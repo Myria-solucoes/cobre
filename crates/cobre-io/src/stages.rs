@@ -916,46 +916,34 @@ fn resolve_or_validate_season_id(
     })
 }
 
-/// Detect whether a `season_map` layers more than one temporal resolution
-/// level (e.g. `d30-multi-resolution-monthly-quarterly`'s monthly + quarterly
-/// `Custom` definitions). `Monthly`/`Weekly` always tile their cycle by
-/// construction (12 disjoint months / 52 disjoint ISO weeks) and can never be
-/// multi-resolution; only `Custom` definitions legitimately overlap by design.
-/// Detection sweeps a 366-day canonical calendar (leap year, February 29
-/// included, mirroring `SeasonMap::season_for_date`'s `Custom` arm) and flags
-/// any day covered by two or more definitions.
-///
-/// `pub(crate)` so `validation::semantic::season`'s per-level Custom tiling
-/// check can share this detector rather than forking a second copy.
+/// `pub(crate)` delegate to [`SeasonMap::is_multi_resolution`] so
+/// `validation::semantic::season`'s per-level Custom tiling check shares one
+/// implementation instead of forking a second copy.
 #[must_use]
 pub(crate) fn is_multi_resolution(season_map: &SeasonMap) -> bool {
-    if season_map.cycle_type != SeasonCycleType::Custom {
-        return false;
-    }
-    day_of_year_calendar().into_iter().any(|(month, day)| {
-        season_map
-            .seasons
-            .iter()
-            .filter(|def| season_definition_covers(def, month, day))
-            .count()
-            >= 2
-    })
+    season_map.is_multi_resolution()
 }
 
-/// Tolerance (days) mirroring the semantic layer's season-duration-spread
+/// Tolerance (days) shared with the semantic layer's season-duration-spread
 /// check (`validation::semantic::season::check_season_id_consistency`, rule
 /// 29): stages sharing a `season_id` are treated as one resolution when their
-/// durations are within 7 days of each other. Applied here: a stage counts as
-/// a sub-period of its resolved season — and its declared `season_id` is
-/// trusted as an operator grouping label rather than cross-checked against
-/// the calendar — only when its own duration sits more than this tolerance
-/// below the resolved season's full period width.
-const SUB_PERIOD_TOLERANCE_DAYS: i64 = 7;
+/// durations are within this many days of each other. Applied here: a stage
+/// counts as a sub-period of its resolved season — and its declared
+/// `season_id` is trusted as an operator grouping label rather than
+/// cross-checked against the calendar — only when its own duration sits more
+/// than this tolerance below the resolved season's full period width.
+///
+/// `pub(crate)` so Rule 29 reads the same literal rather than forking a
+/// second `7`.
+pub(crate) const SUB_PERIOD_TOLERANCE_DAYS: i64 = 7;
 
 /// Calendar width, in days, of the period identified by `season_id` under
 /// `season_map`'s cycle: the specific month's length for `Monthly` (leap-aware,
-/// using `year`), always 7 for `Weekly`, and the matching definition's own
-/// calendar span for `Custom`. An unresolvable `season_id` falls back to the
+/// using `year` — genuinely different from [`SeasonMap::resolution_level_of`]'s
+/// year-independent classifier, so the `Monthly` arm stays local), always 7
+/// for `Weekly`, and the matching definition's own calendar span for `Custom`
+/// (delegated to `resolution_level_of`, since that arm's computation is
+/// year-independent already). An unresolvable `season_id` falls back to the
 /// widest plausible span (31d) so a dangling id never masquerades as a
 /// sub-period stage — the cross-reference check (rule 27) rejects dangling
 /// ids independently.
@@ -968,16 +956,8 @@ fn period_width_days(season_map: &SeasonMap, season_id: usize, year: i32) -> i64
             .find(|s| s.id == season_id)
             .map_or(31, |s| days_in_month(year, s.month_start)),
         SeasonCycleType::Custom => season_map
-            .seasons
-            .iter()
-            .find(|s| s.id == season_id)
-            .map_or(31, |def| {
-                let covered_days = day_of_year_calendar()
-                    .into_iter()
-                    .filter(|&(month, day)| season_definition_covers(def, month, day))
-                    .count();
-                i64::try_from(covered_days).unwrap_or(366)
-            }),
+            .resolution_level_of(season_id)
+            .map_or(31, |days| i64::try_from(days).unwrap_or(366)),
     }
 }
 
@@ -994,41 +974,6 @@ fn days_in_month(year: i32, month: u32) -> i64 {
     ) {
         (Some(start), Some(next)) => (next - start).num_days(),
         _ => 31,
-    }
-}
-
-/// Canonical 366-day `(month, day)` sequence for one leap year, swept when
-/// comparing `Custom` season spans — the year itself is arbitrary since
-/// `SeasonMap::season_for_date` matches on `(month, day)` alone, and omitting
-/// February 29 would silently skip a checkable calendar position.
-fn day_of_year_calendar() -> Vec<(u32, u32)> {
-    const DAYS_IN_MONTH_LEAP: [u32; 12] = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let mut days = Vec::with_capacity(366);
-    for (month_index, &days_in_month) in DAYS_IN_MONTH_LEAP.iter().enumerate() {
-        let month = u32::try_from(month_index).unwrap_or(0) + 1;
-        for day in 1..=days_in_month {
-            days.push((month, day));
-        }
-    }
-    days
-}
-
-/// Mirror of [`SeasonMap::season_for_date`]'s `Custom` match arm, generalized
-/// to test ANY definition (not only the first match) against a `(month, day)`
-/// pair — overlap detection needs every definition a day belongs to, not just
-/// the first.
-fn season_definition_covers(def: &SeasonDefinition, month: u32, day: u32) -> bool {
-    let month_start = def.month_start;
-    let day_start = def.day_start.unwrap_or(1);
-    let month_end = def.month_end.unwrap_or(month_start);
-    let day_end = def.day_end.unwrap_or(31);
-    let start = (month_start, day_start);
-    let end = (month_end, day_end);
-    let cur = (month, day);
-    if start <= end {
-        cur >= start && cur <= end
-    } else {
-        cur >= start || cur <= end
     }
 }
 

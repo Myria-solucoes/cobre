@@ -346,6 +346,72 @@ pub struct SeasonDefinition {
     pub day_end: Option<u32>,
 }
 
+impl SeasonDefinition {
+    /// Whether this definition's calendar span covers `(month, day)`.
+    ///
+    /// Mirrors [`SeasonMap::season_for_date`]'s `Custom` match arm, generalized
+    /// to test any one definition (not just the first match) — the shared
+    /// primitive `is_multi_resolution` and `span_days` sweep against every
+    /// definition in a map, not only the one `season_for_date` would resolve to.
+    fn covers(&self, month: u32, day: u32) -> bool {
+        let start = (self.month_start, self.day_start.unwrap_or(1));
+        let end = (
+            self.month_end.unwrap_or(self.month_start),
+            self.day_end.unwrap_or(31),
+        );
+        let cur = (month, day);
+        if start <= end {
+            cur >= start && cur <= end
+        } else {
+            cur >= start || cur <= end
+        }
+    }
+
+    /// Canonical calendar width, in days, of this season's own span under
+    /// `cycle_type`: a season/temporal-granularity classifier, not a
+    /// study-year-specific duration (a leap `Monthly` February is still
+    /// classified at its canonical 28-day width; year-specific leap-awareness
+    /// is a stage-vs-season fact a caller derives separately when needed).
+    ///
+    /// `Weekly` is always `7`. `Monthly` reads `month_start` against a fixed
+    /// non-leap month-length table. `Custom` counts the days this definition
+    /// covers out of the 366-day canonical calendar (`canonical_calendar_days`,
+    /// leap year, Feb 29 included) — the same sweep `is_multi_resolution` uses
+    /// to detect overlapping definitions.
+    #[must_use]
+    pub fn span_days(&self, cycle_type: SeasonCycleType) -> usize {
+        match cycle_type {
+            SeasonCycleType::Weekly => 7,
+            SeasonCycleType::Monthly => {
+                const MONTH_DAYS: [usize; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+                let index = usize::try_from(self.month_start.saturating_sub(1)).unwrap_or(0);
+                MONTH_DAYS.get(index).copied().unwrap_or(31)
+            }
+            SeasonCycleType::Custom => canonical_calendar_days()
+                .into_iter()
+                .filter(|&(month, day)| self.covers(month, day))
+                .count(),
+        }
+    }
+}
+
+/// Canonical 366-day `(month, day)` sequence for one leap year, swept when
+/// comparing `Custom` season spans — the year itself is arbitrary since
+/// `Custom` matching (`SeasonMap::season_for_date`, `SeasonDefinition::covers`)
+/// operates on `(month, day)` alone, and omitting February 29 would silently
+/// skip a checkable calendar position.
+fn canonical_calendar_days() -> Vec<(u32, u32)> {
+    const DAYS_IN_MONTH_LEAP: [u32; 12] = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut days = Vec::with_capacity(366);
+    for (month_index, &days_in_month) in DAYS_IN_MONTH_LEAP.iter().enumerate() {
+        let month = u32::try_from(month_index).unwrap_or(0) + 1;
+        for day in 1..=days_in_month {
+            days.push((month, day));
+        }
+    }
+    days
+}
+
 // ---------------------------------------------------------------------------
 // SeasonMap (SS12.8)
 // ---------------------------------------------------------------------------
@@ -400,25 +466,44 @@ impl SeasonMap {
             }
             SeasonCycleType::Custom => {
                 let (m, d) = (date.month(), date.day());
-                self.seasons
-                    .iter()
-                    .find(|s| {
-                        let ms = s.month_start;
-                        let ds = s.day_start.unwrap_or(1);
-                        let me = s.month_end.unwrap_or(ms);
-                        let de = s.day_end.unwrap_or(31);
-                        let start = (ms, ds);
-                        let end = (me, de);
-                        let cur = (m, d);
-                        if start <= end {
-                            cur >= start && cur <= end
-                        } else {
-                            cur >= start || cur <= end
-                        }
-                    })
-                    .map(|s| s.id)
+                self.seasons.iter().find(|s| s.covers(m, d)).map(|s| s.id)
             }
         }
+    }
+
+    /// Detect whether this map layers more than one temporal-resolution level
+    /// (e.g. a monthly + quarterly `Custom` map, the shape covered by the
+    /// `test_d30_shaped_custom_map_is_multi_resolution` test below).
+    /// `Monthly`/`Weekly` always tile their cycle by construction (12 disjoint
+    /// months / 52 disjoint ISO weeks) and can never be multi-resolution; only
+    /// `Custom` definitions legitimately overlap by design.
+    ///
+    /// Sweeps the 366-day canonical calendar (leap year, February 29 included,
+    /// mirroring [`SeasonMap::season_for_date`]'s `Custom` arm) and flags any
+    /// day covered by two or more definitions.
+    #[must_use]
+    pub fn is_multi_resolution(&self) -> bool {
+        if self.cycle_type != SeasonCycleType::Custom {
+            return false;
+        }
+        canonical_calendar_days().into_iter().any(|(month, day)| {
+            self.seasons
+                .iter()
+                .filter(|def| def.covers(month, day))
+                .count()
+                >= 2
+        })
+    }
+
+    /// Canonical calendar width, in days, of the entry identified by
+    /// `season_id` — [`SeasonDefinition::span_days`] resolved through this
+    /// map's own `cycle_type`. `None` when `season_id` matches no entry.
+    #[must_use]
+    pub fn resolution_level_of(&self, season_id: usize) -> Option<usize> {
+        self.seasons
+            .iter()
+            .find(|s| s.id == season_id)
+            .map(|s| s.span_days(self.cycle_type))
     }
 }
 
@@ -671,6 +756,161 @@ mod tests {
         let week2_date = NaiveDate::from_ymd_opt(2021, 1, 11).unwrap();
         assert_eq!(week2_date.iso_week().week(), 2, "precondition: ISO week 2");
         assert_eq!(season_map.season_for_date(week2_date), Some(1));
+    }
+
+    /// `d30-multi-resolution-monthly-quarterly`-shaped `season_definitions`:
+    /// 12 monthly + 4 quarterly `Custom` definitions whose calendar spans
+    /// overlap by design.
+    fn d30_shaped_season_map() -> SeasonMap {
+        let mut seasons: Vec<SeasonDefinition> = (0..12u32)
+            .map(|i| SeasonDefinition {
+                id: i as usize,
+                label: format!("Month{}", i + 1),
+                month_start: i + 1,
+                day_start: Some(1),
+                month_end: Some(i + 1),
+                day_end: Some(if i == 1 { 28 } else { 31 }),
+            })
+            .collect();
+        seasons.extend([
+            SeasonDefinition {
+                id: 12,
+                label: "Q3".to_string(),
+                month_start: 7,
+                day_start: Some(1),
+                month_end: Some(9),
+                day_end: Some(30),
+            },
+            SeasonDefinition {
+                id: 13,
+                label: "Q4".to_string(),
+                month_start: 10,
+                day_start: Some(1),
+                month_end: Some(12),
+                day_end: Some(31),
+            },
+            SeasonDefinition {
+                id: 14,
+                label: "Q1".to_string(),
+                month_start: 1,
+                day_start: Some(1),
+                month_end: Some(3),
+                day_end: Some(31),
+            },
+            SeasonDefinition {
+                id: 15,
+                label: "Q2".to_string(),
+                month_start: 4,
+                day_start: Some(1),
+                month_end: Some(6),
+                day_end: Some(30),
+            },
+        ]);
+        SeasonMap {
+            cycle_type: SeasonCycleType::Custom,
+            seasons,
+        }
+    }
+
+    #[test]
+    fn test_d30_shaped_custom_map_is_multi_resolution() {
+        assert!(
+            d30_shaped_season_map().is_multi_resolution(),
+            "monthly + quarterly Custom definitions overlap by design"
+        );
+    }
+
+    #[test]
+    fn test_all_monthly_map_is_not_multi_resolution() {
+        let seasons: Vec<SeasonDefinition> = (0..12u32)
+            .map(|i| SeasonDefinition {
+                id: i as usize,
+                label: format!("Month{}", i + 1),
+                month_start: i + 1,
+                day_start: None,
+                month_end: None,
+                day_end: None,
+            })
+            .collect();
+        let season_map = SeasonMap {
+            cycle_type: SeasonCycleType::Monthly,
+            seasons,
+        };
+        assert!(!season_map.is_multi_resolution());
+    }
+
+    #[test]
+    fn test_weekly_map_is_not_multi_resolution() {
+        let seasons: Vec<SeasonDefinition> = (0..52u32)
+            .map(|i| SeasonDefinition {
+                id: i as usize,
+                label: format!("W{:02}", i + 1),
+                month_start: 1,
+                day_start: None,
+                month_end: None,
+                day_end: None,
+            })
+            .collect();
+        let season_map = SeasonMap {
+            cycle_type: SeasonCycleType::Weekly,
+            seasons,
+        };
+        assert!(!season_map.is_multi_resolution());
+    }
+
+    #[test]
+    fn test_resolution_level_of_d30_shaped_map() {
+        let season_map = d30_shaped_season_map();
+        assert_eq!(
+            season_map.resolution_level_of(0),
+            Some(31),
+            "January spans 31 canonical days"
+        );
+        assert_eq!(
+            season_map.resolution_level_of(1),
+            Some(28),
+            "the D30 fixture caps February at day_end 28, excluding the leap Feb 29"
+        );
+        assert_eq!(
+            season_map.resolution_level_of(12),
+            Some(92),
+            "Q3 (Jul+Aug+Sep) spans 92 canonical days"
+        );
+        assert_eq!(
+            season_map.resolution_level_of(14),
+            Some(91),
+            "Q1 (Jan+Feb+Mar) spans 91 canonical days, including the leap Feb 29"
+        );
+        assert_eq!(season_map.resolution_level_of(999), None);
+    }
+
+    #[test]
+    fn test_resolution_level_of_weekly_is_always_seven() {
+        let seasons: Vec<SeasonDefinition> = (0..52u32)
+            .map(|i| SeasonDefinition {
+                id: i as usize,
+                label: format!("W{:02}", i + 1),
+                month_start: 1,
+                day_start: None,
+                month_end: None,
+                day_end: None,
+            })
+            .collect();
+        let season_map = SeasonMap {
+            cycle_type: SeasonCycleType::Weekly,
+            seasons,
+        };
+        assert_eq!(season_map.resolution_level_of(0), Some(7));
+        assert_eq!(season_map.resolution_level_of(51), Some(7));
+    }
+
+    #[test]
+    fn test_season_for_date_custom_first_match_wins_on_overlap() {
+        // Both "July" (id 6) and "Q3" (id 12) cover 2024-07-15; monthly entries
+        // are listed first in the map, so `find` resolves the finer match.
+        let season_map = d30_shaped_season_map();
+        let july_15 = NaiveDate::from_ymd_opt(2024, 7, 15).unwrap();
+        assert_eq!(season_map.season_for_date(july_15), Some(6));
     }
 
     #[cfg(feature = "serde")]
