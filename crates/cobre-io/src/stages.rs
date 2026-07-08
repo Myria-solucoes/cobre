@@ -871,7 +871,7 @@ fn resolve_or_validate_season_id(
         return Ok(raw_season_id);
     };
 
-    if is_multi_resolution(season_map) {
+    if season_map.is_multi_resolution() {
         return match raw_season_id {
             Some(declared) => Ok(Some(declared)),
             None => Err(LoadError::SchemaError {
@@ -914,14 +914,6 @@ fn resolve_or_validate_season_id(
              derive it automatically"
         ),
     })
-}
-
-/// `pub(crate)` delegate to [`SeasonMap::is_multi_resolution`] so
-/// `validation::semantic::season`'s per-level Custom tiling check shares one
-/// implementation instead of forking a second copy.
-#[must_use]
-pub(crate) fn is_multi_resolution(season_map: &SeasonMap) -> bool {
-    season_map.is_multi_resolution()
 }
 
 /// Tolerance (days) shared with the semantic layer's season-duration-spread

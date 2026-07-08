@@ -350,9 +350,7 @@ impl SeasonDefinition {
     /// Whether this definition's calendar span covers `(month, day)`.
     ///
     /// Mirrors [`SeasonMap::season_for_date`]'s `Custom` match arm, generalized
-    /// to test any one definition (not just the first match) — the shared
-    /// primitive `is_multi_resolution` and `span_days` sweep against every
-    /// definition in a map, not only the one `season_for_date` would resolve to.
+    /// to test any one definition (not just the first match).
     fn covers(&self, month: u32, day: u32) -> bool {
         let start = (self.month_start, self.day_start.unwrap_or(1));
         let end = (
@@ -373,11 +371,10 @@ impl SeasonDefinition {
     /// classified at its canonical 28-day width; year-specific leap-awareness
     /// is a stage-vs-season fact a caller derives separately when needed).
     ///
-    /// `Weekly` is always `7`. `Monthly` reads `month_start` against a fixed
-    /// non-leap month-length table. `Custom` counts the days this definition
-    /// covers out of the 366-day canonical calendar (`canonical_calendar_days`,
-    /// leap year, Feb 29 included) — the same sweep `is_multi_resolution` uses
-    /// to detect overlapping definitions.
+    /// `Monthly` reads a fixed non-leap month-length table (its February is 28);
+    /// `Custom` counts covered days out of the leap `canonical_calendar_days`
+    /// calendar (Feb 29 included) — the two arms disagree on Feb 29 by design,
+    /// the same sweep `is_multi_resolution` uses to detect overlapping definitions.
     #[must_use]
     pub fn span_days(&self, cycle_type: SeasonCycleType) -> usize {
         match cycle_type {
