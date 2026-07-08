@@ -549,3 +549,133 @@ fn test_is_ready_at_monotonic_prefix_for_constant_lead() {
         "slot 2 is beyond this plant's depth and must not be ready"
     );
 }
+
+// Migration-equivalence pins: every field of `SpreadResolution`/
+// `PointResolution`, byte-compared against a baseline captured from the
+// pre-unification resolver bodies, on the fixtures the ticket names. A tolerance
+// compare would miss a projection-kernel extraction that subtly perturbs one
+// field while leaving the others (and any narrower assertion) untouched.
+
+#[test]
+fn migration_equivalence_spread_monthly_half_split() {
+    let resolution = resolve_spread(360.0, 0, &[720.0, 720.0, 720.0], None);
+    assert_eq!(
+        resolution,
+        SpreadResolution {
+            stage_reach: 1,
+            stage_weights: vec![0.5, 0.5],
+            block_deposits: vec![],
+            within_stage_routing: vec![],
+            arrival_density: vec![vec![1.0]],
+        }
+    );
+}
+
+#[test]
+fn migration_equivalence_spread_weekly_to_monthly() {
+    let resolution = resolve_spread(
+        360.0,
+        0,
+        &[168.0, 168.0, 168.0, 168.0, 720.0, 720.0, 720.0],
+        None,
+    );
+    assert_eq!(
+        resolution,
+        SpreadResolution {
+            stage_reach: 3,
+            stage_weights: vec![0.0, 0.0, 6.0 / 7.0, 1.0 / 7.0],
+            block_deposits: vec![],
+            within_stage_routing: vec![],
+            arrival_density: vec![vec![], vec![1.0], vec![1.0]],
+        }
+    );
+}
+
+#[test]
+fn migration_equivalence_spread_daily_chronological_block() {
+    let resolution = resolve_spread(6.0, 0, &[24.0, 24.0, 24.0], Some(&[1.0; 24]));
+
+    assert_eq!(resolution.stage_reach, 1);
+    assert_close(&resolution.stage_weights, &[0.75, 0.25]);
+
+    let mut expected_deposits = vec![vec![1.0, 0.0]; 18];
+    expected_deposits.extend(vec![vec![0.0, 1.0]; 6]);
+    assert_eq!(resolution.block_deposits, expected_deposits);
+
+    let expected_routing: Vec<Vec<f64>> = (0..24)
+        .map(|b| {
+            let width = 24 - b;
+            (0..width)
+                .map(|j| if b < 18 && j == 6 { 1.0 } else { 0.0 })
+                .collect()
+        })
+        .collect();
+    assert_eq!(resolution.within_stage_routing, expected_routing);
+
+    assert_eq!(resolution.arrival_density, vec![vec![1.0 / 6.0; 6]]);
+}
+
+#[test]
+fn migration_equivalence_point_pmo_end_anchored() {
+    let resolution = resolve_point(
+        LeadTime::Time(720.0),
+        &[168.0, 168.0, 168.0, 168.0, 720.0, 720.0, 720.0],
+        7,
+    );
+    assert_eq!(
+        resolution,
+        PointResolution {
+            decider: vec![None, None, None, None, Some(3), Some(4), Some(5)],
+            decision_sets: vec![vec![], vec![], vec![], vec![4], vec![5], vec![6], vec![]],
+            depth: vec![0, 0, 0, 1, 1, 1, 0],
+        }
+    );
+}
+
+#[test]
+fn migration_equivalence_point_k0_degeneracy() {
+    let resolution = resolve_point(LeadTime::Time(720.0), &[700.0, 744.0], 2);
+    assert_eq!(
+        resolution,
+        PointResolution {
+            decider: vec![None, Some(1)],
+            decision_sets: vec![vec![], vec![1]],
+            depth: vec![0, 0],
+        }
+    );
+}
+
+#[test]
+fn migration_equivalence_point_stage_count() {
+    let resolution = resolve_point(
+        LeadTime::Stages(2),
+        &[672.0, 700.0, 744.0, 720.0, 672.0, 744.0, 700.0, 744.0],
+        8,
+    );
+    assert_eq!(
+        resolution,
+        PointResolution {
+            decider: vec![
+                None,
+                None,
+                Some(0),
+                Some(1),
+                Some(2),
+                Some(3),
+                Some(4),
+                Some(5)
+            ],
+            decision_sets: vec![
+                vec![2],
+                vec![3],
+                vec![4],
+                vec![5],
+                vec![6],
+                vec![7],
+                vec![],
+                vec![]
+            ],
+            depth: vec![1, 2, 2, 2, 2, 2, 1, 0],
+        }
+    );
+}

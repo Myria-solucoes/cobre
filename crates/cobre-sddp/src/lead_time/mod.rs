@@ -19,7 +19,7 @@ use cobre_core::window_period_overlaps;
 
 /// Resolved spread of one arc's travel-time arrival density, anchored at a
 /// single stage `t`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SpreadResolution {
     /// Deepest future stage the arrival window reaches (the depth) — the max
     /// index reached, never a count (`window_period_overlaps`'s contiguity
