@@ -140,9 +140,7 @@ pub(crate) fn validate_dimensional_consistency(data: &ParsedData, ctx: &mut Vali
                 }
             }
         }
-    }
 
-    if let Some(correlation) = &data.correlation {
         for entry in &correlation.schedule {
             if !correlation.profiles.contains_key(&entry.profile_name) {
                 ctx.add_error(

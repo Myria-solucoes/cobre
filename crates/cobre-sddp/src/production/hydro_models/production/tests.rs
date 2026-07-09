@@ -318,7 +318,6 @@ fn find_fpha_config_for_stage_returns_config_in_range() {
 /// find_fpha_config_for_stage: returns None when no range covers the stage.
 #[test]
 fn find_fpha_config_for_stage_returns_none_outside_range() {
-    // Create a config with range [5, 10].
     let config = ProductionModelConfig {
         hydro_id: EntityId::from(0),
         selection_mode: SelectionMode::StageRanges {
@@ -340,7 +339,6 @@ fn find_fpha_config_for_stage_returns_none_outside_range() {
         },
     };
 
-    // Stage 0 is before the range [5, 10].
     let stage = make_stage(0);
     let result = find_fpha_config_for_stage(&config, &stage);
     assert!(
@@ -657,7 +655,7 @@ fn find_model_for_stage_returns_none_when_before_range_start() {
             }],
         },
     };
-    let stage = make_stage(3); // id 3, before start_stage_id 5
+    let stage = make_stage(3);
     let result = find_model_for_stage(&config, &stage);
     assert!(
         result.is_none(),
@@ -764,7 +762,6 @@ fn test_resolve_stage_model_returns_sentinel_when_json_lacks_productivity() {
 
     #[cfg(debug_assertions)]
     {
-        // Debug build: the `debug_assert!` fires and the call panics.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             super::resolve_stage_model(
                 &hydro,
@@ -795,8 +792,6 @@ fn test_resolve_stage_model_returns_sentinel_when_json_lacks_productivity() {
 
     #[cfg(not(debug_assertions))]
     {
-        // Release build: the assert is compiled out and the function
-        // returns the sentinel directly.
         let model = super::resolve_stage_model(
             &hydro,
             &stage,

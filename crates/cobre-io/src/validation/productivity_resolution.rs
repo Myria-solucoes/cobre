@@ -86,7 +86,7 @@ pub(crate) fn validate_productivity_resolution(data: &ParsedData, ctx: &mut Vali
                         ),
                     );
                 }
-                (Some(_), None) | (None, Some(_)) => {} // Exactly one source — valid.
+                (Some(_), None) | (None, Some(_)) => {}
             }
         }
     }
