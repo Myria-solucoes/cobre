@@ -129,7 +129,9 @@ fn parquet_lookup(
 /// Find the `productivity_mw_per_m3s` from the JSON config for a given stage.
 ///
 /// The matching logic is reimplemented locally so this crate carries no
-/// dependency on downstream solver crates and no algorithm-specific identifiers.
+/// dependency on downstream solver crates and no algorithm-specific identifiers
+/// — a mirror of the solver crate's `resolve_stage`/`selection_entries`
+/// resolver's season-miss shape, kept in agreement rather than called.
 ///
 /// For `Seasonal`, a stage with no matching season entry falls back to the
 /// `default_model`, which carries no explicit productivity (returns `None`).

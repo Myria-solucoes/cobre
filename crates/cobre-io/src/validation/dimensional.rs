@@ -262,6 +262,11 @@ fn collect_head_dependent_hydro_ids(
     ids
 }
 
+// `production_model_uses_fpha` and `production_model_uses_head_dependent`
+// mirror the solver crate's `resolve_stage`/`selection_entries` resolver: a
+// Seasonal season miss falls back to `default_model`, so each fold reads
+// `default_model` too — keep in agreement with that resolver's season-miss
+// semantics, not just the declared seasons.
 fn production_model_uses_fpha(config: &ProductionModelConfig) -> bool {
     match &config.selection_mode {
         SelectionMode::StageRanges { ranges } => ranges.iter().any(|r| r.model == "fpha"),
@@ -272,6 +277,8 @@ fn production_model_uses_fpha(config: &ProductionModelConfig) -> bool {
     }
 }
 
+// Same mirror contract as `production_model_uses_fpha` above, extended to
+// `linearized_head`.
 fn production_model_uses_head_dependent(config: &ProductionModelConfig) -> bool {
     match &config.selection_mode {
         SelectionMode::StageRanges { ranges } => ranges
@@ -316,7 +323,7 @@ mod tests {
     };
 
     use crate::{
-        extensions::{FphaHyperplaneRow, HydroGeometryRow},
+        extensions::{FphaHyperplaneRow, HydroGeometryRow, SeasonConfig},
         scenarios::{InflowSeasonalStatsRow, LoadSeasonalStatsRow},
         validation::{ErrorKind, ValidationContext},
     };
@@ -1126,6 +1133,36 @@ mod tests {
                 .iter()
                 .all(|e| e.kind == ErrorKind::DimensionMismatch),
             "all errors should be DimensionMismatch"
+        );
+    }
+
+    // ── Cross-crate agreement with the solver crate's resolve_stage/selection_entries ──
+
+    /// `production_model_uses_fpha` agrees with the solver crate's
+    /// `resolve_stage`/`selection_entries` classification: a `Seasonal` config
+    /// with `default_model == "fpha"` and every listed season non-FPHA still
+    /// classifies as using FPHA.
+    #[test]
+    fn test_production_model_uses_fpha_agrees_with_resolve_stage_on_seasonal_default() {
+        let config = ProductionModelConfig {
+            hydro_id: EntityId(0),
+            selection_mode: SelectionMode::Seasonal {
+                default_model: "fpha".to_string(),
+                seasons: vec![SeasonConfig {
+                    season_id: 1,
+                    model: "constant_productivity".to_string(),
+                    fpha_config: None,
+                    reference_volume: None,
+                    productivity_mw_per_m3s: Some(0.5),
+                }],
+            },
+        };
+
+        assert!(
+            production_model_uses_fpha(&config),
+            "production_model_uses_fpha must agree with the solver crate's \
+             resolve_stage/selection_entries: default_model == \"fpha\" classifies \
+             as FPHA even when every listed season is non-FPHA"
         );
     }
 }

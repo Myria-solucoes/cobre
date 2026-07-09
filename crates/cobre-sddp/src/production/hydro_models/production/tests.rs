@@ -993,6 +993,185 @@ fn find_model_for_stage_seasonal_with_override() {
     assert_eq!(result, Some(("constant_productivity".to_string(), None)));
 }
 
+// ── Canonical resolver (resolve_stage / selection_entries) ────────────────
+
+/// A `Seasonal` config's season miss resolves to `default_model`, with
+/// `fpha_config`, `reference_volume`, and `productivity` all `None`.
+#[test]
+fn resolve_stage_seasonal_season_miss_uses_default_model() {
+    let config = ProductionModelConfig {
+        hydro_id: EntityId::from(0),
+        selection_mode: SelectionMode::Seasonal {
+            default_model: "constant_productivity".to_string(),
+            seasons: vec![SeasonConfig {
+                season_id: 1,
+                model: "fpha".to_string(),
+                fpha_config: Some(FphaColumnLayout {
+                    source: "precomputed".to_string(),
+                    volume_discretization_points: None,
+                    turbine_discretization_points: None,
+                    spillage_discretization_points: None,
+                    max_planes_per_hydro: None,
+                    fitting_window: None,
+                }),
+                reference_volume: None,
+                productivity_mw_per_m3s: None,
+            }],
+        },
+    };
+    let mut stage = make_stage(0);
+    stage.season_id = Some(99);
+
+    let resolution = resolve_stage(&config, &stage);
+
+    assert_eq!(resolution.model, Some("constant_productivity"));
+    assert!(resolution.fpha_config.is_none());
+    assert!(resolution.reference_volume.is_none());
+    assert!(resolution.productivity.is_none());
+}
+
+/// A `Seasonal` config's matching season passes through that season's own
+/// model, fpha_config, reference_volume, and productivity — not the default.
+#[test]
+fn resolve_stage_seasonal_matching_season_passes_through() {
+    let config = ProductionModelConfig {
+        hydro_id: EntityId::from(0),
+        selection_mode: SelectionMode::Seasonal {
+            default_model: "constant_productivity".to_string(),
+            seasons: vec![SeasonConfig {
+                season_id: 2,
+                model: "linearized_head".to_string(),
+                fpha_config: None,
+                reference_volume: Some(ReferenceVolume::AbsoluteHm3(1200.0)),
+                productivity_mw_per_m3s: Some(0.77),
+            }],
+        },
+    };
+    let mut stage = make_stage(3);
+    stage.season_id = Some(2);
+
+    let resolution = resolve_stage(&config, &stage);
+
+    assert_eq!(resolution.model, Some("linearized_head"));
+    assert!(resolution.fpha_config.is_none());
+    assert_eq!(
+        resolution.reference_volume,
+        Some(&ReferenceVolume::AbsoluteHm3(1200.0))
+    );
+    assert_eq!(resolution.productivity, Some(0.77));
+}
+
+/// `selection_entries` yields a synthetic `default_model` entry for
+/// `Seasonal`, so a fold over precomputed-FPHA classification treats
+/// `default_model == "fpha"` (no `fpha_config`, so precomputed by parquet) as
+/// using precomputed FPHA even when every listed season is non-FPHA.
+#[test]
+fn selection_entries_classifies_default_fpha_as_precomputed() {
+    let config = ProductionModelConfig {
+        hydro_id: EntityId::from(0),
+        selection_mode: SelectionMode::Seasonal {
+            default_model: "fpha".to_string(),
+            seasons: vec![SeasonConfig {
+                season_id: 1,
+                model: "constant_productivity".to_string(),
+                fpha_config: None,
+                reference_volume: None,
+                productivity_mw_per_m3s: Some(0.5),
+            }],
+        },
+    };
+
+    let uses_precomputed = selection_entries(&config).any(|entry| {
+        entry.fpha_config.is_some_and(|f| f.source == "precomputed")
+            || (entry.model == "fpha" && entry.fpha_config.is_none())
+    });
+
+    assert!(
+        uses_precomputed,
+        "default_model == \"fpha\" with no fpha_config must classify as using precomputed FPHA"
+    );
+}
+
+/// A `Seasonal` config with `default_model == "fpha"` and every listed season
+/// non-FPHA classifies as precomputed FPHA on both `determine_source` and
+/// `config_uses_precomputed_fpha`: `default_model` participates in source
+/// classification, not only in per-stage resolution. Guards the
+/// validate-then-blow-up path: the wrong-but-compiling alternative has
+/// `determine_source` ignore `default_model` and classify `DefaultConstant`,
+/// so the `fpha_hyperplanes.parquet` load gate (keyed on
+/// `config_uses_precomputed_fpha`) skips loading it — yet `find_model_for_stage`
+/// already resolves `"fpha"` on the season miss, so `resolve_stage_model`
+/// reaches `build_fpha_model` against an empty hyperplane map and errors "no
+/// hyperplane rows" for a config with no real coverage gap.
+#[test]
+fn seasonal_default_fpha_classifies_as_precomputed_source() {
+    let hydro = make_hydro(0, HydroGenerationModel::Fpha);
+    let config = ProductionModelConfig {
+        hydro_id: EntityId::from(0),
+        selection_mode: SelectionMode::Seasonal {
+            default_model: "fpha".to_string(),
+            seasons: vec![SeasonConfig {
+                season_id: 1,
+                model: "constant_productivity".to_string(),
+                fpha_config: None,
+                reference_volume: None,
+                productivity_mw_per_m3s: Some(0.5),
+            }],
+        },
+    };
+
+    let source = determine_source(&hydro, Some(&config)).expect("should succeed");
+    assert_eq!(source, ProductionModelSource::PrecomputedHyperplanes);
+    assert!(config_uses_precomputed_fpha(&config));
+}
+
+/// A `StageRanges` config resolves a covering range's model, fpha_config,
+/// reference_volume, and productivity verbatim, and every field to `None` for
+/// a stage outside every range (no default exists for `StageRanges`).
+#[test]
+fn resolve_stage_stage_ranges_covering_and_uncovered() {
+    let config = ProductionModelConfig {
+        hydro_id: EntityId::from(0),
+        selection_mode: SelectionMode::StageRanges {
+            ranges: vec![StageRange {
+                start_stage_id: 0,
+                end_stage_id: Some(10),
+                model: "constant_productivity".to_string(),
+                fpha_config: Some(FphaColumnLayout {
+                    source: "precomputed".to_string(),
+                    volume_discretization_points: None,
+                    turbine_discretization_points: None,
+                    spillage_discretization_points: None,
+                    max_planes_per_hydro: None,
+                    fitting_window: None,
+                }),
+                reference_volume: Some(ReferenceVolume::Percentile(0.5)),
+                productivity_mw_per_m3s: Some(0.42),
+            }],
+        },
+    };
+
+    let covered = make_stage(5);
+    let resolution = resolve_stage(&config, &covered);
+    assert_eq!(resolution.model, Some("constant_productivity"));
+    assert_eq!(
+        resolution.fpha_config.map(|f| f.source.as_str()),
+        Some("precomputed")
+    );
+    assert_eq!(
+        resolution.reference_volume,
+        Some(&ReferenceVolume::Percentile(0.5))
+    );
+    assert_eq!(resolution.productivity, Some(0.42));
+
+    let uncovered = make_stage(20);
+    let resolution = resolve_stage(&config, &uncovered);
+    assert!(resolution.model.is_none());
+    assert!(resolution.fpha_config.is_none());
+    assert!(resolution.reference_volume.is_none());
+    assert!(resolution.productivity.is_none());
+}
+
 /// precomputed config returns PrecomputedHyperplanes source.
 #[test]
 fn precomputed_config_returns_precomputed_source() {

@@ -16,7 +16,7 @@ use cobre_core::{EntityId, System, entities::hydro::HydroGenerationModel};
 use cobre_io::HydroReferenceVolumeFractions;
 use cobre_io::extensions::{
     FphaColumnLayout, FphaHyperplaneRow, HydroGeometryRow, ProductionModelConfig, ReferenceVolume,
-    SelectionMode, build_hydro_reference_volumes_resolved,
+    SeasonConfig, SelectionMode, StageRange, build_hydro_reference_volumes_resolved,
 };
 
 use super::load_artifacts_for_hydro_models;
@@ -644,37 +644,20 @@ fn fit_computed_planes_per_stage(
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 /// Return `true` if the config entry uses `source: "precomputed"` FPHA in any
-/// stage range or season entry.
+/// stage range or season entry, or falls back to a declared `"fpha"` model
+/// with no `fpha_config` — the `Seasonal` `default_model` case, which reads
+/// `fpha_hyperplanes.parquet` globally and so is precomputed by construction.
 fn config_uses_precomputed_fpha(config: &ProductionModelConfig) -> bool {
-    match &config.selection_mode {
-        SelectionMode::StageRanges { ranges } => ranges.iter().any(|r| {
-            r.fpha_config
-                .as_ref()
-                .is_some_and(|f| f.source == "precomputed")
-        }),
-        SelectionMode::Seasonal { seasons, .. } => seasons.iter().any(|s| {
-            s.fpha_config
-                .as_ref()
-                .is_some_and(|f| f.source == "precomputed")
-        }),
-    }
+    selection_entries(config).any(|entry| {
+        entry.fpha_config.is_some_and(|f| f.source == "precomputed")
+            || (entry.model == "fpha" && entry.fpha_config.is_none())
+    })
 }
 
 /// Return `true` if the config entry uses `source: "computed"` FPHA in any
 /// stage range or season entry.
 fn config_uses_computed_fpha(config: &ProductionModelConfig) -> bool {
-    match &config.selection_mode {
-        SelectionMode::StageRanges { ranges } => ranges.iter().any(|r| {
-            r.fpha_config
-                .as_ref()
-                .is_some_and(|f| f.source == "computed")
-        }),
-        SelectionMode::Seasonal { seasons, .. } => seasons.iter().any(|s| {
-            s.fpha_config
-                .as_ref()
-                .is_some_and(|f| f.source == "computed")
-        }),
-    }
+    selection_entries(config).any(|entry| entry.fpha_config.is_some_and(|f| f.source == "computed"))
 }
 
 /// Extract the [`FphaColumnLayout`] that applies to a given stage from a [`ProductionModelConfig`].
@@ -685,31 +668,7 @@ fn find_fpha_config_for_stage<'a>(
     config: &'a ProductionModelConfig,
     stage: &cobre_core::temporal::Stage,
 ) -> Option<&'a FphaColumnLayout> {
-    match &config.selection_mode {
-        SelectionMode::StageRanges { ranges } => {
-            for range in ranges {
-                let after_start = stage.id >= range.start_stage_id;
-                let before_end = range.end_stage_id.is_none_or(|end| stage.id <= end);
-                if after_start && before_end {
-                    return range.fpha_config.as_ref();
-                }
-            }
-            None
-        }
-        SelectionMode::Seasonal {
-            default_model: _,
-            seasons,
-        } => {
-            if let Some(season_id) = stage.season_id {
-                for season in seasons {
-                    if i32::try_from(season_id).is_ok_and(|sid| sid == season.season_id) {
-                        return season.fpha_config.as_ref();
-                    }
-                }
-            }
-            None
-        }
-    }
+    resolve_stage(config, stage).fpha_config
 }
 
 /// Default reference operating volume as a fraction of the `[v_min, v_max]`
@@ -728,31 +687,7 @@ fn find_reference_volume_for_stage<'a>(
     config: &'a ProductionModelConfig,
     stage: &cobre_core::temporal::Stage,
 ) -> Option<&'a ReferenceVolume> {
-    match &config.selection_mode {
-        SelectionMode::StageRanges { ranges } => {
-            for range in ranges {
-                let after_start = stage.id >= range.start_stage_id;
-                let before_end = range.end_stage_id.is_none_or(|end| stage.id <= end);
-                if after_start && before_end {
-                    return range.reference_volume.as_ref();
-                }
-            }
-            None
-        }
-        SelectionMode::Seasonal {
-            default_model: _,
-            seasons,
-        } => {
-            if let Some(season_id) = stage.season_id {
-                for season in seasons {
-                    if i32::try_from(season_id).is_ok_and(|sid| sid == season.season_id) {
-                        return season.reference_volume.as_ref();
-                    }
-                }
-            }
-            None
-        }
-    }
+    resolve_stage(config, stage).reference_volume
 }
 
 /// Resolve a [`ReferenceVolume`] to an absolute storage value (`hm³`) against the
@@ -820,31 +755,12 @@ fn determine_source(
     config_entry: Option<&ProductionModelConfig>,
 ) -> Result<ProductionModelSource, SddpError> {
     if let Some(config) = config_entry {
-        let computed_range = match &config.selection_mode {
-            SelectionMode::StageRanges { ranges } => ranges
-                .iter()
-                .find(|r| {
-                    r.fpha_config
-                        .as_ref()
-                        .is_some_and(|f| f.source == "computed")
-                })
-                .map(|r| r.model.clone()),
-            SelectionMode::Seasonal { seasons, .. } => seasons
-                .iter()
-                .find(|s| {
-                    s.fpha_config
-                        .as_ref()
-                        .is_some_and(|f| f.source == "computed")
-                })
-                .map(|s| s.model.clone()),
-        };
-        if computed_range.is_some() {
+        let has_computed = selection_entries(config)
+            .any(|entry| entry.fpha_config.is_some_and(|f| f.source == "computed"));
+        if has_computed {
             return Ok(ProductionModelSource::ComputedFromGeometry);
         }
-        let has_fpha = match &config.selection_mode {
-            SelectionMode::StageRanges { ranges } => ranges.iter().any(|r| r.model == "fpha"),
-            SelectionMode::Seasonal { seasons, .. } => seasons.iter().any(|s| s.model == "fpha"),
-        };
+        let has_fpha = selection_entries(config).any(|entry| entry.model == "fpha");
         Ok(if has_fpha {
             ProductionModelSource::PrecomputedHyperplanes
         } else {
@@ -944,16 +860,128 @@ fn find_model_for_stage(
     config: &ProductionModelConfig,
     stage: &cobre_core::temporal::Stage,
 ) -> Option<(String, Option<f64>)> {
+    let resolution = resolve_stage(config, stage);
+    resolution
+        .model
+        .map(|model| (model.to_string(), resolution.productivity))
+}
+
+// ── Canonical per-stage resolver ─────────────────────────────────────────────
+
+/// One `SelectionMode` entry's borrowed `(model, fpha_config)` view, yielded by
+/// [`selection_entries`].
+struct SelectionEntry<'a> {
+    model: &'a str,
+    fpha_config: Option<&'a FphaColumnLayout>,
+}
+
+/// Enum-dispatched iterator backing [`selection_entries`] over the two
+/// `SelectionMode` arms, avoiding a `Box<dyn Iterator>`.
+enum SelectionEntries<'a> {
+    StageRanges(std::slice::Iter<'a, StageRange>),
+    Seasonal {
+        seasons: std::slice::Iter<'a, SeasonConfig>,
+        default_model: Option<&'a str>,
+    },
+}
+
+impl<'a> Iterator for SelectionEntries<'a> {
+    type Item = SelectionEntry<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::StageRanges(ranges) => ranges.next().map(|range| SelectionEntry {
+                model: range.model.as_str(),
+                fpha_config: range.fpha_config.as_ref(),
+            }),
+            Self::Seasonal {
+                seasons,
+                default_model,
+            } => seasons
+                .next()
+                .map(|season| SelectionEntry {
+                    model: season.model.as_str(),
+                    fpha_config: season.fpha_config.as_ref(),
+                })
+                .or_else(|| {
+                    default_model.take().map(|model| SelectionEntry {
+                        model,
+                        fpha_config: None,
+                    })
+                }),
+        }
+    }
+}
+
+/// Enumerate every declared `SelectionMode` entry, plus — for `Seasonal` — one
+/// synthetic `default_model` entry with `fpha_config: None`: the ONLY OTHER
+/// config-level `SelectionMode` match in this module (mirrors
+/// [`resolve_stage`]'s per-stage match).
+///
+/// The synthetic entry makes `default_model` participate in source
+/// classification alongside the declared seasons: folding for `fpha_config`
+/// with `source == "precomputed"` OR `model == "fpha"` with no `fpha_config`
+/// (precomputed-by-parquet has none to declare) classifies a Seasonal config
+/// with `default_model == "fpha"` as using precomputed FPHA even when every
+/// listed season is non-FPHA.
+fn selection_entries(config: &ProductionModelConfig) -> SelectionEntries<'_> {
+    match &config.selection_mode {
+        SelectionMode::StageRanges { ranges } => SelectionEntries::StageRanges(ranges.iter()),
+        SelectionMode::Seasonal {
+            default_model,
+            seasons,
+        } => SelectionEntries::Seasonal {
+            seasons: seasons.iter(),
+            default_model: Some(default_model.as_str()),
+        },
+    }
+}
+
+/// Canonical per-stage production-model resolution: the model name, FPHA
+/// config, reference volume, and constant-productivity override for one
+/// `(hydro, stage)` pair, borrowed from `config` with no owning clones.
+struct StageProductionResolution<'a> {
+    /// Model name, or `None` for a `StageRanges` gap — the sole case with no
+    /// default (a `Seasonal` season miss always resolves to `default_model`).
+    model: Option<&'a str>,
+    fpha_config: Option<&'a FphaColumnLayout>,
+    reference_volume: Option<&'a ReferenceVolume>,
+    productivity: Option<f64>,
+}
+
+/// Resolve one `(hydro, stage)` production-model entry: the ONLY per-stage
+/// `SelectionMode` match in this module.
+///
+/// `StageRanges`: the first range covering `stage.id`, else every field
+/// `None`. `Seasonal`: the season matching `stage.season_id`, else
+/// `default_model` with `fpha_config`, `reference_volume`, and `productivity`
+/// all `None` — `default_model` is the config's declared fallback, not a
+/// coverage gap, so it still resolves a model where a `StageRanges` gap would
+/// not.
+fn resolve_stage<'a>(
+    config: &'a ProductionModelConfig,
+    stage: &cobre_core::temporal::Stage,
+) -> StageProductionResolution<'a> {
     match &config.selection_mode {
         SelectionMode::StageRanges { ranges } => {
             for range in ranges {
                 let after_start = stage.id >= range.start_stage_id;
                 let before_end = range.end_stage_id.is_none_or(|end| stage.id <= end);
                 if after_start && before_end {
-                    return Some((range.model.clone(), range.productivity_mw_per_m3s));
+                    return StageProductionResolution {
+                        model: Some(range.model.as_str()),
+                        fpha_config: range.fpha_config.as_ref(),
+                        reference_volume: range.reference_volume.as_ref(),
+                        productivity: range.productivity_mw_per_m3s,
+                    };
                 }
             }
-            None
+            StageProductionResolution {
+                model: None,
+                fpha_config: None,
+                reference_volume: None,
+                productivity: None,
+            }
         }
         SelectionMode::Seasonal {
             default_model,
@@ -962,11 +990,21 @@ fn find_model_for_stage(
             if let Some(season_id) = stage.season_id {
                 for season in seasons {
                     if i32::try_from(season_id).is_ok_and(|sid| sid == season.season_id) {
-                        return Some((season.model.clone(), season.productivity_mw_per_m3s));
+                        return StageProductionResolution {
+                            model: Some(season.model.as_str()),
+                            fpha_config: season.fpha_config.as_ref(),
+                            reference_volume: season.reference_volume.as_ref(),
+                            productivity: season.productivity_mw_per_m3s,
+                        };
                     }
                 }
             }
-            Some((default_model.clone(), None))
+            StageProductionResolution {
+                model: Some(default_model.as_str()),
+                fpha_config: None,
+                reference_volume: None,
+                productivity: None,
+            }
         }
     }
 }
