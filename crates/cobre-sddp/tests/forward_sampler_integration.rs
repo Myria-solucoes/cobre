@@ -50,7 +50,8 @@ use cobre_core::{
 };
 use cobre_sddp::{
     InflowNonNegativityMethod, StoppingMode, StoppingRule, StoppingRuleSet, StudySetup,
-    hydro_models::PrepareHydroModelsResult, lag_transition::precompute_stage_lag_transitions,
+    hydro_models::PrepareHydroModelsResult,
+    lag_transition::{derive_downstream_par_order, precompute_stage_lag_transitions},
     setup::ConstructionConfig,
 };
 use cobre_solver::ActiveSolver;
@@ -2408,6 +2409,107 @@ fn differential_lag_chain_negative_control_primary_only_advance_diverges_at_tran
              naive={} vs forward={} (diff={diff})",
             naive_incoming[4][h],
             oracle_incoming[4][h],
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Opening-tree ring-honoring regression (derive_downstream_par_order)
+// ---------------------------------------------------------------------------
+//
+// `build_opening_tree_library` (cobre-sddp) and the CLI's non-root rebuild
+// mirror it derive `downstream_par_order` via `derive_downstream_par_order`
+// and thread it into `standardize_historical_windows`; both used to pass a
+// literal `0` there instead. This drives the same DLC monthly->quarterly
+// fixture through `standardize_historical_windows` twice — once with the
+// derived value, once with the literal-`0` regression — and checks the
+// derived-value run against the independent forward-chain oracle while the
+// literal-`0` run reproduces the independently-computed primary-only advance.
+
+#[test]
+fn opening_tree_historical_standardization_ring_aware_eta_requires_derived_downstream_par_order() {
+    let fx = build_dlc_fixture();
+    let oracle_incoming = dlc_forward_oracle_incoming_lags(&fx);
+    let naive_incoming = dlc_naive_primary_only_incoming_lags(&fx);
+
+    let derived = derive_downstream_par_order(&fx.stages, fx.par.max_order());
+    assert_eq!(
+        derived,
+        fx.par.max_order(),
+        "the fixture crosses season_id >= 12 at stage 3; derive_downstream_par_order \
+         must gate to par.max_order(), not 0"
+    );
+
+    let window_year = 2026;
+    let mut hist_rows = Vec::with_capacity(DLC_N_STAGES * DLC_N_HYDROS);
+    for t in 0..DLC_N_STAGES {
+        let date = fx.stages[t].start_date;
+        for h in 0..DLC_N_HYDROS {
+            hist_rows.push(InflowHistoryRow {
+                hydro_id: fx.hydro_ids[h],
+                date,
+                value_m3s: fx.raw[t][h],
+            });
+        }
+    }
+
+    let mut hist_lib_ring_aware =
+        HistoricalScenarioLibrary::new(1, DLC_N_STAGES, DLC_N_HYDROS, 1, vec![window_year]);
+    standardize_historical_windows(
+        &mut hist_lib_ring_aware,
+        &hist_rows,
+        &fx.hydro_ids,
+        &fx.stages,
+        &fx.par,
+        &[window_year],
+        None,
+        &fx.past_inflows,
+        &fx.transitions,
+        derived,
+    );
+
+    let mut hist_lib_literal_zero =
+        HistoricalScenarioLibrary::new(1, DLC_N_STAGES, DLC_N_HYDROS, 1, vec![window_year]);
+    standardize_historical_windows(
+        &mut hist_lib_literal_zero,
+        &hist_rows,
+        &fx.hydro_ids,
+        &fx.stages,
+        &fx.par,
+        &[window_year],
+        None,
+        &fx.past_inflows,
+        &fx.transitions,
+        0,
+    );
+
+    for h in 0..DLC_N_HYDROS {
+        let det_base = fx.par.deterministic_base(4, h);
+        let psi = fx.par.psi_slice(4, h);
+        let sigma = fx.par.sigma(4, h);
+
+        let expected_ring_aware_eta =
+            solve_par_noise(det_base, psi, &[oracle_incoming[4][h]], sigma, fx.raw[4][h]);
+        let expected_naive_eta =
+            solve_par_noise(det_base, psi, &[naive_incoming[4][h]], sigma, fx.raw[4][h]);
+
+        let eta_ring_aware = hist_lib_ring_aware.eta_slice(0, 4)[h];
+        let eta_literal_zero = hist_lib_literal_zero.eta_slice(0, 4)[h];
+
+        assert_eq!(
+            eta_ring_aware, expected_ring_aware_eta,
+            "hydro {h}: standardize_historical_windows with the derived downstream_par_order \
+             must match the independent forward-chain oracle at the quarterly transition"
+        );
+        assert_eq!(
+            eta_literal_zero, expected_naive_eta,
+            "hydro {h}: standardize_historical_windows with a literal 0 must reproduce the \
+             independently-computed primary-only advance (the pre-fix regression value)"
+        );
+        assert!(
+            (eta_ring_aware - eta_literal_zero).abs() > 1e-6,
+            "hydro {h}: ring-aware eta must differ from the literal-0 regression value, \
+             got ring_aware={eta_ring_aware} == literal_zero={eta_literal_zero}"
         );
     }
 }

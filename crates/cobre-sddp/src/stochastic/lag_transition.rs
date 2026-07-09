@@ -434,6 +434,26 @@ pub(crate) fn compute_period_transition(
     }
 }
 
+/// Derives the `downstream_par_order` gate consumed by
+/// [`precompute_stage_lag_transitions`] and by η-inversion
+/// (`standardize_historical_windows`): `par_max_order` once any stage crosses
+/// into the quarterly range (`season_id >= 12`), else `0` (ring-inert). Every
+/// call site that needs this gate — training/simulation lag transitions and
+/// both the rank-0 and non-root opening-tree builds — routes through this one
+/// function; an independent re-derivation risks the two opening-tree sides
+/// diverging across MPI ranks.
+#[must_use]
+pub fn derive_downstream_par_order(stages: &[Stage], par_max_order: usize) -> usize {
+    let has_quarterly_stages = stages
+        .iter()
+        .any(|s| s.season_id.is_some_and(|id| id >= 12));
+    if has_quarterly_stages {
+        par_max_order
+    } else {
+        0
+    }
+}
+
 /// Precompute one [`StageLagTransition`] per stage from stage date boundaries
 /// and season definitions; consumed read-only on the forward-pass hot path.
 ///

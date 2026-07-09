@@ -1039,14 +1039,8 @@ fn precompute_lag_data(
     };
     // Proxy: the global `max_par_order` stands in for the quarterly PAR order until a
     // separate quarterly stochastic context exists.
-    let has_quarterly_stages = stages
-        .iter()
-        .any(|s| s.season_id.is_some_and(|id| id >= 12));
-    let downstream_par_order = if has_quarterly_stages {
-        stochastic.par().max_order()
-    } else {
-        0
-    };
+    let downstream_par_order =
+        crate::lag_transition::derive_downstream_par_order(stages, stochastic.par().max_order());
     let stage_lag_transitions = crate::lag_transition::precompute_stage_lag_transitions(
         stages,
         season_map_ref,

@@ -494,13 +494,13 @@ fn rebuild_historical_library_non_root(
                 };
                 &noop_season_map
             };
+        let downstream_par_order =
+            cobre_sddp::lag_transition::derive_downstream_par_order(&study_stages, max_order);
         let stage_lag_transitions = cobre_sddp::lag_transition::precompute_stage_lag_transitions(
             &study_stages,
             season_map_for_transitions,
-            max_order,
+            downstream_par_order,
         );
-        // Opening-tree library, not the ScenarioSource::Historical replay path
-        // setup/scenario_libraries.rs builds — downstream ring stays inert (0) here.
         cobre_stochastic::standardize_historical_windows(
             &mut lib,
             system.inflow_history(),
@@ -511,7 +511,7 @@ fn rebuild_historical_library_non_root(
             system.policy_graph().season_map.as_ref(),
             &system.initial_conditions().past_inflows,
             &stage_lag_transitions,
-            0,
+            downstream_par_order,
         );
         Ok(Some(lib))
     } else {

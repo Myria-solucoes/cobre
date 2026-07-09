@@ -216,13 +216,13 @@ fn build_opening_tree_library(
         };
         &noop_season_map
     };
+    let downstream_par_order =
+        crate::lag_transition::derive_downstream_par_order(&study_stages, max_order);
     let stage_lag_transitions = crate::lag_transition::precompute_stage_lag_transitions(
         &study_stages,
         effective_season_map,
-        max_order,
+        downstream_par_order,
     );
-    // Opening-tree library, not the ScenarioSource::Historical replay path
-    // setup/scenario_libraries.rs builds — downstream ring stays inert (0) here.
     cobre_stochastic::standardize_historical_windows(
         &mut lib,
         system.inflow_history(),
@@ -233,7 +233,7 @@ fn build_opening_tree_library(
         season_map_ref,
         &system.initial_conditions().past_inflows,
         &stage_lag_transitions,
-        0,
+        downstream_par_order,
     );
     Ok(Some(lib))
 }
@@ -435,4 +435,496 @@ pub fn prepare_stochastic(
         estimation_report,
         estimation_path,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lag_transition::{derive_downstream_par_order, precompute_stage_lag_transitions};
+    use chrono::NaiveDate;
+    use cobre_core::{
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, HydroPastInflows,
+        HydroStageBounds, HydroStagePenalties, InitialConditions, LineStageBounds,
+        LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
+        PumpingStageBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalStageBounds,
+        entities::{
+            bus::{Bus, DeficitSegment},
+            hydro::{Hydro, HydroGenerationModel, HydroPenalties},
+        },
+        scenario::{InflowHistoryRow, InflowModel, LoadModel},
+        temporal::{
+            Block, BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig,
+            SeasonCycleType, SeasonDefinition, SeasonMap, Stage, StageRiskConfig, StageStateConfig,
+        },
+    };
+    use cobre_stochastic::{
+        PrecomputedPar,
+        par::lag_kernel::{DownstreamLagAccum, LagMajor, PrimaryLagAccum, advance_lag_chain},
+        solve_par_noise,
+    };
+
+    /// Season definitions for the monthly->quarterly fixture below: three
+    /// monthly seasons, then two quarterly seasons (`id >= 12`) — the same
+    /// shape as the DLC fixture in `forward_sampler_integration.rs`.
+    fn ring_season_map() -> SeasonMap {
+        let def = |id: usize, month_start: u32, month_end: Option<u32>| SeasonDefinition {
+            id,
+            label: format!("S{id}"),
+            month_start,
+            day_start: None,
+            month_end,
+            day_end: None,
+        };
+        SeasonMap {
+            cycle_type: SeasonCycleType::Custom,
+            seasons: vec![
+                def(0, 1, None),
+                def(1, 2, None),
+                def(2, 3, None),
+                def(12, 4, Some(6)),
+                def(13, 7, Some(9)),
+            ],
+        }
+    }
+
+    /// A `System` with 5 study stages (three monthly, Jan-Mar 2026, then two
+    /// quarterly, Q2-Q3 2026) and one hydro on `HistoricalResiduals`, wired so
+    /// `build_opening_tree_library` runs its production derivation end to end
+    /// rather than a hand-supplied `downstream_par_order`.
+    struct RingFixture {
+        system: System,
+        stages: Vec<Stage>,
+        hydro_id: EntityId,
+        raw: [f64; 5],
+        past_inflow_seed: f64,
+    }
+
+    // Rationale: one flat literal `System` fixture (bus, hydro, 5 stages,
+    // inflow models, bounds, penalties) mirroring `setup/tests.rs`'s
+    // `minimal_system_2_hydros_with_past_inflows`; splitting it fragments a
+    // single-purpose, single-call fixture across artificial sub-functions.
+    #[allow(clippy::too_many_lines)]
+    fn build_ring_fixture() -> RingFixture {
+        let hydro_id = EntityId(2);
+        let bus_id = EntityId(1);
+
+        let stage = |index: usize,
+                     id: i32,
+                     start: NaiveDate,
+                     end: NaiveDate,
+                     season_id: usize,
+                     duration_hours: f64| Stage {
+            index,
+            id,
+            start_date: start,
+            end_date: end,
+            season_id: Some(season_id),
+            blocks: vec![Block {
+                index: 0,
+                name: "S".to_string(),
+                duration_hours,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: true,
+                inflow_lags: true,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::HistoricalResiduals,
+            },
+        };
+
+        let stages = vec![
+            stage(
+                0,
+                0,
+                NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 2, 1).unwrap(),
+                0,
+                31.0 * 24.0,
+            ),
+            stage(
+                1,
+                1,
+                NaiveDate::from_ymd_opt(2026, 2, 1).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 3, 1).unwrap(),
+                1,
+                28.0 * 24.0,
+            ),
+            stage(
+                2,
+                2,
+                NaiveDate::from_ymd_opt(2026, 3, 1).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 4, 1).unwrap(),
+                2,
+                31.0 * 24.0,
+            ),
+            stage(
+                3,
+                3,
+                NaiveDate::from_ymd_opt(2026, 4, 1).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(),
+                12,
+                91.0 * 24.0,
+            ),
+            stage(
+                4,
+                4,
+                NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 10, 1).unwrap(),
+                13,
+                92.0 * 24.0,
+            ),
+        ];
+
+        let raw = [80.0, 150.0, 40.0, 190.0, 60.0];
+        let past_inflow_seed = 70.0;
+
+        let mut inflow_models = Vec::with_capacity(6);
+        for stage_id in -1..5_i32 {
+            inflow_models.push(InflowModel {
+                hydro_id,
+                stage_id,
+                mean_m3s: 100.0,
+                std_m3s: 20.0,
+                ar_coefficients: if stage_id >= 0 { vec![0.6] } else { vec![] },
+                residual_std_ratio: 1.0,
+                annual: None,
+            });
+        }
+
+        let mut inflow_history: Vec<InflowHistoryRow> = stages
+            .iter()
+            .enumerate()
+            .map(|(t, stage)| InflowHistoryRow {
+                hydro_id,
+                date: stage.start_date,
+                value_m3s: raw[t],
+            })
+            .collect();
+        // `discover_historical_windows` also requires one lag observation
+        // (season 13, the wraparound lag season for PAR order 1 immediately
+        // before the first study season). Its value is never read by
+        // `standardize_historical_windows`, which only consumes the 5
+        // study-stage entries above.
+        inflow_history.push(InflowHistoryRow {
+            hydro_id,
+            date: NaiveDate::from_ymd_opt(2025, 7, 15).unwrap(),
+            value_m3s: 999.0,
+        });
+
+        let load_models: Vec<LoadModel> = (0..5_i32)
+            .map(|stage_id| LoadModel {
+                bus_id,
+                stage_id,
+                mean_mw: 100.0,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        let bus = Bus {
+            id: bus_id,
+            name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 500.0,
+            }],
+            excess_cost: 0.0,
+        };
+        let hydro = Hydro {
+            id: hydro_id,
+            name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id,
+            downstream_id: None,
+            travel_time_hours: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 200.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 250.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: HydroPenalties {
+                spillage_cost: 0.01,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 0.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+        };
+
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: 5,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 200.0,
+                    min_turbined_m3s: 0.0,
+                    max_turbined_m3s: 100.0,
+                    min_outflow_m3s: 0.0,
+                    max_outflow_m3s: None,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 250.0,
+                    max_diversion_m3s: None,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 1,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: 5,
+            },
+            &PenaltiesDefaults {
+                hydro: HydroStagePenalties {
+                    spillage_cost: 0.01,
+                    diversion_cost: 0.0,
+                    turbined_cost: 0.0,
+                    storage_violation_below_cost: 500.0,
+                    filling_target_violation_cost: 0.0,
+                    turbined_violation_below_cost: 0.0,
+                    outflow_violation_below_cost: 0.0,
+                    outflow_violation_above_cost: 0.0,
+                    generation_violation_below_cost: 0.0,
+                    evaporation_violation_cost: 0.0,
+                    water_withdrawal_violation_cost: 0.0,
+                    water_withdrawal_violation_pos_cost: 0.0,
+                    water_withdrawal_violation_neg_cost: 0.0,
+                    evaporation_violation_pos_cost: 0.0,
+                    evaporation_violation_neg_cost: 0.0,
+                    inflow_nonnegativity_cost: 1000.0,
+                },
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        let policy_graph = PolicyGraph {
+            graph_type: PolicyGraphType::FiniteHorizon,
+            annual_discount_rate: 0.0,
+            transitions: vec![],
+            season_map: Some(ring_season_map()),
+        };
+
+        let system = SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(vec![hydro])
+            .stages(stages.clone())
+            .inflow_models(inflow_models)
+            .load_models(load_models)
+            .inflow_history(inflow_history)
+            .bounds(bounds)
+            .penalties(penalties)
+            .policy_graph(policy_graph)
+            .initial_conditions(InitialConditions {
+                storage: vec![],
+                filling_storage: vec![],
+                past_inflows: vec![HydroPastInflows {
+                    hydro_id,
+                    values_m3s: vec![past_inflow_seed],
+                    season_ids: None,
+                }],
+                past_anticipated_commitments: vec![],
+                recent_observations: vec![],
+                past_defluences: vec![],
+            })
+            .build()
+            .expect("ring fixture: valid system");
+
+        RingFixture {
+            system,
+            stages,
+            hydro_id,
+            raw,
+            past_inflow_seed,
+        }
+    }
+
+    /// Drive `advance_lag_chain::<LagMajor>` across `fx`'s 5 stages, returning
+    /// the incoming (pre-advance) lag at stage 4 — the value the AR(1) model
+    /// there reads. `downstream_par_order = 0` (`accumulator`/`completed_lags`
+    /// empty) reproduces the literal-`0` regression `build_opening_tree_library`
+    /// used to pass to `standardize_historical_windows`; a positive value
+    /// reproduces the ring-aware, fixed behavior.
+    fn ring_fixture_incoming_lag_at_stage4(
+        fx: &RingFixture,
+        transitions: &[cobre_core::temporal::StageLagTransition],
+        downstream_par_order: usize,
+    ) -> f64 {
+        let layout = LagMajor {
+            entity_count: 1,
+            max_order: 1,
+        };
+        let mut lag_state = vec![fx.past_inflow_seed];
+        let mut incoming = vec![0.0];
+        let mut primary_acc = vec![0.0];
+        let mut primary_w = 0.0_f64;
+        let mut ds_acc = if downstream_par_order > 0 {
+            vec![0.0]
+        } else {
+            Vec::new()
+        };
+        let mut ds_completed = vec![0.0; downstream_par_order];
+        let mut ds_w = 0.0_f64;
+        let mut ds_n = 0usize;
+        let mut incoming_stage4 = 0.0;
+
+        for (t, (stage_lag, &raw)) in transitions.iter().zip(fx.raw.iter()).enumerate() {
+            incoming.copy_from_slice(&lag_state);
+            if t == 4 {
+                incoming_stage4 = incoming[0];
+            }
+            let mut primary = PrimaryLagAccum {
+                accumulator: &mut primary_acc,
+                weight_accum: &mut primary_w,
+            };
+            let mut downstream = DownstreamLagAccum {
+                accumulator: &mut ds_acc,
+                weight_accum: &mut ds_w,
+                completed_lags: &mut ds_completed,
+                n_completed: &mut ds_n,
+                par_order: downstream_par_order,
+            };
+            advance_lag_chain(
+                layout,
+                &mut lag_state,
+                &incoming,
+                &[raw],
+                stage_lag,
+                &mut primary,
+                &mut downstream,
+            );
+        }
+        incoming_stage4
+    }
+
+    /// `build_opening_tree_library` (rank-0 opening-tree build) must thread
+    /// `derive_downstream_par_order`'s result into `standardize_historical_windows`,
+    /// not a literal `0`: the resulting eta at the quarterly transition must
+    /// match the independent ring-aware forward-chain oracle and differ from
+    /// the primary-only advance the literal-`0` regression produces.
+    #[test]
+    fn build_opening_tree_library_ring_aware_eta_at_quarterly_transition() {
+        let fx = build_ring_fixture();
+        let training_source = ScenarioSource {
+            inflow_scheme: SamplingScheme::InSample,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            seed: None,
+            historical_years: None,
+        };
+
+        let lib = build_opening_tree_library(&fx.system, &training_source)
+            .expect("build_opening_tree_library must succeed")
+            .expect("HistoricalResiduals noise method must build a library");
+        assert_eq!(
+            lib.n_windows(),
+            1,
+            "exactly one historical window (2026) is discoverable"
+        );
+
+        let par =
+            PrecomputedPar::build(fx.system.inflow_models(), &fx.stages, &[fx.hydro_id], None)
+                .expect("oracle PrecomputedPar must build");
+        assert_eq!(par.max_order(), 1);
+
+        let derived = derive_downstream_par_order(&fx.stages, par.max_order());
+        assert_eq!(
+            derived,
+            par.max_order(),
+            "the fixture crosses season_id >= 12 at stage 3; derive_downstream_par_order \
+             must gate to par.max_order(), not 0"
+        );
+        let season_map = ring_season_map();
+        let transitions = precompute_stage_lag_transitions(&fx.stages, &season_map, derived);
+
+        let ring_aware_incoming = ring_fixture_incoming_lag_at_stage4(&fx, &transitions, derived);
+        let naive_incoming = ring_fixture_incoming_lag_at_stage4(&fx, &transitions, 0);
+        assert!(
+            (ring_aware_incoming - naive_incoming).abs() > 1.0,
+            "ring-rebuilt lag feeding stage 4 must differ from the primary-only advance, \
+             got ring_aware={ring_aware_incoming} vs naive={naive_incoming}"
+        );
+
+        let det_base = par.deterministic_base(4, 0);
+        let psi = par.psi_slice(4, 0);
+        let sigma = par.sigma(4, 0);
+        let expected_ring_aware_eta =
+            solve_par_noise(det_base, psi, &[ring_aware_incoming], sigma, fx.raw[4]);
+        let expected_naive_eta =
+            solve_par_noise(det_base, psi, &[naive_incoming], sigma, fx.raw[4]);
+
+        let eta_stage4 = lib.eta_slice(0, 4)[0];
+        assert_eq!(
+            eta_stage4, expected_ring_aware_eta,
+            "build_opening_tree_library's eta at the quarterly transition must match the \
+             independent ring-aware forward-chain oracle"
+        );
+        assert!(
+            (eta_stage4 - expected_naive_eta).abs() > 1e-6,
+            "build_opening_tree_library's eta must differ from the primary-only advance \
+             (the literal downstream_par_order=0 regression value), got eta={eta_stage4} \
+             vs naive={expected_naive_eta}"
+        );
+    }
 }
