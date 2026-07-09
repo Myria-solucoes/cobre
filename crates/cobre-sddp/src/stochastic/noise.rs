@@ -5,6 +5,7 @@
 
 use cobre_core::temporal::StageLagTransition;
 use cobre_solver::SolverInterface;
+use cobre_stochastic::par::lag_kernel::{LagMajor, advance_lag_chain};
 use cobre_stochastic::{StochasticContext, evaluate_par_batch, solve_par_noise_batch};
 
 use crate::{
@@ -192,53 +193,11 @@ pub(crate) fn shift_lag_state(
     }
 }
 
-/// Shift the lag state using pre-computed monthly inflows, newest lag set to
-/// `monthly_inflows[h]`. Caller guarantees `monthly_inflows.len() >= hydro_count`.
-fn shift_lag_state_from_inflows(
-    state: &mut [f64],
-    incoming_lags: &[f64],
-    monthly_inflows: &[f64],
-    layout: &crate::indexer::StateLayout,
-) {
-    let n_h = layout.hydro_count;
-    let l_max = layout.max_par_order;
-    let lag_start = layout.inflow_lags.start;
-    for h in 0..n_h {
-        // Read from incoming_lags (lag-major: lag * n_h + h) to avoid aliasing state.
-        for lag in (1..l_max).rev() {
-            state[lag_start + lag * n_h + h] = incoming_lags[(lag - 1) * n_h + h];
-        }
-        state[lag_start + h] = monthly_inflows[h];
-    }
-}
-
-/// Primary lag-accumulation buffers, grouped to keep
-/// [`accumulate_and_shift_lag_state`] within the 7-parameter budget.
-pub(crate) struct LagAccumState<'a> {
-    /// Weighted-sum buffer for the current primary lag period, length `>= hydro_count`.
-    pub accumulator: &'a mut [f64],
-    /// Total weight accumulated so far in the current primary lag period.
-    pub weight_accum: &'a mut f64,
-}
-
-/// Downstream (coarser-resolution) accumulation buffers, grouped to keep
-/// [`accumulate_and_shift_lag_state`] within the 7-parameter budget.
-///
-/// For uniform-resolution studies pass `accumulator: &mut []` (empty slice);
-/// all downstream code paths short-circuit on `accumulator.is_empty()`.
-pub(crate) struct DownstreamAccumState<'a> {
-    /// Weighted-sum accumulator buffer, length `>= hydro_count` (empty when `par_order == 0`).
-    pub accumulator: &'a mut [f64],
-    /// Accumulated weight for the current downstream lag period.
-    pub weight_accum: &'a mut f64,
-    /// Slot-major ring buffer (`completed_lags[slot * n_h + h]`, slot 0 = oldest
-    /// quarter), length `n_h * par_order` or empty.
-    pub completed_lags: &'a mut [f64],
-    /// Number of completed downstream lags in the ring buffer (capped at `par_order`).
-    pub n_completed: &'a mut usize,
-    /// PAR order for the downstream resolution; `0` for uniform-resolution studies.
-    pub par_order: usize,
-}
+// LagAccumState/DownstreamAccumState alias the kernel's own accumulator
+// structs (identical fields) so stage_solve.rs/pipeline.rs and their tests
+// keep constructing them under these names.
+pub(crate) use cobre_stochastic::par::lag_kernel::DownstreamLagAccum as DownstreamAccumState;
+pub(crate) use cobre_stochastic::par::lag_kernel::PrimaryLagAccum as LagAccumState;
 
 /// Accumulate this stage's inflow and, when a lag period finalizes, shift the
 /// lag state — supporting multi-resolution studies where stages are shorter than
@@ -247,6 +206,10 @@ pub(crate) struct DownstreamAccumState<'a> {
 /// For the monthly identity case (`accumulate_weight=1.0, spillover_weight=0.0,
 /// finalize_period=true`) this produces bit-for-bit identical results to
 /// [`shift_lag_state`].
+///
+/// Thin adapter: resolves the LP-`StateLayout` offsets into plain slices, then
+/// delegates the accumulate/finalize/shift/downstream-ring algorithm to
+/// [`advance_lag_chain`].
 ///
 /// # Panics (debug only)
 ///
@@ -272,113 +235,27 @@ pub(crate) fn accumulate_and_shift_lag_state(
     lag: &mut LagAccumState<'_>,
     ds: &mut DownstreamAccumState<'_>,
 ) {
+    let lag_start = layout.inflow_lags.start;
     let n_h = layout.hydro_count;
     let l_max = layout.max_par_order;
-    if l_max == 0 || n_h == 0 {
-        return; // same early-return guard as shift_lag_state
-    }
-
-    debug_assert!(
-        lag.accumulator.len() >= n_h,
-        "lag_accumulator too short: {} < {n_h}",
-        lag.accumulator.len()
-    );
-
     let z_start = layout.z_inflow.start;
 
-    // Accumulate before the finalize check so this stage is in the average.
-    let w = stage_lag.accumulate_weight;
-    for h in 0..n_h {
-        lag.accumulator[h] += unscaled_primal[z_start + h] * w;
-    }
-    *lag.weight_accum += w;
-
-    if !ds.accumulator.is_empty() && stage_lag.accumulate_downstream {
-        debug_assert!(
-            ds.accumulator.len() >= n_h,
-            "downstream_accumulator too short: {} < {n_h}",
-            ds.accumulator.len()
-        );
-        debug_assert!(
-            ds.par_order == 0 || ds.completed_lags.len() >= n_h * ds.par_order,
-            "downstream_completed_lags too short: {} < {}",
-            ds.completed_lags.len(),
-            n_h * ds.par_order
-        );
-
-        let dw = stage_lag.downstream_accumulate_weight;
-        for h in 0..n_h {
-            ds.accumulator[h] += unscaled_primal[z_start + h] * dw;
-        }
-        *ds.weight_accum += dw;
-
-        if stage_lag.downstream_finalize && *ds.weight_accum > 0.0 {
-            let inv = 1.0 / *ds.weight_accum;
-            for v in &mut ds.accumulator[..n_h] {
-                *v *= inv;
-            }
-
-            let slot = (*ds.n_completed).min(ds.par_order.saturating_sub(1));
-            let offset = slot * n_h;
-            ds.completed_lags[offset..offset + n_h].copy_from_slice(&ds.accumulator[..n_h]);
-            *ds.n_completed = (*ds.n_completed + 1).min(ds.par_order);
-
-            if stage_lag.downstream_spillover_weight > 0.0 {
-                let dsw = stage_lag.downstream_spillover_weight;
-                for h in 0..n_h {
-                    ds.accumulator[h] = unscaled_primal[z_start + h] * dsw;
-                }
-                *ds.weight_accum = dsw;
-            } else {
-                ds.accumulator[..n_h].fill(0.0);
-                *ds.weight_accum = 0.0;
-            }
-        }
-    }
-
-    // Rebuild from the downstream ring buffer and return, skipping the primary
-    // finalize below — which would overwrite the lags with monthly data.
-    if stage_lag.rebuild_from_downstream && *ds.n_completed > 0 {
-        let n_fill = (*ds.n_completed).min(l_max);
-        for lag_idx in 0..n_fill {
-            // lag_idx 0 = newest = slot n_completed-1, descending into older slots.
-            let src_slot = *ds.n_completed - 1 - lag_idx;
-            let src_offset = src_slot * n_h;
-            let dst_offset = layout.inflow_lags.start + lag_idx * n_h;
-            state[dst_offset..dst_offset + n_h]
-                .copy_from_slice(&ds.completed_lags[src_offset..src_offset + n_h]);
-        }
-        *ds.n_completed = 0;
-        ds.completed_lags.fill(0.0);
-        if !ds.accumulator.is_empty() {
-            ds.accumulator[..n_h].fill(0.0);
-        }
-        *ds.weight_accum = 0.0;
-        return;
-    }
-
-    if stage_lag.finalize_period && *lag.weight_accum > 0.0 {
-        // Overwrite accumulator in place with the weighted average (sum no longer needed).
-        let inv = 1.0 / *lag.weight_accum;
-        for v in &mut lag.accumulator[..n_h] {
-            *v *= inv;
-        }
-
-        shift_lag_state_from_inflows(state, incoming_lags, lag.accumulator, layout);
-
-        // Spillover seeds the NEXT period with RAW z_inflow, not the averaged value.
-        if stage_lag.spillover_weight > 0.0 {
-            let sw = stage_lag.spillover_weight;
-            for h in 0..n_h {
-                lag.accumulator[h] = unscaled_primal[z_start + h] * sw;
-            }
-            *lag.weight_accum = sw;
-        } else {
-            lag.accumulator[..n_h].fill(0.0);
-            *lag.weight_accum = 0.0;
-        }
-    }
-    // Non-finalizing stages leave the lag state frozen (accumulation applied above).
+    // LagMajor::index treats offset 0 as this call's lag block, not the state
+    // vector's absolute start — slicing from `lag_start` keeps every kernel
+    // write on the right hydro/lag; slicing from 0 would silently misdirect
+    // every write by `lag_start`.
+    advance_lag_chain(
+        LagMajor {
+            entity_count: n_h,
+            max_order: l_max,
+        },
+        &mut state[lag_start..],
+        incoming_lags,
+        &unscaled_primal[z_start..z_start + n_h],
+        stage_lag,
+        lag,
+        ds,
+    );
 }
 
 /// Transform raw load noise `η` into patched load-balance RHS values, one per

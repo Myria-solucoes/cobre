@@ -476,7 +476,7 @@ fn validate_partial_estimation_coverage(
 fn run_user_ar_estimation(
     system: System,
     case_dir: &Path,
-    _config: &Config,
+    config: &Config,
     manifest: &FileManifest,
 ) -> Result<(System, EstimationReport), EstimationError> {
     let history_path = case_dir.join("scenarios/inflow_history.parquet");
@@ -490,7 +490,20 @@ fn run_user_ar_estimation(
     let hydro_ids: Vec<EntityId> = system.hydros().iter().map(|h| h.id).collect();
     let stages = system.stages();
     let season_map = system.policy_graph().season_map.as_ref();
+    let max_order = config.estimation.max_order as usize;
 
+    // Empty for a full-year study, so `extended == stages` and the estimation
+    // is bit-identical to the no-prestudy path.
+    let prestudy = synthesize_prestudy_stages(stages, max_order, season_map);
+    let extended: Vec<cobre_core::temporal::Stage> = stages
+        .iter()
+        .cloned()
+        .chain(prestudy.iter().cloned())
+        .collect();
+    let extended = extended.as_slice();
+
+    // Aggregate against stages, not extended: the synthetic pre-study stages
+    // would not change any observation's resolved season.
     let observations = if let Some(sm) = season_map {
         aggregate_observations_to_season(&observations, stages, sm)?
     } else {
@@ -499,7 +512,7 @@ fn run_user_ar_estimation(
 
     // User AR coefficients are NOT re-estimated here.
     let seasonal_stats =
-        estimate_seasonal_stats_with_season_map(&observations, stages, &hydro_ids, season_map)?;
+        estimate_seasonal_stats_with_season_map(&observations, extended, &hydro_ids, season_map)?;
 
     // Read AR from file: system.inflow_models() is empty on this path (no user stats).
     let ar_path = case_dir.join("scenarios/inflow_ar_coefficients.parquet");
@@ -521,7 +534,7 @@ fn run_user_ar_estimation(
     };
 
     // History stats drive mean_m3s/std_m3s; user AR rows drive ar_coefficients/residual_std_ratio.
-    let stats_rows = seasonal_stats_to_rows(&seasonal_stats, stages);
+    let stats_rows = seasonal_stats_to_rows(&seasonal_stats, extended);
 
     let inflow_models = assemble_inflow_models(stats_rows, user_ar_rows, vec![])?;
 

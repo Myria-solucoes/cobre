@@ -499,6 +499,8 @@ fn rebuild_historical_library_non_root(
             season_map_for_transitions,
             max_order,
         );
+        // Opening-tree library, not the ScenarioSource::Historical replay path
+        // setup/scenario_libraries.rs builds — downstream ring stays inert (0) here.
         cobre_stochastic::standardize_historical_windows(
             &mut lib,
             system.inflow_history(),
@@ -509,6 +511,7 @@ fn rebuild_historical_library_non_root(
             system.policy_graph().season_map.as_ref(),
             &system.initial_conditions().past_inflows,
             &stage_lag_transitions,
+            0,
         );
         Ok(Some(lib))
     } else {

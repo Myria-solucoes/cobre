@@ -33,10 +33,10 @@ use std::collections::BTreeMap;
 use chrono::NaiveDate;
 use cobre_core::{
     BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, DeficitSegment,
-    EntityId, HydroStageBounds, HydroStagePenalties, LineStageBounds, LineStagePenalties,
-    NcsStagePenalties, NonControllableSource, PenaltiesCountsSpec, PenaltiesDefaults,
-    PumpingStageBounds, ResolvedBounds, ResolvedPenalties, ScenarioSource, SystemBuilder,
-    ThermalStageBounds,
+    EntityId, HydroPastInflows, HydroStageBounds, HydroStagePenalties, LineStageBounds,
+    LineStagePenalties, NcsStagePenalties, NonControllableSource, PenaltiesCountsSpec,
+    PenaltiesDefaults, PumpingStageBounds, ResolvedBounds, ResolvedPenalties, ScenarioSource,
+    SystemBuilder, ThermalStageBounds,
     entities::hydro::{HydroGenerationModel, HydroPenalties},
     scenario::{
         CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, ExternalLoadRow,
@@ -44,16 +44,22 @@ use cobre_core::{
         SamplingScheme,
     },
     temporal::{
-        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
-        StageStateConfig,
+        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, SeasonCycleType, SeasonDefinition,
+        SeasonMap, Stage, StageLagTransition, StageRiskConfig, StageStateConfig,
     },
 };
 use cobre_sddp::{
     InflowNonNegativityMethod, StoppingMode, StoppingRule, StoppingRuleSet, StudySetup,
-    hydro_models::PrepareHydroModelsResult, setup::ConstructionConfig,
+    hydro_models::PrepareHydroModelsResult, lag_transition::precompute_stage_lag_transitions,
+    setup::ConstructionConfig,
 };
 use cobre_solver::ActiveSolver;
-use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
+use cobre_stochastic::{
+    ClassSchemes, ExternalScenarioLibrary, HistoricalScenarioLibrary, OpeningTreeInputs,
+    PrecomputedPar, build_stochastic_context,
+    par::lag_kernel::{DownstreamLagAccum, LagMajor, PrimaryLagAccum, advance_lag_chain},
+    solve_par_noise, standardize_external_inflow, standardize_historical_windows,
+};
 
 mod common;
 use common::StubComm;
@@ -1997,4 +2003,411 @@ fn monthly_noise_sharing_regression() {
         "monthly noise sharing regression: lower bound must be finite, got {}",
         result_a.final_lb
     );
+}
+
+// ---------------------------------------------------------------------------
+// Differential lag-chain golden test (forward vs. External vs. Historical)
+// ---------------------------------------------------------------------------
+//
+// Three call sites route through the shared kernel
+// (`cobre_stochastic::par::lag_kernel::advance_lag_chain`): the forward pass
+// (`LagMajor` layout), and the External/Historical samplers (`EntityMajor`
+// layout). This drives the same realized inflow sequence through all three
+// on a monthly→quarterly multi-resolution fixture and asserts per-stage,
+// per-hydro agreement — not total cost, since a fold/naive advance can match
+// total cost while the per-stage lag split differs.
+//
+// Neither `standardize_external_inflow` nor `standardize_historical_windows`
+// exposes its internal lag state directly; each emits only a standardized
+// `eta`. `solve_par_noise` is an affine, deterministic function of the
+// incoming lag, so re-solving it with the forward oracle's own lag value
+// reproduces, bit-for-bit, whatever `eta` a sampler with the SAME internal
+// lag would have produced. An equality failure below means the sampler's
+// internal chain diverged from the forward chain.
+
+const DLC_N_HYDROS: usize = 2;
+const DLC_N_STAGES: usize = 5;
+
+/// Fixed multi-resolution fixture: three monthly stages (Jan–Mar 2026) feed a
+/// downstream Q1 ring, the fourth stage (Q2 2026) rebuilds the primary lag
+/// from that completed ring, and the fifth stage (Q3 2026) reads the
+/// rebuilt lag under its own AR(1) model.
+struct DlcFixture {
+    stages: Vec<Stage>,
+    hydro_ids: Vec<EntityId>,
+    par: PrecomputedPar,
+    transitions: Vec<StageLagTransition>,
+    past_inflows: Vec<HydroPastInflows>,
+    /// `raw[stage][hydro]` — the realized inflow (m³/s) driven through all
+    /// three call sites.
+    raw: [[f64; DLC_N_HYDROS]; DLC_N_STAGES],
+}
+
+fn dlc_season_def(id: usize, month_start: u32, month_end: Option<u32>) -> SeasonDefinition {
+    SeasonDefinition {
+        id,
+        label: format!("S{id}"),
+        month_start,
+        day_start: None,
+        month_end,
+        day_end: None,
+    }
+}
+
+fn build_dlc_fixture() -> DlcFixture {
+    let stage = |index, start_date, end_date, season_id, duration_hours| {
+        make_stage(
+            index,
+            StageSpec {
+                start_date,
+                end_date,
+                season_id: Some(season_id),
+                blocks: vec![Block {
+                    index: 0,
+                    name: "SINGLE".to_string(),
+                    duration_hours,
+                }],
+                ..StageSpec::default()
+            },
+        )
+    };
+    let stages = vec![
+        stage(
+            0,
+            NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 2, 1).unwrap(),
+            0,
+            31.0 * 24.0,
+        ),
+        stage(
+            1,
+            NaiveDate::from_ymd_opt(2026, 2, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 3, 1).unwrap(),
+            1,
+            28.0 * 24.0,
+        ),
+        stage(
+            2,
+            NaiveDate::from_ymd_opt(2026, 3, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 4, 1).unwrap(),
+            2,
+            31.0 * 24.0,
+        ),
+        stage(
+            3,
+            NaiveDate::from_ymd_opt(2026, 4, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(),
+            12,
+            91.0 * 24.0,
+        ),
+        stage(
+            4,
+            NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 10, 1).unwrap(),
+            13,
+            92.0 * 24.0,
+        ),
+    ];
+    let season_map = SeasonMap {
+        cycle_type: SeasonCycleType::Custom,
+        seasons: vec![
+            dlc_season_def(0, 1, None),
+            dlc_season_def(1, 2, None),
+            dlc_season_def(2, 3, None),
+            dlc_season_def(12, 4, Some(6)),
+            dlc_season_def(13, 7, Some(9)),
+        ],
+    };
+
+    let hydro1 = EntityId(1);
+    let hydro2 = EntityId(2);
+    let hydro_ids = vec![hydro1, hydro2];
+
+    let mut models = Vec::new();
+    for stage_id in -1..i32::try_from(DLC_N_STAGES).unwrap() {
+        let ar1 = if stage_id >= 0 { vec![0.6] } else { vec![] };
+        let ar2 = if stage_id >= 0 { vec![0.5] } else { vec![] };
+        models.push(InflowModel {
+            hydro_id: hydro1,
+            stage_id,
+            mean_m3s: 100.0,
+            std_m3s: 20.0,
+            ar_coefficients: ar1,
+            residual_std_ratio: 1.0,
+            annual: None,
+        });
+        models.push(InflowModel {
+            hydro_id: hydro2,
+            stage_id,
+            mean_m3s: 150.0,
+            std_m3s: 25.0,
+            ar_coefficients: ar2,
+            residual_std_ratio: 0.9,
+            annual: None,
+        });
+    }
+
+    let par = PrecomputedPar::build(&models, &stages, &hydro_ids, None).unwrap();
+    assert_eq!(par.max_order(), 1);
+
+    let transitions = precompute_stage_lag_transitions(&stages, &season_map, 1);
+    assert_eq!(transitions.len(), DLC_N_STAGES);
+    for t in &transitions[0..3] {
+        assert!(t.accumulate_downstream);
+        assert!(!t.rebuild_from_downstream);
+    }
+    assert!(!transitions[0].downstream_finalize);
+    assert!(!transitions[1].downstream_finalize);
+    assert!(transitions[2].downstream_finalize);
+    assert!(transitions[3].rebuild_from_downstream);
+    assert!(!transitions[4].accumulate_downstream);
+    assert!(!transitions[4].rebuild_from_downstream);
+
+    let past_inflows = vec![
+        HydroPastInflows {
+            hydro_id: hydro1,
+            values_m3s: vec![70.0],
+            season_ids: None,
+        },
+        HydroPastInflows {
+            hydro_id: hydro2,
+            values_m3s: vec![280.0],
+            season_ids: None,
+        },
+    ];
+
+    let raw = [
+        [80.0, 300.0],
+        [150.0, 120.0],
+        [40.0, 260.0],
+        [190.0, 50.0],
+        [60.0, 400.0],
+    ];
+
+    DlcFixture {
+        stages,
+        hydro_ids,
+        par,
+        transitions,
+        past_inflows,
+        raw,
+    }
+}
+
+/// Drive `advance_lag_chain::<LagMajor>` across the fixture's stages exactly
+/// as the forward pass's `noise.rs` adapter does, recording the incoming
+/// (pre-advance) lag at every stage — the value each call site's own eta
+/// computation reads.
+fn dlc_forward_oracle_incoming_lags(fx: &DlcFixture) -> Vec<[f64; DLC_N_HYDROS]> {
+    let layout = LagMajor {
+        entity_count: DLC_N_HYDROS,
+        max_order: 1,
+    };
+    let mut lag_state = vec![
+        fx.past_inflows[0].values_m3s[0],
+        fx.past_inflows[1].values_m3s[0],
+    ];
+    let mut incoming = vec![0.0; DLC_N_HYDROS];
+    let mut primary_acc = vec![0.0; DLC_N_HYDROS];
+    let mut primary_w = 0.0_f64;
+    let mut ds_acc = vec![0.0; DLC_N_HYDROS];
+    let mut ds_w = 0.0_f64;
+    let mut ds_completed = vec![0.0; DLC_N_HYDROS];
+    let mut ds_n = 0_usize;
+
+    let mut incoming_per_stage = Vec::with_capacity(DLC_N_STAGES);
+    for t in 0..DLC_N_STAGES {
+        incoming.copy_from_slice(&lag_state);
+        incoming_per_stage.push([incoming[0], incoming[1]]);
+
+        let mut primary = PrimaryLagAccum {
+            accumulator: &mut primary_acc,
+            weight_accum: &mut primary_w,
+        };
+        let mut downstream = DownstreamLagAccum {
+            accumulator: &mut ds_acc,
+            weight_accum: &mut ds_w,
+            completed_lags: &mut ds_completed,
+            n_completed: &mut ds_n,
+            par_order: 1,
+        };
+        advance_lag_chain(
+            layout,
+            &mut lag_state,
+            &incoming,
+            &fx.raw[t],
+            &fx.transitions[t],
+            &mut primary,
+            &mut downstream,
+        );
+    }
+    incoming_per_stage
+}
+
+/// Independent reimplementation of the pre-016 primary-only lag shift: it
+/// accumulates `accumulate_weight`-weighted realized values and, at
+/// `finalize_period`, shifts the lag to the period average — never
+/// consulting `accumulate_downstream` or `rebuild_from_downstream`.
+fn dlc_naive_primary_only_incoming_lags(fx: &DlcFixture) -> Vec<[f64; DLC_N_HYDROS]> {
+    let mut lag_state = [
+        fx.past_inflows[0].values_m3s[0],
+        fx.past_inflows[1].values_m3s[0],
+    ];
+    let mut accumulator = [0.0_f64; DLC_N_HYDROS];
+    let mut weight_accum = 0.0_f64;
+
+    let mut incoming_per_stage = Vec::with_capacity(DLC_N_STAGES);
+    for t in 0..DLC_N_STAGES {
+        incoming_per_stage.push(lag_state);
+
+        let stage_lag = &fx.transitions[t];
+        for h in 0..DLC_N_HYDROS {
+            accumulator[h] += fx.raw[t][h] * stage_lag.accumulate_weight;
+        }
+        weight_accum += stage_lag.accumulate_weight;
+
+        if stage_lag.finalize_period && weight_accum > 0.0 {
+            let inv = 1.0 / weight_accum;
+            for h in 0..DLC_N_HYDROS {
+                lag_state[h] = accumulator[h] * inv;
+            }
+            if stage_lag.spillover_weight > 0.0 {
+                for h in 0..DLC_N_HYDROS {
+                    accumulator[h] = fx.raw[t][h] * stage_lag.spillover_weight;
+                }
+                weight_accum = stage_lag.spillover_weight;
+            } else {
+                accumulator = [0.0; DLC_N_HYDROS];
+                weight_accum = 0.0;
+            }
+        }
+    }
+    incoming_per_stage
+}
+
+#[test]
+fn differential_lag_chain_forward_external_historical_agree_at_quarterly_transition() {
+    let fx = build_dlc_fixture();
+    let oracle_incoming = dlc_forward_oracle_incoming_lags(&fx);
+
+    assert_eq!(
+        oracle_incoming[0],
+        [
+            fx.past_inflows[0].values_m3s[0],
+            fx.past_inflows[1].values_m3s[0],
+        ],
+        "stage 0's incoming lag must be the unmodified past_inflows seed"
+    );
+    for h in 0..DLC_N_HYDROS {
+        assert!(
+            (oracle_incoming[4][h] - fx.raw[3][h]).abs() > 1.0,
+            "hydro {h}: the ring-rebuilt lag feeding stage 4 must differ from \
+             the transition stage's own raw value"
+        );
+    }
+
+    let mut ext_lib = ExternalScenarioLibrary::new(
+        DLC_N_STAGES,
+        1,
+        DLC_N_HYDROS,
+        "inflow",
+        vec![1; DLC_N_STAGES],
+    );
+    let mut ext_rows = Vec::with_capacity(DLC_N_STAGES * DLC_N_HYDROS);
+    for t in 0..DLC_N_STAGES {
+        for h in 0..DLC_N_HYDROS {
+            ext_rows.push(ExternalScenarioRow {
+                stage_id: i32::try_from(t).unwrap(),
+                scenario_id: 0,
+                hydro_id: fx.hydro_ids[h],
+                value_m3s: fx.raw[t][h],
+            });
+        }
+    }
+    standardize_external_inflow(
+        &mut ext_lib,
+        &ext_rows,
+        &fx.hydro_ids,
+        &fx.stages,
+        &fx.par,
+        &fx.past_inflows,
+        &fx.transitions,
+        1,
+    );
+
+    let window_year = 2026;
+    let mut hist_lib =
+        HistoricalScenarioLibrary::new(1, DLC_N_STAGES, DLC_N_HYDROS, 1, vec![window_year]);
+    let mut hist_rows = Vec::with_capacity(DLC_N_STAGES * DLC_N_HYDROS);
+    for t in 0..DLC_N_STAGES {
+        let date = fx.stages[t].start_date;
+        for h in 0..DLC_N_HYDROS {
+            hist_rows.push(InflowHistoryRow {
+                hydro_id: fx.hydro_ids[h],
+                date,
+                value_m3s: fx.raw[t][h],
+            });
+        }
+    }
+    standardize_historical_windows(
+        &mut hist_lib,
+        &hist_rows,
+        &fx.hydro_ids,
+        &fx.stages,
+        &fx.par,
+        &[window_year],
+        None,
+        &fx.past_inflows,
+        &fx.transitions,
+        1,
+    );
+
+    for t in 0..DLC_N_STAGES {
+        for h in 0..DLC_N_HYDROS {
+            let det_base = fx.par.deterministic_base(t, h);
+            let psi = fx.par.psi_slice(t, h);
+            let sigma = fx.par.sigma(t, h);
+            let lag_buf = [oracle_incoming[t][h]];
+            let expected_eta = solve_par_noise(det_base, psi, &lag_buf, sigma, fx.raw[t][h]);
+
+            let eta_ext = ext_lib.eta_slice(t, 0)[h];
+            let eta_hist = hist_lib.eta_slice(0, t)[h];
+
+            assert_eq!(
+                eta_ext, expected_eta,
+                "External sampler eta[stage={t}, hydro={h}] diverges from the forward lag chain"
+            );
+            assert_eq!(
+                eta_hist, expected_eta,
+                "Historical sampler eta[stage={t}, hydro={h}] diverges from the forward lag chain"
+            );
+        }
+    }
+}
+
+#[test]
+fn differential_lag_chain_negative_control_primary_only_advance_diverges_at_transition() {
+    let fx = build_dlc_fixture();
+    let oracle_incoming = dlc_forward_oracle_incoming_lags(&fx);
+    let naive_incoming = dlc_naive_primary_only_incoming_lags(&fx);
+
+    for t in 0..4 {
+        assert_eq!(
+            naive_incoming[t], oracle_incoming[t],
+            "stage {t} precedes (or is) the transition stage; the ring is inert \
+             here, so naive and kernel-routed chains must still agree"
+        );
+    }
+
+    for h in 0..DLC_N_HYDROS {
+        let diff = (naive_incoming[4][h] - oracle_incoming[4][h]).abs();
+        assert!(
+            diff > 1e-9,
+            "hydro {h}: naive primary-only advance must diverge from the \
+             ring-rebuilt forward chain at the transition stage, got \
+             naive={} vs forward={} (diff={diff})",
+            naive_incoming[4][h],
+            oracle_incoming[4][h],
+        );
+    }
 }

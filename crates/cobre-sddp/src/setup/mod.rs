@@ -420,6 +420,7 @@ impl StudySetup {
             training_source,
             simulation_source,
             forward_passes,
+            downstream_par_order,
         )?;
 
         let hydro_min_storage_hm3: Vec<f64> =
@@ -1094,6 +1095,7 @@ fn build_scenario_libraries(
     training_source: &ScenarioSource,
     simulation_source: &ScenarioSource,
     forward_passes: u32,
+    downstream_par_order: usize,
 ) -> Result<ScenarioLibraries, SddpError> {
     let inflow_scheme = training_source.inflow_scheme;
     let load_scheme = training_source.load_scheme;
@@ -1114,6 +1116,7 @@ fn build_scenario_libraries(
                 stage_lag_transitions,
                 training_source.historical_years.as_ref(),
                 forward_passes,
+                downstream_par_order,
             )?)
         } else {
             None
@@ -1129,6 +1132,7 @@ fn build_scenario_libraries(
                 &system.initial_conditions().past_inflows,
                 stage_lag_transitions,
                 forward_passes,
+                downstream_par_order,
             )?)
         } else {
             None
@@ -1170,6 +1174,7 @@ fn build_scenario_libraries(
                 stage_lag_transitions,
                 simulation_source.historical_years.as_ref(),
                 forward_passes,
+                downstream_par_order,
             )?)
         } else {
             None
@@ -1185,6 +1190,7 @@ fn build_scenario_libraries(
                 &system.initial_conditions().past_inflows,
                 stage_lag_transitions,
                 forward_passes,
+                downstream_par_order,
             )?)
         } else {
             None
