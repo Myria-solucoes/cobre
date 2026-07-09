@@ -2,12 +2,10 @@
 //!
 //! Three call sites accumulate a stage's realized value into a lag period,
 //! finalize and shift the lag chain, and — for multi-resolution studies —
-//! roll completed periods into a coarser downstream ring, each with its own
-//! hand-rolled copy of the same algorithm. [`advance_lag_chain`] is the
-//! single kernel those call sites route through, generic over the
-//! lag-storage layout via [`LagIndex`]. This module validates the kernel in
-//! isolation against hand-computed oracles (see the test module below); no
-//! call site is migrated here.
+//! roll completed periods into a coarser downstream ring.
+//! [`advance_lag_chain`] is the single kernel they all route through, generic
+//! over the lag-storage layout via [`LagIndex`]. The test module validates the
+//! kernel in isolation against hand-computed oracles.
 //!
 //! ## Locked design decisions
 //!

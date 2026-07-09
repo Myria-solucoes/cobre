@@ -95,30 +95,7 @@ fn run_deterministic_with_setup(
 
 /// Train a case (`StubComm`, `ActiveSolver`, seed 42, 1 thread) and return the result.
 fn run_deterministic(case_dir: &Path) -> cobre_sddp::TrainingResult {
-    let config_path = case_dir.join("config.json");
-    let config = cobre_io::parse_config(&config_path).expect("config must parse");
-
-    let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
-
-    let prepare_result =
-        prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-            .expect("prepare_stochastic must succeed");
-    let system = prepare_result.system;
-    let stochastic = prepare_result.stochastic;
-
-    let hydro_models =
-        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
-
-    let mut setup = build_setup_for_case(case_dir, &config, &system, stochastic, hydro_models);
-
-    let comm = StubComm;
-    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
-
-    let outcome = setup
-        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
-        .expect("train must return Ok");
-    assert!(outcome.error.is_none(), "expected no training error");
-    outcome.result
+    run_deterministic_with_solver(case_dir).0
 }
 
 /// Train with 1-scenario simulation enabled, then simulate, returning the
@@ -6400,14 +6377,14 @@ mod nonzero_stage_fpha_override_regression {
     }
 }
 
-/// End-to-end regression for ticket-010's `CalendarMonth` fix: a `Custom`-cycle
-/// stage whose `season_id` deliberately differs from its calendar month must
-/// still resolve evaporation by the TRUE calendar month derived from
+/// End-to-end regression for the `CalendarMonth` evaporation-month fix: a
+/// `Custom`-cycle stage whose `season_id` deliberately differs from its calendar
+/// month must still resolve evaporation by the TRUE calendar month derived from
 /// `start_date`, and a `Weekly`-cycle evaporating stage (`season_id >= 12`) must
-/// no longer hard-error at setup. Both fixtures route through the full
+/// not hard-error at setup. Both fixtures route through the full
 /// `cobre_io::load_case` -> `prepare_stochastic` -> `prepare_hydro_models`
-/// pipeline every other deterministic case uses — the season-parsing path
-/// ticket-010's own unit tests (`production/stage_key.rs`,
+/// pipeline every other deterministic case uses — the season-parsing path the
+/// fix's own unit tests (`production/stage_key.rs`,
 /// `hydro_models/evaporation.rs`) construct `Stage` values directly and never
 /// exercise.
 mod custom_weekly_evaporation_regression {
@@ -6428,9 +6405,9 @@ mod custom_weekly_evaporation_regression {
 
     /// Run `dir` through the same `load_case` -> `prepare_stochastic` ->
     /// `prepare_hydro_models` pipeline `run_deterministic` uses internally, and
-    /// return the resolved evaporation models. A pre-ticket-010 checkout panics
-    /// here on the Weekly fixture (`season_id >= 12` -> `SddpError::Validation`
-    /// surfaces through the `.expect` below).
+    /// return the resolved evaporation models. Without the calendar-month
+    /// derivation, the Weekly fixture panics here (`season_id >= 12` ->
+    /// `SddpError::Validation` surfaces through the `.expect` below).
     fn resolve_evaporation(dir: &Path) -> EvaporationModelSet {
         let config = cobre_io::parse_config(&dir.join("config.json")).expect("config must parse");
         let system = cobre_io::load_case(dir).expect("load_case must succeed");
@@ -6484,8 +6461,8 @@ mod custom_weekly_evaporation_regression {
         10.0, 20.0, 1.0, 40.0, 50.0, 60.0, 70.0, 1.0, 90.0, 100.0, 110.0, 120.0,
     ];
 
-    /// AC1 + AC3 (negative control, documented per the ticket's sanctioned
-    /// analytical-discrimination approach — ticket-010 is never reverted): stage
+    /// Positive assertion plus analytic negative control (the fix is never
+    /// reverted; the wrong lookup's value is asserted against instead): stage
     /// 0 (`start_date` 2024-06-01, `season_id = 2`) and stage 1 (`start_date`
     /// 2024-11-01, `season_id = 7`) each resolve evaporation from
     /// `coefficients_mm[month_of(stage)]` (index 5 = June = 60.0, index 10 =
@@ -6537,11 +6514,11 @@ mod custom_weekly_evaporation_regression {
         );
     }
 
-    /// AC2: a Weekly-cycle evaporating study (`season_id` 21 and 26, both `>= 12`)
-    /// no longer returns `SddpError::Validation` at setup, and training
-    /// completes and converges. Pre-ticket-010, [`super::run_deterministic`]
-    /// would panic on this fixture inside `prepare_hydro_models`'s
-    /// `.expect("prepare_hydro_models must succeed")`.
+    /// A Weekly-cycle evaporating study (`season_id` 21 and 26, both `>= 12`)
+    /// does not return `SddpError::Validation` at setup, and training
+    /// completes and converges. Without the calendar-month derivation,
+    /// [`super::run_deterministic`] panics on this fixture inside
+    /// `prepare_hydro_models`'s `.expect("prepare_hydro_models must succeed")`.
     #[test]
     fn weekly_cycle_evaporation_no_longer_errors_and_setup_completes() {
         let dir = weekly_case_dir();

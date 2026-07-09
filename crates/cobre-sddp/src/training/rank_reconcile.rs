@@ -157,22 +157,20 @@ mod tests {
         }
     }
 
-    // Box<dyn Any> is the only safe typed-dispatch path through the generic
-    // `allreduce` signature in this forbid-unsafe crate; the stub only ever
-    // reduces the i32 flag `reconcile_error_flag` sends.
+    // Borrowed `&dyn Any` dispatch through the generic `allreduce` signature in
+    // this forbid-unsafe crate; the stub only ever reduces the i32 flag
+    // `reconcile_error_flag` sends.
     fn downcast_i32<T: CommData>(value: T) -> i32 {
         use std::any::Any;
-        let boxed: Box<dyn Any> = Box::new(value);
-        *boxed
-            .downcast::<i32>()
+        *(&value as &dyn Any)
+            .downcast_ref::<i32>()
             .expect("reconcile stub only reduces i32 flags")
     }
 
     fn upcast_i32<T: CommData>(value: i32) -> T {
         use std::any::Any;
-        let boxed: Box<dyn Any> = Box::new(value);
-        *boxed
-            .downcast::<T>()
+        *(&value as &dyn Any)
+            .downcast_ref::<T>()
             .expect("reconcile stub only reduces i32 flags")
     }
 
