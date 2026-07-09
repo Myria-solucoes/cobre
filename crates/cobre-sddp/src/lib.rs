@@ -143,6 +143,8 @@ pub use policy::provenance::{
     HydroProductionProvenance, InflowProvenance, ModelProvenanceReport, ProvenanceSource,
     build_provenance_report,
 };
+// ── rank_reconcile ────────────────────────────────────────────────────────────
+pub use training::rank_reconcile::reconcile_global_ok;
 // ── risk_measure ──────────────────────────────────────────────────────────────
 pub use convergence::risk_measure::{BackwardOutcome, RiskMeasure};
 // ── setup ─────────────────────────────────────────────────────────────────────

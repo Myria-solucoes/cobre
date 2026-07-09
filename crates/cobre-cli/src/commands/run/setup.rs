@@ -575,24 +575,68 @@ pub(super) fn run_pre_training(
         crate::summary::print_setup_summary(&ctx.stderr, timings);
     }
 
-    // Built regardless of `quiet`: it also feeds the persisted sidecar consumed
-    // by `cobre summary`, not just the optional print.
-    if ctx.is_root {
-        let hydro_summary = build_hydro_model_summary(&setup.hydro_models, system);
-        if !ctx.quiet {
-            crate::summary::print_hydro_model_summary(&ctx.stderr, &hydro_summary);
-        }
-        let hydro_models_path = ctx.output_dir.join("training/hydro_models.json");
-        cobre_io::write_hydro_model_summary(&hydro_models_path, &hydro_summary).map_err(|e| {
-            CliError::Internal {
-                message: format!("failed to write hydro model summary: {e}"),
-            }
+    let export_result: Result<(), CliError> = if ctx.is_root {
+        run_root_exports(
+            ctx,
+            system,
+            setup,
+            root_config,
+            root_estimation_report,
+            root_estimation_path,
+        )
+    } else {
+        Ok(())
+    };
+
+    // Reconcile the rank-0-only export writes BEFORE the barrier: a rank-0 I/O
+    // failure (disk full, permissions) would otherwise strand every peer at the
+    // barrier while rank 0 returned early.
+    let mut reconcile_scratch = [0_i32];
+    let global_ok =
+        cobre_sddp::reconcile_global_ok(export_result.is_ok(), &ctx.comm, &mut reconcile_scratch)
+            .map_err(|e| CliError::Internal {
+            message: format!("pre-training export reconcile error: {e}"),
         })?;
+    export_result?;
+    if !global_ok {
+        return Err(CliError::Internal {
+            message: "rank 0 pre-training export failed; failing on every rank in lockstep"
+                .to_string(),
+        });
     }
 
-    if ctx.is_root
-        && let Some(path) = root_estimation_path
-    {
+    ctx.comm.barrier().map_err(|e| CliError::Internal {
+        message: format!("post-export barrier error: {e}"),
+    })?;
+
+    Ok(())
+}
+
+/// Rank-0 pre-training export writes: hydro model summary, provenance report,
+/// stochastic artifacts (non-fatal), and scaling report. Called only on rank 0;
+/// the returned `Result` is reconciled across ranks before the post-export barrier.
+fn run_root_exports(
+    ctx: &RunContext<impl Communicator>,
+    system: &System,
+    setup: &StudySetup,
+    root_config: Option<&cobre_io::Config>,
+    root_estimation_report: Option<&EstimationReport>,
+    root_estimation_path: Option<cobre_sddp::EstimationPath>,
+) -> Result<(), CliError> {
+    // Built regardless of `quiet`: it also feeds the persisted sidecar consumed
+    // by `cobre summary`, not just the optional print.
+    let hydro_summary = build_hydro_model_summary(&setup.hydro_models, system);
+    if !ctx.quiet {
+        crate::summary::print_hydro_model_summary(&ctx.stderr, &hydro_summary);
+    }
+    let hydro_models_path = ctx.output_dir.join("training/hydro_models.json");
+    cobre_io::write_hydro_model_summary(&hydro_models_path, &hydro_summary).map_err(|e| {
+        CliError::Internal {
+            message: format!("failed to write hydro model summary: {e}"),
+        }
+    })?;
+
+    if let Some(path) = root_estimation_path {
         let provenance = cobre_sddp::build_provenance_report(
             path,
             root_estimation_report,
@@ -611,7 +655,7 @@ pub(super) fn run_pre_training(
         })?;
     }
 
-    if ctx.is_root && root_config.is_some_and(|c| c.exports.stochastic) {
+    if root_config.is_some_and(|c| c.exports.stochastic) {
         if !ctx.quiet {
             let _ = ctx.stderr.write_line("Exporting stochastic artifacts...");
         }
@@ -631,18 +675,12 @@ pub(super) fn run_pre_training(
         );
     }
 
-    if ctx.is_root {
-        let scaling_path = ctx.output_dir.join("training/scaling_report.json");
-        cobre_io::write_scaling_report(&scaling_path, &setup.stage_data.scaling_report).map_err(
-            |e| CliError::Internal {
-                message: format!("failed to write scaling report: {e}"),
-            },
-        )?;
-    }
-
-    ctx.comm.barrier().map_err(|e| CliError::Internal {
-        message: format!("post-export barrier error: {e}"),
-    })?;
+    let scaling_path = ctx.output_dir.join("training/scaling_report.json");
+    cobre_io::write_scaling_report(&scaling_path, &setup.stage_data.scaling_report).map_err(
+        |e| CliError::Internal {
+            message: format!("failed to write scaling report: {e}"),
+        },
+    )?;
 
     Ok(())
 }

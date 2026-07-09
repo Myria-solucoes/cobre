@@ -94,11 +94,28 @@ pub(super) fn run_simulation_phase(
 
     drop(result_tx);
 
-    let (sim_writer, write_failures) = drain_handle.join().map_err(|_| CliError::Internal {
+    let drain_join = drain_handle.join();
+
+    // Reconcile the per-rank simulation outcome BEFORE the first post-sim
+    // collective (`merge_simulation_metadata`'s allreduce): `simulate()` is
+    // collective-free, so a failure on a strict subset of ranks would otherwise
+    // strand every healthy rank in that allreduce while the failing ranks skip it.
+    let mut reconcile_scratch = [0_i32];
+    let local_ok = drain_join.is_ok() && sim_result.is_ok();
+    let global_ok = cobre_sddp::reconcile_global_ok(local_ok, &ctx.comm, &mut reconcile_scratch)
+        .map_err(|e| CliError::Internal {
+            message: format!("simulation outcome reconcile error: {e}"),
+        })?;
+
+    let (sim_writer, write_failures) = drain_join.map_err(|_| CliError::Internal {
         message: "simulation drain thread panicked".to_string(),
     })?;
-
     let sim_run_result = sim_result?;
+    if !global_ok {
+        return Err(CliError::Internal {
+            message: "a peer rank failed simulation; failing on every rank in lockstep".to_string(),
+        });
+    }
 
     #[allow(clippy::cast_possible_truncation)]
     let sim_time_ms = sim_start.elapsed().as_millis() as u64;

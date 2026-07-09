@@ -4,16 +4,44 @@ use cobre_comm::{CommError, Communicator, ReduceOp};
 
 use crate::SddpError;
 
-/// Reduce every rank's local outcome to one global outcome that all ranks return
-/// identically, so they enter or skip the next collective in lockstep.
+/// Reconcile whether every rank's local step succeeded before a lockstep
+/// collective: returns `true` iff no rank reported a failure, so all ranks enter
+/// or skip the next collective together.
 ///
-/// `ReduceOp::Max` over a 0/non-zero flag is order-independent, so the global
-/// flag — hence the returned `Result` shape — is identical on every rank
-/// regardless of rank count (the declaration-order/bit-for-bit invariant). A
-/// failing rank keeps its own error; a healthy rank whose peer failed returns a
-/// peer-failure `Communication` error. `scratch` is caller-owned so no heap
-/// allocation occurs. A single-rank communicator returns `local_ok` unchanged
-/// with no collective.
+/// `ReduceOp::Max` over a 0/non-zero flag is order-independent, so the global flag
+/// is identical on every rank regardless of rank count (the declaration-order/
+/// bit-for-bit invariant). A single-rank communicator returns `local_ok` with no
+/// collective. `scratch` is caller-owned so no heap allocation occurs.
+///
+/// The caller owns error construction — this reports only the global flag, so it
+/// serves callers whose error type is not [`SddpError`] (e.g. the CLI's
+/// `CliError`); `reconcile_error_flag` wraps it for the `SddpError` path.
+///
+/// # Errors
+///
+/// Returns [`CommError`] when the reconciling `allreduce` transport fails.
+pub fn reconcile_global_ok<C: Communicator>(
+    local_ok: bool,
+    comm: &C,
+    scratch: &mut [i32; 1],
+) -> Result<bool, CommError> {
+    if comm.size() == 1 {
+        return Ok(local_ok);
+    }
+
+    scratch[0] = i32::from(!local_ok);
+
+    let mut reduced = [0_i32];
+    comm.allreduce(&scratch[..], &mut reduced, ReduceOp::Max)?;
+
+    Ok(reduced[0] == 0)
+}
+
+/// Reduce every rank's local outcome to one global outcome that all ranks return
+/// identically, so they enter or skip the next collective in lockstep. A failing
+/// rank keeps its own error; a healthy rank whose peer failed returns a
+/// peer-failure `Communication` error. A single-rank communicator returns
+/// `local_ok` unchanged with no collective.
 ///
 /// # Errors
 ///
@@ -25,16 +53,7 @@ pub(crate) fn reconcile_error_flag<C: Communicator>(
     comm: &C,
     scratch: &mut [i32; 1],
 ) -> Result<(), SddpError> {
-    if comm.size() == 1 {
-        return local_ok;
-    }
-
-    scratch[0] = i32::from(local_ok.is_err());
-
-    let mut reduced = [0_i32];
-    comm.allreduce(&scratch[..], &mut reduced, ReduceOp::Max)?;
-
-    if reduced[0] == 0 {
+    if reconcile_global_ok(local_ok.is_ok(), comm, scratch)? {
         Ok(())
     } else {
         Err(local_ok.err().unwrap_or_else(|| {
@@ -82,7 +101,7 @@ pub(crate) fn reconcile_result<T, C: Communicator>(
 
 #[cfg(test)]
 mod tests {
-    use super::{reconcile_error_flag, reconcile_result};
+    use super::{reconcile_error_flag, reconcile_global_ok, reconcile_result};
     use crate::SddpError;
     use crate::forward::ForwardResult;
     use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
@@ -395,6 +414,92 @@ mod tests {
                 &mut scratch,
             ),
             Err(SddpError::Validation(_))
+        ));
+    }
+
+    /// Single-rank `reconcile_global_ok` returns `local_ok` unchanged and enters no
+    /// collective (`Mode::Forbidden` panics if `allreduce` is reached).
+    #[test]
+    fn reconcile_global_ok_single_rank_skips_collective() {
+        let comm = ReconcileStub {
+            size: 1,
+            peer_flag: 0,
+            mode: Mode::Forbidden,
+        };
+        let mut scratch = [0_i32];
+        assert!(matches!(
+            reconcile_global_ok(true, &comm, &mut scratch),
+            Ok(true)
+        ));
+        assert!(matches!(
+            reconcile_global_ok(false, &comm, &mut scratch),
+            Ok(false)
+        ));
+    }
+
+    /// CLI simulation-phase deadlock-freedom: `reconcile_global_ok` between the
+    /// per-rank `simulate()` and the first post-sim collective
+    /// (`merge_simulation_metadata`'s allreduce) reports `Ok(false)` on BOTH the
+    /// failing rank and its healthy peer, so the CLI fails every rank in lockstep
+    /// rather than let a healthy rank block in that allreduce. The stub's
+    /// non-reconcile collectives are `unreachable!`, so the reconcile touches only
+    /// the flag allreduce.
+    #[test]
+    fn reconcile_global_ok_fails_both_ranks_before_post_sim_collective() {
+        // Rank whose local simulate() failed.
+        let failing = ReconcileStub {
+            size: 2,
+            peer_flag: 0,
+            mode: Mode::Reduce,
+        };
+        let mut scratch = [0_i32];
+        assert!(matches!(
+            reconcile_global_ok(false, &failing, &mut scratch),
+            Ok(false)
+        ));
+
+        // Healthy peer whose simulate() succeeded, but its peer failed.
+        let healthy = ReconcileStub {
+            size: 2,
+            peer_flag: 1,
+            mode: Mode::Reduce,
+        };
+        let mut scratch = [0_i32];
+        assert!(matches!(
+            reconcile_global_ok(true, &healthy, &mut scratch),
+            Ok(false)
+        ));
+    }
+
+    /// CLI setup-phase deadlock-freedom: `reconcile_global_ok` between the
+    /// rank-0-only export writes and the post-export barrier reports `Ok(false)` on
+    /// BOTH the rank whose write failed and its healthy peers, so the CLI fails
+    /// every rank in lockstep rather than strand peers at the barrier
+    /// (`ReconcileStub::barrier` is `unreachable!`, so reaching it would panic).
+    #[test]
+    fn reconcile_global_ok_fails_both_ranks_before_post_export_barrier() {
+        // Rank 0: its export write failed.
+        let root_failed = ReconcileStub {
+            size: 2,
+            peer_flag: 0,
+            mode: Mode::Reduce,
+        };
+        let mut scratch = [0_i32];
+        assert!(matches!(
+            reconcile_global_ok(false, &root_failed, &mut scratch),
+            Ok(false)
+        ));
+
+        // A peer rank: no local write, but rank 0 failed.
+        let peer = ReconcileStub {
+            size: 2,
+            peer_flag: 1,
+            mode: Mode::Reduce,
+        };
+        let mut scratch = [0_i32];
+        assert!(matches!(
+            reconcile_global_ok(true, &peer, &mut scratch),
+            Ok(false)
         ));
     }
 }
