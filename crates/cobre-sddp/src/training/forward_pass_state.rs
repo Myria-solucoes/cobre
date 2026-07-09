@@ -1366,8 +1366,12 @@ mod tests {
     }
 
     /// After two calls to `ForwardPassState::run` with the same dimensions,
-    /// the outer `worker_stage_stats` Vec must not have been reallocated
-    /// (in-place reset preserves the heap buffer across iterations).
+    /// the shape is unchanged and the INNER per-stage stats buffers are
+    /// recycled (reset in place, round-tripped through the workers, never
+    /// reallocated). The OUTER Vec's buffer is deliberately not asserted:
+    /// `run` takes it (`std::mem::take`) into the parallel region and rebuilds
+    /// it in post-processing, so its address is an allocator coincidence, not
+    /// a contract.
     #[test]
     fn forward_pass_state_run_preserves_worker_stage_stats_shape() {
         let mut fx = ForwardFixture::new();
@@ -1438,12 +1442,14 @@ mod tests {
             let _ = state.run(&mut inputs).expect("first run must not error");
         }
 
-        // Capture the heap address of the outer Vec's buffer after the first run.
-        let ptr_after_first = state.worker_stage_stats.as_ptr();
+        // Capture the INNER buffer's heap address after the first run; moves of
+        // the Vec header (worker round-trip) do not move the heap buffer.
+        let inner_ptr_after_first = state.worker_stage_stats[0].as_ptr();
+        let inner_cap_after_first = state.worker_stage_stats[0].capacity();
         let len_after_first = state.worker_stage_stats.len();
         let inner_len_after_first = state.worker_stage_stats[0].len();
 
-        // Second run: must reuse the allocation (no clear+rebuild).
+        // Second run: must reuse the inner allocations (no clear+rebuild).
         {
             let mut inputs = ForwardPassInputs {
                 workspaces: &mut fx.workspaces,
@@ -1462,11 +1468,15 @@ mod tests {
             let _ = state.run(&mut inputs).expect("second run must not error");
         }
 
-        // The outer Vec must not have been reallocated.
         assert_eq!(
-            state.worker_stage_stats.as_ptr(),
-            ptr_after_first,
-            "worker_stage_stats outer Vec must not be reallocated between runs"
+            state.worker_stage_stats[0].as_ptr(),
+            inner_ptr_after_first,
+            "inner per-stage stats buffer must be recycled, not reallocated"
+        );
+        assert_eq!(
+            state.worker_stage_stats[0].capacity(),
+            inner_cap_after_first,
+            "inner per-stage stats buffer must not grow between runs"
         );
         assert_eq!(
             state.worker_stage_stats.len(),
