@@ -44,11 +44,9 @@ pub struct SpreadResolution {
     pub arrival_density: Vec<Vec<f64>>,
 }
 
-/// The one shared arrival-density window: a uniform release over the anchor
-/// stage `[0, h_anchor)` delayed by `travel_time_hours` arrives over
-/// `[travel_time_hours, travel_time_hours + h_anchor)`. `stage_weights`,
-/// `block_deposits`, `within_stage_routing`, and `arrival_density` all read
-/// overlaps against this same window.
+/// The shared arrival window: a uniform release over the anchor stage
+/// `[0, h_anchor)` delayed by `travel_time_hours`, i.e.
+/// `[travel_time_hours, travel_time_hours + h_anchor)`.
 fn arrival_window(travel_time_hours: f64, h_anchor: f64) -> (f64, f64) {
     (travel_time_hours, travel_time_hours + h_anchor)
 }
@@ -56,17 +54,13 @@ fn arrival_window(travel_time_hours: f64, h_anchor: f64) -> (f64, f64) {
 /// Resolve a scalar travel time into stage-clock weights and, for a
 /// chronological anchor, block-resolved deposit/routing/delivery factors.
 ///
-/// `stage_lengths_hours` is the full per-stage calendar; `anchor_stage`
-/// selects stage `t`, and the arrival window is overlapped against
-/// `stage_lengths_hours[anchor_stage..]`. `block_lengths_hours` is the
-/// anchor's own block partition for a chronological anchor (`None` for a
+/// `block_lengths_hours` is the anchor's own block partition (`None` for a
 /// parallel anchor) and must sum to `stage_lengths_hours[anchor_stage]`.
 /// Delivery reuses this partition at a reached arrival stage only when that
-/// stage's own length matches the anchor's (`resolve_delivery`'s per-
-/// arrival-stage split); a mismatch falls back to a single row rather than
-/// splitting against a partition that would not conserve the target stage's
-/// own mass. `block_deposits`/`within_stage_routing`/`stage_weights` are
-/// unaffected either way.
+/// stage's own length matches the anchor's; a mismatch falls back to a single
+/// row rather than splitting against a partition that would not conserve the
+/// target stage's own mass (`block_deposits`/`within_stage_routing`/
+/// `stage_weights` are unaffected).
 ///
 /// # Panics
 ///
@@ -367,10 +361,8 @@ impl PointResolution {
     /// Whether delivery stage `m`'s commitment is genuinely anticipated: its
     /// decider is `None` (pre-study) or strictly earlier than `m`. `false`
     /// exactly at a `K = 0` sub-stage lead ([`Self::self_delivered_stages`]).
-    /// `m` beyond the resolved horizon (out of [`Self::decider`]'s range, the
-    /// fixture-only degenerate case of a resolution built for fewer stages
-    /// than queried) safely defaults to `true` — no data to suggest a
-    /// self-delivery, so the fishing gate stays open rather than silently
+    /// `m` beyond [`Self::decider`]'s range defaults to `true` (no data to
+    /// suggest self-delivery), keeping the fishing gate open rather than
     /// suppressing an otherwise-ordinary plant.
     #[must_use]
     pub fn is_anticipated_at(&self, m: usize) -> bool {
@@ -504,8 +496,7 @@ impl AnticipatedResolution {
     }
 }
 
-/// Cumulative stage-end boundaries `S_0 = 0, S_1, .., S_n`, the hour-clock
-/// primitive shared with [`resolve_spread`].
+/// Cumulative stage-end boundaries `S_0 = 0, S_1, .., S_n` on the hour clock.
 fn cumulative_stage_boundaries(stage_lengths_hours: &[f64]) -> Vec<f64> {
     let mut boundaries = Vec::with_capacity(stage_lengths_hours.len() + 1);
     let mut cumulative = 0.0_f64;

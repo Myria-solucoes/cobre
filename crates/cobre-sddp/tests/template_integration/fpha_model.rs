@@ -1,4 +1,4 @@
-//! `fpha_model` section tests (split from the parent integration binary).
+//! `fpha_model` section tests.
 
 use super::*;
 

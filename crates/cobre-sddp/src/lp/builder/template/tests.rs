@@ -117,7 +117,6 @@ fn system_with_thermals(thermals: Vec<Thermal>) -> cobre_core::System {
         std_mw: 0.0,
     }];
 
-    // k_max for the anticipated thermals in this system
     let k_max = thermals
         .iter()
         .filter_map(|t| t.anticipated_config.as_ref())
@@ -433,7 +432,6 @@ fn build_template_build_ctx_pumping_stations_id_sorted_and_pos_mapped() {
     assert_eq!(ctx.pumping_pos[&EntityId(20)], 1);
     assert_eq!(ctx.pumping_pos[&EntityId(30)], 2);
 
-    // The position map must agree with the slot order of the sorted slice.
     for (slot, station) in ctx.pumping_stations.iter().enumerate() {
         assert_eq!(
             ctx.pumping_pos[&station.id], slot,
@@ -479,10 +477,8 @@ fn build_template_build_ctx_n_pumping_matches_slice_and_bounds() {
         "ctx.n_pumping must agree with the resolved-bounds station count"
     );
 
-    // The re-pointed ctx count flows through to the layout: StageLayout reads
-    // its `n_pumping` from `ctx.n_pumping`. (The block-major column reservation
-    // itself is pinned by the layout-module test
-    // `pumping_layout_reserves_block_major_columns`.)
+    // Block-major column reservation is pinned separately by the layout-module
+    // test `pumping_layout_reserves_block_major_columns`.
     let stage = system
         .stages()
         .iter()
@@ -525,8 +521,6 @@ fn build_stage_templates_records_layout_pumping_col_start_per_stage() {
     )
     .expect("build_stage_templates: valid system");
 
-    // Rebuild the ctx once so each stage's StageLayout can be reconstructed
-    // and compared against the recorded per-stage value.
     let (anticipated_resolution, anticipated_lead_stages, per_stage_mask) =
         ctx_anticipated_and_mask_inputs(&system);
     let (ctx, _, _) = super::build_template_build_ctx(
@@ -884,7 +878,6 @@ fn build_template_build_ctx_contract_count_divergence_panics() {
         mean_mw: 100.0,
         std_mw: 0.0,
     }];
-    // n_contracts: 0 in the bounds table while one contract entity exists.
     let resolved_bounds = ResolvedBounds::new(
         &BoundsCountsSpec {
             n_hydros: 0,
@@ -1244,9 +1237,8 @@ fn anticipated_invariance_system() -> cobre_core::System {
         },
     );
 
-    // Per-thermal stage bounds (distinct so a permutation actually changes
-    // the LP coefficients). The bounds table is indexed [thermal_idx][stage_idx]
-    // with a stage axis of length `n_stages + k_max` (delivery-stage padding).
+    // The bounds table is indexed [thermal_idx][stage_idx] with a stage axis of
+    // length `n_stages + k_max` (delivery-stage padding).
     let stage_axis_len = resolved_bounds.thermal_stage_axis_len();
     for t_idx in 0..n_thermals {
         for s_idx in 0..stage_axis_len {
@@ -1298,27 +1290,9 @@ fn anticipated_invariance_system() -> cobre_core::System {
         .expect("anticipated_invariance_system: valid system")
 }
 
-/// Compare two `StageTemplate`s for bit-for-bit equivalence after applying
-/// the swap-(0,1) permutation on anticipated-decision columns,
-/// anticipated-state ring-buffer columns/rows (slot-major), and
-/// anticipated-fishing rows.
-///
-/// `dec_start_a` / `dec_start_b`: column index of `col_anticipated_decision_start`
-/// in each template.
-/// `state_start_a` / `state_start_b`: column index of
-/// `col_anticipated_state_start` in each template.
-/// `n_ant`: number of anticipated plants (must be 2 for this swap).
-/// `k_max`: ring-buffer slots per plant.
-/// `fish_start_a` / `fish_start_b`: row index of `row_anticipated_fishing_start`.
-/// `n_fish_rows`: number of active fishing rows at this stage (0..=n_ant).
-///
-/// Strategy: build the column-permutation `col_perm` such that
-/// `tpl_a.column[col_perm[j]]` corresponds to `tpl_b.column[j]`, and the row
-/// permutation `row_perm` analogously. Then assert that the permuted dense
-/// LP (bounds, objective, full coefficient matrix) matches `tpl_b` bitwise.
-///
-/// Uses dense matrix expansion for clarity; the templates are tiny
-/// (`num_cols ~ 20-50`, `num_rows ~ 10-20`) so the O(n^2) memory cost is fine.
+/// Assert two `StageTemplate`s are bit-for-bit equivalent under the swap-(0,1)
+/// permutation on anticipated-decision, anticipated-state (slot-major), and
+/// anticipated-fishing columns/rows.
 // Paired per-template layout offsets (a/b); a params struct would relocate
 // the arity, not reduce it.
 #[allow(clippy::too_many_arguments)]
@@ -1356,50 +1330,30 @@ fn assert_lp_equivalence_after_anticipated_swap(
     assert_eq!(tpl_a.num_nz, tpl_b.num_nz, "stage {stage_idx}: num_nz");
     assert_eq!(n_ant, 2, "this helper requires n_ant == 2");
 
-    // Build column permutation: `col_perm[j] = i` means tpl_a column `i`
-    // corresponds to tpl_b column `j`. Identity outside the anticipated regions.
+    // col_perm[j] = i: tpl_a column i corresponds to tpl_b column j.
     let mut col_perm: Vec<usize> = (0..tpl_a.num_cols).collect();
-    // Swap the two anticipated_decision columns.
     col_perm[dec_start_b] = dec_start_a + 1;
     col_perm[dec_start_b + 1] = dec_start_a;
-    // Swap anticipated_state (incoming) columns at each ring-buffer slot.
-    // Slot-major layout: column for slot `s`, plant `p` = state_start + s *
-    // n_ant + p.
+    // Slot-major layout: column for slot s, plant p = state_start + s * n_ant + p.
     for s in 0..k_max {
         col_perm[state_start_b + s * n_ant] = state_start_a + s * n_ant + 1;
         col_perm[state_start_b + s * n_ant + 1] = state_start_a + s * n_ant;
     }
-    // Swap anticipated_slots_out (outgoing) columns at each ring-buffer slot.
     for s in 0..k_max {
         col_perm[slots_out_start_b + s * n_ant] = slots_out_start_a + s * n_ant + 1;
         col_perm[slots_out_start_b + s * n_ant + 1] = slots_out_start_a + s * n_ant;
     }
 
-    // Build row permutation: identity outside anticipated_fishing and
-    // anticipated_state_out_def rows. State fixing now uses column bounds
-    // (no row equalities), so there are no state-fixing rows to permute.
+    // State pinning uses column bounds, not equality rows, so no state-fixing
+    // rows are permuted.
     let mut row_perm: Vec<usize> = (0..tpl_a.num_rows).collect();
     if n_fish_rows == 2 {
         row_perm[fish_start_b] = fish_start_a + 1;
         row_perm[fish_start_b + 1] = fish_start_a;
     }
-    // Under the always-active fishing predicate every anticipated plant
-    // emits exactly one fishing row at every stage; this branch handles the
-    // historical case of a partial active set still encountered in legacy
-    // fixtures that pre-date the predicate flip. The SAME plant is active
-    // in both LPs — but at LOCAL index 0 in one and
-    // LOCAL index 1 in the other. The fishing-row index differs but corresponds
-    // to the same plant's constraint. The mapping is still a single-row swap
-    // when applicable.
     if n_fish_rows == 1 {
-        // The single active fishing row in tpl_a corresponds to the single
-        // active fishing row in tpl_b (same plant, different local index).
         row_perm[fish_start_b] = fish_start_a;
     }
-    // Anticipated-state-out definition rows: one per active plant (strict gate).
-    // When both plants are active, swap rows 0 and 1 (plant order changes).
-    // When only one plant is active, the single def row maps identity-wise
-    // (the active plant appears at local index 0 in both ctx_a and ctx_b).
     if n_def_rows == 2 {
         row_perm[def_row_start_b] = def_row_start_a + 1;
         row_perm[def_row_start_b + 1] = def_row_start_a;
@@ -1407,13 +1361,10 @@ fn assert_lp_equivalence_after_anticipated_swap(
     if n_def_rows == 1 {
         row_perm[def_row_start_b] = def_row_start_a;
     }
-    // Anticipated-ring interior-slot definition rows: the general per-(slot,
-    // plant) analogue of the def-row swap above. `slot_row_pos_b`'s global
-    // index `slot * n_ant + plant` corresponds to `slot_row_pos_a`'s
-    // `slot * n_ant + (1 - plant)` (the same plant-swap the column loops
-    // apply); both must agree on reachability (Some/None) since swapping
-    // local labels never changes which physical (slot, plant) pair is
-    // in-horizon.
+    // slot_row_pos_b's global index slot*n_ant + plant maps to slot_row_pos_a's
+    // slot*n_ant + (1 - plant) (the column loops' plant-swap); both must agree on
+    // reachability — swapping local labels never changes which physical
+    // (slot, plant) pair is in-horizon.
     for (g_b, pos_b) in slot_row_pos_b.iter().enumerate() {
         let Some(pos_b) = *pos_b else { continue };
         let slot = g_b / n_ant;
@@ -1428,7 +1379,6 @@ fn assert_lp_equivalence_after_anticipated_swap(
         row_perm[slot_def_row_start_b + pos_b] = slot_def_row_start_a + pos_a;
     }
 
-    // Dense bound/objective comparison: tpl_a[col_perm[j]] == tpl_b[j].
     for j in 0..tpl_a.num_cols {
         let a = col_perm[j];
         assert_eq!(
@@ -1461,8 +1411,6 @@ fn assert_lp_equivalence_after_anticipated_swap(
         );
     }
 
-    // Dense matrix comparison: expand CSC to dense, apply permutation,
-    // assert bit-equality. Tiny LPs (~50x20) so the O(n^2) cost is fine.
     let dense_a = csc_to_dense(tpl_a);
     let dense_b = csc_to_dense(tpl_b);
     for i in 0..tpl_a.num_rows {
@@ -1495,56 +1443,19 @@ fn csc_to_dense(tpl: &cobre_solver::StageTemplate) -> Vec<Vec<f64>> {
     dense
 }
 
-/// **Invariance probe** — direct LP-construction layer test.
+/// Invariance probe at the LP-construction layer: the templates from
+/// [`build_single_stage_template`] are equivalent under a permutation of the
+/// `anticipated_thermal_indices` / `anticipated_lead_stages` arrays.
 ///
-/// Verifies that the LP templates produced by [`build_single_stage_template`]
-/// are equivalent under a permutation of the `anticipated_thermal_indices` /
-/// `anticipated_lead_stages` arrays.
-///
-/// ## Why this test exists
-///
-/// A full-`System` declaration-order test is a tautology: building two
-/// `System`s with thermals declared in different orders proves only
-/// **determinism** (same canonical input -> same output), because
-/// `SystemBuilder::build()` sorts by `EntityId` so both present identical
-/// canonical input downstream — not **invariance** (different declaration
-/// orders -> same canonical result). That canonicalization is covered
-/// directly by the `cobre-core` proptest
-/// `build_canonical_order_invariant_under_input_permutation`.
-///
-/// The Cobre hard rule on declaration-order invariance requires bit-for-bit
-/// identical results regardless of input entity ordering. This unit test
-/// targets the **actual** code path that the canonical sort masks: it
-/// directly constructs a `TemplateBuildCtx` with a permuted (yet internally
-/// consistent) pair of `(anticipated_thermal_indices, anticipated_lead_stages)`
-/// arrays and confirms that the resulting LP coefficients are equivalent
-/// (modulo the expected swap of the anticipated-decision columns,
-/// anticipated-state ring-buffer columns/rows, and anticipated-fishing rows).
-///
-/// ## Method
-///
-/// 1. Build a system with two anticipated thermals (K=2 and K=3) plus one
-///    standard backup thermal, with **distinct** per-thermal stage costs
-///    and bounds (uniform defaults would trivially pass).
-/// 2. Call `build_template_build_ctx` to obtain `ctx_a` with the canonical
-///    ordering `anticipated_thermal_indices = [0, 1]`,
-///    `anticipated_lead_stages = [2, 3]`.
-/// 3. Manually construct `ctx_b` by swapping both arrays in lockstep:
-///    `anticipated_thermal_indices = [1, 0]`,
-///    `anticipated_lead_stages = [3, 2]`.
-/// 4. Build single-stage templates for both contexts at stages 0, 2, and 3.
-///    Under the always-active fishing predicate every anticipated plant
-///    emits one fishing row at every stage, so all sampled stages carry
-///    the same number of fishing rows; the anticipated-decision active set
-///    is independent of the fishing predicate and still depends on
-///    `t + K_i < T` at each stage.
-/// 5. Assert LP equivalence under the canonical swap permutation
-///    (column swap on anticipated_decision and slot-major state, row swap
-///    on state-fixing and fishing rows when both plants are present).
+/// A full-`System` declaration-order test is a tautology here — `SystemBuilder::build`
+/// sorts by `EntityId`, so both orderings present identical canonical input and
+/// prove only determinism, not invariance (that canonicalization is covered by the
+/// `cobre-core` proptest `build_canonical_order_invariant_under_input_permutation`).
+/// This test constructs the permuted `TemplateBuildCtx` directly, hitting the path
+/// the canonical sort otherwise masks.
 #[test]
 fn lp_template_invariant_under_anticipated_index_permutation() {
     let system = anticipated_invariance_system();
-    // Canonical sort places thermals as [id=1, id=2, id=3].
     assert_eq!(system.thermals().len(), 3);
     assert_eq!(system.thermals()[0].id.0, 1);
     assert_eq!(system.thermals()[1].id.0, 2);
@@ -1571,15 +1482,13 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
         per_stage_mask,
     );
 
-    // Sanity: ctx_a uses canonical ordering.
     assert_eq!(ctx_a.n_anticipated, 2);
     assert_eq!(ctx_a.k_max, 3);
     assert_eq!(ctx_a.anticipated_thermal_indices, vec![0, 1]);
     assert_eq!(ctx_a.anticipated_lead_stages, vec![2, 3]);
 
-    // Construct ctx_b: a clone of ctx_a with the two anticipated arrays
-    // swapped in lockstep. Both arrays must be permuted by the same
-    // permutation to preserve the (thermal_idx, K_i) pairing.
+    // Both anticipated arrays must be permuted in lockstep to preserve the
+    // (thermal_idx, K_i) pairing.
     let ctx_b = super::super::layout::TemplateBuildCtx {
         hydros: ctx_a.hydros,
         thermals: ctx_a.thermals,
@@ -1621,7 +1530,6 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
         max_par_order: ctx_a.max_par_order,
         n_anticipated: ctx_a.n_anticipated,
         k_max: ctx_a.k_max,
-        // The swap: lockstep permutation [0,1] -> [1,0] on both arrays.
         anticipated_lead_stages: vec![
             ctx_a.anticipated_lead_stages[1],
             ctx_a.anticipated_lead_stages[0],
@@ -1630,11 +1538,7 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
             ctx_a.anticipated_thermal_indices[1],
             ctx_a.anticipated_thermal_indices[0],
         ],
-        // Swap the windows in lockstep with the index/lead permutation so the
-        // per-plant window stays aligned with its anticipated-local position.
         anticipated_windows: vec![ctx_a.anticipated_windows[1], ctx_a.anticipated_windows[0]],
-        // Same lockstep swap on the resolution's per-plant order; this test's
-        // `state_layout_for` never attaches it, so it is unread here.
         anticipated_resolution: crate::lead_time::AnticipatedResolution {
             per_plant: vec![
                 ctx_a.anticipated_resolution.per_plant[1].clone(),
@@ -1654,15 +1558,13 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
         per_stage_mask: ctx_a.per_stage_mask.clone(),
     };
 
-    // Sanity: ctx_b really has the swapped ordering.
     assert_eq!(ctx_b.anticipated_thermal_indices, vec![1, 0]);
     assert_eq!(ctx_b.anticipated_lead_stages, vec![3, 2]);
 
     let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
 
-    // Test multiple stages to cover the active-decision boundary while
-    // the always-active fishing predicate keeps the fishing-row count
-    // constant at every stage (one row per anticipated plant).
+    // Stages [0, 2, 3] straddle the active-decision boundary; the always-active
+    // fishing predicate keeps the fishing-row count constant across them.
     for stage_idx in [0_usize, 2, 3] {
         let stage = study_stages[stage_idx];
 
@@ -1672,15 +1574,11 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
         let tpl_a = super::build_single_stage_template(&ctx_a, &state_a, stage, stage_idx).template;
         let tpl_b = super::build_single_stage_template(&ctx_b, &state_b, stage, stage_idx).template;
 
-        // Reconstruct the layout for tpl_a / tpl_b to find the
-        // anticipated_decision / anticipated_state / fishing row offsets.
-        // Both templates use the same num_cols/num_rows (the layout depends
-        // only on n_anticipated and k_max, both unchanged by the swap).
+        // Both templates share num_cols/num_rows: the layout depends only on
+        // n_anticipated and k_max, unchanged by the swap.
         let layout_a = super::super::layout::StageLayout::new(&ctx_a, &state_a, stage, stage_idx);
         let layout_b = super::super::layout::StageLayout::new(&ctx_b, &state_b, stage, stage_idx);
 
-        // Layout offsets must be identical (they depend only on counts,
-        // not on the contents of the anticipated arrays).
         assert_eq!(
             layout_a.anticipated.col_anticipated_decision_start,
             layout_b.anticipated.col_anticipated_decision_start,
@@ -1730,9 +1628,8 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
 
 // ── StageTemplates::empty ──────────────────────────────────────────────────
 
-/// `StageTemplates::empty(n)` yields every per-stage collection empty and
-/// records `n_hydros == n`. This pins the all-empty shape the empty-study
-/// early return relies on.
+/// Pins the all-empty shape (every per-stage collection empty, `n_hydros == n`)
+/// the empty-study early return relies on.
 #[test]
 fn stage_templates_empty_is_all_empty_with_n_hydros() {
     let n = 7_usize;
@@ -1893,8 +1790,6 @@ fn discounted_multi_stage_system() -> cobre_core::System {
         },
     );
 
-    // Non-zero global rate with no per-transition overrides: every stage
-    // discounts at the global rate.
     let policy_graph = PolicyGraph {
         graph_type: PolicyGraphType::FiniteHorizon,
         annual_discount_rate: 0.10,
@@ -1914,13 +1809,9 @@ fn discounted_multi_stage_system() -> cobre_core::System {
         .expect("discounted_multi_stage_system: valid system")
 }
 
-/// Any `StageTemplates` produced by the public build + postprocess path has
-/// `cumulative_discount_factors().len() == templates.len()` and is no longer
-/// the all-`1.0` placeholder once a non-zero discount rate is in effect.
-///
-/// The discount fields are private, so an external caller can only ever observe
-/// the postprocessed (discounted) values, never the placeholder
-/// `build_stage_templates` leaves behind.
+/// The public build+postprocess path installs real discount factors. The
+/// discount fields are private, so a caller only ever observes the postprocessed
+/// values, never the all-`1.0` placeholder `build_stage_templates` leaves behind.
 #[test]
 fn postprocessed_stage_templates_carry_discounted_factors() {
     let system = discounted_multi_stage_system();
@@ -1940,8 +1831,6 @@ fn postprocessed_stage_templates_carry_discounted_factors() {
     )
     .expect("build_stage_templates: valid system");
 
-    // Run the postprocess step that installs the real discount factors —
-    // exactly the public path StudySetup drives.
     let _report =
         crate::setup::template_postprocess::postprocess_templates(&mut templates, &system);
 
@@ -1955,9 +1844,6 @@ fn postprocessed_stage_templates_carry_discounted_factors() {
         cumulative[0], 1.0,
         "cumulative_discount_factors[0] is the present value (1.0)"
     );
-    // With a 10% annual rate the later cumulative factors compound strictly
-    // below the 1.0 placeholder, so the postprocessed vector is provably not
-    // the placeholder the builder hands back.
     assert!(
         cumulative.iter().any(|&d| d < 1.0),
         "postprocessed cumulative factors must drop below the 1.0 placeholder, got {cumulative:?}"
@@ -1970,14 +1856,6 @@ fn postprocessed_stage_templates_carry_discounted_factors() {
 }
 
 // ── Operational-violation RHS & matrix-coefficient verification ──────────
-//
-// These verify the LP-builder's row bounds (RHS) and CSC matrix coefficients
-// at the four operational-violation constraint-row families. They locate the
-// rows via `StageLayout`'s op-violation row ranges directly — the row ranges
-// the per-stage layout owns and the public `StageGeometry` does not expose —
-// so this is the correct layer for them. The RHS/coefficient values are
-// produced by `fill_operational_violation_rows` / `fill_operational_violation_entries`
-// through `build_single_stage_template`.
 
 use super::super::layout::StageLayout;
 use super::COST_SCALE_FACTOR;
@@ -2258,7 +2136,6 @@ fn build_active_violations_layout_and_template() -> (StageLayout<'static>, Stage
 
 #[test]
 fn relocated_operational_violation_row_counts() {
-    // 1 hydro, 2 blocks => 4 operational violation rows of length 2 each.
     let (layout, t) = build_active_violations_layout_and_template();
 
     // 4 row ranges each contain n_hydros * n_blks = 1 * 2 = 2 rows.
@@ -2267,7 +2144,6 @@ fn relocated_operational_violation_row_counts() {
     assert_eq!(layout.min_turbine_rows.len(), 2);
     assert_eq!(layout.min_generation_rows.len(), 2);
 
-    // All constraint rows are within the template's range.
     assert!(
         layout.min_generation_rows.end <= t.num_rows,
         "operational violation rows exceed num_rows"
@@ -2280,7 +2156,6 @@ fn relocated_min_outflow_row_bounds() {
     let (layout, t) = build_active_violations_layout_and_template();
     let expected_lower = 50.0; // min_outflow_m3s
 
-    // Both blocks get the same RHS.
     for blk in 0..2 {
         let row = layout.min_outflow_rows.start + blk;
         assert!(
@@ -2373,7 +2248,6 @@ fn relocated_min_outflow_matrix_coefficients() {
     for blk in 0..n_blks {
         let row = layout.min_outflow_rows.start + blk;
 
-        // Turbine column for this block: coefficient 1.0
         let entries = csc_entries_for_col(&t, layout.turbine.start + blk);
         let v = entries.iter().find(|e| e.0 == row).map(|e| e.1);
         assert!(
@@ -2381,7 +2255,6 @@ fn relocated_min_outflow_matrix_coefficients() {
             "turbine blk{blk} entry for min_outflow row: {v:?}"
         );
 
-        // Spillage column for this block: coefficient 1.0
         let entries = csc_entries_for_col(&t, layout.spillage.start + blk);
         let v = entries.iter().find(|e| e.0 == row).map(|e| e.1);
         assert!(
@@ -2389,7 +2262,6 @@ fn relocated_min_outflow_matrix_coefficients() {
             "spillage blk{blk} entry for min_outflow row: {v:?}"
         );
 
-        // Slack column for this block: coefficient 1.0
         let entries = csc_entries_for_col(&t, layout.outflow_below_slack.start + blk);
         let v = entries.iter().find(|e| e.0 == row).map(|e| e.1);
         assert!(
@@ -2402,7 +2274,6 @@ fn relocated_min_outflow_matrix_coefficients() {
 #[test]
 #[allow(clippy::cast_sign_loss)]
 fn relocated_max_outflow_matrix_slack_is_negative() {
-    // Per-block max outflow row: slack coefficient = -1.0.
     let (layout, t) = build_active_violations_layout_and_template();
     let n_blks = 2;
 
@@ -2427,7 +2298,6 @@ fn relocated_min_turbine_matrix_only_turbine_cols() {
     for blk in 0..n_blks {
         let row = layout.min_turbine_rows.start + blk;
 
-        // Turbine column: coefficient 1.0
         let entries = csc_entries_for_col(&t, layout.turbine.start + blk);
         let v = entries.iter().find(|e| e.0 == row).map(|e| e.1);
         assert!(
@@ -2435,7 +2305,6 @@ fn relocated_min_turbine_matrix_only_turbine_cols() {
             "turbine blk{blk} min_turbine: {v:?}"
         );
 
-        // Spillage should NOT appear in min_turbine row.
         let entries_spill = csc_entries_for_col(&t, layout.spillage.start + blk);
         let v_spill = entries_spill.iter().find(|e| e.0 == row);
         assert!(
@@ -2443,7 +2312,6 @@ fn relocated_min_turbine_matrix_only_turbine_cols() {
             "spillage should not appear in min_turbine row (blk {blk})"
         );
 
-        // Slack = +1.0
         let entries = csc_entries_for_col(&t, layout.turbine_below_slack.start + blk);
         let v = entries.iter().find(|e| e.0 == row).map(|e| e.1);
         assert!(
@@ -2464,7 +2332,6 @@ fn relocated_min_generation_constant_productivity_coefficients() {
     for blk in 0..n_blks {
         let row = layout.min_generation_rows.start + blk;
 
-        // Turbine column: coefficient = rho
         let entries = csc_entries_for_col(&t, layout.turbine.start + blk);
         let v = entries.iter().find(|e| e.0 == row).map(|e| e.1);
         assert!(
@@ -2472,7 +2339,6 @@ fn relocated_min_generation_constant_productivity_coefficients() {
             "turbine blk{blk} min_gen coeff: {v:?}, expected {rho}"
         );
 
-        // Slack: +1.0
         let entries_s = csc_entries_for_col(&t, layout.generation_below_slack.start + blk);
         let vs = entries_s.iter().find(|e| e.0 == row).map(|e| e.1);
         assert!(
@@ -2484,8 +2350,6 @@ fn relocated_min_generation_constant_productivity_coefficients() {
 
 #[test]
 fn relocated_operational_violation_rows_outside_dual_relevant() {
-    // n_dual_relevant is always 0 (state pinning uses column bounds). All
-    // operational violation rows must be placed beyond this range.
     let (layout, t) = build_active_violations_layout_and_template();
 
     assert_eq!(
@@ -2493,7 +2357,6 @@ fn relocated_operational_violation_rows_outside_dual_relevant() {
         "n_dual_relevant is always 0 with column-bound state pinning"
     );
 
-    // All 4 operational violation row ranges must start beyond n_dual_relevant.
     assert!(
         layout.min_outflow_rows.start > t.n_dual_relevant,
         "min_outflow row {} must be > n_dual_relevant {}",
@@ -2524,18 +2387,14 @@ fn relocated_operational_violation_rows_outside_dual_relevant() {
 fn relocated_diagnostic_template_operational_violation_correctness() {
     let (layout, t) = build_active_violations_layout_and_template();
 
-    // Operational-violation presence: the non-empty min-outflow slack range
-    // is the evidence the families are present when hydros exist.
     assert!(
         !layout.outflow_below_slack.is_empty(),
         "operational-violation slack columns must be present when hydros exist"
     );
 
     // Per-block formulation: RHS is in rate units (m3/s or MW), not volume/energy.
-    // Block 0 column at `.start`, block 1 at `.start + 1`.
     let block_hours_0 = 720.0;
 
-    // Min outflow row (block 0): row_lower = 50.0 m3/s
     let row = layout.min_outflow_rows.start;
     assert!(
         (t.row_lower[row] - 50.0).abs() < 1e-10,
@@ -2548,7 +2407,6 @@ fn relocated_diagnostic_template_operational_violation_correctness() {
         "min_outflow row_upper must be +inf for >= constraint"
     );
 
-    // Column bounds: outflow_below_slack block 0.
     let col = layout.outflow_below_slack.start;
     assert_eq!(
         t.col_lower[col], 0.0,
@@ -2560,7 +2418,6 @@ fn relocated_diagnostic_template_operational_violation_correctness() {
         "outflow_below_slack col_upper must be +inf when min_outflow > 0"
     );
 
-    // Objective: penalty * block_hours (block 0).
     let expected_objective = 1000.0 * block_hours_0 / COST_SCALE_FACTOR;
     assert!(
         t.objective[col] > 0.0,
@@ -2588,7 +2445,6 @@ fn relocated_diagnostic_template_operational_violation_correctness() {
     assert_eq!(t.col_upper[col_gen], f64::INFINITY);
     assert!(t.objective[col_gen] > 0.0);
 
-    // Min turbine row (block 0): row_lower = 10.0 m3/s
     let min_turb_row = layout.min_turbine_rows.start;
     assert!(
         (t.row_lower[min_turb_row] - 10.0).abs() < 1e-10,
@@ -2596,7 +2452,6 @@ fn relocated_diagnostic_template_operational_violation_correctness() {
         t.row_lower[min_turb_row],
     );
 
-    // Min generation row (block 0): row_lower = 5.0 MW
     let min_gen_row = layout.min_generation_rows.start;
     assert!(
         (t.row_lower[min_gen_row] - 5.0).abs() < 1e-10,
@@ -2604,7 +2459,6 @@ fn relocated_diagnostic_template_operational_violation_correctness() {
         t.row_lower[min_gen_row],
     );
 
-    // Max outflow row (block 0): row_upper = 800.0 m3/s
     let max_outflow_row = layout.max_outflow_rows.start;
     assert!(
         (t.row_upper[max_outflow_row] - 800.0).abs() < 1e-10,
@@ -2744,7 +2598,6 @@ fn build_filling_v_target_backward_fold_ac_values() {
         !v_target.contains_key(&(0, 4)),
         "no V_target at Operating id 4"
     );
-    // Exactly the two Filling-stage entries.
     assert_eq!(v_target.len(), 2, "exactly one V_target per Filling stage");
 }
 
@@ -2773,12 +2626,10 @@ fn build_filling_v_target_clips_at_min_storage_when_over_provisioned() {
             "V_target[{stage_id}] = {v} must not exceed the dead volume {min_storage}"
         );
     }
-    // The anchor (last Filling stage, id 5) is exactly the dead volume.
     assert!(
         (v_target[&(0, 5)] - min_storage).abs() < 1e-9,
         "V_target[L] == min_storage (the clip is a no-op at the anchor)"
     );
-    // The earliest floor is strictly below (deep accumulation requirement).
     assert!(
         v_target[&(0, 1)] < v_target[&(0, 5)],
         "earliest floor strictly below the anchor"
@@ -4281,7 +4132,6 @@ fn template_anticipated_resolution_matches_setup_lead_time() {
         "template's threaded resolution must resolve the calendar-derived decider"
     );
 
-    // setup's own entry point must resolve to the byte-identical resolution.
     let (setup_resolution, setup_lead_stages) =
         crate::setup::resolve_anticipated_commitments(&system);
     assert_eq!(
@@ -4297,8 +4147,8 @@ fn template_anticipated_resolution_matches_setup_lead_time() {
 
 /// AC2 mutation companion: reproduces the PRE-FIX `StateLayout` template.rs
 /// used to build for a `LeadTime` plant — `anticipated_lead_stages` derived
-/// via `cfg.lead_stages().unwrap_or(0)` (`0` for `LeadTime`, the bug this
-/// ticket fixes) and no [`crate::indexer::StateLayout::set_anticipated_resolution`]
+/// via `cfg.lead_stages().unwrap_or(0)` (`0` for `LeadTime`, the pre-fix bug)
+/// and no [`crate::indexer::StateLayout::set_anticipated_resolution`]
 /// attach — and shows its decider differs from the fixed layout's: the
 /// resulting `Stages(0)` fallback resolves every delivery stage as
 /// self-delivered (`decider[m] == m` for all `m`), never the calendar-derived
@@ -4324,8 +4174,8 @@ fn pre_fix_template_state_layout_yields_differing_all_self_delivered_decider() {
 }
 
 /// AC3: a `LeadStages(1)` plant on the same calendar keeps the fallback
-/// byte-identical to the threaded resolution — the LeadStages behaviour this
-/// ticket must leave unchanged (d34/d37 parity).
+/// byte-identical to the threaded resolution — the LeadStages behaviour must
+/// stay unchanged (d34/d37 parity).
 #[test]
 fn template_leadstages_byte_identical_to_setup_and_fallback() {
     let system = anticipated_lead_config_system(3, 744.0, AnticipatedConfig::LeadStages(1), 1);
@@ -4433,7 +4283,7 @@ impl tracing::Subscriber for WarnRecorder {
     fn exit(&self, _span: &tracing::span::Id) {}
 }
 
-/// `build_stage_templates` no longer resolves anticipated commitments itself
+/// `build_stage_templates` does not resolve anticipated commitments itself
 /// — that responsibility belongs solely to setup's `resolve_state_layout` —
 /// so, given an already-resolved `state_layout`/`per_stage_mask`, running it
 /// under a WARN-capturing subscriber emits no `K = 0` advisory, even for a

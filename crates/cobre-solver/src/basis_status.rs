@@ -12,8 +12,7 @@ use crate::ffi::highs::{
 };
 
 /// Canonical simplex basis status covering every basis state either backend
-/// can produce. All variants but [`Self::Basic`] denote a nonbasic state;
-/// they differ in where the variable sits relative to its bounds.
+/// can produce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BasisStatus {
     /// At the lower bound.

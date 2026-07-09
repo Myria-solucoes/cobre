@@ -1,4 +1,4 @@
-//! `penalty` section tests (split from the parent integration binary).
+//! `penalty` section tests.
 
 use super::*;
 
@@ -64,8 +64,6 @@ fn test_penalty_columns_added_3_hydros() {
     );
 }
 
-// Slack objective = penalty_cost * total_stage_hours; the fixture has 1 block
-// of 744h, so the expected coefficient is 1000.0 * 744.0 (then COST_SCALE_FACTOR-scaled).
 #[test]
 fn test_penalty_objective_coefficient() {
     let system = one_hydro_system(1, 0);

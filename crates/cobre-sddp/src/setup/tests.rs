@@ -30,9 +30,7 @@ use cobre_io::config::{
 };
 use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
-/// Build a minimal system with 1 bus, 1 thermal, 1 hydro, and `n_stages`
-/// study stages (each with 1 block). All bounds and penalties are set to
-/// sensible non-zero defaults so `build_stage_templates` succeeds.
+/// Bounds and penalties are non-zero defaults so `build_stage_templates` succeeds.
 #[allow(
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
@@ -261,9 +259,8 @@ fn minimal_system(n_stages: usize) -> cobre_core::System {
         .expect("minimal_system: valid")
 }
 
-/// Variant of [`minimal_system`] whose single hydro is FPHA without any
-/// VHA rows or `specific_productivity_mw_per_m3s_per_m`, so the energy
-/// conversion gate must reject it.
+/// FPHA hydro with no VHA rows or `specific_productivity_mw_per_m3s_per_m`, so
+/// the energy-conversion gate must reject it.
 #[allow(
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
@@ -484,7 +481,6 @@ fn minimal_fpha_misconfigured_system(n_stages: usize) -> cobre_core::System {
         .expect("minimal_fpha_misconfigured_system: valid")
 }
 
-/// Build a minimal valid [`Config`] with a single iteration-limit stopping rule.
 fn minimal_config(forward_passes: u32, max_iterations: u32) -> Config {
     Config {
         schema: None,
@@ -513,11 +509,9 @@ fn minimal_config(forward_passes: u32, max_iterations: u32) -> Config {
     }
 }
 
-/// Build a minimal valid [`Config`] with the given per-class scheme overrides.
-///
-/// `inflow_scheme`, `load_scheme`, and `ncs_scheme` are optional strings
-/// matching the JSON schema values (`"in_sample"`, `"historical"`, `"external"`,
-/// `"out_of_sample"`). `None` leaves the class defaulting to `in_sample`.
+/// `inflow_scheme`/`load_scheme`/`ncs_scheme` take the JSON schema scheme values
+/// (`"in_sample"`, `"historical"`, `"external"`, `"out_of_sample"`); `None`
+/// leaves the class at `in_sample`.
 fn minimal_config_with_schemes(
     forward_passes: u32,
     max_iterations: u32,
@@ -547,9 +541,6 @@ fn minimal_config_with_schemes(
     config
 }
 
-/// Given a minimal valid system (1 hydro, 1 thermal, 1 bus, 2 stages),
-/// when `StudySetup::new()` is called, then it returns `Ok` and
-/// `stage_templates()` returns a non-empty slice.
 #[test]
 fn new_minimal_valid_system_returns_ok() {
     let system = minimal_system(2);
@@ -580,8 +571,6 @@ fn new_minimal_valid_system_returns_ok() {
     assert!(!setup.stage_data.stage_templates.templates.is_empty());
 }
 
-/// Given a system with zero study stages, when `StudySetup::new()` is
-/// called, then it returns `Err` containing the substring "no study stages".
 #[test]
 fn new_zero_stages_returns_validation_error() {
     let system = minimal_system(0);
@@ -616,7 +605,6 @@ fn new_zero_stages_returns_validation_error() {
     );
 }
 
-/// Given a valid `StudySetup`, accessor methods return the expected values.
 #[test]
 fn accessor_methods_return_expected_values() {
     let n_stages = 3;
@@ -667,7 +655,6 @@ fn accessor_methods_return_expected_values() {
     assert_eq!(setup.stage_data.entity_counts.thermal_ids.len(), 1);
 }
 
-/// FCF is accessible mutably via `fcf_mut()`.
 #[test]
 fn fcf_mut_allows_cut_insertion() {
     let system = minimal_system(2);
@@ -701,7 +688,6 @@ fn fcf_mut_allows_cut_insertion() {
     assert_eq!(setup.fcf.total_active_cuts(), 1);
 }
 
-/// `inflow_method()` reflects the config setting.
 #[test]
 fn inflow_method_reflects_config() {
     use crate::InflowNonNegativityMethod;
@@ -740,7 +726,6 @@ fn inflow_method_reflects_config() {
     );
 }
 
-/// `cut_selection()` returns `None` when disabled in config (default).
 #[test]
 fn cut_selection_none_when_disabled() {
     let system = minimal_system(2);
@@ -933,9 +918,6 @@ fn simulation_ctx_propagates_dynamic_dcs_from_setup() {
     );
 }
 
-/// Given a 1-hydro, 1-thermal, 1-bus, 2-stage system with an iteration
-/// limit of 3, when `train()` is called, then it completes successfully
-/// with `result.iterations <= 3`.
 #[test]
 fn train_completes_within_iteration_limit() {
     use cobre_comm::LocalBackend;
@@ -984,8 +966,6 @@ fn train_completes_within_iteration_limit() {
     );
 }
 
-/// After `train()` completes, at least one cut should be populated in the
-/// FCF cut pool for stage 0.
 #[test]
 fn train_generates_cuts_in_fcf() {
     use cobre_comm::LocalBackend;
@@ -1028,8 +1008,6 @@ fn train_generates_cuts_in_fcf() {
     );
 }
 
-/// `simulation_config()` returns a `SimulationConfig` whose fields match
-/// the values extracted from the `Config` at construction time.
 #[test]
 fn simulation_config_reflects_setup_fields() {
     use cobre_io::config::SimulationConfig as IoSimulationConfig;
@@ -1074,8 +1052,6 @@ fn simulation_config_reflects_setup_fields() {
     );
 }
 
-/// `create_workspace_pool()` with `n_threads = 2` returns a pool whose
-/// `workspaces.len()` equals 2.
 #[test]
 fn create_workspace_pool_returns_correct_size() {
     use cobre_comm::LocalBackend;
@@ -1114,9 +1090,6 @@ fn create_workspace_pool_returns_correct_size() {
     assert_eq!(pool.workspaces.len(), 2);
 }
 
-/// `build_training_output()` with a non-empty `TrainingResult` and empty
-/// events produces a `TrainingOutput` whose `convergence_records` is
-/// non-empty (one record per `result.iterations`).
 #[test]
 fn build_training_output_non_empty() {
     use cobre_comm::LocalBackend;
@@ -1170,8 +1143,6 @@ fn build_training_output_non_empty() {
     );
 }
 
-/// Given a trained `StudySetup` with `n_scenarios > 0`, calling `simulate()`
-/// returns `Ok(costs)` with `costs.len() > 0`.
 #[test]
 fn simulate_after_train_returns_nonempty_costs() {
     use cobre_comm::LocalBackend;
@@ -1209,7 +1180,6 @@ fn simulate_after_train_returns_nonempty_costs() {
     )
     .expect("setup");
 
-    // Train first so the FCF has cuts.
     let comm = LocalBackend;
     let mut solver = ActiveSolver::new().expect("solver");
     setup
@@ -1243,8 +1213,6 @@ fn simulate_after_train_returns_nonempty_costs() {
     );
 }
 
-/// Given a config with no overrides, `StudyParams::from_config` returns the
-/// default values for all fields.
 #[test]
 fn study_params_from_config_defaults() {
     use super::{DEFAULT_FORWARD_PASSES, DEFAULT_SEED, StudyParams};
@@ -1316,8 +1284,6 @@ fn study_params_from_config_defaults() {
     );
 }
 
-/// Given a config with explicit values for all fields, `StudyParams::from_config`
-/// extracts them correctly.
 #[test]
 fn study_params_from_config_explicit() {
     use super::StudyParams;
@@ -1395,9 +1361,8 @@ fn study_params_from_config_explicit() {
     assert_eq!(params.policy_path, "./my_policy", "policy_path mismatch");
 }
 
-/// Build a minimal case directory with required structural files present so
-/// that `validate_structure` does not fail. The optional estimation and
-/// opening tree files are NOT created here; tests add them as needed.
+/// Writes the structural files `validate_structure` requires. The optional
+/// estimation and opening-tree files are left out; tests add them as needed.
 fn write_minimal_case_dir(root: &std::path::Path) {
     use std::fs;
 
@@ -1412,7 +1377,6 @@ fn write_minimal_case_dir(root: &std::path::Path) {
     fs::write(root.join("system/thermals.json"), b"{}").unwrap();
 }
 
-/// Build a minimal [`cobre_io::Config`] with no estimation or seed overrides.
 fn minimal_prepare_config() -> cobre_io::Config {
     use cobre_io::config::{
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
@@ -1446,9 +1410,6 @@ fn minimal_prepare_config() -> cobre_io::Config {
     }
 }
 
-/// Given a case directory with no `inflow_history.parquet` and no
-/// `scenarios/noise_openings.parquet`, `prepare_stochastic` returns
-/// `estimation_report = None` and a stochastic context with generated provenance.
 #[test]
 fn prepare_stochastic_no_history_no_tree_returns_none_report_and_generated_provenance() {
     use super::prepare_stochastic;
@@ -1485,9 +1446,6 @@ fn prepare_stochastic_no_history_no_tree_returns_none_report_and_generated_prove
     );
 }
 
-/// Given a case directory with `inflow_seasonal_stats.parquet` present
-/// alongside `inflow_history.parquet`, estimation is skipped and
-/// `estimation_report` is `None`.
 #[test]
 fn prepare_stochastic_with_stats_file_present_skips_estimation() {
     use super::prepare_stochastic;
@@ -1526,11 +1484,9 @@ fn prepare_stochastic_with_stats_file_present_skips_estimation() {
     );
 }
 
-/// Given a case directory with no `scenarios/noise_openings.parquet`,
-/// `load_user_opening_tree_inner` returns `None`.
-///
-/// This is tested indirectly via `prepare_stochastic` by checking that the
-/// returned stochastic context does not claim `UserSupplied` provenance.
+/// `load_user_opening_tree_inner` is exercised indirectly through
+/// `prepare_stochastic`: with no `scenarios/noise_openings.parquet`, the
+/// resulting context must not claim `UserSupplied` provenance.
 #[test]
 fn prepare_stochastic_no_opening_tree_gives_non_user_supplied_provenance() {
     use super::prepare_stochastic;
@@ -1562,10 +1518,6 @@ fn prepare_stochastic_no_opening_tree_gives_non_user_supplied_provenance() {
     );
 }
 
-/// Given a system with `NoiseMethod::HistoricalResiduals` on all stages and
-/// sufficient inflow history, when `prepare_stochastic` is called, then it
-/// returns `Ok` and the resulting stochastic context has
-/// `opening_tree().n_stages()` equal to the number of study stages.
 #[test]
 #[allow(
     clippy::too_many_lines,
@@ -1651,8 +1603,7 @@ fn test_prepare_stochastic_historical_residuals_noise_method() {
         },
     };
 
-    // Stages with HistoricalResiduals noise method; branching_factor=2 so
-    // each stage selects 2 historical windows as openings.
+    // branching_factor=2 → each stage selects 2 historical windows as openings.
     let stages: Vec<Stage> = (0..n_stages)
         .map(|i| Stage {
             index: i,
@@ -1825,8 +1776,6 @@ fn test_prepare_stochastic_historical_residuals_noise_method() {
     );
 }
 
-/// Given a system with no FPHA and no evaporation data, `default_from_system`
-/// returns a result where all hydros use constant productivity and no evaporation.
 #[test]
 fn default_from_system_gives_constant_and_no_evaporation() {
     use crate::hydro_models::{EvaporationModel, ProductionModelSource, ResolvedProductionModel};
@@ -1870,7 +1819,6 @@ fn default_from_system_gives_constant_and_no_evaporation() {
     );
 }
 
-/// Given a valid `StudySetup`, `hydro_models()` returns the stored result.
 #[test]
 fn hydro_models_accessor_returns_stored_result() {
     use crate::hydro_models::ProductionModelSource;
@@ -1910,10 +1858,7 @@ fn hydro_models_accessor_returns_stored_result() {
     }
 }
 
-/// Given a valid `StudySetup`, `energy_conversion()` returns a set with
-/// the correct dimensions and a non-zero accumulated productivity where
-/// expected (the system hydro has `ρ_eq=2.5`, and no downstream, so
-/// `ρ_acum=2.5` at every stage).
+/// The hydro has `ρ_eq=2.5` and no downstream, so `ρ_acum=2.5` at every stage.
 #[test]
 fn energy_conversion_accessor_returns_built_set() {
     let system = minimal_system(2);
@@ -1933,9 +1878,8 @@ fn energy_conversion_accessor_returns_built_set() {
     )
     .expect("stochastic context");
 
-    // Build a PrepareHydroModelsResult with productivity=2.5 for the single hydro.
-    // `default_from_system` uses 0.0 as a placeholder; here we supply the
-    // specific value that the assertion checks against.
+    // default_from_system seeds productivity 0.0; supply 2.5 so the ρ_acum
+    // assertion has a non-zero expected value.
     let n_study_stages = system.stages().iter().filter(|s| s.id >= 0).count();
     let hydro_models_result = {
         let mut result = PrepareHydroModelsResult::default_from_system(&system);
@@ -1957,8 +1901,7 @@ fn energy_conversion_accessor_returns_built_set() {
 
     let ec = setup.energy_conversion();
     assert_eq!(ec.n_hydros(), system.hydros().len());
-    // The minimal system has 2 study stages and 1 hydro (ConstantProductivity,
-    // productivity=2.5, no downstream). ρ_acum must equal ρ_eq = 2.5.
+    // ρ_acum must equal ρ_eq = 2.5 (ConstantProductivity, no downstream).
     for s in 0..ec.n_stages() {
         assert!(
             (ec.accumulated_productivity(0, s) - 2.5).abs() < f64::EPSILON,
@@ -1968,10 +1911,6 @@ fn energy_conversion_accessor_returns_built_set() {
     }
 }
 
-/// Given a system whose single hydro is FPHA but lacks VHA geometry and
-/// `specific_productivity_mw_per_m3s_per_m`, `StudySetup::new` must
-/// propagate the energy-conversion gate failure as an error whose chain
-/// contains `EnergyConversionError::FphaMissingEquivalentProductivity`.
 #[test]
 fn study_setup_propagates_fpha_missing_equivalent_productivity() {
     let system = minimal_fpha_misconfigured_system(2);
@@ -2010,23 +1949,19 @@ fn study_setup_propagates_fpha_missing_equivalent_productivity() {
     );
 }
 
-/// Build the role-(a) `StateLayout` for lag tests: N hydros, L lags.
 fn layout_for_lag_test(hydro_count: usize, max_par_order: usize) -> StateLayout {
     crate::test_support::state_layout(hydro_count, max_par_order)
 }
 
-/// Build the role-(a) `StateLayout` matching [`counts_with_anticipated`]
-/// (1 hydro, 0 lags, `n_anticipated` plants with the given per-plant K).
+/// Must match [`counts_with_anticipated`]: 1 hydro, 0 lags, `n_anticipated`
+/// plants with the given per-plant K.
 fn layout_with_anticipated(n_anticipated: usize, k_values: &[usize]) -> StateLayout {
     let k_max = k_values.iter().copied().max().unwrap_or(0);
     crate::test_support::state_layout_full(1, 0, n_anticipated, k_max, k_values.to_vec())
 }
 
-/// Build a 2-hydro system (IDs 1 and 2) with `n_stages` study stages and
-/// PAR order 2 AR coefficients on all stages, with `inflow_lags: true`.
-///
-/// Provides `past_inflows` in `initial_conditions` with the given values
-/// for both hydros.
+/// 2-hydro PAR(2) system with `inflow_lags` and the given `past_inflows` for
+/// hydros 1 and 2.
 #[allow(
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
@@ -2273,11 +2208,8 @@ fn minimal_system_2_hydros_with_past_inflows(
         .expect("minimal_system_2_hydros_with_past_inflows: valid")
 }
 
-/// Given 2 hydros (IDs 1, 2), `max_par_order`=2, and `past_inflows` set,
-/// `build_initial_state` populates lag slots correctly.
-///
-/// Hydro idx 0 (id=1): lag 0 = 600.0, lag 1 = 500.0
-/// Hydro idx 1 (id=2): lag 0 = 200.0, lag 1 = 100.0
+/// Expected lag seeds — hydro 0 (id=1): lag0=600, lag1=500;
+/// hydro 1 (id=2): lag0=200, lag1=100.
 #[test]
 fn build_initial_state_populates_lags_from_past_inflows() {
     use super::build_initial_state;
@@ -2320,7 +2252,6 @@ fn build_initial_state_populates_lags_from_past_inflows() {
     );
 }
 
-/// Given no `past_inflows` entries, all lag slots remain 0.0.
 #[test]
 fn build_initial_state_empty_past_inflows_leaves_zero_lags() {
     use super::build_initial_state;
@@ -2340,8 +2271,6 @@ fn build_initial_state_empty_past_inflows_leaves_zero_lags() {
     }
 }
 
-/// Given `past_inflows` only for a hydro not in the system, lag slots
-/// for the system's hydros remain 0.0.
 #[test]
 fn build_initial_state_unknown_hydro_in_past_inflows_stays_zero() {
     use super::build_initial_state;
@@ -2701,14 +2630,9 @@ fn test_initial_state_seeds_correctly_under_staggered_commissioning_dates() {
     );
 }
 
-/// Build a 2-hydro system (IDs 1, 2) where hydro 2 carries a `FillingConfig`
-/// (a filling hydro) and hydro 1 is operating, with caller-supplied
-/// `initial_conditions`.
-///
-/// Mirrors [`minimal_system_2_hydros_with_past_inflows`] but exposes the full
-/// `InitialConditions` so a test can populate `storage` and `filling_storage`
-/// independently. `start_stage_id` sets hydro 2's filling start stage (0 =
-/// mid-filling seed; >0 = empty pit).
+/// 2-hydro fixture: hydro 2 is a filling reservoir, hydro 1 operating, with
+/// caller-supplied `initial_conditions`. `start_stage_id` sets hydro 2's
+/// filling start stage (0 = mid-filling seed; >0 = empty pit).
 #[allow(
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
@@ -2946,9 +2870,6 @@ fn filling_system_2_hydros(
         .expect("filling_system_2_hydros: valid")
 }
 
-/// Given a `filling_storage` entry with a non-zero mid-fill seed for the
-/// filling hydro (id=2, system index 1), `build_initial_state` writes the
-/// seed at the hydro's storage coordinate.
 #[test]
 fn build_initial_state_seeds_filling_storage() {
     use super::build_initial_state;
@@ -2984,9 +2905,6 @@ fn build_initial_state_seeds_filling_storage() {
     );
 }
 
-/// Given a filling hydro whose `start_stage_id > 0` so `filling_storage`
-/// holds `value_hm3 == 0.0` (empty pit), `build_initial_state`
-/// leaves the coordinate at 0.0 and fires no debug-assert.
 #[test]
 fn build_initial_state_filling_empty_pit_is_zero() {
     use super::build_initial_state;
@@ -3014,9 +2932,6 @@ fn build_initial_state_filling_empty_pit_is_zero() {
     );
 }
 
-/// Given a `filling_storage` entry whose `hydro_id` matches no hydro in the
-/// system, `build_initial_state` returns without panic and every state slot
-/// is unchanged from the no-filling baseline.
 #[test]
 fn build_initial_state_unknown_filling_hydro_skipped() {
     use super::build_initial_state;
@@ -3056,11 +2971,6 @@ fn build_initial_state_unknown_filling_hydro_skipped() {
     );
 }
 
-/// Given both `storage` (operating hydro id=1) and `filling_storage`
-/// (filling hydro id=2) populated alongside `past_inflows`,
-/// `build_initial_state` seeds both storage coordinates and the AR-lag slots
-/// identically to the operating-only path (filling hydros share the lag
-/// path).
 #[test]
 fn build_initial_state_mixed_operating_and_filling_seeds() {
     use super::build_initial_state;
@@ -3098,7 +3008,6 @@ fn build_initial_state_mixed_operating_and_filling_seeds() {
 
     let state = build_initial_state(&system, &crate::test_support::study_dims(), &layout);
 
-    // Both storage coordinates carry their respective seeds.
     assert!(
         (state[0] - operating_seed).abs() < 1e-10,
         "operating hydro storage should be {operating_seed}, got {}",
@@ -3135,8 +3044,6 @@ fn build_initial_state_mixed_operating_and_filling_seeds() {
     );
 }
 
-/// Integration test: `StudySetup::new` with `past_inflows` in the system's
-/// initial conditions produces `initial_state()` with non-zero lag values.
 #[test]
 fn study_setup_initial_state_has_nonzero_lags_from_past_inflows() {
     let system =
@@ -3195,7 +3102,6 @@ fn study_setup_initial_state_has_nonzero_lags_from_past_inflows() {
     );
 }
 
-/// Given `max_par_order`=0, no lag slots exist; state is storage-only.
 #[test]
 fn build_initial_state_no_lags_state_is_storage_only() {
     use super::build_initial_state;
@@ -3219,13 +3125,9 @@ fn build_initial_state_no_lags_state_is_storage_only() {
 // build_initial_state — anticipated_state seed
 // -----------------------------------------------------------------------
 
-/// Build the `GeometryDims` for N=1 hydro, L=0 lags, and the given
-/// anticipated-thermal metadata.
-///
-/// This gives a non-zero `anticipated_state` block in the state vector. The
-/// anticipated `build_initial_state` tests derive their non-state
-/// `StudyDimensions` from these dims (via `study_dims_for`), so the geometry
-/// and the study shape stay aligned from one source.
+/// `GeometryDims` for 1 hydro, 0 lags, and the given anticipated metadata. The
+/// anticipated `build_initial_state` tests derive their `StudyDimensions` from
+/// these dims (`study_dims_for`), so geometry and study shape stay aligned.
 fn counts_with_anticipated(
     n_anticipated: usize,
     k_values: &[usize],
@@ -3244,11 +3146,9 @@ fn counts_with_anticipated(
     }
 }
 
-/// Build a 1-bus / 1-hydro system whose `thermals` list contains N
-/// anticipated thermals with the given `lead_stages` values.  Thermal IDs
-/// are assigned as `EntityId(10 + i as i32)` so they are distinct from the
-/// bus (ID 1) and the hydro (ID 3).  `past_anticipated_commitments` is set
-/// to `past_commits` (must be pre-sorted by `thermal_id`).
+/// N anticipated thermals with the given `lead_stages`; IDs are `10 + i` (kept
+/// clear of the bus id 1 and hydro id 3). `past_commits` must be pre-sorted by
+/// `thermal_id`.
 #[allow(
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
@@ -3272,8 +3172,6 @@ fn system_with_anticipated_thermals(
         excess_cost: 0.0,
     };
 
-    // Build N anticipated thermals. IDs are 10, 11, 12, … so they are
-    // always above the hydro ID (3) and can be easily identified.
     let thermals: Vec<Thermal> = k_values
         .iter()
         .enumerate()
@@ -3835,10 +3733,6 @@ fn build_initial_state_anticipated_seed_correct_under_staggered_commissioning_da
     );
 }
 
-/// AC-1: A system with `n_anticipated == 0` produces an unchanged state
-/// vector (length `n_state`, `anticipated_slots_out` block is empty).
-///
-/// Regression guard: confirms zero-anticipated path is unaffected.
 #[test]
 fn build_initial_state_no_anticipated_state_unchanged() {
     use super::build_initial_state;
@@ -3846,7 +3740,6 @@ fn build_initial_state_no_anticipated_state_unchanged() {
     let system = minimal_system(2);
     let layout = layout_for_lag_test(1, 0);
 
-    // n_anticipated == 0; anticipated_slots_out range is 0..0.
     assert_eq!(layout.n_anticipated, 0);
     assert!(layout.anticipated_slots_out.is_empty());
 
@@ -3864,12 +3757,9 @@ fn build_initial_state_no_anticipated_state_unchanged() {
     );
 }
 
-/// AC-2: `n_anticipated == 1`, `k_max == 2`, `K_0 == 2` and
-/// `past_anticipated_commitments` has one entry with `values_mw: [50.0, 75.0]`.
-///
-/// Expected slot-major layout (`n_ant=1`):
-///   slot 0: `ant_start + 0*1 + 0 = ant_start`   → 50.0
-///   slot 1: `ant_start + 1*1 + 0 = ant_start+1`  → 75.0
+/// Slot-major layout (`n_ant=1`), `values_mw = [50.0, 75.0]`:
+///   slot 0 (`ant_start`)   → 50.0
+///   slot 1 (`ant_start+1`) → 75.0
 #[test]
 fn build_initial_state_single_anticipated_thermal_k2() {
     use super::build_initial_state;
@@ -3883,7 +3773,6 @@ fn build_initial_state_single_anticipated_thermal_k2() {
     }];
     let system = system_with_anticipated_thermals(&[2], past_commits);
 
-    // indexer: 1 hydro, 0 lags, 1 anticipated thermal (global idx 0), k_max=2.
     let layout = layout_with_anticipated(1, &[2]);
 
     let state = build_initial_state(
@@ -3910,16 +3799,13 @@ fn build_initial_state_single_anticipated_thermal_k2() {
     );
 }
 
-/// AC-3: `n_anticipated == 2`, `k_max == 3`, `K_0 == 2`, `K_1 == 3`.
-///
-/// Slot-major layout with `n_ant=2`:
-///
-/// - (slot 0, plant 0): `ant_start + 0*2+0` → 10.0
-/// - (slot 0, plant 1): `ant_start + 0*2+1` → 100.0
-/// - (slot 1, plant 0): `ant_start + 1*2+0` → 20.0
-/// - (slot 1, plant 1): `ant_start + 1*2+1` → 200.0
-/// - (slot 2, plant 0): `ant_start + 2*2+0` → 0.0  (padding: `K_0=2 < k_max=3`)
-/// - (slot 2, plant 1): `ant_start + 2*2+1` → 300.0
+/// Slot-major layout (`n_ant=2`, `k_max=3`):
+/// - (slot 0, plant 0) `ant_start+0*2+0` → 10.0
+/// - (slot 0, plant 1) `ant_start+0*2+1` → 100.0
+/// - (slot 1, plant 0) `ant_start+1*2+0` → 20.0
+/// - (slot 1, plant 1) `ant_start+1*2+1` → 200.0
+/// - (slot 2, plant 0) `ant_start+2*2+0` → 0.0  (padding: `K_0=2` < `k_max=3`)
+/// - (slot 2, plant 1) `ant_start+2*2+1` → 300.0
 #[test]
 fn build_initial_state_two_anticipated_thermals_mixed_k() {
     use super::build_initial_state;
@@ -3939,10 +3825,6 @@ fn build_initial_state_two_anticipated_thermals_mixed_k() {
     ];
     let system = system_with_anticipated_thermals(&[2, 3], past_commits);
 
-    // indexer: 1 hydro, 0 lags, 2 anticipated thermals
-    //   anticipated_thermal_indices = [0, 1]  (global idxs in thermals())
-    //   anticipated_lead_stages     = [2, 3]
-    //   k_max                       = 3
     let layout = layout_with_anticipated(2, &[2, 3]);
 
     let state = build_initial_state(
@@ -3956,9 +3838,7 @@ fn build_initial_state_two_anticipated_thermals_mixed_k() {
         layout.n_state,
         "state length must equal n_state"
     );
-    // n_ant = 2, k_max = 3.  Slot-major offsets from ant_start:
-    //   (slot, plant) → offset = slot * n_ant + plant
-    //   (0,0)→0, (0,1)→1, (1,0)→2, (1,1)→3, (2,0)→4, (2,1)→5
+    // offset from ant_start = slot * n_ant + plant.
     let s = layout.anticipated_slots_out.start;
 
     assert!(
@@ -3993,8 +3873,6 @@ fn build_initial_state_two_anticipated_thermals_mixed_k() {
     );
 }
 
-/// AC-4: `n_anticipated == 1`, `k_max == 2`, but `past_anticipated_commitments`
-/// is empty.  All `anticipated_state` slots must remain 0.0 (no panic).
 #[test]
 fn build_initial_state_empty_past_commitments_leaves_zeros() {
     use super::build_initial_state;
@@ -4024,16 +3902,11 @@ fn build_initial_state_empty_past_commitments_leaves_zeros() {
     }
 }
 
-/// AC-5: `past_anticipated_commitments` contains a `thermal_id` that does
-/// not match any anticipated thermal.  The function silently ignores it and
-/// all `anticipated_state` slots remain 0.0 (no panic).
 #[test]
 fn build_initial_state_unknown_thermal_id_silently_skipped() {
     use super::build_initial_state;
     use cobre_core::AnticipatedCommitmentHistory;
 
-    // System has one anticipated thermal (ID 10).
-    // past_anticipated_commitments references ID 99999 — not in the system.
     let past_commits = vec![AnticipatedCommitmentHistory {
         thermal_id: EntityId(99999),
         values_mw: vec![42.0, 43.0],
@@ -4063,13 +3936,9 @@ fn build_initial_state_unknown_thermal_id_silently_skipped() {
     }
 }
 
-/// AC-6 (happy path with padding slot): two anticipated plants with
-/// `K_0 = 1` and `K_1 = 2`, so `k_max = 2`. The plant-0 ring-buffer column
-/// has one valid slot (slot 0) and one padding slot (slot 1).
-///
-/// `past_anticipated_commitments` carries `[100.0]` for plant 0 and
-/// `[50.0, 75.0]` for plant 1, each of length `K_i` exactly (the contract
-/// the cobre-io validator enforces in production).
+/// `past_anticipated_commitments` carries `[100.0]` for plant 0 (`K_0=1`) and
+/// `[50.0, 75.0]` for plant 1 (`K_1=2`), each of length `K_i` exactly (the
+/// contract cobre-io's validator enforces in production).
 ///
 /// Expected layout (`n_ant = 2`, slot-major):
 ///   - `ant_start + 0*2 + 0` (slot 0, plant 0) -> 100.0  (seed)
@@ -4077,8 +3946,8 @@ fn build_initial_state_unknown_thermal_id_silently_skipped() {
 ///   - `ant_start + 1*2 + 0` (slot 1, plant 0) ->   0.0  (padding; `K_0=1` < `k_max=2`)
 ///   - `ant_start + 1*2 + 1` (slot 1, plant 1) ->  75.0  (seed)
 ///
-/// The padding-slot `debug_assert!` must not fire because the `.min(k_i)`
-/// clamp prevents writing past slot `K_0=1` on plant 0.
+/// The padding-slot `debug_assert!` must not fire — the `.min(k_i)` clamp
+/// prevents writing past slot `K_0=1` on plant 0.
 #[test]
 fn build_initial_state_anticipated_seed_padding_slot_stays_zero() {
     use super::build_initial_state;
@@ -4095,7 +3964,6 @@ fn build_initial_state_anticipated_seed_padding_slot_stays_zero() {
         },
     ];
     let system = system_with_anticipated_thermals(&[1, 2], past_commits);
-    // n_anticipated=2, k_values=[1, 2] -> k_max=2.
     let layout = layout_with_anticipated(2, &[1, 2]);
 
     let state = build_initial_state(
@@ -4114,26 +3982,22 @@ fn build_initial_state_anticipated_seed_padding_slot_stays_zero() {
     assert_eq!(n_ant, 2);
     assert_eq!(layout.k_max, 2);
 
-    // slot 0, plant 0 -> 100.0
     assert!(
         (state[s] - 100.0).abs() < 1e-10,
         "slot 0 plant 0 expected 100.0, got {}",
         state[s]
     );
-    // slot 0, plant 1 -> 50.0
     assert!(
         (state[s + 1] - 50.0).abs() < 1e-10,
         "slot 0 plant 1 expected 50.0, got {}",
         state[s + 1]
     );
-    // slot 1, plant 0 -> 0.0 (padding for K_0=1 < k_max=2). This is the
-    // invariant the new debug_assert! protects.
+    // Padding slot: the invariant the debug_assert! protects.
     assert!(
         state[s + 2].abs() < 1e-10,
         "padding slot 1 plant 0 expected 0.0, got {}",
         state[s + 2]
     );
-    // slot 1, plant 1 -> 75.0
     assert!(
         (state[s + 3] - 75.0).abs() < 1e-10,
         "slot 1 plant 1 expected 75.0, got {}",
@@ -4141,8 +4005,6 @@ fn build_initial_state_anticipated_seed_padding_slot_stays_zero() {
     );
 }
 
-/// Given a `System` with `inflow_scheme = InSample`, when `StudySetup::new()`
-/// is called, then `historical_library()` returns `None`.
 #[test]
 fn historical_library_none_for_insample() {
     let system = minimal_system(2);
@@ -4188,14 +4050,10 @@ fn historical_library_none_for_insample() {
     );
 }
 
-/// Build a system that has `inflow_scheme = Historical` and the inflow
-/// history needed to discover at least one window.
-///
-/// The system has 1 hydro, 1 bus, 1 thermal, 2 monthly stages (`season_id`
-/// `Some(0)` and `Some(1)`), and historical data covering years 1990-1991.
-/// With `max_par_order = 0` (no AR coefficients), a window is valid if
-/// we have observations for both study months. Year 1990 covers months 0-1
-/// so season 0 and 1 are available under year 1990.
+/// `Historical`-scheme fixture with the inflow history needed to discover at
+/// least one window: 2 monthly stages (seasons 0-1) and data covering
+/// 1990-1991. With `max_par_order = 0`, a window is valid when both study
+/// months are observed — year 1990 covers months 0-1, so it qualifies.
 #[allow(
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
@@ -4313,7 +4171,6 @@ fn system_with_historical_inflow(n_stages: usize) -> cobre_core::System {
         },
     };
 
-    // Monthly stages: season_id = month index (0-based).
     let stages: Vec<Stage> = (0..n_stages)
         .map(|i| Stage {
             index: i,
@@ -4360,9 +4217,6 @@ fn system_with_historical_inflow(n_stages: usize) -> cobre_core::System {
         })
         .collect();
 
-    // Historical inflow data: 1990 and 1991 cover 12 months each.
-    // With n_stages <= 2 and max_par_order = 0, year 1990 and 1991 are
-    // both valid windows (study months are in Jan-Feb = seasons 0-1).
     let inflow_history: Vec<InflowHistoryRow> = (1990_i32..=1991)
         .flat_map(|year| {
             (1u32..=12).map(move |month| InflowHistoryRow {
@@ -4440,9 +4294,6 @@ fn system_with_historical_inflow(n_stages: usize) -> cobre_core::System {
         .expect("system_with_historical_inflow: valid")
 }
 
-/// Given a `System` with `inflow_scheme = Historical` and valid inflow history,
-/// when `StudySetup::new()` is called, then `historical_library()` returns
-/// `Some` and `n_windows() > 0`.
 #[test]
 fn historical_library_built_when_scheme_is_historical() {
     let system = system_with_historical_inflow(2);
@@ -4488,9 +4339,6 @@ fn historical_library_built_when_scheme_is_historical() {
     assert_eq!(lib.n_hydros(), 1, "expected n_hydros == 1");
 }
 
-/// Given a `System` with `inflow_scheme = External` and valid external
-/// inflow rows, when `StudySetup::new()` is called, then
-/// `external_inflow_library()` returns `Some` and `n_entities() > 0`.
 #[test]
 #[allow(
     clippy::too_many_lines,
@@ -4504,7 +4352,6 @@ fn external_inflow_library_built_when_scheme_is_external() {
     use cobre_core::scenario::ExternalScenarioRow;
     use cobre_core::{scenario::InflowModel as CoreInflowModel, system::SystemBuilder};
 
-    // 3 scenarios × 1 hydro (ID 3, from minimal_system) × 2 stages.
     let hydro_id = EntityId(3);
     let mut external_rows: Vec<ExternalScenarioRow> = Vec::new();
     for stage_id in 0i32..2 {
@@ -4764,9 +4611,6 @@ fn external_inflow_library_built_when_scheme_is_external() {
     assert_eq!(lib.entity_class(), "inflow");
 }
 
-/// Given a `System` with `load_scheme = External` and valid external load
-/// rows, when `StudySetup::new()` is called, then
-/// `external_load_library()` returns `Some` and `n_entities() > 0`.
 #[test]
 #[allow(
     clippy::too_many_lines,
@@ -4894,7 +4738,6 @@ fn external_load_library_built_when_scheme_is_external() {
         })
         .collect();
 
-    // External load rows: 3 scenarios × 1 bus × 2 stages.
     let mut external_load_rows: Vec<ExternalLoadRow> = Vec::new();
     for stage_id in 0i32..2 {
         for scenario_id in 0i32..3 {
@@ -5038,9 +4881,6 @@ fn external_load_library_built_when_scheme_is_external() {
     assert_eq!(lib.entity_class(), "load");
 }
 
-/// Given a `System` with `ncs_scheme = External` and valid external NCS
-/// rows, when `StudySetup::new()` is called, then
-/// `external_ncs_library()` returns `Some` and `n_entities() > 0`.
 #[test]
 #[allow(
     clippy::too_many_lines,
@@ -5194,7 +5034,6 @@ fn external_ncs_library_built_when_scheme_is_external() {
         })
         .collect();
 
-    // External NCS rows: 3 scenarios × 1 NCS × 2 stages.
     let mut external_ncs_rows: Vec<ExternalNcsRow> = Vec::new();
     for stage_id in 0i32..2 {
         for scenario_id in 0i32..3 {
@@ -5340,9 +5179,6 @@ fn external_ncs_library_built_when_scheme_is_external() {
     assert_eq!(lib.entity_class(), "ncs");
 }
 
-/// Given a `System` with `inflow_scheme = Historical` but a user pool
-/// that references a year with no data, when `StudySetup::new()` is
-/// called, then it returns `Err` with a message about windows.
 #[test]
 #[allow(
     clippy::too_many_lines,
@@ -5552,7 +5388,6 @@ fn historical_library_fails_when_no_valid_windows() {
         },
     );
 
-    // Historical scheme but NO inflow_history data — discovery must fail.
     let system = SystemBuilder::new()
         .buses(vec![bus])
         .thermals(vec![thermal])
@@ -5596,15 +5431,10 @@ fn historical_library_fails_when_no_valid_windows() {
     );
 }
 
-/// Given a `Config` with training inflow scheme `InSample` and simulation
-/// inflow scheme `OutOfSample`, when `StudySetup::new()` is called, then
-/// `training_ctx().inflow_scheme` is `InSample` and
-/// `simulation_ctx().inflow_scheme` is `OutOfSample`.
 #[test]
 fn test_simulate_uses_simulation_scheme() {
     let system = minimal_system(2);
 
-    // Training: InSample (default). Simulation: OutOfSample.
     let mut config = minimal_config(1, 5);
     config.simulation.scenario_source = Some(RawScenarioSourceConfig {
         seed: Some(99),
@@ -5654,15 +5484,10 @@ fn test_simulate_uses_simulation_scheme() {
     );
 }
 
-/// Given a `Config` with training inflow scheme `InSample` and simulation
-/// inflow scheme `Historical`, when `StudySetup::new()` is called on a
-/// system that has inflow history, then `training_ctx().historical_library`
-/// is `None` and `simulation_ctx().historical_library` is `Some`.
 #[test]
 fn test_sim_historical_library_built_when_sim_scheme_is_historical() {
     let system = system_with_historical_inflow(2);
 
-    // Training: InSample. Simulation: Historical.
     let mut config = minimal_config(1, 5);
     config.simulation.scenario_source = Some(RawScenarioSourceConfig {
         seed: Some(42),
@@ -5708,11 +5533,9 @@ fn test_sim_historical_library_built_when_sim_scheme_is_historical() {
     );
 }
 
-/// Build a minimal system identical to [`minimal_system`] except that the single
-/// thermal carries the given `anticipated_config` and each study stage's single
-/// block runs for the corresponding `stage_hours` entry. `k_max_bounds` sets
-/// `BoundsCountsSpec::k_max` so the thermal stage-bounds axis is wide enough for
-/// delivery-stage padding.
+/// Like [`minimal_system`] but the thermal carries `anticipated_config` and each
+/// stage's block runs for the matching `stage_hours` entry. `k_max_bounds`
+/// widens the thermal stage-bounds axis for delivery-stage padding.
 #[allow(
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
@@ -5947,8 +5770,6 @@ fn minimal_system_with_anticipated(
         .expect("minimal_system_with_anticipated: valid")
 }
 
-/// [`minimal_system_with_anticipated`] with `n_stages` uniform 744 h stages and a
-/// `LeadStages(lead_stages)` thermal — the pre-delivery-anchor fixture.
 fn minimal_system_with_anticipated_lead_stages(
     n_stages: usize,
     lead_stages: u32,
@@ -5960,9 +5781,6 @@ fn minimal_system_with_anticipated_lead_stages(
     )
 }
 
-/// Given a `StudySetup::new` call on a system with one anticipated thermal
-/// (`K_i = 2`), when the test inspects the resulting indexer metadata, then
-/// `n_anticipated == 1`, `k_max == 2`, and `anticipated_lead_stages == [2]`.
 #[test]
 fn setup_wires_anticipated_metadata_into_indexer() {
     let system = minimal_system_with_anticipated_lead_stages(2, 2);
@@ -6002,10 +5820,9 @@ fn setup_wires_anticipated_metadata_into_indexer() {
     );
 }
 
-/// AC#1: a `LeadStages(2)` plant on a 5-stage uniform study resolves to a
-/// per-plant depth whose max is `2` with singleton in-horizon decision sets
-/// `{t+2}`, and the resulting `k_max` and `state_dimension` equal the
-/// pre-delivery-anchor values (`k_max == 2`, `n_state == 3`).
+/// A `LeadStages(2)` plant on a 5-stage uniform study resolves to per-plant
+/// depth max 2 with singleton decision sets `{t+2}`; `k_max == 2` and
+/// `n_state == 3` (the delivery-anchored values).
 #[test]
 fn setup_leadstages_resolution_preserves_k_max_and_state_dimension() {
     let system = minimal_system_with_anticipated_lead_stages(5, 2);
@@ -6064,11 +5881,10 @@ fn setup_leadstages_resolution_preserves_k_max_and_state_dimension() {
     );
 }
 
-/// AC#2 (hand-derived): a `LeadTime(720.0)` plant on the weekly-then-monthly PMO
-/// calendar `[168,168,168,168,720,720]` resolves via the end-anchored
-/// `resolve_point` decider contract to `decider ==
-/// [None,None,None,None,Some(3),Some(4)]`, `C(3) == {4}`, `C(4) == {5}`, and
-/// `depth == [0,0,0,1,1,0]` (ring depth 1).
+/// Hand-derived: a `LeadTime(720.0)` plant on the weekly-then-monthly PMO
+/// calendar `[168,168,168,168,720,720]` resolves (end-anchored `resolve_point`)
+/// to `decider == [None,None,None,None,Some(3),Some(4)]`, `C(3) == {4}`,
+/// `C(4) == {5}`, `depth == [0,0,0,1,1,0]` (ring depth 1).
 #[test]
 fn test_anticipated_resolve_point_pmo_calendar() {
     let system = minimal_system_with_anticipated(
@@ -6089,10 +5905,10 @@ fn test_anticipated_resolve_point_pmo_calendar() {
     assert_eq!(resolution.k_max, 1);
 }
 
-/// AC#3 (hand-derived): a `LeadTime(720.0)` plant on the monthly-then-weekly
-/// fan-out calendar `[720,168,168,168,168,168]` resolves to a coarse decider 0
-/// committing four fine delivery stages — `C(0) == {1,2,3,4}` (|C(0)| == 4) —
-/// with `depth == [4,4,3,2,1,0]` and ring depth 4.
+/// Hand-derived: a `LeadTime(720.0)` plant on the monthly-then-weekly fan-out
+/// calendar `[720,168,168,168,168,168]` resolves to coarse decider 0 committing
+/// four fine delivery stages — `C(0) == {1,2,3,4}` — `depth == [4,4,3,2,1,0]`,
+/// ring depth 4.
 #[test]
 fn test_anticipated_resolve_point_fanout_calendar() {
     let system = minimal_system_with_anticipated(
@@ -6109,16 +5925,10 @@ fn test_anticipated_resolve_point_fanout_calendar() {
     assert_eq!(resolution.k_max, 4);
 }
 
-/// Assert the canonical `StageData.state` role-(a) layout is internally
-/// consistent and finalized, and that it agrees with a reference
-/// [`StateLayout`] built independently from the same state-vector dimensions.
-///
-/// The role-(a) concern lives solely on `StateLayout`; the role-(b)
-/// equipment geometry lives per stage on `StageGeometry`, so there is no
-/// state half there to compare against. This checks that
-/// `resolve_state_layout`'s `StateLayout` finalizes both caches and reproduces
-/// a fresh `StateLayout::new` over the same `(N, L, A, k_max, leads)`
-/// byte-for-byte — the property the single-owner extraction guarantees.
+/// Assert `state` is finalized and byte-for-byte reproduces a fresh
+/// `StateLayout::new` over the same `(N, L, A, k_max, leads)` — the single-owner
+/// property `resolve_state_layout` guarantees. Role-(b) equipment geometry lives
+/// on `StageGeometry`, so there is no state half to compare here.
 fn assert_state_layout_finalized(state: &StateLayout) {
     assert_eq!(
         state.state_to_lp_column_map.len(),
@@ -6172,8 +5982,6 @@ fn assert_state_layout_finalized(state: &StateLayout) {
     );
 }
 
-/// AC#1 (uniform): `StageData.state` finalized by `resolve_state_layout` is
-/// internally consistent and finalized for a storage+lag study.
 #[test]
 fn stage_data_state_matches_indexer_role_a_uniform() {
     let system = minimal_system(3);
@@ -6204,9 +6012,8 @@ fn stage_data_state_matches_indexer_role_a_uniform() {
     assert_state_layout_finalized(&setup.stage_data.state);
 }
 
-/// Build a 2-hydro cascade with hydro 2 (upstream) declaring a travel-time
-/// arc into hydro 1 (downstream) — mirrors [`minimal_system`]'s single-hydro
-/// template, extended to a cascade so `bucket_topology.n_buckets > 0`.
+/// 2-hydro cascade: hydro 2 (upstream) declares a travel-time arc into hydro 1
+/// (downstream), so `bucket_topology.n_buckets > 0`.
 #[allow(
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
@@ -6449,10 +6256,8 @@ fn system_with_travel_time_arc(n_stages: usize) -> cobre_core::System {
         .expect("system_with_travel_time_arc: valid")
 }
 
-/// A declared travel-time arc (`n_buckets > 0`) sizes `StageData.state` (the
-/// single role-(a) `StateLayout` `resolve_state_layout` builds) and the actual
-/// LP template's `n_state` to the SAME value — both read the one threaded
-/// instance.
+/// A declared arc (`n_buckets > 0`) sizes `StageData.state` and the LP
+/// template's `n_state` to the same value — both read the one threaded instance.
 #[test]
 fn setup_state_and_stage_template_agree_on_n_state_with_declared_arc() {
     let system = system_with_travel_time_arc(6);
@@ -6468,12 +6273,9 @@ fn setup_state_and_stage_template_agree_on_n_state_with_declared_arc() {
     );
 }
 
-/// Single-owner invariant: `stage_templates.state_layout` (repointed by
-/// `build_stage_templates` at the threaded instance) and `StudySetup`'s own
-/// authoritative `StateLayout` (`stage_data.state`) agree field-for-field —
-/// sibling to [`assert_state_layout_finalized`], but comparing the two
-/// production-held handles directly rather than each against an independent
-/// reference build.
+/// Single-owner invariant: `stage_templates.state_layout` and the authoritative
+/// `stage_data.state` agree field-for-field — comparing the two production
+/// handles directly, unlike [`assert_state_layout_finalized`]'s reference build.
 #[test]
 fn stage_templates_state_layout_matches_authoritative_state_layout() {
     let system = minimal_system(3);
@@ -6554,13 +6356,10 @@ fn stage_templates_state_layout_matches_authoritative_state_layout() {
     );
 }
 
-/// Geometry byte-identity: the production stage-0 `StageGeometry` (built by
-/// `StageGeometry::from_layout` and stored in `StageTemplates::geometry_per_stage[0]`)
-/// is byte-identical to an independent `test_support::geometry` build from
-/// the same equipment dimensions (the role-(b) analogue of
-/// `assert_state_layout_finalized`). A divergence means the per-stage geometry
-/// the `StageLayout` produces drifted from the column/row arithmetic the
-/// fixture reproduces.
+/// Geometry byte-identity (the role-(b) analogue of
+/// `assert_state_layout_finalized`): the production stage-0 `StageGeometry` is
+/// byte-identical to an independent `test_support::geometry` build; a divergence
+/// means the per-stage geometry drifted from the fixture's column/row arithmetic.
 #[test]
 fn stage_data_geometry_role_b_matches_reference_build() {
     let system = minimal_system(3);
@@ -6590,9 +6389,6 @@ fn stage_data_geometry_role_b_matches_reference_build() {
 
     let geometry = &setup.stage_data.stage_templates.geometry_per_stage[0];
     let study_dims = &setup.stage_data.study_dims;
-    // Rebuild the reference geometry independently from the single-owner
-    // `study_dims`, so a divergence between it and the production geometry fails
-    // the test.
     let dims = crate::test_support::GeometryDims {
         hydro_count: geometry.water_balance.len(),
         max_par_order: 0, // role-(b) ranges do not depend on L
@@ -6615,7 +6411,6 @@ fn stage_data_geometry_role_b_matches_reference_build() {
         geometry.evap_hydro_indices.clone(),
     );
 
-    // Role-(b) equipment/slack column ranges.
     assert_eq!(reference.turbine, geometry.turbine, "turbine range");
     assert_eq!(reference.spillage, geometry.spillage, "spillage range");
     assert_eq!(reference.diversion, geometry.diversion, "diversion range");
@@ -6636,7 +6431,6 @@ fn stage_data_geometry_role_b_matches_reference_build() {
         reference.withdrawal_slack_pos, geometry.withdrawal_slack_pos,
         "withdrawal_slack_pos range"
     );
-    // Role-(b) constraint row ranges + surviving stride scalars.
     assert_eq!(
         reference.water_balance, geometry.water_balance,
         "water_balance"
@@ -6652,10 +6446,8 @@ fn stage_data_geometry_role_b_matches_reference_build() {
     assert_eq!(reference.n_blks, geometry.n_blks, "n_blks");
 }
 
-/// AC#1 (anticipated): `StageData.state` is byte-identical to the indexer's
-/// role-(a) when anticipated thermals are present (`K_i = 2`), exercising
-/// the `anticipated_slots_out` / `anticipated_state` ranges and the
-/// anticipated entries of the nonzero mask.
+/// `StageData.state` byte-identity with anticipated thermals present (`K_i = 2`),
+/// exercising the `anticipated_slots_out`/`anticipated_state` ranges.
 #[test]
 fn stage_data_state_matches_indexer_role_a_anticipated() {
     let system = minimal_system_with_anticipated_lead_stages(2, 2);
@@ -6687,14 +6479,11 @@ fn stage_data_state_matches_indexer_role_a_anticipated() {
     assert_state_layout_finalized(&setup.stage_data.state);
 }
 
-/// AC#2 (cut-row byte-identity at the cut-path repoint): the production cut
-/// row built by `build_cut_row_batch` reading role (a) from `StageData.state`
-/// (a [`StateLayout`]) is byte-identical to an independent reference loop that
-/// reads the same `StateLayout` (`theta`, `nonzero_state_indices`,
-/// `lp_column_for_state`). This is the substitutability guarantee the cut-path
-/// repoint relies on: after repointing the production builder onto
-/// `StateLayout`, the mask, `theta`, and `lp_column_for_state` reads resolve
-/// to the same LP columns and the same negated-scaled coefficients.
+/// Cut-row byte-identity: the production `build_cut_row_batch` reading role-(a)
+/// from `StageData.state` matches an independent reference loop over the same
+/// `StateLayout` (mask, `theta`, `lp_column_for_state`) — the substitutability
+/// guarantee the cut-path repoint relies on (same LP columns, same
+/// negated-scaled coefficients).
 #[test]
 fn cut_row_from_state_matches_reference_loop() {
     use crate::cut::FutureCostFunction;
@@ -6745,9 +6534,8 @@ fn cut_row_from_state_matches_reference_loop() {
         &[],
     );
 
-    // Independent mirror of `build_cut_row_batch_into`'s mask-driven body over the
-    // same `StateLayout` role-(a) reads; a disagreement means the cut-path repoint
-    // changed the emitted row.
+    // Mirror of `build_cut_row_batch_into`'s mask-driven body; a disagreement
+    // means the cut-path repoint changed the emitted row.
     let mut from_state = cobre_solver::RowBatch {
         num_rows: 0,
         row_starts: Vec::new(),
@@ -6807,11 +6595,9 @@ fn cut_row_from_state_matches_reference_loop() {
 
 // ── per-stage cut-pool sizing (build_cut_state_layouts) ───────────────────
 
-/// Build a PAR(2) study (`max_par_order = 2`, so `L > 0`) with 1 hydro, 1
-/// thermal, 1 bus, and one stage per entry in `state_configs`. Each stage
-/// takes the matching `StageStateConfig`; AR(2) coefficients plus pre-study
-/// inflow models at stage ids -1/-2 give the PAR builder the lag statistics
-/// it needs, so the global `StateLayout` has `n_state = N*(1 + 2)`.
+/// PAR(2) study (one stage per `state_configs` entry): AR(2) coefficients plus
+/// pre-study inflow models at stage ids -1/-2 give the PAR builder its lag
+/// statistics, so the global `StateLayout` has `n_state = N*(1 + 2)`.
 #[allow(clippy::too_many_lines, clippy::cast_possible_wrap)]
 fn par2_system_with_state_configs(state_configs: &[StageStateConfig]) -> cobre_core::System {
     use chrono::NaiveDate;
@@ -7052,7 +6838,6 @@ fn par2_system_with_state_configs(state_configs: &[StageStateConfig]) -> cobre_c
         .expect("par2_system_with_state_configs: valid")
 }
 
-/// Construct a [`StudySetup`] from `system` with a single-iteration config.
 fn setup_from_system(system: &cobre_core::System) -> StudySetup {
     let config = minimal_config(1, 10);
     let stochastic = build_stochastic_context(
@@ -7134,13 +6919,12 @@ fn cut_pool_sizing_all_enabled_matches_global_n_state() {
             "all-enabled pool {t} must equal the global n_state"
         );
     }
-    // The FCF's global field is unchanged from today's single-value model.
     assert_eq!(setup.fcf.state_dimension, global_n_state);
 }
 
-/// One [`CutStateProjection`] is stored per pool and is reachable, with each
-/// layout's `n_state()` equal to its pool's `state_dimension` (the pairing
-/// the backward pass relies on to extract duals at the right dimension).
+/// Each pool's `CutStateProjection` has `n_state()` equal to the pool's
+/// `state_dimension` — the pairing the backward pass relies on to extract duals
+/// at the right dimension.
 #[test]
 fn cut_state_layouts_stored_one_per_pool_and_reachable() {
     let lags = StageStateConfig {
@@ -7186,9 +6970,7 @@ fn cut_state_layouts_stored_one_per_pool_and_reachable() {
 // K = 0 sub-stage lead (`c(m) = m`) — exclude-with-advisory
 // ---------------------------------------------------------------------------
 
-/// Minimal WARN-capturing `tracing::Subscriber`, mirroring
-/// `params::tests::WarnRecorder` (the established setup-time advisory-test
-/// pattern for this crate).
+/// WARN-capturing `tracing::Subscriber`, mirroring `params::tests::WarnRecorder`.
 struct WarnRecorder {
     messages: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
@@ -7386,12 +7168,9 @@ fn warn_on_sub_stage_lead_emits_once_per_self_delivered_stage() {
 // LeadTime fan-out — rejected at setup, not silently dropped, no panic
 // ---------------------------------------------------------------------------
 
-/// Given a `LeadTime` thermal whose calendar makes it fan out
-/// (`AnticipatedResolution::max_fanout > 1`: a coarse 744h decision stage
-/// anchoring TWO finer 168h delivery stages), when `StudySetup::new` builds
-/// the study, then setup rejects it with `SddpError::Validation` naming the
-/// fanned plant and stating per-delivery-stage fan-out output is not yet
-/// supported — no panic, no silently dropped fan member.
+/// A fan-out `LeadTime` calendar (`max_fanout > 1`) is rejected at
+/// `StudySetup::new` with `SddpError::Validation` naming the fanned plant —
+/// no panic, no silently dropped fan member.
 #[test]
 fn lead_time_fanout_rejected_at_setup() {
     use crate::error::SddpError;
@@ -7452,14 +7231,10 @@ fn lead_time_fanout_rejected_at_setup() {
     );
 }
 
-/// Build a 1-bus, no-hydro, two-thermal system on a coarse-month-then-fine-weeks
-/// calendar (`[744.0, 168.0, 168.0]` h): thermal id=20 is a non-fanning
-/// `LeadStages(1)` plant, thermal id=21 is a `LeadTime(900.0)` plant whose
-/// stage-0 decision fans out into both stage-1 and stage-2 deliveries
-/// (`AnticipatedResolution::max_fanout == 2`). Declared `[fanning, non_fanning]`
-/// (`SystemBuilder` re-sorts by `EntityId` ascending regardless) so the
-/// declaration-order-invariance test proves the rejection does not depend on
-/// input order.
+/// Two anticipated thermals: id=20 non-fanning `LeadStages(1)`, id=21
+/// `LeadTime(900.0)` fanning (`max_fanout == 2`) on `[744,168,168]` h. Declared
+/// `[fanning, non_fanning]` (`SystemBuilder` re-sorts by `EntityId` ascending) so
+/// the declaration-order-invariance test proves rejection is input-order-independent.
 #[allow(
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
@@ -7657,11 +7432,9 @@ fn system_with_two_thermals_one_fanning() -> cobre_core::System {
         .expect("two-thermal fan-out system: valid")
 }
 
-/// Given two anticipated thermals where only the SECOND declared (canonical
-/// id order: `non_fanning`=20 before `fanning`=21) fans out, the rejection
-/// must still fire and name that plant, regardless of where it falls in
-/// declaration order — `system.thermals()` is canonical (ID-sorted), so
-/// scanning in that order is order-invariant by construction.
+/// Only the second declared thermal (canonical order: `non_fanning`=20 before
+/// `fanning`=21) fans out; the rejection still fires and names it, because
+/// `system.thermals()` is canonical (ID-sorted) — order-invariant by construction.
 #[test]
 fn lead_time_fanout_rejection_is_declaration_order_invariant() {
     use crate::error::SddpError;

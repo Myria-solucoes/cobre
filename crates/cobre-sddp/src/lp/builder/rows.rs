@@ -305,10 +305,8 @@ fn fill_filled_min_storage_floor_rows(
     }
 }
 
-/// Fill load-balance row bounds: static RHS = `mean_mw` · `block_factor`.
-///
-/// Block factors from `load_factors.json` scale the mean load per block
-/// (e.g., heavy/medium/light blocks). Default factor is 1.0 (no scaling).
+/// Fill load-balance row bounds: static RHS = `mean_mw · block_factor`, the
+/// per-block load scaling from `load_factors.json`.
 fn fill_load_balance_rows(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,

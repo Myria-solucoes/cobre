@@ -1,22 +1,12 @@
-//! Shared stage-LP solve-preparation pipeline: `pin → row_patches → ncs_patch →
-//! commit` — the verbatim 6-call block (`fill_col_state_patches →
-//! fill_forward_patches → [fill_load_patches] → fill_z_inflow_patches →
-//! set_col_bounds → set_row_bounds`) plus the NCS availability patch, duplicated
-//! today at all four solve sites (forward, backward, lower bound, simulation).
+//! Shared stage-LP solve-preparation pipeline (`pin → row_patches → ncs_patch →
+//! commit`): the single owner the forward pass, backward pass, simulation
+//! pipeline, and lower-bound evaluation all route through, so every solve site
+//! patches the LP identically (the "patch NCS identically" contract, D15).
 //!
-//! Home: `training/`, not `lp/builder/` — this pipeline needs
-//! `crate::context` (`StageContext`/`TrainingContext`), `crate::workspace`
-//! (`ScratchBuffers`), and `crate::noise` (the noise transforms plus
-//! [`crate::noise::apply_ncs_col_bounds`]), all of which `training/` already
-//! depends on. `lp/builder/` has no existing dependency on any of them, and
-//! depending on `training/` from `lp/builder/` would invert the crate's
-//! layering (`core → io/stochastic/solver → comm → sddp`'s `lp` sits below
-//! `training`), so `training/` is the cycle-free home.
-//!
-//! Called by the forward pass (`training/forward/stage_solve.rs`), the
-//! backward pass (`training/backward/lp_setup.rs`), the simulation pipeline
-//! (`simulation/pipeline.rs`), and the lower-bound evaluation
-//! (`training/lower_bound.rs`).
+//! Home is `training/`, not `lp/builder/`: the pipeline needs `crate::context`,
+//! `crate::workspace`, and `crate::noise`, which `training/` already depends on,
+//! whereas `lp/builder/` sits below `training/` in the crate layering — hosting it
+//! there would invert the dependency direction.
 
 use cobre_solver::SolverInterface;
 
@@ -31,18 +21,14 @@ use crate::{
     workspace::ScratchBuffers,
 };
 
-/// The `&[f64]` state slice this stage solve pins as incoming state — the
-/// caller resolves the concrete slice (forward `current_state`, backward
-/// `x_hat`, lower-bound `initial_state`, simulation `current_state`);
-/// [`StageSolvePrep`] treats it opaquely.
+/// The state slice this stage solve pins as incoming state; the caller resolves
+/// it per site (forward `current_state`, backward `x_hat`, lower-bound
+/// `initial_state`, simulation `current_state`).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct StateSource<'a>(pub &'a [f64]);
 
 /// Whether the caller drives one realized stage solve (forward pass,
 /// simulation) or a per-opening loop (backward pass, lower bound).
-///
-/// [`StageSolvePrep::run`] always prepares exactly one solve; a `PerOpening`
-/// caller owns its own loop and calls `run` once per opening.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OpeningMode {
     /// One realized noise draw per stage.
@@ -54,10 +40,9 @@ pub(crate) enum OpeningMode {
 /// Whether this stage solve patches stochastic load-bus bounds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LoadNoise {
-    /// Call `transform_load_noise`, and — when `ctx.n_load_buses > 0` —
-    /// `fill_load_patches` (forward, backward, simulation).
+    /// Patch stochastic load-bus bounds (forward, backward, simulation).
     Present,
-    /// Skip both: the lower bound evaluates no load-bus noise dimension.
+    /// Skip them: the lower bound has no load-bus noise dimension.
     Absent,
 }
 
@@ -65,22 +50,19 @@ pub(crate) enum LoadNoise {
 /// (`scratch.noise_buf`, `scratch.z_inflow_rhs_buf`) are populated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InflowNoise {
-    /// Call `transform_inflow_noise` to fill the buffers (forward, backward,
-    /// simulation).
+    /// Fill the buffers from `raw_noise` (forward, backward, simulation).
     Transform,
-    /// The caller has already filled the buffers (the lower bound's
-    /// PAR-batch precompute).
+    /// The caller has already filled the buffers (the lower bound's PAR-batch
+    /// precompute).
     PreBuilt,
 }
 
 /// Per-call variation points for [`StageSolvePrep::run`] — the divergences
-/// among the four solve sites that today are enforced only by prose and
-/// regression tests.
+/// among the four solve sites.
 ///
-/// The NCS availability patch is NOT modeled here: [`StageSolvePrep::run`]
-/// derives its own gate (`stochastic.n_stochastic_ncs() > 0`,
-/// `study_dims.has_ncs`) from `ctx`/`training_ctx`, the same gate every current
-/// solve site already applies, so no caller-supplied variant is needed.
+/// The NCS availability patch is not a variation point: [`StageSolvePrep::run`]
+/// derives its own gate (`n_stochastic_ncs() > 0`, `has_ncs`) internally, the
+/// same gate every solve site applies.
 pub(crate) struct StageSolvePrepParams<'a> {
     /// Which slice this solve pins as incoming state.
     pub state_source: StateSource<'a>,
@@ -94,8 +76,7 @@ pub(crate) struct StageSolvePrepParams<'a> {
     pub load_noise: LoadNoise,
     /// How the inflow-noise buffers are populated.
     pub inflow_noise: InflowNoise,
-    /// This solve's realized noise draw (`[hydro | load-bus | NCS]`), read by
-    /// the inflow- and load-noise transforms above.
+    /// This solve's realized noise draw, laid out `[hydro | load-bus | NCS]`.
     pub raw_noise: &'a [f64],
 }
 

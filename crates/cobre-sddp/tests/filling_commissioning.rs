@@ -90,9 +90,6 @@ mod d38_dead_volume_filling_simulation {
     const START_STAGE_ID: i32 = 2;
     /// Filling → Operating boundary for `H2`: it becomes a normal plant at this id.
     const ENTRY_STAGE_ID: i32 = 4;
-    /// Hydro entity ids in canonical order. `H1` (id 0) is the upstream cascade
-    /// feeder, `H2` (id 1) the mid-cascade filling hydro, `H3` (id 2) its real fed
-    /// downstream, and `H4` (id 3) the off-cascade control.
     const H1_ID: i32 = 0;
     const H2_ID: i32 = 1;
     const H3_ID: i32 = 2;
@@ -116,12 +113,11 @@ mod d38_dead_volume_filling_simulation {
     /// Every stage in `stages.json` totals 720 h, so `ζ` is uniform.
     const STAGE_HOURS: f64 = 720.0;
 
-    /// Per-(stage, hydro) view collapsing the stage's per-block rows to the scalars
-    /// the assertions need. The simulation emits one `SimulationHydroResult` per
-    /// (block, hydro): storage and the σ_fill / σ^{v-} slacks are stage-level
-    /// (block-invariant), so they are read from the first block; generation and
-    /// turbined flow are summed across blocks. The §7.1 water balance reads the
-    /// per-block rows directly (it needs per-block τ), not this aggregate.
+    /// Per-(stage, hydro) view collapsing the stage's per-block rows to the scalars the
+    /// assertions need: storage and the σ_fill / σ^{v-} slacks are stage-level
+    /// (block-invariant), read from the first block; generation and turbined flow are
+    /// summed across blocks. The water balance reads the per-block rows directly (it
+    /// needs per-block τ), not this aggregate.
     struct StageHydro {
         storage_initial_hm3: f64,
         storage_final_hm3: f64,
@@ -132,9 +128,7 @@ mod d38_dead_volume_filling_simulation {
         storage_violation_below_hm3: f64,
     }
 
-    /// Collect the per-stage hydro view for `hydro_id` from a scenario result. Storage
-    /// and slack fields are stage-level (block-invariant); turbined/spillage are
-    /// summed across blocks (the §7.1 balance needs the whole-stage release).
+    /// Collect the per-stage hydro view for `hydro_id` from a scenario result.
     fn stage_hydro(
         scenario: &cobre_sddp::SimulationScenarioResult,
         hydro_id: i32,
@@ -162,12 +156,10 @@ mod d38_dead_volume_filling_simulation {
     }
 
     /// Train the d38 dead-volume-filling case, simulate one deterministic scenario,
-    /// and assert the §7.1–§7.7 obligations the parity hash cannot see.
-    // Rationale: the seven §7 assertions read a single train+simulate run; splitting
-    // the body into per-criterion helpers would force the one expensive pipeline to be
-    // re-run per helper (or thread the whole scenario + outcome through opaque
-    // arguments), obscuring the linear "train → simulate → assert each criterion against
-    // the same trajectory" flow this regression exists to make legible.
+    /// and assert the obligations the parity hash cannot see.
+    // Rationale: splitting the body into per-criterion helpers would re-run the one
+    // expensive train+simulate pipeline per helper (or thread the whole scenario
+    // through opaque args).
     #[allow(clippy::too_many_lines)]
     #[test]
     fn dead_volume_filling_binds_and_routes_in_simulation() {
@@ -178,7 +170,6 @@ mod d38_dead_volume_filling_simulation {
             .unwrap()
             .join("examples/deterministic/d38-dead-volume-filling");
 
-        // §7.1: load + parse succeed and the filling config round-trips.
         let config_path = case_dir.join("config.json");
         let mut config = cobre_io::parse_config(&config_path).expect("config must parse");
         let system_for_check = cobre_io::load_case(&case_dir).expect("load_case must succeed");
@@ -199,8 +190,7 @@ mod d38_dead_volume_filling_simulation {
             "H2 must short-circuit onto H3 (its real fed downstream)"
         );
 
-        // The shipped case disables simulation (the parity harness trains only).
-        // Enable one deterministic simulation scenario so the extraction path runs.
+        // The shipped parity case trains only; enable one sim scenario so the extraction path runs.
         config.simulation = cobre_io::config::SimulationConfig {
             enabled: true,
             num_scenarios: 1,
@@ -242,7 +232,6 @@ mod d38_dead_volume_filling_simulation {
             outcome.error
         );
 
-        // §7.6: monotone lower bound within absolute-relative FP tolerance.
         let lower_bounds: Vec<f64> = event_rx
             .try_iter()
             .filter_map(|e| {
@@ -267,10 +256,8 @@ mod d38_dead_volume_filling_simulation {
             );
         }
 
-        // §7.6: zero basis-rejection spike at the two filling boundary stages. Stage
-        // id == index here, so the boundary stages are START_STAGE_ID and
-        // ENTRY_STAGE_ID. Aggregate ONLY those two stages on the forward/backward
-        // passes — a global aggregate would dilute a boundary spike.
+        // Aggregate ONLY the two filling boundary stages (id == index here): a global
+        // aggregate would dilute a boundary spike.
         let boundary_stages = [START_STAGE_ID, ENTRY_STAGE_ID];
         let boundary_rejections = SolverStatsDelta::aggregate(
             outcome
@@ -327,9 +314,8 @@ mod d38_dead_volume_filling_simulation {
 
         let zeta = STAGE_HOURS * M3S_TO_HM3;
 
-        // §7.2: zero generation and turbine for H2 at every stage before entry
-        // (PreFilling 0–1 and Filling 2–3). The turbine/generation columns are pinned
-        // [0, 0] until Operating.
+        // H2's turbine/generation columns are pinned [0, 0] until Operating (PreFilling
+        // 0–1, Filling 2–3).
         for stage in 0..(ENTRY_STAGE_ID as usize) {
             let h2_s = stage_hydro(scenario, H2_ID, stage);
             assert!(
@@ -344,17 +330,12 @@ mod d38_dead_volume_filling_simulation {
             );
         }
 
-        // §7.3: H2's PreFilling freeze and its per-stage Filling water balance. H2
-        // spillage is frozen [0,0] only while PreFilling (no dam yet — the "spillage
-        // frozen during PreFilling" contract); it is FREE during Filling, so the LP may
+        // H2 spillage is frozen [0,0] only while PreFilling (the "spillage frozen during
+        // PreFilling" contract, D38/D40); it is FREE during Filling, so the LP may
         // legitimately release the impounded water at the last Filling stage (id 3) to
-        // feed the water-starved downstream H3 rather than hold it. The σ_fill row is a
-        // SOFT floor (`fill_filling_target_rows`: row_upper = +∞), so storage is NOT
-        // required to be monotone across Filling. d40 (byte-identical penalties)
-        // suppresses the same release only via a downstream turbine cap that d38 lacks.
-
-        // (a) PreFilling freeze: storage stays pinned at the empty-pit seed through both
-        // PreFilling stages (ids 0–1), the stage-0 incoming storage.
+        // feed the starved downstream H3. The σ_fill row is a SOFT floor
+        // (`fill_filling_target_rows`: row_upper = +∞), so storage is NOT required to be
+        // monotone across Filling.
         let h2_s0 = stage_hydro(scenario, H2_ID, 0);
         let h2_s1 = stage_hydro(scenario, H2_ID, 1);
         let seed = h2_s0.storage_initial_hm3;
@@ -370,12 +351,11 @@ mod d38_dead_volume_filling_simulation {
             );
         }
 
-        // (b) Per-stage Filling water balance (ids 2–3), every term pinned to FP
-        // tolerance: v_out = v_in + ζ·incr_H2 − τ·spillage_H2 + routed_upstream(H1→H2).
-        // H2 turbine and diversion are 0 while Filling (asserted by §7.2 / the
-        // diversion-pin contract), so only its spillage subtracts. The upstream H1
-        // release enters with per-block τ_k = block_hours·M3S_TO_HM3, summed across the
-        // stage's blocks so the balance is exact regardless of block count.
+        // Per-stage Filling water balance (ids 2–3), every term pinned to FP tolerance:
+        // v_out = v_in + ζ·incr_H2 − τ·spillage_H2 + routed_upstream(H1→H2). H2 turbine
+        // and diversion are 0 while Filling, so only its spillage subtracts. The upstream
+        // H1 release enters with per-block τ_k = block_hours·M3S_TO_HM3, summed across
+        // the stage's blocks so the balance is exact regardless of block count.
         let h2_incr_filling_m3s = 5.0; // scenarios/inflow_seasonal_stats.parquet, H2 ids 2–3
         for stage in (START_STAGE_ID as usize)..(ENTRY_STAGE_ID as usize) {
             let h2 = stage_hydro(scenario, H2_ID, stage);
@@ -407,10 +387,10 @@ mod d38_dead_volume_filling_simulation {
             );
         }
 
-        // (c) When H2 releases at the last Filling stage (v_out[3] < v_out[2] with
-        // spillage[3] > 0), the released water must reach the starved downstream H3 (the
-        // same routed-gap balance §7.1 uses on H3), and σ_fill[3] must book the
-        // dead-volume shortfall exactly: σ_fill[3] = V_target[3] − v_out[3].
+        // When H2 releases at the last Filling stage (v_out[3] < v_out[2] with
+        // spillage[3] > 0), the released water must reach the starved downstream H3, and
+        // σ_fill[3] must book the dead-volume shortfall exactly: σ_fill[3] = V_target[3]
+        // − v_out[3].
         let h2_s2 = stage_hydro(scenario, H2_ID, 2);
         let h2_s3 = stage_hydro(scenario, H2_ID, 3);
         let h2_s3_spill_total: f64 = scenario.stages[3]
@@ -463,7 +443,7 @@ mod d38_dead_volume_filling_simulation {
             );
         }
 
-        // §7.1 (water balance on H3, re-anchored — does NOT use inflow_m3s): during
+        // Water balance on H3, re-anchored (does NOT use inflow_m3s): during
         // PreFilling the dam at H2 does not exist, so H2's water short-circuits onto
         // H3's real water-balance row. The closed water balance on H3 is
         //     Δstorage = ζ·incr_H3 − release_H3 + ROUTED,
@@ -481,10 +461,8 @@ mod d38_dead_volume_filling_simulation {
         for prefilling_stage in [0_usize, 1] {
             let h3_s = stage_hydro(scenario, H3_ID, prefilling_stage);
             let delta_storage = h3_s.storage_final_hm3 - h3_s.storage_initial_hm3;
-            // The release term uses per-block τ_k = block_hours·M3S_TO_HM3, built from
-            // the per-block rows so the balance is exact regardless of the stage's
-            // block count (it differs across the 1/1/3/2/3/1 schedule). Using a single
-            // stage-level ζ on the release would mis-weight a multi-block stage.
+            // Release uses per-block τ_k, not a stage-level ζ: a single ζ mis-weights the
+            // multi-block 1/1/3/2/3/1 schedule.
             let release_hm3: f64 = scenario.stages[prefilling_stage]
                 .hydros
                 .iter()
@@ -509,8 +487,8 @@ mod d38_dead_volume_filling_simulation {
             );
         }
 
-        // §7.4: σ_fill binds at BOTH Filling stages (ids 2 and 3) under the short
-        // inflow, and σ^{v-} → 0 by the last Operating stage (id 5) on recovery. The
+        // σ_fill binds at BOTH Filling stages (ids 2 and 3) under the short inflow, and
+        // σ^{v-} → 0 by the last Operating stage (id 5) on recovery. The
         // volume-target model imposes a per-stage soft floor v_out[t] + σ_fill[t] ≥
         // V_target[t]; with the short inflow the inflow-only accumulation (12.96 hm³
         // by id 2, 25.92 hm³ by id 3) stays below the backward-anchored targets
@@ -537,8 +515,6 @@ mod d38_dead_volume_filling_simulation {
          {sigma_floor_s5}"
         );
 
-        // §7.5: entry handoff / pin chain — H2's end-of-Filling storage at id 3 equals
-        // its incoming storage at id 4 (first block).
         let h2_s3_final = stage_hydro(scenario, H2_ID, 3).storage_final_hm3;
         let h2_s4_initial = stage_hydro(scenario, H2_ID, 4).storage_initial_hm3;
         assert!(
@@ -547,8 +523,6 @@ mod d38_dead_volume_filling_simulation {
          id 4 ({h2_s4_initial}) via the pin chain"
         );
 
-        // §7.7: off-cascade control H4 dispatches as a normal Operating plant — every
-        // storage value within [min, max] and at least one value off the seed.
         let mut h4_moved = false;
         for stage in 0..6 {
             let h4_s = stage_hydro(scenario, H4_ID, stage);
@@ -571,8 +545,7 @@ mod d38_dead_volume_filling_simulation {
     }
 
     /// Block duration in hours for `(stage_index, block_id)`, mirroring `stages.json`.
-    /// Used by the §7.1 per-block-exact release balance. `block_id` is the
-    /// `SimulationHydroResult.block_id` (always `Some` for a hydro with turbines).
+    /// `block_id` is always `Some` for a turbine-branch hydro row.
     fn block_hours(stage_index: usize, block_id: Option<u32>) -> f64 {
         let blk = block_id.expect("turbine-branch hydro rows carry a block id") as usize;
         match stage_index {
@@ -650,10 +623,6 @@ mod d40_filling_cascade_simulation {
     const START_STAGE_ID: i32 = 1;
     /// Filling → Operating boundary shared by both filling hydros.
     const ENTRY_STAGE_ID: i32 = 4;
-    /// Hydro entity ids in canonical order. `H_up` (id 0) is the upstream filling
-    /// reservoir, `H_down` (id 1) the downstream filling reservoir fed by `H_up`,
-    /// `H_sink` (id 2) the real cascade outlet, and `H_ctrl` (id 3) the off-cascade
-    /// control.
     const H_UP_ID: i32 = 0;
     const H_DOWN_ID: i32 = 1;
     const H_SINK_ID: i32 = 2;
@@ -698,9 +667,7 @@ mod d40_filling_cascade_simulation {
         storage_violation_below_hm3: f64,
     }
 
-    /// Collect the per-stage hydro view for `hydro_id` from a scenario result. Storage
-    /// and slack fields are stage-level (block-invariant); turbined flow is summed
-    /// across blocks (the cascade balance needs the whole-stage release).
+    /// Collect the per-stage hydro view for `hydro_id` from a scenario result.
     fn stage_hydro(
         scenario: &cobre_sddp::SimulationScenarioResult,
         hydro_id: i32,
@@ -728,11 +695,8 @@ mod d40_filling_cascade_simulation {
     }
 
     /// `H_up`'s whole-stage release (turbine + spillage) routed onto `H_down`'s
-    /// water-balance row at `stage_index`, in hm³. The release term uses per-block
-    /// `τ_k = block_hours·M3S_TO_HM3` built from the per-block rows so the balance is
-    /// exact regardless of the stage's block count (it differs across the 1/1/3/2/3/1
-    /// schedule). Using a single stage-level ζ on the release would mis-weight a
-    /// multi-block stage.
+    /// water-balance row at `stage_index`, in hm³. Uses per-block τ_k, not a stage-level
+    /// ζ: a single ζ mis-weights the multi-block 1/1/3/2/3/1 schedule.
     fn routed_release_hm3(
         scenario: &cobre_sddp::SimulationScenarioResult,
         upstream_id: i32,
@@ -753,11 +717,9 @@ mod d40_filling_cascade_simulation {
     /// Train the d40 filling-cascade case, simulate one deterministic scenario, and
     /// assert the per-floor independence and release-only cascade coupling the parity
     /// hash cannot see.
-    // Rationale: the assertions read a single train+simulate run; splitting the body
-    // into per-criterion helpers would force the one expensive pipeline to be re-run
-    // per helper (or thread the whole scenario + outcome through opaque arguments),
-    // obscuring the linear "train → simulate → assert each criterion against the same
-    // trajectory" flow this regression exists to make legible.
+    // Rationale: splitting the body into per-criterion helpers would re-run the one
+    // expensive train+simulate pipeline per helper (or thread the whole scenario
+    // through opaque args).
     #[allow(clippy::too_many_lines)]
     #[test]
     fn filling_cascade_floors_are_independent_and_couple_release_only() {
@@ -768,8 +730,6 @@ mod d40_filling_cascade_simulation {
             .unwrap()
             .join("examples/deterministic/d40-filling-cascade");
 
-        // Load + parse succeed and BOTH filling configs round-trip with the shared
-        // window — the overlapping Filling phase is the case's whole point.
         let config_path = case_dir.join("config.json");
         let mut config = cobre_io::parse_config(&config_path).expect("config must parse");
         let system_for_check = cobre_io::load_case(&case_dir).expect("load_case must succeed");
@@ -799,8 +759,7 @@ mod d40_filling_cascade_simulation {
             );
         }
 
-        // The shipped case disables simulation (the parity harness trains only).
-        // Enable one deterministic simulation scenario so the extraction path runs.
+        // The shipped parity case trains only; enable one sim scenario so the extraction path runs.
         config.simulation = cobre_io::config::SimulationConfig {
             enabled: true,
             num_scenarios: 1,
@@ -921,8 +880,6 @@ mod d40_filling_cascade_simulation {
             let sigma_up = h_up_s.filling_target_violation_hm3;
             let sigma_down = h_down_s.filling_target_violation_hm3;
 
-            // Each σ_fill is strictly positive: the short inflow leaves storage below
-            // V_target.
             assert!(
                 sigma_up > 1e-6,
                 "H_up σ_fill must be strictly positive at Filling stage {filling_stage} \
@@ -965,8 +922,6 @@ mod d40_filling_cascade_simulation {
             );
         }
 
-        // σ^{v-} → 0 for BOTH at the last Operating stage (id 5): inflow recovers and
-        // storage climbs above the dead volume, so the soft operating floor releases.
         for id in [H_UP_ID, H_DOWN_ID] {
             let sigma_floor_s5 = stage_hydro(scenario, id, 5).storage_violation_below_hm3;
             assert!(
@@ -1009,7 +964,6 @@ mod d40_filling_cascade_simulation {
              Δstorage {delta_storage:.6} − incremental-only balance {incremental_balance:.6}) \
              must be at least H_up's routed release ({release_up:.6} hm³)"
             );
-            // Tight equality: no coupling beyond the cascade release (release-only).
             assert!(
                 (routed_gap - release_up).abs() < 1e-3,
                 "Filling stage {filling_stage}: H_down's routed-water gap ({routed_gap:.6} hm³) must \
@@ -1070,8 +1024,7 @@ mod d40_filling_cascade_simulation {
     }
 
     /// Block duration in hours for `(stage_index, block_id)`, mirroring `stages.json`.
-    /// Used by the per-block-exact cascade release balance. `block_id` is the
-    /// `SimulationHydroResult.block_id` (always `Some` for a hydro with turbines).
+    /// `block_id` is always `Some` for a turbine-branch hydro row.
     fn block_hours(stage_index: usize, block_id: Option<u32>) -> f64 {
         let blk = block_id.expect("turbine-branch hydro rows carry a block id") as usize;
         match stage_index {
@@ -1121,9 +1074,6 @@ mod prefilling_spillage_frozen {
 
     use super::common::StubComm;
 
-    /// Hydro ids in canonical order. H2 (id 1) is the filling hydro that is PreFilling
-    /// at stages 0–1; H1 (id 0) is its upstream feeder; H3 (id 2) is the active fed
-    /// downstream that the short-circuit routes onto.
     const H1_ID: i32 = 0;
     const H2_ID: i32 = 1;
     const H3_ID: i32 = 2;
@@ -1261,9 +1211,9 @@ mod prefilling_spillage_frozen {
         let zeta = STAGE_HOURS * M3S_TO_HM3;
 
         for stage in 0..H2_START_STAGE_ID {
-            // (1) The PreFilling hydro spills exactly 0. This is the assertion the d38
-            // one-sided routed-water floor cannot make — it never inspects H2's own
-            // spillage, only the aggregate gap on H3.
+            // The PreFilling hydro spills exactly 0 — the assertion the d38 one-sided
+            // routed-water floor cannot make (it never inspects H2's own spillage, only
+            // the aggregate gap on H3).
             let (h2_turb, h2_spill) = release_m3s(scenario, H2_ID, stage);
             assert!(
                 h2_spill.abs() < 1e-6,
@@ -1275,7 +1225,7 @@ mod prefilling_spillage_frozen {
                 "PreFilling H2 must not turbine at stage {stage}; got {h2_turb} m³/s"
             );
 
-            // (2) No phantom water downstream: H3's closed water balance over the stage
+            // No phantom water downstream: H3's closed water balance over the stage
             // is Δstorage = ζ·incr_H3 − release_H3 + ROUTED, where the only routed terms
             // onto H3's row while H2 is PreFilling are H2's own incremental inflow
             // (ζ·incr_H2) and H1's re-routed release (H1→H3, since H1→H2→H3 collapses
@@ -1302,7 +1252,6 @@ mod prefilling_spillage_frozen {
              injected phantom spillage onto H3's row (the bug the one-sided floor hides)"
             );
 
-            // Sanity: H3 keeps its own incremental inflow (routing is additive).
             assert!(
                 (h3_incr - H3_INCR_M3S).abs() < 1e-6,
                 "stage {stage}: H3 incremental inflow must be {H3_INCR_M3S} m³/s (own inflow must \
@@ -1840,9 +1789,6 @@ mod filling_cut_validity {
             .as_ref()
             .expect("export_states was enabled, so the visited archive is populated");
 
-        // The control is Operating (not frozen at its seed like a PreFilling hydro):
-        // assert it stays within [0, max] and MOVES off its initial 100.0 hm3 somewhere
-        // across the horizon.
         let init_storage = 100.0_f64;
         let mut control_moved = false;
         for stage in 0..N_STAGES {
@@ -1876,7 +1822,7 @@ mod filling_cut_validity {
          frozen like a PreFilling hydro"
         );
 
-        // (e) Continuous handoff (no reset) across the Filling -> Operating boundary.
+        // Continuous handoff (no reset) across the Filling -> Operating boundary.
         // The end-of-filling outgoing storage flows into the first Operating stage's
         // incoming-state pin via the SAME pin chain every other stage uses (no
         // entry-boundary reset / RHS-fold / `initial_operating_volume`); the no-reset
@@ -2025,8 +1971,7 @@ mod d35_pumping_commissioning_simulation {
 
         let config_path = case_dir.join("config.json");
         let mut config = cobre_io::parse_config(&config_path).expect("config must parse");
-        // The shipped case disables simulation (the parity harness trains only);
-        // enable one scenario so the pumping extraction path runs.
+        // The shipped parity case trains only; enable one sim scenario so the pumping extraction path runs.
         config.simulation = cobre_io::config::SimulationConfig {
             enabled: true,
             num_scenarios: 1,
@@ -2183,7 +2128,7 @@ mod d36_thermal_line_commissioning_simulation {
 
         let config_path = case_dir.join("config.json");
         let mut config = cobre_io::parse_config(&config_path).expect("config must parse");
-        // The shipped case disables simulation; enable one scenario so the thermal/line
+        // The shipped parity case trains only; enable one sim scenario so the thermal/line
         // extraction paths run (`StudySetup::new` reads `n_scenarios` from this).
         config.simulation = cobre_io::config::SimulationConfig {
             enabled: true,
@@ -2630,8 +2575,6 @@ mod d42_nonfilling_hydro_commissioning {
              ζ·incr_new ({expected_routed:.6} hm³); a smaller gap means H_new's inflow was \
              trapped on its own frozen row instead of routed downstream"
             );
-            // Sanity: H_down actually carries its own inflow (the routing is additive, not
-            // a relabeling).
             assert_eq!(
                 h_down.incremental_inflow_m3s, H_DOWN_INCR_M3S,
                 "stage {stage}: H_down keeps its own incremental inflow"

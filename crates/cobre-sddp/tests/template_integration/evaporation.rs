@@ -1,8 +1,7 @@
-//! `evaporation` section tests (split from the parent integration binary).
+//! `evaporation` section tests.
 
 use super::*;
 
-/// With zero evaporation hydros, `num_cols` and `num_rows` match the no-evaporation baseline.
 #[test]
 fn evap_zero_hydros_layout_unchanged() {
     let system = one_hydro_system(1, 0);
@@ -39,8 +38,6 @@ fn evap_zero_hydros_layout_unchanged() {
     );
 }
 
-/// Each evaporation hydro adds 3 columns (evap outflow, f_evap_plus, f_evap_minus)
-/// and 1 row (the evaporation equality), measured against the no-evaporation baseline.
 #[test]
 fn evap_two_hydros_increases_cols_and_rows() {
     let system1 = one_hydro_system(1, 0);
@@ -85,7 +82,6 @@ fn evap_two_hydros_increases_cols_and_rows() {
     );
 }
 
-/// The evaporation row is an equality at `intercept_m3s` (row_lower == row_upper).
 #[test]
 fn evap_row_bounds_equality_at_intercept() {
     let system = one_hydro_system(1, 0);
@@ -119,8 +115,6 @@ fn evap_row_bounds_equality_at_intercept() {
     );
 }
 
-/// The evaporation-outflow column has a physical upper bound; f_plus and f_minus
-/// are unbounded above. All three carry objective 0.0.
 #[test]
 fn evap_col_bounds_and_objective() {
     let system = one_hydro_system(1, 0);
@@ -212,7 +206,6 @@ fn evap_csc_entries_one_hydro_correct_coefficients() {
     //   col 0 = v (storage_out)  col 1 = z_inflow  col 2 = v_in  col 3 = theta
     //   col 4 = turbine  col 5 = spillage  col 6 = diversion
     //   col 7 = deficit  col 8 = excess
-    //   col_evap_start = num_cols - 4 - 4*N
     // Row layout for N=1, L=0, B=1, K=1, no FPHA (no state-fixing rows):
     //   row 0: z_inflow definition
     //   row 1: water balance (row_water_balance_start = N = 1)
@@ -226,8 +219,7 @@ fn evap_csc_entries_one_hydro_correct_coefficients() {
     let evap_row = t.num_rows - 1 - 4 * t.n_hydro;
     let water_balance_row = 1_usize; // row_water_balance_start = N = 1
 
-    // evaporation outflow has 2 entries: water balance row (+zeta) and
-    // evaporation constraint row (+1.0). Entries are sorted by row ascending.
+    // Entries are sorted by row ascending: [0] = water balance, [1] = evap constraint.
     let zeta = 744.0 * (3_600.0 / 1_000_000.0);
     let entries_evaporation_flow = entries_for_col(t, col_evaporation_flow);
     assert_eq!(
@@ -311,7 +303,6 @@ fn evap_csc_entries_one_hydro_correct_coefficients() {
     );
 }
 
-/// coefficient value check with `volume_slope_m3s_per_hm3 = 0.04` → v and `v_in` entries are -0.02.
 #[test]
 fn evap_csc_entries_coefficient_scaling() {
     let system = one_hydro_system(1, 0);
@@ -356,8 +347,6 @@ fn evap_csc_entries_coefficient_scaling() {
     );
 }
 
-/// 0 evaporation hydros — `fill_evaporation_entries` is a no-op;
-/// the evaporation columns do not exist and no extra non-zeros are added.
 #[test]
 fn evap_csc_entries_zero_hydros_no_op() {
     let system = one_hydro_system(1, 0);
@@ -391,7 +380,6 @@ fn evap_csc_entries_zero_hydros_no_op() {
     );
 }
 
-/// 2 evap hydros with distinct `volume_slope_m3s_per_hm3` produce independent rows.
 #[test]
 fn evap_csc_entries_two_hydros_independent_rows() {
     let (system, production) = four_hydro_mixed_system();
@@ -466,8 +454,6 @@ fn evap_csc_entries_two_hydros_independent_rows() {
     assert!((t.row_lower[evap_row_1] - 2.0).abs() < 1e-12);
 }
 
-/// `volume_slope_m3s_per_hm3 = 0.0` → v and `v_in` entries are 0.0;
-/// the constraint reduces to `evaporation outflow + f_plus - f_minus = intercept_m3s`.
 #[test]
 fn evap_csc_entries_zero_volume_slope_produces_zero_volume_coefficients() {
     let system = one_hydro_system(1, 0);
@@ -510,8 +496,6 @@ fn evap_csc_entries_zero_volume_slope_produces_zero_volume_coefficients() {
     );
 }
 
-/// The evaporation-outflow column enters the water balance row with `+zeta`,
-/// `zeta = 744.0 * 3_600.0 / 1_000_000.0` (1 block of 744h).
 #[test]
 #[allow(clippy::cast_sign_loss)]
 fn evap_water_balance_one_hydro_coefficient_is_zeta() {
@@ -551,8 +535,6 @@ fn evap_water_balance_one_hydro_coefficient_is_zeta() {
     );
 }
 
-/// With evaporation only on hydro 1, hydro 1's evap-outflow column carries `+zeta`
-/// in its water balance row while hydro 0's water balance row has no evap entry.
 #[test]
 #[allow(clippy::cast_sign_loss, clippy::too_many_lines)]
 fn evap_water_balance_only_second_hydro_has_evap() {
@@ -757,7 +739,6 @@ fn evap_water_balance_only_second_hydro_has_evap() {
         .build()
         .expect("2-hydro system ok");
 
-    // Only hydro 1 (h_idx=1) has evaporation.
     let evap = evap_set_with_volume_slope(&system, &[1], 0.0, 0.0);
 
     let result = build_stage_templates_resolving_layout(
@@ -781,7 +762,6 @@ fn evap_water_balance_only_second_hydro_has_evap() {
     // N=2 withdrawal + 4*N operational slack columns follow evap.
     let col_evaporation_flow_h1 = t.num_cols - 5 - 5 * t.n_hydro;
 
-    // evaporation outflow (h1) must have an entry at water balance row 3.
     let entries_h1 = entries_for_col(t, col_evaporation_flow_h1);
     let found_h1 = entries_h1
         .iter()
@@ -798,7 +778,6 @@ fn evap_water_balance_only_second_hydro_has_evap() {
         found_h1.unwrap().1
     );
 
-    // evaporation outflow (h1) must NOT have an entry at hydro 0's water balance row.
     let found_h0 = entries_h1.iter().any(|&(r, _)| r == water_balance_row_h0);
     assert!(
         !found_h0,
@@ -806,7 +785,6 @@ fn evap_water_balance_only_second_hydro_has_evap() {
     );
 }
 
-/// Zero evaporation hydros leave `num_nz` identical to the no-evaporation baseline.
 #[test]
 fn evap_water_balance_zero_hydros_no_op() {
     let system = one_hydro_system(1, 0);
@@ -840,9 +818,6 @@ fn evap_water_balance_zero_hydros_no_op() {
     );
 }
 
-/// `f_evap_plus` and `f_evap_minus` both carry the base violation cost: with
-/// `evaporation_violation_cost = 500.0` over a 730h block the objective is
-/// `500.0 * 730.0 / COST_SCALE_FACTOR = 365.0` (the test sets pos_cost == base_cost).
 #[test]
 fn evap_violation_cost_applied_to_slack_columns() {
     let system = evap_hydro_system_with_violation_cost(730.0, 500.0);
@@ -879,8 +854,7 @@ fn evap_violation_cost_applied_to_slack_columns() {
         "f_evap_plus objective: expected {expected_base}, got {}",
         t.objective[col_f_plus]
     );
-    // f_evap_minus (over-evaporation) now uses evaporation_violation_pos_cost directly.
-    // Test-constructed HydroPenalties sets pos_cost = base_cost, so objective matches.
+    // f_evap_minus uses evaporation_violation_pos_cost; the test sets pos_cost == base_cost.
     assert!(
         (t.objective[col_f_minus] - expected_base).abs() < 1e-6,
         "f_evap_minus objective: expected {expected_base} (pos_cost == base_cost in test), got {}",
@@ -888,8 +862,6 @@ fn evap_violation_cost_applied_to_slack_columns() {
     );
 }
 
-/// `evaporation outflow` column objective is 0.0 even when a
-/// non-zero `evaporation_violation_cost` is set.
 #[test]
 fn evap_outflow_objective_is_zero() {
     let system = evap_hydro_system_with_violation_cost(730.0, 500.0);
@@ -917,13 +889,6 @@ fn evap_outflow_objective_is_zero() {
     );
 }
 
-/// LP with 1 evaporation hydro is solvable (`HiGHS` returns `Optimal`) after
-/// fixing `v_in = 1000.0 hm3`.
-///
-/// System: 1 bus, 1 hydro, `intercept_m3s = 1.0`, `volume_slope_m3s_per_hm3 = 0.02`.
-/// With all-positive coefficients and `v_in` fixed at 1000 hm3, the
-/// linearised equality forces `evaporation outflow = intercept_m3s + (volume_slope_m3s_per_hm3 / 2) · (v + v_in)`,
-/// whose minimum at `v = v_min = 0` is `1.0 + 0.01 · 1000 = 11.0`.
 #[test]
 fn evap_lp_solvable_and_outflow_positive_coefficients() {
     use cobre_solver::{ActiveSolver, RowBatch, SolverInterface};
@@ -979,13 +944,6 @@ fn evap_lp_solvable_and_outflow_positive_coefficients() {
     );
 }
 
-/// violation slacks are near zero when `v_in` is large
-/// enough for the linearised evaporation constraint to be satisfiable without
-/// artificial violation.
-///
-/// With `intercept_m3s = 1.0`, `volume_slope_m3s_per_hm3 = 0.02`, and `v_in = 1000 hm3`, the
-/// evaporation constraint RHS is positive and feasible, so the solver should
-/// drive the high-cost violation slacks to zero.
 #[test]
 fn evap_violation_slacks_near_zero_feasible_constraint() {
     use cobre_solver::{ActiveSolver, RowBatch, SolverInterface};
@@ -1041,13 +999,6 @@ fn evap_violation_slacks_near_zero_feasible_constraint() {
     );
 }
 
-/// the storage-fixing dual for an evaporation hydro differs
-/// from the no-evaporation case.
-///
-/// When evaporation is active, higher `v_in` reduces evaporation volume
-/// (water retained in the reservoir increases), changing the water balance and
-/// hence the marginal value of initial storage. The dual of the storage-fixing
-/// row must differ between the two configurations.
 #[test]
 fn evap_storage_fixing_dual_differs_from_no_evaporation() {
     use cobre_solver::{ActiveSolver, RowBatch, SolverInterface};
@@ -1095,8 +1046,6 @@ fn evap_storage_fixing_dual_differs_from_no_evaporation() {
         let v_in = 1_000.0_f64;
         solver.set_row_bounds(&[0], &[v_in], &[v_in]);
         let view = solver.solve(None).expect("LP must solve to optimal");
-        // Row 0 is the storage-fixing equality; its dual is the marginal value
-        // of one additional hm3 of initial storage.
         view.dual[0]
     };
 
@@ -1120,10 +1069,6 @@ fn evap_storage_fixing_dual_differs_from_no_evaporation() {
     }
 }
 
-/// evaporation outflow physical bound prevents the LP from using evaporation as a dump
-/// valve.  With high v_in and high inflow, the LP must use spillage (not
-/// evaporation) to remove excess water.  The test confirms evaporation outflow <= evaporation_flow_max,
-/// f_minus ~ 0, and spillage > 0.
 #[test]
 fn evap_bound_prevents_dump_valve() {
     use cobre_solver::{ActiveSolver, RowBatch, SolverInterface};
@@ -1156,7 +1101,6 @@ fn evap_bound_prevents_dump_valve() {
     };
     solver.add_rows(&empty_cuts);
 
-    // Fix v_in at max_storage = 2000 hm3 via column bounds on storage_in.
     // col 0 = storage_out, col 1 = z_inflow, col 2 = storage_in (N=1, L=0).
     let col_storage_in = 2_usize;
     let v_in = 2_000.0_f64;
@@ -1200,7 +1144,6 @@ fn evap_bound_prevents_dump_valve() {
         "evaporation outflow must be bounded by physical limit {evaporation_flow_max}, got {evaporation_flow}"
     );
 
-    // Over-evaporation violation must be near zero (the violation penalty deters it).
     assert!(
         f_minus < 1e-6,
         "f_minus (over-evaporation) must be near zero, got {f_minus}"

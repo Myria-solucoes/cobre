@@ -2135,7 +2135,6 @@ fn d20_operational_violations() {
     let scenario = &scenario_results[0];
     assert_eq!(scenario.stages.len(), 2);
 
-    // Verify operational violation slacks fire in at least one stage.
     let mut found_outflow_below = false;
     let mut found_turbine_below = false;
     for stage_result in &scenario.stages {

@@ -42,9 +42,6 @@ pub(crate) struct ResolvedTables<'a> {
 }
 
 /// System-level context shared across all stages during template construction.
-///
-/// Constructed once in `build_stage_templates` and borrowed by
-/// `build_single_stage_template` for each study stage.
 pub(crate) struct TemplateBuildCtx<'a> {
     pub(crate) hydros: &'a [Hydro],
     pub(crate) thermals: &'a [Thermal],
@@ -907,13 +904,11 @@ fn enumerate_generic_constraint_rows(
             .resolved_generic_bounds
             .bounds_for_stage(constraint_idx, stage.id);
 
-        // A block-independent expression produces identical rows for every block,
-        // so it collapses to one stage-level row priced by total hours.
         let collapse_stage_level =
             crate::generic_constraints::expression_is_block_independent(&constraint.expression);
 
-        // Bind the constraint-invariant fields once; the closure keeps the three
-        // arms below field-for-field identical (only per-row fields vary).
+        // Bind the constraint-invariant fields once so the three arms below stay
+        // field-for-field identical (only per-row fields vary).
         let entity_id = constraint.id.0;
         let sense = constraint.sense;
         let slack_enabled = constraint.slack.enabled;
@@ -1017,8 +1012,6 @@ impl<'a> StageLayout<'a> {
         let n_blks = stage.blocks.len();
         let n_h = ctx.n_hydros;
 
-        // Per-stage membership sets that size the column/row blocks below; each gates
-        // filling hydros by `stage.id` (see the `identify_*` helpers).
         let (fpha_hydro_indices, fpha_planes_per_hydro) =
             identify_fpha_hydros(ctx, stage_idx, stage.id);
         let evap_hydro_indices = identify_evap_hydros(ctx, stage.id);
@@ -1031,7 +1024,6 @@ impl<'a> StageLayout<'a> {
             fpha_local_index[h_idx] = Some(local_idx);
         }
 
-        // Strides the deficit column block.
         let max_deficit_segments = ctx
             .buses
             .iter()
@@ -1054,8 +1046,6 @@ impl<'a> StageLayout<'a> {
         let diversion_start = spillage_start + n_h * n_blks;
         let thermal_start = diversion_start + n_h * n_blks;
         let thermal_end = thermal_start + ctx.n_thermals * n_blks;
-        // Anticipated-decision columns occupy `[thermal_end, thermal_end + A)`,
-        // one per plant; `line_fwd` follows them.
         let anticipated_decision_end = thermal_end + ctx.n_anticipated;
         let line_fwd_start = anticipated_decision_end;
         let line_rev_start = line_fwd_start + ctx.n_lines * n_blks;
@@ -1063,7 +1053,6 @@ impl<'a> StageLayout<'a> {
         let excess_start = deficit_start + ctx.n_buses * max_deficit_segments * n_blks;
         let excess_end = excess_start + ctx.n_buses * n_blks;
 
-        // Inflow non-negativity slack, after `excess`, only with the penalty.
         let has_inflow_penalty = ctx.has_penalty && n_h > 0;
         let inflow_slack = if has_inflow_penalty {
             excess_end..excess_end + n_h
@@ -1071,9 +1060,8 @@ impl<'a> StageLayout<'a> {
             0..0
         };
 
-        // FPHA generation columns follow `inflow_slack` (or `excess`).
         // `generation_col_start` is the empty-block cursor `col_generation_start`
-        // reads when the block is empty, so it never returns a bare-`.start` `0`.
+        // reads, so it never returns a bare-`.start` `0`.
         let n_fpha_hydros = fpha_hydro_indices.len();
         let generation_col_start = if has_inflow_penalty {
             inflow_slack.end
@@ -1087,10 +1075,8 @@ impl<'a> StageLayout<'a> {
             0..0
         };
 
-        // Evaporation columns after FPHA generation; `evap_col_start` is the
-        // empty-block cursor `col_evap_start` reads. One `EVAP_COLS_PER_HYDRO`
-        // triple per `(evap hydro, block)`, so the block grows by `n_blks` in
-        // chronological mode (`n_blks == 1` leaves it at the single-triple size).
+        // `evap_col_start` is the empty-block cursor `col_evap_start` reads; one
+        // `EVAP_COLS_PER_HYDRO` triple per `(evap hydro, block)`, block-strided by `n_blks`.
         let n_evap_hydros = evap_hydro_indices.len();
         let evap_col_start = generation_end;
         let evap_col_end = evap_col_start + n_evap_hydros * n_blks * EVAP_COLS_PER_HYDRO;
@@ -1123,15 +1109,15 @@ impl<'a> StageLayout<'a> {
         let load_balance_end = load_balance_start + ctx.n_buses * n_blks;
         let load_balance = load_balance_start..load_balance_end;
 
-        // FPHA rows follow load_balance; only the end cursor is kept here (the
-        // per-hydro ranges live on `StageData.indexer`). `fpha_rows_end` is the
-        // evaporation-row start even when the FPHA block is empty.
+        // Only the end cursor is kept here (the per-hydro ranges live on
+        // `StageData.indexer`); `fpha_rows_end` is the evaporation-row start even
+        // when the FPHA block is empty.
         let fpha_rows_end = build_fpha_rows(&fpha_planes_per_hydro, n_blks, load_balance_end);
 
-        // Evaporation rows follow FPHA rows; `evap_rows_end` is the post-equipment
-        // row cursor the empty operational-violation row families collapse onto.
-        // One row per `(evap hydro, block)`, so the block grows by `n_blks` — the
-        // cursor chain below MUST stay in lockstep or every downstream row shifts.
+        // `evap_rows_end` is the post-equipment row cursor the empty
+        // operational-violation row families collapse onto. One row per
+        // `(evap hydro, block)`, so the block grows by `n_blks` — the cursor chain
+        // below MUST stay in lockstep or every downstream row shifts.
         let evap_indices = build_evap_indices(n_evap_hydros, n_blks, evap_col_start, fpha_rows_end);
         let evap_rows_end = fpha_rows_end + n_evap_hydros * n_blks;
         let post_equipment_row_start = evap_rows_end;
@@ -1184,7 +1170,6 @@ impl<'a> StageLayout<'a> {
         };
         let col_ncs_end = col_ncs_start + n_ncs * n_blks;
 
-        // Row offsets: operational, σ_fill, σ^{v-}, fishing, state-out-def, generic.
         // n_dual_relevant is 0 — state pinning uses column bounds, so the cut path
         // reads view.reduced_costs, not a structural dual prefix.
         let n_dual_relevant = 0_usize;
@@ -1209,19 +1194,16 @@ impl<'a> StageLayout<'a> {
 
         // Fishing rows: one per GENUINELY anticipated plant this stage
         // (`build_anticipated_fishing_row_pos`) — a `K = 0` self-delivery
-        // excludes a plant's fishing row this stage, so the row family
-        // is sparse like the deposit family below, not the dense
-        // `ctx.n_anticipated` count the single-decider ring shipped with.
+        // excludes a plant's fishing row this stage, so the row family is sparse
+        // like the deposit family below, not the dense `ctx.n_anticipated` count.
         let n_stages = ctx.resolved.bounds.n_stages();
         let (anticipated_fishing_row_pos, n_anticipated_fishing_rows) =
             build_anticipated_fishing_row_pos(state, n_stages, stage_idx);
         let row_anticipated_fishing_start =
             row_filled_min_storage_floor_start + n_filled_min_storage_floor_rows;
 
-        // Anticipated-state-out (deposit) definition rows: one per plant with a
-        // genuine, ACTIVE decision this stage (`build_anticipated_decision_row_pos`
-        // — `PointResolution::genuine_decisions_at(stage_idx).next()` AND the
-        // delivery stage's commissioning window).
+        // Anticipated-state-out (deposit) definition rows
+        // (`build_anticipated_decision_row_pos`).
         let (anticipated_decision_row_pos, n_anticipated_state_out_def_rows) =
             build_anticipated_decision_row_pos(
                 state,
@@ -1233,11 +1215,8 @@ impl<'a> StageLayout<'a> {
         let row_anticipated_state_out_def_start =
             row_anticipated_fishing_start + n_anticipated_fishing_rows;
 
-        // Anticipated-ring interior-slot definition rows: one per (plant, slot)
-        // strictly before this stage's fresh-deposit boundary
-        // (`build_anticipated_slot_row_pos`, mirroring
-        // `build_transit_bucket_row_pos`). Immediately after
-        // `row_anticipated_state_out_def_start`.
+        // Anticipated-ring interior-slot definition rows
+        // (`build_anticipated_slot_row_pos`).
         let (anticipated_slot_row_pos, n_anticipated_slot_definition_rows) =
             build_anticipated_slot_row_pos(state, n_stages, stage_idx);
         let row_anticipated_slot_definition_start =
@@ -1245,14 +1224,12 @@ impl<'a> StageLayout<'a> {
         let row_generic_start =
             row_anticipated_slot_definition_start + n_anticipated_slot_definition_rows;
 
-        // Pumping columns follow NCS, before the generic-slack columns.
         let n_pumping = ctx.n_pumping;
         let col_pumping_start = col_ncs_end;
         let col_pumping_end = col_pumping_start + n_pumping * n_blks;
 
-        // Contract columns follow pumping, before the generic-slack columns:
-        // import block then export block. With both counts 0 the blocks are empty
-        // and col_generic_slack_start stays at col_pumping_end (parity-neutral).
+        // Import then export contract block; both empty leaves
+        // col_generic_slack_start at col_pumping_end (parity-neutral).
         let n_contract_import = ctx.n_contract_import;
         let n_contract_export = ctx.n_contract_export;
         let col_contract_import_start = col_pumping_end;
@@ -1297,7 +1274,6 @@ impl<'a> StageLayout<'a> {
             anticipated_slot_row_pos,
         };
 
-        // Reverse map for O(1) `AnticipatedDecision` generic-constraint resolution.
         let anticipated_local_by_sys_pos = ctx
             .anticipated_thermal_indices
             .iter()

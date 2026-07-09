@@ -1,16 +1,13 @@
 //! Crate-internal test-support builders: role-(a) [`StateLayout`], role-(b)
 //! [`StageGeometry`], and [`StudyDimensions`] fixtures shared across the crate's
-//! unit tests (indexer, extraction, patch, noise, training, setup, …) and the
-//! `tests/` integration suites.
+//! unit tests and `tests/` integration suites.
 //!
-//! These reproduce the production stage-0 geometry arithmetic from explicit
-//! equipment dimensions so a test can build the exact `StageGeometry`,
-//! `StateLayout`, and `StudyDimensions` a study with those dimensions would
-//! produce, without constructing a full `StudySetup`. They build crate-internal
-//! types, so they live in `src/` (not `tests/`) under
-//! `#[cfg(any(test, feature = "test-support"))]`: plain `cargo test` and
-//! downstream integration tests (via the `test-support` feature) reach the same
-//! builders.
+//! They reproduce production stage-0 layout arithmetic from explicit equipment
+//! dimensions, so a test builds the exact types a study of those dimensions would
+//! without a full `StudySetup`. They construct crate-internal types, so they live
+//! in `src/` under `#[cfg(any(test, feature = "test-support"))]` — reachable by
+//! plain `cargo test` and by downstream integration tests via the `test-support`
+//! feature.
 
 use crate::indexer::{CutStateProjection, EvaporationIndices, StateLayout, StudyDimensions};
 use crate::lp_builder::{
@@ -20,10 +17,8 @@ use cobre_solver::StageTemplate;
 
 /// Equipment dimensions for the [`geometry`] / [`study_dims_for`] test builders.
 ///
-/// Mirrors the entity-count inputs a study's stage-0 LP layout is built from.
-/// `Default` yields all-zero counts with `max_deficit_segments == 1` (a
-/// non-degenerate deficit stride), matching what the named [`eq`] /
-/// [`eq_with_anticipated`] builders set.
+/// `Default` sets `max_deficit_segments == 1` (a non-degenerate deficit stride);
+/// every other count is `0`.
 #[derive(Debug, Clone)]
 pub struct GeometryDims {
     /// Number of hydro plants.
@@ -125,23 +120,10 @@ pub fn eq_with_anticipated(
 /// Build the role-(b) [`StageGeometry`] for a single stage from explicit
 /// equipment dimensions, FPHA plane counts, and evaporation hydro indices.
 ///
-/// Reproduces the production stage-0 column/row arithmetic
-/// (`build_single_stage_template` / `StageLayout`): `theta = N*(3+L) + A*k_max + A`
-/// anchors the control region at `theta + 1`, equipment columns follow in the
-/// canonical order (turbine, spillage, diversion, thermal, `anticipated_decision`,
-/// lines, deficit, excess, `inflow_slack`, generation, evaporation, withdrawal
-/// slacks, operational-violation slacks), and rows follow z-inflow → water
-/// balance → load balance → FPHA → evaporation. The returned geometry is correct
-/// for a single stage whose block count is `dims.n_blks`.
-///
-/// `fpha_hydro_indices` / `fpha_planes` describe the FPHA hydros at this stage
-/// (parallel, equal length); `evap_hydro_indices` lists the evaporation hydros.
+/// `fpha_hydro_indices` / `fpha_planes` are parallel (equal length).
 #[must_use]
-// Rationale: single cohesive LP column/row layout reproduction; every local
-// binding contributes to the `StageGeometry { .. }` literal that closes the
-// function. Splitting into sub-helpers would scatter the offset derivation order
-// and obscure the one-shot build contract where each offset derives from the
-// previous.
+// Rationale: each offset derives from the previous, so splitting into sub-helpers
+// would scatter the sequential layout derivation.
 #[allow(clippy::too_many_lines)]
 pub fn geometry(
     dims: &GeometryDims,
@@ -164,10 +146,7 @@ pub fn geometry(
     } = *dims;
     let n_ant_state = n_anticipated * k_max;
 
-    // No `n_buckets` field on `GeometryDims` (B == 0 always here), so the
-    // `2*B` term of the production formula drops out; the in-LP anticipated
-    // ring's two `n_ant_state`-wide blocks (`anticipated_slots_out` outgoing +
-    // `anticipated_state` incoming) contribute `2*n_ant_state`.
+    // `2 * n_ant_state`: the anticipated ring's outgoing + incoming blocks.
     let theta = hydro_count * (3 + max_par_order) + 2 * n_ant_state;
     let decision_start = theta + 1;
 
@@ -257,7 +236,6 @@ pub fn geometry(
         };
 
     StageGeometry {
-        // θ sits one column before the turbine block (`turbine.start == theta + 1`).
         theta_col: turbine_start - 1,
         turbine: turbine_start..spillage_start,
         spillage: spillage_start..diversion_start,
@@ -277,15 +255,10 @@ pub fn geometry(
         outflow_above_slack,
         turbine_below_slack,
         generation_below_slack,
-        // This fixture models no contract columns; the production
-        // `start..start`-at-pumping-end anchoring is owned by
-        // `StageGeometry::from_layout`.
         contract_import: 0..0,
         contract_export: 0..0,
         water_balance: water_balance_start..water_balance_start + hydro_count,
         load_balance: load_balance_start..load_balance_end,
-        // This fixture models no filling hydros, so the terminal-target and
-        // operating-floor blocks are empty.
         filling_target: 0..0,
         filling_target_col: 0..0,
         filled_min_storage_floor: 0..0,
@@ -303,23 +276,16 @@ pub fn geometry(
 
 /// Build the empty-equipment role-(b) [`StageGeometry`] (every range `0..0`).
 ///
-/// The `_hydro_count` / `_max_par_order` arguments are accepted for call-site
-/// symmetry but add no equipment columns — the state-region columns the study
-/// implies are owned by the separate [`StateLayout`] handle.
+/// The `_hydro_count` / `_max_par_order` arguments are ignored — accepted only for
+/// call-site symmetry with [`geometry`].
 #[must_use]
 pub fn geom(_hydro_count: usize, _max_par_order: usize) -> StageGeometry {
     StageGeometry::default()
 }
 
-/// Build a finalized storage+lag [`StateLayout`] (no anticipated thermals) with
-/// the full `max_par_order` lag stride for every hydro.
-///
-/// This is the dense coverage production `resolve_state_layout` finalizes for a
-/// study with no per-hydro AR-order truncation, so the layout's
-/// `nonzero_state_indices` and `state_to_lp_column_map` caches match a production
-/// storage+lag study. The state-fixing patch and cut-path tests read only the
-/// state-region column ranges, which are pure functions of `(hydro_count,
-/// max_par_order)`.
+/// Build a finalized storage+lag [`StateLayout`] (no anticipated thermals) with the
+/// full `max_par_order` lag stride for every hydro — the dense coverage
+/// `crate::setup::resolve_state_layout` finalizes with no per-hydro AR truncation.
 #[must_use]
 pub fn state_layout(hydro_count: usize, max_par_order: usize) -> StateLayout {
     let effective_lag_count = vec![max_par_order; hydro_count];
@@ -336,11 +302,10 @@ pub fn state_layout(hydro_count: usize, max_par_order: usize) -> StateLayout {
 }
 
 /// Build a finalized [`StateLayout`] from explicit state-vector dimensions,
-/// including anticipated thermals.
+/// including anticipated thermals. Lag coverage is dense (full `max_par_order`).
 ///
-/// `effective_lag_count` is set to the full `max_par_order` for every hydro
-/// (dense coverage). `anticipated_lead_stages` must have length `n_anticipated`
-/// and its max (when non-empty) must equal `k_max`.
+/// `anticipated_lead_stages` must have length `n_anticipated` and its max (when
+/// non-empty) must equal `k_max`.
 #[must_use]
 pub fn state_layout_full(
     hydro_count: usize,
@@ -389,12 +354,8 @@ pub fn state_layout_with_transit_buckets(
     )
 }
 
-/// Bucket-only [`StageTemplate`] (no hydro rows): `num_cols` state + control
-/// columns, zero rows. Every column is free (`col_lower = -inf`, `col_upper =
-/// +inf`) and the row buffers stay empty; `n_hydro = 0` matches an
-/// `n_hydros = 0` fixture spec so noise transformation never runs. Used by the
-/// lower-bound and backward consumer-path regressions that pin travel-time
-/// bucket incoming columns without needing a real water-balance row.
+/// Bucket-only [`StageTemplate`]: `num_cols` free columns, zero rows. `n_hydro = 0`
+/// so noise transformation never runs.
 #[must_use]
 pub fn transit_bucket_only_template(num_cols: usize, n_state: usize) -> StageTemplate {
     StageTemplate {
@@ -419,13 +380,9 @@ pub fn transit_bucket_only_template(num_cols: usize, n_state: usize) -> StageTem
     }
 }
 
-/// Build the all-enabled per-pool [`CutStateProjection`] vector (one entry per stage)
-/// the default training paths use: every pool projects the full global state, so
-/// `cut_state_layouts[t].n_state() == global.n_state` for all `t`.
-///
-/// Tests that drive the backward pass need this slice on `TrainingContext`; the
-/// default (all-enabled) projection keeps the extracted subgradient bit-identical
-/// to the global-loop result.
+/// Build the all-enabled per-pool [`CutStateProjection`] vector (one per stage): every
+/// pool projects the full global state (`n_state() == global.n_state` for all `t`),
+/// keeping the extracted subgradient bit-identical to the unprojected global loop.
 #[must_use]
 pub fn all_enabled_cut_state_layouts(
     global: &StateLayout,
@@ -440,10 +397,7 @@ pub fn all_enabled_cut_state_layouts(
         .collect()
 }
 
-/// Build a single all-enabled per-pool [`CutStateProjection`] projecting the full
-/// global state — the projection a cut-row builder test threads alongside a
-/// full-dimension [`StateLayout`] so the render reproduces the global nonzero
-/// mask.
+/// Build a single all-enabled [`CutStateProjection`] projecting the full global state.
 #[must_use]
 pub fn cut_state_projection(global: &StateLayout) -> CutStateProjection {
     CutStateProjection::new(
@@ -463,16 +417,8 @@ pub fn study_dims() -> StudyDimensions {
 }
 
 /// Build the [`StudyDimensions`] matching the [`GeometryDims`] a test built its
-/// stage geometry from, so the non-state shape stays aligned with the geometry.
-///
-/// The non-state scalars come straight off `dims`; the presence flags use the
-/// production predicates (`has_inflow_penalty` is the flag, `has_withdrawal ==
-/// hydro_count > 0`, `has_operational_violations == hydro_count != 0`).
-///
-/// `has_ncs` is `false`: NCS presence is set only by the production NCS wiring
-/// (`!ncs_col_starts.is_empty()`), never by these fixtures — every fixture-built
-/// stage is NCS-inactive. `n_pumping` is `0` on the non-state shape these
-/// fixtures imply.
+/// stage geometry from. `has_ncs` is always `false`: these fixtures never model NCS
+/// (production sets it from `!ncs_col_starts.is_empty()`).
 #[must_use]
 pub fn study_dims_for(dims: &GeometryDims) -> StudyDimensions {
     StudyDimensions {

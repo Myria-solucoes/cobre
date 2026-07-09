@@ -1,13 +1,11 @@
 //! Bucket topology: canonical column order, global bucket count, and
 //! per-stage reachability mask for water travel-time in-transit buckets.
 //!
-//! Depths are resolved on the stage clock via [`resolve_spread`] (in-study
-//! anchors) and [`window_period_overlaps`] (the pre-study IC anchor) —
-//! `n_blks`/block mode never enter dimensioning. Every arc feeding one
-//! downstream plant collapses into a single aggregated block (the arrival
-//! schedule at a plant is a sufficient statistic over its upstreams), ordered
-//! by the same canonical `(operational_start_date, id)` index every other
-//! state block uses.
+//! Depths resolve on the stage clock ([`resolve_spread`] for in-study anchors,
+//! [`window_period_overlaps`] for the pre-study IC anchor); `n_blks`/block mode
+//! never enter dimensioning. Every arc feeding one downstream plant collapses
+//! into a single aggregated block ordered by the canonical
+//! `(operational_start_date, id)` index every other state block uses.
 
 use std::collections::HashMap;
 
@@ -20,11 +18,9 @@ use crate::lead_time::{SpreadResolution, resolve_arrival_density_at, resolve_spr
 ///
 /// `n_buckets == 0` exactly when the system declares no travel-time arc
 /// (`travel_time_hours` absent, `0.0`, or missing a `downstream_id`).
-// Voice 4: no production read site consumes these fields yet — the state
-// layout will read `n_buckets`/`column_order` to size and order the bucket
-// block, and the per-stage LP fill will read `per_stage_mask` to gate which
-// bucket rows it emits. The `#[allow(dead_code)]` refires once those readers
-// land.
+// Voice 4: no production read site consumes these fields yet — the state layout
+// (sizing/ordering) and the per-stage LP fill (bucket-row gating) will.
+// `#[allow(dead_code)]` refires once those readers land.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct TransitBucketTopology {
@@ -73,9 +69,8 @@ fn declared_arcs(system: &System) -> HashMap<EntityId, Vec<f64>> {
 
 /// Extend the study calendar with copies of its trailing stage duration so
 /// [`resolve_spread`] never sees a calendar too short to absorb the window —
-/// its conservation check panics otherwise. The extension makes the depth
-/// well-defined "as if the horizon continued"; capping it back to the true
-/// remaining horizon is a separate, later step this function does not take.
+/// its conservation check panics otherwise. Horizon capping is a separate,
+/// later step this does not take.
 fn extend_for_resolution(study_durations: &[f64], t_v: f64) -> Vec<f64> {
     let Some(&last) = study_durations.last() else {
         return study_durations.to_vec();
@@ -107,14 +102,8 @@ fn ic_only_depth(t_v: f64, study_durations: &[f64]) -> usize {
 }
 
 /// Caps a stage's active lag at `n_stages − stage − 1`, the deepest lag whose
-/// target stage `stage + lag` still lands inside `[0, n_stages)` — the same
-/// horizon bound `is_anticipated_decision_active` enforces as
-/// `stage_idx + K_i < n_stages`. A lag beyond the cap has no receiving stage;
-/// [`build_transit_bucket_topology`] drops it from the mask here rather than
-/// retaining and zeroing it downstream, the target-stage imprecision the
-/// deferred terminal bucket credit (`V_eff`) would otherwise absorb under the
-/// zero-terminal-value horizon [`crate::horizon_mode::HorizonMode::Finite`]
-/// implements. Never caps [`TransitBucketTopology::per_plant_depth`] or
+/// target stage lands inside `[0, n_stages)`. Never caps
+/// [`TransitBucketTopology::per_plant_depth`] or
 /// [`TransitBucketTopology::column_order`], which size from the global max over
 /// every stage anchor and must retain what the earliest stages need.
 fn horizon_cap_active(active: usize, stage: usize, n_stages: usize) -> usize {
@@ -123,11 +112,10 @@ fn horizon_cap_active(active: usize, stage: usize, n_stages: usize) -> usize {
 
 /// Fraction of pre-study period `m`'s release — spanning
 /// `[t_v - cumulative_before - period_duration, t_v - cumulative_before)` in
-/// real time before stage 0 — landing in study stage `d` (0-indexed, at
-/// `result[d]`). The IC-anchor analogue of [`resolve_spread`]'s `k`: resolved
-/// directly against the forward calendar rather than a concatenated local one
-/// anchored at period `m` — equivalent, since [`window_period_overlaps`]
-/// depends only on relative offsets, never the absolute origin.
+/// real time before stage 0 — landing in study stage `d` (at `result[d]`). The
+/// IC-anchor analogue of [`resolve_spread`]'s `k`, resolved against the forward
+/// calendar directly: [`window_period_overlaps`] depends only on relative
+/// offsets, so this equals anchoring a local calendar at period `m`.
 pub(crate) fn ic_anchor_k(
     t_v: f64,
     cumulative_before: f64,
@@ -141,12 +129,10 @@ pub(crate) fn ic_anchor_k(
         .collect()
 }
 
-/// Build the [`TransitBucketTopology`] from the resolved system: group declared arcs
-/// per downstream plant (confluence aggregates every contributing arc into
-/// one block of depth `max_i L_i`, never one block per arc), size each
-/// plant's depth as the max over every in-study stage anchor and the
-/// pre-study IC anchor, and emit the canonical column order and per-stage
-/// reachability mask in `(operational_start_date, id)` order.
+/// Build the [`TransitBucketTopology`]: confluence aggregates every arc feeding
+/// one downstream plant into a single block of depth `max_i L_i` (never one
+/// block per arc), sized as the max over every in-study stage anchor and the
+/// pre-study IC anchor, in canonical `(operational_start_date, id)` order.
 pub(crate) fn build_transit_bucket_topology(system: &System) -> TransitBucketTopology {
     let study_durations = study_stage_durations(system);
     let n_stages = study_durations.len();
@@ -209,15 +195,10 @@ pub(crate) fn build_transit_bucket_topology(system: &System) -> TransitBucketTop
     }
 }
 
-/// Per-declared-arc resolved stage-clock weights for the PARALLEL-mode LP fill,
-/// keyed by the arc's upstream hydro system index (a hydro declares at most one
-/// arc — its own `travel_time_hours`/`downstream_id`). `k_by_stage[stage_idx]`
-/// is [`resolve_spread`]'s stage-clock weight vector `stage_weights` anchored
-/// at that in-study stage (`stage_weights[0]` the same-stage share); a hydro
-/// absent from the map declares no arc — the LP fill's undeclared branch
-/// (full same-stage arrival, no bucket deposit). The chronological-mode
-/// block-resolved `block_deposits`/`within_stage_routing` factors are
-/// threaded separately.
+/// Per-declared-arc PARALLEL-mode stage-clock weights, keyed by the arc's
+/// upstream hydro system index. `k_by_stage[stage_idx]` is [`resolve_spread`]'s
+/// `stage_weights` anchored at that in-study stage (`stage_weights[0]` is the
+/// same-stage share); a hydro absent declares no arc.
 pub(crate) fn build_arc_stage_weights(system: &System) -> HashMap<usize, Vec<Vec<f64>>> {
     let study_durations = study_stage_durations(system);
     let n_stages = study_durations.len();
@@ -242,12 +223,10 @@ pub(crate) fn build_arc_stage_weights(system: &System) -> HashMap<usize, Vec<Vec
 
 /// Per-declared-arc, per-CHRONOLOGICAL-stage full [`SpreadResolution`]
 /// (`block_deposits`, `within_stage_routing`, `arrival_density`, plus the
-/// same `stage_weights`/`stage_reach` [`build_arc_stage_weights`] stores),
-/// resolved with the sending stage's own block partition
-/// (`resolve_spread(.., Some(blocks))`). Keyed like `build_arc_stage_weights`;
-/// `by_stage[stage_idx]` is `None` for a study stage whose own `block_mode` is
-/// `Parallel` (no block-resolved routing to compute there — the parallel fill
-/// reads `build_arc_stage_weights` instead).
+/// `stage_weights`/`stage_reach` [`build_arc_stage_weights`] also stores),
+/// resolved with the sending stage's own block partition. Keyed like
+/// `build_arc_stage_weights`; `by_stage[stage_idx]` is `None` for a `Parallel`
+/// stage (no block-resolved routing there).
 pub(crate) fn build_arc_spread_chrono(
     system: &System,
 ) -> HashMap<usize, Vec<Option<SpreadResolution>>> {
@@ -287,16 +266,13 @@ pub(crate) fn build_arc_spread_chrono(
 
 /// Per-declared-arc, per-CHRONOLOGICAL-arrival-stage `A` blend of every
 /// contributing source stage's arrival density, resolved in `A`'s own frame
-/// (ρ in the methodology): `density_b = (sum_d weight_d * source_density_{d,b})
-/// / (sum_d weight_d)`, `weight_d` source stage `A-d`'s stage-clock weight
-/// (`arc_stage_weights`) and `source_density_d` that source's lag-`d` delivery
-/// density resolved against `A`'s own blocks ([`resolve_arrival_density_at`])
-/// — covering a parallel source reaching a chronological arrival exactly like
-/// a chronological one, both contributing their weight/density pair to the
-/// same blend. Keyed like [`build_arc_stage_weights`]; `by_stage[stage_idx]` is
-/// `None` for a study stage whose own `block_mode` is `Parallel`, or when no
-/// in-study source stage reaches it (total weight `== 0`, e.g. the study's
-/// first stage).
+/// (ρ in the methodology): `density_b = Σ_d weight_d·source_density_{d,b} /
+/// Σ_d weight_d`, `weight_d` source stage `A-d`'s stage-clock weight and
+/// `source_density_d` its lag-`d` density against `A`'s own blocks
+/// ([`resolve_arrival_density_at`]) — a parallel source blends exactly like a
+/// chronological one. Keyed like [`build_arc_stage_weights`];
+/// `by_stage[stage_idx]` is `None` for a `Parallel` stage, or when no in-study
+/// source stage reaches it (total weight `== 0`, e.g. the first stage).
 pub(crate) fn build_arc_arrival_density(
     system: &System,
     arc_stage_weights: &HashMap<usize, Vec<Vec<f64>>>,
@@ -381,10 +357,9 @@ fn arrival_frame_density(
             source_density.len() <= arrival_blocks.len(),
             "arc {u_idx} arrival stage {arrival_stage}: source_density row must not exceed A's own block count"
         );
-        // window_period_overlaps's contiguity contract omits trailing
-        // zero-overlap blocks rather than returning them as explicit 0.0s
-        // (see the lead_time module doc); pad back to A's own block count so
-        // every source_density row aligns with `weighted_density` positionally.
+        // window_period_overlaps omits trailing zero-overlap blocks (lead_time
+        // module doc); pad back to A's own block count so each source_density
+        // row aligns with `weighted_density` positionally.
         source_density.resize(arrival_blocks.len(), 0.0);
 
         for (acc, &density_b) in weighted_density.iter_mut().zip(&source_density) {

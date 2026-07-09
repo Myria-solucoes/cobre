@@ -311,7 +311,7 @@ mod tests {
         }
     }
 
-    /// AC E3-001-1: a matrix where every row has min_abs == max_abs gives scale 1.0.
+    /// A matrix where every row has min_abs == max_abs gives scale 1.0.
     ///
     /// Matrix (2 rows × 2 cols, column-major), all nonzeros |value| = 1.0:
     ///
@@ -340,7 +340,7 @@ mod tests {
         );
     }
 
-    /// AC E3-001-2: geometric-mean scale matches expected value for known matrix.
+    /// Geometric-mean scale matches expected value for known matrix.
     ///
     /// Matrix (2 rows × 2 cols):
     ///
@@ -372,7 +372,7 @@ mod tests {
         );
     }
 
-    /// AC E3-001-3: `apply_row_scale` multiplies matrix values and row bounds.
+    /// `apply_row_scale` multiplies matrix values and row bounds.
     ///
     /// Uses the same 2×2 matrix as `row_scale_geometric_mean` so the expected
     /// values are easily verified by hand.
@@ -428,7 +428,7 @@ mod tests {
         assert_eq!(tmpl.objective, vec![0.0; 2]);
     }
 
-    /// AC E3-001-4: a row with no nonzeros receives scale factor 1.0.
+    /// A row with no nonzeros receives scale factor 1.0.
     ///
     /// Matrix (3 rows × 1 col): only row 1 has a nonzero.
     /// Rows 0 and 2 are structurally empty → scale = 1.0.

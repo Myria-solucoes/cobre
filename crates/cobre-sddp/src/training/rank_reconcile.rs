@@ -10,12 +10,9 @@ use crate::SddpError;
 ///
 /// `ReduceOp::Max` over a 0/non-zero flag is order-independent, so the global flag
 /// is identical on every rank regardless of rank count (the declaration-order/
-/// bit-for-bit invariant). A single-rank communicator returns `local_ok` with no
-/// collective. `scratch` is caller-owned so no heap allocation occurs.
-///
-/// The caller owns error construction — this reports only the global flag, so it
-/// serves callers whose error type is not [`SddpError`] (e.g. the CLI's
-/// `CliError`); `reconcile_error_flag` wraps it for the `SddpError` path.
+/// bit-for-bit invariant). Reports only the flag, not an [`SddpError`], so the CLI
+/// can reconcile with its own `CliError`; `reconcile_error_flag` wraps it for the
+/// `SddpError` path.
 ///
 /// # Errors
 ///
@@ -38,10 +35,7 @@ pub fn reconcile_global_ok<C: Communicator>(
 }
 
 /// Reduce every rank's local outcome to one global outcome that all ranks return
-/// identically, so they enter or skip the next collective in lockstep. A failing
-/// rank keeps its own error; a healthy rank whose peer failed returns a
-/// peer-failure `Communication` error. A single-rank communicator returns
-/// `local_ok` unchanged with no collective.
+/// identically, so they enter or skip the next collective in lockstep.
 ///
 /// # Errors
 ///
@@ -70,9 +64,7 @@ pub(crate) fn reconcile_error_flag<C: Communicator>(
 
 /// Reconcile a rank-local `Result<T, SddpError>` across ranks before a lockstep
 /// collective: every rank returns `Ok(payload)` iff no rank failed, otherwise
-/// every rank returns `Err` (its own error on a failing rank, a peer-failure
-/// `Communication` error on a healthy rank whose peer failed). The `T` payload
-/// rides on the stack and `scratch` is caller-owned, so no heap allocation occurs.
+/// every rank returns `Err` in lockstep.
 ///
 /// # Errors
 ///
@@ -176,9 +168,8 @@ mod tests {
         }
     }
 
-    // Borrowed `&dyn Any` dispatch through the generic `allreduce` signature in
-    // this forbid-unsafe crate; the stub only ever reduces the i32 flag
-    // `reconcile_error_flag` sends.
+    // forbid-unsafe crate: `&dyn Any` dispatch, not a transmute; the stub only
+    // reduces the i32 flag `reconcile_error_flag` sends.
     fn downcast_i32<T: CommData>(value: T) -> i32 {
         use std::any::Any;
         *(&value as &dyn Any)
@@ -314,7 +305,6 @@ mod tests {
     /// than one rank blocking in `sync_forward`'s allgatherv).
     #[test]
     fn reconcile_result_fails_both_ranks_before_forward_collective() {
-        // Rank 1: local forward solve failed; it keeps its own error.
         let failing = ReconcileStub {
             size: 2,
             peer_flag: 0,
@@ -332,9 +322,6 @@ mod tests {
         );
         assert!(matches!(rank1, Err(SddpError::Infeasible { .. })));
 
-        // Rank 0: local forward solve succeeded, but its peer failed; it must still
-        // return Err (a peer-failure Communication error) so it never enters
-        // sync_forward.
         let healthy = ReconcileStub {
             size: 2,
             peer_flag: 1,
@@ -353,7 +340,6 @@ mod tests {
     /// would panic instead of hanging as the real allgatherv would.
     #[test]
     fn reconcile_result_fails_both_ranks_before_backward_collective() {
-        // Rank 1: local backward solve failed; it keeps its own error.
         let failing = ReconcileStub {
             size: 2,
             peer_flag: 0,
@@ -371,9 +357,6 @@ mod tests {
         );
         assert!(matches!(rank1, Err(SddpError::Infeasible { .. })));
 
-        // Rank 0: local backward solve succeeded (cuts_generated payload), but its
-        // peer failed; it must still return Err (a peer-failure Communication error)
-        // so it never enters sync_packed_records.
         let healthy = ReconcileStub {
             size: 2,
             peer_flag: 1,
@@ -446,7 +429,6 @@ mod tests {
     /// the flag allreduce.
     #[test]
     fn reconcile_global_ok_fails_both_ranks_before_post_sim_collective() {
-        // Rank whose local simulate() failed.
         let failing = ReconcileStub {
             size: 2,
             peer_flag: 0,
@@ -458,7 +440,6 @@ mod tests {
             Ok(false)
         ));
 
-        // Healthy peer whose simulate() succeeded, but its peer failed.
         let healthy = ReconcileStub {
             size: 2,
             peer_flag: 1,
@@ -478,7 +459,6 @@ mod tests {
     /// (`ReconcileStub::barrier` is `unreachable!`, so reaching it would panic).
     #[test]
     fn reconcile_global_ok_fails_both_ranks_before_post_export_barrier() {
-        // Rank 0: its export write failed.
         let root_failed = ReconcileStub {
             size: 2,
             peer_flag: 0,
@@ -490,7 +470,6 @@ mod tests {
             Ok(false)
         ));
 
-        // A peer rank: no local write, but rank 0 failed.
         let peer = ReconcileStub {
             size: 2,
             peer_flag: 1,

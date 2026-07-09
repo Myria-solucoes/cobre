@@ -1,13 +1,9 @@
 //! Stage-0 incoming travel-time bucket seed from windowed `past_defluences`
 //! releases.
 //!
-//! [`build_initial_transit_bucket_state`] unrolls each declared arc's
-//! `past_defluences` windows through the IC-anchor overlap arithmetic into the
-//! stage-0 incoming bucket state, aggregated per downstream plant exactly as
-//! [`TransitBucketTopology`] aggregates depth. The caller splices the result
-//! into the same `initial_state` vector `build_initial_state` populates, so
-//! the single `fill_col_state_patches` pin path picks it up with no separate
-//! wiring.
+//! The caller splices the result into the same `initial_state` vector
+//! `build_initial_state` populates, so the single `fill_col_state_patches` pin
+//! path picks it up with no separate wiring.
 
 use chrono::NaiveDate;
 use cobre_core::System;
@@ -20,18 +16,16 @@ use super::bucket_topology::{TransitBucketTopology, ic_anchor_k, study_stage_dur
 /// incoming bucket seed, in [`TransitBucketTopology::column_order`] order.
 ///
 /// Each window `[start_date, end_date)` for upstream hydro `i` contributes
-/// `k_d · D_i`, `D_i` the window's period-duration-scaled volume (mirroring
-/// how an in-study release is already volume-scaled by `τ`) and `k_d` the
-/// fraction of that window landing `d` study stages after stage 0
-/// ([`ic_anchor_k`], anchored at `e_off = start_0 − end_date` with period
-/// width `end_date − start_date`).
+/// `k_d · D_i`: `D_i` the window's period-duration-scaled volume, `k_d` the
+/// fraction landing `d` study stages after stage 0 ([`ic_anchor_k`], anchored
+/// at `e_off = start_0 − end_date`, width `end_date − start_date`).
 ///
-/// Runs single-threaded in [`TransitBucketTopology::column_order`]'s canonical
-/// (sorted) order — never a rank-count-dependent parallel reduction.
+/// Runs single-threaded in canonical [`TransitBucketTopology::column_order`]
+/// order — never a rank-count-dependent parallel reduction.
 ///
 /// `cobre-io`'s `validate_travel_time` coverage gate guarantees every declared
-/// arc's `past_defluences` windows cover `[start_0 − t_v, start_0)` before
-/// setup runs this seed; there is no `past_inflows` fallback.
+/// arc's windows cover `[start_0 − t_v, start_0)` before this runs; there is no
+/// `past_inflows` fallback.
 #[must_use]
 pub(crate) fn build_initial_transit_bucket_state(
     system: &System,

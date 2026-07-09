@@ -1,4 +1,4 @@
-//! `violations_par_anticipated` section tests (split from the parent integration binary).
+//! `violations_par_anticipated` section tests.
 
 use super::*;
 
@@ -112,8 +112,6 @@ fn turbine_column_lower_bound_is_zero() {
 
 /// When an annual component is present, `max_par_order` is widened to 12
 /// regardless of the classical AR order.
-///
-/// System: 1 stage, 2 hydros, AR order p=2, `annual: Some(_)` on hydro 0.
 #[test]
 fn max_par_order_uses_par_lp_when_annual_present() {
     use cobre_core::scenario::{AnnualComponent, InflowModel};
@@ -170,8 +168,6 @@ fn max_par_order_uses_par_lp_when_annual_present() {
 }
 
 /// Classical PAR systems are unaffected: `max_par_order` equals the AR order.
-///
-/// System: 1 stage, 2 hydros, AR order p=3, no annual component.
 #[test]
 fn max_par_order_classical_unchanged() {
     use cobre_core::scenario::InflowModel;
@@ -231,7 +227,6 @@ fn max_par_order_classical_unchanged() {
 fn max_par_order_z_inflow_row_has_twelve_lag_entries() {
     use cobre_core::scenario::{AnnualComponent, InflowModel};
 
-    // Same annual-PAR fixture as `max_par_order_uses_par_lp_when_annual_present`.
     let ar_coeffs: Vec<f64> = vec![0.3, 0.2];
     let ann = AnnualComponent {
         coefficient: 0.5,
@@ -282,12 +277,11 @@ fn max_par_order_z_inflow_row_has_twelve_lag_entries() {
         "precondition: max_par_order must be 12"
     );
 
-    // z_inflow rows start at 0; row for hydro 0 is row 0.
     let n_h = 2_usize;
     let l = 12_usize;
     let row_z_inflow_h0 = 0_usize; // z_inflow rows start at 0
 
-    // z_inflow column for hydro 0: col_z_inflow_start = N*(1+L) = 2*13 = 26 (unchanged).
+    // z_inflow column for hydro 0: col_z_inflow_start = N*(1+L) = 2*13 = 26.
     let col_z_inflow_h0 = n_h * (1 + l); // = 26
     let mut lag_entry_count = 0usize;
     for col in 0..t.num_cols {
@@ -311,10 +305,8 @@ fn max_par_order_z_inflow_row_has_twelve_lag_entries() {
 ///
 /// The only row categories `PatchBuffer` mutates at solve time are AR dynamics /
 /// noise, load-balance, and z-inflow definition; incoming state is pinned via
-/// column bounds, not patched rows.
-/// Generic-constraint coefficients are immutable after construction. The test pins
-/// this by asserting `forward_patch_count` after filling all three categories
-/// equals `N + M*B_active + N` and never exceeds capacity `N + M*B_max + N`.
+/// column bounds, not patched rows. Generic-constraint coefficients are immutable
+/// after construction.
 #[test]
 #[allow(clippy::cast_precision_loss)] // fixture values are small integers; no precision is lost
 fn parameter_coefficient_persists_across_stage_template_uses() {
@@ -337,13 +329,11 @@ fn parameter_coefficient_persists_across_stage_template_uses() {
          formula change indicates new patch categories were added"
     );
 
-    // Fill all three row categories with realistic values.
     let n_state = n * (1 + l);
     let state: Vec<f64> = (0..n_state).map(|i| (i + 1) as f64 * 10.0).collect();
     let noise: Vec<f64> = (0..n).map(|h| h as f64 * 0.5).collect();
     let base_row: usize = n; // water_balance_start = N
 
-    // Noise — AR dynamics.
     buf.fill_forward_patches(
         &StateLayout::new(n, l, 0, Vec::new(), 0, 0, vec![], &vec![l; n]),
         &state,
@@ -367,7 +357,6 @@ fn parameter_coefficient_persists_across_stage_template_uses() {
         &[],
     );
 
-    // Z-inflow rows.
     let z_inflow_rhs: Vec<f64> = (0..n).map(|h| 80.0 + h as f64).collect();
     let z_inflow_row_start: usize = 50;
     buf.fill_z_inflow_patches(z_inflow_row_start, &z_inflow_rhs, &[]);
@@ -913,13 +902,9 @@ fn test_anticipated_fishing_rows_count_by_stage() {
     );
 }
 
-/// Because the fishing constraint is always active for every anticipated
-/// plant, each plant emits exactly one fishing row at every stage in
-/// `[0, n_stages)`. This test confirms the row count is stage-invariant by
-/// asserting equality between `num_rows` at two adjacent stages.
-///
-/// System: one anticipated thermal K=2, n_stages=4.
-/// At every stage: `n_anticipated_fishing_rows == n_anticipated == 1`.
+/// The fishing constraint is always active for every anticipated plant, so each
+/// emits exactly one fishing row at every stage in `[0, n_stages)` — `num_rows` is
+/// stage-invariant for this single-anticipated-thermal fixture (K=2, n_stages=4).
 #[test]
 fn test_anticipated_fishing_same_count_both_stages() {
     let system = one_anticipated_thermal_system(4, 2, 0.0, 100.0);
@@ -934,10 +919,6 @@ fn test_anticipated_fishing_same_count_both_stages() {
     )
     .expect("build ok");
 
-    // Under the always-active predicate every stage carries one fishing row
-    // per anticipated plant. The two adjacent stages must therefore have the
-    // same total row count (the rest of the LP layout is also stage-invariant
-    // for this single-anticipated-thermal fixture).
     let rows_stage_0 = result.templates[0].num_rows;
     let rows_stage_1 = result.templates[1].num_rows;
     assert_eq!(
@@ -1022,11 +1003,8 @@ fn test_anticipated_decision_write_to_state_out_def_row() {
     let t = &result.templates[0]; // stage 0: plant active (0+2<4)
     let col_dec = anticipated_decision_col(2);
 
-    // The old Cat 6 slot: row = state_fixing_base(0) + (K_i-1)*n_anticipated + 0
-    //                         = 0 + (2-1)*1 + 0 = 1.
-    // Under Alternative A the decision column must have NO entry at this row.
-    // The decision-write moved to the def-row (-1.0 on decision, +1.0 on state_out),
-    // so the old state-fixing slot must hold no decision entry.
+    // The decision-write lives on the def-row (-1.0 on decision, +1.0 on state_out),
+    // so the old state-fixing slot (row 1) holds no decision entry.
     let old_state_fixing_row = 1_usize;
     let entries_at_old_row = csc_entries_at(t, col_dec, old_state_fixing_row);
     assert!(
@@ -1162,7 +1140,7 @@ fn test_anticipated_thermals_lp_roundtrip_k1() {
     let col_thermal = rt_col_thermal_start(k); // 11
     let row_fish_start = rt_row_ant_fishing_start(k); // 12
 
-    // ── n_state (AC-1.a) ─────────────────────────────────────────────────────
+    // ── n_state ─────────────────────────────────────────────────────
     for t in 0..n_stages {
         assert_eq!(
             result.templates[t].n_state,
@@ -1173,7 +1151,7 @@ fn test_anticipated_thermals_lp_roundtrip_k1() {
         );
     }
 
-    // ── num_cols (AC-1.b) ────────────────────────────────────────────────────
+    // ── num_cols ────────────────────────────────────────────────────
     let expected_cols = rt_expected_num_cols(k);
     for t in 0..n_stages {
         assert_eq!(
@@ -1183,7 +1161,7 @@ fn test_anticipated_thermals_lp_roundtrip_k1() {
         );
     }
 
-    // ── num_rows (AC-1.b) ────────────────────────────────────────────────────
+    // ── num_rows ────────────────────────────────────────────────────
     for t in 0..n_stages {
         let expected_rows = rt_expected_num_rows(k, t);
         assert_eq!(
@@ -1193,7 +1171,7 @@ fn test_anticipated_thermals_lp_roundtrip_k1() {
         );
     }
 
-    // ── anticipated_decision bounds (AC-1.d) ────────────────────────────────
+    // ── anticipated_decision bounds ────────────────────────────────
     // Active: t in 0..3 (t+1 < 4: 1, 2, 3 all < 4 under strict predicate).
     for t in 0..(n_stages - k) {
         let tmpl = &result.templates[t];
@@ -1223,7 +1201,7 @@ fn test_anticipated_thermals_lp_roundtrip_k1() {
         );
     }
 
-    // ── NPV objective at stage 0 (AC-1.e) ────────────────────────────────────
+    // ── NPV objective at stage 0 ────────────────────────────────────
     // delivery_stage = 0+1 = 1; cumulative_factor[1] = 1.0 (no discount).
     let expected_obj = 50.0 * total_hours * 1.0 / COST_SCALE_FACTOR; // 36.0
     assert!(
@@ -1232,7 +1210,7 @@ fn test_anticipated_thermals_lp_roundtrip_k1() {
         result.templates[0].objective[col_ant_dec]
     );
 
-    // ── Fishing row CSC at stage 1 (K=1 <= 1) (AC-1.h) ──────────────────────
+    // ── Fishing row CSC at stage 1 (K=1 <= 1) ──────────────────────
     {
         let t = &result.templates[1]; // stage 1: K=1 <= stage_idx=1 → fishing active
         let row_fish = row_fish_start;
@@ -1259,7 +1237,7 @@ fn test_anticipated_thermals_lp_roundtrip_k1() {
         );
     }
 
-    // ── Fishing row equality bounds 0==0 at stage 1 (AC-1.i) ─────────────────
+    // ── Fishing row equality bounds 0==0 at stage 1 ─────────────────
     {
         let t = &result.templates[1];
         let row_fish = row_fish_start;
@@ -1327,7 +1305,7 @@ fn test_anticipated_thermals_lp_roundtrip_k2() {
     let col_thermal = rt_col_thermal_start(k); // 12
     let row_fish_start = rt_row_ant_fishing_start(k); // 12
 
-    // ── n_state (AC-2.a) ─────────────────────────────────────────────────────
+    // ── n_state ─────────────────────────────────────────────────────
     for t in 0..n_stages {
         assert_eq!(
             result.templates[t].n_state,
@@ -1338,7 +1316,7 @@ fn test_anticipated_thermals_lp_roundtrip_k2() {
         );
     }
 
-    // ── num_cols / num_rows (AC-2.b) ─────────────────────────────────────────
+    // ── num_cols / num_rows ─────────────────────────────────────────
     let expected_cols = rt_expected_num_cols(k);
     for t in 0..n_stages {
         assert_eq!(
@@ -1354,7 +1332,7 @@ fn test_anticipated_thermals_lp_roundtrip_k2() {
         );
     }
 
-    // ── anticipated_decision bounds (AC-2.d) ─────────────────────────────────
+    // ── anticipated_decision bounds ─────────────────────────────────
     // Active under strict predicate: t=0 (0+2=2 < 4), t=1 (1+2=3 < 4).
     for t in 0..=1 {
         let tmpl = &result.templates[t];
@@ -1380,7 +1358,7 @@ fn test_anticipated_thermals_lp_roundtrip_k2() {
         );
     }
 
-    // ── NPV objective at stage 0 (AC-2.e) ────────────────────────────────────
+    // ── NPV objective at stage 0 ────────────────────────────────────
     // delivery_stage=2; cumulative_factor[2]=1.0 (no discount).
     let expected_obj = 50.0 * total_hours * 1.0 / COST_SCALE_FACTOR; // 36.0
     assert!(
@@ -1389,7 +1367,7 @@ fn test_anticipated_thermals_lp_roundtrip_k2() {
         result.templates[0].objective[col_ant_dec]
     );
 
-    // ── Fishing row CSC at stage 2 (K=2 <= 2) (AC-2.h) ──────────────────────
+    // ── Fishing row CSC at stage 2 (K=2 <= 2) ──────────────────────
     {
         let t = &result.templates[2];
         let row_fish = row_fish_start;
@@ -1413,7 +1391,7 @@ fn test_anticipated_thermals_lp_roundtrip_k2() {
         );
     }
 
-    // ── Fishing row equality bounds 0==0 at stage 2 (AC-2.i) ─────────────────
+    // ── Fishing row equality bounds 0==0 at stage 2 ─────────────────
     {
         let t = &result.templates[2];
         let row_fish = row_fish_start;
@@ -1487,7 +1465,7 @@ fn test_anticipated_thermals_lp_roundtrip_k3() {
     let col_thermal = rt_col_thermal_start(k); // 13
     let row_fish_start = rt_row_ant_fishing_start(k); // 12 (K-independent)
 
-    // ── n_state (AC-3.a) ─────────────────────────────────────────────────────
+    // ── n_state ─────────────────────────────────────────────────────
     for t in 0..n_stages {
         assert_eq!(
             result.templates[t].n_state,
@@ -1498,7 +1476,7 @@ fn test_anticipated_thermals_lp_roundtrip_k3() {
         );
     }
 
-    // ── num_cols / num_rows (AC-3.b) ─────────────────────────────────────────
+    // ── num_cols / num_rows ─────────────────────────────────────────
     let expected_cols = rt_expected_num_cols(k);
     for t in 0..n_stages {
         assert_eq!(
@@ -1514,7 +1492,7 @@ fn test_anticipated_thermals_lp_roundtrip_k3() {
         );
     }
 
-    // ── anticipated_decision bounds (AC-3.d) ─────────────────────────────────
+    // ── anticipated_decision bounds ─────────────────────────────────
     // Active under strict predicate: t=0 only (0+3=3 < 4).
     {
         let tmpl = &result.templates[0];
@@ -1540,7 +1518,7 @@ fn test_anticipated_thermals_lp_roundtrip_k3() {
         );
     }
 
-    // ── NPV objective at stage 0 (AC-3.e) ────────────────────────────────────
+    // ── NPV objective at stage 0 ────────────────────────────────────
     // delivery_stage=3; cumulative_factor[3]=1.0 (no discount).
     let expected_obj = 50.0 * total_hours * 1.0 / COST_SCALE_FACTOR; // 36.0
     assert!(
@@ -1569,7 +1547,7 @@ fn test_anticipated_thermals_lp_roundtrip_k3() {
         );
     }
 
-    // ── Fishing row CSC at stage 3 (K=3 <= 3) (AC-3.h) ──────────────────────
+    // ── Fishing row CSC at stage 3 (K=3 <= 3) ──────────────────────
     {
         let t = &result.templates[3];
         let row_fish = row_fish_start;
@@ -1593,7 +1571,7 @@ fn test_anticipated_thermals_lp_roundtrip_k3() {
         );
     }
 
-    // ── Fishing row equality bounds 0==0 at stage 3 (AC-3.i) ─────────────────
+    // ── Fishing row equality bounds 0==0 at stage 3 ─────────────────
     {
         let t = &result.templates[3];
         let row_fish = row_fish_start;

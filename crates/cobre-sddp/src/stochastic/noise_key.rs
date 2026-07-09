@@ -1,12 +1,12 @@
 //! Per-(stage, canonical-ω) σ-weighted noise keys for the backward solve order.
 //!
 //! `noise_key[stage][ω]` is a pure function of setup-constant data (the synced
-//! tree's `raw_noise` and the fixed per-(hydro, stage) `std_m3s`), so it is
-//! precomputed once at setup and never reaches the hot path. The backward solve
-//! order sorts each stage's openings by this key (see
-//! [`crate::setup`] / `OpeningTree::set_solve_order`); the keys are a pure
-//! function of the synced tree plus fixed σ, so every rank computes the identical
-//! permutation and cuts stay bit-identical across thread/rank counts.
+//! tree's `raw_noise` and the fixed per-(hydro, stage) `std_m3s`), precomputed
+//! once at setup and never reaching the hot path. The backward solve order
+//! sorts each stage's openings by this key (see [`crate::setup`] /
+//! `OpeningTree::set_solve_order`); because the key is setup-constant, every
+//! rank computes the identical permutation and cuts stay bit-identical across
+//! thread/rank counts.
 //!
 //! ## σ layout alignment
 //!
@@ -85,10 +85,9 @@ pub(crate) fn noise_key(sigma: &[f64], raw_noise: &[f64]) -> Result<f64, SddpErr
     Ok(sigma.iter().zip(raw_noise.iter()).map(|(s, n)| s * n).sum())
 }
 
-/// Build the per-(stage, hydro) seasonal `std_m3s` table, indexed
-/// `[stage * n_hydros + h]`, keyed on `(hydro_id, stage_id)` exactly as the PAR
-/// precompute so σ matches the canonical hydro order; a `(hydro, stage)` pair
-/// with no inflow model contributes σ = 0.
+/// Build the per-(stage, hydro) seasonal `std_m3s` table indexed
+/// `[stage * n_hydros + h]`; a `(hydro, stage)` pair with no inflow model
+/// contributes σ = 0.
 fn build_sigma_table(
     system: &System,
     hydro_ids: &[EntityId],
@@ -120,7 +119,6 @@ mod tests {
 
     #[test]
     fn test_noise_key_sums_sigma_weighted_components() {
-        // noise_key = Σ σ_h · raw_noise[h] over a hand-constructed 3-element pair.
         let sigma = [30.0, 20.0, 10.0];
         let raw_noise = [1.5, -2.0, 0.5];
         // 30*1.5 + 20*(-2.0) + 10*0.5 = 45 - 40 + 5 = 10.
@@ -130,7 +128,6 @@ mod tests {
 
     #[test]
     fn test_noise_key_ignores_trailing_noise_components() {
-        // Trailing load/NCS components beyond σ.len() are not weighted.
         let sigma = [2.0, 4.0];
         let raw_noise = [1.0, 1.0, 100.0, -50.0];
         // 2*1 + 4*1 = 6; the 100.0 and -50.0 tail is ignored.
@@ -140,8 +137,6 @@ mod tests {
 
     #[test]
     fn test_noise_key_hard_errors_on_sigma_longer_than_noise() {
-        // σ longer than the noise vector must hard-error, naming both lengths,
-        // never silently truncate or zero-pad.
         let sigma = [1.0, 2.0, 3.0];
         let raw_noise = [1.0, 1.0];
         let err = noise_key(&sigma, &raw_noise).expect_err("must reject mismatch");

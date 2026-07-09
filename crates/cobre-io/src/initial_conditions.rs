@@ -98,23 +98,8 @@ use crate::LoadError;
 
 // ── Intermediate serde types ──────────────────────────────────────────────────
 
-/// Initial reservoir storage conditions, past inflow values, and recent
-/// observations for all hydro plants in the case.
-///
-/// Two arrays specify starting volumes at simulation time zero:
-/// - `storage` — operating hydros (those participating in generation dispatch).
-/// - `filling_storage` — filling hydros (reservoirs under construction or filling).
-///
-/// An optional array provides past inflow values for PAR(p) lag initialization:
-/// - `past_inflows` — ordered from most recent (lag 1) to oldest (lag p).
-///
-/// An optional array provides observed inflow data for mid-season study starts:
-/// - `recent_observations` — date-ranged observations that seed the lag accumulator.
-///
-/// A hydro may appear in at most one of the two storage arrays. Duplicate
-/// `hydro_id` values within the same array are rejected. Cross-reference
-/// validation (checking that IDs exist in the hydro registry) is deferred to
-/// a later validation layer.
+/// Intermediate serde type for `initial_conditions.json`, deserialized then
+/// validated before conversion to [`InitialConditions`].
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -262,10 +247,6 @@ pub(crate) struct RawAnticipatedCommitmentHistory {
 
 /// Load and validate `initial_conditions.json` from `path`.
 ///
-/// Reads the JSON file, deserializes it through intermediate serde types, then
-/// performs post-deserialization validation before converting to
-/// [`InitialConditions`].
-///
 /// # Errors
 ///
 /// | Condition                                              | Error variant              |
@@ -325,7 +306,6 @@ fn validate_raw(raw: &RawInitialConditions, path: &Path) -> Result<(), LoadError
     Ok(())
 }
 
-/// Check that all `value_hm3` entries in an array are non-negative.
 fn validate_non_negative(
     entries: &[RawHydroStorage],
     array_name: &str,
@@ -343,7 +323,6 @@ fn validate_non_negative(
     Ok(())
 }
 
-/// Check that no `hydro_id` appears more than once within an array.
 fn validate_no_duplicates(
     entries: &[RawHydroStorage],
     array_name: &str,
@@ -362,7 +341,6 @@ fn validate_no_duplicates(
     Ok(())
 }
 
-/// Check that no `hydro_id` appears in both `storage` and `filling_storage`.
 fn validate_mutual_exclusion(raw: &RawInitialConditions, path: &Path) -> Result<(), LoadError> {
     let storage_ids: HashSet<i32> = raw.storage.iter().map(|e| e.hydro_id).collect();
 
@@ -382,7 +360,6 @@ fn validate_mutual_exclusion(raw: &RawInitialConditions, path: &Path) -> Result<
     Ok(())
 }
 
-/// Check that no `hydro_id` appears more than once in `past_inflows`.
 fn validate_past_inflows_no_duplicates(
     entries: &[RawHydroPastInflows],
     path: &Path,
@@ -400,7 +377,6 @@ fn validate_past_inflows_no_duplicates(
     Ok(())
 }
 
-/// Check that every value in `past_inflows[i].values_m3s` is finite and non-negative.
 fn validate_past_inflows_values(
     entries: &[RawHydroPastInflows],
     path: &Path,
@@ -422,8 +398,6 @@ fn validate_past_inflows_values(
     Ok(())
 }
 
-/// Check that when `season_ids` is present for a `past_inflows` entry, its
-/// length equals `values_m3s.len()`.
 fn validate_past_inflows_season_ids(
     entries: &[RawHydroPastInflows],
     path: &Path,
@@ -448,8 +422,6 @@ fn validate_past_inflows_season_ids(
     Ok(())
 }
 
-/// Check that every `start_date` and `end_date` in `recent_observations` is a
-/// valid ISO 8601 date (`YYYY-MM-DD`) and that `end_date > start_date`.
 fn validate_recent_observations_dates(
     entries: &[RawRecentObservation],
     path: &Path,
@@ -492,7 +464,6 @@ fn validate_recent_observations_dates(
     Ok(())
 }
 
-/// Check that every `value_m3s` in `recent_observations` is finite and non-negative.
 fn validate_recent_observations_values(
     entries: &[RawRecentObservation],
     path: &Path,
@@ -560,11 +531,6 @@ fn validate_recent_observations_no_overlap(
 }
 
 /// Validate IO-layer invariants on `past_anticipated_commitments`.
-///
-/// Checks:
-/// - No duplicate `thermal_id` within the array.
-/// - No entry with an empty `values_mw` (anticipated plants always need ≥ 1 value).
-/// - No negative or non-finite value in `values_mw`.
 fn validate_anticipated_commitment_histories(
     histories: &[RawAnticipatedCommitmentHistory],
     path: &Path,
@@ -617,8 +583,6 @@ fn validate_anticipated_commitment_histories(
     Ok(())
 }
 
-/// Check that every `start_date` and `end_date` in `past_defluences` is a valid
-/// ISO 8601 date (`YYYY-MM-DD`) and that `end_date > start_date`.
 fn validate_past_defluences_dates(
     entries: &[RawHydroPastDefluence],
     path: &Path,
@@ -661,7 +625,6 @@ fn validate_past_defluences_dates(
     Ok(())
 }
 
-/// Check that every `value_m3s` in `past_defluences` is finite and non-negative.
 fn validate_past_defluences_values(
     entries: &[RawHydroPastDefluence],
     path: &Path,

@@ -14,7 +14,6 @@ pub(super) fn check_stage_structure(data: &ParsedData, ctx: &mut ValidationConte
 
     let stage_ids: HashSet<i32> = stages.iter().map(|s| s.id).collect();
 
-    // Rule 1.
     for transition in &graph.transitions {
         if !stage_ids.contains(&transition.source_id) {
             ctx.add_error(
@@ -40,7 +39,6 @@ pub(super) fn check_stage_structure(data: &ParsedData, ctx: &mut ValidationConte
         }
     }
 
-    // Rule 2.
     let mut prob_sums: HashMap<i32, f64> = HashMap::new();
     for transition in &graph.transitions {
         *prob_sums.entry(transition.source_id).or_insert(0.0) += transition.probability;
@@ -62,7 +60,6 @@ pub(super) fn check_stage_structure(data: &ParsedData, ctx: &mut ValidationConte
         }
     }
 
-    // Rule 3.
     if graph.graph_type == PolicyGraphType::Cyclic && graph.annual_discount_rate <= 0.0 {
         ctx.add_error(
             ErrorKind::InvalidValue,
@@ -76,7 +73,6 @@ pub(super) fn check_stage_structure(data: &ParsedData, ctx: &mut ValidationConte
         );
     }
 
-    // Rule 4.
     for stage in stages {
         for block in &stage.blocks {
             if block.duration_hours <= 0.0 {
@@ -94,7 +90,6 @@ pub(super) fn check_stage_structure(data: &ParsedData, ctx: &mut ValidationConte
         }
     }
 
-    // Rule 5.
     for stage in stages {
         if let StageRiskConfig::CVaR { alpha, lambda } = stage.risk_config {
             if alpha <= 0.0 || alpha > 1.0 {

@@ -47,7 +47,7 @@ pub struct PolicyCutRecord<'a> {
     pub iteration: u32,
     /// Forward pass index within the generating iteration.
     pub forward_pass_index: u32,
-    /// Pre-computed cut intercept: `alpha - beta' * x_hat`.
+    /// Pre-computed cut intercept.
     pub intercept: f64,
     /// Gradient coefficients, length must equal `state_dimension`.
     ///
@@ -60,8 +60,6 @@ pub struct PolicyCutRecord<'a> {
 }
 
 /// One stage's solver basis for policy checkpoint serialization.
-///
-/// `'a` borrows the status arrays without copying.
 #[derive(Debug, Clone)]
 pub struct PolicyBasisRecord<'a> {
     /// Stage index (0-based).
@@ -96,7 +94,7 @@ pub struct StageStatesPayload<'a> {
 }
 
 /// Per-stage cut data payload for [`crate::write_policy_checkpoint`], grouping the
-/// arguments of [`crate::serialize_stage_cuts`]. `'a` borrows slices without copying.
+/// arguments of [`crate::serialize_stage_cuts`].
 #[derive(Debug)]
 pub struct StageCutsPayload<'a> {
     /// Stage index (0-based), used as the file name index in `cuts/stage_NNN.bin`.

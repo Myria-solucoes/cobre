@@ -24,8 +24,7 @@ use cobre_core::{BlockMode, EntityId, Hydro, SeasonCycleType, window_period_over
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 
 /// Below this `max_t(t_v/h_t)` ratio, cross-stage transport carries a
-/// mass-fraction (e.g. 6h travel time over a 720h monthly stage, ratio
-/// ~=0.8%) small enough to treat as negligible.
+/// mass-fraction small enough to treat as negligible.
 const NEGLIGIBLE_RATIO_THRESHOLD: f64 = 0.01;
 
 pub(super) fn validate_travel_time(data: &ParsedData, ctx: &mut ValidationContext) {

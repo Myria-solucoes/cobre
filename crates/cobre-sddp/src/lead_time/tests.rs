@@ -306,7 +306,7 @@ fn test_resolve_delivery_splits_against_arrival_stage_own_blocks() {
     assert_close(&arrival_density[1], &[1.0]);
 }
 
-// Exercises the new Σ_b φ_{d,b} == 1 delivery-conservation debug_assert
+// Exercises the Σ_b φ_{d,b} == 1 delivery-conservation debug_assert
 // directly: every nonempty arrival_density row sums to 1.0, whether the row
 // split against a matching block partition (uniform calendar) or fell back
 // to a single row (a length mismatch, the mixed calendar).
@@ -460,8 +460,6 @@ fn test_anticipated_resolution_k_max_is_global_depth_max() {
     assert_eq!(resolution.k_max, 4);
 }
 
-// An empty lead set (no anticipated plants) resolves to an empty batch with ring
-// depth 0 — the zero-anticipated collapse.
 #[test]
 fn test_anticipated_resolution_empty_is_zero_depth() {
     let resolution = AnticipatedResolution::resolve(&[], &[720.0; 4], 4);
@@ -550,11 +548,10 @@ fn test_is_ready_at_monotonic_prefix_for_constant_lead() {
     );
 }
 
-// Migration-equivalence pins: every field of `SpreadResolution`/
-// `PointResolution`, byte-compared against a baseline captured from the
-// pre-unification resolver bodies, on the fixtures the ticket names. A tolerance
-// compare would miss a projection-kernel extraction that subtly perturbs one
-// field while leaving the others (and any narrower assertion) untouched.
+// These pins byte-compare every field of `SpreadResolution`/`PointResolution`
+// against a captured baseline: a tolerance compare would miss a projection-kernel
+// extraction that subtly perturbs one field while leaving every narrower
+// assertion untouched.
 
 #[test]
 fn migration_equivalence_spread_monthly_half_split() {

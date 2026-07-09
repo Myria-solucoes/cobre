@@ -70,7 +70,7 @@ mod anticipated_backward_cut {
 
     const TOL: f64 = 1e-6;
 
-    // System::build sorts thermals by EntityId ascending; with reg_id < ant_id (R7),
+    // System::build sorts thermals by EntityId ascending; with reg_id < ant_id,
     // thermal_idx 0 is the regular thermal and 1 is the anticipated thermal.
     const THERMAL_IDX_REG: usize = 0;
     const THERMAL_IDX_ANT: usize = 1;
@@ -342,7 +342,7 @@ mod anticipated_backward_cut {
             },
         );
 
-        // Anticipated ring-buffer seeds; per R6 any feasible choice yields the same cut.
+        // Anticipated ring-buffer seeds; any feasible choice yields the same cut.
         let initial_conditions = InitialConditions {
             storage: vec![],
             filling_storage: vec![],
@@ -549,7 +549,6 @@ mod anticipated_backward_cut {
             outcome.error,
         );
 
-        // ── AC-2: at least one active cut at stage 0 FCF ──────────────────
         let pool0 = &setup.fcf.pools[0];
         let active_count = pool0.active_count();
         assert!(
@@ -558,10 +557,8 @@ mod anticipated_backward_cut {
          {N_ITERATIONS} iterations; got {active_count}",
         );
 
-        // Locate the anticipated_slots_out indices inside the state vector.
-        // For n_hydros = 0 and max_par_order = 0 the block starts at 0, with
-        // layout `start + slot * n_anticipated + plant`. Here n_anticipated = 1
-        // and plant = 0, so slot 0 lives at `start + 0` and slot 1 at `start + 1`.
+        // Anticipated ring layout is `start + slot * n_anticipated + plant`; with
+        // n_anticipated = 1, plant = 0 the slots are consecutive from `start`.
         let state = setup.stage_state();
         let ant_state_start = state.anticipated_slots_out.start;
         let slot0_idx = ant_state_start; // slot 0, plant 0
@@ -577,18 +574,10 @@ mod anticipated_backward_cut {
          be 0; got {ant_state_start}",
         );
 
-        // ── AC-3 / AC-4: select the iteration-1 cut explicitly.
-        // `active_cuts(stage)` yields `(slot, intercept, &[coeffs])` where `slot`
-        // encodes `warm_start_count + (iteration - iteration_base) * forward_passes
-        // + forward_pass_index` (per CutPool::slot_index). With dense packing
-        // (iteration_base = start_iteration + 1 = 1) and forward_passes = 1, the
-        // iteration-1 cut lands at slot 0. The analytical match is this FIRST cut:
-        // once iteration 1's cut is frozen into stage 0's template, the iteration-2
-        // forward trial point shifts to a regime where stage 2's subproblem is
-        // insensitive to the propagated state (the FCF tangent is exact at the
-        // visited point), so iterations 2-5 add zero-subgradient cuts with intercept
-        // c_ant*D_1/K = 0.5. The closed-form derivation applies to the iteration-1
-        // cut; select it explicitly rather than taking the most-recent one.
+        // The closed-form matches the iteration-1 cut only: it lands at slot 0 under
+        // dense packing (iteration_base = 1, forward_passes = 1, per
+        // CutPool::slot_index); later iterations add zero-subgradient cuts at shifted
+        // trial points. Select slot 0 explicitly rather than the most-recent cut.
         let analytical = setup
         .fcf
         .active_cuts(0)
@@ -607,13 +596,6 @@ mod anticipated_backward_cut {
             state.anticipated_slots_out.end,
         );
 
-        // ── AC-3: coefficient at slot 1 ─────────────────────────────────────────
-        // Expected: -C_REG / COST_SCALE_FACTOR * BLOCK_HOURS = -0.0001.
-        // Source: dual flowing through the frozen stage-1 FCF cut, which carries
-        // coefficient +c_reg/COST_SCALE*BLOCK_HOURS on x_state[slot=1]_1.
-        // The coefficient originates from stage 2's slot-0 fishing dual, routed
-        // through the in-LP ring-shift definition row linking stage 1's outgoing
-        // slot to stage 2's incoming pin (`StateLayout::state_to_lp_column`).
         let actual_coeff_slot1 = coefficients[slot1_idx];
         assert!(
             (actual_coeff_slot1 - EXPECTED_COEFF_SLOT1).abs() < TOL,
@@ -629,12 +611,6 @@ mod anticipated_backward_cut {
             n_state = coefficients.len(),
         );
 
-        // ── AC-4: coefficient at slot 0 ─────────────────────────────────────────
-        // Expected: -C_REG / COST_SCALE_FACTOR * BLOCK_HOURS = -0.0001.
-        // Source: dual of the same-stage fishing equality at stage 1, which is
-        // active because the fishing constraint is always active for every
-        // anticipated plant. Both slots carry identical magnitude via different
-        // propagation paths.
         let actual_coeff_slot0 = coefficients[slot0_idx];
         assert!(
             (actual_coeff_slot0 - EXPECTED_COEFF_SLOT0).abs() < TOL,
@@ -1227,8 +1203,6 @@ mod anticipated_pre_horizon_seed_delivery {
     /// may commit less if cuts are loose, never more); plus a $1,000 tolerance.
     #[test]
     fn pre_horizon_seed_delivers_at_stage_zero_k1() {
-        // Cost bound: see this test's doc comment. Tolerance matches
-        // anticipated_numerical_reconciliation_k2.
         const STAGE_0_BACKUP_COST_USD: f64 = (150.0 - 100.0) * 744.0 * 5000.0;
         const MAX_DECISION_COST_USD: f64 = 4.0 * 200.0 * 744.0 * 10.0;
         const COST_TOLERANCE_USD: f64 = 1_000.0;
@@ -1271,7 +1245,6 @@ mod anticipated_pre_horizon_seed_delivery {
                 .and_then(|th| th.anticipated_committed_mw)
         };
 
-        // ── AC1: committed_at(0) == Some(100.0) within 1e-6 MW ─────────────────
         let c0 = committed_at(0).expect(
             "AC1 FAIL: committed_at(0) is None. \
          The always-active fishing predicate is not delivering the 100 MW seed \
@@ -1285,7 +1258,6 @@ mod anticipated_pre_horizon_seed_delivery {
          slot 0 = 100.0 MW of the ring buffer.",
         );
 
-        // ── AC2: decision_at(t) non-zero and saturates near 200 MW ─────────────
         // Active-decision stages are t ∈ {0,1,2,3} (t + K < n_stages, i.e. t + 1 < 5).
         for t in 0..4_usize {
             let dt = decision_at(t).unwrap_or_else(|| {
@@ -1308,7 +1280,6 @@ mod anticipated_pre_horizon_seed_delivery {
             );
         }
 
-        // ── AC3: committed_at(t) ≈ decision_at(t-1) for t ∈ {1,2,3,4} ─────────
         // Ring-buffer shift invariant: after the shift at the end of stage t-1, slot 0
         // holds the in-study decision from t-1, which stage t's fishing equality pins.
         for t in 1..5_usize {
@@ -1335,10 +1306,8 @@ mod anticipated_pre_horizon_seed_delivery {
             );
         }
 
-        // ── AC4: observed_total ≤ EXPECTED_TOTAL_UPPER_BOUND_USD ────────────────
-        // Sum per-stage `immediate_cost` (LP objective minus theta), NOT `total_cost`
-        // — the latter includes the theta approximation artefact. The bound is derived
-        // on the cost-bound constants above.
+        // Sum immediate_cost (LP objective minus theta), not total_cost — total_cost
+        // includes the theta approximation artefact.
         let observed_total: f64 = scenario
             .stages
             .iter()
@@ -1399,8 +1368,6 @@ mod anticipated_pre_horizon_seed_delivery {
     ///    - Total ≤ $636,865,000.
     #[test]
     fn pre_horizon_seed_delivers_pre_horizon_stages_k2() {
-        // Cost bound: see this test's doc comment. Tolerance matches
-        // anticipated_numerical_reconciliation_k2.
         const STAGE_0_BACKUP_COST_USD: f64 = (150.0 - 80.0) * 744.0 * 5000.0;
         const STAGE_1_BACKUP_COST_USD: f64 = (150.0 - 50.0) * 744.0 * 5000.0;
         const MAX_DECISION_COST_USD: f64 = 3.0 * 200.0 * 744.0 * 10.0;
@@ -1414,8 +1381,8 @@ mod anticipated_pre_horizon_seed_delivery {
         let config = build_config(FIXTURE_K2.iterations);
         let mut setup = build_setup_in_code(system, &config);
 
-        // 5 iterations: after 1, stage-1 decisions are too loose to satisfy the AC5
-        // cost bound.
+        // 5 iterations: after 1, stage-1 decisions are too loose to satisfy the cost
+        // bound.
         let scenario_results = run_simulation(&mut setup, FIXTURE_K2.iterations);
 
         assert_eq!(
@@ -1446,7 +1413,6 @@ mod anticipated_pre_horizon_seed_delivery {
                 .and_then(|th| th.anticipated_committed_mw)
         };
 
-        // ── AC1: committed_at(0) == Some(80.0) within 1e-6 MW ──────────────────
         let c0 = committed_at(0).expect(
             "AC1 FAIL: committed_at(0) is None. \
          The always-active fishing predicate is not delivering the 80 MW seed \
@@ -1460,8 +1426,7 @@ mod anticipated_pre_horizon_seed_delivery {
          slot 0 = 80.0 MW of the ring buffer.",
         );
 
-        // ── AC2: committed_at(1) == Some(50.0) within 1e-6 MW ──────────────────
-        // (K=2-specific: tests ring-buffer shift between pre-horizon stages 0→1)
+        // K=2-specific: ring-buffer shift between pre-horizon stages 0→1.
         let c1 = committed_at(1).expect(
         "AC2 FAIL: committed_at(1) is None. \
          The fishing constraint is always active for every anticipated plant, so it must be active at stage 1. \
@@ -1476,8 +1441,7 @@ mod anticipated_pre_horizon_seed_delivery {
          moving slot 1 into slot 0 between pre-horizon stages.",
         );
 
-        // ── AC3: committed_at(t) ≈ decision_at(t-2) for t ∈ {2,3,4} ───────────
-        // (K=2 ring-buffer: decisions mature 2 stages after being made)
+        // K=2 ring-buffer: decisions mature 2 stages after being made.
         for t in 2..5_usize {
             let ct = committed_at(t).unwrap_or_else(|| {
                 panic!(
@@ -1504,8 +1468,7 @@ mod anticipated_pre_horizon_seed_delivery {
             );
         }
 
-        // ── AC4: decision_at(t) non-zero and bounded for t ∈ {0,1,2} ───────────
-        // (Active-decision stages: t + 2 < 5; LP saturates on cost ratio)
+        // Active-decision stages: t + 2 < 5; LP saturates on cost ratio.
         for t in 0..3_usize {
             let dt = decision_at(t).unwrap_or_else(|| {
                 panic!(
@@ -1528,9 +1491,8 @@ mod anticipated_pre_horizon_seed_delivery {
             );
         }
 
-        // ── AC5: observed_total ≤ EXPECTED_TOTAL_UPPER_BOUND_USD ────────────────
-        // (Use immediate_cost, not total_cost which includes theta approximation artefact.
-        //  If no seeds delivered: 2 × 150 MW × 744 h × $5000 = $1.116B >> bound → fails)
+        // Use immediate_cost, not total_cost (which includes the theta approximation
+        // artefact).
         let observed_total: f64 = scenario
             .stages
             .iter()
@@ -1601,8 +1563,6 @@ mod anticipated_pre_horizon_seed_delivery {
     ///    - Total upper bound: $1,343,665,000.
     #[test]
     fn pre_horizon_seed_delivers_three_pre_horizon_stages_k3() {
-        // Cost bound: see this test's doc comment. Tolerance matches
-        // anticipated_numerical_reconciliation_k2.
         const STAGE_0_BACKUP_COST_USD: f64 = (150.0 - 50.0) * 744.0 * 5000.0;
         const STAGE_1_BACKUP_COST_USD: f64 = (150.0 - 30.0) * 744.0 * 5000.0;
         const STAGE_2_BACKUP_COST_USD: f64 = (150.0 - 10.0) * 744.0 * 5000.0;
@@ -1619,7 +1579,7 @@ mod anticipated_pre_horizon_seed_delivery {
         let mut setup = build_setup_in_code(system, &config);
 
         // 5 iterations let cuts sharpen so stage-2 decisions reach max_gen, covering
-        // stage-5 delivery at zero backup cost (the AC6 bound).
+        // stage-5 delivery at zero backup cost.
         let scenario_results = run_simulation(&mut setup, FIXTURE_K3.iterations);
 
         assert_eq!(
@@ -1650,7 +1610,6 @@ mod anticipated_pre_horizon_seed_delivery {
                 .and_then(|th| th.anticipated_committed_mw)
         };
 
-        // ── AC1: committed_at(0) == Some(50.0) within 1e-6 MW ──────────────────
         let c0 = committed_at(0).expect(
             "AC1 FAIL: committed_at(0) is None. \
          The always-active fishing predicate is not delivering the 50 MW seed \
@@ -1664,7 +1623,6 @@ mod anticipated_pre_horizon_seed_delivery {
          slot 0 = 50.0 MW of the ring buffer.",
         );
 
-        // ── AC2: committed_at(1) == Some(30.0) within 1e-6 MW ──────────────────
         let c1 = committed_at(1).expect(
         "AC2 FAIL: committed_at(1) is None. \
          The fishing constraint is always active for every anticipated plant, so it must be active at stage 1. \
@@ -1679,7 +1637,6 @@ mod anticipated_pre_horizon_seed_delivery {
          moving slot 1 into slot 0 between pre-horizon stages 0 and 1.",
         );
 
-        // ── AC3: committed_at(2) == Some(10.0) within 1e-6 MW ──────────────────
         let c2 = committed_at(2).expect(
         "AC3 FAIL: committed_at(2) is None. \
          The fishing constraint is always active for every anticipated plant, so it must be active at stage 2. \
@@ -1694,7 +1651,6 @@ mod anticipated_pre_horizon_seed_delivery {
          If the result is 50.0 MW, neither shift has occurred.",
         );
 
-        // ── AC4: committed_at(t) ≈ decision_at(t-3) for t ∈ {3,4,5} ───────────
         for t in 3..6_usize {
             let ct = committed_at(t).unwrap_or_else(|| {
                 panic!(
@@ -1721,7 +1677,6 @@ mod anticipated_pre_horizon_seed_delivery {
             );
         }
 
-        // ── AC5: decision_at(t) non-zero and bounded for t ∈ {0,1,2} ───────────
         for t in 0..3_usize {
             let dt = decision_at(t).unwrap_or_else(|| {
                 panic!(
@@ -1744,9 +1699,8 @@ mod anticipated_pre_horizon_seed_delivery {
             );
         }
 
-        // ── AC6: observed_total ≤ EXPECTED_TOTAL_UPPER_BOUND_USD ────────────────
-        // Sum immediate_cost, NOT total_cost — total_cost includes the theta
-        // approximation artefact that would break this bound.
+        // Sum immediate_cost, not total_cost — total_cost includes the theta
+        // approximation artefact.
         let observed_total: f64 = scenario
             .stages
             .iter()
@@ -2219,7 +2173,6 @@ mod anticipated_d_t_saturation {
     fn d_t_commits_to_load_for_every_active_stage_k2() {
         let k: usize = 2;
         let n_stages: usize = 6;
-        // Active decision stages: t + K < n_stages  =>  t in {0, 1, 2, 3}.
         let active_stages: Vec<usize> = (0..n_stages).filter(|&t| t + k < n_stages).collect();
         let inactive_stages: Vec<usize> = (0..n_stages).filter(|&t| t + k >= n_stages).collect();
 
@@ -2250,7 +2203,6 @@ mod anticipated_d_t_saturation {
                 .and_then(|th| th.anticipated_decision_mw)
         };
 
-        // ── Active stages: decision must exist and commit to load = 150 MW ──
         let load_mw = 150.0_f64;
         let tol = 1e-3_f64;
         for t in &active_stages {
@@ -2270,7 +2222,6 @@ mod anticipated_d_t_saturation {
             );
         }
 
-        // ── Inactive stages: decision must be None (strict-boundary predicate) ──
         for t in &inactive_stages {
             assert!(
                 decision_at(*t).is_none(),
@@ -2349,7 +2300,6 @@ mod anticipated_d_t_saturation {
                 .and_then(|th| th.anticipated_committed_mw)
         };
 
-        // ── Active stages: decision must exist and commit to load = 150 MW ──
         let load_mw = 150.0_f64;
         let tol = 1e-3_f64;
         for t in &active_stages {
@@ -2370,7 +2320,6 @@ mod anticipated_d_t_saturation {
             );
         }
 
-        // ── Inactive stages: decision must be None (strict-boundary predicate) ──
         for t in &inactive_stages {
             assert!(
                 decision_at(*t).is_none(),
@@ -2379,8 +2328,6 @@ mod anticipated_d_t_saturation {
             );
         }
 
-        // ── Ring-buffer shift: committed_at(t) == decision_at(t - K) ──
-        //
         // The shift at end-of-stage-(t-3) places d_{t-3} into slot K-1=2; after two
         // more shifts (end of stage t-2 and t-1) it reaches slot 0, where the fishing
         // constraint reads it at stage t. So committed_at(t) = d_{t-3}.
@@ -2814,8 +2761,8 @@ mod anticipated_forward_pass {
             "basis_cache must have one entry per study stage"
         );
 
-        // AC-2: forward pass stores the post-shift outgoing state. Seed [100.0, 50.0]
-        // shifts to slot 0 = 50.0 (no other code path produces this exact value),
+        // Forward pass stores the post-shift outgoing state. Seed [100.0, 50.0]
+        // shifts to slot 0 = 50.0 (no other code path produces this exact value);
         // slot 1 = LP decision d_0 ∈ [0, 100].
         let s0 = basis_cache[0]
             .as_ref()
@@ -2833,8 +2780,8 @@ mod anticipated_forward_pass {
             s0[ant_start + 1]
         );
 
-        // AC-3: backward pass for stage 1 stores the forward outgoing of stage 0 as
-        // its trial point x_hat, so basis_cache[1] equals basis_cache[0].
+        // Backward pass for stage 1 stores the forward outgoing of stage 0 as its
+        // trial point x_hat, so basis_cache[1] equals basis_cache[0].
         let s1 = basis_cache[1]
             .as_ref()
             .expect("AC-3: stage 1 basis must be captured")
@@ -2855,8 +2802,8 @@ mod anticipated_forward_pass {
             s0[ant_start + 1],
         );
 
-        // AC-4: for t≥2, basis_cache[t] holds the forward outgoing of stage t-1, so
-        // the forward shift gives s_curr slot 0 == s_prev slot 1.
+        // For t≥2, basis_cache[t] holds the forward outgoing of stage t-1, so the
+        // forward shift gives s_curr slot 0 == s_prev slot 1.
         for t in 2..5_usize {
             let s_curr = basis_cache[t]
                 .as_ref()
@@ -2878,8 +2825,6 @@ mod anticipated_forward_pass {
             );
         }
 
-        // AC-5: every captured slot 1 (the anticipated decision) stays within the
-        // thermal's dispatch bounds [0.0, 100.0].
         for t in 0..5_usize {
             let s_t = basis_cache[t]
                 .as_ref()
@@ -4834,7 +4779,6 @@ mod anticipated_bridge_st_cruz_nova_k1 {
                 .and_then(|th| th.anticipated_committed_mw)
         };
 
-        // ── AC-delivery: committed_at(0) ≈ 204.5647 MW within 1e-3 MW ──────────
         let c0 = committed_at(0).expect(
             "AC-delivery FAIL: committed_at(0) is None. \
          The always-active fishing predicate is not delivering the 204.5647 MW seed \
@@ -4848,7 +4792,6 @@ mod anticipated_bridge_st_cruz_nova_k1 {
          thermal to slot 0 = 204.5647 MW of the ring buffer.",
         );
 
-        // ── AC-decision-nonzero: decision_at(t) > 1e-6 for t ∈ {0,1,2,3} ───────
         for t in 0..4_usize {
             let dt = decision_at(t).unwrap_or_else(|| {
                 panic!(
@@ -4871,8 +4814,6 @@ mod anticipated_bridge_st_cruz_nova_k1 {
             );
         }
 
-        // ── AC-ring-buffer: committed_at(t) ≈ decision_at(t-1) for t ∈ {1,2,3,4}
-        //
         // After the shift ending stage t-1, slot 0 holds that stage's decision, and
         // stage t's fishing equality pins generation to it.
         for t in 1..5_usize {
@@ -4899,11 +4840,8 @@ mod anticipated_bridge_st_cruz_nova_k1 {
             );
         }
 
-        // ── AC-cost-bound: observed_total ≤ EXPECTED_TOTAL_UPPER_BOUND_USD ───────
-        //
-        // Sum `immediate_cost` (LP objective minus theta), NOT `total_cost`; the
-        // latter includes the theta approximation artefact. Bound derived in the
-        // module doc.
+        // Sum immediate_cost (LP objective minus theta), not total_cost — total_cost
+        // includes the theta approximation artefact.
         let observed_total: f64 = scenario
             .stages
             .iter()
@@ -4966,17 +4904,9 @@ mod anticipated_convergence_slow {
     // System builder
     // ---------------------------------------------------------------------------
 
-    /// Build a 4-stage system with:
-    /// - 1 bus (deficit cost 500 $/MWh)
-    /// - 1 hydro (storage 200 hm³, initial 100 hm³, max_gen 250 MW,
-    ///   inflow mean 80 m³/s, std 20 m³/s) — id=3
-    /// - 1 anticipated thermal (K=2, cost 50 $/MWh, max 100 MW) — id=2
-    /// - 1 backup standard thermal (cost 500 $/MWh, max 200 MW) — id=4
-    /// - Load 220 MW constant across all stages
-    /// - `branching_factor=5`, `NoiseMethod::Saa`
-    /// - `past_anticipated_commitments = [(id=2, [40.0, 20.0])]`
-    ///
-    /// The LP is always feasible: backup thermal alone covers 220 MW.
+    /// Build the 4-stage K=2 convergence fixture (1 hydro, 1 anticipated thermal,
+    /// 1 backup). The LP is always feasible: the backup thermal alone covers the
+    /// 220 MW load.
     fn build_system(branching_factor: usize) -> cobre_core::System {
         let bus = make_bus(
             EntityId(1),
@@ -5441,9 +5371,9 @@ mod a1b_value_cut_identity_anchor {
     // `N_STAGES + K_MAX` axis `fill_anticipated_columns` reads. Stage 0 is the
     // seed-delivery stage AND the decision-anchored decoy for the delivery-1
     // decision; the delivery-stage-1 (150) and delivery-stage-2 (80) caps differ,
-    // which is what makes the AC3 mutation non-vacuous — constant caps would make a
-    // decision-anchored read indistinguishable from a delivery-anchored one.
-    // Delivery-stage axis width `fill_anticipated_columns` reads (`stage_idx + K`).
+    // which is what makes the delivery-anchoring mutation non-vacuous — constant caps
+    // would make a decision-anchored read indistinguishable from a delivery-anchored
+    // one.
     const THERMAL_AXIS: usize = N_STAGES + K_MAX;
     const DELIVERY_CAP: [f64; THERMAL_AXIS] = [150.0, 150.0, 80.0, 80.0];
 
@@ -5821,7 +5751,7 @@ mod a1b_value_cut_identity_anchor {
     /// (its stage-1 cap), T0 supplies 50; delivery stage 2 -> T1 commits 80 (its
     /// stage-2 cap), T0 supplies 120.
     ///
-    /// AC3 delivery-anchoring is MUTATION-verified. Changing the production read in
+    /// Delivery-anchoring is MUTATION-verified. Changing the production read in
     /// `fill_anticipated_columns` from `thermal_bounds(thermal_idx, delivery_stage)`
     /// to `thermal_bounds(thermal_idx, stage_idx)` (the decision stage) relaxes the
     /// stage-1 decision column to stage-1's 150 MW cap for delivery at stage 2; stage
@@ -5842,7 +5772,6 @@ mod a1b_value_cut_identity_anchor {
             &build_config(ITERATIONS),
         );
 
-        // Both modes must derive the same ring geometry on the uniform calendar.
         let (k_max_stages, n_ant_stages) = {
             let s = setup_stages.stage_state();
             (s.k_max, s.n_anticipated)
@@ -5968,7 +5897,7 @@ mod a1c_stage_count_mode_anchor {
     const D37_DURATIONS: [f64; 6] = [730.0, 730.0, 730.0, 720.0, 744.0, 720.0];
     const N_STAGES: usize = 6;
 
-    /// AC1: `LeadStages(2)` on the d37 calendar is the pure index shift
+    /// `LeadStages(2)` on the d37 calendar is the pure index shift
     /// `c(m) = m − 2`: `decider = [None, None, Some(0), Some(1), Some(2), Some(3)]`,
     /// each in-horizon `C(t)` is the singleton `{t + 2}` (t = 4, 5 deliver past the
     /// horizon and are empty), and every `depth` entry is `≤ 2`.
@@ -6011,7 +5940,7 @@ mod a1c_stage_count_mode_anchor {
         );
     }
 
-    /// AC2: the same `LeadStages(2)` lead resolves identically against a different
+    /// The same `LeadStages(2)` lead resolves identically against a different
     /// 6-stage duration vector (`[672.0; 6]`) — the hour clock is never consulted,
     /// so `decider`, `decision_sets`, and `depth` are byte-for-byte identical.
     #[test]
@@ -6036,7 +5965,7 @@ mod a1c_stage_count_mode_anchor {
         );
     }
 
-    /// AC3: the physical `LeadTime(1450.0)` mode DOES consult the clock. On the d37
+    /// The physical `LeadTime(1450.0)` mode DOES consult the clock. On the d37
     /// calendar `end_1 − 1450 = 1460 − 1450 = 10`, which lands in stage 0, so the
     /// end-anchored decider decides `m = 1` at stage 0 — where the pure stage-count
     /// shift (`c(1) = 1 − 2`) is still `None`. Full physical decider:
@@ -6069,7 +5998,7 @@ mod a1c_stage_count_mode_anchor {
         );
     }
 
-    // ── AC5: single-decider LeadTime end-to-end on the d37 unequal-hours calendar ──
+    // ── single-decider LeadTime end-to-end on the d37 unequal-hours calendar ──
 
     const LEAD_TIME_HOURS: f64 = 1440.0;
     const K_MAX: usize = 1;
@@ -6336,7 +6265,7 @@ mod a1c_stage_count_mode_anchor {
         }
     }
 
-    /// AC5: a single-decider `LeadTime(1440.0)` thermal on the d37 unequal-hours
+    /// A single-decider `LeadTime(1440.0)` thermal on the d37 unequal-hours
     /// calendar trains to convergence (`LB == UB`) with no panic — the physical
     /// mode is a live end-to-end path, not merely a resolver unit.
     #[test]

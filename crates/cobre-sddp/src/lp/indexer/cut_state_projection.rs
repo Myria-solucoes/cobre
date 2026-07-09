@@ -1,102 +1,64 @@
-//! Storage-scoped projection of the global [`StateLayout`] for cut storage,
-//! extraction (incoming), and rendering (outgoing).
-//!
-//! [`CutStateProjection`] exposes only the cut-state dimensions a stage's
-//! [`StageStateConfig`] enables — storage and/or inflow lags — with travel-time
-//! buckets and anticipated state always included (neither is governed by
-//! [`StageStateConfig`]). It maps a
-//! cut slot index `j ∈ [0, n_state())` to the LP incoming-state column its
-//! subgradient is read from ([`Self::state_to_lp_incoming_column`]) or the
-//! outgoing column its coefficient is dotted against in DCS scoring
-//! ([`Self::state_to_lp_outgoing_column`]), and exposes the nonzero-subset render
-//! pairs a cut row is built from ([`Self::render_pairs`]) — all in
-//! storage → lag → buckets → anticipated order.
-//!
-//! The global [`StateLayout`] is unchanged: it still drives the LP. This carries
-//! no LP-build responsibility and delegates every column to
-//! [`StateLayout::state_to_lp_incoming_column`] (incoming) or
-//! [`StateLayout::lp_column_for_state`] (outgoing).
+//! Storage-scoped projection of the global [`StateLayout`] onto the cut-state
+//! dimensions a stage enables, for cut storage, subgradient extraction (incoming
+//! columns), and cut rendering (outgoing columns).
 
 use cobre_core::temporal::StageStateConfig;
 
 use super::StateLayout;
 
 /// A storage-scoped view of the global state vector exposing only the cut-state
-/// dimensions a stage enables, plus anticipated state (always included).
+/// dimensions a stage enables, plus travel-time buckets and anticipated state
+/// (always included, never gated by [`StageStateConfig`]).
 ///
-/// This is a projection **of** a [`StateLayout`], not a sibling layout: it
-/// delegates all column arithmetic to the global layout and carries only an
-/// enabled-dimension mask (the [`StageStateConfig`] applied at construction) plus
-/// the precomputed column vectors that mask selects. It is meaningless without the
-/// [`StateLayout`] it was built from, and it never drives the LP. The default
-/// (all-enabled) projection is index-identical to that global layout (see the
-/// default-identity contract below).
-///
-/// This is the foundational projection that sizes a stage's cut pool to its
-/// enabled cut-state dimensions, gates which incoming-state columns dual
-/// extraction reads, and gates which outgoing columns a stored cut renders onto —
-/// so a stage with `inflow_lags: false` carries no lag coefficients in its cuts
-/// and its cut rows touch no lag column.
+/// A projection **of** a [`StateLayout`], not a sibling layout: it delegates all
+/// column arithmetic to the global layout and never drives the LP.
 ///
 /// ## Default-identity contract
 ///
-/// When `storage: true, inflow_lags: true`, [`Self::n_state`] equals the global
-/// [`StateLayout::n_state`], [`Self::state_to_lp_incoming_column`] equals the
-/// global incoming resolver for every `j`, and [`Self::render_pairs`] reproduces
-/// the global `nonzero_state_indices` render (same reduced index `j`, same
-/// outgoing column) exactly. The construction walks the global state index space
-/// in storage → lag → buckets → anticipated order, so the default projection
-/// reproduces `[0, StateLayout::n_state)` exactly. The forbidden alternative is
-/// reordering dimensions (e.g. anticipated before buckets) so a cut coefficient
-/// lands on the wrong LP column, silently corrupting every existing study.
+/// When `storage: true, inflow_lags: true` the projection is the identity:
+/// [`Self::n_state`] equals [`StateLayout::n_state`],
+/// [`Self::state_to_lp_incoming_column`] equals the global incoming resolver for
+/// every `j`, and [`Self::render_pairs`] reproduces the global
+/// `nonzero_state_indices` render exactly. Holds because the construction walks
+/// the state index space in storage → lag → buckets → anticipated order — the
+/// same order [`StateLayout::set_nonzero_mask`] builds its mask in. The forbidden
+/// alternative is reordering dimensions (e.g. anticipated before buckets),
+/// landing a cut coefficient on the wrong LP column and silently corrupting every
+/// existing study.
 ///
 /// ## Incoming vs outgoing vs render
 ///
-/// The incoming projection ([`Self::state_to_lp_incoming_column`]) and the
-/// outgoing projection ([`Self::state_to_lp_outgoing_column`]) both span the full
-/// enabled range `[0, n_state())` — including AR-padding and anticipated-padding
-/// slots whose coefficients are structurally zero — because dual extraction and
-/// DCS dot-product scoring read every enabled dimension. The render projection
-/// ([`Self::render_pairs`]) is the **nonzero subset** of that range (padding slots
-/// dropped, matching the global `nonzero_state_indices`), because a cut row emits
-/// no entry for a structurally-zero padding coefficient.
+/// Incoming ([`Self::state_to_lp_incoming_column`]) and outgoing
+/// ([`Self::state_to_lp_outgoing_column`]) both span the full enabled range
+/// `[0, n_state())`, including structurally-zero AR- and anticipated-padding
+/// slots, because dual extraction and DCS scoring read every enabled dimension.
+/// Render ([`Self::render_pairs`]) is the **nonzero subset** (padding dropped,
+/// matching the global `nonzero_state_indices`), because a cut row emits no entry
+/// for a structurally-zero coefficient.
 #[derive(Debug, Clone)]
 pub struct CutStateProjection {
-    /// Precomputed LP incoming-state column for every cut slot `j`, read on the
-    /// extraction hot path.
+    /// LP incoming column per cut slot `j` (extraction hot path).
     incoming_columns: Vec<usize>,
 
-    /// Precomputed LP outgoing-state column for every cut slot `j`, read on the
-    /// DCS scoring hot path; parallel to [`Self::incoming_columns`] (same `j`,
-    /// same enabled dimension).
+    /// LP outgoing column per cut slot `j` (DCS scoring); parallel to
+    /// [`Self::incoming_columns`].
     outgoing_columns: Vec<usize>,
 
-    /// Reduced coefficient index `j ∈ [0, n_state())` for each render pair, in
-    /// nonzero-subset order. Parallel to [`Self::render_columns`].
+    /// Reduced coefficient index `j` per render pair, nonzero-subset order;
+    /// parallel to [`Self::render_columns`].
     render_coeff_indices: Vec<usize>,
 
-    /// LP outgoing-state column for each render pair, in nonzero-subset order.
-    /// Parallel to [`Self::render_coeff_indices`].
+    /// LP outgoing column per render pair; parallel to
+    /// [`Self::render_coeff_indices`].
     render_columns: Vec<usize>,
 }
 
 impl CutStateProjection {
-    /// Project the global [`StateLayout`] onto the cut-state dimensions enabled by
-    /// `state_config`, with travel-time buckets and anticipated state always
-    /// included.
-    ///
-    /// Dimensions are walked in storage → lag → buckets → anticipated order —
-    /// the same order [`StateLayout::set_nonzero_mask`] builds its global mask
-    /// in, which is what makes the all-enabled default projection reproduce it
-    /// exactly. Each region's bounds come from `StateLayout`'s region
-    /// accessors, the sole owner of the boundary arithmetic:
-    /// `state_dim_storage_range` (included iff `state_config.storage`),
-    /// `state_dim_lag_range` (iff `state_config.inflow_lags`), and
-    /// `state_dim_bucket_range` / `state_dim_anticipated_range` (always —
-    /// mirroring anticipated: neither is governed by `state_config`). The
-    /// render subset keeps only indices in `global.nonzero_state_indices`
-    /// (padding slots dropped), so the default projection reproduces the
-    /// global `nonzero_state_indices` render exactly.
+    /// Project the global [`StateLayout`] onto the cut-state dimensions
+    /// `state_config` enables, with travel-time buckets and anticipated state
+    /// always included, walking storage → lag → buckets → anticipated (the
+    /// default-identity contract). Region bounds come from `StateLayout`'s region
+    /// accessors, the sole owner of the boundary arithmetic.
     #[must_use]
     pub fn new(global: &StateLayout, state_config: StageStateConfig) -> Self {
         let mut incoming_columns = Vec::new();
@@ -109,9 +71,8 @@ impl CutStateProjection {
             let outgoing = global.lp_column_for_state(g);
             incoming_columns.push(global.state_to_lp_incoming_column(g));
             outgoing_columns.push(outgoing);
-            // Drop padding slots (not zero-fill): a dropped structurally-zero
-            // coefficient keeps the default render bit-identical to the global
-            // nonzero_state_indices render.
+            // Drop padding slots, never zero-fill: keeps the default render
+            // bit-identical to the global nonzero_state_indices render.
             if global.nonzero_state_indices.binary_search(&g).is_ok() {
                 render_coeff_indices.push(reduced_j);
                 render_columns.push(outgoing);
@@ -128,10 +89,9 @@ impl CutStateProjection {
                 push_dim(g);
             }
         }
-        // Travel-time buckets: always included, the anticipated pattern — a
-        // per-stage `StageStateConfig` reduction here would shrink pool
-        // `state_dimension` and misalign the intercept dot against the global
-        // trial state.
+        // Buckets and anticipated are always included, never gated by
+        // state_config: gating here would shrink pool state_dimension and
+        // misalign the intercept dot against the global trial state.
         for g in global.state_dim_bucket_range() {
             push_dim(g);
         }
@@ -257,8 +217,7 @@ mod tests {
         )
     }
 
-    /// Same as [`finalized`] but with a declared bucket block, mirroring
-    /// `state_layout.rs`'s own bucket-aware test helper.
+    /// Like [`finalized`] but with a declared bucket block.
     fn finalized_with_transit_buckets(
         hydro_count: usize,
         max_par_order: usize,
@@ -290,9 +249,6 @@ mod tests {
         inflow_lags: false,
     };
 
-    /// Default projection (`storage + inflow_lags`) over `N=3, L=2, A=0` is the
-    /// identity: `n_state()` equals the global `StateLayout::n_state` (9) and the
-    /// resolver agrees with the global resolver for every `j ∈ [0, 9)`.
     #[test]
     fn default_projection_is_identity() {
         let global = finalized(3, 2, 0, 0, vec![]);
@@ -309,8 +265,6 @@ mod tests {
         }
     }
 
-    /// Storage-only projection (`N=3, L=2, A=0`): `n_state()` is 3 and each cut
-    /// slot maps to `storage_in.start + j`.
     #[test]
     fn storage_only_projection() {
         let global = finalized(3, 2, 0, 0, vec![]);
@@ -326,11 +280,8 @@ mod tests {
         }
     }
 
-    /// Storage-only with anticipated (`N=2, L=1, A=1, k_max=2`): `inflow_lags`
-    /// disabled drops the lag dimensions but anticipated state stays included, so
-    /// `n_state()` is `2 + A*k_max = 4`. The two storage slots map to
-    /// `storage_in.start + j`; the two anticipated slots map to
-    /// `anticipated_state.start + i`.
+    /// `inflow_lags` disabled drops the lag dims but keeps anticipated:
+    /// `n_state() = N + A*k_max = 2 + 2 = 4`.
     #[test]
     fn storage_only_with_anticipated_includes_anticipated() {
         let global = finalized(2, 1, 1, 2, vec![2]);
@@ -352,10 +303,8 @@ mod tests {
         }
     }
 
-    /// `storage: false` edge case (`N=2, L=1, A=0`, `inflow_lags: true`): cut
-    /// state begins at the first enabled dimension (the inflow lags). With
-    /// `N*L = 2` lag slots and no storage or anticipated, `n_state()` is 2 and
-    /// each slot maps to `inflow_lags.start + i`.
+    /// `storage: false`: cut state begins at the first enabled dimension, the
+    /// inflow lags (`N*L = 2` slots, no storage or anticipated).
     #[test]
     fn storage_disabled_begins_at_first_enabled_dimension() {
         let global = finalized(2, 1, 0, 0, vec![]);
@@ -379,10 +328,6 @@ mod tests {
 
     // ── Outgoing projection / render-pairs tests ──────────────────────────────
 
-    /// Default projection (`storage + inflow_lags`) over `N=3, L=2, A=0`: the
-    /// outgoing resolver agrees with the global `lp_column_for_state` for every
-    /// `j`, and `render_pairs` reproduces the global `nonzero_state_indices` render
-    /// exactly (reduced index == global index, column == global outgoing column).
     #[test]
     fn default_render_matches_global_nonzero_mask() {
         let global = finalized(3, 2, 0, 0, vec![]);
@@ -410,10 +355,6 @@ mod tests {
         assert_eq!(cut.render_len(), global.nonzero_state_indices.len());
     }
 
-    /// Storage-only projection (`N=3, L=2, A=0`): the cut row renders ONLY the
-    /// three storage columns. `render_len()` is 3, each render pair maps reduced
-    /// index `j` to storage outgoing column `j` (identity for storage), and no lag
-    /// column appears.
     #[test]
     fn storage_only_render_touches_only_storage_columns() {
         let global = finalized(3, 2, 0, 0, vec![]);
@@ -436,18 +377,15 @@ mod tests {
     }
 
     /// AR-padding slots are dropped from the render but kept in the full enabled
-    /// range. With `N=2, L=3` and per-hydro effective lag counts `[1, 3]`, hydro 0
-    /// has padding at lags 1,2. The full enabled range is `N*(1+L)=8`, but the
-    /// render keeps only the global nonzero subset (storage + non-padding lags).
+    /// range. Per-hydro lag counts `[1, 3]` give hydro 0 padding at lags 1,2, so
+    /// the render (nonzero subset) is shorter than `n_state`.
     #[test]
     fn render_drops_ar_padding_slots() {
         let lag_counts = [1usize, 3];
         let global = StateLayout::new(2, 3, 0, Vec::new(), 0, 0, vec![], &lag_counts);
         let cut = CutStateProjection::new(&global, ALL_ENABLED);
 
-        // Full enabled range spans every dimension (incl. padding).
         assert_eq!(cut.n_state(), global.n_state);
-        // Render keeps only the nonzero subset.
         assert_eq!(cut.render_len(), global.nonzero_state_indices.len());
         assert!(
             cut.render_len() < cut.n_state(),
@@ -465,12 +403,9 @@ mod tests {
 
     // ── Bucket block tests ────────────────────────────────────────────────────
 
-    /// Storage-only projection with buckets present (`N=2, L=1, B=2, A=1,
-    /// k_max=2`): `inflow_lags` disabled drops the lag dimensions, but the
-    /// bucket block stays included — the anticipated always-included pattern,
-    /// never gated by `StageStateConfig`. `n_state()` is `N + B + A*k_max = 6`;
-    /// the two bucket slots sit between the storage slots and the anticipated
-    /// slots.
+    /// `inflow_lags` disabled, but the bucket block stays included (never gated
+    /// by `StageStateConfig`): `n_state() = N + B + A*k_max = 2 + 2 + 2 = 6`, with
+    /// bucket slots between storage and anticipated.
     #[test]
     fn bucket_block_always_included_with_storage_only() {
         let global = finalized_with_transit_buckets(2, 1, 2, vec![(0, 1), (1, 1)], 1, 2, vec![2]);
@@ -502,13 +437,10 @@ mod tests {
         }
     }
 
-    /// Bucket render pairs sit strictly between the lag block and the
-    /// anticipated block (`N=2, L=1, B=2, A=1, k_max=2`, all-enabled, no
-    /// padding): the render reproduces the global `nonzero_state_indices` walk
-    /// exactly — the ordering regression guard for "walk order MUST be
-    /// storage→lag→buckets→anticipated" (swapping buckets and anticipated
-    /// would misassign reduced coefficient indices even though every
-    /// `(index, column)` pair individually still resolves to a valid column).
+    /// The ordering regression guard for the storage→lag→buckets→anticipated walk:
+    /// swapping buckets and anticipated would misassign reduced coefficient
+    /// indices even though every `(index, column)` pair still resolves to a valid
+    /// column.
     #[test]
     fn bucket_render_pairs_sit_between_lag_and_anticipated() {
         let global = finalized_with_transit_buckets(2, 1, 2, vec![(0, 1), (1, 1)], 1, 2, vec![2]);
@@ -543,11 +475,9 @@ mod tests {
         );
     }
 
-    /// `B == 0`, reached via the bucket-aware constructor: the projection
-    /// reproduces `[0, StateLayout::n_state)` and its render exactly,
-    /// byte-identical to the pre-bucket walk — the required regression guard
-    /// for the always-included bucket block inserted between lag and
-    /// anticipated.
+    /// `B == 0` regression guard for the always-included bucket block: the
+    /// projection reproduces `[0, StateLayout::n_state)` and its render
+    /// byte-identically to the pre-bucket walk.
     #[test]
     fn b_zero_projection_matches_pre_transit_bucket_walk() {
         let global = finalized_with_transit_buckets(3, 2, 0, vec![], 2, 2, vec![1, 2]);

@@ -6,13 +6,12 @@
 //! over the FULL canonical stage vector, pre-study stages included), and
 //! `season_id` (a season-cycle index whose meaning — calendar month, week, or
 //! an arbitrary custom bucket — depends on `SeasonCycleType` and is *not*
-//! always the calendar month). Neither bare `usize`/`i32` distinguishes "look
-//! this up by domain id" from "look this up by study position" at the type
-//! level, which is how the FPHA productivity-override path came to key by
-//! position while the table itself is built and validated by domain id
-//! (`cobre_io::validation::productivity_resolution`); nor does it distinguish
-//! "season-cycle index" from "calendar month", which is how evaporation once
-//! reinterpreted `season_id` as a month and errored on `Weekly` stages. [`StageId`],
+//! always the calendar month). A bare `usize`/`i32` distinguishes neither
+//! "look up by domain id" from "look up by study position" nor "season-cycle
+//! index" from "calendar month": a mismatch keys by the wrong convention and
+//! still compiles (the FPHA productivity table is built and validated by
+//! domain id, `cobre_io::validation::productivity_resolution`; `season_id` is
+//! not the calendar month on `Weekly`/`Custom` cycles). [`StageId`],
 //! [`StudyPos`], and [`CalendarMonth`] make each convention a distinct type so a
 //! mismatched call site is a compile error, not a silent wrong-stage lookup.
 
@@ -42,7 +41,7 @@ pub struct StudyPos(pub usize);
 pub struct CalendarMonth(usize);
 
 impl CalendarMonth {
-    /// The 0-based month index (0 = January … 11 = December).
+    /// The 0-based month index.
     #[must_use]
     pub fn index(self) -> usize {
         self.0
@@ -114,9 +113,8 @@ mod tests {
         }
     }
 
-    /// On a Monthly-cycle study, `season_id` follows the `season_id == month0`
-    /// convention, so `month_of` must reproduce it exactly — the parity
-    /// invariant evaporation's derive-correct migration depends on.
+    /// On a Monthly-cycle study `season_id == month0`, so `month_of` must
+    /// reproduce it exactly.
     #[test]
     fn month_of_monthly_stage_equals_season_id() {
         let june = NaiveDate::from_ymd_opt(2024, 6, 15).unwrap_or_default();

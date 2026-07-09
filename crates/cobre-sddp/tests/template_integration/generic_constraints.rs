@@ -1,8 +1,7 @@
-//! `generic_constraints` section tests (split from the parent integration binary).
+//! `generic_constraints` section tests.
 
 use super::*;
 
-/// Zero generic constraints leave num_rows and num_cols at the baseline.
 #[test]
 fn generic_constraints_zero_does_not_change_layout() {
     let system = one_bus_system_n_blks(1);
@@ -22,8 +21,6 @@ fn generic_constraints_zero_does_not_change_layout() {
     );
 }
 
-/// A block-independent (trivial) constraint with `block_id = None` over 3 blocks
-/// collapses to a single stage-level row: num_rows += 1, num_cols unchanged.
 #[test]
 fn generic_constraint_no_slack_block_id_none_3_blocks_collapses() {
     use cobre_core::{ConstraintSense, ResolvedGenericConstraintBounds};
@@ -54,8 +51,6 @@ fn generic_constraint_no_slack_block_id_none_3_blocks_collapses() {
     );
 }
 
-/// A block-level (`BusExcess`) constraint with `block_id = None` over 3 blocks
-/// keeps one row per block: num_rows += n_blks.
 #[test]
 fn generic_constraint_no_slack_block_id_none_3_blocks_block_level_per_block() {
     use cobre_core::{ConstraintSense, ResolvedGenericConstraintBounds};
@@ -91,8 +86,6 @@ fn generic_constraint_no_slack_block_id_none_3_blocks_block_level_per_block() {
     );
 }
 
-/// A block-independent `<=` constraint with slack and `block_id = None` over 2
-/// blocks collapses to one stage-level row plus one `<=` slack column.
 #[test]
 fn generic_constraint_le_slack_enabled_2_blocks_collapses() {
     use cobre_core::{ConstraintSense, ResolvedGenericConstraintBounds};
@@ -124,8 +117,6 @@ fn generic_constraint_le_slack_enabled_2_blocks_collapses() {
     );
 }
 
-/// A block-level `<=` constraint with slack over 2 blocks yields 2 rows (one per
-/// block) and 2 slack columns (one per row).
 #[test]
 fn generic_constraint_le_slack_enabled_2_blocks_block_level_per_block() {
     use cobre_core::{ConstraintSense, ResolvedGenericConstraintBounds};
@@ -162,8 +153,6 @@ fn generic_constraint_le_slack_enabled_2_blocks_block_level_per_block() {
     );
 }
 
-/// A block-independent `==` constraint with slack and `block_id = None` over 2
-/// blocks collapses to one stage-level row plus two slack columns (plus/minus).
 #[test]
 fn generic_constraint_equal_sense_two_slacks_collapses() {
     use cobre_core::{ConstraintSense, ResolvedGenericConstraintBounds};
@@ -195,8 +184,6 @@ fn generic_constraint_equal_sense_two_slacks_collapses() {
     );
 }
 
-/// A block-level `==` constraint with slack over 2 blocks yields 2 rows (one per
-/// block) and 4 slack columns (two per row).
 #[test]
 fn generic_constraint_equal_sense_two_slacks_block_level_per_block() {
     use cobre_core::{ConstraintSense, ResolvedGenericConstraintBounds};
@@ -229,10 +216,6 @@ fn generic_constraint_equal_sense_two_slacks_block_level_per_block() {
     );
 }
 
-/// The collapsed stage-level slack is priced by total stage hours, conserving the
-/// per-block penalty sum: `penalty × total_stage_hours = penalty × Σ block_hours`.
-/// With 3 blocks of 720h (Σ = 2160h), the `<=` slack objective is
-/// `penalty × 2160 / COST_SCALE_FACTOR`.
 #[test]
 fn generic_constraint_collapsed_slack_priced_by_total_stage_hours() {
     use cobre_core::{ConstraintSense, ResolvedGenericConstraintBounds};
@@ -284,8 +267,6 @@ fn generic_constraint_collapsed_slack_priced_by_total_stage_hours() {
     );
 }
 
-/// A constraint with `block_id = Some(1)` over 3 blocks generates exactly one
-/// row (only the specified block).
 #[test]
 fn generic_constraint_specific_block_id_generates_one_row() {
     use cobre_core::{ConstraintSense, ResolvedGenericConstraintBounds};
@@ -316,8 +297,6 @@ fn generic_constraint_specific_block_id_generates_one_row() {
     );
 }
 
-/// Of two constraints, only the one with bounds at stage 0 contributes rows; the
-/// boundless constraint is inactive.
 #[test]
 fn generic_constraint_inactive_does_not_contribute_rows() {
     use cobre_core::{ConstraintSense, ResolvedGenericConstraintBounds};
@@ -348,8 +327,6 @@ fn generic_constraint_inactive_does_not_contribute_rows() {
     );
 }
 
-/// `thermal_generation(0) <= 50.0` gives the generic row `row_upper = 50.0`,
-/// `row_lower = -INF`, and a `+1.0` CSC entry in the thermal generation column.
 #[test]
 fn generic_constraint_thermal_le_row_bounds_and_csc_entry() {
     use cobre_core::ResolvedGenericConstraintBounds;
@@ -416,8 +393,6 @@ fn generic_constraint_thermal_le_row_bounds_and_csc_entry() {
     );
 }
 
-/// With slack enabled (penalty=5000) on `thermal <= 50.0`, the slack column has
-/// bounds [0, +INF), objective 5000*744, and a `-1.0` CSC entry at the generic row.
 #[test]
 fn generic_constraint_thermal_le_slack_column_and_csc_entry() {
     use cobre_core::ResolvedGenericConstraintBounds;
@@ -497,8 +472,6 @@ fn generic_constraint_thermal_le_slack_column_and_csc_entry() {
     );
 }
 
-/// `thermal_generation(0) >= 10.0` gives the generic row `row_lower = 10.0`,
-/// `row_upper = +INF`.
 #[test]
 fn generic_constraint_thermal_ge_row_bounds() {
     use cobre_core::ResolvedGenericConstraintBounds;
@@ -550,8 +523,6 @@ fn generic_constraint_thermal_ge_row_bounds() {
     );
 }
 
-/// `thermal_generation(0) == 80.0` with slack adds two slack columns (plus at
-/// col 4, minus at col 5) and sets the generic row to an equality at 80.0.
 #[test]
 fn generic_constraint_thermal_equal_two_slacks() {
     use cobre_core::ResolvedGenericConstraintBounds;
@@ -641,8 +612,6 @@ fn generic_constraint_thermal_equal_two_slacks() {
     );
 }
 
-/// For `hydro_generation(H1) + hydro_generation(H2)` with constant productivities
-/// 2.5 and 3.0, each turbine column's CSC coefficient equals its productivity.
 #[test]
 #[allow(clippy::cast_possible_wrap)]
 fn generic_constraint_two_hydros_sum_csc_entries() {
@@ -1132,12 +1101,6 @@ fn one_hydro_system(
     builder.build().expect("one_hydro_system: valid")
 }
 
-/// A chronological `K=3` stage net-storage constraint `hydro_storage_final(h) −
-/// hydro_storage_initial(h) ≤ Δ` with `block_id = None` collapses to a single
-/// stage-level row: `+1.0` on the stage-final boundary `Sᴷ` and `−1.0` on the
-/// stage-initial boundary `S⁰` (both `None` selectors are stage endpoints, so the
-/// expression is block-independent). Boundary columns (N=1, storage.start=0,
-/// storage_in.start=2, K=3): S⁰=2, Sᴷ=0.
 #[test]
 #[allow(clippy::cast_possible_wrap)]
 fn generic_constraint_chronological_stage_net_storage_one_row() {
@@ -1220,9 +1183,6 @@ fn generic_constraint_chronological_stage_net_storage_one_row() {
     );
 }
 
-/// A `block_id = Some(b)` ramp produces exactly one generic row referencing block
-/// `b`'s boundaries (`+1.0` on `block_storage_col(h, b+1)`, `−1.0` on
-/// `block_storage_col(h, b)`).
 #[test]
 #[allow(clippy::cast_possible_wrap)]
 fn generic_constraint_chronological_specific_block_ramp_one_row() {

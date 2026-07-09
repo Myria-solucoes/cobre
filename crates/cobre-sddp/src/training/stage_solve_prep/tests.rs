@@ -268,14 +268,6 @@ impl SolverInterface for RecordingSolver {
     }
 }
 
-/// [`StageSolvePrep::run`], configured the way the forward site would
-/// configure it (`StateSource(current_state)`, `OpeningMode::SingleRealized`,
-/// `LoadNoise::Present`, `InflowNoise::Transform` — this fixture has no load
-/// buses and no NCS), produces the exact same `set_col_bounds`/`set_row_bounds`
-/// calls as the literal open-coded forward block (`fill_col_state_patches →
-/// fill_forward_patches → fill_z_inflow_patches → set_col_bounds →
-/// set_row_bounds`, with the NCS patch absent) driven independently against a
-/// second solver instance.
 #[test]
 fn run_matches_open_coded_forward_block_for_minimal_fixture() {
     let state = crate::test_support::state_layout(1, 0);

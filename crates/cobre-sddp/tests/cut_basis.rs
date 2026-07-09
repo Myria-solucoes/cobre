@@ -45,7 +45,6 @@ mod boundary_cuts {
             .join("examples/deterministic/d01-thermal-dispatch")
     }
 
-    /// Write a policy checkpoint to `policy_dir` from the given setup and training result.
     fn write_test_checkpoint(
         policy_dir: &Path,
         setup: &StudySetup,
@@ -103,14 +102,12 @@ mod boundary_cuts {
         let config_path = case_dir.join("config.json");
         let config = cobre_io::parse_config(&config_path).expect("config");
 
-        // 5 iterations for speed.
         let mut config_5iter = config.clone();
         config_5iter.training.stopping_rules =
             Some(vec![cobre_io::config::StoppingRuleConfig::IterationLimit {
                 limit: 5,
             }]);
 
-        // Run A: source study, produces the checkpoint.
         let (mut setup_a, _system_a) = build_setup(&case_dir, &config_5iter);
         let comm = StubComm;
         let mut solver_a = ActiveSolver::new().expect("solver");
@@ -126,7 +123,6 @@ mod boundary_cuts {
         let num_stages = setup_a.fcf.pools.len();
         let source_stage = (num_stages - 2) as u32; // terminal stage has no backward-pass cuts
 
-        // Run B: consumer baseline, no boundary cuts.
         let (mut setup_b, _system_b) = build_setup(&case_dir, &config_5iter);
         let mut solver_b = ActiveSolver::new().expect("solver");
         let outcome_b = setup_b
@@ -135,7 +131,6 @@ mod boundary_cuts {
         assert!(outcome_b.error.is_none());
         let lb_no_boundary = outcome_b.result.final_lb;
 
-        // Run C: consumer with boundary cuts.
         let (mut setup_c, system_c) = build_setup(&case_dir, &config_5iter);
         let state_dim = setup_c.fcf.state_dimension as u32;
         let current_manifest = setup_c.build_terminal_entity_manifest(&system_c);
@@ -171,7 +166,6 @@ mod boundary_cuts {
         assert!(outcome_c.error.is_none());
         let lb_with_boundary = outcome_c.result.final_lb;
 
-        // The boundary-cut contract: valid cuts only tighten, never degrade, the LB.
         assert!(
             lb_with_boundary >= lb_no_boundary - 1e-6,
             "boundary LB ({lb_with_boundary}) must be >= baseline LB ({lb_no_boundary})"
@@ -281,11 +275,9 @@ mod cut_subgradient_parity {
     const GAMMA_Q: f64 = 0.8;
     const GAMMA_0: f64 = 0.0;
 
-    /// Evaporation coefficients.
     const VOLUME_SLOPE_M3S_PER_HM3: f64 = 0.01;
     const INTERCEPT_M3S: f64 = 0.0;
 
-    /// Initial (incoming) storage value pinned via column bounds.
     const V_IN_HM3: f64 = 100.0;
 
     /// Indices into the column/row layout documented in the module doc; the
@@ -496,7 +488,6 @@ mod cut_subgradient_parity {
             .expect("fpha_evap_system: valid")
     }
 
-    /// Build the FPHA production model (1 hydro, 1 stage, 1 plane).
     fn fpha_production() -> ProductionModelSet {
         let plane = FphaPlane {
             intercept: GAMMA_0,
@@ -510,7 +501,6 @@ mod cut_subgradient_parity {
         ProductionModelSet::new(models, 1, 1)
     }
 
-    /// Build the evaporation model set (1 hydro with volume_slope_m3s_per_hm3 > 0).
     fn fpha_evap_evaporation(system: &cobre_core::System) -> EvaporationModelSet {
         let models = vec![EvaporationModel::Linearized {
             coefficients: vec![LinearizedEvaporation {
@@ -649,7 +639,6 @@ mod cut_selection_determinism_realistic {
     use cobre_sddp::cut::CutPool;
     use cobre_sddp::cut_selection::{CutActivityUpdates, CutMetadata, CutSelectionStrategy};
 
-    /// Splitmix64 PRNG, inlined so no external crate is needed.
     fn splitmix64(state: &mut u64) -> u64 {
         *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = *state;
@@ -866,7 +855,6 @@ mod basis_reconstruct_churn {
     // Helpers
     // ---------------------------------------------------------------------------
 
-    /// Aggregate `SolverStatsDelta` across all `"forward"` log entries.
     fn sum_forward_deltas(log: &[SolverStatsLogEntry]) -> SolverStatsDelta {
         SolverStatsDelta::aggregate(
             log.iter()
@@ -885,8 +873,8 @@ mod basis_reconstruct_churn {
     fn basis_reconstruct_churn() {
         // Simplex pin and lower-bound pin are calibrated against HiGHS's simplex path
         // and last-ULP accumulation, so they gate to the `highs` backend; the
-        // structural checks below run on both. Regenerate the pin only if HiGHS major
-        // version, the fixture parameters, or the G1 design changes.
+        // structural checks below run on both. Regenerate the pin only if the HiGHS
+        // major version or the fixture parameters change.
         #[cfg(feature = "highs")]
         const PINNED_SIMPLEX_ITERS: u64 = 30;
         #[cfg(feature = "highs")]
@@ -1071,8 +1059,8 @@ mod basis_reconstruct_churn {
         // and stops after iteration 1.
         config.training.forward_passes = Some(2);
         config.training.stopping_rules = Some(vec![
-            StoppingRuleConfig::IterationLimit { limit: 2 }, // FCF capacity sizing
-            StoppingRuleConfig::IterationLimit { limit: 1 }, // actual stop point
+            StoppingRuleConfig::IterationLimit { limit: 2 },
+            StoppingRuleConfig::IterationLimit { limit: 1 },
         ]);
         let system = cobre_io::load_case(&case_dir).expect("load_case phase1 must succeed");
         let prepare_result =
@@ -1727,10 +1715,6 @@ mod test_backward_cache_reduces_pivots {
     const D03_PRE_PLAN_BWD_OMEGA0_MEAN_PIVOTS: f64 = 0.112;
 
     // ---------------------------------------------------------------------------
-    // Stub communicator (single-rank, no MPI)
-    // ---------------------------------------------------------------------------
-
-    // ---------------------------------------------------------------------------
     // Path helpers
     // ---------------------------------------------------------------------------
 
@@ -1821,8 +1805,6 @@ mod test_backward_cache_reduces_pivots {
         #[allow(clippy::cast_precision_loss)]
         let observed_mean = sum as f64 / n as f64;
 
-        // 20× the baseline mean tolerates the known ~4× state-drift regression while
-        // still catching order-of-magnitude failures; see module docs for rationale.
         let upper_bound = D03_PRE_PLAN_BWD_OMEGA0_MEAN_PIVOTS * 20.0;
         assert!(
             observed_mean < upper_bound,

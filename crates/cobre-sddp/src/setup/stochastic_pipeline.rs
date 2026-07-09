@@ -21,7 +21,7 @@ pub struct PrepareStochasticResult {
     /// Estimation report (`Some` if `inflow_history.parquet` was present and
     /// `inflow_seasonal_stats.parquet` was absent, triggering auto-estimation).
     pub estimation_report: Option<EstimationReport>,
-    /// Which of the 7 estimation path rows was taken during preprocessing.
+    /// Which estimation path row was taken during preprocessing.
     pub estimation_path: EstimationPath,
 }
 
@@ -134,8 +134,7 @@ pub fn build_ncs_factor_entries(
 }
 
 /// Load `scenarios/load_factors.json` from the case directory, returning an
-/// empty vec when the file is absent. This is consumed by the stochastic
-/// context builder for per-block noise scaling.
+/// empty vec when the file is absent.
 ///
 /// # Errors
 ///
@@ -204,8 +203,7 @@ fn build_opening_tree_library(
     // η-inversion rolling chain must match the forward-pass lag accumulator;
     // `max_order` width covers all AR lags.
     let season_map_ref = system.policy_graph().season_map.as_ref();
-    // `precompute_stage_lag_transitions` requires a non-optional &SeasonMap;
-    // supply an empty noop map when the system has none.
+    // `precompute_stage_lag_transitions` requires a non-optional &SeasonMap.
     let noop_season_map;
     let effective_season_map: &cobre_core::temporal::SeasonMap = if let Some(sm) = season_map_ref {
         sm
@@ -396,9 +394,6 @@ pub fn prepare_stochastic(
     let opening_tree_library = build_opening_tree_library(&system, training_source)?;
     let external_scenario_counts = compute_external_scenario_counts(&system, training_source);
 
-    // Stages sharing a `(season_id, year)` share opening-tree noise draws (weekly
-    // stages within one monthly bucket). Uniform monthly studies get unique group
-    // IDs, so no sharing is triggered.
     let opening_tree_noise_group_ids: Vec<u32> = {
         let study_stages: Vec<_> = system
             .stages()

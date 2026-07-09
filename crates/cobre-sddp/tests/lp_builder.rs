@@ -60,10 +60,6 @@ mod extraction_nonuniform_block_bases {
 
     use super::common::StubComm;
 
-    // ---------------------------------------------------------------------------
-    // Single-rank stub communicator (mirrors the parity harness).
-    // ---------------------------------------------------------------------------
-
     fn case_dir(suffix: &str) -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../examples/deterministic")

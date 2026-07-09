@@ -21,8 +21,7 @@ pub(super) fn check_penalty_ordering(data: &ParsedData, ctx: &mut ValidationCont
         .fold(f64::NEG_INFINITY, f64::max)
         .max(0.0);
 
-    // Check 6: filling must not be as hard as load shedding. Skipped with no
-    // deficit segments (max == 0.0) — there is then no comparand.
+    // Skipped with no deficit segments (max == 0.0): there is then no comparand.
     if max_deficit_cost > 0.0 {
         let mut violations: Vec<(i32, f64)> = Vec::new(); // (id, filling_target_cost)
         for hydro in &data.hydros {
@@ -50,7 +49,6 @@ pub(super) fn check_penalty_ordering(data: &ParsedData, ctx: &mut ValidationCont
         }
     }
 
-    // Check 7.
     {
         let mut violations: Vec<(i32, f64)> = Vec::new(); // (id, storage_violation_cost)
         for hydro in &data.hydros {
@@ -78,7 +76,6 @@ pub(super) fn check_penalty_ordering(data: &ParsedData, ctx: &mut ValidationCont
         }
     }
 
-    // Check 8.
     {
         let max_cv = |h: &cobre_core::entities::Hydro| {
             let p = &h.penalties;
@@ -97,29 +94,28 @@ pub(super) fn check_penalty_ordering(data: &ParsedData, ctx: &mut ValidationCont
             .fold(f64::NEG_INFINITY, f64::max)
             .max(0.0);
 
-        if !data.hydros.is_empty() && max_deficit_cost <= max_constraint_cost {
-            // worst offender: highest constraint-violation cost
-            if let Some(worst_hydro) = data.hydros.iter().max_by(|a, b| {
+        if !data.hydros.is_empty()
+            && max_deficit_cost <= max_constraint_cost
+            && let Some(worst_hydro) = data.hydros.iter().max_by(|a, b| {
                 max_cv(a)
                     .partial_cmp(&max_cv(b))
                     .unwrap_or(std::cmp::Ordering::Equal)
-            }) {
-                ctx.add_warning(
-                    ErrorKind::ModelQuality,
-                    "penalties.json",
-                    None::<&str>,
-                    format!(
-                        "Penalty ordering violation: max(deficit_segment_costs) \
-                         ({max_deficit_cost}) should be > max(constraint_violation_costs) \
-                         ({max_constraint_cost}) -- 1 hydro(s) affected, worst case: Hydro {}",
-                        worst_hydro.id.0
-                    ),
-                );
-            }
+            })
+        {
+            ctx.add_warning(
+                ErrorKind::ModelQuality,
+                "penalties.json",
+                None::<&str>,
+                format!(
+                    "Penalty ordering violation: max(deficit_segment_costs) \
+                     ({max_deficit_cost}) should be > max(constraint_violation_costs) \
+                     ({max_constraint_cost}) -- 1 hydro(s) affected, worst case: Hydro {}",
+                    worst_hydro.id.0
+                ),
+            );
         }
     }
 
-    // Check 9.
     {
         if !data.hydros.is_empty() {
             let min_cv = |h: &cobre_core::entities::Hydro| {
@@ -142,30 +138,28 @@ pub(super) fn check_penalty_ordering(data: &ParsedData, ctx: &mut ValidationCont
                 .fold(f64::NEG_INFINITY, f64::max)
                 .max(0.0);
 
-            if min_constraint_cost <= max_resource_cost {
-                // worst offender: lowest constraint-violation cost
-                if let Some(worst_hydro) = data.hydros.iter().min_by(|a, b| {
+            if min_constraint_cost <= max_resource_cost
+                && let Some(worst_hydro) = data.hydros.iter().min_by(|a, b| {
                     min_cv(a)
                         .partial_cmp(&min_cv(b))
                         .unwrap_or(std::cmp::Ordering::Equal)
-                }) {
-                    ctx.add_warning(
-                        ErrorKind::ModelQuality,
-                        "penalties.json",
-                        None::<&str>,
-                        format!(
-                            "Penalty ordering violation: min(constraint_violation_costs) \
-                             ({min_constraint_cost}) should be > max(resource_costs) \
-                             ({max_resource_cost}) -- 1 hydro(s) affected, worst case: Hydro {}",
-                            worst_hydro.id.0
-                        ),
-                    );
-                }
+                })
+            {
+                ctx.add_warning(
+                    ErrorKind::ModelQuality,
+                    "penalties.json",
+                    None::<&str>,
+                    format!(
+                        "Penalty ordering violation: min(constraint_violation_costs) \
+                         ({min_constraint_cost}) should be > max(resource_costs) \
+                         ({max_resource_cost}) -- 1 hydro(s) affected, worst case: Hydro {}",
+                        worst_hydro.id.0
+                    ),
+                );
             }
         }
     }
 
-    // Check 10.
     {
         let mut violations: Vec<(i32, f64)> = Vec::new(); // (id, min_resource_cost)
         for hydro in &data.hydros {
@@ -388,7 +382,6 @@ pub(super) fn check_load_factor_consistency(data: &ParsedData, ctx: &mut Validat
         .collect();
 
     for (i, entry) in data.load_factors.iter().enumerate() {
-        // Rule 17.
         if let Some(valid_indices) = stage_block_indices.get(&entry.stage_id) {
             for bf in &entry.block_factors {
                 let block_idx = usize::try_from(bf.block_id).unwrap_or(usize::MAX);
@@ -412,7 +405,6 @@ pub(super) fn check_load_factor_consistency(data: &ParsedData, ctx: &mut Validat
             }
         }
 
-        // Rule 18.
         let key = (entry.bus_id.0, entry.stage_id);
         if let Some(&std_mw) = load_std.get(&key)
             && std_mw == 0.0
@@ -459,7 +451,6 @@ pub(super) fn check_estimation_prerequisites(data: &ParsedData, ctx: &mut Valida
         return;
     }
 
-    // Rule 19.
     if data.stages.policy_graph.season_map.is_none() {
         ctx.add_error(
             ErrorKind::BusinessRuleViolation,
@@ -470,7 +461,6 @@ pub(super) fn check_estimation_prerequisites(data: &ParsedData, ctx: &mut Valida
         );
     }
 
-    // Rule 21.
     let hydro_ids_in_history: HashSet<i32> =
         data.inflow_history.iter().map(|r| r.hydro_id.0).collect();
     let mut missing_hydros: Vec<i32> = data
@@ -492,8 +482,8 @@ pub(super) fn check_estimation_prerequisites(data: &ParsedData, ctx: &mut Valida
         );
     }
 
-    // Rule 20. Skipped when season_map is None — Rule 19 already errored, and
-    // running here would cascade a confusing second diagnostic.
+    // Skipped when season_map is None: Rule 19 already errored, and running here
+    // would cascade a confusing second diagnostic.
     if let Some(_season_map) = &data.stages.policy_graph.season_map {
         let min_obs = data.config.estimation.min_observations_per_season as usize;
 
@@ -582,7 +572,6 @@ pub(super) fn check_past_inflows_coverage(data: &ParsedData, ctx: &mut Validatio
 
     let past_inflows = &data.initial_conditions.past_inflows;
 
-    // Rule 22.
     if past_inflows.is_empty() {
         ctx.add_error(
             ErrorKind::BusinessRuleViolation,
@@ -606,7 +595,6 @@ pub(super) fn check_past_inflows_coverage(data: &ParsedData, ctx: &mut Validatio
         .map(|pi| (pi.hydro_id.0, pi.values_m3s.len()))
         .collect();
 
-    // Rule 23.
     {
         let mut coverage_violations: Vec<(i32, i32, usize)> = Vec::new(); // (hydro_id, order, provided)
         for (&hydro_id, &order) in &max_order_per_hydro {
@@ -637,7 +625,6 @@ pub(super) fn check_past_inflows_coverage(data: &ParsedData, ctx: &mut Validatio
         }
     }
 
-    // Rule 24.
     {
         let hydro_registry: HashSet<i32> = data.hydros.iter().map(|h| h.id.0).collect();
         let past_inflow_ids: HashSet<i32> = past_inflows.iter().map(|pi| pi.hydro_id.0).collect();

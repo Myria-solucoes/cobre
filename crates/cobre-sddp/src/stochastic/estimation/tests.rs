@@ -25,8 +25,6 @@ fn minimal_system_with_inflow_models(models: Vec<InflowModel>) -> System {
 
 // ── with_scenario_models tests ────────────────────────────────────────────
 
-/// AC-036-1: `with_scenario_models` replaces `inflow_models` and `correlation`
-/// while preserving all other fields.
 #[test]
 fn test_with_scenario_models_replaces_fields() {
     use cobre_core::{
@@ -45,7 +43,6 @@ fn test_with_scenario_models_replaces_fields() {
         excess_cost: 0.0,
     };
 
-    // Build system with 2 inflow models.
     let old_model = InflowModel {
         hydro_id: EntityId(1),
         stage_id: 0,
@@ -68,7 +65,6 @@ fn test_with_scenario_models_replaces_fields() {
     assert_eq!(system.inflow_models().len(), 2);
     assert_eq!(system.n_buses(), 1);
 
-    // Replace with 4 models.
     let new_models: Vec<InflowModel> = (0..4)
         .map(|i| InflowModel {
             hydro_id: EntityId(1),
@@ -84,7 +80,6 @@ fn test_with_scenario_models_replaces_fields() {
 
     let updated = system.with_scenario_models(new_models.clone(), new_corr.clone());
 
-    // inflow_models and correlation updated.
     assert_eq!(updated.inflow_models().len(), 4, "expected 4 inflow models");
     assert_eq!(
         *updated.correlation(),
@@ -92,7 +87,6 @@ fn test_with_scenario_models_replaces_fields() {
         "correlation should equal new_corr"
     );
 
-    // hydros, buses, stages unchanged.
     assert_eq!(updated.n_buses(), 1, "buses must be preserved");
     assert!(
         updated.hydros().is_empty(),
@@ -104,7 +98,6 @@ fn test_with_scenario_models_replaces_fields() {
     );
 }
 
-/// `with_scenario_models` with an empty vec clears `inflow_models`.
 #[test]
 fn test_with_scenario_models_clears_when_empty() {
     let model = InflowModel {
@@ -125,8 +118,6 @@ fn test_with_scenario_models_clears_when_empty() {
 
 // ── estimate_from_history path-matrix tests ────────────────────────────────
 
-/// AC-036-3: When both stats files exist, `estimate_from_history` returns
-/// the system unchanged.
 #[test]
 fn test_estimate_explicit_stats_returns_unchanged() {
     use tempfile::TempDir;
@@ -134,11 +125,8 @@ fn test_estimate_explicit_stats_returns_unchanged() {
     let dir = TempDir::new().unwrap();
     let case_dir = dir.path();
 
-    // Create the minimal required files so validate_structure won't fail
-    // (it only checks existence).
     create_required_files(case_dir);
 
-    // Create both stats files.
     let scenarios = case_dir.join("scenarios");
     std::fs::create_dir_all(&scenarios).unwrap();
     std::fs::write(scenarios.join("inflow_history.parquet"), b"").unwrap();
@@ -171,8 +159,6 @@ fn test_estimate_explicit_stats_returns_unchanged() {
     );
 }
 
-/// AC-036-4: When no history file exists, `estimate_from_history` returns
-/// the system unchanged.
 #[test]
 fn test_estimate_no_history_returns_unchanged() {
     use tempfile::TempDir;
@@ -180,7 +166,6 @@ fn test_estimate_no_history_returns_unchanged() {
     let dir = TempDir::new().unwrap();
     let case_dir = dir.path();
 
-    // No scenarios/ directory at all.
     create_required_files(case_dir);
 
     let model = InflowModel {
@@ -208,10 +193,6 @@ fn test_estimate_no_history_returns_unchanged() {
 
 // ── EstimationPath unit tests ─────────────────────────────────────────────
 
-/// All 8 boolean combinations map to the expected `EstimationPath` variant.
-///
-/// Covers all 7 named variants plus the edge case `(false, false, true)`
-/// which must map to `Deterministic` because AR alone is meaningless.
 #[test]
 fn test_estimation_path_resolve_all_8_combinations() {
     use cobre_io::FileManifest;
@@ -223,49 +204,41 @@ fn test_estimation_path_resolve_all_8_combinations() {
         ..Default::default()
     };
 
-    // Row 1: (false, false, false) -> Deterministic
     assert_eq!(
         EstimationPath::resolve(&make(false, false, false)),
         EstimationPath::Deterministic,
     );
-    // Edge case: (false, false, true) -> Deterministic (AR alone is meaningless)
+    // AR alone is meaningless → Deterministic
     assert_eq!(
         EstimationPath::resolve(&make(false, false, true)),
         EstimationPath::Deterministic,
     );
-    // Row 2: (false, true, false) -> UserStatsWhiteNoise
     assert_eq!(
         EstimationPath::resolve(&make(false, true, false)),
         EstimationPath::UserStatsWhiteNoise,
     );
-    // Row 3: (false, true, true) -> UserProvidedNoHistory
     assert_eq!(
         EstimationPath::resolve(&make(false, true, true)),
         EstimationPath::UserProvidedNoHistory,
     );
-    // Row 4: (true, false, false) -> FullEstimation
     assert_eq!(
         EstimationPath::resolve(&make(true, false, false)),
         EstimationPath::FullEstimation,
     );
-    // Row 5: (true, false, true) -> UserArHistoryStats
     assert_eq!(
         EstimationPath::resolve(&make(true, false, true)),
         EstimationPath::UserArHistoryStats,
     );
-    // Row 6: (true, true, false) -> PartialEstimation
     assert_eq!(
         EstimationPath::resolve(&make(true, true, false)),
         EstimationPath::PartialEstimation,
     );
-    // Row 7: (true, true, true) -> UserProvidedAll
     assert_eq!(
         EstimationPath::resolve(&make(true, true, true)),
         EstimationPath::UserProvidedAll,
     );
 }
 
-/// Every variant's `as_str()` must return a non-empty, unique string.
 #[test]
 fn test_estimation_path_as_str_round_trip() {
     let variants = [
@@ -280,12 +253,10 @@ fn test_estimation_path_as_str_round_trip() {
 
     let strings: Vec<&str> = variants.iter().map(|v| v.as_str()).collect();
 
-    // All strings must be non-empty.
     for s in &strings {
         assert!(!s.is_empty(), "as_str() returned empty string");
     }
 
-    // All strings must be unique.
     let unique: std::collections::HashSet<&&str> = strings.iter().collect();
     assert_eq!(
         unique.len(),
@@ -296,8 +267,6 @@ fn test_estimation_path_as_str_round_trip() {
 
 // ── user_stats_to_rows unit tests ─────────────────────────────────────────
 
-/// `user_stats_to_rows` maps all models — 3 InflowModel entries (2 hydros,
-/// multiple stages) produce the same count of rows with bitwise-equal stats.
 #[test]
 fn test_user_stats_to_rows_maps_all_models() {
     let models = vec![
@@ -337,7 +306,6 @@ fn test_user_stats_to_rows_maps_all_models() {
     for (model, row) in models.iter().zip(rows.iter()) {
         assert_eq!(row.hydro_id, model.hydro_id, "hydro_id must be preserved");
         assert_eq!(row.stage_id, model.stage_id, "stage_id must be preserved");
-        // Bitwise equality: the f64 bits must be identical, not just approximately equal.
         assert_eq!(
             row.mean_m3s.to_bits(),
             model.mean_m3s.to_bits(),
@@ -351,7 +319,6 @@ fn test_user_stats_to_rows_maps_all_models() {
     }
 }
 
-/// `user_stats_to_rows` on an empty system returns an empty vec.
 #[test]
 fn test_user_stats_to_rows_empty_system() {
     let system = minimal_system_with_inflow_models(vec![]);
@@ -361,16 +328,9 @@ fn test_user_stats_to_rows_empty_system() {
 
 // ── PartialEstimation unit tests ──────────────────────────────────────────
 
-/// Write a real `inflow_history.parquet` with synthetic 2-season PAR(1) data
-/// for a single hydro (id=1), using the existing `simulate_two_season_par2`
-/// helper at order 2 to generate observations with non-trivial structure.
-///
-/// Observations are placed on Jan 1 (season 0) and Jul 1 (season 1) of
-/// successive years starting from 1970, dated so they fall within the
-/// study stages built by `make_two_season_stage`.
-///
-/// The history file is required to have real Parquet content because
-/// `run_partial_estimation` calls `parse_inflow_history` on it.
+/// Writes a real `inflow_history.parquet` (`parse_inflow_history` requires real
+/// content, not a sentinel). Observation dates must fall within the
+/// `make_two_season_stage` stages so they map to seasons 0/1.
 fn write_unit_test_inflow_history(path: &std::path::Path, hydro_id: i32, n_years: usize) {
     use arrow::array::{Date32Array, Float64Array, Int32Array};
     use arrow::datatypes::{DataType, Field, Schema};
@@ -392,14 +352,11 @@ fn write_unit_test_inflow_history(path: &std::path::Path, hydro_id: i32, n_years
 
     for y in 0..n_years {
         let year = (1970 + y) as i32;
-        // Season 0: Jan 1 falls within make_two_season_stage(..., first_half=true)
         ids.push(hydro_id);
         dates.push(date_to_days(NaiveDate::from_ymd_opt(year, 1, 15).unwrap()));
-        // Shift values by 300 so they are all positive (simulate_two_season_par2
-        // produces ~0-mean series; offset keeps inflows physically plausible).
+        // +300 shifts the ~0-mean series positive; inflows must be physically plausible.
         values.push(obs_s0[y] + 300.0);
 
-        // Season 1: Jul 1 falls within make_two_season_stage(..., first_half=false)
         ids.push(hydro_id);
         dates.push(date_to_days(NaiveDate::from_ymd_opt(year, 7, 15).unwrap()));
         values.push(obs_s1[y] + 300.0);
@@ -427,12 +384,9 @@ fn write_unit_test_inflow_history(path: &std::path::Path, hydro_id: i32, n_years
     writer.close().expect("close writer");
 }
 
-/// Build a `System` with one hydro (id=1), one bus, and 2-season stages
-/// spanning `n_years` study years, with pre-loaded inflow models whose
-/// `mean_m3s = 100.0` and `std_m3s = 10.0` (user-provided stats).
-///
-/// This represents the state after `load_case` has loaded
-/// `inflow_seasonal_stats.parquet` but not `inflow_ar_coefficients.parquet`.
+/// One-hydro 2-season system with pre-loaded user stats — the state after
+/// `load_case` reads `inflow_seasonal_stats.parquet` but not
+/// `inflow_ar_coefficients.parquet` (the `PartialEstimation` precondition).
 #[allow(clippy::cast_possible_wrap)]
 fn build_system_with_user_stats(n_years: usize) -> System {
     use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
@@ -451,8 +405,6 @@ fn build_system_with_user_stats(n_years: usize) -> System {
         excess_cost: 0.0,
     };
 
-    // Build 2-season stages using make_two_season_stage (season 0: Jan–Jun,
-    // season 1: Jul–Dec), one stage per season per year.
     let ref_year = 1970_i32;
     let mut stages = Vec::with_capacity(n_years * 2);
     for y in 0..n_years {
@@ -467,8 +419,6 @@ fn build_system_with_user_stats(n_years: usize) -> System {
         ));
     }
 
-    // Build inflow models for each stage, preserving user-provided stats.
-    // These represent what load_case produces after reading inflow_seasonal_stats.
     let inflow_models: Vec<InflowModel> = stages
         .iter()
         .map(|s| InflowModel {
@@ -537,41 +487,23 @@ fn build_system_with_user_stats(n_years: usize) -> System {
         .expect("valid system with user stats")
 }
 
-/// Create the minimal directory skeleton and write both the real Parquet
-/// history and an empty sentinel file for `inflow_seasonal_stats.parquet`,
-/// which is sufficient for the manifest to classify the path as
-/// `PartialEstimation` (history=true, stats=true, ar=false).
+/// Writes a real history parquet + a sentinel `inflow_seasonal_stats.parquet`
+/// (no AR file) → the `PartialEstimation` manifest classification.
 fn setup_partial_estimation_case(case_dir: &std::path::Path, n_years: usize) {
     create_required_files(case_dir);
     let scenarios = case_dir.join("scenarios");
     std::fs::create_dir_all(&scenarios).unwrap();
 
-    // Write a real Parquet history file — it must be parseable.
     write_unit_test_inflow_history(
         &scenarios.join("inflow_history.parquet"),
         1, // hydro_id
         n_years,
     );
 
-    // Write a sentinel file to trigger the manifest flag.
-    // validate_structure only checks existence, not content.
     std::fs::write(scenarios.join("inflow_seasonal_stats.parquet"), b"sentinel")
         .expect("write sentinel");
-
-    // No inflow_ar_coefficients.parquet → PartialEstimation path.
 }
 
-/// `PartialEstimation` preserves user-provided `mean_m3s` and
-/// `std_m3s` while estimating AR coefficients from history.
-///
-/// Setup: system with known user stats (mean=100.0, std=10.0 for every
-/// stage), case dir with a real `inflow_history.parquet` (synthetic PAR(2)
-/// data) and an `inflow_seasonal_stats.parquet` sentinel.
-///
-/// Asserts:
-/// - Every inflow model in the returned system has `mean_m3s == 100.0`
-///   (bitwise) and `std_m3s == 10.0` (bitwise).
-/// - Every inflow model has at least one AR coefficient (non-empty).
 #[test]
 fn test_partial_estimation_preserves_user_stats() {
     use tempfile::TempDir;
@@ -604,7 +536,6 @@ fn test_partial_estimation_preserves_user_stats() {
     );
 
     for m in models {
-        // Bitwise equality — no rounding or transformation is allowed.
         assert_eq!(
             m.mean_m3s.to_bits(),
             100.0_f64.to_bits(),
@@ -625,10 +556,6 @@ fn test_partial_estimation_preserves_user_stats() {
     }
 }
 
-/// `PartialEstimation` returns a `Some(report)` with method "PACF"
-/// and an entry for the single hydro plant.
-///
-/// Same setup as `test_partial_estimation_preserves_user_stats`.
 #[test]
 fn test_partial_estimation_returns_report() {
     use tempfile::TempDir;
@@ -704,9 +631,6 @@ fn create_required_files(case_dir: &std::path::Path) {
 
 // ── EstimationReport unit tests ───────────────────────────────────────────
 
-/// Construct mock `ArCoefficientEstimate` entries for 2 hydros with 3
-/// seasons each, call `build_estimation_report`, and verify that the
-/// report contains exactly 2 entries with the expected structure.
 #[test]
 fn test_estimation_report_structure() {
     use cobre_stochastic::par::fitting::{ContributionReduction, build_estimation_report};
@@ -715,7 +639,6 @@ fn test_estimation_report_structure() {
     let h2 = EntityId(2);
     let n_seasons = 3_usize;
 
-    // Build mock estimates: 2 hydros x 3 seasons, max order 2.
     let mut estimates = Vec::new();
     for &hydro_id in &[h1, h2] {
         for season_id in 0..n_seasons {
@@ -745,8 +668,6 @@ fn test_estimation_report_structure() {
     }
 }
 
-/// With empty observations the returned `EstimationReport` must have an
-/// empty entries map.
 #[test]
 fn test_estimation_report_empty_for_pacf() {
     use cobre_core::temporal::Stage;
@@ -779,7 +700,6 @@ fn test_estimation_report_empty_for_pacf() {
 
 // ── Pre-study stage expansion tests ─────────────────────────────────────
 
-/// Build a Stage with the given parameters, suitable for expansion tests.
 fn make_expansion_stage(
     index: usize,
     id: i32,
@@ -816,8 +736,6 @@ fn make_expansion_stage(
 
 #[test]
 fn seasonal_stats_to_rows_includes_prestudy_stages() {
-    // 3 study stages (id 0, 1, 2; seasons 0, 1, 2)
-    // 2 pre-study stages (id -1, -2; seasons 2, 1)
     let stages = vec![
         make_expansion_stage(0, -2, Some(1)),
         make_expansion_stage(1, -1, Some(2)),
@@ -827,8 +745,6 @@ fn seasonal_stats_to_rows_includes_prestudy_stages() {
     ];
 
     let h1 = EntityId(1);
-    // SeasonalStats for seasons 0, 1, 2 (stage_id is the first stage
-    // with that season).
     let stats = vec![
         SeasonalStats {
             entity_id: h1,
@@ -858,7 +774,6 @@ fn seasonal_stats_to_rows_includes_prestudy_stages() {
     // Total: 1 + 2 + 2 = 5 rows
     assert_eq!(rows.len(), 5, "expected 5 rows (3 study + 2 pre-study)");
 
-    // Verify pre-study rows exist with negative stage_ids.
     let prestudy_rows: Vec<_> = rows.iter().filter(|r| r.stage_id < 0).collect();
     assert_eq!(
         prestudy_rows.len(),
@@ -877,7 +792,6 @@ fn seasonal_stats_to_rows_includes_prestudy_stages() {
     assert!((neg1.mean_m3s - 120.0).abs() < f64::EPSILON);
     assert!((neg1.std_m3s - 24.0).abs() < f64::EPSILON);
 
-    // Rows should be sorted by (hydro_id, stage_id).
     for w in rows.windows(2) {
         assert!(
             (w[0].hydro_id.0, w[0].stage_id) <= (w[1].hydro_id.0, w[1].stage_id),
@@ -888,7 +802,6 @@ fn seasonal_stats_to_rows_includes_prestudy_stages() {
 
 #[test]
 fn ar_estimates_to_rows_includes_prestudy_stages() {
-    // Same stage layout as test 1.
     let stages = vec![
         make_expansion_stage(0, -2, Some(1)),
         make_expansion_stage(1, -1, Some(2)),
@@ -898,7 +811,6 @@ fn ar_estimates_to_rows_includes_prestudy_stages() {
     ];
 
     let h1 = EntityId(1);
-    // AR(1) estimates for seasons 0, 1, 2.
     let ar_estimates = vec![
         ArCoefficientEstimate {
             hydro_id: h1,
@@ -931,7 +843,6 @@ fn ar_estimates_to_rows_includes_prestudy_stages() {
     // Total: 5 rows (each AR(1), so 1 coefficient row per stage)
     assert_eq!(rows.len(), 5, "expected 5 rows");
 
-    // Pre-study coefficient rows exist.
     let prestudy_rows: Vec<_> = rows.iter().filter(|r| r.stage_id < 0).collect();
     assert_eq!(prestudy_rows.len(), 2);
 
@@ -950,7 +861,6 @@ fn ar_estimates_to_rows_includes_prestudy_stages() {
 fn full_estimation_produces_prestudy_inflow_models() {
     use cobre_io::scenarios::assemble_inflow_models;
 
-    // Build stages with 2 pre-study + 3 study.
     let stages = vec![
         make_expansion_stage(0, -2, Some(1)),
         make_expansion_stage(1, -1, Some(2)),
@@ -961,7 +871,6 @@ fn full_estimation_produces_prestudy_inflow_models() {
 
     let h1 = EntityId(1);
 
-    // Build stats rows (including pre-study).
     let stats = vec![
         SeasonalStats {
             entity_id: h1,
@@ -984,7 +893,6 @@ fn full_estimation_produces_prestudy_inflow_models() {
     ];
     let stats_rows = seasonal_stats_to_rows(&stats, &stages);
 
-    // Build coefficient rows.
     let ar_ests = vec![
         ArCoefficientEstimate {
             hydro_id: h1,
@@ -1010,17 +918,14 @@ fn full_estimation_produces_prestudy_inflow_models() {
     ];
     let coeff_rows = ar_estimates_to_rows(&ar_ests, &stages);
 
-    // Assemble into InflowModel.
     let inflow_models =
         assemble_inflow_models(stats_rows, coeff_rows, vec![]).expect("assembly should succeed");
 
-    // Should have entries for pre-study stages.
     assert!(
         inflow_models.iter().any(|m| m.stage_id < 0),
         "expected pre-study InflowModel entries (negative stage_id)"
     );
 
-    // Pre-study models should have correct stats from their season.
     let prestudy_neg2 = inflow_models
         .iter()
         .find(|m| m.stage_id == -2)
@@ -1031,8 +936,7 @@ fn full_estimation_produces_prestudy_inflow_models() {
 
 // ── PACF and contribution cascade tests ──────────────────────
 
-/// Simulate a 2-season PAR(2) process using deterministic LCG (Box-Muller).
-/// Model: `z_t = phi_1 * z_{t-1} + phi_2 * z_{t-2} + noise_t`.
+/// Simulate a 2-season PAR(2) process with a deterministic seeded LCG.
 #[allow(
     clippy::cast_precision_loss,
     clippy::cast_sign_loss,
@@ -1075,7 +979,6 @@ fn simulate_two_season_par2(
     (obs_s0, obs_s1)
 }
 
-/// Build a minimal 2-season `Stage` for testing.
 fn make_two_season_stage(
     index: usize,
     id: i32,
@@ -1126,14 +1029,9 @@ fn make_two_season_stage(
 
 // ── ar_rows_to_estimates unit tests ───────────────────────────────────────
 
-/// AC-009-ar-rows-1: `ar_rows_to_estimates` groups by season, deduplicates stages.
-///
-/// Creates `InflowArCoefficientRow` entries for 2 hydros across 3 stages:
-/// - Stage 0 (season 0), stage 1 (season 0), stage 2 (season 1).
-///
-/// After conversion the output must have 2 * 2 = 4 estimates (2 hydros * 2
-/// seasons). Each estimate must carry the coefficients from the FIRST stage
-/// in the season (stage 0 for season 0, stage 2 for season 1).
+/// 2 hydros × 3 stages (stages 0,1 → season 0; stage 2 → season 1) produce
+/// 2 hydros × 2 seasons = 4 estimates; each carries the coefficients from the
+/// FIRST stage in its season (stage 0 for season 0, stage 2 for season 1).
 #[test]
 #[allow(clippy::cast_sign_loss)]
 fn test_ar_rows_to_estimates_groups_by_season() {
@@ -1164,13 +1062,10 @@ fn test_ar_rows_to_estimates_groups_by_season() {
         },
     };
 
-    // 3 stages: stage 0 and stage 1 map to season 0; stage 2 maps to season 1.
     let stages = vec![make_stage(0, 0), make_stage(1, 0), make_stage(2, 1)];
 
-    // AR(1) rows for 2 hydros; sorted by (hydro_id, stage_id, lag).
-    // Each stage has one lag-1 row (AR order 1).
+    // AR(1) rows, sorted by (hydro_id, stage_id, lag).
     let rows = vec![
-        // hydro 1, stage 0 (season 0), lag 1
         InflowArCoefficientRow {
             hydro_id: EntityId(1),
             stage_id: 0,
@@ -1178,7 +1073,6 @@ fn test_ar_rows_to_estimates_groups_by_season() {
             coefficient: 0.50,
             residual_std_ratio: 0.85,
         },
-        // hydro 1, stage 1 (season 0 duplicate), lag 1
         InflowArCoefficientRow {
             hydro_id: EntityId(1),
             stage_id: 1,
@@ -1186,7 +1080,6 @@ fn test_ar_rows_to_estimates_groups_by_season() {
             coefficient: 0.50,
             residual_std_ratio: 0.85,
         },
-        // hydro 1, stage 2 (season 1), lag 1
         InflowArCoefficientRow {
             hydro_id: EntityId(1),
             stage_id: 2,
@@ -1194,7 +1087,6 @@ fn test_ar_rows_to_estimates_groups_by_season() {
             coefficient: 0.60,
             residual_std_ratio: 0.80,
         },
-        // hydro 2, stage 0 (season 0), lag 1
         InflowArCoefficientRow {
             hydro_id: EntityId(2),
             stage_id: 0,
@@ -1202,7 +1094,6 @@ fn test_ar_rows_to_estimates_groups_by_season() {
             coefficient: 0.40,
             residual_std_ratio: 0.90,
         },
-        // hydro 2, stage 1 (season 0 duplicate), lag 1
         InflowArCoefficientRow {
             hydro_id: EntityId(2),
             stage_id: 1,
@@ -1210,7 +1101,6 @@ fn test_ar_rows_to_estimates_groups_by_season() {
             coefficient: 0.40,
             residual_std_ratio: 0.90,
         },
-        // hydro 2, stage 2 (season 1), lag 1
         InflowArCoefficientRow {
             hydro_id: EntityId(2),
             stage_id: 2,
@@ -1222,7 +1112,6 @@ fn test_ar_rows_to_estimates_groups_by_season() {
 
     let estimates = ar_rows_to_estimates(&rows, &stages);
 
-    // 2 hydros * 2 seasons = 4 estimates.
     assert_eq!(
         estimates.len(),
         4,
@@ -1230,7 +1119,7 @@ fn test_ar_rows_to_estimates_groups_by_season() {
         estimates.len()
     );
 
-    // Hydro 1, season 0: coefficient from stage 0 (canonical first stage).
+    // season 0 coeff comes from stage 0 (the season's first stage).
     let e = estimates
         .iter()
         .find(|e| e.hydro_id == EntityId(1) && e.season_id == 0)
@@ -1246,7 +1135,7 @@ fn test_ar_rows_to_estimates_groups_by_season() {
         "residual_std_ratio must be 0.85"
     );
 
-    // Hydro 1, season 1: coefficient from stage 2.
+    // season 1 coeff comes from stage 2 (the season's first stage).
     let e = estimates
         .iter()
         .find(|e| e.hydro_id == EntityId(1) && e.season_id == 1)
@@ -1255,7 +1144,6 @@ fn test_ar_rows_to_estimates_groups_by_season() {
     assert!((e.coefficients[0] - 0.60).abs() < f64::EPSILON);
     assert!((e.residual_std_ratio - 0.80).abs() < f64::EPSILON);
 
-    // Hydro 2, season 0.
     let e = estimates
         .iter()
         .find(|e| e.hydro_id == EntityId(2) && e.season_id == 0)
@@ -1263,7 +1151,6 @@ fn test_ar_rows_to_estimates_groups_by_season() {
     assert_eq!(e.coefficients.len(), 1);
     assert!((e.coefficients[0] - 0.40).abs() < f64::EPSILON);
 
-    // Hydro 2, season 1.
     let e = estimates
         .iter()
         .find(|e| e.hydro_id == EntityId(2) && e.season_id == 1)
@@ -1274,11 +1161,9 @@ fn test_ar_rows_to_estimates_groups_by_season() {
 
 // ── UserArHistoryStats unit tests ─────────────────────────────────────────
 
-/// Write `inflow_ar_coefficients.parquet` with known AR(1) coefficients for
-/// a single hydro expanded to all stages in `stages`.
-///
-/// `stages` must be pre-built (same as the system's stages). The parquet
-/// file will have one row per stage with lag=1.
+/// Writes `inflow_ar_coefficients.parquet` with a known AR(1) coefficient, one
+/// lag-1 row per stage. `stages` must match the system's stages so the
+/// stage_ids resolve.
 fn write_unit_test_ar_coefficients(
     path: &std::path::Path,
     hydro_id: i32,
@@ -1325,12 +1210,9 @@ fn write_unit_test_ar_coefficients(
     writer.close().expect("close writer");
 }
 
-/// Build a system with one hydro and 2-season stages (same structure as
-/// `build_system_with_user_stats`) but with EMPTY inflow_models.
-///
-/// This represents the state after `load_case` when `inflow_seasonal_stats.parquet`
-/// is absent (the P7/UserArHistoryStats case): `assemble_inflow_models` returns
-/// an empty vec, so `system.inflow_models()` is empty.
+/// One-hydro 2-season system with EMPTY inflow_models — the state after
+/// `load_case` when `inflow_seasonal_stats.parquet` is absent (the
+/// `UserArHistoryStats` case), where `assemble_inflow_models` returns empty.
 #[allow(clippy::cast_possible_wrap)]
 fn build_system_empty_models(n_years: usize) -> System {
     use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
@@ -1412,17 +1294,13 @@ fn build_system_empty_models(n_years: usize) -> System {
         .buses(vec![bus])
         .hydros(vec![hydro])
         .stages(stages)
-        // NOTE: no inflow_models — represents the P7 case after load_case
         .build()
         .expect("valid system with empty inflow models")
 }
 
-/// Setup a case directory for the P7 (UserArHistoryStats) path:
-/// - `inflow_history.parquet`: real Parquet with synthetic 2-season data.
-/// - `inflow_ar_coefficients.parquet`: real Parquet with known AR(1) coefficients.
-/// - No `inflow_seasonal_stats.parquet`.
-///
-/// Returns the stages used in the system so the AR file can reference valid stage IDs.
+/// Sets up the `UserArHistoryStats` case: real `inflow_history.parquet` +
+/// `inflow_ar_coefficients.parquet` (known AR(1) coeffs), no
+/// `inflow_seasonal_stats.parquet`.
 #[allow(clippy::cast_possible_wrap)]
 fn setup_user_ar_case(
     case_dir: &std::path::Path,
@@ -1434,10 +1312,8 @@ fn setup_user_ar_case(
     let scenarios = case_dir.join("scenarios");
     std::fs::create_dir_all(&scenarios).unwrap();
 
-    // Write history parquet.
     write_unit_test_inflow_history(&scenarios.join("inflow_history.parquet"), 1, n_years);
 
-    // Build the same stages as build_system_empty_models to get stage IDs.
     let ref_year = 1970_i32;
     let mut stages = Vec::with_capacity(n_years * 2);
     for y in 0..n_years {
@@ -1452,7 +1328,6 @@ fn setup_user_ar_case(
         ));
     }
 
-    // Write AR coefficients parquet with known values, one row per stage.
     write_unit_test_ar_coefficients(
         &scenarios.join("inflow_ar_coefficients.parquet"),
         1,
@@ -1460,16 +1335,8 @@ fn setup_user_ar_case(
         ar_coefficient,
         residual_std_ratio,
     );
-
-    // NO inflow_seasonal_stats.parquet — this is the P7 path.
 }
 
-/// AC-009-1: `estimate_from_history` with P7 setup preserves user AR coefficients
-/// bitwise in the returned inflow models.
-///
-/// Setup: system with empty inflow_models, case dir with history + AR (no stats).
-/// Assert: every returned model's `ar_coefficients[0]` and `residual_std_ratio`
-/// match the known values written to `inflow_ar_coefficients.parquet` exactly.
 #[test]
 fn test_user_ar_estimation_preserves_ar_coefficients() {
     use tempfile::TempDir;
@@ -1526,10 +1393,6 @@ fn test_user_ar_estimation_preserves_ar_coefficients() {
     }
 }
 
-/// AC-009-2: `estimate_from_history` with P7 setup produces finite, positive
-/// `mean_m3s` and `std_m3s` estimated from inflow history.
-///
-/// Same setup as `test_user_ar_estimation_preserves_ar_coefficients`.
 #[test]
 fn test_user_ar_estimation_estimates_stats_from_history() {
     use tempfile::TempDir;
@@ -1568,8 +1431,6 @@ fn test_user_ar_estimation_estimates_stats_from_history() {
     }
 }
 
-/// AC-009-3: `estimate_from_history` with P7 setup returns a report with
-/// method "user_provided" and an empty entries map.
 #[test]
 fn test_user_ar_estimation_returns_user_provided_report() {
     use tempfile::TempDir;
@@ -1602,8 +1463,6 @@ fn test_user_ar_estimation_returns_user_provided_report() {
 
 // ── Bidirectional coverage validation tests ─────────────────
 
-/// Build a minimal Hydro struct reusing the same penalty/generation defaults
-/// as the single-hydro helpers above.
 fn make_hydro(hydro_id: EntityId, bus_id: EntityId) -> cobre_core::entities::hydro::Hydro {
     use cobre_core::entities::hydro::{Hydro, HydroGenerationModel};
     Hydro {
@@ -1653,9 +1512,8 @@ fn make_hydro(hydro_id: EntityId, bus_id: EntityId) -> cobre_core::entities::hyd
     }
 }
 
-/// Build a System with two hydros (IDs 1 and 2). User stats (inflow_models)
-/// are created only for the hydros in `stats_hydro_ids`. Hydros in
-/// `all_hydro_ids` but not in `stats_hydro_ids` have no stats rows.
+/// Two-hydro system; inflow_models (user stats) are built only for
+/// `stats_hydro_ids`, so hydros in `all_hydro_ids` outside it have no stats.
 #[allow(clippy::cast_possible_wrap)]
 fn build_two_hydro_system_selective_stats(
     n_years: usize,
@@ -1691,7 +1549,6 @@ fn build_two_hydro_system_selective_stats(
         ));
     }
 
-    // Build inflow models only for hydros in stats_hydro_ids.
     let inflow_models: Vec<InflowModel> = stats_hydro_ids
         .iter()
         .flat_map(|&hid| {
@@ -1721,8 +1578,8 @@ fn build_two_hydro_system_selective_stats(
         .expect("valid two-hydro system")
 }
 
-/// Write a real `inflow_history.parquet` with data for the given list of
-/// hydro IDs. Each hydro gets identical synthetic PAR(2) observations.
+/// Writes `inflow_history.parquet` with identical synthetic PAR(2) data for
+/// each hydro_id.
 fn write_history_for_hydros(path: &std::path::Path, hydro_ids: &[i32], n_years: usize) {
     use arrow::array::{Date32Array, Float64Array, Int32Array};
     use arrow::datatypes::{DataType, Field, Schema};
@@ -1777,13 +1634,8 @@ fn write_history_for_hydros(path: &std::path::Path, hydro_ids: &[i32], n_years: 
     writer.close().expect("close writer");
 }
 
-/// Direction A — AR estimated for hydro 2 but no user stats for it.
-///
-/// Setup: system with hydros [1, 2], history for both [1, 2], but
-/// `inflow_seasonal_stats.parquet` provides stats only for hydro 1.
-///
-/// Assert: `estimate_from_history` returns `Err` with a `ConstraintError`
-/// whose description contains `"2"` (the uncovered hydro ID).
+/// Direction A: hydro 2 has history (so AR is estimated) but no user stats —
+/// the coverage error must name the uncovered hydro 2.
 #[test]
 fn test_partial_estimation_direction_a_missing_stats() {
     use tempfile::TempDir;
@@ -1796,14 +1648,11 @@ fn test_partial_estimation_direction_a_missing_stats() {
     let scenarios = case_dir.join("scenarios");
     std::fs::create_dir_all(&scenarios).unwrap();
 
-    // History for both hydros 1 and 2.
     write_history_for_hydros(&scenarios.join("inflow_history.parquet"), &[1, 2], N_YEARS);
 
-    // Stats sentinel — presence triggers PartialEstimation manifest flag.
     std::fs::write(scenarios.join("inflow_seasonal_stats.parquet"), b"sentinel")
         .expect("write sentinel");
 
-    // System: hydros [1, 2] in the hydros list, but stats only for hydro 1.
     let system = build_two_hydro_system_selective_stats(
         N_YEARS,
         &[EntityId(1), EntityId(2)],
@@ -1826,14 +1675,8 @@ fn test_partial_estimation_direction_a_missing_stats() {
     );
 }
 
-/// Direction B — user stats for hydro 2 but no history for it.
-///
-/// Setup: system with hydros [1, 2] and stats for both, but history only
-/// for hydro 1.
-///
-/// Assert: `estimate_from_history` returns `Ok`, the `EstimationReport`
-/// has `white_noise_fallbacks == [EntityId(2)]`, and the returned system's
-/// inflow model for hydro 2 has empty `ar_coefficients`.
+/// Direction B: hydro 2 has user stats but no history — it falls back to white
+/// noise (empty `ar_coefficients`, listed in `white_noise_fallbacks`).
 #[test]
 fn test_partial_estimation_direction_b_white_noise_fallback() {
     use tempfile::TempDir;
@@ -1846,14 +1689,11 @@ fn test_partial_estimation_direction_b_white_noise_fallback() {
     let scenarios = case_dir.join("scenarios");
     std::fs::create_dir_all(&scenarios).unwrap();
 
-    // History only for hydro 1.
     write_history_for_hydros(&scenarios.join("inflow_history.parquet"), &[1], N_YEARS);
 
-    // Stats sentinel.
     std::fs::write(scenarios.join("inflow_seasonal_stats.parquet"), b"sentinel")
         .expect("write sentinel");
 
-    // System: hydros [1, 2] with stats for both (hydro 2 gets white-noise fallback).
     let system = build_two_hydro_system_selective_stats(
         N_YEARS,
         &[EntityId(1), EntityId(2)],
@@ -1879,7 +1719,6 @@ fn test_partial_estimation_direction_b_white_noise_fallback() {
         report.white_noise_fallbacks
     );
 
-    // Hydro 2 should have empty ar_coefficients in the returned system.
     let hydro2_models: Vec<_> = updated
         .inflow_models()
         .iter()
@@ -1898,10 +1737,6 @@ fn test_partial_estimation_direction_b_white_noise_fallback() {
     }
 }
 
-/// Exact coverage — single hydro with matching history and stats.
-///
-/// Reuses the single-hydro setup. Asserts that
-/// `white_noise_fallbacks` is empty on the returned report.
 #[test]
 fn test_partial_estimation_exact_coverage_no_fallback() {
     use tempfile::TempDir;
@@ -1926,8 +1761,6 @@ fn test_partial_estimation_exact_coverage_no_fallback() {
     );
 }
 
-/// `run_estimation` (FullEstimation path) never populates
-/// `white_noise_fallbacks` — it must be empty on the returned report.
 #[test]
 fn test_full_estimation_report_has_empty_fallbacks() {
     use tempfile::TempDir;
@@ -1940,11 +1773,8 @@ fn test_full_estimation_report_has_empty_fallbacks() {
     let scenarios = case_dir.join("scenarios");
     std::fs::create_dir_all(&scenarios).unwrap();
 
-    // History only — no stats file → FullEstimation path.
     write_history_for_hydros(&scenarios.join("inflow_history.parquet"), &[1], N_YEARS);
-    // No inflow_seasonal_stats.parquet → FullEstimation.
 
-    // System with one hydro, no pre-loaded inflow models (no user stats).
     let system = build_two_hydro_system_selective_stats(
         N_YEARS,
         &[EntityId(1)],
@@ -1972,12 +1802,9 @@ fn test_full_estimation_report_has_empty_fallbacks() {
 
 // ── StdRatioDivergence unit tests ─────────────────────────────────────────
 
-/// Helper: build a System and fitting_stats for a single hydro with the
-/// given per-season std values, then call `check_std_ratio_divergence`.
-///
-/// `user_stds[i]` is the user-provided std for season `i`.
-/// `est_stds[i]` is the estimated std for season `i`.
-/// Stages are created so that stage_id == season_id (one stage per season).
+/// Builds a single-hydro System + fitting_stats from per-season user/estimated
+/// stds (stage_id == season_id, one stage per season), then calls
+/// `check_std_ratio_divergence`.
 fn collect_std_ratio_warnings(
     hydro_id: EntityId,
     user_stds: &[f64],
@@ -1992,7 +1819,6 @@ fn collect_std_ratio_warnings(
     );
     let n = user_stds.len();
 
-    // Build stages: stage_id == season_id == i, one stage per season.
     let stages: Vec<cobre_core::temporal::Stage> = (0..n)
         .map(|i| {
             let year = 1970_i32;
@@ -2001,7 +1827,6 @@ fn collect_std_ratio_warnings(
         })
         .collect();
 
-    // Build user InflowModels: one per stage.
     let user_models: Vec<InflowModel> = (0..n)
         .map(|i| InflowModel {
             hydro_id,
@@ -2020,7 +1845,6 @@ fn collect_std_ratio_warnings(
         .build()
         .expect("valid system");
 
-    // Build fitting_stats: entity_id = hydro_id, stage_id = i, std = est_stds[i].
     let fitting_stats: Vec<SeasonalStats> = (0..n)
         .map(|i| SeasonalStats {
             entity_id: hydro_id,
@@ -2033,13 +1857,8 @@ fn collect_std_ratio_warnings(
     check_std_ratio_divergence(&system, &fitting_stats, &stages)
 }
 
-/// P9-001: Warning fires when consecutive std ratios diverge by more than 2x.
-///
-/// user stds [100.0, 20.0], est stds [100.0, 100.0].
-/// Pair (0→1): ratio_user = 5.0, ratio_est = 1.0, divergence = 5.0 → warn.
-/// Wrap (1→0): ratio_user = 0.2, ratio_est = 1.0, divergence = 5.0 → warn.
-/// Both pairs diverge, so 2 warnings are emitted. The test verifies that
-/// at least one warning covers the (0→1) pair and the hydro_id is correct.
+/// user stds [100.0, 20.0], est stds [100.0, 100.0]. Pair (0→1): ratio_user=5.0,
+/// ratio_est=1.0 → divergence 5.0 (> 2× threshold → warn); wrap (1→0) likewise.
 #[test]
 fn test_std_ratio_divergence_fires_when_ratios_diverge() {
     let warnings = collect_std_ratio_warnings(EntityId(1), &[100.0, 20.0], &[100.0, 100.0]);
@@ -2066,10 +1885,8 @@ fn test_std_ratio_divergence_fires_when_ratios_diverge() {
     );
 }
 
-/// P9-002: No warning when ratios are similar (divergence <= 2.0).
-///
-/// user stds [100.0, 20.0], est stds [90.0, 18.0].
-/// ratio_user = 5.0, ratio_est = 5.0. divergence = 1.0 → no warning.
+/// user stds [100.0, 20.0], est stds [90.0, 18.0]: ratio_user=5.0, ratio_est=5.0,
+/// divergence 1.0 (≤ 2× threshold) → no warning.
 #[test]
 fn test_std_ratio_divergence_not_fires_when_similar() {
     let warnings = collect_std_ratio_warnings(EntityId(1), &[100.0, 20.0], &[90.0, 18.0]);
@@ -2079,45 +1896,28 @@ fn test_std_ratio_divergence_not_fires_when_similar() {
     );
 }
 
-/// P9-003: Season pairs with near-zero denominator std are skipped.
-///
-/// user stds [100.0, 0.0], est stds [90.0, 18.0].
-/// The pair (season 0 → season 1) has u_b = 0.0 < 1e-12 → skipped.
-/// The wrap pair (season 1 → season 0) has u_b = 100.0 and e_b = 90.0 → checked.
-/// ratio_user = 0/100 = 0.0, ratio_est = 18/90 = 0.2.
-/// divergence = max(0/0.2, 0.2/0) → second division hits near-zero guard → skipped.
+/// user stds [100.0, 0.0], est stds [90.0, 18.0]: pair 0→1 has denominator
+/// u_b=0.0 < 1e-12 → skipped; the wrap pair's divergence = max(0/0.2, 0.2/0)
+/// hits the near-zero guard on the second division → skipped. No panic.
 #[test]
 fn test_std_ratio_divergence_skips_near_zero_std() {
-    // user stds [100.0, 0.0]: the first pair has denominator 0.0 → skipped.
     let warnings = collect_std_ratio_warnings(EntityId(1), &[100.0, 0.0], &[90.0, 18.0]);
-    // No panic must occur. The pair involving zero std is silently skipped.
-    // The wrap pair has ratio_user = 0.0/100.0 = 0.0, ratio_est = 18.0/90.0 = 0.2;
-    // ratio_user / ratio_est would require dividing 0/0.2 = 0, and
-    // ratio_est / ratio_user would divide by 0. The near-zero guard on ratio_est
-    // is not triggered here (0.2 is not near zero), but ratio_user = 0.0 means
-    // divergence = max(0/0.2, 0.2/0). The 0.2/0 branch triggers the ratio_est
-    // guard only if ratio_user < 1e-12, which 0.0 satisfies → skipped.
-    // We assert no panic and that the result is well-defined.
-    let _ = warnings; // result is valid (empty or one entry); no panic is the key assertion.
+    let _ = warnings; // the assertion is that no panic occurs; the result may be empty or one entry.
 }
 
-/// P9-004: Wrap-around pair (last season → first season) is checked.
-///
-/// user stds [100.0, 20.0, 50.0], est stds [100.0, 20.0, 10.0].
-/// Pair (0→1): ratio_user=5.0, ratio_est=5.0 → divergence=1.0 (no warn).
-/// Pair (1→2): ratio_user=0.4, ratio_est=2.0 → divergence=5.0 (warn).
-/// Wrap (2→0): ratio_user=50/100=0.5, ratio_est=10/100=0.1 → divergence=5.0 (warn).
+/// Wrap-around pair (last season → first) is checked.
+/// user stds [100.0, 20.0, 50.0], est stds [100.0, 20.0, 10.0]:
+/// (0→1) divergence 1.0 (no warn); (1→2) divergence 5.0 (warn);
+/// wrap (2→0) divergence 5.0 (warn).
 #[test]
 fn test_std_ratio_divergence_wraps_last_to_first() {
     let warnings =
         collect_std_ratio_warnings(EntityId(1), &[100.0, 20.0, 50.0], &[100.0, 20.0, 10.0]);
-    // Pairs (1→2) and wrap (2→0) both diverge.
     assert!(
         warnings.len() >= 2,
         "expected at least 2 StdRatioDivergence entries (including wrap), got {}",
         warnings.len()
     );
-    // The wrap pair (season 2 → season 0) must appear.
     let has_wrap = warnings.iter().any(|w| w.season_a == 2 && w.season_b == 0);
     assert!(
         has_wrap,
@@ -2132,8 +1932,7 @@ use cobre_core::temporal::{
     Block, BlockMode, NoiseMethod, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
 };
 
-/// Build a 12-season monthly stage sequence spanning `n_years` starting from
-/// year 2000. Stage IDs are 0-based sequential; season IDs cycle 0..12.
+/// 12-season monthly stages over `n_years` from year 2000; season_id cycles 0..12.
 fn make_monthly_stages_for_annual(n_years: usize) -> Vec<cobre_core::temporal::Stage> {
     let mut stages = Vec::new();
     let mut idx = 0usize;
@@ -2170,9 +1969,7 @@ fn make_monthly_stages_for_annual(n_years: usize) -> Vec<cobre_core::temporal::S
     stages
 }
 
-/// Build `n_years * 12` synthetic monthly observations for `hydro_id`.
-///
-/// Formula: `z[year*12 + month] = base + (month+1) * scale + year * drift`.
+/// `n_years` × 12 synthetic monthly observations for `hydro_id`.
 fn synthetic_monthly_obs(
     hydro_id: EntityId,
     n_years: usize,
@@ -2198,11 +1995,8 @@ fn synthetic_monthly_obs(
     obs
 }
 
-/// Build a `System` with two hydros on a 12-season (monthly) grid spanning
-/// `n_years` study years, with no pre-loaded inflow models.
-///
-/// This represents the state before estimation: only hydros and stages are
-/// present, so `estimate_from_history` will follow the `FullEstimation` path.
+/// Two-hydro 12-season monthly system with no pre-loaded inflow models —
+/// `estimate_from_history` follows the `FullEstimation` path.
 #[allow(clippy::cast_possible_wrap)]
 fn build_two_hydro_monthly_system(n_years: usize) -> System {
     use cobre_core::{Bus, DeficitSegment, SystemBuilder};
@@ -2228,11 +2022,8 @@ fn build_two_hydro_monthly_system(n_years: usize) -> System {
         .expect("valid two-hydro monthly system")
 }
 
-/// Write `inflow_history.parquet` with synthetic monthly data for two hydros.
-///
-/// Uses `synthetic_monthly_obs` to generate observations for hydros 1 and 2
-/// with different base values so the series are distinct. Observations are
-/// dated starting from 2000-01-01 and cover `n_years * 12` months per hydro.
+/// Writes `inflow_history.parquet` with distinct synthetic monthly series for
+/// hydros 1 and 2.
 fn write_monthly_inflow_history_two_hydros(path: &std::path::Path, n_years: usize) {
     use arrow::array::{Date32Array, Float64Array, Int32Array};
     use arrow::datatypes::{DataType, Field, Schema};
@@ -2279,11 +2070,6 @@ fn write_monthly_inflow_history_two_hydros(path: &std::path::Path, n_years: usiz
     writer.close().expect("close writer");
 }
 
-/// `estimate_from_history` with `PacfAnnual` populates `InflowModel.annual`.
-///
-/// Fixture: 2-hydro × 60-month (12 seasons × 5 years) synthetic monthly
-/// history. Config has `order_selection = PacfAnnual`. Asserts that at
-/// least one returned inflow model has `annual = Some(_)`.
 #[test]
 fn estimate_from_history_pacf_annual_populates_annual_field() {
     use cobre_io::config::{EstimationConfig, OrderSelectionMethod};
@@ -2293,7 +2079,6 @@ fn estimate_from_history_pacf_annual_populates_annual_field() {
     let dir = TempDir::new().unwrap();
     let case_dir = dir.path();
 
-    // FullEstimation: only inflow_history.parquet, no stats or AR files.
     create_required_files(case_dir);
     let scenarios = case_dir.join("scenarios");
     std::fs::create_dir_all(&scenarios).unwrap();
@@ -2330,11 +2115,6 @@ fn estimate_from_history_pacf_annual_populates_annual_field() {
     );
 }
 
-/// `estimate_from_history` with classical `Pacf` keeps `InflowModel.annual = None`.
-///
-/// Same fixture as `estimate_from_history_pacf_annual_populates_annual_field`
-/// but with `order_selection = Pacf`. Asserts that every returned inflow
-/// model has `annual = None` (regression: classical path unchanged).
 #[test]
 fn estimate_from_history_pacf_classical_keeps_annual_none() {
     use cobre_io::config::{EstimationConfig, OrderSelectionMethod};
@@ -2380,12 +2160,6 @@ fn estimate_from_history_pacf_classical_keeps_annual_none() {
     );
 }
 
-/// AC #8 — Classical path unchanged: `use_annual_component = false` returns
-/// `method = "PACF"` and every `ArCoefficientEstimate.annual.is_none()`.
-///
-/// Uses the same 2-hydro 30-year fixture as AC #6 to ensure the dispatch
-/// (`estimate_ar_coefficients_with_selection`) routes to the classical path
-/// when `use_annual_component = false`.
 #[test]
 fn estimate_ar_coefficients_with_selection_classical_path_unchanged() {
     let h1 = EntityId(1);
@@ -2491,17 +2265,9 @@ fn partial_year_stages(
         .collect()
 }
 
-/// Full-cycle PAR(2) partial-year fit: a monthly study spanning seasons
-/// 8–11 (Sep–Dec) with 30 years of full-cycle synthetic history.
-///
-/// Mirrors the `run_estimation` pipeline (synthesize pre-study stages →
-/// fit on the combined stages → expand rows → assemble models →
-/// `PrecomputedPar::build`) and asserts:
-/// (a) no panic during fitting,
-/// (b) the synthesized pre-study stages produce `InflowModel` entries at
-///     negative `stage_id`s,
-/// (c) the first study stage's `PrecomputedPar` psi for its pre-study lags
-///     is non-zero (the lag stats were sourced from history, not zeroed).
+/// Full-cycle PAR(2) partial-year fit: a monthly study over seasons 8–11
+/// (Sep–Dec) with 30 years of full-cycle history, mirroring the `run_estimation`
+/// pipeline (synthesize pre-study stages → fit → expand → assemble → build).
 #[test]
 fn partial_year_par2_synthesizes_prestudy_lag_models() {
     let h1 = EntityId(1);
@@ -2509,14 +2275,12 @@ fn partial_year_par2_synthesizes_prestudy_lag_models() {
     let max_order = 2usize;
     let season_map = monthly_season_map();
 
-    // Study spans seasons 8..=11 (Sep–Dec), study stage ids 0..=3.
     let study_stages = partial_year_stages(8, 4, 2030);
 
-    // Full-cycle history: all 12 months per year so the out-of-window lag
-    // seasons (6 = July, 7 = August) have observations to fit.
+    // Full-cycle history (all 12 months) so the out-of-study lag seasons 6/7
+    // have observations to fit.
     let obs = synthetic_monthly_obs(h1, n_years, 100.0, 5.0, 1.0);
 
-    // ── Synthesize pre-study stages for the lag window ───────────────────
     let prestudy = synthesize_prestudy_stages(&study_stages, max_order, Some(&season_map));
     // max_order=2 → lags into seasons 7 (Aug) and 6 (Jul), neither in study.
     assert_eq!(
@@ -2548,7 +2312,6 @@ fn partial_year_par2_synthesizes_prestudy_lag_models() {
         .chain(prestudy.iter().cloned())
         .collect();
 
-    // ── Fit seasonal stats + AR(2) on the combined stages ────────────────
     let seasonal_stats = {
         use cobre_stochastic::par::fitting::estimate_seasonal_stats_with_season_map;
         estimate_seasonal_stats_with_season_map(&obs, &stages, &[h1], Some(&season_map))
@@ -2569,14 +2332,12 @@ fn partial_year_par2_synthesizes_prestudy_lag_models() {
     )
     .expect("AR(2) fit must succeed");
 
-    // ── Expand rows onto pre-study stages and assemble inflow models ─────
     let stats_rows = seasonal_stats_to_rows(&seasonal_stats, &stages);
     let coeff_rows = ar_estimates_to_rows(&ar_estimates, &stages);
     let annual_rows = ar_estimates_to_annual_rows(&ar_estimates, &stages);
     let inflow_models = assemble_inflow_models(stats_rows, coeff_rows, annual_rows)
         .expect("assembly must succeed with pre-study rows present");
 
-    // (b) Pre-study InflowModel entries exist at negative stage_ids.
     let neg_models: Vec<&cobre_core::scenario::InflowModel> =
         inflow_models.iter().filter(|m| m.stage_id < 0).collect();
     assert!(
@@ -2585,7 +2346,6 @@ fn partial_year_par2_synthesizes_prestudy_lag_models() {
         neg_models.iter().map(|m| m.stage_id).collect::<Vec<_>>()
     );
 
-    // ── Build PrecomputedPar with the true cycle length (12) ─────────────
     let par = cobre_stochastic::PrecomputedPar::build(
         &inflow_models,
         &study_stages,
@@ -2594,11 +2354,9 @@ fn partial_year_par2_synthesizes_prestudy_lag_models() {
     )
     .expect("PrecomputedPar build must succeed");
 
-    // (c) The first study stage (s_idx 0, season 8) has non-zero psi for
-    // its pre-study lags, proving the lag stats came from history rather
-    // than the (0.0, 0.0) season fallback. PACF may select an order ≤
-    // max_order; whatever the stride, at least one lag must be non-zero
-    // and the lag it consumes resolves to a pre-study stage (season 7/6).
+    // A non-zero psi for the first study stage's pre-study lags proves the lag
+    // stats came from history, not the (0,0) season fallback. PACF may select any
+    // order ≤ max_order, so assert at least one lag is non-zero, not a fixed stride.
     let par_order = par.max_order();
     assert!(
         par_order >= 1 && par_order <= max_order,

@@ -97,16 +97,12 @@ impl MockSolver {
     }
 
     /// Shared solve logic used by both cold-start and warm-start paths.
-    ///
-    /// Increments `call_count` and returns `Infeasible` when `call_count`
-    /// matches `infeasible_at`, otherwise returns the stored solution.
     fn do_solve(&mut self) -> Result<cobre_solver::SolutionView<'_>, SolverError> {
         let call = self.call_count;
         self.call_count += 1;
         if self.infeasible_at == Some(call) {
             return Err(SolverError::Infeasible);
         }
-        // Fill internal buffers from the stored solution.
         self.buf_primal.clone_from(&self.solution.primal);
         self.buf_dual.clone_from(&self.solution.dual);
         self.buf_reduced_costs
@@ -168,26 +164,10 @@ impl SolverInterface for MockSolver {
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
-/// Minimal valid stage template for N=1 hydro, L=0 PAR order.
-///
-/// Column layout: [storage (0), `storage_in` (1), theta (2)]
-/// Row layout: [`storage_fixing` (0)]
+/// Minimal valid stage template for N=1 hydro, L=0 PAR order: columns
+/// `[storage_out(0), z_inflow(1), storage_in(2), theta(3)]`, one storage-fixing
+/// row whose only nonzero is the `storage_in` coefficient. Minimises theta.
 fn minimal_template_1_0() -> StageTemplate {
-    // N=1, L=0:
-    //   storage      = 0..1
-    //   storage_in   = 1..2
-    //   theta        = 2
-    //   n_state      = 1
-    //   n_transfer   = 0
-    //   n_dual_relevant = 1
-    //
-    // Column layout for N=1, L=0:
-    //   col 0: storage_out, col 1: z_inflow, col 2: storage_in, col 3: theta
-    //
-    // LP: min theta  s.t. storage_in = ? (patched)  x >= 0
-    //
-    // CSC matrix has 1 non-zero: storage_in coefficient in storage_fixing row.
-    // Simplified to a structurally valid but otherwise no-op LP for testing.
     StageTemplate {
         num_cols: 4,
         num_rows: 1,
@@ -210,10 +190,6 @@ fn minimal_template_1_0() -> StageTemplate {
     }
 }
 
-/// Build a fixed `LpSolution` with `num_cols` columns.
-///
-/// `objective` is passed directly. `primal[theta_col]` is set to
-/// `theta_val`; all other primal entries are zero.
 fn fixed_solution(num_cols: usize, objective: f64, theta_col: usize, theta_val: f64) -> LpSolution {
     let mut primal = vec![0.0_f64; num_cols];
     primal[theta_col] = theta_val;
@@ -228,7 +204,6 @@ fn fixed_solution(num_cols: usize, objective: f64, theta_col: usize, theta_val: 
     }
 }
 
-/// Allocate `n` empty `TrajectoryRecord`s.
 fn empty_records(n: usize) -> Vec<TrajectoryRecord> {
     (0..n)
         .map(|_| TrajectoryRecord {
@@ -416,9 +391,6 @@ fn forward_result_clone_and_debug() {
 
 // ── Unit tests: forward overhead decomposition ───────────────────────────
 
-/// Verify the three-component decomposition: 4 workers with solve times
-/// 500/600/550/580 ms and setup times 50/60/45/55 ms yields setup=210,
-/// imbalance=50, scheduling varies by `parallel_wall_ms`.
 #[test]
 fn forward_overhead_decomposition_four_workers() {
     use cobre_solver::SolverStatistics;
@@ -440,7 +412,6 @@ fn forward_overhead_decomposition_four_workers() {
         }
     }
 
-    // Solve times (s): 0.5, 0.6, 0.55, 0.58; setup times (s): 0.05, 0.06, 0.045, 0.055
     let befores = [
         make_stats(0.0, 0.0, 0.0, 0.0),
         make_stats(0.0, 0.0, 0.0, 0.0),
@@ -460,13 +431,11 @@ fn forward_overhead_decomposition_four_workers() {
         .map(|(b, a)| SolverStatsDelta::from_snapshots(b, a))
         .collect();
 
-    // setup_time_ms: sum of all workers' setup phases.
     let setup_ms: f64 = deltas
         .iter()
         .map(|d| d.load_model_time_ms + d.set_bounds_time_ms + d.basis_set_time_ms)
         .sum();
 
-    // Per-worker totals: solve + setup.
     let worker_totals: Vec<f64> = deltas
         .iter()
         .map(|d| {
@@ -509,7 +478,6 @@ fn forward_overhead_decomposition_four_workers() {
     );
 }
 
-/// Edge case: single worker — load imbalance must be exactly zero.
 #[test]
 fn forward_overhead_decomposition_single_worker_zero_imbalance() {
     use cobre_solver::SolverStatistics;
@@ -542,8 +510,6 @@ fn forward_overhead_decomposition_single_worker_zero_imbalance() {
     );
 }
 
-/// Edge case: scheduling overhead is clamped to zero when parallel wall
-/// time is less than the max worker total (clock-skew scenario).
 #[test]
 fn forward_overhead_scheduling_clamped_to_zero_on_clock_skew() {
     use cobre_solver::SolverStatistics;
@@ -573,7 +539,6 @@ fn forward_overhead_scheduling_clamped_to_zero_on_clock_skew() {
     );
 }
 
-/// Build a single-workspace from a solver sized for the given `indexer`.
 fn single_workspace(
     solver: MockSolver,
     state: &crate::indexer::StateLayout,
@@ -661,8 +626,6 @@ fn make_stages_3() -> Vec<Stage> {
 
 // ── Acceptance criteria integration tests ───────────────────────────────
 
-/// AC: 2 scenarios, 3 stages, fixed `LpSolution(objective=100, theta=30)`.
-/// Expected: `scenario_count=2`, all 6 records with `stage_cost=70_000`.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn ac_two_scenarios_three_stages_fixed_solution() {
@@ -778,25 +741,19 @@ fn ac_two_scenarios_three_stages_fixed_solution() {
     )
     .unwrap();
 
-    // AC: scenario_costs has exactly 2 entries (one per forward pass).
     assert_eq!(result.scenario_costs.len(), 2);
-    // AC: all 6 records have stage_cost = (100 - 30) * COST_SCALE_FACTOR = 70_000_000.
+    // stage_cost = (100 - 30) * COST_SCALE_FACTOR = 70_000_000.
     for (i, record) in records.iter().enumerate() {
         assert_eq!(
             record.stage_cost, 70_000_000.0,
             "record[{i}].stage_cost should be 70_000_000.0 ((objective - theta) * COST_SCALE_FACTOR)"
         );
     }
-    // AC: each scenario cost = 70_000_000 * 3 stages = 210_000_000.
+    // each scenario cost = 70_000_000 * 3 stages = 210_000_000.
     assert_eq!(result.scenario_costs[0], 210_000_000.0);
     assert_eq!(result.scenario_costs[1], 210_000_000.0);
 }
 
-/// AC: mock solver returns `Infeasible` at stage 1, scenario 0.
-///
-/// Call 0 = scenario 0 stage 0 (succeeds). Call 1 = scenario 0 stage 1
-/// (infeasible). The function must return `SddpError::Infeasible { stage: 1,
-/// scenario: 0 }`.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
@@ -913,7 +870,6 @@ fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
         &mut records,
     );
 
-    // AC: must return SddpError::Infeasible with stage=1, scenario=0.
     match result {
         Err(crate::SddpError::Infeasible {
             stage, scenario, ..
@@ -925,7 +881,6 @@ fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
     }
 }
 
-/// AC: with `forward_passes=3`, rank=1, size=2, `global_scenario` for m=0 is 3.
 #[test]
 fn ac_global_scenario_index_rank1_scenario0() {
     // global_scenario = rank * forward_passes + m = 1 * 3 + 0 = 3
@@ -936,12 +891,6 @@ fn ac_global_scenario_index_rank1_scenario0() {
     assert_eq!(global_scenario, 3);
 }
 
-/// Behavioral: `cost_sum` and `cost_sum_sq` are correctly accumulated.
-///
-/// With 2 scenarios and `stage_cost=70_000` at every `(scenario, stage)`:
-/// - `total_cost` per scenario = `70_000` \* 3 = `210_000`
-/// - `cost_sum` = `210_000` + `210_000` = `420_000`
-/// - `cost_sum_sq` = `210_000`^2 + `210_000`^2 = `88_200_000_000`
 #[test]
 #[allow(clippy::too_many_lines)]
 fn cost_statistics_accumulated_correctly() {
@@ -1124,7 +1073,6 @@ fn ub_statistics_four_scenarios_correct_mean_and_std() {
 
     assert_eq!(result.global_ub_mean, 75.0, "mean must be 300/4 = 75");
 
-    // variance = 500/3, std = sqrt(500/3) ≈ 12.910
     let expected_std = (500.0_f64 / 3.0).sqrt();
     let tolerance = 1e-9;
     assert!(
@@ -1133,7 +1081,6 @@ fn ub_statistics_four_scenarios_correct_mean_and_std() {
         got = result.global_ub_std,
     );
 
-    // ci_95 = 1.96 * std / sqrt(4) = 1.96 * std / 2
     let expected_ci = 1.96_f64 * expected_std / 4.0_f64.sqrt();
     assert!(
         (result.ci_95_half_width - expected_ci).abs() < tolerance,
@@ -1165,7 +1112,6 @@ fn acceptance_criterion_ub_mean() {
     let result = sync_forward(&local, &comm, 4).unwrap();
 
     assert_eq!(result.global_ub_mean, 75.0);
-    // std = sqrt((23000 - 4 * 75^2) / 3) = sqrt(500/3) ≈ 12.910
     let expected_std = (500.0_f64 / 3.0).sqrt();
     assert!(
         (result.global_ub_std - expected_std).abs() < 1e-9,
@@ -1183,7 +1129,6 @@ fn acceptance_criterion_ub_mean() {
 /// ranks with 2 scenarios each.
 #[test]
 fn canonical_summation_identical_regardless_of_partition() {
-    // Single-rank: all 4 costs provided together.
     let single_rank = ForwardResult {
         scenario_costs: vec![1.0, 2.0, 3.0, 4.0],
         elapsed_ms: 0,
@@ -1196,10 +1141,8 @@ fn canonical_summation_identical_regardless_of_partition() {
     let comm = LocalBackend;
     let result_single = sync_forward(&single_rank, &comm, 4).unwrap();
 
-    // Simulate two-rank scenario: rank 0 has [1.0, 2.0], rank 1 has [3.0, 4.0].
-    // The mock communicator below pre-fills the recv buf with both ranks' data.
-    // We test by constructing the full global buffer manually and verifying
-    // that sequential summation produces the same statistics.
+    // Build the full global buffer manually; sequential summation must yield
+    // the same statistics as the single-rank result above.
     let global_costs = [1.0_f64, 2.0, 3.0, 4.0];
     let global_n = global_costs.len();
     #[allow(clippy::cast_precision_loss)]
@@ -1223,7 +1166,6 @@ fn canonical_summation_identical_regardless_of_partition() {
     );
 }
 
-/// AC: Bessel correction edge case — single scenario produces zero variance.
 #[test]
 fn bessel_correction_single_scenario_zero_std_and_ci() {
     let local = ForwardResult {
@@ -1251,17 +1193,9 @@ fn bessel_correction_single_scenario_zero_std_and_ci() {
 /// Guard: negative variance from floating-point cancellation → std = 0.0, not NaN.
 #[test]
 fn negative_variance_guard_produces_zero_std_not_nan() {
-    // Construct two identical large values so that the single-pass Bessel
-    // formula (sum_sq - N*mean^2) / (N-1) can produce a tiny negative result
-    // due to floating-point representation differences.
-    //
-    // With costs = [v, v]: sum = 2v, mean = v, sum_sq = 2v^2.
-    // Variance = (2v^2 - 2v^2) / 1 = 0. In floating-point the exact
-    // representation of sum_sq and N*mean^2 may differ by epsilon,
-    // potentially yielding a slightly negative result.
-    //
-    // We synthesise this by using two scenarios whose costs are very close
-    // to the representable large value but not exactly equal.
+    // Two identical large values: the single-pass Bessel formula
+    // (sum_sq - N*mean^2)/(N-1) can yield a tiny negative variance from
+    // floating-point rounding, which the max(0, .).sqrt() guard must clamp.
     let v = 1.0e15_f64;
     let local = ForwardResult {
         scenario_costs: vec![v, v],
@@ -1289,7 +1223,6 @@ fn negative_variance_guard_produces_zero_std_not_nan() {
 
 // ── Integration tests: sync_forward with LocalBackend ────────────────────
 
-/// Integration: single-rank mode — global UB mean equals local mean.
 #[test]
 fn sync_forward_local_backend_global_equals_local() {
     // Two scenarios each costing 420.0 → mean = 420.0.
@@ -1312,7 +1245,6 @@ fn sync_forward_local_backend_global_equals_local() {
     );
 }
 
-/// Integration: `sync_time_ms` is a valid non-negative u64.
 #[test]
 fn sync_forward_sync_time_ms_is_valid_u64() {
     let local = ForwardResult {
@@ -1331,7 +1263,6 @@ fn sync_forward_sync_time_ms_is_valid_u64() {
     let _ = result.sync_time_ms;
 }
 
-/// Integration: `CommError` from a failing communicator is wrapped as `SddpError::Communication`.
 #[test]
 fn sync_forward_comm_error_wraps_as_sddp_communication() {
     use cobre_comm::CommError;
@@ -1514,13 +1445,6 @@ fn run_one_iteration(
     .map(|_| ())
 }
 
-/// Warm-start invocation: the first iteration calls `solve(None)` (cold start);
-/// the second iteration calls `solve(Some(&basis))` (warm start).
-///
-/// AC: `run_forward_pass` called twice, sharing the same `BasisStore`
-/// (1 scenario × 3 stages). After iteration 1: `warm_start_calls` == 0
-/// (3 cold-start solves). After iteration 2: `warm_start_calls` > 0 (all
-/// 3 stages warm-start from the store populated in iteration 1).
 #[test]
 fn warm_start_first_iteration_cold_second_iteration_warm() {
     let state = crate::test_support::state_layout(1, 0);
@@ -1531,7 +1455,6 @@ fn warm_start_first_iteration_cold_second_iteration_warm() {
     let mut ws = single_workspace(solver, &state);
     let mut basis_store = BasisStore::new(1, 3);
 
-    // First iteration: no cached bases → all cold-start.
     run_one_iteration(&mut ws, &mut basis_store).unwrap();
     assert_eq!(
         ws.solver.inner().warm_start_calls,
@@ -1545,7 +1468,6 @@ fn warm_start_first_iteration_cold_second_iteration_warm() {
         "basis_store must be fully populated for scenario 0 after the first iteration"
     );
 
-    // Second iteration: cached bases present → all stages warm-start.
     run_one_iteration(&mut ws, &mut basis_store).unwrap();
     assert!(
         ws.solver.inner().warm_start_calls > 0,
@@ -1555,15 +1477,6 @@ fn warm_start_first_iteration_cold_second_iteration_warm() {
     );
 }
 
-/// Basis invalidation on solver error: when a forward solve returns
-/// `SolverError::Infeasible`, the `BasisStore` slot at `(scenario, stage)`
-/// must be set to `None` before the error propagates.
-///
-/// AC: `MockSolver` returns `Infeasible` on call index 4 (second iteration,
-/// stage 1 — calls 0-2 = first iteration stages 0,1,2; calls 3,4,5 = second
-/// iteration stages 0,1,2). After the error:
-/// - `basis_store.get(0, 1)` is `None` (invalidated at the failing stage).
-/// - `basis_store.get(0, 0)` is `Some` (stage 0 succeeded in iteration 2).
 #[test]
 fn basis_invalidated_on_solver_error() {
     let state = crate::test_support::state_layout(1, 0);
@@ -1576,7 +1489,6 @@ fn basis_invalidated_on_solver_error() {
     let mut ws = single_workspace(solver, &state);
     let mut basis_store = BasisStore::new(1, 3);
 
-    // First iteration: all cold-start, all succeed, populate all 3 stages.
     run_one_iteration(&mut ws, &mut basis_store).unwrap();
     assert!(
         (0..3).all(|t| basis_store.get(0, t).is_some()),
@@ -1590,7 +1502,6 @@ fn basis_invalidated_on_solver_error() {
         "expected Infeasible at stage 1, got: {err:?}"
     );
 
-    // AC: basis_store slot (0, 1) must be None after the error (invalidated).
     assert!(
         basis_store.get(0, 1).is_none(),
         "basis_store.get(0, 1) must be None after solver error at stage 1"
@@ -1654,7 +1565,6 @@ fn test_forward_pass_parallel_cost_agreement() {
         downstream_par_order: 0,
     };
 
-    // Run with 1 workspace.
     let mut ws1 = single_workspace(MockSolver::always_ok(solution.clone()), &state);
     let mut records1 = empty_records(n_scenarios * 3);
     let mut basis_store1 = BasisStore::new(n_scenarios, templates.len());
@@ -1698,7 +1608,6 @@ fn test_forward_pass_parallel_cost_agreement() {
     )
     .unwrap();
 
-    // Run with 4 workspaces.
     let mut workspaces4: Vec<SolverWorkspace<MockSolver>> = (0..4)
         .map(|_| single_workspace(MockSolver::always_ok(solution.clone()), &state))
         .collect();
@@ -1766,15 +1675,6 @@ fn test_forward_pass_parallel_cost_agreement() {
 
 // ── New test: work distribution across 4 workspaces ──────────────────────
 
-/// C1: verify that 10 scenarios distributed across 4 workspaces assign
-/// each workspace `floor(10/4)` or `ceil(10/4)` scenarios.
-///
-/// With `n=10`, `n_workers=4`: `base=2`, `remainder=2`.
-/// - Workers 0,1 receive 3 scenarios each → 3 * 3 stages = 9 solve calls.
-/// - Workers 2,3 receive 2 scenarios each → 2 * 3 stages = 6 solve calls.
-///
-/// `MockSolver.statistics().solve_count` now returns `call_count`, so we
-/// can verify each workspace performed its assigned number of LP solves.
 #[allow(clippy::too_many_lines)]
 #[test]
 fn test_forward_pass_work_distribution() {
@@ -1874,7 +1774,6 @@ fn test_forward_pass_work_distribution() {
         let assigned_scenarios = end_m - start_m;
         let expected_solves = assigned_scenarios * num_stages;
 
-        // floor and ceil of n_scenarios / n_workers for boundary check.
         let floor_scenarios = n_scenarios / n_workers;
         let ceil_scenarios = n_scenarios.div_ceil(n_workers);
         assert!(
@@ -1890,7 +1789,6 @@ fn test_forward_pass_work_distribution() {
         );
     }
 
-    // Verify the total solve count equals n_scenarios * num_stages.
     let total_solves: usize = workspaces
         .iter()
         .map(|ws| {
@@ -2101,7 +1999,6 @@ fn run_single_stage_forward(
     let horizon = HorizonMode::Finite { num_stages: 1 };
     let template = minimal_template_1_0_with_base(base_rhs);
     let templates = vec![template];
-    // base_rows[t] = 1: the water-balance row is at row index 1.
     let base_rows = vec![2usize];
     let initial_state = vec![0.0_f64; state.n_state];
     let mut records = empty_records(1);
@@ -2198,23 +2095,6 @@ fn run_single_stage_forward(
     ws.scratch.noise_buf.clone()
 }
 
-/// AC: truncation clamps negative inflow noise.
-///
-/// Set up a 1-hydro, 1-stage system where the PAR mean is very large
-/// negative (`mean_m3s = -1000.0`) and sigma is small (`std_m3s = 1.0`)
-/// so that the deterministic base alone produces a hugely negative inflow.
-/// Any sampled noise value will produce a negative inflow without truncation.
-///
-/// With truncation active: the noise buffer entry must be >= 0.0 because
-/// `noise_buf[h] = base_rhs + noise_scale * clamped_eta`
-/// = `zeta * (mean + sigma * eta_min)` = `zeta * 0.0` = 0.0 (or near it).
-///
-/// Concretely: `noise_buf[0] = base_rhs + noise_scale * clamped_eta`
-/// where `base_rhs = zeta * (-1000)` and `noise_scale = zeta * 1`.
-/// After clamping: `clamped_eta = max(eta, (0 - (-1000)) / 1) = 1000`.
-/// So `noise_buf[0] = zeta * (-1000) + zeta * 1000 = 0`.
-///
-/// The actual PAR inflow = `mean + sigma * clamped_eta = -1000 + 1 * 1000 = 0 >= 0`.
 #[test]
 fn truncation_clamps_negative_inflow_noise() {
     // Deterministic base = -1000 m³/s (always produces negative inflow).
@@ -2283,10 +2163,6 @@ fn truncation_no_clamp_when_inflow_positive() {
     );
 }
 
-/// AC: `InflowNonNegativityMethod::None` produces unchanged behavior when
-/// truncation code is present in the same function.
-///
-/// Uses the existing 3-stage fixture to verify no regression.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn none_method_unchanged_with_truncation_code_present() {
@@ -2522,7 +2398,6 @@ fn make_stochastic_context_1_hydro_1_load_bus(mean_mw: f64, std_mw: f64) -> Stoc
         mean_mw,
         std_mw,
     };
-    // No correlation profile: entities are treated as independent.
     let correlation = CorrelationModel {
         method: "spectral".to_string(),
         profiles: std::collections::BTreeMap::new(),
@@ -2555,13 +2430,6 @@ fn make_stochastic_context_1_hydro_1_load_bus(mean_mw: f64, std_mw: f64) -> Stoc
 
 // ── New test: parallel infeasibility propagation ──────────────────────────
 
-/// C3: when one of 4 workspaces returns `SolverError::Infeasible`, the
-/// error propagates as `SddpError::Infeasible` with correct stage and
-/// scenario indices.
-///
-/// Worker 1 handles scenarios [3, 6) (3 scenarios) with 3 stages each.
-/// Its solver is configured to fail on call 0 (scenario 3, stage 0).
-/// Expected: `SddpError::Infeasible { stage: 0, scenario: 3, .. }`.
 #[test]
 fn test_forward_pass_parallel_infeasibility() {
     let state = crate::test_support::state_layout(1, 0);
@@ -3009,14 +2877,8 @@ fn forward_pass_load_noise_clamped_to_zero() {
     );
 }
 
-/// Verify that when `n_load_buses == 0` no load patches are applied and
-/// `forward_patch_count()` equals `N`.
-///
-/// With N=1 hydro, L=0 PAR order, and no load buses the patch count must be
-/// exactly `1`.
 #[test]
 fn forward_pass_no_load_buses_unchanged() {
-    // Use the existing 1-hydro-3-stage context that has no load buses.
     let stochastic = make_stochastic_context_1_hydro_3_stages();
     let stages = make_stages_3();
     let state = crate::test_support::state_layout(1, 0);
@@ -3158,9 +3020,6 @@ fn test_build_delta_empty_pool() {
 fn test_build_delta_single_iteration_filter() {
     // Pool has cuts at iterations 1, 2, 3; calling with current_iteration=2
     // emits only the iteration-2 cut.
-    //
-    // FCF: 2 stages, 1 state dimension, 1 forward pass, 10 max iterations,
-    // 0 warm-start cuts per stage.
     let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
     // iteration=1, fwd_idx=0: slot = 0 + 1*1 + 0 = 1
     fcf.add_cut(0, 1, 0, 10.0, &[1.0]);

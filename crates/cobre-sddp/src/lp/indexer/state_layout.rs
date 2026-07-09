@@ -1,36 +1,23 @@
 //! The stage-invariant state-vector layout and its LP-column resolvers.
 //!
-//! [`StateLayout`] owns the role-(a) concern of the stage LP: the
-//! stage-invariant state-vector column ranges, the two layout-derived caches
-//! (`nonzero_state_indices`, `state_to_lp_column_map`), and the resolvers that
-//! map a state-vector index to the LP column a cut row references
-//! ([`StateLayout::state_to_lp_column`]) or the incoming-state column a cut
-//! subgradient is read from ([`StateLayout::state_to_lp_incoming_column`]).
+//! State pinning uses column bounds, not equality rows:
+//! [`StateLayout::state_to_lp_incoming_column`] is the single authoritative
+//! incoming-state column resolver — the LP column for both pinning and dual
+//! extraction is always resolved through it, never by assuming a fixing-row
+//! index. The companion [`StateLayout::state_to_lp_column`] maps the outgoing
+//! state vector to the LP columns a forward-pass cut row references.
 //!
-//! It carries the state-pinning contract (state pinning uses column bounds, not
-//! equality rows): [`StateLayout::state_to_lp_incoming_column`] is the single
-//! authoritative incoming-state column resolver; the LP column for both pinning
-//! and dual extraction is always resolved through it, never by assuming a
-//! fixing-row index. The companion [`StateLayout::state_to_lp_column`] maps the
-//! outgoing state vector to the LP columns a forward-pass cut row references.
-//!
-//! Unlike the satellite control/equipment geometry, every offset here is a pure
-//! function of `N` (`hydro_count`), `L` (`max_par_order`), `B` (`n_buckets`), `A`
-//! (`n_anticipated`), and `k_max` — independent of `n_blks`/`n_thermals` — so a
-//! single global stage-0 layout resolves onto the correct column at every stage
-//! regardless of per-stage block counts.
+//! Every offset here is a pure function of `N` (`hydro_count`), `L`
+//! (`max_par_order`), `B` (`n_buckets`), `A` (`n_anticipated`), and `k_max` —
+//! independent of `n_blks`/`n_thermals` — so a single global stage-0 layout
+//! resolves onto the correct column at every stage regardless of per-stage
+//! block counts.
 
 use std::ops::Range;
 
 use crate::lead_time::AnticipatedResolution;
 
 /// Stage-invariant state-vector layout for one SDDP stage subproblem.
-///
-/// Computed once from the state dimensions (`N`, `L`, `B`, `A`, `k_max`) plus
-/// the per-hydro effective lag-slot counts. Both layout-derived caches
-/// ([`Self::nonzero_state_indices`] and [`Self::state_to_lp_column_map`]) are
-/// finalized at construction by the single [`StateLayout::new`] constructor —
-/// there is no two-phase init on this type.
 ///
 /// ## Column layout
 ///
@@ -46,121 +33,65 @@ use crate::lead_time::AnticipatedResolution;
 /// … + A*k_max                                 theta                 — future cost variable (scalar)
 /// ```
 ///
-/// The anticipated ring mirrors the travel-time bucket ring construct-for-
-/// construct: an outgoing block ([`Self::anticipated_slots_out`], identity-
-/// resolved by [`Self::state_to_lp_column`], contributing to [`Self::n_state`])
-/// and a separate incoming block ([`Self::anticipated_state`], pinned via
-/// [`Self::state_to_lp_incoming_column`]) — never one dual-purpose range shifted
-/// out-of-LP. Both DO contribute to [`Self::n_state`] (one state dimension per
-/// ring slot, the `storage`/bucket convention) — there is no separate cut-target
-/// alias column anymore; the plant's own newest slot (`k_i − 1`) IS the cut
-/// target, pinned to the anticipated-decision column by the
-/// `anticipated_state_out_def` equality row.
+/// The anticipated ring is two blocks: an outgoing block
+/// ([`Self::anticipated_slots_out`], identity-resolved, contributing to
+/// [`Self::n_state`]) and a separate incoming block ([`Self::anticipated_state`],
+/// pinned via [`Self::state_to_lp_incoming_column`]) — never one dual-purpose
+/// range shifted out-of-LP.
 #[derive(Debug, Clone)]
 pub struct StateLayout {
-    /// Column range `[0, N)` for outgoing storage volumes.
+    /// Outgoing storage volumes.
     pub storage: Range<usize>,
 
-    /// Column range `[N, N*(1+L))` for AR lag variables.
-    ///
-    /// Lag variables are stored in lag-major order: all hydros for lag 0,
-    /// then all hydros for lag 1, etc. The column index for hydro `h` at
-    /// lag `l` (0-indexed, lag 0 = most recent) is:
-    /// `inflow_lags.start + l * hydro_count + h`.
+    /// AR lag variables, lag-major: all hydros for lag 0, then lag 1, …. Hydro
+    /// `h` at lag `l` is at `inflow_lags.start + l * hydro_count + h`.
     pub inflow_lags: Range<usize>,
 
-    /// Column range `[N*(1+L), N*(1+L) + B)` for travel-time in-transit bucket
-    /// state, immediately after [`Self::inflow_lags`] and before
-    /// [`Self::anticipated_slots_out`] so anticipated offsets shift by a
-    /// constant `B`.
-    ///
-    /// Outgoing bucket state maps to this column by identity — the `storage`
-    /// convention, not the `z_inflow` lag remap.
-    ///
-    /// Empty (`0..0`) when [`Self::n_buckets`] `== 0`.
+    /// Travel-time in-transit bucket state. Outgoing bucket state maps to its
+    /// LP column by identity — the `storage` convention, not the `z_inflow`
+    /// lag remap.
     pub transit_buckets_out: Range<usize>,
 
-    /// Column range `[N*(1+L) + B, N*(1+L) + B + n_anticipated*k_max)` for the
-    /// anticipated ring's OUTGOING slots.
-    ///
-    /// Ring-buffer block mirroring [`Self::transit_buckets_out`]: slot
-    /// `k = 0..k_max` for anticipated plant `i = 0..n_anticipated` lives at
-    /// column `anticipated_slots_out.start + k * n_anticipated + i`
-    /// (slot-major, plant-minor). Each slot is a genuine LP column defined by
-    /// an in-LP definition row — a plain ring shift
-    /// (`slot_k^out = slot_{k+1}^in`) for `k < k_i − 1`, or the
-    /// delivery-decision deposit (`slot_{k_i-1}^out = decision_col`) for
-    /// plant `i`'s own newest slot `k_i − 1` — never resolved out-of-LP. Slots
-    /// `k >= k_i` are stage-invariant padding, frozen `[0, 0]`.
-    ///
-    /// Outgoing anticipated state maps to this column by identity — the
-    /// `transit_buckets_out` convention.
-    ///
-    /// Empty (`0..0`) when `n_anticipated * k_max == 0`.
+    /// Anticipated ring OUTGOING slots, slot-major/plant-minor: slot `k` for
+    /// plant `i` at `anticipated_slots_out.start + k * n_anticipated + i`. Each
+    /// slot is a genuine LP column resolved by identity (the
+    /// `transit_buckets_out` convention) and defined by an in-LP definition row
+    /// (ring shift or delivery-decision deposit) — never resolved out-of-LP.
+    /// Slots `k >= k_i` are padding, frozen `[0, 0]`.
     pub anticipated_slots_out: Range<usize>,
 
-    /// Incoming storage volumes — the column block immediately after `z_inflow`
-    /// (see the module-level column-layout diagram for the offset chain).
-    ///
-    /// Pinned to the preceding stage's outgoing `storage` solution values via
-    /// `set_col_bounds` on these columns — not via equality rows (the LP has no
-    /// state-fixing row range). Resolve the column with
+    /// Incoming storage volumes, pinned via
     /// [`StateLayout::state_to_lp_incoming_column`].
     pub storage_in: Range<usize>,
 
-    /// Column range for incoming travel-time bucket volumes, immediately after
-    /// [`Self::storage_in`].
-    ///
-    /// Pinned like `storage_in` via `set_col_bounds` — not equality rows.
-    /// Resolve with [`StateLayout::state_to_lp_incoming_column`].
-    ///
-    /// Empty (`0..0`) when [`Self::n_buckets`] `== 0`.
+    /// Incoming travel-time bucket volumes, pinned via
+    /// [`StateLayout::state_to_lp_incoming_column`].
     pub transit_buckets_in: Range<usize>,
 
-    /// Column range for realized-inflow variables `z_h`, one per hydro.
-    ///
-    /// Free columns (lower = -inf, upper = +inf, zero cost) holding total
-    /// natural inflow `Z_t_h`, defined by the z-inflow equality constraints.
-    ///
-    /// Empty when `hydro_count == 0`.
+    /// Realized-inflow variables `z_h`, one per hydro.
     pub z_inflow: Range<usize>,
 
-    /// Column range for the anticipated ring's INCOMING slots, immediately
-    /// after [`Self::transit_buckets_in`] — the `transit_buckets_in`
-    /// convention: a dedicated pinned-incoming block after the
-    /// outgoing/`z_inflow`/`storage_in` chain, not interleaved with
-    /// [`Self::anticipated_slots_out`].
-    ///
-    /// Same slot-major, plant-minor layout as `anticipated_slots_out`. Pinned
-    /// via `set_col_bounds` — not equality rows (the LP has no state-fixing row
-    /// range). Resolve with [`StateLayout::state_to_lp_incoming_column`]; slot
-    /// 0 (the commitment maturing this stage) is also read directly by
-    /// [`crate::lp_builder`]'s anticipated-fishing row fill.
-    ///
-    /// Empty (`0..0`) when `n_anticipated * k_max == 0`.
+    /// Anticipated ring INCOMING slots, same slot-major/plant-minor layout as
+    /// [`Self::anticipated_slots_out`], pinned via
+    /// [`StateLayout::state_to_lp_incoming_column`]. Slot 0 (the commitment
+    /// maturing this stage) is also read directly by [`crate::lp_builder`]'s
+    /// anticipated-fishing row fill.
     pub anticipated_state: Range<usize>,
 
-    /// The future cost variable (theta) — the final column, immediately after
-    /// `anticipated_state` (see the module-level column-layout diagram).
-    ///
-    /// Scalar: there is exactly one theta variable per stage LP.
+    /// Future cost variable (theta) column.
     pub theta: usize,
 
-    /// State-vector dimension: `N*(1+L) + B`, or `N*(1+L) + B + A*K_max` with
-    /// anticipated thermals.
-    ///
-    /// The dimension used by cut storage and broadcast payloads — **not** a
-    /// valid LP row index. Do not slice the LP row buffer as `[0, n_state)`: no
-    /// state-fixing rows exist; resolve the pinning/subgradient column via
-    /// [`StateLayout::state_to_lp_incoming_column`].
+    /// State-vector dimension used by cut storage and broadcast payloads —
+    /// **not** a valid LP row index. No state-fixing rows exist; do not slice
+    /// the LP row buffer as `[0, n_state)`. Resolve the pinning/subgradient
+    /// column via [`StateLayout::state_to_lp_incoming_column`].
     pub n_state: usize,
 
     /// Number of operating hydro plants (N).
     pub hydro_count: usize,
 
-    /// Maximum PAR order across all operating hydros (L).
-    ///
-    /// Every hydro uses a uniform lag stride of `max_par_order`.
+    /// Maximum PAR order across all operating hydros (L); every hydro uses this
+    /// uniform lag stride.
     pub max_par_order: usize,
 
     /// Global travel-time bucket count `B` (`Σ_j per_plant_depth[j]`), `0` when
@@ -174,31 +105,25 @@ pub struct StateLayout {
     /// Maximum `lead_stages` across the anticipated thermals (`K_max`).
     pub k_max: usize,
 
-    /// Per-plant `lead_stages` (`K_i`), indexed by anticipated-local position.
-    ///
-    /// Length [`Self::n_anticipated`].
+    /// Per-plant `lead_stages` (`K_i`), indexed by anticipated-local position;
+    /// length [`Self::n_anticipated`].
     pub anticipated_lead_stages: Vec<usize>,
 
     /// Delivery-anchored point-commitment resolution per anticipated plant
-    /// (anticipated-local order), threaded from setup for the manifest's
-    /// delivery-anchor population ([`crate::policy::policy_export`]).
-    /// Default-empty until [`Self::set_anticipated_resolution`] attaches it.
+    /// (anticipated-local order); default-empty until
+    /// [`Self::set_anticipated_resolution`] attaches it.
     pub(crate) anticipated_resolution: AnticipatedResolution,
 
     /// Canonical `(plant_canonical_idx, lag)` pair per bucket state-vector
     /// dimension, in [`Self::transit_buckets_out`] order.
     pub transit_bucket_column_order: Vec<(usize, usize)>,
 
-    /// Indices of state dimensions whose cut coefficients can be nonzero.
-    ///
-    /// Storage indices `[0, N)` are always included. Lag indices `[N, N*(1+L))`
-    /// are included only when `lag < effective_lag_count[hydro]`. Hydros with AR
-    /// order < `max_par_order` have padded lag slots whose duals are
-    /// structurally zero.
+    /// State dimensions whose cut coefficients can be nonzero (padded lag/ring
+    /// slots excluded); computed by [`Self::set_nonzero_mask`].
     pub nonzero_state_indices: Vec<usize>,
 
-    /// Precomputed `state_to_lp_column(j)` for every `j ∈ [0, n_state)`, read on
-    /// the forward-pass cut-row hot path.
+    /// Precomputed `state_to_lp_column(j)` for every `j ∈ [0, n_state)` (cut-row
+    /// hot path).
     pub state_to_lp_column_map: Vec<usize>,
 }
 
@@ -207,14 +132,11 @@ impl StateLayout {
     /// per-hydro effective lag-slot counts.
     ///
     /// `effective_lag_count` must have length `hydro_count`; each entry is
-    /// `PrecomputedPar::effective_lag_count(h)` — the number of lag-state slots
-    /// that may carry non-zero cut coefficients for that hydro. `n_buckets` and
-    /// `transit_bucket_column_order` are the travel-time bucket count and its canonical
-    /// `(plant, lag)` order (`transit_bucket_column_order.len() == n_buckets`); `n_buckets
-    /// == 0` reproduces the pre-bucket layout byte-for-byte.
-    ///
-    /// Both layout-derived caches are finalized here, so the returned value is
-    /// ready for the cut-row hot path with no two-phase init.
+    /// `PrecomputedPar::effective_lag_count(h)` — the count of lag slots that
+    /// may carry non-zero cut coefficients (see [`Self::set_nonzero_mask`] for
+    /// why `order(h)` is wrong). `transit_bucket_column_order` is the buckets'
+    /// canonical `(plant, lag)` order (`len() == n_buckets`); `n_buckets == 0`
+    /// reproduces the pre-bucket layout byte-for-byte.
     ///
     /// # Panics (debug builds only)
     ///
@@ -245,11 +167,9 @@ impl StateLayout {
         let l = max_par_order;
         let n_ant_state = n_anticipated * k_max;
 
-        // Sequential-offset chain: each range starts at the previous range's
-        // `.end`, so the whole state region is auditable in one linear read.
-        // Optional blocks empty-normalise to `0..0`; use the `*_end` bindings
-        // (not `range.end`) for downstream arithmetic so the shift survives the
-        // `0..0` collapse.
+        // Optional blocks empty-normalise to `0..0`; use the `*_end` bindings,
+        // not `range.end`, for downstream arithmetic so the shift survives the
+        // collapse.
         let storage = 0..n;
         let inflow_lags = n..n * (1 + l);
 
@@ -292,10 +212,8 @@ impl StateLayout {
 
         let theta = anticipated_state_end;
 
-        // Both the outgoing (`anticipated_slots_out`) and incoming
-        // (`anticipated_state`) ring blocks describe the SAME `A*k_max` state
-        // dimensions (the `transit_buckets_out`/`transit_buckets_in` pairing),
-        // so `n_ant_state` enters `n_state` once, not twice.
+        // Outgoing and incoming ring blocks describe the SAME `A*k_max` state
+        // dimensions, so `n_ant_state` enters `n_state` once, not twice.
         let n_state = n * (1 + l) + n_buckets + n_ant_state;
 
         let mut layout = Self {
@@ -329,11 +247,6 @@ impl StateLayout {
 
     /// Attach the setup-computed [`AnticipatedResolution`].
     ///
-    /// Called once in production, from setup's single role-(a) owner
-    /// `crate::setup::resolve_state_layout` — every other call site is a test
-    /// fixture. Every other `StateLayout` construction leaves the
-    /// default-empty resolution.
-    ///
     /// # Panics (debug builds only)
     ///
     /// Panics if the delivery-anchored ring depth exceeds the sized `k_max`, or
@@ -361,13 +274,11 @@ impl StateLayout {
         self.theta + 1
     }
 
-    // ── Canonical state-dimension region boundaries (GLOBAL STATE INDEX
-    // space, not LP columns) ────────────────────────────────────────────────
-    // The canonical storage → lag → bucket → anticipated cumulative boundaries,
-    // mirroring the order [`Self::set_nonzero_mask`] walks in;
-    // `CutStateProjection::new` and `state_to_lp_incoming_column` read these
-    // instead of re-deriving `N`, `N*(1+L)`, `+ B`, `+ A*k_max` locally, so
-    // neither can drift from the mask.
+    // ── Canonical state-dimension region boundaries ─────────────────────────
+    // GLOBAL STATE INDEX space, not LP columns. `CutStateProjection::new` and
+    // `state_to_lp_incoming_column` read these instead of re-deriving the
+    // boundaries locally, so neither can drift from the order
+    // `set_nonzero_mask` walks (storage → lag → bucket → anticipated).
 
     /// State-dimension region `[0, N)` — storage.
     #[inline]
@@ -376,8 +287,7 @@ impl StateLayout {
         0..self.hydro_count
     }
 
-    /// State-dimension region `[N, N*(1+L))` — AR inflow lags, immediately
-    /// after [`Self::state_dim_storage_range`].
+    /// State-dimension region `[N, N*(1+L))` — AR inflow lags.
     #[inline]
     #[must_use]
     pub(crate) fn state_dim_lag_range(&self) -> Range<usize> {
@@ -385,8 +295,7 @@ impl StateLayout {
         n..n * (1 + self.max_par_order)
     }
 
-    /// State-dimension region `[N*(1+L), N*(1+L) + B)` — travel-time buckets,
-    /// immediately after [`Self::state_dim_lag_range`].
+    /// State-dimension region `[N*(1+L), N*(1+L) + B)` — travel-time buckets.
     #[inline]
     #[must_use]
     pub(crate) fn state_dim_bucket_range(&self) -> Range<usize> {
@@ -395,7 +304,7 @@ impl StateLayout {
     }
 
     /// State-dimension region `[N*(1+L) + B, N*(1+L) + B + A*k_max)` —
-    /// anticipated ring slots, immediately after [`Self::state_dim_bucket_range`].
+    /// anticipated ring slots.
     #[inline]
     #[must_use]
     pub(crate) fn state_dim_anticipated_range(&self) -> Range<usize> {
@@ -403,22 +312,13 @@ impl StateLayout {
         start..start + self.n_anticipated * self.k_max
     }
 
-    /// Map a state-vector index to the LP column it should reference in a cut.
+    /// Map a state-vector index to the LP column it references in a cut.
     ///
-    /// The outgoing state after `shift_lag_state` stores:
-    /// - `[0, N)`: outgoing storage → LP column `j` (identity mapping)
-    /// - `[N + 0·N + h]`: outgoing lag 0 for hydro `h` = realised inflow
-    ///   → LP column `z_inflow.start + h`
-    /// - `[N + l·N + h]` for `l ≥ 1`: outgoing lag `l` = incoming lag `l − 1`
-    ///   → LP column `N + (l − 1)·N + h`
-    /// - `[N*(1+L), N*(1+L) + B)`: `transit_buckets_out` slots → LP column `j`
-    ///   (identity, the `storage` convention — no lag remap)
-    /// - `[N*(1+L) + B, N*(1+L) + B + n_anticipated*k_max)`: `anticipated_slots_out`
-    ///   slots → LP column `j` (identity, the same convention). Each slot is a
-    ///   genuine outgoing LP column defined by an in-LP definition row (plain
-    ///   shift or delivery-decision deposit; see
-    ///   [`Self::anticipated_slots_out`]), so no shift-aware remap is needed
-    ///   here — the ring transition is resolved by the LP, not by this map.
+    /// Storage, `transit_buckets_out`, and `anticipated_slots_out` map by
+    /// identity. Lag indices remap to the outgoing state after
+    /// `shift_lag_state`: lag 0 is realised inflow → `z_inflow.start + h`; lag
+    /// `l ≥ 1` is the previous stage's lag `l − 1` →
+    /// `inflow_lags.start + (l − 1)·N + h`.
     #[inline]
     #[must_use]
     pub fn state_to_lp_column(&self, j: usize) -> usize {
@@ -426,9 +326,9 @@ impl StateLayout {
         if j < n {
             return j;
         }
-        // Must precede the lag arithmetic below: bucket and anticipated-ring
-        // indices are not lag indices, and the modular lag decode would
-        // silently misresolve them once `max_par_order > 0`.
+        // Must precede the lag arithmetic: the modular lag decode would
+        // silently misresolve bucket/anticipated-ring indices once
+        // `max_par_order > 0`.
         if self.transit_buckets_out.contains(&j) || self.anticipated_slots_out.contains(&j) {
             return j;
         }
@@ -445,12 +345,9 @@ impl StateLayout {
         }
     }
 
-    /// Fill [`state_to_lp_column_map`](Self::state_to_lp_column_map) by calling
-    /// [`state_to_lp_column`](Self::state_to_lp_column) for every
-    /// `j ∈ [0, n_state)`.
-    ///
-    /// The map is a pure cache of the resolver — it never reimplements the
-    /// mapping arithmetic.
+    /// Fill [`Self::state_to_lp_column_map`] by calling
+    /// [`Self::state_to_lp_column`] for every `j ∈ [0, n_state)` — a pure cache
+    /// of the resolver, never a reimplementation of its arithmetic.
     pub fn finalize_state_column_map(&mut self) {
         self.state_to_lp_column_map.clear();
         self.state_to_lp_column_map.reserve(self.n_state);
@@ -461,11 +358,9 @@ impl StateLayout {
     }
 
     /// Read the precomputed `state_to_lp_column(j)` from
-    /// [`state_to_lp_column_map`](Self::state_to_lp_column_map).
-    ///
-    /// [`StateLayout::new`] always finalizes the map to `n_state` length, so the
-    /// indexed read is in range for `j ∈ [0, n_state)` with no live-resolver
-    /// fallback.
+    /// [`Self::state_to_lp_column_map`], which [`StateLayout::new`] always
+    /// finalizes to `n_state` length (indexed read is in range for
+    /// `j ∈ [0, n_state)`).
     #[inline]
     #[must_use]
     pub fn lp_column_for_state(&self, j: usize) -> usize {
@@ -477,40 +372,24 @@ impl StateLayout {
         self.state_to_lp_column_map[j]
     }
 
-    /// Map a state-vector index to the LP column pinned by
-    /// [`fill_col_state_patches`](crate::lp_builder::PatchBuffer::fill_col_state_patches).
+    /// Map a state-vector index to its **incoming-state** LP column — the column
+    /// pinned to `lb = ub = v` via `set_col_bounds` (never an equality/fixing
+    /// row; the LP has no state-fixing row range). The returned columns are
+    /// exactly those
+    /// [`fill_col_state_patches`](crate::lp_builder::PatchBuffer::fill_col_state_patches)
+    /// writes, in state-vector order; the backward pass reads
+    /// `view.reduced_costs[col]` at them for the cut subgradient, one per
+    /// component `j ∈ [0, n_state)`.
     ///
-    /// This is the **incoming-state column** — the column whose bound is set to
-    /// `lb = ub = v` when state-fixing is applied via `set_col_bounds`. The
-    /// column indices returned here are exactly those written into
-    /// `PatchBuffer::col_indices[..state_col_patch_count()]` by
-    /// `fill_col_state_patches`, in state-vector order.
+    /// The travel-time bucket range resolves through an explicit
+    /// `transit_buckets_in` arm, not the trailing anticipated-state catch-all.
     ///
-    /// Use this method in the backward pass to read `view.reduced_costs[col]`
-    /// for the cut subgradient, one entry per state-vector component
-    /// `j ∈ [0, n_state)`.
-    ///
-    /// ## Mapping by range
-    ///
-    /// - `j ∈ [0, N)` (storage): returns `self.storage_in.start + j`.
-    /// - `j ∈ [N, N*(1+L))` (AR lags): returns
-    ///   `self.inflow_lags.start + (j − N)`.
-    /// - `j ∈ [N*(1+L), N*(1+L) + B)` (travel-time buckets): returns
-    ///   `self.transit_buckets_in.start + (j − N*(1+L))` — an explicit arm, not the
-    ///   anticipated catch-all below.
-    /// - `j ∈ [N*(1+L) + B, n_state)` (anticipated state): returns
-    ///   `self.anticipated_state.start + (j − N*(1+L) − B)`.
-    ///
-    /// ## Contrast with [`state_to_lp_column`]
-    ///
-    /// [`state_to_lp_column`] returns the **outgoing** column used for
-    /// cut-row coefficient construction in the forward pass (`forward.rs`).
-    /// For the storage range, `state_to_lp_column(j) = j` (the outgoing
-    /// storage column), while this method returns `storage_in.start + j`
-    /// (the incoming storage column). The two columns are related via the
-    /// water-balance equality row, and by KKT duality the reduced cost on
-    /// the incoming column equals the dual of the equivalent equality row
-    /// that a row-based state-fixing formulation would produce.
+    /// Contrast [`state_to_lp_column`], which returns the **outgoing** column
+    /// for forward-pass cut-row construction: for storage it returns `j`
+    /// (outgoing), this returns `storage_in.start + j` (incoming). The two are
+    /// related by the water-balance equality row — by KKT duality the incoming
+    /// column's reduced cost equals the dual a row-based state-fixing
+    /// formulation would produce, which is why column-bound pinning is exact.
     ///
     /// [`state_to_lp_column`]: Self::state_to_lp_column
     #[inline]
@@ -531,35 +410,21 @@ impl StateLayout {
     }
 
     /// Whether anticipated plant `local_idx` emits a decision column and an
-    /// `anticipated_state_out_def` row at `stage_idx`.
+    /// `anticipated_state_out_def` row at `stage_idx` — the single cross-module
+    /// owner of the anticipated-decision gate. Both clauses key on the
+    /// **delivery** stage `t + K_i`:
     ///
-    /// The single cross-module owner of the anticipated-decision gate, the
-    /// conjunction of two clauses on the **delivery** stage `t + K_i`:
+    /// 1. **Strict horizon** — `stage_idx + K_i < n_stages`. The `<` is strict:
+    ///    a `<=` would price a commitment delivered at `n_stages`, outside
+    ///    `[0, n_stages)`, with no delivery LP.
+    /// 2. **Operation window** — the delivery stage is commissioning-active,
+    ///    `commissioning_active(entry_i, exit_i, id(t + K_i))`. Keying on the
+    ///    DELIVERY stage, not the decision stage `t`, is load-bearing: a
+    ///    pre-entry decision at `entry − K_i` legitimately delivers at `entry`,
+    ///    and keying on `t` would invert which decisions are active.
     ///
-    /// 1. **Strict horizon clause** — the commitment delivered `K_i` stages later
-    ///    still falls **inside** the horizon, `stage_idx + K_i < n_stages`. The
-    ///    `<` is strict and load-bearing: a `<=` gate would price a commitment
-    ///    delivered at `stage_idx + K_i == n_stages`, whose delivery stage falls
-    ///    outside `[0, n_stages)` and has no delivery LP.
-    /// 2. **Operation-window clause** — the delivery stage is commissioning-active
-    ///    for this plant, `commissioning_active(entry_i, exit_i, id(t + K_i))`. A
-    ///    decision priced now matures at `t + K_i`; if that stage is outside the
-    ///    plant's `[entry, exit)` operation window the matured generation column is
-    ///    pinned to `[0, 0]`, so committing to it would buy generation that can
-    ///    never be delivered. Keying on the DELIVERY stage (not the decision stage
-    ///    `t`) is the shift the commissioning window needs: the decision is placed
-    ///    `K_i` stages ahead of the first generating stage, so a decision at
-    ///    `entry − K_i` (pre-entry) legitimately delivers at `entry`.
-    ///
-    /// The horizon clause is evaluated first and short-circuits, so the
-    /// delivery-stage lookup `study_stage_ids[stage_idx + K_i]` is only reached
-    /// when the index is in range.
-    ///
-    /// The per-plant windows and stage-id map flow in by reference, keeping the
-    /// type a pure layout carrier.
-    ///
-    /// `anticipated_windows` is indexed by anticipated-local position
-    /// (`0..n_anticipated`); `study_stage_ids` by study stage index.
+    /// `anticipated_windows` is indexed by anticipated-local position;
+    /// `study_stage_ids` by study stage index.
     #[inline]
     #[must_use]
     pub fn is_anticipated_decision_active(
@@ -590,15 +455,11 @@ impl StateLayout {
         )
     }
 
-    /// Whether anticipated plant `local_idx`'s commitment maturing at an
-    /// EXPLICIT `delivery_stage` is active — the same horizon + commissioning
-    /// gate as [`Self::is_anticipated_decision_active`], generalized so a
-    /// decision column whose delivery stage is read from
-    /// `PointResolution::genuine_decisions_at` (not derived as a constant
-    /// offset from the decision stage) can compose the gate on ITS OWN
-    /// delivery stage. [`Self::is_anticipated_decision_active`] delegates
-    /// here with the constant-lead derived delivery stage — a pure refactor,
-    /// not a behavior change.
+    /// Whether plant `local_idx`'s commitment maturing at an EXPLICIT
+    /// `delivery_stage` is active — the same horizon + commissioning gate as
+    /// [`Self::is_anticipated_decision_active`], for a decision whose delivery
+    /// stage comes from `PointResolution::genuine_decisions_at` rather than a
+    /// constant lead offset.
     #[inline]
     #[must_use]
     pub fn is_anticipated_decision_active_for_delivery(
@@ -627,14 +488,12 @@ impl StateLayout {
         crate::lp_builder::commissioning_active(entry, exit, study_stage_ids[delivery_stage])
     }
 
-    /// Plant `local_idx`'s effective delivery-anchored resolution: the
-    /// setup-threaded [`crate::lead_time::PointResolution`] when
-    /// [`Self::anticipated_resolution`] is attached (production always
-    /// attaches it via [`Self::set_anticipated_resolution`]), or an on-the-fly
-    /// `LeadTime::Stages`-equivalent resolution built from the plant's
-    /// constant [`Self::anticipated_lead_stages`] otherwise — the fixture
-    /// fallback that keeps every existing constant-lead unit test
-    /// byte-identical without threading a resolution through it.
+    /// Plant `local_idx`'s delivery-anchored resolution: the setup-threaded
+    /// [`crate::lead_time::PointResolution`] when [`Self::anticipated_resolution`]
+    /// is attached (production always attaches it), else an on-the-fly
+    /// `LeadTime::Stages`-equivalent built from the plant's constant
+    /// [`Self::anticipated_lead_stages`] — the fixture fallback for
+    /// constant-lead tests that thread no resolution.
     #[must_use]
     pub(crate) fn anticipated_resolution_for(
         &self,
@@ -652,46 +511,28 @@ impl StateLayout {
         ))
     }
 
-    /// Compute and store the nonzero state index mask from per-hydro
-    /// lag-state-slot counts and per-plant anticipated lead-stage counts.
+    /// Compute and store [`Self::nonzero_state_indices`] from per-hydro
+    /// lag-slot counts and per-plant anticipated lead-stage counts.
     ///
-    /// `lag_counts` must have length `hydro_count`. Each entry is the number of
-    /// lag-state slots that may carry non-zero cut coefficients for that hydro
-    /// (0 means no AR lags). Indices `[0, N)` (storage) are always included.
-    /// For each hydro `h`, lag indices
-    /// `inflow_lags.start + l * hydro_count + h` are included for
-    /// `l in 0..lag_counts[h]`.
+    /// `lag_counts` must have length `hydro_count`; `lag_counts[h]` is the count
+    /// of lag slots that may carry non-zero cut coefficients for hydro `h`. It
+    /// must be `PrecomputedPar::effective_lag_count(h)`, **not** `order(h)`: for
+    /// PAR(p)-A hydros `effective_lag_count == max_par_order` so the `ψ̂/12`
+    /// annual contributions on slots `order..max_par_order` reach the cut rows;
+    /// `order(h)` would truncate them and produce over-estimating cuts (LB > UB
+    /// at convergence). Storage `[0, N)` is always included.
     ///
-    /// Every travel-time bucket slot `transit_buckets_out.start..transit_buckets_out.end` is
-    /// always included — bucket depth is already sized as the per-stage
-    /// reachability union, so (unlike anticipated) there is no padding to
-    /// exclude.
+    /// Every travel-time bucket slot is always included — bucket depth is
+    /// already sized as the per-stage reachability union, so (unlike
+    /// anticipated) there is no padding to exclude.
     ///
-    /// `anticipated_lead_stages` must have length `n_anticipated`. Each entry
-    /// is the per-plant occupied-slot count `K_i` (`0..K_i` of the
-    /// anticipated-state ring buffer at plant `i`). The trailing
-    /// `k_max - K_i` slots are padding and are excluded from the mask: no
-    /// decision variable writes to those columns, so their cut coefficients
-    /// are structurally zero. Including padded slots would over-estimate cut
-    /// hyperplanes (the direct analogue of the PAR(p)-A bug, where
-    /// padded lag slots were included and shifted the cut above the LP value
-    /// at the visited state).
+    /// For anticipated plant `i`, only slots `0..K_i` are included; the trailing
+    /// `k_max − K_i` are padding whose cut coefficients are structurally zero
+    /// (no decision writes them). Including padding over-estimates cut
+    /// hyperplanes — the same failure mode as the lag block above.
     ///
-    /// Layout for the anticipated block:
-    /// `anticipated_slots_out.start + slot * n_anticipated + plant`. The loop
-    /// iterates slot-first, plant-second so the emitted indices stay
-    /// monotonically increasing.
-    ///
-    /// The correct value for `lag_counts[h]` is
-    /// `PrecomputedPar::effective_lag_count(h)`, **not** `PrecomputedPar::order(h)`.
-    /// For PAR(p)-A hydros, `effective_lag_count` equals `max_order` (= 12) so
-    /// that the `ψ̂/12` annual contributions on lag slots `order..max_order` are
-    /// included in cut rows. Using `order(h)` would truncate those slots and
-    /// produce over-estimating cuts (the same failure mode as anticipated
-    /// padding, but on the lag block).
-    ///
-    /// After calling, `nonzero_state_indices` is sorted ascending with no
-    /// duplicates.
+    /// The loop iterates lag/slot-first so the emitted indices stay strictly
+    /// ascending (the sortedness the `debug_assert` enforces).
     ///
     /// # Panics (debug builds only)
     ///
@@ -712,7 +553,6 @@ impl StateLayout {
             mask.push(h);
         }
 
-        // Iterate lag-first (lag-major layout) to emit sorted indices.
         for lag in 0..self.max_par_order {
             for (h, &lag_count) in lag_counts.iter().enumerate() {
                 debug_assert!(lag_count <= self.max_par_order);
@@ -722,12 +562,8 @@ impl StateLayout {
             }
         }
 
-        // Bucket depth is already sized as the per-stage reachability union (no
-        // shared-stride padding like anticipated), so every declared slot is
-        // reachable and the whole range is included, mirroring `storage` above.
         mask.extend(self.transit_buckets_out.clone());
 
-        // Anticipated state: emit slots `0..K_i` for plant `i`, skipping padding.
         for slot in 0..self.k_max {
             for (plant, &k_i) in anticipated_lead_stages.iter().enumerate() {
                 debug_assert!(k_i <= self.k_max);

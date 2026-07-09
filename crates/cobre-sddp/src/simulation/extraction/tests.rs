@@ -193,7 +193,7 @@ fn extract_reads_binding_filling_target_slack_no_turbine_branch() {
     assert_eq!(result.hydros.len(), 2);
     // Hydro 0 (filling, slack binds) reports the σ_fill primal — not 0.0.
     assert_eq!(result.hydros[0].filling_target_violation_hm3, sigma_fill);
-    // Hydro 1 (non-filling, absent from the family) reports 0.0 (parity-neutral).
+    // Hydro 1 (non-filling, absent from the family) reports 0.0.
     assert_eq!(result.hydros[1].filling_target_violation_hm3, 0.0);
     // Neither hydro owns a σ^{v-} column here, so both floor fields stay 0.0.
     assert_eq!(result.hydros[0].storage_violation_below_hm3, 0.0);
@@ -305,20 +305,17 @@ fn extract_reads_binding_filled_min_storage_floor_slack_per_block_branch() {
 
 #[test]
 fn assign_scenarios_uneven_rank0() {
-    // Acceptance criterion: n=10, rank=0, world=3 → 0..4
     // 10 % 3 = 1 fat rank → rank 0 gets ceil(10/3) = 4 scenarios
     assert_eq!(assign_scenarios(10, 0, 3), 0..4);
 }
 
 #[test]
 fn assign_scenarios_uneven_rank2() {
-    // Acceptance criterion: n=10, rank=2, world=3 → 7..10
     assert_eq!(assign_scenarios(10, 2, 3), 7..10);
 }
 
 #[test]
 fn assign_scenarios_single_rank() {
-    // Acceptance criterion: n=7, rank=0, world=1 → 0..7
     assert_eq!(assign_scenarios(7, 0, 1), 0..7);
 }
 
@@ -339,7 +336,6 @@ fn assign_scenarios_exact_division() {
 
 #[test]
 fn assign_scenarios_zero_scenarios() {
-    // Every rank gets an empty range.
     assert_eq!(assign_scenarios(0, 0, 1), 0..0);
     assert_eq!(assign_scenarios(0, 0, 4), 0..0);
     assert_eq!(assign_scenarios(0, 3, 4), 0..0);
@@ -410,8 +406,6 @@ fn make_entity_counts_2_hydros() -> EntityCounts {
 }
 
 /// Build a primal vector for a stage geometry with `hydro_count=2`, `max_par_order=1`.
-///
-/// Layout: storage\[0..2\], `inflow_lags`\[2..4\], `storage_in`\[4..6\], theta=6
 fn make_primal_2_1(
     storage: [f64; 2],
     lags: [f64; 2],
@@ -802,8 +796,6 @@ fn extract_stage_id_propagates_to_all_results() {
 
 #[test]
 fn extract_equipment_zero_when_indexer_has_no_equipment_ranges() {
-    // When the geometry has no equipment, equipment ranges are empty and
-    // all equipment result fields default to zero — backward-compatible behaviour.
     let indexer = crate::test_support::geom(2, 1);
     let study_dims = crate::test_support::study_dims();
     let state = crate::test_support::state_layout(2, 1);
@@ -1845,8 +1837,7 @@ fn extract_thermals_decision_uses_attached_resolution_delivery_stage() {
     );
 }
 
-// Tests for compute_anticipated_committed_mw (consolidated helper that
-// reads slot 0 of the anticipated_state ring buffer in both branches).
+// Tests for compute_anticipated_committed_mw
 // -------------------------------------------------------------------------
 
 /// Build a `StageGeometry` for the anticipated-committed tests.
@@ -1920,7 +1911,6 @@ fn extract_thermals_per_block_committed_at_delivery_stage() {
     primal[7] = 70.0; // thermal 10, block 2
     let obj = vec![0.0_f64; n_cols];
 
-    // Also verify the helper directly for AC-1 coverage.
     let study_dims = crate::test_support::study_dims_for(&anticipated_committed_counts_k2_3blks());
     let lookup = super::ThermalReverseLookup::build(&study_dims, 1);
     let spec = StageExtractionSpec {
@@ -1970,15 +1960,12 @@ fn extract_thermals_per_block_committed_at_delivery_stage() {
         row_lower: &[],
     };
 
-    // Direct helper call: thermal_local=0. The helper must read slot 0 of
-    // anticipated_state (col 0), NOT a per-block thermal column.
     assert_eq!(
         super::compute_anticipated_committed_mw(&view, &spec, &lookup, 0),
         Some(42.0),
         "helper: expected slot-0 value 42.0, NOT a per-block thermal value"
     );
 
-    // Full extraction path.
     let counts = EntityCounts {
         hydro_ids: vec![],
         hydro_productivities: vec![],
@@ -2031,10 +2018,6 @@ fn extract_thermals_per_block_committed_at_delivery_stage() {
         0,
     );
 
-    // 1 thermal * 3 blocks = 3 records. Every block carries the same
-    // (per-stage) committed scalar from slot 0, NOT its own generation.
-    // On the buggy code path this assertion fails with the
-    // per-block thermal values [50, 60, 70].
     assert_eq!(result.thermals.len(), 3);
     for (blk, rec) in result.thermals.iter().enumerate() {
         assert_eq!(
@@ -2042,9 +2025,6 @@ fn extract_thermals_per_block_committed_at_delivery_stage() {
             Some(42.0),
             "block {blk}: must read slot-0 ant_state (42.0), not per-block gen"
         );
-        // Sanity: generation_mw is still the per-block thermal column,
-        // and the per-block values are distinct from 42.0 — so the
-        // regression would surface as committed_mw == generation_mw.
         assert_ne!(
             rec.anticipated_committed_mw,
             Some(rec.generation_mw),
@@ -2053,8 +2033,8 @@ fn extract_thermals_per_block_committed_at_delivery_stage() {
     }
 }
 
-/// AC-3: Per-block branch, K=2, `stage_index=1` (pre-delivery under the
-/// legacy maturity-gate, but the always-active fishing predicate reads
+/// AC-3: Per-block branch, K=2, `stage_index=1` (pre-delivery under
+/// a maturity gate, but the always-active fishing predicate reads
 /// slot 0 of `anticipated_state` regardless of `K_i` vs `stage_index`).
 /// With a zero-initialised `primal[anticipated_state.start + 0]`,
 /// expects every block to read `Some(0.0)`.
@@ -2337,7 +2317,6 @@ fn extract_thermals_no_block_committed_at_delivery_is_zero() {
         "n_blks=0 must yield empty thermal range"
     );
 
-    // Also verify stage-level helper directly.
     let lookup = super::ThermalReverseLookup::build(&study_dims, 1);
     let spec_delivery = StageExtractionSpec {
         study_dims: &study_dims,
@@ -2378,9 +2357,8 @@ fn extract_thermals_no_block_committed_at_delivery_is_zero() {
         anticipated_windows: &[(None, None)],
         study_stage_ids: &[0, 1, 2, 3, 4, 5],
     };
-    // In the no-block branch the fishing-constraint LHS sum vanishes; the anticipated
-    // patch pins slot 0 to incoming (0.0 here), so the helper returns Some(0.0) — same
-    // observable as before the fix, but via slot-0 of anticipated_state.
+    // No-block branch: the fishing-constraint LHS sum vanishes and the anticipated
+    // patch pins slot 0 to incoming (0.0 here), so the helper returns Some(0.0).
     let n_cols_helper = indexer.anticipated_decision.end.max(1);
     let primal_helper = vec![0.0_f64; n_cols_helper];
     let dual_helper: Vec<f64> = vec![];
@@ -2397,7 +2375,6 @@ fn extract_thermals_no_block_committed_at_delivery_is_zero() {
         "consolidated helper: expected Some(0.0) at delivery stage (slot-0 = incoming = 0.0)"
     );
 
-    // Full extraction path.
     let n_cols = indexer.anticipated_decision.end.max(1);
     let primal = vec![0.0_f64; n_cols];
     let obj = vec![0.0_f64; n_cols];
@@ -2463,7 +2440,7 @@ fn extract_thermals_no_block_committed_at_delivery_is_zero() {
 }
 
 /// AC-7: No-block branch, K=1, `stage_index=0`, `n_stages=2`. Pre-delivery
-/// under the legacy maturity-gate, but the always-active fishing predicate
+/// under a maturity gate, but the always-active fishing predicate
 /// reads slot 0 of `anticipated_state` regardless. Expects `Some(0.0)`
 /// (zero-initialised slot 0).
 #[test]
@@ -2642,16 +2619,13 @@ fn extract_stage_result_prebuilt_lookup_matches_standard_path() {
         study_stage_ids: &[0, 1, 2, 3, 4, 5],
     };
 
-    // Standard path: builds the lookup internally on every call.
     let result_standard = extract_stage_result(&view, &spec, 2);
 
-    // Pre-built path: lookup built once, reused across calls (hot-path pattern).
     let thermal_lookup = ThermalReverseLookup::build(&study_dims, counts.thermal_ids.len());
     let hydro_lookup = HydroReverseLookup::build(spec.geometry, counts.hydro_ids.len());
     let result_prebuilt =
         extract_stage_result_with_lookups(&view, &spec, 2, &hydro_lookup, &thermal_lookup);
 
-    // Verify bit-for-bit equality on the anticipated fields.
     assert_eq!(
         result_standard.thermals.len(),
         result_prebuilt.thermals.len(),
@@ -2952,11 +2926,9 @@ fn test_slack_extraction_with_penalty_active() {
         "inflow_slack must be non-empty"
     );
 
-    // Primal vector: base columns + inflow slack + withdrawal slack columns
     let n_cols = indexer.generation_below_slack.end;
     let mut primal = vec![0.0_f64; n_cols];
 
-    // Fill base values
     primal[0] = 100.0; // storage h0
     primal[1] = 200.0; // storage h1
     primal[2] = 50.0; // lag h0
@@ -5015,8 +4987,7 @@ fn extract_contract_dormant_zero_row_keeps_state_code_1() {
 }
 
 /// AC: a contract-free system yields an empty contracts vector from
-/// `extract_stub_collections` (parity-neutral with the prior zero-placeholder
-/// behaviour, which also emitted no real dispatch).
+/// `extract_stub_collections`.
 #[test]
 fn extract_stub_collections_contract_free_is_empty() {
     let state = crate::test_support::state_layout(0, 0);
@@ -5425,7 +5396,7 @@ fn extract_chronological_per_block_evaporation() {
 }
 
 /// Parallel mode: every block row's evaporation fields are `.to_bits()`-identical to
-/// the block-0 read (byte-identical to the pre-change behavior).
+/// the block-0 read.
 #[test]
 fn extract_parallel_per_block_evaporation_byte_identical() {
     let k = 3_usize;

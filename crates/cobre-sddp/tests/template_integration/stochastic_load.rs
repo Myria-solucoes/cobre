@@ -1,4 +1,4 @@
-//! `stochastic_load` section tests (split from the parent integration binary).
+//! `stochastic_load` section tests.
 
 use super::*;
 

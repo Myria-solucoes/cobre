@@ -1,4 +1,4 @@
-//! `fpha_structure` section tests (split from the parent integration binary).
+//! `fpha_structure` section tests.
 
 use super::*;
 
@@ -43,8 +43,6 @@ fn fpha_ac1_dimensions_one_fpha_hydro_five_planes() {
     );
 }
 
-/// Generation column has +1.0 in all 5 FPHA rows and in the hydro's load
-/// balance row.
 #[test]
 fn fpha_ac2_generation_column_entries() {
     let n_planes = 5;
@@ -157,8 +155,6 @@ fn fpha_ac4_v_out_column_entries() {
     }
 }
 
-/// In the mixed system, FPHA hydros enter the load-balance row via their
-/// generation column (+1.0) while constant hydros enter via rho * turbine.
 #[test]
 fn fpha_ac5_mixed_system_load_balance_uses_generation_col() {
     let (system, production) = four_hydro_mixed_system();
@@ -177,7 +173,7 @@ fn fpha_ac5_mixed_system_load_balance_uses_generation_col() {
     let tmpl = &result.templates[0];
 
     // Base (constant) num_cols = 13 + 4*1*3 (turbine+spillage+diversion per hydro/block)
-    // + 1*1*2 = 27; + 2 FPHA generation = 29; + 4 withdrawal (N=4) = 33;
+    // + 1*1*2 = 27; + 2 FPHA generation = 29; + 2*N=8 withdrawal = 37;
     // + 4*N=16 op-violation slacks = 53.
     // num_rows (no state-fixing rows) = N z_inflow(4) + N water balance(4) + load balance(1)
     // = 9; + 2*3 FPHA = 15; + 4*N=16 op-violation = 31.
@@ -227,7 +223,6 @@ fn fpha_ac5_mixed_system_load_balance_uses_generation_col() {
     );
 }
 
-/// 1-FPHA-hydro LP solves to optimal with generation > 0, given `v_in = 100 hm³`.
 #[test]
 fn fpha_solve_one_hydro_optimal() {
     use cobre_solver::{ActiveSolver, RowBatch, SolverInterface};
@@ -424,7 +419,6 @@ fn fpha_solve_storage_fixing_dual_differs_from_constant() {
         let v_in = 100.0_f64;
         solver.set_col_bounds(&[col_storage_in], &[v_in], &[v_in]);
         let view = solver.solve(None).expect("LP must solve to optimal");
-        // The storage_in column's reduced cost is the shadow price of fixing v_in.
         view.reduced_costs[col_storage_in]
     };
 
@@ -450,8 +444,6 @@ fn fpha_solve_storage_fixing_dual_differs_from_constant() {
     );
 }
 
-/// The `four_hydro_mixed_system` (2 constant + 2 FPHA) solves to a finite
-/// objective with non-negative FPHA generation variables.
 #[test]
 fn fpha_solve_mixed_system_optimal() {
     use cobre_solver::{ActiveSolver, RowBatch, SolverInterface};
@@ -483,7 +475,6 @@ fn fpha_solve_mixed_system_optimal() {
     };
     solver.add_rows(&empty_cuts);
 
-    // Fix v_in for all 4 hydros via rows 0..3.
     solver.set_row_bounds(
         &[0, 1, 2, 3],
         &[100.0, 100.0, 100.0, 100.0],

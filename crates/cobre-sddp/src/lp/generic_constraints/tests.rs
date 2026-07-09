@@ -35,11 +35,9 @@ fn make_state_anticipated() -> StateLayout {
     StateLayout::new(0, 0, 0, Vec::new(), 1, 2, vec![2], &[])
 }
 
-/// Build the [`GenericResolverGeom`] view from a test [`StageGeometry`] (role
-/// (b)), a [`StateLayout`] (role (a)), the deficit-segment stride, and the
-/// anticipated-thermal identity list. Mirrors the production view built in
-/// `entries.rs`, sourcing each role-(b) range from the geometry's equivalent
-/// field so the resolver tests exercise the same offsets production does.
+/// Mirrors the production `GenericResolverGeom` built in `entries.rs`, sourcing
+/// each role-(b) range from the geometry's equivalent field so the resolver
+/// tests exercise the same offsets production does.
 fn make_geom<'a>(
     indexer: &'a StageGeometry,
     state: &'a StateLayout,
@@ -67,10 +65,7 @@ fn make_geom_with_contracts<'a>(
     contract_import: &'a std::ops::Range<usize>,
     contract_export: &'a std::ops::Range<usize>,
 ) -> GenericResolverGeom<'a> {
-    // Production builds the `anticipated_local_by_sys_pos` reverse map on the
-    // per-stage `StageLayout`; the non-state anticipated identity list lives on
-    // `StudyDimensions`, so the test passes it in here. Reconstruct the
-    // equivalent reverse map and leak it so the borrowed `GenericResolverGeom`
+    // Leak the reconstructed reverse map so the borrowed `GenericResolverGeom`
     // field has a `'a`-compatible referent without threading an owner through
     // every call site.
     let reverse: std::collections::HashMap<usize, usize> = anticipated_thermal_indices
@@ -105,7 +100,6 @@ fn make_geom_with_contracts<'a>(
 
 /// Minimal `Hydro` carrying only the `id`/`downstream_id` that
 /// [`CascadeTopology::build`] reads; every other field is an inert default.
-/// Mirrors the `make_hydro` helper in `cobre-core`'s cascade tests.
 fn make_hydro(id: i32, downstream_id: Option<i32>) -> Hydro {
     let zero_penalties = HydroPenalties {
         spillage_cost: 0.0,
@@ -155,7 +149,6 @@ fn make_hydro(id: i32, downstream_id: Option<i32>) -> Hydro {
     }
 }
 
-/// An empty cascade (no upstream links) for the resolver paths that ignore it.
 fn empty_cascade() -> CascadeTopology {
     CascadeTopology::build(&[])
 }
@@ -183,11 +176,7 @@ fn empty_cascade() -> CascadeTopology {
 ///   generation: [79, 79+2*3) = 79..85  (2 FPHA hydros * 3 blocks)
 ///   evap: none
 ///   withdrawal_slack_neg: [85, 89)  withdrawal_slack_pos: [89, 93) (4 hydros)
-///
-/// Storage: 0..4
 fn make_indexer() -> StageGeometry {
-    // N=4, L=0, T=2, Ln=1, B=2, K=3, no penalty, 2 FPHA hydros at positions 0 and 2
-    // (local FPHA indices 0 and 1), each with 3 planes.
     crate::test_support::geometry(
         &crate::test_support::GeometryDims {
             hydro_count: 4,
@@ -204,12 +193,6 @@ fn make_indexer() -> StageGeometry {
     )
 }
 
-/// Build a `ProductionModelSet` for 4 hydros and 2 stages.
-///
-/// - Hydro 0: FPHA at all stages
-/// - Hydro 1: ConstantProductivity(2.5) at all stages
-/// - Hydro 2: FPHA at all stages
-/// - Hydro 3: ConstantProductivity(1.0) at all stages
 fn make_production_models() -> ProductionModelSet {
     let fpha_plane = FphaPlane {
         intercept: 0.0,
@@ -221,22 +204,21 @@ fn make_production_models() -> ProductionModelSet {
         planes: vec![fpha_plane],
     };
     let models: Vec<Vec<ResolvedProductionModel>> = vec![
-        vec![fpha_model(), fpha_model()], // hydro 0 — FPHA
+        vec![fpha_model(), fpha_model()],
         vec![
             ResolvedProductionModel::ConstantProductivity { productivity: 2.5 },
             ResolvedProductionModel::ConstantProductivity { productivity: 2.5 },
-        ], // hydro 1 — constant
-        vec![fpha_model(), fpha_model()], // hydro 2 — FPHA
+        ],
+        vec![fpha_model(), fpha_model()],
         vec![
             ResolvedProductionModel::ConstantProductivity { productivity: 1.0 },
             ResolvedProductionModel::ConstantProductivity { productivity: 1.0 },
-        ], // hydro 3 — constant
+        ],
     ];
     ProductionModelSet::new(models, 4, 2)
 }
 
 fn make_hydro_pos() -> BTreeMap<EntityId, usize> {
-    // Hydros with EntityId 10, 20, 30, 40 at system positions 0, 1, 2, 3
     [
         (EntityId(10), 0),
         (EntityId(20), 1),
@@ -248,19 +230,16 @@ fn make_hydro_pos() -> BTreeMap<EntityId, usize> {
 }
 
 fn make_thermal_pos() -> BTreeMap<EntityId, usize> {
-    // Thermals with EntityId 5 and 6 at positions 0 and 1
     [(EntityId(5), 0), (EntityId(6), 1)].into_iter().collect()
 }
 
 fn make_bus_pos() -> BTreeMap<EntityId, usize> {
-    // Buses with EntityId 100, 200 at positions 0, 1
     [(EntityId(100), 0), (EntityId(200), 1)]
         .into_iter()
         .collect()
 }
 
 fn make_line_pos() -> BTreeMap<EntityId, usize> {
-    // Line with EntityId 50 at position 0
     [(EntityId(50), 0)].into_iter().collect()
 }
 
@@ -274,7 +253,6 @@ fn call(
     bus_pos: &BTreeMap<EntityId, usize>,
     line_pos: &BTreeMap<EntityId, usize>,
 ) -> Vec<(usize, f64)> {
-    // Paths under test here ignore the cascade context; pass an empty one.
     let cascade = empty_cascade();
     let diversion_upstream: HashMap<EntityId, Vec<usize>> = HashMap::new();
     call_with_cascade(
@@ -291,8 +269,6 @@ fn call(
     )
 }
 
-/// Like [`call`], but threads an explicit cascade topology and
-/// diversion-into map for the `HydroInflow` total-inflow tests.
 fn call_with_cascade(
     var_ref: VariableRef,
     block_idx: usize,
@@ -315,8 +291,6 @@ fn call_with_cascade(
         cascade,
         diversion_upstream,
     };
-    // Non-pumping paths ignore the pumping context; pass an empty one (no
-    // stations), so the PumpingFlow/PumpingPower lookup misses and yields [].
     let no_stations: Vec<PumpingStation> = Vec::new();
     let empty_pumping_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
     let pumping_refs = PumpingRefs {
@@ -324,8 +298,6 @@ fn call_with_cascade(
         pumping_stations: &no_stations,
         pumping_pos: &empty_pumping_pos,
     };
-    // Non-contract paths ignore the contract context; pass an empty one, so the
-    // ContractImport/ContractExport lookup misses and yields [].
     let no_contracts: Vec<EnergyContract> = Vec::new();
     let empty_contract_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
     let contract_refs = ContractRefs {
@@ -345,14 +317,9 @@ fn call_with_cascade(
     )
 }
 
-/// Resolve a `PumpingFlow`/`PumpingPower` ref with an explicit pumping
-/// context (column start, block stride, station slice, position map).
-///
 /// Threads real pumping data the way the production `fill_pumping_water_entries`
-/// caller does — sourcing
-/// `col_pumping_start` from a `StageLayout`-style reserved range — so the
-/// pumping arms exercise their real column arithmetic and consumption-rate
-/// coefficient instead of the empty fixture used by [`call`].
+/// caller does, so the pumping arms exercise their real column arithmetic and
+/// consumption-rate coefficient instead of the empty fixture used by [`call`].
 // Mirrors the production resolver's argument surface it exercises; bundling
 // into a struct would diverge the test from the real call shape.
 #[allow(clippy::too_many_arguments)]
@@ -384,10 +351,9 @@ fn call_pumping(
         pumping_stations,
         pumping_pos,
     };
-    // The pumping column stride is now sourced from the geometry's `BlockGrid`,
-    // so the fixture's declared `n_blks` must match `geom.n_blks` for the
-    // asserted columns to hold; pin that invariant rather than silently
-    // diverging if a future fixture sets a mismatched stride.
+    // The pumping column stride comes from the geometry's `BlockGrid`, so the
+    // fixture's declared `n_blks` must match `geom.n_blks` for the asserted
+    // columns to hold.
     assert_eq!(n_blks, geom.n_blks);
     let no_contracts: Vec<EnergyContract> = Vec::new();
     let empty_contract_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
@@ -408,11 +374,10 @@ fn call_pumping(
     )
 }
 
-/// Resolve a `ContractImport`/`ContractExport` ref with an explicit contract
-/// context (the id-sorted contract slice and its id→slot map), threaded the way
-/// the production `fill_generic_constraint_entries` caller does so the contract
-/// arms exercise their real per-family-slot column arithmetic. The column bases
-/// ride on `geom.contract_import`/`contract_export`.
+/// Threads real contract data the way the production
+/// `fill_generic_constraint_entries` caller does, so the contract arms exercise
+/// their real per-family-slot column arithmetic; the column bases ride on
+/// `geom.contract_import`/`contract_export`.
 fn call_contract(
     var_ref: VariableRef,
     block_idx: usize,
@@ -541,10 +506,7 @@ fn thermal_generation_column_arithmetic() {
 
 // ── HydroStorage tests ────────────────────────────────────────────────────
 
-/// HydroStorage returns stage-level storage column.
-///
-/// storage.start = 0, hydro_pos[EntityId(10)] = 0
-/// Expected column = 0 + 0 = 0, regardless of block_idx.
+/// storage.start = 0, hydro_pos[EntityId(10)] = 0 → column 0, regardless of block_idx.
 #[test]
 fn hydro_storage_stage_level_ignores_block() {
     let indexer = make_indexer();
@@ -569,11 +531,9 @@ fn hydro_storage_stage_level_ignores_block() {
             &bpos,
             &lpos,
         );
-        // storage.start = 0, pos = 0 → column 0
         assert_eq!(result, vec![(0, 1.0)], "block_idx={block_idx}");
     }
 
-    // Hydro at position 2 (EntityId 30)
     let result2 = call(
         VariableRef::HydroStorage {
             hydro_id: EntityId(30),
@@ -592,11 +552,8 @@ fn hydro_storage_stage_level_ignores_block() {
 
 // ── HydroOutflow tests ────────────────────────────────────────────────────
 
-/// HydroOutflow returns 2 entries (turbine + spillage).
-///
-/// hydro_pos[EntityId(40)] = 3 (position 3), block_id=None, block_idx=0
-/// turbine.start = 13, spillage.start = 25, n_blks = 3
-/// Expected: [(13 + 3*3 + 0, 1.0), (25 + 3*3 + 0, 1.0)] = [(22, 1.0), (34, 1.0)]
+/// hydro_pos[EntityId(40)] = 3, block_idx=0, turbine.start = 13, spillage.start = 25,
+/// n_blks = 3 → [(13 + 3*3, 1.0), (25 + 3*3, 1.0)] = [(22, 1.0), (34, 1.0)].
 #[test]
 fn hydro_outflow_expands_to_turbine_and_spillage() {
     let indexer = make_indexer();
@@ -629,7 +586,6 @@ fn hydro_outflow_expands_to_turbine_and_spillage() {
     assert_eq!(result[1], (spillage_col, 1.0));
 }
 
-/// HydroOutflow with block_id=Some(1) at block_idx=0: should use the explicit block.
 #[test]
 fn hydro_outflow_block_id_some_uses_explicit_block() {
     let indexer = make_indexer();
@@ -661,12 +617,8 @@ fn hydro_outflow_block_id_some_uses_explicit_block() {
 
 // ── HydroGeneration tests ─────────────────────────────────────────────────
 
-/// HydroGeneration for constant-productivity hydro returns
-/// turbine column with productivity multiplier.
-///
-/// hydro_pos[EntityId(20)] = 1 → constant productivity 2.5
-/// turbine.start = 13, n_blks = 3, block_idx = 0
-/// Expected: [(13 + 1*3 + 0, 2.5)] = [(16, 2.5)]
+/// hydro_pos[EntityId(20)] = 1 → constant productivity 2.5; turbine.start = 13,
+/// n_blks = 3, block_idx = 0 → [(13 + 1*3, 2.5)] = [(16, 2.5)].
 #[test]
 fn hydro_generation_constant_productivity_maps_to_turbine() {
     let indexer = make_indexer();
@@ -696,11 +648,8 @@ fn hydro_generation_constant_productivity_maps_to_turbine() {
     assert_eq!(result, vec![(13 + 1 * 3 + 0, 2.5)]);
 }
 
-/// HydroGeneration for FPHA hydro returns generation column.
-///
-/// hydro_pos[EntityId(10)] = 0 → FPHA (local FPHA index = 0)
-/// generation.start = 79, n_blks = 3, block_idx = 0
-/// Expected: [(79 + 0*3 + 0, 1.0)] = [(79, 1.0)]
+/// hydro_pos[EntityId(10)] = 0 → FPHA (local FPHA index 0); generation.start = 79,
+/// n_blks = 3, block_idx = 0 → [(79, 1.0)].
 #[test]
 fn hydro_generation_fpha_maps_to_generation_column() {
     let indexer = make_indexer();
@@ -730,11 +679,8 @@ fn hydro_generation_fpha_maps_to_generation_column() {
     assert_eq!(result, vec![(79 + 0 * 3 + 0, 1.0)]);
 }
 
-/// HydroGeneration for FPHA hydro at position 2 (second FPHA hydro, local index 1).
-///
-/// hydro_pos[EntityId(30)] = 2 → FPHA (local FPHA index = 1)
-/// generation.start = 79, n_blks = 3, block_idx = 2
-/// Expected: [(79 + 1*3 + 2, 1.0)] = [(84, 1.0)]
+/// hydro_pos[EntityId(30)] = 2 → FPHA (local FPHA index 1); generation.start = 79,
+/// n_blks = 3, block_idx = 2 → [(79 + 1*3 + 2, 1.0)] = [(84, 1.0)].
 #[test]
 fn hydro_generation_fpha_second_hydro_block_2() {
     let indexer = make_indexer();
@@ -766,11 +712,8 @@ fn hydro_generation_fpha_second_hydro_block_2() {
 
 // ── HydroEvaporation tests ────────────────────────────────────────────────
 
-/// HydroEvaporation maps to the evaporation-outflow column for the matching evaporation hydro.
-///
-/// Use a dedicated indexer with evaporation hydros to test this path.
-///
-/// N=2, L=0, T=0, Ln=0, B=1, K=1, no penalty, no FPHA, evap hydro at pos 0.
+/// Dedicated evap-hydro geom (evap hydro at pos 0):
+/// N=2, L=0, T=0, Ln=0, B=1, K=1, no penalty, no FPHA.
 /// theta = 2*(3+0) = 6
 /// turbine:    [7, 9)
 /// spillage:   [9, 11)
@@ -852,7 +795,6 @@ fn hydro_evaporation_maps_to_evaporation_flow_col() {
     assert_eq!(result, vec![(15, 1.0)]);
 }
 
-/// HydroEvaporation for hydro that has no evaporation model returns empty vec.
 #[test]
 fn hydro_evaporation_no_evap_model_returns_empty() {
     let evap_indexer = crate::test_support::geometry(
@@ -1126,8 +1068,6 @@ fn pumping_flow_none_resolves_per_block() {
     let prod = make_production_models();
     let (stations, ppos) = make_pumping_fixture();
 
-    // The caller iterates blocks and calls the resolver once per block; collect
-    // those per-block resolutions to confirm one (col, 1.0) entry per block.
     let per_block: Vec<(usize, f64)> = (0..PUMP_N_BLKS)
         .map(|blk| {
             let r = call_pumping(
@@ -1199,7 +1139,6 @@ fn pumping_power_none_resolves_per_block_with_consumption() {
     );
 }
 
-/// Unknown station id resolves to `vec![]` for both pumping variants.
 #[test]
 fn pumping_unknown_station_returns_empty() {
     let indexer = make_indexer();
@@ -1349,9 +1288,6 @@ fn contract_family_slot_counts_per_direction() {
     );
 }
 
-/// AC: `ContractImport { contract_id, block_id: Some(0) }` resolves to exactly
-/// one `(column, 1.0)` pair addressing the contract's block-0 column.
-///
 /// Two imports + one export: import base 200 (2 imports * n_blks=3 → cols
 /// 200..206), export base 206 (1 export * 3 → 206..209). The second import
 /// (id 30, per-family slot 1) at block 0 is `grid.flat(200, 1, 0) = 203`.
@@ -1390,12 +1326,9 @@ fn contract_import_resolves_to_column_with_unit_coefficient() {
     assert_eq!(result, vec![(203, 1.0)]);
 }
 
-/// AC: a `ContractExport` ref resolves to exactly one `(column, 1.0)` pair on
-/// the export family. The variable's own coefficient is `+1.0`; the
-/// injection/withdrawal sign is owned by the load-balance fill, not here.
-///
-/// Same fixture as the import test: export id 20 is per-family slot 0,
-/// `grid.flat(206, 0, 2) = 208`.
+/// The variable's own coefficient is `+1.0`; the injection/withdrawal sign is
+/// owned by the load-balance fill, not here. Same fixture as the import test:
+/// export id 20 is per-family slot 0, `grid.flat(206, 0, 2) = 208`.
 #[test]
 fn contract_export_resolves_to_column_with_unit_coefficient() {
     let indexer = make_indexer();
@@ -1461,7 +1394,6 @@ fn contract_unknown_id_returns_empty() {
 
 // ── Stub entity tests ─────────────────────────────────────────────────────
 
-/// NonControllableGeneration returns empty vec.
 #[test]
 fn non_controllable_generation_returns_empty() {
     let indexer = make_indexer();
@@ -1568,7 +1500,6 @@ fn non_controllable_curtailment_returns_empty() {
 
 // ── Missing entity ID test ─────────────────────────────────────────────────
 
-/// missing entity ID returns empty vec (defense-in-depth).
 #[test]
 fn missing_entity_id_returns_empty() {
     let indexer = make_indexer();
@@ -1580,7 +1511,6 @@ fn missing_entity_id_returns_empty() {
     let bpos = make_bus_pos();
     let lpos = make_line_pos();
 
-    // EntityId(999) is not in thermal_pos
     let result = call(
         VariableRef::ThermalGeneration {
             thermal_id: EntityId(999),
@@ -1600,12 +1530,8 @@ fn missing_entity_id_returns_empty() {
 
 // ── BusDeficit tests ──────────────────────────────────────────────────────
 
-/// BusDeficit with S=2 deficit segments returns 2 column entries.
-///
-/// bus_pos[EntityId(100)] = 0, deficit.start = 61, max_deficit_segments = 2,
-/// n_blks = 3, block_idx = 0
-/// Expected: [(61 + 0*2*3 + 0*3 + 0, 1.0), (61 + 0*2*3 + 1*3 + 0, 1.0)]
-///         = [(61, 1.0), (64, 1.0)]
+/// bus_pos[EntityId(100)] = 0, deficit.start = 61, S = 2, n_blks = 3, block_idx = 0 →
+/// [(61 + 0*2*3 + 0*3, 1.0), (61 + 0*2*3 + 1*3, 1.0)] = [(61, 1.0), (64, 1.0)].
 #[test]
 fn bus_deficit_returns_one_entry_per_segment() {
     let indexer = make_indexer();
@@ -1631,19 +1557,13 @@ fn bus_deficit_returns_one_entry_per_segment() {
         &lpos,
     );
 
-    // deficit.start=61, b_pos=0, S=2, n_blks=3, blk=0
-    // seg0: 61 + 0*2*3 + 0*3 + 0 = 61
-    // seg1: 61 + 0*2*3 + 1*3 + 0 = 64
     assert_eq!(result.len(), 2);
     assert_eq!(result[0], (61, 1.0));
     assert_eq!(result[1], (64, 1.0));
 }
 
-/// BusDeficit for second bus (position 1) at block 1.
-///
-/// bus_pos[EntityId(200)] = 1, deficit.start = 61, S = 2, n_blks = 3, blk = 1
-/// seg0: 61 + 1*2*3 + 0*3 + 1 = 61 + 6 + 0 + 1 = 68
-/// seg1: 61 + 1*2*3 + 1*3 + 1 = 61 + 6 + 3 + 1 = 71
+/// bus_pos[EntityId(200)] = 1, deficit.start = 61, S = 2, n_blks = 3, blk = 1:
+/// seg0 = 61 + 1*2*3 + 0*3 + 1 = 68; seg1 = 61 + 1*2*3 + 1*3 + 1 = 71.
 #[test]
 fn bus_deficit_second_bus_block_1() {
     let indexer = make_indexer();
@@ -1676,10 +1596,8 @@ fn bus_deficit_second_bus_block_1() {
 
 // ── BusExcess tests ───────────────────────────────────────────────────────
 
-/// BusExcess maps to the excess column for the bus.
-///
-/// bus_pos[EntityId(100)] = 0, excess.start = 73, n_blks = 3, block = 2
-/// Expected: [(73 + 0*3 + 2, 1.0)] = [(75, 1.0)]
+/// bus_pos[EntityId(100)] = 0, excess.start = 73, n_blks = 3, block = 2 →
+/// [(73 + 0*3 + 2, 1.0)] = [(75, 1.0)].
 #[test]
 fn bus_excess_maps_to_excess_column() {
     let indexer = make_indexer();
@@ -1710,10 +1628,8 @@ fn bus_excess_maps_to_excess_column() {
 
 // ── LineDirect / LineReverse tests ────────────────────────────────────────
 
-/// LineDirect maps to line_fwd column.
-///
-/// line_pos[EntityId(50)] = 0, line_fwd.start = 55, n_blks = 3, block = 1
-/// Expected: [(55 + 0*3 + 1, 1.0)] = [(56, 1.0)]
+/// line_pos[EntityId(50)] = 0, line_fwd.start = 55, n_blks = 3, block = 1 →
+/// [(55 + 0*3 + 1, 1.0)] = [(56, 1.0)].
 #[test]
 fn line_direct_maps_to_fwd_column() {
     let indexer = make_indexer();
@@ -1742,10 +1658,7 @@ fn line_direct_maps_to_fwd_column() {
     assert_eq!(result, vec![(55 + 0 * 3 + 1, 1.0)]);
 }
 
-/// LineReverse maps to line_rev column.
-///
-/// line_pos[EntityId(50)] = 0, line_rev.start = 58, n_blks = 3, block = 0
-/// Expected: [(58 + 0*3 + 0, 1.0)] = [(58, 1.0)]
+/// line_pos[EntityId(50)] = 0, line_rev.start = 58, n_blks = 3, block = 0 → [(58, 1.0)].
 #[test]
 fn line_reverse_maps_to_rev_column() {
     let indexer = make_indexer();
@@ -1841,7 +1754,6 @@ fn line_exchange_with_explicit_block() {
     assert_eq!(result, vec![(55, 1.0), (58, -1.0)]);
 }
 
-/// LineExchange with unknown line ID returns empty vec.
 #[test]
 fn line_exchange_unknown_id_returns_empty() {
     let indexer = make_indexer();
@@ -1910,20 +1822,14 @@ fn make_indexer_with_anticipated() -> StageGeometry {
     )
 }
 
-/// AC-12: `AnticipatedDecision` for an anticipated thermal maps to the
-/// correct stage-level column: `anticipated_decision.start + local_idx`.
-///
-/// Using `make_indexer_with_anticipated`:
-/// - Thermal EntityId(6) at sys_pos=1, which is anticipated_thermal_indices[0].
-/// - anticipated_decision.start = 9, local_idx = 0.
-/// - Expected column = 9 + 0 = 9.
+/// `AnticipatedDecision` for an anticipated thermal maps to
+/// `anticipated_decision.start + local_idx`: EntityId(6) at sys_pos=1
+/// (anticipated_thermal_indices[0]), anticipated_decision.start = 9, local_idx = 0
+/// → column 9.
 #[test]
 fn anticipated_decision_maps_to_correct_column() {
     let indexer = make_indexer_with_anticipated();
     let state = make_state_anticipated();
-    // `make_indexer_with_anticipated` places the anticipated plant at system
-    // position 1 (local index 0), matching the reverse map the production
-    // `StageLayout` builds.
     let geom = make_geom(&indexer, &state, 1, &[1]);
     let prod = ProductionModelSet::new(vec![], 0, 1);
     let hpos: BTreeMap<EntityId, usize> = BTreeMap::new();
@@ -1932,7 +1838,6 @@ fn anticipated_decision_maps_to_correct_column() {
     let bpos: BTreeMap<EntityId, usize> = [(EntityId(100), 0)].into_iter().collect();
     let lpos: BTreeMap<EntityId, usize> = BTreeMap::new();
 
-    // Verify anticipated_decision.start is as expected.
     assert_eq!(
         indexer.anticipated_decision.start, 9,
         "anticipated_decision.start should be 9, got {}",
@@ -1959,14 +1864,12 @@ fn anticipated_decision_maps_to_correct_column() {
     );
 }
 
-/// AC-12 (block-independence): `AnticipatedDecision` is stage-level — the
-/// returned column is the same regardless of `block_idx`.
+/// `AnticipatedDecision` is stage-level — the returned column is the same
+/// regardless of `block_idx`.
 #[test]
 fn anticipated_decision_ignores_block_idx() {
     let indexer = make_indexer_with_anticipated();
     let state = make_state_anticipated();
-    // `make_indexer_with_anticipated` places the anticipated plant at system
-    // position 1 (local index 0).
     let geom = make_geom(&indexer, &state, 1, &[1]);
     let prod = ProductionModelSet::new(vec![], 0, 1);
     let hpos: BTreeMap<EntityId, usize> = BTreeMap::new();
@@ -1996,16 +1899,12 @@ fn anticipated_decision_ignores_block_idx() {
     }
 }
 
-/// AC-13: `AnticipatedDecision` for a regular (non-anticipated) thermal
-/// returns an empty vec (defense-in-depth).
-///
-/// Thermal EntityId(5) at sys_pos=0 is NOT in anticipated_thermal_indices.
+/// A regular (non-anticipated) thermal returns empty (defense-in-depth):
+/// EntityId(5) at sys_pos=0 is NOT in anticipated_thermal_indices.
 #[test]
 fn anticipated_decision_non_anticipated_thermal_returns_empty() {
     let indexer = make_indexer_with_anticipated();
     let state = make_state_anticipated();
-    // Anticipated plant is at system position 1; querying a different thermal
-    // must miss the populated reverse map and return empty.
     let geom = make_geom(&indexer, &state, 1, &[1]);
     let prod = ProductionModelSet::new(vec![], 0, 1);
     let hpos: BTreeMap<EntityId, usize> = BTreeMap::new();
@@ -2033,12 +1932,10 @@ fn anticipated_decision_non_anticipated_thermal_returns_empty() {
     );
 }
 
-/// AC-14: `AnticipatedDecision` for an unknown entity ID returns empty vec.
 #[test]
 fn anticipated_decision_unknown_entity_returns_empty() {
     let indexer = make_indexer_with_anticipated();
     let state = make_state_anticipated();
-    // Anticipated plant is at system position 1 (populated reverse map).
     let geom = make_geom(&indexer, &state, 1, &[1]);
     let prod = ProductionModelSet::new(vec![], 0, 1);
     let hpos: BTreeMap<EntityId, usize> = BTreeMap::new();
@@ -2103,7 +2000,6 @@ fn block_col_range_maps_each_family_to_its_geometry_range() {
 
 // ── HydroTurbined / HydroSpillage tests ───────────────────────────────────
 
-/// HydroTurbined maps to turbine column.
 #[test]
 fn hydro_turbined_maps_to_turbine_column() {
     let indexer = make_indexer();
@@ -2133,7 +2029,6 @@ fn hydro_turbined_maps_to_turbine_column() {
     assert_eq!(result, vec![(13 + 1 * 3 + 2, 1.0)]);
 }
 
-/// HydroSpillage maps to spillage column.
 #[test]
 fn hydro_spillage_maps_to_spillage_column() {
     let indexer = make_indexer();
@@ -2163,11 +2058,8 @@ fn hydro_spillage_maps_to_spillage_column() {
     assert_eq!(result, vec![(25 + 3 * 3 + 1, 1.0)]);
 }
 
-/// HydroDiversion maps to the diversion column.
-///
-/// Routes through `resolve_block_variable` with
-/// `block_col_range(geom, ElementKind::Diversion).start = 37`. For hydro
-/// pos=1 (EntityId 20), n_blks=3, block=2 the flat block-major address is
+/// `block_col_range(geom, ElementKind::Diversion).start = 37`. For hydro pos=1
+/// (EntityId 20), n_blks=3, block=2 the flat block-major address is
 /// `37 + 1*3 + 2 = 42` with the unit coefficient.
 #[test]
 fn diversion_maps_to_diversion_column() {
@@ -2211,13 +2103,11 @@ fn make_inflow_cascade() -> CascadeTopology {
     ])
 }
 
-/// AC: a two-upstream hydro (no diversion-into) resolves at block `k` to the
+/// A two-upstream hydro (no diversion-into) resolves at block `k` to the
 /// incremental `z_inflow` column plus, in canonical upstream order, each
-/// upstream plant's turbine + spillage column. All coefficients `+1.0`.
-///
+/// upstream plant's turbine + spillage column, all coefficients `+1.0`.
 /// Target EntityId(40) at pos_h=3; upstream [10, 20] at pos 0, 1.
-/// z_inflow.start=4 → (4+3, 1.0)=(7, 1.0); turbine.start=13, spillage.start=25,
-/// n_blks=3, k=2.
+/// z_inflow.start=4 → (7, 1.0); turbine.start=13, spillage.start=25, n_blks=3, k=2.
 #[test]
 fn hydro_inflow_two_upstream_canonical_order() {
     let indexer = make_indexer();
@@ -2264,7 +2154,7 @@ fn hydro_inflow_two_upstream_canonical_order() {
     );
 }
 
-/// AC: `block_id = None` with `block_idx = k` matches `block_id = Some(k)`
+/// `block_id = None` with `block_idx = k` matches `block_id = Some(k)`
 /// (the resolver uses `eff_blk = block_id.unwrap_or(block_idx)`).
 #[test]
 fn hydro_inflow_none_matches_some_block_idx() {
@@ -2314,11 +2204,9 @@ fn hydro_inflow_none_matches_some_block_idx() {
     assert_eq!(none_result, some_result);
 }
 
-/// AC: a hydro that also has a plant diverting into it gets the diversion
-/// column appended after the upstream terms.
-///
-/// `diversion_upstream[40] = [2]` (system index 2). diversion.start=37,
-/// n_blks=3, k=1 → (37 + 2*3 + 1, 1.0) = (44, 1.0).
+/// A hydro that also has a plant diverting into it gets the diversion column
+/// appended after the upstream terms. `diversion_upstream[40] = [2]` (system
+/// index 2), diversion.start=37, n_blks=3, k=1 → (37 + 2*3 + 1, 1.0) = (44, 1.0).
 #[test]
 fn hydro_inflow_diversion_into_appends_diversion_column() {
     let indexer = make_indexer();
@@ -2367,11 +2255,9 @@ fn hydro_inflow_diversion_into_appends_diversion_column() {
     );
 }
 
-/// AC: a headwater hydro (no upstream, no diversion-into) resolves to exactly
-/// the incremental `z_inflow` column.
-///
-/// EntityId(30) at pos=2 is a headwater in `make_inflow_cascade`.
-/// z_inflow.start=4 → (6, 1.0).
+/// A headwater hydro (no upstream, no diversion-into) resolves to exactly the
+/// incremental `z_inflow` column. EntityId(30) at pos=2 is a headwater in
+/// `make_inflow_cascade`; z_inflow.start=4 → (6, 1.0).
 #[test]
 fn hydro_inflow_headwater_resolves_to_z_inflow_only() {
     let indexer = make_indexer();
@@ -2405,8 +2291,7 @@ fn hydro_inflow_headwater_resolves_to_z_inflow_only() {
     }
 }
 
-/// AC: `hydro_count == 0` (empty `z_inflow`) resolves to `vec![]`.
-///
+/// `hydro_count == 0` (empty `z_inflow`) resolves to `vec![]`:
 /// `make_indexer_with_anticipated` has no hydros, so `z_inflow` is empty and
 /// `z_inflow.start` is meaningless; the resolver must short-circuit to `[]`.
 #[test]
@@ -2447,7 +2332,6 @@ fn hydro_inflow_empty_when_no_hydros() {
     );
 }
 
-/// AC: an unknown `hydro_id` resolves to `vec![]`.
 #[test]
 fn hydro_inflow_unknown_id_returns_empty() {
     let indexer = make_indexer();
@@ -2479,7 +2363,7 @@ fn hydro_inflow_unknown_id_returns_empty() {
     );
 }
 
-/// AC: `HydroInflow` is block-DEPENDENT — its upstream releases are per-block
+/// `HydroInflow` is block-DEPENDENT — its upstream releases are per-block
 /// columns, so the single-row collapse must NOT apply.
 #[test]
 fn hydro_inflow_is_block_dependent() {
@@ -2707,7 +2591,6 @@ fn hydro_storage_boundary_none_resolves_stage_endpoint() {
     }
 }
 
-/// A `hydro_pos` miss resolves to an empty vec for both boundary variants.
 #[test]
 fn hydro_storage_boundary_unknown_id_returns_empty() {
     let indexer = make_indexer();

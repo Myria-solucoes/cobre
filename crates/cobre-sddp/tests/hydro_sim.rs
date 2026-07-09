@@ -1,11 +1,9 @@
 //! Consolidated hydro-simulation and stage-structure integration tests for
 //! `cobre-sddp`.
 //!
-//! Each source domain (simulation round-trip, signed evaporation, energy-contract
-//! dispatch, multi-resolution stages, sparse/dense cut rows, and multi-stage
-//! decomposition) lives in its own inner `mod` so the suite links the statically-
-//! bound solver once rather than once per file. Per-`mod` scoping isolates each
-//! group's consts, helpers, and fixtures.
+//! Each source domain lives in its own inner `mod` so the suite links the
+//! statically-bound solver once rather than once per file. Per-`mod` scoping
+//! isolates each group's consts, helpers, and fixtures.
 
 #![allow(
     clippy::unwrap_used,
@@ -382,8 +380,7 @@ mod d41_energy_contracts_simulation {
 
         let config_path = case_dir.join("config.json");
         let mut config = cobre_io::parse_config(&config_path).expect("config must parse");
-        // The shipped case disables simulation (the parity harness trains only);
-        // enable one scenario so the contract extraction path runs.
+        // The shipped parity case trains only; enable one sim scenario so the contract extraction path runs.
         config.simulation = cobre_io::config::SimulationConfig {
             enabled: true,
             num_scenarios: 1,
@@ -475,7 +472,7 @@ mod d41_energy_contracts_simulation {
                 .unwrap_or_else(|| panic!("stage {t} must have an export (id 1) row"))
         };
 
-        // AC1 — commissioning gate, dormant zero: export id 1 has entry_stage_id = 1,
+        // Commissioning gate, dormant zero: export id 1 has entry_stage_id = 1,
         // so stage 0 (t < E) is dormant: zero power, operative_state_code == 1.
         let exp0 = export_row(0);
         assert_eq!(
@@ -488,7 +485,7 @@ mod d41_energy_contracts_simulation {
             "dormant export row still carries operative_state_code 1",
         );
 
-        // AC2 — commissioning gate, active dispatch + post-exit zero: export id 1 has
+        // Commissioning gate, active dispatch + post-exit zero: export id 1 has
         // exit_stage_id = 2, active only at stage 1 (E <= t < X). It is the surplus
         // stage, so the optimizer sells the revenue export at a positive power.
         let exp1 = export_row(1);
@@ -509,7 +506,7 @@ mod d41_energy_contracts_simulation {
             exp2.power_mw,
         );
 
-        // R2 shortage — import id 0 is pulled at stage 0 (high load, scarce hydro,
+        // Stage 0 is a shortage stage — import id 0 is pulled (high load, scarce hydro,
         // thermal capped): import at $200 beats the $1000 deficit.
         let imp0 = import_row(0);
         assert!(
@@ -523,7 +520,7 @@ mod d41_energy_contracts_simulation {
             imp0.price_per_mwh,
         );
 
-        // AC4 — take-or-pay floor binds: the contract_bounds override sets import id 0
+        // Take-or-pay floor binds: the contract_bounds override sets import id 0
         // min_mw = 10.0 at stage 2, where importing is uneconomic (hydro+thermal cover
         // the load and the override price is 999.0). The floor forces power_mw == 10.0.
         let imp2 = import_row(2);
@@ -533,7 +530,7 @@ mod d41_energy_contracts_simulation {
             imp2.power_mw,
         );
 
-        // AC3 — stage override changes price and cost: the same override sets import id
+        // Stage override changes price and cost: the same override sets import id
         // 0 price_per_mwh = 999.0 at stage 2, differing from the base 200.0 used at
         // stage 0, which visibly changes total_cost relative to the non-overridden
         // stage 0 import row.
@@ -557,7 +554,7 @@ mod d41_energy_contracts_simulation {
             "overridden stage 2 import total_cost must differ from non-overridden stage 0",
         );
 
-        // AC5 — cost-breakdown invariant with an active contract: the five macro
+        // Cost-breakdown invariant with an active contract: the five macro
         // categories sum to immediate_cost at the export-active stage 1.
         let cost = &scenario.stages[1].costs[0];
         let mut accum = ScenarioCategoryCosts {
@@ -737,7 +734,6 @@ mod multi_resolution_integration {
             );
         }
 
-        // Stages 0-2 are outside the window: no downstream accumulation.
         for (t, transition) in lag_transitions.iter().enumerate().take(3) {
             assert!(
                 !transition.accumulate_downstream,

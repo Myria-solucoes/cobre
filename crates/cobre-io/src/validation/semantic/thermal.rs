@@ -200,10 +200,7 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
 /// study horizon — spans a pair of adjacent study stages with differing
 /// durations. A fixed stage-count lead delivers a different physical lead on
 /// each side of such a cadence change; `anticipated_config.lead_time` anchors
-/// the lead to physical hours instead and is immune to this. Never a hard
-/// error — the same `ModelQuality`
-/// channel `check_recent_observations_non_monthly_seed_gap`
-/// (`validation/semantic/travel_time.rs`) uses.
+/// the lead to physical hours instead and is immune to this. Never a hard error.
 pub(super) fn check_anticipated_cadence_transition(data: &ParsedData, ctx: &mut ValidationContext) {
     let study_durations = study_stage_durations(data);
     let n_stages = study_durations.len();

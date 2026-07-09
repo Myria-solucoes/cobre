@@ -27,33 +27,23 @@ use super::{
 pub struct StageTemplates {
     /// One structural LP template per study stage, in stage order.
     pub templates: Vec<StageTemplate>,
-    /// Row index of the first water-balance constraint in each stage's LP.
-    ///
-    /// Length equals `templates.len()`.  Used by `PatchBuffer::fill_forward_patches`
-    /// to locate the noise-injection rows.
+    /// Row index of the first water-balance constraint in each stage's LP (the
+    /// noise-injection `base_row`). Length equals `templates.len()`.
     pub base_rows: Vec<usize>,
-    /// Pre-computed noise scale `ζ_stage * σ_{stage,hydro}` for each (stage, hydro) pair.
+    /// Pre-computed noise scale `ζ_stage * σ_{stage,hydro}`, flat stage-major:
+    /// `noise_scale[stage * n_hydros + hydro]`, length `n_study_stages * n_hydros`.
     ///
-    /// Flat array in stage-major layout: `noise_scale[stage * n_hydros + hydro]`.
-    /// Length equals `n_study_stages * n_hydros`.
-    ///
-    /// Used by the forward pass to transform raw standard-normal noise `η` into
-    /// the full noise term `ζ*σ*η` before patching the water-balance RHS.
-    /// The complete patch value is `ζ*base + ζ*σ*η`, where `ζ*base` is encoded
-    /// in the template's `row_lower`/`row_upper` and `ζ*σ*η` is computed by the
-    /// caller at each stage using this pre-computed scale.
+    /// The full water-balance patch is `ζ*base + ζ*σ*η`: `ζ*base` is already encoded
+    /// in the template's `row_lower`/`row_upper`, and the caller adds `ζ*σ*η` at solve
+    /// time using this scale.
     pub noise_scale: Vec<f64>,
-    /// Per-stage time-conversion factor `ζ = total_hours * M3S_TO_HM3`.
-    ///
-    /// Length equals `templates.len()`.  Used by the simulation pipeline to
-    /// convert the water-balance RHS (in hm³) back to inflow in m³/s for
-    /// output reporting: `inflow_m3s = rhs_hm3 / zeta_per_stage[stage]`.
+    /// Per-stage time-conversion factor `ζ = total_hours * M3S_TO_HM3`, length
+    /// `templates.len()`. Inverts the water-balance RHS back to inflow:
+    /// `inflow_m3s = rhs_hm3 / zeta_per_stage[stage]`.
     pub zeta_per_stage: Vec<f64>,
-    /// Per-stage block durations in hours.
-    ///
-    /// `block_hours_per_stage[stage]` is a `Vec<f64>` of length `n_blocks` for
-    /// that stage.  Used by the simulation pipeline to convert load-balance
-    /// constraint duals from $/MW to $/`MWh`: `spot_price = dual / block_hours`.
+    /// Per-stage block durations in hours (`block_hours_per_stage[stage]` is length
+    /// `n_blocks`). Converts load-balance duals $/MW → $/`MWh`:
+    /// `spot_price = dual / block_hours`.
     pub block_hours_per_stage: Vec<Vec<f64>>,
     /// Number of hydro plants (N) used to stride into `noise_scale`.
     pub n_hydros: usize,
@@ -62,31 +52,21 @@ pub struct StageTemplates {
     /// `load_balance_row_starts[s]` is `StageLayout::row_load_balance_start()`
     /// for stage `s` — NOT a hand-derived `row_water_balance_start + n_hydros`
     /// offset, which only held before the chronological per-block water rows
-    /// and the travel-time bucket-definition rows existed between the two.
-    /// Length equals `templates.len()`.  Used by the forward, backward, and
-    /// simulation passes to locate load-balance rows for stochastic load
-    /// patching.
+    /// and the travel-time bucket-definition rows sat between the two.
+    /// Length equals `templates.len()`.
     pub load_balance_row_starts: Vec<usize>,
-    /// Number of buses with stochastic load noise (i.e. with `std_mw > 0`).
-    ///
-    /// Equals `normal_lp.n_entities()`.  Tells the forward and backward passes
-    /// how many load-noise components to extract from the opening tree noise
-    /// vector, which carries load noise in indices `[n_hydros, n_hydros + n_load_buses)`.
+    /// Number of buses with stochastic load noise (`std_mw > 0`); equals
+    /// `normal_lp.n_entities()`. Load noise occupies opening-tree noise-vector
+    /// indices `[n_hydros, n_hydros + n_load_buses)`.
     pub n_load_buses: usize,
-    /// Position in the `buses` slice for each stochastic load bus.
-    ///
-    /// Length equals `n_load_buses`.  Bus IDs are sorted by [`cobre_core::EntityId`] for
-    /// declaration-order invariance.  The forward and backward passes use
-    /// `load_bus_indices[i]` to compute the base row index of bus `i` in the
-    /// load-balance region: `row = load_balance_row_start + load_bus_indices[i] * n_blks + blk`.
+    /// Position in the `buses` slice for each stochastic load bus, length
+    /// `n_load_buses`, sorted by [`cobre_core::EntityId`] for declaration-order
+    /// invariance. Bus `i`'s load-balance base row is
+    /// `load_balance_row_start + load_bus_indices[i] * n_blks + blk`.
     pub load_bus_indices: Vec<usize>,
-    /// Per-stage metadata for active generic constraint rows.
-    ///
-    /// `generic_constraint_row_entries[s]` contains one
+    /// Per-stage metadata for active generic constraint rows: one
     /// [`GenericConstraintRowEntry`] per active `(constraint, block)` pair at
-    /// stage `s`.  Used by the simulation extraction pipeline to map LP
-    /// row/column indices back to constraint identity and block.  Empty for
-    /// stages with no active generic constraints.
+    /// stage `s`. Empty for stages with no active generic constraints.
     pub generic_constraint_row_entries: Vec<Vec<GenericConstraintRowEntry>>,
     /// Per-stage NCS column start indices.
     ///
@@ -604,9 +584,8 @@ fn collect_load_bus_indices(system: &System, bus_pos: &BTreeMap<EntityId, usize>
 ///   see `layout.rs` for the authoritative column and row counts
 /// - `n_state  = N*(1+L)`
 /// - `n_transfer = N*L`  (storage + all lags except the oldest)
-/// - `n_dual_relevant = N*(1+L)`  (`z_inflow` definition, water balance, load balance, FPHA,
-///   evaporation, operational violation, and generic constraint rows are all structural and
-///   non-dual-relevant; only the state-fixing rows contribute to cut gradients)
+/// - `n_dual_relevant = 0`  (state pinning uses column bounds, not state-fixing rows, so no
+///   structural row contributes to cut gradients; the cut path reads `view.reduced_costs`)
 ///
 /// ## PAR order and `max_par_order`
 ///
@@ -649,8 +628,8 @@ fn collect_load_bus_indices(system: &System, bus_pos: &BTreeMap<EntityId, usize>
 /// ```
 ///
 /// The `v_in` contribution propagates through the LP via the matrix coefficient
-/// `-gamma_v/2` on the incoming-storage column; when `v_in` is fixed by the
-/// storage-fixing equality row its value automatically enters the FPHA constraint
+/// `-gamma_v/2` on the incoming-storage column; when `v_in` is pinned by that
+/// column's bounds its value automatically enters the FPHA constraint
 /// right-hand side.  No changes to the backward pass or cut extraction are needed.
 ///
 /// Returns `Ok` with empty templates for a system with zero stages.  All

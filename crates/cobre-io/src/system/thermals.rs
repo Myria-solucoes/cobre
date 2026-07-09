@@ -132,22 +132,13 @@ pub(crate) enum RawAnticipatedConfig {
 
 /// Load and validate `system/thermals.json` from `path`.
 ///
-/// Reads the JSON file, deserializes it through intermediate serde types,
-/// performs post-deserialization validation, then converts to `Vec<Thermal>`.
 /// The result is sorted by `id` ascending, so parser output is deterministic
 /// regardless of file row order (declaration-order invariance); the builder applies
 /// the same id as its `(operational_start_date, id)` canonical tiebreak.
 ///
-/// Parse-time validation for `anticipated_config` (`LeadStages` and `LeadTime`
-/// are mutually exclusive by construction, via `RawAnticipatedConfig`):
-/// - `lead_stages >= 1`
-/// - `lead_time_hours` finite and `> 0.0`
-///
-/// Semantic validation (cross-field, requires knowledge of `T` and the
-/// entity registry) is performed by `validation::semantic::thermal`.
-///
-/// Cross-reference validation (e.g., `bus_id` existence in the bus registry)
-/// is deferred to Layer 3.
+/// Semantic validation (cross-field) is performed by
+/// `validation::semantic::thermal`; cross-reference validation (e.g., `bus_id`
+/// existence in the bus registry) is deferred to Layer 3.
 ///
 /// # Errors
 ///

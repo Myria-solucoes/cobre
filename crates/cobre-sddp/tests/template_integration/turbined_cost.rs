@@ -1,4 +1,4 @@
-//! `turbined_cost` section tests (split from the parent integration binary).
+//! `turbined_cost` section tests.
 
 use super::*;
 

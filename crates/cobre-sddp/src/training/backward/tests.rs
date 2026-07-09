@@ -1,17 +1,8 @@
 use crate::SddpError;
 
-/// Test-only backward-pass shim that owns per-call scratch.
-///
-/// Production code drives the backward pass via [`BackwardPassState::run`]
-/// on the state struct held by `TrainingSession`. This shim exists so that
-/// the tests in this module can exercise `run_one_backward_stage` without
-/// threading a full `TrainingSession` through every fixture.
-///
-/// # Errors
-///
-/// Returns `Err(SddpError::Infeasible { .. })` when a stage LP has no
-/// feasible solution during the backward sweep. Returns
-/// `Err(SddpError::Solver(_))` for all other terminal LP solver failures.
+/// Test-only backward-pass shim that owns per-call scratch, so the tests in
+/// this module can exercise the backward pass without threading a full
+/// `TrainingSession` through every fixture.
 #[cfg(test)]
 fn run_backward_pass<S, C: Communicator>(
     inputs: &mut crate::backward_pass_state::BackwardPassInputs<'_, S, C>,
@@ -83,7 +74,6 @@ impl Communicator for StubComm {
         _counts: &[usize],
         _displs: &[usize],
     ) -> Result<(), CommError> {
-        // Single-rank: copy send to recv (mirrors LocalBackend behavior).
         recv[..send.len()].copy_from_slice(send);
         Ok(())
     }
@@ -661,7 +651,6 @@ fn backward_result_clone_and_debug() {
 
 #[test]
 fn dual_extraction_formula_coefficients_are_negated_duals() {
-    // Given known dual values [d0, d1], coefficients must be [-d0, -d1].
     let d0 = 3.5_f64;
     let d1 = -1.2_f64;
     let dual = [d0, d1];
@@ -789,9 +778,6 @@ fn single_stage_system_produces_no_cuts() {
 
 #[test]
 fn two_stage_system_two_trial_points_generates_two_cuts_at_stage_0() {
-    // Acceptance criterion: 3-stage system, 1 hydro (n_state=1), 2 openings,
-    // 2 trial points → 2 cuts at stage 0. This is the 2-stage version
-    // (stages 0 and 1); cuts should exist only at stage 0.
     let n_stages = 2_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
@@ -1002,7 +988,6 @@ fn cut_inserted_with_correct_stage_iteration_and_forward_pass_index() {
 
 #[test]
 fn no_cuts_generated_at_last_stage() {
-    // Acceptance criterion: 5-stage system → cuts at stages 0..3, not at 4.
     let n_stages = 5_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
@@ -1201,8 +1186,6 @@ fn elapsed_ms_is_non_negative() {
 
 #[test]
 fn infeasible_solver_returns_sddp_infeasible_error() {
-    // Acceptance criterion: MockSolver::infeasible_on(0) for the first
-    // backward solve → SddpError::Infeasible is returned.
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
     let state = crate::test_support::state_layout(1, 0);
@@ -1221,7 +1204,6 @@ fn infeasible_solver_returns_sddp_infeasible_error() {
     let risk_measures = vec![RiskMeasure::Expectation; n_stages];
 
     let solution = solution_1_0(0.0, 0.0);
-    // First solve call returns infeasible.
     let solver = MockSolver::infeasible_on(solution, 0);
     let comm = StubComm;
     let mut workspaces = single_workspace(solver, n_state);
@@ -1706,7 +1688,6 @@ fn cut_is_tight_at_trial_point() {
 
 #[test]
 fn single_rank_backward_pass_with_local_backend_produces_correct_fcf() {
-    // Integration test with LocalBackend communicator (exercises single-rank path).
     use cobre_comm::LocalBackend;
 
     let n_stages = 3_usize;
@@ -1935,14 +1916,6 @@ fn forward_pass_index_matches_global_scenario_index() {
 
 // ── Unit tests: warm-start basis caching (backward pass) ──────────────────
 
-/// Warm-start from a pre-populated forward basis: when `BasisStore` has
-/// `Some(Basis)` at `(scenario=0, stage=1)` before the first backward call,
-/// the first opening at the successor stage must call `solve(Some(&basis))`
-/// rather than `solve(None)`.
-///
-/// AC: Given a 2-stage system, 1 trial point, 1 opening, with
-/// `basis_store.get(0, 1) = Some(Basis::new(...))` pre-populated,
-/// then `solver.warm_start_calls == 1` after the backward pass.
 #[test]
 fn warm_start_uses_prepopulated_forward_basis() {
     let n_stages = 2_usize;
@@ -2048,14 +2021,6 @@ fn warm_start_uses_prepopulated_forward_basis() {
     );
 }
 
-/// Multi-opening P3b behavior: given 3 openings at the same successor stage,
-/// the first opening cold-starts (store slot is None via `solve()`), and
-/// openings 1 and 2 use `HiGHS` internal hot-start via `solve(None)` instead of
-/// `solve(Some(&working_basis))`.
-///
-/// AC: Given a 2-stage system, 1 trial point, 3 openings, empty basis cache,
-/// then `solver.warm_start_calls == 0` after the backward pass (P3b: no
-/// and 3 warm-start; opening 1 cold-starts).
 #[test]
 fn multi_opening_subsequent_openings_use_internal_hotstart() {
     let n_stages = 2_usize;
@@ -2151,9 +2116,9 @@ fn multi_opening_subsequent_openings_use_internal_hotstart() {
     })
     .unwrap();
 
-    // P3b optimization: opening 0 cold-starts (no basis in store),
-    // openings 1 and 2 use solve(None) (HiGHS internal hot-start) instead of
-    // solve(Some(&working_basis)). No explicit warm-start calls for subsequent openings.
+    // Opening 0 cold-starts (no basis in store); openings 1 and 2 use
+    // solve(None) (HiGHS internal hot-start) instead of solve(Some(&working_basis)),
+    // so no explicit warm-start calls are issued for subsequent openings.
     let warm_start_calls = workspaces[0].solver.inner().warm_start_calls;
     assert_eq!(
         warm_start_calls, 0,
@@ -2162,16 +2127,6 @@ fn multi_opening_subsequent_openings_use_internal_hotstart() {
     );
 }
 
-/// Error propagation: when a backward solve returns `SolverError::Infeasible`,
-/// the error must propagate as `SddpError::Infeasible`.
-///
-/// In the new per-scenario design, the backward pass uses a local `working_basis`
-/// variable (not written back to `BasisStore`), so there is no shared cache slot
-/// to check after the error. The test verifies that the error is correctly
-/// propagated regardless of what was in the basis store at entry.
-///
-/// AC: Given a 2-stage system, 1 opening, `MockSolver` returns infeasible on
-/// call 0, then `run_backward_pass` returns `Err(SddpError::Infeasible { .. })`.
 #[test]
 fn backward_solver_error_propagates() {
     let n_stages = 2_usize;
@@ -3293,7 +3248,7 @@ fn backward_pass_cut_coefficients_unaffected() {
     );
 }
 
-/// BUG-1 structural invariant: per-stage cut sync inside the backward loop.
+/// Structural invariant: per-stage cut sync inside the backward loop.
 ///
 /// Verifies that after `run_backward_pass`, the cut synchronization has been
 /// performed per-stage (not as a separate post-sweep loop). The structural
@@ -4634,8 +4589,6 @@ fn patch_opening_bounds_pins_transit_bucket_incoming_columns_per_stage_visit() {
 
 #[test]
 fn resolve_backward_basis_returns_some_when_slot_is_populated() {
-    // Given: BasisStore[0, 1] has Some(CapturedBasis).
-    // Then: resolve_backward_basis returns Some(_).
     use crate::workspace::{BasisStore, CapturedBasis};
 
     let b = CapturedBasis::new(2, 2, 0, 0, 0);
@@ -4652,8 +4605,6 @@ fn resolve_backward_basis_returns_some_when_slot_is_populated() {
 
 #[test]
 fn resolve_backward_basis_returns_none_when_slot_is_empty() {
-    // Given: BasisStore[0, 1] is None (cold-start, slot never written).
-    // Then: resolve_backward_basis returns None.
     use crate::workspace::BasisStore;
 
     let mut store = BasisStore::new(1, 2);
@@ -4671,13 +4622,6 @@ fn resolve_backward_basis_returns_none_when_slot_is_empty() {
 
 #[test]
 fn backward_write_populates_basis_store_at_omega_zero() {
-    // Given: a 2-stage, 1-opening study with one forward trial point (m=0, x_hat=[5.0]).
-    //        BasisStore starts empty (all None).
-    // When: process_trial_point_backward runs at omega=0.
-    // Then: BasisStore[0, 1] is Some(CapturedBasis) with state_at_capture == [5.0].
-    //
-    // write occurs only at omega=0 (this test has exactly 1 opening).
-    // infeasibility guard is not triggered (solver succeeds).
     use crate::workspace::BasisStore;
 
     let mut basis_store = BasisStore::new(1, 2);
@@ -4704,17 +4648,6 @@ fn backward_write_populates_basis_store_at_omega_zero() {
 
 #[test]
 fn backward_write_preserves_slot_on_infeasibility_at_omega_zero() {
-    // Given: a 2-stage, 1-opening study.
-    //        BasisStore starts with a pre-existing basis at [0, 1].
-    //        The solver returns Infeasible on its first call.
-    // When: process_trial_point_backward runs via run_backward_pass.
-    // Then: run_backward_pass returns Err(SddpError::Infeasible) and
-    //       BasisStore[0, 1] retains its original content.
-    //
-    // the write in process_trial_point_backward is guarded by `?`
-    // immediately after run_stage_solve. An Infeasible error propagates
-    // out of the function before reaching the BasisStore write site, so
-    // the slot is unconditionally preserved on infeasibility.
     use cobre_solver::Basis;
 
     use crate::workspace::{BasisStore, CapturedBasis};

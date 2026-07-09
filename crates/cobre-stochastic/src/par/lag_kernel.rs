@@ -4,40 +4,13 @@
 //! finalize and shift the lag chain, and — for multi-resolution studies —
 //! roll completed periods into a coarser downstream ring.
 //! [`advance_lag_chain`] is the single kernel they all route through, generic
-//! over the lag-storage layout via [`LagIndex`]. The test module validates the
-//! kernel in isolation against hand-computed oracles.
+//! over the lag-storage layout via [`LagIndex`].
 //!
-//! ## Locked design decisions
-//!
-//! - **D1 — separate `incoming_lags` read buffer.** `advance_lag_chain` reads
-//!   the previous lag values it shifts forward from a **separate**
-//!   `incoming_lags` slice, distinct from the `lag_state` slice it writes
-//!   into; it is never an in-place shift. At least one caller's realized
-//!   value already lands in the same storage `lag_state` writes into before
-//!   the shift runs, so that caller's old lag values survive only in a
-//!   pre-saved snapshot it passes as `incoming_lags`. A caller that shifts in
-//!   place today adapts by copying its lag buffer into a reused snapshot
-//!   scratch immediately before the call — a cold, setup-time copy, not a
-//!   hot-path allocation. Both callers read
-//!   `incoming_lags[layout.index(lag - 1, entity)]` and write
-//!   `lag_state[layout.index(lag, entity)]`.
-//! - **D2 — realized value is a plain `&[f64]` of length `entity_count`.**
-//!   The caller pre-resolves the realized value for this stage into a
-//!   contiguous slice before calling; the kernel never derives that slice's
-//!   offset from a larger buffer itself.
-//! - **D3 — one entry point, primary and downstream ring advance in the same
-//!   call.** The downstream (coarser-resolution) ring threads through the
-//!   same `advance_lag_chain` call via the `downstream` parameter;
-//!   uniform-resolution studies pass `downstream.accumulator: &mut []` and
-//!   `downstream.par_order: 0`, and every downstream branch short-circuits on
-//!   `downstream.accumulator.is_empty()`. There is no paired second call for
-//!   the downstream ring.
-//! - **D4 — layout via a `Copy` trait plus two implementing structs (static
-//!   dispatch), never an enum, never `Box<dyn>`.** `LagMajor` serves the
-//!   caller whose lag state is one contiguous lag-major window; `EntityMajor`
-//!   serves the caller whose lag state is a per-entity buffer. Marking
-//!   `index` `#[inline]` keeps the mapping zero-cost, so the higher-frequency
-//!   caller stays allocation-free.
+//! The shift is never in-place: `advance_lag_chain` reads the lags it moves
+//! forward from a separate `incoming_lags` slice, distinct from the `lag_state`
+//! it writes into. A caller whose realized value has already landed in its lag
+//! storage before the call would lose the old lags to an in-place shift, so it
+//! passes a pre-saved snapshot as `incoming_lags`.
 
 use cobre_core::temporal::StageLagTransition;
 
@@ -104,8 +77,7 @@ impl LagIndex for EntityMajor {
     }
 }
 
-/// Primary lag-accumulation buffers, grouped to keep the
-/// [`advance_lag_chain`] call within a reasonable parameter budget.
+/// Primary lag-accumulation buffers for [`advance_lag_chain`].
 pub struct PrimaryLagAccum<'a> {
     /// Weighted-sum accumulator for the current lag period; length `>= entity_count`.
     pub accumulator: &'a mut [f64],
@@ -113,8 +85,8 @@ pub struct PrimaryLagAccum<'a> {
     pub weight_accum: &'a mut f64,
 }
 
-/// Downstream (coarser-resolution) lag-accumulation buffers, grouped to keep
-/// the [`advance_lag_chain`] call within a reasonable parameter budget.
+/// Downstream (coarser-resolution) lag-accumulation buffers for
+/// [`advance_lag_chain`].
 ///
 /// Uniform-resolution studies pass `accumulator: &mut []` (empty slice) and
 /// `par_order: 0`; every downstream branch short-circuits on
@@ -142,8 +114,8 @@ pub struct DownstreamLagAccum<'a> {
 /// finalize_period=true`), a direct highest-lag-first shift seeded with the
 /// realized value.
 ///
-/// Also advances the downstream (coarser-resolution) ring in the same call
-/// (D3): when `stage_lag.rebuild_from_downstream` fires and the ring holds at
+/// Also advances the downstream (coarser-resolution) ring in the same call:
+/// when `stage_lag.rebuild_from_downstream` fires and the ring holds at
 /// least one completed period, the newest-first ring contents overwrite
 /// `lag_state` and the primary finalize below is skipped for this call.
 ///

@@ -27,11 +27,7 @@ use crate::{
     workspace::{BackwardAccumulators, CapturedBasis, ScratchBuffers, SolverWorkspace},
 };
 
-/// Thin test helper that mirrors the old `simulate` free-function signature
-/// and delegates to `SimulationState::run`. Allows all 24 existing test call
-/// sites to stay unchanged apart from the function name.
-// The arity mirrors the retired free-function signature so the existing call
-// sites compile unchanged; a params struct would churn all of them.
+// A params struct would churn every call site; the wide arity is deliberate.
 #[allow(clippy::too_many_arguments)]
 fn run_simulate<S, C: cobre_comm::Communicator>(
     workspaces: &mut [SolverWorkspace<S>],
@@ -65,7 +61,6 @@ where
 
 // ── Stub communicator ────────────────────────────────────────────────────
 
-/// Single-rank stub communicator for unit tests.
 struct StubComm {
     rank: usize,
     size: usize,
@@ -114,24 +109,9 @@ impl Communicator for StubComm {
 
 // ── Mock solver ──────────────────────────────────────────────────────────
 
-/// Mock solver that returns a configurable fixed `LpSolution` on every solve.
-///
-/// Optionally returns `SolverError::Infeasible` at a specific (0-based) solve
-/// call index (counting across both cold-start and warm-start calls).
-///
-/// `load_count` and `add_rows_count` track how many times `load_model` and
-/// `add_rows` were called, used by the frozen-path acceptance tests.
-///
-/// `solve_count` counts calls to the cold-start `solve(None)` path only.
-/// `solve_with_basis_count` counts calls to the warm-start `solve(Some(&basis))`
-/// path only.  `call_count` tracks the combined total across both paths and
-/// is used by the infeasibility injection logic.
-///
-/// `recorded_basis` captures the last `Basis` passed to `solve(Some(&basis))`,
-/// used by the warm-start reconstruction acceptance tests.
-///
-/// `reconstruction_counter` counts `record_reconstruction_stats` invocations
-/// (one per warm-start solve that applied a stored basis via slot reconciliation).
+/// Mock solver returning a fixed `LpSolution` on every solve; `infeasible_at`
+/// injects `SolverError::Infeasible` at that 0-based solve index, counted across
+/// both cold- and warm-start calls.
 struct MockSolver {
     solution: LpSolution,
     infeasible_at: Option<usize>,
@@ -139,17 +119,11 @@ struct MockSolver {
     buf_primal: Vec<f64>,
     buf_dual: Vec<f64>,
     buf_reduced_costs: Vec<f64>,
-    /// Number of `load_model` calls since construction.
     load_count: usize,
-    /// Number of `add_rows` calls since construction.
     add_rows_count: usize,
-    /// Number of cold-start `solve(None)` calls.
     solve_count: usize,
-    /// Number of warm-start `solve(Some(&basis))` calls.
     solve_with_basis_count: usize,
-    /// Last `Basis` passed to `solve(Some(&basis))`, if any.
     recorded_basis: Option<Basis>,
-    /// Cumulative `preserved` argument from `record_reconstruction_stats`.
     reconstruction_counter: u32,
 }
 
@@ -256,11 +230,6 @@ fn minimal_template_1_0() -> StageTemplate {
         num_cols: 4,
         num_rows: 2,
         num_nz: 1,
-        // CSC col_starts: 4 cols + 1 sentinel = 5 entries.
-        // col 0 (storage_out): 0 NZ
-        // col 1 (z_inflow):    0 NZ
-        // col 2 (storage_in):  1 NZ at row 0
-        // col 3 (theta):       0 NZ
         col_starts: vec![0_i32, 0, 0, 1, 1],
         row_indices: vec![0_i32],
         values: vec![1.0],
@@ -282,9 +251,8 @@ fn minimal_template_1_0() -> StageTemplate {
 /// Build a fixed `LpSolution` for the minimal N=1 L=0 template.
 ///
 /// N=1 L=0 column layout: `storage`(0), `z_inflow`(1), `storage_in`(2), `theta`(3).
-/// `primal[3] = theta_val`, `objective = objective`.
 fn fixed_solution(objective: f64, theta_val: f64) -> LpSolution {
-    let num_cols = 4; // storage(0), z_inflow(1), storage_in(2), theta(3)
+    let num_cols = 4;
     let mut primal = vec![0.0_f64; num_cols];
     primal[3] = theta_val; // theta at col 3 (N=1, L=0 → theta = N*(3+L) = 3)
     LpSolution {
@@ -464,10 +432,7 @@ fn make_stochastic_context(n_stages: usize) -> StochasticContext {
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
-/// Build per-stage hydro productivities for 1 hydro with productivity 1.0.
-///
-/// Returns `n_stages` inner vecs each containing a single `1.0` entry,
-/// matching `entity_counts_1_hydro().hydro_productivities`.
+/// Per-stage hydro productivities: `n_stages` vecs of a single `1.0`.
 fn hydro_productivities_1hydro(n_stages: usize) -> Vec<Vec<f64>> {
     vec![vec![1.0]; n_stages]
 }
@@ -869,7 +834,6 @@ fn simulation_load_patches_applied() {
     )
     .unwrap();
 
-    // The load noise path must have populated load_rhs_buf.
     assert_eq!(
         workspaces[0].scratch.load_rhs_buf.len(),
         n_load_buses,
@@ -899,7 +863,6 @@ fn simulation_load_patches_applied() {
         "formula consistency: d={d_observed}, eta_back={eta_back}, recomputed={recomputed}"
     );
 
-    // The load patch must also be reflected in the patch buffer.
     let load_start = 1; // n_hydros = 1
     assert_eq!(
         workspaces[0].patch_buf.lower[load_start], workspaces[0].scratch.load_rhs_buf[0],
@@ -910,8 +873,6 @@ fn simulation_load_patches_applied() {
         "patch_buf upper at load slot must equal load_rhs_buf[0] (equality constraint)"
     );
 
-    // Verify that the extraction row_lower_buf was patched with the
-    // stochastic realization (not the template mean 300.0).
     // row_lower_buf[2] is the load balance row (row index 2).
     assert!(
         !workspaces[0].scratch.row_lower_buf.is_empty(),
@@ -1038,12 +999,10 @@ fn simulation_no_load_buses_unchanged() {
     )
     .unwrap();
 
-    // load_rhs_buf must remain empty when n_load_buses=0.
     assert!(
         workspaces[0].scratch.load_rhs_buf.is_empty(),
         "load_rhs_buf must be empty when n_load_buses=0"
     );
-    // forward_patch_count = N = 1 (no load patches added).
     assert_eq!(
         workspaces[0].patch_buf.forward_patch_count(),
         1,
@@ -1231,8 +1190,6 @@ fn simulation_inflow_extraction_unaffected() {
     )
     .unwrap();
 
-    // noise_buf contains only inflow values (n_hydros=1 entries).
-    // It must not be contaminated by load noise (which lives in load_rhs_buf).
     assert_eq!(
         workspaces[0].scratch.noise_buf.len(),
         1,
@@ -1248,7 +1205,6 @@ fn simulation_inflow_extraction_unaffected() {
         "noise_buf[0] must be a reasonable inflow value near 100.0, got {}",
         workspaces[0].scratch.noise_buf[0]
     );
-    // load_rhs_buf must also be populated (confirms both buffers coexist).
     assert_eq!(
         workspaces[0].scratch.load_rhs_buf.len(),
         n_load_buses,
@@ -1528,7 +1484,6 @@ fn simulation_truncation_clamps_negative_inflow_noise() {
 
     let (tx, _rx) = mpsc::sync_channel(16);
 
-    // Use the hydro-aware workspace builder so zero_targets_buf[..1] is valid.
     let hprod = hydro_productivities_1hydro(n_stages);
     let ec = zero_energy_conversion(1, n_stages);
     let mut workspaces = single_workspace_with_hydros(solver, 1);
@@ -1609,9 +1564,7 @@ fn simulation_truncation_clamps_negative_inflow_noise() {
     )
     .unwrap();
 
-    // After truncation the noise_buf contains the value from the last stage solved
-    // for the last scenario.  All scenarios must have produced a clamped value >= 0.
-    // We verify the workspace buffer left by the final scenario-stage pair.
+    // noise_buf holds the last scenario-stage's value; truncation clamps it >= 0.
     assert_eq!(
         workspaces[0].scratch.noise_buf.len(),
         1,
@@ -1625,7 +1578,7 @@ fn simulation_truncation_clamps_negative_inflow_noise() {
 }
 
 /// AC: `InflowNonNegativityMethod::None` in the simulation pipeline produces
-/// raw (potentially negative) noise values, unchanged from the pre-fix behavior.
+/// raw (potentially negative) noise values.
 ///
 /// With `mean_m3s = -1000.0` and `std_m3s = 1.0`, the PAR inflow is always
 /// deeply negative.  The `None` path must NOT clamp eta, so the noise buffer
@@ -2142,8 +2095,6 @@ mod dcs_simulation {
         let all_cuts_template = sim_all_cuts_frozen();
         let dominating = sim_frozen_dominating_cut();
         let (_, frozen) = run_one_sim_stage(None, &all_cuts_template);
-        // DCS is handed the dominating frozen template but must ignore it and
-        // load the cut-free base, recovering the all-cuts (theta=4) result.
         let (_, dcs) = run_one_sim_stage(Some(dcs_params()), &dominating);
 
         let ac = stage_cost(&frozen);

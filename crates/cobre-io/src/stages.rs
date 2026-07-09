@@ -237,17 +237,11 @@ pub(crate) struct RawStateVariables {
 /// `#[serde(untagged)]` tries each variant in declaration order.
 /// The `Expectation` string variant must come first so it is tried before
 /// the `CVaR` object variant.
-///
-/// The inner string of `Expectation` is not read after deserialization;
-/// presence of the variant alone signals `StageRiskConfig::Expectation`.
 #[derive(Deserialize)]
 #[serde(untagged)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) enum RawRiskMeasure {
     /// String variant: any string (canonically `"expectation"`).
-    ///
-    /// The inner `String` is only used by serde during deserialization;
-    /// the actual value is not inspected in `convert_risk_measure`.
     // Rationale: serde's `#[serde(untagged)]` matches this variant by attempting to deserialize
     // the JSON value as a `String`; the inner field is structurally required for that match to
     // succeed. Removing it (e.g. to `Expectation`) changes the variant to a unit that serde
@@ -607,7 +601,6 @@ fn convert_stages(raw: RawStagesFile, path: &Path) -> Result<StagesData, LoadErr
         )?;
 
         all_stages.push(Stage {
-            // index will be assigned after sort
             index: 0,
             id: raw_stage.id,
             start_date,
@@ -836,7 +829,7 @@ fn convert_season_definitions(
     }
 }
 
-// ── Season ID derivation (design doc §0 convention 1 / §1.3) ──────────────────
+// ── Season ID derivation ─────────────────────────────────────────────────────
 
 /// Resolve or validate a study stage's `season_id` under the earliest-study-
 /// period anchor: derive it from `start_date` via [`SeasonMap::season_for_date`]

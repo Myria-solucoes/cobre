@@ -4,15 +4,6 @@
 //! file from the case `system/` directory, validates it, and returns a sorted
 //! `Vec` of core entity types.
 //!
-//! ## Parsing convention
-//!
-//! All parsers follow the canonical four-step pipeline:
-//!
-//! 1. `fs::read_to_string` — read the file into a string.
-//! 2. `serde_json::from_str` — deserialize into a `Raw*` intermediate type.
-//! 3. `validate_raw(&raw, path)?` — post-deserialization invariant checks.
-//! 4. `Ok(convert(raw))` — convert to core types and sort by ID.
-//!
 //! Cross-reference validation (e.g., checking that `bus_id` exists in the bus
 //! registry) is deferred to Layer 3. Only schema-level invariants
 //! are checked here.
@@ -73,10 +64,6 @@ pub(crate) fn parse_operational_start_date(
 
 /// Load `system/non_controllable_sources.json`, or return an empty vec when absent.
 ///
-/// When `path` is `None` (the file is not present in the case directory), returns
-/// `Ok(Vec::new())` without error. When `path` is `Some`, delegates to
-/// [`parse_non_controllable_sources`].
-///
 /// # Errors
 ///
 /// Propagates errors from [`parse_non_controllable_sources`] when `path` is `Some`.
@@ -92,10 +79,6 @@ pub fn load_non_controllable_sources(
 
 /// Load `system/pumping_stations.json`, or return an empty vec when absent.
 ///
-/// When `path` is `None` (the file is not present in the case directory), returns
-/// `Ok(Vec::new())` without error. When `path` is `Some`, delegates to
-/// [`parse_pumping_stations`].
-///
 /// # Errors
 ///
 /// Propagates errors from [`parse_pumping_stations`] when `path` is `Some`.
@@ -107,10 +90,6 @@ pub fn load_pumping_stations(path: Option<&Path>) -> Result<Vec<PumpingStation>,
 }
 
 /// Load `system/energy_contracts.json`, or return an empty vec when absent.
-///
-/// When `path` is `None` (the file is not present in the case directory), returns
-/// `Ok(Vec::new())` without error. When `path` is `Some`, delegates to
-/// [`parse_energy_contracts`].
 ///
 /// # Errors
 ///

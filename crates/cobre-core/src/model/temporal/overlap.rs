@@ -1,9 +1,6 @@
 //! Interval-overlap primitive on an hour-resolution stage clock.
 //!
-//! [`window_period_overlaps`] intersects a shifted window against a sequence
-//! of consecutive calendar periods (the stage clock, built from cumulative
-//! period durations) and returns the overlap hours per period. It is pure
-//! hour arithmetic: no calendar cycle, no dates, no block mode.
+//! Pure hour arithmetic: no calendar cycle, no dates, no block mode.
 
 /// Intersect `[window_start_hours, window_start_hours + window_width_hours)`
 /// against consecutive periods whose durations are `stage_lengths_hours`

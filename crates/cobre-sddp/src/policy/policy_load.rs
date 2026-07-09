@@ -70,10 +70,6 @@ pub enum PolicyLoadKind {
     FullFcf,
     /// Single-stage boundary-cut injection into the terminal pool: `num_stages`
     /// is unchecked (a monthly source may feed a weekly+monthly current study).
-    ///
-    /// Reserved for the boundary-coupling family-fill payload (not yet wired):
-    /// a future field on this variant will carry the entity-family re-indexing
-    /// rules that replace today's positional cut copy.
     BoundaryInjection,
 }
 
@@ -221,8 +217,7 @@ fn slot_identity(slot: &cobre_io::EntitySlot) -> (u8, i32, u32) {
 /// terminal manifest) describe the same-length state vector of two studies. A
 /// per-slot `(entity_type, entity_id, subindex)` mismatch means a cut coefficient
 /// would attach to the wrong state variable and is REJECTED. `was_active` is
-/// excluded from `slot_identity` (a slot whose entity merely changed activity is
-/// still the same state variable); a `source`-dormant slot now active only warns.
+/// excluded from `slot_identity`, so a `source`-dormant slot now active only warns.
 /// An empty manifest on either side (a pre-manifest checkpoint) cannot be
 /// verified: warn and return `Ok`, leaving the caller's `state_dimension` check
 /// standing.
@@ -283,22 +278,15 @@ pub fn compare_manifest_slot_identity(
 
 /// Load boundary cuts from the `source_stage` of a source Cobre policy checkpoint.
 ///
-/// Per-slot `(entity_type, entity_id, subindex)` identity is matched against
-/// `current_manifest` slot-for-slot and a mismatch is REJECTED: the
-/// `state_dimension` check alone passes a different entity (or lag) occupying the
-/// same slot, silently attaching a cut's coefficient to the wrong state variable.
-/// Only `state_dimension` must match — `num_stages` may differ (a monthly source
-/// vs. a weekly+monthly current study); per-slot matching compares the source
-/// stage's manifest to the current TERMINAL-stage manifest, both length
-/// `state_dimension`.
-///
-/// `current_manifest` is built via
+/// Per-slot matching compares the source stage's manifest to the current
+/// TERMINAL-stage manifest (both length `state_dimension`); `num_stages` may
+/// differ. `current_manifest` is built via
 /// [`StudySetup::build_terminal_entity_manifest`](crate::StudySetup::build_terminal_entity_manifest)
 /// (single owner of identity resolution, shared with the checkpoint writer). An
 /// empty manifest (pre-manifest checkpoint) leaves the `state_dimension` check
-/// standing and warns. A `was_active == false` boundary slot whose current
-/// counterpart is active is a non-fatal divergence: warn, load the cut anyway.
-/// Delegates to [`validate_policy_load`] with [`PolicyLoadKind::BoundaryInjection`].
+/// standing and warns; a `was_active == false` boundary slot whose current
+/// counterpart is active warns and loads. Delegates to [`validate_policy_load`]
+/// with [`PolicyLoadKind::BoundaryInjection`] for the per-slot identity reject.
 ///
 /// # Errors
 ///

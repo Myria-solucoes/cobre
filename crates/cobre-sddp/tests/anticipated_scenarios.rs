@@ -1,8 +1,7 @@
 //! Consolidated anticipated-scenarios integration tests for `cobre-sddp`.
 //!
-//! Each anticipated-scenarios domain group lives in its own inner `mod` so the
-//! suite links the statically-bound solver once rather than once per file.
-//! Per-`mod` scoping isolates each group's consts, helpers, and fixtures.
+//! Grouped into inner `mod`s in one binary so the statically-linked solver links
+//! once, not once per file.
 
 #![allow(
     clippy::unwrap_used,
@@ -25,25 +24,12 @@
 mod common;
 
 mod anticipated_5stage_k2_smoke {
-    //! Smoke test for K=2 anticipated thermal dispatch with 5 stages.
-    //!
-    //! ## Scope
-    //!
-    //! Uses structural assertions (training completes without error, iteration
-    //! count matches the configured limit, lower bound is finite and
-    //! non-decreasing across iterations, basis cache is populated at every
-    //! stage, and anticipated-state slots at delivery stages hold finite,
-    //! non-negative values). It deliberately does NOT pin an `EXPECTED_LB`
-    //! constant: there is no closed-form derivation for this fixture, so a
-    //! pinned value would only certify the converged value is _stable_, not
-    //! that it is _correct_.
-    //!
-    //! The closed-form value-correctness canary is the
-    //! `anticipated_closed_form_lb_k1_single_thermal` test in `anticipated_core.rs`,
-    //! which uses a stripped 2-stage K=1 fixture whose lower bound is hand-derivable
-    //! in five minutes.
-    //! That canary defends the LP/cut math; this smoke test defends multi-stage
-    //! state propagation, the K=2 ring-buffer shift, and basis-cache capture.
+    //! Smoke test for K=2 anticipated thermal dispatch, 5 stages: structural
+    //! assertions only. No `EXPECTED_LB` is pinned — this fixture has no closed form,
+    //! so a pinned value would certify stability, not correctness. Value-correctness
+    //! is the `anticipated_closed_form_lb_k1_single_thermal` canary in
+    //! `anticipated_core.rs`; this defends multi-stage state propagation, the K=2
+    //! ring-buffer shift, and basis-cache capture.
 
     use cobre_core::entities::{
         bus::DeficitSegment,
@@ -424,21 +410,10 @@ mod anticipated_5stage_k2_smoke {
         );
     }
 
-    /// Warm-start regression: an anticipated-thermal study trained with warm-start
-    /// must reconstruct every stored basis with zero rejections.
-    ///
-    /// The anticipated ring's `anticipated_slots_out` block lives in the
-    /// stage-invariant state region, so it shifts `z_inflow`/`storage_in`/`theta`
-    /// and the whole control region downstream by `n_anticipated * k_max`. The
-    /// risk this test pins: that the shift breaks `reconstruct_basis`'s
-    /// slot-identity matching and starts producing bases `HiGHS` rejects. It
-    /// cannot, because `reconstruct_basis` matches stored cut rows to current LP
-    /// rows by `CutPool` slot identity — never by absolute column index — and
-    /// copies the column block verbatim before resizing to the (now-wider) column
-    /// count. `basis_consistency_failures` is the `SolverStatistics` counter
-    /// incremented whenever the solver rejects an offered warm-start basis
-    /// (`isBasisConsistent` returns false): every reconstructed basis must be
-    /// accepted by the solver.
+    /// Warm-start regression: the anticipated ring's `anticipated_slots_out` block
+    /// shifts every downstream column by `n_anticipated * k_max`. `reconstruct_basis`
+    /// matches stored cut rows by `CutPool` slot identity, never absolute column index,
+    /// so the shift must stay transparent — zero `basis_consistency_failures`.
     #[test]
     fn test_anticipated_5stage_k2_warm_start_zero_basis_rejections() {
         let system = build_system();
@@ -463,10 +438,6 @@ mod anticipated_5stage_k2_smoke {
          reconstruct_basis on iterations 2..8"
         );
 
-        // Aggregate basis-rejection telemetry across every phase. On the frozen
-        // warm-start path `reconstruct_basis` runs once per warm-start solve; a
-        // single rejection here would mean the relocated-column LP produced a basis
-        // HiGHS could not accept.
         let total_rejections =
             SolverStatsDelta::aggregate(result.solver_stats_log.iter().map(|entry| &entry.delta))
                 .basis_consistency_failures;
@@ -482,14 +453,12 @@ mod anticipated_5stage_k2_smoke {
 }
 
 mod anticipated_two_plants_smoke {
-    //! Integration test verifying the training lower bound for a 6-stage system
-    //! with 2 anticipated thermals (K_1=2, K_2=4), 1 backup thermal, and 1 hydro.
-    //!
-    //! ## Multi-plant LP layout
+    //! Training lower bound for a 6-stage system with 2 anticipated thermals
+    //! (K_1=2, K_2=4), 1 backup thermal, and 1 hydro.
     //!
     //! With `n_anticipated=2` and `K_max=4`, the anticipated-state block has
-    //! `2 * 4 = 8` columns in slot-major, plant-minor order (the index arithmetic
-    //! the assertions below depend on):
+    //! `2 * 4 = 8` columns in slot-major, plant-minor order — the index arithmetic
+    //! the assertions below depend on:
     //!
     //! ```text
     //! ant_start + 0 = slot 0, plant 0  (K=2 plant — delivery slot)
@@ -502,13 +471,10 @@ mod anticipated_two_plants_smoke {
     //! ant_start + 7 = slot 3, plant 1  (K=4 plant — decision slot)
     //! ```
     //!
-    //! ## Ring-buffer shift invariant (plant 0, stages 1→2)
-    //!
-    //! The shift invariant asserts slot 1 at stage `t` equals slot 0 at stage `t+1`
-    //! (t≥1). Using t=1→t=2 (not t=0→t=1) avoids the trivial identity where
-    //! `basis_cache[0]` (forward capture) and `basis_cache[1]` (backward trial point
-    //! for stage 1, which also holds the forward outgoing of stage 0) carry the same
-    //! state, so it exercises a genuine backward-to-backward ring-buffer advancement.
+    //! The shift invariant asserts slot 1 at stage `t` equals slot 0 at stage `t+1`.
+    //! It uses t=1→t=2, not t=0→t=1: at t=0 `basis_cache[0]` and `basis_cache[1]`
+    //! carry the same state (the trivial identity), so t=1→t=2 exercises a genuine
+    //! backward-to-backward ring advancement.
 
     use cobre_core::entities::{
         bus::DeficitSegment,
@@ -541,10 +507,8 @@ mod anticipated_two_plants_smoke {
         BusSpec, HydroSpec, StageSpec, ThermalSpec, make_bus, make_hydro, make_stage, make_thermal,
     };
 
-    // EXPECTED_LB = 0.0 is pinned from a converged run of this fixture. The test
-    // validates slot-major LP layout, per-plant ring-buffer shift, and basis-cache
-    // capture across two anticipated plants — not a closed-form cost. Re-pin only
-    // after deliberate fixture changes.
+    // Pinned from a converged run of this fixture (no closed form); re-pin only
+    // after a deliberate fixture change.
     const EXPECTED_LB: f64 = 0.0_f64;
 
     // ---------------------------------------------------------------------------
@@ -969,14 +933,9 @@ mod anticipated_two_plants_smoke {
 }
 
 mod anticipated_simulation_ring_buffer {
-    //! Regression: the simulation pipeline (`solve_simulation_stage`) advances
-    //! the anticipated ring exactly like the forward pass — a plain identity
-    //! copy of the LP's own `anticipated_slots_out` columns, each resolved
-    //! in-LP by the ring's definition rows (a shift for interior slots, the
-    //! delivery-decision deposit for the newest slot; see
-    //! `StateLayout::state_to_lp_column`). The contract this pins: with the
-    //! anticipated thermal cheaper than the backup, the matured commitment
-    //! equals the in-study decision made `K` stages earlier,
+    //! Regression: simulation advances the anticipated ring like the forward pass
+    //! (`StateLayout::state_to_lp_column`). With the anticipated thermal cheaper than
+    //! backup, the matured commitment equals the decision made `K` stages earlier,
     //!
     //! `anticipated_committed_mw(t = K) == anticipated_decision_mw(t = 0)`,
     //!
@@ -1019,14 +978,12 @@ mod anticipated_simulation_ring_buffer {
     // System builder
     // ---------------------------------------------------------------------------
 
-    /// Build a deterministic K-stage system: one bus, one mostly-inactive hydro, a
-    /// cheap anticipated thermal (id 2) plus an expensive backup (id 4), constant
-    /// 150 MW load, and `past_anticipated_commitments` seeded with `past_commitments_mw`.
+    /// Build a deterministic K-stage system: cheap anticipated thermal (id 2),
+    /// expensive backup (id 4), 150 MW load, ring seeded with `past_commitments_mw`.
     ///
-    /// The non-zero seed is intentional: building the resolved `System` directly via
-    /// `SystemBuilder::new()` bypasses the `cobre-io` parse-and-validate pipeline, so
-    /// the semantic validator that rejects non-zero `values_mw` does not fire — that
-    /// rule applies to JSON through `load_case`, not to directly-constructed `System`.
+    /// The non-zero seed is intentional: constructing `System` directly via
+    /// `SystemBuilder::new()` bypasses `cobre-io`'s validator that rejects non-zero
+    /// `values_mw` — that rule applies to JSON through `load_case`, not here.
     fn build_system(
         k: usize,
         past_commitments_mw: Vec<f64>,
@@ -1054,8 +1011,6 @@ mod anticipated_simulation_ring_buffer {
             },
         );
 
-        // Anticipated thermal: K lead stages, very cheap so the optimal policy
-        // saturates anticipated dispatch at the load level.
         let anticipated_id = EntityId(2);
         let thermal_ant = make_thermal(
             anticipated_id,
@@ -1073,8 +1028,6 @@ mod anticipated_simulation_ring_buffer {
             },
         );
 
-        // Backup thermal: very expensive so the LP prefers anticipated dispatch
-        // whenever possible.
         let thermal_backup = make_thermal(
             EntityId(4),
             ThermalSpec {
@@ -1091,7 +1044,6 @@ mod anticipated_simulation_ring_buffer {
             },
         );
 
-        // Hydro: small to keep the model deterministic in the thermal regime.
         let hydro = make_hydro(
             EntityId(3),
             HydroSpec {
@@ -1267,9 +1219,9 @@ mod anticipated_simulation_ring_buffer {
         // delivery-stage axis there, so the decision column needs its cost out to K.
         let thermal_axis = n_stages + k;
         for s in 0..thermal_axis {
-            bounds.thermal_bounds_mut(0, s).cost_per_mwh = 10.0; // anticipated
+            bounds.thermal_bounds_mut(0, s).cost_per_mwh = 10.0;
             bounds.thermal_bounds_mut(0, s).max_generation_mw = 100.0;
-            bounds.thermal_bounds_mut(1, s).cost_per_mwh = 5000.0; // backup
+            bounds.thermal_bounds_mut(1, s).cost_per_mwh = 5000.0;
             bounds.thermal_bounds_mut(1, s).max_generation_mw = 200.0;
         }
 
@@ -1291,10 +1243,6 @@ mod anticipated_simulation_ring_buffer {
             },
         );
 
-        // Seed the anticipated ring buffer with NON-ZERO past commitments. This
-        // is the lever that exposes the bug: if the simulation pipeline failed
-        // to shift the buffer, slot 0 at stage K would still report the seed
-        // values rather than the in-study decision.
         let initial_conditions = InitialConditions {
             storage: vec![HydroStorage {
                 hydro_id: EntityId(3),
@@ -1328,7 +1276,6 @@ mod anticipated_simulation_ring_buffer {
     // Config builder
     // ---------------------------------------------------------------------------
 
-    /// Build a [`Config`] for training + 1-scenario deterministic simulation.
     fn build_config(training_iters: u32) -> Config {
         Config {
             schema: None,
@@ -1576,31 +1523,8 @@ mod anticipated_simulation_ring_buffer {
 
 mod anticipated_generic_constraint_e2e {
     //! End-to-end integration tests for generic constraints referencing
-    //! `anticipated_decision(N)`.
-    //!
-    //! ## AC-15: Constrained training with `anticipated_decision <= 20.0`
-    //!
-    //! A 4-stage, K=2, no-hydro deterministic fixture (1 anticipated thermal, 1
-    //! backup thermal, no hydro). Load = 50 MW. Backup cost = 100 $/MWh, anticipated
-    //! cost = 10 $/MWh. Past commitments are both zero so stage-0 anticipated decision
-    //! delivers at stage 2, and stage-1 decision delivers at stage 3.
-    //!
-    //! Without constraint: optimal decision is `d_ant_0 = 50 MW`, eliminating all
-    //! backup cost at stage 2. Constrained to `d_ant_0 ≤ 20 MW`, backup must cover
-    //! 30 MW at stage 2, raising the lower bound.
-    //!
-    //! Assertions:
-    //! - Training completes without error in both constrained and baseline runs.
-    //! - Constrained final LB is strictly greater than baseline LB, proving the
-    //!   constraint is economically binding.
-    //!
-    //! ## AC-16: Semantic-validator rejects constraint on non-anticipated thermal
-    //!
-    //! Same fixture topology, but the `generic_constraints.json` references thermal id=3
-    //! (the backup thermal, which is NOT anticipated). The `cobre_io::validate_case`
-    //! pipeline is invoked on a temp case directory. The test asserts that loading
-    //! fails with a `BusinessRuleViolation` error whose message contains the
-    //! substring "not an anticipated thermal".
+    //! `anticipated_decision(N)`: one pins that a binding cap raises the lower bound,
+    //! one that the validator rejects the reference on a non-anticipated thermal.
 
     use std::path::Path;
 
@@ -1634,36 +1558,28 @@ mod anticipated_generic_constraint_e2e {
     };
 
     // ---------------------------------------------------------------------------
-    // Fixture parameters (AC-15 closed-form derivation)
+    // Fixture parameters
     // ---------------------------------------------------------------------------
 
-    /// Number of study stages.
     const N_STAGES: usize = 4;
-    /// Anticipated thermal lead time (stages).
     const K_MAX: usize = 2;
-    /// Block duration (hours). 1 hour keeps cost magnitudes small and derivable.
+    /// 1 hour keeps cost magnitudes small and hand-derivable.
     const BLOCK_HOURS: f64 = 1.0;
-    /// Constant deterministic load (MW).
     const LOAD_MW: f64 = 50.0;
-    /// Anticipated thermal capacity (MW).
     const ANT_MAX_MW: f64 = 100.0;
-    /// Anticipated thermal cost ($/MWh). Must be less than BACKUP_COST.
+    /// Must be less than BACKUP_COST (anticipated is the cheap plant).
     const ANT_COST: f64 = 10.0;
-    /// Backup thermal capacity (MW).
     const BACKUP_MAX_MW: f64 = 200.0;
-    /// Backup thermal cost ($/MWh).
     const BACKUP_COST: f64 = 100.0;
-    /// Deficit cost ($/MWh). Well above BACKUP_COST so deficit is never optimal.
+    /// Well above BACKUP_COST so deficit is never optimal.
     const DEFICIT_COST: f64 = 1000.0;
-    /// Constraint upper bound on anticipated_decision (MW). Strictly below LOAD_MW
-    /// so the unconstrained optimum (d_ant = LOAD_MW) is infeasible under the constraint.
+    /// Strictly below LOAD_MW, so the unconstrained optimum (d_ant = LOAD_MW) is
+    /// infeasible under the constraint.
     const CONSTRAINT_BOUND_MW: f64 = 20.0;
 
-    /// EntityId of the anticipated thermal.
     const ANT_THERMAL_ID: EntityId = EntityId(2);
-    /// EntityId of the backup thermal. Non-anticipated.
+    /// Non-anticipated — the AC rejection target.
     const BACKUP_THERMAL_ID: EntityId = EntityId(3);
-    /// EntityId of the bus.
     const BUS_ID: EntityId = EntityId(1);
 
     // ---------------------------------------------------------------------------
@@ -1921,26 +1837,15 @@ mod anticipated_generic_constraint_e2e {
     }
 
     // ---------------------------------------------------------------------------
-    // AC-15: Constrained training lower-bound is strictly worse than unconstrained
+    // Constrained training lower-bound is strictly worse than unconstrained
     // ---------------------------------------------------------------------------
 
-    /// AC-15: A 4-stage, K=2, no-hydro deterministic fixture with a generic
-    /// constraint `anticipated_decision(2) <= 20.0`.
+    /// A 4-stage, K=2, no-hydro fixture with `anticipated_decision(2) <= 20.0`.
     ///
-    /// ## Closed-form expected behaviour
-    ///
-    /// With K=2 and N=4 stages, anticipated decisions are active at stages 0 and 1:
-    /// - Stage 0 decision (`d0`) delivers at stage 2.
-    /// - Stage 1 decision (`d1`) delivers at stage 3.
-    ///
-    /// Past commitments are zero, so no pre-study deliveries at stages 0 or 1.
-    ///
-    /// Without constraint: optimal `d0 = d1 = LOAD_MW (50 MW)`, fully covering
-    /// load at delivery stages with cheap anticipated dispatch, eliminating backup.
-    ///
-    /// With constraint (`d0, d1 <= 20 MW`): only 20 MW of cheap anticipated
-    /// dispatch is available at stages 2 and 3; the remaining 30 MW at each
-    /// delivery stage must use the backup at BACKUP_COST (100 $/MWh), raising LB.
+    /// K=2, N=4: decisions active at stages 0 (delivers at 2) and 1 (delivers at 3),
+    /// zero past commitments. Unconstrained optimum is `d0 = d1 = 50 MW`, eliminating
+    /// backup at the delivery stages. Capped at 20 MW, backup must cover the remaining
+    /// 30 MW at stages 2 and 3 at BACKUP_COST — so constrained LB exceeds baseline.
     #[test]
     fn anticipated_decision_constraint_raises_lb() {
         let constraint = GenericConstraint {
@@ -1967,9 +1872,6 @@ mod anticipated_generic_constraint_e2e {
         let config = build_config();
         let comm = StubComm;
 
-        // Constraint id=1 carries a bound at every study stage. At stages 2 and 3 the
-        // d_ant column is inactive ([0,0]) so its row has no LP effect, but applying it
-        // uniformly is harmless and keeps the setup simple.
         let id_map: std::collections::HashMap<i32, usize> =
             [(1_i32, 0_usize)].into_iter().collect();
         let raw_bounds: Vec<(i32, i32, Option<i32>, f64)> = (0..N_STAGES as i32)
@@ -2014,9 +1916,6 @@ mod anticipated_generic_constraint_e2e {
         );
         let baseline_lb = baseline_outcome.result.final_lb;
 
-        // The constraint limits d0, d1 to CONSTRAINT_BOUND_MW (20 MW) instead of
-        // the optimal LOAD_MW (50 MW). At each delivery stage (2 and 3), 30 MW must
-        // use backup at BACKUP_COST $/MWh. So the constrained run costs strictly more.
         assert!(
             constrained_lb > baseline_lb,
             "constrained LB ({constrained_lb:.6}) must be strictly greater than \
@@ -2031,15 +1930,13 @@ mod anticipated_generic_constraint_e2e {
     }
 
     // ---------------------------------------------------------------------------
-    // AC-16: Semantic validator rejects anticipated_decision on non-anticipated thermal
+    // Semantic validator rejects anticipated_decision on non-anticipated thermal
     // ---------------------------------------------------------------------------
 
-    /// AC-16: A case loaded via `cobre_io::validate_case` with a generic constraint
-    /// `anticipated_decision(3)` where thermal id=3 is NOT an anticipated thermal.
-    ///
-    /// The semantic validator (`check_anticipated_decision_target_is_anticipated`)
-    /// must reject this, returning `Err` with a message containing "not an anticipated
-    /// thermal".
+    /// A case with a generic constraint `anticipated_decision(3)` where id=3 is NOT
+    /// anticipated. `cobre_io::validate_case` must reject it via
+    /// `check_anticipated_decision_target_is_anticipated` — the error contains
+    /// "not an anticipated thermal".
     #[test]
     fn anticipated_decision_on_non_anticipated_thermal_rejected_by_validator() {
         use std::fs;
@@ -2091,8 +1988,6 @@ mod anticipated_generic_constraint_e2e {
         let constraints_dir = case_dir.join("constraints");
         fs::create_dir_all(&constraints_dir).expect("create constraints dir");
 
-        // Constraint references thermal id=3 (non-anticipated) via anticipated_decision.
-        // Must be rejected by the semantic validator (rule 17).
         fs::write(
             constraints_dir.join("generic_constraints.json"),
             r#"{
@@ -2109,8 +2004,8 @@ mod anticipated_generic_constraint_e2e {
         )
         .expect("write generic_constraints.json");
 
-        // Write a minimal constraint-bounds parquet (required by the pipeline when
-        // generic_constraints.json is present).
+        // The pipeline requires a constraint-bounds parquet whenever
+        // generic_constraints.json is present.
         write_constraint_bounds_parquet(
             &constraints_dir.join("generic_constraint_bounds.parquet"),
             1,    // constraint_id
@@ -2273,24 +2168,17 @@ mod anticipated_generic_constraint_e2e {
 mod d34_anticipated_varying_blocks_shape {
     //! Case-shape assertions for the D34 deterministic fixture.
     //!
-    //! D34 is the regression backstop for the relocation of the
-    //! `anticipated_state_out` LP column out of the per-block (`n_blks`-dependent)
-    //! control region and into the stage-invariant state region. The bug that
-    //! relocation fixes can only fire when an anticipated commitment **matures at an
-    //! interior stage whose block count differs from stage 0's** — so this fixture
-    //! must simultaneously satisfy two shape constraints that no shipped case
-    //! combined before:
+    //! `parity_hash_d34` exercises the `anticipated_state_out` column's independence
+    //! from `n_blks` only if D34 combines two shapes no other shipped case does:
     //!
-    //! 1. at least one anticipated thermal whose `lead_stages` `K_i` matures
-    //!    **strictly inside** the horizon (`stage + K_i < n_stages`) at an interior
-    //!    delivery stage, and
-    //! 2. a per-stage-varying block schedule (block counts differ across stages),
-    //!    with the maturation stage landing on an off-stage-0 block count.
+    //! 1. an anticipated thermal whose `lead_stages` `K_i` matures **strictly inside**
+    //!    the horizon (`stage + K_i < n_stages`) at an interior delivery stage, and
+    //! 2. a per-stage-varying block schedule, with the maturation stage landing on an
+    //!    off-stage-0 block count.
     //!
-    //! This test pins those two properties so a future edit to the fixture inputs
-    //! that silently flattens the block schedule, drops the anticipated thermal, or
-    //! pushes the only commitment's maturation outside the horizon is caught here
-    //! rather than degrading the `parity_hash_d34` regression to a no-op.
+    //! This test pins both, so an edit that flattens the block schedule, drops the
+    //! anticipated thermal, or pushes maturation outside the horizon is caught here
+    //! rather than silently degrading `parity_hash_d34` to a no-op.
 
     use std::path::Path;
 
@@ -2333,9 +2221,6 @@ mod d34_anticipated_varying_blocks_shape {
             "D34 must declare at least one anticipated thermal"
         );
 
-        // A commitment at decision stage `s` matures at `s + K_i` and is active iff
-        // `s + K_i < n_stages` (strict). The off-stage-0 maturation requires such a
-        // delivery stage to land on an interior block count differing from stage 0's.
         let exercises_off_stage0_maturation = anticipated.iter().any(|&(_, k_i)| {
             let k = k_i as usize;
             (0..n_stages).any(|decision_stage| {
@@ -2369,35 +2254,21 @@ mod d37_anticipated_commissioning_simulation {
     //! Anticipated-thermal commissioning-window gating must reach the simulation
     //! output, and warm-start must survive the dormancy boundary.
     //!
-    //! ## What this case exercises that no other anticipated case does
+    //! T1 (`K=2`, cheap, `max 150 MW`) carries window `[entry=2, exit=4)` over a
+    //! 6-stage horizon (per-stage block schedule 1/3/2/3/1/2). The decision gate
+    //! (`StateLayout::is_anticipated_decision_active`) conjoins the strict horizon
+    //! clause (`t + K < n_stages`) with the operation-window clause keyed on the
+    //! DELIVERY stage `id(t + K)`:
     //!
-    //! `d37-anticipated-commissioning` is the only deterministic case combining an
-    //! anticipated thermal with a commissioning window. The anticipated thermal T1
-    //! (`K=2`, cheap, `max 150 MW`) carries window `[entry=2, exit=4)` over a
-    //! 6-stage horizon (ids 0..6) with a per-stage-varying block schedule (1/3/2/3/1/2).
-    //!
-    //! The decision gate (`StateLayout::is_anticipated_decision_active`) is the
-    //! conjunction of the strict horizon clause (`t + K < n_stages`) and the
-    //! operation-window clause keyed on the DELIVERY stage (`commissioning_active(2,
-    //! 4, id(t + 2))`):
-    //!
-    //! - `t = 0` → delivers at id 2 ∈ `[2, 4)` → ACTIVE (the pre-entry decision,
-    //!   priced at `entry − K`),
+    //! - `t = 0` → delivers at id 2 ∈ `[2, 4)` → ACTIVE (pre-entry, priced at `entry − K`),
     //! - `t = 1` → delivers at id 3 ∈ `[2, 4)` → ACTIVE,
-    //! - `t = 2` → delivers at id 4 ∉ `[2, 4)` → INACTIVE (post-exit drain begins),
-    //! - `t = 3` → delivers at id 5 ∉ `[2, 4)` → INACTIVE,
+    //! - `t = 2, 3` → delivers at id 4, 5 ∉ `[2, 4)` → INACTIVE,
     //! - `t = 4, 5` → `t + K ≥ 6` → horizon-INACTIVE.
     //!
-    //! The GENERATION column (operation window) zeroes T1's generation outside
-    //! `[entry, exit)`: T1 generates only at stages 2 and 3.
-    //!
-    //! ## What the parity hash cannot see
-    //!
     //! The parity baseline hashes hydro storage/water/cuts/convergence, NOT thermal
-    //! generation, the anticipated decision, or the ring buffer. A gating bug that
-    //! let T1 run outside its window, or never delivered the pre-entry commitment, or
-    //! left the ring buffer un-drained, could still hash-match. This test exercises
-    //! those paths directly through train + simulate.
+    //! generation, the decision, or the ring — so a gating bug (T1 running out of
+    //! window, an undelivered pre-entry commitment, an un-drained ring) could still
+    //! hash-match. This test exercises those paths through train + simulate.
 
     use std::path::Path;
     use std::sync::mpsc;
@@ -2453,7 +2324,6 @@ mod d37_anticipated_commissioning_simulation {
     const N_STAGES: usize = 6;
     const TOL: f64 = 1e-6;
 
-    /// Locate the anticipated thermal (T1) result at a given stage.
     fn t1_at(
         scenario: &cobre_sddp::simulation::SimulationScenarioResult,
         stage: usize,
@@ -2465,9 +2335,6 @@ mod d37_anticipated_commissioning_simulation {
             .unwrap_or_else(|| panic!("T1 (id={T1_ID}) missing at stage {stage}"))
     }
 
-    /// Train the windowed anticipated case, simulate one deterministic scenario, and
-    /// assert the commissioning window gates the generation, the pre-entry decision
-    /// delivers at `entry`, and the ring buffer drains after `exit`.
     #[test]
     fn anticipated_commissioning_window_gates_simulation_output() {
         let dir = case_dir();
@@ -2519,7 +2386,6 @@ mod d37_anticipated_commissioning_simulation {
             "one record per study stage"
         );
 
-        // (i) GENERATION == 0 at every stage outside [entry, exit).
         for stage in 0..N_STAGES {
             if !(ENTRY..EXIT).contains(&stage) {
                 let g = t1_at(scenario, stage).generation_mw;
@@ -2531,11 +2397,10 @@ mod d37_anticipated_commissioning_simulation {
             }
         }
 
-        // (ii) Generation present at the first operating stage `entry`. This proves
-        // the pre-entry decision at `entry − K` delivered: the only way T1 can
-        // generate at stage `entry` is for the commitment placed K stages earlier to
-        // have matured here (the generation column is in-window, the decision column
-        // at `entry` itself delivers at `entry + K`, outside the window).
+        // Generation at the first operating stage `entry` proves the pre-entry
+        // decision at `entry − K` delivered: the decision column at `entry` itself
+        // delivers at `entry + K`, outside the window, so this generation can only
+        // come from the commitment placed K stages earlier.
         let g_entry = t1_at(scenario, ENTRY).generation_mw;
         assert!(
             g_entry > TOL,
@@ -2544,11 +2409,9 @@ mod d37_anticipated_commissioning_simulation {
             ENTRY - K,
         );
 
-        // (iii) The ring buffer drains to 0 within K stages after exit. The committed
-        // MW (slot 0 of the ring buffer) is the matured commitment; after the last
-        // in-window delivery (stage EXIT-1 = 3) no new in-window decision is made, so
-        // by stage EXIT + K - 1 = 5 the buffer has shifted all residual commitments
-        // out and reads 0.
+        // The ring drains within K stages after exit: no in-window decision is made
+        // after the last in-window delivery (stage EXIT-1), so by stage EXIT + K - 1
+        // the buffer has shifted all residual commitments out and committed MW reads 0.
         let drain_stage = EXIT + K - 1;
         let committed_drain = t1_at(scenario, drain_stage)
             .anticipated_committed_mw
@@ -2559,8 +2422,6 @@ mod d37_anticipated_commissioning_simulation {
          committed MW at stage {drain_stage} must be 0, got {committed_drain}",
         );
 
-        // The decision column is inactive at every post-exit / horizon-edge stage:
-        // the simulation read returns None there (the column is pinned to [0, 0]).
         for stage in ENTRY..N_STAGES {
             let decision = t1_at(scenario, stage).anticipated_decision_mw;
             assert!(
@@ -2570,8 +2431,6 @@ mod d37_anticipated_commissioning_simulation {
                 stage + K,
             );
         }
-        // Conversely, the pre-entry decision stages (0 and 1, delivering at 2 and 3)
-        // are active and report a decision value.
         for stage in 0..ENTRY {
             let decision = t1_at(scenario, stage).anticipated_decision_mw;
             assert!(
@@ -2583,17 +2442,11 @@ mod d37_anticipated_commissioning_simulation {
         }
     }
 
-    /// Warm-start regression: the windowed anticipated study must reconstruct every
-    /// stored basis with zero rejections across the dormancy boundary.
-    ///
-    /// The relocated `anticipated_state_out` column lives in the stage-invariant
-    /// state region; the commissioning window toggles which stages emit an active
-    /// `anticipated_state_out_def` row, so the per-stage row/column counts change at
-    /// the entry/exit boundaries. `reconstruct_basis` matches stored cut rows to
-    /// current LP rows by `CutPool` slot identity (never by absolute index), so the
-    /// dormancy-driven count change must remain transparent to the warm start.
-    /// `basis_consistency_failures` counts every rejected offered basis; it must stay
-    /// at zero.
+    /// Warm-start regression across the dormancy boundary: the commissioning window
+    /// toggles which stages emit an `anticipated_state_out_def` row, changing per-stage
+    /// row/column counts at the entry/exit boundaries. `reconstruct_basis` matches cut
+    /// rows by `CutPool` slot identity, never absolute index, so the change must stay
+    /// transparent — zero `basis_consistency_failures`.
     #[test]
     fn anticipated_commissioning_warm_start_zero_basis_rejections() {
         let dir = case_dir();
@@ -2610,10 +2463,8 @@ mod d37_anticipated_commissioning_simulation {
             outcome.error
         );
         let result = &outcome.result;
-        // Warm-start reconstruction runs on every iteration after the first, so the
-        // regression needs at least two iterations to exercise `reconstruct_basis`
-        // across the dormancy boundary. The shipped config's iteration limit governs
-        // the exact count; a deterministic case may converge before the cap.
+        // reconstruct_basis runs on every iteration after the first, so the regression
+        // needs >= 2 iterations to exercise it across the dormancy boundary.
         assert!(
             result.iterations >= 2,
             "warm-start regression needs >= 2 iterations to exercise reconstruct_basis \
@@ -2678,10 +2529,9 @@ mod anticipated_commitment_at_cap {
     };
 
     const CAP_MW: f64 = 100.0;
-    /// A pre-study commitment exactly at the delivery generation cap.
     const AT_CAP_SEED_MW: f64 = CAP_MW;
-    /// A pre-study commitment `1e-6` (relative) over the cap — comfortably above
-    /// any pin/fish round-trip noise, so the infeasibility is deterministic.
+    /// `1e-6` (relative) over the cap — comfortably above any pin/fish round-trip
+    /// noise, so the infeasibility is deterministic.
     const OVER_CAP_SEED_MW: f64 = CAP_MW * (1.0 + 1e-6);
 
     fn build_system(seed_mw: f64) -> cobre_core::System {

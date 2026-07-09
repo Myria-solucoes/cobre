@@ -44,7 +44,6 @@ pub struct SimulationCostResult {
     /// value of `immediate_cost` is `discount_factor * immediate_cost`.
     /// When `annual_discount_rate == 0.0`, this field is `1.0` for all stages.
     pub discount_factor: f64,
-    // Resource costs
     /// Cost attributed to thermal generation dispatch.
     pub thermal_cost: f64,
     /// Cost of anticipated (forward-committed) thermal generation, charged on the
@@ -153,7 +152,6 @@ pub struct SimulationHydroResult {
     pub storage_binding_code: i8,
     /// Operative state code for this hydro plant at this block.
     pub operative_state_code: i8,
-    // Violation slacks
     /// Turbining capacity slack in m³/s.
     pub turbined_slack_m3s: f64,
     /// Minimum outflow violation slack in m³/s.
@@ -725,7 +723,6 @@ mod tests {
             decoded.stored_energy_final_mwh,
             original.stored_energy_final_mwh
         );
-        // Verify the exact bit patterns match for the five new fields.
         assert_eq!(
             decoded.equivalent_productivity_mw_per_m3s.to_bits(),
             original.equivalent_productivity_mw_per_m3s.to_bits()
@@ -964,7 +961,6 @@ mod tests {
 
     #[test]
     fn scenario_result_is_send() {
-        // Compile-time Send bound check.
         fn assert_send<T: Send>() {}
         assert_send::<SimulationScenarioResult>();
     }

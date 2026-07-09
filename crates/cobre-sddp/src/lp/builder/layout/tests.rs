@@ -247,12 +247,10 @@ fn stage_layout_zero_anticipated_matches_pre_anticipated_offsets() {
     let state = state_layout_for(&ctx);
     let layout = StageLayout::new(&ctx, &state, &stage, 0);
 
-    // n_ant_state, n_anticipated, k_max must all be zero.
     assert_eq!(layout.n_ant_state, 0, "n_ant_state");
     assert_eq!(layout.n_anticipated, 0, "n_anticipated");
     assert_eq!(layout.k_max, 0, "k_max");
 
-    // col_turbine_start must equal the legacy theta + 1.
     let idx = crate::test_support::state_layout(ctx.n_hydros, ctx.max_par_order);
     assert_eq!(
         layout.col_turbine_start(),
@@ -1007,7 +1005,6 @@ fn filling_target_row_and_col_below_structural_bounds() {
     let n_targets = layout.filling_target_hydro_indices.len();
     assert_eq!(n_targets, 2, "both filling hydros carry the target at id 2");
 
-    // Every σ_fill row index is strictly below num_rows (pre-cut region).
     let row_start = layout.row_filling_target_start();
     for local_idx in 0..n_targets {
         assert!(
@@ -1017,15 +1014,11 @@ fn filling_target_row_and_col_below_structural_bounds() {
             layout.num_rows
         );
     }
-    // The σ_fill rows sit immediately after the operational-violation rows (the
-    // last of which is `min_generation_rows`) and before the fishing rows — i.e.
-    // inside the pre-cut region, with no retention block in between.
     assert_eq!(
         row_start, layout.min_generation_rows.end,
         "σ_fill rows follow the operational-violation rows directly"
     );
 
-    // Every σ_fill column index is strictly below num_cols.
     let col_start = layout.col_filling_target_start();
     for local_idx in 0..n_targets {
         assert!(
@@ -1304,8 +1297,6 @@ fn stage_layout_operational_violation_rows_are_contiguous_blocks() {
         "fixture must have hydros so the rows are non-empty"
     );
 
-    // The four families are non-empty, in canonical order, contiguous, and
-    // each spans exactly `n_op` rows.
     assert_eq!(layout.min_outflow_rows.len(), n_op, "min_outflow row count");
     assert_eq!(layout.max_outflow_rows.len(), n_op, "max_outflow row count");
     assert_eq!(layout.min_turbine_rows.len(), n_op, "min_turbine row count");
@@ -1329,8 +1320,6 @@ fn stage_layout_operational_violation_rows_are_contiguous_blocks() {
         "min_generation must start one min_turbine block (n_op rows) after max_outflow ends"
     );
 
-    // The block anchors at the post-equipment row cursor, mirrored by the
-    // `row_min_outflow_start` accessor.
     assert_eq!(
         layout.min_outflow_rows.start,
         layout.row_min_outflow_start(),
@@ -1424,7 +1413,7 @@ fn anticipated_decision_columns_placed_between_thermal_and_line_fwd() {
     // col_thermal_start = col_diversion_start + 0 * 4 = col_diversion_start
     // col_anticipated_decision_start = col_thermal_start + 0 * 4 = col_thermal_start
     // col_line_fwd_start = col_anticipated_decision_start + n_anticipated
-    //   (state_out is no longer in the control region)
+    //   (state_out lives in the state region, not the control region)
     assert_eq!(
         layout.anticipated.col_anticipated_decision_start,
         layout.col_thermal_start(),
@@ -1445,8 +1434,6 @@ fn anticipated_decision_columns_placed_between_thermal_and_line_fwd() {
         "col_anticipated_slots_out_start must equal the state-region offset \
              N*(1+L) + B"
     );
-    // Verify the separation between thermal_start and line_fwd_start is
-    // exactly n_anticipated (only the decision block remains between them).
     assert_eq!(
         layout.col_line_fwd_start() - layout.col_thermal_start(),
         n_anticipated,
@@ -1513,7 +1500,6 @@ fn stage_layout_with_anticipated_shifts_decision_region() {
 /// Setup: `n_anticipated=2`, `k_max=2`, `anticipated_lead_stages=[1,2]`,
 /// zero hydros, one block. At `stage_idx=1`:
 /// - `n_op_rows = 0 * 1 = 0` (no hydros)
-/// - `n_anticipated_fishing_rows = 1` (`K_0=1<=1` active, `K_1=2>1` inactive)
 /// - `row_anticipated_fishing_start` must equal `row_min_generation_start + 0`
 #[test]
 fn anticipated_fishing_row_offset_after_operational_violations() {
@@ -1528,7 +1514,6 @@ fn anticipated_fishing_row_offset_after_operational_violations() {
         vec![0, 1], // arbitrary thermal indices
     );
     let stage = minimal_stage(); // 1 block
-    // stage_idx=1: always-active → both plants active → 2 fishing rows.
     let state = state_layout_for(&ctx);
     let layout = StageLayout::new(&ctx, &state, &stage, 1);
 
@@ -1539,7 +1524,6 @@ fn anticipated_fishing_row_offset_after_operational_violations() {
         layout.row_min_generation_start() + n_op_rows,
         "row_anticipated_fishing_start must equal row_min_generation_start + n_op_rows"
     );
-    // Always-active: both plants active at every stage → 2 fishing rows.
     assert_eq!(
         layout.anticipated.n_anticipated_fishing_rows, 2,
         "n_anticipated_fishing_rows must equal n_anticipated (2) under always-active predicate"
@@ -1807,7 +1791,6 @@ fn test_layout_state_out_block_adjacent_to_decision() {
         "outgoing-ring columns must be sourced from the state-region offset \
              N*(1+L) + B"
     );
-    // line_fwd follows anticipated_decision directly (state_out moved out).
     assert_eq!(
         layout.col_line_fwd_start(),
         layout.anticipated.col_anticipated_decision_start + 2,
@@ -2093,7 +2076,6 @@ fn pumping_layout_inert_when_no_stations() {
     let state = state_layout_for(&ctx);
     let layout = StageLayout::new(&ctx, &state, &stage, 0);
 
-    // No stations: the bounds table reports zero pumping.
     assert_eq!(
         ctx.resolved.bounds.n_pumping(),
         0,
@@ -2119,7 +2101,6 @@ fn pumping_layout_inert_when_no_stations() {
     assert_eq!(layout.col_excess_start(), expected_start);
     assert_eq!(layout.col_ncs_start, expected_start);
     assert_eq!(layout.col_pumping_start, expected_start);
-    // num_cols is the single theta column; the empty pumping block adds nothing.
     assert_eq!(
         layout.num_cols, expected_start,
         "num_cols must be unshifted"
@@ -2134,7 +2115,6 @@ fn pumping_layout_reserves_block_major_columns() {
     let n_pumping = 2_usize;
     let n_blks = 3_usize;
 
-    // Baseline: identical zero-entity 3-block layout with no stations.
     let baseline_fixtures = PumpingFixtures::new(0, 3);
     let baseline_ctx = baseline_fixtures.make_ctx();
     let stage = PumpingFixtures::stage_with_blocks(n_blks);
@@ -2142,7 +2122,6 @@ fn pumping_layout_reserves_block_major_columns() {
     let baseline = StageLayout::new(&baseline_ctx, &state, &stage, 0);
     assert_eq!(baseline.n_pumping, 0);
 
-    // Station-bearing layout: 2 pumping stations across 3 stages.
     let fixtures = PumpingFixtures::new(n_pumping, 3);
     let ctx = fixtures.make_ctx();
     assert_eq!(
@@ -2154,7 +2133,6 @@ fn pumping_layout_reserves_block_major_columns() {
     let layout = StageLayout::new(&ctx, &state, &stage, 0);
 
     assert_eq!(layout.n_pumping, n_pumping, "layout.n_pumping == 2");
-    // The pumping block begins exactly where the NCS region ends (no NCS here).
     assert_eq!(
         layout.col_pumping_start, layout.col_ncs_start,
         "col_pumping_start must follow the NCS region"
@@ -2165,7 +2143,6 @@ fn pumping_layout_reserves_block_major_columns() {
         n_pumping * n_blks,
         "num_cols must grow by exactly n_pumping * n_blks == 6"
     );
-    // The 6 reserved columns occupy [col_pumping_start, col_pumping_start + 6).
     assert_eq!(
         layout.num_cols,
         layout.col_pumping_start + n_pumping * n_blks,
@@ -2305,7 +2282,6 @@ fn column_accessors_match_open_coded_formulas() {
         }
     }
 
-    // Per-family block-major accessors, each owning its `col_*_start`.
     for entity in [0_usize, 1, 3] {
         for blk in 0..n_blks {
             assert_eq!(
@@ -2394,7 +2370,6 @@ fn column_accessors_match_open_coded_formulas() {
             );
         }
     }
-    // The evap offset consts are exactly 0/1/2 in order.
     assert_eq!(EVAP_FLOW_OFFSET, 0);
     assert_eq!(EVAP_F_PLUS_OFFSET, 1);
     assert_eq!(EVAP_F_MINUS_OFFSET, 2);

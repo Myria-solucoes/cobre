@@ -1,4 +1,4 @@
-//! `shape` section tests (split from the parent integration binary).
+//! `shape` section tests.
 
 use super::*;
 

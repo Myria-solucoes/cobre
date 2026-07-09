@@ -1,9 +1,8 @@
-//! Microbenchmark for `CutSelectionStrategy::Lml1` selection at the aggregated
-//! scale (K=945, D=155, M=384) on 8 rayon worker threads.
+//! Microbenchmark for `CutSelectionStrategy::Lml1` selection at aggregated scale
+//! on 8 rayon worker threads.
 //!
-//! Synthetic, deterministic fixtures (`splitmix64`); no external data. The rayon
-//! pool is built once outside the timed region so Criterion measures only the
-//! `select` call.
+//! The rayon pool is built once outside the timed region so Criterion measures
+//! only the `select` call.
 
 #![allow(missing_docs, clippy::expect_used, clippy::cast_possible_truncation)]
 

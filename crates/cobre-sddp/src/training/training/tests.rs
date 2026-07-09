@@ -431,13 +431,6 @@ fn iteration_limit_rules(limit: u64) -> StoppingRuleSet {
     }
 }
 
-/// AC: `train_completes_with_iteration_limit`
-///
-/// Given `max_iterations: 5`, a `StoppingRuleSet` with
-/// `IterationLimit { limit: 5 }` in `Any` mode, a mock solver returning
-/// fixed objectives, and `StubComm` as communicator, when the function
-/// completes, then `result.iterations == 5` and
-/// `result.reason == "iteration_limit"`.
 #[test]
 fn ac_train_completes_with_iteration_limit() {
     let n_stages = 2;
@@ -541,12 +534,6 @@ fn ac_train_completes_with_iteration_limit() {
     assert_eq!(result.result.reason, "iteration_limit");
 }
 
-/// AC: `train_returns_partial_on_infeasible`
-///
-/// Given a mock solver that returns `SolverError::Infeasible` on the first
-/// forward pass solve, when the function is called, then it returns
-/// `Ok(TrainingOutcome)` with `error: Some(SddpError::Infeasible { .. })`
-/// and `result.iterations == 0`.
 #[test]
 fn ac_train_returns_partial_on_infeasible() {
     let n_stages = 2;
@@ -661,18 +648,6 @@ fn ac_train_returns_partial_on_infeasible() {
     assert_eq!(outcome.result.reason, "error");
 }
 
-/// AC: `train_emits_correct_event_sequence`
-///
-/// Given `train` with `event_sender: Some(tx)`, runs for 2 iterations
-/// before `IterationLimit(2)` triggers. The receiver must collect exactly:
-///
-/// - 1 `TrainingStarted`
-/// - 2 × (`WorkerTiming` (Forward), `ForwardPassComplete`, `ForwardSyncComplete`,
-///   `WorkerTiming` (Backward), `BackwardPassComplete`, `PolicySyncComplete`,
-///   `PolicyTemplateFreezeComplete`, `ConvergenceUpdate`, `IterationSummary`)
-/// - 1 `TrainingFinished`
-///
-/// = 1 + 18 + 1 = 20 events.
 #[test]
 fn ac_train_emits_correct_event_sequence() {
     let n_stages = 2;
@@ -773,7 +748,6 @@ fn ac_train_emits_correct_event_sequence() {
     )
     .unwrap();
 
-    // Drain all events.
     drop(fcf); // not needed; just for clarity
     let events: Vec<TrainingEvent> = rx.try_iter().collect();
 
@@ -797,7 +771,6 @@ fn ac_train_emits_correct_event_sequence() {
         "last event must be TrainingFinished"
     );
 
-    // Check per-iteration event pattern for iteration 1 (events[1..10])
     assert!(matches!(
         events[1],
         TrainingEvent::WorkerTiming {
@@ -835,7 +808,6 @@ fn ac_train_emits_correct_event_sequence() {
     assert!(matches!(events[8], TrainingEvent::ConvergenceUpdate { .. }));
     assert!(matches!(events[9], TrainingEvent::IterationSummary { .. }));
 
-    // Iteration 2 (events[10..19]) follows the same pattern.
     assert!(matches!(
         events[10],
         TrainingEvent::WorkerTiming {
@@ -877,11 +849,6 @@ fn ac_train_emits_correct_event_sequence() {
     assert!(matches!(events[18], TrainingEvent::IterationSummary { .. }));
 }
 
-/// with 4 workers and 1 iteration, exactly
-/// `2 * n_workers_local = 8` WorkerTiming events are emitted with `rank = 0`
-/// and `worker_id ∈ {0, 1, 2, 3}`; AND the sum of `timings[BWD_SETUP]` across
-/// the 4 backward emissions equals `BackwardPassComplete.setup_time_ms` for
-/// the same iteration (within ±1 ms numerical tolerance).
 #[test]
 fn ac_worker_timing_per_worker_event_count_and_setup_invariant() {
     use cobre_core::WorkerTimingPhase;
@@ -986,7 +953,6 @@ fn ac_worker_timing_per_worker_event_count_and_setup_invariant() {
 
     let events: Vec<TrainingEvent> = rx.try_iter().collect();
 
-    // Collect all WorkerTiming events and the BackwardPassComplete event.
     let worker_events: Vec<&TrainingEvent> = events
         .iter()
         .filter(|e| matches!(e, TrainingEvent::WorkerTiming { .. }))
@@ -999,7 +965,6 @@ fn ac_worker_timing_per_worker_event_count_and_setup_invariant() {
         worker_events.len()
     );
 
-    // C2: rank=0, worker_id ∈ {0,1,2,3}, iteration=1 for every event.
     let mut fwd_workers = std::collections::BTreeSet::new();
     let mut bwd_workers = std::collections::BTreeSet::new();
     let mut bwd_setup_sum_ms = 0.0_f64;
@@ -1062,10 +1027,6 @@ fn ac_worker_timing_per_worker_event_count_and_setup_invariant() {
     );
 }
 
-/// AC: `train_result_fields_populated`
-///
-/// Verify that all `TrainingResult` fields are non-default after a
-/// successful 5-iteration run.
 #[test]
 fn ac_train_result_fields_populated() {
     let n_stages = 2;
@@ -1169,10 +1130,6 @@ fn ac_train_result_fields_populated() {
     assert!(!result.result.reason.is_empty(), "reason must not be empty");
 }
 
-/// AC: `train_with_no_event_sender`
-///
-/// Verify that `event_sender: None` does not panic and training completes
-/// normally.
 #[test]
 fn ac_train_with_no_event_sender() {
     let n_stages = 2;
@@ -1273,10 +1230,6 @@ fn ac_train_with_no_event_sender() {
     assert!(result.is_ok(), "train with no event_sender must not panic");
 }
 
-/// AC: train result `total_time_ms` is greater than 0
-///
-/// After a successful run, `result.total_time_ms` must be >= 0 and the
-/// `TrainingResult` must be constructible without panicking.
 #[test]
 fn ac_total_time_ms_is_non_negative() {
     let n_stages = 2;
@@ -1383,10 +1336,6 @@ fn ac_total_time_ms_is_non_negative() {
     );
 }
 
-/// `cut_selection_none_skips_step`
-///
-/// Given `train` with `cut_selection: None` running for 5 iterations, then
-/// no `PolicySelectionComplete` event is emitted.
 #[test]
 fn cut_selection_none_skips_step() {
     let n_stages = 2;
@@ -1499,11 +1448,6 @@ fn cut_selection_none_skips_step() {
     );
 }
 
-/// `cut_selection_level1_runs_at_frequency`
-///
-/// Given `train` with `cut_selection: Some(Level1 { check_frequency: 3,
-/// tie_tolerance: 1e-10 })` running for 5 iterations, then
-/// `PolicySelectionComplete` is emitted exactly once (at iteration 3).
 #[test]
 fn cut_selection_level1_runs_at_frequency() {
     use crate::cut_selection::CutSelectionStrategy;
@@ -1631,11 +1575,6 @@ fn cut_selection_level1_runs_at_frequency() {
     );
 }
 
-/// `cut_selection_deactivates_inactive_cuts`
-///
-/// Stage 0 is exempt from cut selection because its cuts have no
-/// backward-pass activity tracking. With a 2-stage system, only stage 0
-/// has cuts, so `rows_deactivated` must be 0.
 #[test]
 fn cut_selection_stage0_exempt_preserves_cuts() {
     use crate::cut_selection::CutSelectionStrategy;
@@ -1780,12 +1719,6 @@ fn cut_selection_stage0_exempt_preserves_cuts() {
     );
 }
 
-/// `existing_train_tests_pass_with_none`
-///
-/// Verify backward compatibility: calling `train` with `cut_selection:
-/// None` produces the same result as before. This is
-/// implicitly verified by the existing `ac_train_completes_with_iteration_limit`
-/// test. This test is an explicit additional check with an explicit `None`.
 #[test]
 fn existing_train_tests_pass_with_none() {
     let n_stages = 2;
@@ -1889,14 +1822,6 @@ fn existing_train_tests_pass_with_none() {
     assert_eq!(result.result.reason, "iteration_limit");
 }
 
-/// AC: `train_partial_result_on_mid_iteration_failure`
-///
-/// Given a mock solver that fails on the 3rd solve call (which occurs
-/// during iteration 1 since each iteration performs multiple solves),
-/// when `train` is called, it returns `Ok(TrainingOutcome)` with
-/// `error: Some(...)`, `result.iterations == 0` (no completed iterations),
-/// `result.reason == "error"`, and `solver_stats_log` containing entries
-/// from the phases that completed before the error.
 #[test]
 fn ac_train_partial_result_on_mid_iteration_failure() {
     let n_stages = 2;
@@ -2027,8 +1952,6 @@ fn ac_train_partial_result_on_mid_iteration_failure() {
     }
 }
 
-/// When `start_iteration = 3` and `max_iterations = 5`, the training loop
-/// executes exactly 2 iterations (4 and 5) and reports `iterations = 5`.
 #[test]
 fn start_iteration_resumes_from_offset() {
     let n_stages = 2;
@@ -2134,8 +2057,6 @@ fn start_iteration_resumes_from_offset() {
     assert_eq!(outcome.result.reason, "iteration_limit");
 }
 
-/// When `start_iteration >= max_iterations`, the training loop executes zero
-/// iterations and returns immediately with `iterations = start_iteration`.
 #[test]
 fn start_iteration_at_or_beyond_max_runs_zero_iterations() {
     let n_stages = 2;
@@ -2246,12 +2167,6 @@ fn start_iteration_at_or_beyond_max_runs_zero_iterations() {
 
 // ── broadcast_basis_cache unit tests ─────────────────────────────────────
 
-/// AC: `broadcast_basis_cache` returns scenario 0's bases, not scenario N-1's.
-///
-/// Constructs a `BasisStore` with 2 scenarios and 3 stages. Scenario 0 is
-/// populated with known distinct values; scenario 1 is populated with
-/// different values. The helper must return scenario 0's bases on
-/// `LocalBackend` (single-rank, no broadcast).
 #[test]
 fn ac_broadcast_basis_cache_uses_scenario_0_not_last() {
     use super::broadcast_basis_cache;
@@ -2273,7 +2188,6 @@ fn ac_broadcast_basis_cache_uses_scenario_0_not_last() {
 
     // Populate scenario 0 with a per-stage-distinct status sequence.
     for t in 0..num_stages {
-        // test shim: zero metadata is acceptable for tests exercising broadcast path
         *store.get_mut(0, t) = Some(crate::workspace::CapturedBasis {
             basis: Basis {
                 col_status: vec![VARIANTS[t], VARIANTS[t + 1]],
@@ -2287,7 +2201,6 @@ fn ac_broadcast_basis_cache_uses_scenario_0_not_last() {
 
     // Populate scenario 3 (last) with completely different values.
     for t in 0..num_stages {
-        // test shim: zero metadata is acceptable for tests exercising broadcast path
         *store.get_mut(3, t) = Some(crate::workspace::CapturedBasis {
             basis: Basis {
                 col_status: vec![BasisStatus::Superbasic, BasisStatus::Fixed],
@@ -2320,11 +2233,6 @@ fn ac_broadcast_basis_cache_uses_scenario_0_not_last() {
     }
 }
 
-/// AC: `broadcast_basis_cache` handles `None` slots correctly.
-///
-/// When scenario 0 has no basis stored for some stages (e.g. training
-/// stopped before any forward pass completed), those stages must be `None`
-/// in the returned cache.
 #[test]
 fn ac_broadcast_basis_cache_none_slots_preserved() {
     use super::broadcast_basis_cache;
@@ -2346,9 +2254,6 @@ fn ac_broadcast_basis_cache_none_slots_preserved() {
     }
 }
 
-/// `broadcast_basis_cache` with `comm.size() == 1` must clone
-/// the full `CapturedBasis` including metadata (`cut_row_slots`,
-/// `state_at_capture`, `base_row_count`), not just the bare basis body.
 #[test]
 fn broadcast_basis_cache_single_rank_preserves_metadata() {
     use super::broadcast_basis_cache;
@@ -2474,15 +2379,6 @@ impl Communicator for MultiRankMockComm {
     }
 
     fn broadcast<T: CommData>(&self, buf: &mut [T], root: usize) -> Result<(), CommError> {
-        // We need MockRecord to dispatch safely. We cannot add that bound
-        // to the Communicator trait, so we use a private helper that
-        // downcasts via a local trait object. This is the only clean safe
-        // approach without unsafe in a forbid-unsafe crate.
-        //
-        // The actual dispatch is done by calling into a monomorphic helper
-        // through a function pointer selected at the call site where T is
-        // known. We implement this by defining a local function that takes
-        // &dyn Any and casts it:
         self.broadcast_typed(buf, root)
     }
 
@@ -2515,7 +2411,6 @@ impl MultiRankMockComm {
         let probe: Box<dyn Any> = Box::new(T::default());
 
         if probe.downcast_ref::<i32>().is_some() {
-            // T == i32
             if self.rank == 0 {
                 let ints: Vec<i32> = buf
                     .iter()
@@ -2546,7 +2441,6 @@ impl MultiRankMockComm {
                 }
             }
         } else if probe.downcast_ref::<f64>().is_some() {
-            // T == f64
             if self.rank == 0 {
                 let floats: Vec<f64> = buf
                     .iter()
@@ -2583,10 +2477,6 @@ impl MultiRankMockComm {
     }
 }
 
-/// `broadcast_basis_cache` with `size=2` must transmit the
-/// full `CapturedBasis` metadata (`cut_row_slots`, `state_at_capture`,
-/// `base_row_count`) to rank 1. The `MultiRankMockComm` pair records
-/// rank-0's four broadcasts and replays them exactly to rank 1.
 #[test]
 fn broadcast_basis_cache_multi_rank_round_trips_full_metadata() {
     use super::broadcast_basis_cache;
@@ -2604,12 +2494,9 @@ fn broadcast_basis_cache_multi_rank_round_trips_full_metadata() {
     });
     // Stage 1 left None.
 
-    // Step 1: run broadcast_basis_cache from rank-0's perspective.
-    // This populates the mock's recorded buffers.
     let root_comm = MultiRankMockComm::new_root();
     let _cache_rank0 = broadcast_basis_cache(&store, 2, &root_comm).unwrap();
 
-    // Step 2: build a rank-1 peer that replays rank-0's recorded buffers.
     let peer_comm = MultiRankMockComm::new_peer(&root_comm);
     // Rank 1's basis_store is empty — all data must come from the broadcast.
     let empty_store = BasisStore::new(1, 2);
@@ -2646,9 +2533,6 @@ fn broadcast_basis_cache_multi_rank_round_trips_full_metadata() {
     assert!(cache[1].is_none(), "stage 1 had no basis → None");
 }
 
-/// When rank 0's `CapturedBasis` has an empty `cut_row_slots`
-/// (legitimate for stages that never produced cuts), the round-trip must
-/// produce `cut_row_slots.is_empty()` on rank 1 without error.
 #[test]
 fn broadcast_basis_cache_empty_cut_slots_round_trips_ok() {
     use super::broadcast_basis_cache;
@@ -2688,11 +2572,6 @@ fn broadcast_basis_cache_empty_cut_slots_round_trips_ok() {
     assert_eq!(cb.base_row_count, 1, "base_row_count must round-trip");
 }
 
-/// When the i32 broadcast buffer is truncated mid-
-/// `cut_row_slots`, `broadcast_basis_cache` must return
-/// `SddpError::Validation` with a message containing "cut_row_slots" and
-/// the stage index.
-///
 /// The queue produced by a successful rank-0 run contains four payloads:
 ///   [0] Ints(i32-len-scalar)   — one i32 (the total i32 count)
 ///   [1] Ints(i32-payload)      — all the integer data
@@ -2763,12 +2642,7 @@ fn broadcast_basis_cache_truncated_cut_slots_returns_validation() {
     }
 }
 
-/// When the f64 broadcast buffer is truncated mid-
-/// `state_at_capture`, `broadcast_basis_cache` must return
-/// `SddpError::Validation` with a message containing "state_at_capture"
-/// and the stage index.
-///
-/// We truncate entry [3] (Floats payload) and patch entry [2] (f64-len
+/// Truncate entry [3] (Floats payload) and patch entry [2] (f64-len
 /// scalar) to match, so rank 1 allocates a shorter f64 buffer and the
 /// `state_at_capture` bounds check fires.
 #[test]
@@ -2833,14 +2707,6 @@ fn broadcast_basis_cache_truncated_state_returns_validation() {
     }
 }
 
-/// Regression test for the i32-truncation guard in `broadcast_basis_cache`.
-///
-/// A buffer length that exceeds `i32::MAX` must be rejected by
-/// `checked_broadcast_len` before any MPI broadcast call is issued.
-/// The returned error must be
-/// `SddpError::Communication(CommError::InvalidBufferSize { .. })`
-/// with `actual == (i32::MAX as usize) + 1` and the operation string
-/// `"broadcast_basis_cache_i32"`.
 #[test]
 fn broadcast_basis_cache_rejects_oversized_i32_payload() {
     use super::checked_broadcast_len;
@@ -2871,12 +2737,6 @@ fn broadcast_basis_cache_rejects_oversized_i32_payload() {
     }
 }
 
-/// AC: `template_freeze_event_emitted`
-///
-/// Verify that `PolicyTemplateFreezeComplete` is emitted exactly once per iteration
-/// with the correct `stages_processed` count. Also verifies that
-/// `total_rows_frozen > 0` on iteration 2 (because the backward pass on
-/// iteration 1 generates cuts before step 4c runs on that same iteration).
 #[test]
 fn template_freeze_event_emitted() {
     let n_stages = 2;
@@ -2980,7 +2840,6 @@ fn template_freeze_event_emitted() {
 
     let events: Vec<TrainingEvent> = rx.try_iter().collect();
 
-    // Collect all PolicyTemplateFreezeComplete events.
     let freeze_events: Vec<&TrainingEvent> = events
         .iter()
         .filter(|e| matches!(e, TrainingEvent::PolicyTemplateFreezeComplete { .. }))

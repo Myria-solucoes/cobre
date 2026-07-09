@@ -1,8 +1,7 @@
-//! `deficit_and_withdrawal` section tests (split from the parent integration binary).
+//! `deficit_and_withdrawal` section tests.
 
 use super::*;
 
-/// 2 buses (bus0: 3 segments, bus1: 1), 2 blocks → deficit columns = `B*S_max*K` = 2*3*2 = 12.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn test_multi_segment_deficit_column_count() {
@@ -190,8 +189,6 @@ fn test_multi_segment_deficit_column_count() {
     );
 }
 
-/// Bus with 2 deficit segments [{10MW, $500}, {None, $5000}], 1 block of 730h:
-/// segment upper bounds are depth_mw / +inf, objectives are cost * block_hours.
 #[test]
 fn test_multi_segment_deficit_bounds_and_objective() {
     let bus = make_bus(
@@ -260,7 +257,6 @@ fn test_multi_segment_deficit_bounds_and_objective() {
     );
 }
 
-/// A single-segment bus produces one unbounded deficit column carrying the cost.
 #[test]
 fn test_single_segment_backward_compat() {
     let cost = 1000.0_f64;
@@ -316,8 +312,6 @@ fn test_single_segment_backward_compat() {
     );
 }
 
-/// Each deficit segment column has exactly one CSC entry, in the load-balance
-/// row, with coefficient +1.0.
 #[test]
 fn test_multi_segment_deficit_load_balance_coefficients() {
     let bus = make_bus(
@@ -420,7 +414,7 @@ fn withdrawal_rhs_subtracted_from_water_balance() {
     let row_water = 1_usize; // row_water_balance_start = N = 1
     let total_hours = 744.0_f64;
     let zeta = total_hours * 3_600.0 / 1_000_000.0;
-    // base = 0 (no PAR data), withdrawal = 10.0
+    // base = 0 (no PAR data)
     let expected_rhs = zeta * (0.0 - withdrawal);
     assert!(
         (t.row_lower[row_water] - expected_rhs).abs() < 1e-12,
@@ -436,8 +430,7 @@ fn withdrawal_rhs_subtracted_from_water_balance() {
 
 /// `PrecomputedPar::default()` has `n_stages`=0, so `deterministic_base`=0 cannot
 /// be set to a non-zero value here; this test only confirms withdrawal=0 leaves
-/// the RHS identical to the no-withdrawal case. The base=50 arithmetic
-/// (0.36 * (50-10) = 14.4) is covered by the fixture-free test below.
+/// the RHS identical to the no-withdrawal case.
 #[test]
 fn withdrawal_zero_leaves_rhs_unchanged_from_base() {
     let system_zero = one_hydro_system_with_withdrawal(1, 0, 0.0, 0.0);
@@ -484,7 +477,6 @@ fn withdrawal_zero_leaves_rhs_unchanged_from_base() {
     );
 }
 
-/// The withdrawal slack column has exactly one CSC entry, at (`row_water`, -`zeta`).
 #[test]
 fn withdrawal_slack_matrix_entry_coefficient_is_minus_zeta() {
     let system = one_hydro_system_with_withdrawal(1, 0, 5.0, 1000.0);
@@ -518,7 +510,6 @@ fn withdrawal_slack_matrix_entry_coefficient_is_minus_zeta() {
         -zeta
     );
 
-    // Must have exactly one entry (water balance only; no load balance).
     let all_entries = entries_for_col(t, col_neg);
     assert_eq!(
         all_entries.len(),
@@ -527,8 +518,6 @@ fn withdrawal_slack_matrix_entry_coefficient_is_minus_zeta() {
     );
 }
 
-/// Slack objective = `water_withdrawal_violation_cost` * `total_stage_hours`;
-/// 1000.0 * 744.0 = 744_000.0 (then COST_SCALE_FACTOR-scaled).
 #[test]
 fn withdrawal_slack_objective_equals_cost_times_hours() {
     let violation_cost = 1_000.0_f64;
@@ -556,7 +545,6 @@ fn withdrawal_slack_objective_equals_cost_times_hours() {
     );
 }
 
-/// The withdrawal slack objective is 0.0 when the violation cost is 0.0.
 #[test]
 fn withdrawal_slack_objective_zero_when_cost_is_zero() {
     let system = one_hydro_system_with_withdrawal(1, 0, 0.0, 0.0);
@@ -581,9 +569,6 @@ fn withdrawal_slack_objective_zero_when_cost_is_zero() {
     );
 }
 
-/// For a positive target `T = 10`, the under-delivery (`neg`) slack is capped at
-/// `|T| = 10` (floors realized withdrawal ≥ 0) and the over-delivery (`pos`) slack
-/// is unbounded; both lower bounds are 0.
 #[test]
 fn withdrawal_slack_bounds_are_sign_aware_positive_target() {
     let system = one_hydro_system_with_withdrawal(1, 0, 10.0, 5_000.0);
@@ -625,8 +610,6 @@ fn withdrawal_slack_bounds_are_sign_aware_positive_target() {
     );
 }
 
-/// For N=2 hydros, each withdrawal slack column has one CSC entry at
-/// (`row_water` + `h_idx`, -`zeta`).
 #[test]
 #[allow(
     clippy::cast_possible_truncation,
@@ -953,7 +936,6 @@ fn two_hydro_withdrawal_slack_entries_per_hydro() {
     );
 }
 
-/// 3-hydro system: `num_cols` includes exactly 3 withdrawal slack columns.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn three_hydro_num_cols_includes_three_withdrawal_slacks() {
@@ -1286,13 +1268,8 @@ fn three_hydro_num_cols_includes_three_withdrawal_slacks() {
         t.num_cols
     );
 
-    // Verify the withdrawal slack columns. They are followed by
-    // 2*N withdrawal + 4*N operational = 6*N columns after withdrawal_neg start.
+    // Withdrawal slacks: 2*N withdrawal + 4*N operational = 6*N trailing columns;
     // withdrawal_neg starts at num_cols - 6*N.
-    //
-    // All three hydros have a positive withdrawal target T = 5.0, so the
-    // under-delivery (neg) slack is capped at |T| = 5.0 (floors realized
-    // withdrawal R ≥ 0); the over-delivery (pos) slack remains unbounded.
     let n_h = t.n_hydro;
     let neg_start = t.num_cols - 6 * n_h;
     let pos_start = neg_start + n_h;

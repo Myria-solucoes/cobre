@@ -75,9 +75,8 @@ pub fn build_stage_entity_manifest(
         global_layout.k_max,
     );
 
-    // Study stages in canonical index order (the space `AnticipatedResolution`'s
-    // decider/depth and the bucket topology both index); `current_stage_idx`
-    // recovers this stage's position from its `stage.id`.
+    // Study stages in canonical index order — the space `AnticipatedResolution`'s
+    // decider/depth and the bucket topology both index.
     let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
     let current_stage_idx = study_stages.iter().position(|s| s.id == stage_id);
     // Delivery/arrival calendar anchor of the stage `current_stage_idx + offset`;

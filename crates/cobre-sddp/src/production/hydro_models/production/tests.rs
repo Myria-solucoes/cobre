@@ -171,10 +171,8 @@ fn computed_fpha_config(hydro_id: i32) -> ProductionModelConfig {
 
 // ── resolve_production_models unit tests (in-memory, no disk I/O) ─────────
 
-/// Non-FPHA hydros without any config entry produce
-/// `DefaultConstant` provenance from `determine_source`. The
-/// downstream sentinel behaviour in `resolve_stage_model` is exercised
-/// by `test_resolve_stage_model_returns_sentinel_when_no_config_entry`.
+/// The downstream sentinel behaviour is exercised by
+/// `test_resolve_stage_model_returns_sentinel_when_no_config_entry`.
 #[test]
 fn all_constant_no_config_returns_default_constant_provenance() {
     let hydro0 = make_hydro(0, HydroGenerationModel::ConstantProductivity);
@@ -186,9 +184,7 @@ fn all_constant_no_config_returns_default_constant_provenance() {
     assert_eq!(src1, ProductionModelSource::DefaultConstant);
 }
 
-/// `LinearizedHead` entities without a config entry produce
-/// `DefaultConstant` provenance from `determine_source`. The downstream
-/// sentinel behaviour in `resolve_stage_model` is exercised by
+/// The downstream sentinel behaviour is exercised by
 /// `test_resolve_stage_model_returns_sentinel_when_no_config_entry`.
 #[test]
 fn linearized_head_entity_resolves_to_constant_productivity() {
@@ -198,7 +194,6 @@ fn linearized_head_entity_resolves_to_constant_productivity() {
     assert_eq!(src, ProductionModelSource::DefaultConstant);
 }
 
-/// Fpha entity model without config → validation error.
 #[test]
 fn fpha_entity_without_config_entry_returns_validation_error() {
     let hydro = make_hydro(0, HydroGenerationModel::Fpha);
@@ -210,7 +205,6 @@ fn fpha_entity_without_config_entry_returns_validation_error() {
     );
 }
 
-/// source: "computed" in config → returns `ComputedFromGeometry` (fitting is now supported).
 #[test]
 fn computed_source_returns_computed_from_geometry() {
     let hydro = make_hydro(0, HydroGenerationModel::Fpha);
@@ -224,7 +218,7 @@ fn computed_source_returns_computed_from_geometry() {
     );
 }
 
-/// Helper: build a minimal hydro with all computed-source prerequisites set.
+/// A hydro with all computed-source prerequisites (tailrace, losses, efficiency).
 fn make_computed_hydro(id: i32) -> cobre_core::entities::hydro::Hydro {
     let mut hydro = make_hydro(id, HydroGenerationModel::Fpha);
     hydro.tailrace = Some(TailraceModel::Polynomial {
@@ -235,7 +229,6 @@ fn make_computed_hydro(id: i32) -> cobre_core::entities::hydro::Hydro {
     hydro
 }
 
-/// Helper: build a two-point VHA geometry row vector for a hydro.
 fn make_geometry_rows(hydro_id: i32) -> Vec<HydroGeometryRow> {
     vec![
         HydroGeometryRow {
@@ -253,11 +246,9 @@ fn make_geometry_rows(hydro_id: i32) -> Vec<HydroGeometryRow> {
     ]
 }
 
-/// validate_computed_prerequisites: missing tailrace → Validation error with "tailrace" and hydro name.
 #[test]
 fn computed_source_missing_tailrace_returns_validation_error() {
     let hydro = make_hydro(0, HydroGenerationModel::Fpha);
-    // tailrace is None in make_hydro
     let rows = make_geometry_rows(0);
     let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
     let row_refs: Vec<&HydroGeometryRow> = rows.iter().collect();
@@ -277,7 +268,6 @@ fn computed_source_missing_tailrace_returns_validation_error() {
     );
 }
 
-/// validate_computed_prerequisites: missing geometry rows → Validation error with "geometry" and hydro name.
 #[test]
 fn computed_source_missing_geometry_returns_validation_error() {
     let hydro = make_computed_hydro(0);
@@ -297,7 +287,6 @@ fn computed_source_missing_geometry_returns_validation_error() {
     );
 }
 
-/// find_fpha_config_for_stage: returns Some(&FphaColumnLayout) when stage is in the range.
 #[test]
 fn find_fpha_config_for_stage_returns_config_in_range() {
     let config = computed_fpha_config(0);
@@ -315,7 +304,6 @@ fn find_fpha_config_for_stage_returns_config_in_range() {
     );
 }
 
-/// find_fpha_config_for_stage: returns None when no range covers the stage.
 #[test]
 fn find_fpha_config_for_stage_returns_none_outside_range() {
     let config = ProductionModelConfig {
@@ -347,7 +335,6 @@ fn find_fpha_config_for_stage_returns_none_outside_range() {
     );
 }
 
-/// kappa = 0.95 → intercept is gamma_0 * kappa.
 #[test]
 fn gamma_0_is_scaled_by_kappa() {
     let hydro = make_hydro(0, HydroGenerationModel::Fpha);
@@ -395,14 +382,13 @@ fn gamma_0_is_scaled_by_kappa() {
     }
 }
 
-/// validate_hyperplane_row rejects negative gamma_v.
 #[test]
 fn validation_rejects_gamma_v_negative() {
     let hydro = make_hydro(0, HydroGenerationModel::Fpha);
     let stage = make_stage(0);
 
     let mut row = valid_row(0, None, 0);
-    row.gamma_v = -0.1; // invalid: must be >= 0
+    row.gamma_v = -0.1;
 
     let err = validate_hyperplane_row(&hydro, &stage, &row).expect_err("should fail");
     let msg = err.to_string();
@@ -412,7 +398,6 @@ fn validation_rejects_gamma_v_negative() {
     );
 }
 
-/// validate_hyperplane_row accepts gamma_v == 0.0 (constant-head plant).
 #[test]
 fn validation_accepts_gamma_v_zero() {
     let hydro = make_hydro(0, HydroGenerationModel::Fpha);
@@ -425,7 +410,6 @@ fn validation_accepts_gamma_v_zero() {
         .expect("gamma_v = 0.0 must be valid for constant-head plants");
 }
 
-/// validate_hyperplane_row rejects gamma_s > 0.
 #[test]
 fn validation_rejects_gamma_s_positive() {
     let hydro = make_hydro(0, HydroGenerationModel::Fpha);
@@ -442,7 +426,6 @@ fn validation_rejects_gamma_s_positive() {
     );
 }
 
-/// validate_hyperplane_row rejects gamma_q <= 0.
 #[test]
 fn validation_rejects_gamma_q_nonpositive() {
     let hydro = make_hydro(0, HydroGenerationModel::Fpha);
@@ -459,7 +442,6 @@ fn validation_rejects_gamma_q_nonpositive() {
     );
 }
 
-/// validate_hyperplane_row rejects kappa = 0 (must be > 0).
 #[test]
 fn validation_rejects_kappa_zero() {
     let hydro = make_hydro(0, HydroGenerationModel::Fpha);
@@ -476,7 +458,6 @@ fn validation_rejects_kappa_zero() {
     );
 }
 
-/// validate_hyperplane_row rejects kappa = 1.5 (must be <= 1).
 #[test]
 fn validation_rejects_kappa_above_one() {
     let hydro = make_hydro(0, HydroGenerationModel::Fpha);
@@ -493,7 +474,6 @@ fn validation_rejects_kappa_above_one() {
     );
 }
 
-/// Stage-specific hyperplanes (Some(stage_id)) override all-stage (None) rows.
 #[test]
 fn stage_specific_hyperplanes_override_all_stage() {
     let hydro = make_hydro(0, HydroGenerationModel::Fpha);
@@ -503,7 +483,7 @@ fn stage_specific_hyperplanes_override_all_stage() {
         hydro_id: EntityId::from(0),
         stage_id: None,
         plane_id: 0,
-        gamma_0: 500.0, // distinct intercept to identify
+        gamma_0: 500.0,
         gamma_v: 0.001,
         gamma_q: 0.80,
         gamma_s: -0.005,
@@ -516,7 +496,7 @@ fn stage_specific_hyperplanes_override_all_stage() {
         hydro_id: EntityId::from(0),
         stage_id: Some(0),
         plane_id: 0,
-        gamma_0: 900.0, // distinct intercept to identify
+        gamma_0: 900.0,
         gamma_v: 0.002,
         gamma_q: 0.85,
         gamma_s: -0.01,
@@ -546,7 +526,6 @@ fn stage_specific_hyperplanes_override_all_stage() {
 
     match model {
         ResolvedProductionModel::Fpha { planes, .. } => {
-            // Stage-specific row has gamma_0 = 900, global has 500; stage-specific wins.
             assert!(
                 (planes[0].intercept - 900.0).abs() < 1e-10,
                 "stage-specific intercept 900 should override global 500, got {}",
@@ -557,11 +536,10 @@ fn stage_specific_hyperplanes_override_all_stage() {
     }
 }
 
-/// All-stage hyperplanes (stage_id: None) are used when no stage-specific rows exist.
 #[test]
 fn all_stage_hyperplanes_used_when_no_stage_specific_rows() {
     let hydro = make_hydro(0, HydroGenerationModel::Fpha);
-    let stage = make_stage(5); // stage id 5, no stage-specific rows for it
+    let stage = make_stage(5);
 
     let global_row = FphaHyperplaneRow {
         hydro_id: EntityId::from(0),
@@ -603,13 +581,11 @@ fn all_stage_hyperplanes_used_when_no_stage_specific_rows() {
     }
 }
 
-/// Zero hyperplanes for a stage (empty rows) → validation error.
 #[test]
 fn zero_hyperplanes_for_stage_returns_validation_error() {
     let hydro = make_hydro(0, HydroGenerationModel::Fpha);
     let stage = make_stage(0);
 
-    // Map has the key but an empty rows vec.
     let mut map = std::collections::HashMap::new();
     map.insert(
         (EntityId::from(0), None::<i32>),
@@ -630,7 +606,6 @@ fn zero_hyperplanes_for_stage_returns_validation_error() {
     );
 }
 
-/// find_model_for_stage: stage_id in range returns fpha model name.
 #[test]
 fn find_model_for_stage_returns_correct_model_name_in_range() {
     let config = precomputed_fpha_config(0);
@@ -639,7 +614,6 @@ fn find_model_for_stage_returns_correct_model_name_in_range() {
     assert_eq!(result.as_ref().map(|(name, _)| name.as_str()), Some("fpha"));
 }
 
-/// find_model_for_stage: stage_id before start of range returns None.
 #[test]
 fn find_model_for_stage_returns_none_when_before_range_start() {
     let config = ProductionModelConfig {
@@ -663,7 +637,6 @@ fn find_model_for_stage_returns_none_when_before_range_start() {
     );
 }
 
-/// find_model_for_stage: end_stage_id = None covers all stages from start.
 #[test]
 fn find_model_for_stage_open_ended_range_covers_all_stages() {
     let config = ProductionModelConfig {
@@ -692,7 +665,6 @@ fn find_model_for_stage_open_ended_range_covers_all_stages() {
 
 // ── Productivity override tests ─────────────────────────────────────────
 
-/// resolve_stage_model uses productivity_override when present.
 #[test]
 fn resolve_stage_model_uses_productivity_override() {
     let hydro = make_hydro(0, HydroGenerationModel::ConstantProductivity);
@@ -728,23 +700,15 @@ fn resolve_stage_model_uses_productivity_override() {
     );
 }
 
-/// When the JSON config entry exists but its `productivity_mw_per_m3s`
-/// field is `None`, `resolve_stage_model` returns a sentinel
-/// `ConstantProductivity { productivity: 0.0 }`. The build site in
-/// `build_energy_conversion_set` consults the parquet override and
-/// overwrites the sentinel with the user-supplied value.
-///
-/// In debug builds the sentinel path is gated by a `debug_assert!` that
-/// catches mis-configured cases that escape load-time validation in
-/// `cobre_io::validation::productivity_resolution`. In release builds the
-/// `debug_assert!` is compiled out and the function returns the sentinel
-/// directly.
+/// JSON config entry present but `productivity_mw_per_m3s` is `None`:
+/// `resolve_stage_model` returns a sentinel `ConstantProductivity { 0.0 }` that
+/// `build_energy_conversion_set` later overwrites from the parquet override.
+/// A debug_assert (debug only) catches configs that escape load-time
+/// `cobre_io::validation::productivity_resolution`; release returns the sentinel.
 #[test]
 fn test_resolve_stage_model_returns_sentinel_when_json_lacks_productivity() {
     let hydro = make_hydro(0, HydroGenerationModel::ConstantProductivity);
     let stage = make_stage(0);
-    // Config entry exists but productivity is missing — the parquet
-    // override is the supplier in production.
     let config = ProductionModelConfig {
         hydro_id: EntityId::from(0),
         selection_mode: SelectionMode::StageRanges {
@@ -813,11 +777,6 @@ fn test_resolve_stage_model_returns_sentinel_when_json_lacks_productivity() {
     }
 }
 
-/// When the JSON has no productivity and the parquet override supplies a
-/// value, `resolve_stage_model` returns that value as the resolved
-/// `ConstantProductivity { productivity }`. This is the path the LP
-/// coefficient flows through for non-FPHA hydros authored entirely via the
-/// parquet.
 #[test]
 fn test_resolve_stage_model_uses_parquet_override_when_json_omits_productivity() {
     let hydro = make_hydro(0, HydroGenerationModel::ConstantProductivity);
@@ -867,11 +826,10 @@ fn test_resolve_stage_model_uses_parquet_override_when_json_omits_productivity()
     );
 }
 
-/// When no JSON config entry exists at all for a non-FPHA hydro,
-/// `resolve_stage_model` returns the same sentinel. Load-time validation
-/// in `cobre_io::validation::productivity_resolution` is responsible for
-/// catching missing entries; this branch trusts that invariant in release
-/// builds and is guarded by a `debug_assert!` in debug builds.
+/// No JSON config entry at all for a non-FPHA hydro: `resolve_stage_model`
+/// returns the same sentinel. A debug_assert (debug only) catches missing
+/// entries that escape load-time `cobre_io::validation::productivity_resolution`;
+/// release trusts the invariant and returns the sentinel.
 #[test]
 fn test_resolve_stage_model_returns_sentinel_when_no_config_entry() {
     let hydro = make_hydro(7, HydroGenerationModel::ConstantProductivity);
@@ -931,7 +889,6 @@ fn test_resolve_stage_model_returns_sentinel_when_no_config_entry() {
     }
 }
 
-/// find_model_for_stage returns override in tuple.
 #[test]
 fn find_model_for_stage_returns_override_in_tuple() {
     let config = ProductionModelConfig {
@@ -955,8 +912,6 @@ fn find_model_for_stage_returns_override_in_tuple() {
     );
 }
 
-/// Seasonal mode: find_model_for_stage returns override for matching season
-/// and None for default model.
 #[test]
 fn find_model_for_stage_seasonal_with_override() {
     let config = ProductionModelConfig {
@@ -972,7 +927,6 @@ fn find_model_for_stage_seasonal_with_override() {
             }],
         },
     };
-    // Stage with matching season_id = 1
     let mut stage_match = make_stage(0);
     stage_match.season_id = Some(1);
     let result = find_model_for_stage(&config, &stage_match);
@@ -981,7 +935,6 @@ fn find_model_for_stage_seasonal_with_override() {
         Some(("constant_productivity".to_string(), Some(0.60)))
     );
 
-    // Stage with non-matching season_id → default model, no override
     let mut stage_default = make_stage(0);
     stage_default.season_id = Some(99);
     let result = find_model_for_stage(&config, &stage_default);
@@ -990,8 +943,6 @@ fn find_model_for_stage_seasonal_with_override() {
 
 // ── Canonical resolver (resolve_stage / selection_entries) ────────────────
 
-/// A `Seasonal` config's season miss resolves to `default_model`, with
-/// `fpha_config`, `reference_volume`, and `productivity` all `None`.
 #[test]
 fn resolve_stage_seasonal_season_miss_uses_default_model() {
     let config = ProductionModelConfig {
@@ -1025,8 +976,6 @@ fn resolve_stage_seasonal_season_miss_uses_default_model() {
     assert!(resolution.productivity.is_none());
 }
 
-/// A `Seasonal` config's matching season passes through that season's own
-/// model, fpha_config, reference_volume, and productivity — not the default.
 #[test]
 fn resolve_stage_seasonal_matching_season_passes_through() {
     let config = ProductionModelConfig {
@@ -1056,10 +1005,9 @@ fn resolve_stage_seasonal_matching_season_passes_through() {
     assert_eq!(resolution.productivity, Some(0.77));
 }
 
-/// `selection_entries` yields a synthetic `default_model` entry for
-/// `Seasonal`, so a fold over precomputed-FPHA classification treats
-/// `default_model == "fpha"` (no `fpha_config`, so precomputed by parquet) as
-/// using precomputed FPHA even when every listed season is non-FPHA.
+/// `selection_entries` emits a synthetic `default_model` entry, so
+/// `default_model == "fpha"` with no `fpha_config` (precomputed by parquet)
+/// classifies as precomputed FPHA even when every listed season is non-FPHA.
 #[test]
 fn selection_entries_classifies_default_fpha_as_precomputed() {
     let config = ProductionModelConfig {
@@ -1120,9 +1068,6 @@ fn seasonal_default_fpha_classifies_as_precomputed_source() {
     assert!(config_uses_precomputed_fpha(&config));
 }
 
-/// A `StageRanges` config resolves a covering range's model, fpha_config,
-/// reference_volume, and productivity verbatim, and every field to `None` for
-/// a stage outside every range (no default exists for `StageRanges`).
 #[test]
 fn resolve_stage_stage_ranges_covering_and_uncovered() {
     let config = ProductionModelConfig {
@@ -1167,7 +1112,6 @@ fn resolve_stage_stage_ranges_covering_and_uncovered() {
     assert!(resolution.productivity.is_none());
 }
 
-/// precomputed config returns PrecomputedHyperplanes source.
 #[test]
 fn precomputed_config_returns_precomputed_source() {
     let hydro = make_hydro(0, HydroGenerationModel::Fpha);
@@ -1178,8 +1122,8 @@ fn precomputed_config_returns_precomputed_source() {
 
 // ── Computed-source integration tests ─────────────────────────────────────
 
-/// Sobradinho-style hydro with all computed prerequisites, matching the known-valid
-/// fixture from `fpha_fitting.rs`. Used for end-to-end computed-source tests.
+/// Sobradinho-style hydro with all computed prerequisites — the known-valid fit
+/// fixture (mirrors `fpha_fitting.rs`).
 fn make_sobradinho_computed_hydro(id: i32) -> cobre_core::entities::hydro::Hydro {
     let mut hydro = make_hydro(id, HydroGenerationModel::Fpha);
     hydro.name = format!("Sobradinho{id}");
@@ -1194,8 +1138,7 @@ fn make_sobradinho_computed_hydro(id: i32) -> cobre_core::entities::hydro::Hydro
     hydro
 }
 
-/// Four-point VHA geometry rows spanning volumes 100.0 to 20_000.0 hm³ and heights
-/// 386.5 to 400.0 m. Mirrors the Sobradinho-style fixture used in `fpha_fitting.rs`.
+/// Four-point VHA geometry rows (Sobradinho-style, mirrors `fpha_fitting.rs`).
 fn make_sobradinho_geometry_rows(hydro_id: i32) -> Vec<HydroGeometryRow> {
     vec![
         HydroGeometryRow {
@@ -1225,10 +1168,6 @@ fn make_sobradinho_geometry_rows(hydro_id: i32) -> Vec<HydroGeometryRow> {
     ]
 }
 
-/// Computed-source end-to-end: a hydro with all prerequisites and Sobradinho-style geometry
-/// produces a valid `Fpha` model with 3–10 planes and correct coefficient signs.
-///
-/// Tests `fit_planes_for_hydro` + `resolve_stage_model` together.
 #[test]
 fn computed_source_end_to_end_produces_valid_fpha_planes() {
     let hydro = make_sobradinho_computed_hydro(0);
@@ -1240,7 +1179,6 @@ fn computed_source_end_to_end_produces_valid_fpha_planes() {
     let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
     geometry_map.insert(EntityId::from(0), geo_refs);
 
-    // Fit planes once (simulating the per-entry fit in resolve_production_models).
     let layout =
         find_fpha_config_for_stage(&config, &stage).expect("computed config covers stage 0");
     let fit_result = super::fit_planes_for_hydro(
@@ -1256,11 +1194,9 @@ fn computed_source_end_to_end_produces_valid_fpha_planes() {
     .expect("fit_planes_for_hydro must succeed for valid Sobradinho-style input");
     let planes = &fit_result.planes;
 
-    // The fitter derives planes from the convex hull of the production cloud,
-    // so the count is the number of distinct upper-envelope hull faces rather
-    // than a dense tangent candidate set. The hull-based invariant is at least
-    // one plane with valid coefficient signs (migrated from the former
-    // tangent-derived 3–10 count).
+    // The hull-based fitter emits one plane per distinct upper-envelope hull
+    // face, so the count is not fixed; assert only that at least one plane
+    // exists with valid coefficient signs.
     assert!(
         !planes.is_empty(),
         "expected at least one plane, got {}",
@@ -1289,7 +1225,6 @@ fn computed_source_end_to_end_produces_valid_fpha_planes() {
         );
     }
 
-    // Verify resolve_stage_model correctly wraps the cached planes.
     let empty_hyperplane_map: HashMap<(EntityId, Option<i32>), Vec<&FphaHyperplaneRow>> =
         HashMap::new();
     let model = super::resolve_stage_model(
@@ -1317,14 +1252,11 @@ fn computed_source_end_to_end_produces_valid_fpha_planes() {
     }
 }
 
-/// Round-trip: computed-FPHA export rows written to parquet and re-read via
-/// `parse_fpha_hyperplanes` reconstruct the fitted planes to within 1e-9.
-///
-/// The computed path writes the α-scaled coefficients verbatim with the IO
-/// `kappa` column pinned to 1.0, so the precomputed reader's reconstruction
-/// (`intercept = gamma_0 * kappa`, gradients pass through) reproduces the
-/// fitted planes exactly — proving the kappa column round-trips without
-/// re-scaling the already-corrected coefficients.
+/// Computed-FPHA export rows round-trip through `parse_fpha_hyperplanes`: the
+/// computed path writes α-scaled coefficients with the IO `kappa` column pinned
+/// to 1.0, so the precomputed reader's `intercept = gamma_0 * kappa`
+/// reconstruction reproduces the fitted planes without re-scaling the
+/// already-corrected coefficients.
 #[test]
 fn computed_export_rows_round_trip_through_parquet() {
     let hydro = make_sobradinho_computed_hydro(0);
@@ -1379,8 +1311,6 @@ fn computed_export_rows_round_trip_through_parquet() {
         "re-read row count must match fitted plane count"
     );
 
-    // Reconstruct each plane exactly as the precomputed reader does:
-    // intercept = gamma_0 * kappa; the gradients pass through unchanged.
     for (row, fitted) in read_rows.iter().zip(fitted_planes) {
         let reconstructed = FphaPlane {
             intercept: row.gamma_0 * row.kappa,
@@ -1400,14 +1330,8 @@ fn computed_export_rows_round_trip_through_parquet() {
     }
 }
 
-/// Mixed precomputed + computed sources: both hydros resolve to valid `Fpha` models and
-/// provenance is correctly differentiated by source.
-///
-/// Hydro 0: `source: "precomputed"` with 3 manually-constructed hyperplane rows.
-/// Hydro 1: `source: "computed"` with Sobradinho-style geometry.
 #[test]
 fn mixed_precomputed_and_computed_sources_resolve_correctly() {
-    // Hydro 0: precomputed FPHA.
     let hydro0 = make_hydro(0, HydroGenerationModel::Fpha);
     let config0 = precomputed_fpha_config(0);
 
@@ -1421,7 +1345,6 @@ fn mixed_precomputed_and_computed_sources_resolve_correctly() {
         vec![&precomp_row_a, &precomp_row_b, &precomp_row_c],
     );
 
-    // Hydro 1: computed FPHA.
     let hydro1 = make_sobradinho_computed_hydro(1);
     let config1 = computed_fpha_config(1);
 
@@ -1432,7 +1355,6 @@ fn mixed_precomputed_and_computed_sources_resolve_correctly() {
 
     let stage = make_stage(0);
 
-    // Determine sources.
     let src0 = determine_source(&hydro0, Some(&config0)).expect("hydro0 source");
     let src1 = determine_source(&hydro1, Some(&config1)).expect("hydro1 source");
     assert_eq!(
@@ -1446,7 +1368,6 @@ fn mixed_precomputed_and_computed_sources_resolve_correctly() {
         "hydro 1 must be ComputedFromGeometry"
     );
 
-    // Fit computed planes for hydro 1.
     let layout1 =
         find_fpha_config_for_stage(&config1, &stage).expect("computed config covers stage 0");
     let computed_fit = super::fit_planes_for_hydro(
@@ -1461,7 +1382,6 @@ fn mixed_precomputed_and_computed_sources_resolve_correctly() {
     )
     .expect("fit_planes_for_hydro must succeed for hydro 1");
 
-    // Resolve stage model for hydro 0 (precomputed path).
     let model0 = super::resolve_stage_model(
         &hydro0,
         &stage,
@@ -1473,7 +1393,6 @@ fn mixed_precomputed_and_computed_sources_resolve_correctly() {
     )
     .expect("resolve_stage_model must succeed for hydro 0 (precomputed)");
 
-    // Resolve stage model for hydro 1 (computed path, cached planes).
     let empty_hyperplane_map: HashMap<(EntityId, Option<i32>), Vec<&FphaHyperplaneRow>> =
         HashMap::new();
     let model1 = super::resolve_stage_model(
@@ -1487,7 +1406,6 @@ fn mixed_precomputed_and_computed_sources_resolve_correctly() {
     )
     .expect("resolve_stage_model must succeed for hydro 1 (computed)");
 
-    // Both models must be Fpha.
     assert!(
         matches!(model0, ResolvedProductionModel::Fpha { .. }),
         "hydro 0 must resolve to Fpha, got {model0:?}"
@@ -1497,7 +1415,6 @@ fn mixed_precomputed_and_computed_sources_resolve_correctly() {
         "hydro 1 must resolve to Fpha, got {model1:?}"
     );
 
-    // Provenance in canonical id-sorted order: [(id=0, Precomputed), (id=1, Computed)].
     assert_eq!(
         src0,
         ProductionModelSource::PrecomputedHyperplanes,
@@ -1510,8 +1427,6 @@ fn mixed_precomputed_and_computed_sources_resolve_correctly() {
     );
 }
 
-/// Computed-source all-stages-same: three stages all receive plane vectors with identical
-/// coefficients, confirming that the outer loop fits once and clones for every stage.
 #[test]
 fn computed_source_all_stages_produce_identical_planes() {
     let hydro = make_sobradinho_computed_hydro(0);
@@ -1522,10 +1437,8 @@ fn computed_source_all_stages_produce_identical_planes() {
     let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
     geometry_map.insert(EntityId::from(0), geo_refs);
 
-    // Three study stages.
     let stages = [make_stage(0), make_stage(1), make_stage(2)];
 
-    // Fit once.
     let layout =
         find_fpha_config_for_stage(&config, &stages[0]).expect("computed config covers stage 0");
     let cached_fit = super::fit_planes_for_hydro(
@@ -1543,7 +1456,6 @@ fn computed_source_all_stages_produce_identical_planes() {
     let empty_hyperplane_map: HashMap<(EntityId, Option<i32>), Vec<&FphaHyperplaneRow>> =
         HashMap::new();
 
-    // Resolve for each stage and collect planes.
     let stage_planes: Vec<Vec<FphaPlane>> = stages
         .iter()
         .map(|stage| {
@@ -1570,7 +1482,6 @@ fn computed_source_all_stages_produce_identical_planes() {
         "must have plane vectors for 3 stages"
     );
 
-    // All stages must have the same plane count.
     let expected_count = stage_planes[0].len();
     for (s, planes) in stage_planes.iter().enumerate() {
         assert_eq!(
@@ -1581,7 +1492,6 @@ fn computed_source_all_stages_produce_identical_planes() {
         );
     }
 
-    // Planes must be bitwise-identical across stages (cloned from the same source).
     for (s, planes) in stage_planes.iter().enumerate().skip(1) {
         for (p, plane) in planes.iter().enumerate() {
             assert_eq!(
@@ -1592,13 +1502,11 @@ fn computed_source_all_stages_produce_identical_planes() {
     }
 }
 
-/// `validate_computed_prerequisites`: missing `efficiency` returns `SddpError::Validation`
-/// with a message containing both "efficiency" and the hydro name "TestHydro".
 #[test]
 fn computed_source_missing_efficiency_returns_validation_error() {
     let mut hydro = make_computed_hydro(0);
     hydro.name = "TestHydro".to_string();
-    hydro.efficiency = None; // remove efficiency to trigger prerequisite failure
+    hydro.efficiency = None;
 
     let rows = make_geometry_rows(0);
     let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
@@ -1618,12 +1526,10 @@ fn computed_source_missing_efficiency_returns_validation_error() {
     );
 }
 
-/// `validate_computed_prerequisites`: missing `hydraulic_losses` returns `SddpError::Validation`
-/// with a message containing "hydraulic_losses" and the hydro name.
 #[test]
 fn computed_source_missing_losses_returns_validation_error() {
     let mut hydro = make_computed_hydro(0);
-    hydro.hydraulic_losses = None; // remove losses to trigger prerequisite failure
+    hydro.hydraulic_losses = None;
 
     let rows = make_geometry_rows(0);
     let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
@@ -1646,26 +1552,21 @@ fn computed_source_missing_losses_returns_validation_error() {
 
 // ── Stage-aware per-entry fitting tests ───────────────────────────────────
 
-/// Build a single-hydro geometry map for the Sobradinho-style fixture.
 fn sobradinho_geometry_map(rows: &[HydroGeometryRow]) -> HashMap<EntityId, Vec<&HydroGeometryRow>> {
     let mut map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
     map.insert(rows[0].hydro_id, rows.iter().collect());
     map
 }
 
-/// An empty tailrace-families map: every hydro falls back to its entity
-/// `TailraceModel` (the inert fallback). Used by the per-entry fit tests that
-/// exercise the config/window dedup, which is independent of the families
-/// path.
+/// An empty tailrace-families map — every hydro falls back to its entity
+/// `TailraceModel` (the inert fallback).
 fn empty_families_map() -> HashMap<EntityId, TailraceFamilies> {
     HashMap::new()
 }
 
-/// A minimal single-hydro `System` plus a flat reference-fraction resolver,
-/// the inputs `fit_computed_planes_per_stage` needs for downstream-level
-/// resolution. The hydro has no `downstream_id`, so the resolver returns
-/// `None` and the families path (when used) sees an unresolved level — the
-/// fit tests below feed an empty families map, so the level is unused.
+/// A minimal single-hydro `System` + flat reference-fraction resolver for
+/// `fit_computed_planes_per_stage`. The hydro has no `downstream_id`, so the
+/// downstream level resolves to `None` (unused with an empty families map).
 fn entity_fit_context(
     hydro: &cobre_core::entities::hydro::Hydro,
 ) -> (System, HydroReferenceVolumeFractions) {
@@ -1696,16 +1597,12 @@ fn computed_layout_with_window(min: Option<f64>, max: Option<f64>) -> FphaColumn
     }
 }
 
-/// Per-range fits differ: two `StageRange`s carrying different
-/// `fitting_window`s yield non-identical plane sets for stages in range A vs
-/// range B.
 #[test]
 fn per_range_fits_differ_when_windows_differ() {
     let hydro = make_sobradinho_computed_hydro(0);
     let rows = make_sobradinho_geometry_rows(0);
     let geometry_map = sobradinho_geometry_map(&rows);
 
-    // Range A (stages 0-1): narrow low window. Range B (stages 2-3): wide.
     let config = ProductionModelConfig {
         hydro_id: EntityId::from(0),
         selection_mode: SelectionMode::StageRanges {
@@ -1753,8 +1650,6 @@ fn per_range_fits_differ_when_windows_differ() {
     )
     .expect("per-stage fit must succeed");
 
-    // Stages in range A (0,1) share one plane set; stages in range B (2,3)
-    // share another. The two range plane sets must differ.
     assert_eq!(per_stage[0], per_stage[1], "range A stages must match");
     assert_eq!(per_stage[2], per_stage[3], "range B stages must match");
     assert_ne!(
@@ -1763,8 +1658,6 @@ fn per_range_fits_differ_when_windows_differ() {
     );
 }
 
-/// Per-season fits differ: two season configs with different windows yield
-/// distinct plane sets for stages mapping to each season.
 #[test]
 fn per_season_fits_differ_when_season_configs_differ() {
     let hydro = make_sobradinho_computed_hydro(0);
@@ -1827,16 +1720,12 @@ fn per_season_fits_differ_when_season_configs_differ() {
     );
 }
 
-/// Single-config dedup: a hydro whose `SelectionMode` resolves to one config
-/// for all stages is fitted once — every stage carries the identical plane
-/// set and emits per-stage export rows.
 #[test]
 fn single_config_dedup_yields_identical_planes_across_stages() {
     let hydro = make_sobradinho_computed_hydro(0);
     let rows = make_sobradinho_geometry_rows(0);
     let geometry_map = sobradinho_geometry_map(&rows);
 
-    // One open-ended range covering all stages with one config.
     let config = computed_fpha_config(0);
 
     let stages = [make_stage(0), make_stage(1), make_stage(2)];
@@ -1879,9 +1768,6 @@ fn single_config_dedup_yields_identical_planes_across_stages() {
     );
 }
 
-/// Export rows carry `stage_id = Some(stage.id)` and are ordered canonically
-/// by `(stage_id, plane_id)` (single-hydro fixture upholds the
-/// `(hydro_id, stage_id, plane_id)` global order).
 #[test]
 fn export_rows_carry_stage_id_and_canonical_order() {
     let hydro = make_sobradinho_computed_hydro(0);
@@ -1912,7 +1798,6 @@ fn export_rows_carry_stage_id_and_canonical_order() {
     )
     .expect("fit must succeed");
 
-    // Every row carries a concrete stage_id (never None for computed FPHA).
     for row in &export_rows {
         assert!(
             row.stage_id.is_some(),
@@ -1920,7 +1805,6 @@ fn export_rows_carry_stage_id_and_canonical_order() {
         );
     }
 
-    // Rows must be sorted by (hydro_id, stage_id, plane_id).
     let keys: Vec<(i32, Option<i32>, i32)> = export_rows
         .iter()
         .map(|r| (r.hydro_id.0, r.stage_id, r.plane_id))
@@ -1932,7 +1816,6 @@ fn export_rows_carry_stage_id_and_canonical_order() {
         "export rows must be ordered by (hydro_id, stage_id, plane_id)"
     );
 
-    // The covered stage ids are exactly {0, 1, 2}.
     let mut seen_stages: Vec<i32> = export_rows.iter().filter_map(|r| r.stage_id).collect();
     seen_stages.sort_unstable();
     seen_stages.dedup();
@@ -1943,15 +1826,12 @@ fn export_rows_carry_stage_id_and_canonical_order() {
     );
 }
 
-/// A `SelectionMode` entry mapping no config to a stage (coverage gap) →
-/// `SddpError::Validation`; stages are never silently dropped.
 #[test]
 fn coverage_gap_returns_validation_error() {
     let hydro = make_sobradinho_computed_hydro(0);
     let rows = make_sobradinho_geometry_rows(0);
     let geometry_map = sobradinho_geometry_map(&rows);
 
-    // Range covers only stages [0, 1]; stage 2 falls in a gap.
     let config = ProductionModelConfig {
         hydro_id: EntityId::from(0),
         selection_mode: SelectionMode::StageRanges {
@@ -1994,7 +1874,7 @@ fn coverage_gap_returns_validation_error() {
     );
 }
 
-// ── long-term mean inflow (long-term mean inflow) for the lateral secant ────────────────────
+// ── long-term mean inflow for the lateral secant ────────────────────
 
 fn inflow_row(hydro_id: i32, day: u32, value_m3s: f64) -> InflowHistoryRow {
     InflowHistoryRow {
@@ -2004,8 +1884,6 @@ fn inflow_row(hydro_id: i32, day: u32, value_m3s: f64) -> InflowHistoryRow {
     }
 }
 
-/// A hydro with an inflow history yields long-term mean inflow = the canonical-order mean of its
-/// `value_m3s` series, and only its own rows are summed (other hydros ignored).
 #[test]
 fn long_term_mean_inflow_is_per_hydro_canonical_mean() {
     let rows = vec![
@@ -2019,9 +1897,8 @@ fn long_term_mean_inflow_is_per_hydro_canonical_mean() {
         .build()
         .expect("valid system");
 
-    // mean(100, 200, 300) = 200. This long-term mean inflow feeds S_max = 2·long-term mean inflow at the fit call
-    // site; the long-term mean inflow→S_max mapping is the secant's `resolve_s_max` contract,
-    // exercised in the `fpha_fitting::secant` unit tests.
+    // mean(100, 200, 300) = 200. This feeds S_max = 2·mean at the fit site
+    // (resolve_s_max's contract, exercised in the fpha_fitting::secant tests).
     let long_term_mean_inflow_m3s = super::long_term_mean_inflow(&system, EntityId::from(1));
     assert_eq!(
         long_term_mean_inflow_m3s, 200.0,
@@ -2029,7 +1906,6 @@ fn long_term_mean_inflow_is_per_hydro_canonical_mean() {
     );
 }
 
-/// A hydro with no inflow history yields long-term mean inflow = 0.0 (the fallback sentinel).
 #[test]
 fn long_term_mean_inflow_empty_history_is_zero() {
     let system = SystemBuilder::new().build().expect("empty system is valid");
@@ -2040,7 +1916,6 @@ fn long_term_mean_inflow_empty_history_is_zero() {
     );
 }
 
-/// Determinism: the long-term mean inflow mean is independent of inflow-row declaration order.
 #[test]
 fn long_term_mean_inflow_is_order_independent() {
     let ascending = vec![
@@ -2072,7 +1947,6 @@ fn long_term_mean_inflow_is_order_independent() {
 
 // ── resolve_downstream_level tests ───────────────────────────────────────
 
-/// The single bus (`id = 10`) every test hydro injects into.
 fn make_bus() -> Bus {
     Bus {
         id: EntityId::from(10),
@@ -2100,7 +1974,6 @@ fn flat_reference_fractions(
     cobre_io::extensions::build_hydro_reference_volumes_resolved(&resolved, 0.0)
 }
 
-/// A geometry map carrying one plant's two-point VHA rows.
 fn geometry_map_for(rows: &[HydroGeometryRow]) -> HashMap<EntityId, Vec<&HydroGeometryRow>> {
     let mut map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
     for r in rows {
@@ -2109,10 +1982,9 @@ fn geometry_map_for(rows: &[HydroGeometryRow]) -> HashMap<EntityId, Vec<&HydroGe
     map
 }
 
-/// `downstream_id == None` ⇒ `None` (no downstream reservoir to couple).
 #[test]
 fn resolve_downstream_level_no_downstream_is_none() {
-    let hydro = make_hydro(0, HydroGenerationModel::Fpha); // downstream_id = None
+    let hydro = make_hydro(0, HydroGenerationModel::Fpha);
     let stage = make_stage(0);
     let system = SystemBuilder::new()
         .buses(vec![make_bus()])
@@ -2126,11 +1998,8 @@ fn resolve_downstream_level_no_downstream_is_none() {
     assert!(level.is_none(), "no downstream_id must resolve to None");
 }
 
-/// A resolved downstream plant with geometry + fraction yields
-/// `Some(forebay.height(v_ref))`, matching an independent `ForebayTable`.
 #[test]
 fn resolve_downstream_level_matches_independent_forebay_height() {
-    // Upstream plant 0 discharges into downstream plant 1.
     let mut upstream = make_hydro(0, HydroGenerationModel::Fpha);
     upstream.downstream_id = Some(EntityId::from(1));
     let downstream = make_hydro(1, HydroGenerationModel::ConstantProductivity);
@@ -2164,7 +2033,6 @@ fn resolve_downstream_level_matches_independent_forebay_height() {
     );
 }
 
-/// A downstream plant absent from the geometry map ⇒ `None`.
 #[test]
 fn resolve_downstream_level_missing_geometry_is_none() {
     let mut upstream = make_hydro(0, HydroGenerationModel::Fpha);
@@ -2178,7 +2046,6 @@ fn resolve_downstream_level_missing_geometry_is_none() {
         .build()
         .expect("system");
 
-    // Empty geometry map: the downstream plant has no VHA rows.
     let geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
     let fractions = flat_reference_fractions(0.5, system.hydros());
 
@@ -2192,9 +2059,9 @@ fn resolve_downstream_level_missing_geometry_is_none() {
 
 // ── Tailrace-source resolution + dedup-key tests ──────────────────────────
 
-/// A hydro absent from the families map resolves to `TailraceSource::Entity`
-/// carrying the entity `TailraceModel` — the inert fallback. Per-plant
-/// fallback: the global presence of a table for other plants is irrelevant.
+/// A hydro absent from the families map falls back to `TailraceSource::Entity`
+/// (its entity `TailraceModel`) — a per-plant fallback: a table for other plants
+/// is irrelevant.
 #[test]
 fn resolve_tailrace_source_absent_from_map_is_entity() {
     let hydro = make_sobradinho_computed_hydro(0);
@@ -2239,12 +2106,10 @@ fn resolve_tailrace_source_absent_from_map_is_entity() {
     }
 }
 
-/// Two `SelectionMode` entries of one hydro whose downstream reference levels
-/// differ (multi-family table) produce DISTINCT plane sets: the dedup cache
-/// key includes `downstream_level_m`, so the two entries are not collapsed to
-/// one fit. Stage 0 resolves a low downstream level (lowest family), stage 1 a
-/// high one (highest family); the two families carry different tailrace
-/// heights, so the fitted planes differ.
+/// The dedup cache key includes `downstream_level_m`, so two entries of one
+/// hydro resolving DISTINCT downstream levels (via a multi-family table) are not
+/// collapsed to one fit — their fitted planes differ. (Dropping the level from
+/// the key would wrongly collapse them.)
 #[test]
 fn dedup_key_separates_distinct_downstream_levels() {
     // Upstream computed-FPHA plant 0 discharges into downstream plant 1.
@@ -2307,8 +2172,6 @@ fn dedup_key_separates_distinct_downstream_levels() {
     let families_map =
         super::build_tailrace_families_map(&tailrace_rows).expect("families map builds");
 
-    // Stage 0 → season 0 (fraction 0.0 → level 380), stage 1 → season 1
-    // (fraction 1.0 → level 420) for the downstream plant.
     let mut stage0 = make_stage(0);
     stage0.season_id = Some(0);
     let mut stage1 = make_stage(1);
@@ -2355,7 +2218,6 @@ fn dedup_key_separates_distinct_downstream_levels() {
     )
     .expect("per-stage fit succeeds");
 
-    // Sanity: the two stages resolved distinct downstream levels.
     let lvl0 =
         resolve_downstream_level(&upstream, stage0.index, &system, &geometry_map, &fractions)
             .expect("stage 0 level");
@@ -2374,13 +2236,11 @@ fn dedup_key_separates_distinct_downstream_levels() {
     );
 }
 
-/// Capture-all: `fit_computed_planes_per_stage` records ONE
-/// `FphaDeviationDiagnostic` per DISTINCT fit, regardless of the warn
-/// threshold. Two stages resolving distinct downstream levels yield two
-/// distinct fits, so the diagnostics vector holds exactly two entries — even
-/// for a well-fit (under-threshold) concave surface that would raise no
-/// warning. A regression that re-introduced the warn-worthy push filter would
-/// drop the under-threshold entries and fail the count.
+/// Capture-all: `fit_computed_planes_per_stage` records one
+/// `FphaDeviationDiagnostic` per DISTINCT fit regardless of the warn threshold —
+/// even a well-fit (under-threshold) surface is captured. A regression
+/// re-introducing a warn-worthy push filter would drop the under-threshold
+/// entries and fail the count.
 #[test]
 fn fit_computed_planes_per_stage_records_every_distinct_fit() {
     let mut upstream = make_sobradinho_computed_hydro(0);
@@ -2488,12 +2348,9 @@ fn fit_computed_planes_per_stage_records_every_distinct_fit() {
         2,
         "one diagnostic per distinct fit must be captured (capture-all), not only warn-worthy ones"
     );
-    // The diagnostics are tagged with the first stage each fit covers (0 and 1).
+    // Each fit is tagged with the first stage it covers (0 and 1).
     assert_eq!(diagnostics[0].stage_id, 0);
     assert_eq!(diagnostics[1].stage_id, 1);
-    // At least one fit of this well-fit concave surface is under the warn
-    // threshold — the entry it is still captured (capture-all), confirming the
-    // push is not gated on `exceeds_warn_threshold()`.
     assert!(
         diagnostics
             .iter()
@@ -2502,12 +2359,10 @@ fn fit_computed_planes_per_stage_records_every_distinct_fit() {
     );
 }
 
-/// Carry-up + warn split through the resolver: every distinct computed-FPHA
-/// fit reaches `fpha_fit_deviations` (capture-all), in canonical
-/// `(hydro, stage)` order, with `hydro_id` recovered from the outer zip — even
-/// for an under-threshold fit that raises no `tracing::warn!`. The warn
-/// predicate (`exceeds_warn_threshold()`) is exercised in `deviation.rs`; here
-/// we assert the carried vector is the full superset.
+/// Every distinct computed-FPHA fit reaches `fpha_fit_deviations` (capture-all)
+/// in canonical `(hydro, stage)` order, with `hydro_id` from the outer zip —
+/// even an under-threshold fit that raises no warn. The warn predicate itself
+/// is exercised in `deviation.rs`.
 #[test]
 fn resolver_carries_every_fit_deviation_in_canonical_order() {
     let hydro = make_sobradinho_computed_hydro(0);
@@ -2547,12 +2402,8 @@ fn resolver_carries_every_fit_deviation_in_canonical_order() {
     );
 }
 
-/// Declaration-order invariance: `resolve_production_models_from_artifacts`
-/// yields bit-identical `export_rows` when the hydros and tailrace-curve rows
-/// are supplied in shuffled declaration orders.
 #[test]
 fn export_rows_are_declaration_order_invariant_with_tailrace() {
-    // One computed-FPHA hydro (id=0) with a single-family tailrace table.
     fn build_artifacts(
         tailrace_rows: Vec<TailraceCurveRow>,
         geo_rows: Vec<HydroGeometryRow>,
@@ -2581,10 +2432,8 @@ fn export_rows_are_declaration_order_invariant_with_tailrace() {
     let mut geo_rev = geo_fwd.clone();
     geo_rev.reverse();
 
-    // Single-segment single family: a flat 2.0 m tailrace covering the full
-    // sampled outflow range. The tailrace rows are supplied in canonical
-    // `(hydro_id, family_id, segment_id)` order (as the loader produces them);
-    // the shuffled dimension here is the geometry input.
+    // Flat single-segment tailrace in canonical order (as the loader produces
+    // it); the shuffled dimension under test is the geometry input.
     let segment = TailraceCurveRow {
         hydro_id: EntityId::from(0),
         family_id: 1,
@@ -2631,8 +2480,6 @@ fn export_rows_are_declaration_order_invariant_with_tailrace() {
 
 // ── reference_volume resolution ─────────────────────────────────────────
 
-/// Build a single-`StageRange` config covering `[0, ∞)` with the given
-/// `reference_volume`.
 fn config_with_reference_volume(rv: Option<ReferenceVolume>) -> ProductionModelConfig {
     ProductionModelConfig {
         hydro_id: EntityId::from(1),
@@ -2668,8 +2515,6 @@ fn find_reference_volume_for_stage_returns_none_when_unset() {
 
 #[test]
 fn find_reference_volume_for_stage_returns_none_outside_coverage() {
-    // Range covers stages [5, 10]; stage 0 is uncovered, so the finder
-    // returns `None` exactly as `find_fpha_config_for_stage` does.
     let config = ProductionModelConfig {
         hydro_id: EntityId::from(1),
         selection_mode: SelectionMode::StageRanges {
@@ -2706,8 +2551,8 @@ fn resolve_reference_volume_hm3_none_reproduces_065_fraction() {
     let v_min = 100.0_f64;
     let v_max = 200.0_f64;
     let resolved = resolve_reference_volume_hm3(None, v_min, v_max);
-    // Bit-identical to the legacy inline `0.65`-fraction formula: this is the
-    // byte-identity guarantee the consumer rewrite relies on.
+    // Bit-identical to the 0.65-fraction formula — the byte-identity guarantee
+    // the consumer relies on.
     let expected = v_min + 0.65 * (v_max - v_min);
     assert_eq!(resolved.to_bits(), expected.to_bits());
 }
@@ -2724,8 +2569,6 @@ fn resolve_reference_volume_hm3_degenerate_band_is_not_nan() {
 
 // ── Resolver-wiring tests (the JSON-sourced reference volume) ─────────────
 
-/// A single constant-productivity hydro with the given storage band, plus a
-/// two-stage study, built for the resolver-wiring tests below.
 fn ref_vol_system(v_min: f64, v_max: f64) -> System {
     let mut hydro = make_hydro(0, HydroGenerationModel::ConstantProductivity);
     hydro.min_storage_hm3 = v_min;
@@ -2738,8 +2581,6 @@ fn ref_vol_system(v_min: f64, v_max: f64) -> System {
         .expect("single-hydro two-stage system builds")
 }
 
-/// Artifacts carrying a single `StageRange` production config for hydro 0
-/// covering `[0, ∞)` with the given `reference_volume`.
 fn ref_vol_artifacts(rv: Option<ReferenceVolume>) -> cobre_io::CaseArtifacts {
     cobre_io::CaseArtifacts {
         production_models: vec![ProductionModelConfig {
@@ -2759,9 +2600,8 @@ fn ref_vol_artifacts(rv: Option<ReferenceVolume>) -> cobre_io::CaseArtifacts {
     }
 }
 
-/// With no `reference_volume` declared, the resolver returns
-/// `v_min + 0.65·(v_max − v_min)` bit-for-bit for every plant/stage — the
-/// byte-identity guarantee the baseline regression depends on.
+/// With no `reference_volume` declared, the resolver returns the 0.65-fraction
+/// hm³ bit-for-bit — the byte-identity a baseline regression depends on.
 #[test]
 fn resolver_default_path_returns_065_fraction_hm3_bit_for_bit() {
     let v_min = 100.0_f64;
@@ -2784,7 +2624,6 @@ fn resolver_default_path_returns_065_fraction_hm3_bit_for_bit() {
     }
 }
 
-/// A declared absolute `volume_hm3: 800.0` flows through the resolver `get`.
 #[test]
 fn resolver_declared_absolute_flows_through_get() {
     let system = ref_vol_system(100.0, 2000.0);
@@ -2813,16 +2652,12 @@ fn resolver_declared_percentile_resolves_against_band() {
     assert_eq!(resolver.get(EntityId::from(0), 0), 150.0);
 }
 
-/// A study horizon may begin in any season — not only season 0 — and may wrap
-/// around the seasonal cycle. With a SEASONAL `reference_volume` config, the
-/// value stored at each 0-based study position reflects THAT stage's
-/// `season_id` (selected by `find_reference_volume_for_stage`), and the resolver
-/// is keyed by study position — never by `season_id` or by `stage.index`. So a
-/// horizon starting mid-cycle resolves each stage's own season value, and the
-/// energy-conversion build (which counts stages from 0, proven by
-/// `per_season_override_produces_different_v_ref_per_stage`) reads them back in
-/// order. This exercises the real `resolve_production_models_from_artifacts`
-/// build end-to-end.
+/// A study horizon may begin in any season and wrap the cycle. With a SEASONAL
+/// `reference_volume` config, the resolver is keyed by 0-based study position —
+/// never by `season_id` or `stage.index` — so each position resolves THAT
+/// stage's own season value (via `find_reference_volume_for_stage`). A
+/// season-keyed or index-keyed lookup would mis-assign for a horizon not
+/// starting at season 0.
 #[test]
 fn seasonal_reference_volume_supports_nonzero_start_season() {
     let (v_min, v_max) = (100.0_f64, 200.0_f64);
@@ -2874,9 +2709,7 @@ fn seasonal_reference_volume_supports_nonzero_start_season() {
             .expect("resolve succeeds");
     let resolver = build_hydro_reference_volumes_resolved(&table, 0.0);
 
-    // Position 0 carries season 2's value (0.2 → 120), position 1 carries
-    // season 1's (0.8 → 180). A season-keyed or stage.index-keyed lookup would
-    // mis-assign these for a horizon that does not start at season 0.
+    // Position 0 carries season 2's value (0.2 → 120), position 1 season 1's (0.8 → 180).
     assert_eq!(
         resolver.get(EntityId::from(0), 0),
         v_min + 0.2 * (v_max - v_min),
