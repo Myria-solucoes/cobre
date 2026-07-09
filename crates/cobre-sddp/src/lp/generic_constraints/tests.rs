@@ -353,6 +353,8 @@ fn call_with_cascade(
 /// `col_pumping_start` from a `StageLayout`-style reserved range — so the
 /// pumping arms exercise their real column arithmetic and consumption-rate
 /// coefficient instead of the empty fixture used by [`call`].
+// Mirrors the production resolver's argument surface it exercises; bundling
+// into a struct would diverge the test from the real call shape.
 #[allow(clippy::too_many_arguments)]
 fn call_pumping(
     var_ref: VariableRef,

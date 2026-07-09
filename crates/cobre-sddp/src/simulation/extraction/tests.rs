@@ -2754,6 +2754,8 @@ fn extract_optional_entity_types_are_empty_when_absent() {
 // accumulate_category_costs
 // -------------------------------------------------------------------------
 
+// One positional argument per cost category, 1:1 with SimulationCostResult's
+// fields; a builder or params struct would just restate the struct itself.
 #[allow(clippy::too_many_arguments)]
 fn make_cost(
     thermal: f64,

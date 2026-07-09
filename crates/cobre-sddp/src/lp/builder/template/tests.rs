@@ -1319,6 +1319,8 @@ fn anticipated_invariance_system() -> cobre_core::System {
 ///
 /// Uses dense matrix expansion for clarity; the templates are tiny
 /// (`num_cols ~ 20-50`, `num_rows ~ 10-20`) so the O(n^2) memory cost is fine.
+// Paired per-template layout offsets (a/b); a params struct would relocate
+// the arity, not reduce it.
 #[allow(clippy::too_many_arguments)]
 fn assert_lp_equivalence_after_anticipated_swap(
     tpl_a: &cobre_solver::StageTemplate,

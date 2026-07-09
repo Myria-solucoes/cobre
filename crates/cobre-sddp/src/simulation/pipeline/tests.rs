@@ -30,6 +30,8 @@ use crate::{
 /// Thin test helper that mirrors the old `simulate` free-function signature
 /// and delegates to `SimulationState::run`. Allows all 24 existing test call
 /// sites to stay unchanged apart from the function name.
+// The arity mirrors the retired free-function signature so the existing call
+// sites compile unchanged; a params struct would churn all of them.
 #[allow(clippy::too_many_arguments)]
 fn run_simulate<S, C: cobre_comm::Communicator>(
     workspaces: &mut [SolverWorkspace<S>],
@@ -1931,6 +1933,8 @@ mod dcs_simulation {
 
     /// Solve one simulation stage with the given `dcs` option and `frozen`
     /// template, returning `(immediate_cost, SimulationStageResult)`.
+    // Builds the full two-branch (DCS vs frozen) stage-solve fixture inline;
+    // extracting pieces would scatter the setup the branch comparison reads.
     #[allow(clippy::too_many_lines)]
     fn run_one_sim_stage(
         dcs: Option<DcsParams>,
