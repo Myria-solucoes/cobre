@@ -402,13 +402,7 @@ pub fn standardize_historical_windows(
     for r in inflow_history {
         let season_id = find_season_for_date(&stage_index, r.date)
             .or_else(|| season_map.and_then(|sm| sm.season_for_date(r.date)))
-            .or_else(|| {
-                if season_map.is_none() {
-                    Some(r.date.month0() as usize)
-                } else {
-                    None
-                }
-            });
+            .or_else(|| season_map.is_none().then(|| r.date.month0() as usize));
         if let Some(sid) = season_id
             && let Some(&h) = hydro_id_to_idx.get(&r.hydro_id)
             && let Some(idx) = table_idx(h, r.date.year(), sid)

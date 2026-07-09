@@ -2244,10 +2244,10 @@ fn dlc_forward_oracle_incoming_lags(fx: &DlcFixture) -> Vec<[f64; DLC_N_HYDROS]>
     incoming_per_stage
 }
 
-/// Independent reimplementation of the pre-016 primary-only lag shift: it
-/// accumulates `accumulate_weight`-weighted realized values and, at
-/// `finalize_period`, shifts the lag to the period average — never
-/// consulting `accumulate_downstream` or `rebuild_from_downstream`.
+/// Independent reimplementation of the primary-only lag shift that ignores
+/// `accumulate_downstream`/`rebuild_from_downstream` entirely: it accumulates
+/// `accumulate_weight`-weighted realized values and, at `finalize_period`,
+/// shifts the lag to the period average.
 fn dlc_naive_primary_only_incoming_lags(fx: &DlcFixture) -> Vec<[f64; DLC_N_HYDROS]> {
     let mut lag_state = [
         fx.past_inflows[0].values_m3s[0],

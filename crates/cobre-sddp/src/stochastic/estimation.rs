@@ -510,7 +510,6 @@ fn run_user_ar_estimation(
         observations
     };
 
-    // User AR coefficients are NOT re-estimated here.
     let seasonal_stats =
         estimate_seasonal_stats_with_season_map(&observations, extended, &hydro_ids, season_map)?;
 
@@ -527,7 +526,7 @@ fn run_user_ar_estimation(
             &observations,
             &user_ar_estimates,
             &seasonal_stats,
-            stages,
+            extended,
             &hydro_ids,
             season_map,
         )?

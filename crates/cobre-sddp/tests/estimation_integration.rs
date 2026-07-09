@@ -76,13 +76,20 @@ fn date_to_date32(date: NaiveDate) -> i32 {
 /// `[1st, 1st-of-next-month)` window. Values use a seasonal sine-wave pattern to
 /// give non-trivial autocorrelation structure for PAR(p) fitting.
 fn write_inflow_history(path: &Path) {
+    write_inflow_history_n_years(path, N_YEARS);
+}
+
+/// [`write_inflow_history`], parameterized over the number of years so a caller
+/// can grow the per-season observation count past a fixed minimum-sample
+/// threshold in the correlation-estimation path.
+fn write_inflow_history_n_years(path: &Path, n_years: usize) {
     let schema = inflow_history_schema();
 
     let mut hydro_ids: Vec<i32> = Vec::new();
     let mut dates: Vec<i32> = Vec::new();
     let mut values: Vec<f64> = Vec::new();
 
-    for year in 0..N_YEARS {
+    for year in 0..n_years {
         for month in 0..N_SEASONS {
             let cal_year = START_YEAR + year as i32;
             let cal_month = (month as u32) + 1;
@@ -596,7 +603,6 @@ fn build_system_for_par1(n_hydros: usize) -> cobre_core::System {
     for year in 0..N_OBS_PER_SEASON {
         let cal_year = 2000 + year as i32;
 
-        // January stage: season_id = 0
         stages.push(make_stage(
             stage_index,
             StageSpec {
@@ -623,7 +629,6 @@ fn build_system_for_par1(n_hydros: usize) -> cobre_core::System {
         ));
         stage_index += 1;
 
-        // February stage: season_id = 1
         stages.push(make_stage(
             stage_index,
             StageSpec {
@@ -1224,5 +1229,60 @@ fn user_ar_prestudy_full_year_study_synthesizes_nothing() {
             .filter(|m| m.stage_id < 0)
             .map(|m| m.stage_id)
             .collect::<Vec<_>>()
+    );
+}
+
+/// `UserArHistoryStats`, partial-year study, correlation estimated (no
+/// `scenarios/correlation.json`): September (season 8, the study's first
+/// stage) needs both its AR lags — August and July, seasons 7 and 6 — neither
+/// of which has a study stage of its own; only the pre-study-synthesized
+/// stages carry them. Passing the study-only stage set (rather than the
+/// pre-study-extended set already used for seasonal-stats estimation) to the
+/// correlation call drops every September residual, since the lag lookup
+/// misses both seasons. A history long enough to cross the correlation
+/// module's fixed 30-residual-per-season minimum turns that into an
+/// observable difference: a `season_08` profile appears once the fix is
+/// applied and never appears under the study-only regression.
+///
+/// An in-memory-edit discrimination control (temporarily reverting
+/// `run_user_ar_estimation`'s correlation call to pass `stages` instead of
+/// `extended`, confirming this assertion then fails, then restoring the file
+/// byte-identical) is performed out-of-band during implementation, not as an
+/// automated test path.
+#[test]
+fn user_ar_prestudy_correlation_uses_extended_stages() {
+    const HISTORY_YEARS: usize = 32;
+
+    let dir = TempDir::new().unwrap();
+    let case_dir = dir.path();
+
+    create_minimal_case_skeleton(case_dir, "pacf", 2);
+    write_inflow_history_n_years(
+        &case_dir.join("scenarios/inflow_history.parquet"),
+        HISTORY_YEARS,
+    );
+    write_user_inflow_ar_coefficients(case_dir, 4, 2);
+
+    let system = build_season_mapped_system(8, 4);
+    let config = parse_config(case_dir);
+
+    let (updated, _report, path) = estimate_from_history(system, case_dir, &config)
+        .expect("UserArHistoryStats estimation must succeed");
+
+    assert_eq!(
+        path,
+        cobre_sddp::EstimationPath::UserArHistoryStats,
+        "expected UserArHistoryStats path, got {path:?}"
+    );
+
+    let correlation = updated.correlation();
+    assert!(
+        correlation.profiles.contains_key("season_08"),
+        "expected a season_08 (September) correlation profile once {HISTORY_YEARS} \
+         years of history cross the correlation module's minimum-sample threshold; \
+         a missing profile means correlation estimation dropped every September \
+         residual because its AR lags (August, July) require seasonal stats that \
+         only the pre-study-extended stage set carries, got profiles {:?}",
+        correlation.profiles.keys().collect::<Vec<_>>()
     );
 }

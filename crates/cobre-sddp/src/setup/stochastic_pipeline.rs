@@ -11,10 +11,6 @@ use cobre_stochastic::{OpeningTreeInputs, StochasticContext, context::OpeningTre
 
 use crate::{EstimationPath, EstimationReport, SddpError};
 
-// ---------------------------------------------------------------------------
-// PrepareStochasticResult + prepare_stochastic
-// ---------------------------------------------------------------------------
-
 /// Result of the stochastic preprocessing pipeline.
 #[derive(Debug)]
 pub struct PrepareStochasticResult {
@@ -97,7 +93,6 @@ pub fn build_ncs_factor_entries(
     Vec<cobre_stochastic::normal::precompute::BlockFactorPair>,
 )> {
     use cobre_stochastic::normal::precompute::BlockFactorPair;
-    use std::collections::BTreeSet;
 
     let stochastic_ncs: BTreeSet<cobre_core::EntityId> =
         system.ncs_models().iter().map(|m| m.ncs_id).collect();

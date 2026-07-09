@@ -159,7 +159,6 @@ fn par_a_historical_replay_roundtrip() {
     let transitions: Vec<StageLagTransition> =
         (0..12).map(|_| uniform_monthly_transition()).collect();
 
-    // Standardise the historical library for this single window.
     let mut library = HistoricalScenarioLibrary::new(1, 12, 1, par.max_order(), vec![window_year]);
     standardize_historical_windows(
         &mut library,
