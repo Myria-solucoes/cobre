@@ -61,19 +61,28 @@ pub struct PolicyCutRecord<'a> {
 
 /// One stage's solver basis for policy checkpoint serialization.
 ///
-/// `'a` borrows the status arrays without copying.
+/// `'a` borrows the status arrays without copying. Current writers populate the
+/// `*_canonical` fields (injective, lossless across backends) and leave the
+/// legacy `column_status`/`row_status` empty; those legacy `HiGHS`-code-space
+/// fields stay declared only so old files remain readable.
 #[derive(Debug, Clone)]
 pub struct PolicyBasisRecord<'a> {
     /// Stage index (0-based).
     pub stage_id: u32,
     /// Training iteration that produced this basis.
     pub iteration: u32,
-    /// One status code per LP column (variable). Encoding is solver-specific.
+    /// LEGACY, read-only: per-column status in `HiGHS` code space. Empty in files
+    /// the current writer produces (it emits `col_status_canonical`).
     pub column_status: &'a [u8],
-    /// One status code per LP row (constraint). Encoding is solver-specific.
+    /// LEGACY, read-only: per-row status in `HiGHS` code space. Empty in files the
+    /// current writer produces (it emits `row_status_canonical`).
     pub row_status: &'a [u8],
-    /// Number of trailing rows in `row_status` that correspond to cut rows.
+    /// Number of trailing rows in the row-status vector that correspond to cut rows.
     pub num_cut_rows: u32,
+    /// Injective canonical per-column status (all backend variants, lossless).
+    pub col_status_canonical: &'a [u8],
+    /// Injective canonical per-row status (all backend variants, lossless).
+    pub row_status_canonical: &'a [u8],
 }
 
 /// Payload for writing per-stage visited states to a policy checkpoint.
@@ -232,19 +241,29 @@ pub struct OwnedPolicyCutRecord {
 /// Owned version of [`PolicyBasisRecord`] returned by [`crate::deserialize_stage_basis`].
 ///
 /// Unlike [`PolicyBasisRecord<'a>`], this type owns its status byte vectors so it
-/// can be returned from a deserialization function.
+/// can be returned from a deserialization function. A reader prefers the
+/// `*_canonical` vectors when non-empty and falls back to the legacy
+/// `HiGHS`-code-space vectors for files that predate the canonical fields.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OwnedPolicyBasisRecord {
     /// Stage index (0-based).
     pub stage_id: u32,
     /// Training iteration that produced this basis.
     pub iteration: u32,
-    /// One status code per LP column (variable). Encoding is solver-specific.
+    /// LEGACY, read-only: per-column status in `HiGHS` code space. Empty in files
+    /// the current writer produces.
     pub column_status: Vec<u8>,
-    /// One status code per LP row (constraint). Encoding is solver-specific.
+    /// LEGACY, read-only: per-row status in `HiGHS` code space. Empty in files the
+    /// current writer produces.
     pub row_status: Vec<u8>,
-    /// Number of trailing rows in `row_status` that correspond to cut rows.
+    /// Number of trailing rows in the row-status vector that correspond to cut rows.
     pub num_cut_rows: u32,
+    /// Injective canonical per-column status (all backend variants, lossless);
+    /// empty when the field is absent from the buffer (an old file).
+    pub col_status_canonical: Vec<u8>,
+    /// Injective canonical per-row status (all backend variants, lossless);
+    /// empty when the field is absent from the buffer (an old file).
+    pub row_status_canonical: Vec<u8>,
 }
 
 /// Stage-level metadata and cut records returned by [`crate::deserialize_stage_cuts`].

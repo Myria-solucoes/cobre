@@ -57,6 +57,8 @@ const BASIS_FIELD_NUM_ROWS: u16 = 10;
 const BASIS_FIELD_COLUMN_STATUS: u16 = 12;
 const BASIS_FIELD_ROW_STATUS: u16 = 14;
 const BASIS_FIELD_NUM_CUT_ROWS: u16 = 16;
+const BASIS_FIELD_COL_STATUS_CANONICAL: u16 = 18;
+const BASIS_FIELD_ROW_STATUS_CANONICAL: u16 = 20;
 
 const STATES_FIELD_STAGE_ID: u16 = 4;
 const STATES_FIELD_STATE_DIMENSION: u16 = 6;
@@ -194,9 +196,11 @@ pub fn serialize_stage_cuts(
 /// let record = PolicyBasisRecord {
 ///     stage_id: 0,
 ///     iteration: 5,
-///     column_status: &[0, 1, 2],
-///     row_status: &[1, 1, 0, 0],
+///     column_status: &[],
+///     row_status: &[],
 ///     num_cut_rows: 2,
+///     col_status_canonical: &[0, 1, 2],
+///     row_status_canonical: &[1, 1, 0, 0],
 /// };
 /// let buf = serialize_stage_basis(&record);
 /// assert!(!buf.is_empty());
@@ -204,24 +208,42 @@ pub fn serialize_stage_cuts(
 #[must_use]
 #[allow(clippy::cast_possible_truncation)]
 pub fn serialize_stage_basis(record: &PolicyBasisRecord<'_>) -> Vec<u8> {
-    let estimated =
-        64 + std::mem::size_of_val(record.column_status) + std::mem::size_of_val(record.row_status);
+    let estimated = 64
+        + std::mem::size_of_val(record.column_status)
+        + std::mem::size_of_val(record.row_status)
+        + std::mem::size_of_val(record.col_status_canonical)
+        + std::mem::size_of_val(record.row_status_canonical);
 
     let mut builder = FlatBufferBuilder::with_capacity(estimated);
 
     // Nested vectors must be created before opening the table.
     let col_vec = builder.create_vector(record.column_status);
     let row_vec = builder.create_vector(record.row_status);
+    let col_canonical_vec = builder.create_vector(record.col_status_canonical);
+    let row_canonical_vec = builder.create_vector(record.row_status_canonical);
+
+    // The canonical vectors are the populated ones on a current writer; the
+    // legacy vectors are empty there, so the dimension is the longer of each pair.
+    let num_columns = record
+        .column_status
+        .len()
+        .max(record.col_status_canonical.len()) as u32;
+    let num_rows = record
+        .row_status
+        .len()
+        .max(record.row_status_canonical.len()) as u32;
 
     let root = builder.start_table();
 
     builder.push_slot_always::<u32>(BASIS_FIELD_STAGE_ID, record.stage_id);
     builder.push_slot_always::<u32>(BASIS_FIELD_ITERATION, record.iteration);
-    builder.push_slot_always::<u32>(BASIS_FIELD_NUM_COLUMNS, record.column_status.len() as u32);
-    builder.push_slot_always::<u32>(BASIS_FIELD_NUM_ROWS, record.row_status.len() as u32);
+    builder.push_slot_always::<u32>(BASIS_FIELD_NUM_COLUMNS, num_columns);
+    builder.push_slot_always::<u32>(BASIS_FIELD_NUM_ROWS, num_rows);
     builder.push_slot_always(BASIS_FIELD_COLUMN_STATUS, col_vec);
     builder.push_slot_always(BASIS_FIELD_ROW_STATUS, row_vec);
     builder.push_slot_always::<u32>(BASIS_FIELD_NUM_CUT_ROWS, record.num_cut_rows);
+    builder.push_slot_always(BASIS_FIELD_COL_STATUS_CANONICAL, col_canonical_vec);
+    builder.push_slot_always(BASIS_FIELD_ROW_STATUS_CANONICAL, row_canonical_vec);
 
     let root_offset = builder.end_table(root);
     builder.finish_minimal(root_offset);
@@ -680,15 +702,17 @@ fn deserialize_cut_table(buf: &[u8], cut_table_pos: usize) -> Option<OwnedPolicy
 /// let record = PolicyBasisRecord {
 ///     stage_id: 0,
 ///     iteration: 5,
-///     column_status: &[0, 1, 2],
-///     row_status: &[1, 1, 0, 0],
+///     column_status: &[],
+///     row_status: &[],
 ///     num_cut_rows: 2,
+///     col_status_canonical: &[0, 1, 2],
+///     row_status_canonical: &[1, 1, 0, 0],
 /// };
 /// let buf = serialize_stage_basis(&record);
 /// let owned = deserialize_stage_basis(&buf).expect("round-trip must succeed");
 /// assert_eq!(owned.stage_id, 0);
-/// assert_eq!(owned.column_status, &[0, 1, 2]);
-/// assert_eq!(owned.row_status, &[1, 1, 0, 0]);
+/// assert_eq!(owned.col_status_canonical, &[0, 1, 2]);
+/// assert_eq!(owned.row_status_canonical, &[1, 1, 0, 0]);
 /// ```
 pub fn deserialize_stage_basis(buf: &[u8]) -> Result<OwnedPolicyBasisRecord, OutputError> {
     let ctx = "stage_basis";
@@ -707,29 +731,23 @@ pub fn deserialize_stage_basis(buf: &[u8]) -> Result<OwnedPolicyBasisRecord, Out
         .and_then(|p| read_u32_le(buf, p))
         .unwrap_or(0);
 
-    let column_status = if let Some(col_field_pos) =
-        field_pos(buf, table_pos, vtable_pos, BASIS_FIELD_COLUMN_STATUS)
-    {
-        let vec_pos = follow_uoffset(buf, col_field_pos).ok_or_else(|| {
-            OutputError::serialization(ctx, "invalid uoffset for column_status vector")
+    let read_status_vector = |slot: u16, name: &str| -> Result<Vec<u8>, OutputError> {
+        let Some(field_pos) = field_pos(buf, table_pos, vtable_pos, slot) else {
+            return Ok(Vec::new());
+        };
+        let vec_pos = follow_uoffset(buf, field_pos).ok_or_else(|| {
+            OutputError::serialization(ctx, format!("invalid uoffset for {name} vector"))
         })?;
         read_u8_vector(buf, vec_pos)
-            .ok_or_else(|| OutputError::serialization(ctx, "column_status vector truncated"))?
-    } else {
-        Vec::new()
+            .ok_or_else(|| OutputError::serialization(ctx, format!("{name} vector truncated")))
     };
 
-    let row_status = if let Some(row_field_pos) =
-        field_pos(buf, table_pos, vtable_pos, BASIS_FIELD_ROW_STATUS)
-    {
-        let vec_pos = follow_uoffset(buf, row_field_pos).ok_or_else(|| {
-            OutputError::serialization(ctx, "invalid uoffset for row_status vector")
-        })?;
-        read_u8_vector(buf, vec_pos)
-            .ok_or_else(|| OutputError::serialization(ctx, "row_status vector truncated"))?
-    } else {
-        Vec::new()
-    };
+    let column_status = read_status_vector(BASIS_FIELD_COLUMN_STATUS, "column_status")?;
+    let row_status = read_status_vector(BASIS_FIELD_ROW_STATUS, "row_status")?;
+    let col_status_canonical =
+        read_status_vector(BASIS_FIELD_COL_STATUS_CANONICAL, "col_status_canonical")?;
+    let row_status_canonical =
+        read_status_vector(BASIS_FIELD_ROW_STATUS_CANONICAL, "row_status_canonical")?;
 
     let num_cut_rows = field_pos(buf, table_pos, vtable_pos, BASIS_FIELD_NUM_CUT_ROWS)
         .and_then(|p| read_u32_le(buf, p))
@@ -741,6 +759,8 @@ pub fn deserialize_stage_basis(buf: &[u8]) -> Result<OwnedPolicyBasisRecord, Out
         column_status,
         row_status,
         num_cut_rows,
+        col_status_canonical,
+        row_status_canonical,
     })
 }
 

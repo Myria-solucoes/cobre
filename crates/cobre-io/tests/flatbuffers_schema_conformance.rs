@@ -471,14 +471,20 @@ fn stage_cuts_reduced_dimension_reader_consumes_flatc_buffer() {
 
 #[test]
 fn stage_basis_writer_matches_schema() {
-    let cols = [0_u8, 1, 2, 3];
-    let rows = [4_u8, 5, 6, 0, 1];
+    // Populate BOTH the legacy (id 4/5) and canonical (id 7/8) status slots with
+    // distinct patterns, so flatc decoding pins each vector to its own schema id.
+    let legacy_cols = [0_u8, 1, 2, 3];
+    let legacy_rows = [4_u8, 5, 6, 0, 1];
+    let canonical_cols = [6_u8, 5, 4, 3];
+    let canonical_rows = [2_u8, 1, 0, 6, 5];
     let record = PolicyBasisRecord {
         stage_id: 11,
         iteration: 23,
-        column_status: &cols,
-        row_status: &rows,
+        column_status: &legacy_cols,
+        row_status: &legacy_rows,
         num_cut_rows: 2,
+        col_status_canonical: &canonical_cols,
+        row_status_canonical: &canonical_rows,
     };
     let buf = serialize_stage_basis(&record);
 
@@ -491,6 +497,8 @@ fn stage_basis_writer_matches_schema() {
     assert_eq!(as_u64(&json, "num_cut_rows"), 2);
     assert_eq!(get(&json, "column_status"), &json!([0, 1, 2, 3]));
     assert_eq!(get(&json, "row_status"), &json!([4, 5, 6, 0, 1]));
+    assert_eq!(get(&json, "col_status_canonical"), &json!([6, 5, 4, 3]));
+    assert_eq!(get(&json, "row_status_canonical"), &json!([2, 1, 0, 6, 5]));
 }
 
 #[test]
@@ -502,7 +510,9 @@ fn stage_basis_reader_consumes_flatc_buffer() {
         "num_rows": 4,
         "column_status": [1, 2, 3],
         "row_status": [0, 1, 1, 2],
-        "num_cut_rows": 1
+        "num_cut_rows": 1,
+        "col_status_canonical": [3, 2, 1],
+        "row_status_canonical": [6, 5, 4, 0]
     });
     let buf = flatc_encode(&document, "StageBasis");
     let result: OwnedPolicyBasisRecord =
@@ -513,6 +523,66 @@ fn stage_basis_reader_consumes_flatc_buffer() {
     assert_eq!(result.column_status, vec![1, 2, 3]);
     assert_eq!(result.row_status, vec![0, 1, 1, 2]);
     assert_eq!(result.num_cut_rows, 1);
+    assert_eq!(result.col_status_canonical, vec![3, 2, 1]);
+    assert_eq!(result.row_status_canonical, vec![6, 5, 4, 0]);
+}
+
+/// §E6 forward-compat for `StageBasis`: a buffer written against a pre-canonical
+/// schema (fields stop at `num_cut_rows`, id 6) must deserialize with both
+/// canonical vectors empty and the legacy vectors intact — the fallback the
+/// loader relies on for old policy files.
+#[test]
+fn pre_canonical_stage_basis_reads_with_empty_canonical_fields() {
+    let schema_pre_canonical = "
+namespace Cobre.IO.Policy;
+
+table StageBasis {
+  stage_id:uint32 (id: 0);
+  iteration:uint32 (id: 1);
+  num_columns:uint32 (id: 2);
+  num_rows:uint32 (id: 3);
+  column_status:[uint8] (id: 4);
+  row_status:[uint8] (id: 5);
+  num_cut_rows:uint32 (id: 6);
+}
+";
+    let dir = TempDir::new().unwrap();
+    let pre_canonical_schema = dir.path().join("pre_canonical.fbs");
+    std::fs::write(&pre_canonical_schema, schema_pre_canonical).unwrap();
+
+    let document = json!({
+        "stage_id": 4,
+        "iteration": 9,
+        "num_columns": 3,
+        "num_rows": 2,
+        "column_status": [3, 1, 0],
+        "row_status": [1, 0],
+        "num_cut_rows": 1
+    });
+    let json_path = dir.path().join("doc.json");
+    std::fs::write(&json_path, serde_json::to_vec(&document).unwrap()).unwrap();
+
+    let status = flatc_command()
+        .arg("-b")
+        .arg("--root-type")
+        .arg(qualified("StageBasis"))
+        .arg("-o")
+        .arg(dir.path())
+        .arg(&pre_canonical_schema)
+        .arg(&json_path)
+        .status()
+        .expect("run flatc -b on pre-canonical schema");
+    assert!(status.success(), "flatc -b on pre-canonical schema failed");
+    let buf = std::fs::read(dir.path().join("doc.bin")).unwrap();
+
+    let result: OwnedPolicyBasisRecord =
+        deserialize_stage_basis(&buf).expect("hand-rolled reader must accept pre-canonical buffer");
+    assert_eq!(result.column_status, vec![3, 1, 0]);
+    assert_eq!(result.row_status, vec![1, 0]);
+    assert!(
+        result.col_status_canonical.is_empty() && result.row_status_canonical.is_empty(),
+        "a pre-canonical buffer must read back with empty canonical vectors"
+    );
 }
 
 // ─── StageStates ─────────────────────────────────────────────────────────────

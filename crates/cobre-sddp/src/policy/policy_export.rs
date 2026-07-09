@@ -282,13 +282,13 @@ pub fn build_stage_cuts_payloads<'a>(
         .collect()
 }
 
-/// Convert the solver basis cache to u8 byte vectors via `to_highs_code`
-/// (range 0..=4, so the truncation is safe).
+/// Convert the solver basis cache to u8 byte vectors via `to_discriminant_code`.
 ///
-/// Deliberately NOT the injective discriminant `CapturedBasis::to_broadcast_payload`
-/// uses for the MPI wire: this checkpoint format keeps its existing HiGHS-code
-/// byte semantics for on-disk compatibility, at the cost of folding CLP-only
-/// `Superbasic`/`Fixed` on export (pre-existing, unchanged by this conversion).
+/// The injective canonical code space distinguishes all seven basis-status
+/// variants; the legacy `HiGHS`-code path folded CLP-only `Superbasic`/`Fixed`,
+/// degrading a CLP warm-start on checkpoint reload. These codes fill the
+/// `col_status_canonical`/`row_status_canonical` fields; the legacy fields are
+/// read-only for old files.
 ///
 /// Returns `(col_status_bytes, row_status_bytes)`.
 #[must_use]
@@ -302,7 +302,7 @@ pub fn convert_basis_cache(training_result: &TrainingResult) -> (Vec<Vec<u8>>, V
                     cb.basis
                         .col_status
                         .iter()
-                        .map(|status| status.to_highs_code() as u8)
+                        .map(|status| status.to_discriminant_code())
                         .collect()
                 })
                 .unwrap_or_default()
@@ -317,7 +317,7 @@ pub fn convert_basis_cache(training_result: &TrainingResult) -> (Vec<Vec<u8>>, V
                     cb.basis
                         .row_status
                         .iter()
-                        .map(|status| status.to_highs_code() as u8)
+                        .map(|status| status.to_discriminant_code())
                         .collect()
                 })
                 .unwrap_or_default()
@@ -347,9 +347,11 @@ pub fn build_stage_basis_records<'a>(
                 PolicyBasisRecord {
                     stage_id: stage_idx as u32,
                     iteration: training_result.iterations as u32,
-                    column_status: &basis_col_u8[stage_idx],
-                    row_status: &basis_row_u8[stage_idx],
+                    column_status: &[],
+                    row_status: &[],
                     num_cut_rows,
+                    col_status_canonical: &basis_col_u8[stage_idx],
+                    row_status_canonical: &basis_row_u8[stage_idx],
                 }
             })
         })

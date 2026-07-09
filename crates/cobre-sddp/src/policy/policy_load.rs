@@ -124,11 +124,31 @@ pub fn validate_policy_load(
     Ok(CompatibilityReport { warnings })
 }
 
+/// Decode a checkpoint status vector, preferring the lossless `canonical` codes
+/// and falling back to the legacy `HiGHS`-code-space `legacy` codes only when
+/// `canonical` is empty (a file written before the canonical fields existed).
+fn decode_status_vector(canonical: &[u8], legacy: &[u8]) -> Vec<BasisStatus> {
+    if canonical.is_empty() {
+        legacy
+            .iter()
+            .map(|&c| BasisStatus::from_highs_code(i32::from(c)))
+            .collect()
+    } else {
+        canonical
+            .iter()
+            .map(|&c| BasisStatus::from_discriminant_code(c))
+            .collect()
+    }
+}
+
 /// Build a basis cache from deserialized checkpoint basis records.
 ///
 /// Returns a `Vec<Option<CapturedBasis>>`, one entry per stage; stages without a
-/// matching record get `None`. `u8` status codes decode via `from_highs_code`,
-/// the mirror of `convert_basis_cache`'s export-side `to_highs_code`.
+/// matching record get `None`. A record's canonical status vectors decode via
+/// `from_discriminant_code` (lossless, the mirror of `convert_basis_cache`'s
+/// export-side `to_discriminant_code`); an old file carrying only the legacy
+/// `HiGHS`-code-space vectors falls back to `from_highs_code`, preserving that
+/// format's `Superbasic`→`Nonbasic`/`Fixed`→`Lower` fold.
 ///
 /// # Cut-slot reconstruction
 ///
@@ -157,16 +177,8 @@ pub fn build_basis_cache_from_checkpoint(
         if stage >= num_stages {
             continue;
         }
-        let col_status: Vec<BasisStatus> = record
-            .column_status
-            .iter()
-            .map(|&c| BasisStatus::from_highs_code(i32::from(c)))
-            .collect();
-        let row_status: Vec<BasisStatus> = record
-            .row_status
-            .iter()
-            .map(|&r| BasisStatus::from_highs_code(i32::from(r)))
-            .collect();
+        let col_status = decode_status_vector(&record.col_status_canonical, &record.column_status);
+        let row_status = decode_status_vector(&record.row_status_canonical, &record.row_status);
 
         let num_cut = record.num_cut_rows as usize;
         let active_slots: Option<Vec<u32>> = stage_cuts
@@ -1192,5 +1204,134 @@ mod tests {
         let meta = meta_with_counts(5, vec![]);
         let counts = resolve_warm_start_counts(&meta, 0).unwrap();
         assert!(counts.is_empty());
+    }
+
+    // ── basis-status export+load round-trip (§E6) ─────────────────────────────
+
+    /// Every one of the seven `BasisStatus` variants survives the full
+    /// export→disk→load path losslessly — including the CLP-only `Superbasic`
+    /// and `Fixed`, which the legacy `HiGHS`-code path folded onto `Nonbasic`/
+    /// `Lower`. Encode via `convert_basis_cache`, round-trip through the codec's
+    /// canonical fields, decode via `build_basis_cache_from_checkpoint`.
+    #[test]
+    fn basis_status_round_trips_through_export_and_load_for_every_variant() {
+        use cobre_io::{PolicyBasisRecord, deserialize_stage_basis, serialize_stage_basis};
+        use cobre_solver::{Basis, BasisStatus};
+
+        use super::build_basis_cache_from_checkpoint;
+        use crate::TrainingResult;
+        use crate::policy_export::convert_basis_cache;
+        use crate::workspace::CapturedBasis;
+
+        let col_status = vec![
+            BasisStatus::Lower,
+            BasisStatus::Basic,
+            BasisStatus::Upper,
+            BasisStatus::Zero,
+            BasisStatus::Nonbasic,
+            BasisStatus::Superbasic,
+            BasisStatus::Fixed,
+        ];
+        // Reversed so the column and row vectors are checked independently.
+        let mut row_status = col_status.clone();
+        row_status.reverse();
+
+        let captured = CapturedBasis {
+            basis: Basis {
+                col_status: col_status.clone(),
+                row_status: row_status.clone(),
+            },
+            base_row_count: row_status.len(),
+            cut_row_slots: Vec::new(),
+            state_at_capture: Vec::new(),
+        };
+        let training_result = TrainingResult::new(
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1,
+            "test".to_string(),
+            0,
+            vec![Some(captured)],
+            Vec::new(),
+            None,
+            None,
+        );
+
+        let (col_u8, row_u8) = convert_basis_cache(&training_result);
+
+        let record = PolicyBasisRecord {
+            stage_id: 0,
+            iteration: 1,
+            column_status: &[],
+            row_status: &[],
+            num_cut_rows: 0,
+            col_status_canonical: &col_u8[0],
+            row_status_canonical: &row_u8[0],
+        };
+        let buf = serialize_stage_basis(&record);
+        let owned = deserialize_stage_basis(&buf).expect("codec round-trip must succeed");
+
+        let cache = build_basis_cache_from_checkpoint(1, std::slice::from_ref(&owned), &[]);
+        let recovered = cache[0].as_ref().expect("stage 0 basis must be present");
+
+        assert_eq!(
+            recovered.basis.col_status, col_status,
+            "every column variant must round-trip losslessly"
+        );
+        assert_eq!(
+            recovered.basis.row_status, row_status,
+            "every row variant must round-trip losslessly, including Superbasic/Fixed"
+        );
+    }
+
+    /// Backward compatibility: an old-file basis record carrying ONLY the legacy
+    /// `HiGHS`-code-space vectors (canonical fields empty) loads through the
+    /// `from_highs_code` fallback. A legacy byte outside the `HiGHS` `0..=4` range
+    /// folds to `Nonbasic` (never `Superbasic`/`Fixed`, which the canonical
+    /// decoder would yield), proving the legacy branch is the one selected.
+    #[test]
+    fn legacy_only_basis_record_loads_via_highs_fold() {
+        use cobre_solver::BasisStatus;
+
+        use super::build_basis_cache_from_checkpoint;
+
+        let legacy = cobre_io::OwnedPolicyBasisRecord {
+            stage_id: 0,
+            iteration: 1,
+            column_status: vec![0, 1, 2, 3, 4, 6],
+            row_status: vec![4, 3, 2, 1, 0],
+            num_cut_rows: 0,
+            col_status_canonical: Vec::new(),
+            row_status_canonical: Vec::new(),
+        };
+
+        let cache = build_basis_cache_from_checkpoint(1, std::slice::from_ref(&legacy), &[]);
+        let recovered = cache[0].as_ref().expect("stage 0 basis must be present");
+
+        assert_eq!(
+            recovered.basis.col_status,
+            vec![
+                BasisStatus::Lower,
+                BasisStatus::Basic,
+                BasisStatus::Upper,
+                BasisStatus::Zero,
+                BasisStatus::Nonbasic,
+                BasisStatus::Nonbasic,
+            ],
+            "legacy bytes decode via from_highs_code; the out-of-range 6 folds to Nonbasic"
+        );
+        assert_eq!(
+            recovered.basis.row_status,
+            vec![
+                BasisStatus::Nonbasic,
+                BasisStatus::Zero,
+                BasisStatus::Upper,
+                BasisStatus::Basic,
+                BasisStatus::Lower,
+            ],
+            "legacy row bytes decode via from_highs_code"
+        );
     }
 }

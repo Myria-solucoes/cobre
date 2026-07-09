@@ -91,6 +91,40 @@ impl BasisStatus {
             _ => Self::Nonbasic,
         }
     }
+
+    /// Maps to the injective canonical discriminant (`0..=6`), the one code
+    /// space that distinguishes all seven variants losslessly — unlike
+    /// [`Self::to_highs_code`]/[`Self::to_clp_code`], which fold the variants a
+    /// backend cannot represent. Use this for a durable cross-backend encoding
+    /// where a CLP-only `Superbasic`/`Fixed` must survive a round-trip; the
+    /// explicit arms make the code space independent of enum declaration order.
+    #[must_use]
+    pub fn to_discriminant_code(self) -> u8 {
+        match self {
+            Self::Lower => 0,
+            Self::Basic => 1,
+            Self::Upper => 2,
+            Self::Zero => 3,
+            Self::Nonbasic => 4,
+            Self::Superbasic => 5,
+            Self::Fixed => 6,
+        }
+    }
+
+    /// Inverse of [`Self::to_discriminant_code`]; any code outside `0..=6`
+    /// falls back to [`Self::Nonbasic`] (non-panicking decode).
+    #[must_use]
+    pub fn from_discriminant_code(code: u8) -> Self {
+        match code {
+            0 => Self::Lower,
+            1 => Self::Basic,
+            2 => Self::Upper,
+            3 => Self::Zero,
+            5 => Self::Superbasic,
+            6 => Self::Fixed,
+            _ => Self::Nonbasic,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -114,6 +148,16 @@ mod tests {
         BasisStatus::Basic,
         BasisStatus::Upper,
         BasisStatus::Lower,
+        BasisStatus::Superbasic,
+        BasisStatus::Fixed,
+    ];
+
+    const ALL_VARIANTS: [BasisStatus; 7] = [
+        BasisStatus::Lower,
+        BasisStatus::Basic,
+        BasisStatus::Upper,
+        BasisStatus::Zero,
+        BasisStatus::Nonbasic,
         BasisStatus::Superbasic,
         BasisStatus::Fixed,
     ];
@@ -196,5 +240,40 @@ mod tests {
     #[test]
     fn from_clp_code_out_of_range_falls_back_without_panicking() {
         assert_eq!(BasisStatus::from_clp_code(99), BasisStatus::Nonbasic);
+    }
+
+    #[test]
+    fn discriminant_code_round_trips_for_every_variant() {
+        for status in ALL_VARIANTS {
+            assert_eq!(
+                BasisStatus::from_discriminant_code(status.to_discriminant_code()),
+                status,
+                "{status:?} did not round-trip through the discriminant code space"
+            );
+        }
+    }
+
+    #[test]
+    fn discriminant_code_is_injective() {
+        let codes: Vec<u8> = ALL_VARIANTS
+            .iter()
+            .map(|s| s.to_discriminant_code())
+            .collect();
+        let mut sorted = codes.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            ALL_VARIANTS.len(),
+            "discriminant codes must be distinct across all variants: {codes:?}"
+        );
+    }
+
+    #[test]
+    fn from_discriminant_code_out_of_range_falls_back_without_panicking() {
+        assert_eq!(
+            BasisStatus::from_discriminant_code(99),
+            BasisStatus::Nonbasic
+        );
     }
 }
