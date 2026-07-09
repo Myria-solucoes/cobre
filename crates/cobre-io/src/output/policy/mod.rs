@@ -139,8 +139,6 @@ mod tests {
             column_status: &[0, 1, 2],
             row_status: &[1, 1, 0, 0],
             num_cut_rows: 2,
-            col_status_canonical: &[],
-            row_status_canonical: &[],
         };
 
         let buf = serialize_stage_basis(&record);
@@ -162,8 +160,6 @@ mod tests {
             column_status: &[],
             row_status: &[],
             num_cut_rows: 0,
-            col_status_canonical: &[],
-            row_status_canonical: &[],
         };
 
         let buf = serialize_stage_basis(&record);
@@ -188,8 +184,6 @@ mod tests {
             column_status: &col,
             row_status: &row,
             num_cut_rows: 3,
-            col_status_canonical: &[],
-            row_status_canonical: &[],
         };
 
         let buf_a = serialize_stage_basis(&record);
@@ -341,9 +335,7 @@ mod tests {
         }
     }
 
-    /// Build a [`PolicyBasisRecord`] for the given stage, exercising the legacy
-    /// HiGHS-code-space fields (the current writer emits the `*_canonical`
-    /// fields; this fixture keeps the old-file readability path covered).
+    /// Build a [`PolicyBasisRecord`] for the given stage.
     fn make_basis_record(stage_id: u32) -> PolicyBasisRecord<'static> {
         PolicyBasisRecord {
             stage_id,
@@ -351,8 +343,6 @@ mod tests {
             column_status: &[0, 1, 2, 3],
             row_status: &[1, 0, 1, 0, 1],
             num_cut_rows: 2,
-            col_status_canonical: &[],
-            row_status_canonical: &[],
         }
     }
 
@@ -615,29 +605,23 @@ mod tests {
         let basis_records_0 = PolicyBasisRecord {
             stage_id: 0,
             iteration: 1,
-            column_status: &[],
-            row_status: &[],
+            column_status: &[0u8],
+            row_status: &[1u8],
             num_cut_rows: 0,
-            col_status_canonical: &[0u8],
-            row_status_canonical: &[1u8],
         };
         let basis_records_1 = PolicyBasisRecord {
             stage_id: 1,
             iteration: 1,
-            column_status: &[],
-            row_status: &[],
+            column_status: &[0u8],
+            row_status: &[1u8],
             num_cut_rows: 0,
-            col_status_canonical: &[0u8],
-            row_status_canonical: &[1u8],
         };
         let basis_records_59 = PolicyBasisRecord {
             stage_id: 59,
             iteration: 1,
-            column_status: &[],
-            row_status: &[],
+            column_status: &[0u8],
+            row_status: &[1u8],
             num_cut_rows: 0,
-            col_status_canonical: &[0u8],
-            row_status_canonical: &[1u8],
         };
         let stage_bases = [basis_records_0, basis_records_1, basis_records_59];
         let metadata = make_metadata(3, 2);
@@ -941,15 +925,13 @@ mod tests {
     // ── deserialize_stage_basis tests ─────────────────────────────────────────
 
     #[test]
-    fn deserialize_stage_basis_canonical_fields_round_trip() {
+    fn deserialize_stage_basis_all_fields() {
         let record = PolicyBasisRecord {
             stage_id: 3,
             iteration: 7,
-            column_status: &[],
-            row_status: &[],
+            column_status: &[0, 1, 2, 3],
+            row_status: &[1, 0, 1, 0, 1],
             num_cut_rows: 2,
-            col_status_canonical: &[0, 1, 2, 3],
-            row_status_canonical: &[1, 0, 1, 0, 1],
         };
 
         let buf = serialize_stage_basis(&record);
@@ -958,54 +940,16 @@ mod tests {
         assert_eq!(owned.stage_id, 3, "stage_id must round-trip");
         assert_eq!(owned.iteration, 7, "iteration must round-trip");
         assert_eq!(
-            owned.col_status_canonical,
-            &[0u8, 1, 2, 3],
-            "col_status_canonical must round-trip"
-        );
-        assert_eq!(
-            owned.row_status_canonical,
-            &[1u8, 0, 1, 0, 1],
-            "row_status_canonical must round-trip"
-        );
-        assert!(
-            owned.column_status.is_empty() && owned.row_status.is_empty(),
-            "a current-writer record leaves the legacy fields empty"
-        );
-        assert_eq!(owned.num_cut_rows, 2, "num_cut_rows must round-trip");
-    }
-
-    /// Legacy readability: a record carrying ONLY the legacy HiGHS-code-space
-    /// vectors (the shape of a pre-canonical file) still round-trips through the
-    /// codec, and the canonical fields read back empty.
-    #[test]
-    fn deserialize_stage_basis_legacy_only_fields_round_trip() {
-        let record = PolicyBasisRecord {
-            stage_id: 3,
-            iteration: 7,
-            column_status: &[0, 1, 2, 3],
-            row_status: &[1, 0, 1, 0, 1],
-            num_cut_rows: 2,
-            col_status_canonical: &[],
-            row_status_canonical: &[],
-        };
-
-        let buf = serialize_stage_basis(&record);
-        let owned = deserialize_stage_basis(&buf).expect("basis round-trip must succeed");
-
-        assert_eq!(
             owned.column_status,
             &[0u8, 1, 2, 3],
-            "legacy column_status must round-trip"
+            "column_status must round-trip"
         );
         assert_eq!(
             owned.row_status,
             &[1u8, 0, 1, 0, 1],
-            "legacy row_status must round-trip"
+            "row_status must round-trip"
         );
-        assert!(
-            owned.col_status_canonical.is_empty() && owned.row_status_canonical.is_empty(),
-            "a legacy-only record leaves the canonical fields empty"
-        );
+        assert_eq!(owned.num_cut_rows, 2, "num_cut_rows must round-trip");
     }
 
     #[test]
@@ -1016,8 +960,6 @@ mod tests {
             column_status: &[],
             row_status: &[],
             num_cut_rows: 0,
-            col_status_canonical: &[],
-            row_status_canonical: &[],
         };
 
         let buf = serialize_stage_basis(&record);
@@ -1041,18 +983,16 @@ mod tests {
         let record = PolicyBasisRecord {
             stage_id: 10,
             iteration: 99,
-            column_status: &[],
-            row_status: &[],
+            column_status: &col,
+            row_status: &row,
             num_cut_rows: 50,
-            col_status_canonical: &col,
-            row_status_canonical: &row,
         };
 
         let buf = serialize_stage_basis(&record);
         let owned = deserialize_stage_basis(&buf).expect("large basis must deserialize");
 
-        assert_eq!(owned.col_status_canonical, col);
-        assert_eq!(owned.row_status_canonical, row);
+        assert_eq!(owned.column_status, col);
+        assert_eq!(owned.row_status, row);
         assert_eq!(owned.num_cut_rows, 50);
     }
 
@@ -1061,11 +1001,9 @@ mod tests {
         let record = PolicyBasisRecord {
             stage_id: 0,
             iteration: 1,
-            column_status: &[],
-            row_status: &[],
+            column_status: &[0, 1],
+            row_status: &[1, 0],
             num_cut_rows: 0,
-            col_status_canonical: &[0, 1],
-            row_status_canonical: &[1, 0],
         };
         let full_buf = serialize_stage_basis(&record);
         let truncated = &full_buf[..3];

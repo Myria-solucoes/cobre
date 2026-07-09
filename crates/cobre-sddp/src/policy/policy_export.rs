@@ -284,11 +284,11 @@ pub fn build_stage_cuts_payloads<'a>(
 
 /// Convert the solver basis cache to u8 byte vectors via `to_discriminant_code`.
 ///
-/// The injective canonical code space distinguishes all seven basis-status
-/// variants; the legacy `HiGHS`-code path folded CLP-only `Superbasic`/`Fixed`,
-/// degrading a CLP warm-start on checkpoint reload. These codes fill the
-/// `col_status_canonical`/`row_status_canonical` fields; the legacy fields are
-/// read-only for old files.
+/// The canonical discriminant space (`0..=6`) is a strict superset of the `HiGHS`
+/// code space this format previously stored, so pre-existing checkpoints (bytes
+/// `0..=4`) decode identically — while a CLP-captured `Superbasic`/`Fixed`, which
+/// `to_highs_code` would fold, now survives reload. Mirrored on load by
+/// `build_basis_cache_from_checkpoint`'s `from_discriminant_code`.
 ///
 /// Returns `(col_status_bytes, row_status_bytes)`.
 #[must_use]
@@ -347,11 +347,9 @@ pub fn build_stage_basis_records<'a>(
                 PolicyBasisRecord {
                     stage_id: stage_idx as u32,
                     iteration: training_result.iterations as u32,
-                    column_status: &[],
-                    row_status: &[],
+                    column_status: &basis_col_u8[stage_idx],
+                    row_status: &basis_row_u8[stage_idx],
                     num_cut_rows,
-                    col_status_canonical: &basis_col_u8[stage_idx],
-                    row_status_canonical: &basis_row_u8[stage_idx],
                 }
             })
         })

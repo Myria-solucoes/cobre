@@ -155,12 +155,10 @@ table StageCuts {
 
 /// Root table for `policy/basis/stage_NNN.bin`.
 ///
-/// LP simplex basis checkpoint for one stage. New writers emit the injective
-/// canonical status codes in `col_status_canonical`/`row_status_canonical` (all
-/// seven backend-neutral variants, lossless). The legacy `column_status`/
-/// `row_status` fields carry HiGHS-code-space values and are read-only: still
-/// deserialised for files written before the canonical fields existed, never
-/// populated by a current writer.
+/// LP simplex basis checkpoint for one stage. `column_status`/`row_status` bytes
+/// are the canonical BasisStatus discriminant space (0..=6), a strict superset of
+/// the HiGHS code space this format previously carried, so files written before
+/// the canonical encoding decode identically.
 table StageBasis {
   /// Stage index (0-based).
   stage_id:uint32 (id: 0);
@@ -168,35 +166,21 @@ table StageBasis {
   /// Training iteration that produced this basis.
   iteration:uint32 (id: 1);
 
-  /// Number of LP columns. Equals the populated column-status vector length.
+  /// Number of LP columns. Equals `column_status.length`.
   num_columns:uint32 (id: 2);
 
-  /// Number of LP rows. Equals the populated row-status vector length.
+  /// Number of LP rows. Equals `row_status.length`.
   num_rows:uint32 (id: 3);
 
-  /// LEGACY, read-only: status code per LP column in HiGHS code space. Absent
-  /// (empty) in files written by the current writer, which emits
-  /// `col_status_canonical` instead; read only as the fallback for old files.
+  /// Canonical BasisStatus discriminant per LP column (variable).
   column_status:[uint8] (id: 4);
 
-  /// LEGACY, read-only: status code per LP row in HiGHS code space. Absent
-  /// (empty) in files written by the current writer, which emits
-  /// `row_status_canonical` instead; read only as the fallback for old files.
+  /// Canonical BasisStatus discriminant per LP row (constraint).
   row_status:[uint8] (id: 5);
 
-  /// Number of trailing entries in the row-status vector that correspond to
+  /// Number of trailing entries in `row_status` that correspond to
   /// cut rows (as opposed to structural constraints).
   num_cut_rows:uint32 (id: 6);
-
-  /// Injective canonical status code per LP column, distinguishing all seven
-  /// basis-status variants losslessly (no HiGHS/CLP fold). What current writers
-  /// emit; prefer it over `column_status` when present/non-empty.
-  col_status_canonical:[uint8] (id: 7);
-
-  /// Injective canonical status code per LP row, distinguishing all seven
-  /// basis-status variants losslessly (no HiGHS/CLP fold). What current writers
-  /// emit; prefer it over `row_status` when present/non-empty.
-  row_status_canonical:[uint8] (id: 8);
 }
 
 /// Root table for `policy/states/stage_NNN.bin`.

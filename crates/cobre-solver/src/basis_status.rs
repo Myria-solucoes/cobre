@@ -276,4 +276,16 @@ mod tests {
             BasisStatus::Nonbasic
         );
     }
+
+    #[test]
+    fn discriminant_and_highs_decode_agree_over_pre_existing_checkpoint_range() {
+        for code in 0..=4u8 {
+            assert_eq!(
+                BasisStatus::from_discriminant_code(code),
+                BasisStatus::from_highs_code(i32::from(code)),
+                "canonical and HiGHS decodes must agree over the legacy 0..=4 range \
+                 a pre-existing checkpoint carries"
+            );
+        }
+    }
 }

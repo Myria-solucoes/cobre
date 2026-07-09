@@ -56,36 +56,20 @@ pub struct CapturedBasis {
 /// consumed warm-start.
 pub const BASIS_BROADCAST_WIRE_VERSION: i32 = 1;
 
-/// Wire-format discriminant for [`BasisStatus`], explicit and independent of the
-/// enum's declaration order. Owned exclusively by this function and
-/// [`basis_status_from_wire_code`] — the pair [`CapturedBasis::to_broadcast_payload`]
-/// and [`CapturedBasis::try_from_broadcast_payload`] call; change all four
-/// together. Injective (unlike `to_highs_code`, which folds `Superbasic`/`Fixed`),
-/// so a CLP-captured basis round-trips without loss.
+/// Widens [`BasisStatus::to_discriminant_code`] to the `i32` the broadcast payload
+/// carries; that method is the single owner of the numeric mapping (injective, so
+/// a CLP-captured `Superbasic`/`Fixed` round-trips). The payload byte layout stays
+/// owned by [`CapturedBasis::to_broadcast_payload`] /
+/// [`CapturedBasis::try_from_broadcast_payload`].
 fn basis_status_to_wire_code(status: BasisStatus) -> i32 {
-    match status {
-        BasisStatus::Lower => 0,
-        BasisStatus::Basic => 1,
-        BasisStatus::Upper => 2,
-        BasisStatus::Zero => 3,
-        BasisStatus::Nonbasic => 4,
-        BasisStatus::Superbasic => 5,
-        BasisStatus::Fixed => 6,
-    }
+    i32::from(status.to_discriminant_code())
 }
 
-/// Inverse of [`basis_status_to_wire_code`]; code `4` and any code outside
-/// `0..=6` both fall back to [`BasisStatus::Nonbasic`] (non-panicking decode).
+/// Inverse of [`basis_status_to_wire_code`] via [`BasisStatus::from_discriminant_code`];
+/// any `i32` outside the discriminant range decodes to [`BasisStatus::Nonbasic`]
+/// without panicking.
 fn basis_status_from_wire_code(code: i32) -> BasisStatus {
-    match code {
-        0 => BasisStatus::Lower,
-        1 => BasisStatus::Basic,
-        2 => BasisStatus::Upper,
-        3 => BasisStatus::Zero,
-        5 => BasisStatus::Superbasic,
-        6 => BasisStatus::Fixed,
-        _ => BasisStatus::Nonbasic,
-    }
+    u8::try_from(code).map_or(BasisStatus::Nonbasic, BasisStatus::from_discriminant_code)
 }
 
 impl CapturedBasis {
