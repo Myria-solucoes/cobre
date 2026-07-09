@@ -326,6 +326,45 @@ mod tests {
         assert!(matches!(rank0, Err(SddpError::Communication(_))));
     }
 
+    /// Backward-phase deadlock-freedom: with rank 1's backward solve returning
+    /// `Infeasible` on a 2-rank comm (ranks solve disjoint trial points, so the
+    /// failure is divergent), the reconcile between the cut-insert loop and
+    /// `sync_packed_records` makes BOTH ranks return `Err` before any sync
+    /// collective — `ReconcileStub::allgatherv` is unreachable, so reaching one
+    /// would panic instead of hanging as the real allgatherv would.
+    #[test]
+    fn reconcile_result_fails_both_ranks_before_backward_collective() {
+        // Rank 1: local backward solve failed; it keeps its own error.
+        let failing = ReconcileStub {
+            size: 2,
+            peer_flag: 0,
+            mode: Mode::Reduce,
+        };
+        let mut scratch = [0_i32];
+        let rank1 = reconcile_result::<usize, _>(
+            Err(SddpError::Infeasible {
+                stage: 4,
+                iteration: 2,
+                scenario: 1,
+            }),
+            &failing,
+            &mut scratch,
+        );
+        assert!(matches!(rank1, Err(SddpError::Infeasible { .. })));
+
+        // Rank 0: local backward solve succeeded (cuts_generated payload), but its
+        // peer failed; it must still return Err (a peer-failure Communication error)
+        // so it never enters sync_packed_records.
+        let healthy = ReconcileStub {
+            size: 2,
+            peer_flag: 1,
+            mode: Mode::Reduce,
+        };
+        let mut scratch = [0_i32];
+        let rank0 = reconcile_result::<usize, _>(Ok(7), &healthy, &mut scratch);
+        assert!(matches!(rank0, Err(SddpError::Communication(_))));
+    }
+
     /// Finalize deadlock-freedom: a rank that reached the clean `finalize` while a
     /// peer is erroring must return `Err` (and skip `broadcast_basis_cache`) rather
     /// than enter the broadcast alone, and the erroring rank (in

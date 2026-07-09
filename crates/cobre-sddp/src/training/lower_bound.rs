@@ -20,6 +20,7 @@ use crate::{
     inflow_method::InflowNonNegativityMethod,
     lp_builder::{COST_SCALE_FACTOR, PatchBuffer},
     noise::compute_effective_eta,
+    rank_reconcile::reconcile_error_flag,
     risk_measure::RiskMeasure,
     training::stage_solve_prep::{
         InflowNoise, LoadNoise, OpeningMode, StageSolvePrep, StageSolvePrepParams, StateSource,
@@ -301,7 +302,8 @@ fn lb_aggregate_and_broadcast<C: Communicator>(
 /// - [`SddpError::Infeasible`] — a stage-0 opening LP is infeasible (a modelling
 ///   error; stage 0 should always be feasible via the penalty/recourse structure).
 /// - [`SddpError::Solver`] — LP solve failed for another reason.
-/// - [`SddpError::Communication`] — the broadcast to non-root ranks failed.
+/// - [`SddpError::Communication`] — the cross-rank reconcile or the broadcast to
+///   non-root ranks failed (a peer rank-0 failure surfaces here on the healthy ranks).
 ///
 /// # Panics
 ///
@@ -317,6 +319,7 @@ pub fn evaluate_lower_bound<S: SolverInterface, C: Communicator>(
     comm: &C,
 ) -> Result<f64, SddpError> {
     let mut lb = 0.0_f64;
+    let mut reconcile_scratch = [0_i32; 1];
 
     if comm.rank() == 0 {
         assert!(
@@ -333,14 +336,19 @@ pub fn evaluate_lower_bound<S: SolverInterface, C: Communicator>(
             scratch.lb_cut_row_map.as_deref_mut(),
         );
 
-        lb_evaluate_stage_0(
+        let stage_0 = lb_evaluate_stage_0(
             solver,
             ctx,
             training_ctx,
             scratch.patch_buf,
             scratch.noise_scratch,
             &mut scratch.lb_scratch.objectives_buf,
-        )?;
+        );
+        // Reconcile rank 0's stage-0 solve across ranks BEFORE the broadcast pair
+        // (mirrors the forward-phase precedent): a rank-0 failure makes every rank
+        // return Err here rather than let a non-root rank block at its matching
+        // broadcast while rank 0 skipped `lb_aggregate_and_broadcast`.
+        reconcile_error_flag(stage_0, comm, &mut reconcile_scratch)?;
 
         return lb_aggregate_and_broadcast(
             &scratch.lb_scratch.objectives_buf,
@@ -350,6 +358,7 @@ pub fn evaluate_lower_bound<S: SolverInterface, C: Communicator>(
         );
     }
 
+    reconcile_error_flag(Ok(()), comm, &mut reconcile_scratch)?;
     comm.broadcast(std::slice::from_mut(&mut lb), 0)
         .map_err(SddpError::from)?;
     Ok(lb)
@@ -626,6 +635,67 @@ mod tests {
 
         fn size(&self) -> usize {
             1
+        }
+
+        fn abort(&self, error_code: i32) -> ! {
+            std::process::exit(error_code)
+        }
+    }
+
+    /// Two-rank stub whose `allreduce` reduces the i32 reconcile flag with `Max`
+    /// against a fixed `peer_flag`, and whose `broadcast` is unreachable — so a
+    /// test that reaches the reconcile's `Err` exit proves no rank blocks at the
+    /// LB broadcast.
+    struct LbReconcileStub {
+        rank: usize,
+        peer_flag: i32,
+    }
+
+    impl Communicator for LbReconcileStub {
+        fn allgatherv<T: CommData>(
+            &self,
+            _send: &[T],
+            _recv: &mut [T],
+            _counts: &[usize],
+            _displs: &[usize],
+        ) -> Result<(), CommError> {
+            unreachable!("evaluate_lower_bound reconcile does not call allgatherv")
+        }
+
+        fn allreduce<T: CommData>(
+            &self,
+            send: &[T],
+            recv: &mut [T],
+            op: ReduceOp,
+        ) -> Result<(), CommError> {
+            use std::any::Any;
+            assert_eq!(op, ReduceOp::Max, "reconcile must reduce with Max");
+            for (s, r) in send.iter().zip(recv.iter_mut()) {
+                let flag = *(s as &dyn Any)
+                    .downcast_ref::<i32>()
+                    .expect("reconcile stub only reduces i32 flags");
+                let reduced = flag.max(self.peer_flag);
+                *r = *(&reduced as &dyn Any)
+                    .downcast_ref::<T>()
+                    .expect("reconcile stub only reduces i32 flags");
+            }
+            Ok(())
+        }
+
+        fn broadcast<T: CommData>(&self, _buf: &mut [T], _root: usize) -> Result<(), CommError> {
+            unreachable!("a reconciled failure must return Err before the LB broadcast")
+        }
+
+        fn barrier(&self) -> Result<(), CommError> {
+            Ok(())
+        }
+
+        fn rank(&self) -> usize {
+            self.rank
+        }
+
+        fn size(&self) -> usize {
+            2
         }
 
         fn abort(&self, error_code: i32) -> ! {
@@ -1155,6 +1225,122 @@ mod tests {
             matches!(result, Err(SddpError::Communication(_))),
             "broadcast failure must produce SddpError::Communication, got {result:?}"
         );
+    }
+
+    /// Deadlock-freedom: a rank-0 stage-0 solve failure makes BOTH ranks return
+    /// `Err` before the broadcast pair rather than hang (rank 0 skips
+    /// `lb_aggregate_and_broadcast` while a non-root rank blocks at its matching
+    /// broadcast). `LbReconcileStub::broadcast` is unreachable, so reaching it
+    /// would panic instead of hanging as the real broadcast would.
+    #[test]
+    fn evaluate_lower_bound_rank0_failure_errors_all_ranks_before_broadcast() {
+        // Rank 0: stage-0 solve is infeasible; the reconcile hands rank 0 its own
+        // error before lb_aggregate_and_broadcast's broadcast.
+        {
+            let fixture = SimpleLbFixture::new(
+                minimal_template(),
+                1,
+                vec![],
+                0,
+                1,
+                simple_opening_tree(1),
+                InflowNonNegativityMethod::None,
+                vec![0.0_f64],
+            );
+            let fcf = make_fcf(2, fixture.state.n_state);
+            let mut patch_buf = PatchBuffer::new(
+                fixture.state.hydro_count,
+                fixture.state.max_par_order,
+                0,
+                0,
+                0,
+                0,
+                0,
+            );
+            let rm = RiskMeasure::Expectation;
+            let comm = LbReconcileStub {
+                rank: 0,
+                peer_flag: 0,
+            };
+            let mut solver = MockSolver::infeasible_on_first();
+
+            let (mut row_batch, mut lb_scratch) = make_lb_locals();
+            let mut noise_scratch = ScratchBuffers::new(WorkspaceSizing::default());
+            let mut bundle = LbEvalScratchBundle::from_scratch_fields(
+                &mut patch_buf,
+                &mut row_batch,
+                None,
+                &mut noise_scratch,
+                &mut lb_scratch,
+            );
+            let result = evaluate_lower_bound(
+                &mut solver,
+                &fcf,
+                &fixture.ctx(),
+                &fixture.training_ctx(),
+                &rm,
+                &mut bundle,
+                &comm,
+            );
+            assert!(
+                matches!(result, Err(SddpError::Infeasible { stage: 0, .. })),
+                "rank 0 must return its own Infeasible before the broadcast, got {result:?}"
+            );
+        }
+
+        // Rank 1 (non-root): its peer (rank 0) failed; the reconcile returns a
+        // peer-failure Communication error before rank 1 blocks at its broadcast.
+        {
+            let fixture = SimpleLbFixture::new(
+                minimal_template(),
+                1,
+                vec![],
+                0,
+                1,
+                simple_opening_tree(1),
+                InflowNonNegativityMethod::None,
+                vec![0.0_f64],
+            );
+            let fcf = make_fcf(2, fixture.state.n_state);
+            let mut patch_buf = PatchBuffer::new(
+                fixture.state.hydro_count,
+                fixture.state.max_par_order,
+                0,
+                0,
+                0,
+                0,
+                0,
+            );
+            let rm = RiskMeasure::Expectation;
+            let comm = LbReconcileStub {
+                rank: 1,
+                peer_flag: 1,
+            };
+            let mut solver = MockSolver::with_objectives(vec![100.0]);
+
+            let (mut row_batch, mut lb_scratch) = make_lb_locals();
+            let mut noise_scratch = ScratchBuffers::new(WorkspaceSizing::default());
+            let mut bundle = LbEvalScratchBundle::from_scratch_fields(
+                &mut patch_buf,
+                &mut row_batch,
+                None,
+                &mut noise_scratch,
+                &mut lb_scratch,
+            );
+            let result = evaluate_lower_bound(
+                &mut solver,
+                &fcf,
+                &fixture.ctx(),
+                &fixture.training_ctx(),
+                &rm,
+                &mut bundle,
+                &comm,
+            );
+            assert!(
+                matches!(result, Err(SddpError::Communication(_))),
+                "non-root rank must return a peer-failure Communication error before its broadcast, got {result:?}"
+            );
+        }
     }
 
     // ── Integration tests ────────────────────────────────────────────────────

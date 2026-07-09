@@ -24,6 +24,7 @@ use crate::{
     cut_sync::CutSyncBuffers,
     error::SddpError,
     forward::build_delta_cut_row_batch_into,
+    rank_reconcile::reconcile_result,
     risk_measure::RiskMeasure,
     solve::partition,
     solver_phase::Phase,
@@ -224,6 +225,10 @@ pub struct BackwardPassState {
     /// Per-worker total work time (solve + load + set-bounds + basis-set) for
     /// load-imbalance decomposition.
     pub(crate) worker_totals: Vec<f64>,
+
+    /// Cross-rank error-reconciliation scratch, reused each stage by the
+    /// pre-`sync_packed_records` reconcile so that reconciliation never allocates.
+    pub(crate) reconcile_scratch: [i32; 1],
 }
 
 impl BackwardPassState {
@@ -263,6 +268,7 @@ impl BackwardPassState {
             worker_stats_after: Vec::with_capacity(n_workers_local),
             worker_deltas: Vec::with_capacity(n_workers_local),
             worker_totals: Vec::with_capacity(n_workers_local),
+            reconcile_scratch: [0_i32; 1],
         }
     }
 
@@ -762,35 +768,53 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
     let parallel_wall_ms = process_start.elapsed().as_millis() as u64;
 
     state.staged_cuts_buf.clear();
+    let mut worker_failure: Option<SddpError> = None;
     for worker_result in worker_staged {
-        let (w, cuts) = worker_result?;
+        match worker_result {
+            Ok((w, cuts)) => state
+                .staged_cuts_buf
+                .extend(cuts.into_iter().map(|cut| (w, cut))),
+            Err(e) => {
+                worker_failure = Some(e);
+                break;
+            }
+        }
+    }
+
+    let local_solve: Result<usize, SddpError> = if let Some(e) = worker_failure {
+        Err(e)
+    } else {
+        // `trial_point_idx` is the SOLE sort key: globally unique across workers
+        // (disjoint contiguous partitions), so the merge order is identical regardless
+        // of worker index.
         state
             .staged_cuts_buf
-            .extend(cuts.into_iter().map(|cut| (w, cut)));
-    }
-    // `trial_point_idx` is the SOLE sort key: globally unique across workers
-    // (disjoint contiguous partitions), so the merge order is identical regardless
-    // of worker index.
-    state
-        .staged_cuts_buf
-        .sort_by_key(|(_, cut)| cut.trial_point_idx);
-    debug_assert_eq!(state.staged_cuts_buf.len(), inputs.local_work);
-    let cuts_generated = state.staged_cuts_buf.len();
-    for (w, cut) in &state.staged_cuts_buf {
-        let range = cut.coefficients_range.clone();
-        let arena = &inputs.workspaces[*w].backward_accum.agg_arena;
-        debug_assert!(
-            range.len() == cut_state_projection.n_state() && range.end <= arena.len(),
-            "coefficients_range must span exactly the pool's cut n_state and lie within the worker arena"
-        );
-        inputs.fcf.add_cut(
-            t,
-            inputs.iteration,
-            cut.forward_pass_index,
-            cut.intercept,
-            &arena[range],
-        );
-    }
+            .sort_by_key(|(_, cut)| cut.trial_point_idx);
+        debug_assert_eq!(state.staged_cuts_buf.len(), inputs.local_work);
+        for (w, cut) in &state.staged_cuts_buf {
+            let range = cut.coefficients_range.clone();
+            let arena = &inputs.workspaces[*w].backward_accum.agg_arena;
+            debug_assert!(
+                range.len() == cut_state_projection.n_state() && range.end <= arena.len(),
+                "coefficients_range must span exactly the pool's cut n_state and lie within the worker arena"
+            );
+            inputs.fcf.add_cut(
+                t,
+                inputs.iteration,
+                cut.forward_pass_index,
+                cut.intercept,
+                &arena[range],
+            );
+        }
+        Ok(state.staged_cuts_buf.len())
+    };
+
+    // Reconcile the divergent backward solve outcome BEFORE the first sync
+    // collective (mirrors the forward-phase precedent): ranks solve disjoint trial
+    // points, so a failure on a strict subset makes every rank return Err here
+    // rather than let a healthy rank block in `sync_packed_records` /
+    // `sync_stage_metadata` / `gather_stage_solver_stats` while a peer skipped them.
+    let cuts_generated = reconcile_result(local_solve, inputs.comm, &mut state.reconcile_scratch)?;
 
     let sync_start = Instant::now();
     let n_local = inputs
