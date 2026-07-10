@@ -16,14 +16,16 @@
     clippy::cast_possible_wrap,
     clippy::too_many_lines
 )]
+// `..Default::default()` in the make_* Spec calls is the intentional future-field
+// seam from `common::builders` — a no-op today, not dead code.
+#![allow(clippy::needless_update)]
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc;
 
 use chrono::NaiveDate;
-use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::{
-    BoundsCountsSpec, BoundsDefaults, Bus, BusStagePenalties, ContractStageBounds, DeficitSegment,
+    BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, DeficitSegment,
     EntityId, HydroStageBounds, HydroStagePenalties, LineStageBounds, LineStagePenalties,
     NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
     ResolvedPenalties, ThermalStageBounds,
@@ -45,7 +47,7 @@ use cobre_sddp::{
     hydro_models::PrepareHydroModelsResult,
     indexer::StateLayout,
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::{PatchBuffer, build_stage_templates},
+    lp_builder::{PatchBuffer, build_stage_templates_resolving_layout},
     risk_measure::RiskMeasure,
     simulate,
     simulation::{EntityCounts, SimulationConfig, SimulationOutputSpec},
@@ -56,6 +58,10 @@ use cobre_solver::ActiveSolver;
 use cobre_stochastic::{
     ClassSchemes, OpeningTreeInputs, PrecomputedPar, StochasticContext, build_stochastic_context,
 };
+
+mod common;
+use common::StubComm;
+use common::builders::{BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage};
 
 // ===========================================================================
 // Communicator stub
@@ -69,6 +75,8 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
     StateLayout::new(
         hydro_count,
         max_par_order,
+        0,
+        Vec::new(),
         0,
         0,
         vec![],
@@ -101,51 +109,6 @@ fn study_dims_for(
     }
 }
 
-struct StubComm;
-
-impl Communicator for StubComm {
-    fn allgatherv<T: CommData>(
-        &self,
-        send: &[T],
-        recv: &mut [T],
-        _counts: &[usize],
-        _displs: &[usize],
-    ) -> Result<(), CommError> {
-        recv[..send.len()].clone_from_slice(send);
-        Ok(())
-    }
-
-    fn allreduce<T: CommData>(
-        &self,
-        send: &[T],
-        recv: &mut [T],
-        _op: ReduceOp,
-    ) -> Result<(), CommError> {
-        recv.clone_from_slice(send);
-        Ok(())
-    }
-
-    fn broadcast<T: CommData>(&self, _buf: &mut [T], _root: usize) -> Result<(), CommError> {
-        Ok(())
-    }
-
-    fn barrier(&self) -> Result<(), CommError> {
-        Ok(())
-    }
-
-    fn rank(&self) -> usize {
-        0
-    }
-
-    fn size(&self) -> usize {
-        1
-    }
-
-    fn abort(&self, error_code: i32) -> ! {
-        std::process::exit(error_code)
-    }
-}
-
 // ===========================================================================
 // System and stochastic context fixture
 // ===========================================================================
@@ -155,9 +118,9 @@ const N_HYDROS: usize = 2;
 
 /// Build the 2-hydro, 1-bus, 3-stage negative-inflow fixture. `ResolvedBounds`
 /// and `ResolvedPenalties` are built manually from the hydro entity values so
-/// `build_stage_templates` can read them without `cobre-io` case loading.
+/// `build_stage_templates_resolving_layout` can read them without `cobre-io` case loading.
 fn build_system() -> cobre_core::System {
-    use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
+    use cobre_core::entities::hydro::{HydroGenerationModel, HydroPenalties};
     use cobre_core::scenario::InflowModel;
 
     let zero_entity_penalties = HydroPenalties {
@@ -179,69 +142,83 @@ fn build_system() -> cobre_core::System {
         inflow_nonnegativity_cost: 1000.0,
     };
 
-    let bus = Bus {
-        id: EntityId(0),
-        name: "B0".to_string(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 1000.0,
-        }],
-        excess_cost: 0.0,
-    };
-
-    let make_hydro = |id_val: i32, name: &str| Hydro {
-        id: EntityId(id_val),
-        name: name.to_string(),
-        bus_id: EntityId(0),
-        downstream_id: None,
-        entry_stage_id: None,
-        exit_stage_id: None,
-        min_storage_hm3: 0.0,
-        max_storage_hm3: 50.0,
-        min_outflow_m3s: 0.0,
-        max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity,
-        min_turbined_m3s: 0.0,
-        max_turbined_m3s: 50.0,
-        specific_productivity_mw_per_m3s_per_m: None,
-        min_generation_mw: 0.0,
-        max_generation_mw: 50.0,
-        tailrace: None,
-        hydraulic_losses: None,
-        efficiency: None,
-        evaporation_coefficients_mm: None,
-        evaporation_reference_volumes_hm3: None,
-        diversion: None,
-        filling: None,
-        penalties: zero_entity_penalties,
-    };
-
-    let hydros = vec![make_hydro(1, "H1"), make_hydro(2, "H2")];
-
-    let make_stage = |idx: usize| Stage {
-        index: idx,
-        id: idx as i32,
-        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-        season_id: Some(0),
-        blocks: vec![Block {
-            index: 0,
-            name: "S".to_string(),
-            duration_hours: 744.0,
-        }],
-        block_mode: BlockMode::Parallel,
-        state_config: StageStateConfig {
-            storage: true,
-            inflow_lags: false,
+    let bus = make_bus(
+        EntityId(0),
+        BusSpec {
+            name: "B0".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 1000.0,
+            }],
+            excess_cost: 0.0,
+            ..Default::default()
         },
-        risk_config: StageRiskConfig::Expectation,
-        scenario_config: ScenarioSourceConfig {
-            branching_factor: 10,
-            noise_method: NoiseMethod::Saa,
-        },
+    );
+
+    let build_hydro = |id_val: i32, name: &str| {
+        make_hydro(
+            EntityId(id_val),
+            HydroSpec {
+                name: name.to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                bus_id: EntityId(0),
+                downstream_id: None,
+                entry_stage_id: None,
+                exit_stage_id: None,
+                min_storage_hm3: 0.0,
+                max_storage_hm3: 50.0,
+                min_outflow_m3s: 0.0,
+                max_outflow_m3s: None,
+                generation_model: HydroGenerationModel::ConstantProductivity,
+                min_turbined_m3s: 0.0,
+                max_turbined_m3s: 50.0,
+                specific_productivity_mw_per_m3s_per_m: None,
+                min_generation_mw: 0.0,
+                max_generation_mw: 50.0,
+                tailrace: None,
+                hydraulic_losses: None,
+                efficiency: None,
+                evaporation_coefficients_mm: None,
+                evaporation_reference_volumes_hm3: None,
+                diversion: None,
+                filling: None,
+                penalties: zero_entity_penalties,
+                ..Default::default()
+            },
+        )
     };
 
-    let stages: Vec<Stage> = (0..N_STAGES).map(make_stage).collect();
+    let hydros = vec![build_hydro(1, "H1"), build_hydro(2, "H2")];
+
+    let stages: Vec<Stage> = (0..N_STAGES)
+        .map(|idx| {
+            make_stage(
+                idx,
+                StageSpec {
+                    start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                    season_id: Some(0),
+                    blocks: vec![Block {
+                        index: 0,
+                        name: "S".to_string(),
+                        duration_hours: 744.0,
+                    }],
+                    block_mode: BlockMode::Parallel,
+                    state_config: StageStateConfig {
+                        storage: true,
+                        inflow_lags: false,
+                    },
+                    risk_config: StageRiskConfig::Expectation,
+                    scenario_config: ScenarioSourceConfig {
+                        branching_factor: 10,
+                        noise_method: NoiseMethod::Saa,
+                    },
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
 
     // PAR(0) with mean=0.0, std=30.0 → large chance of negative inflow.
     let inflow_models: Vec<InflowModel> = (0..N_STAGES)
@@ -440,7 +417,7 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
     .unwrap();
 
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
-    let stage_templates = build_stage_templates(
+    let stage_templates = build_stage_templates_resolving_layout(
         &system,
         inflow_method,
         &par_lp,
@@ -581,6 +558,7 @@ fn train_fixture(
         &TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
+            cut_state_layouts: &all_enabled_cut_state_layouts(&fx.state, n_stages),
             study_dims: &fx.study_dims,
             inflow_method: &fx.inflow_method,
             stochastic: &fx.stochastic,
@@ -596,7 +574,6 @@ fn train_fixture(
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &comm,
         ActiveSolver::new,
@@ -622,7 +599,7 @@ fn simulate_fixture(
         0,
         0,
         ActiveSolver::new().expect("ActiveSolver::new must succeed"),
-        PatchBuffer::new(fx.state.hydro_count, fx.state.max_par_order, 0, 0, 0, 0),
+        PatchBuffer::new(fx.state.hydro_count, fx.state.max_par_order, 0, 0, 0, 0, 0),
         fx.state.n_state,
         WorkspaceSizing {
             hydro_count: fx.state.hydro_count,
@@ -684,6 +661,10 @@ fn simulate_fixture(
         &TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
+            cut_state_layouts: &all_enabled_cut_state_layouts(
+                &fx.state,
+                fx.stage_templates.templates.len(),
+            ),
             study_dims: &fx.study_dims,
             inflow_method: &fx.inflow_method,
             stochastic: &fx.stochastic,
@@ -699,7 +680,6 @@ fn simulate_fixture(
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &SimulationConfig {
             n_scenarios: 20,
@@ -926,7 +906,7 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
     )
     .unwrap();
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
-    let templates = build_stage_templates(
+    let templates = build_stage_templates_resolving_layout(
         &system,
         inflow_method,
         &par_lp,
@@ -935,7 +915,7 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
         &hydro_models.evaporation,
         &cobre_sddp::ResolvedParameters::default(),
     )
-    .expect("build_stage_templates must succeed");
+    .expect("build_stage_templates_resolving_layout must succeed");
 
     let tmpl0 = &templates.templates[0];
     let block_hours = 744.0_f64;
@@ -967,4 +947,22 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
         "H2/H1 objective ratio must be 50 (5000/100), got {}",
         h2_obj / h1_obj
     );
+}
+
+/// Local mirror of the gated `test_support::all_enabled_cut_state_layouts`
+/// via the public `CutStateProjection::new`, so this external test crate (which cannot
+/// see the parent crate's `#[cfg(test)]` surface) builds the default all-enabled
+/// per-pool projection. Every pool projects the full global state, keeping the
+/// extracted subgradient bit-identical to the global-loop result.
+fn all_enabled_cut_state_layouts(
+    global: &StateLayout,
+    n_stages: usize,
+) -> Vec<cobre_sddp::indexer::CutStateProjection> {
+    let full = StageStateConfig {
+        storage: true,
+        inflow_lags: true,
+    };
+    (0..n_stages)
+        .map(|_| cobre_sddp::indexer::CutStateProjection::new(global, full))
+        .collect()
 }

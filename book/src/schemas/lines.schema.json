@@ -50,6 +50,10 @@
           "description": "Human-readable line name.",
           "type": "string"
         },
+        "operational_start_date": {
+          "description": "Date the entity enters service (ISO 8601 `YYYY-MM-DD`).",
+          "type": "string"
+        },
         "source_bus_id": {
           "description": "Source bus identifier.",
           "format": "int32",
@@ -64,6 +68,7 @@
       "required": [
         "id",
         "name",
+        "operational_start_date",
         "source_bus_id",
         "target_bus_id",
         "capacity"

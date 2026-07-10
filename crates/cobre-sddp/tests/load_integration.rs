@@ -12,15 +12,17 @@
     clippy::cast_possible_wrap,
     clippy::too_many_lines
 )]
+// `..Default::default()` in the make_* Spec calls is the intentional future-field
+// seam from `common::builders` — a no-op today, not dead code.
+#![allow(clippy::needless_update)]
 
 use std::collections::BTreeMap;
 use std::sync::mpsc;
 
 use chrono::NaiveDate;
-use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::{
-    Bus, DeficitSegment, EntityId, TrainingEvent,
-    entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties},
+    DeficitSegment, EntityId, TrainingEvent,
+    entities::hydro::{HydroGenerationModel, HydroPenalties},
     scenario::{InflowModel, LoadModel, SamplingScheme},
     temporal::{
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
@@ -45,17 +47,23 @@ use cobre_stochastic::{
     ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context,
 };
 
+mod common;
+use common::StubComm;
+use common::builders::{BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage};
+
 // ===========================================================================
 // Shared helpers
 // ===========================================================================
 
-/// Mirror the gated `indexer::test_fixtures::state_layout_for` via the public
+/// Mirror the gated `test_support::state_layout_for` via the public
 /// [`StateLayout::new`], so this external test crate (which cannot see the parent
 /// crate's `#[cfg(test)]` surface) resolves byte-identical patch columns.
 fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
     StateLayout::new(
         hydro_count,
         max_par_order,
+        0,
+        Vec::new(),
         0,
         0,
         vec![],
@@ -65,53 +73,6 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
 
 fn study_dims() -> cobre_sddp::indexer::StudyDimensions {
     cobre_sddp::indexer::StudyDimensions::default()
-}
-
-/// Single-rank communicator that copies data through `allgatherv` / `allreduce`
-/// (not a no-op): the backward pass needs forward-sync state to be propagated.
-struct StubComm;
-
-impl Communicator for StubComm {
-    fn allgatherv<T: CommData>(
-        &self,
-        send: &[T],
-        recv: &mut [T],
-        _counts: &[usize],
-        _displs: &[usize],
-    ) -> Result<(), CommError> {
-        recv[..send.len()].clone_from_slice(send);
-        Ok(())
-    }
-
-    fn allreduce<T: CommData>(
-        &self,
-        send: &[T],
-        recv: &mut [T],
-        _op: ReduceOp,
-    ) -> Result<(), CommError> {
-        recv.clone_from_slice(send);
-        Ok(())
-    }
-
-    fn broadcast<T: CommData>(&self, _buf: &mut [T], _root: usize) -> Result<(), CommError> {
-        Ok(())
-    }
-
-    fn barrier(&self) -> Result<(), CommError> {
-        Ok(())
-    }
-
-    fn rank(&self) -> usize {
-        0
-    }
-
-    fn size(&self) -> usize {
-        1
-    }
-
-    fn abort(&self, error_code: i32) -> ! {
-        std::process::exit(error_code)
-    }
 }
 
 /// Mock solver that returns a fixed objective on every `solve` call.
@@ -182,84 +143,96 @@ fn build_system_with_load(
     load_mean_mw: f64,
     load_std_mw: f64,
 ) -> cobre_core::System {
-    let bus = Bus {
-        id: EntityId(0),
-        name: "B0".to_string(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 1000.0,
-        }],
-        excess_cost: 0.0,
-    };
-
-    let hydro = Hydro {
-        id: EntityId(1),
-        name: "H1".to_string(),
-        bus_id: EntityId(0),
-        downstream_id: None,
-        entry_stage_id: None,
-        exit_stage_id: None,
-        min_storage_hm3: 0.0,
-        max_storage_hm3: 100.0,
-        min_outflow_m3s: 0.0,
-        max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity,
-        min_turbined_m3s: 0.0,
-        max_turbined_m3s: 100.0,
-        specific_productivity_mw_per_m3s_per_m: None,
-        min_generation_mw: 0.0,
-        max_generation_mw: 100.0,
-        tailrace: None,
-        hydraulic_losses: None,
-        efficiency: None,
-        evaporation_coefficients_mm: None,
-        evaporation_reference_volumes_hm3: None,
-        diversion: None,
-        filling: None,
-        penalties: HydroPenalties {
-            spillage_cost: 0.0,
-            diversion_cost: 0.0,
-            turbined_cost: 0.0,
-            storage_violation_below_cost: 0.0,
-            filling_target_violation_cost: 0.0,
-            turbined_violation_below_cost: 0.0,
-            outflow_violation_below_cost: 0.0,
-            outflow_violation_above_cost: 0.0,
-            generation_violation_below_cost: 0.0,
-            evaporation_violation_cost: 0.0,
-            water_withdrawal_violation_cost: 0.0,
-            water_withdrawal_violation_pos_cost: 0.0,
-            water_withdrawal_violation_neg_cost: 0.0,
-            evaporation_violation_pos_cost: 0.0,
-            evaporation_violation_neg_cost: 0.0,
-            inflow_nonnegativity_cost: 1000.0,
+    let bus = make_bus(
+        EntityId(0),
+        BusSpec {
+            name: "B0".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 1000.0,
+            }],
+            excess_cost: 0.0,
+            ..Default::default()
         },
-    };
+    );
 
-    let make_stage = |idx: usize| Stage {
-        index: idx,
-        id: idx as i32,
-        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-        season_id: Some(0),
-        blocks: vec![Block {
-            index: 0,
-            name: "S".to_string(),
-            duration_hours: 744.0,
-        }],
-        block_mode: BlockMode::Parallel,
-        state_config: StageStateConfig {
-            storage: true,
-            inflow_lags: false,
+    let hydro = make_hydro(
+        EntityId(1),
+        HydroSpec {
+            name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: EntityId(0),
+            downstream_id: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 100.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 100.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: HydroPenalties {
+                spillage_cost: 0.0,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 0.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+            ..Default::default()
         },
-        risk_config: StageRiskConfig::Expectation,
-        scenario_config: ScenarioSourceConfig {
-            branching_factor: n_openings,
-            noise_method: NoiseMethod::Saa,
-        },
-    };
+    );
 
-    let stages: Vec<Stage> = (0..n_stages).map(make_stage).collect();
+    let stages: Vec<Stage> = (0..n_stages)
+        .map(|idx| {
+            make_stage(
+                idx,
+                StageSpec {
+                    start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                    season_id: Some(0),
+                    blocks: vec![Block {
+                        index: 0,
+                        name: "S".to_string(),
+                        duration_hours: 744.0,
+                    }],
+                    block_mode: BlockMode::Parallel,
+                    state_config: StageStateConfig {
+                        storage: true,
+                        inflow_lags: false,
+                    },
+                    risk_config: StageRiskConfig::Expectation,
+                    scenario_config: ScenarioSourceConfig {
+                        branching_factor: n_openings,
+                        noise_method: NoiseMethod::Saa,
+                    },
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
 
     let inflow_models: Vec<InflowModel> = (0..n_stages)
         .map(|i| InflowModel {
@@ -473,6 +446,7 @@ fn test_stochastic_load_training_completes() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -488,7 +462,6 @@ fn test_stochastic_load_training_completes() {
             recent_weight_seed: 0.0,
             dcs: None,
             stages: &[],
-            noise_key_diag: None,
         },
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
@@ -606,6 +579,7 @@ fn test_deterministic_load_training_matches_baseline() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -621,7 +595,6 @@ fn test_deterministic_load_training_matches_baseline() {
             recent_weight_seed: 0.0,
             dcs: None,
             stages: &[],
-            noise_key_diag: None,
         },
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
@@ -722,6 +695,7 @@ fn test_stochastic_load_seed_determinism() {
             &TrainingContext {
                 horizon: &horizon,
                 state: &state,
+                cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
                 study_dims: &study_dims(),
                 inflow_method: &InflowNonNegativityMethod::None,
                 stochastic: &stochastic,
@@ -737,7 +711,6 @@ fn test_stochastic_load_seed_determinism() {
                 recent_weight_seed: 0.0,
                 dcs: None,
                 stages: &[],
-                noise_key_diag: None,
             },
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
@@ -795,4 +768,22 @@ fn test_stochastic_load_seed_determinism() {
         result1.result.final_lb,
         result2.result.final_lb
     );
+}
+
+/// Local mirror of the gated `test_support::all_enabled_cut_state_layouts`
+/// via the public `CutStateProjection::new`, so this external test crate (which cannot
+/// see the parent crate's `#[cfg(test)]` surface) builds the default all-enabled
+/// per-pool projection. Every pool projects the full global state, keeping the
+/// extracted subgradient bit-identical to the global-loop result.
+fn all_enabled_cut_state_layouts(
+    global: &StateLayout,
+    n_stages: usize,
+) -> Vec<cobre_sddp::indexer::CutStateProjection> {
+    let full = StageStateConfig {
+        storage: true,
+        inflow_lags: true,
+    };
+    (0..n_stages)
+        .map(|_| cobre_sddp::indexer::CutStateProjection::new(global, full))
+        .collect()
 }

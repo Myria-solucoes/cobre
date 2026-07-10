@@ -33,14 +33,20 @@
 use super::pool::CutPool;
 
 /// All-stages container for the Future Cost Function (FCF): one [`CutPool`] per
-/// stage, all sharing `state_dimension`. Per-cut logic is delegated to
-/// [`CutPool`].
+/// stage. Per-cut logic is delegated to [`CutPool`].
+///
+/// Each pool carries its own [`CutPool::state_dimension`]; a stage whose cuts
+/// span fewer state dimensions (a successor with `inflow_lags: false`) sizes a
+/// smaller pool. [`Self::state_dimension`] remains the global state-vector
+/// length used by the cross-cutting checkpoint and boundary paths, equal to
+/// every pool's dimension when all stages enable all dimensions (the default).
 #[derive(Debug, Clone)]
 pub struct FutureCostFunction {
     /// One cut pool per stage, indexed 0-based.
     pub pools: Vec<CutPool>,
 
-    /// State-vector length shared across all stages.
+    /// Global state-vector length (`StateLayout::n_state`); a pool's own
+    /// `state_dimension` may be smaller.
     pub state_dimension: usize,
 
     /// Forward passes per training iteration. Immutable after construction.
@@ -77,12 +83,46 @@ impl FutureCostFunction {
         max_iterations: u64,
         warm_start_counts: &[u32],
     ) -> Self {
+        Self::new_per_stage(
+            &vec![state_dimension; num_stages],
+            state_dimension,
+            forward_passes,
+            max_iterations,
+            warm_start_counts,
+        )
+    }
+
+    /// Construct a `FutureCostFunction` sizing each stage's [`CutPool`] by its own
+    /// cut state dimension, for the per-stage `state_config` projection.
+    ///
+    /// `pool_state_dimensions[t]` is the dimension of pool `t` (the count from
+    /// `CutStateProjection(stages[t+1].state_config)` for non-terminal pools; the
+    /// global `n_state` for the terminal pool). `global_state_dimension` is
+    /// `StateLayout::n_state` — the value stored in [`Self::state_dimension`] and
+    /// used by the checkpoint/boundary paths, independent of any reduced pool.
+    ///
+    /// # Parameters
+    ///
+    /// - `warm_start_counts`: per-stage warm-start cut counts; length must equal
+    ///   `pool_state_dimensions.len()`. Pass `&vec![0; n]` for no warm-start.
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if `warm_start_counts.len() != pool_state_dimensions.len()`.
+    #[must_use]
+    pub fn new_per_stage(
+        pool_state_dimensions: &[usize],
+        global_state_dimension: usize,
+        forward_passes: u32,
+        max_iterations: u64,
+        warm_start_counts: &[u32],
+    ) -> Self {
         debug_assert_eq!(
             warm_start_counts.len(),
-            num_stages,
-            "warm_start_counts.len() ({}) != num_stages ({})",
+            pool_state_dimensions.len(),
+            "warm_start_counts.len() ({}) != pool_state_dimensions.len() ({})",
             warm_start_counts.len(),
-            num_stages
+            pool_state_dimensions.len()
         );
 
         // u64 arithmetic guards the capacity product against overflow; the cast
@@ -90,16 +130,17 @@ impl FutureCostFunction {
         #[allow(clippy::cast_possible_truncation)]
         let pools = warm_start_counts
             .iter()
-            .map(|&wsc| {
+            .zip(pool_state_dimensions)
+            .map(|(&wsc, &pool_dim)| {
                 let capacity =
                     (u64::from(wsc) + max_iterations * u64::from(forward_passes)) as usize;
-                CutPool::new(capacity, state_dimension, forward_passes, wsc)
+                CutPool::new(capacity, pool_dim, forward_passes, wsc)
             })
             .collect();
 
         Self {
             pools,
-            state_dimension,
+            state_dimension: global_state_dimension,
             forward_passes,
         }
     }
@@ -116,22 +157,8 @@ impl FutureCostFunction {
     pub fn from_deserialized(
         stage_results: &[cobre_io::StageCutsReadResult],
     ) -> Result<Self, crate::SddpError> {
-        if stage_results.is_empty() {
-            return Err(crate::SddpError::Validation(
-                "from_deserialized: stage_results is empty".to_string(),
-            ));
-        }
-
-        let state_dimension = stage_results[0].state_dimension as usize;
-        for sr in &stage_results[1..] {
-            if sr.state_dimension as usize != state_dimension {
-                return Err(crate::SddpError::Validation(format!(
-                    "from_deserialized: inconsistent state_dimension: stage {} has {}, \
-                     expected {} (from stage {})",
-                    sr.stage_id, sr.state_dimension, state_dimension, stage_results[0].stage_id
-                )));
-            }
-        }
+        let state_dimension =
+            validate_consistent_state_dimension("from_deserialized", stage_results)?;
 
         let pools = stage_results
             .iter()
@@ -159,22 +186,8 @@ impl FutureCostFunction {
         forward_passes: u32,
         max_iterations: u64,
     ) -> Result<Self, crate::SddpError> {
-        if stage_results.is_empty() {
-            return Err(crate::SddpError::Validation(
-                "new_with_warm_start: stage_results is empty".to_string(),
-            ));
-        }
-
-        let state_dimension = stage_results[0].state_dimension as usize;
-        for sr in &stage_results[1..] {
-            if sr.state_dimension as usize != state_dimension {
-                return Err(crate::SddpError::Validation(format!(
-                    "new_with_warm_start: inconsistent state_dimension: stage {} has {}, \
-                     expected {} (from stage {})",
-                    sr.stage_id, sr.state_dimension, state_dimension, stage_results[0].stage_id
-                )));
-            }
-        }
+        let state_dimension =
+            validate_consistent_state_dimension("new_with_warm_start", stage_results)?;
 
         let pools = stage_results
             .iter()
@@ -292,7 +305,7 @@ impl FutureCostFunction {
     ///
     /// # Panics (debug builds only)
     ///
-    /// Panics if `stage >= pools.len()` or if `slot >= pools[stage].populated_count`.
+    /// Panics if `stage >= pools.len()` or if `slot >= pools[stage].populated()`.
     ///
     /// [`CutPool::set_active`]: super::pool::CutPool::set_active
     pub fn set_active(&mut self, stage: usize, slot: u32, active: bool) {
@@ -329,6 +342,30 @@ impl FutureCostFunction {
     pub fn sparsity_reports(&self) -> Vec<super::pool::SparsityReport> {
         self.pools.iter().map(CutPool::sparsity_report).collect()
     }
+}
+
+fn validate_consistent_state_dimension(
+    context: &str,
+    stage_results: &[cobre_io::StageCutsReadResult],
+) -> Result<usize, crate::SddpError> {
+    if stage_results.is_empty() {
+        return Err(crate::SddpError::Validation(format!(
+            "{context}: stage_results is empty"
+        )));
+    }
+
+    let state_dimension = stage_results[0].state_dimension as usize;
+    for sr in &stage_results[1..] {
+        if sr.state_dimension as usize != state_dimension {
+            return Err(crate::SddpError::Validation(format!(
+                "{context}: inconsistent state_dimension: stage {} has {}, \
+                 expected {} (from stage {})",
+                sr.stage_id, sr.state_dimension, state_dimension, stage_results[0].stage_id
+            )));
+        }
+    }
+
+    Ok(state_dimension)
 }
 
 #[cfg(test)]
@@ -393,7 +430,6 @@ mod tests {
 
     #[test]
     fn new_uniform_zero_counts_matches_old_scalar_zero_behavior() {
-        // Verifies that &[0, 0, 0] gives identical behavior to old warm_start_count = 0
         let fcf = FutureCostFunction::new(3, 4, 2, 10, &[0, 0, 0]);
         for pool in &fcf.pools {
             // capacity = 0 + 10*2 = 20
@@ -496,7 +532,7 @@ mod tests {
         // (base 0 would place these at slots 2,3 with populated_count 4).
         fcf.add_cut(0, 1, 0, 1.0, &[1.0]);
         fcf.add_cut(0, 1, 1, 2.0, &[1.0]);
-        assert_eq!(fcf.pools[0].populated_count, 2);
+        assert_eq!(fcf.pools[0].populated(), 2);
         assert_eq!(fcf.pools[0].generated_count, 2);
     }
 
@@ -595,6 +631,7 @@ mod tests {
             warm_start_count: 0,
             populated_count,
             cuts,
+            entity_manifest: Vec::new(),
         }
     }
 
@@ -633,7 +670,7 @@ mod tests {
         let fcf = FutureCostFunction::from_deserialized(&stages).unwrap();
         assert_eq!(fcf.pools.len(), 1);
         assert_eq!(fcf.total_active_cuts(), 2);
-        assert_eq!(fcf.pools[0].populated_count, 3);
+        assert_eq!(fcf.pools[0].populated(), 3);
     }
 
     #[test]
@@ -714,7 +751,7 @@ mod tests {
         assert_eq!(fcf.pools[0].capacity, 42);
         assert_eq!(fcf.pools[0].warm_start_count, 2);
         assert_eq!(fcf.pools[0].forward_passes, 4);
-        assert_eq!(fcf.pools[0].populated_count, 2);
+        assert_eq!(fcf.pools[0].populated(), 2);
         assert_eq!(fcf.total_active_cuts(), 2);
     }
 
@@ -730,12 +767,12 @@ mod tests {
         fcf.add_cut(0, 0, 1, 30.0, &[3.0]);
 
         assert_eq!(fcf.total_active_cuts(), 3);
-        assert_eq!(fcf.pools[0].populated_count, 3);
+        assert_eq!(fcf.pools[0].populated(), 3);
         // Warm-start cut at slot 0
-        assert_eq!(fcf.pools[0].intercepts[0], 10.0);
+        assert_eq!(fcf.pools[0].intercept(0), 10.0);
         // Training cuts at slots 1 and 2
-        assert_eq!(fcf.pools[0].intercepts[1], 20.0);
-        assert_eq!(fcf.pools[0].intercepts[2], 30.0);
+        assert_eq!(fcf.pools[0].intercept(1), 20.0);
+        assert_eq!(fcf.pools[0].intercept(2), 30.0);
     }
 
     #[test]
@@ -783,7 +820,7 @@ mod tests {
 
         fcf.set_active(1, 0, false);
 
-        assert!(!fcf.pools[1].active[0]);
+        assert!(!fcf.pools[1].is_active(0));
         assert_eq!(fcf.total_active_cuts(), prior - 1);
     }
 }

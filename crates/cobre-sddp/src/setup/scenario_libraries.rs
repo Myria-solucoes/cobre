@@ -1,6 +1,5 @@
 //! Scenario library builders for historical and external sampling schemes.
 //!
-//! Each builder constructs, validates, standardizes, and pads a library.
 //! Builders are not factored generically because external types have different
 //! standardization semantics.
 
@@ -31,6 +30,9 @@ use crate::SddpError;
 /// # Errors
 ///
 /// Returns `SddpError::Stochastic` on window discovery or validation failure.
+// Rationale: mirrors standardize_historical_windows's own arity; a context
+// struct would just relocate the arity, not reduce it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_historical_inflow_library(
     inflow_history: &[InflowHistoryRow],
     hydro_ids: &[EntityId],
@@ -41,6 +43,7 @@ pub(crate) fn build_historical_inflow_library(
     stage_lag_transitions: &[StageLagTransition],
     user_pool: Option<&HistoricalYears>,
     forward_passes: u32,
+    downstream_par_order: usize,
 ) -> Result<HistoricalScenarioLibrary, SddpError> {
     let max_order = par.max_order();
     let window_years = discover_historical_windows(
@@ -70,6 +73,7 @@ pub(crate) fn build_historical_inflow_library(
         season_map,
         past_inflows,
         stage_lag_transitions,
+        downstream_par_order,
     );
     validate_historical_library(
         &library,
@@ -97,6 +101,7 @@ pub(crate) fn build_external_inflow_library(
     past_inflows: &[HydroPastInflows],
     stage_lag_transitions: &[StageLagTransition],
     forward_passes: u32,
+    downstream_par_order: usize,
 ) -> Result<ExternalScenarioLibrary, SddpError> {
     let n_stages = stages.len();
     let n_hydros = hydro_ids.len();
@@ -140,6 +145,7 @@ pub(crate) fn build_external_inflow_library(
         par,
         past_inflows,
         stage_lag_transitions,
+        downstream_par_order,
     );
     pad_library_to_uniform(&mut library);
     Ok(library)

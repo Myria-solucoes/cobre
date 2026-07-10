@@ -62,9 +62,7 @@
 //! assert_eq!(stats, ReconstructionStats::default());
 //! ```
 
-pub use cobre_solver::ffi::{HIGHS_BASIS_STATUS_BASIC, HIGHS_BASIS_STATUS_LOWER};
-
-use cobre_solver::Basis;
+use cobre_solver::{Basis, BasisStatus};
 
 use crate::workspace::CapturedBasis;
 
@@ -106,7 +104,7 @@ pub struct ReconstructionStats {
 
 /// Reconstruct a full [`Basis`] for the target LP using slot identity: stored
 /// cut rows keep their status verbatim, new cut rows are seeded
-/// [`HIGHS_BASIS_STATUS_BASIC`].
+/// [`BasisStatus::Basic`].
 ///
 /// ## Parameters
 ///
@@ -146,15 +144,15 @@ where
 
     let mut stats = ReconstructionStats::default();
     for (target_slot, _intercept, _coefficients) in current_cut_rows {
-        let row_status_byte = if let Some(pos) = slot_lookup.get(target_slot).and_then(|o| *o) {
+        let row_status = if let Some(pos) = slot_lookup.get(target_slot).and_then(|o| *o) {
             let stored_row_idx = stored.base_row_count + pos as usize;
             stats.preserved += 1;
             stored.basis.row_status[stored_row_idx]
         } else {
             stats.new_slack += 1;
-            HIGHS_BASIS_STATUS_BASIC
+            BasisStatus::Basic
         };
-        out.row_status.push(row_status_byte);
+        out.row_status.push(row_status);
     }
 
     stats
@@ -165,7 +163,7 @@ where
 // ---------------------------------------------------------------------------
 
 /// Reconstruct a [`Basis`] for the **Dynamic Cut Selection (DCS)** initial
-/// solve, seeding every cut row uniform [`HIGHS_BASIS_STATUS_BASIC`].
+/// solve, seeding every cut row uniform [`BasisStatus::Basic`].
 ///
 /// **Slot-identity-free**: takes no `slot_lookup`, reads none of
 /// [`CapturedBasis::cut_row_slots`] — DCS adds cut rows fresh each solve and does
@@ -192,10 +190,8 @@ pub fn reconstruct_basis_uniform_basic(
          cut-row seeding"
     );
 
-    out.row_status.resize(
-        target.base_row_count + cut_row_count,
-        HIGHS_BASIS_STATUS_BASIC,
-    );
+    out.row_status
+        .resize(target.base_row_count + cut_row_count, BasisStatus::Basic);
 }
 
 // ---------------------------------------------------------------------------
@@ -203,18 +199,17 @@ pub fn reconstruct_basis_uniform_basic(
 // ---------------------------------------------------------------------------
 
 /// Copy column statuses from the stored basis into `out`, resized to
-/// `target.num_cols` (padded with `HIGHS_BASIS_STATUS_BASIC` if wider).
+/// `target.num_cols` (padded with [`BasisStatus::Basic`] if wider).
 fn reconstruct_col_statuses(stored: &CapturedBasis, target: ReconstructionTarget, out: &mut Basis) {
     out.col_status.clear();
     out.col_status.extend_from_slice(&stored.basis.col_status);
     if out.col_status.len() != target.num_cols {
-        out.col_status
-            .resize(target.num_cols, HIGHS_BASIS_STATUS_BASIC);
+        out.col_status.resize(target.num_cols, BasisStatus::Basic);
     }
 }
 
 /// Copy the first `target.base_row_count` template row statuses from the stored
-/// basis (missing rows filled `HIGHS_BASIS_STATUS_BASIC`).
+/// basis (missing rows filled [`BasisStatus::Basic`]).
 ///
 /// Cut rows (indices `>= base_row_count`) are not written here — they belong to
 /// the slot-identity loop in [`reconstruct_basis`].
@@ -230,7 +225,7 @@ fn reconstruct_template_row_statuses(
     } else {
         out.row_status.extend_from_slice(&stored.basis.row_status);
         out.row_status
-            .resize(target.base_row_count, HIGHS_BASIS_STATUS_BASIC);
+            .resize(target.base_row_count, BasisStatus::Basic);
     }
 }
 
@@ -291,12 +286,12 @@ pub fn enforce_basic_count_invariant(
     let col_basic = out
         .col_status
         .iter()
-        .filter(|&&s| s == HIGHS_BASIS_STATUS_BASIC)
+        .filter(|&&s| s == BasisStatus::Basic)
         .count();
     let row_basic = out
         .row_status
         .iter()
-        .filter(|&&s| s == HIGHS_BASIS_STATUS_BASIC)
+        .filter(|&&s| s == BasisStatus::Basic)
         .count();
 
     let total_basic = col_basic + row_basic;
@@ -311,8 +306,8 @@ pub fn enforce_basic_count_invariant(
         if excess == 0 {
             break;
         }
-        if out.row_status[idx] == HIGHS_BASIS_STATUS_BASIC {
-            out.row_status[idx] = HIGHS_BASIS_STATUS_LOWER;
+        if out.row_status[idx] == BasisStatus::Basic {
+            out.row_status[idx] = BasisStatus::Lower;
             excess -= 1;
             demotions += 1;
         }
@@ -329,11 +324,11 @@ pub fn enforce_basic_count_invariant(
 #[allow(clippy::doc_markdown)]
 mod tests {
     use cobre_solver::Basis;
+    use cobre_solver::BasisStatus::{Basic as B, Lower as L};
 
     use super::{
-        HIGHS_BASIS_STATUS_BASIC as B, HIGHS_BASIS_STATUS_LOWER as L, ReconstructionStats,
-        ReconstructionTarget, enforce_basic_count_invariant, reconstruct_basis,
-        reconstruct_basis_uniform_basic,
+        ReconstructionStats, ReconstructionTarget, enforce_basic_count_invariant,
+        reconstruct_basis, reconstruct_basis_uniform_basic,
     };
     use crate::workspace::CapturedBasis;
 
@@ -344,7 +339,7 @@ mod tests {
         base_rows: usize,
         num_cols: usize,
         slots: &[u32],
-        cut_statuses: &[i32],
+        cut_statuses: &[cobre_solver::BasisStatus],
         state_at_capture: &[f64],
     ) -> CapturedBasis {
         assert_eq!(slots.len(), cut_statuses.len());
@@ -357,16 +352,13 @@ mod tests {
             state_at_capture.len(),
         );
 
-        // Fill basis row_status: template rows = BASIC, then cut statuses.
         cb.basis.row_status.clear();
         cb.basis.row_status.resize(base_rows, B);
         cb.basis.row_status.extend_from_slice(cut_statuses);
 
-        // Fill col_status: all BASIC.
         cb.basis.col_status.clear();
         cb.basis.col_status.resize(num_cols, B);
 
-        // Slot and state metadata.
         cb.cut_row_slots.extend_from_slice(slots);
         cb.state_at_capture.extend_from_slice(state_at_capture);
 
@@ -583,7 +575,6 @@ mod tests {
         let mut out = Basis::new(0, 0);
 
         reconstruct_basis_uniform_basic(&stored, target, 4, &mut out);
-        // Pre-repair: col_status = [B, B, B], row_status = [L, L, B, B, B, B].
         assert_eq!(out.col_status, vec![B, B, B]);
         assert_eq!(out.row_status, vec![L, L, B, B, B, B]);
 

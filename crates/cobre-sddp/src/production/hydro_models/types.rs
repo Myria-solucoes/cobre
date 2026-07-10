@@ -355,7 +355,7 @@ pub struct PrepareHydroModelsResult {
     /// (empty when absent). Carried because the FPHA derivation in
     /// [`crate::energy_conversion::build_energy_conversion_set`] still needs the raw
     /// override entries to override its VHA + `ρ_esp` derivation; for non-FPHA
-    /// hydros the override is already baked into `production`.
+    /// hydros the override is already folded into `production`.
     pub productivity_override: crate::energy_conversion::HydroEnergyProductivityOverride,
     /// Resolved evaporation models for all hydro plants.
     pub evaporation: EvaporationModelSet,

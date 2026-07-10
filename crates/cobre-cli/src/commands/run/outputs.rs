@@ -38,7 +38,8 @@ pub(super) fn write_training_outputs(args: &WriteTrainingArgs<'_>) -> Result<(),
     let policy_dir = args.output_dir.join(&args.setup.policy_path);
     cobre_sddp::orchestration::write_checkpoint(
         &policy_dir,
-        &args.setup.fcf,
+        args.setup,
+        args.system,
         args.training_result,
         &cobre_sddp::orchestration::CheckpointParams {
             max_iterations: args.setup.loop_params.max_iterations,

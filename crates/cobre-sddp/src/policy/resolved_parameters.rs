@@ -2,7 +2,7 @@
 //!
 //! ## Basis-cache invariance
 //!
-//! Resolved values bake into [`StageTemplate`](cobre_solver::StageTemplate)
+//! Resolved values freeze into [`StageTemplate`](cobre_solver::StageTemplate)
 //! entries at construction and are never rebuilt; the hot-path solver patches
 //! only row bounds, so LP matrix coefficients stay identical across iterations
 //! and the warm-start basis cache needs no invalidation. A future change that
@@ -15,6 +15,7 @@ use cobre_core::{ComputedParameter, EntityId, Hydro, ParameterKind, ScalarParame
 use thiserror::Error;
 
 use crate::energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride};
+use crate::stage_key::StageId;
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -145,6 +146,7 @@ impl ResolvedParameters {
 /// use cobre_sddp::energy_conversion::{
 ///     EnergyConversionSet, HydroEnergyProductivityOverride,
 /// };
+/// use cobre_sddp::stage_key::StageId;
 /// use cobre_sddp::resolved_parameters::build_resolved_parameters;
 ///
 /// let params = vec![ScalarParameter {
@@ -154,8 +156,9 @@ impl ResolvedParameters {
 /// }];
 /// let ec = EnergyConversionSet::new(vec![], vec![], 0, 4);
 /// let overrides = HydroEnergyProductivityOverride::default();
+/// let stage_ids = [StageId(0), StageId(1), StageId(2), StageId(3)];
 ///
-/// let table = build_resolved_parameters(&params, &ec, &overrides, &[], &[0, 0, 1, 1], 4)
+/// let table = build_resolved_parameters(&params, &ec, &overrides, &[], &[0, 0, 1, 1], &stage_ids, 4)
 ///     .unwrap();
 ///
 /// assert!((table.get(EntityId(1), 0) - 3.6).abs() < 1e-12);
@@ -167,8 +170,14 @@ pub fn build_resolved_parameters(
     override_table: &HydroEnergyProductivityOverride,
     hydros: &[Hydro],
     stage_to_season: &[i32],
+    stage_ids: &[StageId],
     n_stages: usize,
 ) -> Result<ResolvedParameters, ResolvedParametersError> {
+    debug_assert_eq!(
+        stage_ids.len(),
+        n_stages,
+        "stage_ids must carry one domain StageId per study stage"
+    );
     let hydro_index: HashMap<EntityId, usize> = hydros
         .iter()
         .enumerate()
@@ -184,6 +193,7 @@ pub fn build_resolved_parameters(
             &param.name,
             n_stages,
             stage_to_season,
+            stage_ids,
             energy_conversion,
             override_table,
             hydros,
@@ -225,6 +235,7 @@ fn resolve_kind(
     name: &str,
     n_stages: usize,
     stage_to_season: &[i32],
+    stage_ids: &[StageId],
     energy_conversion: &EnergyConversionSet,
     override_table: &HydroEnergyProductivityOverride,
     hydros: &[Hydro],
@@ -268,6 +279,7 @@ fn resolve_kind(
             name,
             n_stages,
             stage_to_season,
+            stage_ids,
             energy_conversion,
             override_table,
             hydros,
@@ -286,6 +298,7 @@ fn resolve_computed(
     name: &str,
     n_stages: usize,
     _stage_to_season: &[i32],
+    stage_ids: &[StageId],
     energy_conversion: &EnergyConversionSet,
     override_table: &HydroEnergyProductivityOverride,
     hydros: &[Hydro],
@@ -324,7 +337,7 @@ fn resolve_computed(
 
     // Stage-varying resolution for the remaining five variants.
     let mut values = Vec::with_capacity(n_stages);
-    for t in 0..n_stages {
+    for (t, &stage_id) in stage_ids.iter().enumerate().take(n_stages) {
         let value = match cp {
             ComputedParameter::EquivalentProductivity { .. } => {
                 energy_conversion
@@ -344,11 +357,16 @@ fn resolve_computed(
                     .reference_volume_hm3
             }
             ComputedParameter::ReferenceTurbine { .. } => {
-                override_table.reference_outflow(hydro_id, t).unwrap_or(
-                    energy_conversion
-                        .conversion(hydro_idx, t)
-                        .reference_outflow_m3s,
-                )
+                // Keyed by the domain StageId (matches how the override table is
+                // built and validated), never by the study position `t` used for
+                // the position-indexed `energy_conversion` fallback below.
+                override_table
+                    .reference_outflow(hydro_id, stage_id)
+                    .unwrap_or(
+                        energy_conversion
+                            .conversion(hydro_idx, t)
+                            .reference_outflow_m3s,
+                    )
             }
             ComputedParameter::MinStorage { .. } => {
                 // Handled above via early return; unreachable here.
@@ -359,7 +377,7 @@ fn resolve_computed(
                 hydro.max_storage_hm3
             }
             ComputedParameter::SpecificProductivity { .. } => override_table
-                .specific_productivity(hydro_id, t)
+                .specific_productivity(hydro_id, stage_id)
                 .or(hydro.specific_productivity_mw_per_m3s_per_m)
                 .ok_or_else(|| ResolvedParametersError::MissingSpecificProductivity {
                     name: name.to_string(),
@@ -408,6 +426,7 @@ struct ResolvedParametersWireEnvelope {
 /// };
 /// use cobre_core::{EntityId, ParameterKind, ScalarParameter};
 /// use cobre_sddp::energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride};
+/// use cobre_sddp::stage_key::StageId;
 ///
 /// let params = vec![ScalarParameter {
 ///     id: EntityId(1),
@@ -416,7 +435,8 @@ struct ResolvedParametersWireEnvelope {
 /// }];
 /// let ec = EnergyConversionSet::new(vec![], vec![], 0, 4);
 /// let overrides = HydroEnergyProductivityOverride::default();
-/// let table = build_resolved_parameters(&params, &ec, &overrides, &[], &[0, 0, 1, 1], 4)
+/// let stage_ids = [StageId(0), StageId(1), StageId(2), StageId(3)];
+/// let table = build_resolved_parameters(&params, &ec, &overrides, &[], &[0, 0, 1, 1], &stage_ids, 4)
 ///     .unwrap();
 ///
 /// let bytes = serialize_resolved_parameters(&table).unwrap();
@@ -459,6 +479,7 @@ pub fn serialize_resolved_parameters(
 /// };
 /// use cobre_core::{EntityId, ParameterKind, ScalarParameter};
 /// use cobre_sddp::energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride};
+/// use cobre_sddp::stage_key::StageId;
 /// use cobre_sddp::resolved_parameters::build_resolved_parameters;
 ///
 /// let params = vec![ScalarParameter {
@@ -468,7 +489,8 @@ pub fn serialize_resolved_parameters(
 /// }];
 /// let ec = EnergyConversionSet::new(vec![], vec![], 0, 4);
 /// let overrides = HydroEnergyProductivityOverride::default();
-/// let table = build_resolved_parameters(&params, &ec, &overrides, &[], &[0, 0, 1, 1], 4)
+/// let stage_ids = [StageId(0), StageId(1), StageId(2), StageId(3)];
+/// let table = build_resolved_parameters(&params, &ec, &overrides, &[], &[0, 0, 1, 1], &stage_ids, 4)
 ///     .unwrap();
 ///
 /// let bytes = serialize_resolved_parameters(&table).unwrap();
@@ -527,8 +549,10 @@ mod tests {
         Hydro {
             id: EntityId(id),
             name: format!("h{id}"),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
+            travel_time_hours: None,
             entry_stage_id: None,
             exit_stage_id: None,
             generation_model: HydroGenerationModel::ConstantProductivity,
@@ -594,7 +618,16 @@ mod tests {
         EnergyConversionSet::new(per_hydro_stage, accumulated, n_hydros, n_stages)
     }
 
-    /// Return `(hydros, energy_conversion, override_table, stage_to_season)`
+    /// `StageId(0)..StageId(n_stages - 1)`: the 0-based domain ids every test
+    /// fixture in this module uses (no pre-study-stage offset), so study
+    /// position and domain id coincide.
+    fn stage_ids_0_based(n_stages: usize) -> Vec<StageId> {
+        (0..n_stages)
+            .map(|s| StageId(i32::try_from(s).expect("test stage count fits in i32")))
+            .collect()
+    }
+
+    /// Return `(hydros, energy_conversion, override_table, stage_to_season, stage_ids)`
     /// for tests that need a consistent set of inputs.
     fn make_setup_inputs(
         n_stages: usize,
@@ -603,6 +636,7 @@ mod tests {
         EnergyConversionSet,
         HydroEnergyProductivityOverride,
         Vec<i32>,
+        Vec<StageId>,
     ) {
         let hydros = vec![
             make_hydro(0, 50.0, 2000.0, Some(0.0085)),
@@ -611,7 +645,14 @@ mod tests {
         let energy_conversion = make_energy_conversion(2, n_stages);
         let override_table = HydroEnergyProductivityOverride::default();
         let stage_to_season: Vec<i32> = (0..n_stages).map(|t| (t % 4) as i32).collect();
-        (hydros, energy_conversion, override_table, stage_to_season)
+        let stage_ids = stage_ids_0_based(n_stages);
+        (
+            hydros,
+            energy_conversion,
+            override_table,
+            stage_to_season,
+            stage_ids,
+        )
     }
 
     fn make_param(id: i32, kind: ParameterKind) -> ScalarParameter {
@@ -632,9 +673,18 @@ mod tests {
         let ec = EnergyConversionSet::new(vec![], vec![], 0, 4);
         let overrides = HydroEnergyProductivityOverride::default();
         let stage_to_season = vec![0i32; 4];
+        let stage_ids = stage_ids_0_based(4);
 
-        let table =
-            build_resolved_parameters(&params, &ec, &overrides, &[], &stage_to_season, 4).unwrap();
+        let table = build_resolved_parameters(
+            &params,
+            &ec,
+            &overrides,
+            &[],
+            &stage_to_season,
+            &stage_ids,
+            4,
+        )
+        .unwrap();
 
         assert!((table.get(EntityId(0), 0) - 3.6).abs() < 1e-12);
         assert!((table.get(EntityId(0), 1) - 3.6).abs() < 1e-12);
@@ -657,8 +707,17 @@ mod tests {
         let ec = EnergyConversionSet::new(vec![], vec![], 0, 3);
         let overrides = HydroEnergyProductivityOverride::default();
         let stage_to_season = vec![0i32; 3];
+        let stage_ids = stage_ids_0_based(3);
 
-        let result = build_resolved_parameters(&params, &ec, &overrides, &[], &stage_to_season, 3);
+        let result = build_resolved_parameters(
+            &params,
+            &ec,
+            &overrides,
+            &[],
+            &stage_to_season,
+            &stage_ids,
+            3,
+        );
 
         assert!(matches!(
             result,
@@ -685,9 +744,18 @@ mod tests {
         let ec = EnergyConversionSet::new(vec![], vec![], 0, 3);
         let overrides = HydroEnergyProductivityOverride::default();
         let stage_to_season = vec![0i32, 1, 0];
+        let stage_ids = stage_ids_0_based(3);
 
-        let table =
-            build_resolved_parameters(&params, &ec, &overrides, &[], &stage_to_season, 3).unwrap();
+        let table = build_resolved_parameters(
+            &params,
+            &ec,
+            &overrides,
+            &[],
+            &stage_to_season,
+            &stage_ids,
+            3,
+        )
+        .unwrap();
 
         assert!((table.get(EntityId(0), 0) - 0.5).abs() < 1e-12);
         assert!((table.get(EntityId(0), 1) - 1.5).abs() < 1e-12);
@@ -701,7 +769,7 @@ mod tests {
     #[test]
     fn computed_equivalent_productivity_reads_energy_conversion() {
         let n_stages = 4;
-        let (hydros, energy_conversion, override_table, stage_to_season) =
+        let (hydros, energy_conversion, override_table, stage_to_season, stage_ids) =
             make_setup_inputs(n_stages);
 
         let params = vec![make_param(
@@ -719,6 +787,7 @@ mod tests {
             &override_table,
             &hydros,
             &stage_to_season,
+            &stage_ids,
             n_stages,
         )
         .unwrap();
@@ -748,7 +817,7 @@ mod tests {
     #[test]
     fn reference_volume_reads_energy_conversion_cell() {
         let n_stages = 4;
-        let (hydros, energy_conversion, override_table, stage_to_season) =
+        let (hydros, energy_conversion, override_table, stage_to_season, stage_ids) =
             make_setup_inputs(n_stages);
 
         let params = vec![make_param(
@@ -766,6 +835,7 @@ mod tests {
             &override_table,
             &hydros,
             &stage_to_season,
+            &stage_ids,
             n_stages,
         )
         .unwrap();
@@ -790,7 +860,7 @@ mod tests {
     #[test]
     fn reference_turbine_consults_parquet_override() {
         let n_stages = 3;
-        let (hydros, energy_conversion, _default_override, stage_to_season) =
+        let (hydros, energy_conversion, _default_override, stage_to_season, stage_ids) =
             make_setup_inputs(n_stages);
 
         // A per-hydro-default q_ref override that differs from every
@@ -821,6 +891,7 @@ mod tests {
             &override_table,
             &hydros,
             &stage_to_season,
+            &stage_ids,
             n_stages,
         )
         .unwrap();
@@ -832,6 +903,72 @@ mod tests {
                 "stage {t}: ReferenceTurbine must honor the parquet q_ref override"
             );
         }
+    }
+
+    /// A stage-specific override (not the per-hydro default) resolves by
+    /// domain `StageId`, not by the study position `t`. The study has a
+    /// single stage whose position is 0 but whose domain id is 60; keying
+    /// the lookup at position 0 would miss the `(hydro, 60)` entry and fall
+    /// through to the `energy_conversion` / hydro-entity fallback instead.
+    #[test]
+    fn reference_turbine_and_specific_productivity_key_by_domain_stage_id_not_position() {
+        let hydros = vec![make_hydro(1, 100.0, 5000.0, Some(0.0090))];
+        let energy_conversion = make_energy_conversion(1, 1);
+        let stage_to_season = vec![0i32];
+        let stage_ids = vec![StageId(60)];
+
+        let override_q_ref = 777.0;
+        let override_esp = 0.0123;
+        let override_table =
+            build_hydro_energy_productivity_override(&[HydroEnergyProductivityRow {
+                hydro_id: EntityId(1),
+                stage_id: Some(60),
+                equivalent_productivity_mw_per_m3s: None,
+                reference_outflow_m3s: Some(override_q_ref),
+                specific_productivity_mw_per_m3s_per_m: Some(override_esp),
+            }])
+            .unwrap();
+
+        let params = vec![
+            make_param(
+                0,
+                ParameterKind::Computed {
+                    computed_spec: ComputedParameter::ReferenceTurbine {
+                        hydro_id: EntityId(1),
+                    },
+                },
+            ),
+            make_param(
+                1,
+                ParameterKind::Computed {
+                    computed_spec: ComputedParameter::SpecificProductivity {
+                        hydro_id: EntityId(1),
+                    },
+                },
+            ),
+        ];
+
+        let table = build_resolved_parameters(
+            &params,
+            &energy_conversion,
+            &override_table,
+            &hydros,
+            &stage_to_season,
+            &stage_ids,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(
+            table.get(EntityId(0), 0).to_bits(),
+            override_q_ref.to_bits(),
+            "ReferenceTurbine must resolve the StageId(60) override at position 0"
+        );
+        assert_eq!(
+            table.get(EntityId(1), 0).to_bits(),
+            override_esp.to_bits(),
+            "SpecificProductivity must resolve the StageId(60) override at position 0"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -846,6 +983,7 @@ mod tests {
         let energy_conversion = make_energy_conversion(1, n_stages);
         let override_table = HydroEnergyProductivityOverride::default();
         let stage_to_season = vec![0i32; n_stages];
+        let stage_ids = stage_ids_0_based(n_stages);
 
         let params = vec![make_param(
             0,
@@ -862,6 +1000,7 @@ mod tests {
             &override_table,
             &hydros,
             &stage_to_season,
+            &stage_ids,
             n_stages,
         );
 
@@ -881,7 +1020,7 @@ mod tests {
     #[test]
     fn declaration_order_invariance() {
         let n_stages = 3;
-        let (hydros, energy_conversion, override_table, stage_to_season) =
+        let (hydros, energy_conversion, override_table, stage_to_season, stage_ids) =
             make_setup_inputs(n_stages);
 
         let param_a = make_param(10, ParameterKind::Constant { value: 1.0 });
@@ -909,6 +1048,7 @@ mod tests {
             &override_table,
             &hydros,
             &stage_to_season,
+            &stage_ids,
             n_stages,
         )
         .unwrap();
@@ -918,6 +1058,7 @@ mod tests {
             &override_table,
             &hydros,
             &stage_to_season,
+            &stage_ids,
             n_stages,
         )
         .unwrap();
@@ -940,7 +1081,7 @@ mod tests {
     #[test]
     fn unknown_hydro_in_computed_returns_error() {
         let n_stages = 2;
-        let (hydros, energy_conversion, override_table, stage_to_season) =
+        let (hydros, energy_conversion, override_table, stage_to_season, stage_ids) =
             make_setup_inputs(n_stages);
 
         // Use a hydro_id that does not exist in the hydros slice (ids 0 and 1 exist).
@@ -959,6 +1100,7 @@ mod tests {
             &override_table,
             &hydros,
             &stage_to_season,
+            &stage_ids,
             n_stages,
         );
 
@@ -978,7 +1120,7 @@ mod tests {
     #[test]
     fn min_max_storage_use_stage_invariant_hydro_field() {
         let n_stages = 5;
-        let (hydros, energy_conversion, override_table, stage_to_season) =
+        let (hydros, energy_conversion, override_table, stage_to_season, stage_ids) =
             make_setup_inputs(n_stages);
 
         let params = vec![
@@ -1006,6 +1148,7 @@ mod tests {
             &override_table,
             &hydros,
             &stage_to_season,
+            &stage_ids,
             n_stages,
         )
         .unwrap();
@@ -1035,7 +1178,7 @@ mod tests {
         let ec = EnergyConversionSet::new(vec![], vec![], 0, 0);
         let overrides = HydroEnergyProductivityOverride::default();
 
-        let table = build_resolved_parameters(&[], &ec, &overrides, &[], &[], 0).unwrap();
+        let table = build_resolved_parameters(&[], &ec, &overrides, &[], &[], &[], 0).unwrap();
         // Nothing to query — just verify it doesn't panic.
         let _ = table;
     }
@@ -1048,7 +1191,7 @@ mod tests {
     /// `PerStage`, and `Computed(EquivalentProductivity)` resolution paths.
     fn broadcast_fixture() -> ResolvedParameters {
         let n_stages = 4;
-        let (hydros, energy_conversion, override_table, stage_to_season) =
+        let (hydros, energy_conversion, override_table, stage_to_season, stage_ids) =
             make_setup_inputs(n_stages);
 
         let params = vec![
@@ -1075,6 +1218,7 @@ mod tests {
             &override_table,
             &hydros,
             &stage_to_season,
+            &stage_ids,
             n_stages,
         )
         .unwrap()

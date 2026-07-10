@@ -4,27 +4,9 @@
 //! plant data into the per-`(hydro, stage)` production representations the LP
 //! consumes — FPHA hyperplane fitting, resolved production/evaporation models,
 //! energy-conversion scalars, and the simulation write-payload conversions.
-//!
-//! ## Contents
-//!
-//! - [`hydro_models`] — resolved production functions
-//!   ([`ProductionModelSet`](hydro_models::ProductionModelSet),
-//!   [`ResolvedProductionModel`](hydro_models::ResolvedProductionModel)),
-//!   evaporation models, and the [`prepare_hydro_models`](hydro_models::prepare_hydro_models)
-//!   preprocessing entry point.
-//! - `fpha_fitting` — FPHA hyperplane fitting from the Volume-Height-Area curve.
-//!   Owns the static FPHA-geometry validation
-//!   (`FphaFittingError`); the runtime FPHA
-//!   average-storage coefficient lives in [`crate::lp::builder`].
-//! - [`energy_conversion`] — derives the `ρ_eq`, `V_ref`, `Q_ref`, and `ρ_acum`
-//!   scalars ([`EnergyConversionSet`](energy_conversion::EnergyConversionSet))
-//!   consumed by simulation extraction and the energy-balance constraints.
-//! - `conversion` — field-for-field conversions from `Simulation*Result` to the
-//!   `cobre-io` write-payload record types.
 
+pub(crate) mod conversion;
 pub mod energy_conversion;
 pub(crate) mod fpha_fitting;
 pub mod hydro_models;
-
-// Intra-crate internal, never named from outside the crate: keep `pub(crate)`.
-pub(crate) mod conversion;
+pub mod stage_key;

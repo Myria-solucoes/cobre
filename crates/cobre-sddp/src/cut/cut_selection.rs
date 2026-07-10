@@ -293,7 +293,7 @@ impl CutSelectionStrategy {
             };
         }
 
-        let populated = pool.populated_count;
+        let populated = pool.populated();
         let n_state = pool.state_dimension;
         let warm_start = pool.warm_start_count as usize;
 
@@ -306,7 +306,7 @@ impl CutSelectionStrategy {
         }
 
         let eligible: Vec<bool> = (0..populated)
-            .map(|k| k >= warm_start && pool.metadata[k].iteration_generated < current_iteration)
+            .map(|k| k >= warm_start && pool.metadata(k).iteration_generated < current_iteration)
             .collect();
         let n_eligible = eligible.iter().filter(|&&e| e).count();
         if n_eligible < 2 {
@@ -322,21 +322,13 @@ impl CutSelectionStrategy {
         let n_blocks = n_states.div_ceil(M_BLOCK);
         let m_block_starts: Vec<usize> = (0..n_blocks).map(|i| i * M_BLOCK).collect();
 
-        // `pool.coefficients` is `capacity * n_state` long; trim to the populated
-        // prefix so the GEMM sees exactly `populated * n_state`.
-        let coef_slice = &pool.coefficients[..populated * n_state];
-        let intercepts: &[f64] = &pool.intercepts[..populated];
+        let coef_slice = pool.coefficients_prefix();
+        let intercepts = pool.intercepts_prefix();
 
         let is_selected: Vec<bool> = m_block_starts
             .par_iter()
             .fold(
-                || {
-                    (
-                        // populated × M_BLOCK row-major value-block scratch.
-                        vec![0.0_f64; populated * M_BLOCK],
-                        vec![false; populated],
-                    )
-                },
+                || (vec![0.0_f64; populated * M_BLOCK], vec![false; populated]),
                 |(mut v_block_local, mut bitmap_local), &m_start| {
                     let m_end = (m_start + M_BLOCK).min(n_states);
                     let m_len = m_end - m_start;
@@ -393,7 +385,7 @@ impl CutSelectionStrategy {
         #[allow(clippy::cast_possible_truncation)]
         for k in warm_start..populated {
             if eligible[k] {
-                let currently_active = pool.active[k];
+                let currently_active = pool.is_active(k);
                 if is_selected[k] && !currently_active {
                     reactivations.push(k as u32);
                 } else if !is_selected[k] && currently_active {
@@ -604,9 +596,7 @@ mod tests {
         for i in 0..n {
             pool.add_cut(0, i as u32, 0.0, &[0.0]);
         }
-        pool.metadata[..n].clone_from_slice(metadata);
-        pool.active[..n].clone_from_slice(active);
-        pool.cached_active_count = active.iter().filter(|&&a| a).count();
+        pool.replace_selection(metadata, active);
         pool
     }
 
@@ -1014,9 +1004,9 @@ mod tests {
         pool.add_cut(0, 0, 1.0, &[0.0]);
         pool.add_cut(1, 0, 1.0, &[0.0]);
         pool.add_cut(2, 0, 5.0, &[0.0]);
-        pool.metadata[0].iteration_generated = 10; // current iteration
-        pool.metadata[1].iteration_generated = 5;
-        pool.metadata[2].iteration_generated = 5;
+        pool.set_iteration_generated_for_test(0, 10); // current iteration
+        pool.set_iteration_generated_for_test(1, 5);
+        pool.set_iteration_generated_for_test(2, 5);
         let deact = strategy.select(&pool, &[0.0], 10);
         assert_eq!(
             deact.deactivation_indices(),
@@ -1163,9 +1153,9 @@ mod tests {
         pool.add_cut(1, 0, 5.0, &[0.0]);
         pool.add_cut(2, 0, 3.0, &[0.0]);
         // All from current iteration.
-        pool.metadata[0].iteration_generated = 10;
-        pool.metadata[1].iteration_generated = 10;
-        pool.metadata[2].iteration_generated = 10;
+        pool.set_iteration_generated_for_test(0, 10);
+        pool.set_iteration_generated_for_test(1, 10);
+        pool.set_iteration_generated_for_test(2, 10);
         let result = strategy.select(&pool, &[0.0], 10);
         assert!(
             result.deactivation_indices().is_empty(),
@@ -1188,27 +1178,23 @@ mod tests {
             tie_tolerance: 0.0,
         };
         // warm_start_count=1 → slot 0 is warm-start (protected).
-        // Populate the pool directly (warm-start slots are not inserted via add_cut).
+        // Slot 0 comes from a warm-start record (add_cut cannot address it once
+        // warm_start_count > 0); slots 1,2 come from add_cut.
         // 3 slots total: slot 0 (warm-start, intercept=10), slot 1 (eligible, =1), slot 2 (eligible, =3).
         // max=10 (slot 0). Cutoff=10. Eligible cuts 1,2 both below cutoff → deactivated.
         // Slot 0 is not eligible (warm-start) → not deactivated.
-        let n = 3usize;
-        let mut pool = CutPool::new(n, 1, 1, 1); // warm_start_count=1
-        let intercepts = [10.0f64, 1.0, 3.0];
-        #[allow(clippy::needless_range_loop)]
-        for i in 0..n {
-            pool.intercepts[i] = intercepts[i];
-            pool.coefficients[i] = 0.0;
-            pool.active[i] = true;
-            pool.metadata[i] = CutMetadata {
-                iteration_generated: 1,
-                forward_pass_index: i as u32,
-                active_count: 0,
-                last_active_iter: 1,
-            };
-        }
-        pool.populated_count = n;
-        pool.cached_active_count = n;
+        let warm_start_records = vec![cobre_io::OwnedPolicyCutRecord {
+            cut_id: 0,
+            slot_index: 0,
+            iteration: 1,
+            forward_pass_index: 0,
+            intercept: 10.0,
+            coefficients: vec![0.0],
+            is_active: true,
+        }];
+        let mut pool = CutPool::new_with_warm_start(1, 1, 2, &warm_start_records);
+        pool.add_cut(0, 0, 1.0, &[0.0]); // slot 1
+        pool.add_cut(1, 0, 3.0, &[0.0]); // slot 2
 
         let result = strategy.select(&pool, &[0.0], 10);
         // Warm-start slot 0 must not appear in deactivations.
@@ -1564,10 +1550,8 @@ mod tests {
         for i in 0..n {
             // Use add_cut to advance populated_count correctly.
             pool.add_cut(0, i as u32, intercepts[i], &coefficients[i]);
-            pool.metadata[i] = metadata[i].clone();
-            pool.active[i] = active[i];
         }
-        pool.cached_active_count = active.iter().filter(|&&a| a).count();
+        pool.replace_selection(metadata, active);
         pool
     }
 
@@ -1867,8 +1851,8 @@ mod tests {
         pool.add_cut(0, 0, 10.0, &[0.0]); // higher value
         pool.add_cut(1, 0, 1.0, &[0.0]); // lower value
         // Slot 0 from current iteration → ineligible. Slot 1 eligible.
-        pool.metadata[0].iteration_generated = 10; // current_iteration
-        pool.metadata[1].iteration_generated = 5;
+        pool.set_iteration_generated_for_test(0, 10); // current_iteration
+        pool.set_iteration_generated_for_test(1, 5);
         // n_eligible = 1 (only slot 1). Guard returns empty.
         let result = strategy.select(&pool, &[0.0], 10);
         assert!(
@@ -1899,7 +1883,7 @@ mod tests {
             pool.add_cut(0, i as u32, intercept, &[slope]);
             // Make every cut eligible (iteration_generated < current_iteration in
             // the tests below).
-            pool.metadata[i].iteration_generated = 1;
+            pool.set_iteration_generated_for_test(i, 1);
         }
         pool
     }

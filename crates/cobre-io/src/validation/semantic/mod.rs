@@ -15,7 +15,8 @@
 //! | 5 | `min_generation_mw <= max_generation_mw` (hydro)  | `system/hydros.json`                  | `InvalidValue`         |
 //! | 6 | `entry_stage_id < exit_stage_id` (when both Some) | all six entity types                  | `InvalidValue`         |
 //! | 7 | Filling `start_stage_id` in study stage set       | `system/hydros.json`                  | `InvalidValue`         |
-//! | 7a| Filling guards: entry⟺filling paired, `start_stage_id < entry_stage_id`, `entry_stage_id < horizon`, seed in `[0, min_storage_hm3)`, no `exit_stage_id` on a filling hydro | `system/hydros.json` | `InvalidValue` |
+//! | 7a| Filling guards (hard): `filling ⟹ entry_stage_id` (a bare window without filling is valid), `start_stage_id < entry_stage_id`, seed in `[0, min_storage_hm3)`, no `exit_stage_id` on a filling hydro, seed `== 0` when `start_stage_id > 0` | `system/hydros.json` | `InvalidValue` |
+//! | 7b| `entry_stage_id >= horizon` on a filling hydro (fills throughout, never operates within this study) | `system/hydros.json` | `ModelQuality` (warning) |
 //! | 8 | Geometry `volume_hm3` strictly increasing         | `system/hydro_geometry.parquet`       | `BusinessRuleViolation`|
 //! | 9 | Geometry `height_m` non-decreasing                | `system/hydro_geometry.parquet`       | `BusinessRuleViolation`|
 //! |10 | Geometry `area_km2` non-decreasing                | `system/hydro_geometry.parquet`       | `BusinessRuleViolation`|
@@ -28,7 +29,16 @@
 //! |17 | `anticipated_decision(N)` in generic constraint targets an anticipated thermal | `constraints/generic_constraints.json` | `BusinessRuleViolation` |
 //! |18 | `thermal_generation(N)` in generic constraint when `N` is anticipated (warn) | `constraints/generic_constraints.json` | `SemanticAmbiguity` (warning) |
 //! |19 | Pumping `source_hydro_id != destination_hydro_id`  | `system/pumping_stations.json`        | `InvalidValue`         |
-//! |20 | Non-filling hydro sets `entry_stage_id`/`exit_stage_id` (parsed, not applied; filling hydros, thermal/line/NCS/pumping/contract windows ARE applied) | `system/hydros.json` | `ModelQuality` (warning) |
+//! |20 | Per-block storage reference resolves to a real boundary (parallel `K>1` interior / out-of-range block rejected) | `constraints/generic_constraints.json` | `BusinessRuleViolation` |
+//! |21 | `travel_time_hours` negative or non-finite                             | `system/hydros.json`                  | `InvalidValue`         |
+//! |22 | `travel_time_hours == 0.0` — treated as undeclared, no arc created     | `system/hydros.json`                  | `ModelQuality` (warning) |
+//! |23 | Declared arc: `max_t(t_v/h_t)` below a smallness threshold             | `system/hydros.json`                  | `ModelQuality` (warning) |
+//! |24 | Declared arc: `t_v` exceeds the remaining study horizon at some stage  | `system/hydros.json`                  | `ModelQuality` (warning) |
+//! |25 | Declared arc: `past_defluences` history shorter than the required pre-study depth (derived-from-`past_inflows` fallback logs a caveat instead) | `initial_conditions.json` | `BusinessRuleViolation` (or `ModelQuality` warning) |
+//! |26 | 2+ declared arcs into one downstream plant with differing `travel_time_hours`, while any study stage is `Chronological` | `system/hydros.json` | `NotImplemented` |
+//! |27 | `recent_observations` present but the season cycle is not `Monthly` — mid-period PAR lag seeding silently skipped | `initial_conditions.json` | `ModelQuality` (warning) |
+//! |28 | `lead_stages` anticipated active window spans a stage-cadence transition (adjacent unequal stage durations); `lead_time` is the physically-anchored alternative | `system/thermals.json` | `ModelQuality` (warning) |
+//! |29 | Study supplies an inflow annual component (`inflow_annual_components` non-empty) while `season_map.cycle_type` is not `Monthly` — PAR(p)-A is monthly-exclusive by design | `scenarios/inflow_annual_component.parquet` | `BusinessRuleViolation` |
 //!
 //! ## Layer 5b rules (stages, penalties, and scenario domain) — `validate_semantic_stages_penalties_scenarios`
 //!
@@ -67,9 +77,11 @@
 //! |31  | Observation resolution must not be finer than season resolution          | `scenarios/inflow_history.parquet`             | `BusinessRuleViolation`  |
 //! |32  | Each `season_id` in `past_inflows[i].season_ids` must exist in `SeasonMap` | `initial_conditions.json`                    | `BusinessRuleViolation`  |
 //! |33  | Filling schedule reaches the dead volume: `Σ ζ_s·rate_s >= min_storage − seed` | `system/hydros.json`               | `BusinessRuleViolation`  |
+//! |34  | PAR order > 0 but every study stage has `inflow_lags == false` (inflow-lag state omitted) | `stages.json`        | `ModelQuality` (warning) |
 
 use super::{ValidationContext, schema::ParsedData};
 
+mod constraints;
 mod correlation;
 mod hydro;
 mod pumping;
@@ -78,6 +90,7 @@ mod season;
 mod sobol;
 mod stages;
 mod thermal;
+mod travel_time;
 
 #[cfg(test)]
 mod test_support;
@@ -87,7 +100,6 @@ pub(crate) fn validate_semantic_hydro_thermal(data: &ParsedData, ctx: &mut Valid
     hydro::check_hydro_bounds(data, ctx);
     hydro::check_lifecycle_consistency(data, ctx);
     hydro::check_lifecycle_consistency_remaining(data, ctx);
-    hydro::warn_commissioning_parsed_not_applied(data, ctx);
     hydro::check_filling_config(data, ctx);
     hydro::check_filling_guards(data, ctx);
     hydro::check_geometry_monotonicity(data, ctx);
@@ -95,10 +107,15 @@ pub(crate) fn validate_semantic_hydro_thermal(data: &ParsedData, ctx: &mut Valid
     hydro::check_fpha_constraints(data, ctx);
     thermal::check_thermal_generation_bounds(data, ctx);
     thermal::check_anticipated_thermals(data, ctx);
+    thermal::check_anticipated_cadence_transition(data, ctx);
     thermal::check_thermal_bounds_override_stage_range(data, ctx);
     thermal::check_anticipated_decision_target_is_anticipated(data, ctx);
     thermal::warn_thermal_generation_on_anticipated_thermal(data, ctx);
+    constraints::check_per_block_storage_interior_reference(data, ctx);
     pumping::check_pumping_semantics(data, ctx);
+    travel_time::validate_travel_time(data, ctx);
+    travel_time::check_recent_observations_non_monthly_seed_gap(data, ctx);
+    travel_time::check_annual_component_monthly_only(data, ctx);
 }
 
 // ── validate_semantic_stages_penalties_scenarios ──────────────────────────────
@@ -117,6 +134,7 @@ pub(crate) fn validate_semantic_stages_penalties_scenarios(
     ctx: &mut ValidationContext,
 ) {
     stages::check_stage_structure(data, ctx);
+    stages::check_inflow_lags_vs_par_order(data, ctx);
     sobol::check_sobol_power_of_2(data, ctx);
     scenarios::check_penalty_ordering(data, ctx);
     scenarios::check_filling_sufficiency(data, ctx);
@@ -135,8 +153,6 @@ pub(crate) fn validate_semantic_stages_penalties_scenarios(
 
 // ── Tolerances ────────────────────────────────────────────────────────────────
 
-/// Tolerance for floating-point probability sum comparisons.
 const PROB_TOLERANCE: f64 = 1e-6;
 
-/// Tolerance for floating-point correlation matrix comparisons.
 const CORR_TOLERANCE: f64 = 1e-9;

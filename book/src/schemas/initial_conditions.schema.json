@@ -2,7 +2,7 @@
   "$defs": {
     "RawAnticipatedCommitmentHistory": {
       "additionalProperties": false,
-      "description": "Past committed MW values for one anticipated thermal plant.\n\n`values_mw[0]` is the commitment for the earliest pending delivery stage;\n`values_mw[k-1]` is the most recent. Length must equal the plant's\n`lead_stages` (validated semantically in a later validation layer).",
+      "description": "Past committed MW values for one anticipated thermal plant.\n\n`values_mw[j]` is the MW dispatched at the `j`-th pre-study-committed\ndelivery stage (delivery-anchored; required length is calendar-derived, not\n`lead_stages` on a non-uniform calendar — validated semantically). The\nvalues are sunk cost: they do not enter the study objective. Each value\nmust lie within the plant's `[min_generation_mw, max_generation_mw]` bounds\nand, if the plant has a commissioning window, mature inside it (both\nvalidated semantically).",
       "properties": {
         "thermal_id": {
           "description": "Thermal plant identifier. Must reference an anticipated thermal.",
@@ -10,7 +10,7 @@
           "type": "integer"
         },
         "values_mw": {
-          "description": "Past committed MW values, ordered by delivery stage ascending.\nLength must equal the plant's `lead_stages` (validated semantically).",
+          "description": "Past committed MW values, ordered by delivery stage ascending. Required\nlength is calendar-derived (validated semantically), not `lead_stages`.",
           "items": {
             "format": "double",
             "type": "number"
@@ -21,6 +21,37 @@
       "required": [
         "thermal_id",
         "values_mw"
+      ],
+      "type": "object"
+    },
+    "RawHydroPastDefluence": {
+      "additionalProperties": false,
+      "description": "Past defluence (release) for the arc fed by a single upstream hydro over a\nspecific date range.\n\nMirrors [`RawRecentObservation`]: a self-describing `[start_date, end_date)`\nwindow (ISO 8601, `end_date` exclusive and after `start_date`) carrying the\naverage release rate over the window. Multiple windows per hydro are allowed;\ndate ranges for the same hydro must not overlap, though adjacent ranges\n(`start_date == previous end_date`) are accepted.",
+      "properties": {
+        "end_date": {
+          "description": "End of the release window (exclusive), as an ISO 8601 date (YYYY-MM-DD).\nMust be after `start_date`.",
+          "type": "string"
+        },
+        "hydro_id": {
+          "description": "Upstream hydro plant identifier whose release feeds the arc.",
+          "format": "int32",
+          "type": "integer"
+        },
+        "start_date": {
+          "description": "Start of the release window (inclusive), as an ISO 8601 date\n(YYYY-MM-DD).",
+          "type": "string"
+        },
+        "value_m3s": {
+          "description": "Average release rate over the window [m³/s]. Must be finite and\nnon-negative.",
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "hydro_id",
+        "start_date",
+        "end_date",
+        "value_m3s"
       ],
       "type": "object"
     },
@@ -116,7 +147,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Initial reservoir storage conditions, past inflow values, and recent\nobservations for all hydro plants in the case.\n\nTwo arrays specify starting volumes at simulation time zero:\n- `storage` — operating hydros (those participating in generation dispatch).\n- `filling_storage` — filling hydros (reservoirs under construction or filling).\n\nAn optional array provides past inflow values for PAR(p) lag initialization:\n- `past_inflows` — ordered from most recent (lag 1) to oldest (lag p).\n\nAn optional array provides observed inflow data for mid-season study starts:\n- `recent_observations` — date-ranged observations that seed the lag accumulator.\n\nA hydro may appear in at most one of the two storage arrays. Duplicate\n`hydro_id` values within the same array are rejected. Cross-reference\nvalidation (checking that IDs exist in the hydro registry) is deferred to\na later validation layer.",
+  "description": "Intermediate serde type for `initial_conditions.json`, deserialized then\nvalidated before conversion to [`InitialConditions`].",
   "properties": {
     "$schema": {
       "description": "JSON schema URI — informational, not validated.",
@@ -136,6 +167,13 @@
       "description": "Past committed MW values for each anticipated thermal plant, ordered by\ndelivery stage ascending. Present only when the study includes at least\none anticipated thermal. Optional; defaults to empty.",
       "items": {
         "$ref": "#/$defs/RawAnticipatedCommitmentHistory"
+      },
+      "type": "array"
+    },
+    "past_defluences": {
+      "description": "Past defluence (release) windows per arc [m³/s per date range], keyed by\nthe upstream hydro whose release feeds the arc. Each entry is a\nself-describing `[start_date, end_date)` window on the pre-study calendar.\nWindows for the same hydro must not overlap; adjacent ranges\n(start == previous end) are accepted. Optional; defaults to empty.",
+      "items": {
+        "$ref": "#/$defs/RawHydroPastDefluence"
       },
       "type": "array"
     },

@@ -1,7 +1,7 @@
 //! Per-trial-point opening-solve dispatch and the deterministic trial-point kernel.
 //!
 //! [`StageOpeningSolver`] is the closed two-variant per-opening solve strategy
-//! (baked all-cuts vs lazy resident-set DCS), and `process_trial_point_backward`
+//! (frozen all-cuts vs lazy resident-set DCS), and `process_trial_point_backward`
 //! drives it: it solves a trial point's openings in a run-constant, rank-invariant
 //! `solve_order` permutation but writes and aggregates outcomes by canonical ω, so
 //! the generated cut is bit-identical regardless of solve order.
@@ -33,16 +33,16 @@ use super::{
 /// (CLAUDE.md closed-variant-set rule). The two variants are the two per-opening
 /// solve paths:
 ///
-/// - [`StageOpeningSolver::Baked`]: the baked all-cuts LP. Cross-iteration warm
+/// - [`StageOpeningSolver::Frozen`]: the frozen all-cuts LP. Cross-iteration warm
 ///   basis on the first-solved opening, full state+cut dual extraction,
-///   baked-order slot bumps, and first-solved basis capture.
+///   frozen-order slot bumps, and first-solved basis capture.
 /// - [`StageOpeningSolver::Lazy`]: the resident-set LP (DCS). A cut-free core is
 ///   loaded once per trial point and reused across the openings; the first-solved
 ///   opening solves fresh, the rest warm-carry; state-dual-only extraction;
 ///   row-map-correct slot bumps; no basis capture.
 pub(crate) enum StageOpeningSolver {
-    /// Baked all-cuts LP path (no DCS).
-    Baked,
+    /// Frozen all-cuts LP path (no DCS).
+    Frozen,
     /// Lazy resident-set LP path (Dynamic Cut Selection). Carries the active
     /// [`DcsParams`] so the per-opening call needs no separate `Option` test.
     Lazy(DcsParams),
@@ -50,18 +50,18 @@ pub(crate) enum StageOpeningSolver {
 
 impl StageOpeningSolver {
     /// Choose the strategy from the already-`is_active`-filtered `dcs_params`:
-    /// `Some` → [`StageOpeningSolver::Lazy`], `None` → [`StageOpeningSolver::Baked`].
+    /// `Some` → [`StageOpeningSolver::Lazy`], `None` → [`StageOpeningSolver::Frozen`].
     pub(crate) fn from_dcs_params(dcs_params: Option<DcsParams>) -> Self {
         match dcs_params {
             Some(params) => StageOpeningSolver::Lazy(params),
-            None => StageOpeningSolver::Baked,
+            None => StageOpeningSolver::Frozen,
         }
     }
 
     /// Per-trial-point LP load, issued once after `reset_solver_state()` and before
     /// any opening solve; each variant owns its own load.
     ///
-    /// - [`StageOpeningSolver::Baked`]: load the baked all-cuts LP via
+    /// - [`StageOpeningSolver::Frozen`]: load the frozen all-cuts LP via
     ///   [`load_backward_lp`].
     /// - [`StageOpeningSolver::Lazy`]: load the cut-free core and build the metadata
     ///   seed ONCE here, then reuse the loaded LP across this trial point's
@@ -75,7 +75,7 @@ impl StageOpeningSolver {
         iteration: u64,
     ) {
         match self {
-            StageOpeningSolver::Baked => {
+            StageOpeningSolver::Frozen => {
                 load_backward_lp(ws, succ);
             }
             StageOpeningSolver::Lazy(params) => {
@@ -94,7 +94,7 @@ impl StageOpeningSolver {
     /// active variant's path.
     ///
     /// `is_first` is `true` for the trial point's **first-solved** opening — ω=0
-    /// under the identity order, else the first entry of the solve order. The baked
+    /// under the identity order, else the first entry of the solve order. The frozen
     /// path loads and captures the per-(m, s) stored basis only on it; the lazy
     /// path passes `continue_carry == !is_first`. Decoupling basis identity from the
     /// literal ω=0 is what lets the openings be solved in any order while the
@@ -121,7 +121,7 @@ impl StageOpeningSolver {
         is_first: bool,
     ) -> Result<(), SddpError> {
         match self {
-            StageOpeningSolver::Baked => Self::solve_baked(
+            StageOpeningSolver::Frozen => Self::solve_frozen(
                 ws,
                 ctx,
                 training_ctx,
@@ -153,13 +153,13 @@ impl StageOpeningSolver {
         }
     }
 
-    /// Baked all-cuts per-opening solve: patch the opening bounds, reconstruct +
+    /// Frozen all-cuts per-opening solve: patch the opening bounds, reconstruct +
     /// solve, extract state and cut duals, accumulate the outcome (including the
     /// `slot_increments` update), and capture the first-solved opening's basis.
     // Rationale: see [`StageOpeningSolver::solve_opening`] — disjoint-borrow args
     // with no natural grouping.
     #[allow(clippy::too_many_arguments)]
-    fn solve_baked<S: SolverInterface + Send>(
+    fn solve_frozen<S: SolverInterface + Send>(
         ws: &mut SolverWorkspace<S>,
         ctx: &StageContext<'_>,
         training_ctx: &TrainingContext<'_>,
@@ -174,7 +174,6 @@ impl StageOpeningSolver {
         omega: usize,
         is_first: bool,
     ) -> Result<(), SddpError> {
-        let state = training_ctx.state;
         patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s);
 
         // Moved out before the solve to avoid a borrow conflict with `view`'s
@@ -205,8 +204,7 @@ impl StageOpeningSolver {
         // below).
         let objective = extract_duals_from_view(
             &view,
-            state.n_state,
-            state,
+            succ.cut_state,
             &ctx.templates[s].col_scale,
             succ,
             &mut state_duals,
@@ -261,7 +259,7 @@ impl StageOpeningSolver {
     /// `metadata_sync_contribution` allreduce without altering the gradient.
     ///
     /// First-solved basis capture is intentionally NOT performed: a captured basis
-    /// would describe the baked layout, not the DCS resident subset.
+    /// would describe the frozen layout, not the DCS resident subset.
     // Rationale: the args are disjoint borrows (ws, ctx, training_ctx, succ) and
     // per-opening scalars (params, raw_noise, x_hat, s, scenario, iteration,
     // omega); no natural grouping reduces caller-side borrows.
@@ -282,7 +280,7 @@ impl StageOpeningSolver {
     ) -> Result<(), SddpError> {
         let state = training_ctx.state;
         // The DCS LP must start from the cut-free base template (`ctx.templates[s]`),
-        // NOT `succ.baked_template`: the baked template already carries the active
+        // NOT `succ.frozen_template`: the frozen template already carries the active
         // cut rows, and loading it would make the lazy loop's fresh CutRowMap treat
         // those slots as non-resident and append them again (duplicate rows, broken
         // laziness).
@@ -304,11 +302,16 @@ impl StageOpeningSolver {
             iteration: Some(iteration),
             continue_carry,
         };
+        // The DCS LP renders `successor_pool`'s cuts into stage `s` (== successor);
+        // its projection is pool `successor`'s, NOT `succ.cut_state` (pool `t`'s,
+        // used only for the incoming extraction below).
+        let successor_cut_layout = &training_ctx.cut_state_layouts[succ.successor];
         lazy_solve_preloaded(
             &mut ws.solver,
             core,
             succ.successor_pool,
             state,
+            successor_cut_layout,
             col_scale,
             None,
             &ws.backward_accum.dcs_initial_resident,
@@ -319,7 +322,7 @@ impl StageOpeningSolver {
         let view = ws.backward_accum.dcs_solve.result_view();
 
         let objective =
-            extract_state_duals_only(&view, state.n_state, state, col_scale, &mut state_duals);
+            extract_state_duals_only(&view, succ.cut_state, col_scale, &mut state_duals);
 
         // `view` and `dcs_solve.row_map` both borrow `dcs_solve` immutably (so they
         // coexist); `slot_increments` is a distinct field borrowed mutably.
@@ -355,7 +358,7 @@ impl StageOpeningSolver {
 
 /// Process one trial point `m` in the backward pass, iterating over all openings.
 ///
-/// On the baked path the post-solve basis is written into `basis_slice` only at the
+/// On the frozen path the post-solve basis is written into `basis_slice` only at the
 /// first-solved opening; later writes are forbidden (retained-LU corruption). The
 /// DCS arm skips capture (see [`StageOpeningSolver::solve_lazy`]).
 // RATIONALE: 12 args required — each is a disjoint borrow (ws, ctx, training_ctx, exchange,
@@ -387,9 +390,6 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
         succ.probabilities.len(),
         "per_opening_stats must be initialised to n_openings before each stage's trial-point loop"
     );
-
-    // Env-gated backward `noise_key` diagnostic; `None` on the default path.
-    let noise_key_diag = training_ctx.noise_key_diag;
 
     // Openings are SOLVED in `solve_order(s)` (a run-constant, rank-invariant
     // permutation) but written and aggregated by CANONICAL ω below, so the generated
@@ -429,15 +429,6 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
             omega,
             is_first,
         )?;
-
-        if let Some(diag) = noise_key_diag {
-            let simplex_iterations = ws.backward_accum.per_opening_stats[omega].simplex_iterations;
-            let noise_key = diag.key(s, omega).unwrap_or(f64::NAN);
-            eprintln!(
-                "COBRE_W1_DIAG\tstage={s}\ttrial={scenario}\tomega={omega}\t\
-                 noise_key={noise_key:.17e}\tsimplex_iterations={simplex_iterations}"
-            );
-        }
     }
 
     // Aggregate into `agg_coefficients`, then copy into this trial point's arena

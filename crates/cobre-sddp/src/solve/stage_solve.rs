@@ -8,6 +8,7 @@ use crate::{
     context::StageContext,
     cut::pool::CutPool,
     error::SddpError,
+    indexer::StateLayout,
     workspace::{CapturedBasis, SolverWorkspace},
 };
 
@@ -48,16 +49,16 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
     ws: &'ws mut SolverWorkspace<S>,
     inputs: &StageInputs<'_>,
 ) -> Result<SolutionView<'ws>, SddpError> {
-    // `pool.populated_count` only grows, so this resize is a no-op after the
+    // `pool.populated()` only grows, so this resize is a no-op after the
     // first few iterations.
-    if ws.scratch.recon_slot_lookup.len() < inputs.pool.populated_count {
+    if ws.scratch.recon_slot_lookup.len() < inputs.pool.populated() {
         ws.scratch
             .recon_slot_lookup
-            .resize(inputs.pool.populated_count, None);
+            .resize(inputs.pool.populated(), None);
     }
 
     let view = if let Some(captured) = inputs.stored_basis {
-        // `base_row_count` is the non-baked template row count so cut rows are
+        // `base_row_count` is the non-frozen template row count so cut rows are
         // matched by slot identity, not positional copy from the stored basis.
         let target = ReconstructionTarget {
             base_row_count: inputs.stage_context.templates[inputs.stage_index].num_rows,
@@ -76,8 +77,8 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
         // demotes them until `col_basic + row_basic == num_row`.
         //
         // `num_row_for_invariant` uses the reconstructed length, not
-        // baked.num_rows, because delta cuts (added during the current backward
-        // pass) extend past the baked template row count.
+        // frozen.num_rows, because delta cuts (added during the current backward
+        // pass) extend past the frozen template row count.
         //
         // `base_row_for_invariant = 0` is safe: the loop demotes only currently-
         // BASIC rows, and equality rows are never BASIC by LP duality.
@@ -171,14 +172,41 @@ pub(crate) fn fill_unscaled_dual(out: &mut Vec<f64>, scaled: &[f64], row_scale: 
         out.extend_from_slice(scaled);
     } else {
         out.extend(scaled.iter().enumerate().map(|(i, &d)| {
-            let scale = if i < row_scale.len() {
-                row_scale[i]
-            } else {
-                1.0
-            };
+            let scale = row_scale.get(i).copied().unwrap_or(1.0);
             d * scale
         }));
     }
+}
+
+/// Assert the bucket and anticipated-ring state rode the state-assembly plain
+/// copy untouched.
+///
+/// The forward/simulation assembly plain-copies `unscaled_primal[..n_state]`
+/// into the advanced state, then overwrites only `inflow_lags` in place;
+/// `transit_buckets_out` and `anticipated_slots_out` sit in the shift-gap that
+/// overwrite never reaches, because both outgoing columns equal their
+/// state-vector index (the `storage` identity convention). Call after the lag
+/// overwrite, before the caller moves `unscaled_primal` back into scratch.
+// Rationale: this checks a verbatim copy invariant (`extend_from_slice`), not
+// a numerical result, so exact equality is the correct comparison — a
+// tolerance would mask the one bug this guards against (an overwrite landing
+// on the bucket/anticipated-ring range).
+#[allow(clippy::float_cmp)]
+pub(crate) fn debug_assert_bucket_copy_gap_intact(
+    assembled_state: &[f64],
+    unscaled_primal: &[f64],
+    layout: &StateLayout,
+) {
+    debug_assert!(
+        layout
+            .transit_buckets_out
+            .clone()
+            .chain(layout.anticipated_slots_out.clone())
+            .all(|j| assembled_state[j] == unscaled_primal[j]),
+        "bucket/anticipated-ring state must equal the LP primal's identity \
+         columns: the lag overwrite must never touch the bucket/anticipated-ring \
+         shift-gap"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -187,6 +215,7 @@ pub(crate) fn fill_unscaled_dual(out: &mut Vec<f64>, scaled: &[f64], row_scale: 
 
 #[cfg(test)]
 mod tests {
+    use cobre_solver::BasisStatus::{Basic as B, Lower as L};
     use cobre_solver::{ActiveSolver, SolverInterface, StageTemplate};
     // `SolverError` is only referenced by the `highs`-gated
     // `basis_inconsistent_propagates_as_sddp_solver_error` test below.
@@ -196,7 +225,6 @@ mod tests {
     use super::{StageInputs, run_stage_solve};
     use crate::{
         SddpError,
-        basis_reconstruct::{HIGHS_BASIS_STATUS_BASIC as B, HIGHS_BASIS_STATUS_LOWER as L},
         context::StageContext,
         cut::pool::CutPool,
         lp_builder::PatchBuffer,
@@ -268,7 +296,7 @@ mod tests {
             0,
             0,
             solver,
-            PatchBuffer::new(0, 0, 0, 0, 0, 0),
+            PatchBuffer::new(0, 0, 0, 0, 0, 0, 0),
             0,
             WorkspaceSizing::default(),
         )
@@ -335,11 +363,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 2: warm start on the baked path — successful solve returns outcome
+    // Test 2: warm start on the frozen path — successful solve returns outcome
     // -----------------------------------------------------------------------
 
-    /// Verifies that a warm-start with a valid `CapturedBasis` on the baked
-    /// path completes successfully.  On the baked path all cut rows are
+    /// Verifies that a warm-start with a valid `CapturedBasis` on the frozen
+    /// path completes successfully.  On the frozen path all cut rows are
     /// structural, so `reconstruct_basis` uses an empty iterator and
     /// `enforce_basic_count_invariant` is a no-op (no excess BASIC rows).
     ///
@@ -348,7 +376,7 @@ mod tests {
     /// `target.base_row_count=2` copies the 2 stored row statuses.
     /// With 2 BASIC col statuses + 0 BASIC row statuses, `total_basic=2 == num_row=2`.
     #[test]
-    fn run_stage_solve_warm_start_baked_path_succeeds() {
+    fn run_stage_solve_warm_start_frozen_path_succeeds() {
         let template = make_template();
         let templates = std::slice::from_ref(&template);
         let ctx = make_context(templates);
@@ -388,7 +416,7 @@ mod tests {
         let result = run_stage_solve(&mut ws, &inputs);
         assert!(
             result.is_ok(),
-            "warm start on baked path should succeed: {result:?}"
+            "warm start on frozen path should succeed: {result:?}"
         );
         // No cut rows → no demotions. Row statuses are all LOWER (non-basic).
         let lower_count = ws
@@ -503,5 +531,77 @@ mod tests {
                  got {other:?}"
             ),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 7: bucket copy-gap assertion helper
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn debug_assert_bucket_copy_gap_intact_passes_when_bucket_matches_primal() {
+        let layout = crate::test_support::state_layout_with_transit_buckets(
+            0,
+            0,
+            2,
+            vec![(0, 0), (0, 1)],
+            0,
+            0,
+            vec![],
+        );
+        let primal = vec![7.0, 11.0];
+        let assembled = primal.clone();
+        super::debug_assert_bucket_copy_gap_intact(&assembled, &primal, &layout);
+    }
+
+    #[test]
+    #[should_panic(expected = "bucket/anticipated-ring state must equal the LP primal's identity")]
+    fn debug_assert_bucket_copy_gap_intact_panics_when_bucket_diverges() {
+        let layout = crate::test_support::state_layout_with_transit_buckets(
+            0,
+            0,
+            2,
+            vec![(0, 0), (0, 1)],
+            0,
+            0,
+            vec![],
+        );
+        let primal = vec![7.0, 11.0];
+        let mut assembled = primal.clone();
+        assembled[1] = 999.0; // simulate an accidental overwrite of the bucket block
+        super::debug_assert_bucket_copy_gap_intact(&assembled, &primal, &layout);
+    }
+
+    #[test]
+    fn debug_assert_bucket_copy_gap_intact_passes_when_anticipated_ring_matches_primal() {
+        let layout = crate::test_support::state_layout_with_transit_buckets(
+            0,
+            0,
+            0,
+            vec![],
+            2,
+            1,
+            vec![1, 1],
+        );
+        let primal = vec![3.0, 5.0];
+        let assembled = primal.clone();
+        super::debug_assert_bucket_copy_gap_intact(&assembled, &primal, &layout);
+    }
+
+    #[test]
+    #[should_panic(expected = "bucket/anticipated-ring state must equal the LP primal's identity")]
+    fn debug_assert_bucket_copy_gap_intact_panics_when_anticipated_ring_diverges() {
+        let layout = crate::test_support::state_layout_with_transit_buckets(
+            0,
+            0,
+            0,
+            vec![],
+            2,
+            1,
+            vec![1, 1],
+        );
+        let primal = vec![3.0, 5.0];
+        let mut assembled = primal.clone();
+        assembled[0] = 999.0; // simulate an accidental overwrite of the anticipated-ring slot
+        super::debug_assert_bucket_copy_gap_intact(&assembled, &primal, &layout);
     }
 }

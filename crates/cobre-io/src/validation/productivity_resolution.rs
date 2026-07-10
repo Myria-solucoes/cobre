@@ -86,7 +86,7 @@ pub(crate) fn validate_productivity_resolution(data: &ParsedData, ctx: &mut Vali
                         ),
                     );
                 }
-                (Some(_), None) | (None, Some(_)) => {} // Exactly one source — valid.
+                (Some(_), None) | (None, Some(_)) => {}
             }
         }
     }
@@ -129,7 +129,9 @@ fn parquet_lookup(
 /// Find the `productivity_mw_per_m3s` from the JSON config for a given stage.
 ///
 /// The matching logic is reimplemented locally so this crate carries no
-/// dependency on downstream solver crates and no algorithm-specific identifiers.
+/// dependency on downstream solver crates and no algorithm-specific identifiers
+/// — a mirror of the solver crate's `resolve_stage`/`selection_entries`
+/// resolver's season-miss shape, kept in agreement rather than called.
 ///
 /// For `Seasonal`, a stage with no matching season entry falls back to the
 /// `default_model`, which carries no explicit productivity (returns `None`).
@@ -222,8 +224,10 @@ mod tests {
         cobre_core::entities::Hydro {
             id: EntityId(id),
             name: format!("Hydro {id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
+            travel_time_hours: None,
             entry_stage_id: None,
             exit_stage_id: None,
             min_storage_hm3: 0.0,
@@ -345,10 +349,12 @@ mod tests {
                 past_inflows: vec![],
                 past_anticipated_commitments: vec![],
                 recent_observations: vec![],
+                past_defluences: vec![],
             },
             buses: vec![Bus {
                 id: EntityId(1),
                 name: "BUS_1".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
                 deficit_segments: vec![DeficitSegment {
                     depth_mw: None,
                     cost_per_mwh: 1000.0,

@@ -76,6 +76,7 @@ pub fn resolve_load_factors(
 #[allow(clippy::unwrap_used, clippy::float_cmp)]
 mod tests {
     use super::*;
+    use chrono::NaiveDate;
     use cobre_core::EntityId;
     use cobre_core::temporal::{
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
@@ -85,6 +86,7 @@ mod tests {
         Bus {
             id: EntityId(id),
             name: format!("B{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![],
             excess_cost: 0.0,
         }

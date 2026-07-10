@@ -2,6 +2,8 @@
 
 use std::collections::HashSet;
 
+use chrono::NaiveDate;
+
 use super::System;
 use super::validate::{
     CrossRefEntities, build_index, build_stage_index, check_duplicate_stages, check_duplicates,
@@ -23,19 +25,25 @@ use crate::{
 /// # Examples
 ///
 /// ```
+/// use chrono::NaiveDate;
 /// use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
 ///
+/// let early = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+/// let late = NaiveDate::from_ymd_opt(2024, 2, 1).unwrap();
 /// let system = SystemBuilder::new()
 ///     .buses(vec![
-///         Bus { id: EntityId(2), name: "B".to_string(), deficit_segments: vec![], excess_cost: 0.0 },
-///         Bus { id: EntityId(1), name: "A".to_string(), deficit_segments: vec![], excess_cost: 0.0 },
+///         Bus { id: EntityId(1), name: "B".to_string(), operational_start_date: late, deficit_segments: vec![], excess_cost: 0.0 },
+///         Bus { id: EntityId(2), name: "Z".to_string(), operational_start_date: early, deficit_segments: vec![], excess_cost: 0.0 },
+///         Bus { id: EntityId(3), name: "A".to_string(), operational_start_date: early, deficit_segments: vec![], excess_cost: 0.0 },
 ///     ])
 ///     .build()
 ///     .expect("valid system");
 ///
-/// // Canonical ordering: id=1 comes before id=2.
-/// assert_eq!(system.buses()[0].id, EntityId(1));
-/// assert_eq!(system.buses()[1].id, EntityId(2));
+/// // Canonical ordering: by operational_start_date, then by id; never by name.
+/// // The two early-date buses order by id (2 then 3), not by name (which would be A then Z).
+/// assert_eq!(system.buses()[0].id, EntityId(2)); // early date, smaller id (name "Z")
+/// assert_eq!(system.buses()[1].id, EntityId(3)); // early date, larger id (name "A")
+/// assert_eq!(system.buses()[2].id, EntityId(1)); // later date
 /// ```
 pub struct SystemBuilder {
     buses: Vec<Bus>,
@@ -302,9 +310,11 @@ impl SystemBuilder {
         self
     }
 
-    /// Sort every collection into canonical [`EntityId`] order, validate, and assemble
-    /// the immutable [`System`]. All validation errors are collected before returning —
-    /// no short-circuiting on the first error.
+    /// Sort every collection into canonical order, validate, and assemble the
+    /// immutable [`System`]. Operational entities sort by
+    /// `(operational_start_date, id)`; stages and generic constraints sort by
+    /// `id`. All validation errors are collected before returning — no
+    /// short-circuiting on the first error.
     ///
     /// # Errors
     ///
@@ -319,13 +329,25 @@ impl SystemBuilder {
     // thread those through every call and lose the fail-fast-on-duplicates short-circuit.
     #[allow(clippy::too_many_lines)]
     pub fn build(mut self) -> Result<System, Vec<ValidationError>> {
-        self.buses.sort_by_key(|e| e.id.0);
-        self.lines.sort_by_key(|e| e.id.0);
-        self.hydros.sort_by_key(|e| e.id.0);
-        self.thermals.sort_by_key(|e| e.id.0);
-        self.pumping_stations.sort_by_key(|e| e.id.0);
-        self.contracts.sort_by_key(|e| e.id.0);
-        self.non_controllable_sources.sort_by_key(|e| e.id.0);
+        sort_canonical(&mut self.buses, |b| b.operational_start_date, |b| b.id.0);
+        sort_canonical(&mut self.lines, |l| l.operational_start_date, |l| l.id.0);
+        sort_canonical(&mut self.hydros, |h| h.operational_start_date, |h| h.id.0);
+        sort_canonical(&mut self.thermals, |t| t.operational_start_date, |t| t.id.0);
+        sort_canonical(
+            &mut self.pumping_stations,
+            |p| p.operational_start_date,
+            |p| p.id.0,
+        );
+        sort_canonical(
+            &mut self.contracts,
+            |c| c.operational_start_date,
+            |c| c.id.0,
+        );
+        sort_canonical(
+            &mut self.non_controllable_sources,
+            |n| n.operational_start_date,
+            |n| n.id.0,
+        );
         self.stages.sort_by_key(|s| s.id);
         self.generic_constraints.sort_by_key(|c| c.id.0);
 
@@ -443,5 +465,421 @@ impl SystemBuilder {
             external_load_scenarios: self.external_load_scenarios,
             external_ncs_scenarios: self.external_ncs_scenarios,
         })
+    }
+}
+
+/// Sort entities by `(operational_start_date, id)`. The `id` tiebreak is unique
+/// within an entity type (duplicates are rejected), so this is a total order and
+/// upholds the declaration-order hard rule without relying on input order. The
+/// secondary key is the id, not the name, because names are user-chosen and vary
+/// between authors of the same system, whereas the id is the stable canonical key.
+fn sort_canonical<T>(entities: &mut [T], date: impl Fn(&T) -> NaiveDate, id: impl Fn(&T) -> i32) {
+    entities.sort_by(|a, b| date(a).cmp(&date(b)).then_with(|| id(a).cmp(&id(b))));
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::{
+        Block, BlockMode, ConstraintExpression, ConstraintSense, ContractType, DeficitSegment,
+        HydroGenerationModel, HydroPenalties, NoiseMethod, ScenarioSourceConfig, SlackConfig,
+        StageRiskConfig, StageStateConfig,
+    };
+    use proptest::prelude::*;
+
+    fn date_early() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date")
+    }
+
+    fn date_late() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2024, 2, 1).expect("valid date")
+    }
+
+    fn zero_penalties() -> HydroPenalties {
+        HydroPenalties {
+            spillage_cost: 0.0,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 0.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 0.0,
+        }
+    }
+
+    fn bus(id: i32, name: &str, date: NaiveDate) -> Bus {
+        Bus {
+            id: EntityId(id),
+            name: name.to_string(),
+            operational_start_date: date,
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 5000.0,
+            }],
+            excess_cost: 0.0,
+        }
+    }
+
+    fn line(id: i32, name: &str, date: NaiveDate, source_bus: i32, target_bus: i32) -> Line {
+        Line {
+            id: EntityId(id),
+            name: name.to_string(),
+            operational_start_date: date,
+            source_bus_id: EntityId(source_bus),
+            target_bus_id: EntityId(target_bus),
+            entry_stage_id: None,
+            exit_stage_id: None,
+            direct_capacity_mw: 100.0,
+            reverse_capacity_mw: 100.0,
+            losses_percent: 0.0,
+            exchange_cost: 0.0,
+        }
+    }
+
+    fn hydro(id: i32, name: &str, date: NaiveDate, bus_id: i32) -> Hydro {
+        Hydro {
+            id: EntityId(id),
+            name: name.to_string(),
+            operational_start_date: date,
+            bus_id: EntityId(bus_id),
+            downstream_id: None,
+            travel_time_hours: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 1000.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 100.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: zero_penalties(),
+        }
+    }
+
+    fn thermal(id: i32, name: &str, date: NaiveDate, bus_id: i32) -> Thermal {
+        Thermal {
+            id: EntityId(id),
+            name: name.to_string(),
+            operational_start_date: date,
+            bus_id: EntityId(bus_id),
+            entry_stage_id: None,
+            exit_stage_id: None,
+            cost_per_mwh: 10.0,
+            min_generation_mw: 0.0,
+            max_generation_mw: 100.0,
+            anticipated_config: None,
+        }
+    }
+
+    fn pumping(
+        id: i32,
+        name: &str,
+        date: NaiveDate,
+        bus_id: i32,
+        source_hydro: i32,
+        destination_hydro: i32,
+    ) -> PumpingStation {
+        PumpingStation {
+            id: EntityId(id),
+            name: name.to_string(),
+            operational_start_date: date,
+            bus_id: EntityId(bus_id),
+            source_hydro_id: EntityId(source_hydro),
+            destination_hydro_id: EntityId(destination_hydro),
+            entry_stage_id: None,
+            exit_stage_id: None,
+            consumption_mw_per_m3s: 0.5,
+            min_flow_m3s: 0.0,
+            max_flow_m3s: 100.0,
+        }
+    }
+
+    fn contract(
+        id: i32,
+        name: &str,
+        date: NaiveDate,
+        bus_id: i32,
+        contract_type: ContractType,
+    ) -> EnergyContract {
+        EnergyContract {
+            id: EntityId(id),
+            name: name.to_string(),
+            operational_start_date: date,
+            bus_id: EntityId(bus_id),
+            contract_type,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            price_per_mwh: 100.0,
+            min_mw: 0.0,
+            max_mw: 100.0,
+        }
+    }
+
+    fn ncs(id: i32, name: &str, date: NaiveDate, bus_id: i32) -> NonControllableSource {
+        NonControllableSource {
+            id: EntityId(id),
+            name: name.to_string(),
+            operational_start_date: date,
+            bus_id: EntityId(bus_id),
+            entry_stage_id: None,
+            exit_stage_id: None,
+            max_generation_mw: 100.0,
+            allow_curtailment: true,
+            curtailment_cost: 0.0,
+        }
+    }
+
+    fn stage(id: i32) -> Stage {
+        Stage {
+            index: 0,
+            id,
+            start_date: date_early(),
+            end_date: date_late(),
+            season_id: None,
+            blocks: vec![Block {
+                index: 0,
+                name: "B0".to_string(),
+                duration_hours: 744.0,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: true,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        }
+    }
+
+    fn generic_constraint(id: i32) -> GenericConstraint {
+        GenericConstraint {
+            id: EntityId(id),
+            name: format!("gc{id}"),
+            description: None,
+            expression: ConstraintExpression { terms: vec![] },
+            sense: ConstraintSense::GreaterEqual,
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+        }
+    }
+
+    // Each operational collection mixes two distinct dates so the primary date key
+    // is exercised; the bus set additionally carries a same-date pair ("Z"/"A") so
+    // the name tiebreak is exercised. Declaration order is non-canonical so a
+    // permutation that happens to be canonical is not the only case the property
+    // sees. Cross-references resolve: bus ids {1,2,3}, hydro ids {1,2}.
+    fn reference_buses() -> Vec<Bus> {
+        vec![
+            bus(1, "B", date_late()),
+            bus(2, "Z", date_early()),
+            bus(3, "A", date_early()),
+        ]
+    }
+
+    fn reference_lines() -> Vec<Line> {
+        vec![
+            line(1, "LB", date_late(), 1, 2),
+            line(2, "LA", date_early(), 2, 3),
+        ]
+    }
+
+    fn reference_hydros() -> Vec<Hydro> {
+        vec![
+            hydro(1, "HB", date_late(), 1),
+            hydro(2, "HA", date_early(), 2),
+        ]
+    }
+
+    fn reference_thermals() -> Vec<Thermal> {
+        vec![
+            thermal(1, "TB", date_late(), 1),
+            thermal(2, "TA", date_early(), 3),
+        ]
+    }
+
+    fn reference_pumping() -> Vec<PumpingStation> {
+        vec![
+            pumping(1, "PB", date_late(), 1, 1, 2),
+            pumping(2, "PA", date_early(), 2, 2, 1),
+        ]
+    }
+
+    fn reference_contracts() -> Vec<EnergyContract> {
+        vec![
+            contract(1, "CB", date_late(), 1, ContractType::Import),
+            contract(2, "CA", date_early(), 2, ContractType::Export),
+        ]
+    }
+
+    fn reference_ncs() -> Vec<NonControllableSource> {
+        vec![ncs(1, "NB", date_late(), 1), ncs(2, "NA", date_early(), 3)]
+    }
+
+    fn reference_stages() -> Vec<Stage> {
+        vec![stage(3), stage(1), stage(2)]
+    }
+
+    fn reference_generic_constraints() -> Vec<GenericConstraint> {
+        vec![
+            generic_constraint(30),
+            generic_constraint(10),
+            generic_constraint(20),
+        ]
+    }
+
+    /// Canonical key the builder applies to operational entities:
+    /// `(operational_start_date, id)`. Returned as owned tuples so the projected
+    /// post-`build()` order can be compared against the expected order.
+    trait OpKey {
+        fn op_date(&self) -> NaiveDate;
+        fn op_id(&self) -> i32;
+    }
+
+    macro_rules! impl_op_key {
+        ($t:ty) => {
+            impl OpKey for $t {
+                fn op_date(&self) -> NaiveDate {
+                    self.operational_start_date
+                }
+                fn op_id(&self) -> i32 {
+                    self.id.0
+                }
+            }
+        };
+    }
+
+    impl_op_key!(Bus);
+    impl_op_key!(Line);
+    impl_op_key!(Hydro);
+    impl_op_key!(Thermal);
+    impl_op_key!(PumpingStation);
+    impl_op_key!(EnergyContract);
+    impl_op_key!(NonControllableSource);
+
+    fn project_op<T: OpKey>(entities: &[T]) -> Vec<(NaiveDate, i32)> {
+        entities.iter().map(|e| (e.op_date(), e.op_id())).collect()
+    }
+
+    /// Expected canonical projection: clone the reference set and apply the SAME
+    /// `(date, id)` key `build()` uses, then project. Computed, never hand-typed,
+    /// so the expectation tracks the contract rather than a guessed order.
+    fn expected_op<T: OpKey>(mut reference: Vec<T>) -> Vec<(NaiveDate, i32)> {
+        reference.sort_by(|a, b| {
+            a.op_date()
+                .cmp(&b.op_date())
+                .then_with(|| a.op_id().cmp(&b.op_id()))
+        });
+        project_op(&reference)
+    }
+
+    fn expected_stage_ids() -> Vec<i32> {
+        let mut s = reference_stages();
+        s.sort_by_key(|s| s.id);
+        s.iter().map(|s| s.id).collect()
+    }
+
+    fn expected_gc_ids() -> Vec<i32> {
+        let mut g = reference_generic_constraints();
+        g.sort_by_key(|c| c.id.0);
+        g.iter().map(|c| c.id.0).collect()
+    }
+
+    fn is_sorted<T: PartialOrd>(seq: &[T]) -> bool {
+        seq.windows(2).all(|w| w[0] <= w[1])
+    }
+
+    proptest! {
+        /// Declaration-order invariance guard: `SystemBuilder::build()` canonicalizes
+        /// every collection identically regardless of input order. Each parameter is
+        /// an independent shuffle of a fixed valid reference set — only the ORDER is
+        /// random — so each generated `System` stays valid while exercising the sort.
+        #[test]
+        fn build_canonical_order_invariant_under_input_permutation(
+            buses in Just(reference_buses()).prop_shuffle(),
+            lines in Just(reference_lines()).prop_shuffle(),
+            hydros in Just(reference_hydros()).prop_shuffle(),
+            thermals in Just(reference_thermals()).prop_shuffle(),
+            pumping in Just(reference_pumping()).prop_shuffle(),
+            contracts in Just(reference_contracts()).prop_shuffle(),
+            ncs in Just(reference_ncs()).prop_shuffle(),
+            stages in Just(reference_stages()).prop_shuffle(),
+            gcs in Just(reference_generic_constraints()).prop_shuffle(),
+        ) {
+            let system = SystemBuilder::new()
+                .buses(buses)
+                .lines(lines)
+                .hydros(hydros)
+                .thermals(thermals)
+                .pumping_stations(pumping)
+                .contracts(contracts)
+                .non_controllable_sources(ncs)
+                .stages(stages)
+                .generic_constraints(gcs)
+                .build()
+                .expect("reference system is valid");
+
+            let expected_buses = expected_op(reference_buses());
+            let expected_lines = expected_op(reference_lines());
+            let expected_hydros = expected_op(reference_hydros());
+            let expected_thermals = expected_op(reference_thermals());
+            let expected_pumping = expected_op(reference_pumping());
+            let expected_contracts = expected_op(reference_contracts());
+            let expected_ncs = expected_op(reference_ncs());
+            let expected_stages = expected_stage_ids();
+            let expected_gcs = expected_gc_ids();
+
+            // Sortedness: the precomputed expectation is itself non-decreasing under
+            // the canonical key, so a mistake in the expectation cannot mask a sort bug.
+            prop_assert!(is_sorted(&expected_buses));
+            prop_assert!(is_sorted(&expected_lines));
+            prop_assert!(is_sorted(&expected_hydros));
+            prop_assert!(is_sorted(&expected_thermals));
+            prop_assert!(is_sorted(&expected_pumping));
+            prop_assert!(is_sorted(&expected_contracts));
+            prop_assert!(is_sorted(&expected_ncs));
+            prop_assert!(is_sorted(&expected_stages));
+            prop_assert!(is_sorted(&expected_gcs));
+
+            prop_assert_eq!(project_op(system.buses()), expected_buses);
+            prop_assert_eq!(project_op(system.lines()), expected_lines);
+            prop_assert_eq!(project_op(system.hydros()), expected_hydros);
+            prop_assert_eq!(project_op(system.thermals()), expected_thermals);
+            prop_assert_eq!(project_op(system.pumping_stations()), expected_pumping);
+            prop_assert_eq!(project_op(system.contracts()), expected_contracts);
+            prop_assert_eq!(project_op(system.non_controllable_sources()), expected_ncs);
+            prop_assert_eq!(
+                system.stages().iter().map(|s| s.id).collect::<Vec<_>>(),
+                expected_stages
+            );
+            prop_assert_eq!(
+                system.generic_constraints().iter().map(|c| c.id.0).collect::<Vec<_>>(),
+                expected_gcs
+            );
+        }
     }
 }

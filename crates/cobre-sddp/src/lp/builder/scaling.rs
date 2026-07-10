@@ -6,6 +6,8 @@ use cobre_core::{Hydro, Stage};
 use cobre_solver::StageTemplate;
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
+use crate::indexer::StateLayout;
+
 use super::M3S_TO_HM3;
 
 /// Per-column geometric-mean scaling factors from a CSC matrix:
@@ -31,8 +33,7 @@ pub(crate) fn compute_col_scale(num_cols: usize, col_starts: &[i32], values: &[f
             }
         }
         if max_abs > 0.0 && min_abs < f64::INFINITY {
-            let d = 1.0 / (max_abs * min_abs).sqrt();
-            scale[j] = d;
+            scale[j] = 1.0 / (max_abs * min_abs).sqrt();
         }
     }
     scale
@@ -60,7 +61,6 @@ pub(crate) fn apply_col_scale(template: &mut StageTemplate, col_scale: &[f64]) {
         *obj *= d;
     }
 
-    // Inverse-scale column bounds: `x̃ = x / d_j`, so bounds become `[lo/d, hi/d]`.
     for ((lo, hi), &d) in template
         .col_lower
         .iter_mut()
@@ -69,6 +69,69 @@ pub(crate) fn apply_col_scale(template: &mut StageTemplate, col_scale: &[f64]) {
     {
         *lo /= d;
         *hi /= d;
+    }
+}
+
+/// Override the matrix-derived empty-column default (`1.0`) on travel-time
+/// bucket columns with the corresponding downstream plant's already-computed
+/// storage scale — buckets are volumes (hm³), the same unit as storage, and
+/// `transit_bucket_column_order[b] = (plant_canonical_idx, _lag)` IS that plant's
+/// `storage` column offset, so REUSE it rather than re-deriving a bucket scale
+/// from row/column entries the LP fill has not wired yet. Every lag for the
+/// same plant shares that one scale — they measure the same reservoir's
+/// incoming volume, not independent quantities. No-op when `n_buckets == 0`.
+///
+/// # Panics (debug builds only)
+///
+/// Panics if `col_scale` does not cover every state column including `theta` —
+/// the `col_scale.len() > theta_col` contract every render/patch call site
+/// relies on.
+// Voice 4: no production call site wires this in yet — `postprocess_templates`
+// activates it once the travel-time bucket LP fill gives bucket columns real
+// row/column entries. The `#[allow(dead_code)]` refires once that reader lands.
+#[allow(dead_code)]
+pub(crate) fn apply_bucket_col_scale(col_scale: &mut [f64], state_layout: &StateLayout) {
+    debug_assert!(
+        col_scale.len() > state_layout.theta,
+        "col_scale must cover every state column including theta ({}); got len {}",
+        state_layout.theta,
+        col_scale.len()
+    );
+    for (b, &(plant_idx, _lag)) in state_layout.transit_bucket_column_order.iter().enumerate() {
+        let d = col_scale[state_layout.storage.start + plant_idx];
+        col_scale[state_layout.transit_buckets_out.start + b] = d;
+        col_scale[state_layout.transit_buckets_in.start + b] = d;
+    }
+}
+
+/// Force `col_scale = 1.0` on the anticipated ring's two state ranges
+/// (`anticipated_slots_out`, `anticipated_state`), overriding whatever
+/// `compute_col_scale` derived there. The ring pins a commitment at
+/// `v / col_scale` then re-reads it at `· col_scale` in the fishing row; that
+/// round-trip is exact only at `col_scale = 1.0` (any other factor can drift a
+/// commitment sitting exactly at its delivery-stage generation cap a sub-ULP
+/// outside the bound). No-op when `n_anticipated * k_max == 0` (both ranges empty).
+///
+/// # Panics (debug builds only)
+///
+/// Panics if `col_scale` does not cover every state column including `theta` —
+/// the `col_scale.len() > theta_col` contract every render/patch call site
+/// relies on.
+pub(crate) fn apply_anticipated_col_scale_unscale(
+    col_scale: &mut [f64],
+    state_layout: &StateLayout,
+) {
+    debug_assert!(
+        col_scale.len() > state_layout.theta,
+        "col_scale must cover every state column including theta ({}); got len {}",
+        state_layout.theta,
+        col_scale.len()
+    );
+    for c in state_layout.anticipated_slots_out.clone() {
+        col_scale[c] = 1.0;
+    }
+    for c in state_layout.anticipated_state.clone() {
+        col_scale[c] = 1.0;
     }
 }
 
@@ -177,6 +240,7 @@ pub(super) fn compute_noise_scale(
                     crate::lp_builder::filling_phase(
                         hydro.filling.as_ref(),
                         hydro.entry_stage_id,
+                        hydro.exit_stage_id,
                         stage.id,
                     ),
                     crate::lp_builder::Phase::PreFilling
@@ -247,7 +311,7 @@ mod tests {
         }
     }
 
-    /// AC E3-001-1: a matrix where every row has min_abs == max_abs gives scale 1.0.
+    /// A matrix where every row has min_abs == max_abs gives scale 1.0.
     ///
     /// Matrix (2 rows × 2 cols, column-major), all nonzeros |value| = 1.0:
     ///
@@ -259,8 +323,6 @@ mod tests {
     /// For each row: min_abs = max_abs = 1.0 → scale = 1/sqrt(1*1) = 1.0.
     #[test]
     fn row_scale_identity_for_uniform_matrix() {
-        // All nonzeros have |value| = 1.0.  min_abs = max_abs = 1.0.
-        // scale[i] = 1/sqrt(1.0 * 1.0) = 1.0 for every row.
         let col_starts = vec![0, 2, 4];
         let row_indices = vec![0, 1, 0, 1];
         let values = vec![1.0, 1.0, 1.0, 1.0];
@@ -278,7 +340,7 @@ mod tests {
         );
     }
 
-    /// AC E3-001-2: geometric-mean scale matches expected value for known matrix.
+    /// Geometric-mean scale matches expected value for known matrix.
     ///
     /// Matrix (2 rows × 2 cols):
     ///
@@ -310,7 +372,7 @@ mod tests {
         );
     }
 
-    /// AC E3-001-3: `apply_row_scale` multiplies matrix values and row bounds.
+    /// `apply_row_scale` multiplies matrix values and row bounds.
     ///
     /// Uses the same 2×2 matrix as `row_scale_geometric_mean` so the expected
     /// values are easily verified by hand.
@@ -366,7 +428,7 @@ mod tests {
         assert_eq!(tmpl.objective, vec![0.0; 2]);
     }
 
-    /// AC E3-001-4: a row with no nonzeros receives scale factor 1.0.
+    /// A row with no nonzeros receives scale factor 1.0.
     ///
     /// Matrix (3 rows × 1 col): only row 1 has a nonzero.
     /// Rows 0 and 2 are structurally empty → scale = 1.0.
@@ -393,6 +455,122 @@ mod tests {
         assert!(
             (scale[2] - 1.0).abs() < 1e-15,
             "empty row 2 scale should be 1.0"
+        );
+    }
+
+    // =========================================================================
+    // Bucket column scale tests
+    // =========================================================================
+
+    use crate::indexer::StateLayout;
+
+    /// `N=2` hydros, `L=0` (no lags), `B=3` buckets: hydro 0 feeds two lags
+    /// (depth 2), hydro 1 feeds one lag (depth 1). Each bucket's in/out scale
+    /// must equal ITS downstream plant's storage scale, and every lag of the
+    /// same plant must share that one value.
+    #[test]
+    fn apply_bucket_col_scale_reuses_storage_scale_per_plant() {
+        let state_layout =
+            StateLayout::new(2, 0, 3, vec![(0, 1), (0, 2), (1, 1)], 0, 0, vec![], &[0, 0]);
+
+        assert_eq!(state_layout.storage, 0..2);
+        assert_eq!(state_layout.transit_buckets_out, 2..5);
+        assert_eq!(state_layout.transit_buckets_in, 9..12);
+        assert_eq!(state_layout.theta, 12);
+
+        let mut col_scale = vec![1.0_f64; state_layout.theta + 1];
+        col_scale[state_layout.storage.start] = 2.0; // hydro 0
+        col_scale[state_layout.storage.start + 1] = 5.0; // hydro 1
+
+        super::apply_bucket_col_scale(&mut col_scale, &state_layout);
+
+        assert!(col_scale.len() > state_layout.theta);
+        for (b, &(plant_idx, _lag)) in state_layout.transit_bucket_column_order.iter().enumerate() {
+            let expected = col_scale[state_layout.storage.start + plant_idx];
+            let out = col_scale[state_layout.transit_buckets_out.start + b];
+            let in_ = col_scale[state_layout.transit_buckets_in.start + b];
+            assert!(out.is_finite() && out == expected, "bucket {b} out scale");
+            assert!(in_.is_finite() && in_ == expected, "bucket {b} in scale");
+        }
+        // Hydro 0's two lags (buckets 0, 1) share hydro 0's scale.
+        assert_eq!(col_scale[state_layout.transit_buckets_out.start], 2.0);
+        assert_eq!(col_scale[state_layout.transit_buckets_out.start + 1], 2.0);
+        // Hydro 1's one lag (bucket 2) gets hydro 1's scale.
+        assert_eq!(col_scale[state_layout.transit_buckets_out.start + 2], 5.0);
+    }
+
+    /// `B == 0`: `transit_bucket_column_order` is empty, so the override loop touches
+    /// no column — `col_scale` is left exactly as the generic computation
+    /// produced it.
+    #[test]
+    fn apply_bucket_col_scale_is_noop_when_b_zero() {
+        let state_layout = StateLayout::new(2, 0, 0, vec![], 0, 0, vec![], &[0, 0]);
+        let mut col_scale = vec![1.0_f64; state_layout.theta + 1];
+        col_scale[0] = 3.0;
+
+        let before = col_scale.clone();
+        super::apply_bucket_col_scale(&mut col_scale, &state_layout);
+
+        assert_eq!(
+            col_scale, before,
+            "n_buckets == 0 must leave col_scale untouched"
+        );
+    }
+
+    // =========================================================================
+    // Anticipated ring col_scale=1.0 override
+    // =========================================================================
+
+    /// `N=2` hydros, `L=0`, `A=1` anticipated plant, `K=2` slots: seeds every
+    /// `col_scale` entry with a distinct non-1.0 value, then asserts the override
+    /// forces exactly the `anticipated_slots_out` and `anticipated_state` indices
+    /// to `1.0` while leaving every other index byte-identical to its seed.
+    #[test]
+    fn apply_anticipated_col_scale_unscale_forces_ring_to_one() {
+        let state_layout = StateLayout::new(2, 0, 0, vec![], 1, 2, vec![2], &[0, 0]);
+
+        assert_eq!(state_layout.anticipated_slots_out, 2..4);
+        assert_eq!(state_layout.anticipated_state, 8..10);
+        assert_eq!(state_layout.theta, 10);
+
+        let mut col_scale: Vec<f64> =
+            vec![2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0];
+        assert_eq!(col_scale.len(), state_layout.theta + 1);
+        let before = col_scale.clone();
+
+        super::apply_anticipated_col_scale_unscale(&mut col_scale, &state_layout);
+
+        for c in state_layout.anticipated_slots_out.clone() {
+            assert_eq!(col_scale[c], 1.0, "anticipated_slots_out index {c}");
+        }
+        for c in state_layout.anticipated_state.clone() {
+            assert_eq!(col_scale[c], 1.0, "anticipated_state index {c}");
+        }
+        for (i, (&got, &want)) in col_scale.iter().zip(before.iter()).enumerate() {
+            if state_layout.anticipated_slots_out.contains(&i)
+                || state_layout.anticipated_state.contains(&i)
+            {
+                continue;
+            }
+            assert_eq!(got, want, "non-anticipated index {i} must be untouched");
+        }
+    }
+
+    /// `n_anticipated == 0`: both ring ranges are empty, so the override loop
+    /// touches no column — `col_scale` is left exactly as the generic
+    /// computation produced it.
+    #[test]
+    fn apply_anticipated_col_scale_unscale_is_noop_when_a_zero() {
+        let state_layout = StateLayout::new(2, 0, 0, vec![], 0, 0, vec![], &[0, 0]);
+        let mut col_scale = vec![1.0_f64; state_layout.theta + 1];
+        col_scale[0] = 3.0;
+
+        let before = col_scale.clone();
+        super::apply_anticipated_col_scale_unscale(&mut col_scale, &state_layout);
+
+        assert_eq!(
+            col_scale, before,
+            "n_anticipated == 0 must leave col_scale untouched"
         );
     }
 
@@ -435,8 +613,10 @@ mod tests {
         Hydro {
             id: EntityId(id),
             name: format!("H{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
+            travel_time_hours: None,
             entry_stage_id: filling.then_some(4),
             exit_stage_id: None,
             min_storage_hm3: 0.0,

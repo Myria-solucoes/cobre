@@ -16,8 +16,9 @@
 )]
 
 use cobre_sddp::cut::{CutPool, CutRowMap};
+use cobre_sddp::cut_selection::CutMetadata;
 use cobre_sddp::dcs::{DcsParams, DcsScoringScratch, score_violated_candidates};
-use cobre_sddp::indexer::StateLayout;
+use cobre_sddp::indexer::{CutStateProjection, StateLayout};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
@@ -126,7 +127,7 @@ fn score_per_candidate_baseline(
 
     for (slot, intercept, coefficients) in pool.active_cuts() {
         if let Some(k1) = params.k1 {
-            let age = current_iteration.saturating_sub(pool.metadata[slot].iteration_generated);
+            let age = current_iteration.saturating_sub(pool.metadata(slot).iteration_generated);
             if age >= u64::from(k1) {
                 continue;
             }
@@ -162,8 +163,16 @@ fn make_candidate_pool(k: usize, n_state: usize, seed: u64) -> CutPool {
         let intercept = draw_f64(&mut state);
         fill_f64(&mut coeffs, state.wrapping_add(0xABCD_0000 + slot as u64));
         pool.add_cut(0, slot as u32, intercept, &coeffs);
-        pool.metadata[slot].iteration_generated = 1;
     }
+    let metadata: Vec<CutMetadata> = (0..k)
+        .map(|slot| {
+            let mut meta = pool.metadata(slot).clone();
+            meta.iteration_generated = 1;
+            meta
+        })
+        .collect();
+    let active: Vec<bool> = (0..k).map(|slot| pool.is_active(slot)).collect();
+    pool.replace_selection(&metadata, &active);
     pool
 }
 
@@ -179,7 +188,14 @@ fn make_primal(n_state: usize, seed: u64) -> Vec<f64> {
 }
 
 fn bench_one(c: &mut Criterion, k: usize, n_state: usize) {
-    let state = StateLayout::new(n_state, 0, 0, 0, vec![], &vec![0; n_state]);
+    let state = StateLayout::new(n_state, 0, 0, Vec::new(), 0, 0, vec![], &vec![0; n_state]);
+    let cut_state = CutStateProjection::new(
+        &state,
+        cobre_core::temporal::StageStateConfig {
+            storage: true,
+            inflow_lags: true,
+        },
+    );
     let pool = make_candidate_pool(k, n_state, 0xDEAD_BEEF_CAFE_F00D);
     let primal = make_primal(n_state, 0xFEED_FACE_1234_5678);
     let resident = CutRowMap::new(k.max(1), 0); // empty: every cut a candidate
@@ -204,6 +220,7 @@ fn bench_one(c: &mut Criterion, k: usize, n_state: usize) {
                 let count = score_violated_candidates(
                     black_box(&pool),
                     black_box(&state),
+                    black_box(&cut_state),
                     black_box(&primal),
                     black_box(&[]),
                     black_box(&resident),

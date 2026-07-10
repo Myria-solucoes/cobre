@@ -1,17 +1,8 @@
 use crate::SddpError;
 
-/// Test-only backward-pass shim that owns per-call scratch.
-///
-/// Production code drives the backward pass via [`BackwardPassState::run`]
-/// on the state struct held by `TrainingSession`. This shim exists so that
-/// the tests in this module can exercise `run_one_backward_stage` without
-/// threading a full `TrainingSession` through every fixture.
-///
-/// # Errors
-///
-/// Returns `Err(SddpError::Infeasible { .. })` when a stage LP has no
-/// feasible solution during the backward sweep. Returns
-/// `Err(SddpError::Solver(_))` for all other terminal LP solver failures.
+/// Test-only backward-pass shim that owns per-call scratch, so the tests in
+/// this module can exercise the backward pass without threading a full
+/// `TrainingSession` through every fixture.
 #[cfg(test)]
 fn run_backward_pass<S, C: Communicator>(
     inputs: &mut crate::backward_pass_state::BackwardPassInputs<'_, S, C>,
@@ -83,7 +74,6 @@ impl Communicator for StubComm {
         _counts: &[usize],
         _displs: &[usize],
     ) -> Result<(), CommError> {
-        // Single-rank: copy send to recv (mirrors LocalBackend behavior).
         recv[..send.len()].copy_from_slice(send);
         Ok(())
     }
@@ -309,7 +299,7 @@ fn single_workspace(solver: MockSolver, n_state: usize) -> Vec<SolverWorkspace<M
         rank: 0,
         worker_id: 0,
         solver: ProfiledSolver::new(solver),
-        patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
+        patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
         current_state: Vec::with_capacity(n_state),
         scratch: crate::workspace::ScratchBuffers {
             noise_buf: Vec::new(),
@@ -341,12 +331,62 @@ fn single_workspace(solver: MockSolver, n_state: usize) -> Vec<SolverWorkspace<M
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
-            anticipated_state_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
         worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
     }]
+}
+
+/// Single `MockSolver` workspace with a bucket-aware `PatchBuffer`
+/// (`hydro_count = 0`, `max_par_order = 0`), for the `patch_opening_bounds`
+/// bucket-pinning regression.
+fn transit_bucket_only_workspace(
+    solver: MockSolver,
+    n_buckets: usize,
+) -> SolverWorkspace<MockSolver> {
+    use crate::lp_builder::PatchBuffer;
+    SolverWorkspace {
+        rank: 0,
+        worker_id: 0,
+        solver: ProfiledSolver::new(solver),
+        patch_buf: PatchBuffer::new(0, 0, 0, 0, n_buckets, 0, 0),
+        current_state: Vec::new(),
+        scratch: crate::workspace::ScratchBuffers {
+            noise_buf: Vec::new(),
+            inflow_m3s_buf: Vec::new(),
+            lag_matrix_buf: Vec::new(),
+            par_inflow_buf: Vec::new(),
+            eta_floor_buf: Vec::new(),
+            zero_targets_buf: Vec::new(),
+            ncs_col_upper_buf: Vec::new(),
+            ncs_col_lower_buf: Vec::new(),
+            ncs_col_indices_buf: Vec::new(),
+            ncs_col_lower_active_buf: Vec::new(),
+            ncs_col_upper_active_buf: Vec::new(),
+            last_ncs_col_start: usize::MAX,
+            ncs_col_upper_extract_buf: Vec::new(),
+            load_rhs_buf: Vec::new(),
+            row_lower_buf: Vec::new(),
+            z_inflow_rhs_buf: Vec::new(),
+            effective_eta_buf: Vec::new(),
+            unscaled_primal: Vec::new(),
+            unscaled_dual: Vec::new(),
+            lag_accumulator: vec![],
+            lag_weight_accum: 0.0,
+            downstream_accumulator: Vec::new(),
+            downstream_weight_accum: 0.0,
+            downstream_completed_lags: Vec::new(),
+            downstream_n_completed: 0,
+            recon_slot_lookup: Vec::new(),
+            trajectory_costs_buf: Vec::new(),
+            raw_noise_buf: Vec::new(),
+            perm_scratch: Vec::new(),
+        },
+        scratch_basis: Basis::new(0, 0),
+        backward_accum: BackwardAccumulators::default(),
+        worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+    }
 }
 
 /// Create an empty `BasisStore` for `num_scenarios` scenarios and
@@ -424,6 +464,7 @@ fn make_stochastic_context(
     let bus = Bus {
         id: EntityId(0),
         name: "B0".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 1000.0,
@@ -433,8 +474,10 @@ fn make_stochastic_context(
     let hydro = Hydro {
         id: EntityId(1),
         name: "H1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(0),
         downstream_id: None,
+        travel_time_hours: None,
         entry_stage_id: None,
         exit_stage_id: None,
         min_storage_hm3: 0.0,
@@ -608,7 +651,6 @@ fn backward_result_clone_and_debug() {
 
 #[test]
 fn dual_extraction_formula_coefficients_are_negated_duals() {
-    // Given known dual values [d0, d1], coefficients must be [-d0, -d1].
     let d0 = 3.5_f64;
     let d1 = -1.2_f64;
     let dual = [d0, d1];
@@ -641,7 +683,7 @@ fn single_stage_system_produces_no_cuts() {
     // A 1-stage system has no stages with a successor, so the backward
     // sweep (0..0) is empty — zero cuts are generated.
     let stochastic = make_stochastic_context(1, 2);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0()];
     let base_rows = vec![1_usize];
 
@@ -691,13 +733,16 @@ fn single_stage_system_produces_no_cuts() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -712,7 +757,6 @@ fn single_stage_system_produces_no_cuts() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         comm: &comm,
         records: &[],
@@ -734,13 +778,10 @@ fn single_stage_system_produces_no_cuts() {
 
 #[test]
 fn two_stage_system_two_trial_points_generates_two_cuts_at_stage_0() {
-    // Acceptance criterion: 3-stage system, 1 hydro (n_state=1), 2 openings,
-    // 2 trial points → 2 cuts at stage 0. This is the 2-stage version
-    // (stages 0 and 1); cuts should exist only at stage 0.
     let n_stages = 2_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -794,13 +835,16 @@ fn two_stage_system_two_trial_points_generates_two_cuts_at_stage_0() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -815,7 +859,6 @@ fn two_stage_system_two_trial_points_generates_two_cuts_at_stage_0() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         comm: &comm,
         records: &[],
@@ -846,7 +889,7 @@ fn cut_inserted_with_correct_stage_iteration_and_forward_pass_index() {
     let n_stages = 2_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -897,13 +940,16 @@ fn cut_inserted_with_correct_stage_iteration_and_forward_pass_index() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -918,7 +964,6 @@ fn cut_inserted_with_correct_stage_iteration_and_forward_pass_index() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         comm: &comm,
         records: &[],
@@ -935,19 +980,18 @@ fn cut_inserted_with_correct_stage_iteration_and_forward_pass_index() {
     .unwrap();
 
     // Trial point m=1: slot = 0 + 2*3 + 1 = 7
-    // Verify that pool[0].metadata[7] has the correct iteration and fpi.
-    let meta = &fcf.pools[0].metadata[7];
+    // Verify that pool[0].metadata(7) has the correct iteration and fpi.
+    let meta = fcf.pools[0].metadata(7);
     assert_eq!(meta.iteration_generated, 2);
     assert_eq!(meta.forward_pass_index, 1);
 }
 
 #[test]
 fn no_cuts_generated_at_last_stage() {
-    // Acceptance criterion: 5-stage system → cuts at stages 0..3, not at 4.
     let n_stages = 5_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -996,13 +1040,16 @@ fn no_cuts_generated_at_last_stage() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -1017,7 +1064,6 @@ fn no_cuts_generated_at_last_stage() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         comm: &comm,
         records: &[],
@@ -1046,7 +1092,7 @@ fn no_cuts_generated_at_last_stage() {
 fn elapsed_ms_is_non_negative() {
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 2);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -1095,13 +1141,16 @@ fn elapsed_ms_is_non_negative() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -1116,7 +1165,6 @@ fn elapsed_ms_is_non_negative() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         comm: &comm,
         records: &[],
@@ -1138,11 +1186,9 @@ fn elapsed_ms_is_non_negative() {
 
 #[test]
 fn infeasible_solver_returns_sddp_infeasible_error() {
-    // Acceptance criterion: MockSolver::infeasible_on(0) for the first
-    // backward solve → SddpError::Infeasible is returned.
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -1158,7 +1204,6 @@ fn infeasible_solver_returns_sddp_infeasible_error() {
     let risk_measures = vec![RiskMeasure::Expectation; n_stages];
 
     let solution = solution_1_0(0.0, 0.0);
-    // First solve call returns infeasible.
     let solver = MockSolver::infeasible_on(solution, 0);
     let comm = StubComm;
     let mut workspaces = single_workspace(solver, n_state);
@@ -1192,13 +1237,16 @@ fn infeasible_solver_returns_sddp_infeasible_error() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -1213,7 +1261,6 @@ fn infeasible_solver_returns_sddp_infeasible_error() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         comm: &comm,
         records: &[],
@@ -1284,7 +1331,7 @@ fn cut_coefficients_and_intercept_match_dual_extraction_formula() {
     //   coefficients = [-3.0]
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -1334,13 +1381,16 @@ fn cut_coefficients_and_intercept_match_dual_extraction_formula() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -1355,7 +1405,6 @@ fn cut_coefficients_and_intercept_match_dual_extraction_formula() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         comm: &comm,
         records: &[],
@@ -1403,7 +1452,7 @@ fn cut_gradient_sign_physically_correct() {
     //   (more storage → higher cut value → wrong incentive).
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -1454,13 +1503,16 @@ fn cut_gradient_sign_physically_correct() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -1475,7 +1527,6 @@ fn cut_gradient_sign_physically_correct() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         comm: &comm,
         records: &[],
@@ -1527,7 +1578,7 @@ fn cut_is_tight_at_trial_point() {
     // This test verifies the tightness property.
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -1579,13 +1630,16 @@ fn cut_is_tight_at_trial_point() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -1600,7 +1654,6 @@ fn cut_is_tight_at_trial_point() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         comm: &comm,
         records: &[],
@@ -1635,13 +1688,12 @@ fn cut_is_tight_at_trial_point() {
 
 #[test]
 fn single_rank_backward_pass_with_local_backend_produces_correct_fcf() {
-    // Integration test with LocalBackend communicator (exercises single-rank path).
     use cobre_comm::LocalBackend;
 
     let n_stages = 3_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -1690,13 +1742,16 @@ fn single_rank_backward_pass_with_local_backend_produces_correct_fcf() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -1711,7 +1766,6 @@ fn single_rank_backward_pass_with_local_backend_produces_correct_fcf() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         comm: &comm,
         records: &[],
@@ -1750,7 +1804,7 @@ fn forward_pass_index_matches_global_scenario_index() {
     // The key invariant: forward_pass_index = m = 5.
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -1811,13 +1865,16 @@ fn forward_pass_index_matches_global_scenario_index() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -1832,7 +1889,6 @@ fn forward_pass_index_matches_global_scenario_index() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         comm: &comm,
         records: &[],
@@ -1850,7 +1906,7 @@ fn forward_pass_index_matches_global_scenario_index() {
 
     // m=5: slot = warm_start(0) + 2*6 + 5 = 17
     // The critical check: forward_pass_index in metadata equals global m=5.
-    let meta = &fcf.pools[0].metadata[17];
+    let meta = fcf.pools[0].metadata(17);
     assert_eq!(meta.iteration_generated, 2, "iteration_generated must be 2");
     assert_eq!(
         meta.forward_pass_index, 5,
@@ -1860,20 +1916,12 @@ fn forward_pass_index_matches_global_scenario_index() {
 
 // ── Unit tests: warm-start basis caching (backward pass) ──────────────────
 
-/// Warm-start from a pre-populated forward basis: when `BasisStore` has
-/// `Some(Basis)` at `(scenario=0, stage=1)` before the first backward call,
-/// the first opening at the successor stage must call `solve(Some(&basis))`
-/// rather than `solve(None)`.
-///
-/// AC: Given a 2-stage system, 1 trial point, 1 opening, with
-/// `basis_store.get(0, 1) = Some(Basis::new(...))` pre-populated,
-/// then `solver.warm_start_calls == 1` after the backward pass.
 #[test]
 fn warm_start_uses_prepopulated_forward_basis() {
     let n_stages = 2_usize;
     let n_openings = 1_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -1926,13 +1974,16 @@ fn warm_start_uses_prepopulated_forward_basis() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -1947,7 +1998,6 @@ fn warm_start_uses_prepopulated_forward_basis() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         comm: &comm,
         records: &[],
@@ -1971,20 +2021,12 @@ fn warm_start_uses_prepopulated_forward_basis() {
     );
 }
 
-/// Multi-opening P3b behavior: given 3 openings at the same successor stage,
-/// the first opening cold-starts (store slot is None via `solve()`), and
-/// openings 1 and 2 use `HiGHS` internal hot-start via `solve(None)` instead of
-/// `solve(Some(&working_basis))`.
-///
-/// AC: Given a 2-stage system, 1 trial point, 3 openings, empty basis cache,
-/// then `solver.warm_start_calls == 0` after the backward pass (P3b: no
-/// and 3 warm-start; opening 1 cold-starts).
 #[test]
 fn multi_opening_subsequent_openings_use_internal_hotstart() {
     let n_stages = 2_usize;
     let n_openings = 3_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -2035,13 +2077,16 @@ fn multi_opening_subsequent_openings_use_internal_hotstart() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -2056,7 +2101,6 @@ fn multi_opening_subsequent_openings_use_internal_hotstart() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         comm: &comm,
         records: &[],
@@ -2072,9 +2116,9 @@ fn multi_opening_subsequent_openings_use_internal_hotstart() {
     })
     .unwrap();
 
-    // P3b optimization: opening 0 cold-starts (no basis in store),
-    // openings 1 and 2 use solve(None) (HiGHS internal hot-start) instead of
-    // solve(Some(&working_basis)). No explicit warm-start calls for subsequent openings.
+    // Opening 0 cold-starts (no basis in store); openings 1 and 2 use
+    // solve(None) (HiGHS internal hot-start) instead of solve(Some(&working_basis)),
+    // so no explicit warm-start calls are issued for subsequent openings.
     let warm_start_calls = workspaces[0].solver.inner().warm_start_calls;
     assert_eq!(
         warm_start_calls, 0,
@@ -2083,22 +2127,12 @@ fn multi_opening_subsequent_openings_use_internal_hotstart() {
     );
 }
 
-/// Error propagation: when a backward solve returns `SolverError::Infeasible`,
-/// the error must propagate as `SddpError::Infeasible`.
-///
-/// In the new per-scenario design, the backward pass uses a local `working_basis`
-/// variable (not written back to `BasisStore`), so there is no shared cache slot
-/// to check after the error. The test verifies that the error is correctly
-/// propagated regardless of what was in the basis store at entry.
-///
-/// AC: Given a 2-stage system, 1 opening, `MockSolver` returns infeasible on
-/// call 0, then `run_backward_pass` returns `Err(SddpError::Infeasible { .. })`.
 #[test]
 fn backward_solver_error_propagates() {
     let n_stages = 2_usize;
     let n_openings = 1_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -2151,13 +2185,16 @@ fn backward_solver_error_propagates() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -2172,7 +2209,6 @@ fn backward_solver_error_propagates() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         comm: &comm,
         records: &[],
@@ -2219,7 +2255,7 @@ fn test_backward_pass_parallel_cut_determinism() {
     let n_trial_points = 8_usize;
 
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -2246,7 +2282,7 @@ fn test_backward_pass_parallel_cut_determinism() {
         rank: 0,
         worker_id: 0,
         solver: ProfiledSolver::new(solver_1),
-        patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
+        patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
         current_state: Vec::with_capacity(n_state),
         scratch: crate::workspace::ScratchBuffers {
             noise_buf: Vec::new(),
@@ -2278,7 +2314,6 @@ fn test_backward_pass_parallel_cut_determinism() {
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
-            anticipated_state_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -2314,13 +2349,16 @@ fn test_backward_pass_parallel_cut_determinism() {
         workspaces: &mut workspaces_1,
         basis_store: &mut basis_store_1,
         ctx: &ctx,
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf_1,
         cut_batches: &mut empty_cut_batches(n_stages),
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -2335,7 +2373,6 @@ fn test_backward_pass_parallel_cut_determinism() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         comm: &comm,
         records: &[],
@@ -2359,7 +2396,7 @@ fn test_backward_pass_parallel_cut_determinism() {
             rank: 0,
             worker_id: idx,
             solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
-            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
+            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
             scratch: crate::workspace::ScratchBuffers {
                 noise_buf: Vec::new(),
@@ -2391,7 +2428,6 @@ fn test_backward_pass_parallel_cut_determinism() {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
-                anticipated_state_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -2404,13 +2440,16 @@ fn test_backward_pass_parallel_cut_determinism() {
         workspaces: &mut workspaces_4,
         basis_store: &mut basis_store_4,
         ctx: &ctx,
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf_4,
         cut_batches: &mut empty_cut_batches(n_stages),
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -2425,7 +2464,6 @@ fn test_backward_pass_parallel_cut_determinism() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         comm: &comm,
         records: &[],
@@ -2511,6 +2549,7 @@ fn make_stochastic_context_with_load(
     let bus0 = Bus {
         id: EntityId(0),
         name: "B0".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 1000.0,
@@ -2520,6 +2559,7 @@ fn make_stochastic_context_with_load(
     let bus1 = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 1000.0,
@@ -2529,8 +2569,10 @@ fn make_stochastic_context_with_load(
     let hydro = Hydro {
         id: EntityId(10),
         name: "H10".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(0),
         downstream_id: None,
+        travel_time_hours: None,
         entry_stage_id: None,
         exit_stage_id: None,
         min_storage_hm3: 0.0,
@@ -2667,10 +2709,10 @@ fn backward_pass_load_patches_applied() {
     let n_openings = 2_usize;
     // mean_mw=300 guarantees a positive realization for any reasonable eta draw.
     let stochastic = make_stochastic_context_with_load(n_stages, n_openings, 300.0, 30.0);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
 
     // PatchBuffer: n_hydros=1, max_par_order=0, n_load_buses=1, max_blocks=1.
-    let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 1, 1, 0, 0);
+    let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 1, 1, 0, 0, 0);
 
     // Template: 2 rows (row 0 = state-fixing, row 1 = water-balance).
     // base_rows=[1] → inflow RHS row starts at index 1.
@@ -2749,7 +2791,6 @@ fn backward_pass_load_patches_applied() {
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
-            anticipated_state_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -2793,13 +2834,16 @@ fn backward_pass_load_patches_applied() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -2814,7 +2858,6 @@ fn backward_pass_load_patches_applied() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         comm: &comm,
         records: &[],
@@ -2854,10 +2897,10 @@ fn backward_pass_no_load_buses_unchanged() {
     let n_stages = 2_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
 
     // PatchBuffer with no load buses: n_load_buses=0, max_blocks=1.
-    let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 0, 0, 0, 0);
+    let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 0, 0, 0, 0, 0);
 
     let template = StageTemplate {
         num_cols: 3,
@@ -2931,7 +2974,6 @@ fn backward_pass_no_load_buses_unchanged() {
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
-            anticipated_state_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -2969,13 +3011,16 @@ fn backward_pass_no_load_buses_unchanged() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -2990,7 +3035,6 @@ fn backward_pass_no_load_buses_unchanged() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         comm: &comm,
         records: &[],
@@ -3032,9 +3076,9 @@ fn backward_pass_cut_coefficients_unaffected() {
     let n_stages = 2_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context_with_load(n_stages, n_openings, 200.0, 20.0);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
 
-    let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 1, 1, 0, 0);
+    let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 1, 1, 0, 0, 0);
 
     let template = StageTemplate {
         num_cols: 3,
@@ -3108,7 +3152,6 @@ fn backward_pass_cut_coefficients_unaffected() {
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
-            anticipated_state_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -3150,13 +3193,16 @@ fn backward_pass_cut_coefficients_unaffected() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -3171,7 +3217,6 @@ fn backward_pass_cut_coefficients_unaffected() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         comm: &comm,
         records: &[],
@@ -3203,7 +3248,7 @@ fn backward_pass_cut_coefficients_unaffected() {
     );
 }
 
-/// BUG-1 structural invariant: per-stage cut sync inside the backward loop.
+/// Structural invariant: per-stage cut sync inside the backward loop.
 ///
 /// Verifies that after `run_backward_pass`, the cut synchronization has been
 /// performed per-stage (not as a separate post-sweep loop). The structural
@@ -3228,7 +3273,7 @@ fn per_stage_cut_sync_invariant_after_bug1_fix() {
     let n_stages = 4_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -3277,13 +3322,16 @@ fn per_stage_cut_sync_invariant_after_bug1_fix() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -3298,7 +3346,6 @@ fn per_stage_cut_sync_invariant_after_bug1_fix() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         comm: &comm,
         records: &[],
@@ -3360,7 +3407,7 @@ fn metadata_sync_updates_active_count_and_last_active_iter() {
     let n_stages = 3_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -3413,13 +3460,16 @@ fn metadata_sync_updates_active_count_and_last_active_iter() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -3434,7 +3484,6 @@ fn metadata_sync_updates_active_count_and_last_active_iter() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         comm: &comm,
         records: &[],
@@ -3456,7 +3505,7 @@ fn metadata_sync_updates_active_count_and_last_active_iter() {
     // Pool[1] received 3 cuts from t=1 backward pass.
     // Slot formula: warm_start(0) + iteration(1) * fwd_passes(3) + fpi
     // → slots 3, 4, 5. Populated count = 6 (high-water mark).
-    assert_eq!(fcf.pools[1].populated_count, 6);
+    assert_eq!(fcf.pools[1].populated(), 6);
 
     // At t=0, the 3 cuts in pool[1] (slots 3,4,5) were evaluated for
     // binding. The mock solver returns positive duals (cut_dual_padding
@@ -3465,22 +3514,24 @@ fn metadata_sync_updates_active_count_and_last_active_iter() {
     // gets 3 trial points × 2 openings = 6 increments.
     for slot in 3..6 {
         assert!(
-            fcf.pools[1].metadata[slot].active_count > 0,
+            fcf.pools[1].metadata(slot).active_count > 0,
             "slot {slot} active_count should be > 0 (cuts were binding)"
         );
         assert_eq!(
-            fcf.pools[1].metadata[slot].active_count, 6,
+            fcf.pools[1].metadata(slot).active_count,
+            6,
             "slot {slot} active_count should be 6 (3 trial points × 2 openings)"
         );
         assert_eq!(
-            fcf.pools[1].metadata[slot].last_active_iter, 1,
+            fcf.pools[1].metadata(slot).last_active_iter,
+            1,
             "slot {slot} last_active_iter should be 1 (current iteration)"
         );
     }
 
     // Pool[2] (terminal successor) received no cuts and no binding
     // was checked against it — metadata should be at defaults.
-    assert_eq!(fcf.pools[2].populated_count, 0);
+    assert_eq!(fcf.pools[2].populated(), 0);
 }
 
 /// Build N identical `SolverWorkspace<MockSolver>` instances and run a
@@ -3501,7 +3552,7 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
     let local_work = 6_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
     let n_state = state.n_state; // 1
@@ -3534,7 +3585,7 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
             rank: 0,
             worker_id: i32::try_from(idx).expect("worker_id fits in i32"),
             solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
-            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
+            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
             scratch: crate::workspace::ScratchBuffers {
                 noise_buf: Vec::new(),
@@ -3566,7 +3617,6 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
-                anticipated_state_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -3605,13 +3655,16 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -3626,7 +3679,6 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         comm: &comm,
         records: &[],
@@ -3884,7 +3936,7 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
     let n_workers = 2_usize;
     let local_work = 4_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
     let n_state = state.n_state;
@@ -3903,7 +3955,7 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
             rank: 0,
             worker_id: i32::try_from(idx).expect("idx fits in i32"),
             solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
-            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
+            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
             scratch: crate::workspace::ScratchBuffers {
                 noise_buf: Vec::new(),
@@ -3935,7 +3987,6 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
-                anticipated_state_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -3975,13 +4026,16 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -3996,7 +4050,6 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         comm: &StubComm,
         records: &[],
@@ -4115,7 +4168,7 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
     let n_workers = 1_usize;
     let local_work = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
     let n_state = state.n_state;
@@ -4134,7 +4187,7 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
             rank: 0,
             worker_id: i32::try_from(idx).expect("idx fits in i32"),
             solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
-            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
+            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
             scratch: crate::workspace::ScratchBuffers {
                 noise_buf: Vec::new(),
@@ -4166,7 +4219,6 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
-                anticipated_state_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -4206,13 +4258,16 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -4227,7 +4282,6 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         comm: &DualRankStubComm,
         records: &[],
@@ -4285,7 +4339,7 @@ fn run_one_trial_point_with_stores(
     let n_openings = 1_usize;
     let n_state = 1_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::indexer::test_fixtures::state_layout(n_state, 0);
+    let state = crate::test_support::state_layout(n_state, 0);
 
     let solver = MockSolver::always_ok(solution_1_0(100.0, -5.0));
     let mut workspaces = single_workspace(solver, n_state);
@@ -4338,10 +4392,11 @@ fn run_one_trial_point_with_stores(
         num_stages: n_stages,
     };
     let risk_measures = vec![RiskMeasure::Expectation; n_stages];
-    let study_dims = crate::indexer::test_fixtures::study_dims();
+    let study_dims = crate::test_support::study_dims();
     let training_ctx = TrainingContext {
         horizon: &horizon,
         state: &state,
+        cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(&state, n_stages),
         study_dims: &study_dims,
         inflow_method: &InflowNonNegativityMethod::None,
         stochastic: &stochastic,
@@ -4357,14 +4412,13 @@ fn run_one_trial_point_with_stores(
         recent_accum_seed: &[],
         recent_weight_seed: 0.0,
         dcs: None,
-        noise_key_diag: None,
     };
 
     let iteration: u64 = 1;
     let fwd_offset: usize = 0;
     let succ_probabilities = vec![1.0_f64; n_openings];
     let successor_active_slots: Vec<usize> = vec![];
-    let baked_template = minimal_template_1_0();
+    let frozen_template = minimal_template_1_0();
 
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0u32; n_stages]);
     let empty_cut_batch = RowBatch {
@@ -4376,6 +4430,13 @@ fn run_one_trial_point_with_stores(
         row_upper: Vec::new(),
     };
 
+    let cut_state_projection = crate::indexer::CutStateProjection::new(
+        &state,
+        cobre_core::temporal::StageStateConfig {
+            storage: true,
+            inflow_lags: true,
+        },
+    );
     let succ_spec = super::SuccessorSpec {
         t: 0,
         successor: 1,
@@ -4383,12 +4444,13 @@ fn run_one_trial_point_with_stores(
         probabilities: &succ_probabilities,
         cut_batch: &empty_cut_batch,
         num_cuts_at_successor: 0,
-        template_num_rows: baked_template.num_rows,
-        baked_template: &baked_template,
+        template_num_rows: frozen_template.num_rows,
+        frozen_template: &frozen_template,
         successor_active_slots: &successor_active_slots,
         cut_activity_tolerance: 0.0,
-        successor_populated_count: fcf.pools[1].populated_count,
+        successor_populated_count: fcf.pools[1].populated(),
         successor_pool: &fcf.pools[1],
+        cut_state: &cut_state_projection,
     };
 
     // Derive a single-worker BasisStoreSliceMut covering all scenarios.
@@ -4420,11 +4482,105 @@ fn run_one_trial_point_with_stores(
         &risk_measures,
         &succ_spec,
         &mut basis_slice,
-        &super::StageOpeningSolver::Baked,
+        &super::StageOpeningSolver::Frozen,
         0,
         0,
     )?;
     Ok(workspaces)
+}
+
+/// Regression: the backward trial-point path (`patch_opening_bounds`) inherits
+/// the `PatchBuffer` single-owner fix — every travel-time bucket incoming column
+/// is pinned to `x_hat`, a value constant across the opening loop (the
+/// decision-driven trial point), not re-derived per opening (contrast NCS
+/// availability, which genuinely varies per opening).
+#[test]
+fn patch_opening_bounds_pins_transit_bucket_incoming_columns_per_stage_visit() {
+    let state = crate::test_support::state_layout_with_transit_buckets(
+        0,
+        0,
+        2,
+        vec![(0, 0), (0, 1)],
+        0,
+        0,
+        vec![],
+    );
+    assert_eq!(state.n_state, 2);
+
+    let stochastic = make_stochastic_context(1, 1);
+    let template =
+        crate::test_support::transit_bucket_only_template(state.theta + 1, state.n_state);
+
+    let templates: &'static _ = Box::leak(Box::new(vec![template]));
+    let base_rows: &'static _ = Box::leak(Box::new(vec![0_usize]));
+    let ctx: StageContext<'static> = StageContext {
+        geometry_per_stage: &[],
+        templates,
+        base_rows,
+        noise_scale: &[],
+        n_hydros: 0,
+        n_load_buses: 0,
+        load_balance_row_starts: &[],
+        load_bus_indices: &[],
+        block_counts_per_stage: &[],
+        ncs_col_starts: &[],
+        n_ncs: 0,
+        ncs_stochastic_dense_col: &[],
+        ncs_stochastic_windows: &[],
+        anticipated_windows: &[],
+        study_stage_ids: &[],
+        ncs_max_gen: &[],
+        ncs_allow_curtailment: &[],
+        discount_factors: &[],
+        cumulative_discount_factors: &[],
+        stage_lag_transitions: &[],
+        noise_group_ids: &[],
+        downstream_par_order: 0,
+    };
+
+    let horizon = HorizonMode::Finite { num_stages: 1 };
+    let study_dims = crate::test_support::study_dims();
+    let training_ctx = TrainingContext {
+        horizon: &horizon,
+        state: &state,
+        cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(&state, 1),
+        study_dims: &study_dims,
+        inflow_method: &InflowNonNegativityMethod::None,
+        stochastic: &stochastic,
+        initial_state: &[],
+        inflow_scheme: SamplingScheme::InSample,
+        load_scheme: SamplingScheme::InSample,
+        ncs_scheme: SamplingScheme::InSample,
+        stages: &[],
+        historical_library: None,
+        external_inflow_library: None,
+        external_load_library: None,
+        external_ncs_library: None,
+        recent_accum_seed: &[],
+        recent_weight_seed: 0.0,
+        dcs: None,
+    };
+
+    let x_hat = vec![7.0_f64, 11.0];
+    let raw_noise: Vec<f64> = Vec::new();
+    let mut ws = transit_bucket_only_workspace(MockSolver::always_ok(solution_1_0(0.0, 0.0)), 2);
+
+    super::patch_opening_bounds(&mut ws, &ctx, &training_ctx, &raw_noise, &x_hat, 0);
+
+    let cp = ws.patch_buf.state_col_patch_count();
+    assert_eq!(
+        cp, 2,
+        "state_col_patch_count must equal n_buckets when N=0, A=0"
+    );
+    for (i, &expected) in x_hat.iter().enumerate() {
+        let col = state.transit_buckets_in.start + i;
+        let pos = ws.patch_buf.col_indices[..cp]
+            .iter()
+            .position(|&c| c == col)
+            .unwrap_or_else(|| panic!("bucket incoming column {col} must be pinned"));
+        assert_eq!(ws.patch_buf.col_lower[pos], expected);
+        assert_eq!(ws.patch_buf.col_upper[pos], expected);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4433,8 +4589,6 @@ fn run_one_trial_point_with_stores(
 
 #[test]
 fn resolve_backward_basis_returns_some_when_slot_is_populated() {
-    // Given: BasisStore[0, 1] has Some(CapturedBasis).
-    // Then: resolve_backward_basis returns Some(_).
     use crate::workspace::{BasisStore, CapturedBasis};
 
     let b = CapturedBasis::new(2, 2, 0, 0, 0);
@@ -4451,8 +4605,6 @@ fn resolve_backward_basis_returns_some_when_slot_is_populated() {
 
 #[test]
 fn resolve_backward_basis_returns_none_when_slot_is_empty() {
-    // Given: BasisStore[0, 1] is None (cold-start, slot never written).
-    // Then: resolve_backward_basis returns None.
     use crate::workspace::BasisStore;
 
     let mut store = BasisStore::new(1, 2);
@@ -4470,13 +4622,6 @@ fn resolve_backward_basis_returns_none_when_slot_is_empty() {
 
 #[test]
 fn backward_write_populates_basis_store_at_omega_zero() {
-    // Given: a 2-stage, 1-opening study with one forward trial point (m=0, x_hat=[5.0]).
-    //        BasisStore starts empty (all None).
-    // When: process_trial_point_backward runs at omega=0.
-    // Then: BasisStore[0, 1] is Some(CapturedBasis) with state_at_capture == [5.0].
-    //
-    // write occurs only at omega=0 (this test has exactly 1 opening).
-    // infeasibility guard is not triggered (solver succeeds).
     use crate::workspace::BasisStore;
 
     let mut basis_store = BasisStore::new(1, 2);
@@ -4503,17 +4648,6 @@ fn backward_write_populates_basis_store_at_omega_zero() {
 
 #[test]
 fn backward_write_preserves_slot_on_infeasibility_at_omega_zero() {
-    // Given: a 2-stage, 1-opening study.
-    //        BasisStore starts with a pre-existing basis at [0, 1].
-    //        The solver returns Infeasible on its first call.
-    // When: process_trial_point_backward runs via run_backward_pass.
-    // Then: run_backward_pass returns Err(SddpError::Infeasible) and
-    //       BasisStore[0, 1] retains its original content.
-    //
-    // the write in process_trial_point_backward is guarded by `?`
-    // immediately after run_stage_solve. An Infeasible error propagates
-    // out of the function before reaching the BasisStore write site, so
-    // the slot is unconditionally preserved on infeasibility.
     use cobre_solver::Basis;
 
     use crate::workspace::{BasisStore, CapturedBasis};
@@ -4577,7 +4711,7 @@ fn handshake_passes_with_local_backend() {
     let n_stages = 1_usize;
     let n_workers = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0()];
     let base_rows = vec![1_usize];
     let n_state = state.n_state;
@@ -4597,7 +4731,7 @@ fn handshake_passes_with_local_backend() {
             rank: 0,
             worker_id: i32::try_from(idx).expect("idx fits i32"),
             solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
-            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0),
+            patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
             scratch: crate::workspace::ScratchBuffers {
                 noise_buf: Vec::new(),
@@ -4629,7 +4763,6 @@ fn handshake_passes_with_local_backend() {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
-                anticipated_state_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -4668,13 +4801,16 @@ fn handshake_passes_with_local_backend() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(n_stages),
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -4689,7 +4825,6 @@ fn handshake_passes_with_local_backend() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         comm: &comm,
         records: &[],
@@ -4784,7 +4919,7 @@ fn handshake_rejects_nonuniform_workers() {
 
     let n_stages = 1_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0()];
     let base_rows = vec![1_usize];
     let n_state = state.n_state;
@@ -4831,13 +4966,16 @@ fn handshake_rejects_nonuniform_workers() {
             noise_group_ids: &[],
             downstream_par_order: 0,
         },
-        baked: &mut templates.clone(),
+        frozen: &mut templates.clone(),
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(n_stages),
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -4852,7 +4990,6 @@ fn handshake_rejects_nonuniform_workers() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         comm: &comm,
         records: &[],
@@ -4892,18 +5029,19 @@ fn handshake_rejects_nonuniform_workers() {
     }
 }
 
-/// Verify cut sign convention: the matured anticipated slot's coefficient 7.5 is
-/// negated to -7.5 at the cut-target column. Drives the cut-row builder against a
-/// finalized anticipated [`StateLayout`] (the role-(a) owner of the resolver).
+/// Verify cut sign convention: an anticipated ring slot's stored coefficient
+/// 7.5 is negated to -7.5 at the cut-target column. Drives the cut-row
+/// builder against a finalized anticipated [`StateLayout`] (the role-(a)
+/// owner of the resolver).
 #[test]
 fn cut_coefficient_sign_convention_slot_zero_k2() {
-    let state = crate::indexer::test_fixtures::state_layout_full(0, 0, 1, 2, vec![2]);
-    assert_eq!(state.anticipated_state.start, 0);
+    let state = crate::test_support::state_layout_full(0, 0, 1, 2, vec![2]);
+    assert_eq!(state.anticipated_slots_out.start, 0);
     assert_eq!(state.n_state, 2);
 
     let mut fcf = FutureCostFunction::new(3, state.n_state, 1, 10, &[0; 3]);
     let mut coefficients = vec![0.0_f64; state.n_state];
-    coefficients[state.anticipated_state.start] = 7.5;
+    coefficients[state.anticipated_slots_out.start] = 7.5;
     fcf.add_cut(1, 0, 0, 0.0, &coefficients);
 
     let mut batch = RowBatch {
@@ -4914,12 +5052,20 @@ fn cut_coefficient_sign_convention_slot_zero_k2() {
         row_lower: Vec::new(),
         row_upper: Vec::new(),
     };
-    crate::cut::row::build_cut_row_batch_into(&mut batch, &fcf, 1, &state, &[]);
+    crate::cut::row::build_cut_row_batch_into(
+        &mut batch,
+        &fcf,
+        1,
+        &state,
+        &crate::test_support::cut_state_projection(&state),
+        &[],
+    );
 
-    // Slot 0 (j = anticipated_state.start) is the matured slot (K=2, slot+1==K via
-    // the Equal branch), so it maps to anticipated_state_out.start == 1.
-    let lp_col = state.state_to_lp_column(state.anticipated_state.start);
-    assert_eq!(lp_col, 1);
+    // Slot 0 (j = anticipated_slots_out.start) resolves by identity — the
+    // in-LP ring's definition row (not `state_to_lp_column`) resolves the
+    // ring transition, so the cut renders directly onto the outgoing column.
+    let lp_col = state.state_to_lp_column(state.anticipated_slots_out.start);
+    assert_eq!(lp_col, state.anticipated_slots_out.start);
 
     let pos = batch
         .col_indices
@@ -5000,9 +5146,9 @@ fn dcs_two_stage_fcf() -> FutureCostFunction {
         active_count: 0,
         last_active_iter: last,
     };
-    fcf.pools[1].metadata[0] = meta(1, 5);
-    fcf.pools[1].metadata[1] = meta(1, 1); // stale → outside k2=2 window at iter 5
-    fcf.pools[1].metadata[2] = meta(1, 5);
+    fcf.pools[1].set_metadata_for_test(0, meta(1, 5));
+    fcf.pools[1].set_metadata_for_test(1, meta(1, 1)); // stale → outside k2=2 window at iter 5
+    fcf.pools[1].set_metadata_for_test(2, meta(1, 5));
     fcf
 }
 
@@ -5013,6 +5159,7 @@ fn dcs_active_workspace() -> Vec<SolverWorkspace<ActiveSolver>> {
         max_par_order: 0,
         n_load_buses: 0,
         max_blocks: 0,
+        n_buckets: 0,
         downstream_par_order: 0,
         max_openings: 1,
         initial_pool_capacity: 16,
@@ -5028,7 +5175,7 @@ fn dcs_active_workspace() -> Vec<SolverWorkspace<ActiveSolver>> {
         0,
         0,
         solver,
-        PatchBuffer::new(1, 0, 0, 0, 0, 0),
+        PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
         1,
         sizing,
     )]
@@ -5056,8 +5203,9 @@ fn run_dcs_backward_trial_point_at(
     iteration: u64,
     x_hat: f64,
 ) -> (super::StagedCut, Vec<f64>, Vec<u64>) {
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let n_state = state.n_state;
+    let n_stages = 2;
     let core = dcs_core_template();
     let templates = vec![core.clone(), core.clone()];
     let base_rows = vec![0_usize, 0_usize];
@@ -5066,9 +5214,15 @@ fn run_dcs_backward_trial_point_at(
     let risk_measures = vec![RiskMeasure::Expectation; 2];
 
     let mut fcf = dcs_two_stage_fcf();
-    // All-cuts batch for the baked path (delta == all cuts here).
-    let cut_batch = crate::cut::row::build_cut_row_batch(&fcf, 1, &state, &[]);
-    let successor_active_slots: Vec<usize> = (0..fcf.pools[1].populated_count).collect();
+    // All-cuts batch for the frozen path (delta == all cuts here).
+    let cut_batch = crate::cut::row::build_cut_row_batch(
+        &fcf,
+        1,
+        &state,
+        &crate::test_support::cut_state_projection(&state),
+        &[],
+    );
+    let successor_active_slots: Vec<usize> = (0..fcf.pools[1].populated()).collect();
     let num_cuts = successor_active_slots.len();
 
     let mut exchange = exchange_with_states(n_state, vec![vec![x_hat]]);
@@ -5099,10 +5253,11 @@ fn run_dcs_backward_trial_point_at(
         noise_group_ids: &[],
         downstream_par_order: 0,
     };
-    let study_dims = crate::indexer::test_fixtures::study_dims();
+    let study_dims = crate::test_support::study_dims();
     let training_ctx = TrainingContext {
         horizon: &horizon,
         state: &state,
+        cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(&state, n_stages),
         study_dims: &study_dims,
         inflow_method: &InflowNonNegativityMethod::None,
         stochastic: &stochastic,
@@ -5118,10 +5273,16 @@ fn run_dcs_backward_trial_point_at(
         recent_accum_seed: &[],
         recent_weight_seed: 0.0,
         dcs,
-        noise_key_diag: None,
     };
 
     let probabilities = vec![1.0_f64];
+    let cut_state_projection = crate::indexer::CutStateProjection::new(
+        &state,
+        cobre_core::temporal::StageStateConfig {
+            storage: true,
+            inflow_lags: true,
+        },
+    );
     let succ = super::SuccessorSpec {
         t: 0,
         successor: 1,
@@ -5130,18 +5291,19 @@ fn run_dcs_backward_trial_point_at(
         cut_batch: &cut_batch,
         num_cuts_at_successor: num_cuts,
         template_num_rows: core.num_rows,
-        baked_template: &core,
+        frozen_template: &core,
         successor_active_slots: &successor_active_slots,
         cut_activity_tolerance: 0.0,
-        successor_populated_count: fcf.pools[1].populated_count,
+        successor_populated_count: fcf.pools[1].populated(),
         successor_pool: &fcf.pools[1],
+        cut_state: &cut_state_projection,
     };
 
     let mut basis_slices = basis_store.split_workers_mut(1);
     let ws = &mut workspaces[0];
     // Choose the opening-solve strategy exactly as the driver does, then issue
     // the per-trial-point prepare/load (mirrors process_stage_backward's per-`m`
-    // load after the per-opening solver-state reset). The `Baked` variant loads the baked all-cuts
+    // load after the per-opening solver-state reset). The `Frozen` variant loads the frozen all-cuts
     // LP; the `Lazy` variant loads the cut-free core + builds the metadata seed.
     let opening_solver = super::StageOpeningSolver::from_dcs_params(
         dcs.filter(|params| params.is_active(iteration)),
@@ -5225,33 +5387,37 @@ fn dcs_params(start_iteration: u64) -> DcsParams {
 #[test]
 fn backward_dcs_cut_equals_all_cuts_cut() {
     let iteration = 5;
-    let (baked_cut, baked_coefficients, _) = run_dcs_backward_trial_point(None, iteration);
+    let (frozen_cut, frozen_coefficients, _) = run_dcs_backward_trial_point(None, iteration);
     let (dcs_cut, dcs_coefficients, _) =
         run_dcs_backward_trial_point(Some(dcs_params(2)), iteration);
 
     assert!(
-        (baked_cut.intercept - dcs_cut.intercept).abs() < 1e-9,
-        "intercept: baked {} vs DCS {}",
-        baked_cut.intercept,
+        (frozen_cut.intercept - dcs_cut.intercept).abs() < 1e-9,
+        "intercept: frozen {} vs DCS {}",
+        frozen_cut.intercept,
         dcs_cut.intercept
     );
-    assert_eq!(baked_coefficients.len(), dcs_coefficients.len());
-    for (i, (b, d)) in baked_coefficients.iter().zip(&dcs_coefficients).enumerate() {
+    assert_eq!(frozen_coefficients.len(), dcs_coefficients.len());
+    for (i, (b, d)) in frozen_coefficients
+        .iter()
+        .zip(&dcs_coefficients)
+        .enumerate()
+    {
         assert!(
             (b - d).abs() < 1e-9,
-            "coefficient[{i}]: baked {b} vs DCS {d}"
+            "coefficient[{i}]: frozen {b} vs DCS {d}"
         );
     }
     // The binding cut has gradient 2.0 on the incoming storage; both paths
     // must recover it.
     assert!(
-        (baked_coefficients[0] - 2.0).abs() < 1e-9,
-        "baked gradient must be the binding cut's 2.0, got {}",
-        baked_coefficients[0]
+        (frozen_coefficients[0] - 2.0).abs() < 1e-9,
+        "frozen gradient must be the binding cut's 2.0, got {}",
+        frozen_coefficients[0]
     );
 }
 
-/// `dcs = None` ⇒ the baked all-cuts path is taken and the cut is identical
+/// `dcs = None` ⇒ the frozen all-cuts path is taken and the cut is identical
 /// to the pre-DCS baseline (same fixture run with `None`).
 #[test]
 fn backward_dcs_off_is_identical_to_baseline() {
@@ -5263,19 +5429,19 @@ fn backward_dcs_off_is_identical_to_baseline() {
     assert!((coefficients_a[0] - 2.0).abs() < 1e-9);
 }
 
-/// `dcs = Some` but `iteration < start_iteration` ⇒ the baked path is used
-/// (DCS not yet active), so the cut equals the baked cut.
+/// `dcs = Some` but `iteration < start_iteration` ⇒ the frozen path is used
+/// (DCS not yet active), so the cut equals the frozen cut.
 #[test]
 fn backward_dcs_inactive_before_start_iteration() {
     // start_iteration = 4, iteration = 1 → inactive.
-    let (baked_cut, baked_coefficients, baked_meta) = run_dcs_backward_trial_point(None, 1);
+    let (frozen_cut, frozen_coefficients, frozen_meta) = run_dcs_backward_trial_point(None, 1);
     let (early_cut, early_coefficients, early_meta) =
         run_dcs_backward_trial_point(Some(dcs_params(4)), 1);
-    assert_eq!(baked_cut.intercept, early_cut.intercept);
-    assert_eq!(baked_coefficients, early_coefficients);
-    // Baked path updates binding-count metadata; the inactive-DCS run takes
-    // the baked path, so its metadata contribution matches the baked run.
-    assert_eq!(baked_meta, early_meta);
+    assert_eq!(frozen_cut.intercept, early_cut.intercept);
+    assert_eq!(frozen_coefficients, early_coefficients);
+    // Frozen path updates binding-count metadata; the inactive-DCS run takes
+    // the frozen path, so its metadata contribution matches the frozen run.
+    assert_eq!(frozen_meta, early_meta);
 }
 
 /// AC1: the DCS path extracts the cut gradient from the final all-satisfied
@@ -5284,26 +5450,26 @@ fn backward_dcs_inactive_before_start_iteration() {
 /// converged optimum (`x_hat` = 2, theta = 4) is the binding slot 1; slots 0
 /// (floor 1) and 2 (floor 3) are resident from the seed but slack, so their
 /// cut-row duals are zero. The DCS binding-count contribution must therefore
-/// equal the baked path's — slot 1 bumped, all others zero — proving the
+/// equal the frozen path's — slot 1 bumped, all others zero — proving the
 /// slot-correct translation maps the resident binding row back to slot 1 and
 /// to no other.
 #[test]
-fn backward_dcs_binding_counts_match_baked() {
-    let (_, _, baked_meta) = run_dcs_backward_trial_point(None, 5);
+fn backward_dcs_binding_counts_match_frozen() {
+    let (_, _, frozen_meta) = run_dcs_backward_trial_point(None, 5);
     let (_, _, dcs_meta) = run_dcs_backward_trial_point(Some(dcs_params(2)), 5);
 
-    // Baked path bumps exactly the binding slot 1 (the floor-4 cut at x=2).
+    // Frozen path bumps exactly the binding slot 1 (the floor-4 cut at x=2).
     assert_eq!(
-        baked_meta,
+        frozen_meta,
         vec![0, 1, 0],
-        "baked path must bump exactly binding slot 1, got {baked_meta:?}"
+        "frozen path must bump exactly binding slot 1, got {frozen_meta:?}"
     );
     // DCS path records the SAME binding-count contribution: the resident
     // binding row maps back to slot 1, and to no other slot.
     assert_eq!(
-        dcs_meta, baked_meta,
-        "DCS binding-count metadata must match baked (slot-correct via the \
-         resident CutRowMap), got DCS {dcs_meta:?} vs baked {baked_meta:?}"
+        dcs_meta, frozen_meta,
+        "DCS binding-count metadata must match frozen (slot-correct via the \
+         resident CutRowMap), got DCS {dcs_meta:?} vs frozen {frozen_meta:?}"
     );
 }
 
@@ -5352,13 +5518,13 @@ fn dcs_params_k1(start_iteration: u64, k1: Option<u32>) -> DcsParams {
 #[test]
 fn backward_dcs_exactness_and_terminates() {
     let iteration = 5;
-    let (baked, baked_coefficients, _) = run_dcs_backward_trial_point(None, iteration);
+    let (frozen, frozen_coefficients, _) = run_dcs_backward_trial_point(None, iteration);
 
     // Default-cap DCS reaches the no-violation stop and matches all-cuts.
     let (dcs, dcs_coefficients, _) = run_dcs_backward_trial_point(Some(dcs_params(2)), iteration);
-    assert!((baked.intercept - dcs.intercept).abs() < 1e-9);
-    for (b, d) in baked_coefficients.iter().zip(&dcs_coefficients) {
-        assert!((b - d).abs() < 1e-9, "coeff mismatch baked {b} vs DCS {d}");
+    assert!((frozen.intercept - dcs.intercept).abs() < 1e-9);
+    for (b, d) in frozen_coefficients.iter().zip(&dcs_coefficients) {
+        assert!((b - d).abs() < 1e-9, "coeff mismatch frozen {b} vs DCS {d}");
     }
 
     // A 1-iteration cap forces the bounded TC fallback; the call must still
@@ -5368,11 +5534,11 @@ fn backward_dcs_exactness_and_terminates() {
         ..dcs_params(2)
     };
     let (dcs_tc, dcs_tc_coefficients, _) = run_dcs_backward_trial_point(Some(tight), iteration);
-    assert!((baked.intercept - dcs_tc.intercept).abs() < 1e-9);
-    for (b, d) in baked_coefficients.iter().zip(&dcs_tc_coefficients) {
+    assert!((frozen.intercept - dcs_tc.intercept).abs() < 1e-9);
+    for (b, d) in frozen_coefficients.iter().zip(&dcs_tc_coefficients) {
         assert!(
             (b - d).abs() < 1e-9,
-            "TC-fallback coeff mismatch baked {b} vs DCS {d}"
+            "TC-fallback coeff mismatch frozen {b} vs DCS {d}"
         );
     }
 }
@@ -5386,9 +5552,9 @@ fn backward_dcs_exactness_and_terminates() {
 #[test]
 fn backward_dcs_finite_k1_window_takes_effect() {
     let iteration = 5;
-    let (baked, baked_coefficients, _) = run_dcs_backward_trial_point(None, iteration);
+    let (frozen, frozen_coefficients, _) = run_dcs_backward_trial_point(None, iteration);
     // Sanity: the all-cuts (and k1=None DCS) gradient is the binding cut's 2.0.
-    assert!((baked_coefficients[0] - 2.0).abs() < 1e-9);
+    assert!((frozen_coefficients[0] - 2.0).abs() < 1e-9);
 
     let (windowed, windowed_coefficients, _) =
         run_dcs_backward_trial_point(Some(dcs_params_k1(2, Some(1))), iteration);
@@ -5396,14 +5562,14 @@ fn backward_dcs_finite_k1_window_takes_effect() {
     // the surviving cuts (slots 0,2, both gradient 0) give a 0 gradient and
     // a different intercept than the all-cuts cut.
     assert!(
-        (windowed_coefficients[0] - baked_coefficients[0]).abs() > 1e-6
-            || (windowed.intercept - baked.intercept).abs() > 1e-6,
+        (windowed_coefficients[0] - frozen_coefficients[0]).abs() > 1e-6
+            || (windowed.intercept - frozen.intercept).abs() > 1e-6,
         "finite k1 must change the cut vs all-cuts (windowed coeff {} intercept {}; \
          all-cuts coeff {} intercept {})",
         windowed_coefficients[0],
         windowed.intercept,
-        baked_coefficients[0],
-        baked.intercept,
+        frozen_coefficients[0],
+        frozen.intercept,
     );
 }
 
@@ -5448,46 +5614,50 @@ fn backward_dcs_exactness_sweep() {
     let iterations = [3_u64, 5, 7];
     for &iteration in &iterations {
         for &x in &x_hats {
-            let (baked, baked_coefficients, _) =
+            let (frozen, frozen_coefficients, _) =
                 run_dcs_backward_trial_point_at(None, iteration, x);
             let (dcs, dcs_coefficients, _) =
                 run_dcs_backward_trial_point_at(Some(dcs_params(2)), iteration, x);
             assert!(
-                (baked.intercept - dcs.intercept).abs() < 1e-9,
-                "sweep iter {iteration} x_hat {x}: intercept baked {} vs DCS {}",
-                baked.intercept,
+                (frozen.intercept - dcs.intercept).abs() < 1e-9,
+                "sweep iter {iteration} x_hat {x}: intercept frozen {} vs DCS {}",
+                frozen.intercept,
                 dcs.intercept
             );
-            for (i, (b, d)) in baked_coefficients.iter().zip(&dcs_coefficients).enumerate() {
+            for (i, (b, d)) in frozen_coefficients
+                .iter()
+                .zip(&dcs_coefficients)
+                .enumerate()
+            {
                 assert!(
                     (b - d).abs() < 1e-9,
-                    "sweep iter {iteration} x_hat {x}: coeff[{i}] baked {b} vs DCS {d}"
+                    "sweep iter {iteration} x_hat {x}: coeff[{i}] frozen {b} vs DCS {d}"
                 );
             }
         }
     }
 }
 
-/// Baked successor template for the regression fixture: the cut-free base
+/// Frozen successor template for the regression fixture: the cut-free base
 /// (`dcs_core_template`, the coupling row `col0 - col2 = 0`) PLUS the binding
-/// cut (`-2*col0 + theta >= 0`) baked as a second structural row. This
-/// mimics baking being active (`baked_template.num_rows = 2 >
-/// template_num_rows = 1`), so the all-cuts/baked successor LP already
+/// cut (`-2*col0 + theta >= 0`) frozen as a second structural row. This
+/// mimics freeze being active (`frozen_template.num_rows = 2 >
+/// template_num_rows = 1`), so the all-cuts/frozen successor LP already
 /// carries a cut row that the DCS path must NOT re-append.
 ///
 /// CSC by column (4 cols, 2 rows):
 ///   col0 -> (row0, +1), (row1, -5);  col2 -> (row0, -1);  col3 -> (row1, +1)
 ///
-/// The baked cut intentionally DOMINATES the pool's true binding cut: it is
+/// The frozen cut intentionally DOMINATES the pool's true binding cut: it is
 /// `-5*col0 + theta >= 0`, i.e. `theta >= 5*col0`, giving floor `10` at the
 /// pinned `x_hat = 2` versus the pool's true optimum floor `4` (gradient 2).
 /// This is a cut that is NOT in the DCS resident pool (the pool's cuts have
 /// gradients 0 and 2, never 5). If the DCS path erroneously loaded this
-/// baked template as its core, the LP would carry the spurious floor-10
+/// frozen template as its core, the LP would carry the spurious floor-10
 /// constraint and the produced cut would be `theta = 10, gradient = 5` —
 /// observably different from the correct all-cuts cut. Loading the cut-free
-/// base (the fix) ignores this baked row, so the DCS cut matches all-cuts.
-fn dcs_baked_template_with_one_cut() -> StageTemplate {
+/// base (the fix) ignores this frozen row, so the DCS cut matches all-cuts.
+fn dcs_frozen_template_with_one_cut() -> StageTemplate {
     StageTemplate {
         num_cols: 4,
         num_rows: 2,
@@ -5498,7 +5668,7 @@ fn dcs_baked_template_with_one_cut() -> StageTemplate {
         col_lower: vec![0.0, 0.0, 0.0, -1.0e6],
         col_upper: vec![f64::INFINITY, f64::INFINITY, f64::INFINITY, 1.0e6],
         objective: vec![0.0, 0.0, 0.0, 1.0],
-        // row0: coupling equality (=0); row1: spurious baked cut
+        // row0: coupling equality (=0); row1: spurious frozen cut
         // -5*col0 + theta >= 0 (NOT a DCS pool cut).
         row_lower: vec![0.0, 0.0],
         row_upper: vec![0.0, f64::INFINITY],
@@ -5512,33 +5682,38 @@ fn dcs_baked_template_with_one_cut() -> StageTemplate {
     }
 }
 
-/// Regression for the baked-template-as-core bug: when baking is active
-/// (`baked_template.num_rows > template_num_rows`), the DCS path must load
-/// the cut-free base `ctx.templates[s]` — NOT `succ.baked_template`, which
-/// already carries the active cut rows. Loading the baked template would
-/// leave its baked cut rows resident in the LP even though the lazy loop's
+/// Regression for the frozen-template-as-core bug: when freeze is active
+/// (`frozen_template.num_rows > template_num_rows`), the DCS path must load
+/// the cut-free base `ctx.templates[s]` — NOT `succ.frozen_template`, which
+/// already carries the active cut rows. Loading the frozen template would
+/// leave its frozen cut rows resident in the LP even though the lazy loop's
 /// fresh `CutRowMap` does not own them, so DCS would solve against cut rows
 /// it never selected.
 ///
-/// Here `succ.baked_template` carries one baked cut row
-/// (`dcs_baked_template_with_one_cut`, `num_rows = 2`) that is a spurious
+/// Here `succ.frozen_template` carries one frozen cut row
+/// (`dcs_frozen_template_with_one_cut`, `num_rows = 2`) that is a spurious
 /// floor-10 / gradient-5 constraint NOT present in the DCS pool, while
 /// `ctx.templates[s]` is the cut-free base (`num_rows = 1`). With the fix
 /// the DCS cut equals the all-cuts cut (gradient 2) within 1e-9. Against the
-/// old `core = succ.baked_template`, the spurious baked cut dominates the
+/// old `core = succ.frozen_template`, the spurious frozen cut dominates the
 /// solve and DCS returns gradient 5 — observably wrong — failing this
 /// assertion. (Verified: this test fails on the buggy code, passes on the
 /// fix.)
 #[test]
-fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
+// Rationale: one end-to-end DCS-vs-frozen scenario whose setup (templates, fcf,
+// SuccessorSpec, contexts) and sequential assertions form a single coherent
+// fixture; splitting would fragment the cut-row-identity checks it verifies.
+#[allow(clippy::too_many_lines)]
+fn backward_dcs_frozen_cuts_present_no_duplicate_rows() {
     let iteration = 5;
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let n_state = state.n_state;
+    let n_stages = 2;
 
-    // Cut-free base (loaded by the DCS path) and the baked successor
+    // Cut-free base (loaded by the DCS path) and the frozen successor
     // template that carries the binding cut as a structural row.
     let base = dcs_core_template();
-    let baked = dcs_baked_template_with_one_cut();
+    let frozen = dcs_frozen_template_with_one_cut();
     // ctx.templates carries the cut-free base for the successor stage.
     let templates = vec![base.clone(), base.clone()];
     let base_rows = vec![0_usize, 0_usize];
@@ -5547,12 +5722,18 @@ fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
     let risk_measures = vec![RiskMeasure::Expectation; 2];
 
     let mut fcf = dcs_two_stage_fcf();
-    // All-cuts batch (delta) for the baked path; with baked carrying the
-    // binding cut, the delta is the remaining (non-baked) cuts. For the DCS
+    // All-cuts batch (delta) for the frozen path; with frozen carrying the
+    // binding cut, the delta is the remaining (non-frozen) cuts. For the DCS
     // exactness comparison we only need the all-cuts reference, computed
     // from the full pool against the cut-free base below.
-    let cut_batch = crate::cut::row::build_cut_row_batch(&fcf, 1, &state, &[]);
-    let successor_active_slots: Vec<usize> = (0..fcf.pools[1].populated_count).collect();
+    let cut_batch = crate::cut::row::build_cut_row_batch(
+        &fcf,
+        1,
+        &state,
+        &crate::test_support::cut_state_projection(&state),
+        &[],
+    );
+    let successor_active_slots: Vec<usize> = (0..fcf.pools[1].populated()).collect();
     let num_cuts = successor_active_slots.len();
 
     let mut exchange = exchange_with_states(n_state, vec![vec![2.0]]);
@@ -5583,10 +5764,11 @@ fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
         noise_group_ids: &[],
         downstream_par_order: 0,
     };
-    let study_dims = crate::indexer::test_fixtures::study_dims();
+    let study_dims = crate::test_support::study_dims();
     let training_ctx = TrainingContext {
         horizon: &horizon,
         state: &state,
+        cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(&state, n_stages),
         study_dims: &study_dims,
         inflow_method: &InflowNonNegativityMethod::None,
         stochastic: &stochastic,
@@ -5602,13 +5784,19 @@ fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
         recent_accum_seed: &[],
         recent_weight_seed: 0.0,
         dcs: Some(dcs_params(2)),
-        noise_key_diag: None,
     };
 
     let probabilities = vec![1.0_f64];
-    // `baked_template` carries a baked cut row (num_rows = 2); the cut-free
-    // base has template_num_rows = 1. This is the baking-active shape that
+    // `frozen_template` carries a frozen cut row (num_rows = 2); the cut-free
+    // base has template_num_rows = 1. This is the freeze-active shape that
     // exposed the bug.
+    let cut_state_projection = crate::indexer::CutStateProjection::new(
+        &state,
+        cobre_core::temporal::StageStateConfig {
+            storage: true,
+            inflow_lags: true,
+        },
+    );
     let succ = super::SuccessorSpec {
         t: 0,
         successor: 1,
@@ -5617,11 +5805,12 @@ fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
         cut_batch: &cut_batch,
         num_cuts_at_successor: num_cuts,
         template_num_rows: base.num_rows,
-        baked_template: &baked,
+        frozen_template: &frozen,
         successor_active_slots: &successor_active_slots,
         cut_activity_tolerance: 0.0,
-        successor_populated_count: fcf.pools[1].populated_count,
+        successor_populated_count: fcf.pools[1].populated(),
         successor_pool: &fcf.pools[1],
+        cut_state: &cut_state_projection,
     };
 
     let mut basis_slices = basis_store.split_workers_mut(1);
@@ -5683,7 +5872,7 @@ fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
         0,
         0,
     )
-    .expect("DCS backward solve with baked cuts present must succeed");
+    .expect("DCS backward solve with frozen cuts present must succeed");
     // Resolve the DCS coefficient slice from the worker arena while `ws` is
     // still in scope.
     let dcs_coefficients = staged_cut_coefficients(&dcs_cut, &ws.backward_accum.agg_arena).to_vec();
@@ -5694,7 +5883,7 @@ fn backward_dcs_baked_cuts_present_no_duplicate_rows() {
 
     // With the fix (core = cut-free ctx.templates[s]), the binding cut is
     // added exactly once and the DCS cut matches the all-cuts cut. With the
-    // bug (core = baked_template), the baked cut is double-added and the
+    // bug (core = frozen_template), the frozen cut is double-added and the
     // solve/extraction is malformed, so this fails.
     assert!(
         (dcs_cut.intercept - allcuts.intercept).abs() < 1e-9,

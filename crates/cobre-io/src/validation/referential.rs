@@ -893,7 +893,9 @@ fn validate_variable_ref_entity(
         | VariableRef::HydroDiversion { hydro_id, .. }
         | VariableRef::HydroOutflow { hydro_id, .. }
         | VariableRef::HydroGeneration { hydro_id, .. }
-        | VariableRef::HydroInflow { hydro_id, .. } => {
+        | VariableRef::HydroInflow { hydro_id, .. }
+        | VariableRef::HydroStorageInitial { hydro_id, .. }
+        | VariableRef::HydroStorageFinal { hydro_id, .. } => {
             if !ids.hydro.contains(&hydro_id.0) {
                 ctx.add_error(
                     ErrorKind::InvalidReference,
@@ -993,6 +995,7 @@ fn validate_variable_ref_entity(
 )]
 mod tests {
     use super::*;
+    use chrono::NaiveDate;
     use cobre_core::{
         EntityId,
         entities::{
@@ -1100,7 +1103,7 @@ mod tests {
         write_file(
             root,
             "system/buses.json",
-            r#"{ "buses": [{ "id": 1, "name": "BUS_1" }] }"#,
+            r#"{ "buses": [{ "id": 1, "name": "BUS_1", "operational_start_date": "2024-01-01" }] }"#,
         );
         write_file(root, "system/lines.json", r#"{ "lines": [] }"#);
         write_file(root, "system/hydros.json", r#"{ "hydros": [] }"#);
@@ -1152,8 +1155,10 @@ mod tests {
         Hydro {
             id: EntityId::from(id),
             name: format!("Hydro_{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(bus_id),
             downstream_id: None,
+            travel_time_hours: None,
             entry_stage_id: None,
             exit_stage_id: None,
             min_storage_hm3: 0.0,
@@ -1181,6 +1186,7 @@ mod tests {
         Line {
             id: EntityId::from(id),
             name: format!("Line_{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             source_bus_id: EntityId::from(source_bus),
             target_bus_id: EntityId::from(target_bus),
             entry_stage_id: None,
@@ -1196,6 +1202,7 @@ mod tests {
         NonControllableSource {
             id: EntityId::from(id),
             name: format!("Ncs_{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(bus_id),
             entry_stage_id: None,
             exit_stage_id: None,
@@ -1209,6 +1216,7 @@ mod tests {
         PumpingStation {
             id: EntityId::from(id),
             name: format!("Pump_{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(bus_id),
             source_hydro_id: EntityId::from(src_hydro),
             destination_hydro_id: EntityId::from(dst_hydro),
@@ -1338,6 +1346,7 @@ mod tests {
         data.thermals = vec![Thermal {
             id: EntityId::from(20),
             name: "T20".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(777), // bad
             entry_stage_id: None,
             exit_stage_id: None,
@@ -2288,6 +2297,62 @@ mod tests {
                 terms: vec![LinearTerm::literal(
                     1.0,
                     VariableRef::HydroInflow {
+                        hydro_id: EntityId::from(99),
+                        block_id: Some(0),
+                    },
+                )],
+            },
+            sense: ConstraintSense::LessEqual,
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+        };
+        data.generic_constraints = vec![gc];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+        assert!(ctx.has_errors(), "expected referential errors");
+
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidReference)
+            .collect();
+        assert_eq!(
+            inv.len(),
+            1,
+            "expected exactly 1 InvalidReference, got: {inv:?}"
+        );
+        assert!(
+            inv[0].message.contains("non-existent Hydro 99"),
+            "error message must name non-existent Hydro 99, got: {}",
+            inv[0].message
+        );
+    }
+
+    /// A constraint referencing `hydro_storage_initial(99, 0)` where Hydro 99 does
+    /// not exist produces exactly one `InvalidReference` naming Hydro 99. The
+    /// hydro arm's `..` pattern absorbs `block_id`, matching `HydroStorage`.
+    #[test]
+    fn test_hydro_storage_initial_unknown_hydro_ref() {
+        use cobre_core::{
+            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
+            VariableRef,
+        };
+
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        let gc = GenericConstraint {
+            id: EntityId::from(1),
+            name: "test_constraint".to_string(),
+            description: None,
+            expression: ConstraintExpression {
+                terms: vec![LinearTerm::literal(
+                    1.0,
+                    VariableRef::HydroStorageInitial {
                         hydro_id: EntityId::from(99),
                         block_id: Some(0),
                     },

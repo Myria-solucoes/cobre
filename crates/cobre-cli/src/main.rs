@@ -39,13 +39,7 @@ use commands::{
 
 /// Controls when ANSI color/style escapes are emitted on stderr.
 ///
-/// Follows the same env-var override pattern as `--threads` / `COBRE_THREADS`.
-/// Resolution order (highest to lowest priority):
-///
-/// 1. `--color <WHEN>` CLI flag
-/// 2. `COBRE_COLOR` environment variable (`always` | `never`; invalid values ignored)
-/// 3. `FORCE_COLOR=1` environment variable (forces color on; see <https://force-color.org>)
-/// 4. Console auto-detection (the `console` crate checks whether stderr is a TTY)
+/// Selected solely by the `--color <WHEN>` CLI flag (no environment override).
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub(crate) enum ColorWhen {
     /// Enable color when stderr is connected to a TTY (default).
@@ -59,22 +53,13 @@ pub(crate) enum ColorWhen {
 /// Apply the resolved color setting to the `console` crate's global stderr flag.
 ///
 /// Must be called before any output is written to stderr so that the banner,
-/// progress bars, and error messages all honour the chosen setting.
+/// progress bars, and error messages all honour the chosen setting. `Auto` leaves
+/// the `console` crate's TTY auto-detection in place.
 pub(crate) fn resolve_color(cli_color: ColorWhen) {
     match cli_color {
         ColorWhen::Always => console::set_colors_enabled_stderr(true),
         ColorWhen::Never => console::set_colors_enabled_stderr(false),
-        ColorWhen::Auto => {
-            if let Ok(val) = std::env::var("COBRE_COLOR") {
-                match val.to_ascii_lowercase().as_str() {
-                    "always" => console::set_colors_enabled_stderr(true),
-                    "never" => console::set_colors_enabled_stderr(false),
-                    _ => {} // Invalid values are silently ignored, auto-detection applies.
-                }
-            } else if std::env::var_os("FORCE_COLOR").is_some() {
-                console::set_colors_enabled_stderr(true);
-            }
-        }
+        ColorWhen::Auto => {}
     }
 }
 
@@ -89,7 +74,7 @@ struct Cli {
     ///
     /// `always` forces color on (useful under `mpiexec` which pipes stderr through
     /// a non-TTY). `never` disables all color. `auto` lets the terminal detection
-    /// decide. Also honoured via the `COBRE_COLOR` env var (flag takes precedence).
+    /// decide.
     #[arg(long, global = true, default_value = "auto")]
     color: ColorWhen,
 
@@ -157,9 +142,6 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{ColorWhen, resolve_color};
-
-    // `Auto` env-var resolution is exercised in the integration suite (cli_color.rs);
-    // these cover only the env-var-free `Always` / `Never` arms.
 
     #[test]
     fn test_resolve_color_always_enables_color() {

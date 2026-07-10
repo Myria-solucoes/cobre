@@ -159,7 +159,6 @@ fn par_a_historical_replay_roundtrip() {
     let transitions: Vec<StageLagTransition> =
         (0..12).map(|_| uniform_monthly_transition()).collect();
 
-    // Standardise the historical library for this single window.
     let mut library = HistoricalScenarioLibrary::new(1, 12, 1, par.max_order(), vec![window_year]);
     standardize_historical_windows(
         &mut library,
@@ -171,6 +170,7 @@ fn par_a_historical_replay_roundtrip() {
         None,
         &past_inflows,
         &transitions,
+        0,
     );
 
     let n_hydros = 1;
@@ -280,6 +280,7 @@ fn t2_past_inflows_differ_from_window_lags_roundtrip() {
         None,
         &past_inflows,
         &transitions,
+        0,
     );
 
     let safe_max_order = max_order.max(1);
@@ -379,6 +380,7 @@ fn t3_ar0_par_a_roundtrip() {
         None,
         &past_inflows,
         &transitions,
+        0,
     );
 
     let safe_max_order = max_order.max(1);
@@ -485,6 +487,7 @@ fn t4_past_inflows_shorter_than_max_order_roundtrip() {
         None,
         &past_inflows,
         &transitions,
+        0,
     );
 
     let max_order = par.max_order();
@@ -586,6 +589,7 @@ fn t5_two_windows_shared_past_inflows_roundtrip() {
         None,
         &past_inflows,
         &transitions,
+        0,
     );
 
     let safe = max_order.max(1);
@@ -614,58 +618,4 @@ fn t5_two_windows_shared_past_inflows_roundtrip() {
             advance_lag_state_uniform(&mut lag_state, got, max_order);
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// T6: Non-trivial stage_lag_transitions guard fires in debug builds
-// ---------------------------------------------------------------------------
-
-/// A non-trivial `StageLagTransition` must trip the `debug_assert!` guard in
-/// `standardize_historical_windows`; release elides the guard, hence the
-/// `#[cfg(debug_assertions)]` gate.
-#[test]
-#[cfg(debug_assertions)]
-#[should_panic(expected = "historical-replay-non-monthly")]
-fn t6_non_trivial_transitions_guard_fires() {
-    let hydro = EntityId(1);
-    let stages: Vec<Stage> = vec![monthly_stage(0, 0), monthly_stage(1, 1)];
-    let models: Vec<InflowModel> = (0_i32..2)
-        .map(|sid| InflowModel {
-            hydro_id: hydro,
-            stage_id: sid,
-            mean_m3s: 100.0,
-            std_m3s: 10.0,
-            ar_coefficients: vec![],
-            residual_std_ratio: 1.0,
-            annual: None,
-        })
-        .collect();
-    let par = PrecomputedPar::build(&models, &stages, &[hydro], None).expect("PAR build");
-
-    let history = vec![row(hydro, 2000, 0, 110.0), row(hydro, 2000, 1, 90.0)];
-
-    let non_trivial = StageLagTransition {
-        accumulate_weight: 0.5,
-        spillover_weight: 0.5,
-        finalize_period: false, // non-uniform: trips the guard
-        accumulate_downstream: false,
-        downstream_accumulate_weight: 0.0,
-        downstream_spillover_weight: 0.0,
-        downstream_finalize: false,
-        rebuild_from_downstream: false,
-    };
-    let transitions = vec![non_trivial, non_trivial];
-
-    let mut lib = HistoricalScenarioLibrary::new(1, 2, 1, 0, vec![2000]);
-    standardize_historical_windows(
-        &mut lib,
-        &history,
-        &[hydro],
-        &stages,
-        &par,
-        &[2000],
-        None,
-        &[],
-        &transitions,
-    );
 }

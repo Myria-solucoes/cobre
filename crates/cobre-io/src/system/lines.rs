@@ -12,6 +12,7 @@
 //!     {
 //!       "id": 0,
 //!       "name": "SE-S",
+//!       "operational_start_date": "2024-01-01",
 //!       "source_bus_id": 0,
 //!       "target_bus_id": 1,
 //!       "capacity": { "direct_mw": 2500.0, "reverse_mw": 2000.0 },
@@ -21,6 +22,7 @@
 //!     {
 //!       "id": 1,
 //!       "name": "SE-NE",
+//!       "operational_start_date": "2024-01-01",
 //!       "source_bus_id": 0,
 //!       "target_bus_id": 2,
 //!       "entry_stage_id": 1,
@@ -51,6 +53,7 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::Path;
 
+use super::parse_operational_start_date;
 use crate::LoadError;
 
 /// Top-level intermediate type for `lines.json` (serde only, not re-exported).
@@ -74,6 +77,8 @@ pub(crate) struct RawLine {
     id: i32,
     /// Human-readable line name.
     name: String,
+    /// Date the entity enters service (ISO 8601 `YYYY-MM-DD`).
+    operational_start_date: String,
     /// Source bus identifier.
     source_bus_id: i32,
     /// Target bus identifier.
@@ -111,7 +116,9 @@ pub(crate) struct RawLineCapacity {
 /// Reads the JSON file, deserializes it through intermediate serde types,
 /// performs post-deserialization validation, then converts to `Vec<Line>` using
 /// the two-tier penalty resolution cascade (global → entity) for `exchange_cost`.
-/// The result is sorted by `id` ascending to satisfy declaration-order invariance.
+/// The result is sorted by `id` ascending, so parser output is deterministic
+/// regardless of file row order (declaration-order invariance); the builder applies
+/// the same id as its `(operational_start_date, id)` canonical tiebreak.
 ///
 /// # Errors
 ///
@@ -146,7 +153,7 @@ pub fn parse_lines(
 
     validate_raw_lines(&raw, path)?;
 
-    Ok(convert_lines(raw, global_penalties))
+    convert_lines(raw, global_penalties, path)
 }
 
 fn validate_raw_lines(raw: &RawLineFile, path: &Path) -> Result<(), LoadError> {
@@ -209,16 +216,28 @@ fn validate_losses_percent(
     Ok(())
 }
 
-fn convert_lines(raw: RawLineFile, global: &GlobalPenaltyDefaults) -> Vec<Line> {
+fn convert_lines(
+    raw: RawLineFile,
+    global: &GlobalPenaltyDefaults,
+    path: &Path,
+) -> Result<Vec<Line>, LoadError> {
     let mut lines: Vec<Line> = raw
         .lines
         .into_iter()
-        .map(|raw_line| {
+        .enumerate()
+        .map(|(i, raw_line)| {
+            let operational_start_date = parse_operational_start_date(
+                &raw_line.operational_start_date,
+                path,
+                &format!("lines[{i}].operational_start_date"),
+            )?;
+
             let exchange_cost = resolve_line_exchange_cost(raw_line.exchange_cost, global);
 
-            Line {
+            Ok(Line {
                 id: EntityId(raw_line.id),
                 name: raw_line.name,
+                operational_start_date,
                 source_bus_id: EntityId(raw_line.source_bus_id),
                 target_bus_id: EntityId(raw_line.target_bus_id),
                 entry_stage_id: raw_line.entry_stage_id,
@@ -227,13 +246,14 @@ fn convert_lines(raw: RawLineFile, global: &GlobalPenaltyDefaults) -> Vec<Line> 
                 reverse_capacity_mw: raw_line.capacity.reverse_mw,
                 losses_percent: raw_line.losses_percent,
                 exchange_cost,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<_, LoadError>>()?;
 
-    // Sort by id ascending to satisfy declaration-order invariance.
+    // Sort by id so this parser's output is deterministic regardless of file row
+    // order (declaration-order invariance); id is the builder's canonical tiebreak.
     lines.sort_by_key(|l| l.id.0);
-    lines
+    Ok(lines)
 }
 
 #[cfg(test)]
@@ -302,6 +322,7 @@ mod tests {
             {
               "id": 0,
               "name": "SE-S",
+              "operational_start_date": "2024-01-01",
               "source_bus_id": 0,
               "target_bus_id": 1,
               "capacity": { "direct_mw": 2500.0, "reverse_mw": 2000.0 },
@@ -311,6 +332,7 @@ mod tests {
             {
               "id": 1,
               "name": "SE-NE",
+              "operational_start_date": "2024-01-01",
               "source_bus_id": 0,
               "target_bus_id": 2,
               "entry_stage_id": 1,
@@ -364,11 +386,11 @@ mod tests {
         let json = r#"{
           "lines": [
             {
-              "id": 5, "name": "Alpha", "source_bus_id": 0, "target_bus_id": 1,
+              "id": 5, "name": "Alpha", "operational_start_date": "2024-01-01", "source_bus_id": 0, "target_bus_id": 1,
               "capacity": { "direct_mw": 100.0, "reverse_mw": 100.0 }
             },
             {
-              "id": 5, "name": "Beta", "source_bus_id": 1, "target_bus_id": 2,
+              "id": 5, "name": "Beta", "operational_start_date": "2024-01-01", "source_bus_id": 1, "target_bus_id": 2,
               "capacity": { "direct_mw": 200.0, "reverse_mw": 200.0 }
             }
           ]
@@ -399,7 +421,7 @@ mod tests {
         let json = r#"{
           "lines": [
             {
-              "id": 0, "name": "Alpha", "source_bus_id": 0, "target_bus_id": 1,
+              "id": 0, "name": "Alpha", "operational_start_date": "2024-01-01", "source_bus_id": 0, "target_bus_id": 1,
               "capacity": { "direct_mw": -100.0, "reverse_mw": 100.0 }
             }
           ]
@@ -428,7 +450,7 @@ mod tests {
         let json = r#"{
           "lines": [
             {
-              "id": 0, "name": "Alpha", "source_bus_id": 0, "target_bus_id": 1,
+              "id": 0, "name": "Alpha", "operational_start_date": "2024-01-01", "source_bus_id": 0, "target_bus_id": 1,
               "capacity": { "direct_mw": 100.0, "reverse_mw": -50.0 }
             }
           ]
@@ -457,7 +479,7 @@ mod tests {
         let json = r#"{
           "lines": [
             {
-              "id": 0, "name": "Alpha", "source_bus_id": 0, "target_bus_id": 1,
+              "id": 0, "name": "Alpha", "operational_start_date": "2024-01-01", "source_bus_id": 0, "target_bus_id": 1,
               "capacity": { "direct_mw": 100.0, "reverse_mw": 100.0 },
               "losses_percent": -1.0
             }
@@ -490,11 +512,11 @@ mod tests {
         let json_forward = r#"{
           "lines": [
             {
-              "id": 0, "name": "Alpha", "source_bus_id": 0, "target_bus_id": 1,
+              "id": 0, "name": "Alpha", "operational_start_date": "2024-01-01", "source_bus_id": 0, "target_bus_id": 1,
               "capacity": { "direct_mw": 100.0, "reverse_mw": 100.0 }
             },
             {
-              "id": 1, "name": "Beta", "source_bus_id": 1, "target_bus_id": 2,
+              "id": 1, "name": "Beta", "operational_start_date": "2024-01-01", "source_bus_id": 1, "target_bus_id": 2,
               "capacity": { "direct_mw": 200.0, "reverse_mw": 200.0 }
             }
           ]
@@ -502,11 +524,11 @@ mod tests {
         let json_reversed = r#"{
           "lines": [
             {
-              "id": 1, "name": "Beta", "source_bus_id": 1, "target_bus_id": 2,
+              "id": 1, "name": "Beta", "operational_start_date": "2024-01-01", "source_bus_id": 1, "target_bus_id": 2,
               "capacity": { "direct_mw": 200.0, "reverse_mw": 200.0 }
             },
             {
-              "id": 0, "name": "Alpha", "source_bus_id": 0, "target_bus_id": 1,
+              "id": 0, "name": "Alpha", "operational_start_date": "2024-01-01", "source_bus_id": 0, "target_bus_id": 1,
               "capacity": { "direct_mw": 100.0, "reverse_mw": 100.0 }
             }
           ]
@@ -574,7 +596,7 @@ mod tests {
         let json = r#"{
           "lines": [
             {
-              "id": 0, "name": "Alpha", "source_bus_id": 0, "target_bus_id": 1,
+              "id": 0, "name": "Alpha", "operational_start_date": "2024-01-01", "source_bus_id": 0, "target_bus_id": 1,
               "capacity": { "direct_mw": 100.0, "reverse_mw": 100.0 }
             }
           ]
@@ -595,7 +617,7 @@ mod tests {
         let json = r#"{
           "lines": [
             {
-              "id": 0, "name": "Alpha", "source_bus_id": 0, "target_bus_id": 1,
+              "id": 0, "name": "Alpha", "operational_start_date": "2024-01-01", "source_bus_id": 0, "target_bus_id": 1,
               "capacity": { "direct_mw": 0.0, "reverse_mw": 0.0 }
             }
           ]

@@ -17,29 +17,17 @@ use crate::{FutureCostFunction, TrainingResult};
 /// Time fields are milliseconds.
 #[derive(Default)]
 struct PartialRecord {
-    /// Lower bound.
     lower_bound: f64,
-    /// Upper bound mean.
     upper_bound_mean: f64,
-    /// Upper bound std.
     upper_bound_std: f64,
-    /// Convergence gap.
     gap: f64,
-    /// Forward pass wall-clock.
     forward_ms: u64,
-    /// Backward pass wall-clock.
     backward_ms: u64,
-    /// Iteration total wall-clock.
     iteration_time_ms: u64,
-    /// LP solve count.
     lp_solves: u64,
-    /// Forward passes.
     forward_passes: u32,
-    /// Cuts generated.
     cuts_added: u32,
-    /// Rows removed.
     cuts_removed: u32,
-    /// Active rows.
     cuts_active: u32,
     /// Scalar bound-statistic `allreduce` time — not the `allgatherv` scenario exchange.
     forward_sync_ms: u64,
@@ -47,27 +35,18 @@ struct PartialRecord {
     cut_sync_ms: u64,
     /// Local row selection time.
     cut_selection_ms: u64,
-    /// Row-selection allgatherv time.
     cut_selection_allgatherv_ms: u64,
     /// Cumulative LP solve wall-clock time for this iteration.
     solve_time_ms: f64,
-    /// State exchange time.
     state_exchange_ms: u64,
-    /// Cut batch build time.
     cut_batch_build_ms: u64,
     /// Backward thread-pool setup time.
     bwd_setup_ms: u64,
-    /// Backward load imbalance.
     bwd_load_imbalance_ms: u64,
-    /// Backward scheduling overhead.
     bwd_scheduling_overhead_ms: u64,
-    /// Lower bound evaluation wall-clock.
     lower_bound_eval_ms: u64,
-    /// Forward pass setup time.
     fwd_setup_ms: u64,
-    /// Forward pass load imbalance.
     fwd_load_imbalance_ms: u64,
-    /// Forward pass scheduling overhead.
     fwd_scheduling_overhead_ms: u64,
     /// Sum of resident rows-in-LP over this iteration's lazy solves (all ranks). Zero for non-lazy methods.
     rows_in_lp_sum: u64,
@@ -639,7 +618,7 @@ mod tests {
         // stage 1: one cut at iteration 1 -> slot 2.
         fcf.add_cut(1, 1, 0, 3.0, &[1.0]);
 
-        let populated: u64 = fcf.pools.iter().map(|p| p.populated_count as u64).sum();
+        let populated: u64 = fcf.pools.iter().map(|p| p.populated() as u64).sum();
         assert_eq!(
             populated, 7,
             "high-water mark includes the empty leading block"

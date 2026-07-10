@@ -75,10 +75,10 @@ When applying a stored basis at any call site, read:
 → `crates/cobre-sddp/src/cut/basis_reconstruct.rs` module docs.
 Two public entry points exist — use the correct one for the path:
 
-- `reconstruct_basis` — the **baked hot path** (forward pass, simulation, baked
+- `reconstruct_basis` — the **frozen hot path** (forward pass, simulation, frozen
   backward). Slot-identity-based: matches stored cut-row statuses to the current
   LP by `CutPool` slot, assigns `BASIC` to new cuts, then calls
-  `enforce_basic_count_invariant`. **Never bypass this on the baked path.**
+  `enforce_basic_count_invariant`. **Never bypass this on the frozen path.**
 - `reconstruct_basis_uniform_basic` — the **DCS path** (`dcs.rs`). Slot-identity-
   free: copies the column block and template rows, then assigns every resident cut
   row `BASIC` unconditionally. DCS adds its cut rows fresh each solve and does not

@@ -79,7 +79,6 @@ my_first_study/results/
     convergence.parquet     Per-iteration convergence metrics (lower bound, upper bound, gap)
     dictionaries/
       codes.json            Integer-to-string code mappings for entity categories
-      state_dictionary.json State variable definitions and units
       entities.csv          Entity registry (id, name, type)
       variables.csv         LP variable registry
       bounds.parquet        LP variable bound definitions
@@ -135,7 +134,7 @@ training. The 1dtoy run produces:
 
 ```json
 {
-  "cobre_version": "0.9.1",
+  "cobre_version": "0.10.0",
   "hostname": "<hostname>",
   "solver": "highs",
   "solver_version": "<solver version>",

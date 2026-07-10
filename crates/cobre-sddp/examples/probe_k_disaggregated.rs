@@ -179,7 +179,7 @@ fn print_pool_report(setup: &StudySetup) -> PoolReport {
     let mut total_k: u64 = 0;
 
     for (t, pool) in pools.iter().enumerate() {
-        let k = pool.populated_count;
+        let k = pool.populated();
         let a = pool.active_count();
         println!("stage={t} populated_count={k} active_count={a}");
         if k > max_k {

@@ -234,52 +234,6 @@ pub(super) fn check_lifecycle_consistency_remaining(
     }
 }
 
-/// Warns when a non-filling hydro sets `entry_stage_id`/`exit_stage_id` — the
-/// only window still not honored by the LP, which models it active at every
-/// stage.
-///
-/// Deliberately excluded (warning for them would be a false signal): filling
-/// hydros (the `FillingConfig` drives the reservoir's lifecycle), and thermals,
-/// lines, NCS, pumping stations, and energy contracts (their windows ARE applied
-/// at the LP fill site, pinning a dormant entity's columns to `[0, 0]`). The
-/// all-`None` case is the correct inert default and stays silent.
-pub(super) fn warn_commissioning_parsed_not_applied(
-    data: &ParsedData,
-    ctx: &mut ValidationContext,
-) {
-    fn warn_if_set(
-        ctx: &mut ValidationContext,
-        entry: Option<i32>,
-        exit: Option<i32>,
-        file: &str,
-        entity_str: &str,
-    ) {
-        if entry.is_some() || exit.is_some() {
-            ctx.add_warning(
-                ErrorKind::ModelQuality,
-                file,
-                Some(entity_str),
-                format!(
-                    "{entity_str} sets entry_stage_id/exit_stage_id, but commissioning windows are not applied: the entity is modeled active at every stage"
-                ),
-            );
-        }
-    }
-
-    for hydro in &data.hydros {
-        if hydro.filling.is_some() {
-            continue;
-        }
-        warn_if_set(
-            ctx,
-            hydro.entry_stage_id,
-            hydro.exit_stage_id,
-            "system/hydros.json",
-            &format!("Hydro {}", hydro.id.0),
-        );
-    }
-}
-
 pub(super) fn check_filling_config(data: &ParsedData, ctx: &mut ValidationContext) {
     let study_stage_ids: HashSet<i32> = data
         .stages
@@ -310,13 +264,18 @@ pub(super) fn check_filling_config(data: &ParsedData, ctx: &mut ValidationContex
 /// Enforces the structural guards a filling hydro must satisfy beyond the
 /// start-stage-validity check in [`check_filling_config`]. Each rejects an
 /// ill-formed combination that would otherwise yield a meaningless or infeasible
-/// `PreFilling`/`Filling`/`Operating` lifecycle:
+/// `PreFilling`/`Filling`/`Operating` lifecycle, except guard 3, which warns:
 ///
-/// 1. `entry_stage_id.is_some()` ⟺ `filling.is_some()` — one without the other
-///    has no meaning.
+/// 1. `filling.is_some()` ⟹ `entry_stage_id.is_some()` — a filling config needs an
+///    entry to fill toward. The converse does NOT hold: a bare `entry_stage_id`
+///    with no `filling` is a valid non-filling commissioning window. The forbidden
+///    alternative — `filling` without an entry — leaves the reservoir filling toward
+///    nothing.
 /// 2. `start_stage_id < entry_stage_id` — else the `Filling` phase is empty.
-/// 3. `entry_stage_id < horizon` (study stage count) — else the reservoir never
-///    operates.
+/// 3. `entry_stage_id >= horizon` (study stage count) is a `ModelQuality`
+///    WARNING, not an error: the plant fills throughout and never operates
+///    within this study (a longer study reuses the same system file). It must
+///    still load.
 /// 4. the `filling_storage` seed lies in `[0, min_storage_hm3)` — strictly below
 ///    the dead volume. Equality with `min_storage_hm3` belongs to neither the
 ///    filling range nor the operating `.storage` range `[min_storage,
@@ -334,20 +293,15 @@ pub(super) fn check_filling_guards(data: &ParsedData, ctx: &mut ValidationContex
     for hydro in &data.hydros {
         let entity_str = format!("Hydro {}", hydro.id.0);
 
-        if hydro.entry_stage_id.is_some() != hydro.filling.is_some() {
+        if hydro.filling.is_some() && hydro.entry_stage_id.is_none() {
             ctx.add_error(
                 ErrorKind::InvalidValue,
                 "system/hydros.json",
                 Some(&entity_str),
                 format!(
-                    "{entity_str}: entry_stage_id ({:?}) and filling ({}) must be set together; \
-                     a hydro entry requires a filling config and vice-versa",
-                    hydro.entry_stage_id,
-                    if hydro.filling.is_some() {
-                        "present"
-                    } else {
-                        "absent"
-                    },
+                    "{entity_str}: filling is set but entry_stage_id is absent; a filling config \
+                     requires an entry_stage_id to fill toward (a bare entry_stage_id without \
+                     filling is a valid non-filling commissioning window)"
                 ),
             );
         }
@@ -371,13 +325,14 @@ pub(super) fn check_filling_guards(data: &ParsedData, ctx: &mut ValidationContex
             if let Some(entry) = hydro.entry_stage_id
                 && entry >= horizon
             {
-                ctx.add_error(
-                    ErrorKind::InvalidValue,
+                ctx.add_warning(
+                    ErrorKind::ModelQuality,
                     "system/hydros.json",
                     Some(&entity_str),
                     format!(
-                        "{entity_str}: entry_stage_id ({entry}) is not less than the study \
-                         horizon ({horizon}); the hydro must operate at least one stage"
+                        "{entity_str}: entry_stage_id ({entry}) is at or beyond the study \
+                         horizon ({horizon}); the hydro fills throughout and never operates \
+                         within this study"
                     ),
                 );
             }
@@ -610,6 +565,7 @@ mod tests {
     use super::super::test_support::*;
     use super::super::validate_semantic_hydro_thermal;
     use crate::validation::{ErrorKind, ValidationContext};
+    use chrono::NaiveDate;
 
     // ── Cascade acyclicity tests ───────────────────────────────────────────────
 
@@ -820,8 +776,8 @@ mod tests {
 
     /// An entity with only `entry_stage_id` set (no exit) produces no lifecycle
     /// ordering error. A line carries the generic `entry/exit` ordering check
-    /// without the hydro-specific filling guards, so it is the carrier for the
-    /// ordering-only assertion (a hydro entry requires a filling config).
+    /// without the hydro-specific filling guards, isolating the ordering-only
+    /// assertion from them.
     #[test]
     fn test_lifecycle_only_entry_no_error() {
         let line = make_windowed_line(8, Some(5), None);
@@ -862,7 +818,7 @@ mod tests {
         assert!(!ctx.has_errors());
     }
 
-    // ── Commissioning hygiene: ordering parity + parsed-not-applied warning ────
+    // ── Commissioning hygiene: ordering parity + applied-window silence ────────
 
     use cobre_core::EntityId;
     use cobre_core::entities::{
@@ -874,6 +830,7 @@ mod tests {
         PumpingStation {
             id: EntityId::from(id),
             name: format!("Pump_{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(1),
             source_hydro_id: EntityId::from(1),
             destination_hydro_id: EntityId::from(2),
@@ -890,6 +847,7 @@ mod tests {
         NonControllableSource {
             id: EntityId::from(id),
             name: format!("NCS_{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(1),
             entry_stage_id: entry,
             exit_stage_id: exit,
@@ -904,6 +862,7 @@ mod tests {
         EnergyContract {
             id: EntityId::from(id),
             name: format!("Contract_{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(1),
             contract_type: ContractType::Import,
             entry_stage_id: entry,
@@ -1005,10 +964,10 @@ mod tests {
     }
 
     /// A filling hydro's window IS applied (the `FillingConfig` drives its
-    /// lifecycle), so it emits NO parsed-not-applied `ModelQuality` warning, and
-    /// the case still loads (`has_errors()` is false). The filling pairing keeps
-    /// the hydro guard-clean (a bare entry without filling would be rejected),
-    /// isolating the commissioning behavior under test.
+    /// lifecycle), so it emits NO `ModelQuality` warning, and the case still loads
+    /// (`has_errors()` is false). The filling pairing keeps the hydro guard-clean
+    /// (a bare entry without filling would be rejected), isolating the
+    /// commissioning behavior under test.
     #[test]
     fn test_filling_hydro_emits_no_warning() {
         // start (1) < entry (2) < horizon (3); no exit; seed left empty (no
@@ -1036,19 +995,19 @@ mod tests {
             .collect();
         assert!(
             warnings.is_empty(),
-            "a filling hydro's window is applied; no parsed-not-applied warning \
+            "a filling hydro's window is applied; no ModelQuality warning \
              is expected, got: {:?}",
             warnings.iter().map(|e| &e.message).collect::<Vec<_>>()
         );
     }
 
-    /// A non-filling hydro with `exit_stage_id` set (and `filling = None`) still
-    /// has an unapplied window — the entity is modeled active at every stage —
-    /// so it emits exactly one parsed-not-applied `ModelQuality` warning. Exit
-    /// alone (no entry) clears both the `entry >= exit` ordering check and the
-    /// filling guards, isolating the commissioning warning.
+    /// A non-filling hydro with `exit_stage_id` set (and `filling = None`) has its
+    /// commissioning window applied at the LP fill site, so it emits NO
+    /// `ModelQuality` warning. Exit alone (no entry) clears both the
+    /// `entry >= exit` ordering check and the filling guards, isolating the
+    /// commissioning behavior under test.
     #[test]
-    fn test_non_filling_hydro_with_exit_emits_warning() {
+    fn test_non_filling_windowed_hydro_emits_no_warning() {
         let mut hydro = make_hydro(7, None);
         hydro.exit_stage_id = Some(10);
         let data = make_data(
@@ -1071,16 +1030,11 @@ mod tests {
             .into_iter()
             .filter(|e| e.kind == ErrorKind::ModelQuality)
             .collect();
-        assert_eq!(
-            warnings.len(),
-            1,
-            "expected exactly 1 ModelQuality warning, got: {:?}",
-            warnings.iter().map(|e| &e.message).collect::<Vec<_>>()
-        );
         assert!(
-            warnings[0].message.contains("Hydro 7") && warnings[0].message.contains("not applied"),
-            "warning should name the entity and state it is not applied, got: {}",
-            warnings[0].message
+            warnings.is_empty(),
+            "a non-filling hydro's window is applied; no ModelQuality warning is \
+             expected, got: {:?}",
+            warnings.iter().map(|e| &e.message).collect::<Vec<_>>()
         );
     }
 
@@ -1107,7 +1061,7 @@ mod tests {
         );
     }
 
-    /// Build a windowed `Line` (entry < exit) for the parsed-not-applied tests.
+    /// Build a windowed `Line` (entry < exit) for the commissioning tests.
     fn make_windowed_line(
         id: i32,
         entry: Option<i32>,
@@ -1116,6 +1070,7 @@ mod tests {
         cobre_core::entities::Line {
             id: EntityId::from(id),
             name: format!("Line_{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             source_bus_id: EntityId::from(1),
             target_bus_id: EntityId::from(2),
             entry_stage_id: entry,
@@ -1128,9 +1083,8 @@ mod tests {
     }
 
     /// A windowed thermal, line, NCS, and pumping station each have their
-    /// commissioning window APPLIED at the LP fill site, so none of them emits
-    /// the parsed-not-applied ModelQuality warning. Only a non-filling windowed
-    /// hydro — whose window is still unapplied — warns.
+    /// commissioning window APPLIED at the LP fill site, so none of them emits a
+    /// `ModelQuality` warning.
     #[test]
     fn test_applied_window_entities_emit_no_warning() {
         let thermal = cobre_core::entities::Thermal {
@@ -1159,15 +1113,14 @@ mod tests {
             .collect();
         assert!(
             model_quality.is_empty(),
-            "thermal/line/NCS/pumping windows are applied; no parsed-not-applied \
+            "thermal/line/NCS/pumping windows are applied; no ModelQuality \
              warning is expected, got: {:?}",
             model_quality.iter().map(|e| &e.message).collect::<Vec<_>>()
         );
     }
 
     /// A windowed energy contract's commissioning window IS applied at the LP fill
-    /// site (dormant stages zero-pinned), so it emits no parsed-not-applied
-    /// `ModelQuality` warning.
+    /// site (dormant stages zero-pinned), so it emits no `ModelQuality` warning.
     #[test]
     fn test_windowed_contract_emits_no_warning() {
         let mut data = make_data(
@@ -1188,7 +1141,7 @@ mod tests {
             .collect();
         assert!(
             model_quality.is_empty(),
-            "a windowed energy contract's window is applied; no parsed-not-applied \
+            "a windowed energy contract's window is applied; no ModelQuality \
              warning is expected, got: {:?}",
             model_quality.iter().map(|e| &e.message).collect::<Vec<_>>()
         );
@@ -1223,10 +1176,11 @@ mod tests {
             .collect()
     }
 
-    /// Guard 1 (violating): `entry_stage_id = Some` with `filling = None` yields an
-    /// `InvalidValue` stating entry requires a filling config.
+    /// Guard 1 (well-formed): `entry_stage_id = Some` with `filling = None` is a
+    /// valid non-filling commissioning window and produces NO error — the converse
+    /// of the filling⟹entry implication does not hold.
     #[test]
-    fn test_filling_guard_entry_without_filling_errors() {
+    fn test_filling_guard_entry_without_filling_no_error() {
         let mut hydro = make_hydro(1, None);
         hydro.entry_stage_id = Some(4);
         hydro.filling = None;
@@ -1240,11 +1194,38 @@ mod tests {
         );
         let mut ctx = ValidationContext::new();
         validate_semantic_hydro_thermal(&data, &mut ctx);
+        assert!(
+            hydro_invalid_value_messages(&ctx).is_empty(),
+            "a non-filling hydro with a commissioning window must validate clean, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Guard 1 (violating): `filling = Some` with `entry_stage_id = None` still
+    /// errors — a filling config needs an entry to fill toward.
+    #[test]
+    fn test_filling_guard_filling_without_entry_errors() {
+        let mut hydro = make_hydro(1, None);
+        hydro.entry_stage_id = None;
+        hydro.filling = Some(FillingConfig {
+            start_stage_id: 0,
+            filling_min_rate_m3s: 10.0,
+        });
+        let data = make_data(
+            vec![hydro],
+            vec![],
+            vec![],
+            make_stages(vec![0, 1, 2, 3, 4, 5]),
+            vec![],
+            vec![],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
         let msgs = hydro_invalid_value_messages(&ctx);
         assert!(
             msgs.iter()
-                .any(|m| m.contains("Hydro 1") && m.contains("must be set together")),
-            "expected entry-requires-filling error, got: {msgs:?}"
+                .any(|m| m.contains("Hydro 1") && m.contains("requires an entry_stage_id")),
+            "expected filling-requires-entry error, got: {msgs:?}"
         );
     }
 
@@ -1315,11 +1296,12 @@ mod tests {
         );
     }
 
-    /// Guard 3 (violating): `entry_stage_id (6)` equal to the 6-stage horizon
-    /// leaves no operating stage and yields an `InvalidValue` stating the hydro
-    /// must operate at least one stage.
+    /// Guard 3: `entry_stage_id (6)` at the 6-stage horizon leaves no operating
+    /// stage. It is a tolerated, warned condition (filling-throughout), not a
+    /// rejection: exactly one `ModelQuality` warning and no error, so the case
+    /// still loads.
     #[test]
-    fn test_filling_guard_entry_at_horizon_errors() {
+    fn test_filling_guard_entry_at_horizon_warns() {
         // Six stages (ids 0..=5) ⇒ horizon = 6; entry at 6 has no operating stage.
         let hydro = make_filling_hydro(1, 1, 6, 10.0);
         let data = make_data(
@@ -1332,11 +1314,27 @@ mod tests {
         );
         let mut ctx = ValidationContext::new();
         validate_semantic_hydro_thermal(&data, &mut ctx);
-        let msgs = hydro_invalid_value_messages(&ctx);
         assert!(
-            msgs.iter()
-                .any(|m| m.contains("Hydro 1") && m.contains("must operate at least one stage")),
-            "expected entry<horizon error, got: {msgs:?}"
+            !ctx.has_errors(),
+            "entry at horizon on a filling hydro must not produce an error, got: {:?}",
+            ctx.errors()
+        );
+        let warnings: Vec<_> = ctx
+            .warnings()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::ModelQuality)
+            .collect();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "expected exactly 1 ModelQuality warning, got: {:?}",
+            warnings.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        assert!(
+            warnings[0].message.contains("Hydro 1")
+                && warnings[0].message.contains("never operates"),
+            "warning should name the entity and state it never operates within the study, got: {}",
+            warnings[0].message
         );
     }
 
@@ -1468,9 +1466,9 @@ mod tests {
     /// A fully well-formed filling hydro (`start < entry < horizon`, seed in
     /// range, no exit, zero inflow cap) produces zero errors AND zero warnings.
     /// `start_stage_id == 0` (study starts mid-filling) lets the nonzero in-range
-    /// seed coexist with guard 6's empty-pit rule. A filling hydro is excluded
-    /// from the commissioning parsed-not-applied check (its window IS applied via
-    /// the `FillingConfig`), so no `ModelQuality` warning is emitted either.
+    /// seed coexist with guard 6's empty-pit rule. A filling hydro's window IS
+    /// applied via the `FillingConfig`, so no `ModelQuality` warning is emitted
+    /// either.
     #[test]
     fn test_filling_guard_well_formed_no_error() {
         let mut hydro = make_filling_hydro(1, 0, 4, 0.0); // inflow cap 0.0 is valid

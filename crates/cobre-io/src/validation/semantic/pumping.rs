@@ -33,6 +33,7 @@ pub(super) fn check_pumping_semantics(data: &ParsedData, ctx: &mut ValidationCon
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::doc_markdown)]
 mod tests {
+    use chrono::NaiveDate;
     use cobre_core::{EntityId, entities::PumpingStation};
 
     use super::super::test_support::{make_data, make_hydro, make_stages};
@@ -44,6 +45,7 @@ mod tests {
         PumpingStation {
             id: EntityId::from(id),
             name: format!("Pump_{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(bus_id),
             source_hydro_id: EntityId::from(src_hydro),
             destination_hydro_id: EntityId::from(dst_hydro),

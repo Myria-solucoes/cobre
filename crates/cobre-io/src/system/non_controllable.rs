@@ -16,6 +16,7 @@
 //!     {
 //!       "id": 0,
 //!       "name": "Eólica Caetité",
+//!       "operational_start_date": "2024-01-01",
 //!       "bus_id": 2,
 //!       "max_generation_mw": 300.0,
 //!       "curtailment_cost": 0.01
@@ -23,6 +24,7 @@
 //!     {
 //!       "id": 1,
 //!       "name": "Solar Pirapora",
+//!       "operational_start_date": "2024-01-01",
 //!       "bus_id": 3,
 //!       "entry_stage_id": 12,
 //!       "max_generation_mw": 400.0
@@ -50,6 +52,7 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::Path;
 
+use super::parse_operational_start_date;
 use crate::LoadError;
 
 /// Default for [`RawNcs::allow_curtailment`] when omitted: sources are
@@ -79,6 +82,8 @@ pub(crate) struct RawNcs {
     id: i32,
     /// Human-readable source name.
     name: String,
+    /// Date the entity enters service (ISO 8601 `YYYY-MM-DD`).
+    operational_start_date: String,
     /// Bus to which this source's generation is injected.
     bus_id: i32,
     /// Stage index when the source enters service. Absent or null = always exists.
@@ -113,7 +118,9 @@ pub(crate) struct RawNcs {
 /// performs post-deserialization validation, then converts to
 /// `Vec<NonControllableSource>` using the two-tier penalty resolution cascade
 /// (global → entity) for `curtailment_cost`. The result is sorted by `id`
-/// ascending to satisfy declaration-order invariance.
+/// ascending, so parser output is deterministic regardless of file row order
+/// (declaration-order invariance); the builder applies the same id as its
+/// `(operational_start_date, id)` canonical tiebreak.
 ///
 /// # Errors
 ///
@@ -149,7 +156,7 @@ pub fn parse_non_controllable_sources(
 
     validate_raw_ncs(&raw, path)?;
 
-    Ok(convert_ncs(raw, global_penalties))
+    convert_ncs(raw, global_penalties, path)
 }
 
 fn validate_raw_ncs(raw: &RawNcsFile, path: &Path) -> Result<(), LoadError> {
@@ -189,29 +196,42 @@ fn validate_ncs_generation(
     Ok(())
 }
 
-fn convert_ncs(raw: RawNcsFile, global: &GlobalPenaltyDefaults) -> Vec<NonControllableSource> {
+fn convert_ncs(
+    raw: RawNcsFile,
+    global: &GlobalPenaltyDefaults,
+    path: &Path,
+) -> Result<Vec<NonControllableSource>, LoadError> {
     let mut sources: Vec<NonControllableSource> = raw
         .non_controllable_sources
         .into_iter()
-        .map(|raw_ncs| {
+        .enumerate()
+        .map(|(i, raw_ncs)| {
+            let operational_start_date = parse_operational_start_date(
+                &raw_ncs.operational_start_date,
+                path,
+                &format!("non_controllable_sources[{i}].operational_start_date"),
+            )?;
+
             let curtailment_cost = resolve_ncs_curtailment_cost(raw_ncs.curtailment_cost, global);
 
-            NonControllableSource {
+            Ok(NonControllableSource {
                 id: EntityId(raw_ncs.id),
                 name: raw_ncs.name,
+                operational_start_date,
                 bus_id: EntityId(raw_ncs.bus_id),
                 entry_stage_id: raw_ncs.entry_stage_id,
                 exit_stage_id: raw_ncs.exit_stage_id,
                 max_generation_mw: raw_ncs.max_generation_mw,
                 allow_curtailment: raw_ncs.allow_curtailment,
                 curtailment_cost,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<_, LoadError>>()?;
 
-    // Sort by id ascending to satisfy declaration-order invariance.
+    // Sort by id so this parser's output is deterministic regardless of file row
+    // order (declaration-order invariance); id is the builder's canonical tiebreak.
     sources.sort_by_key(|s| s.id.0);
-    sources
+    Ok(sources)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -281,6 +301,7 @@ mod tests {
             {
               "id": 0,
               "name": "Eólica Caetité",
+              "operational_start_date": "2024-01-01",
               "bus_id": 2,
               "max_generation_mw": 300.0,
               "curtailment_cost": 0.01
@@ -288,6 +309,7 @@ mod tests {
             {
               "id": 1,
               "name": "Solar Pirapora",
+              "operational_start_date": "2024-01-01",
               "bus_id": 3,
               "entry_stage_id": 12,
               "max_generation_mw": 400.0
@@ -336,6 +358,7 @@ mod tests {
             {
               "id": 0,
               "name": "PCH NE Aggregate",
+              "operational_start_date": "2024-01-01",
               "bus_id": 0,
               "max_generation_mw": 120.0,
               "allow_curtailment": false
@@ -343,6 +366,7 @@ mod tests {
             {
               "id": 1,
               "name": "Wind NE Partial",
+              "operational_start_date": "2024-01-01",
               "bus_id": 0,
               "max_generation_mw": 300.0,
               "allow_curtailment": true
@@ -365,8 +389,8 @@ mod tests {
     fn test_duplicate_ncs_id() {
         let json = r#"{
           "non_controllable_sources": [
-            { "id": 3, "name": "Alpha", "bus_id": 0, "max_generation_mw": 100.0 },
-            { "id": 3, "name": "Beta",  "bus_id": 1, "max_generation_mw": 200.0 }
+            { "id": 3, "name": "Alpha", "operational_start_date": "2024-01-01", "bus_id": 0, "max_generation_mw": 100.0 },
+            { "id": 3, "name": "Beta", "operational_start_date": "2024-01-01",  "bus_id": 1, "max_generation_mw": 200.0 }
           ]
         }"#;
         let f = write_json(json);
@@ -394,7 +418,7 @@ mod tests {
     fn test_negative_max_generation_mw() {
         let json = r#"{
           "non_controllable_sources": [
-            { "id": 0, "name": "Bad", "bus_id": 0, "max_generation_mw": -10.0 }
+            { "id": 0, "name": "Bad", "operational_start_date": "2024-01-01", "bus_id": 0, "max_generation_mw": -10.0 }
           ]
         }"#;
         let f = write_json(json);
@@ -423,14 +447,14 @@ mod tests {
     fn test_declaration_order_invariance() {
         let json_forward = r#"{
           "non_controllable_sources": [
-            { "id": 0, "name": "Wind", "bus_id": 0, "max_generation_mw": 100.0 },
-            { "id": 1, "name": "Solar", "bus_id": 1, "max_generation_mw": 200.0 }
+            { "id": 0, "name": "Wind", "operational_start_date": "2024-01-01", "bus_id": 0, "max_generation_mw": 100.0 },
+            { "id": 1, "name": "Solar", "operational_start_date": "2024-01-01", "bus_id": 1, "max_generation_mw": 200.0 }
           ]
         }"#;
         let json_reversed = r#"{
           "non_controllable_sources": [
-            { "id": 1, "name": "Solar", "bus_id": 1, "max_generation_mw": 200.0 },
-            { "id": 0, "name": "Wind",  "bus_id": 0, "max_generation_mw": 100.0 }
+            { "id": 1, "name": "Solar", "operational_start_date": "2024-01-01", "bus_id": 1, "max_generation_mw": 200.0 },
+            { "id": 0, "name": "Wind", "operational_start_date": "2024-01-01",  "bus_id": 0, "max_generation_mw": 100.0 }
           ]
         }"#;
         let global = make_global();

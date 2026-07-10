@@ -1,7 +1,7 @@
-//! Integration tests for the `--color` global flag and `COBRE_COLOR` / `FORCE_COLOR` env vars.
+//! Integration tests for the `--color` global flag.
 //!
-//! Each test spawns a subprocess so that env var overrides and `console`'s global
-//! `colors_enabled_stderr` state are completely isolated from the test process.
+//! Each test spawns a subprocess so that `console`'s global
+//! `colors_enabled_stderr` state is completely isolated from the test process.
 
 #![allow(clippy::unwrap_used)]
 
@@ -80,7 +80,8 @@ const STAGES_JSON: &str = r#"{
 }"#;
 
 const INITIAL_CONDITIONS_JSON: &str = r#"{ "storage": [], "filling_storage": [] }"#;
-const BUSES_JSON: &str = r#"{ "buses": [{ "id": 1, "name": "BUS_1" }] }"#;
+const BUSES_JSON: &str =
+    r#"{ "buses": [{ "id": 1, "name": "BUS_1", "operational_start_date": "2024-01-01" }] }"#;
 const LINES_JSON: &str = r#"{ "lines": [] }"#;
 const HYDROS_JSON: &str = r#"{ "hydros": [] }"#;
 const THERMALS_JSON: &str = r#"{ "thermals": [] }"#;
@@ -174,66 +175,4 @@ fn color_always_global_flag_before_subcommand_is_accepted() {
         .assert()
         .success()
         .stderr(predicate::str::contains("\x1b[38;5;172m"));
-}
-
-#[test]
-fn cobre_color_env_always_forces_ansi() {
-    let dir = TempDir::new().unwrap();
-    make_valid_case(&dir);
-    let out = TempDir::new().unwrap();
-
-    cobre()
-        .env("COBRE_COLOR", "always")
-        .env_remove("FORCE_COLOR")
-        .args([
-            "run",
-            dir.path().to_str().unwrap(),
-            "--output",
-            out.path().to_str().unwrap(),
-        ])
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("\x1b[38;5;172m"));
-}
-
-#[test]
-fn force_color_env_forces_ansi() {
-    let dir = TempDir::new().unwrap();
-    make_valid_case(&dir);
-    let out = TempDir::new().unwrap();
-
-    cobre()
-        .env("FORCE_COLOR", "1")
-        // COBRE_COLOR outranks FORCE_COLOR; unset it so the FORCE_COLOR branch runs.
-        .env_remove("COBRE_COLOR")
-        .args([
-            "run",
-            dir.path().to_str().unwrap(),
-            "--output",
-            out.path().to_str().unwrap(),
-        ])
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("\x1b[38;5;172m"));
-}
-
-/// An invalid value falls back to auto-detection, which disables color on a
-/// non-TTY subprocess; the only meaningful assertion is success (no panic).
-#[test]
-fn cobre_color_env_invalid_value_is_silently_ignored() {
-    let dir = TempDir::new().unwrap();
-    make_valid_case(&dir);
-    let out = TempDir::new().unwrap();
-
-    cobre()
-        .env("COBRE_COLOR", "invalid-value")
-        .env_remove("FORCE_COLOR")
-        .args([
-            "run",
-            dir.path().to_str().unwrap(),
-            "--output",
-            out.path().to_str().unwrap(),
-        ])
-        .assert()
-        .success();
 }

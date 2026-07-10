@@ -1,40 +1,38 @@
-//! Stage-indexed data sub-struct extracted from [`super::StudySetup`].
+//! Stage-indexed data sub-struct of [`super::StudySetup`].
 
 use cobre_core::{Stage, temporal::StageLagTransition};
 
 use crate::{
-    indexer::{StateLayout, StudyDimensions},
+    indexer::{CutStateProjection, StateLayout, StudyDimensions},
     lp_builder::StageTemplates,
     scaling_report::ScalingReport,
     simulation::EntityCounts,
 };
 
-/// All per-stage and stage-indexed data owned by [`super::StudySetup`].
-///
-/// Groups the per-stage and stage-indexed fields that describe the study's
-/// temporal and stage structure. Constructed once during
-/// [`super::StudySetup::from_broadcast_params`] and borrowed for hot-path
-/// context construction.
+/// All per-stage and stage-indexed data owned by [`super::StudySetup`],
+/// constructed once during [`super::StudySetup::from_broadcast_params`] and
+/// borrowed for hot-path context construction.
 #[derive(Debug)]
 pub struct StageData {
     /// LP skeleton templates, one per study stage.
     pub stage_templates: StageTemplates,
 
-    /// Canonical stage-invariant state-vector layout (role (a)): the state / cut
-    /// column ranges and the layout-derived caches.
-    ///
-    /// The single role-(a) owner — resolves every role-(a) read on the hot path.
-    /// Role-(b) equipment geometry lives per stage on
-    /// [`crate::lp_builder::StageGeometry`].
+    /// Canonical stage-invariant state / cut column ranges and layout-derived
+    /// caches — the single owner of these ("role (a)"); per-stage equipment
+    /// geometry ("role (b)") lives on [`crate::lp_builder::StageGeometry`].
     pub(crate) state: StateLayout,
 
-    /// Single owner of the study-invariant, non-state LP shape: the non-state
-    /// entity counts, the optional-column presence flags, and the
-    /// anticipated-thermal identity list.
-    ///
-    /// The state-defining dims live on [`Self::state`] and the per-stage `n_blks`
-    /// lives on the per-stage geometry, so neither is carried here.
+    /// Single owner of the study-invariant, non-state LP shape: non-state entity
+    /// counts, optional-column presence flags, and the anticipated-thermal
+    /// identity list. State-defining dims live on [`Self::state`], per-stage
+    /// `n_blks` on the per-stage geometry.
     pub(crate) study_dims: StudyDimensions,
+
+    /// Per-pool cut-state projection, indexed by stage (pool) `t`, paired 1:1
+    /// with [`crate::FutureCostFunction::pools`] (`pool t` sized by
+    /// `cut_state_layouts[t].n_state()`) — the single owner of each pool's
+    /// cut-state dimension.
+    pub(crate) cut_state_layouts: Vec<CutStateProjection>,
 
     /// Study stages (id >= 0) in index order.
     pub(crate) stages: Vec<Stage>,
@@ -43,11 +41,7 @@ pub struct StageData {
     pub(crate) entity_counts: EntityCounts,
 
     /// Per-station pumping power-consumption rate \[MW/(m³/s)\], ID-sorted to
-    /// match `entity_counts.pumping_station_ids`.
-    ///
-    /// Built from `system.pumping_stations()` in canonical ID order — the same
-    /// order `pumping_station_ids` is built in — so the two slices are
-    /// positionally aligned.
+    /// match `entity_counts.pumping_station_ids` (positionally aligned).
     pub(crate) pumping_consumption_mw_per_m3s: Vec<f64>,
 
     /// Per-stage RESOLVED contract price \[$/`MWh`\]: one inner `Vec` per study
@@ -59,7 +53,6 @@ pub struct StageData {
     /// (`true` = import). Stage-invariant.
     pub(crate) contract_is_import: Vec<bool>,
 
-    /// Number of blocks per stage.
     pub(crate) block_counts_per_stage: Vec<usize>,
 
     /// Precomputed lag accumulation weights and period-finalization flags,

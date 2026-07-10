@@ -4,6 +4,7 @@
     {
       "id": 0,
       "name": "UTE1",
+      "operational_start_date": "2020-01-01",
       "bus_id": 0,
       "generation": {
         "min_mw": 0.0,
@@ -14,6 +15,7 @@
     {
       "id": 1,
       "name": "UTE2",
+      "operational_start_date": "2020-01-02",
       "bus_id": 0,
       "generation": {
         "min_mw": 0.0,

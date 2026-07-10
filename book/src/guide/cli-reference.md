@@ -272,11 +272,11 @@ reserved for machine-readable output (see `cobre report`).
 
 ### File resolution
 
-| File                           | Required | Behaviour when absent                                            |
-| ------------------------------ | -------- | ---------------------------------------------------------------- |
-| `training/metadata.json`      | Yes      | Exits with code 2 (I/O error)                                    |
+| File                           | Required | Behaviour when absent                                                 |
+| ------------------------------ | -------- | --------------------------------------------------------------------- |
+| `training/metadata.json`       | Yes      | Exits with code 2 (I/O error)                                         |
 | `training/convergence.parquet` | No       | Falls back to zero-valued timing fields; gap comes from metadata.json |
-| `simulation/metadata.json`    | No       | Simulation section is omitted from the output                    |
+| `simulation/metadata.json`     | No       | Simulation section is omitted from the output                         |
 
 ### Output format
 
@@ -352,7 +352,7 @@ support, host architecture, and build profile.
 ### Output Format
 
 ```
-cobre   v0.9.1
+cobre   v0.10.0
 solver: HiGHS
 comm:   local
 zstd:   enabled
@@ -399,11 +399,13 @@ See [Error Codes](../reference/error-codes.md) for a detailed catalog.
 
 ## Environment Variables
 
-| Variable             | Description                                                                                                                                             |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `COBRE_COMM_BACKEND` | Override the communication backend at runtime. Set to `local` to force the local backend even when the binary was compiled with `mpi` support.          |
-| `COBRE_THREADS`      | Number of worker threads per MPI rank for `cobre run`. Overridden by the `--threads` flag. Must be a positive integer.                                  |
-| `COBRE_COLOR`        | Override color output when `--color auto` is in effect. Set to `always` or `never`. Ignored if `--color always` or `--color never` is given explicitly. |
-| `FORCE_COLOR`        | Force color output on (any non-empty value). Checked after `COBRE_COLOR`. See [force-color.org](https://force-color.org).                               |
-| `NO_COLOR`           | Disable colored terminal output. Respected by the banner and error formatters. Set to any non-empty value. See [no-color.org](https://no-color.org).    |
-| `COLUMNS`            | Terminal width hint. Used by progress bars under MPI (where stderr is a pipe) to compute correct cursor movement. Inherited from the launching shell.   |
+Cobre reads no environment variable as a configuration channel. Thread count,
+color, and the communication backend are set with `--threads`, `--color`, and
+`--comm-backend` (see above); terminal width and the hostname recorded in run
+provenance are queried from the terminal and the OS directly.
+
+The one runtime probe is MPI launcher detection: with `--comm-backend auto` (the
+default), a process started under `mpiexec`/`mpirun`/`srun` selects the MPI
+backend by detecting the launcher's own variables (`PMI_RANK`, `SLURM_PROCID`,
+and similar). These are set by the launcher, not the user, and configure nothing
+else.

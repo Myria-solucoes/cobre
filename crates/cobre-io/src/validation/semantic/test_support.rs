@@ -12,6 +12,7 @@
     clippy::cast_sign_loss
 )]
 
+use chrono::NaiveDate;
 use cobre_core::{
     EntityId,
     entities::{Bus, Hydro, HydroGenerationModel, HydroPenalties, Line, Thermal},
@@ -93,8 +94,10 @@ pub(super) fn make_hydro(id: i32, downstream_id: Option<i32>) -> Hydro {
     Hydro {
         id: EntityId::from(id),
         name: format!("Hydro {id}"),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId::from(1),
         downstream_id: downstream_id.map(EntityId::from),
+        travel_time_hours: None,
         entry_stage_id: None,
         exit_stage_id: None,
         min_storage_hm3: 0.0,
@@ -123,6 +126,7 @@ pub(super) fn make_thermal(id: i32, min_mw: f64, max_mw: f64) -> Thermal {
     Thermal {
         id: EntityId::from(id),
         name: format!("Thermal {id}"),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId::from(1),
         entry_stage_id: None,
         exit_stage_id: None,
@@ -191,10 +195,12 @@ pub(super) fn make_data(
             past_inflows: vec![],
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
+            past_defluences: vec![],
         },
         buses: vec![Bus {
             id: EntityId::from(1),
             name: "BUS_1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![],
             excess_cost: 100.0,
         }],
@@ -260,6 +266,7 @@ pub(super) fn make_data_5b(
             past_inflows: vec![],
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
+            past_defluences: vec![],
         },
         buses,
         thermals: vec![],
@@ -347,6 +354,7 @@ pub(super) fn make_bus_with_deficit(id: i32, cost_per_mwh: f64) -> Bus {
     Bus {
         id: EntityId::from(id),
         name: format!("Bus {id}"),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh,
@@ -606,10 +614,12 @@ pub(super) fn make_data_estimation(
             past_inflows: vec![],
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
+            past_defluences: vec![],
         },
         buses: vec![Bus {
             id: EntityId::from(1),
             name: "BUS_1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![],
             excess_cost: 100.0,
         }],
@@ -718,10 +728,12 @@ pub(super) fn make_data_past_inflows(
             past_inflows,
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
+            past_defluences: vec![],
         },
         buses: vec![Bus {
             id: EId::from(1),
             name: "BUS_1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![],
             excess_cost: 100.0,
         }],

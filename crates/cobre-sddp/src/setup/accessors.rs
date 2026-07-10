@@ -28,11 +28,7 @@ impl StudySetup {
     /// training.
     ///
     /// `cache` carries one entry per stage (as built by
-    /// [`build_basis_cache_from_checkpoint`](crate::build_basis_cache_from_checkpoint)
-    /// from the checkpoint's stored solver bases). [`StudySetup::train`] takes
-    /// this out of `self` and replicates each stage's basis across every
-    /// forward-pass worker so iteration 1's cut-loaded LPs warm-start.
-    ///
+    /// [`build_basis_cache_from_checkpoint`](crate::build_basis_cache_from_checkpoint)).
     /// Leave unset (the default `None`) for a fresh start.
     pub fn set_warm_start_basis_cache(&mut self, cache: Vec<Option<CapturedBasis>>) {
         self.warm_start_basis_cache = Some(cache);
@@ -68,6 +64,32 @@ impl StudySetup {
     #[must_use]
     pub fn stage_state(&self) -> &StateLayout {
         &self.stage_data.state
+    }
+
+    /// Build the per-slot entity-identity manifest for the terminal stage's cut
+    /// pool — the stage a boundary policy injects into.
+    ///
+    /// Delegates to
+    /// [`build_stage_entity_manifest`](crate::policy_export::build_stage_entity_manifest),
+    /// the single owner of identity resolution shared with the checkpoint writer,
+    /// against the terminal stage's projection. The caller passes the result to
+    /// [`load_boundary_cuts`](crate::load_boundary_cuts) so a boundary cut whose
+    /// slot identity diverges from the current study is rejected rather than
+    /// silently mis-loaded.
+    ///
+    /// `system` is passed explicitly because [`StudySetup`] does not own it.
+    #[must_use]
+    pub fn build_terminal_entity_manifest(
+        &self,
+        system: &cobre_core::System,
+    ) -> Vec<cobre_io::EntitySlot> {
+        let terminal_idx = self.stage_data.cut_state_layouts.len() - 1;
+        crate::policy_export::build_stage_entity_manifest(
+            system,
+            &self.stage_data.state,
+            &self.stage_data.cut_state_layouts[terminal_idx],
+            self.study_stage_ids[terminal_idx],
+        )
     }
 
     /// Number of stages in the planning horizon.
@@ -139,6 +161,7 @@ impl StudySetup {
         TrainingContext {
             horizon: &self.methodology.horizon,
             state: &self.stage_data.state,
+            cut_state_layouts: &self.stage_data.cut_state_layouts,
             study_dims: &self.stage_data.study_dims,
             inflow_method: &self.methodology.inflow_method,
             stochastic: &self.stochastic,
@@ -158,7 +181,6 @@ impl StudySetup {
                 .cut_selection
                 .as_ref()
                 .and_then(crate::dcs::DcsParams::from_strategy),
-            noise_key_diag: None,
         }
     }
 
@@ -204,6 +226,9 @@ impl StudySetup {
         TrainingContext {
             horizon: &self.methodology.horizon,
             state: &self.stage_data.state,
+            // Simulation renders stored cuts into frozen templates and the DCS LP
+            // (it does not extract), so the per-pool projection threads through here.
+            cut_state_layouts: &self.stage_data.cut_state_layouts,
             study_dims: &self.stage_data.study_dims,
             inflow_method: &self.methodology.inflow_method,
             stochastic: &self.stochastic,
@@ -223,7 +248,6 @@ impl StudySetup {
                 .cut_selection
                 .as_ref()
                 .and_then(crate::dcs::DcsParams::from_strategy),
-            noise_key_diag: None,
         }
     }
 }

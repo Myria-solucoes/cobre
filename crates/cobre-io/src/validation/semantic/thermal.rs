@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use cobre_core::{AnticipatedCommitmentHistory, EntityId, VariableRef};
+use cobre_core::{AnticipatedCommitmentHistory, AnticipatedConfig, EntityId, VariableRef};
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 
@@ -28,15 +28,21 @@ pub(super) fn check_thermal_generation_bounds(data: &ParsedData, ctx: &mut Valid
 
 /// Checks cross-field invariants for anticipated thermal plants.
 ///
-/// 1. **Per-plant lead-stage horizon** — `K == 0` is rejected (defence in depth;
-///    parse-time also rejects it) and `K > n_stages` is rejected (the plant can
-///    never deliver within the horizon). A commissioning window IS supported and
-///    composes with the K-stage lookahead via the shifted decision gate; these
-///    two checks validate the LEAD itself, independent of any window.
+/// 1. **Per-plant lead horizon** — `LeadStages` rejects `K == 0` (defence in
+///    depth; parse-time also rejects it) and `K > n_stages`; `LeadTime` rejects
+///    `delta_hours` exceeding the summed study-stage durations (strict `>`, so
+///    a delivery landing exactly on the final stage is accepted). Either way,
+///    the plant can never deliver within the study horizon. A commissioning
+///    window IS supported and composes with the lookahead via the shifted
+///    decision gate; these checks validate the LEAD itself, independent of any
+///    window.
 /// 2. **Past-commitments registry bijection** with
 ///    `ic.past_anticipated_commitments`: each anticipated thermal has exactly one
-///    history entry, each history entry references an anticipated thermal, and
-///    `history.values_mw.len() == lead_stages` exactly.
+///    history entry, each history entry references an anticipated thermal;
+///    `history.values_mw.len()` must equal the calendar-derived count of
+///    pre-study-committed delivery stages (`required_anticipated_commitment_count`)
+///    for either lead mode — a hard gate, no fallback (the "Pre-study
+///    anticipated commitments: calendar-derived coverage" contract).
 /// 3. **Committed-value generation bounds** — see `check_committed_value_bounds`.
 /// 4. **Seed-vs-window consistency** — see `check_seed_within_window`.
 pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut ValidationContext) {
@@ -49,13 +55,34 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
         .map(|s| s.id)
         .collect();
     let n_stages = study_stage_ids.len();
+    let study_durations = study_stage_durations(data);
 
     for thermal in &data.thermals {
         let Some(ref cfg) = thermal.anticipated_config else {
             continue;
         };
-        let k = cfg.lead_stages;
         let thermal_id = thermal.id.0;
+
+        if let AnticipatedConfig::LeadTime(delta_hours) = *cfg {
+            let total_horizon_hours: f64 = study_durations.iter().sum();
+            if delta_hours > total_horizon_hours {
+                let entity_str = format!("thermals[id={thermal_id}].anticipated_config.lead_time");
+                ctx.add_error(
+                    ErrorKind::BusinessRuleViolation,
+                    "system/thermals.json",
+                    Some(&entity_str),
+                    format!(
+                        "Thermal {thermal_id}: lead_time exceeds study horizon \
+                         (lead_time={delta_hours}, total_horizon_hours={total_horizon_hours}); \
+                         the plant can never deliver within the study horizon"
+                    ),
+                );
+            }
+        }
+
+        let Some(k) = cfg.lead_stages() else {
+            continue;
+        };
         let entity_str = format!("thermals[id={thermal_id}].anticipated_config.lead_stages");
 
         if k == 0 {
@@ -85,24 +112,23 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
     }
 
     let ic = &data.initial_conditions;
-    let mut history_by_id: HashMap<EntityId, &AnticipatedCommitmentHistory> = HashMap::new();
-    for history in &ic.past_anticipated_commitments {
-        history_by_id.insert(history.thermal_id, history);
-    }
+    let history_by_id: HashMap<EntityId, &AnticipatedCommitmentHistory> = ic
+        .past_anticipated_commitments
+        .iter()
+        .map(|history| (history.thermal_id, history))
+        .collect();
 
-    let mut anticipated_thermal_ids: std::collections::HashSet<EntityId> =
-        std::collections::HashSet::new();
-    for thermal in &data.thermals {
-        if thermal.anticipated_config.is_some() {
-            anticipated_thermal_ids.insert(thermal.id);
-        }
-    }
+    let anticipated_thermal_ids: HashSet<EntityId> = data
+        .thermals
+        .iter()
+        .filter(|t| t.anticipated_config.is_some())
+        .map(|t| t.id)
+        .collect();
 
     for thermal in &data.thermals {
         let Some(ref cfg) = thermal.anticipated_config else {
             continue;
         };
-        let k = cfg.lead_stages;
         let thermal_id = thermal.id;
 
         match history_by_id.get(&thermal_id) {
@@ -119,7 +145,8 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
                 );
             }
             Some(history) => {
-                let expected = k as usize;
+                let expected =
+                    required_anticipated_commitment_count(*cfg, &study_durations, n_stages);
                 let actual = history.values_mw.len();
                 if actual == expected {
                     check_committed_value_bounds(thermal, thermal_id, &history.values_mw, ctx);
@@ -131,17 +158,15 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
                         ctx,
                     );
                 } else {
-                    let entity_str = format!(
-                        "thermals[id={}].anticipated_config.lead_stages",
-                        thermal_id.0
-                    );
+                    let entity_str = format!("thermals[id={}].anticipated_config", thermal_id.0);
                     ctx.add_error(
                         ErrorKind::BusinessRuleViolation,
                         "initial_conditions.json",
                         Some(&entity_str),
                         format!(
                             "Thermal {}: past_anticipated_commitments.values_mw has wrong length: \
-                             expected {expected} values, got {actual}",
+                             expected {expected} values, got {actual} (calendar-derived count of \
+                             pre-study-committed delivery stages)",
                             thermal_id.0
                         ),
                     );
@@ -165,6 +190,116 @@ pub(super) fn check_anticipated_thermals(data: &ParsedData, ctx: &mut Validation
                     history.thermal_id.0
                 ),
             );
+        }
+    }
+}
+
+/// Advisory (`ModelQuality`): a `lead_stages`-configured thermal whose active
+/// window — decision stage `t` through delivery `t + lead_stages`, `t` ranging
+/// over the plant's commissioning window and the delivery side clamped to the
+/// study horizon — spans a pair of adjacent study stages with differing
+/// durations. A fixed stage-count lead delivers a different physical lead on
+/// each side of such a cadence change; `anticipated_config.lead_time` anchors
+/// the lead to physical hours instead and is immune to this. Never a hard error.
+pub(super) fn check_anticipated_cadence_transition(data: &ParsedData, ctx: &mut ValidationContext) {
+    let study_durations = study_stage_durations(data);
+    let n_stages = study_durations.len();
+    if n_stages < 2 {
+        return;
+    }
+
+    for thermal in &data.thermals {
+        let Some(cfg) = thermal.anticipated_config else {
+            continue;
+        };
+        let Some(k) = cfg.lead_stages() else {
+            continue;
+        };
+        let thermal_id = thermal.id.0;
+        let k_u = usize::try_from(k).unwrap_or(usize::MAX);
+
+        let decision_start = usize::try_from(thermal.entry_stage_id.unwrap_or(0).max(0))
+            .unwrap_or(0)
+            .min(n_stages - 1);
+        let decision_end_id = thermal.exit_stage_id.map_or_else(
+            || i32::try_from(n_stages - 1).unwrap_or(i32::MAX),
+            |exit| exit - 1,
+        );
+        if decision_end_id < 0 {
+            continue;
+        }
+        let decision_end = usize::try_from(decision_end_id)
+            .unwrap_or(0)
+            .min(n_stages - 1);
+        if decision_start > decision_end {
+            continue;
+        }
+        let window_end = decision_end.saturating_add(k_u).min(n_stages - 1);
+
+        let entity_str = format!("thermals[id={thermal_id}].anticipated_config.lead_stages");
+        for i in decision_start..window_end {
+            let (prev, next) = (study_durations[i], study_durations[i + 1]);
+            if (prev - next).abs() > 1e-9 {
+                ctx.add_warning(
+                    ErrorKind::ModelQuality,
+                    "system/thermals.json",
+                    Some(&entity_str),
+                    format!(
+                        "Thermal {thermal_id}: anticipated_config.lead_stages={k} active window \
+                         spans a stage-cadence transition between stage {i} ({prev}h) and stage \
+                         {} ({next}h); a fixed stage-count lead delivers a different physical \
+                         lead on each side of the transition. Consider anticipated_config.lead_time, \
+                         which anchors the lead to physical hours instead of a stage count.",
+                        i + 1
+                    ),
+                );
+                break;
+            }
+        }
+    }
+}
+
+/// Study-stage (`id >= 0`) durations in canonical (ascending `id`) order, each
+/// summed from its blocks. Computed independently of
+/// `travel_time::study_stage_durations` (same shape, own walk) rather than
+/// shared across files.
+fn study_stage_durations(data: &ParsedData) -> Vec<f64> {
+    data.stages
+        .stages
+        .iter()
+        .filter(|s| s.id >= 0)
+        .map(|s| s.blocks.iter().map(|b| b.duration_hours).sum())
+        .collect()
+}
+
+/// Calendar-derived count of pre-study-committed delivery stages: `LeadStages(l)`
+/// clamps `l` to `n_stages`; `LeadTime(delta)` counts the leading study stages
+/// whose stage-end cumulative hours are `<= delta` (tie-inclusive). Both
+/// deciders are monotonic in stage-end cumulative hours, so the pre-study run
+/// is always the strict prefix `0..required` — `values_mw[j]` is always study
+/// stage `j` for either mode, so `check_seed_within_window` needs no resolver
+/// call to map an index to its delivery stage id. Computed independently of
+/// the solver crate's point-commitment resolver (cobre-io is upstream and
+/// cannot depend on it), mirroring `check_defluence_coverage`'s own calendar
+/// walk (`validation/semantic/travel_time.rs`).
+fn required_anticipated_commitment_count(
+    mode: AnticipatedConfig,
+    study_durations: &[f64],
+    n_stages: usize,
+) -> usize {
+    match mode {
+        AnticipatedConfig::LeadStages(lead_stages) => (lead_stages as usize).min(n_stages),
+        AnticipatedConfig::LeadTime(delta_hours) => {
+            let mut cumulative_hours = 0.0_f64;
+            let mut required = 0usize;
+            for &duration in study_durations.iter().take(n_stages) {
+                cumulative_hours += duration;
+                if cumulative_hours > delta_hours {
+                    break;
+                }
+                required += 1;
+            }
+            required
         }
     }
 }
@@ -206,7 +341,9 @@ fn check_committed_value_bounds(
 ///
 /// The half-open `entry <= id < exit` predicate mirrors the LP builder's
 /// `commissioning_active` (the solver crate cannot be a dependency here); a drift
-/// would let an infeasible seed past validation.
+/// would let an infeasible seed past validation. `study_stage_ids[k]` is the
+/// `k`-th pre-study-committed delivery stage for either lead mode (see
+/// `required_anticipated_commitment_count`), so no per-mode branch is needed here.
 fn check_seed_within_window(
     thermal: &cobre_core::entities::Thermal,
     thermal_id: EntityId,
@@ -225,7 +362,7 @@ fn check_seed_within_window(
             continue;
         }
         let Some(&stage_id) = study_stage_ids.get(k) else {
-            // Length is caller-checked (lead_stages <= n_stages), so every k
+            // Length is caller-checked (required <= n_stages), so every k
             // indexes a study stage; defence in depth, never fires for valid input.
             continue;
         };
@@ -384,10 +521,13 @@ pub(super) fn check_thermal_bounds_override_stage_range(
     clippy::cast_sign_loss
 )]
 mod tests {
+    use cobre_core::temporal::{Block, PolicyGraph, PolicyGraphType, Stage};
     use cobre_core::{AnticipatedCommitmentHistory, EntityId, entities::AnticipatedConfig};
 
     use super::super::test_support::*;
     use super::super::validate_semantic_hydro_thermal;
+    use super::required_anticipated_commitment_count;
+    use crate::stages::StagesData;
     use crate::validation::{ErrorKind, ValidationContext};
 
     // ── Helper: build a thermal with anticipated_config ───────────────────────
@@ -399,11 +539,64 @@ mod tests {
         exit_stage_id: Option<i32>,
     ) -> cobre_core::entities::Thermal {
         cobre_core::entities::Thermal {
-            anticipated_config: Some(AnticipatedConfig { lead_stages }),
+            anticipated_config: Some(AnticipatedConfig::LeadStages(lead_stages)),
             entry_stage_id,
             exit_stage_id,
             ..make_thermal(id, 0.0, 500.0)
         }
+    }
+
+    /// Build a `LeadTime`-configured thermal.
+    fn make_lead_time_anticipated_thermal(
+        id: i32,
+        lead_time_hours: f64,
+        entry_stage_id: Option<i32>,
+        exit_stage_id: Option<i32>,
+    ) -> cobre_core::entities::Thermal {
+        cobre_core::entities::Thermal {
+            anticipated_config: Some(AnticipatedConfig::LeadTime(lead_time_hours)),
+            entry_stage_id,
+            exit_stage_id,
+            ..make_thermal(id, 0.0, 500.0)
+        }
+    }
+
+    /// One study stage (`id`) carrying a single block of `duration_hours`.
+    fn make_study_stage(id: i32, duration_hours: f64) -> Stage {
+        let mut stage = make_stage(id);
+        stage.blocks = vec![Block {
+            index: 0,
+            name: "FLAT".to_string(),
+            duration_hours,
+        }];
+        stage
+    }
+
+    /// Build `ParsedData` for anticipated-thermal tests with a non-uniform
+    /// per-stage calendar (`durations_hours`, one entry per study stage,
+    /// `id = 0..durations_hours.len()`), instead of the empty-block default.
+    fn make_data_anticipated_with_durations(
+        thermals: Vec<cobre_core::entities::Thermal>,
+        durations_hours: &[f64],
+        past_anticipated_commitments: Vec<AnticipatedCommitmentHistory>,
+    ) -> crate::validation::schema::ParsedData {
+        let stages: Vec<Stage> = durations_hours
+            .iter()
+            .enumerate()
+            .map(|(id, &duration)| make_study_stage(id as i32, duration))
+            .collect();
+        let stages_data = StagesData {
+            stages,
+            policy_graph: PolicyGraph {
+                graph_type: PolicyGraphType::FiniteHorizon,
+                annual_discount_rate: 0.06,
+                transitions: vec![],
+                season_map: None,
+            },
+        };
+        let mut data = make_data(vec![], thermals, vec![], stages_data, vec![], vec![]);
+        data.initial_conditions.past_anticipated_commitments = past_anticipated_commitments;
+        data
     }
 
     /// Build `ParsedData` for anticipated-thermal tests.
@@ -446,6 +639,68 @@ mod tests {
         assert!(
             !ctx.has_errors(),
             "expected no errors, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    // ── LeadTime: no longer gated `NotImplemented` ────────────────────────────
+
+    /// Given an otherwise-valid `LeadTime`-configured thermal on the
+    /// weekly-then-monthly PMO calendar (calendar-covered commitments), when
+    /// semantic validation runs, then no `NotImplemented` error is produced and
+    /// the study passes validation entirely: `LeadTime` falls through to the
+    /// shared coverage/bounds/window checks unchanged.
+    #[test]
+    fn test_lead_time_thermal_accepted() {
+        let thermal = make_lead_time_anticipated_thermal(1, 720.0, None, None);
+        let history = AnticipatedCommitmentHistory {
+            thermal_id: EntityId::from(1),
+            values_mw: vec![0.0, 0.0, 0.0, 0.0],
+        };
+        let data = make_data_anticipated_with_durations(
+            vec![thermal],
+            &[168.0, 168.0, 168.0, 168.0, 720.0, 720.0],
+            vec![history],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        assert!(
+            !ctx.errors()
+                .iter()
+                .any(|e| e.kind == ErrorKind::NotImplemented),
+            "LeadTime must no longer be rejected as NotImplemented, got: {:?}",
+            ctx.errors()
+        );
+        assert!(
+            !ctx.has_errors(),
+            "a valid LeadTime thermal with calendar-covered commitments must pass \
+             validation entirely, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Given a valid single-decider `LeadTime(744.0)` thermal on a uniform
+    /// 3×744h calendar with a matching one-entry `past_anticipated_commitments`
+    /// history, when semantic validation runs, then the study passes validation
+    /// with no errors — the first `LeadTime` config the gate admits through to
+    /// setup.
+    #[test]
+    fn lead_time_single_decider_passes_validation() {
+        let thermal = make_lead_time_anticipated_thermal(1, 744.0, None, None);
+        let history = AnticipatedCommitmentHistory {
+            thermal_id: EntityId::from(1),
+            values_mw: vec![0.0],
+        };
+        let data = make_data_anticipated_with_durations(
+            vec![thermal],
+            &[744.0, 744.0, 744.0],
+            vec![history],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        assert!(
+            !ctx.has_errors(),
+            "a valid single-decider LeadTime thermal must pass validation, got: {:?}",
             ctx.errors()
         );
     }
@@ -629,6 +884,267 @@ mod tests {
             !ctx.has_errors(),
             "lead_stages == n_stages must be accepted, got: {:?}",
             ctx.errors()
+        );
+    }
+
+    // ── lead_time exceeds study horizon ───────────────────────────────────────
+
+    /// Given a `LeadTime(delta_hours)` thermal whose `delta_hours` strictly
+    /// exceeds the summed study-stage durations, when semantic validation runs,
+    /// then exactly one `BusinessRuleViolation` is appended naming the thermal
+    /// id, `delta_hours`, and the total horizon hours.
+    #[test]
+    fn test_lead_time_exceeds_study_horizon_error() {
+        let thermal = make_lead_time_anticipated_thermal(1, 3000.0, None, None);
+        let data = make_data_anticipated_with_durations(
+            vec![thermal],
+            &[168.0, 168.0, 168.0, 168.0, 720.0, 720.0],
+            vec![],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let errors = ctx.errors();
+        let relevant: Vec<_> = errors
+            .iter()
+            .filter(|e| {
+                e.kind == ErrorKind::BusinessRuleViolation
+                    && e.message.contains("lead_time exceeds study horizon")
+            })
+            .collect();
+        assert_eq!(
+            relevant.len(),
+            1,
+            "expected exactly one BusinessRuleViolation with 'lead_time exceeds study horizon', got: {errors:?}"
+        );
+        let msg = &relevant[0].message;
+        assert!(
+            msg.contains("Thermal 1"),
+            "message should contain 'Thermal 1', got: {msg}"
+        );
+        assert!(
+            msg.contains("3000"),
+            "message should contain delta_hours 3000, got: {msg}"
+        );
+        assert!(
+            msg.contains("2112"),
+            "message should contain the total horizon hours 2112, got: {msg}"
+        );
+    }
+
+    // ── Boundary: lead_time == total horizon is accepted (strict-greater check) ──
+
+    /// Boundary case: `delta_hours == total_horizon_hours` must NOT error. The
+    /// horizon check is `delta_hours > total_horizon_hours` (strict), mirroring
+    /// the `LeadStages` boundary — a delivery landing exactly on the final study
+    /// stage is a valid configuration.
+    #[test]
+    fn test_lead_time_equal_total_horizon_ok() {
+        let thermal = make_lead_time_anticipated_thermal(1, 2112.0, None, None);
+        let history = AnticipatedCommitmentHistory {
+            thermal_id: EntityId::from(1),
+            values_mw: vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        };
+        let data = make_data_anticipated_with_durations(
+            vec![thermal],
+            &[168.0, 168.0, 168.0, 168.0, 720.0, 720.0],
+            vec![history],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        assert!(
+            !ctx.has_errors(),
+            "delta_hours == total_horizon_hours must be accepted, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    // ── Cadence-transition advisory (check_anticipated_cadence_transition) ────
+
+    /// Given a `lead_stages=2` thermal whose active window spans a
+    /// weekly (168h) -> monthly (744h) stage-cadence transition, when
+    /// semantic validation runs, then exactly one advisory is produced naming
+    /// the thermal and citing `lead_time`, and validation still succeeds.
+    #[test]
+    fn lead_stages_cadence_transition_emits_advisory() {
+        let thermal = make_anticipated_thermal(1, 2, None, None);
+        let history = AnticipatedCommitmentHistory {
+            thermal_id: EntityId::from(1),
+            values_mw: vec![0.0, 0.0],
+        };
+        let data = make_data_anticipated_with_durations(
+            vec![thermal],
+            &[168.0, 168.0, 168.0, 744.0, 744.0],
+            vec![history],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+
+        assert!(
+            !ctx.has_errors(),
+            "a cadence transition is advisory-only, never an error; got: {:?}",
+            ctx.errors()
+        );
+        let relevant: Vec<_> = ctx
+            .warnings()
+            .into_iter()
+            .filter(|w| w.kind == ErrorKind::ModelQuality && w.message.contains("Thermal 1"))
+            .collect();
+        assert_eq!(
+            relevant.len(),
+            1,
+            "expected exactly one cadence-transition advisory, got: {:?}",
+            ctx.warnings()
+        );
+        let msg = &relevant[0].message;
+        assert!(
+            msg.contains("lead_time"),
+            "advisory must cite lead_time as the physically-anchored alternative, got: {msg}"
+        );
+        assert!(
+            msg.contains("stage 2") && msg.contains("stage 3"),
+            "advisory must cite the transition stage pair, got: {msg}"
+        );
+    }
+
+    /// Given a `lead_stages=2` thermal whose active window spans only
+    /// equal-duration (uniform) stages, when semantic validation runs, then no
+    /// cadence-transition advisory is produced.
+    #[test]
+    fn lead_stages_uniform_calendar_no_advisory() {
+        let thermal = make_anticipated_thermal(1, 2, None, None);
+        let history = AnticipatedCommitmentHistory {
+            thermal_id: EntityId::from(1),
+            values_mw: vec![0.0, 0.0],
+        };
+        let data = make_data_anticipated_with_durations(
+            vec![thermal],
+            &[744.0, 744.0, 744.0, 744.0, 744.0],
+            vec![history],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+
+        assert!(
+            !ctx.has_errors(),
+            "a uniform calendar is valid, got: {:?}",
+            ctx.errors()
+        );
+        assert!(
+            !ctx.warnings()
+                .iter()
+                .any(|w| w.kind == ErrorKind::ModelQuality && w.message.contains("cadence")),
+            "a uniform calendar must not trigger a cadence-transition advisory, got: {:?}",
+            ctx.warnings()
+        );
+    }
+
+    // ── required_anticipated_commitment_count: direct unit tests ─────────────
+
+    /// Weekly-then-monthly PMO calendar `[168,168,168,168,720,720]` h with
+    /// `LeadTime(720.0)`: the required count is 4 (`S_{m+1} <= 720` holds for
+    /// `m = 0..=3` only; `S_5 = 1392 > 720`).
+    #[test]
+    fn test_required_anticipated_commitment_count_lead_time_pmo_calendar() {
+        let durations = [168.0, 168.0, 168.0, 168.0, 720.0, 720.0];
+        let required = required_anticipated_commitment_count(
+            AnticipatedConfig::LeadTime(720.0),
+            &durations,
+            durations.len(),
+        );
+        assert_eq!(required, 4);
+    }
+
+    /// Uniform 5x720h calendar with `LeadTime(1440.0)`: required is 2
+    /// (`S_{m+1} <= 1440` holds for `m = 0, 1` only; tie-inclusive at `m = 1`).
+    #[test]
+    fn test_required_anticipated_commitment_count_lead_time_uniform_calendar() {
+        let durations = [720.0; 5];
+        let required = required_anticipated_commitment_count(
+            AnticipatedConfig::LeadTime(1440.0),
+            &durations,
+            durations.len(),
+        );
+        assert_eq!(required, 2);
+    }
+
+    /// `LeadStages` ignores durations entirely and clamps to `n_stages`.
+    #[test]
+    fn test_required_anticipated_commitment_count_lead_stages_clamped() {
+        let required =
+            required_anticipated_commitment_count(AnticipatedConfig::LeadStages(2), &[720.0; 5], 5);
+        assert_eq!(required, 2);
+    }
+
+    // ── Calendar-derived coverage: LeadTime on a non-uniform calendar ────────
+
+    /// Given a `LeadTime(720.0)` plant on the weekly-then-monthly PMO calendar
+    /// `[168,168,168,168,720,720]` h and `values_mw.len() == 4` (the
+    /// calendar-derived required count), no coverage-length error fires.
+    #[test]
+    fn test_anticipated_lead_time_coverage_pmo_calendar() {
+        let thermal = make_lead_time_anticipated_thermal(1, 720.0, None, None);
+        let history = AnticipatedCommitmentHistory {
+            thermal_id: EntityId::from(1),
+            values_mw: vec![0.0, 0.0, 0.0, 0.0],
+        };
+        let data = make_data_anticipated_with_durations(
+            vec![thermal],
+            &[168.0, 168.0, 168.0, 168.0, 720.0, 720.0],
+            vec![history],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let errors = ctx.errors();
+        let coverage_errors: Vec<_> = errors
+            .iter()
+            .filter(|e| {
+                e.kind == ErrorKind::BusinessRuleViolation && e.message.contains("wrong length")
+            })
+            .collect();
+        assert!(
+            coverage_errors.is_empty(),
+            "expected no coverage-length error, got: {errors:?}"
+        );
+    }
+
+    /// Given the same PMO calendar and `LeadTime(720.0)` plant but
+    /// `values_mw.len() == 2`, the calendar-derived required count (4) does not
+    /// match: exactly one `BusinessRuleViolation` fires naming both the
+    /// expected (4) and actual (2) counts.
+    #[test]
+    fn test_anticipated_lead_time_coverage_pmo_calendar_under_coverage_rejected() {
+        let thermal = make_lead_time_anticipated_thermal(1, 720.0, None, None);
+        let history = AnticipatedCommitmentHistory {
+            thermal_id: EntityId::from(1),
+            values_mw: vec![0.0, 0.0],
+        };
+        let data = make_data_anticipated_with_durations(
+            vec![thermal],
+            &[168.0, 168.0, 168.0, 168.0, 720.0, 720.0],
+            vec![history],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+        let errors = ctx.errors();
+        let coverage_errors: Vec<_> = errors
+            .iter()
+            .filter(|e| {
+                e.kind == ErrorKind::BusinessRuleViolation && e.message.contains("wrong length")
+            })
+            .collect();
+        assert_eq!(
+            coverage_errors.len(),
+            1,
+            "expected exactly one coverage-length error, got: {errors:?}"
+        );
+        let msg = &coverage_errors[0].message;
+        assert!(
+            msg.contains("expected 4"),
+            "message should name expected count 4, got: {msg}"
+        );
+        assert!(
+            msg.contains("got 2"),
+            "message should name actual count 2, got: {msg}"
         );
     }
 
@@ -881,7 +1397,7 @@ mod tests {
     fn test_committed_value_below_min_gen_bounds_error() {
         // Build a thermal with min_mw=100.0.
         let thermal = cobre_core::entities::Thermal {
-            anticipated_config: Some(cobre_core::entities::AnticipatedConfig { lead_stages: 2 }),
+            anticipated_config: Some(cobre_core::entities::AnticipatedConfig::LeadStages(2)),
             ..make_thermal(5, 100.0, 500.0)
         };
         let history = AnticipatedCommitmentHistory {
@@ -927,7 +1443,7 @@ mod tests {
     #[test]
     fn test_committed_values_all_zero_ok() {
         let thermal = cobre_core::entities::Thermal {
-            anticipated_config: Some(cobre_core::entities::AnticipatedConfig { lead_stages: 3 }),
+            anticipated_config: Some(cobre_core::entities::AnticipatedConfig::LeadStages(3)),
             ..make_thermal(7, 0.0, 400.0)
         };
         let history = AnticipatedCommitmentHistory {
@@ -951,7 +1467,7 @@ mod tests {
     #[test]
     fn test_committed_value_zero_accepted() {
         let thermal = cobre_core::entities::Thermal {
-            anticipated_config: Some(cobre_core::entities::AnticipatedConfig { lead_stages: 1 }),
+            anticipated_config: Some(cobre_core::entities::AnticipatedConfig::LeadStages(1)),
             ..make_thermal(9, 0.0, 400.0)
         };
         let history = AnticipatedCommitmentHistory {
@@ -980,7 +1496,7 @@ mod tests {
     #[test]
     fn test_committed_value_above_max_bounds_error() {
         let thermal = cobre_core::entities::Thermal {
-            anticipated_config: Some(cobre_core::entities::AnticipatedConfig { lead_stages: 1 }),
+            anticipated_config: Some(cobre_core::entities::AnticipatedConfig::LeadStages(1)),
             ..make_thermal(11, 100.0, 350.0)
         };
         let history = AnticipatedCommitmentHistory {
@@ -1029,7 +1545,7 @@ mod tests {
     #[test]
     fn test_f3_002_nonzero_values_mw_in_bounds_accepted_k1() {
         let thermal = cobre_core::entities::Thermal {
-            anticipated_config: Some(cobre_core::entities::AnticipatedConfig { lead_stages: 1 }),
+            anticipated_config: Some(cobre_core::entities::AnticipatedConfig::LeadStages(1)),
             ..make_thermal(2, 0.0, 350.0)
         };
         let history = AnticipatedCommitmentHistory {
@@ -1074,7 +1590,7 @@ mod tests {
     #[test]
     fn test_nonzero_in_bounds_seed_emits_no_semantic_ambiguity_warning() {
         let thermal = cobre_core::entities::Thermal {
-            anticipated_config: Some(cobre_core::entities::AnticipatedConfig { lead_stages: 2 }),
+            anticipated_config: Some(cobre_core::entities::AnticipatedConfig::LeadStages(2)),
             ..make_thermal(3, 0.0, 350.0)
         };
         let history = AnticipatedCommitmentHistory {
@@ -1544,7 +2060,7 @@ mod tests {
         };
 
         let thermal = cobre_core::entities::Thermal {
-            anticipated_config: Some(AnticipatedConfig { lead_stages: 2 }),
+            anticipated_config: Some(AnticipatedConfig::LeadStages(2)),
             ..make_thermal(3, 0.0, 500.0)
         };
         let history = cobre_core::AnticipatedCommitmentHistory {
@@ -1612,7 +2128,7 @@ mod tests {
         };
 
         let thermal = cobre_core::entities::Thermal {
-            anticipated_config: Some(AnticipatedConfig { lead_stages: 1 }),
+            anticipated_config: Some(AnticipatedConfig::LeadStages(1)),
             ..make_thermal(5, 0.0, 300.0)
         };
         let history = cobre_core::AnticipatedCommitmentHistory {

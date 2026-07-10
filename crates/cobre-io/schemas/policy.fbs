@@ -38,6 +38,43 @@
 
 namespace Cobre.IO.Policy;
 
+/// State-vector dimension class for one entry of an entity manifest.
+enum EntityType : byte {
+  HydroStorage = 0,
+  HydroInflowLag = 1,
+  AnticipatedThermalState = 2,
+  HydroTransitBucket = 3,
+}
+
+/// Per-slot entity identity for one state-vector dimension. Element type of
+/// the `entity_manifest` vectors.
+///
+/// `subindex` is the secondary index within the owning entity: the 1-based AR
+/// lag order for `HydroInflowLag`, the ring-buffer slot for
+/// `AnticipatedThermalState`, the maturity lag `d` for `HydroTransitBucket`
+/// (`entity_id` is the downstream hydro), and `0` for `HydroStorage`.
+table EntitySlot {
+  /// Dimension class of this state slot.
+  entity_type:EntityType (id: 0);
+
+  /// Owning entity's id, matching the `entity_id` columns in `entities.csv`
+  /// and `bounds.parquet`.
+  entity_id:int32 (id: 1);
+
+  /// Secondary index within the owning entity (per-type meaning above).
+  subindex:uint32 (id: 2);
+
+  /// Whether the owning entity was operationally active at this slot's stage.
+  was_active:bool (id: 3);
+
+  /// Canonical absolute delivery/arrival calendar anchor for this slot,
+  /// encoded `year * 12 + (month - 1)`; stable across stage resolutions.
+  /// Sentinel `-2147483648` (`i32::MIN`) when the slot has no delivery
+  /// semantics, and the value a reader yields when the field is absent from a
+  /// pre-`id:4` buffer (forward-compatible default).
+  delivery_anchor:int32 (id: 4);
+}
+
 /// One cut record. Element type of `StageCuts.cuts`.
 ///
 /// `coefficients` length equals the enclosing `StageCuts.state_dimension`.
@@ -91,8 +128,8 @@ table StageCuts {
   stage_id:uint32 (id: 0);
 
   /// State-vector dimension. Matches the coefficient-vector length on
-  /// every `Cut` and the `state_dimension` field of
-  /// `state_dictionary.json`.
+  /// every `Cut` and the length of the embedded `entity_manifest`, which
+  /// carries the per-slot identity of each state-vector dimension.
   state_dimension:uint32 (id: 1);
 
   /// Total preallocated cut slots in the pool.
@@ -111,12 +148,17 @@ table StageCuts {
 
   /// Number of filled slots in the pool. Equals `cuts.length`.
   populated_count:uint32 (id: 6);
+
+  /// Per-slot entity identity. Length equals `StageCuts.state_dimension`.
+  entity_manifest:[EntitySlot] (id: 7);
 }
 
 /// Root table for `policy/basis/stage_NNN.bin`.
 ///
-/// LP simplex basis checkpoint for one stage. Status-code encodings
-/// are HiGHS-specific.
+/// LP simplex basis checkpoint for one stage. `column_status`/`row_status` bytes
+/// are the canonical BasisStatus discriminant space (0..=6), a strict superset of
+/// the HiGHS code space this format previously carried, so files written before
+/// the canonical encoding decode identically.
 table StageBasis {
   /// Stage index (0-based).
   stage_id:uint32 (id: 0);
@@ -130,10 +172,10 @@ table StageBasis {
   /// Number of LP rows. Equals `row_status.length`.
   num_rows:uint32 (id: 3);
 
-  /// Status code per LP column (variable). HiGHS-specific encoding.
+  /// Canonical BasisStatus discriminant per LP column (variable).
   column_status:[uint8] (id: 4);
 
-  /// Status code per LP row (constraint). HiGHS-specific encoding.
+  /// Canonical BasisStatus discriminant per LP row (constraint).
   row_status:[uint8] (id: 5);
 
   /// Number of trailing entries in `row_status` that correspond to
@@ -149,7 +191,9 @@ table StageStates {
   /// Stage index (0-based).
   stage_id:uint32 (id: 0);
 
-  /// Length of each state vector. Matches `state_dictionary.json`.
+  /// Length of each state vector. Matches the length of the embedded
+  /// `entity_manifest`, which carries the per-slot identity of each
+  /// state-vector dimension.
   state_dimension:uint32 (id: 1);
 
   /// Number of state vectors stored.
@@ -157,4 +201,7 @@ table StageStates {
 
   /// Flat row-major buffer; length equals `count * state_dimension`.
   data:[float64] (id: 3);
+
+  /// Per-slot entity identity. Length equals `StageStates.state_dimension`.
+  entity_manifest:[EntitySlot] (id: 4);
 }

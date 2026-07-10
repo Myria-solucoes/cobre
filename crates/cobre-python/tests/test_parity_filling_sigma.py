@@ -51,8 +51,9 @@ D38_CASE = "examples/deterministic/d38-dead-volume-filling"
 # The per-stage filling-shortfall slack column under test.
 SIGMA_FILL_COLUMN = "filling_target_violation_hm3"
 
-# Entity id of the filling hydro H2 in d38 (see d38_dead_volume_filling_simulation.rs
-# `H2_ID`). The `hydro_id` column is Int32, so this is the integer id, not "H2".
+# Entity id of the filling hydro H2 in d38 (see the
+# `d38_dead_volume_filling_simulation` mod in filling_commissioning.rs, `H2_ID`).
+# The `hydro_id` column is Int32, so this is the integer id, not "H2".
 H2_ID = 1
 
 # Tolerances for the distinct-non-zero check: drop values within `ZERO_TOL` of 0,

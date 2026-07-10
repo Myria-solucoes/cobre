@@ -514,8 +514,8 @@ fn test_clp_get_basis_dimensions_and_codes() {
         .solve(None)
         .expect("SS1.1 LP should solve to optimal");
 
-    // get_basis resizes a 0/0 Basis to the LP dimensions and fills it with raw
-    // CLP status codes (all in 0..=5).
+    // get_basis resizes a 0/0 Basis to the LP dimensions and fills it with
+    // canonical statuses mapped from the raw CLP codes via `from_clp_code`.
     let mut out = Basis::new(0, 0);
     solver.get_basis(&mut out);
 
@@ -523,8 +523,8 @@ fn test_clp_get_basis_dimensions_and_codes() {
     assert_eq!(out.row_status.len(), 2);
     for &s in out.col_status.iter().chain(out.row_status.iter()) {
         assert!(
-            (0..=5).contains(&s),
-            "status code {s} out of CLP range 0..=5"
+            !matches!(s, crate::BasisStatus::Nonbasic),
+            "status {s:?} is not CLP-representable (from_clp_code never yields Nonbasic)"
         );
     }
 }

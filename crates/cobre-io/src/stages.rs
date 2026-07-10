@@ -44,7 +44,7 @@
 //! Cross-file validation (season-stage containment, transition probability sums,
 //! block hours sum equals stage duration) is deferred to the semantic layer.
 
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 use cobre_core::temporal::{
     Block, BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig,
     SeasonCycleType, SeasonDefinition, SeasonMap, Stage, StageRiskConfig, StageStateConfig,
@@ -237,17 +237,11 @@ pub(crate) struct RawStateVariables {
 /// `#[serde(untagged)]` tries each variant in declaration order.
 /// The `Expectation` string variant must come first so it is tried before
 /// the `CVaR` object variant.
-///
-/// The inner string of `Expectation` is not read after deserialization;
-/// presence of the variant alone signals `StageRiskConfig::Expectation`.
 #[derive(Deserialize)]
 #[serde(untagged)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) enum RawRiskMeasure {
     /// String variant: any string (canonically `"expectation"`).
-    ///
-    /// The inner `String` is only used by serde during deserialization;
-    /// the actual value is not inspected in `convert_risk_measure`.
     // Rationale: serde's `#[serde(untagged)]` matches this variant by attempting to deserialize
     // the JSON value as a `String`; the inner field is structurally required for that match to
     // succeed. Removing it (e.g. to `Expectation`) changes the variant to a unit that serde
@@ -596,14 +590,22 @@ fn convert_stages(raw: RawStagesFile, path: &Path) -> Result<StagesData, LoadErr
             path,
         )?;
         let branching_factor = raw_stage.num_scenarios as usize;
+        let season_id = resolve_or_validate_season_id(
+            raw_stage.season_id,
+            raw_stage.id,
+            start_date,
+            end_date,
+            policy_graph.season_map.as_ref(),
+            &format!("stages[{i}].season_id"),
+            path,
+        )?;
 
         all_stages.push(Stage {
-            // index will be assigned after sort
             index: 0,
             id: raw_stage.id,
             start_date,
             end_date,
-            season_id: raw_stage.season_id,
+            season_id,
             blocks,
             block_mode,
             state_config,
@@ -824,6 +826,139 @@ fn convert_season_definitions(
                 seasons,
             }))
         }
+    }
+}
+
+// ── Season ID derivation ─────────────────────────────────────────────────────
+
+/// Resolve or validate a study stage's `season_id` under the earliest-study-
+/// period anchor: derive it from `start_date` via [`SeasonMap::season_for_date`]
+/// when absent, or cross-check a declared id against the derivation when
+/// present.
+///
+/// - No `season_map`: the field passes through unchanged (normally `None`).
+/// - Multi-resolution `season_map` (`is_multi_resolution`): `season_for_date`
+///   returns only the finest matching definition and cannot disambiguate a
+///   coarse-level id, so an absent id is rejected and a present id is trusted.
+/// - Single-resolution `season_map`: absent derives; a present id that
+///   disagrees with the derivation is rejected UNLESS the stage is a
+///   sub-period of its resolved season (see `period_width_days`) — a
+///   Regime-A weekly stage sharing a coarser PAR draw (e.g.
+///   `d28-decomp-weekly-monthly`) declares a grouping label, not a
+///   calendar-date claim, and is trusted.
+///
+/// # Errors
+/// Returns [`LoadError::SchemaError`] when a multi-resolution map has no
+/// declared id, or when a full-period single-resolution stage declares an id
+/// that disagrees with `season_for_date(start_date)`.
+fn resolve_or_validate_season_id(
+    raw_season_id: Option<usize>,
+    stage_id: i32,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    season_map: Option<&SeasonMap>,
+    field: &str,
+    path: &Path,
+) -> Result<Option<usize>, LoadError> {
+    let Some(season_map) = season_map else {
+        return Ok(raw_season_id);
+    };
+
+    if season_map.is_multi_resolution() {
+        return match raw_season_id {
+            Some(declared) => Ok(Some(declared)),
+            None => Err(LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: field.to_string(),
+                message: format!(
+                    "stage {stage_id}: declare an explicit season_id: a multi-resolution \
+                     season_map cannot be auto-resolved"
+                ),
+            }),
+        };
+    }
+
+    let derived = season_map.season_for_date(start_date);
+
+    let Some(declared) = raw_season_id else {
+        return Ok(derived);
+    };
+
+    let Some(derived_id) = derived else {
+        return Ok(Some(declared));
+    };
+
+    if declared == derived_id {
+        return Ok(Some(declared));
+    }
+
+    let duration_days = (end_date - start_date).num_days();
+    let width_days = period_width_days(season_map, derived_id, start_date.year());
+    if duration_days + SUB_PERIOD_TOLERANCE_DAYS <= width_days {
+        return Ok(Some(declared));
+    }
+
+    Err(LoadError::SchemaError {
+        path: path.to_path_buf(),
+        field: field.to_string(),
+        message: format!(
+            "stage {stage_id} declares season_id {declared} but start_date {start_date} \
+             resolves to season_id {derived_id}; declare {derived_id}, or omit season_id to \
+             derive it automatically"
+        ),
+    })
+}
+
+/// Tolerance (days) shared with the semantic layer's season-duration-spread
+/// check (`validation::semantic::season::check_season_id_consistency`, rule
+/// 29): stages sharing a `season_id` are treated as one resolution when their
+/// durations are within this many days of each other. Applied here: a stage
+/// counts as a sub-period of its resolved season — and its declared
+/// `season_id` is trusted as an operator grouping label rather than
+/// cross-checked against the calendar — only when its own duration sits more
+/// than this tolerance below the resolved season's full period width.
+///
+/// `pub(crate)` so Rule 29 reads the same literal rather than forking a
+/// second `7`.
+pub(crate) const SUB_PERIOD_TOLERANCE_DAYS: i64 = 7;
+
+/// Calendar width, in days, of the period identified by `season_id` under
+/// `season_map`'s cycle: the specific month's length for `Monthly` (leap-aware,
+/// using `year` — genuinely different from [`SeasonMap::resolution_level_of`]'s
+/// year-independent classifier, so the `Monthly` arm stays local), always 7
+/// for `Weekly`, and the matching definition's own calendar span for `Custom`
+/// (delegated to `resolution_level_of`, since that arm's computation is
+/// year-independent already). An unresolvable `season_id` falls back to the
+/// widest plausible span (31d) so a dangling id never masquerades as a
+/// sub-period stage — the cross-reference check (rule 27) rejects dangling
+/// ids independently.
+fn period_width_days(season_map: &SeasonMap, season_id: usize, year: i32) -> i64 {
+    match season_map.cycle_type {
+        SeasonCycleType::Weekly => 7,
+        SeasonCycleType::Monthly => season_map
+            .seasons
+            .iter()
+            .find(|s| s.id == season_id)
+            .map_or(31, |s| days_in_month(year, s.month_start)),
+        SeasonCycleType::Custom => season_map
+            .resolution_level_of(season_id)
+            .map_or(31, |days| i64::try_from(days).unwrap_or(366)),
+    }
+}
+
+/// Number of days in `month` of `year` (1-based month, leap-aware).
+fn days_in_month(year: i32, month: u32) -> i64 {
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    match (
+        NaiveDate::from_ymd_opt(year, month, 1),
+        NaiveDate::from_ymd_opt(next_year, next_month, 1),
+    ) {
+        (Some(start), Some(next)) => (next - start).num_days(),
+        _ => 31,
     }
 }
 
@@ -1097,6 +1232,242 @@ mod tests {
             data.policy_graph.season_map.is_none(),
             "season_map should be None when season_definitions is absent"
         );
+    }
+
+    // ── AC: derive season_id from start_date (Weekly, single-resolution) ─────
+
+    /// Given a `Weekly` single-resolution `season_map` and a stage with
+    /// `season_id: None` starting in ISO week 3 (2024-01-15), when
+    /// `parse_stages` runs, the derived `Stage.season_id` is `Some(2)`
+    /// (week 3 -> id 2), matching `SeasonMap::season_for_date`.
+    #[test]
+    fn test_derive_weekly_season_id_from_start_date() {
+        let seasons: String = (0..52)
+            .map(|i| format!(r#"{{ "id": {i}, "month_start": 1, "label": "W{i:02}" }}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let json = format!(
+            r#"{{
+              "policy_graph": {{ "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] }},
+              "season_definitions": {{ "cycle_type": "weekly", "seasons": [{seasons}] }},
+              "stages": [{{
+                "id": 0, "start_date": "2024-01-15", "end_date": "2024-01-22",
+                "blocks": [{{ "id": 0, "name": "SINGLE", "hours": 168.0 }}], "num_scenarios": 1
+              }}]
+            }}"#
+        );
+        let f = write_json(&json);
+        let data = parse_stages(f.path()).unwrap();
+        assert_eq!(
+            data.stages[0].season_id,
+            Some(2),
+            "ISO week 3 (2024-01-15) must derive to season_id 2"
+        );
+    }
+
+    // ── AC: declared Monthly season_id is an unchanged no-op ──────────────────
+
+    /// Given a `Monthly` study that declares every `season_id` explicitly and
+    /// consistently, when `parse_stages` runs, each parsed `Stage.season_id`
+    /// equals its declared value byte-for-byte (no derivation, no rejection).
+    #[test]
+    fn test_declared_monthly_season_id_unchanged_no_derivation() {
+        let json = r#"{
+          "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] },
+          "season_definitions": {
+            "cycle_type": "monthly",
+            "seasons": [
+              { "id": 0, "month_start": 1, "label": "January" },
+              { "id": 1, "month_start": 2, "label": "February" },
+              { "id": 2, "month_start": 3, "label": "March" }
+            ]
+          },
+          "stages": [
+            {
+              "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
+              "season_id": 0,
+              "blocks": [{ "id": 0, "name": "SINGLE", "hours": 744.0 }], "num_scenarios": 1
+            },
+            {
+              "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
+              "season_id": 1,
+              "blocks": [{ "id": 0, "name": "SINGLE", "hours": 696.0 }], "num_scenarios": 1
+            },
+            {
+              "id": 2, "start_date": "2024-03-01", "end_date": "2024-04-01",
+              "season_id": 2,
+              "blocks": [{ "id": 0, "name": "SINGLE", "hours": 744.0 }], "num_scenarios": 1
+            }
+          ]
+        }"#;
+        let f = write_json(json);
+        let data = parse_stages(f.path()).unwrap();
+        assert_eq!(data.stages[0].season_id, Some(0));
+        assert_eq!(data.stages[1].season_id, Some(1));
+        assert_eq!(data.stages[2].season_id, Some(2));
+    }
+
+    // ── AC: a full-period mismatch is rejected ────────────────────────────────
+
+    /// Given a single-resolution `Monthly` map and a FULL-MONTH-WIDTH stage
+    /// (2024-03-01..2024-04-01, 31 days) declaring `season_id: Some(5)` (June)
+    /// while its `start_date` resolves to season_id 2 (March), when
+    /// `parse_stages` runs, it returns a `SchemaError` naming the stage, the
+    /// declared id (5), and the derived id (2).
+    #[test]
+    fn test_declared_full_period_season_id_mismatch_rejected() {
+        let json = r#"{
+          "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] },
+          "season_definitions": {
+            "cycle_type": "monthly",
+            "seasons": [
+              { "id": 0, "month_start": 1, "label": "January" },
+              { "id": 1, "month_start": 2, "label": "February" },
+              { "id": 2, "month_start": 3, "label": "March" },
+              { "id": 3, "month_start": 4, "label": "April" },
+              { "id": 4, "month_start": 5, "label": "May" },
+              { "id": 5, "month_start": 6, "label": "June" }
+            ]
+          },
+          "stages": [{
+            "id": 7, "start_date": "2024-03-01", "end_date": "2024-04-01",
+            "season_id": 5,
+            "blocks": [{ "id": 0, "name": "SINGLE", "hours": 744.0 }], "num_scenarios": 1
+          }]
+        }"#;
+        let f = write_json(json);
+        let err = parse_stages(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert!(field.contains("season_id"), "field: {field}");
+                assert!(message.contains("stage 7"), "message: {message}");
+                assert!(message.contains('5'), "message: {message}");
+                assert!(message.contains('2'), "message: {message}");
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    // ── AC: a sub-period (Regime A) mismatch is trusted, not rejected ────────
+
+    /// Given a single-resolution `Monthly` map and a ~7-day sub-period stage
+    /// (2026-05-02..2026-05-09) declaring `season_id: Some(3)` (April) even
+    /// though its `start_date` resolves to season_id 4 (May) — the
+    /// `d28-decomp-weekly-monthly` pattern, a Regime-A weekly stage sharing
+    /// April's monthly PAR draw — when `parse_stages` runs, it succeeds and
+    /// preserves the declared id unchanged.
+    #[test]
+    fn test_sub_period_season_id_mismatch_trusted() {
+        let json = r#"{
+          "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] },
+          "season_definitions": {
+            "cycle_type": "monthly",
+            "seasons": [
+              { "id": 0, "month_start": 1, "label": "January" },
+              { "id": 1, "month_start": 2, "label": "February" },
+              { "id": 2, "month_start": 3, "label": "March" },
+              { "id": 3, "month_start": 4, "label": "April" },
+              { "id": 4, "month_start": 5, "label": "May" },
+              { "id": 5, "month_start": 6, "label": "June" }
+            ]
+          },
+          "stages": [{
+            "id": 4, "start_date": "2026-05-02", "end_date": "2026-05-09",
+            "season_id": 3,
+            "blocks": [{ "id": 0, "name": "SINGLE", "hours": 168.0 }], "num_scenarios": 1
+          }]
+        }"#;
+        let f = write_json(json);
+        let data = parse_stages(f.path()).unwrap();
+        assert_eq!(
+            data.stages[0].season_id,
+            Some(3),
+            "a Regime-A sub-period stage keeps its declared operator-grouping season_id"
+        );
+    }
+
+    // ── AC: multi-resolution Custom map (d30-shaped) ──────────────────────────
+
+    /// `d30-multi-resolution-monthly-quarterly`-shaped `season_definitions`:
+    /// 12 monthly + 4 quarterly `Custom` definitions whose calendar spans
+    /// overlap by design.
+    const D30_SHAPED_SEASON_DEFINITIONS: &str = r#"{
+      "cycle_type": "custom",
+      "seasons": [
+        { "id": 0, "month_start": 1, "day_start": 1, "month_end": 1, "day_end": 31, "label": "January" },
+        { "id": 1, "month_start": 2, "day_start": 1, "month_end": 2, "day_end": 28, "label": "February" },
+        { "id": 2, "month_start": 3, "day_start": 1, "month_end": 3, "day_end": 31, "label": "March" },
+        { "id": 3, "month_start": 4, "day_start": 1, "month_end": 4, "day_end": 30, "label": "April" },
+        { "id": 4, "month_start": 5, "day_start": 1, "month_end": 5, "day_end": 31, "label": "May" },
+        { "id": 5, "month_start": 6, "day_start": 1, "month_end": 6, "day_end": 30, "label": "June" },
+        { "id": 6, "month_start": 7, "day_start": 1, "month_end": 7, "day_end": 31, "label": "July" },
+        { "id": 7, "month_start": 8, "day_start": 1, "month_end": 8, "day_end": 31, "label": "August" },
+        { "id": 8, "month_start": 9, "day_start": 1, "month_end": 9, "day_end": 30, "label": "September" },
+        { "id": 9, "month_start": 10, "day_start": 1, "month_end": 10, "day_end": 31, "label": "October" },
+        { "id": 10, "month_start": 11, "day_start": 1, "month_end": 11, "day_end": 30, "label": "November" },
+        { "id": 11, "month_start": 12, "day_start": 1, "month_end": 12, "day_end": 31, "label": "December" },
+        { "id": 12, "month_start": 7, "day_start": 1, "month_end": 9, "day_end": 30, "label": "Q3" },
+        { "id": 13, "month_start": 10, "day_start": 1, "month_end": 12, "day_end": 31, "label": "Q4" },
+        { "id": 14, "month_start": 1, "day_start": 1, "month_end": 3, "day_end": 31, "label": "Q1" },
+        { "id": 15, "month_start": 4, "day_start": 1, "month_end": 6, "day_end": 30, "label": "Q2" }
+      ]
+    }"#;
+
+    /// Given the d30-shaped multi-resolution Custom map and a quarterly stage
+    /// (2024-07-01..2024-10-01, Q3) with an explicit `season_id: Some(12)`,
+    /// when `parse_stages` runs, it succeeds with no error and the id is
+    /// preserved unchanged (multi-resolution present-id is trusted, never
+    /// cross-checked against `season_for_date`'s finest-match result).
+    #[test]
+    fn test_multi_resolution_explicit_id_accepted() {
+        let json = format!(
+            r#"{{
+              "policy_graph": {{ "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] }},
+              "season_definitions": {D30_SHAPED_SEASON_DEFINITIONS},
+              "stages": [{{
+                "id": 6, "start_date": "2024-07-01", "end_date": "2024-10-01",
+                "season_id": 12,
+                "blocks": [{{ "id": 0, "name": "SINGLE", "hours": 2208.0 }}], "num_scenarios": 1
+              }}]
+            }}"#
+        );
+        let f = write_json(&json);
+        let data = parse_stages(f.path()).unwrap();
+        assert_eq!(
+            data.stages[0].season_id,
+            Some(12),
+            "a multi-resolution declared season_id must be trusted unchanged"
+        );
+    }
+
+    /// Given the d30-shaped multi-resolution Custom map and a stage with
+    /// `season_id: None`, when `parse_stages` runs, it returns a
+    /// `SchemaError` instructing the author to declare an explicit id (never
+    /// a silent finest-level guess).
+    #[test]
+    fn test_multi_resolution_absent_id_rejected() {
+        let json = format!(
+            r#"{{
+              "policy_graph": {{ "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] }},
+              "season_definitions": {D30_SHAPED_SEASON_DEFINITIONS},
+              "stages": [{{
+                "id": 6, "start_date": "2024-07-01", "end_date": "2024-10-01",
+                "blocks": [{{ "id": 0, "name": "SINGLE", "hours": 2208.0 }}], "num_scenarios": 1
+              }}]
+            }}"#
+        );
+        let f = write_json(&json);
+        let err = parse_stages(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert!(field.contains("season_id"), "field: {field}");
+                assert!(
+                    message.contains("multi-resolution") && message.contains("explicit"),
+                    "message should instruct declaring an explicit season_id, got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
     }
 
     // ── AC: chronological block_mode ──────────────────────────────────────────

@@ -9,7 +9,7 @@
 //! {
 //!   "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/hydros.schema.json",
 //!   "hydros": [{
-//!     "id": 0, "name": "FURNAS", "bus_id": 0,
+//!     "id": 0, "name": "FURNAS", "operational_start_date": "2030-01-01", "bus_id": 0,
 //!     "downstream_id": 2,
 //!     "entry_stage_id": null, "exit_stage_id": null,
 //!     "filling": null,
@@ -56,6 +56,7 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::Path;
 
+use super::parse_operational_start_date;
 use crate::LoadError;
 
 // ── Intermediate serde types ──────────────────────────────────────────────────
@@ -84,10 +85,16 @@ pub(crate) struct RawHydro {
     id: i32,
     /// Human-readable plant name.
     name: String,
+    /// Date the entity enters service (ISO 8601 `YYYY-MM-DD`).
+    operational_start_date: String,
     /// Bus to which this plant's generation is injected.
     bus_id: i32,
     /// Downstream hydro plant in the cascade. `null` = no downstream.
     downstream_id: Option<i32>,
+    /// Travel time on the cascade arc to `downstream_id` \[hours\]. Absent or
+    /// null = instantaneous (v1 excludes diversion and pumping arcs).
+    #[serde(default)]
+    travel_time_hours: Option<f64>,
     /// Stage index when the plant enters service. Absent or null = always exists.
     #[serde(default)]
     entry_stage_id: Option<i32>,
@@ -398,7 +405,9 @@ pub(crate) struct RawHydroPenaltyOverrides {
 /// Reads the JSON file, deserializes it through intermediate serde types,
 /// performs post-deserialization validation, then converts to `Vec<Hydro>` using
 /// the three-tier penalty resolution cascade (global → entity). The result is
-/// sorted by `id` ascending to satisfy declaration-order invariance.
+/// sorted by `id` ascending, so parser output is deterministic regardless of file
+/// row order (declaration-order invariance); the builder applies the same id as
+/// its `(operational_start_date, id)` canonical tiebreak.
 ///
 /// Cross-reference validation (`bus_id`, `downstream_id`,
 /// `diversion.downstream_id`) is deferred to Layer 3.
@@ -454,7 +463,7 @@ pub fn parse_hydros(
 
     validate_raw_hydros(&raw, path)?;
 
-    Ok(convert_hydros(raw, global_penalties))
+    convert_hydros(raw, global_penalties, path)
 }
 
 // ── Validation ────────────────────────────────────────────────────────────────
@@ -656,11 +665,22 @@ fn validate_evaporation(
 // ── Conversion ────────────────────────────────────────────────────────────────
 
 /// Precondition: [`validate_raw_hydros`] has returned `Ok(())` for this data.
-fn convert_hydros(raw: RawHydroFile, global: &GlobalPenaltyDefaults) -> Vec<Hydro> {
+fn convert_hydros(
+    raw: RawHydroFile,
+    global: &GlobalPenaltyDefaults,
+    path: &Path,
+) -> Result<Vec<Hydro>, LoadError> {
     let mut hydros: Vec<Hydro> = raw
         .hydros
         .into_iter()
-        .map(|raw_hydro| {
+        .enumerate()
+        .map(|(i, raw_hydro)| {
+            let operational_start_date = parse_operational_start_date(
+                &raw_hydro.operational_start_date,
+                path,
+                &format!("hydros[{i}].operational_start_date"),
+            )?;
+
             let (
                 generation_model,
                 min_turbined_m3s,
@@ -706,11 +726,13 @@ fn convert_hydros(raw: RawHydroFile, global: &GlobalPenaltyDefaults) -> Vec<Hydr
                 raw_hydro.penalties.map(convert_penalty_overrides);
             let penalties = resolve_hydro_penalties(&entity_overrides, global);
 
-            Hydro {
+            Ok(Hydro {
                 id: EntityId(raw_hydro.id),
                 name: raw_hydro.name,
+                operational_start_date,
                 bus_id: EntityId(raw_hydro.bus_id),
                 downstream_id: raw_hydro.downstream_id.map(EntityId),
+                travel_time_hours: raw_hydro.travel_time_hours,
                 entry_stage_id: raw_hydro.entry_stage_id,
                 exit_stage_id: raw_hydro.exit_stage_id,
                 min_storage_hm3: raw_hydro.reservoir.min_storage_hm3,
@@ -732,13 +754,14 @@ fn convert_hydros(raw: RawHydroFile, global: &GlobalPenaltyDefaults) -> Vec<Hydr
                 diversion,
                 filling,
                 penalties,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<_, LoadError>>()?;
 
-    // Sort by id ascending to satisfy declaration-order invariance.
+    // Sort by id so this parser's output is deterministic regardless of file row
+    // order (declaration-order invariance); id is the builder's canonical tiebreak.
     hydros.sort_by_key(|h| h.id.0);
-    hydros
+    Ok(hydros)
 }
 
 /// Returns `(model, min_turbined_m3s, max_turbined_m3s, min_generation_mw, max_generation_mw)`.
@@ -929,6 +952,7 @@ mod tests {
     const MINIMAL_HYDRO_JSON: &str = r#"{
       "id": 1,
       "name": "Minimal",
+      "operational_start_date": "2024-01-01",
       "bus_id": 0,
       "downstream_id": null,
       "reservoir": { "min_storage_hm3": 100.0, "max_storage_hm3": 2000.0 },
@@ -946,6 +970,7 @@ mod tests {
     const FULL_HYDRO_JSON: &str = r#"{
       "id": 0,
       "name": "FURNAS",
+      "operational_start_date": "2024-01-01",
       "bus_id": 0,
       "downstream_id": 2,
       "entry_stage_id": 1,
@@ -1055,6 +1080,7 @@ mod tests {
         let json = r#"{
           "hydros": [{
             "id": 0, "name": "FPHA Plant", "bus_id": 0,
+            "operational_start_date": "2024-01-01",
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 100.0, "max_storage_hm3": 5000.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1085,6 +1111,7 @@ mod tests {
         let json = r#"{
           "hydros": [{
             "id": 0, "name": "LH Plant", "bus_id": 0,
+            "operational_start_date": "2024-01-01",
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1119,6 +1146,7 @@ mod tests {
         let json = r#"{
           "hydros": [{
             "id": 0, "name": "Piecewise", "bus_id": 0,
+            "operational_start_date": "2024-01-01",
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1159,6 +1187,7 @@ mod tests {
         let json = r#"{
           "hydros": [{
             "id": 0, "name": "ConstantLoss", "bus_id": 0,
+            "operational_start_date": "2024-01-01",
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 500.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1194,6 +1223,7 @@ mod tests {
         let json = r#"{
           "hydros": [{
             "id": 0, "name": "Override", "bus_id": 0,
+            "operational_start_date": "2024-01-01",
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1233,6 +1263,7 @@ mod tests {
         let json = r#"{
           "hydros": [{
             "id": 0, "name": "NoOverride", "bus_id": 0,
+            "operational_start_date": "2024-01-01",
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1290,6 +1321,7 @@ mod tests {
         let json = r#"{
           "hydros": [{
             "id": 0, "name": "Fill", "bus_id": 0,
+            "operational_start_date": "2024-01-01",
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1325,6 +1357,7 @@ mod tests {
     fn test_duplicate_hydro_id() {
         let entry = r#"{
           "id": 5, "name": "Alpha", "bus_id": 0,
+          "operational_start_date": "2024-01-01",
           "downstream_id": null,
           "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
           "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1362,6 +1395,7 @@ mod tests {
         let json = r#"{
           "hydros": [{
             "id": 0, "name": "Bad", "bus_id": 0,
+            "operational_start_date": "2024-01-01",
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 5000.0, "max_storage_hm3": 1000.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1396,6 +1430,7 @@ mod tests {
         let json = r#"{
           "hydros": [{
             "id": 0, "name": "Bad", "bus_id": 0,
+            "operational_start_date": "2024-01-01",
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": -1.0, "max_storage_hm3": 1000.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1421,6 +1456,7 @@ mod tests {
         let json = r#"{
           "hydros": [{
             "id": 0, "name": "Bad", "bus_id": 0,
+            "operational_start_date": "2024-01-01",
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": -100.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1448,6 +1484,7 @@ mod tests {
         let json = r#"{
           "hydros": [{
             "id": 0, "name": "Bad", "bus_id": 0,
+            "operational_start_date": "2024-01-01",
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1482,6 +1519,7 @@ mod tests {
         let json = r#"{
           "hydros": [{
             "id": 0, "name": "Bad", "bus_id": 0,
+            "operational_start_date": "2024-01-01",
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1507,6 +1545,7 @@ mod tests {
         let json = r#"{
           "hydros": [{
             "id": 0, "name": "Bad", "bus_id": 0,
+            "operational_start_date": "2024-01-01",
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
             "outflow": { "min_outflow_m3s": -10.0, "max_outflow_m3s": null },
@@ -1534,6 +1573,7 @@ mod tests {
         let json = r#"{
           "hydros": [{
             "id": 0, "name": "Bad", "bus_id": 0,
+            "operational_start_date": "2024-01-01",
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1571,6 +1611,7 @@ mod tests {
         let json = r#"{
           "hydros": [{
             "id": 0, "name": "Bad", "bus_id": 0,
+            "operational_start_date": "2024-01-01",
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1590,6 +1631,46 @@ mod tests {
         );
     }
 
+    // ── AC: travel_time_hours (cascade arc) ───────────────────────────────────
+
+    /// Given a hydro with `"travel_time_hours": 360.0`, `parse_hydros` returns a
+    /// `Hydro` with `travel_time_hours == Some(360.0)`.
+    #[test]
+    fn test_travel_time_hours_deserializes_when_present() {
+        let json = r#"{
+          "hydros": [{
+            "id": 0, "name": "Upstream", "bus_id": 0,
+            "operational_start_date": "2024-01-01",
+            "downstream_id": 1,
+            "travel_time_hours": 360.0,
+            "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
+            "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
+            "generation": {
+              "model": "constant_productivity",
+              "min_turbined_m3s": 0.0, "max_turbined_m3s": 500.0,
+              "min_generation_mw": 0.0, "max_generation_mw": 250.0
+            }
+          }]
+        }"#;
+        let f = write_json(json);
+        let global = make_global();
+        let hydros = parse_hydros(f.path(), &global).unwrap();
+
+        assert_eq!(hydros[0].travel_time_hours, Some(360.0));
+    }
+
+    /// Given a hydro with no `travel_time_hours` key, `parse_hydros` returns a
+    /// `Hydro` with `travel_time_hours == None` (backward compatible).
+    #[test]
+    fn test_travel_time_hours_absent_is_none() {
+        let json = format!(r#"{{ "hydros": [{MINIMAL_HYDRO_JSON}] }}"#);
+        let f = write_json(&json);
+        let global = make_global();
+        let hydros = parse_hydros(f.path(), &global).unwrap();
+
+        assert_eq!(hydros[0].travel_time_hours, None);
+    }
+
     // ── AC: declaration-order invariance ──────────────────────────────────────
 
     /// Given hydros in reverse ID order in JSON, `parse_hydros` returns a
@@ -1598,6 +1679,7 @@ mod tests {
     fn test_declaration_order_invariance() {
         let entry_a = r#"{
           "id": 0, "name": "Alpha", "bus_id": 0,
+          "operational_start_date": "2024-01-01",
           "downstream_id": null,
           "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 500.0 },
           "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1609,6 +1691,7 @@ mod tests {
         }"#;
         let entry_b = r#"{
           "id": 1, "name": "Beta", "bus_id": 0,
+          "operational_start_date": "2024-01-01",
           "downstream_id": null,
           "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
           "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1684,6 +1767,7 @@ mod tests {
         let json = r#"{
           "hydros": [{
             "id": 0, "name": "Deg", "bus_id": 0,
+            "operational_start_date": "2024-01-01",
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 500.0, "max_storage_hm3": 500.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1708,6 +1792,7 @@ mod tests {
     /// Helper: reservoir with min=1000 hm³, max=20000 hm³ and evaporation coefficients.
     const HYDRO_WITH_EVAP_BASE: &str = r#"{
       "id": 0, "name": "ReservoirEvap", "bus_id": 0,
+      "operational_start_date": "2024-01-01",
       "downstream_id": null,
       "reservoir": { "min_storage_hm3": 1000.0, "max_storage_hm3": 20000.0 },
       "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1728,6 +1813,7 @@ mod tests {
         let json = r#"{
           "hydros": [{
             "id": 0, "name": "ReservoirEvap", "bus_id": 0,
+            "operational_start_date": "2024-01-01",
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 1000.0, "max_storage_hm3": 20000.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1765,6 +1851,7 @@ mod tests {
         let json = r#"{
           "hydros": [{
             "id": 0, "name": "ReservoirEvap", "bus_id": 0,
+            "operational_start_date": "2024-01-01",
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 1000.0, "max_storage_hm3": 20000.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1795,6 +1882,7 @@ mod tests {
         let json = r#"{
           "hydros": [{
             "id": 0, "name": "ReservoirEvap", "bus_id": 0,
+            "operational_start_date": "2024-01-01",
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 1000.0, "max_storage_hm3": 20000.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1836,6 +1924,7 @@ mod tests {
         let json = r#"{
           "hydros": [{
             "id": 0, "name": "ReservoirEvap", "bus_id": 0,
+            "operational_start_date": "2024-01-01",
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 1000.0, "max_storage_hm3": 20000.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1888,6 +1977,7 @@ mod tests {
         let json = r#"{
           "hydros": [{
             "id": 0, "name": "ReservoirEvap", "bus_id": 0,
+            "operational_start_date": "2024-01-01",
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 1000.0, "max_storage_hm3": 20000.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1930,6 +2020,7 @@ mod tests {
         let json = r#"{
           "hydros": [{
             "id": 0, "name": "ReservoirEvap", "bus_id": 0,
+            "operational_start_date": "2024-01-01",
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 1000.0, "max_storage_hm3": 20000.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1994,6 +2085,7 @@ mod tests {
         let json = r#"{
           "hydros": [{
             "id": 0, "name": "LegacyPlant", "bus_id": 0,
+            "operational_start_date": "2024-01-01",
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -2024,6 +2116,7 @@ mod tests {
           "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/hydros.schema.json",
           "hydros": [{
             "id": 0, "name": "H", "bus_id": 0,
+            "operational_start_date": "2024-01-01",
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 100.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },

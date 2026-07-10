@@ -590,8 +590,10 @@ fn make_hydro(min_storage_hm3: f64, max_storage_hm3: f64) -> Hydro {
     Hydro {
         id: EntityId::from(1),
         name: "TestHydro".to_owned(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId::from(10),
         downstream_id: None,
+        travel_time_hours: None,
         entry_stage_id: None,
         exit_stage_id: None,
         min_storage_hm3,
@@ -1307,8 +1309,10 @@ fn make_sobradinho_hydro() -> Hydro {
     Hydro {
         id: EntityId::from(1),
         name: "Sobradinho".to_owned(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId::from(10),
         downstream_id: None,
+        travel_time_hours: None,
         entry_stage_id: None,
         exit_stage_id: None,
         min_storage_hm3: 0.0,
@@ -1605,8 +1609,10 @@ fn fit_fpha_planes_linear_function_produces_one_plane() {
     let hydro = Hydro {
         id: EntityId::from(1),
         name: "FlatHydro".to_owned(),
+        operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId::from(10),
         downstream_id: None,
+        travel_time_hours: None,
         entry_stage_id: None,
         exit_stage_id: None,
         min_storage_hm3: 0.0,

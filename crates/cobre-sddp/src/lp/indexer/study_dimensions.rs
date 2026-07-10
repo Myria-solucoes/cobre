@@ -1,40 +1,27 @@
 //! The [`StudyDimensions`] single owner of the study-invariant, non-state LP
-//! shape.
-//!
-//! [`StudyDimensions`] owns the scalar entity counts, presence flags, and
-//! anticipated-thermal identity list that are constant across every stage AND
-//! every block of a study and are **not** part of the state vector. It is the
-//! single persisted owner of those facts: no other long-lived type holds them.
+//! shape: the scalar entity counts, presence flags, and anticipated-thermal
+//! identity list constant across every stage and block of a study and not part
+//! of the state vector. No other long-lived type holds these facts.
 
 /// Study-invariant, non-state LP shape for an SDDP study.
 ///
-/// Holds the non-state entity counts, optional-column presence flags, and the
-/// anticipated-thermal identity list.
-///
-/// The exclusions are deliberate, and each excluded dim lives elsewhere because
-/// it is owned by a different concern — duplicating it here would reintroduce
-/// the multi-owner drift this type exists to remove:
+/// The exclusions are deliberate — duplicating a dim owned elsewhere would
+/// reintroduce the multi-owner drift this type exists to remove:
 ///
 /// - **State-defining dims** (`hydro_count`, `max_par_order`, `n_anticipated`,
-///   `k_max`, `anticipated_lead_stages`) define the state vector and its cut
-///   layout, so they are owned solely by
-///   [`StateLayout`](super::StateLayout). A count is either state-defining (→
+///   `k_max`, `anticipated_lead_stages`) are owned solely by
+///   [`StateLayout`](super::StateLayout): a count is either state-defining (→
 ///   `StateLayout`) or non-state study shape (→ here), never both.
-/// - **`n_blks`** is a *per-stage* quantity: a stage's block count is read from
-///   its own template, not from a study-global field. A persisted global
-///   `n_blks` is the exact footgun that mis-strides equipment columns at any
-///   stage whose block count differs from stage 0's, so it is owned by the
-///   per-stage geometry, never here.
+/// - **`n_blks`** is *per-stage*, read from a stage's own template. A persisted
+///   global `n_blks` is the footgun that mis-strides equipment columns at any
+///   stage whose block count differs from stage 0's.
 ///
-/// `anticipated_thermal_indices` is study-invariant (the anticipated plant set
-/// does not change across stages), so it is owned here; the per-stage FPHA /
-/// evaporation identity lists vary by stage and are owned by the per-stage
-/// geometry instead.
-// Rationale: the four bool fields (`has_ncs`, `has_inflow_penalty`,
-// `has_withdrawal`, `has_operational_violations`) are independent presence flags
-// for optional column groups, not states of one machine; folding them into a
-// two-variant enum or state machine — the lint's suggested refactor — would
-// obscure that they vary independently.
+/// `anticipated_thermal_indices` is study-invariant, so it is owned here; the
+/// per-stage FPHA / evaporation identity lists vary by stage and are owned by
+/// the per-stage geometry.
+// Rationale: the four bool fields are independent presence flags for optional
+// column groups, not states of one machine; the lint's suggested enum/state-
+// machine refactor would obscure that they vary independently.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default)]
 pub struct StudyDimensions {
@@ -46,10 +33,8 @@ pub struct StudyDimensions {
     pub n_buses: usize,
     /// Maximum number of deficit segments across all buses (S).
     pub max_deficit_segments: usize,
-    /// Whether the study has NCS generation columns.
-    ///
-    /// The per-(ncs, block) column base is addressed per stage, never from a
-    /// study-global base, so only presence is recorded here.
+    /// Whether the study has NCS generation columns; only presence lives here,
+    /// the per-`(ncs, block)` column base is addressed per stage.
     pub has_ncs: bool,
     /// Whether inflow non-negativity penalty slack columns are present.
     pub has_inflow_penalty: bool,

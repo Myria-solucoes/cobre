@@ -61,6 +61,7 @@ pub struct BoundsOverrides<'a> {
 /// # Examples
 ///
 /// ```
+/// use chrono::NaiveDate;
 /// use cobre_core::EntityId;
 /// use cobre_core::entities::{
 ///     EnergyContract, ContractType, Hydro, HydroGenerationModel, HydroPenalties,
@@ -91,8 +92,10 @@ pub struct BoundsOverrides<'a> {
 /// let hydro = Hydro {
 ///     id: EntityId::from(0),
 ///     name: "H0".to_string(),
+///     operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
 ///     bus_id: EntityId::from(1),
 ///     downstream_id: None,
+///     travel_time_hours: None,
 ///     entry_stage_id: None,
 ///     exit_stage_id: None,
 ///     min_storage_hm3: 10.0,
@@ -513,6 +516,7 @@ fn zero_hydro_stage_bounds() -> HydroStageBounds {
     clippy::doc_markdown
 )]
 mod tests {
+    use chrono::NaiveDate;
     use std::collections::HashMap;
 
     use cobre_core::{
@@ -606,8 +610,10 @@ mod tests {
         Hydro {
             id: EntityId::from(id),
             name: format!("Hydro {id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(1),
             downstream_id: None,
+            travel_time_hours: None,
             entry_stage_id: None,
             exit_stage_id: None,
             min_storage_hm3,
@@ -635,6 +641,7 @@ mod tests {
         Thermal {
             id: EntityId::from(id),
             name: format!("Thermal {id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(1),
             entry_stage_id: None,
             exit_stage_id: None,
@@ -649,6 +656,7 @@ mod tests {
         Line {
             id: EntityId::from(id),
             name: format!("Line {id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             source_bus_id: EntityId::from(1),
             target_bus_id: EntityId::from(2),
             entry_stage_id: None,
@@ -664,6 +672,7 @@ mod tests {
         PumpingStation {
             id: EntityId::from(id),
             name: format!("Pumping {id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(1),
             source_hydro_id: EntityId::from(1),
             destination_hydro_id: EntityId::from(2),
@@ -679,6 +688,7 @@ mod tests {
         EnergyContract {
             id: EntityId::from(id),
             name: format!("Contract {id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(1),
             contract_type: ContractType::Import,
             entry_stage_id: None,
@@ -1398,6 +1408,7 @@ mod tests {
         let thermals = vec![Thermal {
             id: EntityId::from(0),
             name: "ZeroCost".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId::from(1),
             entry_stage_id: None,
             exit_stage_id: None,

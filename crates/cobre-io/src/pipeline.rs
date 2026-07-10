@@ -135,7 +135,15 @@ pub(crate) fn run_pipeline_with_artifacts(
         .thermals
         .iter()
         .filter_map(|t| t.anticipated_config.as_ref())
-        .map(|c| usize::try_from(c.lead_stages).unwrap_or(usize::MAX))
+        .map(|c| {
+            // A LeadTime plant contributes 0 here: this crate cannot compute the
+            // resolver-derived ring depth (that's downstream, solver-side state), and
+            // the delivery-anchored ring only ever reads a plant's bounds at
+            // delivery_stage < n_stages, so the padded [n_stages, n_stages + k_max)
+            // region resolve_bounds sizes from this value is unread for anticipated
+            // plants regardless of lead mode.
+            usize::try_from(c.lead_stages().unwrap_or(0)).unwrap_or(usize::MAX)
+        })
         .max()
         .unwrap_or(0);
     let bounds = resolve_bounds(

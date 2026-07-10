@@ -512,7 +512,6 @@ mod tests {
         assert_eq!(cfg.simulation.num_scenarios, 2000);
         assert_eq!(cfg.policy.mode, PolicyMode::Fresh);
         assert_eq!(cfg.policy.path, "./policy");
-        assert!(cfg.policy.validate_compatibility);
     }
 
     /// AC-2: missing `training.forward_passes` → SchemaError with field name.
@@ -601,8 +600,7 @@ mod tests {
               "interval_iterations": 10,
               "store_basis": true,
               "compress": true
-            },
-            "validate_compatibility": true
+            }
           },
           "simulation": {
             "enabled": true,
@@ -642,7 +640,6 @@ mod tests {
         assert_eq!(cfg.upper_bound_evaluation.initial_iteration, Some(10));
 
         assert_eq!(cfg.policy.mode, PolicyMode::Fresh);
-        assert!(cfg.policy.validate_compatibility);
         assert_eq!(cfg.policy.checkpointing.enabled, Some(true));
 
         assert!(cfg.simulation.enabled);
@@ -795,6 +792,30 @@ mod tests {
                 LoadError::ParseError { .. } | LoadError::SchemaError { .. }
             ),
             "expected parse/schema error for unknown 'version' field, got: {err:?}"
+        );
+    }
+
+    /// A config that still sets the removed `policy.validate_compatibility` flag
+    /// is rejected: `PolicyConfig` uses `deny_unknown_fields`, so the stale key
+    /// fails deserialization with an error naming the field.
+    #[test]
+    fn test_stale_validate_compatibility_field_rejected() {
+        let f = write_config(
+            r#"{
+            "training": {
+                "forward_passes": 1,
+                "stopping_rules": [{"type": "iteration_limit", "limit": 10}]
+            },
+            "policy": {
+                "validate_compatibility": false
+            }
+        }"#,
+        );
+        let err = parse_config(f.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("validate_compatibility"),
+            "expected the stale field name in the rejection error, got: {msg}"
         );
     }
 
@@ -1319,7 +1340,6 @@ mod tests {
         let original = PolicyConfig {
             path: "./policy".to_string(),
             mode: PolicyMode::Fresh,
-            validate_compatibility: true,
             checkpointing: CheckpointingConfig::default(),
             boundary: Some(BoundaryPolicy {
                 path: "../monthly/policy".to_string(),

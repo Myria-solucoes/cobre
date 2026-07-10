@@ -38,6 +38,7 @@ shows all fields, including the optional `entry_stage_id`, `exit_stage_id`, and
     {
       "id": 0,
       "name": "UTE1",
+      "operational_start_date": "2024-01-01",
       "bus_id": 0,
       "cost_per_mwh": 5.0,
       "generation": {
@@ -48,6 +49,7 @@ shows all fields, including the optional `entry_stage_id`, `exit_stage_id`, and
     {
       "id": 1,
       "name": "Angra 1",
+      "operational_start_date": "2024-01-01",
       "bus_id": 0,
       "entry_stage_id": null,
       "exit_stage_id": null,
@@ -116,7 +118,8 @@ always dispatch at least that amount whenever the plant is active.
 The optional `anticipated_config` block enables anticipated dispatch for thermal
 units that require advance scheduling over multiple stages due to commitment lead
 times — for example, a plant that must be booked several weeks before the dispatch
-occurs.
+occurs. Two lead modes are available (below): a stage count, or a physical lead
+time in hours.
 
 ```json
 "anticipated_config": {
@@ -128,7 +131,59 @@ occurs.
 | ------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | `lead_stages` | integer | Number of stages of dispatch anticipation. A value of `2` means the generation commitment for stage `t` must be decided at stage `t - 2`. |
 
+### Two lead modes: `lead_stages` and `lead_time_hours`
+
+`anticipated_config` carries exactly one of two lead modes — never both, never
+neither:
+
+- **`lead_stages`** (above) — a stage count; the calendar is never consulted.
+- **`lead_time_hours`** — a physical lead time in hours; delivery-anchored and
+  resolved against the study calendar.
+
+```json
+"anticipated_config": {
+  "lead_time_hours": 720.0
+}
+```
+
+| Field             | Type   | Description                                               |
+| ----------------- | ------ | --------------------------------------------------------- |
+| `lead_time_hours` | number | Physical lead time, in hours. Must be finite and `> 0.0`. |
+
+Setting both fields, or setting neither, is rejected while `system/thermals.json`
+is being loaded: `anticipated_config` is parsed as one of these two shapes, so a
+JSON object naming both fields, or naming neither, matches neither shape and the
+case fails to load.
+
+Rather than fixing a stage count, `lead_time_hours` fixes a duration on the hour
+clock. For every delivery stage `m`, Cobre finds the study stage that was current
+`lead_time_hours` hours before `m` ends (ties at a stage boundary resolve to the
+earlier stage) and makes that stage `m`'s decision stage. On a calendar where
+every stage has the same length, this produces exactly the same decision/delivery
+pairing as the equivalent `lead_stages` value; the two modes only diverge once the
+calendar's stage lengths change partway through the plant's active window — which
+is exactly where a physical commitment needs to stay anchored to hours rather than
+to a stage count (worked example below).
+
+### Which lead mode to choose
+
+Use `lead_stages` when the plant's active window sits entirely within a single
+stage-cadence regime — the study calendar does not change resolution across it —
+or when the commitment genuinely tracks a fixed number of dispatch cycles rather
+than a real-world duration. Use `lead_time_hours` when the commitment is anchored
+to a duration that should stay constant in hours regardless of how finely the
+study calendar resolves that period — a fuel-nomination deadline, an
+outage-booking window, a regulatory advance-notice period — especially when the
+plant's active window crosses a stage-cadence change.
+
 ### How anticipated dispatch works
+
+The decision/delivery split below is described for `lead_stages`, where every
+decision stage delivers to exactly one delivery stage `K` stages later.
+`lead_time_hours` reuses the same decision/delivery roles and the same
+`anticipated_decision_mw`/`anticipated_committed_mw` output columns; only the
+rule that maps a delivery stage to its decision stage differs (the study
+calendar, rather than a constant `K`).
 
 When a thermal unit has `lead_stages = K`, its dispatch commitment is split across
 two roles that appear at different stages:
@@ -157,6 +212,128 @@ the decision placed at stage 0 matures at stage 1. Stage 0 shows a non-null
 `anticipated_decision_mw` and null `anticipated_committed_mw`; stage 1 shows the
 reverse.
 
+### Worked example: a fixed stage count and a physical lead diverge
+
+Suppose a thermal plant's fuel-nomination process requires the operator to commit
+to a delivery `720` hours (30 days) before it is dispatched, and the study's
+calendar begins with four weekly stages (168 hours each, stages 0–3) before
+switching to monthly stages (720 hours each, stage 4 onward).
+
+With `lead_stages`, the only lever is a constant stage count, so the same setting
+applies on both sides of the cadence change. The table below reports, for each
+delivery stage, the decision stage each configuration resolves to and the
+resulting physical lead — the number of hours between the decision stage's end
+and the delivery stage's end:
+
+| Delivery stage (`m`) | Duration (h) | `lead_stages = 1` | `lead_stages = 4` | `lead_time_hours = 720.0` |
+| -------------------- | ------------ | ----------------- | ----------------- | ------------------------- |
+| 0 (week 1)           | 168          | pre-study         | pre-study         | pre-study                 |
+| 1 (week 2)           | 168          | stage 0 → 168 h   | pre-study         | pre-study                 |
+| 2 (week 3)           | 168          | stage 1 → 168 h   | pre-study         | pre-study                 |
+| 3 (week 4)           | 168          | stage 2 → 168 h   | pre-study         | pre-study                 |
+| 4 (month 1)          | 720          | stage 3 → 720 h   | stage 0 → 1224 h  | stage 3 → 720 h           |
+| 5 (month 2)          | 720          | stage 4 → 720 h   | stage 1 → 1776 h  | stage 4 → 720 h           |
+
+`lead_stages = 1` under-notices every weekly delivery — 168 hours instead of the
+720 the process needs — and only reaches 720 hours at the monthly deliveries,
+where it happens to coincide with the delivery stage's own length.
+`lead_stages = 4` needs the same four pre-study seed entries the correct physical
+lead needs (below), but then over-notices the monthly deliveries, and by a margin
+that grows every stage (1224, then 1776 hours, against a 720-hour target). No
+single `lead_stages` value is correct on both sides of the transition; both
+values above also trigger the cadence-transition advisory described below, at
+the same stage-3/stage-4 boundary.
+
+`lead_time_hours = 720.0` resolves to exactly 720 hours at every delivery stage
+that has an in-study decision, on both sides of the transition, because it
+derives the decision stage from the actual calendar rather than from a fixed
+stage count.
+
+The first four delivery stages resolve to a decision before the study begins —
+720 hours of lead reaches back past the study's first stage while the calendar
+is still weekly — so those four deliveries are seeded from
+`past_anticipated_commitments` rather than decided by an in-study LP stage:
+
+```json
+{
+  "thermals": [
+    {
+      "id": 5,
+      "name": "UTE2",
+      "operational_start_date": "2024-01-01",
+      "bus_id": 0,
+      "cost_per_mwh": 90.0,
+      "generation": {
+        "min_mw": 0.0,
+        "max_mw": 200.0
+      },
+      "anticipated_config": {
+        "lead_time_hours": 720.0
+      }
+    }
+  ]
+}
+```
+
+```json
+{
+  "past_anticipated_commitments": [
+    {
+      "thermal_id": 5,
+      "values_mw": [0.0, 0.0, 150.0, 180.0]
+    }
+  ]
+}
+```
+
+The required seed length here — four entries — is calendar-derived: it is the
+count of study stages whose stage-end cumulative hours are still `<= 720`, not
+`lead_stages` (this plant has none). See
+[Pairing with initial_conditions.json](#pairing-with-initial_conditionsjson)
+below for the full rule, including why `150.0` and `180.0` are accepted values.
+
+### Cadence-transition advisory
+
+A `lead_stages` plant whose decision-to-delivery window spans a stage-cadence
+change — the situation the worked example above shows for both `lead_stages = 1`
+and `lead_stages = 4` — triggers an advisory, not a hard error. Validation scans
+every pair of consecutive stage durations the plant's active window covers, and
+on the first pair with differing durations, emits a warning naming the thermal,
+the two stage indices, and `lead_time_hours` as the alternative that stays
+correct across the transition. The study still validates successfully; a cadence
+transition never blocks a study on its own. A `lead_time_hours` plant never
+triggers this advisory, since its decider already accounts for the actual
+calendar on both sides of any transition.
+
+### Sub-stage leads: the K=0 exclusion
+
+A `lead_time_hours` plant can resolve to a lead shorter than the delivery
+stage's own duration — for example, `lead_time_hours: 100.0` against a 168-hour
+weekly stage. When that happens, the commitment would be decided inside its own
+delivery stage, so no anticipation actually binds. Cobre excludes that stage
+from the anticipated-commitment state entirely and dispatches the plant's
+generation there as ordinary, unconstrained thermal output — exactly as if
+`anticipated_config` were absent for that one stage. This is never a hard error.
+At setup time Cobre logs one diagnostic per affected stage, naming the plant,
+the stage, and that the effective lead at that stage is equivalent to
+`lead_stages = 0`. A `lead_stages` plant never triggers this: a positive stage
+count is never zero stages by construction.
+
+### The fan-out limitation
+
+On a calendar that coarsens as the horizon proceeds, a single `lead_time_hours`
+decision stage can anchor more than one delivery stage — a coarse stage deciding
+several finer stages that follow it. This is structurally impossible under
+`lead_stages`, where a constant stage-count lead always maps one decision stage
+to exactly one delivery stage. Cobre's setup rejects any `lead_time_hours`
+configuration that fans out this way: the study fails to load with a validation
+error naming the plant, rather than silently dropping the later deliveries'
+committed-MW simulation output. Per-delivery-stage simulation output for a
+fanned-out configuration is not yet implemented; until it is, keep a
+`lead_time_hours` plant's calendar from coarsening across its active window, or
+use `lead_stages` where a constant stage-count lead is an acceptable
+approximation.
+
 ### Pairing with initial_conditions.json
 
 Because anticipated dispatch carries state across stages, every anticipated thermal
@@ -176,20 +353,28 @@ unit must have a corresponding entry in `past_anticipated_commitments` in
 }
 ```
 
-The `values_mw` array must have exactly `lead_stages` entries. The values are
-ordered chronologically from oldest to most recent: `values_mw[0]` corresponds to
-the oldest pending slot and `values_mw[lead_stages - 1]` to the most recent.
-For the example above with `lead_stages = 2`, the array has length 2. Supplying an
-array of a different length is a validation error.
+`values_mw`'s required length is calendar-derived, not a fixed count: it equals
+the number of study stages whose commitment is decided before the study begins —
+the pre-study-committed delivery stages the worked example above walks through.
+For a `lead_stages` plant on a study at least `lead_stages` stages long, that
+count equals `lead_stages` exactly (as in the example above, length 2); for a
+`lead_time_hours` plant it depends on the calendar, as the worked example's
+four-entry array shows. The values are ordered chronologically from oldest to
+most recent: `values_mw[0]` corresponds to the oldest pre-study-committed
+delivery stage. Supplying an array of a different length than the
+calendar-derived count is a validation error naming both the expected and
+actual counts.
 
-**Current limitation: every entry in `values_mw` must be `0.0`.** Pre-horizon
-commitments (generation dispatched outside the study horizon that delivers during
-the study) cannot be expressed in the current version. The semantic validator rejects
-any non-zero `values_mw` entry with an explicit error message naming the thermal id
-and the offending slot index. Set all entries to `0.0` when constructing
-`initial_conditions.json` for studies with anticipated thermal units.
-
-Support for non-zero pre-horizon commitments is planned for a future release.
+Each `values_mw[j]` is the MW the plant delivers at that pre-study-committed
+delivery stage; its cost is sunk and does not enter the study's objective. A
+value is accepted as long as it lies within the plant's own
+`[min_generation_mw, max_generation_mw]` bounds — an out-of-bounds value is
+rejected, since the LP would otherwise need to dispatch outside the plant's
+physical capacity to honor it. A plant that also sets
+`entry_stage_id`/`exit_stage_id` additionally requires every nonzero
+`values_mw[j]` to mature inside that commissioning window; a nonzero value
+maturing outside it is rejected, since the plant's generation column is pinned
+to `[0, 0]` there.
 
 The `past_anticipated_commitments` key is optional in the JSON file and defaults to
 an empty list for studies that have no anticipated thermal units.
@@ -212,35 +397,29 @@ both optional columns set to `null`. Rows for anticipated units have
 `is_anticipated = true`; the two nullable columns are populated according to each
 stage's position relative to the decision and delivery windows described above.
 
-Training output also records anticipated-dispatch state in
-`training/dictionaries/state_dictionary.json`. For each anticipated thermal unit,
-the dictionary contains one entry per slot index from `0` to `K_max - 1` where
-`K_max` is the maximum `lead_stages` across all anticipated thermals in the study.
-Entries are emitted in slot-major order. Each entry has the following shape:
+The anticipated-commitment state is part of the policy's state vector, so each
+anticipated thermal unit contributes ring-buffer slots to the per-slot entity
+manifest embedded in every `policy/cuts/stage_NNN.bin` and
+`policy/states/stage_NNN.bin` (see
+[Policy Checkpoint](../reference/output-format.md#policy-checkpoint)). For an
+anticipated unit each slot's manifest entry has `entity_type` set to the
+anticipated-thermal-state class, `entity_id` set to the unit's id, and `subindex`
+set to the ring-buffer slot — slot 0 tracks the oldest still-pending commitment
+and the highest slot the most recent.
 
-```json
-{
-  "type": "anticipated_state",
-  "entity_type": "thermal",
-  "entity_id": 2,
-  "slot_index": 0,
-  "lead_stages": 2,
-  "unit": "MW"
-}
-```
-
-The `lead_stages` field reflects the plant's own `K_i`, not the study-wide
-`K_max`. For a plant where `K_i < K_max` (mixed-`K` studies), entries with
-`slot_index >= lead_stages` are structural padding — those slots are
-deterministically zero and exist only to align the ring buffer to a uniform
-stride. Filter `slot_index < lead_stages` to keep only the active slots.
+The ring buffer is sized to the study-wide `K_max` — the deepest per-stage
+in-flight depth across every anticipated thermal. For a `lead_stages` plant this
+equals its constant `lead_stages` value; for a `lead_time_hours` plant it is the
+deepest depth the calendar resolution produces at any decision stage (the worked
+example above reaches a depth of 1). For a unit whose own reach is shallower
+than `K_max` (mixed studies), the surplus high slots are structural padding
+aligning the buffer to a uniform stride; they are deterministically zero. Each
+slot's `was_active` flag records whether the owning unit was operationally
+active at that stage, encoding the active/padding distinction directly.
 
 For a study with a single anticipated thermal unit (`id = 2`) configured as
-`lead_stages = 2`, the state dictionary contains exactly two such entries: one
-with `slot_index = 0` and one with `slot_index = 1` — both active, since
-`K_max = lead_stages = 2`. The slot index identifies which pending commitment
-the state variable tracks: slot 0 holds the oldest still-pending commitment and
-slot `lead_stages - 1` holds the most recent.
+`lead_stages = 2`, the manifest carries exactly two such slots — `subindex = 0`
+and `subindex = 1` — both active, since `K_i = K_max = 2`.
 
 ---
 
@@ -289,12 +468,18 @@ For context on the constraint file format see
 Cobre's layered validation pipeline checks the following conditions on thermal
 units. Violations are reported as error messages with the failing unit's `id`.
 
-| Rule                       | Error Class          | Description                                                                              |
-| -------------------------- | -------------------- | ---------------------------------------------------------------------------------------- |
-| Bus reference integrity    | Reference error      | Every `bus_id` must match an `id` in `buses.json`.                                       |
-| Non-negative cost          | Schema error         | `cost_per_mwh` must be ≥ 0.0.                                                            |
-| Generation bounds ordering | Physical feasibility | `min_mw` must be less than or equal to `max_mw`.                                         |
-| Anticipated lead validity  | Physical feasibility | When `anticipated_config` is present, `lead_stages` must be a positive integer (`>= 1`). |
+| Rule                                  | Error Class          | Description                                                                                                                     |
+| ------------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Bus reference integrity               | Reference error      | Every `bus_id` must match an `id` in `buses.json`.                                                                              |
+| Non-negative cost                     | Schema error         | `cost_per_mwh` must be ≥ 0.0.                                                                                                   |
+| Generation bounds ordering            | Physical feasibility | `min_mw` must be less than or equal to `max_mw`.                                                                                |
+| Anticipated lead exclusivity          | Schema error         | `anticipated_config` must set exactly one of `lead_stages` or `lead_time_hours`; setting both or setting neither fails to load. |
+| Anticipated stage-count lead validity | Physical feasibility | When `anticipated_config.lead_stages` is present, it must be a positive integer (`>= 1`).                                       |
+| Anticipated physical lead validity    | Physical feasibility | When `anticipated_config.lead_time_hours` is present, it must be finite and `> 0.0`.                                            |
+
+The cadence-transition advisory and the K=0 sub-stage-lead diagnostic (above) are
+non-blocking advisories, not entries in this table — they are logged but never
+fail validation or setup.
 
 ---
 

@@ -1,9 +1,13 @@
 //! Policy loading and compatibility validation.
 //!
+//! [`validate_policy_load`] is the single entry point for compatibility
+//! validation; every load path (full-FCF warm-start/resume/simulation-only and
+//! boundary-cut injection) routes through it.
+//!
 //! [`FutureCostFunction`]: crate::FutureCostFunction
 
 use cobre_io::PolicyCheckpointMetadata;
-use cobre_solver::Basis;
+use cobre_solver::{Basis, BasisStatus};
 
 use crate::SddpError;
 use crate::cut::pool::CutPool;
@@ -42,39 +46,87 @@ pub(crate) fn resolve_warm_start_counts(
     }
 }
 
-/// Validate that a loaded policy checkpoint is compatible with the current
-/// system configuration.
+/// Per-side state layout fed to [`validate_policy_load`]: one manifest for the
+/// loaded policy (`source`) and one for the study being trained or simulated
+/// (`current`). The caller builds both — one from checkpoint metadata and its
+/// entity manifest, the other from the live [`StudySetup`].
+#[derive(Debug, Clone, Copy)]
+pub struct PolicyStageManifest<'a> {
+    /// Length of the state vector (one entry per reservoir/lag/bucket dimension).
+    pub state_dimension: u32,
+    /// Number of stages in the study.
+    pub num_stages: u32,
+    /// Per-slot entity identity, in state-vector order.
+    pub slots: &'a [cobre_io::EntitySlot],
+}
+
+/// Which policy-load path is being validated; selects the `num_stages` rule in
+/// [`validate_policy_load`]'s check matrix (`state_dimension` and per-slot
+/// identity are checked unconditionally on both variants).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyLoadKind {
+    /// Full future-cost-function load (warm-start, resume, simulation-only):
+    /// `num_stages` must match `current` exactly.
+    FullFcf,
+    /// Single-stage boundary-cut injection into the terminal pool: `num_stages`
+    /// is unchecked (a monthly source may feed a weekly+monthly current study).
+    BoundaryInjection,
+}
+
+/// Non-fatal findings from [`validate_policy_load`]; warnings never abort the load.
+#[derive(Debug, Clone, Default)]
+pub struct CompatibilityReport {
+    /// Human-readable warning messages, in emission order.
+    pub warnings: Vec<String>,
+}
+
+/// Validate that `source`'s state layout is compatible with `current`'s, per
+/// `kind`'s check matrix: `state_dimension` equality and per-slot identity
+/// (delegated to [`compare_manifest_slot_identity`]) are hard-rejected on both
+/// variants; `num_stages` equality is hard-rejected only on
+/// [`PolicyLoadKind::FullFcf`]. `col_scale`/scaling is never a compatibility
+/// dimension. This is the single entry point for policy-load validation; every
+/// load path calls it.
 ///
 /// # Errors
 ///
-/// Returns [`SddpError::Validation`] if `state_dimension` or `num_stages`
-/// do not match the current system configuration.
-pub fn validate_policy_compatibility(
-    metadata: &PolicyCheckpointMetadata,
-    current_state_dimension: u32,
-    current_num_stages: u32,
-) -> Result<(), SddpError> {
-    if metadata.state_dimension != current_state_dimension {
+/// Returns [`SddpError::Validation`] on a `state_dimension` mismatch, a
+/// `num_stages` mismatch under [`PolicyLoadKind::FullFcf`], or a per-slot
+/// identity mismatch (see [`compare_manifest_slot_identity`]).
+pub fn validate_policy_load(
+    source: &PolicyStageManifest<'_>,
+    current: &PolicyStageManifest<'_>,
+    kind: PolicyLoadKind,
+) -> Result<CompatibilityReport, SddpError> {
+    if source.state_dimension != current.state_dimension {
         return Err(SddpError::Validation(format!(
             "policy state_dimension mismatch: policy has {}, current system has {}",
-            metadata.state_dimension, current_state_dimension
+            source.state_dimension, current.state_dimension
         )));
     }
 
-    if metadata.num_stages != current_num_stages {
+    if kind == PolicyLoadKind::FullFcf && source.num_stages != current.num_stages {
         return Err(SddpError::Validation(format!(
             "policy num_stages mismatch: policy has {}, current system has {}",
-            metadata.num_stages, current_num_stages
+            source.num_stages, current.num_stages
         )));
     }
 
-    Ok(())
+    let mut warnings = Vec::new();
+    compare_manifest_slot_identity(source.slots, current.slots, &mut |msg| {
+        warnings.push(msg.to_string());
+    })?;
+
+    Ok(CompatibilityReport { warnings })
 }
 
 /// Build a basis cache from deserialized checkpoint basis records.
 ///
 /// Returns a `Vec<Option<CapturedBasis>>`, one entry per stage; stages without a
-/// matching record get `None` (`u8` status codes widen to `i32`).
+/// matching record get `None`. `u8` status codes decode via `from_discriminant_code`,
+/// the mirror of `convert_basis_cache`'s export-side `to_discriminant_code`; a
+/// pre-existing checkpoint (bytes `0..=4`) decodes identically, since that range
+/// means the same in the canonical and `HiGHS` code spaces.
 ///
 /// # Cut-slot reconstruction
 ///
@@ -103,13 +155,18 @@ pub fn build_basis_cache_from_checkpoint(
         if stage >= num_stages {
             continue;
         }
-        let col_status: Vec<i32> = record.column_status.iter().map(|&c| i32::from(c)).collect();
-        let row_status: Vec<i32> = record.row_status.iter().map(|&r| i32::from(r)).collect();
+        let col_status: Vec<BasisStatus> = record
+            .column_status
+            .iter()
+            .map(|&c| BasisStatus::from_discriminant_code(c))
+            .collect();
+        let row_status: Vec<BasisStatus> = record
+            .row_status
+            .iter()
+            .map(|&r| BasisStatus::from_discriminant_code(r))
+            .collect();
 
         let num_cut = record.num_cut_rows as usize;
-        // `build_stage_cut_records` sets `slot_index` to the pool slot, so the
-        // active records' `slot_index` in increasing order reproduce the
-        // capture-time `active_cuts()` order.
         let active_slots: Option<Vec<u32>> = stage_cuts
             .iter()
             .find(|sc| sc.stage_id == record.stage_id)
@@ -147,15 +204,89 @@ pub fn build_basis_cache_from_checkpoint(
     cache
 }
 
-/// Load boundary cuts from a source Cobre policy checkpoint.
+/// Positional identity of one state-vector slot; `was_active` is excluded —
+/// adding it would reject a cut whose entity merely changed activity across
+/// studies.
+fn slot_identity(slot: &cobre_io::EntitySlot) -> (u8, i32, u32) {
+    (slot.entity_type, slot.entity_id, slot.subindex)
+}
+
+/// Compare two entity manifests slot-for-slot by `slot_identity`.
 ///
-/// Reads the checkpoint at `boundary_path`, extracts cuts from the stage
-/// identified by `source_stage`, and validates that the source state dimension
-/// matches `current_state_dimension`.
+/// `source` (a loaded policy's manifest) and `current` (the current study's
+/// terminal manifest) describe the same-length state vector of two studies. A
+/// per-slot `(entity_type, entity_id, subindex)` mismatch means a cut coefficient
+/// would attach to the wrong state variable and is REJECTED. `was_active` is
+/// excluded from `slot_identity`, so a `source`-dormant slot now active only warns.
+/// An empty manifest on either side (a pre-manifest checkpoint) cannot be
+/// verified: warn and return `Ok`, leaving the caller's `state_dimension` check
+/// standing.
 ///
-/// Only `state_dimension` must match between the source and current study —
-/// `num_stages` may differ (e.g., a monthly source checkpoint vs. a
-/// weekly+monthly current study).
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] if `source` and `current` differ in length
+/// or in any slot's `(entity_type, entity_id, subindex)`.
+pub fn compare_manifest_slot_identity(
+    source: &[cobre_io::EntitySlot],
+    current: &[cobre_io::EntitySlot],
+    on_warning: &mut dyn FnMut(&str),
+) -> Result<(), SddpError> {
+    if source.is_empty() || current.is_empty() {
+        on_warning(&format!(
+            "entity manifest absent (source slots: {}, current slots: {}); slot identity \
+             could not be verified, relying on state_dimension alone",
+            source.len(),
+            current.len(),
+        ));
+        return Ok(());
+    }
+
+    if source.len() != current.len() {
+        return Err(SddpError::Validation(format!(
+            "entity manifest length mismatch: source has {} slots, current study has {}",
+            source.len(),
+            current.len()
+        )));
+    }
+
+    for (i, (src, cur)) in source.iter().zip(current).enumerate() {
+        if slot_identity(src) != slot_identity(cur) {
+            return Err(SddpError::Validation(format!(
+                "entity-identity mismatch at slot {i}: \
+                 source (entity_type={}, entity_id={}, subindex={}) != \
+                 current (entity_type={}, entity_id={}, subindex={}); \
+                 the cut coefficient at this slot would attach to the wrong state variable",
+                src.entity_type,
+                src.entity_id,
+                src.subindex,
+                cur.entity_type,
+                cur.entity_id,
+                cur.subindex
+            )));
+        }
+        if !src.was_active && cur.was_active {
+            on_warning(&format!(
+                "slot {i} (entity_type={}, entity_id={}, subindex={}) was dormant in the source \
+                 policy but is active in the current study; loading its cut",
+                cur.entity_type, cur.entity_id, cur.subindex
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Load boundary cuts from the `source_stage` of a source Cobre policy checkpoint.
+///
+/// Per-slot matching compares the source stage's manifest to the current
+/// TERMINAL-stage manifest (both length `state_dimension`); `num_stages` may
+/// differ. `current_manifest` is built via
+/// [`StudySetup::build_terminal_entity_manifest`](crate::StudySetup::build_terminal_entity_manifest)
+/// (single owner of identity resolution, shared with the checkpoint writer). An
+/// empty manifest (pre-manifest checkpoint) leaves the `state_dimension` check
+/// standing and warns; a `was_active == false` boundary slot whose current
+/// counterpart is active warns and loads. Delegates to [`validate_policy_load`]
+/// with [`PolicyLoadKind::BoundaryInjection`] for the per-slot identity reject.
 ///
 /// # Errors
 ///
@@ -163,10 +294,14 @@ pub fn build_basis_cache_from_checkpoint(
 /// - The checkpoint cannot be read
 /// - `source_stage` does not exist in the checkpoint
 /// - The source stage's state dimension does not match `current_state_dimension`
+/// - A populated boundary manifest disagrees with `current_manifest` in length or
+///   in any slot's `(entity_type, entity_id, subindex)`
 pub fn load_boundary_cuts(
     boundary_path: &std::path::Path,
     source_stage: u32,
     current_state_dimension: u32,
+    current_manifest: &[cobre_io::EntitySlot],
+    on_warning: &mut dyn FnMut(&str),
 ) -> Result<Vec<cobre_io::OwnedPolicyCutRecord>, SddpError> {
     let checkpoint =
         cobre_io::output::policy::read_policy_checkpoint(boundary_path).map_err(|e| {
@@ -193,12 +328,19 @@ pub fn load_boundary_cuts(
             ))
         })?;
 
-    if stage_result.state_dimension != current_state_dimension {
-        return Err(SddpError::Validation(format!(
-            "boundary policy state_dimension mismatch: source stage {} has {}, \
-             current study has {}",
-            source_stage, stage_result.state_dimension, current_state_dimension
-        )));
+    let source = PolicyStageManifest {
+        state_dimension: stage_result.state_dimension,
+        num_stages: checkpoint.metadata.num_stages,
+        slots: &stage_result.entity_manifest,
+    };
+    let current = PolicyStageManifest {
+        state_dimension: current_state_dimension,
+        num_stages: checkpoint.metadata.num_stages,
+        slots: current_manifest,
+    };
+    let report = validate_policy_load(&source, &current, PolicyLoadKind::BoundaryInjection)?;
+    for warning in &report.warnings {
+        on_warning(warning);
     }
 
     Ok(stage_result.cuts.clone())
@@ -207,13 +349,9 @@ pub fn load_boundary_cuts(
 /// Inject boundary cuts into the terminal stage of the study's FCF.
 ///
 /// Replaces the terminal stage's [`CutPool`] with one pre-populated from
-/// `boundary_records`. The pool retains capacity for new training cuts;
-/// only the terminal pool is modified.
-///
-/// After this call, `setup.fcf().pools[num_stages - 1].warm_start_count`
-/// equals `boundary_records.len()`, which causes the forward pass to set
-/// `terminal_has_boundary_cuts = true` and prevents theta zeroing at the
-/// terminal stage.
+/// `boundary_records`, retaining capacity for new training cuts. The resulting
+/// nonzero `warm_start_count` is what makes the forward pass treat the terminal
+/// stage as boundary-loaded (`terminal_has_boundary_cuts`) and skip theta zeroing.
 pub fn inject_boundary_cuts(
     setup: &mut StudySetup,
     boundary_records: &[cobre_io::OwnedPolicyCutRecord],
@@ -225,10 +363,9 @@ pub fn inject_boundary_cuts(
     let existing_capacity = fcf.pools[terminal_idx].capacity;
     let existing_warm_start = fcf.pools[terminal_idx].warm_start_count as usize;
     let training_capacity = existing_capacity.saturating_sub(existing_warm_start);
+    #[allow(clippy::cast_possible_truncation)]
     let max_iterations = if forward_passes > 0 {
-        #[allow(clippy::cast_possible_truncation)]
-        let m = (training_capacity / forward_passes as usize) as u64;
-        m
+        (training_capacity / forward_passes as usize) as u64
     } else {
         0
     };
@@ -243,14 +380,25 @@ pub fn inject_boundary_cuts(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::cast_possible_truncation)]
 mod tests {
-    use cobre_io::{PolicyCheckpointMetadata, StageCutsPayload};
+    use cobre_io::{EntitySlot, PolicyCheckpointMetadata, StageCutsPayload};
 
-    use super::{load_boundary_cuts, resolve_warm_start_counts, validate_policy_compatibility};
+    use super::{
+        PolicyLoadKind, PolicyStageManifest, compare_manifest_slot_identity, load_boundary_cuts,
+        resolve_warm_start_counts, validate_policy_load,
+    };
+    use crate::SddpError;
 
     // ── helpers ───────────────────────────────────────────────────────────────
 
+    /// Discard warnings: a `&mut dyn FnMut(&str)` for tests asserting only the
+    /// `Result`.
+    fn ignore_warnings() -> impl FnMut(&str) {
+        |_| {}
+    }
+
     /// Write a minimal policy checkpoint to `dir` with `n_stages` stages each
-    /// having `state_dimension` state variables and the supplied cut intercepts.
+    /// having `state_dimension` state variables and the supplied cut intercepts,
+    /// with no entity manifest (the pre-manifest checkpoint shape).
     ///
     /// Each stage gets `cuts.len()` cuts with coefficients all set to 1.0.
     fn write_minimal_checkpoint(
@@ -258,6 +406,18 @@ mod tests {
         n_stages: u32,
         state_dimension: u32,
         cut_intercepts: &[f64],
+    ) {
+        write_checkpoint_with_manifest(dir, n_stages, state_dimension, cut_intercepts, &[]);
+    }
+
+    /// Like [`write_minimal_checkpoint`] but attaches `manifest` to every stage's
+    /// cuts payload (an empty `manifest` reproduces the pre-manifest shape).
+    fn write_checkpoint_with_manifest(
+        dir: &std::path::Path,
+        n_stages: u32,
+        state_dimension: u32,
+        cut_intercepts: &[f64],
+        manifest: &[EntitySlot],
     ) {
         let state_dim = state_dimension as usize;
         let coefficients = vec![1.0_f64; state_dim];
@@ -294,6 +454,7 @@ mod tests {
                 cuts: &cut_records[s],
                 active_cut_indices: &active_indices[s],
                 populated_count: n_cuts as u32,
+                entity_manifest: manifest,
             })
             .collect();
 
@@ -311,6 +472,8 @@ mod tests {
             warm_start_counts: vec![],
             rng_seed: 0,
             total_visited_states: 0,
+            training_block_mode: "parallel".to_string(),
+            training_block_mode_per_stage: vec![],
         };
 
         cobre_io::write_policy_checkpoint(dir, &payloads, &[], &metadata, &[]).unwrap();
@@ -327,7 +490,7 @@ mod tests {
         let intercepts = vec![10.0, 20.0, 30.0];
         write_minimal_checkpoint(tmp.path(), 12, 10, &intercepts);
 
-        let cuts = load_boundary_cuts(tmp.path(), 2, 10).unwrap();
+        let cuts = load_boundary_cuts(tmp.path(), 2, 10, &[], &mut ignore_warnings()).unwrap();
 
         assert_eq!(cuts.len(), 3, "should return all 3 cuts from stage 2");
         let returned_intercepts: Vec<f64> = cuts.iter().map(|c| c.intercept).collect();
@@ -352,7 +515,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_minimal_checkpoint(tmp.path(), 5, 10, &[1.0]);
 
-        let result = load_boundary_cuts(tmp.path(), 99, 10);
+        let result = load_boundary_cuts(tmp.path(), 99, 10, &[], &mut ignore_warnings());
 
         assert!(result.is_err(), "should fail for missing stage");
         let msg = result.unwrap_err().to_string();
@@ -374,7 +537,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_minimal_checkpoint(tmp.path(), 5, 10, &[1.0]);
 
-        let result = load_boundary_cuts(tmp.path(), 0, 5);
+        let result = load_boundary_cuts(tmp.path(), 0, 5, &[], &mut ignore_warnings());
 
         assert!(result.is_err(), "should fail for dimension mismatch");
         let msg = result.unwrap_err().to_string();
@@ -388,7 +551,13 @@ mod tests {
     /// returns `Err(SddpError::Validation)` with a message describing the failure.
     #[test]
     fn load_boundary_cuts_nonexistent_path_returns_error() {
-        let result = load_boundary_cuts(std::path::Path::new("/nonexistent/path/to/policy"), 0, 10);
+        let result = load_boundary_cuts(
+            std::path::Path::new("/nonexistent/path/to/policy"),
+            0,
+            10,
+            &[],
+            &mut ignore_warnings(),
+        );
 
         assert!(result.is_err(), "should fail for non-existent path");
         let msg = result.unwrap_err().to_string();
@@ -398,63 +567,540 @@ mod tests {
         );
     }
 
-    fn sample_metadata() -> PolicyCheckpointMetadata {
-        PolicyCheckpointMetadata {
-            cobre_version: "0.2.2".to_string(),
-            created_at: "2026-03-29T00:00:00Z".to_string(),
-            completed_iterations: 50,
-            final_lower_bound: 1234.56,
-            best_upper_bound: Some(1300.0),
-            state_dimension: 10,
-            num_stages: 12,
-            max_iterations: 200,
-            forward_passes: 4,
-            warm_start_cuts: 0,
-            warm_start_counts: vec![],
-            rng_seed: 42,
-            total_visited_states: 0,
+    /// Build a 2-slot storage manifest with the given hydro ids, both active.
+    fn storage_manifest(id0: i32, id1: i32) -> Vec<EntitySlot> {
+        vec![storage_slot(id0), storage_slot(id1)]
+    }
+
+    /// A single active `HydroStorage` slot (`entity_type 0`, `subindex 0`).
+    fn storage_slot(id: i32) -> EntitySlot {
+        EntitySlot {
+            entity_type: 0,
+            entity_id: id,
+            subindex: 0,
+            was_active: true,
+            delivery_anchor: cobre_io::ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
         }
     }
 
-    #[test]
-    fn compatible_metadata_passes() {
-        let meta = sample_metadata();
-        assert!(validate_policy_compatibility(&meta, 10, 12).is_ok());
+    /// A single active `HydroTransitBucket` slot (`entity_type 3`): `id` is the
+    /// downstream hydro, `lag` the maturity subindex.
+    fn transit_bucket_slot(id: i32, lag: u32) -> EntitySlot {
+        EntitySlot {
+            entity_type: 3,
+            entity_id: id,
+            subindex: lag,
+            was_active: true,
+            delivery_anchor: cobre_io::ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
+        }
     }
 
+    /// Given a checkpoint whose source-stage manifest matches the current study's
+    /// terminal manifest slot-for-slot, `load_boundary_cuts` returns `Ok` with the
+    /// source cuts and emits no warning.
     #[test]
-    fn state_dimension_mismatch_fails() {
-        let meta = sample_metadata();
-        let result = validate_policy_compatibility(&meta, 8, 12);
-        assert!(result.is_err());
+    fn load_boundary_cuts_matching_manifest_loads_without_warning() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = storage_manifest(1, 2);
+        write_checkpoint_with_manifest(tmp.path(), 5, 2, &[10.0, 20.0], &manifest);
+
+        let current = storage_manifest(1, 2);
+        let mut warnings: Vec<String> = Vec::new();
+        let cuts = load_boundary_cuts(tmp.path(), 0, 2, &current, &mut |m| {
+            warnings.push(m.to_string());
+        })
+        .unwrap();
+
+        assert_eq!(cuts.len(), 2, "matching manifest must load all cuts");
+        assert!(
+            warnings.is_empty(),
+            "a slot-for-slot match must emit no warning: {warnings:?}"
+        );
+    }
+
+    /// Given a boundary slot 0 with `entity_id` 7 but a current slot 0 with
+    /// `entity_id` 9 (same `state_dimension`), `load_boundary_cuts` rejects with a
+    /// `Validation` error naming slot `0`, `7`, and `9`.
+    #[test]
+    fn load_boundary_cuts_entity_id_mismatch_rejects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let boundary = storage_manifest(7, 2);
+        write_checkpoint_with_manifest(tmp.path(), 5, 2, &[10.0, 20.0], &boundary);
+
+        let current = storage_manifest(9, 2);
+        let result = load_boundary_cuts(tmp.path(), 0, 2, &current, &mut ignore_warnings());
+
+        assert!(result.is_err(), "entity_id mismatch at slot 0 must reject");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("slot 0"), "error must name slot 0: {msg}");
+        assert!(
+            msg.contains("entity_id=7"),
+            "error must name the boundary id 7: {msg}"
+        );
+        assert!(
+            msg.contains("entity_id=9"),
+            "error must name the current id 9: {msg}"
+        );
+    }
+
+    /// Given a boundary slot 1 typed `HydroInflowLag` (type 1) but a current slot 1
+    /// typed `HydroStorage` (type 0), `load_boundary_cuts` rejects naming slot 1 and
+    /// the differing entity types.
+    #[test]
+    fn load_boundary_cuts_type_mismatch_rejects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut boundary = storage_manifest(1, 2);
+        boundary[1].entity_type = 1; // HydroInflowLag
+        boundary[1].subindex = 1;
+        write_checkpoint_with_manifest(tmp.path(), 5, 2, &[10.0, 20.0], &boundary);
+
+        let current = storage_manifest(1, 2);
+        let result = load_boundary_cuts(tmp.path(), 0, 2, &current, &mut ignore_warnings());
+
+        assert!(result.is_err(), "type mismatch at slot 1 must reject");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("slot 1"), "error must name slot 1: {msg}");
+        assert!(
+            msg.contains("entity_type=1"),
+            "error must name the boundary type 1: {msg}"
+        );
+        assert!(
+            msg.contains("entity_type=0"),
+            "error must name the current type 0: {msg}"
+        );
+    }
+
+    /// Given a boundary checkpoint with an empty manifest and a matching
+    /// `current_state_dimension`, `load_boundary_cuts` returns `Ok` (no hard fail on
+    /// absence) and surfaces an "identity could not be verified" warning.
+    #[test]
+    fn load_boundary_cuts_absent_manifest_loads_with_warning() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_checkpoint_with_manifest(tmp.path(), 5, 2, &[10.0, 20.0], &[]);
+
+        let current = storage_manifest(1, 2);
+        let mut warnings: Vec<String> = Vec::new();
+        let cuts = load_boundary_cuts(tmp.path(), 0, 2, &current, &mut |m| {
+            warnings.push(m.to_string());
+        })
+        .unwrap();
+
+        assert_eq!(cuts.len(), 2, "absent manifest must still load cuts");
+        assert_eq!(warnings.len(), 1, "absence must surface one warning");
+        assert!(
+            warnings[0].contains("manifest absent"),
+            "warning must flag the absent manifest: {}",
+            warnings[0]
+        );
+    }
+
+    /// Given a boundary slot whose identity matches the current study but whose
+    /// `was_active` is `false` while the current study treats it as active,
+    /// `load_boundary_cuts` returns `Ok` (cut loaded) and surfaces a `was_active`
+    /// divergence warning.
+    #[test]
+    fn load_boundary_cuts_was_active_divergence_warns_and_loads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut boundary = storage_manifest(1, 2);
+        boundary[1].was_active = false; // dormant at the boundary stage
+        write_checkpoint_with_manifest(tmp.path(), 5, 2, &[10.0, 20.0], &boundary);
+
+        let current = storage_manifest(1, 2);
+        let mut warnings: Vec<String> = Vec::new();
+        let cuts = load_boundary_cuts(tmp.path(), 0, 2, &current, &mut |m| {
+            warnings.push(m.to_string());
+        })
+        .unwrap();
+
+        assert_eq!(cuts.len(), 2, "was_active divergence must still load cuts");
+        assert_eq!(warnings.len(), 1, "divergence must surface one warning");
+        assert!(
+            warnings[0].contains("dormant") && warnings[0].contains("slot 1"),
+            "warning must flag slot 1's dormancy divergence: {}",
+            warnings[0]
+        );
+    }
+
+    /// A manifest carrying a `HydroTransitBucket` slot (`entity_type 3`, the
+    /// downstream hydro id, the maturity lag as `subindex`) round-trips: written to a
+    /// checkpoint and reloaded against a slot-for-slot matching current manifest,
+    /// `load_boundary_cuts` returns `Ok` with no warning — the bucket slot passes
+    /// `slot_identity`.
+    #[test]
+    fn load_boundary_cuts_matching_transit_bucket_manifest_round_trips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = vec![storage_slot(1), transit_bucket_slot(2, 1)];
+        write_checkpoint_with_manifest(tmp.path(), 5, 2, &[10.0, 20.0], &manifest);
+
+        let current = vec![storage_slot(1), transit_bucket_slot(2, 1)];
+        let mut warnings: Vec<String> = Vec::new();
+        let cuts = load_boundary_cuts(tmp.path(), 0, 2, &current, &mut |m| {
+            warnings.push(m.to_string());
+        })
+        .unwrap();
+
+        assert_eq!(cuts.len(), 2, "matching bucket manifest must load all cuts");
+        assert!(
+            warnings.is_empty(),
+            "a slot-for-slot bucket match must emit no warning: {warnings:?}"
+        );
+    }
+
+    /// A policy exported WITHOUT travel-time buckets (slot 1 typed `HydroStorage`)
+    /// loaded by bucket-aware code whose terminal manifest types slot 1 as
+    /// `HydroTransitBucket` (type 3) is rejected: the per-slot identity check names
+    /// slot 1 and the differing types. Asserts the `load_boundary_cuts` rejection
+    /// primitive fires on the bucket-vs-non-bucket case (the end-to-end force-on
+    /// wiring lands separately).
+    #[test]
+    fn load_boundary_cuts_missing_transit_bucket_slot_identity_rejects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let boundary = storage_manifest(1, 2);
+        write_checkpoint_with_manifest(tmp.path(), 5, 2, &[10.0, 20.0], &boundary);
+
+        let current = vec![storage_slot(1), transit_bucket_slot(2, 1)];
+        let result = load_boundary_cuts(tmp.path(), 0, 2, &current, &mut ignore_warnings());
+
+        assert!(
+            result.is_err(),
+            "bucket-vs-non-bucket at slot 1 must reject"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("slot 1"), "error must name slot 1: {msg}");
+        assert!(
+            msg.contains("entity_type=3"),
+            "error must name the current bucket type 3: {msg}"
+        );
+        assert!(
+            msg.contains("entity_type=0"),
+            "error must name the boundary storage type 0: {msg}"
+        );
+    }
+
+    /// A policy exported WITHOUT travel-time buckets has a smaller `state_dimension`
+    /// than the bucket-aware current study, so `load_boundary_cuts` rejects on the
+    /// `state_dimension` guard before per-slot identity. Pairs with the force-on
+    /// wiring that lands separately.
+    #[test]
+    fn load_boundary_cuts_no_transit_bucket_export_dimension_mismatch_rejects() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_checkpoint_with_manifest(tmp.path(), 5, 2, &[10.0, 20.0], &storage_manifest(1, 2));
+
+        let current = vec![storage_slot(1), storage_slot(2), transit_bucket_slot(2, 1)];
+        let result = load_boundary_cuts(tmp.path(), 0, 3, &current, &mut ignore_warnings());
+
+        assert!(
+            result.is_err(),
+            "no-bucket export vs bucket study must reject"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("state_dimension"),
+            "error must cite state_dimension: {msg}"
+        );
+    }
+
+    // ── compare_manifest_slot_identity tests ──────────────────────────────────
+
+    /// Two same-length manifests differing only at slot 0's `entity_id` (7 vs 9)
+    /// are rejected, naming slot `0` and both ids.
+    #[test]
+    fn compare_manifest_slot_identity_same_dim_different_id_rejects() {
+        let source = storage_manifest(7, 2);
+        let current = storage_manifest(9, 2);
+
+        let result = compare_manifest_slot_identity(&source, &current, &mut ignore_warnings());
+
+        assert!(result.is_err(), "different entity_id at slot 0 must reject");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("slot 0"), "error must name slot 0: {msg}");
+        assert!(msg.contains("entity_id=7"), "error must name id 7: {msg}");
+        assert!(msg.contains("entity_id=9"), "error must name id 9: {msg}");
+    }
+
+    /// An empty `source` manifest cannot be verified: warn once and return `Ok`.
+    #[test]
+    fn compare_manifest_slot_identity_empty_source_warns_and_oks() {
+        let current = storage_manifest(1, 2);
+        let mut warnings: Vec<String> = Vec::new();
+
+        let result = compare_manifest_slot_identity(&[], &current, &mut |m| {
+            warnings.push(m.to_string());
+        });
+
+        assert!(result.is_ok(), "empty manifest must not hard-fail");
+        assert_eq!(
+            warnings.len(),
+            1,
+            "absence must surface exactly one warning"
+        );
+        assert!(
+            warnings[0].contains("manifest absent"),
+            "warning must flag the absent manifest: {}",
+            warnings[0]
+        );
+    }
+
+    /// Identical manifests pass with no warning.
+    #[test]
+    fn compare_manifest_slot_identity_identical_oks_without_warning() {
+        let source = storage_manifest(1, 2);
+        let current = storage_manifest(1, 2);
+        let mut warnings: Vec<String> = Vec::new();
+
+        let result = compare_manifest_slot_identity(&source, &current, &mut |m| {
+            warnings.push(m.to_string());
+        });
+
+        assert!(result.is_ok(), "identical manifests must pass");
+        assert!(
+            warnings.is_empty(),
+            "a slot-for-slot match must emit no warning: {warnings:?}"
+        );
+    }
+
+    /// A `source`-dormant slot whose current counterpart is active warns but
+    /// loads (`Ok`).
+    #[test]
+    fn compare_manifest_slot_identity_was_active_divergence_warns_and_oks() {
+        let mut source = storage_manifest(1, 2);
+        source[1].was_active = false;
+        let current = storage_manifest(1, 2);
+        let mut warnings: Vec<String> = Vec::new();
+
+        let result = compare_manifest_slot_identity(&source, &current, &mut |m| {
+            warnings.push(m.to_string());
+        });
+
+        assert!(result.is_ok(), "was_active divergence must not hard-fail");
+        assert_eq!(warnings.len(), 1, "divergence must surface one warning");
+        assert!(
+            warnings[0].contains("dormant") && warnings[0].contains("slot 1"),
+            "warning must flag slot 1's dormancy divergence: {}",
+            warnings[0]
+        );
+    }
+
+    /// The full-FCF terminal-manifest shape: a checkpoint terminal manifest
+    /// `[storage(7), storage(2)]` vs a current terminal manifest
+    /// `[storage(9), storage(2)]` at equal `state_dimension` is rejected with a
+    /// `Validation` error naming slot `0` — the same guard
+    /// `load_and_validate_checkpoint` applies after the dims/`num_stages` check.
+    #[test]
+    fn compare_manifest_full_fcf_terminal_entity_swap_rejects() {
+        let checkpoint_terminal = storage_manifest(7, 2);
+        let current_terminal = storage_manifest(9, 2);
+
+        let result = compare_manifest_slot_identity(
+            &checkpoint_terminal,
+            &current_terminal,
+            &mut ignore_warnings(),
+        );
+
+        assert!(
+            matches!(result, Err(SddpError::Validation(_))),
+            "same-dimension terminal entity swap must be a Validation error"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("slot 0"), "error must name slot 0: {msg}");
+        assert!(
+            msg.contains("entity_id=7") && msg.contains("entity_id=9"),
+            "error must name both diverging ids: {msg}"
+        );
+    }
+
+    // ── validate_policy_load tests ────────────────────────────────────────────
+
+    /// Identical `state_dimension`, `num_stages`, and slot-for-slot matching
+    /// manifests pass `FullFcf` with no warnings.
+    #[test]
+    fn validate_policy_load_full_fcf_identical_oks_without_warning() {
+        let slots = storage_manifest(1, 2);
+        let source = PolicyStageManifest {
+            state_dimension: 2,
+            num_stages: 12,
+            slots: &slots,
+        };
+        let current = PolicyStageManifest {
+            state_dimension: 2,
+            num_stages: 12,
+            slots: &slots,
+        };
+
+        let report = validate_policy_load(&source, &current, PolicyLoadKind::FullFcf).unwrap();
+
+        assert!(
+            report.warnings.is_empty(),
+            "identical manifests must emit no warning: {:?}",
+            report.warnings
+        );
+    }
+
+    /// A `state_dimension` mismatch is a hard reject on `FullFcf`.
+    #[test]
+    fn validate_policy_load_full_fcf_state_dimension_mismatch_rejects() {
+        let slots = storage_manifest(1, 2);
+        let source = PolicyStageManifest {
+            state_dimension: 10,
+            num_stages: 12,
+            slots: &slots,
+        };
+        let current = PolicyStageManifest {
+            state_dimension: 8,
+            num_stages: 12,
+            slots: &slots,
+        };
+
+        let result = validate_policy_load(&source, &current, PolicyLoadKind::FullFcf);
+
+        assert!(result.is_err(), "state_dimension mismatch must reject");
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("state_dimension"), "{msg}");
-        assert!(msg.contains("10"), "should include policy value: {msg}");
+        assert!(msg.contains("10"), "should include source value: {msg}");
         assert!(msg.contains('8'), "should include current value: {msg}");
     }
 
+    /// A `num_stages` mismatch is a hard reject on `FullFcf` but the identical
+    /// inputs pass `BoundaryInjection` (unchecked there).
     #[test]
-    fn num_stages_mismatch_fails() {
-        let meta = sample_metadata();
-        let result = validate_policy_compatibility(&meta, 10, 24);
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
+    fn validate_policy_load_num_stages_mismatch_rejects_full_fcf_oks_boundary() {
+        let slots = storage_manifest(1, 2);
+        let source = PolicyStageManifest {
+            state_dimension: 10,
+            num_stages: 12,
+            slots: &slots,
+        };
+        let current = PolicyStageManifest {
+            state_dimension: 10,
+            num_stages: 24,
+            slots: &slots,
+        };
+
+        let full_fcf_result = validate_policy_load(&source, &current, PolicyLoadKind::FullFcf);
+        assert!(
+            full_fcf_result.is_err(),
+            "num_stages mismatch must reject FullFcf"
+        );
+        let msg = full_fcf_result.unwrap_err().to_string();
         assert!(msg.contains("num_stages"), "{msg}");
-        assert!(msg.contains("12"), "should include policy value: {msg}");
+        assert!(msg.contains("12"), "should include source value: {msg}");
         assert!(msg.contains("24"), "should include current value: {msg}");
+
+        let boundary_result =
+            validate_policy_load(&source, &current, PolicyLoadKind::BoundaryInjection);
+        assert!(
+            boundary_result.is_ok(),
+            "num_stages is unchecked under BoundaryInjection: {boundary_result:?}"
+        );
     }
 
+    /// Both `state_dimension` (10 vs 8) and `num_stages` (12 vs 24) mismatch under
+    /// `FullFcf`; the `state_dimension` guard fires first, so the error names
+    /// `state_dimension`, not `num_stages`.
     #[test]
-    fn both_dimensions_mismatched_returns_err() {
-        let meta = sample_metadata();
-        // Both state_dimension (10 vs 8) and num_stages (12 vs 24) mismatch.
-        // The function should return an error on the first mismatch (state_dimension).
-        let result = validate_policy_compatibility(&meta, 8, 24);
-        assert!(result.is_err());
+    fn validate_policy_load_full_fcf_both_dimensions_mismatched_rejects() {
+        let slots = storage_manifest(1, 2);
+        let source = PolicyStageManifest {
+            state_dimension: 10,
+            num_stages: 12,
+            slots: &slots,
+        };
+        let current = PolicyStageManifest {
+            state_dimension: 8,
+            num_stages: 24,
+            slots: &slots,
+        };
+
+        let result = validate_policy_load(&source, &current, PolicyLoadKind::FullFcf);
+
+        assert!(result.is_err(), "both-dimension mismatch must reject");
         let msg = result.unwrap_err().to_string();
         assert!(
             msg.contains("state_dimension"),
             "should report state_dimension mismatch first: {msg}"
+        );
+    }
+
+    /// A per-slot identity mismatch is a hard reject under `FullFcf`, naming the
+    /// mismatched slot and both diverging `entity_id`s.
+    #[test]
+    fn validate_policy_load_full_fcf_slot_mismatch_rejects() {
+        let source_slots = storage_manifest(7, 2);
+        let current_slots = storage_manifest(9, 2);
+        let source = PolicyStageManifest {
+            state_dimension: 2,
+            num_stages: 12,
+            slots: &source_slots,
+        };
+        let current = PolicyStageManifest {
+            state_dimension: 2,
+            num_stages: 12,
+            slots: &current_slots,
+        };
+
+        let result = validate_policy_load(&source, &current, PolicyLoadKind::FullFcf);
+
+        assert!(result.is_err(), "slot identity mismatch must reject");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("slot 0"), "error must name slot 0: {msg}");
+        assert!(
+            msg.contains("entity_id=7"),
+            "error must name the source id 7: {msg}"
+        );
+        assert!(
+            msg.contains("entity_id=9"),
+            "error must name the current id 9: {msg}"
+        );
+    }
+
+    /// A per-slot identity mismatch is a hard reject under `BoundaryInjection`
+    /// too — slot identity is checked on both kinds, unlike `num_stages`.
+    #[test]
+    fn validate_policy_load_boundary_injection_slot_mismatch_rejects() {
+        let source_slots = storage_manifest(7, 2);
+        let current_slots = storage_manifest(9, 2);
+        let source = PolicyStageManifest {
+            state_dimension: 2,
+            num_stages: 12,
+            slots: &source_slots,
+        };
+        let current = PolicyStageManifest {
+            state_dimension: 2,
+            num_stages: 6,
+            slots: &current_slots,
+        };
+
+        let result = validate_policy_load(&source, &current, PolicyLoadKind::BoundaryInjection);
+
+        assert!(result.is_err(), "slot identity mismatch must reject");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("slot 0"), "error must name slot 0: {msg}");
+    }
+
+    /// An empty manifest on either side cannot be verified by slot identity:
+    /// `validate_policy_load` falls back to the `state_dimension` check alone,
+    /// returning `Ok` with one warning.
+    #[test]
+    fn validate_policy_load_full_fcf_empty_manifest_oks_with_warning() {
+        let current_slots = storage_manifest(1, 2);
+        let source = PolicyStageManifest {
+            state_dimension: 2,
+            num_stages: 12,
+            slots: &[],
+        };
+        let current = PolicyStageManifest {
+            state_dimension: 2,
+            num_stages: 12,
+            slots: &current_slots,
+        };
+
+        let report = validate_policy_load(&source, &current, PolicyLoadKind::FullFcf).unwrap();
+
+        assert_eq!(report.warnings.len(), 1, "absence must surface one warning");
+        assert!(
+            report.warnings[0].contains("manifest absent"),
+            "warning must flag the absent manifest: {}",
+            report.warnings[0]
         );
     }
 
@@ -484,6 +1130,8 @@ mod tests {
             warm_start_counts,
             rng_seed: 0,
             total_visited_states: 0,
+            training_block_mode: "parallel".to_string(),
+            training_block_mode_per_stage: vec![],
         }
     }
 
@@ -496,7 +1144,6 @@ mod tests {
 
     #[test]
     fn resolve_warm_start_counts_old_format_broadcasts_scalar() {
-        // Empty warm_start_counts: fall back to warm_start_cuts broadcast.
         let meta = meta_with_counts(5, vec![]);
         let counts = resolve_warm_start_counts(&meta, 3).unwrap();
         assert_eq!(counts, vec![5u32, 5, 5]);
@@ -511,7 +1158,6 @@ mod tests {
 
     #[test]
     fn resolve_warm_start_counts_wrong_length_returns_validation_error() {
-        // warm_start_counts has 2 entries but num_stages is 3 — corrupted checkpoint.
         let meta = meta_with_counts(5, vec![5, 5]);
         let result = resolve_warm_start_counts(&meta, 3);
         assert!(result.is_err());
@@ -536,5 +1182,130 @@ mod tests {
         let meta = meta_with_counts(5, vec![]);
         let counts = resolve_warm_start_counts(&meta, 0).unwrap();
         assert!(counts.is_empty());
+    }
+
+    // ── basis-status export+load round-trip (§E6) ─────────────────────────────
+
+    /// Every one of the seven `BasisStatus` variants survives the full
+    /// export→disk→load path losslessly — including the CLP-only `Superbasic`
+    /// and `Fixed`, which the old `to_highs_code` path folded onto `Nonbasic`/
+    /// `Lower`. Encode via `convert_basis_cache`, round-trip through the codec,
+    /// decode via `build_basis_cache_from_checkpoint`.
+    #[test]
+    fn basis_status_round_trips_through_export_and_load_for_every_variant() {
+        use cobre_io::{PolicyBasisRecord, deserialize_stage_basis, serialize_stage_basis};
+        use cobre_solver::{Basis, BasisStatus};
+
+        use super::build_basis_cache_from_checkpoint;
+        use crate::TrainingResult;
+        use crate::policy_export::convert_basis_cache;
+        use crate::workspace::CapturedBasis;
+
+        let col_status = vec![
+            BasisStatus::Lower,
+            BasisStatus::Basic,
+            BasisStatus::Upper,
+            BasisStatus::Zero,
+            BasisStatus::Nonbasic,
+            BasisStatus::Superbasic,
+            BasisStatus::Fixed,
+        ];
+        // Reversed so the column and row vectors are checked independently.
+        let mut row_status = col_status.clone();
+        row_status.reverse();
+
+        let captured = CapturedBasis {
+            basis: Basis {
+                col_status: col_status.clone(),
+                row_status: row_status.clone(),
+            },
+            base_row_count: row_status.len(),
+            cut_row_slots: Vec::new(),
+            state_at_capture: Vec::new(),
+        };
+        let training_result = TrainingResult::new(
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1,
+            "test".to_string(),
+            0,
+            vec![Some(captured)],
+            Vec::new(),
+            None,
+            None,
+        );
+
+        let (col_u8, row_u8) = convert_basis_cache(&training_result);
+
+        let record = PolicyBasisRecord {
+            stage_id: 0,
+            iteration: 1,
+            column_status: &col_u8[0],
+            row_status: &row_u8[0],
+            num_cut_rows: 0,
+        };
+        let buf = serialize_stage_basis(&record);
+        let owned = deserialize_stage_basis(&buf).expect("codec round-trip must succeed");
+
+        let cache = build_basis_cache_from_checkpoint(1, std::slice::from_ref(&owned), &[]);
+        let recovered = cache[0].as_ref().expect("stage 0 basis must be present");
+
+        assert_eq!(
+            recovered.basis.col_status, col_status,
+            "every column variant must round-trip losslessly"
+        );
+        assert_eq!(
+            recovered.basis.row_status, row_status,
+            "every row variant must round-trip losslessly, including Superbasic/Fixed"
+        );
+    }
+
+    /// Pre-existing-file compatibility: a checkpoint written by the pre-canonical
+    /// writer stored `HiGHS` codes (bytes `0..=4`) directly in `column_status`/
+    /// `row_status`. Those same bytes must load to exactly the statuses the old
+    /// `HiGHS`-space decode produced, since `0..=4` means the same in the canonical
+    /// and `HiGHS` code spaces.
+    #[test]
+    fn pre_existing_checkpoint_bytes_load_to_highs_space_statuses() {
+        use cobre_io::{PolicyBasisRecord, deserialize_stage_basis, serialize_stage_basis};
+        use cobre_solver::BasisStatus;
+
+        use super::build_basis_cache_from_checkpoint;
+
+        // HiGHS codes 0..=4, exactly what the pre-canonical writer stored on disk.
+        let col_bytes: [u8; 5] = [0, 1, 2, 3, 4];
+        let row_bytes: [u8; 5] = [4, 3, 2, 1, 0];
+
+        let record = PolicyBasisRecord {
+            stage_id: 0,
+            iteration: 1,
+            column_status: &col_bytes,
+            row_status: &row_bytes,
+            num_cut_rows: 0,
+        };
+        let buf = serialize_stage_basis(&record);
+        let owned = deserialize_stage_basis(&buf).expect("codec round-trip must succeed");
+
+        let cache = build_basis_cache_from_checkpoint(1, std::slice::from_ref(&owned), &[]);
+        let recovered = cache[0].as_ref().expect("stage 0 basis must be present");
+
+        let expected_col: Vec<BasisStatus> = col_bytes
+            .iter()
+            .map(|&c| BasisStatus::from_highs_code(i32::from(c)))
+            .collect();
+        let expected_row: Vec<BasisStatus> = row_bytes
+            .iter()
+            .map(|&c| BasisStatus::from_highs_code(i32::from(c)))
+            .collect();
+        assert_eq!(
+            recovered.basis.col_status, expected_col,
+            "old-file bytes must load to the old HiGHS-space column statuses"
+        );
+        assert_eq!(
+            recovered.basis.row_status, expected_row,
+            "old-file bytes must load to the old HiGHS-space row statuses"
+        );
     }
 }

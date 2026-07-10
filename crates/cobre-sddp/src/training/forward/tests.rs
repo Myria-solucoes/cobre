@@ -97,16 +97,12 @@ impl MockSolver {
     }
 
     /// Shared solve logic used by both cold-start and warm-start paths.
-    ///
-    /// Increments `call_count` and returns `Infeasible` when `call_count`
-    /// matches `infeasible_at`, otherwise returns the stored solution.
     fn do_solve(&mut self) -> Result<cobre_solver::SolutionView<'_>, SolverError> {
         let call = self.call_count;
         self.call_count += 1;
         if self.infeasible_at == Some(call) {
             return Err(SolverError::Infeasible);
         }
-        // Fill internal buffers from the stored solution.
         self.buf_primal.clone_from(&self.solution.primal);
         self.buf_dual.clone_from(&self.solution.dual);
         self.buf_reduced_costs
@@ -168,26 +164,10 @@ impl SolverInterface for MockSolver {
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
-/// Minimal valid stage template for N=1 hydro, L=0 PAR order.
-///
-/// Column layout: [storage (0), `storage_in` (1), theta (2)]
-/// Row layout: [`storage_fixing` (0)]
+/// Minimal valid stage template for N=1 hydro, L=0 PAR order: columns
+/// `[storage_out(0), z_inflow(1), storage_in(2), theta(3)]`, one storage-fixing
+/// row whose only nonzero is the `storage_in` coefficient. Minimises theta.
 fn minimal_template_1_0() -> StageTemplate {
-    // N=1, L=0:
-    //   storage      = 0..1
-    //   storage_in   = 1..2
-    //   theta        = 2
-    //   n_state      = 1
-    //   n_transfer   = 0
-    //   n_dual_relevant = 1
-    //
-    // Column layout for N=1, L=0:
-    //   col 0: storage_out, col 1: z_inflow, col 2: storage_in, col 3: theta
-    //
-    // LP: min theta  s.t. storage_in = ? (patched)  x >= 0
-    //
-    // CSC matrix has 1 non-zero: storage_in coefficient in storage_fixing row.
-    // Simplified to a structurally valid but otherwise no-op LP for testing.
     StageTemplate {
         num_cols: 4,
         num_rows: 1,
@@ -210,10 +190,6 @@ fn minimal_template_1_0() -> StageTemplate {
     }
 }
 
-/// Build a fixed `LpSolution` with `num_cols` columns.
-///
-/// `objective` is passed directly. `primal[theta_col]` is set to
-/// `theta_val`; all other primal entries are zero.
 fn fixed_solution(num_cols: usize, objective: f64, theta_col: usize, theta_val: f64) -> LpSolution {
     let mut primal = vec![0.0_f64; num_cols];
     primal[theta_col] = theta_val;
@@ -228,7 +204,6 @@ fn fixed_solution(num_cols: usize, objective: f64, theta_col: usize, theta_val: 
     }
 }
 
-/// Allocate `n` empty `TrajectoryRecord`s.
 fn empty_records(n: usize) -> Vec<TrajectoryRecord> {
     (0..n)
         .map(|_| TrajectoryRecord {
@@ -251,6 +226,7 @@ fn make_stochastic_context_1_hydro_3_stages() -> StochasticContext {
     let bus = Bus {
         id: EntityId(0),
         name: "B0".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 1000.0,
@@ -260,8 +236,10 @@ fn make_stochastic_context_1_hydro_3_stages() -> StochasticContext {
     let hydro = Hydro {
         id: EntityId(1),
         name: "H1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(0),
         downstream_id: None,
+        travel_time_hours: None,
         entry_stage_id: None,
         exit_stage_id: None,
         min_storage_hm3: 0.0,
@@ -413,9 +391,6 @@ fn forward_result_clone_and_debug() {
 
 // ── Unit tests: forward overhead decomposition ───────────────────────────
 
-/// Verify the three-component decomposition: 4 workers with solve times
-/// 500/600/550/580 ms and setup times 50/60/45/55 ms yields setup=210,
-/// imbalance=50, scheduling varies by `parallel_wall_ms`.
 #[test]
 fn forward_overhead_decomposition_four_workers() {
     use cobre_solver::SolverStatistics;
@@ -437,7 +412,6 @@ fn forward_overhead_decomposition_four_workers() {
         }
     }
 
-    // Solve times (s): 0.5, 0.6, 0.55, 0.58; setup times (s): 0.05, 0.06, 0.045, 0.055
     let befores = [
         make_stats(0.0, 0.0, 0.0, 0.0),
         make_stats(0.0, 0.0, 0.0, 0.0),
@@ -457,13 +431,11 @@ fn forward_overhead_decomposition_four_workers() {
         .map(|(b, a)| SolverStatsDelta::from_snapshots(b, a))
         .collect();
 
-    // setup_time_ms: sum of all workers' setup phases.
     let setup_ms: f64 = deltas
         .iter()
         .map(|d| d.load_model_time_ms + d.set_bounds_time_ms + d.basis_set_time_ms)
         .sum();
 
-    // Per-worker totals: solve + setup.
     let worker_totals: Vec<f64> = deltas
         .iter()
         .map(|d| {
@@ -506,7 +478,6 @@ fn forward_overhead_decomposition_four_workers() {
     );
 }
 
-/// Edge case: single worker — load imbalance must be exactly zero.
 #[test]
 fn forward_overhead_decomposition_single_worker_zero_imbalance() {
     use cobre_solver::SolverStatistics;
@@ -539,8 +510,6 @@ fn forward_overhead_decomposition_single_worker_zero_imbalance() {
     );
 }
 
-/// Edge case: scheduling overhead is clamped to zero when parallel wall
-/// time is less than the max worker total (clock-skew scenario).
 #[test]
 fn forward_overhead_scheduling_clamped_to_zero_on_clock_skew() {
     use cobre_solver::SolverStatistics;
@@ -570,7 +539,6 @@ fn forward_overhead_scheduling_clamped_to_zero_on_clock_skew() {
     );
 }
 
-/// Build a single-workspace from a solver sized for the given `indexer`.
 fn single_workspace(
     solver: MockSolver,
     state: &crate::indexer::StateLayout,
@@ -582,6 +550,7 @@ fn single_workspace(
         patch_buf: crate::lp_builder::PatchBuffer::new(
             state.hydro_count,
             state.max_par_order,
+            0,
             0,
             0,
             0,
@@ -618,7 +587,6 @@ fn single_workspace(
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
-            anticipated_state_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -658,13 +626,11 @@ fn make_stages_3() -> Vec<Stage> {
 
 // ── Acceptance criteria integration tests ───────────────────────────────
 
-/// AC: 2 scenarios, 3 stages, fixed `LpSolution(objective=100, theta=30)`.
-/// Expected: `scenario_count=2`, all 6 records with `stage_cost=70_000`.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn ac_two_scenarios_three_stages_fixed_solution() {
     // State layout: N=1, L=0 → n_state=1, theta=3, num_cols=4
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     let solver = MockSolver::always_ok(solution);
     let fcf = FutureCostFunction::new(3, state.n_state, 2, 100, &[0; 3]);
@@ -744,7 +710,11 @@ fn ac_two_scenarios_three_stages_fixed_solution() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state,
+                horizon.num_stages(),
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -759,7 +729,6 @@ fn ac_two_scenarios_three_stages_fixed_solution() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &ForwardPassBatch {
             local_forward_passes: config.loop_config.forward_passes as usize,
@@ -772,29 +741,23 @@ fn ac_two_scenarios_three_stages_fixed_solution() {
     )
     .unwrap();
 
-    // AC: scenario_costs has exactly 2 entries (one per forward pass).
     assert_eq!(result.scenario_costs.len(), 2);
-    // AC: all 6 records have stage_cost = (100 - 30) * COST_SCALE_FACTOR = 70_000_000.
+    // stage_cost = (100 - 30) * COST_SCALE_FACTOR = 70_000_000.
     for (i, record) in records.iter().enumerate() {
         assert_eq!(
             record.stage_cost, 70_000_000.0,
             "record[{i}].stage_cost should be 70_000_000.0 ((objective - theta) * COST_SCALE_FACTOR)"
         );
     }
-    // AC: each scenario cost = 70_000_000 * 3 stages = 210_000_000.
+    // each scenario cost = 70_000_000 * 3 stages = 210_000_000.
     assert_eq!(result.scenario_costs[0], 210_000_000.0);
     assert_eq!(result.scenario_costs[1], 210_000_000.0);
 }
 
-/// AC: mock solver returns `Infeasible` at stage 1, scenario 0.
-///
-/// Call 0 = scenario 0 stage 0 (succeeds). Call 1 = scenario 0 stage 1
-/// (infeasible). The function must return `SddpError::Infeasible { stage: 1,
-/// scenario: 0 }`.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     // Stage-first loop: with 2 scenarios and 3 stages, the solve order is
     // (s0,t0), (s1,t0), (s0,t1), (s1,t1), ... — the 3rd call (index 2)
@@ -877,7 +840,11 @@ fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state,
+                horizon.num_stages(),
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -892,7 +859,6 @@ fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &ForwardPassBatch {
             local_forward_passes: config.loop_config.forward_passes as usize,
@@ -904,7 +870,6 @@ fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
         &mut records,
     );
 
-    // AC: must return SddpError::Infeasible with stage=1, scenario=0.
     match result {
         Err(crate::SddpError::Infeasible {
             stage, scenario, ..
@@ -916,7 +881,6 @@ fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
     }
 }
 
-/// AC: with `forward_passes=3`, rank=1, size=2, `global_scenario` for m=0 is 3.
 #[test]
 fn ac_global_scenario_index_rank1_scenario0() {
     // global_scenario = rank * forward_passes + m = 1 * 3 + 0 = 3
@@ -927,16 +891,10 @@ fn ac_global_scenario_index_rank1_scenario0() {
     assert_eq!(global_scenario, 3);
 }
 
-/// Behavioral: `cost_sum` and `cost_sum_sq` are correctly accumulated.
-///
-/// With 2 scenarios and `stage_cost=70_000` at every `(scenario, stage)`:
-/// - `total_cost` per scenario = `70_000` \* 3 = `210_000`
-/// - `cost_sum` = `210_000` + `210_000` = `420_000`
-/// - `cost_sum_sq` = `210_000`^2 + `210_000`^2 = `88_200_000_000`
 #[test]
 #[allow(clippy::too_many_lines)]
 fn cost_statistics_accumulated_correctly() {
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     let solver = MockSolver::always_ok(solution);
     let fcf = FutureCostFunction::new(3, state.n_state, 2, 100, &[0; 3]);
@@ -1016,7 +974,11 @@ fn cost_statistics_accumulated_correctly() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state,
+                horizon.num_stages(),
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1031,7 +993,6 @@ fn cost_statistics_accumulated_correctly() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &ForwardPassBatch {
             local_forward_passes: config.loop_config.forward_passes as usize,
@@ -1112,7 +1073,6 @@ fn ub_statistics_four_scenarios_correct_mean_and_std() {
 
     assert_eq!(result.global_ub_mean, 75.0, "mean must be 300/4 = 75");
 
-    // variance = 500/3, std = sqrt(500/3) ≈ 12.910
     let expected_std = (500.0_f64 / 3.0).sqrt();
     let tolerance = 1e-9;
     assert!(
@@ -1121,7 +1081,6 @@ fn ub_statistics_four_scenarios_correct_mean_and_std() {
         got = result.global_ub_std,
     );
 
-    // ci_95 = 1.96 * std / sqrt(4) = 1.96 * std / 2
     let expected_ci = 1.96_f64 * expected_std / 4.0_f64.sqrt();
     assert!(
         (result.ci_95_half_width - expected_ci).abs() < tolerance,
@@ -1153,7 +1112,6 @@ fn acceptance_criterion_ub_mean() {
     let result = sync_forward(&local, &comm, 4).unwrap();
 
     assert_eq!(result.global_ub_mean, 75.0);
-    // std = sqrt((23000 - 4 * 75^2) / 3) = sqrt(500/3) ≈ 12.910
     let expected_std = (500.0_f64 / 3.0).sqrt();
     assert!(
         (result.global_ub_std - expected_std).abs() < 1e-9,
@@ -1171,7 +1129,6 @@ fn acceptance_criterion_ub_mean() {
 /// ranks with 2 scenarios each.
 #[test]
 fn canonical_summation_identical_regardless_of_partition() {
-    // Single-rank: all 4 costs provided together.
     let single_rank = ForwardResult {
         scenario_costs: vec![1.0, 2.0, 3.0, 4.0],
         elapsed_ms: 0,
@@ -1184,10 +1141,8 @@ fn canonical_summation_identical_regardless_of_partition() {
     let comm = LocalBackend;
     let result_single = sync_forward(&single_rank, &comm, 4).unwrap();
 
-    // Simulate two-rank scenario: rank 0 has [1.0, 2.0], rank 1 has [3.0, 4.0].
-    // The mock communicator below pre-fills the recv buf with both ranks' data.
-    // We test by constructing the full global buffer manually and verifying
-    // that sequential summation produces the same statistics.
+    // Build the full global buffer manually; sequential summation must yield
+    // the same statistics as the single-rank result above.
     let global_costs = [1.0_f64, 2.0, 3.0, 4.0];
     let global_n = global_costs.len();
     #[allow(clippy::cast_precision_loss)]
@@ -1211,7 +1166,6 @@ fn canonical_summation_identical_regardless_of_partition() {
     );
 }
 
-/// AC: Bessel correction edge case — single scenario produces zero variance.
 #[test]
 fn bessel_correction_single_scenario_zero_std_and_ci() {
     let local = ForwardResult {
@@ -1239,17 +1193,9 @@ fn bessel_correction_single_scenario_zero_std_and_ci() {
 /// Guard: negative variance from floating-point cancellation → std = 0.0, not NaN.
 #[test]
 fn negative_variance_guard_produces_zero_std_not_nan() {
-    // Construct two identical large values so that the single-pass Bessel
-    // formula (sum_sq - N*mean^2) / (N-1) can produce a tiny negative result
-    // due to floating-point representation differences.
-    //
-    // With costs = [v, v]: sum = 2v, mean = v, sum_sq = 2v^2.
-    // Variance = (2v^2 - 2v^2) / 1 = 0. In floating-point the exact
-    // representation of sum_sq and N*mean^2 may differ by epsilon,
-    // potentially yielding a slightly negative result.
-    //
-    // We synthesise this by using two scenarios whose costs are very close
-    // to the representable large value but not exactly equal.
+    // Two identical large values: the single-pass Bessel formula
+    // (sum_sq - N*mean^2)/(N-1) can yield a tiny negative variance from
+    // floating-point rounding, which the max(0, .).sqrt() guard must clamp.
     let v = 1.0e15_f64;
     let local = ForwardResult {
         scenario_costs: vec![v, v],
@@ -1277,7 +1223,6 @@ fn negative_variance_guard_produces_zero_std_not_nan() {
 
 // ── Integration tests: sync_forward with LocalBackend ────────────────────
 
-/// Integration: single-rank mode — global UB mean equals local mean.
 #[test]
 fn sync_forward_local_backend_global_equals_local() {
     // Two scenarios each costing 420.0 → mean = 420.0.
@@ -1300,7 +1245,6 @@ fn sync_forward_local_backend_global_equals_local() {
     );
 }
 
-/// Integration: `sync_time_ms` is a valid non-negative u64.
 #[test]
 fn sync_forward_sync_time_ms_is_valid_u64() {
     let local = ForwardResult {
@@ -1319,7 +1263,6 @@ fn sync_forward_sync_time_ms_is_valid_u64() {
     let _ = result.sync_time_ms;
 }
 
-/// Integration: `CommError` from a failing communicator is wrapped as `SddpError::Communication`.
 #[test]
 fn sync_forward_comm_error_wraps_as_sddp_communication() {
     use cobre_comm::CommError;
@@ -1395,7 +1338,7 @@ fn run_one_iteration(
     ws: &mut SolverWorkspace<MockSolver>,
     basis_store: &mut BasisStore,
 ) -> Result<(), crate::SddpError> {
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let fcf = FutureCostFunction::new(3, state.n_state, 1, 100, &[0; 3]);
     let config = TrainingConfig {
         loop_config: LoopConfig {
@@ -1470,7 +1413,11 @@ fn run_one_iteration(
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state,
+                horizon.num_stages(),
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1485,7 +1432,6 @@ fn run_one_iteration(
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &ForwardPassBatch {
             local_forward_passes: config.loop_config.forward_passes as usize,
@@ -1499,24 +1445,16 @@ fn run_one_iteration(
     .map(|_| ())
 }
 
-/// Warm-start invocation: the first iteration calls `solve(None)` (cold start);
-/// the second iteration calls `solve(Some(&basis))` (warm start).
-///
-/// AC: `run_forward_pass` called twice, sharing the same `BasisStore`
-/// (1 scenario × 3 stages). After iteration 1: `warm_start_calls` == 0
-/// (3 cold-start solves). After iteration 2: `warm_start_calls` > 0 (all
-/// 3 stages warm-start from the store populated in iteration 1).
 #[test]
 fn warm_start_first_iteration_cold_second_iteration_warm() {
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let _indexer = crate::indexer::test_fixtures::geom(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
+    let _indexer = crate::test_support::geom(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     let solver = MockSolver::always_ok(solution);
     // Single workspace and a shared basis store (1 scenario × 3 stages).
     let mut ws = single_workspace(solver, &state);
     let mut basis_store = BasisStore::new(1, 3);
 
-    // First iteration: no cached bases → all cold-start.
     run_one_iteration(&mut ws, &mut basis_store).unwrap();
     assert_eq!(
         ws.solver.inner().warm_start_calls,
@@ -1530,7 +1468,6 @@ fn warm_start_first_iteration_cold_second_iteration_warm() {
         "basis_store must be fully populated for scenario 0 after the first iteration"
     );
 
-    // Second iteration: cached bases present → all stages warm-start.
     run_one_iteration(&mut ws, &mut basis_store).unwrap();
     assert!(
         ws.solver.inner().warm_start_calls > 0,
@@ -1540,19 +1477,10 @@ fn warm_start_first_iteration_cold_second_iteration_warm() {
     );
 }
 
-/// Basis invalidation on solver error: when a forward solve returns
-/// `SolverError::Infeasible`, the `BasisStore` slot at `(scenario, stage)`
-/// must be set to `None` before the error propagates.
-///
-/// AC: `MockSolver` returns `Infeasible` on call index 4 (second iteration,
-/// stage 1 — calls 0-2 = first iteration stages 0,1,2; calls 3,4,5 = second
-/// iteration stages 0,1,2). After the error:
-/// - `basis_store.get(0, 1)` is `None` (invalidated at the failing stage).
-/// - `basis_store.get(0, 0)` is `Some` (stage 0 succeeded in iteration 2).
 #[test]
 fn basis_invalidated_on_solver_error() {
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let _indexer = crate::indexer::test_fixtures::geom(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
+    let _indexer = crate::test_support::geom(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     // Call 4 = second iteration, stage 1 (calls 0-2 = first iteration
     // stages 0,1,2; calls 3,4,5 = second iteration stages 0,1,2).
@@ -1561,7 +1489,6 @@ fn basis_invalidated_on_solver_error() {
     let mut ws = single_workspace(solver, &state);
     let mut basis_store = BasisStore::new(1, 3);
 
-    // First iteration: all cold-start, all succeed, populate all 3 stages.
     run_one_iteration(&mut ws, &mut basis_store).unwrap();
     assert!(
         (0..3).all(|t| basis_store.get(0, t).is_some()),
@@ -1575,7 +1502,6 @@ fn basis_invalidated_on_solver_error() {
         "expected Infeasible at stage 1, got: {err:?}"
     );
 
-    // AC: basis_store slot (0, 1) must be None after the error (invalidated).
     assert!(
         basis_store.get(0, 1).is_none(),
         "basis_store.get(0, 1) must be None after solver error at stage 1"
@@ -1599,7 +1525,7 @@ fn basis_invalidated_on_solver_error() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn test_forward_pass_parallel_cost_agreement() {
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     let stochastic = make_stochastic_context_1_hydro_3_stages();
     let stages = make_stages_3();
@@ -1639,7 +1565,6 @@ fn test_forward_pass_parallel_cost_agreement() {
         downstream_par_order: 0,
     };
 
-    // Run with 1 workspace.
     let mut ws1 = single_workspace(MockSolver::always_ok(solution.clone()), &state);
     let mut records1 = empty_records(n_scenarios * 3);
     let mut basis_store1 = BasisStore::new(n_scenarios, templates.len());
@@ -1652,7 +1577,11 @@ fn test_forward_pass_parallel_cost_agreement() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state,
+                horizon.num_stages(),
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1667,7 +1596,6 @@ fn test_forward_pass_parallel_cost_agreement() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &ForwardPassBatch {
             local_forward_passes: n_scenarios,
@@ -1680,7 +1608,6 @@ fn test_forward_pass_parallel_cost_agreement() {
     )
     .unwrap();
 
-    // Run with 4 workspaces.
     let mut workspaces4: Vec<SolverWorkspace<MockSolver>> = (0..4)
         .map(|_| single_workspace(MockSolver::always_ok(solution.clone()), &state))
         .collect();
@@ -1695,7 +1622,11 @@ fn test_forward_pass_parallel_cost_agreement() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state,
+                horizon.num_stages(),
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1710,7 +1641,6 @@ fn test_forward_pass_parallel_cost_agreement() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &ForwardPassBatch {
             local_forward_passes: n_scenarios,
@@ -1745,19 +1675,10 @@ fn test_forward_pass_parallel_cost_agreement() {
 
 // ── New test: work distribution across 4 workspaces ──────────────────────
 
-/// C1: verify that 10 scenarios distributed across 4 workspaces assign
-/// each workspace `floor(10/4)` or `ceil(10/4)` scenarios.
-///
-/// With `n=10`, `n_workers=4`: `base=2`, `remainder=2`.
-/// - Workers 0,1 receive 3 scenarios each → 3 * 3 stages = 9 solve calls.
-/// - Workers 2,3 receive 2 scenarios each → 2 * 3 stages = 6 solve calls.
-///
-/// `MockSolver.statistics().solve_count` now returns `call_count`, so we
-/// can verify each workspace performed its assigned number of LP solves.
 #[allow(clippy::too_many_lines)]
 #[test]
 fn test_forward_pass_work_distribution() {
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     let stochastic = make_stochastic_context_1_hydro_3_stages();
     let stages = make_stages_3();
@@ -1813,7 +1734,11 @@ fn test_forward_pass_work_distribution() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state,
+                horizon.num_stages(),
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1828,7 +1753,6 @@ fn test_forward_pass_work_distribution() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &ForwardPassBatch {
             local_forward_passes: n_scenarios,
@@ -1850,7 +1774,6 @@ fn test_forward_pass_work_distribution() {
         let assigned_scenarios = end_m - start_m;
         let expected_solves = assigned_scenarios * num_stages;
 
-        // floor and ceil of n_scenarios / n_workers for boundary check.
         let floor_scenarios = n_scenarios / n_workers;
         let ceil_scenarios = n_scenarios.div_ceil(n_workers);
         assert!(
@@ -1866,7 +1789,6 @@ fn test_forward_pass_work_distribution() {
         );
     }
 
-    // Verify the total solve count equals n_scenarios * num_stages.
     let total_solves: usize = workspaces
         .iter()
         .map(|ws| {
@@ -1904,6 +1826,7 @@ fn make_stochastic_1h_1s(mean_m3s: f64, std_m3s: f64) -> StochasticContext {
     let bus = Bus {
         id: EntityId(0),
         name: "B0".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 1000.0,
@@ -1913,8 +1836,10 @@ fn make_stochastic_1h_1s(mean_m3s: f64, std_m3s: f64) -> StochasticContext {
     let hydro = Hydro {
         id: EntityId(1),
         name: "H1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(0),
         downstream_id: None,
+        travel_time_hours: None,
         entry_stage_id: None,
         exit_stage_id: None,
         min_storage_hm3: 0.0,
@@ -2067,14 +1992,13 @@ fn run_single_stage_forward(
     base_rhs: f64,
     noise_scale_val: f64,
 ) -> Vec<f64> {
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let solution = fixed_solution(4, 0.0, state.theta, 0.0);
     let solver = MockSolver::always_ok(solution);
     let fcf = FutureCostFunction::new(1, state.n_state, 1, 10, &[0; 1]);
     let horizon = HorizonMode::Finite { num_stages: 1 };
     let template = minimal_template_1_0_with_base(base_rhs);
     let templates = vec![template];
-    // base_rows[t] = 1: the water-balance row is at row index 1.
     let base_rows = vec![2usize];
     let initial_state = vec![0.0_f64; state.n_state];
     let mut records = empty_records(1);
@@ -2137,7 +2061,11 @@ fn run_single_stage_forward(
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state,
+                horizon.num_stages(),
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &inflow_method,
             stochastic,
             initial_state: &initial_state,
@@ -2152,7 +2080,6 @@ fn run_single_stage_forward(
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &ForwardPassBatch {
             local_forward_passes: 1,
@@ -2168,23 +2095,6 @@ fn run_single_stage_forward(
     ws.scratch.noise_buf.clone()
 }
 
-/// AC: truncation clamps negative inflow noise.
-///
-/// Set up a 1-hydro, 1-stage system where the PAR mean is very large
-/// negative (`mean_m3s = -1000.0`) and sigma is small (`std_m3s = 1.0`)
-/// so that the deterministic base alone produces a hugely negative inflow.
-/// Any sampled noise value will produce a negative inflow without truncation.
-///
-/// With truncation active: the noise buffer entry must be >= 0.0 because
-/// `noise_buf[h] = base_rhs + noise_scale * clamped_eta`
-/// = `zeta * (mean + sigma * eta_min)` = `zeta * 0.0` = 0.0 (or near it).
-///
-/// Concretely: `noise_buf[0] = base_rhs + noise_scale * clamped_eta`
-/// where `base_rhs = zeta * (-1000)` and `noise_scale = zeta * 1`.
-/// After clamping: `clamped_eta = max(eta, (0 - (-1000)) / 1) = 1000`.
-/// So `noise_buf[0] = zeta * (-1000) + zeta * 1000 = 0`.
-///
-/// The actual PAR inflow = `mean + sigma * clamped_eta = -1000 + 1 * 1000 = 0 >= 0`.
 #[test]
 fn truncation_clamps_negative_inflow_noise() {
     // Deterministic base = -1000 m³/s (always produces negative inflow).
@@ -2253,14 +2163,10 @@ fn truncation_no_clamp_when_inflow_positive() {
     );
 }
 
-/// AC: `InflowNonNegativityMethod::None` produces unchanged behavior when
-/// truncation code is present in the same function.
-///
-/// Uses the existing 3-stage fixture to verify no regression.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn none_method_unchanged_with_truncation_code_present() {
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     let solver = MockSolver::always_ok(solution);
     let fcf = FutureCostFunction::new(3, state.n_state, 2, 100, &[0; 3]);
@@ -2339,7 +2245,11 @@ fn none_method_unchanged_with_truncation_code_present() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state,
+                horizon.num_stages(),
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2354,7 +2264,6 @@ fn none_method_unchanged_with_truncation_code_present() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &ForwardPassBatch {
             local_forward_passes: config.loop_config.forward_passes as usize,
@@ -2390,6 +2299,7 @@ fn make_stochastic_context_1_hydro_1_load_bus(mean_mw: f64, std_mw: f64) -> Stoc
     let bus0 = Bus {
         id: EntityId(0),
         name: "B0".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 1000.0,
@@ -2399,6 +2309,7 @@ fn make_stochastic_context_1_hydro_1_load_bus(mean_mw: f64, std_mw: f64) -> Stoc
     let bus1 = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: None,
             cost_per_mwh: 1000.0,
@@ -2408,8 +2319,10 @@ fn make_stochastic_context_1_hydro_1_load_bus(mean_mw: f64, std_mw: f64) -> Stoc
     let hydro = Hydro {
         id: EntityId(10),
         name: "H10".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(0),
         downstream_id: None,
+        travel_time_hours: None,
         entry_stage_id: None,
         exit_stage_id: None,
         min_storage_hm3: 0.0,
@@ -2485,7 +2398,6 @@ fn make_stochastic_context_1_hydro_1_load_bus(mean_mw: f64, std_mw: f64) -> Stoc
         mean_mw,
         std_mw,
     };
-    // No correlation profile: entities are treated as independent.
     let correlation = CorrelationModel {
         method: "spectral".to_string(),
         profiles: std::collections::BTreeMap::new(),
@@ -2518,16 +2430,9 @@ fn make_stochastic_context_1_hydro_1_load_bus(mean_mw: f64, std_mw: f64) -> Stoc
 
 // ── New test: parallel infeasibility propagation ──────────────────────────
 
-/// C3: when one of 4 workspaces returns `SolverError::Infeasible`, the
-/// error propagates as `SddpError::Infeasible` with correct stage and
-/// scenario indices.
-///
-/// Worker 1 handles scenarios [3, 6) (3 scenarios) with 3 stages each.
-/// Its solver is configured to fail on call 0 (scenario 3, stage 0).
-/// Expected: `SddpError::Infeasible { stage: 0, scenario: 3, .. }`.
 #[test]
 fn test_forward_pass_parallel_infeasibility() {
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     let stochastic = make_stochastic_context_1_hydro_3_stages();
     let stages = make_stages_3();
@@ -2594,7 +2499,11 @@ fn test_forward_pass_parallel_infeasibility() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state,
+                horizon.num_stages(),
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2609,7 +2518,6 @@ fn test_forward_pass_parallel_infeasibility() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &ForwardPassBatch {
             local_forward_passes: n_scenarios,
@@ -2663,8 +2571,8 @@ fn test_forward_pass_parallel_infeasibility() {
 fn forward_pass_load_noise_positive_realization() {
     let n_load_buses = 1usize;
     let stochastic = make_stochastic_context_1_hydro_1_load_bus(300.0, 30.0);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0);
+    let state = crate::test_support::state_layout(1, 0);
+    let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0);
     let mut ws = SolverWorkspace {
         rank: 0,
         worker_id: 0,
@@ -2706,7 +2614,6 @@ fn forward_pass_load_noise_positive_realization() {
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
-            anticipated_state_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -2757,7 +2664,11 @@ fn forward_pass_load_noise_positive_realization() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state,
+                horizon.num_stages(),
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2772,7 +2683,6 @@ fn forward_pass_load_noise_positive_realization() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &ForwardPassBatch {
             local_forward_passes: 1,
@@ -2796,17 +2706,17 @@ fn forward_pass_load_noise_positive_realization() {
         ws.scratch.load_rhs_buf[0]
     );
 
-    let cat4_start = 1;
+    let load_start = 1;
     assert_eq!(
-        ws.patch_buf.lower[cat4_start], ws.scratch.load_rhs_buf[0],
+        ws.patch_buf.lower[load_start], ws.scratch.load_rhs_buf[0],
         "patch_buf lower must equal load_rhs_buf[0]"
     );
     assert_eq!(
-        ws.patch_buf.upper[cat4_start], ws.scratch.load_rhs_buf[0],
+        ws.patch_buf.upper[load_start], ws.scratch.load_rhs_buf[0],
         "patch_buf upper must equal load_rhs_buf[0] (equality constraint)"
     );
     assert_eq!(
-        ws.patch_buf.indices[cat4_start], 10,
+        ws.patch_buf.indices[load_start], 10,
         "patch index must be load_balance_row_starts[0] + 0 * n_blks"
     );
 }
@@ -2821,8 +2731,8 @@ fn forward_pass_load_noise_positive_realization() {
 fn forward_pass_load_noise_clamped_to_zero() {
     let n_load_buses = 1usize;
     let stochastic = make_stochastic_context_1_hydro_1_load_bus(-1000.0, 1.0);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0);
+    let state = crate::test_support::state_layout(1, 0);
+    let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0);
     let mut ws = SolverWorkspace {
         rank: 0,
         worker_id: 0,
@@ -2864,7 +2774,6 @@ fn forward_pass_load_noise_clamped_to_zero() {
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
-            anticipated_state_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -2915,7 +2824,11 @@ fn forward_pass_load_noise_clamped_to_zero() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state,
+                horizon.num_stages(),
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -2930,7 +2843,6 @@ fn forward_pass_load_noise_clamped_to_zero() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &ForwardPassBatch {
             local_forward_passes: 1,
@@ -2954,28 +2866,22 @@ fn forward_pass_load_noise_clamped_to_zero() {
         ws.scratch.load_rhs_buf[0]
     );
 
-    let cat4_start = 1;
+    let load_start = 1;
     assert_eq!(
-        ws.patch_buf.lower[cat4_start], 0.0,
+        ws.patch_buf.lower[load_start], 0.0,
         "patch lower must be 0.0 (clamped)"
     );
     assert_eq!(
-        ws.patch_buf.upper[cat4_start], 0.0,
+        ws.patch_buf.upper[load_start], 0.0,
         "patch upper must be 0.0 (clamped)"
     );
 }
 
-/// Verify that when `n_load_buses == 0` no load patches are applied and
-/// `forward_patch_count()` equals `N`.
-///
-/// With N=1 hydro, L=0 PAR order, and no load buses the patch count must be
-/// exactly `1`.
 #[test]
 fn forward_pass_no_load_buses_unchanged() {
-    // Use the existing 1-hydro-3-stage context that has no load buses.
     let stochastic = make_stochastic_context_1_hydro_3_stages();
     let stages = make_stages_3();
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
     let solution = fixed_solution(4, 100.0, state.theta, 30.0);
     let mut ws = single_workspace(MockSolver::always_ok(solution), &state);
 
@@ -3024,7 +2930,11 @@ fn forward_pass_no_load_buses_unchanged() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            study_dims: &crate::indexer::test_fixtures::study_dims(),
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state,
+                horizon.num_stages(),
+            ),
+            study_dims: &crate::test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -3039,7 +2949,6 @@ fn forward_pass_no_load_buses_unchanged() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &ForwardPassBatch {
             local_forward_passes: 1,
@@ -3085,11 +2994,19 @@ fn empty_delta_batch() -> RowBatch {
 fn test_build_delta_empty_pool() {
     // Empty pool → num_rows == 0, row_starts == [0], col_indices empty.
     let fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let _indexer = crate::indexer::test_fixtures::geom(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
+    let _indexer = crate::test_support::geom(1, 0);
     let mut batch = empty_delta_batch();
 
-    build_delta_cut_row_batch_into(&mut batch, &fcf, 0, &state, &[], 1);
+    build_delta_cut_row_batch_into(
+        &mut batch,
+        &fcf,
+        0,
+        &state,
+        &crate::test_support::cut_state_projection(&state),
+        &[],
+        1,
+    );
 
     assert_eq!(batch.num_rows, 0);
     assert_eq!(batch.row_starts, vec![0_i32]);
@@ -3103,9 +3020,6 @@ fn test_build_delta_empty_pool() {
 fn test_build_delta_single_iteration_filter() {
     // Pool has cuts at iterations 1, 2, 3; calling with current_iteration=2
     // emits only the iteration-2 cut.
-    //
-    // FCF: 2 stages, 1 state dimension, 1 forward pass, 10 max iterations,
-    // 0 warm-start cuts per stage.
     let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
     // iteration=1, fwd_idx=0: slot = 0 + 1*1 + 0 = 1
     fcf.add_cut(0, 1, 0, 10.0, &[1.0]);
@@ -3114,11 +3028,19 @@ fn test_build_delta_single_iteration_filter() {
     // iteration=3, fwd_idx=0: slot = 0 + 3*1 + 0 = 3
     fcf.add_cut(0, 3, 0, 30.0, &[3.0]);
 
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let _indexer = crate::indexer::test_fixtures::geom(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
+    let _indexer = crate::test_support::geom(1, 0);
     let mut batch = empty_delta_batch();
 
-    build_delta_cut_row_batch_into(&mut batch, &fcf, 0, &state, &[], 2);
+    build_delta_cut_row_batch_into(
+        &mut batch,
+        &fcf,
+        0,
+        &state,
+        &crate::test_support::cut_state_projection(&state),
+        &[],
+        2,
+    );
 
     assert_eq!(batch.num_rows, 1);
     assert_eq!(batch.row_lower, vec![20.0]);
@@ -3140,11 +3062,19 @@ fn test_build_delta_skips_deactivated_cuts() {
     // Deactivate slot 2 (the first iteration-1 cut).
     fcf.pools[0].deactivate(&[2]);
 
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let _indexer = crate::indexer::test_fixtures::geom(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
+    let _indexer = crate::test_support::geom(1, 0);
     let mut batch = empty_delta_batch();
 
-    build_delta_cut_row_batch_into(&mut batch, &fcf, 0, &state, &[], 1);
+    build_delta_cut_row_batch_into(
+        &mut batch,
+        &fcf,
+        0,
+        &state,
+        &crate::test_support::cut_state_projection(&state),
+        &[],
+        1,
+    );
 
     // Only slot 3 (intercept=20.0) should appear.
     assert_eq!(batch.num_rows, 1);
@@ -3175,11 +3105,19 @@ fn test_build_delta_excludes_warm_start_cuts() {
     let mut fcf = FutureCostFunction::new(2, 1, 2, 10, &[0; 2]);
     fcf.pools[0] = pool;
 
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let _indexer = crate::indexer::test_fixtures::geom(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
+    let _indexer = crate::test_support::geom(1, 0);
     let mut batch = empty_delta_batch();
 
-    build_delta_cut_row_batch_into(&mut batch, &fcf, 0, &state, &[], 1);
+    build_delta_cut_row_batch_into(
+        &mut batch,
+        &fcf,
+        0,
+        &state,
+        &crate::test_support::cut_state_projection(&state),
+        &[],
+        1,
+    );
 
     // Warm-start cut (intercept=99.0) must be excluded; training cut
     // (intercept=7.0) must be present.
@@ -3197,14 +3135,29 @@ fn test_build_delta_matches_full_batch_when_pool_has_only_current_iter() {
     // iteration=1, fwd_idx=1: slot = 1*2+1 = 3
     fcf.add_cut(0, 1, 1, 20.0, &[3.0]);
 
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let _indexer = crate::indexer::test_fixtures::geom(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
+    let _indexer = crate::test_support::geom(1, 0);
 
     let mut batch_full = empty_delta_batch();
-    build_cut_row_batch_into(&mut batch_full, &fcf, 0, &state, &[]);
+    build_cut_row_batch_into(
+        &mut batch_full,
+        &fcf,
+        0,
+        &state,
+        &crate::test_support::cut_state_projection(&state),
+        &[],
+    );
 
     let mut batch_delta = empty_delta_batch();
-    build_delta_cut_row_batch_into(&mut batch_delta, &fcf, 0, &state, &[], 1);
+    build_delta_cut_row_batch_into(
+        &mut batch_delta,
+        &fcf,
+        0,
+        &state,
+        &crate::test_support::cut_state_projection(&state),
+        &[],
+        1,
+    );
 
     assert_eq!(batch_delta.num_rows, batch_full.num_rows);
     assert_eq!(batch_delta.row_starts, batch_full.row_starts);
@@ -3232,8 +3185,8 @@ fn test_build_delta_sparse_path() {
 
     // n_hydro=1, n_lag=1: n_state=2 (vol + lag).
     // nonzero_state_indices should be non-empty (check via indexer).
-    let state = crate::indexer::test_fixtures::state_layout(1, 1);
-    let _indexer = crate::indexer::test_fixtures::geom(1, 1);
+    let state = crate::test_support::state_layout(1, 1);
+    let _indexer = crate::test_support::geom(1, 1);
     // nonzero_state_indices is the mask for non-trivially-zero state dims.
     let mask_len = state.nonzero_state_indices.len();
 
@@ -3247,7 +3200,15 @@ fn test_build_delta_sparse_path() {
     fcf.add_cut(0, 1, 0, 5.0, &vec![1.0; state.n_state]);
 
     let mut batch = empty_delta_batch();
-    build_delta_cut_row_batch_into(&mut batch, &fcf, 0, &state, &[], 1);
+    build_delta_cut_row_batch_into(
+        &mut batch,
+        &fcf,
+        0,
+        &state,
+        &crate::test_support::cut_state_projection(&state),
+        &[],
+        1,
+    );
 
     assert_eq!(batch.num_rows, 1);
     // Each row: mask_len state entries + 1 theta entry.
@@ -3262,17 +3223,33 @@ fn test_build_delta_reuses_out_buffer() {
     fcf.add_cut(0, 1, 0, 11.0, &[1.0]);
     fcf.add_cut(0, 2, 0, 22.0, &[2.0]);
 
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let _indexer = crate::indexer::test_fixtures::geom(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
+    let _indexer = crate::test_support::geom(1, 0);
     let mut batch = empty_delta_batch();
 
     // First call: iteration 1 → should yield the iteration-1 cut.
-    build_delta_cut_row_batch_into(&mut batch, &fcf, 0, &state, &[], 1);
+    build_delta_cut_row_batch_into(
+        &mut batch,
+        &fcf,
+        0,
+        &state,
+        &crate::test_support::cut_state_projection(&state),
+        &[],
+        1,
+    );
     assert_eq!(batch.num_rows, 1);
     assert_eq!(batch.row_lower, vec![11.0]);
 
     // Second call: iteration 2 → stale data from first call must be gone.
-    build_delta_cut_row_batch_into(&mut batch, &fcf, 0, &state, &[], 2);
+    build_delta_cut_row_batch_into(
+        &mut batch,
+        &fcf,
+        0,
+        &state,
+        &crate::test_support::cut_state_projection(&state),
+        &[],
+        2,
+    );
     assert_eq!(batch.num_rows, 1);
     assert_eq!(batch.row_lower, vec![22.0]);
     assert_eq!(batch.row_starts.len(), 2); // [0, 2]
@@ -3284,8 +3261,8 @@ fn test_build_delta_clears_row_starts() {
     let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
     fcf.add_cut(0, 1, 0, 5.0, &[1.0]);
 
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let _indexer = crate::indexer::test_fixtures::geom(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
+    let _indexer = crate::test_support::geom(1, 0);
 
     // Pre-populate batch with garbage.
     let mut batch = RowBatch {
@@ -3297,7 +3274,15 @@ fn test_build_delta_clears_row_starts() {
         row_upper: vec![0.0_f64; 5],
     };
 
-    build_delta_cut_row_batch_into(&mut batch, &fcf, 0, &state, &[], 1);
+    build_delta_cut_row_batch_into(
+        &mut batch,
+        &fcf,
+        0,
+        &state,
+        &crate::test_support::cut_state_projection(&state),
+        &[],
+        1,
+    );
 
     assert_eq!(batch.row_starts[0], 0_i32);
     assert_eq!(batch.num_rows, 1);
@@ -3330,8 +3315,8 @@ fn build_delta_cut_row_batch_into_skips_warm_start_slots() {
     let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
     fcf.pools[0] = pool;
 
-    let state = crate::indexer::test_fixtures::state_layout(1, 0);
-    let _indexer = crate::indexer::test_fixtures::geom(1, 0);
+    let state = crate::test_support::state_layout(1, 0);
+    let _indexer = crate::test_support::geom(1, 0);
     let mut batch = RowBatch {
         num_rows: 0,
         row_starts: Vec::new(),
@@ -3341,7 +3326,15 @@ fn build_delta_cut_row_batch_into_skips_warm_start_slots() {
         row_upper: Vec::new(),
     };
 
-    build_delta_cut_row_batch_into(&mut batch, &fcf, 0, &state, &[], 1);
+    build_delta_cut_row_batch_into(
+        &mut batch,
+        &fcf,
+        0,
+        &state,
+        &crate::test_support::cut_state_projection(&state),
+        &[],
+        1,
+    );
 
     // Warm-start slot must be excluded; only the iteration-1 cut appears.
     assert_eq!(batch.num_rows, 1);
@@ -3403,12 +3396,12 @@ mod dcs_forward {
         }
     }
 
-    /// All-cuts baked template: the cut-free base plus the three pool cuts
-    /// baked as structural rows (rows 1..4), in pool slot order:
+    /// All-cuts frozen template: the cut-free base plus the three pool cuts
+    /// frozen as structural rows (rows 1..4), in pool slot order:
     ///   slot 0: -0*col0 + theta >= 1 ; slot 1: -2*col0 + theta >= 0 ;
     ///   slot 2: -0*col0 + theta >= 3.
     /// `num_rows = 4 = template_num_rows(1) + 3 cuts`.
-    fn fwd_all_cuts_baked() -> StageTemplate {
+    fn fwd_all_cuts_frozen() -> StageTemplate {
         // CSC by column. col0 entries: coupling (row0,+1), slot1 cut (row2,-2).
         // col3 (theta): rows 1,2,3 each +1. col2: coupling (row0,-1).
         StageTemplate {
@@ -3436,11 +3429,11 @@ mod dcs_forward {
         }
     }
 
-    /// Baked template carrying a single DOMINATING spurious cut
+    /// Frozen template carrying a single DOMINATING spurious cut
     /// (`-5*col0 + theta >= 0`, floor 10 at `x_hat = 2`, NOT in the pool),
     /// used to prove the DCS path loads the cut-free base and ignores this
     /// row.
-    fn fwd_baked_dominating_cut() -> StageTemplate {
+    fn fwd_frozen_dominating_cut() -> StageTemplate {
         StageTemplate {
             num_cols: 4,
             num_rows: 2,
@@ -3476,9 +3469,9 @@ mod dcs_forward {
             active_count: 0,
             last_active_iter: last,
         };
-        fcf.pools[0].metadata[0] = meta(1, 5);
-        fcf.pools[0].metadata[1] = meta(1, 1); // stale → outside k2=2 window at iter 5
-        fcf.pools[0].metadata[2] = meta(1, 5);
+        fcf.pools[0].set_metadata_for_test(0, meta(1, 5));
+        fcf.pools[0].set_metadata_for_test(1, meta(1, 1)); // stale → outside k2=2 window at iter 5
+        fcf.pools[0].set_metadata_for_test(2, meta(1, 5));
         fcf
     }
 
@@ -3488,6 +3481,7 @@ mod dcs_forward {
             max_par_order: 0,
             n_load_buses: 0,
             max_blocks: 0,
+            n_buckets: 0,
             downstream_par_order: 0,
             max_openings: 1,
             initial_pool_capacity: 16,
@@ -3499,7 +3493,14 @@ mod dcs_forward {
             k_max: 0,
         };
         let solver = ActiveSolver::new().expect("ActiveSolver::new()");
-        SolverWorkspace::new(0, 0, solver, PatchBuffer::new(1, 0, 0, 0, 0, 0), 1, sizing)
+        SolverWorkspace::new(
+            0,
+            0,
+            solver,
+            PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
+            1,
+            sizing,
+        )
     }
 
     fn dcs_params(start_iteration: u64) -> DcsParams {
@@ -3514,22 +3515,22 @@ mod dcs_forward {
     }
 
     /// Run one forward stage (stage 0 of a 2-stage horizon, so theta is not
-    /// terminal-zeroed) with the given `dcs` option and `baked` template,
+    /// terminal-zeroed) with the given `dcs` option and `frozen` template,
     /// returning `(stage_cost, advanced_state, scoring_time_seconds)`. The
-    /// cut-free base is `ctx.templates[0]`; on the baked path the
-    /// caller-equivalent `load_model(baked)` is performed here (mirroring
+    /// cut-free base is `ctx.templates[0]`; on the frozen path the
+    /// caller-equivalent `load_model(frozen)` is performed here (mirroring
     /// `run_forward_worker`).
     ///
     /// The production `run_forward_worker` filter is reproduced verbatim:
     /// `dcs.filter(|p| p.is_active(iteration))`. When `iteration <
-    /// start_iteration` this collapses `dcs` to `None`, so the baked path is
+    /// start_iteration` this collapses `dcs` to `None`, so the frozen path is
     /// taken — exactly as the worker does. The returned
     /// `scoring_time_seconds` (read from the workspace's lazy-solve scratch)
     /// is `0.0` iff the lazy path was never entered, giving callers a faithful
     /// witness for which branch ran.
     fn run_one_forward_stage(
         dcs: Option<DcsParams>,
-        baked: &StageTemplate,
+        frozen: &StageTemplate,
         iteration: u64,
     ) -> (f64, Vec<f64>, f64) {
         // Mirror run_forward_worker's per-pass gate: DCS is `Some` only when
@@ -3538,7 +3539,7 @@ mod dcs_forward {
         // straight through) is what makes the inactive-iteration assertion a
         // real witness instead of a coincidence.
         let dcs = dcs.filter(|p| p.is_active(iteration));
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let core = fwd_core_template();
         let templates = vec![core.clone(), core.clone()];
         let base_rows = vec![0_usize, 0_usize];
@@ -3554,8 +3555,8 @@ mod dcs_forward {
         // Discount factor 0 at this stage makes stage_cost = objective * SCALE
         // = theta * SCALE (no other objective term), so the observable is
         // directly sensitive to the converged theta — letting the
-        // dominating-baked-cut test distinguish theta=4 (correct) from
-        // theta=10 (a wrong baked load).
+        // dominating-frozen-cut test distinguish theta=4 (correct) from
+        // theta=10 (a wrong frozen load).
         let discount_factors = [0.0_f64, 0.0];
         let ctx = StageContext {
             geometry_per_stage: &[],
@@ -3581,10 +3582,14 @@ mod dcs_forward {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::indexer::test_fixtures::study_dims();
+        let study_dims = crate::test_support::study_dims();
         let training_ctx = TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
+                &state,
+                horizon.num_stages(),
+            ),
             study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -3600,13 +3605,12 @@ mod dcs_forward {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs,
-            noise_key_diag: None,
         };
 
-        // Baked path: mirror run_forward_worker's per-scenario baked load.
+        // Frozen path: mirror run_forward_worker's per-scenario frozen load.
         // DCS path: run_forward_stage loads the cut-free base itself.
         if dcs.is_none() {
-            ws.solver.load_model(baked);
+            ws.solver.load_model(frozen);
         }
 
         let mut records = vec![TrajectoryRecord {
@@ -3622,7 +3626,7 @@ mod dcs_forward {
             num_stages: 2,
             iteration,
             raw_noise: &[],
-            basis_row_capacity: baked.num_rows,
+            basis_row_capacity: frozen.num_rows,
             terminal_has_boundary_cuts: false,
             pool: &fcf.pools[0],
             dcs,
@@ -3639,25 +3643,25 @@ mod dcs_forward {
         .expect("forward stage solve must succeed");
         // The lazy-solve scratch accumulates scoring wall time only when
         // `lazy_solve_preloaded` runs (the DCS branch). It stays exactly
-        // `0.0` on the baked path, so it witnesses which branch executed.
+        // `0.0` on the frozen path, so it witnesses which branch executed.
         let scoring_time_seconds = ws.backward_accum.dcs_solve.scoring_time_seconds;
         (stage_cost, records[0].state.clone(), scoring_time_seconds)
     }
 
     /// AC1: DCS branch (binding cut omitted from the seed) yields the same
-    /// stage cost and advanced state as the baked all-cuts path within 1e-9.
+    /// stage cost and advanced state as the frozen all-cuts path within 1e-9.
     #[test]
     fn forward_dcs_exact_matches_all_cuts() {
-        let all_cuts = fwd_all_cuts_baked();
+        let all_cuts = fwd_all_cuts_frozen();
         // iteration 5 >= start_iteration 2 → DCS active; the filter is a pass-through.
-        let (baked_cost, baked_state, baked_scoring) = run_one_forward_stage(None, &all_cuts, 5);
+        let (frozen_cost, frozen_state, frozen_scoring) = run_one_forward_stage(None, &all_cuts, 5);
         let (dcs_cost, dcs_state, dcs_scoring) =
             run_one_forward_stage(Some(dcs_params(2)), &all_cuts, 5);
 
-        // Baked path never scores; the active DCS path does at least one pass.
+        // Frozen path never scores; the active DCS path does at least one pass.
         assert_eq!(
-            baked_scoring, 0.0,
-            "baked path must not enter the lazy solve"
+            frozen_scoring, 0.0,
+            "frozen path must not enter the lazy solve"
         );
         assert!(
             dcs_scoring > 0.0,
@@ -3665,40 +3669,40 @@ mod dcs_forward {
         );
 
         assert!(
-            (baked_cost - dcs_cost).abs() < 1e-9,
-            "stage cost: baked {baked_cost} vs DCS {dcs_cost}"
+            (frozen_cost - dcs_cost).abs() < 1e-9,
+            "stage cost: frozen {frozen_cost} vs DCS {dcs_cost}"
         );
         // The binding cut floor is 4 at x_hat=2; minimise-theta gives theta=4.
         // With discount 0, stage_cost = objective * SCALE = theta * SCALE, so
         // both paths land on 4 * COST_SCALE_FACTOR.
         assert!((dcs_cost - 4.0 * COST_SCALE_FACTOR).abs() < 1e-3);
-        assert_eq!(baked_state.len(), dcs_state.len());
-        for (b, d) in baked_state.iter().zip(&dcs_state) {
-            assert!((b - d).abs() < 1e-9, "state: baked {b} vs DCS {d}");
+        assert_eq!(frozen_state.len(), dcs_state.len());
+        for (b, d) in frozen_state.iter().zip(&dcs_state) {
+            assert!((b - d).abs() < 1e-9, "state: frozen {b} vs DCS {d}");
         }
         // Sanity: advanced storage state equals the pinned x_hat (coupling
         // row forces storage_out = storage_in = x_hat).
         assert!((dcs_state[0] - X_HAT).abs() < 1e-9);
     }
 
-    /// AC2: a baked template with a DOMINATING embedded cut (floor 10,
+    /// AC2: a frozen template with a DOMINATING embedded cut (floor 10,
     /// gradient 5, NOT in the pool) must NOT change the DCS result — proving
-    /// the cut-free `ctx.templates[t]` is loaded, not `params.baked[t]`. If
-    /// the DCS path erroneously loaded the dominating baked template, the
+    /// the cut-free `ctx.templates[t]` is loaded, not `params.frozen[t]`. If
+    /// the DCS path erroneously loaded the dominating frozen template, the
     /// advanced state / cost would reflect theta=10, diverging from all-cuts.
     #[test]
-    fn forward_dcs_baked_cuts_present_uses_cut_free_core() {
-        let all_cuts = fwd_all_cuts_baked();
-        let dominating = fwd_baked_dominating_cut();
+    fn forward_dcs_frozen_cuts_present_uses_cut_free_core() {
+        let all_cuts = fwd_all_cuts_frozen();
+        let dominating = fwd_frozen_dominating_cut();
         let (allcuts_cost, allcuts_state, _) = run_one_forward_stage(None, &all_cuts, 5);
-        // DCS path is handed the dominating baked template, but must ignore it
+        // DCS path is handed the dominating frozen template, but must ignore it
         // and load the cut-free base, recovering the all-cuts result.
         let (dcs_cost, dcs_state, _) = run_one_forward_stage(Some(dcs_params(2)), &dominating, 5);
 
         assert!(
             (allcuts_cost - dcs_cost).abs() < 1e-9,
             "stage cost: all-cuts {allcuts_cost} vs DCS {dcs_cost} (DCS must \
-             ignore the dominating baked cut)"
+             ignore the dominating frozen cut)"
         );
         assert_eq!(allcuts_state.len(), dcs_state.len());
         for (a, d) in allcuts_state.iter().zip(&dcs_state) {
@@ -3718,9 +3722,9 @@ mod dcs_forward {
     /// production filter (`dcs.filter(|p| p.is_active(iteration))`) verbatim.
     ///
     /// - `start_iteration = 4`, `iteration = 1` (inactive): the filter
-    ///   collapses `dcs` to `None`, so the baked path runs — proven by
+    ///   collapses `dcs` to `None`, so the frozen path runs — proven by
     ///   `scoring_time_seconds == 0.0` AND a bit-for-bit match with the
-    ///   `dcs = None` baked run.
+    ///   `dcs = None` frozen run.
     /// - `iteration = 4` (active): the filter lets DCS through — proven by
     ///   `scoring_time_seconds > 0.0`.
     ///
@@ -3739,26 +3743,26 @@ mod dcs_forward {
             "iteration 4 == start_iteration 4 must be active"
         );
 
-        let all_cuts = fwd_all_cuts_baked();
+        let all_cuts = fwd_all_cuts_frozen();
 
-        // Inactive iteration: filter suppresses DCS → baked path. The
+        // Inactive iteration: filter suppresses DCS → frozen path. The
         // scoring counter must be exactly 0.0 (lazy solve never entered),
-        // and the result must match the dcs=None baked run bit-for-bit.
-        let (baked_cost, baked_state, baked_scoring) = run_one_forward_stage(None, &all_cuts, 1);
+        // and the result must match the dcs=None frozen run bit-for-bit.
+        let (frozen_cost, frozen_state, frozen_scoring) = run_one_forward_stage(None, &all_cuts, 1);
         let (early_cost, early_state, early_scoring) =
             run_one_forward_stage(Some(dcs_params(4)), &all_cuts, 1);
         assert_eq!(
-            baked_scoring, 0.0,
-            "dcs=None baked run must not score (sanity)"
+            frozen_scoring, 0.0,
+            "dcs=None frozen run must not score (sanity)"
         );
         assert_eq!(
             early_scoring, 0.0,
             "iteration 1 < start_iteration 4: filter must suppress DCS, so \
-             the baked path runs and no lazy scoring occurs"
+             the frozen path runs and no lazy scoring occurs"
         );
-        assert_eq!(baked_cost.to_bits(), early_cost.to_bits());
-        assert_eq!(baked_state.len(), early_state.len());
-        for (b, e) in baked_state.iter().zip(&early_state) {
+        assert_eq!(frozen_cost.to_bits(), early_cost.to_bits());
+        assert_eq!(frozen_state.len(), early_state.len());
+        for (b, e) in frozen_state.iter().zip(&early_state) {
             assert_eq!(b.to_bits(), e.to_bits());
         }
 
@@ -3770,6 +3774,247 @@ mod dcs_forward {
             active_scoring > 0.0,
             "iteration 4 >= start_iteration 4: filter must let DCS through, \
              so the lazy solve runs and scoring time accumulates"
+        );
+    }
+}
+
+// -----------------------------------------------------------------------
+// Bucket copy-gap regression (forward pass)
+// -----------------------------------------------------------------------
+//
+// Exercises `run_forward_stage` over a bucket-aware state layout (storage +
+// one AR lag + one travel-time bucket + one anticipated-thermal slot) with a
+// `MockSolver` returning a fixed primal, proving the bucket state rides the
+// state-assembly plain copy: the lag-shift overwrite lands on index 1 and the
+// anticipated-shift overwrite lands on index 3, never on the bucket index 2.
+mod transit_bucket_copy_gap {
+    use cobre_solver::{LpSolution, SolverInterface, StageTemplate};
+
+    use super::super::{StageKey, run_forward_stage};
+    use super::MockSolver;
+    use crate::context::{StageContext, TrainingContext};
+    use crate::cut::FutureCostFunction;
+    use crate::horizon_mode::HorizonMode;
+    use crate::inflow_method::InflowNonNegativityMethod;
+    use crate::lp_builder::{PatchBuffer, StageGeometry};
+    use crate::trajectory::TrajectoryRecord;
+    use crate::workspace::{BasisStore, SolverWorkspace, WorkspaceSizing};
+
+    /// Column layout for `N=1, L=1, B=1, A=1, K_max=1`:
+    /// `[storage(0), lag0(1), bucket_out(2), ant_slot0(3), z_inflow(4),
+    /// storage_in(5), bucket_in(6), ant_state_in(7), theta(8)]`.
+    /// `n_state = 4` (storage, lag0, `bucket_out`, `ant_slot0`) — the state
+    /// region is the LP's first `n_state` columns by construction. With
+    /// `k_max = 1`, `ant_slot0` is both the ring's only slot and its newest
+    /// (`k_i - 1 = 0`), so it resolves by identity like `bucket_out` — no
+    /// separate decision-aliased column exists anymore.
+    const NUM_COLS: usize = 9;
+    const TRANSIT_BUCKET_COL: usize = 2;
+    const TRANSIT_BUCKET_VALUE: f64 = 777.0;
+    const ANTICIPATED_SLOT_COL: usize = 3;
+    const ANTICIPATED_SLOT_VALUE: f64 = 400.0;
+    const Z_INFLOW_COL: usize = 4;
+    const Z_INFLOW_VALUE: f64 = 55.0;
+
+    fn transit_bucket_template() -> StageTemplate {
+        StageTemplate {
+            num_cols: NUM_COLS,
+            num_rows: 0,
+            num_nz: 0,
+            col_starts: vec![0_i32; NUM_COLS + 1],
+            row_indices: Vec::new(),
+            values: Vec::new(),
+            col_lower: vec![f64::NEG_INFINITY; NUM_COLS],
+            col_upper: vec![f64::INFINITY; NUM_COLS],
+            objective: vec![0.0; NUM_COLS],
+            row_lower: Vec::new(),
+            row_upper: Vec::new(),
+            n_state: 4,
+            n_transfer: 0,
+            n_dual_relevant: 1,
+            n_hydro: 1,
+            max_par_order: 1,
+            col_scale: Vec::new(),
+            row_scale: Vec::new(),
+        }
+    }
+
+    /// Canned primal: `storage=100`, `lag0=200` (pre-overwrite), `bucket_out=777`,
+    /// `ant_slot0=400`, `z_inflow=55`, `storage_in=0`, `bucket_in=0`,
+    /// `ant_state_in=0`, `theta=0`. The `MockSolver` returns this verbatim
+    /// regardless of the bounds `run_forward_stage` patches.
+    fn transit_bucket_solution() -> LpSolution {
+        let mut primal = vec![0.0_f64; NUM_COLS];
+        primal[0] = 100.0;
+        primal[1] = 200.0;
+        primal[TRANSIT_BUCKET_COL] = TRANSIT_BUCKET_VALUE;
+        primal[ANTICIPATED_SLOT_COL] = ANTICIPATED_SLOT_VALUE;
+        primal[Z_INFLOW_COL] = Z_INFLOW_VALUE;
+        LpSolution {
+            objective: 0.0,
+            primal,
+            dual: Vec::new(),
+            reduced_costs: vec![0.0; NUM_COLS],
+            iterations: 0,
+            solve_time_seconds: 0.0,
+        }
+    }
+
+    fn transit_bucket_workspace() -> SolverWorkspace<MockSolver> {
+        let sizing = WorkspaceSizing {
+            hydro_count: 1,
+            max_par_order: 1,
+            n_load_buses: 0,
+            max_blocks: 0,
+            n_buckets: 1,
+            downstream_par_order: 0,
+            max_openings: 1,
+            initial_pool_capacity: 16,
+            n_state: 4,
+            max_local_fwd: 1,
+            total_forward_passes: 1,
+            noise_dim: 1,
+            n_anticipated: 1,
+            k_max: 1,
+        };
+        SolverWorkspace::new(
+            0,
+            0,
+            MockSolver::always_ok(transit_bucket_solution()),
+            PatchBuffer::new(1, 1, 0, 0, 1, 1, 1),
+            4,
+            sizing,
+        )
+    }
+
+    /// Run one forward stage over the bucket-aware layout, returning the
+    /// captured advanced state (`records[0].state`).
+    fn run_transit_bucket_forward_stage() -> Vec<f64> {
+        let state = crate::test_support::state_layout_with_transit_buckets(
+            1,
+            1,
+            1,
+            vec![(0, 0)],
+            1,
+            1,
+            vec![1],
+        );
+        let template = transit_bucket_template();
+        let templates = vec![template.clone()];
+        let base_rows = vec![0_usize];
+        let stochastic = super::make_stochastic_context_1_hydro_3_stages();
+        let horizon = HorizonMode::Finite { num_stages: 1 };
+        let fcf = FutureCostFunction::new(1, state.n_state, 1, 1, &[0]);
+
+        let mut ws = transit_bucket_workspace();
+        ws.current_state.clear();
+        ws.current_state
+            .extend_from_slice(&[10.0, 20.0, 30.0, 40.0]);
+
+        let geometry_per_stage = vec![StageGeometry::default()];
+
+        let ctx = StageContext {
+            geometry_per_stage: &geometry_per_stage,
+            templates: &templates,
+            base_rows: &base_rows,
+            noise_scale: &[],
+            n_hydros: 0,
+            n_load_buses: 0,
+            load_balance_row_starts: &[],
+            load_bus_indices: &[],
+            block_counts_per_stage: &[1usize],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+            ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
+            discount_factors: &[],
+            cumulative_discount_factors: &[],
+            stage_lag_transitions: &[],
+            noise_group_ids: &[],
+            downstream_par_order: 0,
+        };
+        let study_dims = crate::test_support::study_dims();
+        let training_ctx = TrainingContext {
+            horizon: &horizon,
+            state: &state,
+            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(&state, 1),
+            study_dims: &study_dims,
+            inflow_method: &InflowNonNegativityMethod::None,
+            stochastic: &stochastic,
+            initial_state: &[],
+            inflow_scheme: cobre_core::scenario::SamplingScheme::InSample,
+            load_scheme: cobre_core::scenario::SamplingScheme::InSample,
+            ncs_scheme: cobre_core::scenario::SamplingScheme::InSample,
+            stages: &[],
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+            recent_accum_seed: &[],
+            recent_weight_seed: 0.0,
+            dcs: None,
+        };
+
+        ws.solver.load_model(&template);
+
+        let mut basis_store = BasisStore::new(1, 1);
+        let mut records = vec![TrajectoryRecord {
+            primal: Vec::new(),
+            dual: Vec::new(),
+            stage_cost: 0.0,
+            state: Vec::new(),
+        }];
+        let key = StageKey {
+            t: 0,
+            m: 0,
+            local_m: 0,
+            num_stages: 1,
+            iteration: 1,
+            raw_noise: &[],
+            basis_row_capacity: template.num_rows,
+            terminal_has_boundary_cuts: false,
+            pool: &fcf.pools[0],
+            dcs: None,
+        };
+        let mut slices = basis_store.split_workers_mut(1);
+        run_forward_stage(
+            &mut ws,
+            &mut slices[0],
+            &ctx,
+            &training_ctx,
+            &key,
+            &mut records,
+        )
+        .expect("bucket forward stage solve must succeed");
+
+        records[0].state.clone()
+    }
+
+    /// The bucket and anticipated-ring state (`state[transit_buckets_out]`,
+    /// `state[anticipated_slots_out]`) ride the state-assembly plain copy: each
+    /// equals its own LP primal column, untouched by the lag-shift (the only
+    /// remaining state-assembly overwrite, at index 1).
+    #[test]
+    fn transit_bucket_state_survives_lag_and_anticipated_overwrites() {
+        let advanced = run_transit_bucket_forward_stage();
+        assert_eq!(
+            advanced[TRANSIT_BUCKET_COL], TRANSIT_BUCKET_VALUE,
+            "bucket state must equal the LP primal's bucket_out column"
+        );
+        assert_eq!(
+            advanced[ANTICIPATED_SLOT_COL], ANTICIPATED_SLOT_VALUE,
+            "anticipated-ring slot must equal the LP primal's ant_slot0 column, \
+             identity-resolved like the bucket"
+        );
+        // The lag overwrite genuinely ran (not a vacuous no-op): the lag slot
+        // picks up the accumulated z_inflow value.
+        assert_eq!(
+            advanced[1], Z_INFLOW_VALUE,
+            "lag0 must be overwritten by the lag shift"
         );
     }
 }

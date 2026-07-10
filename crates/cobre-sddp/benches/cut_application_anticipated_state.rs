@@ -27,10 +27,21 @@
 
 use cobre_sddp::build_cut_row_batch_into;
 use cobre_sddp::cut::fcf::FutureCostFunction;
-use cobre_sddp::indexer::StateLayout;
+use cobre_sddp::indexer::{CutStateProjection, StateLayout};
 use cobre_solver::RowBatch;
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
+
+/// All-enabled per-pool projection (full storage + lags) for the bench layouts.
+fn full_cut_state(state: &StateLayout) -> CutStateProjection {
+    CutStateProjection::new(
+        state,
+        cobre_core::temporal::StageStateConfig {
+            storage: true,
+            inflow_lags: true,
+        },
+    )
+}
 
 const N: usize = 10;
 const L_BASELINE: usize = 12;
@@ -67,7 +78,7 @@ fn bench_cut_application_baseline(c: &mut Criterion) {
     // `StateLayout::new` finalizes the mask and column-map cache in its
     // constructor, mirroring production `build_wired_indexer`.
     let lag_counts: Vec<usize> = vec![L_BASELINE; N];
-    let state = StateLayout::new(N, L_BASELINE, 0, 0, vec![], &lag_counts);
+    let state = StateLayout::new(N, L_BASELINE, 0, Vec::new(), 0, 0, vec![], &lag_counts);
     debug_assert_eq!(
         state.n_state, N_STATE,
         "baseline n_state must equal {N_STATE}"
@@ -81,6 +92,7 @@ fn bench_cut_application_baseline(c: &mut Criterion) {
     let fcf = build_fcf(state.n_state);
     let nnz_per_cut = state.nonzero_state_indices.len() + 1;
     let mut batch = build_row_batch(nnz_per_cut);
+    let cut_state = full_cut_state(&state);
 
     c.bench_function("bench_cut_application_baseline", |b| {
         b.iter(|| {
@@ -89,6 +101,7 @@ fn bench_cut_application_baseline(c: &mut Criterion) {
                 black_box(&fcf),
                 black_box(0),
                 black_box(&state),
+                black_box(&cut_state),
                 black_box(&[]),
             );
             black_box(batch.values.len());
@@ -106,6 +119,8 @@ fn bench_cut_application_with_anticipated(c: &mut Criterion) {
     let state = StateLayout::new(
         N,
         L_ANTICIPATED,
+        0,
+        Vec::new(),
         N_ANTICIPATED,
         K_MAX,
         anticipated_lead_stages,
@@ -124,6 +139,7 @@ fn bench_cut_application_with_anticipated(c: &mut Criterion) {
     let fcf = build_fcf(state.n_state);
     let nnz_per_cut = state.nonzero_state_indices.len() + 1;
     let mut batch = build_row_batch(nnz_per_cut);
+    let cut_state = full_cut_state(&state);
 
     c.bench_function("bench_cut_application_with_anticipated", |b| {
         b.iter(|| {
@@ -132,6 +148,7 @@ fn bench_cut_application_with_anticipated(c: &mut Criterion) {
                 black_box(&fcf),
                 black_box(0),
                 black_box(&state),
+                black_box(&cut_state),
                 black_box(&[]),
             );
             black_box(batch.values.len());

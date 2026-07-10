@@ -18,6 +18,11 @@
 //! - `past_anticipated_commitments` — committed MW values for each anticipated
 //!   thermal plant, ordered by delivery stage ascending. Optional; defaults to
 //!   an empty array when no anticipated thermals are present.
+//! - `past_defluences` — past release windows per arc (m³/s per date range),
+//!   keyed by the upstream hydro whose release feeds the arc. Each entry is a
+//!   self-describing `[start_date, end_date)` window on the pre-study calendar,
+//!   mirroring `recent_observations`. Optional; defaults to an empty array when
+//!   absent.
 //!
 //! ```json
 //! {
@@ -60,12 +65,20 @@
 //! 9. No `thermal_id` appears more than once in `past_anticipated_commitments`.
 //! 10. Every `past_anticipated_commitments[i].values_mw` is non-empty.
 //! 11. Every value in `past_anticipated_commitments[i].values_mw` is finite and
-//!     non-negative (`>= 0.0`). (Parse-time check; see also rule 12.)
-//! 12. Every value in `past_anticipated_commitments[i].values_mw` must be `0.0`.
-//!     Non-zero entries are rejected by the semantic validator (Layer 5a) with an
-//!     error naming the thermal id and slot index. Pre-horizon commitments are not
-//!     supported in the current version; see [`AnticipatedCommitmentHistory`] in
-//!     `cobre-core` for the limitation rationale.
+//!     non-negative (`>= 0.0`) (parse-time check).
+//! 12. `past_anticipated_commitments[i].values_mw.len()` equals the
+//!     calendar-derived count of pre-study-committed delivery stages for that
+//!     thermal's lead mode — not `lead_stages` on a non-uniform calendar — and
+//!     every value lies within the plant's `[min_generation_mw, max_generation_mw]`
+//!     bounds and, if the plant has a commissioning window, matures inside it.
+//!     All three are enforced by the semantic validator (Layer 5a); the committed
+//!     values are sunk cost and do not enter the study objective. See
+//!     [`AnticipatedCommitmentHistory`] in `cobre-core` for the full contract.
+//! 13. Every `start_date` and `end_date` in `past_defluences` parses as ISO 8601
+//!     (`YYYY-MM-DD`), and `end_date > start_date`.
+//! 14. Every `value_m3s` in `past_defluences` is finite and non-negative.
+//! 15. For defluence windows with the same `hydro_id`, date ranges do not overlap
+//!     (adjacent ranges where `start == prev_end` are accepted).
 //!
 //! Cross-reference validation (checking that hydro IDs exist in the hydro
 //! registry) is deferred to Layer 3 (deferred). Storage bounds validation
@@ -74,8 +87,8 @@
 
 use chrono::NaiveDate;
 use cobre_core::{
-    AnticipatedCommitmentHistory, EntityId, HydroPastInflows, HydroStorage, InitialConditions,
-    RecentObservation,
+    AnticipatedCommitmentHistory, EntityId, HydroPastDefluence, HydroPastInflows, HydroStorage,
+    InitialConditions, RecentObservation,
 };
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -85,23 +98,8 @@ use crate::LoadError;
 
 // ── Intermediate serde types ──────────────────────────────────────────────────
 
-/// Initial reservoir storage conditions, past inflow values, and recent
-/// observations for all hydro plants in the case.
-///
-/// Two arrays specify starting volumes at simulation time zero:
-/// - `storage` — operating hydros (those participating in generation dispatch).
-/// - `filling_storage` — filling hydros (reservoirs under construction or filling).
-///
-/// An optional array provides past inflow values for PAR(p) lag initialization:
-/// - `past_inflows` — ordered from most recent (lag 1) to oldest (lag p).
-///
-/// An optional array provides observed inflow data for mid-season study starts:
-/// - `recent_observations` — date-ranged observations that seed the lag accumulator.
-///
-/// A hydro may appear in at most one of the two storage arrays. Duplicate
-/// `hydro_id` values within the same array are rejected. Cross-reference
-/// validation (checking that IDs exist in the hydro registry) is deferred to
-/// a later validation layer.
+/// Intermediate serde type for `initial_conditions.json`, deserialized then
+/// validated before conversion to [`InitialConditions`].
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -138,6 +136,14 @@ pub(crate) struct RawInitialConditions {
     /// one anticipated thermal. Optional; defaults to empty.
     #[serde(default)]
     past_anticipated_commitments: Vec<RawAnticipatedCommitmentHistory>,
+
+    /// Past defluence (release) windows per arc [m³/s per date range], keyed by
+    /// the upstream hydro whose release feeds the arc. Each entry is a
+    /// self-describing `[start_date, end_date)` window on the pre-study calendar.
+    /// Windows for the same hydro must not overlap; adjacent ranges
+    /// (start == previous end) are accepted. Optional; defaults to empty.
+    #[serde(default)]
+    past_defluences: Vec<RawHydroPastDefluence>,
 }
 
 /// Initial reservoir volume for one hydro plant, in hm³.
@@ -169,6 +175,31 @@ struct RawHydroPastInflows {
     season_ids: Option<Vec<u32>>,
 }
 
+/// Past defluence (release) for the arc fed by a single upstream hydro over a
+/// specific date range.
+///
+/// Mirrors [`RawRecentObservation`]: a self-describing `[start_date, end_date)`
+/// window (ISO 8601, `end_date` exclusive and after `start_date`) carrying the
+/// average release rate over the window. Multiple windows per hydro are allowed;
+/// date ranges for the same hydro must not overlap, though adjacent ranges
+/// (`start_date == previous end_date`) are accepted.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawHydroPastDefluence {
+    /// Upstream hydro plant identifier whose release feeds the arc.
+    hydro_id: i32,
+    /// Start of the release window (inclusive), as an ISO 8601 date
+    /// (YYYY-MM-DD).
+    start_date: String,
+    /// End of the release window (exclusive), as an ISO 8601 date (YYYY-MM-DD).
+    /// Must be after `start_date`.
+    end_date: String,
+    /// Average release rate over the window [m³/s]. Must be finite and
+    /// non-negative.
+    value_m3s: f64,
+}
+
 /// Observed inflow for a single hydro plant over a specific date range.
 ///
 /// Used to seed the lag accumulator when a study begins mid-season (before the
@@ -194,27 +225,27 @@ struct RawRecentObservation {
 
 /// Past committed MW values for one anticipated thermal plant.
 ///
-/// `values_mw[0]` is the commitment for the earliest pending delivery stage;
-/// `values_mw[k-1]` is the most recent. Length must equal the plant's
-/// `lead_stages` (validated semantically in a later validation layer).
+/// `values_mw[j]` is the MW dispatched at the `j`-th pre-study-committed
+/// delivery stage (delivery-anchored; required length is calendar-derived, not
+/// `lead_stages` on a non-uniform calendar — validated semantically). The
+/// values are sunk cost: they do not enter the study objective. Each value
+/// must lie within the plant's `[min_generation_mw, max_generation_mw]` bounds
+/// and, if the plant has a commissioning window, mature inside it (both
+/// validated semantically).
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawAnticipatedCommitmentHistory {
     /// Thermal plant identifier. Must reference an anticipated thermal.
     thermal_id: i32,
-    /// Past committed MW values, ordered by delivery stage ascending.
-    /// Length must equal the plant's `lead_stages` (validated semantically).
+    /// Past committed MW values, ordered by delivery stage ascending. Required
+    /// length is calendar-derived (validated semantically), not `lead_stages`.
     values_mw: Vec<f64>,
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Load and validate `initial_conditions.json` from `path`.
-///
-/// Reads the JSON file, deserializes it through intermediate serde types, then
-/// performs post-deserialization validation before converting to
-/// [`InitialConditions`].
 ///
 /// # Errors
 ///
@@ -228,6 +259,7 @@ pub(crate) struct RawAnticipatedCommitmentHistory {
 /// | `hydro_id` in both `storage` and `filling_storage`    | [`LoadError::SchemaError`] |
 /// | Duplicate `hydro_id` within `past_inflows`            | [`LoadError::SchemaError`] |
 /// | Non-finite or negative value in `past_inflows`        | [`LoadError::SchemaError`] |
+/// | Invalid date / non-finite value / overlap in `past_defluences` | [`LoadError::SchemaError`] |
 ///
 /// # Examples
 ///
@@ -268,10 +300,12 @@ fn validate_raw(raw: &RawInitialConditions, path: &Path) -> Result<(), LoadError
     validate_recent_observations_values(&raw.recent_observations, path)?;
     validate_recent_observations_no_overlap(&raw.recent_observations, path)?;
     validate_anticipated_commitment_histories(&raw.past_anticipated_commitments, path)?;
+    validate_past_defluences_dates(&raw.past_defluences, path)?;
+    validate_past_defluences_values(&raw.past_defluences, path)?;
+    validate_past_defluences_no_overlap(&raw.past_defluences, path)?;
     Ok(())
 }
 
-/// Check that all `value_hm3` entries in an array are non-negative.
 fn validate_non_negative(
     entries: &[RawHydroStorage],
     array_name: &str,
@@ -289,7 +323,6 @@ fn validate_non_negative(
     Ok(())
 }
 
-/// Check that no `hydro_id` appears more than once within an array.
 fn validate_no_duplicates(
     entries: &[RawHydroStorage],
     array_name: &str,
@@ -308,7 +341,6 @@ fn validate_no_duplicates(
     Ok(())
 }
 
-/// Check that no `hydro_id` appears in both `storage` and `filling_storage`.
 fn validate_mutual_exclusion(raw: &RawInitialConditions, path: &Path) -> Result<(), LoadError> {
     let storage_ids: HashSet<i32> = raw.storage.iter().map(|e| e.hydro_id).collect();
 
@@ -328,7 +360,6 @@ fn validate_mutual_exclusion(raw: &RawInitialConditions, path: &Path) -> Result<
     Ok(())
 }
 
-/// Check that no `hydro_id` appears more than once in `past_inflows`.
 fn validate_past_inflows_no_duplicates(
     entries: &[RawHydroPastInflows],
     path: &Path,
@@ -346,7 +377,6 @@ fn validate_past_inflows_no_duplicates(
     Ok(())
 }
 
-/// Check that every value in `past_inflows[i].values_m3s` is finite and non-negative.
 fn validate_past_inflows_values(
     entries: &[RawHydroPastInflows],
     path: &Path,
@@ -368,8 +398,6 @@ fn validate_past_inflows_values(
     Ok(())
 }
 
-/// Check that when `season_ids` is present for a `past_inflows` entry, its
-/// length equals `values_m3s.len()`.
 fn validate_past_inflows_season_ids(
     entries: &[RawHydroPastInflows],
     path: &Path,
@@ -394,8 +422,6 @@ fn validate_past_inflows_season_ids(
     Ok(())
 }
 
-/// Check that every `start_date` and `end_date` in `recent_observations` is a
-/// valid ISO 8601 date (`YYYY-MM-DD`) and that `end_date > start_date`.
 fn validate_recent_observations_dates(
     entries: &[RawRecentObservation],
     path: &Path,
@@ -438,7 +464,6 @@ fn validate_recent_observations_dates(
     Ok(())
 }
 
-/// Check that every `value_m3s` in `recent_observations` is finite and non-negative.
 fn validate_recent_observations_values(
     entries: &[RawRecentObservation],
     path: &Path,
@@ -506,11 +531,6 @@ fn validate_recent_observations_no_overlap(
 }
 
 /// Validate IO-layer invariants on `past_anticipated_commitments`.
-///
-/// Checks:
-/// - No duplicate `thermal_id` within the array.
-/// - No entry with an empty `values_mw` (anticipated plants always need ≥ 1 value).
-/// - No negative or non-finite value in `values_mw`.
 fn validate_anticipated_commitment_histories(
     histories: &[RawAnticipatedCommitmentHistory],
     path: &Path,
@@ -555,6 +575,114 @@ fn validate_anticipated_commitment_histories(
                     message: format!(
                         "past_anticipated_commitments[{i}].values_mw[{j}] must be >= 0 \
                          (got {v}); anticipated commitments are physical generation amounts"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_past_defluences_dates(
+    entries: &[RawHydroPastDefluence],
+    path: &Path,
+) -> Result<(), LoadError> {
+    for (i, entry) in entries.iter().enumerate() {
+        let start = NaiveDate::parse_from_str(&entry.start_date, "%Y-%m-%d").map_err(|_| {
+            LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("past_defluences[{i}].start_date"),
+                message: format!(
+                    "past_defluences[{i}].start_date '{}' is not a valid ISO 8601 date \
+                     (expected YYYY-MM-DD)",
+                    entry.start_date
+                ),
+            }
+        })?;
+        let end = NaiveDate::parse_from_str(&entry.end_date, "%Y-%m-%d").map_err(|_| {
+            LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("past_defluences[{i}].end_date"),
+                message: format!(
+                    "past_defluences[{i}].end_date '{}' is not a valid ISO 8601 date \
+                     (expected YYYY-MM-DD)",
+                    entry.end_date
+                ),
+            }
+        })?;
+        if end <= start {
+            return Err(LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("past_defluences[{i}].end_date"),
+                message: format!(
+                    "past_defluences[{i}]: end_date must be after start_date \
+                     (start_date={}, end_date={})",
+                    entry.start_date, entry.end_date
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_past_defluences_values(
+    entries: &[RawHydroPastDefluence],
+    path: &Path,
+) -> Result<(), LoadError> {
+    for (i, entry) in entries.iter().enumerate() {
+        if !entry.value_m3s.is_finite() || entry.value_m3s < 0.0 {
+            return Err(LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("past_defluences[{i}].value_m3s"),
+                message: format!(
+                    "past_defluences[{i}].value_m3s must be a finite non-negative number, \
+                     got {}",
+                    entry.value_m3s
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Check that for defluence windows with the same `hydro_id`, date ranges do
+/// not overlap. Adjacent ranges where `start_date == previous end_date` are
+/// accepted (exclusive-end convention).
+///
+/// Precondition: [`validate_past_defluences_dates`] has returned `Ok(())` for
+/// these entries (dates are valid and `end > start`).
+fn validate_past_defluences_no_overlap(
+    entries: &[RawHydroPastDefluence],
+    path: &Path,
+) -> Result<(), LoadError> {
+    use std::collections::HashMap;
+
+    let mut by_hydro: HashMap<i32, Vec<usize>> = HashMap::new();
+    for (i, entry) in entries.iter().enumerate() {
+        by_hydro.entry(entry.hydro_id).or_default().push(i);
+    }
+
+    for (hydro_id, mut indices) in by_hydro {
+        indices.sort_by_key(|&i| {
+            NaiveDate::parse_from_str(&entries[i].start_date, "%Y-%m-%d")
+                .unwrap_or_else(|_| unreachable!("start_date already validated"))
+        });
+
+        for window in indices.windows(2) {
+            let (i_prev, i_curr) = (window[0], window[1]);
+            let prev_end = NaiveDate::parse_from_str(&entries[i_prev].end_date, "%Y-%m-%d")
+                .unwrap_or_else(|_| unreachable!("end_date already validated"));
+            let curr_start = NaiveDate::parse_from_str(&entries[i_curr].start_date, "%Y-%m-%d")
+                .unwrap_or_else(|_| unreachable!("start_date already validated"));
+
+            if curr_start < prev_end {
+                return Err(LoadError::SchemaError {
+                    path: path.to_path_buf(),
+                    field: format!("past_defluences[{i_curr}].start_date"),
+                    message: format!(
+                        "past_defluences: overlapping date ranges for hydro_id {hydro_id}: \
+                         entry [{i_prev}] ends on {prev_end} but entry [{i_curr}] starts on \
+                         {curr_start}"
                     ),
                 });
             }
@@ -626,12 +754,27 @@ fn convert(raw: RawInitialConditions) -> InitialConditions {
         .collect();
     past_anticipated_commitments.sort_by_key(|e| e.thermal_id.0);
 
+    let mut past_defluences: Vec<HydroPastDefluence> = raw
+        .past_defluences
+        .into_iter()
+        .map(|e| HydroPastDefluence {
+            hydro_id: EntityId(e.hydro_id),
+            start_date: NaiveDate::parse_from_str(&e.start_date, "%Y-%m-%d")
+                .unwrap_or_else(|_| unreachable!("start_date already validated")),
+            end_date: NaiveDate::parse_from_str(&e.end_date, "%Y-%m-%d")
+                .unwrap_or_else(|_| unreachable!("end_date already validated")),
+            value_m3s: e.value_m3s,
+        })
+        .collect();
+    past_defluences.sort_by_key(|e| (e.hydro_id.0, e.start_date));
+
     InitialConditions {
         storage,
         filling_storage,
         past_inflows,
         past_anticipated_commitments,
         recent_observations,
+        past_defluences,
     }
 }
 
@@ -720,7 +863,6 @@ mod tests {
         let ic = parse_initial_conditions(f.path()).unwrap();
 
         assert_eq!(ic.past_inflows.len(), 2);
-        // Sorted by hydro_id ascending
         assert_eq!(ic.past_inflows[0].hydro_id, EntityId(0));
         assert_eq!(ic.past_inflows[0].values_m3s, vec![600.0, 500.0]);
         assert_eq!(ic.past_inflows[1].hydro_id, EntityId(1));
@@ -1010,7 +1152,6 @@ mod tests {
             ic1, ic2,
             "results must be identical regardless of input ordering"
         );
-        // Sorted by hydro_id ascending
         assert_eq!(ic1.storage[0].hydro_id, EntityId(0));
         assert_eq!(ic1.storage[1].hydro_id, EntityId(1));
         assert_eq!(ic1.past_inflows[0].hydro_id, EntityId(0));
@@ -1336,7 +1477,6 @@ mod tests {
         let f = write_json(json);
         let ic = parse_initial_conditions(f.path()).unwrap();
         assert_eq!(ic.recent_observations.len(), 3);
-        // Sorted by (hydro_id, start_date): hydro 0 first with earlier start first
         assert_eq!(ic.recent_observations[0].hydro_id, EntityId(0));
         assert_eq!(
             ic.recent_observations[0].start_date,
@@ -1528,7 +1668,6 @@ mod tests {
             ic1.past_anticipated_commitments, ic2.past_anticipated_commitments,
             "results must be identical regardless of input ordering"
         );
-        // Sorted by thermal_id ascending
         assert_eq!(ic1.past_anticipated_commitments[0].thermal_id, EntityId(1));
         assert_eq!(ic1.past_anticipated_commitments[1].thermal_id, EntityId(2));
     }
@@ -1613,6 +1752,129 @@ mod tests {
                 assert!(
                     field.contains("values_mw[1]"),
                     "field should contain 'values_mw[1]', got: {field}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    // ── AC: past_defluences absent → empty; present → parsed and sorted ───────
+
+    /// Given a `initial_conditions.json` without a `past_defluences` key,
+    /// `parse_initial_conditions` returns `Ok(ic)` with an empty
+    /// `past_defluences` vec.
+    #[test]
+    fn test_past_defluences_absent_defaults_to_empty() {
+        let f = write_json(VALID_JSON);
+        let ic = parse_initial_conditions(f.path()).unwrap();
+        assert!(
+            ic.past_defluences.is_empty(),
+            "absent past_defluences must default to empty vec"
+        );
+    }
+
+    /// Given two valid `past_defluences` windows for the same hydro with adjacent
+    /// (non-overlapping) date ranges plus one for another hydro, the entries are
+    /// parsed with dates as `NaiveDate` and sorted by `(hydro_id, start_date)`
+    /// (declaration-order invariance).
+    #[test]
+    fn test_parse_valid_past_defluences_windows_sorted() {
+        let json = r#"{
+          "storage": [],
+          "filling_storage": [],
+          "past_defluences": [
+            { "hydro_id": 1, "start_date": "2023-12-30", "end_date": "2024-01-01", "value_m3s": 200.0 },
+            { "hydro_id": 0, "start_date": "2023-12-25", "end_date": "2023-12-28", "value_m3s": 600.0 },
+            { "hydro_id": 0, "start_date": "2023-12-28", "end_date": "2024-01-01", "value_m3s": 500.0 }
+          ]
+        }"#;
+        let f = write_json(json);
+        let ic = parse_initial_conditions(f.path()).unwrap();
+        assert_eq!(ic.past_defluences.len(), 3);
+        assert_eq!(ic.past_defluences[0].hydro_id, EntityId(0));
+        assert_eq!(
+            ic.past_defluences[0].start_date,
+            chrono::NaiveDate::from_ymd_opt(2023, 12, 25).unwrap()
+        );
+        assert_eq!(ic.past_defluences[1].hydro_id, EntityId(0));
+        assert_eq!(
+            ic.past_defluences[1].start_date,
+            chrono::NaiveDate::from_ymd_opt(2023, 12, 28).unwrap()
+        );
+        assert_eq!(ic.past_defluences[2].hydro_id, EntityId(1));
+        assert!((ic.past_defluences[2].value_m3s - 200.0).abs() < f64::EPSILON);
+    }
+
+    /// Given two `past_defluences` windows for the same hydro with overlapping
+    /// date ranges, `parse_initial_conditions` returns `Err(LoadError::SchemaError)`
+    /// with `message` containing "overlapping".
+    #[test]
+    fn test_past_defluences_overlapping_windows_rejected() {
+        let json = r#"{
+          "storage": [],
+          "filling_storage": [],
+          "past_defluences": [
+            { "hydro_id": 0, "start_date": "2023-12-25", "end_date": "2023-12-30", "value_m3s": 500.0 },
+            { "hydro_id": 0, "start_date": "2023-12-28", "end_date": "2024-01-01", "value_m3s": 480.0 }
+          ]
+        }"#;
+        let f = write_json(json);
+        let err = parse_initial_conditions(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { message, .. } => {
+                assert!(
+                    message.contains("overlapping"),
+                    "message should contain 'overlapping', got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// Given a `past_defluences` window where `end_date <= start_date`,
+    /// `parse_initial_conditions` returns `Err(LoadError::SchemaError)` with
+    /// `message` containing "`end_date` must be after `start_date`".
+    #[test]
+    fn test_past_defluences_end_before_start_rejected() {
+        let json = r#"{
+          "storage": [],
+          "filling_storage": [],
+          "past_defluences": [
+            { "hydro_id": 0, "start_date": "2024-01-01", "end_date": "2023-12-30", "value_m3s": 500.0 }
+          ]
+        }"#;
+        let f = write_json(json);
+        let err = parse_initial_conditions(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { message, .. } => {
+                assert!(
+                    message.contains("end_date must be after start_date"),
+                    "message should contain 'end_date must be after start_date', got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// Given a `past_defluences` window with `value_m3s: -1.0`,
+    /// `parse_initial_conditions` returns `Err(LoadError::SchemaError)` with
+    /// field containing `"value_m3s"`.
+    #[test]
+    fn test_past_defluences_negative_value_rejected() {
+        let json = r#"{
+          "storage": [],
+          "filling_storage": [],
+          "past_defluences": [
+            { "hydro_id": 0, "start_date": "2023-12-30", "end_date": "2024-01-01", "value_m3s": -1.0 }
+          ]
+        }"#;
+        let f = write_json(json);
+        let err = parse_initial_conditions(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, .. } => {
+                assert!(
+                    field.contains("value_m3s"),
+                    "field should contain 'value_m3s', got: {field}"
                 );
             }
             other => panic!("expected SchemaError, got: {other:?}"),

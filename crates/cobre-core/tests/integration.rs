@@ -9,6 +9,7 @@
     clippy::too_many_lines
 )]
 
+use chrono::NaiveDate;
 use cobre_core::{
     ContractType, DeficitSegment, DiversionChannel, EnergyContract, EntityId, FillingConfig, Hydro,
     HydroGenerationModel, HydroPenalties, Line, NonControllableSource, PumpingStation,
@@ -40,6 +41,7 @@ fn make_bus(id: i32) -> cobre_core::Bus {
     cobre_core::Bus {
         id: EntityId(id),
         name: format!("bus-{id}"),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         deficit_segments: vec![DeficitSegment {
             depth_mw: Some(100.0),
             cost_per_mwh: 500.0,
@@ -52,6 +54,7 @@ fn make_line(id: i32, source_bus_id: i32, target_bus_id: i32) -> Line {
     Line {
         id: EntityId(id),
         name: format!("line-{id}").to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         source_bus_id: EntityId(source_bus_id),
         target_bus_id: EntityId(target_bus_id),
         entry_stage_id: None,
@@ -67,8 +70,10 @@ fn make_hydro(id: i32, bus_id: i32, downstream_id: Option<i32>) -> Hydro {
     Hydro {
         id: EntityId(id),
         name: format!("hydro-{id}").to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(bus_id),
         downstream_id: downstream_id.map(EntityId),
+        travel_time_hours: None,
         entry_stage_id: None,
         exit_stage_id: None,
         min_storage_hm3: 0.0,
@@ -96,6 +101,7 @@ fn make_thermal(id: i32, bus_id: i32) -> Thermal {
     Thermal {
         id: EntityId(id),
         name: format!("thermal-{id}").to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(bus_id),
         entry_stage_id: None,
         exit_stage_id: None,
@@ -115,6 +121,7 @@ fn make_pumping_station(
     PumpingStation {
         id: EntityId(id),
         name: format!("ps-{id}").to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(bus_id),
         source_hydro_id: EntityId(source_hydro_id),
         destination_hydro_id: EntityId(destination_hydro_id),
@@ -130,6 +137,7 @@ fn make_contract(id: i32, bus_id: i32) -> EnergyContract {
     EnergyContract {
         id: EntityId(id),
         name: format!("contract-{id}").to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(bus_id),
         contract_type: ContractType::Import,
         entry_stage_id: None,
@@ -144,6 +152,7 @@ fn make_ncs(id: i32, bus_id: i32) -> NonControllableSource {
     NonControllableSource {
         id: EntityId(id),
         name: format!("ncs-{id}").to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
         bus_id: EntityId(bus_id),
         entry_stage_id: None,
         exit_stage_id: None,
@@ -253,6 +262,7 @@ fn test_realistic_multi_entity_system() {
     assert_eq!(buses[1].id, EntityId(2));
     assert_eq!(buses[2].id, EntityId(3));
 
+    // Equal dates sort by id ascending.
     let hydros = system.hydros();
     assert_eq!(hydros[0].id, EntityId(10));
     assert_eq!(hydros[1].id, EntityId(11));
@@ -483,4 +493,92 @@ fn test_diversion_invalid_reference_rejected() {
         )),
         "expected InvalidReference for Hydro.diversion.downstream_id -> Hydro 999; got: {errors:?}"
     );
+}
+
+#[test]
+fn test_canonical_order_stable_under_name_changes() {
+    // Canonical order is (operational_start_date, id): renaming entities with ids
+    // and dates held constant must not change processing order — names are
+    // user-chosen and must not influence the layout.
+    let date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+
+    let mut hydro_a = make_hydro(1, 1, None);
+    hydro_a.name = "alpha".to_string();
+    hydro_a.operational_start_date = date;
+    let mut hydro_b = make_hydro(2, 1, None);
+    hydro_b.name = "bravo".to_string();
+    hydro_b.operational_start_date = date;
+
+    let system_a = SystemBuilder::new()
+        .buses(vec![make_bus(1)])
+        .hydros(vec![hydro_a.clone(), hydro_b.clone()])
+        .build()
+        .expect("system must be valid");
+
+    // Rename both hydros (ids and dates unchanged), and reverse the input order.
+    let mut a_renamed = hydro_a;
+    a_renamed.name = "zulu".to_string();
+    let mut b_renamed = hydro_b;
+    b_renamed.name = "alfa".to_string();
+
+    let system_b = SystemBuilder::new()
+        .buses(vec![make_bus(1)])
+        .hydros(vec![b_renamed, a_renamed])
+        .build()
+        .expect("system must be valid");
+
+    let ids_a: Vec<i32> = system_a.hydros().iter().map(|h| h.id.0).collect();
+    let ids_b: Vec<i32> = system_b.hydros().iter().map(|h| h.id.0).collect();
+    assert_eq!(
+        ids_a, ids_b,
+        "renaming with (date, id) held constant must not change processing order"
+    );
+    assert_eq!(
+        ids_a,
+        vec![1, 2],
+        "same-date entities order by id ascending"
+    );
+}
+
+#[test]
+fn test_canonical_order_sorts_by_distinct_date() {
+    let early = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+    let late = NaiveDate::from_ymd_opt(2024, 6, 1).unwrap();
+
+    let mut bus_late = make_bus(1);
+    bus_late.operational_start_date = late;
+    let mut bus_early = make_bus(2);
+    bus_early.operational_start_date = early;
+
+    let system = SystemBuilder::new()
+        .buses(vec![bus_late, bus_early])
+        .build()
+        .expect("system must be valid");
+
+    assert!(
+        system.buses()[0].operational_start_date < system.buses()[1].operational_start_date,
+        "distinct dates supplied in reverse must come out date-ascending"
+    );
+}
+
+#[test]
+fn test_canonical_order_id_tiebreak_on_equal_date() {
+    let date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+
+    // id 1 has the name that sorts LAST ("B"); id 2 the name that sorts first ("A").
+    // The id tiebreak must win, so id 1 comes first regardless of name.
+    let mut bus_b = make_bus(1);
+    bus_b.name = "B".to_string();
+    bus_b.operational_start_date = date;
+    let mut bus_a = make_bus(2);
+    bus_a.name = "A".to_string();
+    bus_a.operational_start_date = date;
+
+    let system = SystemBuilder::new()
+        .buses(vec![bus_a, bus_b])
+        .build()
+        .expect("system must be valid");
+
+    assert_eq!(system.buses()[0].id, EntityId(1));
+    assert_eq!(system.buses()[1].id, EntityId(2));
 }

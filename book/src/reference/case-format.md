@@ -220,17 +220,16 @@ per-method field tables.
 
 **`policy` section:**
 
-| Field                               | Type           | Default      | Description                                                            |
-| ----------------------------------- | -------------- | ------------ | ---------------------------------------------------------------------- |
-| `path`                              | string         | `"./policy"` | Directory for policy data (cuts, states, vertices, basis)              |
-| `mode`                              | string         | `"fresh"`    | Initialization mode: `"fresh"`, `"warm_start"`, or `"resume"`          |
-| `validate_compatibility`            | boolean        | `true`       | Verify entity and dimension compatibility when loading a stored policy |
-| `boundary`                          | object or null | `null`       | Terminal boundary cut config: `path` (string) + `source_stage` (int)   |
-| `checkpointing.enabled`             | boolean        | `null`       | Enable periodic checkpointing                                          |
-| `checkpointing.initial_iteration`   | integer        | `null`       | First iteration to write a checkpoint                                  |
-| `checkpointing.interval_iterations` | integer        | `null`       | Iterations between checkpoints                                         |
-| `checkpointing.store_basis`         | boolean        | `null`       | Include LP basis in checkpoints                                        |
-| `checkpointing.compress`            | boolean        | `null`       | Compress checkpoint files                                              |
+| Field                               | Type           | Default      | Description                                                          |
+| ----------------------------------- | -------------- | ------------ | -------------------------------------------------------------------- |
+| `path`                              | string         | `"./policy"` | Directory for policy data (cuts, states, vertices, basis)            |
+| `mode`                              | string         | `"fresh"`    | Initialization mode: `"fresh"`, `"warm_start"`, or `"resume"`        |
+| `boundary`                          | object or null | `null`       | Terminal boundary cut config: `path` (string) + `source_stage` (int) |
+| `checkpointing.enabled`             | boolean        | `null`       | Enable periodic checkpointing                                        |
+| `checkpointing.initial_iteration`   | integer        | `null`       | First iteration to write a checkpoint                                |
+| `checkpointing.interval_iterations` | integer        | `null`       | Iterations between checkpoints                                       |
+| `checkpointing.store_basis`         | boolean        | `null`       | Include LP basis in checkpoints                                      |
+| `checkpointing.compress`            | boolean        | `null`       | Compress checkpoint files                                            |
 
 **`simulation` section:**
 
@@ -478,12 +477,13 @@ distinct season IDs.
 Initial reservoir storage, past inflow lags, and recent observations at the
 start of the study.
 
-| Field                 | Required | Description                                                                                                       |
-| --------------------- | -------- | ----------------------------------------------------------------------------------------------------------------- |
-| `storage`             | Yes      | Array of `{ "hydro_id": integer, "value_hm3": number }` entries for operating hydros                              |
-| `filling_storage`     | Yes      | Array of `{ "hydro_id": integer, "value_hm3": number }` entries for filling hydros                                |
-| `past_inflows`        | No       | Array of `{ "hydro_id": integer, "values_m3s": [number], "season_ids": [integer] }` for PAR(p) lag initialization |
-| `recent_observations` | No       | Array of observed inflow entries for mid-season study starts (see below)                                          |
+| Field                 | Required | Description                                                                                                                                                                                                      |
+| --------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `storage`             | Yes      | Array of `{ "hydro_id": integer, "value_hm3": number }` entries for operating hydros                                                                                                                             |
+| `filling_storage`     | Yes      | Array of `{ "hydro_id": integer, "value_hm3": number }` entries for filling hydros                                                                                                                               |
+| `past_inflows`        | No       | Array of `{ "hydro_id": integer, "values_m3s": [number], "season_ids": [integer] }` for PAR(p) lag initialization                                                                                                |
+| `past_defluences`     | No       | Array of `{ "hydro_id": integer, "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD", "value_m3s": number }` dated release windows — pre-study releases in transit at study start, per declared travel-time arc |
+| `recent_observations` | No       | Array of observed inflow entries for mid-season study starts (see below)                                                                                                                                         |
 
 Each `hydro_id` must be unique within its array and must not appear in both
 `storage` and `filling_storage`. All `value_hm3` values must be non-negative.
@@ -597,6 +597,7 @@ Key fields:
 | `hydros[].name`                                   | Yes      | Human-readable plant name                                                                                     |
 | `hydros[].bus_id`                                 | Yes      | Bus where generation is injected                                                                              |
 | `hydros[].downstream_id`                          | No       | Downstream plant ID in the cascade; `null` = tailwater                                                        |
+| `hydros[].travel_time_hours`                      | No       | Cascade-arc travel time in hours to `downstream_id`; `null`/`0` = instantaneous                               |
 | `hydros[].entry_stage_id`                         | No       | Stage when plant enters service; `null` = always exists                                                       |
 | `hydros[].exit_stage_id`                          | No       | Stage when plant is decommissioned; `null` = never                                                            |
 | `hydros[].reservoir`                              | Yes      | `min_storage_hm3` and `max_storage_hm3` (both >= 0)                                                           |

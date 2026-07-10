@@ -84,7 +84,7 @@ pub enum BackendError {
         available: Vec<String>,
     },
 
-    /// The value set in `COBRE_COMM_BACKEND` matches no known backend name.
+    /// The requested backend selector matches no valid backend.
     #[error(
         "unknown communication backend '{requested}' (known backends: {available})",
         available = available.join(", ")

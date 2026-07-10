@@ -3,13 +3,20 @@ use crate::indexer::{BlockGrid, StateLayout};
 /// Pre-allocated row-bound and column-bound patch arrays for one SDDP stage LP solve.
 ///
 /// Reused across all iterations. The row-bound region (`indices`/`lower`/`upper`,
-/// length `N + M*B + N`) holds only the noise (Category 3), load (Category 4), and
-/// z-inflow (Category 5) patches; state fixing (Categories 1/2/6) is applied
+/// length `N + M*B + N`) holds only the noise, load, and z-inflow patches; state
+/// fixing (storage, AR lags, travel-time buckets, anticipated state) is applied
 /// exclusively via column bounds and lives in the column-bound region
-/// (`col_indices`/`col_lower`/`col_upper`, length `N*(1+L) + A*K`). `N` is the
-/// hydro count, `M` the stochastic-load-bus count, `B` the max block count, `L` the
-/// max PAR order, and `A*K` the anticipated-thermal state count. For equality
-/// constraints each entry's lower == upper.
+/// (`col_indices`/`col_lower`/`col_upper`, length `N*(1+L) + n_buckets + A*K`).
+/// `N` is the hydro count, `M` the stochastic-load-bus count, `B` the max block
+/// count, `L` the max PAR order, `n_buckets` the travel-time bucket count, and
+/// `A*K` the anticipated-thermal state count. For equality constraints each
+/// entry's lower == upper.
+///
+/// [`fill_col_state_patches`](Self::fill_col_state_patches) is the single owner
+/// of the column-bound region: it iterates
+/// [`StateLayout::state_to_lp_incoming_column`] over every state-vector index,
+/// so storage, AR lags, buckets, and anticipated state all resolve through one
+/// call site rather than parallel hardcoded offsets.
 #[derive(Debug, Clone)]
 pub struct PatchBuffer {
     /// Row indices to patch.
@@ -42,6 +49,9 @@ pub struct PatchBuffer {
     /// Maximum block count across all stages (B).
     max_blocks: usize,
 
+    /// Global travel-time bucket count; `0` when no arc is declared.
+    n_buckets: usize,
+
     /// Number of anticipated thermals (A).
     n_anticipated: usize,
 
@@ -64,11 +74,12 @@ pub struct PatchBuffer {
 
 impl PatchBuffer {
     /// Construct a [`PatchBuffer`] sized to `N + M*B + N` row patches and
-    /// `N*(1+L) + A*K` column patches, zero-initialised.
+    /// `N*(1+L) + n_buckets + A*K` column patches, zero-initialised.
     ///
     /// Both regions are populated before each LP solve via [`fill_forward_patches`]
     /// / [`fill_load_patches`] (row) and `fill_col_state_patches` (column). Pass `0`
-    /// for `n_load_buses`/`max_blocks` when there is no stochastic load, and for
+    /// for `n_load_buses`/`max_blocks` when there is no stochastic load, for
+    /// `n_buckets` when there are no travel-time buckets, and for
     /// `n_anticipated`/`k_max` when there are no anticipated thermals.
     ///
     /// # Examples
@@ -76,32 +87,38 @@ impl PatchBuffer {
     /// ```
     /// use cobre_sddp::lp_builder::PatchBuffer;
     ///
-    /// // 3-hydro AR(2) system, no stochastic load, no anticipated thermals
+    /// // 3-hydro AR(2) system, no stochastic load, no buckets, no anticipated thermals
     /// // Row capacity = N + M*B + N = 3 + 0 + 3 = 6
-    /// // Col capacity = N*(1+L) + A*K = 3*(1+2) + 0 = 9
-    /// let buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
+    /// // Col capacity = N*(1+L) + n_buckets + A*K = 3*(1+2) + 0 + 0 = 9
+    /// let buf = PatchBuffer::new(3, 2, 0, 0, 0, 0, 0);
     /// assert_eq!(buf.indices.len(), 6);
     /// assert_eq!(buf.col_indices.len(), 9);
     ///
     /// // 3-hydro AR(2) system with 2 stochastic load buses, up to 3 blocks
     /// // Row capacity = N + M*B + N = 3 + 6 + 3 = 12
-    /// let buf_load = PatchBuffer::new(3, 2, 2, 3, 0, 0);
+    /// let buf_load = PatchBuffer::new(3, 2, 2, 3, 0, 0, 0);
     /// assert_eq!(buf_load.indices.len(), 12);
     ///
     /// // Production scale: N = 160, L = 12, no stochastic load
     /// // Row capacity = N + N = 160 + 160 = 320
-    /// let big = PatchBuffer::new(160, 12, 0, 0, 0, 0);
+    /// let big = PatchBuffer::new(160, 12, 0, 0, 0, 0, 0);
     /// assert_eq!(big.indices.len(), 320);
     ///
     /// // Edge case: no lags (L = 0)
     /// // Row capacity = N + N = 5 + 5 = 10
-    /// let no_lag = PatchBuffer::new(5, 0, 0, 0, 0, 0);
+    /// let no_lag = PatchBuffer::new(5, 0, 0, 0, 0, 0, 0);
     /// assert_eq!(no_lag.indices.len(), 10);
     ///
     /// // Anticipated thermals: 1 plant, K=2 — row capacity unchanged (A*K is col-only)
     /// // Row capacity = N + N = 3 + 3 = 6
-    /// let ant = PatchBuffer::new(3, 2, 0, 0, 1, 2);
+    /// let ant = PatchBuffer::new(3, 2, 0, 0, 0, 1, 2);
     /// assert_eq!(ant.indices.len(), 6);
+    ///
+    /// // Travel-time buckets: n_buckets=4 — row capacity unchanged (bucket state is col-only)
+    /// // Col capacity = N*(1+L) + n_buckets + A*K = 3*3 + 4 + 0 = 13
+    /// let transit_buckets = PatchBuffer::new(3, 2, 0, 0, 4, 0, 0);
+    /// assert_eq!(transit_buckets.col_indices.len(), 13);
+    /// assert_eq!(transit_buckets.indices.len(), 6);
     /// ```
     ///
     /// [`fill_forward_patches`]: PatchBuffer::fill_forward_patches
@@ -109,19 +126,21 @@ impl PatchBuffer {
     #[must_use]
     // Rationale: each argument sizes an independent buffer region — noise/z-inflow rows
     // (hydro_count), lag-state column slots (max_par_order), load patches (n_load_buses,
-    // max_blocks), and anticipated-state column slots (n_anticipated, k_max); the capacity
-    // formula for each region is different, so there is no shared sub-struct to collapse them.
+    // max_blocks), bucket-state column slots (n_buckets), and anticipated-state column
+    // slots (n_anticipated, k_max); the capacity formula for each region is different,
+    // so there is no shared sub-struct to collapse them.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         hydro_count: usize,
         max_par_order: usize,
         n_load_buses: usize,
         max_blocks: usize,
+        n_buckets: usize,
         n_anticipated: usize,
         k_max: usize,
     ) -> Self {
         let capacity = hydro_count + n_load_buses * max_blocks + hydro_count;
-        let col_capacity = hydro_count * (1 + max_par_order) + n_anticipated * k_max;
+        let col_capacity = hydro_count * (1 + max_par_order) + n_buckets + n_anticipated * k_max;
         Self {
             indices: vec![0; capacity],
             lower: vec![0.0; capacity],
@@ -133,6 +152,7 @@ impl PatchBuffer {
             max_par_order,
             load_bus_count: n_load_buses,
             max_blocks,
+            n_buckets,
             n_anticipated,
             k_max,
             active_load_patches: 0,
@@ -140,7 +160,7 @@ impl PatchBuffer {
         }
     }
 
-    /// Fill `N` noise patches (Category 3) for a forward-pass solve: row
+    /// Fill `N` noise patches for a forward-pass solve: row
     /// `base_row + h` ← `noise[h]` (equality) for `h ∈ [0, N)`.
     ///
     /// `noise[h]` is NOT prescaled by `row_scale` — it already combines the
@@ -175,28 +195,47 @@ impl PatchBuffer {
         );
 
         for (h, &nv) in noise.iter().enumerate() {
-            // AR dynamics row `base_row + h`, NOT the inflow-lag column
-            // `N + ℓ·N + h` of Category 2, despite the shared `+ h` shape.
+            // AR dynamics row `base_row + h`, NOT the inflow-lag (inflow_lags)
+            // column `N + ℓ·N + h`, despite the shared `+ h` shape.
             self.indices[h] = base_row + h;
             self.lower[h] = nv;
             self.upper[h] = nv;
         }
     }
 
-    /// Fill `N*(1+L) + A*K` equality column-bound patches pinning incoming state:
-    /// Category 1 storage (`storage_in.start + h`), Category 2 AR lags
-    /// (`inflow_lags.start + lag*N + h`), and Category 6 anticipated state.
+    /// Fill `N*(1+L) + n_buckets + A*K` equality column-bound patches pinning
+    /// incoming state: storage, AR lags, travel-time buckets, and anticipated
+    /// state.
+    ///
+    /// The single owner of the column-bound region: iterates
+    /// [`StateLayout::state_to_lp_incoming_column`] over every state-vector index
+    /// `j ∈ [0, n_state)`, writing one patch per `j` at buffer slot `j` — storage,
+    /// AR lags, buckets, and anticipated state all resolve through this one
+    /// resolver call rather than parallel hardcoded offsets. A hardcoded
+    /// `anticipated_start = N*(1+L)` for the anticipated block silently drops the
+    /// `+ n_buckets` shift whenever a bucket block precedes it, misaligning the
+    /// anticipated patches and leaving every bucket incoming column unpinned.
     ///
     /// Enforces `x == v` by setting `lb = ub = v / col_scale[col]` in the scaled LP
     /// — **divided**, contrast with the row-equality path that **multiplies** by
     /// `row_scale[row]`. `col_scale` may be `&[]` (no scaling); when non-empty it
-    /// must be at least `state_layout.anticipated_state.end` long. A single global
-    /// stage-0 `state_layout` resolves the correct column at every stage: the three
-    /// starts are pure functions of `N`, `L`, `A`, `k_max` (independent of `n_blks`).
+    /// must be at least `state_layout.anticipated_state.end` long.
+    ///
+    /// Bucket incoming columns are pinned to whatever the caller supplies in
+    /// `state` at the bucket state-vector indices — pin this **once per
+    /// stage-visit** (the trial point / decision-driven state), never per
+    /// opening, the same contract [`state_to_lp_incoming_column`] documents for
+    /// storage and AR lags (contrast with NCS availability, which patches per
+    /// opening).
+    ///
+    /// [`state_to_lp_incoming_column`]: StateLayout::state_to_lp_incoming_column
     ///
     /// # Panics
     ///
-    /// Panics in debug builds if `state.len() != state_layout.n_state`.
+    /// Panics in debug builds if `state.len() != state_layout.n_state`, if the
+    /// emitted patch count does not equal [`Self::state_col_patch_count`], or if
+    /// any travel-time bucket state index fails to resolve into
+    /// `state_layout.transit_buckets_in`.
     pub fn fill_col_state_patches(
         &mut self,
         state_layout: &StateLayout,
@@ -211,79 +250,37 @@ impl PatchBuffer {
             expected = state_layout.n_state,
         );
 
-        let n = self.hydro_count;
-        let l = self.max_par_order;
-
-        // Category 1: pin the incoming storage column (`storage_in`), distinct from
-        // the outgoing storage column at [0, N); the outgoing column would pin the
-        // water-balance output rather than the state-carrying variable.
-        let storage_in_start = state_layout.storage_in.start;
-        for (h, &sv) in state[..n].iter().enumerate() {
-            let col = storage_in_start + h;
+        for (j, &sv) in state.iter().enumerate() {
+            let col = state_layout.state_to_lp_incoming_column(j);
             let scaled = if col_scale.is_empty() {
                 sv
             } else {
                 sv / col_scale[col]
             };
-            self.col_indices[h] = col;
-            self.col_lower[h] = scaled;
-            self.col_upper[h] = scaled;
+            self.col_indices[j] = col;
+            self.col_lower[j] = scaled;
+            self.col_upper[j] = scaled;
         }
 
-        let inflow_lags_start = state_layout.inflow_lags.start;
-        for lag in 0..l {
-            for h in 0..n {
-                let slot = n + lag * n + h;
-                let col = inflow_lags_start + lag * n + h;
-                let sv = state[slot];
-                let scaled = if col_scale.is_empty() {
-                    sv
-                } else {
-                    sv / col_scale[col]
-                };
-                self.col_indices[slot] = col;
-                self.col_lower[slot] = scaled;
-                self.col_upper[slot] = scaled;
-            }
-        }
-
-        let cat6_start = n * (1 + l);
-        self.fill_anticipated_state_col_patches(state_layout, state, col_scale, cat6_start);
+        debug_assert_eq!(
+            state.len(),
+            self.state_col_patch_count(),
+            "emitted patch count {emitted} must equal state_col_patch_count() {expected}",
+            emitted = state.len(),
+            expected = self.state_col_patch_count(),
+        );
+        debug_assert!(
+            state_layout
+                .transit_buckets_out
+                .clone()
+                .all(|j| state_layout
+                    .transit_buckets_in
+                    .contains(&self.col_indices[j])),
+            "every travel-time bucket state index must resolve to a transit_buckets_in column"
+        );
     }
 
-    /// Write the `A*K` Category 6 anticipated-state column-bound patches at
-    /// `cat6_start`, slot-major / plant-minor — matching the LP ring-buffer layout
-    /// and the row-equality counterpart `fill_anticipated_state_patches`. No-op when
-    /// `n_anticipated == 0` or `k_max == 0`.
-    fn fill_anticipated_state_col_patches(
-        &mut self,
-        state_layout: &StateLayout,
-        state: &[f64],
-        col_scale: &[f64],
-        cat6_start: usize,
-    ) {
-        let n_ant = self.n_anticipated;
-        let k = self.k_max;
-        let ant_state_col_start = state_layout.anticipated_state.start;
-        for slot in 0..k {
-            for plant in 0..n_ant {
-                let off = slot * n_ant + plant;
-                let buf_slot = cat6_start + off;
-                let col = ant_state_col_start + off;
-                let sv = state[col];
-                let scaled = if col_scale.is_empty() {
-                    sv
-                } else {
-                    sv / col_scale[col]
-                };
-                self.col_indices[buf_slot] = col;
-                self.col_lower[buf_slot] = scaled;
-                self.col_upper[buf_slot] = scaled;
-            }
-        }
-    }
-
-    /// Fill `n_load_buses * n_blocks` Category 4 load-balance equality patches into
+    /// Fill `n_load_buses * n_blocks` load-balance equality patches into
     /// the row buffer at offset `N`, addressed via [`BlockGrid::flat`] (the single
     /// owner of block-major strides). `load_rhs` is bus-major, block-minor matching
     /// `bus_positions` order; values are prescaled by `row_scale[row]` when
@@ -328,8 +325,8 @@ impl PatchBuffer {
             mb = self.max_blocks,
         );
 
-        let cat4_start = self.hydro_count;
-        let mut slot = cat4_start;
+        let load_start = self.hydro_count;
+        let mut slot = load_start;
 
         for (i, &bus_pos) in bus_positions.iter().enumerate() {
             for blk in 0..n_blocks {
@@ -352,7 +349,7 @@ impl PatchBuffer {
         self.active_load_patches = self.load_bus_count * n_blocks;
     }
 
-    /// Fill the `N` Category 5 z-inflow-definition equality patches at
+    /// Fill the `N` z-inflow-definition equality patches at
     /// `z_inflow_row_start` from `z_inflow_rhs`, prescaled by `row_scale[row]` when
     /// `row_scale` is non-empty (pass `&[]` for no scaling).
     ///
@@ -372,10 +369,10 @@ impl PatchBuffer {
             return;
         }
 
-        let cat5_start = self.hydro_count + self.active_load_patches;
+        let z_inflow_start = self.hydro_count + self.active_load_patches;
 
         for (h, &rhs) in z_inflow_rhs.iter().enumerate().take(n) {
-            let slot = cat5_start + h;
+            let slot = z_inflow_start + h;
             let row = z_inflow_row_start + h;
             let scaled = if row_scale.is_empty() {
                 rhs
@@ -398,11 +395,13 @@ impl PatchBuffer {
         self.hydro_count + self.active_load_patches + self.active_z_inflow_patches
     }
 
-    /// Column-bound region capacity (`N*(1+L) + A*K` state-fixing slots).
+    /// Column-bound region capacity (`N*(1+L) + n_buckets + A*K` state-fixing slots).
     #[must_use]
     #[inline]
     pub fn state_col_patch_count(&self) -> usize {
-        self.hydro_count * (1 + self.max_par_order) + self.n_anticipated * self.k_max
+        self.hydro_count * (1 + self.max_par_order)
+            + self.n_buckets
+            + self.n_anticipated * self.k_max
     }
 }
 
@@ -415,8 +414,8 @@ impl PatchBuffer {
 )]
 mod tests {
     use super::PatchBuffer;
-    use crate::indexer::test_fixtures::{state_layout, state_layout_full};
     use crate::indexer::{BlockGrid, StateLayout};
+    use crate::test_support::{state_layout, state_layout_full, state_layout_with_transit_buckets};
 
     /// Convenience: make a role-(a) state layout without repeating N/L everywhere.
     fn idx(n: usize, l: usize) -> StateLayout {
@@ -428,24 +427,27 @@ mod tests {
     // -------------------------------------------------------------------------
 
     /// Row capacity is `N + n_load_buses*max_blocks + N` and column capacity is
-    /// `N*(1+L) + A*K`. Both formulas are exercised at zero / unit-anticipated /
-    /// combined / production scales in one table so each scale stays legible via
-    /// the tuple-naming failure message.
+    /// `N*(1+L) + n_buckets + A*K`. Both formulas are exercised at zero /
+    /// unit-anticipated / bucket / combined / production scales in one table so
+    /// each scale stays legible via the tuple-naming failure message.
     #[test]
     fn patch_buffer_capacity_formulas() {
-        // (n, l, n_load_buses, max_blocks, a, k, expected_row_cap, expected_col_cap)
+        // (n, l, n_load_buses, max_blocks, n_buckets, a, k, expected_row_cap, expected_col_cap)
         let cases = [
             (
-                0usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize,
+                0usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize,
             ),
-            (3, 2, 0, 0, 0, 0, 6, 9),
-            (0, 0, 0, 0, 1, 2, 0, 2),
-            (3, 2, 0, 0, 2, 3, 6, 15),
-            (160, 12, 0, 0, 0, 0, 320, 2080),
+            (3, 2, 0, 0, 0, 0, 0, 6, 9),
+            (0, 0, 0, 0, 0, 1, 2, 0, 2),
+            (0, 0, 0, 0, 3, 0, 0, 0, 3),
+            (3, 2, 0, 0, 4, 2, 3, 6, 19),
+            (160, 12, 0, 0, 0, 0, 0, 320, 2080),
         ];
 
-        for (n, l, n_load_buses, max_blocks, a, k, expected_row_cap, expected_col_cap) in cases {
-            let buf = PatchBuffer::new(n, l, n_load_buses, max_blocks, a, k);
+        for (n, l, n_load_buses, max_blocks, n_buckets, a, k, expected_row_cap, expected_col_cap) in
+            cases
+        {
+            let buf = PatchBuffer::new(n, l, n_load_buses, max_blocks, n_buckets, a, k);
 
             for (label, len) in [
                 ("col_indices", buf.col_indices.len()),
@@ -454,7 +456,7 @@ mod tests {
             ] {
                 assert_eq!(
                     len, expected_col_cap,
-                    "{label} col cap mismatch for (n={n}, l={l}, a={a}, k={k})"
+                    "{label} col cap mismatch for (n={n}, l={l}, n_buckets={n_buckets}, a={a}, k={k})"
                 );
             }
 
@@ -465,24 +467,32 @@ mod tests {
             ] {
                 assert_eq!(
                     len, expected_row_cap,
-                    "{label} row cap mismatch for (n={n}, l={l}, n_load_buses={n_load_buses}, max_blocks={max_blocks}, a={a}, k={k})"
+                    "{label} row cap mismatch for (n={n}, l={l}, n_load_buses={n_load_buses}, max_blocks={max_blocks}, n_buckets={n_buckets}, a={a}, k={k})"
                 );
             }
         }
     }
 
-    /// `state_col_patch_count` returns N*(1+L) + A*K.
+    /// `state_col_patch_count` returns N*(1+L) + n_buckets + A*K.
     #[test]
     fn state_col_patch_count_returns_n_times_one_plus_l() {
-        let buf = PatchBuffer::new(3, 2, 0, 0, 1, 2);
-        // N*(1+L) + A*K = 3*3 + 1*2 = 11
+        let buf = PatchBuffer::new(3, 2, 0, 0, 0, 1, 2);
+        // N*(1+L) + n_buckets + A*K = 3*3 + 0 + 1*2 = 11
         assert_eq!(buf.state_col_patch_count(), 11);
+    }
+
+    /// `state_col_patch_count` includes `n_buckets` alongside storage/lag/anticipated.
+    #[test]
+    fn state_col_patch_count_includes_transit_bucket_count() {
+        let buf = PatchBuffer::new(3, 2, 0, 0, 4, 1, 2);
+        // N*(1+L) + n_buckets + A*K = 3*3 + 4 + 1*2 = 15
+        assert_eq!(buf.state_col_patch_count(), 15);
     }
 
     /// Column buffer is zero-initialised at construction.
     #[test]
     fn col_buffer_zero_initialised() {
-        let buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
+        let buf = PatchBuffer::new(3, 2, 0, 0, 0, 0, 0);
         assert_eq!(buf.col_indices.len(), 9);
         assert!(
             buf.col_indices.iter().all(|&v| v == 0),
@@ -501,22 +511,22 @@ mod tests {
     /// forward_patch_count without fill_z_inflow_patches returns N.
     #[test]
     fn forward_patch_count_without_z_inflow_fill() {
-        let buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
+        let buf = PatchBuffer::new(3, 2, 0, 0, 0, 0, 0);
         // forward_patch_count = N + 0 + 0 = 3
         assert_eq!(buf.forward_patch_count(), 3);
     }
 
-    /// Category 3 (noise) indices start at slot 0.
+    /// Noise indices start at slot 0.
     ///
-    /// `fill_forward_patches` writes only Category 3 (noise) at `[0, N)`.
+    /// `fill_forward_patches` writes only noise patches at `[0, N)`.
     #[test]
     fn fill_forward_patches_writes_only_noise() {
-        let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
+        let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0, 0);
         let state = [10.0, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let noise = [0.1, 0.2, 0.3];
         buf.fill_forward_patches(&idx(3, 2), &state, &noise, 50, &[]);
 
-        // Category 3 at slots 0..3: base_row + h = 50 + h
+        // Noise at slots 0..3: base_row + h = 50 + h
         assert_eq!(buf.indices[0], 50);
         assert_eq!(buf.indices[1], 51);
         assert_eq!(buf.indices[2], 52);
@@ -531,7 +541,7 @@ mod tests {
     #[test]
     fn fill_forward_patches_all_equality_constraints() {
         // Every patch must satisfy lower == upper (equality constraint)
-        let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
+        let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0, 0);
         let state = [10.0, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let noise = [0.1, 0.2, 0.3];
         buf.fill_forward_patches(&idx(3, 2), &state, &noise, 50, &[]);
@@ -551,7 +561,7 @@ mod tests {
     #[test]
     fn forward_patches_zero_lags_only_noise() {
         let n = 2;
-        let mut buf = PatchBuffer::new(n, 0, 0, 0, 0, 0);
+        let mut buf = PatchBuffer::new(n, 0, 0, 0, 0, 0, 0);
         let state = [5.0, 7.0];
         let noise = [0.5, 0.6];
         buf.fill_forward_patches(&idx(n, 0), &state, &noise, 10, &[]);
@@ -559,7 +569,7 @@ mod tests {
         // forward_patch_count = N = 2 (noise only; no load, no z-inflow)
         assert_eq!(buf.forward_patch_count(), 2);
 
-        // Category 3 at slots 0, 1
+        // Noise at slots 0, 1
         assert_eq!(buf.indices[0], 10); // base_row + 0 = 10
         assert_eq!(buf.lower[0], 0.5);
         assert_eq!(buf.indices[1], 11); // base_row + 1 = 11
@@ -570,7 +580,7 @@ mod tests {
     fn production_scale_forward_patch_count() {
         // Without fill_z_inflow_patches, forward_patch_count = N = 160.
         // Row buffer capacity = N + N = 320.
-        let buf = PatchBuffer::new(160, 12, 0, 0, 0, 0);
+        let buf = PatchBuffer::new(160, 12, 0, 0, 0, 0, 0);
         assert_eq!(buf.forward_patch_count(), 160);
         assert_eq!(buf.indices.len(), 320);
     }
@@ -580,13 +590,13 @@ mod tests {
     fn production_scale_fill_forward_patches_smoke() {
         let n = 160;
         let l = 12;
-        let mut buf = PatchBuffer::new(n, l, 0, 0, 0, 0);
+        let mut buf = PatchBuffer::new(n, l, 0, 0, 0, 0, 0);
         let n_state = n * (1 + l);
         let state: Vec<f64> = (0..n_state).map(|i| i as f64).collect();
         let noise: Vec<f64> = (0..n).map(|h| h as f64 * 0.01).collect();
         buf.fill_forward_patches(&idx(n, l), &state, &noise, 500, &[]);
 
-        // Category 3 starts at slot 0 (no Cat 1/2/6 in row buffer).
+        // Noise starts at slot 0 (no storage/inflow_lags/anticipated in row buffer).
         assert_eq!(buf.indices[0], 500); // base_row + 0 = 500
         assert_eq!(buf.lower[0], 0.0); // noise[0]
         assert_eq!(buf.indices[159], 659); // base_row + 159 = 659
@@ -600,7 +610,7 @@ mod tests {
 
     #[test]
     fn clone_and_debug() {
-        let buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
+        let buf = PatchBuffer::new(3, 2, 0, 0, 0, 0, 0);
         let cloned = buf.clone();
         assert_eq!(cloned.indices.len(), buf.indices.len());
 
@@ -609,27 +619,27 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Category 4 (load balance) unit tests
+    // Load-balance unit tests
     // -------------------------------------------------------------------------
 
-    /// AC (capacity): `PatchBuffer::new(2, 1, 1, 3, 0, 0)` → row capacity = N + M*B + N = 2 + 3 + 2 = 7.
+    /// AC (capacity): `PatchBuffer::new(2, 1, 1, 3, 0, 0, 0)` → row capacity = N + M*B + N = 2 + 3 + 2 = 7.
     #[test]
     fn new_with_load_allocates_correct_capacity() {
-        let buf = PatchBuffer::new(2, 1, 1, 3, 0, 0);
+        let buf = PatchBuffer::new(2, 1, 1, 3, 0, 0, 0);
         // N + M*B + N = 2 + 1*3 + 2 = 7
         assert_eq!(buf.indices.len(), 7);
         assert_eq!(buf.lower.len(), 7);
         assert_eq!(buf.upper.len(), 7);
     }
 
-    /// Category 4 row indices follow `row = load_row_start + bus_positions[i] * n_blocks + blk`.
+    /// Load-balance row indices follow `row = load_row_start + bus_positions[i] * n_blocks + blk`.
     ///
     /// With `n_load_buses=2, n_blocks=2, bus_positions=[0,1], load_row_start=100`, N=0:
-    /// Cat 4 starts at slot N=0 so indices[0..4] = [100, 101, 102, 103].
+    /// load patches start at slot N=0 so indices[0..4] = [100, 101, 102, 103].
     #[test]
     fn fill_load_patches_correct_indices() {
         // N=0, L=0, M=2, B=2, A=0, K=0 → row capacity = 0 + 2*2 + 0 = 4
-        let mut buf = PatchBuffer::new(0, 0, 2, 2, 0, 0);
+        let mut buf = PatchBuffer::new(0, 0, 2, 2, 0, 0, 0);
         let load_rhs = [300.0_f64, 280.0, 500.0, 450.0];
         let bus_positions = [0_usize, 1];
         buf.fill_load_patches(100, BlockGrid::new(2, 1), &load_rhs, &bus_positions, &[]);
@@ -640,10 +650,10 @@ mod tests {
         assert_eq!(buf.indices[3], 103); // bus 1, blk 1
     }
 
-    /// Category 4 lower and upper bounds equal the corresponding `load_rhs` value.
+    /// Load-balance lower and upper bounds equal the corresponding `load_rhs` value.
     #[test]
     fn fill_load_patches_correct_values() {
-        let mut buf = PatchBuffer::new(0, 0, 2, 2, 0, 0);
+        let mut buf = PatchBuffer::new(0, 0, 2, 2, 0, 0, 0);
         let load_rhs = [300.0_f64, 280.0, 500.0, 450.0];
         let bus_positions = [0_usize, 1];
         buf.fill_load_patches(100, BlockGrid::new(2, 1), &load_rhs, &bus_positions, &[]);
@@ -661,7 +671,7 @@ mod tests {
     /// Every load patch must be an equality constraint: `lower[i] == upper[i]`.
     #[test]
     fn fill_load_patches_equality_constraints() {
-        let mut buf = PatchBuffer::new(3, 2, 2, 3, 0, 0);
+        let mut buf = PatchBuffer::new(3, 2, 2, 3, 0, 0, 0);
         let state = [10.0, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let noise = [0.1, 0.2, 0.3];
         buf.fill_forward_patches(&idx(3, 2), &state, &noise, 50, &[]);
@@ -682,12 +692,12 @@ mod tests {
         }
     }
 
-    /// `forward_patch_count` includes Category 4 after `fill_load_patches`.
+    /// `forward_patch_count` includes load-balance patches after `fill_load_patches`.
     ///
     /// N=3, M=2, n_blocks=3 → forward_patch_count = N + M*n_blocks = 3 + 6 = 9.
     #[test]
     fn forward_patch_count_includes_load() {
-        let mut buf = PatchBuffer::new(3, 2, 2, 3, 0, 0);
+        let mut buf = PatchBuffer::new(3, 2, 2, 3, 0, 0, 0);
         let state = [10.0, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let noise = [0.1, 0.2, 0.3];
         buf.fill_forward_patches(&idx(3, 2), &state, &noise, 50, &[]);
@@ -701,8 +711,8 @@ mod tests {
 
     /// When `n_load_buses == 0`, `forward_patch_count` equals `N`.
     #[test]
-    fn zero_load_buses_no_category4() {
-        let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
+    fn zero_load_buses_no_load_patches() {
+        let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0, 0);
         let state = [10.0, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let noise = [0.1, 0.2, 0.3];
         buf.fill_forward_patches(&idx(3, 2), &state, &noise, 50, &[]);
@@ -712,22 +722,22 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Category 6 col-patch unit tests (col-side path, row-side deleted)
+    // Anticipated col-patch unit tests (col-side path only)
     // -------------------------------------------------------------------------
 
     /// fill_forward_patches with N=0, A=1, K=2 writes zero noise patches
-    /// (N=0 hydros → no Category 3 entries in row buffer).
+    /// (N=0 hydros → no noise entries in row buffer).
     #[test]
     fn fill_forward_patches_zero_hydros_zero_noise_patches() {
         // N=0, A=1, K=2 anticipated-only state layout.
         let state_layout = state_layout_full(0, 0, 1, 2, vec![2]);
 
         let mut state = vec![0.0_f64; state_layout.n_state];
-        state[state_layout.anticipated_state.start] = 7.0;
-        state[state_layout.anticipated_state.start + 1] = 11.0;
+        state[state_layout.anticipated_slots_out.start] = 7.0;
+        state[state_layout.anticipated_slots_out.start + 1] = 11.0;
 
         // N=0, A=1, K=2 → row capacity = 0 + 0 + 0 = 0
-        let mut buf = PatchBuffer::new(0, 0, 0, 0, 1, 2);
+        let mut buf = PatchBuffer::new(0, 0, 0, 0, 0, 1, 2);
 
         // forward_patch_count = N = 0 (state goes in col buffer, not row buffer)
         assert_eq!(
@@ -750,7 +760,7 @@ mod tests {
     fn fill_forward_patches_no_anticipated_noise_at_slot_zero() {
         let n = 3;
         let l = 2;
-        let mut buf = PatchBuffer::new(n, l, 0, 0, 0, 0);
+        let mut buf = PatchBuffer::new(n, l, 0, 0, 0, 0, 0);
         let state = [10.0, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let noise = [0.1, 0.2, 0.3];
         buf.fill_forward_patches(&idx(n, l), &state, &noise, 50, &[]);
@@ -758,7 +768,7 @@ mod tests {
         // forward_patch_count = N = 3 (no load, no z-inflow)
         assert_eq!(buf.forward_patch_count(), 3);
 
-        // Category 3 at slots 0..N (no Cat 1/2/6 in row buffer).
+        // Noise at slots 0..N (no storage/inflow_lags/anticipated in row buffer).
         assert_eq!(buf.indices[0], 50); // base_row + 0 = 50
         assert_eq!(buf.lower[0], 0.1);
         assert_eq!(buf.indices[1], 51);
@@ -771,11 +781,11 @@ mod tests {
     // fill_col_state_patches unit tests
     // -------------------------------------------------------------------------
 
-    /// Category 1 col_indices[0..3] = [storage_in.start, +1, +2].
+    /// Storage col_indices[0..3] = [storage_in.start, +1, +2].
     #[test]
-    fn fill_col_state_patches_category1_indices() {
+    fn fill_col_state_patches_storage_indices() {
         let state = [10.0_f64, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
+        let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0, 0);
         let state_layout = state_layout(3, 2);
         buf.fill_col_state_patches(&state_layout, &state, &[]);
 
@@ -785,11 +795,11 @@ mod tests {
         assert_eq!(buf.col_indices[2], s + 2);
     }
 
-    /// Category 1 col_lower[0..3] == col_upper[0..3] == [10.0, 20.0, 30.0].
+    /// Storage col_lower[0..3] == col_upper[0..3] == [10.0, 20.0, 30.0].
     #[test]
-    fn fill_col_state_patches_category1_values() {
+    fn fill_col_state_patches_storage_values() {
         let state = [10.0_f64, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
+        let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0, 0);
         let state_layout = state_layout(3, 2);
         buf.fill_col_state_patches(&state_layout, &state, &[]);
 
@@ -801,7 +811,7 @@ mod tests {
         assert_eq!(buf.col_upper[2], 30.0);
     }
 
-    /// Category 2 col_indices[3..9] matches lag column targets; col_lower matches lag values.
+    /// inflow_lags col_indices[3..9] matches lag column targets; col_lower matches lag values.
     ///
     /// Lag-column formula: `inflow_lags.start + lag*N + h`.
     /// - lag=0: cols `[il, il+1, il+2]`
@@ -809,9 +819,9 @@ mod tests {
     ///
     /// State layout: lags at `state[3..9]` = [1,2,3,4,5,6].
     #[test]
-    fn fill_col_state_patches_category2_indices_and_values() {
+    fn fill_col_state_patches_inflow_lags_indices_and_values() {
         let state = [10.0_f64, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
+        let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0, 0);
         let state_layout = state_layout(3, 2);
         buf.fill_col_state_patches(&state_layout, &state, &[]);
 
@@ -833,26 +843,57 @@ mod tests {
         assert_eq!(buf.col_upper[8], 6.0);
     }
 
-    /// Category 6 column-bound patches for N=0, L=0, A=1, K=2.
+    /// Anticipated column-bound patches for N=0, L=0, A=1, K=2.
     ///
     /// col_indices[0..2] = [anticipated_state.start, +1],
     /// col_lower[0..2] == col_upper[0..2] == [7.0, 11.0] (slot-major / plant-minor).
     #[test]
-    fn fill_col_state_patches_anticipated_category6() {
+    fn fill_col_state_patches_anticipated_state() {
         // N=0, A=1, K=2 anticipated-only state layout.
         let state_layout = state_layout_full(0, 0, 1, 2, vec![2]);
 
-        // n_state = 0 + 1*2 = 2; anticipated_state.start = 0
-        let ant_start = state_layout.anticipated_state.start;
+        // n_state = 0 + 1*2 = 2; the state-VECTOR anticipated block is
+        // `anticipated_slots_out` (== 0 here), NOT the relocated incoming
+        // `anticipated_state` (== 2 here).
+        let ant_state_vec_start = state_layout.anticipated_slots_out.start;
+        let ant_incoming_col_start = state_layout.anticipated_state.start;
         let mut state = vec![0.0_f64; state_layout.n_state];
-        state[ant_start] = 7.0;
-        state[ant_start + 1] = 11.0;
+        state[ant_state_vec_start] = 7.0;
+        state[ant_state_vec_start + 1] = 11.0;
 
-        let mut buf = PatchBuffer::new(0, 0, 0, 0, 1, 2);
+        let mut buf = PatchBuffer::new(0, 0, 0, 0, 0, 1, 2);
         buf.fill_col_state_patches(&state_layout, &state, &[]);
 
-        assert_eq!(buf.col_indices[0], ant_start);
-        assert_eq!(buf.col_indices[1], ant_start + 1);
+        assert_eq!(buf.col_indices[0], ant_incoming_col_start);
+        assert_eq!(buf.col_indices[1], ant_incoming_col_start + 1);
+        assert_eq!(buf.col_lower[0], 7.0);
+        assert_eq!(buf.col_upper[0], 7.0);
+        assert_eq!(buf.col_lower[1], 11.0);
+        assert_eq!(buf.col_upper[1], 11.0);
+    }
+
+    /// Pin-exactness: with `col_scale = 1.0` at the anticipated ring's incoming
+    /// columns (D1's unscale override), `fill_col_state_patches` writes
+    /// `col_lower == col_upper == v` — the raw commitment, no division — unlike a
+    /// non-unit scale elsewhere in the same array, whose `v / d` round-trip is not
+    /// guaranteed bit-exact.
+    #[test]
+    fn fill_col_state_patches_anticipated_state_unscaled_is_exact() {
+        let state_layout = state_layout_full(0, 0, 1, 2, vec![2]);
+        let ant_state_vec_start = state_layout.anticipated_slots_out.start;
+        let ant_incoming_col_start = state_layout.anticipated_state.start;
+        let mut state = vec![0.0_f64; state_layout.n_state];
+        state[ant_state_vec_start] = 7.0;
+        state[ant_state_vec_start + 1] = 11.0;
+
+        let ncols = state_layout.anticipated_state.end;
+        let mut col_scale = vec![3.0_f64; ncols];
+        col_scale[ant_incoming_col_start] = 1.0;
+        col_scale[ant_incoming_col_start + 1] = 1.0;
+
+        let mut buf = PatchBuffer::new(0, 0, 0, 0, 0, 1, 2);
+        buf.fill_col_state_patches(&state_layout, &state, &col_scale);
+
         assert_eq!(buf.col_lower[0], 7.0);
         assert_eq!(buf.col_upper[0], 7.0);
         assert_eq!(buf.col_lower[1], 11.0);
@@ -863,7 +904,7 @@ mod tests {
     #[test]
     fn fill_col_state_patches_equality_constraints() {
         let state = [10.0_f64, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
+        let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0, 0);
         let state_layout = state_layout(3, 2);
         buf.fill_col_state_patches(&state_layout, &state, &[]);
 
@@ -879,7 +920,7 @@ mod tests {
         }
     }
 
-    /// col_scale divides: col_lower[h] == state[h] / col_scale[col] for Category 1.
+    /// col_scale divides: col_lower[h] == state[h] / col_scale[col] for storage.
     ///
     /// With col_scale[storage_in.start + h] = 2.0 for all h, and state = [10, 20, 30, ...],
     /// expected col_lower[0..3] = [5.0, 10.0, 15.0].
@@ -887,7 +928,7 @@ mod tests {
     fn fill_col_state_patches_unscaled_with_col_scale() {
         let state_layout = state_layout(3, 2);
         let state = [10.0_f64, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
+        let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0, 0);
 
         // Build a col_scale long enough to cover anticipated_state.end.
         // Fill with 1.0 everywhere, then override the storage_in columns to 2.0.
@@ -911,11 +952,11 @@ mod tests {
         assert_eq!(buf.col_upper[2], 15.0);
     }
 
-    /// When n_anticipated == 0, Category 6 is empty and state_col_patch_count() == N*(1+L).
+    /// When n_anticipated == 0, the anticipated region is empty and state_col_patch_count() == N*(1+L).
     #[test]
     fn fill_col_state_patches_zero_anticipated_collapses_correctly() {
         let state = [10.0_f64, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
+        let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0, 0);
         let state_layout = state_layout(3, 2);
         buf.fill_col_state_patches(&state_layout, &state, &[]);
 
@@ -931,7 +972,7 @@ mod tests {
     #[test]
     fn row_buffer_unchanged_after_fill_col_state_patches() {
         let state = [10.0_f64, 20.0, 30.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0);
+        let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0, 0);
         let state_layout = state_layout(3, 2);
         buf.fill_col_state_patches(&state_layout, &state, &[]);
 
@@ -947,5 +988,175 @@ mod tests {
             buf.upper.iter().all(|&v| v == 0.0),
             "row upper modified by fill_col_state_patches"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Travel-time bucket column-bound patches (single-owner refactor)
+    // -------------------------------------------------------------------------
+
+    /// Every travel-time bucket incoming column receives a state-col patch,
+    /// pinned to the value supplied in `state` — the trial point /
+    /// decision-driven state, sourced once per stage-visit before any
+    /// per-opening loop (contrast NCS availability, which patches per opening).
+    #[test]
+    fn fill_col_state_patches_every_transit_bucket_incoming_column_is_pinned() {
+        let n_buckets = 2;
+        let state_layout =
+            state_layout_with_transit_buckets(3, 2, n_buckets, vec![(0, 0), (0, 1)], 0, 0, vec![]);
+        let mut state = vec![0.0_f64; state_layout.n_state];
+        state[state_layout.transit_buckets_out.start] = 100.0;
+        state[state_layout.transit_buckets_out.start + 1] = 200.0;
+
+        let mut buf = PatchBuffer::new(3, 2, 0, 0, n_buckets, 0, 0);
+        buf.fill_col_state_patches(&state_layout, &state, &[]);
+
+        let cp = buf.state_col_patch_count();
+        assert_eq!(cp, state_layout.n_state);
+
+        for (i, j) in state_layout.transit_buckets_out.clone().enumerate() {
+            let col = state_layout.transit_buckets_in.start + i;
+            assert_eq!(
+                buf.col_indices[j], col,
+                "bucket state index {j} must pin transit_buckets_in column {col}"
+            );
+            assert_eq!(buf.col_lower[j], state[j]);
+            assert_eq!(buf.col_upper[j], state[j]);
+        }
+    }
+
+    /// With both buckets (`B=2`) and anticipated thermals (`A=1, K=2`), the
+    /// anticipated patches land on the columns shifted by `+B`: the anticipated
+    /// slots occupy buffer positions `[N*(1+L)+B, N*(1+L)+B+A*K)`, not the
+    /// unshifted `[N*(1+L), N*(1+L)+A*K)` a hardcoded `anticipated_start = N*(1+L)`
+    /// would (incorrectly) target.
+    #[test]
+    fn fill_col_state_patches_anticipated_lands_at_shifted_offset() {
+        let n = 3;
+        let l = 2;
+        let n_buckets = 2;
+        let state_layout =
+            state_layout_with_transit_buckets(n, l, n_buckets, vec![(0, 0), (0, 1)], 1, 2, vec![2]);
+        let unshifted_anticipated_start = n * (1 + l);
+        // The state-VECTOR anticipated position is `anticipated_slots_out`
+        // (the `state_to_lp_column` identity domain), shifted by `n_buckets`
+        // past the unshifted `N*(1+L)` a hardcoded `anticipated_start =
+        // N*(1+L)` would (incorrectly) target.
+        let shifted_anticipated_start = unshifted_anticipated_start + n_buckets;
+        assert_eq!(
+            state_layout.anticipated_slots_out.start,
+            shifted_anticipated_start
+        );
+
+        let mut state = vec![0.0_f64; state_layout.n_state];
+        state[state_layout.transit_buckets_out.start] = 100.0;
+        state[state_layout.transit_buckets_out.start + 1] = 200.0;
+        state[state_layout.anticipated_slots_out.start] = 7.0;
+        state[state_layout.anticipated_slots_out.start + 1] = 11.0;
+
+        let mut buf = PatchBuffer::new(n, l, 0, 0, n_buckets, 1, 2);
+        buf.fill_col_state_patches(&state_layout, &state, &[]);
+
+        // Buckets occupy the unshifted slots; anticipated occupies the shifted ones.
+        assert_eq!(buf.col_lower[unshifted_anticipated_start], 100.0);
+        assert_eq!(buf.col_lower[unshifted_anticipated_start + 1], 200.0);
+        assert_eq!(buf.col_lower[shifted_anticipated_start], 7.0);
+        assert_eq!(buf.col_lower[shifted_anticipated_start + 1], 11.0);
+        // The pinned LP column is the RELOCATED incoming `anticipated_state`
+        // range, not the state-vector index used to populate `state` above.
+        assert_eq!(
+            buf.col_indices[shifted_anticipated_start],
+            state_layout.anticipated_state.start
+        );
+        assert_eq!(
+            buf.col_indices[shifted_anticipated_start + 1],
+            state_layout.anticipated_state.start + 1
+        );
+        assert_eq!(buf.state_col_patch_count(), state_layout.n_state);
+    }
+
+    /// `B == 0`: `fill_col_state_patches` output is byte-identical to the
+    /// pre-refactor per-family formula (storage → `storage_in`, AR
+    /// lags → `inflow_lags.start + lag*N + h`, anticipated →
+    /// `anticipated_state.start + slot*A + plant` at unshifted `anticipated_start =
+    /// N*(1+L)`, which is only correct when `B == 0`).
+    #[test]
+    #[allow(clippy::cast_precision_loss)] // fixture: small integer indices, no precision lost
+    fn fill_col_state_patches_b_zero_byte_identical_to_legacy_formula() {
+        let n = 3;
+        let l = 2;
+        let a = 2;
+        let k = 3;
+        let state_layout = state_layout_full(n, l, a, k, vec![k; a]);
+        assert_eq!(state_layout.n_buckets, 0);
+
+        let state: Vec<f64> = (0..state_layout.n_state)
+            .map(|i| (i as f64).mul_add(1.5, 1.0))
+            .collect();
+        let scale_len = state_layout
+            .anticipated_state
+            .end
+            .max(state_layout.storage_in.end);
+        let col_scale: Vec<f64> = (0..scale_len)
+            .map(|i| (i as f64).mul_add(0.1, 1.0))
+            .collect();
+
+        let mut legacy_indices = vec![0usize; state_layout.n_state];
+        let mut legacy_lower = vec![0.0_f64; state_layout.n_state];
+        let mut legacy_upper = vec![0.0_f64; state_layout.n_state];
+
+        let storage_in_start = state_layout.storage_in.start;
+        for h in 0..n {
+            let col = storage_in_start + h;
+            let scaled = state[h] / col_scale[col];
+            legacy_indices[h] = col;
+            legacy_lower[h] = scaled;
+            legacy_upper[h] = scaled;
+        }
+        let inflow_lags_start = state_layout.inflow_lags.start;
+        for lag in 0..l {
+            for h in 0..n {
+                let slot = n + lag * n + h;
+                let col = inflow_lags_start + lag * n + h;
+                let scaled = state[slot] / col_scale[col];
+                legacy_indices[slot] = col;
+                legacy_lower[slot] = scaled;
+                legacy_upper[slot] = scaled;
+            }
+        }
+        let anticipated_start = n * (1 + l);
+        let ant_state_col_start = state_layout.anticipated_state.start;
+        for slot in 0..k {
+            for plant in 0..a {
+                let off = slot * a + plant;
+                let buf_slot = anticipated_start + off;
+                let col = ant_state_col_start + off;
+                let scaled = state[buf_slot] / col_scale[col];
+                legacy_indices[buf_slot] = col;
+                legacy_lower[buf_slot] = scaled;
+                legacy_upper[buf_slot] = scaled;
+            }
+        }
+
+        let mut buf = PatchBuffer::new(n, l, 0, 0, 0, a, k);
+        buf.fill_col_state_patches(&state_layout, &state, &col_scale);
+
+        assert_eq!(buf.col_indices, legacy_indices);
+        assert_eq!(buf.col_lower, legacy_lower);
+        assert_eq!(buf.col_upper, legacy_upper);
+    }
+
+    /// A `PatchBuffer` constructed with `n_buckets = 0` panics (index out of
+    /// bounds) when filled against a bucket-aware `StateLayout` — the sizing
+    /// contract between `PatchBuffer::new`'s `n_buckets` and the layout it
+    /// patches must match, or the column-bound region has no room for the
+    /// bucket slots.
+    #[test]
+    #[should_panic(expected = "index out of bounds")]
+    fn fill_col_state_patches_undersized_buffer_panics() {
+        let state_layout =
+            state_layout_with_transit_buckets(3, 2, 2, vec![(0, 0), (0, 1)], 0, 0, vec![]);
+        let state = vec![0.0_f64; state_layout.n_state];
+        let mut buf = PatchBuffer::new(3, 2, 0, 0, 0, 0, 0);
+        buf.fill_col_state_patches(&state_layout, &state, &[]);
     }
 }

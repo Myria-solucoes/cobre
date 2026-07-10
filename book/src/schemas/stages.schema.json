@@ -113,7 +113,7 @@
     "RawRiskMeasure": {
       "anyOf": [
         {
-          "description": "String variant: any string (canonically `\"expectation\"`).\n\nThe inner `String` is only used by serde during deserialization;\nthe actual value is not inspected in `convert_risk_measure`.",
+          "description": "String variant: any string (canonically `\"expectation\"`).",
           "type": "string"
         },
         {
@@ -130,7 +130,7 @@
           "type": "object"
         }
       ],
-      "description": "Intermediate untagged union for the `risk_measure` field.\n\nThe JSON value can be:\n- A string: `\"expectation\"`\n- An object: `{\"cvar\": {\"alpha\": 0.95, \"lambda\": 0.5}}`\n\n`#[serde(untagged)]` tries each variant in declaration order.\nThe `Expectation` string variant must come first so it is tried before\nthe `CVaR` object variant.\n\nThe inner string of `Expectation` is not read after deserialization;\npresence of the variant alone signals `StageRiskConfig::Expectation`."
+      "description": "Intermediate untagged union for the `risk_measure` field.\n\nThe JSON value can be:\n- A string: `\"expectation\"`\n- An object: `{\"cvar\": {\"alpha\": 0.95, \"lambda\": 0.5}}`\n\n`#[serde(untagged)]` tries each variant in declaration order.\nThe `Expectation` string variant must come first so it is tried before\nthe `CVaR` object variant."
     },
     "RawSeasonDefinitions": {
       "additionalProperties": false,

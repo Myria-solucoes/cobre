@@ -8,109 +8,35 @@
 //! Must be called **after** the backward pass and cut sync so the FCF holds the
 //! latest cuts when the LPs are solved.
 
-use std::ops::Range;
-
 use cobre_comm::Communicator;
 use cobre_solver::{RowBatch, SolverError, SolverInterface};
-use cobre_stochastic::{OpeningTree, StochasticContext, evaluate_par_batch, solve_par_noise_batch};
+use cobre_stochastic::{evaluate_par_batch, solve_par_noise_batch};
 
 use crate::{
+    context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
     cut::row::build_cut_row_batch_into,
     error::SddpError,
-    indexer::StateLayout,
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::COST_SCALE_FACTOR,
-    lp_builder::PatchBuffer,
-    noise::{NcsNoiseOffsets, compute_effective_eta, transform_ncs_noise},
+    lp_builder::{COST_SCALE_FACTOR, PatchBuffer},
+    noise::compute_effective_eta,
+    rank_reconcile::reconcile_error_flag,
     risk_measure::RiskMeasure,
+    training::stage_solve_prep::{
+        InflowNoise, LoadNoise, OpeningMode, StageSolvePrep, StageSolvePrepParams, StateSource,
+    },
+    workspace::ScratchBuffers,
 };
-use cobre_solver::StageTemplate;
 
-/// Stage-0 inputs for [`evaluate_lower_bound`], bundled to reduce parameter count.
-///
-/// The lower bound evaluates stage 0 only, so every field is its stage-0 value;
-/// the slice/range fields come from the stage-0 `StageContext` (and its
-/// `StageGeometry`). NCS-related fields are empty — and NCS patching is skipped —
-/// when no stochastic NCS entities exist.
-pub struct LbEvalSpec<'a> {
-    /// Stage-0 LP template.
-    pub template: &'a StageTemplate,
-    /// AR-dynamics base row.
-    pub base_row: usize,
-    /// ζ·σ inflow-noise scale per hydro.
-    pub noise_scale: &'a [f64],
-    /// Hydros carrying inflow noise.
-    pub n_hydros: usize,
-    /// Opening tree of noise realizations.
-    pub opening_tree: &'a OpeningTree,
-    /// Objective risk measure.
-    pub risk_measure: &'a RiskMeasure,
-    /// `Some` patches stochastic NCS column bounds per opening via `transform_ncs_noise`; `None` skips.
-    pub stochastic: Option<&'a StochasticContext>,
-    /// Offset to the NCS noise dimensions in the raw noise vector.
-    pub n_load_buses: usize,
-    /// MW, id-sorted (the order `transform_ncs_noise` emits its bound buffers).
-    pub ncs_max_gen: &'a [f64],
-    /// Aligned 1:1 with `ncs_max_gen`; `false` pins the column to availability.
-    pub ncs_allow_curtailment: &'a [bool],
-    /// Dense NCS column index per stochastic slot; see
-    /// [`crate::context::StageContext::ncs_stochastic_dense_col`].
-    pub ncs_stochastic_dense_col: &'a [usize],
-    /// Keep the forward, backward, and lower-bound patch sites identical — the
-    /// "patch NCS identically" contract; a divergence understates the bound (D15).
-    pub ncs_stochastic_windows: &'a [(Option<i32>, Option<i32>)],
-    /// Commissioning key the dormancy predicate compares the windows against.
-    pub stage_id: i32,
-    /// Blocks at stage 0.
-    pub block_count: usize,
-    /// LP column range for NCS generation.
-    pub ncs_generation: Range<usize>,
-    /// Always `0`: column-bound state pinning leaves no rows before the z-inflow block.
-    pub z_inflow_row_start: usize,
-    /// `Truncation`/`TruncationWithPenalty` clamp negative PAR(p) inflows to zero before patching.
-    pub inflow_method: &'a InflowNonNegativityMethod,
-}
-
-/// Per-evaluation scratch buffers for [`evaluate_lower_bound`] on rank 0.
-///
-/// Allocated once on `IterationScratch` and reused across iterations: the first
-/// call grows the `Vec` capacities, later calls refill them in place. Never
-/// replace a reused buffer with a fresh `Vec` — that reintroduces the
-/// per-iteration allocation this struct exists to avoid.
-// `_buf` postfix is shared across fields by design.
-#[allow(clippy::struct_field_names)]
+/// Rank-0 accumulation scratch for [`evaluate_lower_bound`]'s risk-measure
+/// aggregation over stage-0 openings; reused across iterations. The
+/// noise/NCS-transform scratch every other solve site shares lives on
+/// [`ScratchBuffers`] instead — these two fields have no counterpart there.
 pub struct LbEvalScratch {
-    /// Per-opening noise realization (one entry per hydro).
-    pub noise_buf: Vec<f64>,
-    /// Z-inflow RHS per hydro for PAR(p) rows.
-    pub z_inflow_rhs_buf: Vec<f64>,
-    /// NCS column upper bounds in full stochastic-slot order (`transform_ncs_noise` per opening).
-    pub ncs_col_upper_buf: Vec<f64>,
-    /// Stage-0 active NCS column indices (built once before the opening loop).
-    pub ncs_col_indices_buf: Vec<usize>,
-    /// NCS column lower bounds, parallel to `ncs_col_upper_buf`.
-    pub ncs_col_lower_buf: Vec<f64>,
-    /// Active-subset gather (lower): `ncs_col_{lower,upper}_buf` run in full slot
-    /// order, so gathering only the active slots here keeps the set-bounds
-    /// index/lower/upper buffers equal-length at a strict-subset stage 0.
-    pub ncs_col_lower_active_buf: Vec<f64>,
-    /// Active-subset gather (upper), parallel to `ncs_col_lower_active_buf`.
-    pub ncs_col_upper_active_buf: Vec<f64>,
-    /// PAR lag matrix (constant across openings).
-    pub lag_matrix_buf: Vec<f64>,
-    /// Per-hydro eta floor from lags (constant across openings).
-    pub eta_floor_buf: Vec<f64>,
-    /// Per-hydro PAR inflow per opening.
-    pub par_inflow_buf: Vec<f64>,
-    /// Per-hydro effective eta after clamping (per opening).
-    pub effective_eta_buf: Vec<f64>,
-    /// Per-hydro zero-target vector for truncation precompute.
-    pub zero_targets_buf: Vec<f64>,
+    /// Per-opening objective values from the stage-0 evaluation.
+    pub objectives_buf: Vec<f64>,
     /// Uniform per-opening probabilities for risk-measure aggregation.
     pub uniform_prob_buf: Vec<f64>,
-    /// Per-opening objective values from `lb_evaluate_stage_0`.
-    pub objectives_buf: Vec<f64>,
 }
 
 impl LbEvalScratch {
@@ -118,20 +44,8 @@ impl LbEvalScratch {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            noise_buf: Vec::new(),
-            z_inflow_rhs_buf: Vec::new(),
-            ncs_col_upper_buf: Vec::new(),
-            ncs_col_indices_buf: Vec::new(),
-            ncs_col_lower_buf: Vec::new(),
-            ncs_col_lower_active_buf: Vec::new(),
-            ncs_col_upper_active_buf: Vec::new(),
-            lag_matrix_buf: Vec::new(),
-            eta_floor_buf: Vec::new(),
-            par_inflow_buf: Vec::new(),
-            effective_eta_buf: Vec::new(),
-            zero_targets_buf: Vec::new(),
-            uniform_prob_buf: Vec::new(),
             objectives_buf: Vec::new(),
+            uniform_prob_buf: Vec::new(),
         }
     }
 }
@@ -149,10 +63,12 @@ pub struct LbEvalScratchBundle<'a> {
     /// Reusable LP row-bound patch buffer.
     pub patch_buf: &'a mut PatchBuffer,
     /// Stage-0 cut row batch for the lower-bound LP.
-    pub lb_cut_batch: &'a mut cobre_solver::RowBatch,
+    pub lb_cut_batch: &'a mut RowBatch,
     /// Cut row map for append-only lower-bound LP management.
     pub lb_cut_row_map: Option<&'a mut crate::cut::CutRowMap>,
-    /// Reusable per-evaluation scratch buffers.
+    /// Noise/NCS-transform scratch, shared in shape with every other solve site.
+    pub noise_scratch: &'a mut ScratchBuffers,
+    /// Rank-0 risk-measure aggregation scratch.
     pub lb_scratch: &'a mut LbEvalScratch,
 }
 
@@ -162,68 +78,60 @@ impl<'a> LbEvalScratchBundle<'a> {
     /// factory pattern as `BackwardPassInputs::from_session_fields`.
     pub fn from_scratch_fields(
         patch_buf: &'a mut PatchBuffer,
-        lb_cut_batch: &'a mut cobre_solver::RowBatch,
+        lb_cut_batch: &'a mut RowBatch,
         lb_cut_row_map: Option<&'a mut crate::cut::CutRowMap>,
+        noise_scratch: &'a mut ScratchBuffers,
         lb_scratch: &'a mut LbEvalScratch,
     ) -> Self {
         Self {
             patch_buf,
             lb_cut_batch,
             lb_cut_row_map,
+            noise_scratch,
             lb_scratch,
         }
     }
 }
 
-/// Rank-0 setup: pre-populate the constant NCS column-index buffer and run the
-/// append-only LP load. Only called on rank 0.
+/// Rank-0 setup: run the append-only LP load. Only called on rank 0.
 fn lb_init_rank0<S: SolverInterface>(
     solver: &mut S,
     fcf: &FutureCostFunction,
-    spec: &LbEvalSpec<'_>,
-    state_layout: &StateLayout,
+    ctx: &StageContext<'_>,
+    training_ctx: &TrainingContext<'_>,
     lb_cut_batch: &mut RowBatch,
     lb_cut_row_map: Option<&mut crate::cut::CutRowMap>,
-    scratch: &mut LbEvalScratch,
 ) {
-    scratch.ncs_col_upper_buf.clear();
-    scratch.ncs_col_indices_buf.clear();
-    scratch.ncs_col_lower_buf.clear();
-
-    // Indices are constant across openings — build once here; the per-opening
-    // bound buffers are gathered inside the loop.
-    if let Some(stoch) = spec.stochastic {
-        let n_stochastic_ncs = stoch.n_stochastic_ncs();
-        if n_stochastic_ncs > 0 && !spec.ncs_generation.is_empty() {
-            crate::noise::build_dense_ncs_col_indices(
-                spec.ncs_stochastic_dense_col,
-                spec.ncs_generation.start,
-                spec.block_count,
-                &mut scratch.ncs_col_indices_buf,
-            );
-        }
-    }
-
-    scratch.par_inflow_buf.resize(spec.n_hydros, 0.0);
+    let state_layout = training_ctx.state;
+    let cut_state = &training_ctx.cut_state_layouts[0];
+    let template = &ctx.templates[0];
 
     // Append-only: cuts are never removed, keeping the lower bound monotone across
     // iterations. The CutRowMap-less branch (tests) rebuilds the model each call.
     if let Some(row_map) = lb_cut_row_map {
         if row_map.total_cut_rows() == 0 {
-            solver.load_model(spec.template);
+            solver.load_model(template);
         }
         crate::cut::row::append_new_cuts_to_lp(
             solver,
             fcf,
             0,
             state_layout,
-            &spec.template.col_scale,
+            cut_state,
+            &template.col_scale,
             row_map,
             lb_cut_batch,
         );
     } else {
-        build_cut_row_batch_into(lb_cut_batch, fcf, 0, state_layout, &spec.template.col_scale);
-        solver.load_model(spec.template);
+        build_cut_row_batch_into(
+            lb_cut_batch,
+            fcf,
+            0,
+            state_layout,
+            cut_state,
+            &template.col_scale,
+        );
+        solver.load_model(template);
         if lb_cut_batch.num_rows > 0 {
             solver.add_rows(lb_cut_batch);
         }
@@ -231,7 +139,10 @@ fn lb_init_rank0<S: SolverInterface>(
 }
 
 /// Truncation precompute (PAR lag matrix + eta floor, constant across openings),
-/// then a per-opening LP solve writing each objective into `scratch.objectives_buf`.
+/// then a per-opening LP solve delegating solve-prep to [`StageSolvePrep::run`]
+/// (`load_noise = Absent`, `inflow_noise = PreBuilt`: the lower bound hand-builds
+/// `noise_buf`/`z_inflow_rhs_buf` itself and has no load-bus noise dimension),
+/// writing each objective into `objectives_buf`.
 ///
 /// # Errors
 ///
@@ -239,39 +150,43 @@ fn lb_init_rank0<S: SolverInterface>(
 /// [`SddpError::Solver`] for other LP solve failures.
 fn lb_evaluate_stage_0<S: SolverInterface>(
     solver: &mut S,
-    spec: &LbEvalSpec<'_>,
+    ctx: &StageContext<'_>,
+    training_ctx: &TrainingContext<'_>,
     patch_buf: &mut PatchBuffer,
-    initial_state: &[f64],
-    state_layout: &StateLayout,
-    scratch: &mut LbEvalScratch,
+    scratch: &mut ScratchBuffers,
+    objectives_buf: &mut Vec<f64>,
 ) -> Result<(), SddpError> {
-    let n_openings = spec.opening_tree.n_openings(0);
-    let n_hydros = spec.n_hydros;
-    let base_row = spec.base_row;
+    let n_hydros = ctx.n_hydros;
+    let base_row = ctx.base_rows[0];
+    let template0 = &ctx.templates[0];
+    let initial_state = training_ctx.initial_state;
+    let opening_tree = training_ctx.stochastic.opening_tree();
+    let n_openings = opening_tree.n_openings(0);
 
     let needs_truncation = matches!(
-        spec.inflow_method,
+        training_ctx.inflow_method,
         InflowNonNegativityMethod::Truncation | InflowNonNegativityMethod::TruncationWithPenalty
     );
+    let par_lp = training_ctx.stochastic.par();
+    let has_valid_par = par_lp.n_stages() > 0 && par_lp.n_hydros() == n_hydros;
+    let truncation_par = (needs_truncation && has_valid_par).then_some(par_lp);
 
-    let par_lp_opt = spec.stochastic.map(StochasticContext::par);
-    let truncation_par = if needs_truncation {
-        par_lp_opt.filter(|p| p.n_stages() > 0 && p.n_hydros() == n_hydros)
-    } else {
-        None
-    };
+    scratch.par_inflow_buf.clear();
+    scratch.par_inflow_buf.resize(n_hydros, 0.0);
 
     if let Some(par_lp) = truncation_par {
-        let max_order = state_layout.max_par_order;
+        let max_order = training_ctx.state.max_par_order;
         let lag_len = max_order * n_hydros;
+        scratch.lag_matrix_buf.clear();
         scratch.lag_matrix_buf.resize(lag_len, 0.0);
         for h in 0..n_hydros {
             for l in 0..max_order {
                 scratch.lag_matrix_buf[l * n_hydros + h] =
-                    initial_state[state_layout.inflow_lags.start + l * n_hydros + h];
+                    initial_state[training_ctx.state.inflow_lags.start + l * n_hydros + h];
             }
         }
 
+        scratch.eta_floor_buf.clear();
         scratch.eta_floor_buf.resize(n_hydros, f64::NEG_INFINITY);
         scratch.zero_targets_buf.clear();
         scratch.zero_targets_buf.resize(n_hydros, 0.0);
@@ -284,16 +199,12 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
         );
     }
 
-    scratch.objectives_buf.clear();
+    objectives_buf.clear();
 
     for opening_idx in 0..n_openings {
-        let raw_noise = spec.opening_tree.opening(0, opening_idx);
-        scratch.noise_buf.clear();
-        scratch.z_inflow_rhs_buf.clear();
+        let raw_noise = opening_tree.opening(0, opening_idx);
 
         if let Some(par_lp) = truncation_par {
-            // Slice raw_noise to its hydro prefix: it spans hydros + load buses + NCS,
-            // but evaluate_par_batch wants only the n_hydros PAR series.
             evaluate_par_batch(
                 par_lp,
                 0,
@@ -306,94 +217,43 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
         compute_effective_eta(
             raw_noise,
             n_hydros,
-            *spec.inflow_method,
+            *training_ctx.inflow_method,
             &scratch.par_inflow_buf,
             &scratch.eta_floor_buf,
             &mut scratch.effective_eta_buf,
         );
 
-        for (h, &eta_eff) in scratch.effective_eta_buf.iter().enumerate() {
+        scratch.noise_buf.clear();
+        scratch.z_inflow_rhs_buf.clear();
+        for h in 0..n_hydros {
+            let eta_eff = scratch.effective_eta_buf[h];
             scratch
                 .noise_buf
-                .push(spec.template.row_lower[base_row + h] + spec.noise_scale[h] * eta_eff);
-            let z_rhs = spec.stochastic.map_or(0.0, |stoch| {
-                let par_lp = stoch.par();
-                if par_lp.n_stages() > 0 && par_lp.n_hydros() == n_hydros {
-                    par_lp.deterministic_base(0, h) + par_lp.sigma(0, h) * eta_eff
-                } else {
-                    0.0
-                }
-            });
+                .push(template0.row_lower[base_row + h] + ctx.noise_scale[h] * eta_eff);
+            let z_rhs = if has_valid_par {
+                par_lp.deterministic_base(0, h) + par_lp.sigma(0, h) * eta_eff
+            } else {
+                0.0
+            };
             scratch.z_inflow_rhs_buf.push(z_rhs);
         }
 
-        // No shift_anticipated_state here: the lower bound solves at a fixed trial
-        // point, never advancing the ring buffer.
-        patch_buf.fill_col_state_patches(state_layout, initial_state, &spec.template.col_scale);
-        patch_buf.fill_forward_patches(
-            state_layout,
-            initial_state,
-            &scratch.noise_buf,
-            base_row,
-            &spec.template.row_scale,
+        let prep_params = StageSolvePrepParams {
+            state_source: StateSource(initial_state),
+            opening_mode: OpeningMode::PerOpening,
+            load_noise: LoadNoise::Absent,
+            inflow_noise: InflowNoise::PreBuilt,
+            raw_noise,
+        };
+        StageSolvePrep::run(
+            solver,
+            patch_buf,
+            scratch,
+            ctx,
+            training_ctx,
+            0,
+            &prep_params,
         );
-        patch_buf.fill_z_inflow_patches(
-            spec.z_inflow_row_start,
-            &scratch.z_inflow_rhs_buf,
-            &spec.template.row_scale,
-        );
-        let cp = patch_buf.state_col_patch_count();
-        solver.set_col_bounds(
-            &patch_buf.col_indices[..cp],
-            &patch_buf.col_lower[..cp],
-            &patch_buf.col_upper[..cp],
-        );
-        let n_patches = patch_buf.forward_patch_count();
-        solver.set_row_bounds(
-            &patch_buf.indices[..n_patches],
-            &patch_buf.lower[..n_patches],
-            &patch_buf.upper[..n_patches],
-        );
-
-        // The NCS bound patch MUST stay inside the per-opening loop — each opening's
-        // noise changes the available NCS generation; hoisting it understates the
-        // bound (D15, `d15_non_controllable_source`).
-        if let Some(stoch) = spec.stochastic {
-            let n_stochastic_ncs = stoch.n_stochastic_ncs();
-            if n_stochastic_ncs > 0 && !spec.ncs_generation.is_empty() {
-                transform_ncs_noise(
-                    raw_noise,
-                    &NcsNoiseOffsets {
-                        n_hydros,
-                        n_load_buses: spec.n_load_buses,
-                    },
-                    stoch,
-                    0,
-                    spec.block_count,
-                    spec.ncs_max_gen,
-                    spec.ncs_allow_curtailment,
-                    &mut scratch.ncs_col_lower_buf,
-                    &mut scratch.ncs_col_upper_buf,
-                );
-                // Gather the active slots' bounds, forcing `[0, 0]` for slots dormant
-                // at the lower-bound stage — the same zeroing the forward/backward
-                // patch sites apply.
-                crate::noise::gather_dense_ncs_bounds(
-                    spec.ncs_stochastic_windows,
-                    spec.stage_id,
-                    spec.block_count,
-                    &scratch.ncs_col_lower_buf,
-                    &scratch.ncs_col_upper_buf,
-                    &mut scratch.ncs_col_lower_active_buf,
-                    &mut scratch.ncs_col_upper_active_buf,
-                );
-                solver.set_col_bounds(
-                    &scratch.ncs_col_indices_buf,
-                    &scratch.ncs_col_lower_active_buf,
-                    &scratch.ncs_col_upper_active_buf,
-                );
-            }
-        }
 
         let view = solver.solve(None).map_err(|e| match e {
             SolverError::Infeasible => SddpError::Infeasible {
@@ -403,7 +263,7 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
             },
             other => SddpError::Solver(other),
         })?;
-        scratch.objectives_buf.push(view.objective);
+        objectives_buf.push(view.objective);
     }
 
     Ok(())
@@ -435,64 +295,70 @@ fn lb_aggregate_and_broadcast<C: Communicator>(
 /// Evaluate the global lower bound for the current FCF approximation.
 ///
 /// Only rank 0 runs the stage-0 opening loop and applies the risk measure; the
-/// resulting scalar is broadcast to all ranks. `initial_state` is the known `x_0`
-/// (length `state.n_state`). See [`LbEvalSpec`] and [`LbEvalScratchBundle`].
+/// resulting scalar is broadcast to all ranks. See [`LbEvalScratchBundle`].
 ///
 /// # Errors
 ///
 /// - [`SddpError::Infeasible`] — a stage-0 opening LP is infeasible (a modelling
 ///   error; stage 0 should always be feasible via the penalty/recourse structure).
 /// - [`SddpError::Solver`] — LP solve failed for another reason.
-/// - [`SddpError::Communication`] — the broadcast to non-root ranks failed.
+/// - [`SddpError::Communication`] — the cross-rank reconcile or the broadcast to
+///   non-root ranks failed (a peer rank-0 failure surfaces here on the healthy ranks).
 ///
 /// # Panics
 ///
-/// Panics if `spec.opening_tree.n_openings(0) == 0` on rank 0 — stage 0 must have
-/// at least one opening (a caller contract).
+/// Panics if `training_ctx.stochastic.opening_tree().n_openings(0) == 0` on rank
+/// 0 — stage 0 must have at least one opening (a caller contract).
 pub fn evaluate_lower_bound<S: SolverInterface, C: Communicator>(
     solver: &mut S,
     fcf: &FutureCostFunction,
-    initial_state: &[f64],
-    state_layout: &StateLayout,
+    ctx: &StageContext<'_>,
+    training_ctx: &TrainingContext<'_>,
+    risk_measure: &RiskMeasure,
     scratch: &mut LbEvalScratchBundle<'_>,
-    spec: &LbEvalSpec<'_>,
     comm: &C,
 ) -> Result<f64, SddpError> {
     let mut lb = 0.0_f64;
+    let mut reconcile_scratch = [0_i32; 1];
 
     if comm.rank() == 0 {
         assert!(
-            spec.opening_tree.n_openings(0) > 0,
+            training_ctx.stochastic.opening_tree().n_openings(0) > 0,
             "evaluate_lower_bound: stage 0 must have at least one opening"
         );
 
         lb_init_rank0(
             solver,
             fcf,
-            spec,
-            state_layout,
+            ctx,
+            training_ctx,
             scratch.lb_cut_batch,
             scratch.lb_cut_row_map.as_deref_mut(),
-            scratch.lb_scratch,
         );
 
-        lb_evaluate_stage_0(
+        let stage_0 = lb_evaluate_stage_0(
             solver,
-            spec,
+            ctx,
+            training_ctx,
             scratch.patch_buf,
-            initial_state,
-            state_layout,
-            scratch.lb_scratch,
-        )?;
+            scratch.noise_scratch,
+            &mut scratch.lb_scratch.objectives_buf,
+        );
+        // Reconcile rank 0's stage-0 solve across ranks BEFORE the broadcast pair
+        // (mirrors the forward-phase precedent): a rank-0 failure makes every rank
+        // return Err here rather than let a non-root rank block at its matching
+        // broadcast while rank 0 skipped `lb_aggregate_and_broadcast`.
+        reconcile_error_flag(stage_0, comm, &mut reconcile_scratch)?;
 
         return lb_aggregate_and_broadcast(
             &scratch.lb_scratch.objectives_buf,
-            spec.risk_measure,
+            risk_measure,
             &mut scratch.lb_scratch.uniform_prob_buf,
             comm,
         );
     }
 
+    reconcile_error_flag(Ok(()), comm, &mut reconcile_scratch)?;
     comm.broadcast(std::slice::from_mut(&mut lb), 0)
         .map_err(SddpError::from)?;
     Ok(lb)
@@ -507,18 +373,24 @@ pub fn evaluate_lower_bound<S: SolverInterface, C: Communicator>(
     clippy::cast_precision_loss
 )]
 mod tests {
-    use super::{
-        LbEvalScratch, LbEvalScratchBundle, LbEvalSpec, evaluate_lower_bound, lb_evaluate_stage_0,
-    };
+    use super::{LbEvalScratch, LbEvalScratchBundle, evaluate_lower_bound, lb_evaluate_stage_0};
     use crate::{
-        cut::FutureCostFunction, error::SddpError, inflow_method::InflowNonNegativityMethod,
-        lp_builder::PatchBuffer, risk_measure::RiskMeasure,
+        context::{StageContext, TrainingContext},
+        cut::FutureCostFunction,
+        error::SddpError,
+        horizon_mode::HorizonMode,
+        indexer::{CutStateProjection, StateLayout, StudyDimensions},
+        inflow_method::InflowNonNegativityMethod,
+        lp_builder::PatchBuffer,
+        risk_measure::RiskMeasure,
+        workspace::{ScratchBuffers, WorkspaceSizing},
     };
     use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
+    use cobre_core::scenario::SamplingScheme;
     use cobre_solver::{
         Basis, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
     };
-    use cobre_stochastic::OpeningTree;
+    use cobre_stochastic::{OpeningTree, StochasticContext};
 
     fn empty_row_batch() -> RowBatch {
         RowBatch {
@@ -647,6 +519,34 @@ mod tests {
         .unwrap()
     }
 
+    /// Wrap a pre-built stage-0 [`OpeningTree`] into a degenerate, entity-free
+    /// [`StochasticContext`] (`n_stochastic_ncs() == 0`, `par().n_stages() == 0`)
+    /// so a test can pass a real `&StochasticContext` in place of the retired
+    /// `stochastic: None` field. `user_tree` bypasses generation entirely, so the
+    /// injected tree's shape is preserved verbatim.
+    fn wrap_opening_tree(tree: OpeningTree) -> StochasticContext {
+        let system = cobre_core::SystemBuilder::new()
+            .build()
+            .expect("empty system is valid");
+        cobre_stochastic::context::build_stochastic_context(
+            &system,
+            42,
+            None,
+            &[],
+            &[],
+            cobre_stochastic::context::OpeningTreeInputs {
+                user_tree: Some(tree),
+                ..Default::default()
+            },
+            cobre_stochastic::context::ClassSchemes {
+                inflow: None,
+                load: None,
+                ncs: None,
+            },
+        )
+        .expect("degenerate stochastic context must build")
+    }
+
     // ── Mock communicator ────────────────────────────────────────────────────
 
     /// Single-rank stub communicator. broadcast is a no-op (identity operation).
@@ -735,6 +635,67 @@ mod tests {
 
         fn size(&self) -> usize {
             1
+        }
+
+        fn abort(&self, error_code: i32) -> ! {
+            std::process::exit(error_code)
+        }
+    }
+
+    /// Two-rank stub whose `allreduce` reduces the i32 reconcile flag with `Max`
+    /// against a fixed `peer_flag`, and whose `broadcast` is unreachable — so a
+    /// test that reaches the reconcile's `Err` exit proves no rank blocks at the
+    /// LB broadcast.
+    struct LbReconcileStub {
+        rank: usize,
+        peer_flag: i32,
+    }
+
+    impl Communicator for LbReconcileStub {
+        fn allgatherv<T: CommData>(
+            &self,
+            _send: &[T],
+            _recv: &mut [T],
+            _counts: &[usize],
+            _displs: &[usize],
+        ) -> Result<(), CommError> {
+            unreachable!("evaluate_lower_bound reconcile does not call allgatherv")
+        }
+
+        fn allreduce<T: CommData>(
+            &self,
+            send: &[T],
+            recv: &mut [T],
+            op: ReduceOp,
+        ) -> Result<(), CommError> {
+            use std::any::Any;
+            assert_eq!(op, ReduceOp::Max, "reconcile must reduce with Max");
+            for (s, r) in send.iter().zip(recv.iter_mut()) {
+                let flag = *(s as &dyn Any)
+                    .downcast_ref::<i32>()
+                    .expect("reconcile stub only reduces i32 flags");
+                let reduced = flag.max(self.peer_flag);
+                *r = *(&reduced as &dyn Any)
+                    .downcast_ref::<T>()
+                    .expect("reconcile stub only reduces i32 flags");
+            }
+            Ok(())
+        }
+
+        fn broadcast<T: CommData>(&self, _buf: &mut [T], _root: usize) -> Result<(), CommError> {
+            unreachable!("a reconciled failure must return Err before the LB broadcast")
+        }
+
+        fn barrier(&self) -> Result<(), CommError> {
+            Ok(())
+        }
+
+        fn rank(&self) -> usize {
+            self.rank
+        }
+
+        fn size(&self) -> usize {
+            2
         }
 
         fn abort(&self, error_code: i32) -> ! {
@@ -836,55 +797,150 @@ mod tests {
         FutureCostFunction::new(n_stages, n_state, 2, 100, &vec![0; n_stages])
     }
 
+    /// Owned backing data for the "simple" LB unit tests' `StageContext`/
+    /// `TrainingContext` pair, mirroring how `StudySetup` owns `StageData` and
+    /// lends `stage_ctx()`/`training_ctx()`. Every simple test shares this shape
+    /// (single 1-block stage, no load buses/NCS/anticipated thermals); only the
+    /// template, base row, noise scale, `n_hydros`, opening tree, inflow method,
+    /// and initial state differ per test.
+    struct SimpleLbFixture {
+        templates: Vec<StageTemplate>,
+        base_rows: Vec<usize>,
+        noise_scale: Vec<f64>,
+        n_hydros: usize,
+        state: StateLayout,
+        cut_state_layouts: Vec<CutStateProjection>,
+        study_dims: StudyDimensions,
+        horizon: HorizonMode,
+        stochastic: StochasticContext,
+        inflow_method: InflowNonNegativityMethod,
+        initial_state: Vec<f64>,
+    }
+
+    impl SimpleLbFixture {
+        fn new(
+            template: StageTemplate,
+            base_row: usize,
+            noise_scale: Vec<f64>,
+            n_hydros: usize,
+            hydro_count: usize,
+            opening_tree: OpeningTree,
+            inflow_method: InflowNonNegativityMethod,
+            initial_state: Vec<f64>,
+        ) -> Self {
+            let state = crate::test_support::state_layout(hydro_count, 0);
+            let cut_state_layouts = crate::test_support::all_enabled_cut_state_layouts(&state, 2);
+            Self {
+                templates: vec![template],
+                base_rows: vec![base_row],
+                noise_scale,
+                n_hydros,
+                cut_state_layouts,
+                study_dims: crate::test_support::study_dims(),
+                horizon: HorizonMode::Finite { num_stages: 2 },
+                stochastic: wrap_opening_tree(opening_tree),
+                inflow_method,
+                initial_state,
+                state,
+            }
+        }
+
+        fn ctx(&self) -> StageContext<'_> {
+            StageContext {
+                templates: &self.templates,
+                base_rows: &self.base_rows,
+                geometry_per_stage: &[],
+                noise_scale: &self.noise_scale,
+                n_hydros: self.n_hydros,
+                n_load_buses: 0,
+                load_balance_row_starts: &[],
+                load_bus_indices: &[],
+                block_counts_per_stage: &[1],
+                ncs_col_starts: &[],
+                n_ncs: 0,
+                ncs_stochastic_dense_col: &[],
+                ncs_stochastic_windows: &[],
+                anticipated_windows: &[],
+                study_stage_ids: &[],
+                ncs_max_gen: &[],
+                ncs_allow_curtailment: &[],
+                discount_factors: &[],
+                cumulative_discount_factors: &[],
+                stage_lag_transitions: &[],
+                noise_group_ids: &[],
+                downstream_par_order: 0,
+            }
+        }
+
+        fn training_ctx(&self) -> TrainingContext<'_> {
+            TrainingContext {
+                horizon: &self.horizon,
+                state: &self.state,
+                cut_state_layouts: &self.cut_state_layouts,
+                study_dims: &self.study_dims,
+                inflow_method: &self.inflow_method,
+                stochastic: &self.stochastic,
+                initial_state: &self.initial_state,
+                inflow_scheme: SamplingScheme::InSample,
+                load_scheme: SamplingScheme::InSample,
+                ncs_scheme: SamplingScheme::InSample,
+                stages: &[],
+                historical_library: None,
+                external_inflow_library: None,
+                external_load_library: None,
+                external_ncs_library: None,
+                recent_accum_seed: &[],
+                recent_weight_seed: 0.0,
+                dcs: None,
+            }
+        }
+    }
+
     // ── Unit tests ───────────────────────────────────────────────────────────
 
     /// AC1: 1 opening, Expectation — LB equals the single LP objective.
     #[test]
     fn one_opening_expectation_lb_equals_single_objective() {
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let template = minimal_template();
-        let fcf = make_fcf(2, state.n_state);
-        let initial_state = vec![0.0_f64; state.n_state];
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
-        let opening_tree = simple_opening_tree(1);
+        let fixture = SimpleLbFixture::new(
+            minimal_template(),
+            1,
+            vec![],
+            0,
+            1,
+            simple_opening_tree(1),
+            InflowNonNegativityMethod::None,
+            vec![0.0_f64],
+        );
+        let fcf = make_fcf(2, fixture.state.n_state);
+        let mut patch_buf = PatchBuffer::new(
+            fixture.state.hydro_count,
+            fixture.state.max_par_order,
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
-
         let mut solver = MockSolver::with_objectives(vec![100.0]);
 
-        let spec = LbEvalSpec {
-            template: &template,
-            base_row: 1,
-            noise_scale: &[],
-            n_hydros: 0,
-            opening_tree: &opening_tree,
-            risk_measure: &rm,
-            stochastic: None,
-            n_load_buses: 0,
-            ncs_max_gen: &[],
-            ncs_allow_curtailment: &[],
-            ncs_stochastic_dense_col: &[],
-            ncs_stochastic_windows: &[],
-            stage_id: 0,
-            block_count: 1,
-            ncs_generation: 0..0,
-            z_inflow_row_start: 0,
-            inflow_method: &InflowNonNegativityMethod::None,
-        };
         let (mut row_batch, mut lb_scratch) = make_lb_locals();
+        let mut noise_scratch = ScratchBuffers::new(WorkspaceSizing::default());
         let mut bundle = LbEvalScratchBundle::from_scratch_fields(
             &mut patch_buf,
             &mut row_batch,
             None,
+            &mut noise_scratch,
             &mut lb_scratch,
         );
         let lb = evaluate_lower_bound(
             &mut solver,
             &fcf,
-            &initial_state,
-            &state,
+            &fixture.ctx(),
+            &fixture.training_ctx(),
+            &rm,
             &mut bundle,
-            &spec,
             &comm,
         )
         .unwrap();
@@ -898,51 +954,46 @@ mod tests {
     /// AC2: 3 openings, Expectation — LB equals mean of objectives.
     #[test]
     fn three_openings_expectation_lb_equals_mean() {
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let template = minimal_template();
-        let fcf = make_fcf(2, state.n_state);
-        let initial_state = vec![0.0_f64; state.n_state];
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
-        let opening_tree = simple_opening_tree(3);
+        let fixture = SimpleLbFixture::new(
+            minimal_template(),
+            1,
+            vec![],
+            0,
+            1,
+            simple_opening_tree(3),
+            InflowNonNegativityMethod::None,
+            vec![0.0_f64],
+        );
+        let fcf = make_fcf(2, fixture.state.n_state);
+        let mut patch_buf = PatchBuffer::new(
+            fixture.state.hydro_count,
+            fixture.state.max_par_order,
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
-
-        // Solver returns 60, 80, 100 for the three openings.
         let mut solver = MockSolver::with_objectives(vec![60.0, 80.0, 100.0]);
 
-        let spec = LbEvalSpec {
-            template: &template,
-            base_row: 1,
-            noise_scale: &[],
-            n_hydros: 0,
-            opening_tree: &opening_tree,
-            risk_measure: &rm,
-            stochastic: None,
-            n_load_buses: 0,
-            ncs_max_gen: &[],
-            ncs_allow_curtailment: &[],
-            ncs_stochastic_dense_col: &[],
-            ncs_stochastic_windows: &[],
-            stage_id: 0,
-            block_count: 1,
-            ncs_generation: 0..0,
-            z_inflow_row_start: 0,
-            inflow_method: &InflowNonNegativityMethod::None,
-        };
         let (mut row_batch_lb, mut lb_scratch_lb) = make_lb_locals();
+        let mut noise_scratch = ScratchBuffers::new(WorkspaceSizing::default());
         let mut bundle_lb = LbEvalScratchBundle::from_scratch_fields(
             &mut patch_buf,
             &mut row_batch_lb,
             None,
+            &mut noise_scratch,
             &mut lb_scratch_lb,
         );
         let lb = evaluate_lower_bound(
             &mut solver,
             &fcf,
-            &initial_state,
-            &state,
+            &fixture.ctx(),
+            &fixture.training_ctx(),
+            &rm,
             &mut bundle_lb,
-            &spec,
             &comm,
         )
         .unwrap();
@@ -957,12 +1008,26 @@ mod tests {
     /// AC3: 2 openings, CVaR(alpha=0.5, lambda=1.0) — pure `CVaR` selects worst.
     #[test]
     fn two_openings_pure_cvar_alpha_half_lb_equals_worst() {
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let template = minimal_template();
-        let fcf = make_fcf(2, state.n_state);
-        let initial_state = vec![0.0_f64; state.n_state];
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
-        let opening_tree = simple_opening_tree(2);
+        let fixture = SimpleLbFixture::new(
+            minimal_template(),
+            1,
+            vec![],
+            0,
+            1,
+            simple_opening_tree(2),
+            InflowNonNegativityMethod::None,
+            vec![0.0_f64],
+        );
+        let fcf = make_fcf(2, fixture.state.n_state);
+        let mut patch_buf = PatchBuffer::new(
+            fixture.state.hydro_count,
+            fixture.state.max_par_order,
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
         // CVaR(alpha=0.5, lambda=1.0): pure CVaR; upper bound per scenario =
         // p / alpha = 0.5 / 0.5 = 1.0. With 2 equal-probability scenarios the
         // greedy allocation places all mass on the worst scenario.
@@ -971,43 +1036,24 @@ mod tests {
             lambda: 1.0,
         };
         let comm = LocalComm;
-
-        // Solver returns 50, 150.
         let mut solver = MockSolver::with_objectives(vec![50.0, 150.0]);
 
-        let spec = LbEvalSpec {
-            template: &template,
-            base_row: 1,
-            noise_scale: &[],
-            n_hydros: 0,
-            opening_tree: &opening_tree,
-            risk_measure: &rm,
-            stochastic: None,
-            n_load_buses: 0,
-            ncs_max_gen: &[],
-            ncs_allow_curtailment: &[],
-            ncs_stochastic_dense_col: &[],
-            ncs_stochastic_windows: &[],
-            stage_id: 0,
-            block_count: 1,
-            ncs_generation: 0..0,
-            z_inflow_row_start: 0,
-            inflow_method: &InflowNonNegativityMethod::None,
-        };
         let (mut row_batch_lb, mut lb_scratch_lb) = make_lb_locals();
+        let mut noise_scratch = ScratchBuffers::new(WorkspaceSizing::default());
         let mut bundle_lb = LbEvalScratchBundle::from_scratch_fields(
             &mut patch_buf,
             &mut row_batch_lb,
             None,
+            &mut noise_scratch,
             &mut lb_scratch_lb,
         );
         let lb = evaluate_lower_bound(
             &mut solver,
             &fcf,
-            &initial_state,
-            &state,
+            &fixture.ctx(),
+            &fixture.training_ctx(),
+            &rm,
             &mut bundle_lb,
-            &spec,
             &comm,
         )
         .unwrap();
@@ -1023,53 +1069,49 @@ mod tests {
     /// AC4 (extra): 2 openings, CVaR(alpha=1.0, lambda=1.0) = Expectation.
     #[test]
     fn two_openings_cvar_alpha_one_equals_expectation() {
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let template = minimal_template();
-        let fcf = make_fcf(2, state.n_state);
-        let initial_state = vec![0.0_f64; state.n_state];
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
-        let opening_tree = simple_opening_tree(2);
+        let fixture = SimpleLbFixture::new(
+            minimal_template(),
+            1,
+            vec![],
+            0,
+            1,
+            simple_opening_tree(2),
+            InflowNonNegativityMethod::None,
+            vec![0.0_f64],
+        );
+        let fcf = make_fcf(2, fixture.state.n_state);
+        let mut patch_buf = PatchBuffer::new(
+            fixture.state.hydro_count,
+            fixture.state.max_par_order,
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
         let rm = RiskMeasure::CVaR {
             alpha: 1.0,
             lambda: 1.0,
         };
         let comm = LocalComm;
-
         let mut solver = MockSolver::with_objectives(vec![50.0, 150.0]);
 
-        let spec = LbEvalSpec {
-            template: &template,
-            base_row: 1,
-            noise_scale: &[],
-            n_hydros: 0,
-            opening_tree: &opening_tree,
-            risk_measure: &rm,
-            stochastic: None,
-            n_load_buses: 0,
-            ncs_max_gen: &[],
-            ncs_allow_curtailment: &[],
-            ncs_stochastic_dense_col: &[],
-            ncs_stochastic_windows: &[],
-            stage_id: 0,
-            block_count: 1,
-            ncs_generation: 0..0,
-            z_inflow_row_start: 0,
-            inflow_method: &InflowNonNegativityMethod::None,
-        };
         let (mut row_batch_lb, mut lb_scratch_lb) = make_lb_locals();
+        let mut noise_scratch = ScratchBuffers::new(WorkspaceSizing::default());
         let mut bundle_lb = LbEvalScratchBundle::from_scratch_fields(
             &mut patch_buf,
             &mut row_batch_lb,
             None,
+            &mut noise_scratch,
             &mut lb_scratch_lb,
         );
         let lb = evaluate_lower_bound(
             &mut solver,
             &fcf,
-            &initial_state,
-            &state,
+            &fixture.ctx(),
+            &fixture.training_ctx(),
+            &rm,
             &mut bundle_lb,
-            &spec,
             &comm,
         )
         .unwrap();
@@ -1084,50 +1126,46 @@ mod tests {
     /// AC5: solver returns Infeasible for the first opening — must propagate as `SddpError::Infeasible`.
     #[test]
     fn infeasible_solve_maps_to_sddp_infeasible() {
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let template = minimal_template();
-        let fcf = make_fcf(2, state.n_state);
-        let initial_state = vec![0.0_f64; state.n_state];
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
-        let opening_tree = simple_opening_tree(1);
+        let fixture = SimpleLbFixture::new(
+            minimal_template(),
+            1,
+            vec![],
+            0,
+            1,
+            simple_opening_tree(1),
+            InflowNonNegativityMethod::None,
+            vec![0.0_f64],
+        );
+        let fcf = make_fcf(2, fixture.state.n_state);
+        let mut patch_buf = PatchBuffer::new(
+            fixture.state.hydro_count,
+            fixture.state.max_par_order,
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
-
         let mut solver = MockSolver::infeasible_on_first();
 
-        let spec = LbEvalSpec {
-            template: &template,
-            base_row: 1,
-            noise_scale: &[],
-            n_hydros: 0,
-            opening_tree: &opening_tree,
-            risk_measure: &rm,
-            stochastic: None,
-            n_load_buses: 0,
-            ncs_max_gen: &[],
-            ncs_allow_curtailment: &[],
-            ncs_stochastic_dense_col: &[],
-            ncs_stochastic_windows: &[],
-            stage_id: 0,
-            block_count: 1,
-            ncs_generation: 0..0,
-            z_inflow_row_start: 0,
-            inflow_method: &InflowNonNegativityMethod::None,
-        };
         let (mut row_batch_result, mut lb_scratch_result) = make_lb_locals();
+        let mut noise_scratch = ScratchBuffers::new(WorkspaceSizing::default());
         let mut bundle_result = LbEvalScratchBundle::from_scratch_fields(
             &mut patch_buf,
             &mut row_batch_result,
             None,
+            &mut noise_scratch,
             &mut lb_scratch_result,
         );
         let result = evaluate_lower_bound(
             &mut solver,
             &fcf,
-            &initial_state,
-            &state,
+            &fixture.ctx(),
+            &fixture.training_ctx(),
+            &rm,
             &mut bundle_result,
-            &spec,
             &comm,
         );
 
@@ -1140,50 +1178,46 @@ mod tests {
     /// AC6: broadcast failure maps to `SddpError::Communication`.
     #[test]
     fn broadcast_failure_maps_to_communication_error() {
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let template = minimal_template();
-        let fcf = make_fcf(2, state.n_state);
-        let initial_state = vec![0.0_f64; state.n_state];
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
-        let opening_tree = simple_opening_tree(1);
+        let fixture = SimpleLbFixture::new(
+            minimal_template(),
+            1,
+            vec![],
+            0,
+            1,
+            simple_opening_tree(1),
+            InflowNonNegativityMethod::None,
+            vec![0.0_f64],
+        );
+        let fcf = make_fcf(2, fixture.state.n_state);
+        let mut patch_buf = PatchBuffer::new(
+            fixture.state.hydro_count,
+            fixture.state.max_par_order,
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
         let rm = RiskMeasure::Expectation;
         let comm = FailingBcastComm;
-
         let mut solver = MockSolver::with_objectives(vec![100.0]);
 
-        let spec = LbEvalSpec {
-            template: &template,
-            base_row: 1,
-            noise_scale: &[],
-            n_hydros: 0,
-            opening_tree: &opening_tree,
-            risk_measure: &rm,
-            stochastic: None,
-            n_load_buses: 0,
-            ncs_max_gen: &[],
-            ncs_allow_curtailment: &[],
-            ncs_stochastic_dense_col: &[],
-            ncs_stochastic_windows: &[],
-            stage_id: 0,
-            block_count: 1,
-            ncs_generation: 0..0,
-            z_inflow_row_start: 0,
-            inflow_method: &InflowNonNegativityMethod::None,
-        };
         let (mut row_batch_result, mut lb_scratch_result) = make_lb_locals();
+        let mut noise_scratch = ScratchBuffers::new(WorkspaceSizing::default());
         let mut bundle_result = LbEvalScratchBundle::from_scratch_fields(
             &mut patch_buf,
             &mut row_batch_result,
             None,
+            &mut noise_scratch,
             &mut lb_scratch_result,
         );
         let result = evaluate_lower_bound(
             &mut solver,
             &fcf,
-            &initial_state,
-            &state,
+            &fixture.ctx(),
+            &fixture.training_ctx(),
+            &rm,
             &mut bundle_result,
-            &spec,
             &comm,
         );
 
@@ -1191,6 +1225,122 @@ mod tests {
             matches!(result, Err(SddpError::Communication(_))),
             "broadcast failure must produce SddpError::Communication, got {result:?}"
         );
+    }
+
+    /// Deadlock-freedom: a rank-0 stage-0 solve failure makes BOTH ranks return
+    /// `Err` before the broadcast pair rather than hang (rank 0 skips
+    /// `lb_aggregate_and_broadcast` while a non-root rank blocks at its matching
+    /// broadcast). `LbReconcileStub::broadcast` is unreachable, so reaching it
+    /// would panic instead of hanging as the real broadcast would.
+    #[test]
+    fn evaluate_lower_bound_rank0_failure_errors_all_ranks_before_broadcast() {
+        // Rank 0: stage-0 solve is infeasible; the reconcile hands rank 0 its own
+        // error before lb_aggregate_and_broadcast's broadcast.
+        {
+            let fixture = SimpleLbFixture::new(
+                minimal_template(),
+                1,
+                vec![],
+                0,
+                1,
+                simple_opening_tree(1),
+                InflowNonNegativityMethod::None,
+                vec![0.0_f64],
+            );
+            let fcf = make_fcf(2, fixture.state.n_state);
+            let mut patch_buf = PatchBuffer::new(
+                fixture.state.hydro_count,
+                fixture.state.max_par_order,
+                0,
+                0,
+                0,
+                0,
+                0,
+            );
+            let rm = RiskMeasure::Expectation;
+            let comm = LbReconcileStub {
+                rank: 0,
+                peer_flag: 0,
+            };
+            let mut solver = MockSolver::infeasible_on_first();
+
+            let (mut row_batch, mut lb_scratch) = make_lb_locals();
+            let mut noise_scratch = ScratchBuffers::new(WorkspaceSizing::default());
+            let mut bundle = LbEvalScratchBundle::from_scratch_fields(
+                &mut patch_buf,
+                &mut row_batch,
+                None,
+                &mut noise_scratch,
+                &mut lb_scratch,
+            );
+            let result = evaluate_lower_bound(
+                &mut solver,
+                &fcf,
+                &fixture.ctx(),
+                &fixture.training_ctx(),
+                &rm,
+                &mut bundle,
+                &comm,
+            );
+            assert!(
+                matches!(result, Err(SddpError::Infeasible { stage: 0, .. })),
+                "rank 0 must return its own Infeasible before the broadcast, got {result:?}"
+            );
+        }
+
+        // Rank 1 (non-root): its peer (rank 0) failed; the reconcile returns a
+        // peer-failure Communication error before rank 1 blocks at its broadcast.
+        {
+            let fixture = SimpleLbFixture::new(
+                minimal_template(),
+                1,
+                vec![],
+                0,
+                1,
+                simple_opening_tree(1),
+                InflowNonNegativityMethod::None,
+                vec![0.0_f64],
+            );
+            let fcf = make_fcf(2, fixture.state.n_state);
+            let mut patch_buf = PatchBuffer::new(
+                fixture.state.hydro_count,
+                fixture.state.max_par_order,
+                0,
+                0,
+                0,
+                0,
+                0,
+            );
+            let rm = RiskMeasure::Expectation;
+            let comm = LbReconcileStub {
+                rank: 1,
+                peer_flag: 1,
+            };
+            let mut solver = MockSolver::with_objectives(vec![100.0]);
+
+            let (mut row_batch, mut lb_scratch) = make_lb_locals();
+            let mut noise_scratch = ScratchBuffers::new(WorkspaceSizing::default());
+            let mut bundle = LbEvalScratchBundle::from_scratch_fields(
+                &mut patch_buf,
+                &mut row_batch,
+                None,
+                &mut noise_scratch,
+                &mut lb_scratch,
+            );
+            let result = evaluate_lower_bound(
+                &mut solver,
+                &fcf,
+                &fixture.ctx(),
+                &fixture.training_ctx(),
+                &rm,
+                &mut bundle,
+                &comm,
+            );
+            assert!(
+                matches!(result, Err(SddpError::Communication(_))),
+                "non-root rank must return a peer-failure Communication error before its broadcast, got {result:?}"
+            );
+        }
     }
 
     // ── Integration tests ────────────────────────────────────────────────────
@@ -1202,51 +1352,47 @@ mod tests {
     /// and `RiskMeasure::Expectation`.
     #[test]
     fn integration_two_openings_local_backend_expectation() {
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let template = minimal_template();
+        let fixture = SimpleLbFixture::new(
+            minimal_template(),
+            1,
+            vec![],
+            0,
+            1,
+            simple_opening_tree(2),
+            InflowNonNegativityMethod::None,
+            vec![50.0_f64], // non-zero initial state
+        );
         // Start with 0 cuts (empty FCF).
-        let fcf = make_fcf(2, state.n_state);
-        let initial_state = vec![50.0_f64]; // non-zero initial state
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
-        let opening_tree = simple_opening_tree(2);
+        let fcf = make_fcf(2, fixture.state.n_state);
+        let mut patch_buf = PatchBuffer::new(
+            fixture.state.hydro_count,
+            fixture.state.max_par_order,
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
-
         let mut solver = MockSolver::with_objectives(vec![200.0, 300.0]);
 
-        let spec = LbEvalSpec {
-            template: &template,
-            base_row: 1,
-            noise_scale: &[],
-            n_hydros: 0,
-            opening_tree: &opening_tree,
-            risk_measure: &rm,
-            stochastic: None,
-            n_load_buses: 0,
-            ncs_max_gen: &[],
-            ncs_allow_curtailment: &[],
-            ncs_stochastic_dense_col: &[],
-            ncs_stochastic_windows: &[],
-            stage_id: 0,
-            block_count: 1,
-            ncs_generation: 0..0,
-            z_inflow_row_start: 0,
-            inflow_method: &InflowNonNegativityMethod::None,
-        };
         let (mut row_batch_lb, mut lb_scratch_lb) = make_lb_locals();
+        let mut noise_scratch = ScratchBuffers::new(WorkspaceSizing::default());
         let mut bundle_lb = LbEvalScratchBundle::from_scratch_fields(
             &mut patch_buf,
             &mut row_batch_lb,
             None,
+            &mut noise_scratch,
             &mut lb_scratch_lb,
         );
         let lb = evaluate_lower_bound(
             &mut solver,
             &fcf,
-            &initial_state,
-            &state,
+            &fixture.ctx(),
+            &fixture.training_ctx(),
+            &rm,
             &mut bundle_lb,
-            &spec,
             &comm,
         )
         .unwrap();
@@ -1265,51 +1411,47 @@ mod tests {
     /// must be >= the first.
     #[test]
     fn integration_monotonicity_more_cuts_yields_higher_or_equal_lb() {
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let template = minimal_template();
-        let fcf = make_fcf(2, state.n_state);
-        let initial_state = vec![0.0_f64];
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
-        let opening_tree = simple_opening_tree(2);
+        let fixture = SimpleLbFixture::new(
+            minimal_template(),
+            1,
+            vec![],
+            0,
+            1,
+            simple_opening_tree(2),
+            InflowNonNegativityMethod::None,
+            vec![0.0_f64],
+        );
+        let fcf = make_fcf(2, fixture.state.n_state);
+        let mut patch_buf = PatchBuffer::new(
+            fixture.state.hydro_count,
+            fixture.state.max_par_order,
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
-
-        let spec = LbEvalSpec {
-            template: &template,
-            base_row: 1,
-            noise_scale: &[],
-            n_hydros: 0,
-            opening_tree: &opening_tree,
-            risk_measure: &rm,
-            stochastic: None,
-            n_load_buses: 0,
-            ncs_max_gen: &[],
-            ncs_allow_curtailment: &[],
-            ncs_stochastic_dense_col: &[],
-            ncs_stochastic_windows: &[],
-            stage_id: 0,
-            block_count: 1,
-            ncs_generation: 0..0,
-            z_inflow_row_start: 0,
-            inflow_method: &InflowNonNegativityMethod::None,
-        };
 
         // First call: solver returns [50, 100] → LB = 75.
         let mut solver1 = MockSolver::with_objectives(vec![50.0, 100.0]);
         let (mut row_batch_lb1, mut lb_scratch_lb1) = make_lb_locals();
+        let mut noise_scratch1 = ScratchBuffers::new(WorkspaceSizing::default());
         let mut bundle_lb1 = LbEvalScratchBundle::from_scratch_fields(
             &mut patch_buf,
             &mut row_batch_lb1,
             None,
+            &mut noise_scratch1,
             &mut lb_scratch_lb1,
         );
         let lb1 = evaluate_lower_bound(
             &mut solver1,
             &fcf,
-            &initial_state,
-            &state,
+            &fixture.ctx(),
+            &fixture.training_ctx(),
+            &rm,
             &mut bundle_lb1,
-            &spec,
             &comm,
         )
         .unwrap();
@@ -1317,19 +1459,21 @@ mod tests {
         // Second call: solver returns [80, 120] → LB = 100 (tighter cuts raise obj).
         let mut solver2 = MockSolver::with_objectives(vec![80.0, 120.0]);
         let (mut row_batch_lb2, mut lb_scratch_lb2) = make_lb_locals();
+        let mut noise_scratch2 = ScratchBuffers::new(WorkspaceSizing::default());
         let mut bundle_lb2 = LbEvalScratchBundle::from_scratch_fields(
             &mut patch_buf,
             &mut row_batch_lb2,
             None,
+            &mut noise_scratch2,
             &mut lb_scratch_lb2,
         );
         let lb2 = evaluate_lower_bound(
             &mut solver2,
             &fcf,
-            &initial_state,
-            &state,
+            &fixture.ctx(),
+            &fixture.training_ctx(),
+            &rm,
             &mut bundle_lb2,
-            &spec,
             &comm,
         )
         .unwrap();
@@ -1344,55 +1488,52 @@ mod tests {
 
     /// `None` method passes raw noise through unchanged (regression test).
     ///
-    /// With `stochastic: None`, the truncation path is a no-op since
-    /// `has_par == false`. This validates that the `compute_effective_eta`
-    /// control flow works correctly when no PAR model is present.
+    /// With the degenerate wrapped stochastic context, the truncation path is a
+    /// no-op since `has_valid_par == false`. This validates that the
+    /// `compute_effective_eta` control flow works correctly when no PAR model
+    /// applies.
     #[test]
     fn test_lb_none_method_unchanged() {
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let template = minimal_template();
-        let fcf = make_fcf(2, state.n_state);
-        let initial_state = vec![0.0_f64; state.n_state];
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
-        let opening_tree = simple_opening_tree(2);
+        let fixture = SimpleLbFixture::new(
+            minimal_template(),
+            1,
+            vec![],
+            0,
+            1,
+            simple_opening_tree(2),
+            InflowNonNegativityMethod::None,
+            vec![0.0_f64],
+        );
+        let fcf = make_fcf(2, fixture.state.n_state);
+        let mut patch_buf = PatchBuffer::new(
+            fixture.state.hydro_count,
+            fixture.state.max_par_order,
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
-
         let mut solver = MockSolver::with_objectives(vec![60.0, 80.0]);
 
-        let spec = LbEvalSpec {
-            template: &template,
-            base_row: 1,
-            noise_scale: &[],
-            n_hydros: 0,
-            opening_tree: &opening_tree,
-            risk_measure: &rm,
-            stochastic: None,
-            n_load_buses: 0,
-            ncs_max_gen: &[],
-            ncs_allow_curtailment: &[],
-            ncs_stochastic_dense_col: &[],
-            ncs_stochastic_windows: &[],
-            stage_id: 0,
-            block_count: 1,
-            ncs_generation: 0..0,
-            z_inflow_row_start: 0,
-            inflow_method: &InflowNonNegativityMethod::None,
-        };
         let (mut row_batch_lb, mut lb_scratch_lb) = make_lb_locals();
+        let mut noise_scratch = ScratchBuffers::new(WorkspaceSizing::default());
         let mut bundle_lb = LbEvalScratchBundle::from_scratch_fields(
             &mut patch_buf,
             &mut row_batch_lb,
             None,
+            &mut noise_scratch,
             &mut lb_scratch_lb,
         );
         let lb = evaluate_lower_bound(
             &mut solver,
             &fcf,
-            &initial_state,
-            &state,
+            &fixture.ctx(),
+            &fixture.training_ctx(),
+            &rm,
             &mut bundle_lb,
-            &spec,
             &comm,
         )
         .unwrap();
@@ -1406,55 +1547,51 @@ mod tests {
 
     /// `Truncation` method does not cause a crash or infeasibility.
     ///
-    /// With `stochastic: None`, the truncation path is a no-op since
-    /// `has_par == false`, but this validates that the control flow
-    /// (`needs_truncation` = true, `truncation_par` = `None`) does not panic.
+    /// With the degenerate wrapped stochastic context, the truncation path is a
+    /// no-op since `has_valid_par == false`, but this validates that the control
+    /// flow (`needs_truncation` = true, `truncation_par` = `None`) does not panic.
     #[test]
     fn test_lb_truncation_no_crash() {
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let template = minimal_template();
-        let fcf = make_fcf(2, state.n_state);
-        let initial_state = vec![0.0_f64; state.n_state];
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
-        let opening_tree = simple_opening_tree(1);
+        let fixture = SimpleLbFixture::new(
+            minimal_template(),
+            1,
+            vec![],
+            0,
+            1,
+            simple_opening_tree(1),
+            InflowNonNegativityMethod::Truncation,
+            vec![0.0_f64],
+        );
+        let fcf = make_fcf(2, fixture.state.n_state);
+        let mut patch_buf = PatchBuffer::new(
+            fixture.state.hydro_count,
+            fixture.state.max_par_order,
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
-
         let mut solver = MockSolver::with_objectives(vec![100.0]);
 
-        let spec = LbEvalSpec {
-            template: &template,
-            base_row: 1,
-            noise_scale: &[],
-            n_hydros: 0,
-            opening_tree: &opening_tree,
-            risk_measure: &rm,
-            stochastic: None,
-            n_load_buses: 0,
-            ncs_max_gen: &[],
-            ncs_allow_curtailment: &[],
-            ncs_stochastic_dense_col: &[],
-            ncs_stochastic_windows: &[],
-            stage_id: 0,
-            block_count: 1,
-            ncs_generation: 0..0,
-            z_inflow_row_start: 0,
-            inflow_method: &InflowNonNegativityMethod::Truncation,
-        };
         let (mut row_batch_result, mut lb_scratch_result) = make_lb_locals();
+        let mut noise_scratch = ScratchBuffers::new(WorkspaceSizing::default());
         let mut bundle_result = LbEvalScratchBundle::from_scratch_fields(
             &mut patch_buf,
             &mut row_batch_result,
             None,
+            &mut noise_scratch,
             &mut lb_scratch_result,
         );
         let result = evaluate_lower_bound(
             &mut solver,
             &fcf,
-            &initial_state,
-            &state,
+            &fixture.ctx(),
+            &fixture.training_ctx(),
+            &rm,
             &mut bundle_result,
-            &spec,
             &comm,
         );
 
@@ -1467,50 +1604,46 @@ mod tests {
     /// `TruncationWithPenalty` method does not cause a crash or infeasibility.
     #[test]
     fn test_lb_truncation_with_penalty_no_crash() {
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let template = minimal_template();
-        let fcf = make_fcf(2, state.n_state);
-        let initial_state = vec![0.0_f64; state.n_state];
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
-        let opening_tree = simple_opening_tree(1);
+        let fixture = SimpleLbFixture::new(
+            minimal_template(),
+            1,
+            vec![],
+            0,
+            1,
+            simple_opening_tree(1),
+            InflowNonNegativityMethod::TruncationWithPenalty,
+            vec![0.0_f64],
+        );
+        let fcf = make_fcf(2, fixture.state.n_state);
+        let mut patch_buf = PatchBuffer::new(
+            fixture.state.hydro_count,
+            fixture.state.max_par_order,
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
-
         let mut solver = MockSolver::with_objectives(vec![100.0]);
 
-        let spec = LbEvalSpec {
-            template: &template,
-            base_row: 1,
-            noise_scale: &[],
-            n_hydros: 0,
-            opening_tree: &opening_tree,
-            risk_measure: &rm,
-            stochastic: None,
-            n_load_buses: 0,
-            ncs_max_gen: &[],
-            ncs_allow_curtailment: &[],
-            ncs_stochastic_dense_col: &[],
-            ncs_stochastic_windows: &[],
-            stage_id: 0,
-            block_count: 1,
-            ncs_generation: 0..0,
-            z_inflow_row_start: 0,
-            inflow_method: &InflowNonNegativityMethod::TruncationWithPenalty,
-        };
         let (mut row_batch_result, mut lb_scratch_result) = make_lb_locals();
+        let mut noise_scratch = ScratchBuffers::new(WorkspaceSizing::default());
         let mut bundle_result = LbEvalScratchBundle::from_scratch_fields(
             &mut patch_buf,
             &mut row_batch_result,
             None,
+            &mut noise_scratch,
             &mut lb_scratch_result,
         );
         let result = evaluate_lower_bound(
             &mut solver,
             &fcf,
-            &initial_state,
-            &state,
+            &fixture.ctx(),
+            &fixture.training_ctx(),
+            &rm,
             &mut bundle_result,
-            &spec,
             &comm,
         );
 
@@ -1537,8 +1670,7 @@ mod tests {
             Bus, DeficitSegment, EntityId, SystemBuilder,
             entities::non_controllable::NonControllableSource,
             scenario::{
-                CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile,
-                NcsModel, SamplingScheme,
+                CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, NcsModel,
             },
             temporal::{
                 Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
@@ -1559,6 +1691,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(0),
             name: "B0".to_string(),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 1000.0,
@@ -1569,6 +1702,7 @@ mod tests {
         let ncs_source = NonControllableSource {
             id: ncs_entity_id,
             name: "W1".to_string(),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(0),
             entry_stage_id: None,
             exit_stage_id: None,
@@ -1632,7 +1766,7 @@ mod tests {
         let system = SystemBuilder::new()
             .buses(vec![bus])
             .non_controllable_sources(vec![ncs_source])
-            .stages(vec![stage])
+            .stages(vec![stage.clone()])
             .ncs_models(vec![ncs_model])
             .correlation(correlation)
             .build()
@@ -1659,8 +1793,6 @@ mod tests {
             "StochasticContext must report {n_ncs} stochastic NCS entity"
         );
 
-        let opening_tree = stoch.opening_tree();
-
         // Build a template with 1 NCS generation column (col index 0).
         // The NCS generation column range is 0..block_count (= 0..1).
         let template = StageTemplate {
@@ -1683,8 +1815,10 @@ mod tests {
             col_scale: Vec::new(),
             row_scale: Vec::new(),
         };
+        let templates = vec![template];
+        let base_rows = vec![0_usize];
 
-        let state = crate::indexer::test_fixtures::state_layout(0, 0);
+        let state = crate::test_support::state_layout(0, 0);
         let ncs_max_gen = vec![100.0_f64; n_ncs];
         let ncs_allow_curtailment = vec![true; n_ncs];
         // Dense: every stochastic slot maps to its own NCS column (slot order ==
@@ -1692,52 +1826,78 @@ mod tests {
         // so none is commissioning-dormant at stage 0.
         let ncs_stochastic_dense_col: Vec<usize> = (0..n_ncs).collect();
         let ncs_stochastic_windows: Vec<(Option<i32>, Option<i32>)> = vec![(None, None); n_ncs];
+        let ncs_col_starts = vec![0_usize];
 
-        let spec = LbEvalSpec {
-            template: &template,
-            base_row: 0,
+        let ctx = StageContext {
+            templates: &templates,
+            base_rows: &base_rows,
+            geometry_per_stage: &[],
             noise_scale: &[],
             n_hydros: 0,
-            opening_tree,
-            risk_measure: &RiskMeasure::Expectation,
-            stochastic: Some(&stoch),
             n_load_buses: 0,
-            ncs_max_gen: &ncs_max_gen,
-            ncs_allow_curtailment: &ncs_allow_curtailment,
+            load_balance_row_starts: &[],
+            load_bus_indices: &[],
+            block_counts_per_stage: &[block_count],
+            ncs_col_starts: &ncs_col_starts,
+            n_ncs,
             ncs_stochastic_dense_col: &ncs_stochastic_dense_col,
             ncs_stochastic_windows: &ncs_stochastic_windows,
-            stage_id: 0,
-            block_count,
-            ncs_generation: 0..block_count,
-            z_inflow_row_start: 0,
-            inflow_method: &InflowNonNegativityMethod::None,
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+            ncs_max_gen: &ncs_max_gen,
+            ncs_allow_curtailment: &ncs_allow_curtailment,
+            discount_factors: &[],
+            cumulative_discount_factors: &[],
+            stage_lag_transitions: &[],
+            noise_group_ids: &[],
+            downstream_par_order: 0,
         };
 
-        // This test calls lb_evaluate_stage_0 directly, so it seeds the NCS index
-        // buffer that lb_init_rank0 would otherwise build; the lower/upper bound
-        // buffers are left empty — the loop refills them per opening.
-        let mut lb_scratch = LbEvalScratch::new();
-        for ncs_idx in 0..n_ncs {
-            for blk in 0..block_count {
-                lb_scratch
-                    .ncs_col_indices_buf
-                    .push(spec.ncs_generation.start + ncs_idx * block_count + blk);
-            }
-        }
-
-        let mut patch_buf = PatchBuffer::new(0, 0, 0, 0, 0, 0);
+        let horizon = HorizonMode::Finite { num_stages: 1 };
+        // `has_ncs = true`: the same production wiring gate
+        // (`!ncs_col_starts.is_empty()`) that makes `apply_ncs_col_bounds` fire.
+        let study_dims = StudyDimensions {
+            has_ncs: true,
+            ..StudyDimensions::default()
+        };
+        let stages = vec![stage];
+        let cut_state_layouts = crate::test_support::all_enabled_cut_state_layouts(&state, 1);
         let initial_state: Vec<f64> = Vec::new();
-        let actual_n_openings = opening_tree.n_openings(0);
+        let training_ctx = TrainingContext {
+            horizon: &horizon,
+            state: &state,
+            cut_state_layouts: &cut_state_layouts,
+            study_dims: &study_dims,
+            inflow_method: &InflowNonNegativityMethod::None,
+            stochastic: &stoch,
+            initial_state: &initial_state,
+            inflow_scheme: SamplingScheme::InSample,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            stages: &stages,
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+            recent_accum_seed: &[],
+            recent_weight_seed: 0.0,
+            dcs: None,
+        };
+
+        let mut patch_buf = PatchBuffer::new(0, 0, 0, 0, 0, 0, 0);
+        let mut scratch = ScratchBuffers::new(WorkspaceSizing::default());
+        let mut objectives_buf = Vec::new();
+        let actual_n_openings = stoch.opening_tree().n_openings(0);
         let mut solver =
             MockSolver::with_objectives(vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0]);
 
         lb_evaluate_stage_0(
             &mut solver,
-            &spec,
+            &ctx,
+            &training_ctx,
             &mut patch_buf,
-            &initial_state,
-            &state,
-            &mut lb_scratch,
+            &mut scratch,
+            &mut objectives_buf,
         )
         .unwrap();
 
@@ -1756,48 +1916,45 @@ mod tests {
 
     // ── Scratch reuse regression test ────────────────────────────────────────
 
-    /// Verify that `LbEvalScratch` buffers are reused across consecutive calls.
+    /// Verify that `ScratchBuffers` noise buffers are reused across consecutive
+    /// [`evaluate_lower_bound`] calls.
     ///
-    /// Calls `evaluate_lower_bound` twice on the same scratch and verifies that
-    /// `noise_buf.capacity()` does not decrease on the second call (i.e., no
-    /// reallocation occurred). This guards against regressions that would re-
-    /// introduce per-iteration heap allocation on the lower-bound hot path.
+    /// Calls `evaluate_lower_bound` twice on the same `noise_scratch` and
+    /// verifies that `noise_buf.capacity()` does not decrease on the second call
+    /// (i.e., no reallocation occurred). This guards against regressions that
+    /// would re-introduce per-iteration heap allocation on the lower-bound hot
+    /// path.
     #[test]
     fn lb_eval_scratch_reuses_buffers_across_calls() {
         // Use n_hydros = 1 so that noise_buf gets populated (capacity grows to 1
         // after the first call). The template must have at least 1 row to avoid
         // index-out-of-bounds in fill_forward_patches when n_hydros = 1.
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
-        let template = minimal_template();
-        let fcf = make_fcf(2, state.n_state);
-        let initial_state = vec![0.0_f64; state.n_state];
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
-        let opening_tree = simple_opening_tree(1);
+        let fixture = SimpleLbFixture::new(
+            minimal_template(),
+            0,
+            vec![1.0],
+            1,
+            1,
+            simple_opening_tree(1),
+            InflowNonNegativityMethod::None,
+            vec![0.0_f64],
+        );
+        let fcf = make_fcf(2, fixture.state.n_state);
+        let mut patch_buf = PatchBuffer::new(
+            fixture.state.hydro_count,
+            fixture.state.max_par_order,
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
 
-        let spec = LbEvalSpec {
-            template: &template,
-            base_row: 0,
-            noise_scale: &[1.0],
-            n_hydros: 1,
-            opening_tree: &opening_tree,
-            risk_measure: &rm,
-            stochastic: None,
-            n_load_buses: 0,
-            ncs_max_gen: &[],
-            ncs_allow_curtailment: &[],
-            ncs_stochastic_dense_col: &[],
-            ncs_stochastic_windows: &[],
-            stage_id: 0,
-            block_count: 1,
-            ncs_generation: 0..0,
-            z_inflow_row_start: 0,
-            inflow_method: &InflowNonNegativityMethod::None,
-        };
-
         let mut row_batch = empty_row_batch();
         let mut lb_scratch = LbEvalScratch::new();
+        let mut noise_scratch = ScratchBuffers::new(WorkspaceSizing::default());
 
         let mut solver1 = MockSolver::with_objectives(vec![10.0]);
         {
@@ -1805,21 +1962,22 @@ mod tests {
                 &mut patch_buf,
                 &mut row_batch,
                 None,
+                &mut noise_scratch,
                 &mut lb_scratch,
             );
             evaluate_lower_bound(
                 &mut solver1,
                 &fcf,
-                &initial_state,
-                &state,
+                &fixture.ctx(),
+                &fixture.training_ctx(),
+                &rm,
                 &mut bundle,
-                &spec,
                 &comm,
             )
             .unwrap();
         }
 
-        let cap_after_first = lb_scratch.noise_buf.capacity();
+        let cap_after_first = noise_scratch.noise_buf.capacity();
         assert!(
             cap_after_first > 0,
             "noise_buf must have nonzero capacity after first call (n_hydros = 1)"
@@ -1831,21 +1989,22 @@ mod tests {
                 &mut patch_buf,
                 &mut row_batch,
                 None,
+                &mut noise_scratch,
                 &mut lb_scratch,
             );
             evaluate_lower_bound(
                 &mut solver2,
                 &fcf,
-                &initial_state,
-                &state,
+                &fixture.ctx(),
+                &fixture.training_ctx(),
+                &rm,
                 &mut bundle,
-                &spec,
                 &comm,
             )
             .unwrap();
         }
 
-        let cap_after_second = lb_scratch.noise_buf.capacity();
+        let cap_after_second = noise_scratch.noise_buf.capacity();
         assert_eq!(
             cap_after_second, cap_after_first,
             "noise_buf capacity must be stable across calls (first={cap_after_first}, second={cap_after_second}); \
@@ -1935,8 +2094,10 @@ mod tests {
         let filling_hydro = |id: i32, start_stage_id: i32, entry: i32| Hydro {
             id: EntityId(id),
             name: format!("H{id}"),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
+            travel_time_hours: None,
             entry_stage_id: Some(entry),
             exit_stage_id: None,
             min_storage_hm3: 0.0,
@@ -1965,6 +2126,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 500.0,
@@ -2132,7 +2294,7 @@ mod tests {
             id_to_slot: vec![],
         };
 
-        let templates = crate::lp_builder::build_stage_templates(
+        let templates = crate::lp_builder::build_stage_templates_resolving_layout(
             &system,
             InflowNonNegativityMethod::None,
             &par_lp,
@@ -2242,11 +2404,11 @@ mod tests {
     /// `filled_min_storage_floor`/`σ^{v-}` operating-floor family — and the
     /// `PreFilling` hydro's stage-0 `noise_scale` entry is `0.0`.
     ///
-    /// The lower bound's `LbEvalSpec.template` is bound to `stage_ctx.templates[0]`
-    /// and its `noise_scale` to `stage_ctx.noise_scale` — the SAME objects the
-    /// forward/backward passes load. So inspecting the `build_stage_templates`
-    /// output IS inspecting what the lower bound consumes: there is no separate
-    /// lower-bound template build to diverge.
+    /// The lower bound's `StageContext.templates[0]` is bound to
+    /// `stage_ctx.templates[0]` and `noise_scale` to `stage_ctx.noise_scale` — the
+    /// SAME objects the forward/backward passes load. So inspecting the
+    /// `build_stage_templates` output IS inspecting what the lower bound consumes:
+    /// there is no separate lower-bound template build to diverge.
     #[test]
     fn lower_bound_template_matches_forward_for_filling_stage() {
         let (templates, h_a, h_b) = filling_study_templates();
@@ -2254,7 +2416,7 @@ mod tests {
         assert_eq!(n_hydros, 2, "fixture has two filling hydros");
 
         // Stage 0 is H_A's terminal Filling stage: the per-stage geometry the
-        // template was baked with must carry the filling_target (σ_fill) row family
+        // template was frozen with must carry the filling_target (σ_fill) row family
         // plus the σ_fill slack column.
         let geom0 = &templates.geometry_per_stage[0];
         assert!(
@@ -2339,8 +2501,9 @@ mod tests {
 
         // PreFilling noise-scale zeroing: H_B is PreFilling at stage 0 (id 0 <
         // start 2), so its stage-0 noise_scale entry is exactly 0.0 — the
-        // frozen-storage-identity freeze the lower bound inherits via
-        // `spec.noise_scale`. H_A is Filling at stage 0 (not PreFilling), so its
+        // frozen-storage-identity freeze (the PreFilling row-pinning contract,
+        // unrelated to the frozen-template LP mode) the lower bound inherits via
+        // `stage_ctx.noise_scale`. H_A is Filling at stage 0 (not PreFilling), so its
         // entry is NOT zeroed — the contrast that makes the zeroing non-vacuous.
         let stage0_noise_a = templates.noise_scale[h_a];
         let stage0_noise_b = templates.noise_scale[h_b];
@@ -2386,10 +2549,10 @@ mod tests {
         ];
 
         // The full lower-bound module source. Only the PRODUCTION region (above the
-        // `#[cfg(test)] mod tests`) is the code under test; the test module legitimately
-        // names filling symbols (this guard, the fixture, the AC1/AC3 assertions), so
-        // scanning the whole file would flag the tests themselves. Split on the test
-        // module attribute and scan only the production prefix.
+        // `#[cfg(test)] mod tests` line) is the code under test; the test module
+        // legitimately names filling symbols (this guard, the fixture, the AC1/AC3
+        // assertions), so scanning the whole file would flag the tests themselves.
+        // Split on the test module attribute and scan only the production prefix.
         let src = include_str!("lower_bound.rs");
         let prod_src = src
             .split("#[cfg(test)]")
@@ -2436,54 +2599,88 @@ mod tests {
             "σ_fill slack column must be a real column of templates[0]"
         );
 
-        // The per-opening water-balance noise patch reads `spec.noise_scale` —
-        // including H_B's PreFilling-zeroed stage-0 entry — exactly as the
-        // forward/backward passes do, so the bound sees the same stage-0 constraints.
+        // The per-opening water-balance noise patch reads `noise_scale` — including
+        // H_B's PreFilling-zeroed stage-0 entry — exactly as the forward/backward
+        // passes do, so the bound sees the same stage-0 constraints.
         let mut solver = cobre_solver::ActiveSolver::new().expect("ActiveSolver::new");
         let comm = LocalComm;
 
         // 2 storage states (one per hydro), white noise ⇒ max_par_order = 0.
-        let state = crate::indexer::test_fixtures::state_layout(2, 0);
+        let state = crate::test_support::state_layout(2, 0);
         let fcf = make_fcf(templates.templates.len(), state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0);
+        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0);
         let opening_tree = filling_opening_tree(1);
         let rm = RiskMeasure::Expectation;
+        let stochastic = wrap_opening_tree(opening_tree);
 
-        let spec = LbEvalSpec {
-            template: &templates.templates[0],
-            base_row: templates.base_rows[0],
+        let ctx = StageContext {
+            templates: &templates.templates,
+            base_rows: &templates.base_rows,
+            geometry_per_stage: &templates.geometry_per_stage,
             noise_scale: &templates.noise_scale,
             n_hydros: 2,
-            opening_tree: &opening_tree,
-            risk_measure: &rm,
-            stochastic: None,
             n_load_buses: 0,
-            ncs_max_gen: &[],
-            ncs_allow_curtailment: &[],
+            load_balance_row_starts: &[],
+            load_bus_indices: &[],
+            block_counts_per_stage: &[1],
+            ncs_col_starts: &[],
+            n_ncs: 0,
             ncs_stochastic_dense_col: &[],
             ncs_stochastic_windows: &[],
-            stage_id: 0,
-            block_count: 1,
-            ncs_generation: 0..0,
-            z_inflow_row_start: templates.geometry_per_stage[0].z_inflow_row_start,
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+            ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
+            discount_factors: &[],
+            cumulative_discount_factors: &[],
+            stage_lag_transitions: &[],
+            noise_group_ids: &[],
+            downstream_par_order: 0,
+        };
+        let horizon = HorizonMode::Finite {
+            num_stages: templates.templates.len(),
+        };
+        let study_dims = crate::test_support::study_dims();
+        let cut_state_layouts =
+            crate::test_support::all_enabled_cut_state_layouts(&state, templates.templates.len());
+        let training_ctx = TrainingContext {
+            horizon: &horizon,
+            state: &state,
+            cut_state_layouts: &cut_state_layouts,
+            study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
+            stochastic: &stochastic,
+            initial_state: &initial_state,
+            inflow_scheme: SamplingScheme::InSample,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            stages: &[],
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+            recent_accum_seed: &[],
+            recent_weight_seed: 0.0,
+            dcs: None,
         };
         let (mut row_batch, mut lb_scratch) = make_lb_locals();
+        let mut noise_scratch = ScratchBuffers::new(WorkspaceSizing::default());
         let mut bundle = LbEvalScratchBundle::from_scratch_fields(
             &mut patch_buf,
             &mut row_batch,
             None,
+            &mut noise_scratch,
             &mut lb_scratch,
         );
 
         let lb = evaluate_lower_bound(
             &mut solver,
             &fcf,
-            &initial_state,
-            &state,
+            &ctx,
+            &training_ctx,
+            &rm,
             &mut bundle,
-            &spec,
             &comm,
         );
 
@@ -2492,5 +2689,121 @@ mod tests {
             lb.is_finite(),
             "lower bound over the filling-structured LP must be finite, got {lb}"
         );
+    }
+
+    /// Regression: the LB-eval consumer path (`evaluate_lower_bound` →
+    /// `lb_evaluate_stage_0`) inherits the `PatchBuffer` single-owner fix —
+    /// every travel-time bucket incoming column is pinned to `initial_state`, a
+    /// value constant across the opening loop (not re-derived per opening), so a
+    /// single-opening stage-0 evaluation already exercises the per-stage-visit
+    /// pinning contract.
+    #[test]
+    fn evaluate_lower_bound_pins_transit_bucket_incoming_columns() {
+        let state = crate::test_support::state_layout_with_transit_buckets(
+            0,
+            0,
+            2,
+            vec![(0, 0), (0, 1)],
+            0,
+            0,
+            vec![],
+        );
+        assert_eq!(state.n_state, 2);
+
+        let template =
+            crate::test_support::transit_bucket_only_template(state.theta + 1, state.n_state);
+        let templates = vec![template];
+        let base_rows = vec![0_usize];
+        let fcf = make_fcf(1, state.n_state);
+        let initial_state = vec![7.0_f64, 11.0];
+        let mut patch_buf = PatchBuffer::new(0, 0, 0, 0, state.n_buckets, 0, 0);
+        let opening_tree = simple_opening_tree(1);
+        let rm = RiskMeasure::Expectation;
+        let comm = LocalComm;
+        let mut solver = MockSolver::with_objectives(vec![0.0]);
+        let stochastic = wrap_opening_tree(opening_tree);
+
+        let ctx = StageContext {
+            templates: &templates,
+            base_rows: &base_rows,
+            geometry_per_stage: &[],
+            noise_scale: &[],
+            n_hydros: 0,
+            n_load_buses: 0,
+            load_balance_row_starts: &[],
+            load_bus_indices: &[],
+            block_counts_per_stage: &[0],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+            ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
+            discount_factors: &[],
+            cumulative_discount_factors: &[],
+            stage_lag_transitions: &[],
+            noise_group_ids: &[],
+            downstream_par_order: 0,
+        };
+        let horizon = HorizonMode::Finite { num_stages: 1 };
+        let study_dims = crate::test_support::study_dims();
+        let cut_state_layouts = crate::test_support::all_enabled_cut_state_layouts(&state, 1);
+        let training_ctx = TrainingContext {
+            horizon: &horizon,
+            state: &state,
+            cut_state_layouts: &cut_state_layouts,
+            study_dims: &study_dims,
+            inflow_method: &InflowNonNegativityMethod::None,
+            stochastic: &stochastic,
+            initial_state: &initial_state,
+            inflow_scheme: SamplingScheme::InSample,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            stages: &[],
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+            recent_accum_seed: &[],
+            recent_weight_seed: 0.0,
+            dcs: None,
+        };
+        let (mut row_batch, mut lb_scratch) = make_lb_locals();
+        let mut noise_scratch = ScratchBuffers::new(WorkspaceSizing::default());
+        let mut bundle = LbEvalScratchBundle::from_scratch_fields(
+            &mut patch_buf,
+            &mut row_batch,
+            None,
+            &mut noise_scratch,
+            &mut lb_scratch,
+        );
+
+        evaluate_lower_bound(
+            &mut solver,
+            &fcf,
+            &ctx,
+            &training_ctx,
+            &rm,
+            &mut bundle,
+            &comm,
+        )
+        .unwrap();
+
+        let cp = bundle.patch_buf.state_col_patch_count();
+        assert_eq!(
+            cp, 2,
+            "state_col_patch_count must equal n_buckets when N=0, A=0"
+        );
+        for (i, &expected) in initial_state.iter().enumerate() {
+            let col = state.transit_buckets_in.start + i;
+            let pos = bundle.patch_buf.col_indices[..cp]
+                .iter()
+                .position(|&c| c == col)
+                .unwrap_or_else(|| panic!("bucket incoming column {col} must be pinned"));
+            assert_eq!(bundle.patch_buf.col_lower[pos], expected);
+            assert_eq!(bundle.patch_buf.col_upper[pos], expected);
+        }
     }
 }

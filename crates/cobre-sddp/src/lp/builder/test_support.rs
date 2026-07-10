@@ -3,19 +3,30 @@
 use chrono::NaiveDate;
 use cobre_core::{
     Block, BlockMode, HydroPenalties, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
-    StageStateConfig,
+    StageStateConfig, System,
 };
 
 use crate::indexer::StateLayout;
+use crate::lead_time::AnticipatedResolution;
 
 use super::layout::TemplateBuildCtx;
 
-/// Build the canonical role-(a) [`StateLayout`] a `StageLayout` borrows, from a
-/// test [`TemplateBuildCtx`].
-///
-/// Mirrors `template.rs::build_stage_templates` — same state dimensions and
-/// PAR-derived effective lag counts — so the handle a test passes to
-/// `StageLayout::new` is byte-identical to production's.
+/// Resolve the anticipated-resolution / lead-stages / per-stage-mask inputs through
+/// the same setup entry points production uses, so a builder-module test's
+/// `TemplateBuildCtx` matches what setup builds for the same system.
+pub(super) fn ctx_anticipated_and_mask_inputs(
+    system: &System,
+) -> (AnticipatedResolution, Vec<usize>, Vec<Vec<usize>>) {
+    let (resolution, lead_stages) = crate::setup::resolve_anticipated_commitments_core(system);
+    let per_stage_mask =
+        crate::setup::bucket_topology::build_transit_bucket_topology(system).per_stage_mask;
+    (resolution, lead_stages, per_stage_mask)
+}
+
+/// Build the role-(a) [`StateLayout`] a `StageLayout` borrows, from a test
+/// [`TemplateBuildCtx`]. Mirrors `crate::setup::resolve_state_layout` (same state
+/// dimensions and PAR-derived lag counts), so the handle is byte-identical to
+/// production's.
 pub(super) fn state_layout_for(ctx: &TemplateBuildCtx<'_>) -> StateLayout {
     let effective_lag_counts: Vec<usize> = if ctx.max_par_order > 0 {
         (0..ctx.n_hydros)
@@ -33,11 +44,22 @@ pub(super) fn state_layout_for(ctx: &TemplateBuildCtx<'_>) -> StateLayout {
     StateLayout::new(
         ctx.n_hydros,
         ctx.max_par_order,
+        0,
+        Vec::new(),
         ctx.n_anticipated,
         ctx.k_max,
         ctx.anticipated_lead_stages.clone(),
         &effective_lag_counts,
     )
+}
+
+/// [`state_layout_for`] plus the ctx's attached `AnticipatedResolution`. Tests
+/// asserting `anticipated_resolution_for` byte-identity with production must build
+/// through this — [`state_layout_for`] leaves the constant-lead fallback active.
+pub(super) fn state_layout_with_resolution(ctx: &TemplateBuildCtx<'_>) -> StateLayout {
+    let mut state = state_layout_for(ctx);
+    state.set_anticipated_resolution(ctx.anticipated_resolution.clone());
+    state
 }
 
 /// All-zero `HydroPenalties` so no fixture-side penalty cost contaminates the

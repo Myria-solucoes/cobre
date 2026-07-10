@@ -4,14 +4,14 @@ use cobre_io::output::simulation_writer::{
     BusWriteRecord, ContractWriteRecord, CostWriteRecord, ExchangeWriteRecord,
     GenericViolationWriteRecord, HydroWriteRecord, InflowLagWriteRecord,
     NonControllableWriteRecord, PumpingWriteRecord, ScenarioWritePayload, StageWritePayload,
-    ThermalWriteRecord,
+    ThermalWriteRecord, TransitBucketWriteRecord,
 };
 
 use crate::simulation::types::{
     SimulationBusResult, SimulationContractResult, SimulationCostResult, SimulationExchangeResult,
     SimulationGenericViolationResult, SimulationHydroResult, SimulationInflowLagResult,
     SimulationNonControllableResult, SimulationPumpingResult, SimulationScenarioResult,
-    SimulationStageResult, SimulationThermalResult,
+    SimulationStageResult, SimulationThermalResult, SimulationTransitBucketResult,
 };
 
 impl From<SimulationCostResult> for CostWriteRecord {
@@ -186,6 +186,18 @@ impl From<SimulationInflowLagResult> for InflowLagWriteRecord {
     }
 }
 
+impl From<SimulationTransitBucketResult> for TransitBucketWriteRecord {
+    fn from(s: SimulationTransitBucketResult) -> Self {
+        Self {
+            stage_id: s.stage_id,
+            hydro_id: s.hydro_id,
+            lag: s.lag,
+            in_transit_volume_hm3: s.in_transit_volume_hm3,
+            delayed_arrival_hm3: s.delayed_arrival_hm3,
+        }
+    }
+}
+
 impl From<SimulationGenericViolationResult> for GenericViolationWriteRecord {
     fn from(s: SimulationGenericViolationResult) -> Self {
         Self {
@@ -211,6 +223,7 @@ impl From<SimulationStageResult> for StageWritePayload {
             contracts: src.contracts.into_iter().map(Into::into).collect(),
             non_controllables: src.non_controllables.into_iter().map(Into::into).collect(),
             inflow_lags: src.inflow_lags.into_iter().map(Into::into).collect(),
+            transit_buckets: src.transit_buckets.into_iter().map(Into::into).collect(),
             generic_violations: src.generic_violations.into_iter().map(Into::into).collect(),
         }
     }
@@ -385,6 +398,16 @@ mod tests {
         }
     }
 
+    fn make_transit_bucket(stage_id: u32, lag: u32) -> SimulationTransitBucketResult {
+        SimulationTransitBucketResult {
+            stage_id,
+            hydro_id: 1,
+            lag,
+            in_transit_volume_hm3: 12.0,
+            delayed_arrival_hm3: if lag == 1 { 4.0 } else { 0.0 },
+        }
+    }
+
     fn make_generic_violation(stage_id: u32, block_id: u32) -> SimulationGenericViolationResult {
         SimulationGenericViolationResult {
             stage_id,
@@ -407,6 +430,10 @@ mod tests {
             contracts: vec![make_contract(stage_id, 0)],
             non_controllables: vec![make_non_controllable(stage_id, 0)],
             inflow_lags: vec![make_inflow_lag(stage_id)],
+            transit_buckets: vec![
+                make_transit_bucket(stage_id, 1),
+                make_transit_bucket(stage_id, 2),
+            ],
             generic_violations: vec![make_generic_violation(stage_id, 0)],
         }
     }
@@ -448,6 +475,11 @@ mod tests {
         assert_eq!(stage0.contracts[0].price_per_mwh, 80.0);
         assert_eq!(stage0.non_controllables[0].curtailment_mw, 10.0);
         assert_eq!(stage0.inflow_lags[0].inflow_m3s, 45.0);
+        assert_eq!(stage0.transit_buckets.len(), 2);
+        assert_eq!(stage0.transit_buckets[0].lag, 1);
+        assert_eq!(stage0.transit_buckets[0].delayed_arrival_hm3, 4.0);
+        assert_eq!(stage0.transit_buckets[1].lag, 2);
+        assert_eq!(stage0.transit_buckets[1].delayed_arrival_hm3, 0.0);
         assert_eq!(stage0.generic_violations[0].slack_cost, 1000.0);
 
         let stage1 = &payload.stages[1];
@@ -479,6 +511,10 @@ mod tests {
             "inflow_lags must be non-empty"
         );
         assert!(
+            !payload.transit_buckets.is_empty(),
+            "transit_buckets must be non-empty"
+        );
+        assert!(
             !payload.generic_violations.is_empty(),
             "generic_violations must be non-empty"
         );
@@ -492,6 +528,8 @@ mod tests {
         assert_eq!(payload.contracts[0].contract_id, 1);
         assert_eq!(payload.non_controllables[0].non_controllable_id, 1);
         assert_eq!(payload.inflow_lags[0].lag_index, 0);
+        assert_eq!(payload.transit_buckets[0].lag, 1);
+        assert_eq!(payload.transit_buckets[0].in_transit_volume_hm3, 12.0);
         assert_eq!(payload.generic_violations[0].constraint_id, 1);
     }
 }

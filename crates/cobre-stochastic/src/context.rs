@@ -81,6 +81,7 @@ pub use crate::tree::opening_tree::OpeningTree;
 /// #     Bus {
 /// #         id: EntityId(id),
 /// #         name: format!("Bus{id}"),
+/// #         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
 /// #         deficit_segments: vec![DeficitSegment { depth_mw: None, cost_per_mwh: 1000.0 }],
 /// #         excess_cost: 0.0,
 /// #     }
@@ -103,8 +104,10 @@ pub use crate::tree::opening_tree::OpeningTree;
 /// #     Hydro {
 /// #         id: EntityId(id),
 /// #         name: format!("H{id}"),
+/// #         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
 /// #         bus_id: EntityId(0),
 /// #         downstream_id: None,
+/// #         travel_time_hours: None,
 /// #         entry_stage_id: None,
 /// #         exit_stage_id: None,
 /// #         min_storage_hm3: 0.0,
@@ -588,6 +591,7 @@ mod tests {
         Bus {
             id: EntityId(id),
             name: format!("Bus{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 1000.0,
@@ -600,8 +604,10 @@ mod tests {
         Hydro {
             id: EntityId(id),
             name: format!("H{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(0),
             downstream_id: None,
+            travel_time_hours: None,
             entry_stage_id: None,
             exit_stage_id: None,
             min_storage_hm3: 0.0,

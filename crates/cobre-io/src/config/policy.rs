@@ -54,9 +54,6 @@ pub struct PolicyConfig {
     /// Initialization mode: `"fresh"`, `"warm_start"`, or `"resume"`.
     pub mode: PolicyMode,
 
-    /// Verify state dimension and entity compatibility when loading.
-    pub validate_compatibility: bool,
-
     /// Checkpoint settings.
     pub checkpointing: CheckpointingConfig,
 
@@ -70,7 +67,6 @@ impl Default for PolicyConfig {
         Self {
             path: "./policy".to_string(),
             mode: PolicyMode::Fresh,
-            validate_compatibility: true,
             checkpointing: CheckpointingConfig::default(),
             boundary: None,
         }

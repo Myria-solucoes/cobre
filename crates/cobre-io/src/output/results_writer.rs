@@ -289,7 +289,6 @@ mod tests {
             policy: PolicyConfig {
                 path: "./policy".to_string(),
                 mode: PolicyMode::Fresh,
-                validate_compatibility: true,
                 checkpointing: CheckpointingConfig::default(),
                 boundary: None,
             },

@@ -18,28 +18,22 @@
 //!
 //! ## Cut coefficient formula
 //!
-//! The convention is `coefficients = reduced_cost` (raw, no sign flip at
-//! extraction); the LP cut row negates it later in
-//! `cut::row::build_cut_row_batch_into` (`-coeff * x + theta >= intercept`).
-//! `pi[i] = reduced_cost[col_i] / col_scale[col_i]`, where `col_i =
-//! state_to_lp_incoming_column(i)`; state fixing uses column bounds, so the
-//! gradient is a reduced cost (dual of the `lb == ub` pin by KKT stationarity),
-//! unscaled by `col_scale` not `row_scale`. The intercept is
-//! `alpha = Q - sum_i(pi[i] * x_hat[i])`, covering all `n_state` indices
-//! uniformly. See sddp.md "Benders cut sign & subgradient extraction".
+//! `coefficients = reduced_cost` (raw, no sign flip at extraction); the LP cut row
+//! negates it in `cut::row::build_cut_row_batch_into`. The full subgradient
+//! contract (`pi[i] = reduced_cost[col_i] / col_scale[col_i]`, divided not
+//! multiplied) lives in `duals_extraction` and sddp.md "Benders cut sign &
+//! subgradient extraction".
 //!
-//! ### Anticipated-state cut gradient flow
+//! ### Anticipated-ring cut gradient flow
 //!
-//! For anticipated-state slots `state_to_lp_column` applies a shift-aware mapping:
-//! slot `K_p-1` (the maturation slot for plant `p`) maps to the decision column,
-//! while slot `i < K_p-1` maps to slot `i+1`, so cuts apply against the correct LP
-//! variables at the predecessor stage. The fishing constraint is emitted at every
-//! stage unconditionally, so every slot participates in the dual chain. See the
-//! `StateLayout::state_to_lp_column` rustdoc.
-//!
-//! The backward pass does not call `shift_anticipated_state`: `x_hat` is the
-//! forward-shifted state and cut extraction uses it as-is. Re-shifting would offset
-//! `x_hat` relative to the anticipated-state-fixing rows, breaking cut consistency.
+//! Anticipated-ring slots resolve by identity (`state_to_lp_column`, the
+//! `transit_buckets_out` convention): the in-LP ring's definition rows — a
+//! plain shift for slot `i < K_p-1`, the delivery-decision deposit for plant
+//! `p`'s own newest slot `K_p-1` — resolve the ring transition, so cuts apply
+//! directly against the outgoing `anticipated_slots_out` column. The fishing
+//! constraint is emitted at every stage unconditionally, so every slot
+//! participates in the dual chain. See the `StateLayout::state_to_lp_column`
+//! rustdoc.
 //!
 //! ## Cut activity tracking
 //!
@@ -59,7 +53,7 @@
 
 use cobre_solver::RowBatch;
 
-use crate::{cut::pool::CutPool, solver_stats::SolverStatsDelta};
+use crate::{cut::pool::CutPool, indexer::CutStateProjection, solver_stats::SolverStatsDelta};
 
 mod duals_extraction;
 mod lp_setup;
@@ -72,7 +66,7 @@ mod tests;
 pub(crate) use trial_point::{StageOpeningSolver, process_trial_point_backward};
 
 #[cfg(test)]
-pub(crate) use lp_setup::{load_backward_lp, resolve_backward_basis};
+pub(crate) use lp_setup::{load_backward_lp, patch_opening_bounds, resolve_backward_basis};
 
 /// Per-`(rank, worker_id, opening)` solver delta collected during a single
 /// backward stage, as returned inside [`BackwardResult::stage_stats`].
@@ -189,16 +183,16 @@ pub(crate) struct SuccessorSpec<'a> {
     /// Uniform opening probabilities for the successor stage.
     pub(crate) probabilities: &'a [f64],
     /// Pre-built cut rows to append to each successor LP.
-    /// Delta batch when baking is active, full active-cut batch otherwise.
+    /// Delta batch when freeze is active, full active-cut batch otherwise.
     pub(crate) cut_batch: &'a RowBatch,
     /// Total number of active cuts at the successor stage for dual extraction.
-    /// Includes both baked and delta cuts contiguous after `template_num_rows`.
+    /// Includes both frozen and delta cuts contiguous after `template_num_rows`.
     pub(crate) num_cuts_at_successor: usize,
     /// Base row count of the successor template (excludes cuts).
     pub(crate) template_num_rows: usize,
-    /// Baked LP template for the successor stage. Always populated — baking
+    /// Frozen LP template for the successor stage. Always populated — freeze
     /// is complete before the backward pass begins.
-    pub(crate) baked_template: &'a cobre_solver::StageTemplate,
+    pub(crate) frozen_template: &'a cobre_solver::StageTemplate,
     /// Ordered slot indices of the active cuts at the successor stage.
     pub(crate) successor_active_slots: &'a [usize],
     /// Minimum dual multiplier for a cut to count as binding.
@@ -207,4 +201,9 @@ pub(crate) struct SuccessorSpec<'a> {
     pub(crate) successor_populated_count: usize,
     /// Cut pool at the successor stage for binding-activity tracking.
     pub(crate) successor_pool: &'a CutPool,
+    /// Cut-state projection for the pool this stage's cut is inserted into (pool
+    /// `t`, sized from `stages[t+1].state_config`): the LP incoming-state columns
+    /// dual extraction reads and the dimension every per-stage backward buffer is
+    /// sized to. `n_state()` equals `successor_pool.state_dimension`.
+    pub(crate) cut_state: &'a CutStateProjection,
 }

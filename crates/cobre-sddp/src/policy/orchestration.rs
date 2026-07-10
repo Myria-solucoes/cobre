@@ -17,21 +17,45 @@ use cobre_io::output::{
 use cobre_io::scenarios::LoadSeasonalStatsRow;
 use cobre_stochastic::StochasticContext;
 
+use crate::TrainingResult;
 use crate::estimation::EstimationReport;
 use crate::policy_export::{
     build_active_indices, build_stage_basis_records, build_stage_cut_records,
-    build_stage_cuts_payloads, build_stage_states_payloads, convert_basis_cache,
+    build_stage_cuts_payloads, build_stage_entity_manifest, build_stage_states_payloads,
+    convert_basis_cache,
 };
+use crate::setup::StudySetup;
 use crate::stochastic_summary::{
     estimation_report_to_fitting_report, inflow_models_to_annual_component_rows,
     inflow_models_to_ar_rows, inflow_models_to_stats_rows,
 };
-use crate::{FutureCostFunction, TrainingResult};
 
-use cobre_core::System;
-use cobre_core::scenario::LoadModel;
+use cobre_core::{BlockMode, System};
 
 // ── Policy checkpoint ─────────────────────────────────────────────────────────
+
+fn block_mode_label(mode: BlockMode) -> &'static str {
+    match mode {
+        BlockMode::Parallel => "parallel",
+        BlockMode::Chronological => "chronological",
+    }
+}
+
+fn training_block_provenance(modes: &[BlockMode]) -> (String, Vec<String>) {
+    match modes.first() {
+        None => (String::new(), Vec::new()),
+        Some(&first) if modes.iter().all(|&m| m == first) => {
+            (block_mode_label(first).to_string(), Vec::new())
+        }
+        Some(_) => (
+            "mixed".to_string(),
+            modes
+                .iter()
+                .map(|&m| block_mode_label(m).to_string())
+                .collect(),
+        ),
+    }
+}
 
 /// Run-derived inputs to [`write_checkpoint`] (independent of the training
 /// result). Stored in the checkpoint metadata for resume validation and
@@ -55,7 +79,9 @@ pub struct CheckpointParams {
 ///
 /// This is the single implementation shared by the CLI and the Python
 /// bindings — both call this function so the on-disk format and write
-/// ordering cannot drift between them.
+/// ordering (including the per-slot entity manifest) cannot drift between them.
+///
+/// `system` is passed explicitly because [`StudySetup`] does not own it.
 ///
 /// # Errors
 ///
@@ -65,21 +91,46 @@ pub struct CheckpointParams {
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn write_checkpoint(
     policy_dir: &Path,
-    fcf: &FutureCostFunction,
+    setup: &StudySetup,
+    system: &System,
     training_result: &TrainingResult,
     params: &CheckpointParams,
 ) -> Result<(), OutputError> {
+    let fcf = &setup.fcf;
     let n_stages = fcf.pools.len();
     let state_dimension = fcf.state_dimension;
 
+    let global_layout = setup.stage_state();
+    let stage_manifests: Vec<Vec<cobre_io::output::policy::EntitySlot>> = (0..n_stages)
+        .map(|t| {
+            build_stage_entity_manifest(
+                system,
+                global_layout,
+                &setup.stage_data.cut_state_layouts[t],
+                setup.study_stage_ids[t],
+            )
+        })
+        .collect();
+
     let stage_records = build_stage_cut_records(fcf);
     let stage_active_indices = build_active_indices(&stage_records);
-    let stage_cuts = build_stage_cuts_payloads(fcf, &stage_records, &stage_active_indices);
+    let stage_cuts =
+        build_stage_cuts_payloads(fcf, &stage_records, &stage_active_indices, &stage_manifests);
 
     let (basis_col_u8, basis_row_u8) = convert_basis_cache(training_result);
     let stage_bases = build_stage_basis_records(fcf, training_result, &basis_col_u8, &basis_row_u8);
 
     let warm_start_counts: Vec<u32> = fcf.pools.iter().map(|p| p.warm_start_count).collect();
+
+    let study_modes: Vec<BlockMode> = system
+        .stages()
+        .iter()
+        .filter(|s| s.id >= 0)
+        .map(|s| s.block_mode)
+        .collect();
+    let (training_block_mode, training_block_mode_per_stage) =
+        training_block_provenance(&study_modes);
+
     let metadata = PolicyCheckpointMetadata {
         cobre_version: env!("CARGO_PKG_VERSION").to_string(),
         created_at: cobre_io::now_iso8601(),
@@ -97,10 +148,12 @@ pub fn write_checkpoint(
             .visited_archive
             .as_ref()
             .map_or(0, |a| (0..a.num_stages()).map(|t| a.count(t) as u64).sum()),
+        training_block_mode,
+        training_block_mode_per_stage,
     };
 
     let stage_states = if params.export_states {
-        build_stage_states_payloads(training_result.visited_archive.as_ref())
+        build_stage_states_payloads(training_result.visited_archive.as_ref(), &stage_manifests)
     } else {
         Vec::new()
     };
@@ -179,10 +232,7 @@ pub fn export_stochastic_artifacts(
         on_warning(&format!("correlation: {e}"));
     }
 
-    let has_stochastic_load = system
-        .load_models()
-        .iter()
-        .any(|m: &LoadModel| m.std_mw > 0.0);
+    let has_stochastic_load = system.load_models().iter().any(|m| m.std_mw > 0.0);
     if has_stochastic_load {
         let load_rows: Vec<LoadSeasonalStatsRow> = system
             .load_models()
@@ -208,5 +258,37 @@ pub fn export_stochastic_artifacts(
         {
             on_warning(&format!("fitting_report: {e}"));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BlockMode, training_block_provenance};
+
+    #[test]
+    fn uniform_parallel_study_summarizes_without_per_stage_list() {
+        let (summary, per_stage) =
+            training_block_provenance(&[BlockMode::Parallel, BlockMode::Parallel]);
+        assert_eq!(summary, "parallel");
+        assert!(per_stage.is_empty());
+    }
+
+    #[test]
+    fn uniform_chronological_study_summarizes_without_per_stage_list() {
+        let (summary, per_stage) =
+            training_block_provenance(&[BlockMode::Chronological, BlockMode::Chronological]);
+        assert_eq!(summary, "chronological");
+        assert!(per_stage.is_empty());
+    }
+
+    #[test]
+    fn mixed_study_reports_mixed_summary_and_full_per_stage_list() {
+        let (summary, per_stage) = training_block_provenance(&[
+            BlockMode::Parallel,
+            BlockMode::Chronological,
+            BlockMode::Parallel,
+        ]);
+        assert_eq!(summary, "mixed");
+        assert_eq!(per_stage, vec!["parallel", "chronological", "parallel"]);
     }
 }

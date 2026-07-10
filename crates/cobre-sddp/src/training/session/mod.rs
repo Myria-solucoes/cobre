@@ -31,8 +31,9 @@ use crate::{
     cut_sync::CutSyncBuffers,
     forward::sync_forward,
     forward_pass_state::{ForwardPassInputs, ForwardPassState},
+    lower_bound::LbEvalScratchBundle,
     lower_bound::evaluate_lower_bound,
-    lower_bound::{LbEvalScratchBundle, LbEvalSpec},
+    rank_reconcile::{reconcile_error_flag, reconcile_result},
     solver_stats::{
         SOLVER_STATS_DELTA_SCALAR_FIELDS, SolverStatsDelta, SolverStatsLogEntry,
         aggregate_solver_statistics, pack_delta_scalars, unpack_delta_scalars,
@@ -125,10 +126,6 @@ where
     /// # Errors
     ///
     /// Returns `SddpError::Solver(e)` if the workspace pool cannot be constructed.
-    // Rationale: the `i32::try_from(my_rank).expect(...)` cannot fire — the MPI
-    // spec bounds rank counts by `i32::MAX`; `?` would surface an unrecoverable
-    // invariant as a `Result`.
-    #[allow(clippy::expect_used)]
     pub(crate) fn new(
         solver: &'a mut S,
         mut config: TrainingConfig,
@@ -149,6 +146,10 @@ where
         fcf.set_iteration_base(config.loop_config.start_iteration + 1);
 
         let n_threads = config.loop_config.n_fwd_threads.max(1);
+        let max_openings = (0..ranks.num_stages)
+            .map(|t| training_ctx.stochastic.opening_tree().n_openings(t))
+            .max()
+            .unwrap_or(0);
         let mut fwd_pool = WorkspacePool::try_new(
             ranks.fwd_rank,
             n_threads,
@@ -158,11 +159,9 @@ where
                 max_par_order: state.max_par_order,
                 n_load_buses: stage_ctx.n_load_buses,
                 max_blocks: config.loop_config.max_blocks,
+                n_buckets: state.n_buckets,
                 downstream_par_order: stage_ctx.downstream_par_order,
-                max_openings: (0..ranks.num_stages)
-                    .map(|t| training_ctx.stochastic.opening_tree().n_openings(t))
-                    .max()
-                    .unwrap_or(0),
+                max_openings,
                 initial_pool_capacity: fcf.pools[0].capacity,
                 n_state: ranks.n_state,
                 max_local_fwd: ranks.max_local_fwd,
@@ -261,6 +260,7 @@ where
             stage_ctx.templates[0].num_rows,
             state.hydro_count,
             state.max_par_order,
+            state.n_buckets,
             state.n_anticipated,
             state.k_max,
             stage_ctx,
@@ -270,16 +270,11 @@ where
         let fwd_state =
             ForwardPassState::new(n_workers_local, ranks.num_stages, ranks.max_local_fwd);
 
-        let bwd_max_openings = (0..ranks.num_stages)
-            .map(|t| training_ctx.stochastic.opening_tree().n_openings(t))
-            .max()
-            .unwrap_or(0);
-        let n_ranks = comm.size();
         let real_states_capacity = exchange_bufs.real_total_scenarios() * ranks.n_state;
         let bwd_state = BackwardPassState::new(
             n_workers_local,
-            n_ranks,
-            bwd_max_openings,
+            ranks.num_ranks,
+            max_openings,
             real_states_capacity,
         );
 
@@ -455,11 +450,21 @@ where
     /// # Errors
     ///
     /// Returns `SddpError::Communication` if `broadcast_basis_cache` fails.
-    pub(crate) fn finalize(self) -> Result<TrainingOutcome, SddpError> {
+    pub(crate) fn finalize(mut self) -> Result<TrainingOutcome, SddpError> {
+        // Reconcile finalize arrival before the basis-cache broadcast so
+        // broadcast_basis_cache is entered by all ranks or none: a peer that failed
+        // makes this clean rank take the same no-broadcast exit in lockstep, rather
+        // than block alone in the broadcast.
+        if let Err(peer_err) =
+            reconcile_error_flag(Ok(()), self.comm, &mut self.fwd_state.reconcile_scratch)
+        {
+            return Ok(self.finalize_without_broadcast(peer_err, "error"));
+        }
+
         #[allow(clippy::cast_possible_truncation)]
         let total_time_ms = (self.results.start_time.elapsed().as_millis() as u64).max(1);
 
-        let baked_templates = self.scratch.baked_templates;
+        let frozen_templates = self.scratch.frozen_templates;
         let visited_archive = self.visited_archive;
         let TrainingResults {
             final_lb,
@@ -500,20 +505,39 @@ where
                 basis_cache,
                 solver_stats_log,
                 visited_archive,
-                Some(baked_templates),
+                Some(frozen_templates),
             ),
             error: None,
         })
     }
 
     /// Emit `TrainingFinished` with `reason = "error"` and return a partial
-    /// `TrainingOutcome` carrying the original error.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err(comm_err)` if `broadcast_basis_cache` itself fails.
-    pub(crate) fn finalize_with_error(self, err: SddpError) -> Result<TrainingOutcome, SddpError> {
-        let baked_templates = self.scratch.baked_templates;
+    /// `TrainingOutcome` carrying the original error, taking the coordinated
+    /// no-broadcast exit so no rank blocks in `broadcast_basis_cache`.
+    pub(crate) fn finalize_with_error(mut self, err: SddpError) -> TrainingOutcome {
+        // Announce this rank's failure to peers still in the clean `finalize` so they
+        // skip their basis-cache broadcast in lockstep; reconcile over a local Err
+        // hands this rank's own error back (single-rank: the same error unchanged).
+        let err = reconcile_error_flag(Err(err), self.comm, &mut self.fwd_state.reconcile_scratch)
+            .err()
+            .unwrap_or_else(|| {
+                SddpError::Communication(cobre_comm::CommError::CollectiveFailed {
+                    operation: "reconcile_error_flag",
+                    mpi_error_code: 0,
+                    message: "reconcile over a local failure unexpectedly reported agreement"
+                        .to_string(),
+                })
+            });
+        self.finalize_without_broadcast(err, "error")
+    }
+
+    /// Build the error-exit `TrainingOutcome` WITHOUT entering
+    /// `broadcast_basis_cache`. Used once the ranks did not all agree to broadcast
+    /// (a rank-local or peer failure), so the basis cache is empty — no collective
+    /// is safe on this path. The caller must have already reconciled the failure
+    /// across ranks so every rank takes this exit in lockstep.
+    fn finalize_without_broadcast(self, err: SddpError, reason: &str) -> TrainingOutcome {
+        let frozen_templates = self.scratch.frozen_templates;
         let visited_archive = self.visited_archive;
         let TrainingResults {
             final_lb,
@@ -533,7 +557,7 @@ where
         emit(
             self.runtime.event_sender(),
             TrainingEvent::TrainingFinished {
-                reason: "error".to_string(),
+                reason: reason.to_string(),
                 iterations: completed_iterations,
                 final_lb,
                 final_ub,
@@ -542,25 +566,22 @@ where
             },
         );
 
-        let basis_cache =
-            broadcast_basis_cache(&self.basis_store, self.ranks.num_stages, self.comm)?;
-
-        Ok(TrainingOutcome {
+        TrainingOutcome {
             result: TrainingResult::new(
                 final_lb,
                 final_ub,
                 final_ub_std,
                 final_gap,
                 completed_iterations,
-                "error".to_string(),
+                reason.to_string(),
                 total_time_ms,
-                basis_cache,
+                Vec::new(),
                 solver_stats_log,
                 visited_archive,
-                Some(baked_templates),
+                Some(frozen_templates),
             ),
             error: Some(err),
-        })
+        }
     }
 
     // ── Private phase helpers ──────────────────────────────────────────────
@@ -598,7 +619,14 @@ where
             &self.runtime,
             iteration,
         );
-        let forward_result = fwd.run(&mut inputs)?;
+        // Reconcile the rank-local forward result before the forward phase's first
+        // collective (the stage-stats allreduce and sync_forward's allgatherv): a
+        // solve failure on any rank makes every rank return Err here and break
+        // toward a coordinated finalize, so no rank enters those collectives while a
+        // peer has skipped them.
+        let forward_local = fwd.run(&mut inputs);
+        let forward_result =
+            reconcile_result(forward_local, self.comm, &mut fwd.reconcile_scratch)?;
 
         let fwd_solve_time_ms = {
             let fwd_stats_after = aggregate_solver_statistics(
@@ -711,7 +739,7 @@ where
             &mut self.fwd_pool,
             &mut self.basis_store,
             self.stage_ctx,
-            &self.scratch.baked_templates,
+            &self.scratch.frozen_templates,
             &mut self.scratch.cut_batches,
             &self.scratch.records,
             self.fcf,
@@ -787,7 +815,7 @@ where
         Ok((backward_result, bwd_solve_time_ms))
     }
 
-    /// Apply cut selection, budget enforcement, bitmap shift, and template baking.
+    /// Apply cut selection, budget enforcement, bitmap shift, and template freeze.
     ///
     /// All operations are O(active cuts) and perform no heap allocation when the
     /// cut pools have not grown since the previous iteration.
@@ -816,7 +844,7 @@ where
                 let active_0 = pool0.active_count() as u32;
                 per_stage.push(StageRowSelectionRecord {
                     stage: 0,
-                    rows_populated: pool0.populated_count as u32,
+                    rows_populated: pool0.populated() as u32,
                     rows_active_before: active_0,
                     rows_deactivated: 0,
                     rows_reactivated: 0,
@@ -847,7 +875,7 @@ where
             #[allow(clippy::cast_possible_truncation)]
             for (stage, deact, stage_sel_time_ms) in deactivations {
                 let pool = &self.fcf.pools[stage];
-                let populated = pool.populated_count as u32;
+                let populated = pool.populated() as u32;
                 let active_before = pool.active_count() as u32;
                 let n_deact = deact.updates.len() as u32;
                 let n_reactivated = deact.reactivations.len() as u32;
@@ -959,58 +987,59 @@ where
             );
         }
 
-        let bake_start = Instant::now();
-        let total_rows_baked = self.bake_active_cuts_into_templates();
+        let freeze_start = Instant::now();
+        let total_rows_frozen = self.freeze_active_cuts_into_templates();
         #[allow(clippy::cast_possible_truncation)]
-        let bake_time_ms = bake_start.elapsed().as_millis() as u64;
+        let freeze_time_ms = freeze_start.elapsed().as_millis() as u64;
         emit(
             self.runtime.event_sender(),
             #[allow(clippy::cast_possible_truncation)]
-            TrainingEvent::PolicyTemplateBakeComplete {
+            TrainingEvent::PolicyTemplateFreezeComplete {
                 iteration,
                 stages_processed: self.ranks.num_stages as u32,
-                total_rows_baked,
-                bake_time_ms,
+                total_rows_frozen,
+                freeze_time_ms,
             },
         );
     }
 
-    /// Rebuild every stage's baked template from the current active cut set,
-    /// returning the total number of cut rows baked.
+    /// Rebuild every stage's frozen template from the current active cut set,
+    /// returning the total number of cut rows frozen.
     ///
-    /// Each `baked_templates[t]` becomes the base template plus one structural
+    /// Each `frozen_templates[t]` becomes the base template plus one structural
     /// row per active cut in `fcf.pools[t]` (`active_cuts()` order). With no
-    /// active cuts (a fresh start) every batch is empty and the bake is a
-    /// structural copy of the base template — identical to the pre-bake done in
+    /// active cuts (a fresh start) every batch is empty and the freeze is a
+    /// structural copy of the base template — identical to the pre-freeze done in
     /// `IterationScratch::new`.
     ///
-    /// Deliberately left unoptimized: the rebake is quadratic in the active-cut
+    /// Deliberately left unoptimized: the refreeze is quadratic in the active-cut
     /// count only in the no-cut-selection default, which production never runs at
-    /// scale. An append-only fast path would fire only there, so the full rebake
+    /// scale. An append-only fast path would fire only there, so the full refreeze
     /// is kept.
-    fn bake_active_cuts_into_templates(&mut self) -> u64 {
-        let mut total_rows_baked: u64 = 0;
+    fn freeze_active_cuts_into_templates(&mut self) -> u64 {
+        let mut total_rows_frozen: u64 = 0;
         let state = self.training_ctx.state;
         for t in 0..self.ranks.num_stages {
             build_cut_row_batch_into(
-                &mut self.scratch.bake_row_batches[t],
+                &mut self.scratch.freeze_row_batches[t],
                 self.fcf,
                 t,
                 state,
+                &self.training_ctx.cut_state_layouts[t],
                 &self.stage_ctx.templates[t].col_scale,
             );
             #[allow(clippy::cast_possible_truncation)]
             {
-                total_rows_baked += self.scratch.bake_row_batches[t].num_rows as u64;
+                total_rows_frozen += self.scratch.freeze_row_batches[t].num_rows as u64;
             }
-            cobre_solver::bake_rows_into_template(
+            cobre_solver::freeze_rows_into_template(
                 &self.stage_ctx.templates[t],
-                &self.scratch.bake_row_batches[t],
-                &mut self.scratch.baked_templates[t],
-                &mut self.scratch.baking_scratch,
+                &self.scratch.freeze_row_batches[t],
+                &mut self.scratch.frozen_templates[t],
+                &mut self.scratch.freeze_scratch,
             );
         }
-        total_rows_baked
+        total_rows_frozen
     }
 
     /// Seed the per-scenario basis store from a checkpoint's stored bases
@@ -1036,16 +1065,16 @@ where
         }
     }
 
-    /// Bake the warm-start / resume pre-loaded cuts into the stage templates
+    /// Freeze the warm-start / resume pre-loaded cuts into the stage templates
     /// before the first training iteration runs.
     ///
-    /// `IterationScratch::new` pre-bakes with an empty cut batch, and iteration
-    /// 1's passes read `scratch.baked_templates` before `run_cut_management`
-    /// rebakes; without this, the first post-resume iteration would solve a
+    /// `IterationScratch::new` pre-freezes with an empty cut batch, and iteration
+    /// 1's passes read `scratch.frozen_templates` before `run_cut_management`
+    /// refreezes; without this, the first post-resume iteration would solve a
     /// cut-less, myopic policy. No-op for a fresh start (no active cuts).
-    pub(crate) fn prime_baked_templates(&mut self) {
+    pub(crate) fn prime_frozen_templates(&mut self) {
         if self.fcf.total_active_cuts() > 0 {
-            let _ = self.bake_active_cuts_into_templates();
+            let _ = self.freeze_active_cuts_into_templates();
         }
     }
 
@@ -1054,63 +1083,20 @@ where
         let lb_wall_start = Instant::now();
         let lb_stats_before = self.solver.statistics();
 
-        // The NCS column base is the per-stage `StageContext::ncs_col_starts[0]`,
-        // never a global base (`StudyDimensions` has only `has_ncs`). The dense
-        // range spans the full stage-0 NCS block (`n_ncs * block_count[0]`); a
-        // dormant NCS is zeroed inline via the windows. An empty range guards the
-        // patch off via `LbEvalSpec::ncs_generation` emptiness.
-        let block_count_stage0 = self.stage_ctx.block_counts_per_stage[0];
-        let n_ncs = self.stage_ctx.n_ncs;
-        // Stage id of the first study stage — the commissioning key for dormancy.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        let stage0_id = self
-            .training_ctx
-            .stages
-            .first()
-            .map_or(0_i32, |stage| stage.id);
-        let ncs_generation = match self.stage_ctx.ncs_col_starts.first() {
-            Some(&start) => start..(start + n_ncs * block_count_stage0),
-            None => 0..0,
-        };
-
-        let lb_spec = LbEvalSpec {
-            template: &self.stage_ctx.templates[0],
-            base_row: self.stage_ctx.base_rows[0],
-            noise_scale: self.stage_ctx.noise_scale,
-            n_hydros: self.stage_ctx.n_hydros,
-            opening_tree: self.training_ctx.stochastic.opening_tree(),
-            risk_measure: &self.config.cut_management.risk_measures[0],
-            stochastic: Some(self.training_ctx.stochastic),
-            n_load_buses: self.stage_ctx.n_load_buses,
-            ncs_max_gen: self.stage_ctx.ncs_max_gen,
-            ncs_allow_curtailment: self.stage_ctx.ncs_allow_curtailment,
-            ncs_stochastic_dense_col: self.stage_ctx.ncs_stochastic_dense_col,
-            ncs_stochastic_windows: self.stage_ctx.ncs_stochastic_windows,
-            stage_id: stage0_id,
-            block_count: block_count_stage0,
-            ncs_generation,
-            // From the stage-0 geometry; falls back to 0 because state pinning
-            // uses column bounds, leaving no rows before the z-inflow block.
-            z_inflow_row_start: self
-                .stage_ctx
-                .geometry_per_stage
-                .first()
-                .map_or(0, |g| g.z_inflow_row_start),
-            inflow_method: self.training_ctx.inflow_method,
-        };
         let mut lb_bundle = LbEvalScratchBundle::from_scratch_fields(
             &mut self.scratch.patch_buf,
             &mut self.scratch.lb_cut_batch,
             Some(&mut self.scratch.lb_cut_row_map),
+            &mut self.scratch.lb_noise_scratch,
             &mut self.scratch.lb_scratch,
         );
         let lb = evaluate_lower_bound(
             self.solver,
             self.fcf,
-            self.training_ctx.initial_state,
-            self.training_ctx.state,
+            self.stage_ctx,
+            self.training_ctx,
+            &self.config.cut_management.risk_measures[0],
             &mut lb_bundle,
-            &lb_spec,
             self.comm,
         )?;
 
@@ -1326,6 +1312,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(0),
             name: "B0".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![cobre_core::DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 1000.0,
@@ -1335,8 +1322,10 @@ mod tests {
         let hydro = Hydro {
             id: EntityId(1),
             name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(0),
             downstream_id: None,
+            travel_time_hours: None,
             entry_stage_id: None,
             exit_stage_id: None,
             min_storage_hm3: 0.0,
@@ -1573,6 +1562,7 @@ mod tests {
         horizon: &'a HorizonMode,
         study_dims: &'a StudyDimensions,
         state: &'a StateLayout,
+        cut_state_layouts: &'a [crate::indexer::CutStateProjection],
         stochastic: &'a StochasticContext,
         initial_state: &'a [f64],
         stages: &'a [Stage],
@@ -1580,6 +1570,7 @@ mod tests {
         TrainingContext {
             horizon,
             state,
+            cut_state_layouts,
             study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic,
@@ -1595,7 +1586,6 @@ mod tests {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         }
     }
 
@@ -1606,7 +1596,7 @@ mod tests {
     #[test]
     fn training_session_new_preallocates_all_buffers() {
         let n_stages = 2;
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1621,11 +1611,14 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let study_dims = crate::indexer::test_fixtures::study_dims();
+        let study_dims = crate::test_support::study_dims();
+        let cut_state_layouts =
+            crate::test_support::all_enabled_cut_state_layouts(&state, n_stages);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,
             &state,
+            &cut_state_layouts,
             &stochastic,
             &initial_state,
             &stages,
@@ -1655,11 +1648,11 @@ mod tests {
             "cut_batches must have one RowBatch per stage"
         );
         assert_eq!(
-            session.scratch.baked_templates.len(),
+            session.scratch.frozen_templates.len(),
             n_stages,
-            "baked_templates must have one per stage"
+            "frozen_templates must have one per stage"
         );
-        // send_stride = n_workers_local * bwd_max_openings * WORKER_STATS_ENTRY_STRIDE
+        // send_stride = n_workers_local * max_openings * WORKER_STATS_ENTRY_STRIDE
         // n_fwd_threads=1 → n_workers_local=1; max_openings=1 for this fixture
         let expected_send_stride = crate::solver_stats::WORKER_STATS_ENTRY_STRIDE;
         assert_eq!(
@@ -1675,7 +1668,7 @@ mod tests {
     #[test]
     fn training_session_finalize_emits_training_finished() {
         let n_stages = 2;
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1694,11 +1687,14 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let study_dims = crate::indexer::test_fixtures::study_dims();
+        let study_dims = crate::test_support::study_dims();
+        let cut_state_layouts =
+            crate::test_support::all_enabled_cut_state_layouts(&state, n_stages);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,
             &state,
+            &cut_state_layouts,
             &stochastic,
             &initial_state,
             &stages,
@@ -1735,7 +1731,7 @@ mod tests {
     #[test]
     fn training_session_finalize_with_error_emits_training_finished_with_error_reason() {
         let n_stages = 2;
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1754,11 +1750,14 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let study_dims = crate::indexer::test_fixtures::study_dims();
+        let study_dims = crate::test_support::study_dims();
+        let cut_state_layouts =
+            crate::test_support::all_enabled_cut_state_layouts(&state, n_stages);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,
             &state,
+            &cut_state_layouts,
             &stochastic,
             &initial_state,
             &stages,
@@ -1775,9 +1774,7 @@ mod tests {
         )
         .unwrap();
 
-        let outcome = session
-            .finalize_with_error(SddpError::Validation("test error".to_string()))
-            .unwrap();
+        let outcome = session.finalize_with_error(SddpError::Validation("test error".to_string()));
 
         assert!(outcome.error.is_some(), "expected error in outcome");
         assert_eq!(outcome.result.reason, "error");
@@ -1800,7 +1797,7 @@ mod tests {
     #[test]
     fn training_session_run_iteration_returns_continue_when_not_converged() {
         let n_stages = 2;
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1817,11 +1814,14 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let study_dims = crate::indexer::test_fixtures::study_dims();
+        let study_dims = crate::test_support::study_dims();
+        let cut_state_layouts =
+            crate::test_support::all_enabled_cut_state_layouts(&state, n_stages);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,
             &state,
+            &cut_state_layouts,
             &stochastic,
             &initial_state,
             &stages,
@@ -1852,7 +1852,7 @@ mod tests {
     #[test]
     fn training_session_run_iteration_returns_converged_when_gap_closes() {
         let n_stages = 2;
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1869,11 +1869,14 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let study_dims = crate::indexer::test_fixtures::study_dims();
+        let study_dims = crate::test_support::study_dims();
+        let cut_state_layouts =
+            crate::test_support::all_enabled_cut_state_layouts(&state, n_stages);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,
             &state,
+            &cut_state_layouts,
             &stochastic,
             &initial_state,
             &stages,
@@ -1912,14 +1915,14 @@ mod tests {
     /// 9  × per-iteration events (emitted by `run_iteration`):
     ///        `WorkerTiming(Forward)`, `ForwardPassComplete`, `ForwardSyncComplete`,
     ///        `WorkerTiming(Backward)`, `BackwardPassComplete`, `PolicySyncComplete`,
-    ///        `PolicyTemplateBakeComplete`, `ConvergenceUpdate`, `IterationSummary`
+    ///        `PolicyTemplateFreezeComplete`, `ConvergenceUpdate`, `IterationSummary`
     /// 1  × `TrainingFinished`  (emitted by `finalize`)
     ///
     /// Total = 11 events.
     #[test]
     fn training_session_run_iteration_emits_correct_event_sequence() {
         let n_stages = 2;
-        let state = crate::indexer::test_fixtures::state_layout(1, 0);
+        let state = crate::test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1938,11 +1941,14 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let study_dims = crate::indexer::test_fixtures::study_dims();
+        let study_dims = crate::test_support::study_dims();
+        let cut_state_layouts =
+            crate::test_support::all_enabled_cut_state_layouts(&state, n_stages);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,
             &state,
+            &cut_state_layouts,
             &stochastic,
             &initial_state,
             &stages,
@@ -2031,8 +2037,11 @@ mod tests {
             events[6]
         );
         assert!(
-            matches!(events[7], TrainingEvent::PolicyTemplateBakeComplete { .. }),
-            "events[7] must be PolicyTemplateBakeComplete, got: {:?}",
+            matches!(
+                events[7],
+                TrainingEvent::PolicyTemplateFreezeComplete { .. }
+            ),
+            "events[7] must be PolicyTemplateFreezeComplete, got: {:?}",
             events[7]
         );
         assert!(

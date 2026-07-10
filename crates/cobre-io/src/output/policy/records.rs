@@ -7,6 +7,33 @@
 //! algorithm-specific types is the calling crate's responsibility. Field names
 //! correspond to the tables in `schemas/policy.fbs`.
 
+/// Sentinel [`EntitySlot::delivery_anchor`] value for a slot with no
+/// delivery/arrival calendar semantics; also the value a reader yields when the
+/// field is absent from a pre-`id:4` buffer (forward-compatible default).
+pub const ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL: i32 = i32::MIN;
+
+/// One per-slot entity-identity record for a state-vector dimension.
+///
+/// `entity_type` is the raw `EntityType` enum byte from `schemas/policy.fbs`
+/// (`0`/`1`/`2`); the dimension-class meaning of each value is owned by the
+/// calling crate, not interpreted here.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EntitySlot {
+    /// Raw `EntityType` enum byte.
+    pub entity_type: u8,
+    /// Owning entity's id; `int32` because a sentinel id can be `-1`.
+    pub entity_id: i32,
+    /// Secondary index within the owning entity (per-type meaning is the caller's).
+    pub subindex: u32,
+    /// Whether the owning entity was operationally active at this slot's stage.
+    pub was_active: bool,
+    /// Canonical absolute delivery/arrival calendar anchor for this slot;
+    /// [`ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL`] when the slot has no delivery
+    /// semantics. The calendar encoding is the calling crate's responsibility,
+    /// as with `subindex`.
+    pub delivery_anchor: i32,
+}
+
 /// One cut record for policy checkpoint serialization.
 ///
 /// `'a` borrows the coefficient slice without copying (vectors can be large).
@@ -20,20 +47,19 @@ pub struct PolicyCutRecord<'a> {
     pub iteration: u32,
     /// Forward pass index within the generating iteration.
     pub forward_pass_index: u32,
-    /// Pre-computed cut intercept: `alpha - beta' * x_hat`.
+    /// Pre-computed cut intercept.
     pub intercept: f64,
     /// Gradient coefficients, length must equal `state_dimension`.
     ///
-    /// Positional only: index `i` is the i-th state-vector dimension per
-    /// `state_dictionary.json`; no labels are stored inline.
+    /// Positional only: index `i` is the i-th state-vector dimension, whose
+    /// identity is carried by slot `i` of the co-located [`EntitySlot`] manifest
+    /// (`entity_manifest`); no labels are stored inline.
     pub coefficients: &'a [f64],
     /// Whether this cut is currently active in the LP.
     pub is_active: bool,
 }
 
 /// One stage's solver basis for policy checkpoint serialization.
-///
-/// `'a` borrows the status arrays without copying.
 #[derive(Debug, Clone)]
 pub struct PolicyBasisRecord<'a> {
     /// Stage index (0-based).
@@ -62,10 +88,13 @@ pub struct StageStatesPayload<'a> {
     pub count: u32,
     /// Flat data buffer: `count * state_dimension` f64 elements.
     pub data: &'a [f64],
+    /// Per-slot entity identity; length equals `state_dimension` when populated.
+    /// An empty slice means no manifest is written.
+    pub entity_manifest: &'a [EntitySlot],
 }
 
 /// Per-stage cut data payload for [`crate::write_policy_checkpoint`], grouping the
-/// arguments of [`crate::serialize_stage_cuts`]. `'a` borrows slices without copying.
+/// arguments of [`crate::serialize_stage_cuts`].
 #[derive(Debug)]
 pub struct StageCutsPayload<'a> {
     /// Stage index (0-based), used as the file name index in `cuts/stage_NNN.bin`.
@@ -82,6 +111,9 @@ pub struct StageCutsPayload<'a> {
     pub active_cut_indices: &'a [u32],
     /// Number of filled slots in the pool.
     pub populated_count: u32,
+    /// Per-slot entity identity; length equals `state_dimension` when populated.
+    /// An empty slice means no manifest is written.
+    pub entity_manifest: &'a [EntitySlot],
 }
 
 /// Policy metadata for checkpoint resume and warm-start.
@@ -108,6 +140,8 @@ pub struct StageCutsPayload<'a> {
 ///     warm_start_counts: vec![],
 ///     rng_seed: 42,
 ///     total_visited_states: 0,
+///     training_block_mode: "parallel".to_string(),
+///     training_block_mode_per_stage: vec![],
 /// };
 /// let json = serde_json::to_string_pretty(&meta).unwrap();
 /// assert!(json.contains("completed_iterations"));
@@ -153,6 +187,19 @@ pub struct PolicyCheckpointMetadata {
     /// defaults to `0` on deserialization.
     #[serde(default)]
     pub total_visited_states: u64,
+    /// Block mode the policy was trained under: the shared lowercase mode when
+    /// every study stage agrees, else `"mixed"`.
+    ///
+    /// Empty in checkpoints written before this field was added; an empty value
+    /// reads as "unknown / pre-field policy".
+    #[serde(default)]
+    pub training_block_mode: String,
+    /// Per-study-stage training block modes, in study-stage order.
+    ///
+    /// Populated only for mixed-mode studies (empty when all stages share one
+    /// mode, and in pre-field checkpoints).
+    #[serde(default)]
+    pub training_block_mode_per_stage: Vec<String>,
 }
 
 // ── Owned output types for deserialization ───────────────────────────────────
@@ -174,10 +221,7 @@ pub struct OwnedPolicyCutRecord {
     pub forward_pass_index: u32,
     /// Pre-computed cut intercept.
     pub intercept: f64,
-    /// Gradient coefficients, length equals the stage's `state_dimension`.
-    ///
-    /// Positional only: index `i` is the i-th state-vector dimension per
-    /// `state_dictionary.json`; no labels are stored inline.
+    /// Gradient coefficients; positional per the [`PolicyCutRecord::coefficients`] contract.
     pub coefficients: Vec<f64>,
     /// Whether this cut is currently active in the LP.
     pub is_active: bool,
@@ -219,6 +263,8 @@ pub struct StageCutsReadResult {
     pub populated_count: u32,
     /// Deserialized cut records.
     pub cuts: Vec<OwnedPolicyCutRecord>,
+    /// Per-slot entity identity; empty when the field is absent from the buffer.
+    pub entity_manifest: Vec<EntitySlot>,
 }
 
 /// Owned version of [`StageStatesPayload`] returned by [`crate::deserialize_stage_states`].
@@ -232,6 +278,8 @@ pub struct StageStatesReadResult {
     pub count: u32,
     /// Flat data buffer (owned).
     pub data: Vec<f64>,
+    /// Per-slot entity identity; empty when the field is absent from the buffer.
+    pub entity_manifest: Vec<EntitySlot>,
 }
 
 /// Complete deserialized policy checkpoint returned by [`crate::read_policy_checkpoint`].

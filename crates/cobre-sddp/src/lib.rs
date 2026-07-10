@@ -4,7 +4,6 @@
 //! convergence monitoring, and policy simulation. Parallelized via rayon (intra-rank)
 //! and ferrompi (inter-rank).
 
-// Relax strict production lints for test builds.
 #![cfg_attr(
     test,
     allow(
@@ -28,6 +27,7 @@ pub mod error;
 pub(crate) mod gemm;
 pub mod horizon_mode;
 pub(crate) mod hull;
+pub mod lead_time;
 pub mod lp;
 pub mod policy;
 pub mod production;
@@ -36,6 +36,8 @@ pub mod simulation;
 pub mod solve;
 pub mod solver_stats;
 pub mod stochastic;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod training;
 pub mod validate_phases;
 pub mod workspace;
@@ -74,21 +76,22 @@ pub use policy::{orchestration, policy_export, resolved_parameters, scaling_repo
 // from the curated re-export — this shim is its sole resolution path.
 // `fpha_fitting` stays `pub(crate)`.
 pub(crate) use production::fpha_fitting;
-pub use production::{energy_conversion, hydro_models};
+pub use production::{energy_conversion, hydro_models, stage_key};
 
 // Re-export shim exposing the `stochastic/` cluster modules at crate-root paths
 // for raw-path callers the curated re-exports below do not cover.
 // `lag_transition::precompute_stage_lag_transitions` is intentionally absent
 // from the curated re-export — this shim is its sole resolution path. `noise`
 // and `stochastic_summary` stay `pub(crate)`.
-pub use stochastic::{estimation, inflow_method, lag_transition, noise_key_diag};
+pub use stochastic::{estimation, inflow_method, lag_transition};
 pub(crate) use stochastic::{noise, stochastic_summary};
 
 // Re-export shim exposing the `training/` pass modules at crate-root paths for
 // the internal `crate::`-prefixed references the curated re-exports below do not
 // cover. `forward` and `lower_bound` stay `pub`; the rest are `pub(crate)`.
 pub(crate) use training::{
-    backward, backward_pass_state, forward_pass_state, state_exchange, trajectory, visited_states,
+    backward, backward_pass_state, forward_pass_state, rank_reconcile, state_exchange, trajectory,
+    visited_states,
 };
 pub use training::{forward, lower_bound};
 
@@ -127,17 +130,21 @@ pub use production::hydro_models::{
 // ── inflow_method ─────────────────────────────────────────────────────────────
 pub use stochastic::inflow_method::InflowNonNegativityMethod;
 // ── lp_builder ────────────────────────────────────────────────────────────────
+#[cfg(any(test, feature = "test-support"))]
+pub use lp::builder::build_stage_templates_resolving_layout;
 pub use lp::builder::{StageTemplates, build_stage_templates};
 // ── policy_load ───────────────────────────────────────────────────────────────
 pub use policy::policy_load::{
-    build_basis_cache_from_checkpoint, inject_boundary_cuts, load_boundary_cuts,
-    validate_policy_compatibility,
+    CompatibilityReport, PolicyLoadKind, PolicyStageManifest, build_basis_cache_from_checkpoint,
+    compare_manifest_slot_identity, inject_boundary_cuts, load_boundary_cuts, validate_policy_load,
 };
 // ── provenance ────────────────────────────────────────────────────────────────
 pub use policy::provenance::{
     HydroProductionProvenance, InflowProvenance, ModelProvenanceReport, ProvenanceSource,
     build_provenance_report,
 };
+// ── rank_reconcile ────────────────────────────────────────────────────────────
+pub use training::rank_reconcile::reconcile_global_ok;
 // ── risk_measure ──────────────────────────────────────────────────────────────
 pub use convergence::risk_measure::{BackwardOutcome, RiskMeasure};
 // ── setup ─────────────────────────────────────────────────────────────────────
@@ -160,6 +167,8 @@ pub use solver_stats::{
     pack_delta_scalars, pack_scenario_stats, solver_stats_log_to_rows, unpack_delta_scalars,
     unpack_scenario_stats,
 };
+// ── stage_key ─────────────────────────────────────────────────────────────────
+pub use production::stage_key::{CalendarMonth, StageId, StudyPos};
 // ── stochastic_summary ────────────────────────────────────────────────────────
 pub use stochastic::stochastic_summary::{
     ArOrderSummary, StochasticSource, StochasticSummary, build_stochastic_summary,

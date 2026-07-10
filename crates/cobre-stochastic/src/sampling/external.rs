@@ -22,7 +22,10 @@ use cobre_core::{
 
 use crate::StochasticError;
 
-use crate::par::{evaluate::solve_par_noise, precompute::PrecomputedPar};
+use crate::par::{
+    DownstreamLagAccum, EntityMajor, PrimaryLagAccum, advance_lag_chain, evaluate::solve_par_noise,
+    precompute::PrecomputedPar,
+};
 
 // ---------------------------------------------------------------------------
 // ExternalScenarioLibrary
@@ -208,6 +211,10 @@ impl ExternalScenarioLibrary {
 /// - `hydro_ids` — canonical-order hydro entity IDs
 /// - `past_inflows` — pre-study history sorted by `hydro_id`; seeds the stage-0 lag chain
 /// - `stage_lag_transitions` — one per stage, same length as `stages`
+/// - `downstream_par_order` — PAR order of the downstream (coarser) resolution;
+///   `0` for uniform-resolution studies. Reuse the same value the forward pass
+///   was set up with — recomputing it independently here can size the sampler's
+///   ring differently and desync the replay from the forward lag chain.
 ///
 /// # Panics
 ///
@@ -224,6 +231,7 @@ pub fn standardize_external_inflow(
     par: &PrecomputedPar,
     past_inflows: &[HydroPastInflows],
     stage_lag_transitions: &[StageLagTransition],
+    downstream_par_order: usize,
 ) {
     let n_stages = library.n_stages();
     let n_scenarios = library.n_scenarios();
@@ -308,18 +316,41 @@ pub fn standardize_external_inflow(
     let mut lag_state = vec![0.0_f64; n_hydros * safe_max_order];
     let mut lag_buf = vec![0.0_f64; safe_max_order];
     let mut lag_accum = vec![0.0_f64; n_hydros];
+    // Per-stage raw rate, one entry per hydro; read by both the eta-solve and
+    // the accumulate/spillover steps below so the lag-state advancement
+    // mirrors the forward pass's accumulation of `z_inflow`.
+    let mut raw_rate_buf = vec![0.0_f64; n_hydros];
+    // advance_lag_chain (D1) reads the pre-shift lag values from a buffer
+    // separate from the one it writes; this scenario-scratch snapshot fills
+    // that role since `lag_state` is shifted in place.
+    let mut incoming_scratch = vec![0.0_f64; n_hydros * safe_max_order];
+    let mut downstream_accumulator = if downstream_par_order > 0 {
+        vec![0.0_f64; n_hydros]
+    } else {
+        Vec::new()
+    };
+    let mut downstream_completed_lags = if downstream_par_order > 0 {
+        vec![0.0_f64; n_hydros * downstream_par_order]
+    } else {
+        Vec::new()
+    };
 
     for scenario in 0..n_scenarios {
         // Each scenario starts from the same past_inflows-seeded lag state.
         lag_state.copy_from_slice(&past_lag_buf);
         lag_accum.fill(0.0);
         let mut lag_weight_accum = 0.0_f64;
+        downstream_accumulator.fill(0.0);
+        downstream_completed_lags.fill(0.0);
+        let mut downstream_weight_accum = 0.0_f64;
+        let mut downstream_n_completed = 0_usize;
 
         for t in 0..n_stages {
             let stage_lag = &stage_lag_transitions[t];
 
             for h in 0..n_hydros {
-                let target = raw_values[t * n_scenarios * n_hydros + scenario * n_hydros + h];
+                let raw_target = raw_values[t * n_scenarios * n_hydros + scenario * n_hydros + h];
+                raw_rate_buf[h] = raw_target;
 
                 // Full-length lag_buf so PAR(p)-A annual contributions (widened
                 // across the `psi` slice) participate in the η inversion.
@@ -331,47 +362,35 @@ pub fn standardize_external_inflow(
                 let psi = par.psi_slice(t, h);
                 let sigma = par.sigma(t, h);
 
-                let eta = solve_par_noise(det_base, psi, &lag_buf, sigma, target);
+                let eta = solve_par_noise(det_base, psi, &lag_buf, sigma, raw_target);
 
                 library.eta_slice_mut(t, scenario)[h] = eta;
             }
 
-            // Accumulate before the finalize check so this stage's contribution
-            // is always in the period average.
-            let w = stage_lag.accumulate_weight;
-            for h in 0..n_hydros {
-                let val = raw_values[t * n_scenarios * n_hydros + scenario * n_hydros + h];
-                lag_accum[h] += val * w;
-            }
-            lag_weight_accum += w;
-
-            if stage_lag.finalize_period && lag_weight_accum > 0.0 {
-                let inv = 1.0 / lag_weight_accum;
-                for h in 0..n_hydros {
-                    let avg = lag_accum[h] * inv;
-                    // Shift highest-lag-first so each slot reads its predecessor
-                    // before being overwritten.
-                    for l in (1..safe_max_order).rev() {
-                        lag_state[h * safe_max_order + l] = lag_state[h * safe_max_order + l - 1];
-                    }
-                    lag_state[h * safe_max_order] = avg;
-                }
-
-                // Spillover seeds from the RAW value, not the period average.
-                let sw = stage_lag.spillover_weight;
-                if sw > 0.0 {
-                    for h in 0..n_hydros {
-                        let raw_val =
-                            raw_values[t * n_scenarios * n_hydros + scenario * n_hydros + h];
-                        lag_accum[h] = raw_val * sw;
-                    }
-                    lag_weight_accum = sw;
-                } else {
-                    lag_accum.fill(0.0);
-                    lag_weight_accum = 0.0;
-                }
-            }
-            // Non-finalizing stages keep lag_state frozen.
+            incoming_scratch.copy_from_slice(&lag_state);
+            let mut primary = PrimaryLagAccum {
+                accumulator: &mut lag_accum,
+                weight_accum: &mut lag_weight_accum,
+            };
+            let mut downstream = DownstreamLagAccum {
+                accumulator: &mut downstream_accumulator,
+                weight_accum: &mut downstream_weight_accum,
+                completed_lags: &mut downstream_completed_lags,
+                n_completed: &mut downstream_n_completed,
+                par_order: downstream_par_order,
+            };
+            advance_lag_chain(
+                EntityMajor {
+                    entity_count: n_hydros,
+                    max_order: safe_max_order,
+                },
+                &mut lag_state,
+                &incoming_scratch,
+                &raw_rate_buf[..n_hydros],
+                stage_lag,
+                &mut primary,
+                &mut downstream,
+            );
         }
     }
 }
@@ -901,6 +920,7 @@ mod tests {
             &par,
             &[],
             &transitions,
+            0,
         );
 
         let eta_0 = lib.eta_slice(0, 0)[0];
@@ -972,6 +992,7 @@ mod tests {
             &par,
             &past_inflows,
             &transitions,
+            0,
         );
 
         // Stage 0: lag-1 = 110.0 (from past_inflows).
@@ -1105,6 +1126,7 @@ mod tests {
             &par,
             &past_inflows,
             &transitions,
+            0,
         );
 
         let det_base = par.deterministic_base(0, 0);
@@ -1229,6 +1251,7 @@ mod tests {
             &par,
             &past_inflows,
             &transitions,
+            0,
         );
 
         let det_base = par.deterministic_base(0, 0);
@@ -1252,6 +1275,118 @@ mod tests {
         assert!(
             (eta_1 - expected_eta_1).abs() < 1e-10,
             "eta[stage=1] = {eta_1}, expected {expected_eta_1} (lag = 150.0 from spillover period)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Monthly→quarterly downstream ring
+    // -----------------------------------------------------------------------
+
+    /// Monthly→quarterly transition: 3 monthly stages (0,1,2) feed the downstream
+    /// ring (weight 1/3 each, finalized at stage 2), stage 3 rebuilds the primary
+    /// lag from the ring (`rebuild_from_downstream`), and stage 4's AR(1) eta
+    /// reads that rebuilt lag — the first point downstream of the transition
+    /// whose value depends on whether the ring fired, since stage 3's own eta is
+    /// computed from the PRE-rebuild lag (unaffected by the ring either way).
+    ///
+    /// Oracle: ring average = (130+140+150)/3 = 140.0 (mirrors the forward
+    /// `noise.rs` ring's weighted-accumulate-then-average). The negative control
+    /// hand-computes what stage 4's eta would be under the old primary-only
+    /// advance (ignoring `rebuild_from_downstream`, so stage 3's own raw value
+    /// 500.0 — not the ring average — would have shifted into the lag) and
+    /// asserts it differs from the kernel-routed result.
+    #[test]
+    fn quarterly_ring_sampler_external_matches_oracle() {
+        let hydro_id = EntityId(1);
+        let hydro_ids = vec![hydro_id];
+        let stages: Vec<Stage> = (0_i32..5)
+            .map(|i| make_stage(usize::try_from(i).unwrap(), i, 0))
+            .collect();
+
+        let mut models: Vec<InflowModel> = (0..4)
+            .map(|sid| make_inflow_model(1, sid, 100.0, 10.0, vec![]))
+            .collect();
+        // Stage 4: AR(1), base=80, psi=0.5, sigma=25 (mirrors the AR(1) fixture
+        // in `test_inflow_ar1_uses_external_lags`).
+        models.push(make_inflow_model(1, 4, 160.0, 25.0, vec![0.5]));
+        let par = PrecomputedPar::build(&models, &stages, &hydro_ids, None).unwrap();
+        assert_eq!(
+            par.max_order(),
+            1,
+            "stage 4's AR(1) sets the global max_order"
+        );
+
+        let raw_values = [130.0, 140.0, 150.0, 500.0, 200.0];
+        let rows: Vec<ExternalScenarioRow> = raw_values
+            .iter()
+            .enumerate()
+            .map(|(stage_id, &value_m3s)| ExternalScenarioRow {
+                stage_id: i32::try_from(stage_id).unwrap(),
+                scenario_id: 0,
+                hydro_id,
+                value_m3s,
+            })
+            .collect();
+
+        let downstream_transition = |downstream_finalize: bool| StageLagTransition {
+            accumulate_weight: 1.0,
+            spillover_weight: 0.0,
+            finalize_period: true,
+            accumulate_downstream: true,
+            downstream_accumulate_weight: 1.0 / 3.0,
+            downstream_spillover_weight: 0.0,
+            downstream_finalize,
+            rebuild_from_downstream: false,
+        };
+        let transitions = vec![
+            downstream_transition(false),
+            downstream_transition(false),
+            downstream_transition(true),
+            StageLagTransition {
+                accumulate_weight: 1.0,
+                spillover_weight: 0.0,
+                finalize_period: true,
+                accumulate_downstream: false,
+                downstream_accumulate_weight: 0.0,
+                downstream_spillover_weight: 0.0,
+                downstream_finalize: false,
+                rebuild_from_downstream: true,
+            },
+            uniform_monthly_transitions(1)[0],
+        ];
+
+        let mut lib = ExternalScenarioLibrary::new(5, 1, 1, "inflow", vec![1; 5]);
+        standardize_external_inflow(
+            &mut lib,
+            &rows,
+            &hydro_ids,
+            &stages,
+            &par,
+            &[],
+            &transitions,
+            1, // downstream_par_order: one completed quarter needed to rebuild
+        );
+
+        let det_base = par.deterministic_base(4, 0);
+        let psi = par.psi_slice(4, 0)[0];
+        let sigma = par.sigma(4, 0);
+
+        let ring_average = (130.0 + 140.0 + 150.0) / 3.0;
+        let expected_eta_4 = (raw_values[4] - det_base - psi * ring_average) / sigma;
+        let eta_4 = lib.eta_slice(4, 0)[0];
+        assert!(
+            (eta_4 - expected_eta_4).abs() < 1e-10,
+            "eta[stage=4] = {eta_4}, expected {expected_eta_4} (ring average lag = {ring_average})"
+        );
+
+        // Negative control: the old primary-only advance would have shifted
+        // stage 3's own raw value (500.0), not the ring average, into the lag.
+        let naive_lag = raw_values[3];
+        let naive_eta_4 = (raw_values[4] - det_base - psi * naive_lag) / sigma;
+        assert!(
+            (eta_4 - naive_eta_4).abs() > 1e-6,
+            "eta[stage=4] must differ from the primary-only naive value; \
+             got {eta_4} == naive {naive_eta_4}"
         );
     }
 
@@ -1924,6 +2059,7 @@ mod tests {
             &par,
             &past_inflows,
             &stage_lag_transitions,
+            0,
         );
 
         // Forward reconstruction: mirror the frozen-lag + accumulation logic from

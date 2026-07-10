@@ -15,8 +15,12 @@
 //!   contracts/scenario_id=0000/data.parquet
 //!   non_controllables/scenario_id=0000/data.parquet
 //!   inflow_lags/scenario_id=0000/data.parquet
+//!   in_transit/scenario_id=0000/data.parquet
 //!   violations/generic/scenario_id=0000/data.parquet
 //! ```
+//!
+//! The `in_transit/` partition is present only when the system declares a
+//! travel-time arc; a non-travel-time study writes no such directory or file.
 //!
 //! ## Circular-dependency mitigation
 //!
@@ -38,8 +42,8 @@ use crate::output::error::OutputError;
 use crate::output::parquet_config::ParquetWriterConfig;
 use crate::output::schemas::{
     buses_schema, contracts_schema, costs_schema, exchanges_schema, generic_violations_schema,
-    hydros_schema, inflow_lags_schema, non_controllables_schema, pumping_stations_schema,
-    thermals_schema,
+    hydros_schema, in_transit_schema, inflow_lags_schema, non_controllables_schema,
+    pumping_stations_schema, thermals_schema,
 };
 
 // Payload types (mirrors solver simulation result types)
@@ -311,6 +315,23 @@ pub struct InflowLagWriteRecord {
     pub inflow_m3s: f64,
 }
 
+/// Travel-time in-transit water state for one (stage, downstream-plant, lag)
+/// tuple.
+#[derive(Debug)]
+pub struct TransitBucketWriteRecord {
+    /// Stage index (0-based).
+    pub stage_id: u32,
+    /// Downstream hydro plant entity ID the arc feeds.
+    pub hydro_id: i32,
+    /// Maturity bucket index (1-based).
+    pub lag: u32,
+    /// Outgoing in-transit water volume at this maturity in hm³.
+    pub in_transit_volume_hm3: f64,
+    /// Delivered volume in hm³ that matured this stage; non-zero only at
+    /// `lag == 1`.
+    pub delayed_arrival_hm3: f64,
+}
+
 /// Generic constraint violation for one (stage, block, constraint) tuple.
 #[derive(Debug)]
 pub struct GenericViolationWriteRecord {
@@ -349,6 +370,8 @@ pub struct StageWritePayload {
     pub non_controllables: Vec<NonControllableWriteRecord>,
     /// Inflow lag state records for this stage.
     pub inflow_lags: Vec<InflowLagWriteRecord>,
+    /// Travel-time in-transit bucket records for this stage.
+    pub transit_buckets: Vec<TransitBucketWriteRecord>,
     /// Generic constraint violation records for this stage.
     pub generic_violations: Vec<GenericViolationWriteRecord>,
 }
@@ -472,6 +495,18 @@ impl SimulationParquetWriter {
         if system.n_non_controllable_sources() > 0 {
             std::fs::create_dir_all(sim_dir.join("non_controllables"))
                 .map_err(|e| OutputError::io(sim_dir.join("non_controllables"), e))?;
+        }
+        // Gate on a declared travel-time arc, not on hydro count: a non-travel-time
+        // study must emit no `in_transit` directory (byte-neutral). Mirrors
+        // `bucket_topology`'s arc predicate (`travel_time_hours > 0` and a
+        // downstream target).
+        let declares_travel_time = system
+            .hydros()
+            .iter()
+            .any(|h| h.travel_time_hours.is_some_and(|t| t > 0.0) && h.downstream_id.is_some());
+        if declares_travel_time {
+            std::fs::create_dir_all(sim_dir.join("in_transit"))
+                .map_err(|e| OutputError::io(sim_dir.join("in_transit"), e))?;
         }
         if !system.generic_constraints().is_empty() {
             std::fs::create_dir_all(sim_dir.join("violations/generic"))
@@ -650,6 +685,21 @@ impl SimulationParquetWriter {
             write_parquet_atomic(&file_path, &batch, &self.config)?;
             self.partitions_written.push(format!(
                 "simulation/inflow_lags/{partition_suffix}/data.parquet"
+            ));
+        }
+
+        if result.stages.iter().any(|s| !s.transit_buckets.is_empty()) {
+            let part_dir = sim_dir.join("in_transit").join(&partition_suffix);
+            std::fs::create_dir_all(&part_dir).map_err(|e| OutputError::io(&part_dir, e))?;
+            let n: usize = result.stages.iter().map(|s| s.transit_buckets.len()).sum();
+            let batch = build_in_transit_batch(
+                result.stages.iter().flat_map(|s| s.transit_buckets.iter()),
+                n,
+            )?;
+            let file_path = part_dir.join("data.parquet");
+            write_parquet_atomic(&file_path, &batch, &self.config)?;
+            self.partitions_written.push(format!(
+                "simulation/in_transit/{partition_suffix}/data.parquet"
             ));
         }
 
@@ -1400,6 +1450,40 @@ fn build_inflow_lags_batch<'a>(
 }
 
 #[allow(clippy::cast_possible_wrap)]
+fn build_in_transit_batch<'a>(
+    records: impl IntoIterator<Item = &'a TransitBucketWriteRecord>,
+    n: usize,
+) -> Result<RecordBatch, OutputError> {
+    let schema = Arc::new(in_transit_schema());
+
+    let mut stage_id = Int32Builder::with_capacity(n);
+    let mut hydro_id = Int32Builder::with_capacity(n);
+    let mut lag = Int32Builder::with_capacity(n);
+    let mut in_transit_volume_hm3 = Float64Builder::with_capacity(n);
+    let mut delayed_arrival_hm3 = Float64Builder::with_capacity(n);
+
+    for r in records {
+        stage_id.append_value(r.stage_id as i32);
+        hydro_id.append_value(r.hydro_id);
+        lag.append_value(r.lag as i32);
+        in_transit_volume_hm3.append_value(r.in_transit_volume_hm3);
+        delayed_arrival_hm3.append_value(r.delayed_arrival_hm3);
+    }
+
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(stage_id.finish()),
+            Arc::new(hydro_id.finish()),
+            Arc::new(lag.finish()),
+            Arc::new(in_transit_volume_hm3.finish()),
+            Arc::new(delayed_arrival_hm3.finish()),
+        ],
+    )
+    .map_err(|e| OutputError::serialization("in_transit", e.to_string()))
+}
+
+#[allow(clippy::cast_possible_wrap)]
 fn build_generic_violations_batch<'a>(
     records: impl IntoIterator<Item = &'a GenericViolationWriteRecord>,
     n: usize,
@@ -1483,8 +1567,10 @@ mod tests {
         Hydro {
             id: EntityId(id),
             name: format!("H{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             downstream_id: None,
+            travel_time_hours: None,
             entry_stage_id: None,
             exit_stage_id: None,
             min_storage_hm3: 0.0,
@@ -1539,6 +1625,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 1000.0,
@@ -1549,6 +1636,7 @@ mod tests {
         let line = Line {
             id: EntityId(1),
             name: "L1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             source_bus_id: EntityId(1),
             target_bus_id: EntityId(1),
             entry_stage_id: None,
@@ -1565,6 +1653,7 @@ mod tests {
         let thermal = Thermal {
             id: EntityId(1),
             name: "T1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             entry_stage_id: None,
             exit_stage_id: None,
@@ -1595,6 +1684,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(1),
             name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 1000.0,
@@ -1605,6 +1695,7 @@ mod tests {
         let line = Line {
             id: EntityId(1),
             name: "L1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             source_bus_id: EntityId(1),
             target_bus_id: EntityId(1),
             entry_stage_id: None,
@@ -1618,6 +1709,7 @@ mod tests {
         let pumping_station = PumpingStation {
             id: EntityId(1),
             name: "P1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(1),
             source_hydro_id: EntityId(1),
             destination_hydro_id: EntityId(2),
@@ -1742,6 +1834,7 @@ mod tests {
                 contracts: vec![],
                 non_controllables: vec![],
                 inflow_lags: vec![],
+                transit_buckets: vec![],
                 generic_violations: vec![],
             })
             .collect();
@@ -2094,6 +2187,7 @@ mod tests {
             contracts: vec![],
             non_controllables: vec![],
             inflow_lags: vec![],
+            transit_buckets: vec![],
             generic_violations: vec![],
         };
         let payload = ScenarioWritePayload {
@@ -2548,5 +2642,179 @@ mod tests {
             1240.0,
             "stored_energy_final_mwh must round-trip"
         );
+    }
+
+    /// [`make_test_system`] plus a declared travel-time arc (hydro 2 → hydro 1,
+    /// 720 h), so the writer's `in_transit` directory gate fires.
+    fn make_test_system_with_travel_time() -> System {
+        let bus = Bus {
+            id: EntityId(1),
+            name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 1000.0,
+            }],
+            excess_cost: 0.0,
+        };
+        let downstream = make_hydro(1);
+        let mut upstream = make_hydro(2);
+        upstream.downstream_id = Some(EntityId(1));
+        upstream.travel_time_hours = Some(720.0);
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(vec![downstream, upstream])
+            .stages(vec![make_stage(0, 720.0), make_stage(1, 744.0)])
+            .build()
+            .expect("travel-time test system must be valid")
+    }
+
+    /// Absent when undeclared: a non-travel-time system creates no `in_transit`
+    /// directory, and a scenario with no transit-bucket rows writes no file —
+    /// byte-neutral for existing studies.
+    #[test]
+    fn no_in_transit_partition_for_non_travel_time_system() {
+        let tmp = tempfile::tempdir().expect("tempdir must succeed");
+        std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
+
+        let system = make_test_system();
+        let config = ParquetWriterConfig::default();
+        let mut writer =
+            SimulationParquetWriter::new(tmp.path(), &system, &config).expect("new must succeed");
+
+        assert!(
+            !tmp.path().join("simulation/in_transit").exists(),
+            "in_transit/ must not exist when no travel-time arc is declared"
+        );
+
+        let stage0 = StageWritePayload {
+            stage_id: 0,
+            costs: vec![],
+            hydros: vec![],
+            thermals: vec![],
+            exchanges: vec![],
+            buses: vec![],
+            pumping_stations: vec![],
+            contracts: vec![],
+            non_controllables: vec![],
+            inflow_lags: vec![],
+            transit_buckets: vec![],
+            generic_violations: vec![],
+        };
+        writer
+            .write_scenario(ScenarioWritePayload {
+                scenario_id: 0,
+                stages: vec![stage0],
+            })
+            .expect("write_scenario must succeed");
+
+        assert!(
+            !tmp.path().join("simulation/in_transit").exists(),
+            "in_transit/ must stay absent after writing a bucket-free scenario"
+        );
+    }
+
+    #[test]
+    fn write_scenario_writes_in_transit_partition_round_trip() {
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        let tmp = tempfile::tempdir().expect("tempdir must succeed");
+        std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
+
+        let system = make_test_system_with_travel_time();
+        let config = ParquetWriterConfig::default();
+        let mut writer =
+            SimulationParquetWriter::new(tmp.path(), &system, &config).expect("new must succeed");
+
+        assert!(
+            tmp.path().join("simulation/in_transit").exists(),
+            "in_transit/ directory must be created for a travel-time system"
+        );
+
+        // Plant hydro_id 1 with two maturity buckets; delayed arrival lands only
+        // on lag 1.
+        let stage0 = StageWritePayload {
+            stage_id: 0,
+            costs: vec![],
+            hydros: vec![],
+            thermals: vec![],
+            exchanges: vec![],
+            buses: vec![],
+            pumping_stations: vec![],
+            contracts: vec![],
+            non_controllables: vec![],
+            inflow_lags: vec![],
+            transit_buckets: vec![
+                TransitBucketWriteRecord {
+                    stage_id: 0,
+                    hydro_id: 1,
+                    lag: 1,
+                    in_transit_volume_hm3: 11.0,
+                    delayed_arrival_hm3: 7.0,
+                },
+                TransitBucketWriteRecord {
+                    stage_id: 0,
+                    hydro_id: 1,
+                    lag: 2,
+                    in_transit_volume_hm3: 22.0,
+                    delayed_arrival_hm3: 0.0,
+                },
+            ],
+            generic_violations: vec![],
+        };
+        writer
+            .write_scenario(ScenarioWritePayload {
+                scenario_id: 0,
+                stages: vec![stage0],
+            })
+            .expect("write_scenario must succeed");
+
+        let path = tmp
+            .path()
+            .join("simulation/in_transit/scenario_id=0000/data.parquet");
+        assert!(path.exists(), "in_transit parquet must exist");
+
+        let file = std::fs::File::open(&path).expect("in_transit parquet must open");
+        let batch = ParquetRecordBatchReaderBuilder::try_new(file)
+            .expect("reader builder must succeed")
+            .build()
+            .expect("reader must build")
+            .next()
+            .expect("must have rows")
+            .expect("batch must be Ok");
+
+        assert_eq!(
+            batch.schema().fields(),
+            in_transit_schema().fields(),
+            "written schema must match in_transit_schema()"
+        );
+        assert_eq!(batch.num_rows(), 2, "one row per declared bucket");
+
+        let i32_col = |name: &str, row: usize| {
+            batch
+                .column_by_name(name)
+                .unwrap_or_else(|| panic!("{name} column must exist"))
+                .as_any()
+                .downcast_ref::<arrow::array::Int32Array>()
+                .unwrap_or_else(|| panic!("{name} must be Int32Array"))
+                .value(row)
+        };
+        let f64_col = |name: &str, row: usize| {
+            batch
+                .column_by_name(name)
+                .unwrap_or_else(|| panic!("{name} column must exist"))
+                .as_any()
+                .downcast_ref::<arrow::array::Float64Array>()
+                .unwrap_or_else(|| panic!("{name} must be Float64Array"))
+                .value(row)
+        };
+
+        assert_eq!((i32_col("hydro_id", 0), i32_col("lag", 0)), (1, 1));
+        assert_eq!(f64_col("in_transit_volume_hm3", 0), 11.0);
+        assert_eq!(f64_col("delayed_arrival_hm3", 0), 7.0);
+        assert_eq!((i32_col("hydro_id", 1), i32_col("lag", 1)), (1, 2));
+        assert_eq!(f64_col("in_transit_volume_hm3", 1), 22.0);
+        assert_eq!(f64_col("delayed_arrival_hm3", 1), 0.0);
     }
 }

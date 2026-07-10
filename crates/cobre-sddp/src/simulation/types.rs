@@ -44,7 +44,6 @@ pub struct SimulationCostResult {
     /// value of `immediate_cost` is `discount_factor * immediate_cost`.
     /// When `annual_discount_rate == 0.0`, this field is `1.0` for all stages.
     pub discount_factor: f64,
-    // Resource costs
     /// Cost attributed to thermal generation dispatch.
     pub thermal_cost: f64,
     /// Cost of anticipated (forward-committed) thermal generation, charged on the
@@ -153,7 +152,6 @@ pub struct SimulationHydroResult {
     pub storage_binding_code: i8,
     /// Operative state code for this hydro plant at this block.
     pub operative_state_code: i8,
-    // Violation slacks
     /// Turbining capacity slack in m³/s.
     pub turbined_slack_m3s: f64,
     /// Minimum outflow violation slack in m³/s.
@@ -344,6 +342,32 @@ pub struct SimulationInflowLagResult {
     pub inflow_m3s: f64,
 }
 
+/// Travel-time in-transit water state for one (stage, downstream-plant, lag)
+/// tuple.
+///
+/// Corresponds to one row in the `in_transit` output schema. Variable-depth,
+/// mirroring [`SimulationInflowLagResult`]: a downstream plant fed by a declared
+/// travel-time arc owns `L_j` rows, one per maturity bucket. Empty for a plant
+/// with no incoming arc, so the whole table is absent for a non-travel-time
+/// study (`n_buckets == 0`).
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct SimulationTransitBucketResult {
+    /// Stage index (0-based).
+    pub stage_id: u32,
+    /// Downstream hydro plant entity ID the arc feeds.
+    pub hydro_id: i32,
+    /// Maturity bucket index (1-based): water in this bucket matures `lag`
+    /// stages ahead of the outgoing state.
+    pub lag: u32,
+    /// Outgoing in-transit water volume at this maturity in hm³ — the bucket
+    /// state carried to the next stage.
+    pub in_transit_volume_hm3: f64,
+    /// Delivered volume in hm³ that matured onto the downstream water balance
+    /// this stage — the incoming lag-1 bucket `b_1^in`. Non-zero only at
+    /// `lag == 1` (deeper maturities deliver in later stages).
+    pub delayed_arrival_hm3: f64,
+}
+
 /// Generic constraint violation for one (stage, block, constraint) tuple.
 ///
 /// Corresponds to one row in the violations/generic output schema
@@ -395,6 +419,9 @@ pub struct SimulationStageResult {
     /// Inflow lag state records for this stage.
     /// Empty if no hydros have AR order > 0.
     pub inflow_lags: Vec<SimulationInflowLagResult>,
+    /// Travel-time in-transit bucket records for this stage.
+    /// Empty if no travel-time arc is declared (`n_buckets == 0`).
+    pub transit_buckets: Vec<SimulationTransitBucketResult>,
     /// Generic constraint violation records for this stage.
     /// Empty if no generic constraints exist or no violations occurred.
     /// Only non-zero violations are included.
@@ -524,7 +551,7 @@ mod tests {
         SimulationCostResult, SimulationExchangeResult, SimulationGenericViolationResult,
         SimulationHydroResult, SimulationInflowLagResult, SimulationNonControllableResult,
         SimulationPumpingResult, SimulationScenarioResult, SimulationStageResult,
-        SimulationSummary, SimulationThermalResult,
+        SimulationSummary, SimulationThermalResult, SimulationTransitBucketResult,
     };
 
     #[test]
@@ -696,7 +723,6 @@ mod tests {
             decoded.stored_energy_final_mwh,
             original.stored_energy_final_mwh
         );
-        // Verify the exact bit patterns match for the five new fields.
         assert_eq!(
             decoded.equivalent_productivity_mw_per_m3s.to_bits(),
             original.equivalent_productivity_mw_per_m3s.to_bits()
@@ -875,6 +901,23 @@ mod tests {
     }
 
     #[test]
+    fn transit_bucket_result_construction() {
+        let r = SimulationTransitBucketResult {
+            stage_id: 4,
+            hydro_id: 7,
+            lag: 1,
+            in_transit_volume_hm3: 12.5,
+            delayed_arrival_hm3: 3.0,
+        };
+
+        assert_eq!(r.stage_id, 4);
+        assert_eq!(r.hydro_id, 7);
+        assert_eq!(r.lag, 1);
+        assert_eq!(r.in_transit_volume_hm3, 12.5);
+        assert_eq!(r.delayed_arrival_hm3, 3.0);
+    }
+
+    #[test]
     fn generic_violation_result_construction() {
         let r = SimulationGenericViolationResult {
             stage_id: 3,
@@ -904,6 +947,7 @@ mod tests {
             contracts: vec![],
             non_controllables: vec![],
             inflow_lags: vec![],
+            transit_buckets: vec![],
             generic_violations: vec![],
         };
 
@@ -911,12 +955,12 @@ mod tests {
         assert!(stage.contracts.is_empty());
         assert!(stage.non_controllables.is_empty());
         assert!(stage.inflow_lags.is_empty());
+        assert!(stage.transit_buckets.is_empty());
         assert!(stage.generic_violations.is_empty());
     }
 
     #[test]
     fn scenario_result_is_send() {
-        // Compile-time Send bound check.
         fn assert_send<T: Send>() {}
         assert_send::<SimulationScenarioResult>();
     }
@@ -935,6 +979,7 @@ mod tests {
                 contracts: vec![],
                 non_controllables: vec![],
                 inflow_lags: vec![],
+                transit_buckets: vec![],
                 generic_violations: vec![],
             })
             .collect();

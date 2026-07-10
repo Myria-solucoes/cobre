@@ -4,6 +4,7 @@
     {
       "id": 0,
       "name": "Reversible Plant H1->H0 (commissioned stage 1 only)",
+      "operational_start_date": "2020-01-01",
       "bus_id": 0,
       "source_hydro_id": 1,
       "destination_hydro_id": 0,

@@ -410,8 +410,7 @@ pub fn build_forward_sampler(
     let noise_methods: Box<[NoiseMethod]> = stages
         .iter()
         .map(|s| s.scenario_config.noise_method)
-        .collect::<Vec<_>>()
-        .into_boxed_slice();
+        .collect();
 
     let entity_order = ctx.entity_order();
     let inflow_order = &entity_order[..dims.n_hydros];
@@ -619,6 +618,7 @@ mod tests {
         Bus {
             id: EntityId(id),
             name: format!("Bus{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 1000.0,
@@ -656,8 +656,10 @@ mod tests {
         Hydro {
             id: EntityId(id),
             name: format!("H{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(0),
             downstream_id: None,
+            travel_time_hours: None,
             entry_stage_id: None,
             exit_stage_id: None,
             min_storage_hm3: 0.0,

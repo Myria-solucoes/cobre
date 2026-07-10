@@ -131,8 +131,7 @@ fn test_config_all_sections_explicit_no_defaults_applied() {
           },
           "policy": {
             "path": "./my_policy",
-            "mode": "warm_start",
-            "validate_compatibility": false
+            "mode": "warm_start"
           },
           "exports": {
             "states": true,
@@ -160,7 +159,6 @@ fn test_config_all_sections_explicit_no_defaults_applied() {
 
     assert_eq!(cfg.policy.path, "./my_policy");
     assert_eq!(cfg.policy.mode, cobre_io::PolicyMode::WarmStart);
-    assert!(!cfg.policy.validate_compatibility);
 
     assert!(cfg.exports.states);
     assert!(cfg.exports.stochastic);

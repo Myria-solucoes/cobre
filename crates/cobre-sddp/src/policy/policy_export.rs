@@ -6,12 +6,206 @@
 
 #![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
+use cobre_core::System;
 use cobre_io::output::policy::{
-    PolicyBasisRecord, PolicyCutRecord, StageCutsPayload, StageStatesPayload,
+    ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL, EntitySlot, PolicyBasisRecord, PolicyCutRecord,
+    StageCutsPayload, StageStatesPayload,
 };
 
 use crate::cut::FutureCostFunction;
+use crate::indexer::{CutStateProjection, StateLayout};
+use crate::lp_builder::delivery_ring::DeliveryRing;
+use crate::lp_builder::{commissioning_active, hydro_operating_active};
 use crate::training::TrainingResult;
+
+/// `EntityType::HydroStorage` discriminant from `schemas/policy.fbs`.
+const ENTITY_TYPE_HYDRO_STORAGE: u8 = 0;
+/// `EntityType::HydroInflowLag` discriminant from `schemas/policy.fbs`.
+const ENTITY_TYPE_HYDRO_INFLOW_LAG: u8 = 1;
+/// `EntityType::AnticipatedThermalState` discriminant from `schemas/policy.fbs`.
+const ENTITY_TYPE_ANTICIPATED_THERMAL_STATE: u8 = 2;
+/// `EntityType::HydroTransitBucket` discriminant from `schemas/policy.fbs`.
+const ENTITY_TYPE_HYDRO_TRANSIT_BUCKET: u8 = 3;
+
+/// Canonical absolute delivery/arrival calendar anchor of a stage `start_date`,
+/// encoded `year * 12 + (month - 1)`. Year-month granularity is what makes the
+/// anchor stable across stage resolutions: the same calendar month maps to the
+/// same anchor whether resolved from a weekly or a monthly stage.
+fn year_month_anchor(date: chrono::NaiveDate) -> i32 {
+    use chrono::Datelike;
+    // `month0()` is 0..=11, so the conversion never fails.
+    date.year() * 12 + i32::try_from(date.month0()).unwrap_or(0)
+}
+
+/// Build the per-slot entity-identity manifest for one stage's cut pool: one
+/// [`EntitySlot`] per enabled cut-state dimension of `projection`.
+///
+/// Slots are emitted in `projection`'s storage → lag → buckets → anticipated order, so slot
+/// `j` describes the entity owning positional coefficient `j` — the order a
+/// consumer matches the manifest against the cut coefficients. Each slot is
+/// classified by the global [`StateLayout`] region containing its incoming-state
+/// column ([`CutStateProjection::state_to_lp_incoming_column`]), never by
+/// re-deriving column arithmetic.
+///
+/// # Panics (debug builds only)
+///
+/// Panics if the built manifest length differs from `projection.n_state()`.
+#[must_use]
+pub fn build_stage_entity_manifest(
+    system: &System,
+    global_layout: &StateLayout,
+    projection: &CutStateProjection,
+    stage_id: i32,
+) -> Vec<EntitySlot> {
+    let n = global_layout.hydro_count;
+    let n_anticipated = global_layout.n_anticipated;
+    let hydros = system.hydros();
+    let anticipated_thermals: Vec<&cobre_core::Thermal> = system
+        .thermals()
+        .iter()
+        .filter(|t| t.anticipated_config.is_some())
+        .collect();
+    // Single owner of the anticipated ring's slot-major/plant-minor addressing
+    // (see `lp_builder::delivery_ring`); only `slot_lane_at`'s reverse
+    // decomposition is read here — the manifest never emits ring rows/columns.
+    let anticipated_ring = DeliveryRing::new(
+        global_layout.anticipated_slots_out.clone(),
+        global_layout.anticipated_state.clone(),
+        n_anticipated,
+        global_layout.k_max,
+    );
+
+    // Study stages in canonical index order — the space `AnticipatedResolution`'s
+    // decider/depth and the bucket topology both index.
+    let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
+    let current_stage_idx = study_stages.iter().position(|s| s.id == stage_id);
+    // Delivery/arrival calendar anchor of the stage `current_stage_idx + offset`;
+    // sentinel when this stage is unknown or the target lands past the horizon.
+    let anchor_at = |offset: usize| -> i32 {
+        current_stage_idx
+            .and_then(|t| study_stages.get(t + offset))
+            .map_or(ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL, |s| {
+                year_month_anchor(s.start_date)
+            })
+    };
+
+    let mut manifest = Vec::with_capacity(projection.n_state());
+    for j in 0..projection.n_state() {
+        let col = projection.state_to_lp_incoming_column(j);
+        let slot = if global_layout.storage_in.contains(&col) {
+            let h = col - global_layout.storage_in.start;
+            let hydro = &hydros[h];
+            EntitySlot {
+                entity_type: ENTITY_TYPE_HYDRO_STORAGE,
+                entity_id: hydro.id.0,
+                subindex: 0,
+                was_active: hydro_operating_active(
+                    hydro.filling.as_ref(),
+                    hydro.entry_stage_id,
+                    hydro.exit_stage_id,
+                    stage_id,
+                ),
+                delivery_anchor: ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
+            }
+        } else if global_layout.inflow_lags.contains(&col) {
+            let offset = col - global_layout.inflow_lags.start;
+            let lag = offset / n;
+            let h = offset % n;
+            let hydro = &hydros[h];
+            EntitySlot {
+                entity_type: ENTITY_TYPE_HYDRO_INFLOW_LAG,
+                entity_id: hydro.id.0,
+                subindex: (lag + 1) as u32,
+                was_active: hydro_operating_active(
+                    hydro.filling.as_ref(),
+                    hydro.entry_stage_id,
+                    hydro.exit_stage_id,
+                    stage_id,
+                ),
+                delivery_anchor: ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
+            }
+        } else if global_layout.transit_buckets_in.contains(&col) {
+            let b = col - global_layout.transit_buckets_in.start;
+            let (plant_idx, lag) = global_layout.transit_bucket_column_order[b];
+            let hydro = &hydros[plant_idx];
+            EntitySlot {
+                entity_type: ENTITY_TYPE_HYDRO_TRANSIT_BUCKET,
+                entity_id: hydro.id.0,
+                subindex: lag as u32,
+                was_active: hydro_operating_active(
+                    hydro.filling.as_ref(),
+                    hydro.entry_stage_id,
+                    hydro.exit_stage_id,
+                    stage_id,
+                ),
+                // Water in this bucket arrives `lag` stages after this one.
+                delivery_anchor: anchor_at(lag),
+            }
+        } else {
+            debug_assert!(
+                global_layout.anticipated_state.contains(&col),
+                "incoming column {col} must lie in storage_in, inflow_lags, transit_buckets_in, or \
+                 anticipated_state"
+            );
+            let offset = col - global_layout.anticipated_state.start;
+            let (slot_idx, plant_pos) = anticipated_ring.slot_lane_at(offset);
+            let plant = anticipated_thermals[plant_pos];
+            // The ring shifts one stage per transition, so slot `slot_idx` observed
+            // at stage `t` matures at delivery stage `t + slot_idx` regardless of
+            // lead mode (constant `LeadStages` or calendar-derived `LeadTime`).
+            // Reachability uses the SAME per-plant bound the LP masking itself
+            // uses (`anticipated_lead_stages[plant_pos]`, populated from
+            // `AnticipatedResolution` for both lead modes by
+            // `resolve_anticipated_commitments`): a slot beyond it is structural
+            // padding (frozen `[0, 0]`), not a real commitment, even when
+            // `t + slot_idx` itself still lands inside the horizon — the
+            // multi-plant heterogeneous-lead case.
+            let k_i = global_layout.anticipated_lead_stages[plant_pos];
+            let delivery_anchor = if slot_idx < k_i {
+                current_stage_idx.map_or(ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL, |t| {
+                    let m = t + slot_idx;
+                    // Defensive cross-check against the resolver (the single owner
+                    // of c(m), from `resolve_point`): a within-study decider must
+                    // have already fired by `t`; a pre-study (IC-seeded) delivery
+                    // has no decider entry and is exempt.
+                    debug_assert!(
+                        global_layout
+                            .anticipated_resolution
+                            .per_plant
+                            .get(plant_pos)
+                            .and_then(|resolution| resolution.decider.get(m))
+                            .copied()
+                            .flatten()
+                            .is_none_or(|decided_at| decided_at <= t),
+                        "anticipated delivery {m} observed at stage {t} was not yet decided"
+                    );
+                    anchor_at(slot_idx)
+                })
+            } else {
+                ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL
+            };
+            EntitySlot {
+                entity_type: ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
+                entity_id: plant.id.0,
+                subindex: slot_idx as u32,
+                was_active: commissioning_active(
+                    plant.entry_stage_id,
+                    plant.exit_stage_id,
+                    stage_id,
+                ),
+                delivery_anchor,
+            }
+        };
+        manifest.push(slot);
+    }
+
+    debug_assert_eq!(
+        manifest.len(),
+        projection.n_state(),
+        "manifest length must equal projection.n_state()"
+    );
+    manifest
+}
 
 /// Build per-stage vectors of **all** populated [`PolicyCutRecord`]s from the FCF pools.
 ///
@@ -22,19 +216,18 @@ pub fn build_stage_cut_records(fcf: &FutureCostFunction) -> Vec<Vec<PolicyCutRec
     fcf.pools
         .iter()
         .map(|pool| {
-            (0..pool.populated_count)
+            (0..pool.populated())
                 .map(|i| {
-                    let meta = &pool.metadata[i];
+                    let meta = pool.metadata(i);
                     PolicyCutRecord {
                         cut_id: meta.iteration_generated * u64::from(pool.forward_passes)
                             + u64::from(meta.forward_pass_index),
                         slot_index: i as u32,
                         iteration: meta.iteration_generated as u32,
                         forward_pass_index: meta.forward_pass_index,
-                        intercept: pool.intercepts[i],
-                        coefficients: &pool.coefficients
-                            [i * pool.state_dimension..(i + 1) * pool.state_dimension],
-                        is_active: pool.active[i],
+                        intercept: pool.intercept(i),
+                        coefficients: pool.coefficient_row(i),
+                        is_active: pool.is_active(i),
                     }
                 })
                 .collect()
@@ -57,15 +250,20 @@ pub fn build_active_indices(stage_records: &[Vec<PolicyCutRecord<'_>>]) -> Vec<V
         .collect()
 }
 
-/// Build [`StageCutsPayload`] references from pre-built records and indices.
+/// Build [`StageCutsPayload`] references from pre-built records, indices, and
+/// per-stage entity manifests.
 ///
-/// `stage_records` and `stage_active_indices` must have been built from the
-/// same `fcf` via [`build_stage_cut_records`] and [`build_active_indices`].
+/// `stage_records`, `stage_active_indices`, and `stage_manifests` must have been
+/// built from the same `fcf` (via [`build_stage_cut_records`],
+/// [`build_active_indices`], and [`build_stage_entity_manifest`] per pool), so
+/// each is indexed by the same pool index. `stage_manifests[t]` carries one slot
+/// per cut-state dimension of pool `t`.
 #[must_use]
 pub fn build_stage_cuts_payloads<'a>(
     fcf: &FutureCostFunction,
     stage_records: &'a [Vec<PolicyCutRecord<'a>>],
     stage_active_indices: &'a [Vec<u32>],
+    stage_manifests: &'a [Vec<EntitySlot>],
 ) -> Vec<StageCutsPayload<'a>> {
     fcf.pools
         .iter()
@@ -77,14 +275,20 @@ pub fn build_stage_cuts_payloads<'a>(
             warm_start_count: pool.warm_start_count,
             cuts: &stage_records[stage_idx],
             active_cut_indices: &stage_active_indices[stage_idx],
-            populated_count: pool.populated_count as u32,
+            populated_count: pool.populated() as u32,
+            entity_manifest: &stage_manifests[stage_idx],
         })
         .collect()
 }
 
-/// Convert the solver basis cache from i32 status codes to u8 byte vectors.
+/// Convert the solver basis cache to u8 byte vectors via `to_discriminant_code`.
 ///
-/// `HiGHS` status codes are in the range 0..=4, so the truncation is safe.
+/// The canonical discriminant space (`0..=6`) is a strict superset of the `HiGHS`
+/// code space this format previously stored, so pre-existing checkpoints (bytes
+/// `0..=4`) decode identically — while a CLP-captured `Superbasic`/`Fixed`, which
+/// `to_highs_code` would fold, now survives reload. Mirrored on load by
+/// `build_basis_cache_from_checkpoint`'s `from_discriminant_code`.
+///
 /// Returns `(col_status_bytes, row_status_bytes)`.
 #[must_use]
 pub fn convert_basis_cache(training_result: &TrainingResult) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
@@ -93,7 +297,13 @@ pub fn convert_basis_cache(training_result: &TrainingResult) -> (Vec<Vec<u8>>, V
         .iter()
         .map(|opt| {
             opt.as_ref()
-                .map(|cb| cb.basis.col_status.iter().map(|&v| v as u8).collect())
+                .map(|cb| {
+                    cb.basis
+                        .col_status
+                        .iter()
+                        .map(|status| status.to_discriminant_code())
+                        .collect()
+                })
                 .unwrap_or_default()
         })
         .collect();
@@ -102,7 +312,13 @@ pub fn convert_basis_cache(training_result: &TrainingResult) -> (Vec<Vec<u8>>, V
         .iter()
         .map(|opt| {
             opt.as_ref()
-                .map(|cb| cb.basis.row_status.iter().map(|&v| v as u8).collect())
+                .map(|cb| {
+                    cb.basis
+                        .row_status
+                        .iter()
+                        .map(|status| status.to_discriminant_code())
+                        .collect()
+                })
                 .unwrap_or_default()
         })
         .collect();
@@ -126,7 +342,7 @@ pub fn build_stage_basis_records<'a>(
                 let num_cut_rows = fcf
                     .pools
                     .get(stage_idx)
-                    .map_or(0, |pool| pool.populated_count.min(pool.capacity) as u32);
+                    .map_or(0, |pool| pool.populated().min(pool.capacity) as u32);
                 PolicyBasisRecord {
                     stage_id: stage_idx as u32,
                     iteration: training_result.iterations as u32,
@@ -142,10 +358,13 @@ pub fn build_stage_basis_records<'a>(
 /// Build per-stage [`StageStatesPayload`]s from the visited states archive.
 ///
 /// Returns an empty `Vec` if the archive is `None` (non-Dominated strategies).
+/// `stage_manifests[t]` is the same per-pool entity manifest the cut payloads
+/// carry, attached to stage `t`'s states payload.
 #[must_use]
-pub fn build_stage_states_payloads(
-    archive: Option<&crate::visited_states::VisitedStatesArchive>,
-) -> Vec<StageStatesPayload<'_>> {
+pub fn build_stage_states_payloads<'a>(
+    archive: Option<&'a crate::visited_states::VisitedStatesArchive>,
+    stage_manifests: &'a [Vec<EntitySlot>],
+) -> Vec<StageStatesPayload<'a>> {
     let Some(archive) = archive else {
         return Vec::new();
     };
@@ -157,7 +376,714 @@ pub fn build_stage_states_payloads(
                 state_dimension: stage.state_dimension() as u32,
                 count: stage.count() as u32,
                 data: stage.states(),
+                entity_manifest: &stage_manifests[t],
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+mod tests {
+    use super::{
+        ENTITY_TYPE_ANTICIPATED_THERMAL_STATE, ENTITY_TYPE_HYDRO_INFLOW_LAG,
+        ENTITY_TYPE_HYDRO_STORAGE, ENTITY_TYPE_HYDRO_TRANSIT_BUCKET, build_stage_entity_manifest,
+    };
+    use crate::indexer::{CutStateProjection, StateLayout};
+    use crate::lead_time::{AnticipatedResolution, LeadTime};
+    use crate::lp_builder::hydro_operating_active;
+    use crate::test_support;
+    use cobre_core::temporal::StageStateConfig;
+    use cobre_core::{
+        AnticipatedConfig, Block, BlockMode, Bus, DeficitSegment, EntityId, Hydro,
+        HydroGenerationModel, HydroPenalties, NoiseMethod, ScenarioSourceConfig, Stage,
+        StageRiskConfig, System, SystemBuilder, Thermal,
+        resolved::{
+            BoundsCountsSpec, BoundsDefaults, ContractStageBounds, HydroStageBounds,
+            LineStageBounds, PumpingStageBounds, ResolvedBounds, ThermalStageBounds,
+        },
+    };
+    use cobre_io::ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL;
+
+    const ALL_ENABLED: StageStateConfig = StageStateConfig {
+        storage: true,
+        inflow_lags: true,
+    };
+    const STORAGE_ONLY: StageStateConfig = StageStateConfig {
+        storage: true,
+        inflow_lags: false,
+    };
+
+    fn penalties_zero() -> HydroPenalties {
+        HydroPenalties {
+            spillage_cost: 0.0,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 0.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 1000.0,
+        }
+    }
+
+    fn make_hydro(id: i32, entry: Option<i32>, exit: Option<i32>) -> Hydro {
+        Hydro {
+            id: EntityId(id),
+            name: format!("Hydro{id}"),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: EntityId(1),
+            downstream_id: None,
+            travel_time_hours: None,
+            entry_stage_id: entry,
+            exit_stage_id: exit,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 100.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 50.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 45.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: penalties_zero(),
+        }
+    }
+
+    fn anticipated_thermal(id: i32, lead_stages: u32) -> Thermal {
+        anticipated_thermal_cfg(id, AnticipatedConfig::LeadStages(lead_stages))
+    }
+
+    fn anticipated_thermal_cfg(id: i32, cfg: AnticipatedConfig) -> Thermal {
+        Thermal {
+            id: EntityId(id),
+            name: format!("Thermal{id}"),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: EntityId(1),
+            entry_stage_id: None,
+            exit_stage_id: None,
+            cost_per_mwh: 50.0,
+            min_generation_mw: 0.0,
+            max_generation_mw: 100.0,
+            anticipated_config: Some(cfg),
+        }
+    }
+
+    fn make_bus() -> Bus {
+        Bus {
+            id: EntityId(1),
+            name: "Bus1".to_string(),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 1000.0,
+            }],
+            excess_cost: 0.0,
+        }
+    }
+
+    fn make_stage() -> Stage {
+        Stage {
+            index: 0,
+            id: 0,
+            start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: chrono::NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            season_id: Some(0),
+            blocks: vec![Block {
+                index: 0,
+                name: "SINGLE".to_string(),
+                duration_hours: 720.0,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: ALL_ENABLED,
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        }
+    }
+
+    /// `System` with 2 hydros and 1 anticipated thermal (`lead_stages = 2`),
+    /// matching the `N=2, L=2, A=1, k_max=2` layout fixture. `hydros` carry the
+    /// supplied commissioning windows so `was_active` can be exercised.
+    fn system_2h_1ant(
+        h1_window: (Option<i32>, Option<i32>),
+        h2_window: (Option<i32>, Option<i32>),
+    ) -> System {
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 2,
+                n_thermals: 1,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: 1,
+                k_max: 2,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 100.0,
+                    min_turbined_m3s: 0.0,
+                    max_turbined_m3s: 50.0,
+                    min_outflow_m3s: 0.0,
+                    max_outflow_m3s: None,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 45.0,
+                    max_diversion_m3s: None,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 100.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 500.0,
+                    reverse_mw: 500.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        SystemBuilder::new()
+            .buses(vec![make_bus()])
+            .hydros(vec![
+                make_hydro(1, h1_window.0, h1_window.1),
+                make_hydro(2, h2_window.0, h2_window.1),
+            ])
+            .thermals(vec![anticipated_thermal(1, 2)])
+            .stages(vec![make_stage()])
+            .bounds(bounds)
+            .build()
+            .expect("valid system")
+    }
+
+    /// The `N=2, L=2, A=1, k_max=2` global layout the fixture system maps onto.
+    fn layout_2h_1ant() -> StateLayout {
+        test_support::state_layout_full(2, 2, 1, 2, vec![2])
+    }
+
+    /// All-enabled projection: length 8 (2 storage + 4 lag + 2 anticipated), with
+    /// storage slots typed 0 (subindex 0), lag slots typed 1 in lag-major order
+    /// (hydro-interleaved: subindex 1,1,2,2 for hydros 1,2,1,2), and anticipated
+    /// slots typed 2 (plant id 1, ring subindex 0,1).
+    #[test]
+    fn all_enabled_classification_identity_and_subindex() {
+        let system = system_2h_1ant((None, None), (None, None));
+        let global = layout_2h_1ant();
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+
+        let manifest = build_stage_entity_manifest(&system, &global, &projection, 0);
+
+        assert_eq!(manifest.len(), projection.n_state());
+        assert_eq!(manifest.len(), 8);
+
+        assert_eq!(manifest[0].entity_type, ENTITY_TYPE_HYDRO_STORAGE);
+        assert_eq!(manifest[0].entity_id, 1);
+        assert_eq!(manifest[0].subindex, 0);
+        assert_eq!(manifest[1].entity_type, ENTITY_TYPE_HYDRO_STORAGE);
+        assert_eq!(manifest[1].entity_id, 2);
+        assert_eq!(manifest[1].subindex, 0);
+
+        // Lag block, lag-major: (lag0,h0),(lag0,h1),(lag1,h0),(lag1,h1).
+        for (slot, (expected_id, expected_lag)) in
+            [(2, (1, 1)), (3, (2, 1)), (4, (1, 2)), (5, (2, 2))]
+        {
+            assert_eq!(
+                manifest[slot].entity_type, ENTITY_TYPE_HYDRO_INFLOW_LAG,
+                "slot {slot} must be an inflow-lag slot"
+            );
+            assert_eq!(
+                manifest[slot].entity_id, expected_id,
+                "slot {slot} hydro id"
+            );
+            assert_eq!(
+                manifest[slot].subindex, expected_lag,
+                "slot {slot} 1-based lag"
+            );
+        }
+
+        // Anticipated block, slot-major (single plant, ring slots 0 and 1).
+        assert_eq!(
+            manifest[6].entity_type,
+            ENTITY_TYPE_ANTICIPATED_THERMAL_STATE
+        );
+        assert_eq!(manifest[6].entity_id, 1);
+        assert_eq!(manifest[6].subindex, 0);
+        assert_eq!(
+            manifest[7].entity_type,
+            ENTITY_TYPE_ANTICIPATED_THERMAL_STATE
+        );
+        assert_eq!(manifest[7].entity_id, 1);
+        assert_eq!(manifest[7].subindex, 1);
+    }
+
+    /// Bucket block classification (`N=2, L=2, B=2, A=1, k_max=2`): the two
+    /// travel-time bucket slots sit between the lag block and the anticipated block,
+    /// each carrying `entity_type == HydroTransitBucket`, `entity_id ==` the
+    /// downstream hydro id (`transit_bucket_column_order[b].0` into `system.hydros()`), and
+    /// `subindex ==` the maturity lag `d` (`transit_bucket_column_order[b].1`).
+    #[test]
+    fn bucket_slots_classify_as_transit_bucket_with_downstream_id_and_lag() {
+        let system = system_2h_1ant((None, None), (None, None));
+        let global = test_support::state_layout_with_transit_buckets(
+            2,
+            2,
+            2,
+            vec![(0, 1), (1, 2)],
+            1,
+            2,
+            vec![2],
+        );
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+
+        let manifest = build_stage_entity_manifest(&system, &global, &projection, 0);
+
+        assert_eq!(manifest.len(), projection.n_state());
+        assert_eq!(
+            manifest.len(),
+            10,
+            "2 storage + 4 lag + 2 buckets + 2 anticipated"
+        );
+
+        for (slot, (expected_id, expected_lag)) in [(6, (1, 1)), (7, (2, 2))] {
+            assert_eq!(
+                manifest[slot].entity_type, ENTITY_TYPE_HYDRO_TRANSIT_BUCKET,
+                "slot {slot} must be a transit-bucket slot"
+            );
+            assert_eq!(
+                manifest[slot].entity_id, expected_id,
+                "slot {slot} downstream hydro id"
+            );
+            assert_eq!(
+                manifest[slot].subindex, expected_lag,
+                "slot {slot} maturity lag d"
+            );
+        }
+
+        assert_eq!(
+            manifest[5].entity_type, ENTITY_TYPE_HYDRO_INFLOW_LAG,
+            "buckets must follow the lag block"
+        );
+        assert_eq!(
+            manifest[8].entity_type, ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
+            "buckets must precede the anticipated block"
+        );
+    }
+
+    /// Storage-only projection (`inflow_lags: false`): the lag block is dropped, so
+    /// the manifest is length 4 (2 storage + 2 anticipated) and carries NO type-1
+    /// (`HydroInflowLag`) slot. Anticipated state is always included.
+    #[test]
+    fn storage_only_drops_lag_slots() {
+        let system = system_2h_1ant((None, None), (None, None));
+        let global = layout_2h_1ant();
+        let projection = CutStateProjection::new(&global, STORAGE_ONLY);
+
+        let manifest = build_stage_entity_manifest(&system, &global, &projection, 0);
+
+        assert_eq!(manifest.len(), projection.n_state());
+        assert_eq!(manifest.len(), 4);
+        assert!(
+            manifest
+                .iter()
+                .all(|s| s.entity_type != ENTITY_TYPE_HYDRO_INFLOW_LAG),
+            "storage-only manifest must contain no HydroInflowLag slot"
+        );
+        assert_eq!(manifest[0].entity_type, ENTITY_TYPE_HYDRO_STORAGE);
+        assert_eq!(manifest[1].entity_type, ENTITY_TYPE_HYDRO_STORAGE);
+        assert_eq!(
+            manifest[2].entity_type,
+            ENTITY_TYPE_ANTICIPATED_THERMAL_STATE
+        );
+        assert_eq!(manifest[2].subindex, 0);
+        assert_eq!(
+            manifest[3].entity_type,
+            ENTITY_TYPE_ANTICIPATED_THERMAL_STATE
+        );
+        assert_eq!(manifest[3].subindex, 1);
+    }
+
+    /// A hydro dormant at the slot's stage (commissioning window `[2, 5)` queried at
+    /// stage 1) yields `was_active == false` on every slot it owns, and that value
+    /// equals the single-owner `hydro_operating_active` predicate. The second hydro
+    /// (no window) stays active, isolating the per-entity flag.
+    #[test]
+    fn was_active_matches_hydro_operating_active_for_dormant_window() {
+        let h1_window = (Some(2), Some(5));
+        let system = system_2h_1ant(h1_window, (None, None));
+        let global = layout_2h_1ant();
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+        let stage_id = 1;
+
+        let manifest = build_stage_entity_manifest(&system, &global, &projection, stage_id);
+
+        let expected_h1 = hydro_operating_active(None, h1_window.0, h1_window.1, stage_id);
+        assert!(!expected_h1, "hydro 1 must be dormant at stage 1");
+
+        // Hydro 1 owns storage slot 0 and lag slots 2, 4 (lag-major, h index 0).
+        for slot in [0, 2, 4] {
+            assert_eq!(manifest[slot].entity_id, 1, "slot {slot} must be hydro 1");
+            assert_eq!(
+                manifest[slot].was_active, expected_h1,
+                "slot {slot} was_active must equal hydro_operating_active"
+            );
+        }
+        // Hydro 2 has no window: active.
+        for slot in [1, 3, 5] {
+            assert_eq!(manifest[slot].entity_id, 2, "slot {slot} must be hydro 2");
+            assert!(manifest[slot].was_active, "slot {slot} hydro 2 is active");
+        }
+    }
+
+    /// A monthly stage (`index`/`id` shared) starting on the first of `year`/`month`.
+    fn make_stage_ym(index: usize, id: i32, year: i32, month: u32) -> Stage {
+        let start = chrono::NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+        let (end_year, end_month) = if month == 12 {
+            (year + 1, 1)
+        } else {
+            (year, month + 1)
+        };
+        Stage {
+            index,
+            id,
+            start_date: start,
+            end_date: chrono::NaiveDate::from_ymd_opt(end_year, end_month, 1).unwrap(),
+            season_id: Some((month - 1) as usize),
+            blocks: vec![Block {
+                index: 0,
+                name: "SINGLE".to_string(),
+                duration_hours: 720.0,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: ALL_ENABLED,
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        }
+    }
+
+    /// `System` with 1 hydro and 1 anticipated thermal carrying `cfg` over three
+    /// consecutive monthly stages 2024-04, 2024-05, 2024-06 (ids 0, 1, 2).
+    fn system_1h_1ant_3monthly(cfg: AnticipatedConfig) -> System {
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 1,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: 3,
+                k_max: 2,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 100.0,
+                    min_turbined_m3s: 0.0,
+                    max_turbined_m3s: 50.0,
+                    min_outflow_m3s: 0.0,
+                    max_outflow_m3s: None,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 45.0,
+                    max_diversion_m3s: None,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 100.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 500.0,
+                    reverse_mw: 500.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        SystemBuilder::new()
+            .buses(vec![make_bus()])
+            .hydros(vec![make_hydro(1, None, None)])
+            .thermals(vec![anticipated_thermal_cfg(1, cfg)])
+            .stages(vec![
+                make_stage_ym(0, 0, 2024, 4),
+                make_stage_ym(1, 1, 2024, 5),
+                make_stage_ym(2, 2, 2024, 6),
+            ])
+            .bounds(bounds)
+            .build()
+            .expect("valid 3-stage system")
+    }
+
+    /// `System` with 1 hydro and two anticipated thermals of DIFFERENT
+    /// `LeadStages` (id 1: ℓ=1, id 2: ℓ=2) over the same three monthly stages as
+    /// [`system_1h_1ant_3monthly`], sharing one `k_max=2` ring.
+    fn system_1h_2ant_3monthly() -> System {
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 2,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: 3,
+                k_max: 2,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 100.0,
+                    min_turbined_m3s: 0.0,
+                    max_turbined_m3s: 50.0,
+                    min_outflow_m3s: 0.0,
+                    max_outflow_m3s: None,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 45.0,
+                    max_diversion_m3s: None,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 100.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 500.0,
+                    reverse_mw: 500.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        SystemBuilder::new()
+            .buses(vec![make_bus()])
+            .hydros(vec![make_hydro(1, None, None)])
+            .thermals(vec![anticipated_thermal(1, 1), anticipated_thermal(2, 2)])
+            .stages(vec![
+                make_stage_ym(0, 0, 2024, 4),
+                make_stage_ym(1, 1, 2024, 5),
+                make_stage_ym(2, 2, 2024, 6),
+            ])
+            .bounds(bounds)
+            .build()
+            .expect("valid 3-stage 2-anticipated-plant system")
+    }
+
+    /// An `AnticipatedThermalState` ring slot's `delivery_anchor` is the
+    /// year-month of its delivery stage (`current index + ring slot`), resolved
+    /// through the attached `AnticipatedResolution`; storage/lag slots stay at the
+    /// sentinel. At stage index 1 (2024-05) with `lead_stages = 2`, ring slot 1
+    /// delivers at index 2 (2024-06 → `2024*12 + 5`).
+    #[test]
+    fn anticipated_slot_delivery_anchor_matches_delivery_stage_year_month() {
+        let system = system_1h_1ant_3monthly(AnticipatedConfig::LeadStages(2));
+        let mut global = test_support::state_layout_full(1, 1, 1, 2, vec![2]);
+        global.set_anticipated_resolution(AnticipatedResolution::resolve(
+            &[LeadTime::Stages(2)],
+            &[720.0; 3],
+            3,
+        ));
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+
+        // stage_id 1 is the middle stage (2024-05), study index 1.
+        let manifest = build_stage_entity_manifest(&system, &global, &projection, 1);
+
+        // Layout N=1, L=1, A=1, k_max=2: storage j=0, lag j=1, anticipated j=2,3.
+        assert_eq!(manifest.len(), 4);
+        assert_eq!(manifest[0].entity_type, ENTITY_TYPE_HYDRO_STORAGE);
+        assert_eq!(
+            manifest[0].delivery_anchor, ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
+            "storage slot carries no delivery anchor"
+        );
+        assert_eq!(manifest[1].entity_type, ENTITY_TYPE_HYDRO_INFLOW_LAG);
+        assert_eq!(
+            manifest[1].delivery_anchor, ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
+            "inflow-lag slot carries no delivery anchor"
+        );
+
+        assert_eq!(
+            manifest[2].entity_type,
+            ENTITY_TYPE_ANTICIPATED_THERMAL_STATE
+        );
+        assert_eq!(manifest[2].subindex, 0);
+        assert_eq!(
+            manifest[2].delivery_anchor,
+            2024 * 12 + 4,
+            "ring slot 0 delivers at index 1 (2024-05)"
+        );
+
+        assert_eq!(
+            manifest[3].entity_type,
+            ENTITY_TYPE_ANTICIPATED_THERMAL_STATE
+        );
+        assert_eq!(manifest[3].subindex, 1);
+        assert_eq!(
+            manifest[3].delivery_anchor,
+            2024 * 12 + 5,
+            "ring slot 1 delivers at index 2 (2024-06)"
+        );
+    }
+
+    /// A ring slot whose delivery stage lands past the horizon reads the
+    /// sentinel: at the last stage (index 2), ring slot 1 would deliver at index
+    /// 3, which does not exist, so its anchor is the sentinel.
+    #[test]
+    fn anticipated_slot_delivery_anchor_past_horizon_is_sentinel() {
+        let system = system_1h_1ant_3monthly(AnticipatedConfig::LeadStages(2));
+        let mut global = test_support::state_layout_full(1, 1, 1, 2, vec![2]);
+        global.set_anticipated_resolution(AnticipatedResolution::resolve(
+            &[LeadTime::Stages(2)],
+            &[720.0; 3],
+            3,
+        ));
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+
+        // stage_id 2 is the terminal stage (2024-06), study index 2.
+        let manifest = build_stage_entity_manifest(&system, &global, &projection, 2);
+
+        // Ring slot 0 delivers at index 2 (2024-06); ring slot 1 at index 3 (gone).
+        assert_eq!(manifest[2].subindex, 0);
+        assert_eq!(manifest[2].delivery_anchor, 2024 * 12 + 5);
+        assert_eq!(manifest[3].subindex, 1);
+        assert_eq!(
+            manifest[3].delivery_anchor, ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
+            "delivery past the horizon reads the sentinel"
+        );
+    }
+
+    /// A `LeadTime`-mode anticipated plant yields a real anchor on every
+    /// reachable ring slot, exactly like `LeadStages` (compare
+    /// `anticipated_slot_delivery_anchor_matches_delivery_stage_year_month`):
+    /// lead mode no longer gates the anchor, only reachability
+    /// (`anticipated_lead_stages`) and horizon truncation do.
+    #[test]
+    fn anticipated_slot_leadtime_mode_yields_real_anchor() {
+        let system = system_1h_1ant_3monthly(AnticipatedConfig::LeadTime(720.0));
+        let mut global = test_support::state_layout_full(1, 1, 1, 2, vec![2]);
+        global.set_anticipated_resolution(AnticipatedResolution::resolve(
+            &[LeadTime::Time(720.0)],
+            &[720.0; 3],
+            3,
+        ));
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+
+        let manifest = build_stage_entity_manifest(&system, &global, &projection, 1);
+
+        assert_eq!(manifest[2].subindex, 0);
+        assert_eq!(
+            manifest[2].delivery_anchor,
+            2024 * 12 + 4,
+            "ring slot 0 delivers at index 1 (2024-05)"
+        );
+        assert_eq!(manifest[3].subindex, 1);
+        assert_eq!(
+            manifest[3].delivery_anchor,
+            2024 * 12 + 5,
+            "ring slot 1 delivers at index 2 (2024-06)"
+        );
+    }
+
+    /// A slot beyond a plant's OWN `anticipated_lead_stages` is structural
+    /// padding (frozen `[0, 0]`), so it reads the sentinel even when
+    /// `t + slot_idx` itself still lands inside the horizon: with plants
+    /// ℓ=1 and ℓ=2 sharing one `k_max=2` ring, the ℓ=1 plant's slot 1 is
+    /// padding at every stage, while the ℓ=2 plant's slot 1 is reachable.
+    #[test]
+    fn anticipated_slot_padding_beyond_own_lead_is_sentinel() {
+        let system = system_1h_2ant_3monthly();
+        let mut global = test_support::state_layout_full(1, 1, 2, 2, vec![1, 2]);
+        global.set_anticipated_resolution(AnticipatedResolution::resolve(
+            &[LeadTime::Stages(1), LeadTime::Stages(2)],
+            &[720.0; 3],
+            3,
+        ));
+        let projection = CutStateProjection::new(&global, ALL_ENABLED);
+
+        // Stage index 0 (2024-04): plenty of horizon left for both plants.
+        let manifest = build_stage_entity_manifest(&system, &global, &projection, 0);
+
+        // Layout N=1, L=1, A=2, k_max=2: storage j=0, lag j=1, anticipated j=2..6
+        // (slot-major, plant-minor: [slot0,plant0][slot0,plant1][slot1,plant0][slot1,plant1]).
+        assert_eq!(manifest[2].entity_id, 1, "slot0/plant0 = ℓ=1 plant");
+        assert_eq!(manifest[2].subindex, 0);
+        assert_eq!(
+            manifest[2].delivery_anchor,
+            2024 * 12 + 3,
+            "ℓ=1 plant slot 0 delivers at index 0 (2024-04)"
+        );
+
+        assert_eq!(manifest[3].entity_id, 2, "slot0/plant1 = ℓ=2 plant");
+        assert_eq!(manifest[3].subindex, 0);
+        assert_eq!(
+            manifest[3].delivery_anchor,
+            2024 * 12 + 3,
+            "ℓ=2 plant slot 0 delivers at index 0 (2024-04)"
+        );
+
+        assert_eq!(manifest[4].entity_id, 1, "slot1/plant0 = ℓ=1 plant");
+        assert_eq!(manifest[4].subindex, 1);
+        assert_eq!(
+            manifest[4].delivery_anchor, ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
+            "ℓ=1 plant slot 1 is structural padding beyond its own lead"
+        );
+
+        assert_eq!(manifest[5].entity_id, 2, "slot1/plant1 = ℓ=2 plant");
+        assert_eq!(manifest[5].subindex, 1);
+        assert_eq!(
+            manifest[5].delivery_anchor,
+            2024 * 12 + 4,
+            "ℓ=2 plant slot 1 delivers at index 1 (2024-05)"
+        );
+    }
 }

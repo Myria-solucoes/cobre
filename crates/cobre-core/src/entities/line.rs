@@ -1,6 +1,7 @@
 //! Line entity — a transmission interconnection between two buses.
 
 use crate::EntityId;
+use chrono::NaiveDate;
 
 /// Transmission interconnection between two buses.
 ///
@@ -15,6 +16,8 @@ pub struct Line {
     pub id: EntityId,
     /// Human-readable line name.
     pub name: String,
+    /// Date the entity enters service (ISO 8601).
+    pub operational_start_date: NaiveDate,
     /// Source bus for direct flow direction.
     pub source_bus_id: EntityId,
     /// Target bus for direct flow direction.
@@ -42,6 +45,7 @@ mod tests {
         let line = Line {
             id: EntityId::from(1),
             name: "Line A-B".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             source_bus_id: EntityId::from(10),
             target_bus_id: EntityId::from(20),
             entry_stage_id: None,
@@ -69,6 +73,7 @@ mod tests {
         let line = Line {
             id: EntityId::from(2),
             name: "Permanent Line".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             source_bus_id: EntityId::from(1),
             target_bus_id: EntityId::from(2),
             entry_stage_id: None,
@@ -88,6 +93,7 @@ mod tests {
         let line = Line {
             id: EntityId::from(3),
             name: "Temporary Line".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             source_bus_id: EntityId::from(1),
             target_bus_id: EntityId::from(2),
             entry_stage_id: Some(5),
@@ -107,6 +113,7 @@ mod tests {
         let line_a = Line {
             id: EntityId::from(1),
             name: "Line A-B".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             source_bus_id: EntityId::from(10),
             target_bus_id: EntityId::from(20),
             entry_stage_id: None,
@@ -134,6 +141,7 @@ mod tests {
         let line = Line {
             id: EntityId::from(3),
             name: "Temporary Line".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             source_bus_id: EntityId::from(1),
             target_bus_id: EntityId::from(2),
             entry_stage_id: Some(5),

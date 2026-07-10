@@ -4,6 +4,7 @@
     {
       "id": 0,
       "name": "SIN",
+      "operational_start_date": "2020-01-01",
       "deficit_segments": [
         {
           "depth_mw": null,

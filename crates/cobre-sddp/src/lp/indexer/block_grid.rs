@@ -1,55 +1,49 @@
 //! The typed [`BlockGrid`] address primitive shared by all block-stride LP fills.
 //!
-//! The block-stride operation appears in three distinct nesting shapes across
-//! the LP build, patch, resolver, and extraction paths. [`BlockGrid`] is the
-//! single owner of every production block-major address stride for these shapes
+//! The block-stride operation appears in three nesting shapes across the LP
+//! build, patch, resolver, and extraction paths. [`BlockGrid`] is the single
+//! owner of every production block-major stride for these shapes
 //! ([`flat`](BlockGrid::flat), [`fpha_plane`](BlockGrid::fpha_plane),
-//! [`deficit`](BlockGrid::deficit)): every production fill, patch, resolver, and
-//! extraction site addresses through one of them, never by open-coding
-//! `start + entity * n_blks + blk`. The wrong-but-compiling alternative is a
-//! hand-rolled stride that drifts from the grid (a transposed nesting, or a
-//! stride read from a different `n_blks` than the LP was built with).
+//! [`deficit`](BlockGrid::deficit)): every production site addresses through one
+//! of them, never open-coding `start + entity * n_blks + blk`. The
+//! wrong-but-compiling alternative is a hand-rolled stride that drifts from the
+//! grid — a transposed nesting, or a stride read from a different `n_blks` than
+//! the LP was built with.
 //!
-//! The three shapes have opposite nesting orders (flat nests entity OUTER /
-//! block INNER; FPHA-plane nests block OUTER / plane INNER), so each gets its
-//! own method with distinct parameter names rather than one generic
-//! `(a, b, c)` calculator: a shared method would let a caller pass one shape's
-//! arguments in another shape's order and still compile, silently addressing the
-//! wrong cell. No method produces the transposed form `blk * n_entities +
-//! entity`; the entity count it needs is not carried, so the transpose cannot be
-//! expressed without bypassing the type. The
-//! `block_grid_forbids_transposed_shape` test pins this.
+//! Each shape gets its own method with distinct parameter names rather than one
+//! generic `(a, b, c)` calculator: because the shapes nest in opposite orders
+//! (flat: entity OUTER / block INNER; FPHA-plane: block OUTER / plane INNER), a
+//! shared method would let a caller pass one shape's arguments in another's order
+//! and still compile, silently addressing the wrong cell. No method can express
+//! the transpose (`blk * n_entities + entity`) — the entity count it needs is not
+//! carried. Pinned by `block_grid_forbids_transposed_shape`.
 //!
-//! Two site classes legitimately retain the open-coded form and are NOT
-//! violations: (1) the `#[cfg(test)]` differential-oracle tests that compute the
-//! address by hand to verify a `BlockGrid`-routed accessor against the formula;
-//! (2) doc comments mirroring the documented layout formula.
+//! Two open-coded site classes are NOT violations: the `#[cfg(test)]`
+//! differential-oracle tests that compute the address by hand to verify a
+//! `BlockGrid`-routed accessor, and doc comments mirroring the layout formula.
 
 /// Typed block-stride address calculator for one SDDP stage LP.
 ///
-/// Carries the two stage constants (`n_blks` and `max_deficit_segments`) the
-/// three block-stride shapes need beyond their per-call arguments; a cheap
-/// `Copy` value passed by value across fill closures.
+/// A cheap `Copy` value carrying the two stage constants (`n_blks`,
+/// `max_deficit_segments`) the three shapes need beyond their per-call arguments.
 ///
-/// It is `pub` because the public [`PatchBuffer::fill_load_patches`](super::super::builder::PatchBuffer)
-/// API accepts it by value; callers outside the crate construct a per-stage grid
-/// with [`new`](Self::new).
+/// `pub` because the public
+/// [`PatchBuffer::fill_load_patches`](super::super::builder::PatchBuffer) accepts
+/// it by value; narrowing to `pub(crate)` would break that API.
 #[derive(Debug, Clone, Copy)]
 pub struct BlockGrid {
-    /// Number of operating blocks per stage (K), the per-entity stride of the
-    /// flat shape and the inner stride of the deficit shape.
+    /// Operating blocks per stage (K).
     n_blks: usize,
-    /// Maximum number of deficit segments across all buses (S), the per-bus
-    /// stride of the deficit shape.
+    /// Maximum deficit segments across all buses (S).
     max_deficit_segments: usize,
 }
 
 impl BlockGrid {
     /// Construct a [`BlockGrid`] from its two stride constants.
     ///
-    /// Source `n_blks` from the per-stage block count the LP was built with (the
-    /// per-stage `StageLayout` / `block_counts_per_stage[t]`) so the grid cannot
-    /// disagree with the LP it addresses.
+    /// Source `n_blks` from the per-stage block count the LP was built with
+    /// (`StageLayout` / `block_counts_per_stage[t]`), never a study-global value,
+    /// so the grid cannot disagree with the LP it addresses.
     #[inline]
     #[must_use]
     pub fn new(n_blks: usize, max_deficit_segments: usize) -> Self {
@@ -59,8 +53,7 @@ impl BlockGrid {
         }
     }
 
-    /// The per-stage block count `n_blks` this grid strides by, for callers that
-    /// need a buffer size or length assertion rather than an address.
+    /// The per-stage block count `n_blks` this grid strides by.
     #[inline]
     #[must_use]
     pub fn n_blks(&self) -> usize {
@@ -69,9 +62,7 @@ impl BlockGrid {
 
     /// Flat block-major address: `start + entity * n_blks + blk`.
     ///
-    /// Entity OUTER (stride `n_blks`), block INNER. The parameter names fix this
-    /// order so the transposed form `start + blk * n_entities + entity` cannot be
-    /// expressed through the method.
+    /// Entity OUTER (stride `n_blks`), block INNER.
     #[inline]
     #[must_use]
     pub fn flat(&self, start: usize, entity: usize, blk: usize) -> usize {
@@ -81,18 +72,12 @@ impl BlockGrid {
     /// FPHA-plane address: `fpha_block_start + blk * n_planes + p_idx`.
     ///
     /// Block OUTER (stride `n_planes`), plane INNER — the OPPOSITE nesting of
-    /// [`flat`](Self::flat). Taking `(fpha_block_start, blk, p_idx, n_planes)`
-    /// (block before plane) forecloses calling it with [`flat`](Self::flat)'s
-    /// `(start, entity, blk)` order and silently transposing the two shapes.
-    ///
-    /// Advance the per-hydro base with [`advance_fpha_base`](Self::advance_fpha_base)
-    /// after each hydro.
-    // Rationale: this shape's stride is the per-hydro `n_planes` (passed in, since
-    // plane counts vary per hydro), so it reads no grid constant and `self` is
-    // unused. It stays an instance method — not an associated fn — so all three
-    // shapes share the uniform `grid.shape(...)` call form; an associated
-    // `BlockGrid::fpha_plane(..)` would break that symmetry and invite callers to
-    // re-derive the stride inline rather than route through the typed primitive.
+    /// [`flat`](Self::flat). Advance the per-hydro base with
+    /// [`advance_fpha_base`](Self::advance_fpha_base) after each hydro.
+    // Rationale: `self` is unused because this shape's stride is the per-hydro
+    // `n_planes` (passed in), not a grid constant. It stays an instance method,
+    // not an associated fn, so all three shapes share the uniform `grid.shape(..)`
+    // call form.
     #[allow(clippy::unused_self)]
     #[inline]
     #[must_use]
@@ -106,12 +91,8 @@ impl BlockGrid {
         fpha_block_start + blk * n_planes + p_idx
     }
 
-    /// Advance the FPHA per-hydro base by one hydro's row block: `+ n_blks *
-    /// n_planes`.
-    ///
-    /// Each FPHA hydro owns a contiguous `n_blks * n_planes` row block, so the
-    /// next hydro's `fpha_block_start` is the current base plus that span
-    /// (`n_planes` is caller-supplied since plane counts vary per hydro).
+    /// Advance the FPHA per-hydro base by one hydro's `n_blks * n_planes` row
+    /// block (`n_planes` is caller-supplied, since plane counts vary per hydro).
     #[inline]
     #[must_use]
     pub fn advance_fpha_base(&self, fpha_block_start: usize, n_planes: usize) -> usize {
@@ -121,12 +102,8 @@ impl BlockGrid {
     /// Deficit 3-term address:
     /// `deficit_start + b_pos * S * n_blks + seg * n_blks + blk`.
     ///
-    /// Three nested factors: bus `b_pos` strides by `S * n_blks`
-    /// (`S = max_deficit_segments`), segment `seg` by `n_blks`, block `blk`
-    /// innermost. Any reordering (e.g. striding `seg` by `S` instead of `n_blks`,
-    /// or swapping the bus and segment strides) is a same-length but wrong-cell
-    /// alternative. Both `S` and `n_blks` are baked in at construction, so a
-    /// caller cannot supply them per-call and swap their order.
+    /// Bus `b_pos` OUTER (stride `S * n_blks`, `S = max_deficit_segments`),
+    /// segment `seg` MIDDLE (stride `n_blks`), block `blk` INNER.
     #[inline]
     #[must_use]
     pub fn deficit(&self, deficit_start: usize, b_pos: usize, seg: usize, blk: usize) -> usize {
@@ -153,7 +130,6 @@ mod tests {
         assert_eq!(grid.fpha_plane(100, 1, 2, 5), 107);
     }
 
-    // FPHA base advance: one hydro's row block spans n_blks * n_planes rows.
     #[test]
     fn fpha_base_advance() {
         let grid = BlockGrid::new(3, 1);
@@ -168,14 +144,9 @@ mod tests {
         assert_eq!(grid.deficit(61, 0, 1, 0), 64);
     }
 
-    // Contract guard: BlockGrid exposes no method that takes the transposed
-    // argument order, so the wrong-but-compiling transpose of each shape cannot be
-    // expressed through the type — a caller would have to bypass it and re-derive
-    // the stride by hand. This positive test pins the
-    // forbidden alternative per shape by computing the CORRECT address and
-    // asserting it differs from what the transpose would land on, using asymmetric
-    // factors so any swap is detectable (symmetric indices can collide by accident
-    // even though the nestings differ).
+    // Pins the per-shape transpose as unexpressible: each assertion computes the
+    // CORRECT address and asserts it differs from the transpose, using asymmetric
+    // factors so any swap is detectable (symmetric indices can collide by accident).
     #[test]
     fn block_grid_forbids_transposed_shape() {
         // Flat: entity-OUTER, block-INNER. The transpose makes the block the outer

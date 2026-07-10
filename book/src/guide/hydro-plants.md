@@ -109,8 +109,8 @@ all fields — required and optional — for a single plant:
 The `1dtoy` template uses a minimal hydro definition that omits all optional fields.
 Only `id`, `name`, `bus_id`, `downstream_id`, `reservoir`, `outflow`, and `generation`
 are required. All other top-level keys (`tailrace`, `hydraulic_losses`, `efficiency`,
-`evaporation`, `diversion`, `filling`, `penalties`) are optional and default to off
-when absent.
+`evaporation`, `diversion`, `filling`, `penalties`, `travel_time_hours`) are optional and
+default to off when absent.
 
 ---
 
@@ -124,6 +124,7 @@ These fields appear at the top level of each hydro plant object.
 | `name`           | string          | Yes      | Human-readable plant name. Used in output files, validation messages, and log output.                                                                            |
 | `bus_id`         | integer         | Yes      | Identifier of the electrical bus to which this plant's generation is injected. Must match an `id` in `buses.json`.                                               |
 | `downstream_id`  | integer or null | Yes      | Identifier of the plant that receives this plant's outflow. `null` means the plant is at the bottom of its cascade — outflow leaves the system.                  |
+| `travel_time_hours` | number or null | No    | Delay, in hours, on the cascade arc to `downstream_id`. `null` or `0` means the arc is instantaneous (today's default). Declared only on the main cascade arc — diversion and pumping flows are unaffected. See [Water Travel Time](./water-travel-time.md). |
 | `entry_stage_id` | integer or null | No       | Stage index at which the plant enters service (inclusive). `null` means the plant is available from stage 0.                                                     |
 | `exit_stage_id`  | integer or null | No       | Stage index at which the plant is decommissioned (inclusive). `null` means the plant is never decommissioned.                                                    |
 

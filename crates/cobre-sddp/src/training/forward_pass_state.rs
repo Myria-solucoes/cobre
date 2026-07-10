@@ -42,8 +42,8 @@ pub(crate) struct ForwardPassInputs<'a, S: SolverInterface + Send> {
     pub basis_store: &'a mut BasisStore,
     /// Stage-level LP context (templates, row counts, noise scales).
     pub ctx: &'a StageContext<'a>,
-    /// Baked LP templates including pre-appended prior-iteration cuts.
-    pub baked: &'a [StageTemplate],
+    /// Frozen LP templates including pre-appended prior-iteration cuts.
+    pub frozen: &'a [StageTemplate],
     /// Future-cost function — read-only for the forward pass.
     pub fcf: &'a FutureCostFunction,
     /// Study-level training context (horizon, indexer, stochastic model).
@@ -90,7 +90,7 @@ impl<'a, S: SolverInterface + Send> ForwardPassInputs<'a, S> {
             workspaces: &mut fwd_pool.workspaces,
             basis_store,
             ctx,
-            baked: &scratch.baked_templates,
+            frozen: &scratch.frozen_templates,
             fcf,
             training_ctx,
             records: &mut scratch.records[..fwd_record_len],
@@ -135,8 +135,8 @@ pub(crate) struct ForwardWorkerParams<'a> {
     pub state: &'a StateLayout,
     /// Stage-level LP context (templates, row counts, noise scales).
     pub ctx: &'a StageContext<'a>,
-    /// Baked LP templates including pre-appended prior-iteration cuts.
-    pub baked: &'a [StageTemplate],
+    /// Frozen LP templates including pre-appended prior-iteration cuts.
+    pub frozen: &'a [StageTemplate],
     /// Future-cost function — read-only for the forward pass.
     pub fcf: &'a FutureCostFunction,
     /// Study-level training context (horizon, indexer, stochastic model).
@@ -177,7 +177,7 @@ struct PostProcessContext {
 /// Pre-sized from the study dimensions and reused across every iteration; every
 /// field is cleared and repopulated each `run()`, so no allocation occurs on the
 /// hot path. Per-iteration inputs are passed via [`ForwardPassInputs`].
-// The `worker_` prefix is intentional: all fields are per-worker scratch buffers.
+// The `worker_` prefix on the per-worker scratch fields is what struct_field_names flags.
 #[allow(clippy::struct_field_names)]
 pub(crate) struct ForwardPassState {
     /// Per-worker, per-stage solver-stats accumulators (`n_workers × num_stages`).
@@ -204,6 +204,10 @@ pub(crate) struct ForwardPassState {
     /// out via `std::mem::replace` into the [`ForwardResult`] each run, leaving a
     /// pre-sized empty vec so the next iteration's resize does not allocate.
     stage_stats: Vec<SolverStatsDelta>,
+
+    /// Cross-rank error-reconciliation scratch, reused each iteration by the
+    /// pre-`sync_forward` reconcile so that reconciliation never allocates.
+    pub(crate) reconcile_scratch: [i32; 1],
 }
 
 impl ForwardPassState {
@@ -234,6 +238,7 @@ impl ForwardPassState {
             worker_totals: Vec::with_capacity(n_workers),
             scenario_costs: Vec::with_capacity(max_local_fwd),
             stage_stats,
+            reconcile_scratch: [0_i32; 1],
         }
     }
 
@@ -256,7 +261,7 @@ impl ForwardPassState {
     ///
     /// - `inputs.records.len() != inputs.local_forward_passes * num_stages`
     /// - `inputs.training_ctx.initial_state.len() != state.n_state`
-    /// - `inputs.baked.len() != num_stages`
+    /// - `inputs.frozen.len() != num_stages`
     pub(crate) fn run<S>(
         &mut self,
         inputs: &mut ForwardPassInputs<'_, S>,
@@ -282,10 +287,10 @@ impl ForwardPassState {
         debug_assert_eq!(inputs.records.len(), forward_passes * num_stages);
         debug_assert_eq!(initial_state.len(), state.n_state);
         debug_assert_eq!(
-            inputs.baked.len(),
+            inputs.frozen.len(),
             num_stages,
-            "baked templates length mismatch: expected {num_stages}, got {}",
-            inputs.baked.len()
+            "frozen templates length mismatch: expected {num_stages}, got {}",
+            inputs.frozen.len()
         );
 
         let sampler = build_forward_sampler(ForwardSamplerConfig {
@@ -387,7 +392,7 @@ impl ForwardPassState {
             recent_weight_seed,
             state,
             ctx: inputs.ctx,
-            baked: inputs.baked,
+            frozen: inputs.frozen,
             fcf: inputs.fcf,
             training_ctx,
             sampler: &sampler,
@@ -447,7 +452,6 @@ impl ForwardPassState {
             start,
         } = *ppc;
 
-        // Collect per-worker snapshots after the parallel region and decompose overhead.
         self.worker_stats_after.clear();
         self.worker_stats_after
             .extend(inputs.workspaces.iter().map(|ws| ws.solver.statistics()));
@@ -467,7 +471,6 @@ impl ForwardPassState {
             .map(|d| d.load_model_time_ms + d.set_bounds_time_ms + d.basis_set_time_ms)
             .sum();
 
-        // Per-worker elapsed: solve + setup phases.
         self.worker_totals.clear();
         self.worker_totals
             .extend(self.worker_deltas.iter().map(|d| {
@@ -579,7 +582,7 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
     // Snapshot the cumulative lazy-scoring accumulator; the region-end delta
     // attributes this pass's scoring to the forward phase. The accumulator is
     // never reset, so a snapshot-delta is the only correct attribution; it stays
-    // zero on the baked path.
+    // zero on the frozen path.
     let scoring_seconds_before = ws.backward_accum.dcs_solve.scoring_time_seconds;
     let (start_m, end_m) = partition(params.forward_passes, params.n_workers, w);
     let n_local = end_m - start_m;
@@ -612,24 +615,23 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
             .get(t)
             .copied()
             .unwrap_or(1.0);
-
         for (local_m, m) in (start_m..end_m).enumerate() {
             // Reset the solver's simplex state at the per-scenario boundary so
             // this scenario's landed vertex cannot depend on which scenarios the
             // worker solved before it (determinism across thread/rank counts).
             // No-op for HiGHS; for CLP recreates the model (`Clp_loadProblem`
             // leaves rim/pricing state stale). Must precede the per-scenario load
-            // so the fresh CLP handle is the one repopulated — both the baked
+            // so the fresh CLP handle is the one repopulated — both the frozen
             // `load_model` below and the DCS-path load in `run_forward_stage`.
             ws.solver.reset_solver_state();
 
             // Reload model per scenario to ensure deterministic LP state across
-            // thread assignments. The baked all-cuts template is loaded here for
-            // the baked path; on the DCS path `run_forward_stage` instead loads
-            // the cut-free base template (loading baked would double-append the
-            // embedded cut rows), so the baked load is skipped.
+            // thread assignments. The frozen all-cuts template is loaded here for
+            // the frozen path; on the DCS path `run_forward_stage` instead loads
+            // the cut-free base template (loading frozen would double-append the
+            // embedded cut rows), so the frozen load is skipped.
             if dcs_params.is_none() {
-                ws.solver.load_model(&params.baked[t]);
+                ws.solver.load_model(&params.frozen[t]);
             }
             ws.current_state.clear();
             let src: &[f64] = if t == 0 {
@@ -691,6 +693,7 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
                 noise_group_id: params.ctx.noise_group_id_at(t),
             })?;
             let raw_noise = noise.as_slice();
+
             let key = StageKey {
                 t,
                 m,
@@ -698,7 +701,7 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
                 num_stages: params.num_stages,
                 iteration: params.iteration,
                 raw_noise,
-                basis_row_capacity: params.baked[t].num_rows,
+                basis_row_capacity: params.frozen[t].num_rows,
                 terminal_has_boundary_cuts: params.terminal_has_boundary_cuts,
                 pool: &params.fcf.pools[t],
                 dcs: dcs_params,
@@ -726,7 +729,7 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
     let local_solves = ws.solver.statistics().solve_count - local_solve_count_before;
     ws.worker_timing_buf.forward_wall_ms += worker_wall_start.elapsed().as_secs_f64() * 1_000.0;
     // Fold the forward-region lazy-scoring delta into the timing buffer (ms),
-    // mirroring the `forward_wall_ms` fold above. Zero on the baked path.
+    // mirroring the `forward_wall_ms` fold above. Zero on the frozen path.
     ws.worker_timing_buf.scoring_ms +=
         (ws.backward_accum.dcs_solve.scoring_time_seconds - scoring_seconds_before) * 1_000.0;
     Ok(ForwardWorkerResult {
@@ -889,6 +892,7 @@ mod tests {
                 0,
                 0,
                 0,
+                0,
             ),
             current_state: Vec::with_capacity(state.n_state),
             scratch: crate::workspace::ScratchBuffers {
@@ -921,7 +925,6 @@ mod tests {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
-                anticipated_state_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -938,6 +941,7 @@ mod tests {
         let bus = Bus {
             id: EntityId(0),
             name: "B0".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 1000.0,
@@ -947,8 +951,10 @@ mod tests {
         let hydro = Hydro {
             id: EntityId(1),
             name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(0),
             downstream_id: None,
+            travel_time_hours: None,
             entry_stage_id: None,
             exit_stage_id: None,
             min_storage_hm3: 0.0,
@@ -987,29 +993,7 @@ mod tests {
                 inflow_nonnegativity_cost: 1000.0,
             },
         };
-        let make_stage = |idx: usize| Stage {
-            index: idx,
-            id: idx as i32,
-            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-            season_id: Some(0),
-            blocks: vec![Block {
-                index: 0,
-                name: "S".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 2,
-                noise_method: NoiseMethod::Saa,
-            },
-        };
-        let stages: Vec<Stage> = (0..2).map(make_stage).collect();
+        let stages: Vec<Stage> = make_stages_2();
         let inflow_models: Vec<InflowModel> = (0_i32..2)
             .map(|idx| InflowModel {
                 hydro_id: EntityId(1),
@@ -1120,7 +1104,7 @@ mod tests {
         fn new() -> Self {
             let n_stages = 2_usize;
             let n_scenarios = 2_usize;
-            let state = crate::indexer::test_fixtures::state_layout(1, 0);
+            let state = crate::test_support::state_layout(1, 0);
             let stochastic = make_stochastic_context_2_stages();
             let stages = make_stages_2();
             let solution = fixed_solution_1_0();
@@ -1208,10 +1192,11 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::indexer::test_fixtures::study_dims();
+        let study_dims = crate::test_support::study_dims();
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
+            cut_state_layouts: &[],
             study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
@@ -1227,7 +1212,6 @@ mod tests {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         };
 
         let mut state = ForwardPassState::new(1, fx.n_stages, fx.n_scenarios);
@@ -1235,7 +1219,7 @@ mod tests {
             workspaces: &mut fx.workspaces,
             basis_store: &mut fx.basis_store,
             ctx: &ctx,
-            baked: &fx.templates,
+            frozen: &fx.templates,
             fcf: &fx.fcf,
             training_ctx: &training_ctx,
             records: &mut fx.records,
@@ -1284,10 +1268,11 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::indexer::test_fixtures::study_dims();
+        let study_dims = crate::test_support::study_dims();
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
+            cut_state_layouts: &[],
             study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
@@ -1303,7 +1288,6 @@ mod tests {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         };
 
         let sampler = build_forward_sampler(ForwardSamplerConfig {
@@ -1340,7 +1324,7 @@ mod tests {
             recent_weight_seed: 0.0,
             state: &fx.state,
             ctx: &ctx,
-            baked: &fx.templates,
+            frozen: &fx.templates,
             fcf: &fx.fcf,
             training_ctx: &training_ctx,
             sampler: &sampler,
@@ -1382,8 +1366,12 @@ mod tests {
     }
 
     /// After two calls to `ForwardPassState::run` with the same dimensions,
-    /// the outer `worker_stage_stats` Vec must not have been reallocated
-    /// (in-place reset preserves the heap buffer across iterations).
+    /// the shape is unchanged and the INNER per-stage stats buffers are
+    /// recycled (reset in place, round-tripped through the workers, never
+    /// reallocated). The OUTER Vec's buffer is deliberately not asserted:
+    /// `run` takes it (`std::mem::take`) into the parallel region and rebuilds
+    /// it in post-processing, so its address is an allocator coincidence, not
+    /// a contract.
     #[test]
     fn forward_pass_state_run_preserves_worker_stage_stats_shape() {
         let mut fx = ForwardFixture::new();
@@ -1411,10 +1399,11 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::indexer::test_fixtures::study_dims();
+        let study_dims = crate::test_support::study_dims();
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
+            cut_state_layouts: &[],
             study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
@@ -1430,7 +1419,6 @@ mod tests {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         };
 
         let mut state = ForwardPassState::new(1, fx.n_stages, fx.n_scenarios);
@@ -1441,7 +1429,7 @@ mod tests {
                 workspaces: &mut fx.workspaces,
                 basis_store: &mut fx.basis_store,
                 ctx: &ctx,
-                baked: &fx.templates,
+                frozen: &fx.templates,
                 fcf: &fx.fcf,
                 training_ctx: &training_ctx,
                 records: &mut fx.records,
@@ -1454,18 +1442,20 @@ mod tests {
             let _ = state.run(&mut inputs).expect("first run must not error");
         }
 
-        // Capture the heap address of the outer Vec's buffer after the first run.
-        let ptr_after_first = state.worker_stage_stats.as_ptr();
+        // Capture the INNER buffer's heap address after the first run; moves of
+        // the Vec header (worker round-trip) do not move the heap buffer.
+        let inner_ptr_after_first = state.worker_stage_stats[0].as_ptr();
+        let inner_cap_after_first = state.worker_stage_stats[0].capacity();
         let len_after_first = state.worker_stage_stats.len();
         let inner_len_after_first = state.worker_stage_stats[0].len();
 
-        // Second run: must reuse the allocation (no clear+rebuild).
+        // Second run: must reuse the inner allocations (no clear+rebuild).
         {
             let mut inputs = ForwardPassInputs {
                 workspaces: &mut fx.workspaces,
                 basis_store: &mut fx.basis_store,
                 ctx: &ctx,
-                baked: &fx.templates,
+                frozen: &fx.templates,
                 fcf: &fx.fcf,
                 training_ctx: &training_ctx,
                 records: &mut fx.records,
@@ -1478,11 +1468,15 @@ mod tests {
             let _ = state.run(&mut inputs).expect("second run must not error");
         }
 
-        // The outer Vec must not have been reallocated.
         assert_eq!(
-            state.worker_stage_stats.as_ptr(),
-            ptr_after_first,
-            "worker_stage_stats outer Vec must not be reallocated between runs"
+            state.worker_stage_stats[0].as_ptr(),
+            inner_ptr_after_first,
+            "inner per-stage stats buffer must be recycled, not reallocated"
+        );
+        assert_eq!(
+            state.worker_stage_stats[0].capacity(),
+            inner_cap_after_first,
+            "inner per-stage stats buffer must not grow between runs"
         );
         assert_eq!(
             state.worker_stage_stats.len(),
@@ -1539,10 +1533,11 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::indexer::test_fixtures::study_dims();
+        let study_dims = crate::test_support::study_dims();
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
+            cut_state_layouts: &[],
             study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &fx.stochastic,
@@ -1558,7 +1553,6 @@ mod tests {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         };
 
         let mut state = ForwardPassState::new(1, fx.n_stages, fx.n_scenarios);
@@ -1568,7 +1562,7 @@ mod tests {
                 workspaces: &mut fx.workspaces,
                 basis_store: &mut fx.basis_store,
                 ctx: &ctx,
-                baked: &fx.templates,
+                frozen: &fx.templates,
                 fcf: &fx.fcf,
                 training_ctx: &training_ctx,
                 records: &mut fx.records,
@@ -1593,7 +1587,7 @@ mod tests {
                 workspaces: &mut fx.workspaces,
                 basis_store: &mut fx.basis_store,
                 ctx: &ctx,
-                baked: &fx.templates,
+                frozen: &fx.templates,
                 fcf: &fx.fcf,
                 training_ctx: &training_ctx,
                 records: &mut fx.records,

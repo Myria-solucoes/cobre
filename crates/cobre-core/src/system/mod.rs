@@ -29,11 +29,13 @@ use validate::{build_index, build_stage_index};
 /// # Examples
 ///
 /// ```
+/// use chrono::NaiveDate;
 /// use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
 ///
 /// let bus = Bus {
 ///     id: EntityId(1),
 ///     name: "Main Bus".to_string(),
+///     operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
 ///     deficit_segments: vec![],
 ///     excess_cost: 0.0,
 /// };
@@ -460,12 +462,14 @@ impl System {
     /// ```
     /// # #[cfg(feature = "serde")]
     /// # {
+    /// use chrono::NaiveDate;
     /// use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
     ///
     /// let system = SystemBuilder::new()
     ///     .buses(vec![Bus {
     ///         id: EntityId(1),
     ///         name: "A".to_string(),
+    ///         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
     ///         deficit_segments: vec![],
     ///         excess_cost: 0.0,
     ///     }])
@@ -497,11 +501,13 @@ mod tests {
     use super::*;
     use crate::ValidationError;
     use crate::entities::{ContractType, HydroGenerationModel, HydroPenalties};
+    use chrono::NaiveDate;
 
     fn make_bus(id: i32) -> Bus {
         Bus {
             id: EntityId(id),
             name: format!("bus-{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             deficit_segments: vec![],
             excess_cost: 0.0,
         }
@@ -511,6 +517,7 @@ mod tests {
         crate::Line {
             id: EntityId(id),
             name: format!("line-{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             source_bus_id: EntityId(source_bus_id),
             target_bus_id: EntityId(target_bus_id),
             entry_stage_id: None,
@@ -544,8 +551,10 @@ mod tests {
         Hydro {
             id: EntityId(id),
             name: format!("hydro-{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(bus_id),
             downstream_id: None,
+            travel_time_hours: None,
             entry_stage_id: None,
             exit_stage_id: None,
             min_storage_hm3: 0.0,
@@ -578,6 +587,7 @@ mod tests {
         Thermal {
             id: EntityId(id),
             name: format!("thermal-{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(bus_id),
             entry_stage_id: None,
             exit_stage_id: None,
@@ -602,6 +612,7 @@ mod tests {
         PumpingStation {
             id: EntityId(id),
             name: format!("ps-{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(bus_id),
             source_hydro_id: EntityId(source_hydro_id),
             destination_hydro_id: EntityId(destination_hydro_id),
@@ -621,6 +632,7 @@ mod tests {
         EnergyContract {
             id: EntityId(id),
             name: format!("contract-{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(bus_id),
             contract_type: ContractType::Import,
             entry_stage_id: None,
@@ -639,6 +651,7 @@ mod tests {
         NonControllableSource {
             id: EntityId(id),
             name: format!("ncs-{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             bus_id: EntityId(bus_id),
             entry_stage_id: None,
             exit_stage_id: None,
@@ -1521,6 +1534,7 @@ mod tests {
             past_inflows: vec![],
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
+            past_defluences: vec![],
         };
 
         let system = SystemBuilder::new()

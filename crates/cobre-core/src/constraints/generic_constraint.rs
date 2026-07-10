@@ -10,13 +10,16 @@
 //!
 //! # Variable Reference Catalog
 //!
-//! [`VariableRef`] covers all 22 LP variable types defined in the spec (§15).
+//! [`VariableRef`] covers all 24 LP variable types defined in the spec (§15).
 //! Each variant carries the entity ID and, for block-capable variables, an
-//! optional block ID. `Some(i)` references block `i`. `None` selects between a
-//! single collapsed stage-level row (block-independent expression: every term is
-//! stage-level) and one row per block (block-dependent expression: any
-//! block-level term, e.g. [`VariableRef::HydroInflow`]) — it **never** means
-//! "sum over blocks".
+//! optional block ID. `Some(i)` references block `i`. `None` is not
+//! block-specific and resolves by the variable's nature: per-block flows (e.g.
+//! [`VariableRef::HydroInflow`]) follow the materialized row's block — a single
+//! collapsed stage-level row for a block-independent expression, one row per
+//! block otherwise; stage-level stocks ([`VariableRef::HydroStorage`] and the
+//! storage-boundary variants at their stage endpoints S⁰/Sᴷ) resolve to a single
+//! fixed column; [`VariableRef::HydroEvaporation`] with `None` resolves to block 0
+//! (the stage evaporation in parallel mode). No variant sums over blocks.
 //!
 //! # Examples
 //!
@@ -59,9 +62,8 @@ use crate::EntityId;
 
 /// Reference to a single LP variable in a generic constraint expression.
 ///
-/// The 22 variants cover the full variable catalog defined in
-/// `internal-structures.md §15`. See the module header for the `block_id = None`
-/// block-independent vs block-dependent row-materialization contract.
+/// See the module header for the `block_id = None` block-independent vs
+/// block-dependent row-materialization contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum VariableRef {
@@ -74,21 +76,21 @@ pub enum VariableRef {
     HydroTurbined {
         /// Hydro plant identifier.
         hydro_id: EntityId,
-        /// Block selector; see the module header for `None` semantics.
+        /// Block selector.
         block_id: Option<usize>,
     },
     /// Spillage flow for a hydro plant (m³/s).
     HydroSpillage {
         /// Hydro plant identifier.
         hydro_id: EntityId,
-        /// Block selector; see the module header for `None` semantics.
+        /// Block selector.
         block_id: Option<usize>,
     },
     /// Diversion flow for a hydro plant (m³/s). Only valid for hydros with diversion.
     HydroDiversion {
         /// Hydro plant identifier.
         hydro_id: EntityId,
-        /// Block selector; see the module header for `None` semantics.
+        /// Block selector.
         block_id: Option<usize>,
     },
     /// Total outflow for a hydro plant (m³/s): a derived alias for
@@ -96,22 +98,28 @@ pub enum VariableRef {
     HydroOutflow {
         /// Hydro plant identifier.
         hydro_id: EntityId,
-        /// Block selector; see the module header for `None` semantics.
+        /// Block selector.
         block_id: Option<usize>,
     },
     /// Electrical generation from a hydro plant (MW).
     HydroGeneration {
         /// Hydro plant identifier.
         hydro_id: EntityId,
-        /// Block selector; see the module header for `None` semantics.
+        /// Block selector.
         block_id: Option<usize>,
     },
-    /// Signed evaporation flow from a hydro reservoir (m³/s). Stage-level, not
-    /// block-specific. Positive values represent net evaporative outflow;
-    /// negative values represent net rainfall input absorbed by the reservoir.
+    /// Signed evaporation flow from a hydro reservoir (m³/s). Positive values
+    /// represent net evaporative outflow; negative values represent net rainfall
+    /// input absorbed by the reservoir. `Some(k)` selects block `k`; `None` selects
+    /// block 0, which in parallel mode is the stage evaporation (every block shares
+    /// the same stage endpoints). In chronological mode with `K > 1` the blocks
+    /// differ, so a `None` reference is rejected by generic-constraint validation —
+    /// a block must be named.
     HydroEvaporation {
         /// Hydro plant identifier.
         hydro_id: EntityId,
+        /// Block selector; `None` = block 0 (the stage evaporation in parallel mode).
+        block_id: Option<usize>,
     },
     /// Water withdrawal from a hydro reservoir (m³/s). Stage-level, not block-specific.
     HydroWithdrawal {
@@ -122,21 +130,21 @@ pub enum VariableRef {
     ThermalGeneration {
         /// Thermal unit identifier.
         thermal_id: EntityId,
-        /// Block selector; see the module header for `None` semantics.
+        /// Block selector.
         block_id: Option<usize>,
     },
     /// Direct (forward) power flow on a transmission line (MW).
     LineDirect {
         /// Transmission line identifier.
         line_id: EntityId,
-        /// Block selector; see the module header for `None` semantics.
+        /// Block selector.
         block_id: Option<usize>,
     },
     /// Reverse power flow on a transmission line (MW).
     LineReverse {
         /// Transmission line identifier.
         line_id: EntityId,
-        /// Block selector; see the module header for `None` semantics.
+        /// Block selector.
         block_id: Option<usize>,
     },
     /// Net exchange flow on a transmission line (direct - reverse) (MW).
@@ -146,63 +154,63 @@ pub enum VariableRef {
     LineExchange {
         /// Transmission line identifier.
         line_id: EntityId,
-        /// Block selector; see the module header for `None` semantics.
+        /// Block selector.
         block_id: Option<usize>,
     },
     /// Load deficit (unserved energy) at a bus (MW).
     BusDeficit {
         /// Bus identifier.
         bus_id: EntityId,
-        /// Block selector; see the module header for `None` semantics.
+        /// Block selector.
         block_id: Option<usize>,
     },
     /// Load excess (over-generation) at a bus (MW).
     BusExcess {
         /// Bus identifier.
         bus_id: EntityId,
-        /// Block selector; see the module header for `None` semantics.
+        /// Block selector.
         block_id: Option<usize>,
     },
     /// Pumped water flow at a pumping station (m³/s).
     PumpingFlow {
         /// Pumping station identifier.
         station_id: EntityId,
-        /// Block selector; see the module header for `None` semantics.
+        /// Block selector.
         block_id: Option<usize>,
     },
     /// Electrical power consumed by a pumping station (MW).
     PumpingPower {
         /// Pumping station identifier.
         station_id: EntityId,
-        /// Block selector; see the module header for `None` semantics.
+        /// Block selector.
         block_id: Option<usize>,
     },
     /// Energy imported via a contract (MW).
     ContractImport {
         /// Energy contract identifier.
         contract_id: EntityId,
-        /// Block selector; see the module header for `None` semantics.
+        /// Block selector.
         block_id: Option<usize>,
     },
     /// Energy exported via a contract (MW).
     ContractExport {
         /// Energy contract identifier.
         contract_id: EntityId,
-        /// Block selector; see the module header for `None` semantics.
+        /// Block selector.
         block_id: Option<usize>,
     },
     /// Generation from a non-controllable source (wind, solar, etc.) (MW).
     NonControllableGeneration {
         /// Non-controllable source identifier.
         source_id: EntityId,
-        /// Block selector; see the module header for `None` semantics.
+        /// Block selector.
         block_id: Option<usize>,
     },
     /// Curtailment of a non-controllable source (MW).
     NonControllableCurtailment {
         /// Non-controllable source identifier.
         source_id: EntityId,
-        /// Block selector; see the module header for `None` semantics.
+        /// Block selector.
         block_id: Option<usize>,
     },
     /// Forward-commitment decision for an anticipated thermal unit (MW).
@@ -238,6 +246,33 @@ pub enum VariableRef {
         /// Hydro plant identifier.
         hydro_id: EntityId,
         /// Block selector; `None` expands to one row per block.
+        block_id: Option<usize>,
+    },
+    /// Start-of-block storage boundary for a hydro reservoir (hm³).
+    ///
+    /// `Some(k)` references the incoming storage column of block `k` (boundary
+    /// `Sᵏ`); `None` references the stage-initial anchor `S⁰`. A stage-level stock:
+    /// resolves to a single fixed column, never a per-block expansion.
+    ///
+    /// Appended at the END of the enum to keep its postcard discriminant stable.
+    HydroStorageInitial {
+        /// Hydro plant identifier.
+        hydro_id: EntityId,
+        /// Block selector; `None` = stage-initial `S⁰`.
+        block_id: Option<usize>,
+    },
+    /// End-of-block storage boundary for a hydro reservoir (hm³).
+    ///
+    /// `Some(k)` references the outgoing storage column of block `k` (boundary
+    /// `Sᵏ⁺¹`); `None` references the stage-final `Sᴷ`, equal to `HydroStorage`.
+    /// A stage-level stock: resolves to a single fixed column, never a per-block
+    /// expansion.
+    ///
+    /// Appended at the END of the enum to keep its postcard discriminant stable.
+    HydroStorageFinal {
+        /// Hydro plant identifier.
+        hydro_id: EntityId,
+        /// Block selector; `None` = stage-final `Sᴷ`.
         block_id: Option<usize>,
     },
 }
@@ -391,6 +426,7 @@ mod tests {
                 "HydroEvaporation",
                 VariableRef::HydroEvaporation {
                     hydro_id: EntityId(0),
+                    block_id: None,
                 },
             ),
             (
@@ -496,12 +532,26 @@ mod tests {
                     block_id: None,
                 },
             ),
+            (
+                "HydroStorageInitial",
+                VariableRef::HydroStorageInitial {
+                    hydro_id: EntityId(0),
+                    block_id: Some(0),
+                },
+            ),
+            (
+                "HydroStorageFinal",
+                VariableRef::HydroStorageFinal {
+                    hydro_id: EntityId(0),
+                    block_id: None,
+                },
+            ),
         ];
 
         assert_eq!(
             variants.len(),
-            22,
-            "VariableRef must have exactly 22 variants"
+            24,
+            "VariableRef must have exactly 24 variants"
         );
 
         for (name, variant) in variants {
@@ -513,12 +563,13 @@ mod tests {
         }
     }
 
-    /// Pins the postcard discriminant of the last-appended variant. Postcard
-    /// encodes the variant index as a varint; for discriminants `< 0x80` the
-    /// first byte equals the discriminant. `HydroInflow` is appended last
-    /// (index 21 = `0x15`) and `AnticipatedDecision` (index 20 = `0x14`) must
-    /// keep its index — a mid-enum insertion would shift both and silently
-    /// break previously serialized policies.
+    /// Pins the postcard discriminants of the tail variants. Postcard encodes
+    /// the variant index as a varint; for discriminants `< 0x80` the first byte
+    /// equals the discriminant. `AnticipatedDecision` (index 20 = `0x14`),
+    /// `HydroInflow` (index 21 = `0x15`), `HydroStorageInitial` (index 22 =
+    /// `0x16`), and `HydroStorageFinal` (index 23 = `0x17`) must keep their
+    /// indices — a mid-enum insertion would shift them and silently break
+    /// previously serialized policies.
     #[cfg(feature = "serde")]
     #[test]
     fn test_variable_ref_postcard_discriminant_pin() {
@@ -539,6 +590,26 @@ mod tests {
         assert_eq!(
             anticipated[0], 0x14,
             "AnticipatedDecision must keep postcard discriminant 0x14"
+        );
+
+        let storage_initial = postcard::to_allocvec(&VariableRef::HydroStorageInitial {
+            hydro_id: EntityId(0),
+            block_id: None,
+        })
+        .expect("HydroStorageInitial serializes");
+        assert_eq!(
+            storage_initial[0], 0x16,
+            "HydroStorageInitial must serialize to postcard discriminant 0x16"
+        );
+
+        let storage_final = postcard::to_allocvec(&VariableRef::HydroStorageFinal {
+            hydro_id: EntityId(0),
+            block_id: None,
+        })
+        .expect("HydroStorageFinal serializes");
+        assert_eq!(
+            storage_final[0], 0x17,
+            "HydroStorageFinal must serialize to postcard discriminant 0x17"
         );
     }
 

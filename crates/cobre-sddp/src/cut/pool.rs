@@ -53,21 +53,21 @@ use crate::cut_selection::CutMetadata;
 pub struct CutPool {
     /// Flat coefficient storage. Slot `i` occupies
     /// `i * state_dimension .. (i + 1) * state_dimension`.
-    pub coefficients: Vec<f64>,
+    coefficients: Vec<f64>,
 
     /// Per-slot intercept values.
-    pub intercepts: Vec<f64>,
+    intercepts: Vec<f64>,
 
     /// Per-slot cut-selection bookkeeping.
-    pub metadata: Vec<CutMetadata>,
+    metadata: Vec<CutMetadata>,
 
     /// Per-slot activity flags. `false` excludes the cut from LP construction and
     /// evaluation; the slot is retained so the layout stays deterministic.
-    pub active: Vec<bool>,
+    active: Vec<bool>,
 
     /// High-water mark of populated slots; bounds iteration so trailing
     /// unpopulated slots are skipped.
-    pub populated_count: usize,
+    populated_count: usize,
 
     /// Total number of pre-allocated slots. Fixed after construction.
     pub capacity: usize,
@@ -95,13 +95,12 @@ pub struct CutPool {
     /// Active-cut count, maintained incrementally so [`active_count`] is O(1).
     ///
     /// [`active_count`]: CutPool::active_count
-    pub cached_active_count: usize,
+    cached_active_count: usize,
 
-    /// Cuts ever inserted (including warm-start cuts). Unlike [`populated_count`]
-    /// — a slot high-water mark that includes reserved-but-unwritten leading slots
-    /// — this counts only real insertions: the true policy-row count.
-    ///
-    /// [`populated_count`]: CutPool::populated_count
+    /// Cuts ever inserted (including warm-start cuts). Unlike
+    /// [`populated`](CutPool::populated) — a slot high-water mark that includes
+    /// reserved-but-unwritten leading slots — this counts only real insertions:
+    /// the true policy-row count.
     pub generated_count: usize,
 
     /// Scratch buffer for [`enforce_budget`] candidate collection, reused across
@@ -123,7 +122,7 @@ impl CutPool {
     /// assert_eq!(pool.capacity, 50);
     /// assert_eq!(pool.state_dimension, 4);
     /// assert_eq!(pool.active_count(), 0);
-    /// assert_eq!(pool.populated_count, 0);
+    /// assert_eq!(pool.populated(), 0);
     /// ```
     #[must_use]
     pub fn new(
@@ -206,8 +205,8 @@ impl CutPool {
     /// let mut pool = CutPool::new(20, 3, 5, 0);
     /// pool.add_cut(1, 2, 10.0, &[1.0, 2.0, 3.0]);
     /// // slot = 0 + 1*5 + 2 = 7
-    /// assert!(pool.active[7]);
-    /// assert_eq!(pool.intercepts[7], 10.0);
+    /// assert!(pool.is_active(7));
+    /// assert_eq!(pool.intercept(7), 10.0);
     /// ```
     pub fn add_cut(
         &mut self,
@@ -343,6 +342,7 @@ impl CutPool {
     /// assert_eq!(pool.active_count(), 1);
     /// ```
     #[must_use]
+    #[inline]
     pub fn active_count(&self) -> usize {
         debug_assert_eq!(
             self.cached_active_count,
@@ -384,6 +384,123 @@ impl CutPool {
         self.populated_count
     }
 
+    /// Populated-slot count — the same value as [`cuts_in_lp`](CutPool::cuts_in_lp).
+    #[must_use]
+    #[inline]
+    pub fn populated(&self) -> usize {
+        self.populated_count
+    }
+
+    /// Read a single slot's activity flag.
+    #[must_use]
+    #[inline]
+    pub fn is_active(&self, slot: usize) -> bool {
+        self.active[slot]
+    }
+
+    /// Read a single slot's cut-selection metadata.
+    #[must_use]
+    #[inline]
+    pub fn metadata(&self, slot: usize) -> &CutMetadata {
+        &self.metadata[slot]
+    }
+
+    /// Read a single slot's intercept.
+    #[must_use]
+    #[inline]
+    pub fn intercept(&self, slot: usize) -> f64 {
+        self.intercepts[slot]
+    }
+
+    /// Read a single slot's coefficient row (`state_dimension` elements).
+    #[must_use]
+    #[inline]
+    pub fn coefficient_row(&self, slot: usize) -> &[f64] {
+        let start = slot * self.state_dimension;
+        &self.coefficients[start..start + self.state_dimension]
+    }
+
+    /// Read every populated slot's coefficients as one flat, row-major slice
+    /// (`populated() * state_dimension` elements) — the batched-GEMM
+    /// counterpart to [`coefficient_row`](CutPool::coefficient_row).
+    #[must_use]
+    #[inline]
+    pub fn coefficients_prefix(&self) -> &[f64] {
+        &self.coefficients[..self.populated_count * self.state_dimension]
+    }
+
+    /// Read every populated slot's intercepts as one flat slice
+    /// (`populated()` elements) — the batched counterpart to
+    /// [`intercept`](CutPool::intercept).
+    #[must_use]
+    #[inline]
+    pub fn intercepts_prefix(&self) -> &[f64] {
+        &self.intercepts[..self.populated_count]
+    }
+
+    /// Record that a cut was binding `increment` more times, most recently at
+    /// `iteration`. Metadata mutation cannot desync `active`/
+    /// `cached_active_count` (independent fields), so — unlike
+    /// [`replace_selection`](CutPool::replace_selection) — this touches only
+    /// the one slot's metadata.
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if `slot >= populated_count`.
+    #[inline]
+    pub fn record_binding(&mut self, slot: usize, increment: u64, iteration: u64) {
+        debug_assert!(
+            slot < self.populated_count,
+            "record_binding: slot {slot} out of populated range"
+        );
+        self.metadata[slot].active_count += increment;
+        self.metadata[slot].last_active_iter = iteration;
+    }
+
+    /// Test-only: overwrite one slot's metadata directly, bypassing
+    /// `add_cut`'s iteration/slot coupling. Metadata mutation cannot desync
+    /// `active`/`cached_active_count`, so no bulk recomputation is needed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `slot >= populated_count`.
+    #[cfg(test)]
+    pub(crate) fn set_metadata_for_test(&mut self, slot: usize, metadata: CutMetadata) {
+        assert!(
+            slot < self.populated_count,
+            "set_metadata_for_test: slot {slot} out of populated range"
+        );
+        self.metadata[slot] = metadata;
+    }
+
+    /// Test-only: overwrite one slot's `iteration_generated`, decoupling a
+    /// cut's metadata age from the slot `add_cut` placed it at. Every other
+    /// call site fixtures test scenarios (cut-selection windows, DCS
+    /// candidate age) around this one field.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `slot >= populated_count`.
+    #[cfg(test)]
+    pub(crate) fn set_iteration_generated_for_test(
+        &mut self,
+        slot: usize,
+        iteration_generated: u64,
+    ) {
+        assert!(
+            slot < self.populated_count,
+            "set_iteration_generated_for_test: slot {slot} out of populated range"
+        );
+        self.metadata[slot].iteration_generated = iteration_generated;
+    }
+
+    /// Cuts ever inserted, including warm-start cuts.
+    #[must_use]
+    #[inline]
+    pub fn generated(&self) -> usize {
+        self.generated_count
+    }
+
     /// Deactivate the cuts at the given slot indices via [`set_active`].
     ///
     /// [`set_active`]: CutPool::set_active
@@ -403,8 +520,8 @@ impl CutPool {
     /// pool.add_cut(1, 0, 2.0, &[2.0]);
     /// pool.deactivate(&[0]);
     /// assert_eq!(pool.active_count(), 1);
-    /// assert!(!pool.active[0]);
-    /// assert!(pool.active[1]);
+    /// assert!(!pool.is_active(0));
+    /// assert!(pool.is_active(1));
     /// ```
     pub fn deactivate(&mut self, indices: &[u32]) {
         for &idx in indices {
@@ -442,9 +559,9 @@ impl CutPool {
     ///     reactivations: vec![1],    // reactivate slot 1
     /// };
     /// pool.apply_updates(&updates);
-    /// assert!(!pool.active[0]);
-    /// assert!(pool.active[1]);
-    /// assert!(pool.active[2]);
+    /// assert!(!pool.is_active(0));
+    /// assert!(pool.is_active(1));
+    /// assert!(pool.is_active(2));
     /// assert_eq!(pool.active_count(), 2);
     /// ```
     pub fn apply_updates(&mut self, updates: &crate::cut_selection::CutActivityUpdates) {
@@ -454,6 +571,46 @@ impl CutPool {
         for &slot in &updates.reactivations {
             self.set_active(slot, true);
         }
+    }
+
+    /// Overwrite `metadata` and `active` across the populated prefix in one
+    /// call, recomputing `cached_active_count` from the just-written bitmap in
+    /// the same call — the two writes stay atomic so the cache can never
+    /// desync from the bitmap it counts.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `metadata.len() != populated_count` or `active.len() !=
+    /// populated_count` (slice-length mismatch on assignment).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use cobre_sddp::cut::pool::CutPool;
+    /// use cobre_sddp::cut_selection::CutMetadata;
+    ///
+    /// let mut pool = CutPool::new(10, 1, 1, 0);
+    /// pool.add_cut(0, 0, 1.0, &[1.0]);
+    /// pool.add_cut(1, 0, 2.0, &[2.0]);
+    ///
+    /// let meta = CutMetadata {
+    ///     iteration_generated: 0,
+    ///     forward_pass_index: 0,
+    ///     active_count: 0,
+    ///     last_active_iter: 0,
+    /// };
+    /// pool.replace_selection(&[meta.clone(), meta], &[false, true]);
+    /// assert_eq!(pool.active_count(), 1);
+    /// assert!(!pool.is_active(0));
+    /// assert!(pool.is_active(1));
+    /// ```
+    pub fn replace_selection(&mut self, metadata: &[CutMetadata], active: &[bool]) {
+        self.metadata[..self.populated_count].clone_from_slice(metadata);
+        self.active[..self.populated_count].clone_from_slice(active);
+        self.cached_active_count = self.active[..self.populated_count]
+            .iter()
+            .filter(|&&a| a)
+            .count();
     }
 
     /// Toggle a single slot's activity flag, keeping `cached_active_count`
@@ -475,12 +632,12 @@ impl CutPool {
     ///
     /// pool.set_active(1, false);
     /// assert_eq!(pool.active_count(), 2);
-    /// assert!(!pool.active[1]);
+    /// assert!(!pool.is_active(1));
     /// assert_eq!(pool.cuts_in_lp(), 3); // populated count unchanged
     ///
     /// pool.set_active(1, true);
     /// assert_eq!(pool.active_count(), 3);
-    /// assert!(pool.active[1]);
+    /// assert!(pool.is_active(1));
     /// ```
     pub fn set_active(&mut self, slot: u32, active: bool) {
         let i = slot as usize;
@@ -491,11 +648,10 @@ impl CutPool {
         if self.active[i] == active {
             return;
         }
+        self.active[i] = active;
         if active {
-            self.active[i] = true;
             self.cached_active_count += 1;
         } else {
-            self.active[i] = false;
             self.cached_active_count -= 1;
         }
     }
@@ -617,7 +773,7 @@ impl CutPool {
     ///
     /// let pool = CutPool::from_deserialized(2, &records);
     /// assert_eq!(pool.capacity, 1);
-    /// assert_eq!(pool.populated_count, 1);
+    /// assert_eq!(pool.populated(), 1);
     /// assert_eq!(pool.active_count(), 1);
     /// ```
     #[must_use]
@@ -693,7 +849,7 @@ impl CutPool {
     /// let pool = CutPool::new_with_warm_start(2, 4, 10, &records);
     /// assert_eq!(pool.warm_start_count, 1);
     /// assert_eq!(pool.capacity, 1 + 10 * 4); // 41
-    /// assert_eq!(pool.populated_count, 1);
+    /// assert_eq!(pool.populated(), 1);
     /// assert_eq!(pool.active_count(), 1);
     /// ```
     #[must_use]
@@ -1771,5 +1927,114 @@ mod tests {
 
         assert_eq!(pool_a.active, pool_b.active);
         assert_eq!(pool_a.cached_active_count, pool_b.cached_active_count);
+    }
+
+    // ── read accessor equivalence tests ──────────────────────────────────────
+
+    /// Every new read accessor must return exactly the value its corresponding
+    /// direct field read would, on a pool with a mix of active and inactive
+    /// populated slots.
+    #[test]
+    fn accessors_match_direct_field_reads() {
+        let mut pool = CutPool::new(10, 3, 1, 0);
+        pool.add_cut(0, 0, 10.0, &[1.0, 2.0, 3.0]);
+        pool.add_cut(1, 0, 20.0, &[4.0, 5.0, 6.0]);
+        pool.add_cut(2, 0, 30.0, &[7.0, 8.0, 9.0]);
+        pool.deactivate(&[1]);
+
+        assert_eq!(pool.populated(), pool.populated_count);
+        assert_eq!(pool.generated(), pool.generated_count);
+
+        for slot in 0..pool.populated_count {
+            assert_eq!(pool.is_active(slot), pool.active[slot], "slot {slot}");
+            assert_eq!(pool.intercept(slot), pool.intercepts[slot], "slot {slot}");
+
+            let start = slot * pool.state_dimension;
+            assert_eq!(
+                pool.coefficient_row(slot),
+                &pool.coefficients[start..start + pool.state_dimension],
+                "slot {slot}"
+            );
+
+            let via_accessor = pool.metadata(slot);
+            let direct = &pool.metadata[slot];
+            assert_eq!(
+                via_accessor.iteration_generated, direct.iteration_generated,
+                "slot {slot}"
+            );
+            assert_eq!(
+                via_accessor.forward_pass_index, direct.forward_pass_index,
+                "slot {slot}"
+            );
+            assert_eq!(
+                via_accessor.active_count, direct.active_count,
+                "slot {slot}"
+            );
+            assert_eq!(
+                via_accessor.last_active_iter, direct.last_active_iter,
+                "slot {slot}"
+            );
+        }
+    }
+
+    // ── replace_selection tests ────────────────────────────────────────────
+
+    /// `replace_selection` writes `active` and recomputes `cached_active_count`
+    /// in the same call, so `active_count()` — whose internal `debug_assert`
+    /// re-derives the count from the bitmap — must return exactly the count of
+    /// `true` entries with no desync.
+    #[test]
+    fn replace_selection_recomputes_active_count_from_written_bitmap() {
+        use crate::cut_selection::CutMetadata;
+
+        let mut pool = CutPool::new(10, 1, 1, 0);
+        pool.add_cut(0, 0, 1.0, &[1.0]);
+        pool.add_cut(1, 0, 2.0, &[2.0]);
+        pool.add_cut(2, 0, 3.0, &[3.0]);
+        pool.add_cut(3, 0, 4.0, &[4.0]);
+
+        let meta = |iteration_generated: u64| CutMetadata {
+            iteration_generated,
+            forward_pass_index: 0,
+            active_count: 0,
+            last_active_iter: iteration_generated,
+        };
+        let metadata = vec![meta(0), meta(1), meta(2), meta(3)];
+        let active = vec![true, false, true, false];
+
+        pool.replace_selection(&metadata, &active);
+
+        assert_eq!(
+            pool.active_count(),
+            2,
+            "must equal the count of true entries"
+        );
+        assert!(pool.active[0]);
+        assert!(!pool.active[1]);
+        assert!(pool.active[2]);
+        assert!(!pool.active[3]);
+    }
+
+    /// A `replace_selection` call that flips every active slot to inactive
+    /// must recompute `cached_active_count` down to zero, not merely leave it
+    /// unset — the recompute is unconditional, not a delta.
+    #[test]
+    fn replace_selection_recomputes_to_zero_when_all_inactive() {
+        use crate::cut_selection::CutMetadata;
+
+        let mut pool = CutPool::new(10, 1, 1, 0);
+        pool.add_cut(0, 0, 1.0, &[1.0]);
+        pool.add_cut(1, 0, 2.0, &[2.0]);
+        assert_eq!(pool.active_count(), 2);
+
+        let meta = CutMetadata {
+            iteration_generated: 0,
+            forward_pass_index: 0,
+            active_count: 0,
+            last_active_iter: 0,
+        };
+        pool.replace_selection(&[meta.clone(), meta], &[false, false]);
+
+        assert_eq!(pool.active_count(), 0);
     }
 }

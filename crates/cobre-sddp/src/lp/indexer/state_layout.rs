@@ -1,135 +1,102 @@
 //! The stage-invariant state-vector layout and its LP-column resolvers.
 //!
-//! [`StateLayout`] owns the role-(a) concern of the stage LP: the
-//! stage-invariant state-vector column ranges, the two layout-derived caches
-//! (`nonzero_state_indices`, `state_to_lp_column_map`), and the resolvers that
-//! map a state-vector index to the LP column a cut row references
-//! ([`StateLayout::state_to_lp_column`]) or the incoming-state column a cut
-//! subgradient is read from ([`StateLayout::state_to_lp_incoming_column`]).
+//! State pinning uses column bounds, not equality rows:
+//! [`StateLayout::state_to_lp_incoming_column`] is the single authoritative
+//! incoming-state column resolver — the LP column for both pinning and dual
+//! extraction is always resolved through it, never by assuming a fixing-row
+//! index. The companion [`StateLayout::state_to_lp_column`] maps the outgoing
+//! state vector to the LP columns a forward-pass cut row references.
 //!
-//! It carries the state-pinning contract (state pinning uses column bounds, not
-//! equality rows): [`StateLayout::state_to_lp_incoming_column`] is the single
-//! authoritative incoming-state column resolver; the LP column for both pinning
-//! and dual extraction is always resolved through it, never by assuming a
-//! fixing-row index. The companion [`StateLayout::state_to_lp_column`] maps the
-//! outgoing state vector to the LP columns a forward-pass cut row references.
-//!
-//! Unlike the satellite control/equipment geometry, every offset here is a pure
-//! function of `N` (`hydro_count`), `L` (`max_par_order`), `A`
-//! (`n_anticipated`), and `k_max` — independent of `n_blks`/`n_thermals` — so a
-//! single global stage-0 layout resolves onto the correct column at every stage
-//! regardless of per-stage block counts.
+//! Every offset here is a pure function of `N` (`hydro_count`), `L`
+//! (`max_par_order`), `B` (`n_buckets`), `A` (`n_anticipated`), and `k_max` —
+//! independent of `n_blks`/`n_thermals` — so a single global stage-0 layout
+//! resolves onto the correct column at every stage regardless of per-stage
+//! block counts.
 
 use std::ops::Range;
 
+use crate::lead_time::AnticipatedResolution;
+
 /// Stage-invariant state-vector layout for one SDDP stage subproblem.
-///
-/// Computed once from the state dimensions (`N`, `L`, `A`, `k_max`) plus the
-/// per-hydro effective lag-slot counts. Both layout-derived caches
-/// ([`Self::nonzero_state_indices`] and [`Self::state_to_lp_column_map`]) are
-/// finalized at construction by the single [`StateLayout::new`] constructor —
-/// there is no two-phase init on this type.
 ///
 /// ## Column layout
 ///
 /// ```text
-/// [0, N)                                    storage               — outgoing storage volumes (N = hydro_count)
-/// [N, N*(1+L))                              inflow_lags           — AR lag variables (L lags per hydro)
-/// [N*(1+L), N*(1+L) + A*k_max)              anticipated_state     — anticipated thermal commitment state slots
-/// [N*(1+L) + A*k_max, … + A)                anticipated_state_out — cut-target columns (one per anticipated plant)
-/// [… + A, … + A + N)                        z_inflow              — realized inflow (auxiliary, not state)
-/// [… + A + N, … + A + 2*N)                  storage_in            — incoming storage volumes
-/// N*(3+L) + A*k_max + A                      theta                 — future cost variable (scalar)
+/// [0, N)                                     storage               — outgoing storage volumes (N = hydro_count)
+/// [N, N*(1+L))                               inflow_lags           — AR lag variables (L lags per hydro)
+/// [N*(1+L), N*(1+L) + B)                     transit_buckets_out   — travel-time bucket state (outgoing, identity)
+/// [N*(1+L) + B, N*(1+L) + B + A*k_max)       anticipated_slots_out — anticipated-ring outgoing slots (outgoing, identity)
+/// [… + A*k_max, … + N)                       z_inflow              — realized inflow (auxiliary, not state)
+/// [… + N, … + 2*N)                           storage_in            — incoming storage volumes
+/// [… + 2*N, … + 2*N + B)                     transit_buckets_in    — incoming travel-time bucket volumes (pinned)
+/// [… + B, … + B + A*k_max)                   anticipated_state     — incoming anticipated-ring slots (pinned)
+/// … + A*k_max                                 theta                 — future cost variable (scalar)
 /// ```
 ///
-/// `anticipated_state_out` lives in the state region (it is a cut TARGET column,
-/// not a state-vector dimension) and does **not** contribute to [`Self::n_state`].
+/// The anticipated ring is two blocks: an outgoing block
+/// ([`Self::anticipated_slots_out`], identity-resolved, contributing to
+/// [`Self::n_state`]) and a separate incoming block ([`Self::anticipated_state`],
+/// pinned via [`Self::state_to_lp_incoming_column`]) — never one dual-purpose
+/// range shifted out-of-LP.
 #[derive(Debug, Clone)]
 pub struct StateLayout {
-    /// Column range `[0, N)` for outgoing storage volumes.
+    /// Outgoing storage volumes.
     pub storage: Range<usize>,
 
-    /// Column range `[N, N*(1+L))` for AR lag variables.
-    ///
-    /// Lag variables are stored in lag-major order: all hydros for lag 0,
-    /// then all hydros for lag 1, etc. The column index for hydro `h` at
-    /// lag `l` (0-indexed, lag 0 = most recent) is:
-    /// `inflow_lags.start + l * hydro_count + h`.
+    /// AR lag variables, lag-major: all hydros for lag 0, then lag 1, …. Hydro
+    /// `h` at lag `l` is at `inflow_lags.start + l * hydro_count + h`.
     pub inflow_lags: Range<usize>,
 
-    /// Column range `[N*(1+L), N*(1+L) + n_anticipated*K_max)` for
-    /// anticipated thermal commitment state slots.
-    ///
-    /// Ring-buffer block mirroring the inflow-lag layout: slot
-    /// `k = 0..K_max` for anticipated plant `i = 0..n_anticipated` lives at
-    /// column `anticipated_state.start + k * n_anticipated + i` (slot-major,
-    /// plant-minor). Slot 0 holds the commitment maturing at the current
-    /// stage; slot `K_max - 1` holds the commitment that matures
-    /// `K_max - 1` stages from now.
-    ///
-    /// Empty (`0..0`) when `n_anticipated == 0`.
-    pub anticipated_state: Range<usize>,
+    /// Travel-time in-transit bucket state. Outgoing bucket state maps to its
+    /// LP column by identity — the `storage` convention, not the `z_inflow`
+    /// lag remap.
+    pub transit_buckets_out: Range<usize>,
 
-    /// Column range `[N*(2+L) + A*K_max, N*(3+L) + A*K_max)` for incoming
-    /// storage volumes.
-    ///
-    /// Pinned to the preceding stage's outgoing `storage` solution values via
-    /// `set_col_bounds` on these columns — not via equality rows (the LP has no
-    /// state-fixing row range). Resolve the column with
+    /// Anticipated ring OUTGOING slots, slot-major/plant-minor: slot `k` for
+    /// plant `i` at `anticipated_slots_out.start + k * n_anticipated + i`. Each
+    /// slot is a genuine LP column resolved by identity (the
+    /// `transit_buckets_out` convention) and defined by an in-LP definition row
+    /// (ring shift or delivery-decision deposit) — never resolved out-of-LP.
+    /// Slots `k >= k_i` are padding, frozen `[0, 0]`.
+    pub anticipated_slots_out: Range<usize>,
+
+    /// Incoming storage volumes, pinned via
     /// [`StateLayout::state_to_lp_incoming_column`].
     pub storage_in: Range<usize>,
 
-    /// Column range for realized-inflow variables `z_h`, one per hydro.
-    ///
-    /// Free columns (lower = -inf, upper = +inf, zero cost) holding total
-    /// natural inflow `Z_t_h`, defined by the z-inflow equality constraints.
-    ///
-    /// Empty when `hydro_count == 0`.
+    /// Incoming travel-time bucket volumes, pinned via
+    /// [`StateLayout::state_to_lp_incoming_column`].
+    pub transit_buckets_in: Range<usize>,
+
+    /// Realized-inflow variables `z_h`, one per hydro.
     pub z_inflow: Range<usize>,
 
-    /// Column range for the anticipated-thermal outgoing-state variables,
-    /// one column per anticipated plant (stage-level, NOT per-block).
-    ///
-    /// Length: `n_anticipated`. Placed in the **stage-invariant state region**,
-    /// immediately after the [`Self::anticipated_state`] ring buffer and before
-    /// [`Self::z_inflow`], so that
-    /// `anticipated_state_out.start == anticipated_state.end` and its offset is
-    /// a pure function of `N`, `L`, `A`, `k_max` — independent of `n_blks` and
-    /// `n_thermals`. This is what makes it a sound cut TARGET: the global
-    /// stage-0 cut map resolves the matured anticipated slot here (via
-    /// [`Self::state_to_lp_column`]'s Equal branch) onto the same column at
-    /// every stage regardless of per-stage block counts.
-    ///
-    /// Despite living in the state region, it is NOT a state-vector dimension
-    /// and does NOT contribute to [`Self::n_state`]. Together with the
-    /// `anticipated_state_out` definition row it is pinned to the corresponding
-    /// anticipated-decision column by an equality constraint
-    /// (`anticipated_state_out[p] − decision_col[p] = 0`).
-    ///
-    /// Empty (`0..0`) when `n_anticipated == 0`.
-    pub anticipated_state_out: Range<usize>,
+    /// Anticipated ring INCOMING slots, same slot-major/plant-minor layout as
+    /// [`Self::anticipated_slots_out`], pinned via
+    /// [`StateLayout::state_to_lp_incoming_column`]. Slot 0 (the commitment
+    /// maturing this stage) is also read directly by [`crate::lp_builder`]'s
+    /// anticipated-fishing row fill.
+    pub anticipated_state: Range<usize>,
 
-    /// Column index `N*(3+L) + A*K_max + A` for the future cost variable (theta).
-    ///
-    /// Scalar: there is exactly one theta variable per stage LP.
+    /// Future cost variable (theta) column.
     pub theta: usize,
 
-    /// State-vector dimension: `N*(1+L)`, or `N*(1+L) + A*K_max` with
-    /// anticipated thermals.
-    ///
-    /// The dimension used by cut storage and broadcast payloads — **not** a
-    /// valid LP row index. Do not slice the LP row buffer as `[0, n_state)`: no
-    /// state-fixing rows exist; resolve the pinning/subgradient column via
-    /// [`StateLayout::state_to_lp_incoming_column`].
+    /// State-vector dimension used by cut storage and broadcast payloads —
+    /// **not** a valid LP row index. No state-fixing rows exist; do not slice
+    /// the LP row buffer as `[0, n_state)`. Resolve the pinning/subgradient
+    /// column via [`StateLayout::state_to_lp_incoming_column`].
     pub n_state: usize,
 
     /// Number of operating hydro plants (N).
     pub hydro_count: usize,
 
-    /// Maximum PAR order across all operating hydros (L).
-    ///
-    /// Every hydro uses a uniform lag stride of `max_par_order`.
+    /// Maximum PAR order across all operating hydros (L); every hydro uses this
+    /// uniform lag stride.
     pub max_par_order: usize,
+
+    /// Global travel-time bucket count `B` (`Σ_j per_plant_depth[j]`), `0` when
+    /// no arc is declared.
+    pub n_buckets: usize,
 
     /// Number of anticipated thermals (plants with
     /// `anticipated_config.is_some()`).
@@ -138,21 +105,25 @@ pub struct StateLayout {
     /// Maximum `lead_stages` across the anticipated thermals (`K_max`).
     pub k_max: usize,
 
-    /// Per-plant `lead_stages` (`K_i`), indexed by anticipated-local position.
-    ///
-    /// Length [`Self::n_anticipated`].
+    /// Per-plant `lead_stages` (`K_i`), indexed by anticipated-local position;
+    /// length [`Self::n_anticipated`].
     pub anticipated_lead_stages: Vec<usize>,
 
-    /// Indices of state dimensions whose cut coefficients can be nonzero.
-    ///
-    /// Storage indices `[0, N)` are always included. Lag indices `[N, N*(1+L))`
-    /// are included only when `lag < effective_lag_count[hydro]`. Hydros with AR
-    /// order < `max_par_order` have padded lag slots whose duals are
-    /// structurally zero.
+    /// Delivery-anchored point-commitment resolution per anticipated plant
+    /// (anticipated-local order); default-empty until
+    /// [`Self::set_anticipated_resolution`] attaches it.
+    pub(crate) anticipated_resolution: AnticipatedResolution,
+
+    /// Canonical `(plant_canonical_idx, lag)` pair per bucket state-vector
+    /// dimension, in [`Self::transit_buckets_out`] order.
+    pub transit_bucket_column_order: Vec<(usize, usize)>,
+
+    /// State dimensions whose cut coefficients can be nonzero (padded lag/ring
+    /// slots excluded); computed by [`Self::set_nonzero_mask`].
     pub nonzero_state_indices: Vec<usize>,
 
-    /// Precomputed `state_to_lp_column(j)` for every `j ∈ [0, n_state)`, read on
-    /// the forward-pass cut-row hot path.
+    /// Precomputed `state_to_lp_column(j)` for every `j ∈ [0, n_state)` (cut-row
+    /// hot path).
     pub state_to_lp_column_map: Vec<usize>,
 }
 
@@ -161,16 +132,17 @@ impl StateLayout {
     /// per-hydro effective lag-slot counts.
     ///
     /// `effective_lag_count` must have length `hydro_count`; each entry is
-    /// `PrecomputedPar::effective_lag_count(h)` — the number of lag-state slots
-    /// that may carry non-zero cut coefficients for that hydro.
-    ///
-    /// Both layout-derived caches are finalized here, so the returned value is
-    /// ready for the cut-row hot path with no two-phase init.
+    /// `PrecomputedPar::effective_lag_count(h)` — the count of lag slots that
+    /// may carry non-zero cut coefficients (see [`Self::set_nonzero_mask`] for
+    /// why `order(h)` is wrong). `transit_bucket_column_order` is the buckets'
+    /// canonical `(plant, lag)` order (`len() == n_buckets`); `n_buckets == 0`
+    /// reproduces the pre-bucket layout byte-for-byte.
     ///
     /// # Panics (debug builds only)
     ///
     /// Inherits the [`Self::set_nonzero_mask`] and
     /// [`Self::finalize_state_column_map`] debug assertions:
+    /// `transit_bucket_column_order.len() == n_buckets`,
     /// `effective_lag_count.len() == hydro_count`,
     /// `anticipated_lead_stages.len() == n_anticipated`, lag/lead bounds, and
     /// `state_to_lp_column_map.len() == n_state`.
@@ -178,24 +150,59 @@ impl StateLayout {
     pub fn new(
         hydro_count: usize,
         max_par_order: usize,
+        n_buckets: usize,
+        transit_bucket_column_order: Vec<(usize, usize)>,
         n_anticipated: usize,
         k_max: usize,
         anticipated_lead_stages: Vec<usize>,
         effective_lag_count: &[usize],
     ) -> Self {
+        debug_assert_eq!(
+            transit_bucket_column_order.len(),
+            n_buckets,
+            "transit_bucket_column_order must have exactly n_buckets entries"
+        );
+
         let n = hydro_count;
         let l = max_par_order;
         let n_ant_state = n_anticipated * k_max;
 
-        // Sequential-offset chain: each range starts at the previous range's
-        // `.end`, so the whole state region is auditable in one linear read.
-        // Optional blocks empty-normalise to `0..0`; use the `*_end` bindings
-        // (not `range.end`) for downstream arithmetic so the shift survives the
-        // `0..0` collapse.
+        // Optional blocks empty-normalise to `0..0`; use the `*_end` bindings,
+        // not `range.end`, for downstream arithmetic so the shift survives the
+        // collapse.
         let storage = 0..n;
         let inflow_lags = n..n * (1 + l);
 
-        let anticipated_state_start = n * (1 + l);
+        let transit_buckets_out_start = n * (1 + l);
+        let transit_buckets_out_end = transit_buckets_out_start + n_buckets;
+        let transit_buckets_out = if n_buckets > 0 {
+            transit_buckets_out_start..transit_buckets_out_end
+        } else {
+            0..0
+        };
+
+        let anticipated_slots_out_start = transit_buckets_out_end;
+        let anticipated_slots_out_end = anticipated_slots_out_start + n_ant_state;
+        let anticipated_slots_out = if n_ant_state > 0 {
+            anticipated_slots_out_start..anticipated_slots_out_end
+        } else {
+            0..0
+        };
+
+        let z_inflow_start = anticipated_slots_out_end;
+        let z_inflow = z_inflow_start..z_inflow_start + n;
+        let storage_in_start = z_inflow.end;
+        let storage_in = storage_in_start..storage_in_start + n;
+
+        let transit_buckets_in_start = storage_in.end;
+        let transit_buckets_in_end = transit_buckets_in_start + n_buckets;
+        let transit_buckets_in = if n_buckets > 0 {
+            transit_buckets_in_start..transit_buckets_in_end
+        } else {
+            0..0
+        };
+
+        let anticipated_state_start = transit_buckets_in_end;
         let anticipated_state_end = anticipated_state_start + n_ant_state;
         let anticipated_state = if n_ant_state > 0 {
             anticipated_state_start..anticipated_state_end
@@ -203,39 +210,31 @@ impl StateLayout {
             0..0
         };
 
-        let anticipated_state_out_start = anticipated_state_end;
-        let anticipated_state_out_end = anticipated_state_out_start + n_anticipated;
-        let anticipated_state_out = if n_anticipated > 0 {
-            anticipated_state_out_start..anticipated_state_out_end
-        } else {
-            0..0
-        };
+        let theta = anticipated_state_end;
 
-        let z_inflow_start = anticipated_state_out_end;
-        let z_inflow = z_inflow_start..z_inflow_start + n;
-        let storage_in_start = z_inflow.end;
-        let storage_in = storage_in_start..storage_in_start + n;
-        let theta = storage_in.end;
-
-        // `anticipated_state_out` is a cut TARGET column, not a state-vector
-        // dimension, so it does NOT enter `n_state`. Adding it would corrupt
-        // cut-pool storage sizes.
-        let n_state = n * (1 + l) + n_ant_state;
+        // Outgoing and incoming ring blocks describe the SAME `A*k_max` state
+        // dimensions, so `n_ant_state` enters `n_state` once, not twice.
+        let n_state = n * (1 + l) + n_buckets + n_ant_state;
 
         let mut layout = Self {
             storage,
             inflow_lags,
-            anticipated_state,
+            transit_buckets_out,
+            anticipated_slots_out,
             storage_in,
+            transit_buckets_in,
             z_inflow,
-            anticipated_state_out,
+            anticipated_state,
             theta,
             n_state,
             hydro_count,
             max_par_order,
+            n_buckets,
             n_anticipated,
             k_max,
             anticipated_lead_stages,
+            anticipated_resolution: AnticipatedResolution::default(),
+            transit_bucket_column_order,
             nonzero_state_indices: Vec::new(),
             state_to_lp_column_map: Vec::new(),
         };
@@ -246,6 +245,27 @@ impl StateLayout {
         layout
     }
 
+    /// Attach the setup-computed [`AnticipatedResolution`].
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if the delivery-anchored ring depth exceeds the sized `k_max`, or
+    /// the resolution does not carry exactly one `PointResolution` per plant.
+    pub(crate) fn set_anticipated_resolution(&mut self, resolution: AnticipatedResolution) {
+        debug_assert!(
+            resolution.k_max <= self.k_max,
+            "delivery-anchored ring depth {} exceeds the sized k_max {}",
+            resolution.k_max,
+            self.k_max
+        );
+        debug_assert_eq!(
+            resolution.per_plant.len(),
+            self.n_anticipated,
+            "resolution must carry one PointResolution per anticipated plant"
+        );
+        self.anticipated_resolution = resolution;
+    }
+
     /// First column of the control region (`theta + 1`): the state region
     /// occupies `[0, theta]`, equipment columns follow from here.
     #[inline]
@@ -254,31 +274,51 @@ impl StateLayout {
         self.theta + 1
     }
 
-    /// Map a state-vector index to the LP column it should reference in a cut.
+    // ── Canonical state-dimension region boundaries ─────────────────────────
+    // GLOBAL STATE INDEX space, not LP columns. `CutStateProjection::new` and
+    // `state_to_lp_incoming_column` read these instead of re-deriving the
+    // boundaries locally, so neither can drift from the order
+    // `set_nonzero_mask` walks (storage → lag → bucket → anticipated).
+
+    /// State-dimension region `[0, N)` — storage.
+    #[inline]
+    #[must_use]
+    pub(crate) fn state_dim_storage_range(&self) -> Range<usize> {
+        0..self.hydro_count
+    }
+
+    /// State-dimension region `[N, N*(1+L))` — AR inflow lags.
+    #[inline]
+    #[must_use]
+    pub(crate) fn state_dim_lag_range(&self) -> Range<usize> {
+        let n = self.hydro_count;
+        n..n * (1 + self.max_par_order)
+    }
+
+    /// State-dimension region `[N*(1+L), N*(1+L) + B)` — travel-time buckets.
+    #[inline]
+    #[must_use]
+    pub(crate) fn state_dim_bucket_range(&self) -> Range<usize> {
+        let start = self.state_dim_lag_range().end;
+        start..start + self.n_buckets
+    }
+
+    /// State-dimension region `[N*(1+L) + B, N*(1+L) + B + A*k_max)` —
+    /// anticipated ring slots.
+    #[inline]
+    #[must_use]
+    pub(crate) fn state_dim_anticipated_range(&self) -> Range<usize> {
+        let start = self.state_dim_bucket_range().end;
+        start..start + self.n_anticipated * self.k_max
+    }
+
+    /// Map a state-vector index to the LP column it references in a cut.
     ///
-    /// The outgoing state after `shift_lag_state` stores:
-    /// - `[0, N)`: outgoing storage → LP column `j` (identity mapping)
-    /// - `[N + 0·N + h]`: outgoing lag 0 for hydro `h` = realised inflow
-    ///   → LP column `z_inflow.start + h`
-    /// - `[N + l·N + h]` for `l ≥ 1`: outgoing lag `l` = incoming lag `l − 1`
-    ///   → LP column `N + (l − 1)·N + h`
-    /// - `[N*(1+L), N*(1+L) + n_anticipated*K_max)`: `anticipated_state` slots
-    ///   → shift-aware mapping (mirrors the inflow-lag pattern structurally):
-    ///   - `slot == K_p − 1` for plant `p`: the post-shift outgoing slot carries
-    ///     the decision committed at stage `t`. The Equal branch returns
-    ///     `anticipated_state_out.start + p`. That target column is
-    ///     stage-invariant: `anticipated_state_out` lives in the state region
-    ///     (immediately after the `anticipated_state` ring buffer), so its
-    ///     offset is a pure function of `N`, `L`, `A`, `k_max` and the single
-    ///     global stage-0 cut map resolves onto the correct column at every
-    ///     stage regardless of per-stage block counts. The column is pinned to
-    ///     `decision_col[p]` by the `anticipated_state_out_def` equality row
-    ///     (`anticipated_state_out[p] − decision_col[p] = 0`).
-    ///   - `slot < K_p − 1`: the successor's slot `i` = predecessor's incoming
-    ///     slot `i + 1` (shift); returns
-    ///     `anticipated_state.start + (slot + 1) * n_anticipated + p`.
-    ///   - `slot > K_p − 1`: padding (unused for this plant, pinned to 0 by the
-    ///     state-fixing row); returns `j` (identity; safe default).
+    /// Storage, `transit_buckets_out`, and `anticipated_slots_out` map by
+    /// identity. Lag indices remap to the outgoing state after
+    /// `shift_lag_state`: lag 0 is realised inflow → `z_inflow.start + h`; lag
+    /// `l ≥ 1` is the previous stage's lag `l − 1` →
+    /// `inflow_lags.start + (l − 1)·N + h`.
     #[inline]
     #[must_use]
     pub fn state_to_lp_column(&self, j: usize) -> usize {
@@ -286,27 +326,10 @@ impl StateLayout {
         if j < n {
             return j;
         }
-        // Must precede the `max_par_order == 0` early return: shift semantics
-        // apply even with no inflow lags.
-        if self.n_anticipated > 0 && j >= self.anticipated_state.start {
-            let ant_block_size = self.n_anticipated * self.k_max;
-            if j < self.anticipated_state.start + ant_block_size {
-                let offset = j - self.anticipated_state.start;
-                let slot = offset / self.n_anticipated;
-                let plant = offset % self.n_anticipated;
-                let k_p = self.anticipated_lead_stages[plant];
-                return match (slot + 1).cmp(&k_p) {
-                    std::cmp::Ordering::Equal => self.anticipated_state_out.start + plant,
-                    std::cmp::Ordering::Less => {
-                        self.anticipated_state.start + (slot + 1) * self.n_anticipated + plant
-                    }
-                    // INVARIANT: padding slot (`slot >= k_p`) — identity is the
-                    // safe default, not a decision column: it is pinned to 0 by
-                    // its zero-RHS state-fixing row, so its dual and hence its
-                    // cut coefficient are structurally 0.
-                    std::cmp::Ordering::Greater => j,
-                };
-            }
+        // Must precede the lag arithmetic: the modular lag decode would
+        // silently misresolve bucket/anticipated-ring indices once
+        // `max_par_order > 0`.
+        if self.transit_buckets_out.contains(&j) || self.anticipated_slots_out.contains(&j) {
             return j;
         }
         if self.max_par_order == 0 {
@@ -322,12 +345,9 @@ impl StateLayout {
         }
     }
 
-    /// Fill [`state_to_lp_column_map`](Self::state_to_lp_column_map) by calling
-    /// [`state_to_lp_column`](Self::state_to_lp_column) for every
-    /// `j ∈ [0, n_state)`.
-    ///
-    /// The map is a pure cache of the resolver — it never reimplements the
-    /// mapping arithmetic.
+    /// Fill [`Self::state_to_lp_column_map`] by calling
+    /// [`Self::state_to_lp_column`] for every `j ∈ [0, n_state)` — a pure cache
+    /// of the resolver, never a reimplementation of its arithmetic.
     pub fn finalize_state_column_map(&mut self) {
         self.state_to_lp_column_map.clear();
         self.state_to_lp_column_map.reserve(self.n_state);
@@ -338,11 +358,9 @@ impl StateLayout {
     }
 
     /// Read the precomputed `state_to_lp_column(j)` from
-    /// [`state_to_lp_column_map`](Self::state_to_lp_column_map).
-    ///
-    /// [`StateLayout::new`] always finalizes the map to `n_state` length, so the
-    /// indexed read is in range for `j ∈ [0, n_state)` with no live-resolver
-    /// fallback.
+    /// [`Self::state_to_lp_column_map`], which [`StateLayout::new`] always
+    /// finalizes to `n_state` length (indexed read is in range for
+    /// `j ∈ [0, n_state)`).
     #[inline]
     #[must_use]
     pub fn lp_column_for_state(&self, j: usize) -> usize {
@@ -354,85 +372,59 @@ impl StateLayout {
         self.state_to_lp_column_map[j]
     }
 
-    /// Map a state-vector index to the LP column pinned by
-    /// [`fill_col_state_patches`](crate::lp_builder::PatchBuffer::fill_col_state_patches).
+    /// Map a state-vector index to its **incoming-state** LP column — the column
+    /// pinned to `lb = ub = v` via `set_col_bounds` (never an equality/fixing
+    /// row; the LP has no state-fixing row range). The returned columns are
+    /// exactly those
+    /// [`fill_col_state_patches`](crate::lp_builder::PatchBuffer::fill_col_state_patches)
+    /// writes, in state-vector order; the backward pass reads
+    /// `view.reduced_costs[col]` at them for the cut subgradient, one per
+    /// component `j ∈ [0, n_state)`.
     ///
-    /// This is the **incoming-state column** — the column whose bound is set to
-    /// `lb = ub = v` when state-fixing is applied via `set_col_bounds`. The
-    /// column indices returned here are exactly those written into
-    /// `PatchBuffer::col_indices[..state_col_patch_count()]` by
-    /// `fill_col_state_patches`, in state-vector order.
+    /// The travel-time bucket range resolves through an explicit
+    /// `transit_buckets_in` arm, not the trailing anticipated-state catch-all.
     ///
-    /// Use this method in the backward pass to read `view.reduced_costs[col]`
-    /// for the cut subgradient, one entry per state-vector component
-    /// `j ∈ [0, n_state)`.
-    ///
-    /// ## Mapping by range
-    ///
-    /// - `j ∈ [0, N)` (storage): returns `self.storage_in.start + j`.
-    /// - `j ∈ [N, N*(1+L))` (AR lags): returns
-    ///   `self.inflow_lags.start + (j − N)`.
-    /// - `j ∈ [N*(1+L), n_state)` (anticipated state): returns
-    ///   `self.anticipated_state.start + (j − N*(1+L))`.
-    ///
-    /// ## Contrast with [`state_to_lp_column`]
-    ///
-    /// [`state_to_lp_column`] returns the **outgoing** column used for
-    /// cut-row coefficient construction in the forward pass (`forward.rs`).
-    /// For the storage range, `state_to_lp_column(j) = j` (the outgoing
-    /// storage column), while this method returns `storage_in.start + j`
-    /// (the incoming storage column). The two columns are related via the
-    /// water-balance equality row, and by KKT duality the reduced cost on
-    /// the incoming column equals the dual of the equivalent equality row
-    /// that a row-based state-fixing formulation would produce.
+    /// Contrast [`state_to_lp_column`], which returns the **outgoing** column
+    /// for forward-pass cut-row construction: for storage it returns `j`
+    /// (outgoing), this returns `storage_in.start + j` (incoming). The two are
+    /// related by the water-balance equality row — by KKT duality the incoming
+    /// column's reduced cost equals the dual a row-based state-fixing
+    /// formulation would produce, which is why column-bound pinning is exact.
     ///
     /// [`state_to_lp_column`]: Self::state_to_lp_column
     #[inline]
     #[must_use]
     pub fn state_to_lp_incoming_column(&self, j: usize) -> usize {
-        let n = self.hydro_count;
-        let lag_end = n * (1 + self.max_par_order);
-        if j < n {
+        let storage_end = self.state_dim_storage_range().end;
+        let lag_end = self.state_dim_lag_range().end;
+        let transit_bucket_end = self.state_dim_bucket_range().end;
+        if j < storage_end {
             self.storage_in.start + j
         } else if j < lag_end {
-            self.inflow_lags.start + (j - n)
+            self.inflow_lags.start + (j - storage_end)
+        } else if j < transit_bucket_end {
+            self.transit_buckets_in.start + (j - lag_end)
         } else {
-            self.anticipated_state.start + (j - lag_end)
+            self.anticipated_state.start + (j - transit_bucket_end)
         }
     }
 
     /// Whether anticipated plant `local_idx` emits a decision column and an
-    /// `anticipated_state_out_def` row at `stage_idx`.
+    /// `anticipated_state_out_def` row at `stage_idx` — the single cross-module
+    /// owner of the anticipated-decision gate. Both clauses key on the
+    /// **delivery** stage `t + K_i`:
     ///
-    /// The single cross-module owner of the anticipated-decision gate, the
-    /// conjunction of two clauses on the **delivery** stage `t + K_i`:
+    /// 1. **Strict horizon** — `stage_idx + K_i < n_stages`. The `<` is strict:
+    ///    a `<=` would price a commitment delivered at `n_stages`, outside
+    ///    `[0, n_stages)`, with no delivery LP.
+    /// 2. **Operation window** — the delivery stage is commissioning-active,
+    ///    `commissioning_active(entry_i, exit_i, id(t + K_i))`. Keying on the
+    ///    DELIVERY stage, not the decision stage `t`, is load-bearing: a
+    ///    pre-entry decision at `entry − K_i` legitimately delivers at `entry`,
+    ///    and keying on `t` would invert which decisions are active.
     ///
-    /// 1. **Strict horizon clause** — the commitment delivered `K_i` stages later
-    ///    still falls **inside** the horizon, `stage_idx + K_i < n_stages`. The
-    ///    `<` is strict and load-bearing: a `<=` gate would price a commitment
-    ///    delivered at `stage_idx + K_i == n_stages`, whose delivery stage falls
-    ///    outside `[0, n_stages)` and has no delivery LP.
-    /// 2. **Operation-window clause** — the delivery stage is commissioning-active
-    ///    for this plant, `commissioning_active(entry_i, exit_i, id(t + K_i))`. A
-    ///    decision priced now matures at `t + K_i`; if that stage is outside the
-    ///    plant's `[entry, exit)` operation window the matured generation column is
-    ///    pinned to `[0, 0]`, so committing to it would buy generation that can
-    ///    never be delivered. Keying on the DELIVERY stage (not the decision stage
-    ///    `t`) is the shift the commissioning window needs: the decision is placed
-    ///    `K_i` stages ahead of the first generating stage, so a decision at
-    ///    `entry − K_i` (pre-entry) legitimately delivers at `entry`.
-    ///
-    /// The horizon clause is evaluated first and short-circuits, so the
-    /// delivery-stage lookup `study_stage_ids[stage_idx + K_i]` is only reached
-    /// when the index is in range.
-    ///
-    /// The active set is defined once here: the LP-builder column/row counts and
-    /// the simulation read (`compute_anticipated_decision_mw`) both resolve
-    /// activity through this one method. The per-plant windows and stage-id map
-    /// flow in by reference, keeping the type a pure layout carrier.
-    ///
-    /// `anticipated_windows` is indexed by anticipated-local position
-    /// (`0..n_anticipated`); `study_stage_ids` by study stage index.
+    /// `anticipated_windows` is indexed by anticipated-local position;
+    /// `study_stage_ids` by study stage index.
     #[inline]
     #[must_use]
     pub fn is_anticipated_decision_active(
@@ -454,6 +446,35 @@ impl StateLayout {
             "anticipated_windows must have one entry per anticipated plant",
         );
         let delivery_stage = stage_idx.saturating_add(self.anticipated_lead_stages[local_idx]);
+        self.is_anticipated_decision_active_for_delivery(
+            local_idx,
+            delivery_stage,
+            n_stages,
+            anticipated_windows,
+            study_stage_ids,
+        )
+    }
+
+    /// Whether plant `local_idx`'s commitment maturing at an EXPLICIT
+    /// `delivery_stage` is active — the same horizon + commissioning gate as
+    /// [`Self::is_anticipated_decision_active`], for a decision whose delivery
+    /// stage comes from `PointResolution::genuine_decisions_at` rather than a
+    /// constant lead offset.
+    #[inline]
+    #[must_use]
+    pub fn is_anticipated_decision_active_for_delivery(
+        &self,
+        local_idx: usize,
+        delivery_stage: usize,
+        n_stages: usize,
+        anticipated_windows: &[(Option<i32>, Option<i32>)],
+        study_stage_ids: &[i32],
+    ) -> bool {
+        debug_assert!(
+            local_idx < anticipated_windows.len(),
+            "local_idx {local_idx} out of bounds (anticipated_windows.len() = {})",
+            anticipated_windows.len(),
+        );
         if delivery_stage >= n_stages {
             return false;
         }
@@ -467,41 +488,51 @@ impl StateLayout {
         crate::lp_builder::commissioning_active(entry, exit, study_stage_ids[delivery_stage])
     }
 
-    /// Compute and store the nonzero state index mask from per-hydro
-    /// lag-state-slot counts and per-plant anticipated lead-stage counts.
+    /// Plant `local_idx`'s delivery-anchored resolution: the setup-threaded
+    /// [`crate::lead_time::PointResolution`] when [`Self::anticipated_resolution`]
+    /// is attached (production always attaches it), else an on-the-fly
+    /// `LeadTime::Stages`-equivalent built from the plant's constant
+    /// [`Self::anticipated_lead_stages`] — the fixture fallback for
+    /// constant-lead tests that thread no resolution.
+    #[must_use]
+    pub(crate) fn anticipated_resolution_for(
+        &self,
+        local_idx: usize,
+        n_stages: usize,
+    ) -> std::borrow::Cow<'_, crate::lead_time::PointResolution> {
+        if !self.anticipated_resolution.per_plant.is_empty() {
+            return std::borrow::Cow::Borrowed(&self.anticipated_resolution.per_plant[local_idx]);
+        }
+        let lead = u32::try_from(self.anticipated_lead_stages[local_idx]).unwrap_or(u32::MAX);
+        std::borrow::Cow::Owned(crate::lead_time::resolve_point(
+            crate::lead_time::LeadTime::Stages(lead),
+            &[],
+            n_stages,
+        ))
+    }
+
+    /// Compute and store [`Self::nonzero_state_indices`] from per-hydro
+    /// lag-slot counts and per-plant anticipated lead-stage counts.
     ///
-    /// `lag_counts` must have length `hydro_count`. Each entry is the number of
-    /// lag-state slots that may carry non-zero cut coefficients for that hydro
-    /// (0 means no AR lags). Indices `[0, N)` (storage) are always included.
-    /// For each hydro `h`, lag indices
-    /// `inflow_lags.start + l * hydro_count + h` are included for
-    /// `l in 0..lag_counts[h]`.
+    /// `lag_counts` must have length `hydro_count`; `lag_counts[h]` is the count
+    /// of lag slots that may carry non-zero cut coefficients for hydro `h`. It
+    /// must be `PrecomputedPar::effective_lag_count(h)`, **not** `order(h)`: for
+    /// PAR(p)-A hydros `effective_lag_count == max_par_order` so the `ψ̂/12`
+    /// annual contributions on slots `order..max_par_order` reach the cut rows;
+    /// `order(h)` would truncate them and produce over-estimating cuts (LB > UB
+    /// at convergence). Storage `[0, N)` is always included.
     ///
-    /// `anticipated_lead_stages` must have length `n_anticipated`. Each entry
-    /// is the per-plant occupied-slot count `K_i` (`0..K_i` of the
-    /// anticipated-state ring buffer at plant `i`). The trailing
-    /// `k_max - K_i` slots are padding and are excluded from the mask: no
-    /// decision variable writes to those columns, so their cut coefficients
-    /// are structurally zero. Including padded slots would over-estimate cut
-    /// hyperplanes (the direct analogue of the PAR(p)-A bug, where
-    /// padded lag slots were included and shifted the cut above the LP value
-    /// at the visited state).
+    /// Every travel-time bucket slot is always included — bucket depth is
+    /// already sized as the per-stage reachability union, so (unlike
+    /// anticipated) there is no padding to exclude.
     ///
-    /// Layout for the anticipated block:
-    /// `anticipated_state.start + slot * n_anticipated + plant`. The loop
-    /// iterates slot-first, plant-second so the emitted indices stay
-    /// monotonically increasing.
+    /// For anticipated plant `i`, only slots `0..K_i` are included; the trailing
+    /// `k_max − K_i` are padding whose cut coefficients are structurally zero
+    /// (no decision writes them). Including padding over-estimates cut
+    /// hyperplanes — the same failure mode as the lag block above.
     ///
-    /// The correct value for `lag_counts[h]` is
-    /// `PrecomputedPar::effective_lag_count(h)`, **not** `PrecomputedPar::order(h)`.
-    /// For PAR(p)-A hydros, `effective_lag_count` equals `max_order` (= 12) so
-    /// that the `ψ̂/12` annual contributions on lag slots `order..max_order` are
-    /// included in cut rows. Using `order(h)` would truncate those slots and
-    /// produce over-estimating cuts (the same failure mode as anticipated
-    /// padding, but on the lag block).
-    ///
-    /// After calling, `nonzero_state_indices` is sorted ascending with no
-    /// duplicates.
+    /// The loop iterates lag/slot-first so the emitted indices stay strictly
+    /// ascending (the sortedness the `debug_assert` enforces).
     ///
     /// # Panics (debug builds only)
     ///
@@ -515,13 +546,13 @@ impl StateLayout {
 
         let n_lag_active: usize = lag_counts.iter().copied().sum();
         let n_ant_active: usize = anticipated_lead_stages.iter().copied().sum();
-        let mut mask = Vec::with_capacity(self.hydro_count + n_lag_active + n_ant_active);
+        let mut mask =
+            Vec::with_capacity(self.hydro_count + n_lag_active + self.n_buckets + n_ant_active);
 
         for h in 0..self.hydro_count {
             mask.push(h);
         }
 
-        // Iterate lag-first (lag-major layout) to emit sorted indices.
         for lag in 0..self.max_par_order {
             for (h, &lag_count) in lag_counts.iter().enumerate() {
                 debug_assert!(lag_count <= self.max_par_order);
@@ -531,12 +562,13 @@ impl StateLayout {
             }
         }
 
-        // Anticipated state: emit slots `0..K_i` for plant `i`, skipping padding.
+        mask.extend(self.transit_buckets_out.clone());
+
         for slot in 0..self.k_max {
             for (plant, &k_i) in anticipated_lead_stages.iter().enumerate() {
                 debug_assert!(k_i <= self.k_max);
                 if slot < k_i {
-                    mask.push(self.anticipated_state.start + slot * self.n_anticipated + plant);
+                    mask.push(self.anticipated_slots_out.start + slot * self.n_anticipated + plant);
                 }
             }
         }
@@ -554,7 +586,7 @@ impl StateLayout {
 mod tests {
     use super::StateLayout;
 
-    /// Build a [`StateLayout`] finalized the way production `build_wired_indexer`
+    /// Build a [`StateLayout`] finalized the way production `resolve_state_layout`
     /// does: full `max_par_order` lag stride for every hydro (the coverage the
     /// dense path emits for test layouts without a PAR model) and the layout's
     /// own `anticipated_lead_stages`.
@@ -569,6 +601,33 @@ mod tests {
         StateLayout::new(
             hydro_count,
             max_par_order,
+            0,
+            Vec::new(),
+            n_anticipated,
+            k_max,
+            anticipated_lead_stages,
+            &lag_counts,
+        )
+    }
+
+    /// Same as [`finalized`] but with a declared bucket block
+    /// (`n_buckets`/`transit_bucket_column_order`), for the bucket-arm resolver and mask
+    /// tests.
+    fn finalized_with_transit_buckets(
+        hydro_count: usize,
+        max_par_order: usize,
+        n_buckets: usize,
+        transit_bucket_column_order: Vec<(usize, usize)>,
+        n_anticipated: usize,
+        k_max: usize,
+        anticipated_lead_stages: Vec<usize>,
+    ) -> StateLayout {
+        let lag_counts = vec![max_par_order; hydro_count];
+        StateLayout::new(
+            hydro_count,
+            max_par_order,
+            n_buckets,
+            transit_bucket_column_order,
             n_anticipated,
             k_max,
             anticipated_lead_stages,
@@ -608,6 +667,7 @@ mod tests {
             finalized(3, 0, 0, 0, vec![]),     // storage-only
             finalized(2, 3, 0, 0, vec![]),     // storage + lags
             finalized(3, 2, 2, 2, vec![1, 2]), // storage + lags + anticipated
+            finalized_with_transit_buckets(3, 2, 2, vec![(0, 1), (0, 2)], 2, 2, vec![1, 2]), // storage + lags + buckets + anticipated
         ] {
             assert_eq!(
                 idx.state_to_lp_column_map.len(),
@@ -705,53 +765,45 @@ mod tests {
 
     // ── state_to_lp_column tests ──────────────────────────────────────────────
 
-    /// `anticipated_state` indices use the shift-aware mapping when
-    /// `max_par_order == 0 && n_anticipated > 0`. The `anticipated_state` branch
-    /// runs before the `max_par_order == 0` lag-block guard; verify the shift
-    /// semantics apply even when there are no inflow lags.
+    /// `anticipated_slots_out` indices resolve by identity when
+    /// `max_par_order == 0 && n_anticipated > 0` — the ring transition
+    /// (shift/deposit) is now an in-LP definition row, not a resolver-side
+    /// remap. The `anticipated_slots_out` branch runs before the
+    /// `max_par_order == 0` lag-block guard; verify identity holds even when
+    /// there are no inflow lags.
     #[test]
-    fn state_to_lp_column_anticipated_identity_no_lag() {
+    fn state_to_lp_column_anticipated_slots_out_is_identity_no_lag() {
         // N=1, L=0, n_anticipated=1, k_max=2, anticipated_lead_stages=[2].
         // n_state = 1*(1+0) + 1*2 = 3.
-        // anticipated_state = [1, 3); slot 0 at j=1, slot 1 at j=2.
-        // anticipated_state.start = N*(1+L) = 1.
+        // anticipated_slots_out = [1, 3); slot 0 at j=1, slot 1 at j=2.
         let idx = finalized(1, 0, 1, 2, vec![2]);
+        assert_eq!(idx.anticipated_slots_out, 1..3);
         // Storage index: identity.
         assert_eq!(idx.state_to_lp_column(0), 0);
-        // Anticipated-state slot 0 (j=1): slot+1=1 < k_p=2 → shift to slot 1.
-        // Returns anticipated_state.start + 1*n_anticipated + 0 = 1+1 = 2.
-        assert_eq!(idx.state_to_lp_column(1), 2);
-        // Anticipated-state slot 1 (j=2): slot+1=2 == k_p=2 → state-out channel.
-        // Returns anticipated_state_out.start + 0.
-        assert_eq!(idx.state_to_lp_column(2), idx.anticipated_state_out.start);
+        // Both ring slots: identity.
+        assert_eq!(idx.state_to_lp_column(1), 1);
+        assert_eq!(idx.state_to_lp_column(2), 2);
     }
 
-    /// `anticipated_state` indices use the shift-aware mapping when
-    /// `max_par_order > 0 && n_anticipated > 0`.  The fixture uses N=1, L=1,
-    /// `n_anticipated=1`, `K_max=2`, `anticipated_lead_stages=[2]`.
-    ///
-    /// Assertions reflect the shift-aware mapping (identity is wrong for
-    /// `K_max >= 2` because the decision-write slot `K_p - 1` and the shifted
-    /// slots map to different LP columns than the incoming state's own).
+    /// `anticipated_slots_out` indices resolve by identity when
+    /// `max_par_order > 0 && n_anticipated > 0`, and the lag-remap branch for
+    /// non-anticipated indices is unaffected. Fixture: N=1, L=1,
+    /// `n_anticipated=1`, `k_max=2`, `anticipated_lead_stages=[2]`.
     #[test]
-    fn state_to_lp_column_anticipated_identity_with_lag() {
+    fn state_to_lp_column_anticipated_slots_out_is_identity_with_lag() {
         // N=1, L=1, n_anticipated=1, k_max=2, anticipated_lead_stages=[2].
         // n_state = 1*(1+1) + 1*2 = 4.
         // Layout: j=0 storage, j=1 lag-0, j=2 ant slot-0, j=3 ant slot-1.
-        // anticipated_state.start = N*(1+L) = 2.
-        // z_inflow.start = anticipated_state_out_end = 2 + 2 + 1 = 5.
         let idx = finalized(1, 1, 1, 2, vec![2]);
+        assert_eq!(idx.anticipated_slots_out, 2..4);
         // Storage: identity.
         assert_eq!(idx.state_to_lp_column(0), 0);
-        // Lag block: remapped.
+        // Lag block: remapped (unaffected by the anticipated-ring change).
         // j=1: offset=0, h=0, lag=0 → z_inflow.start + 0.
         assert_eq!(idx.state_to_lp_column(1), idx.z_inflow.start);
-        // Anticipated-state slot 0 (j=2): slot+1=1 < k_p=2 → shift to slot 1.
-        // Returns anticipated_state.start + 1*n_anticipated + 0 = 2+1 = 3.
-        assert_eq!(idx.state_to_lp_column(2), 3);
-        // Anticipated-state slot 1 (j=3): slot+1=2 == k_p=2 → state-out channel.
-        // Returns anticipated_state_out.start + 0.
-        assert_eq!(idx.state_to_lp_column(3), idx.anticipated_state_out.start);
+        // Both ring slots: identity.
+        assert_eq!(idx.state_to_lp_column(2), 2);
+        assert_eq!(idx.state_to_lp_column(3), 3);
     }
 
     /// Lag-remap branch is preserved when `n_anticipated == 0` and
@@ -771,127 +823,42 @@ mod tests {
         assert_eq!(idx.state_to_lp_column(1), 2);
     }
 
-    /// State-out channel branch: slot `K_p - 1` of an anticipated plant maps to
-    /// the `anticipated_state_out` column for that plant (not `anticipated_decision`
-    /// directly). The `anticipated_state_out` variable is pinned to the decision
-    /// column by the `anticipated_state_out_def` equality row, so cut coefficients
-    /// on the state-out column correctly express the Benders subgradient.
+    /// Every anticipated ring slot resolves by identity, regardless of which
+    /// slot is a plant's own newest (delivery-deposit) slot, a plain-shift
+    /// interior slot, or a stage-invariant padding slot beyond that plant's own
+    /// `K_p`: the in-LP definition rows (built in `lp/builder`) resolve the
+    /// ring transition, so `state_to_lp_column` never special-cases a slot
+    /// index the way the deleted constant-lead shift-map did.
     #[test]
-    fn state_to_lp_column_anticipated_decision_channel() {
-        // N=0, L=0, n_anticipated=1, k_max=2, anticipated_lead_stages=[2].
-        // n_state = 0*(1+0) + 1*2 = 2.
-        // anticipated_state = [0, 2); slot 0 at j=0, slot 1 at j=1.
-        let idx = finalized(0, 0, 1, 2, vec![2]);
-        // Slot K_p - 1 = 1 (the highest slot for plant 0) → anticipated_state_out column.
-        let slot_k_minus_1 = idx.anticipated_state.start + (idx.k_max - 1) * idx.n_anticipated;
-        assert_eq!(
-            idx.state_to_lp_column(slot_k_minus_1),
-            idx.anticipated_state_out.start,
-        );
-    }
-
-    /// Equal-branch boundary at `k_max == 1`: with a single ring-buffer slot,
-    /// slot 0 is the only slot and `slot + 1 == k_p == 1`, so the Equal branch
-    /// fires immediately on slot 0 — there is no Less (shift) or Greater
-    /// (padding) slot to reach first. The slot must route to the
-    /// `anticipated_state_out` column (the Equal-branch target). The other
-    /// anticipated tests use `k_max >= 2`, where slot 0 takes the Less branch,
-    /// so this is the only coverage of the `k_max == 1` Equal path.
-    #[test]
-    fn state_to_lp_column_equal_branch_k_max_one() {
-        // N=0, L=0, n_anticipated=1, k_max=1, anticipated_lead_stages=[1].
-        // n_state = 0*(1+0) + 1*1 = 1.
-        // anticipated_state = [0, 1); the lone slot 0 is at j=0.
-        let idx = finalized(0, 0, 1, 1, vec![1]);
-        // Slot 0 of plant 0: slot+1 = 1 == k_p = 1 → Equal branch → state-out.
-        let slot_0 = idx.anticipated_state.start;
-        assert_eq!(
-            idx.state_to_lp_column(slot_0),
-            idx.anticipated_state_out.start,
-            "k_max==1 slot 0 must route to anticipated_state_out via the Equal branch",
-        );
-    }
-
-    /// Shift branch: an `anticipated_state` slot `i < K_p - 1` maps to the
-    /// predecessor stage's `anticipated_state` column at slot `i + 1` (the
-    /// shift). Successor's slot `i` comes from predecessor's incoming slot
-    /// `i + 1` after `shift_anticipated_state` runs.
-    #[test]
-    fn state_to_lp_column_anticipated_shift() {
-        // Single plant, K=2.
-        let idx = finalized(0, 0, 1, 2, vec![2]);
-        // Slot 0 → shift to slot 1's column.
-        let slot_0 = idx.anticipated_state.start;
-        let slot_1 = idx.anticipated_state.start + idx.n_anticipated;
-        assert_eq!(idx.state_to_lp_column(slot_0), slot_1);
-    }
-
-    /// Padding branch: an `anticipated_state` slot `i > K_p - 1` (padding
-    /// for a plant with `K_p < K_max`) maps to identity `j`. Padding slots
-    /// are pinned to 0 by the state-fixing row, so the identity mapping is a
-    /// safe default that does not introduce wrong cuts.
-    #[test]
-    fn state_to_lp_column_anticipated_padding_slot_identity() {
+    fn state_to_lp_column_anticipated_slots_out_identity_multi_plant_heterogeneous_k() {
         // Two plants: plant 0 has K_p=1 (only slot 0 is in-use), plant 1 has
         // K_p=3 (slots 0, 1, 2 all in-use). k_max=3 so plant 0 has padding
         // at slots 1 and 2.
         let idx = finalized(0, 0, 2, 3, vec![1, 3]);
-        // Plant 0 padding: slot 1 at j = ant_start + 1*2 + 0, slot 2 at j = ant_start + 2*2 + 0.
-        let pad_slot_1_plant_0 = idx.anticipated_state.start + idx.n_anticipated;
-        let pad_slot_2_plant_0 = idx.anticipated_state.start + 2 * idx.n_anticipated;
-        assert_eq!(
-            idx.state_to_lp_column(pad_slot_1_plant_0),
-            pad_slot_1_plant_0
-        );
-        assert_eq!(
-            idx.state_to_lp_column(pad_slot_2_plant_0),
-            pad_slot_2_plant_0
-        );
+        assert_eq!(idx.anticipated_slots_out, 0..6);
+        for j in idx.anticipated_slots_out.clone() {
+            assert_eq!(
+                idx.state_to_lp_column(j),
+                j,
+                "anticipated ring slot {j} must resolve by identity"
+            );
+        }
     }
 
-    /// Multi-plant layout: correct routing for all `(slot, plant)`
-    /// combinations in a two-plant K=2 fixture.
+    /// The anticipated-ring identity resolution lands inside the **state
+    /// region**: `anticipated_slots_out` sits strictly between
+    /// `transit_buckets_out` and `theta`, never inside the control region.
     #[test]
-    fn state_to_lp_column_anticipated_multi_plant_layout() {
-        // Two plants, both with K_p=2; k_max=2.
-        let idx = finalized(0, 0, 2, 2, vec![2, 2]);
-        // Layout: slot * n_anticipated + plant. n_anticipated=2.
-        //   j=ant_start+0 → slot 0, plant 0; shift → ant_start + 1*2 + 0 = ant_start + 2
-        //   j=ant_start+1 → slot 0, plant 1; shift → ant_start + 1*2 + 1 = ant_start + 3
-        //   j=ant_start+2 → slot 1, plant 0; state-out → anticipated_state_out.start + 0
-        //   j=ant_start+3 → slot 1, plant 1; state-out → anticipated_state_out.start + 1
-        let s = idx.anticipated_state.start;
-        let so = idx.anticipated_state_out.start;
-        assert_eq!(idx.state_to_lp_column(s), s + 2);
-        assert_eq!(idx.state_to_lp_column(s + 1), s + 3);
-        assert_eq!(idx.state_to_lp_column(s + 2), so);
-        assert_eq!(idx.state_to_lp_column(s + 3), so + 1);
-    }
-
-    /// The Equal branch resolves the matured anticipated slot into the
-    /// **state region**: for `j = anticipated_state.start + (K_p − 1)*A + plant`
-    /// it returns `anticipated_state_out.start + plant`, and that column lies
-    /// in `[anticipated_state.end, theta)` — i.e. inside the relocated
-    /// state-region block, not the control region.
-    #[test]
-    fn state_to_lp_column_equal_branch_resolves_into_state_region() {
+    fn state_to_lp_column_anticipated_slots_out_resolves_into_state_region() {
         // N=3, L=2, A=2, k_max=3, uniform K_p = 3.
         let idx = finalized(3, 2, 2, 3, vec![3, 3]);
-        let a = idx.n_anticipated;
-        for plant in 0..a {
-            let k_p = idx.anticipated_lead_stages[plant];
-            let j = idx.anticipated_state.start + (k_p - 1) * a + plant;
+        for j in idx.anticipated_slots_out.clone() {
             let col = idx.state_to_lp_column(j);
-            assert_eq!(
-                col,
-                idx.anticipated_state_out.start + plant,
-                "Equal branch must return anticipated_state_out.start + plant"
-            );
-            // Inside the state region: at/after the ring-buffer end, before theta.
+            assert_eq!(col, j, "identity resolution");
             assert!(
-                col >= idx.anticipated_state.end,
-                "resolved column {col} must be >= anticipated_state.end {}",
-                idx.anticipated_state.end
+                col >= idx.transit_buckets_out.end,
+                "resolved column {col} must be >= transit_buckets_out.end {}",
+                idx.transit_buckets_out.end
             );
             assert!(
                 col < idx.theta,
@@ -940,13 +907,16 @@ mod tests {
 
     /// Anticipated-state range: for a layout with `N=0, L=0, A=1, K=2`,
     /// `state_to_lp_incoming_column(j)` for `j ∈ [0, n_state)` returns
-    /// `anticipated_state.start + j` (since `lag_end` = N*(1+L) = 0).
+    /// `anticipated_state.start + j` (since `lag_end` = N*(1+L) = 0). With
+    /// `N=0` every non-anticipated block collapses to `0..0`, so
+    /// `anticipated_state` (the relocated incoming block, after
+    /// `anticipated_slots_out`/`z_inflow`/`storage_in`/`transit_buckets_in`)
+    /// starts at `anticipated_slots_out`'s own width (`A*K = 2`), not `0`.
     #[test]
     fn state_to_lp_incoming_column_anticipated_range() {
         // N=0, L=0, A=1, K=2: n_state = 0 + 1*2 = 2.
-        // anticipated_state.start = N*(1+L) = 0.
         let idx = finalized(0, 0, 1, 2, vec![2]);
-        assert_eq!(idx.anticipated_state.start, 0);
+        assert_eq!(idx.anticipated_state.start, 2);
         assert_eq!(idx.n_state, 2);
         for j in 0..2_usize {
             assert_eq!(
@@ -963,9 +933,11 @@ mod tests {
     fn state_to_lp_incoming_column_combined_layout() {
         // N=3, L=2, A=1, K=2:
         //   n_state = N*(1+L) + A*K = 3*3 + 1*2 = 11.
-        //   storage_in.start = N*(2+L) + A*K_max + A = 3*4 + 1*2 + 1 = 15.
         //   inflow_lags.start = N = 3.
-        //   anticipated_state.start = N*(1+L) = 9.
+        //   storage_in.start = N*(1+L) + A*K + N = 3*3 + 1*2 + 3 = 14
+        //     (storage + inflow_lags + anticipated_slots_out + z_inflow).
+        //   anticipated_state.start = storage_in.start + N = 17 (transit_buckets_in
+        //     is empty; the relocated incoming block follows storage_in directly).
         //   lag_end = N*(1+L) = 9.
         let idx = finalized(3, 2, 1, 2, vec![2]);
         assert_eq!(idx.n_state, 11);
@@ -1178,11 +1150,11 @@ mod tests {
     #[test]
     fn nonzero_mask_anticipated_state_full_kmax() {
         // 2 anticipated plants, k_max = 3, no hydros, no lags.
-        // anticipated_state.start = 0 (no storage, no lag block).
+        // anticipated_slots_out.start = 0 (no storage, no lag block).
         // Layout: start + slot * n_anticipated + plant.
         let mut idx = finalized(0, 0, 2, 3, vec![3, 3]);
 
-        assert_eq!(idx.anticipated_state.start, 0);
+        assert_eq!(idx.anticipated_slots_out.start, 0);
         assert_eq!(idx.n_anticipated, 2);
         assert_eq!(idx.k_max, 3);
 
@@ -1199,10 +1171,10 @@ mod tests {
     #[test]
     fn nonzero_mask_anticipated_state_partial_padding() {
         // 3 hydros, max_par_order = 2, 2 anticipated plants, k_max = 3.
-        // inflow_lags = [3, 9), anticipated_state.start = 9.
+        // inflow_lags = [3, 9), anticipated_slots_out.start = 9.
         let mut idx = finalized(3, 2, 2, 3, vec![3, 1]);
 
-        assert_eq!(idx.anticipated_state.start, 9);
+        assert_eq!(idx.anticipated_slots_out.start, 9);
         idx.set_nonzero_mask(&[2, 2, 2], &[3, 1]);
 
         // Storage [0, 1, 2] + lag (h0,h1,h2 full = 6 slots) +
@@ -1224,7 +1196,7 @@ mod tests {
         let mut idx = finalized(0, 0, 1, 2, vec![2]);
 
         assert_eq!(idx.hydro_count, 0);
-        assert_eq!(idx.anticipated_state.start, 0);
+        assert_eq!(idx.anticipated_slots_out.start, 0);
 
         idx.set_nonzero_mask(&[], &[2]);
 
@@ -1237,7 +1209,7 @@ mod tests {
     #[test]
     fn nonzero_mask_anticipated_state_mixed_k_values() {
         // n_anticipated = 3, k_max = 4. Lead stages = [4, 2, 1].
-        // anticipated_state.start = 0 (no hydros).
+        // anticipated_slots_out.start = 0 (no hydros).
         let mut idx = finalized(0, 0, 3, 4, vec![4, 2, 1]);
 
         idx.set_nonzero_mask(&[], &[4, 2, 1]);
@@ -1307,5 +1279,219 @@ mod tests {
         // Plant 0 (K_0=2) emits slot=0→0, slot=1→2. Plant 1 (K_1=0) emits
         // nothing. Expected mask: [0, 2].
         assert_eq!(idx.nonzero_state_indices, vec![0, 2]);
+    }
+
+    // ── Bucket block tests ─────────────────────────────────────────────────
+
+    /// Bucket-arm resolution for `state_to_lp_column`: outgoing bucket state
+    /// maps to its LP column by identity (the `storage` convention), not the
+    /// lag remap — verified with lags present so the bucket check must
+    /// correctly intercept before the modular lag decode.
+    #[test]
+    fn state_to_lp_column_transit_bucket_arm_is_identity() {
+        // N=2, L=2 (lags present), B=3, no anticipated.
+        let idx =
+            finalized_with_transit_buckets(2, 2, 3, vec![(0, 1), (0, 2), (1, 1)], 0, 0, vec![]);
+
+        assert_eq!(idx.transit_buckets_out, 6..9);
+        for j in idx.transit_buckets_out.clone() {
+            assert_eq!(
+                idx.state_to_lp_column(j),
+                j,
+                "bucket state index {j} must map to its LP column by identity"
+            );
+        }
+        // The last lag index (j=5, just below the bucket block) still resolves
+        // via the lag remap, proving the bucket check does not swallow lag
+        // indices.
+        assert_eq!(idx.state_to_lp_column(5), 3);
+    }
+
+    /// Bucket-arm resolution for `state_to_lp_incoming_column`: bucket indices
+    /// resolve to the pinned `transit_buckets_in` column via an explicit arm, not the
+    /// anticipated catch-all — verified with anticipated state present so the
+    /// catch-all `else` is live and would otherwise swallow them.
+    #[test]
+    fn state_to_lp_incoming_column_transit_bucket_arm_is_pinned_not_anticipated() {
+        // N=2, L=1, B=2, A=1 (k_max=2, K=[2]).
+        let idx = finalized_with_transit_buckets(2, 1, 2, vec![(0, 1), (0, 2)], 1, 2, vec![2]);
+
+        assert_eq!(idx.transit_buckets_in, 12..14);
+        assert_eq!(idx.anticipated_state.start, 14);
+
+        // Bucket state indices: j=4, j=5 (lag_end = N*(1+L) = 4).
+        assert_eq!(
+            idx.state_to_lp_incoming_column(4),
+            idx.transit_buckets_in.start
+        );
+        assert_eq!(
+            idx.state_to_lp_incoming_column(5),
+            idx.transit_buckets_in.start + 1
+        );
+        assert_ne!(
+            idx.state_to_lp_incoming_column(4),
+            idx.anticipated_state.start,
+            "bucket index must not resolve to the anticipated catch-all"
+        );
+
+        // The first anticipated-state index (j=6) still resolves via the
+        // catch-all, immediately after the bucket range.
+        assert_eq!(
+            idx.state_to_lp_incoming_column(6),
+            idx.anticipated_state.start
+        );
+    }
+
+    /// `state_to_lp_column_map.len() == n_state` for a bucket-only layout (no
+    /// lags, no anticipated) — the map-length invariant isolated from the
+    /// other blocks.
+    #[test]
+    fn state_to_lp_column_map_length_matches_n_state_with_transit_buckets_only() {
+        let idx =
+            finalized_with_transit_buckets(0, 0, 3, vec![(0, 1), (0, 2), (0, 3)], 0, 0, vec![]);
+
+        assert_eq!(idx.n_state, 3);
+        assert_eq!(idx.state_to_lp_column_map.len(), idx.n_state);
+        for j in 0..idx.n_state {
+            assert_eq!(idx.lp_column_for_state(j), j, "bucket-only identity map");
+        }
+    }
+
+    /// Mask contiguity with a masked bucket slot: a bucket block is always
+    /// fully included (mirroring `storage`), coexisting with a genuinely
+    /// excluded lag slot from an unrelated block — the overall mask stays
+    /// sorted with the excluded lag index as the only gap.
+    #[test]
+    fn nonzero_mask_transit_bucket_block_full_range_with_masked_lag_slot() {
+        // N=2, L=2, B=2 (single plant, depth 2), no anticipated. Hydro 0 has
+        // lag_count=1 (lag slot 1 masked out); hydro 1 has lag_count=2 (full).
+        let mut idx = finalized_with_transit_buckets(2, 2, 2, vec![(0, 1), (0, 2)], 0, 0, vec![]);
+
+        idx.set_nonzero_mask(&[1, 2], &[]);
+
+        assert_eq!(idx.transit_buckets_out, 6..8);
+        assert_eq!(
+            idx.nonzero_state_indices,
+            vec![0, 1, 2, 3, 5, 6, 7],
+            "hydro 0's lag-1 slot (index 4) must be excluded while the full \
+             bucket block (6, 7) is included"
+        );
+        assert!(
+            idx.nonzero_state_indices.windows(2).all(|w| w[0] < w[1]),
+            "mask must stay sorted and unique with a masked slot present"
+        );
+    }
+
+    /// `B == 0` (no declared travel-time arc) collapses `transit_buckets_out`/
+    /// `transit_buckets_in` to `0..0` and leaves every other offset the literal
+    /// formula for `N=3, L=2, A=2, k_max=2`; a stray `+0` that reorders the
+    /// sequential-offset chain would move one of these off its hardcoded value.
+    #[test]
+    fn state_layout_b_zero_is_byte_identical_to_pre_transit_bucket_layout() {
+        let idx = finalized(3, 2, 2, 2, vec![1, 2]);
+
+        assert_eq!(idx.n_buckets, 0);
+        assert!(idx.transit_bucket_column_order.is_empty());
+        assert_eq!(idx.transit_buckets_out, 0..0);
+        assert_eq!(idx.transit_buckets_in, 0..0);
+
+        assert_eq!(idx.storage, 0..3);
+        assert_eq!(idx.inflow_lags, 3..9);
+        assert_eq!(idx.anticipated_slots_out, 9..13);
+        assert_eq!(idx.z_inflow, 13..16);
+        assert_eq!(idx.storage_in, 16..19);
+        assert_eq!(idx.anticipated_state, 19..23);
+        assert_eq!(idx.theta, 23);
+        assert_eq!(idx.n_state, 13);
+    }
+
+    /// `A * k_max == 0` (no anticipated thermals) collapses `anticipated_slots_out`/
+    /// `anticipated_state` to `0..0` and reproduces the pre-anticipated-ring
+    /// layout byte-for-byte (`N=3, L=2, B=2`) — the AC#1 collapse anchor.
+    #[test]
+    fn state_layout_a_zero_collapses_to_pre_anticipated_ring_layout() {
+        let idx = finalized_with_transit_buckets(3, 2, 2, vec![(0, 1), (0, 2)], 0, 0, vec![]);
+
+        assert_eq!(idx.n_anticipated, 0);
+        assert_eq!(idx.k_max, 0);
+        assert_eq!(idx.anticipated_slots_out, 0..0);
+        assert_eq!(idx.anticipated_state, 0..0);
+
+        assert_eq!(idx.storage, 0..3);
+        assert_eq!(idx.inflow_lags, 3..9);
+        assert_eq!(idx.transit_buckets_out, 9..11);
+        assert_eq!(idx.z_inflow, 11..14);
+        assert_eq!(idx.storage_in, 14..17);
+        assert_eq!(idx.transit_buckets_in, 17..19);
+        assert_eq!(idx.theta, 19);
+        assert_eq!(idx.n_state, 11);
+
+        for j in 0..idx.n_state {
+            assert_eq!(
+                idx.lp_column_for_state(j),
+                idx.state_to_lp_column(j),
+                "A==0 collapse must not disturb the storage/lag/bucket resolvers"
+            );
+        }
+    }
+
+    // ── In-LP anticipated ring: masking + collapse ─────────────
+
+    /// `k_max == 0` collapses the ring to empty even when `n_anticipated > 0`
+    /// (defensive: `n_ant_state = n_anticipated * k_max` is the sole gate, not
+    /// `n_anticipated` alone), matching the `A * k_max == 0` layout exactly.
+    #[test]
+    fn anticipated_ring_k_max_zero_collapses_even_with_plants_declared() {
+        let zero_k_max = StateLayout::new(3, 2, 0, Vec::new(), 2, 0, vec![0, 0], &[2, 2, 2]);
+        let no_plants = StateLayout::new(3, 2, 0, Vec::new(), 0, 0, vec![], &[2, 2, 2]);
+
+        assert_eq!(zero_k_max.anticipated_slots_out, 0..0);
+        assert_eq!(zero_k_max.anticipated_state, 0..0);
+        assert_eq!(zero_k_max.theta, no_plants.theta);
+        assert_eq!(zero_k_max.n_state, no_plants.n_state);
+        assert_eq!(
+            zero_k_max.state_to_lp_column_map,
+            no_plants.state_to_lp_column_map
+        );
+    }
+
+    // ── State-dimension region accessors ────────────────────────────────────
+
+    /// The four `state_dim_*_range` accessors partition `[0, n_state)`
+    /// contiguously with no gap and no overlap — storage, lags, buckets, and
+    /// anticipated ring slots all present — the direct pin for the region
+    /// order `CutStateProjection::new` consumes.
+    #[test]
+    fn state_dim_ranges_partition_n_state_contiguously() {
+        // N=3, L=2, B=2, A=2, k_max=2: every region non-empty.
+        let idx = finalized_with_transit_buckets(3, 2, 2, vec![(0, 1), (0, 2)], 2, 2, vec![1, 2]);
+
+        let storage = idx.state_dim_storage_range();
+        let lag = idx.state_dim_lag_range();
+        let bucket = idx.state_dim_bucket_range();
+        let anticipated = idx.state_dim_anticipated_range();
+
+        assert!(
+            !storage.is_empty() && !lag.is_empty() && !bucket.is_empty() && !anticipated.is_empty(),
+            "fixture must exercise every region non-empty"
+        );
+
+        assert_eq!(storage.start, 0, "storage must start at the state origin");
+        assert_eq!(
+            lag.start, storage.end,
+            "lag region must start exactly where storage ends (no gap/overlap)"
+        );
+        assert_eq!(
+            bucket.start, lag.end,
+            "bucket region must start exactly where lag ends (no gap/overlap)"
+        );
+        assert_eq!(
+            anticipated.start, bucket.end,
+            "anticipated region must start exactly where bucket ends (no gap/overlap)"
+        );
+        assert_eq!(
+            anticipated.end, idx.n_state,
+            "anticipated region must end exactly at n_state (no trailing gap)"
+        );
     }
 }

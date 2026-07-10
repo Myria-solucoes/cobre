@@ -17,9 +17,9 @@ use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 /// exists in `season_definitions.seasons[].id`.
 ///
 /// Rule 29: All stages in the same `season_id` group must have durations
-/// within 7 days of each other.  A spread greater than 7 days indicates
-/// mixed temporal resolutions (e.g., monthly 30d alongside quarterly 91d)
-/// which leads to conflicting PAR model parameterisations.
+/// within [`crate::stages::SUB_PERIOD_TOLERANCE_DAYS`] of each other. A wider
+/// spread indicates mixed temporal resolutions (e.g., monthly 30d alongside
+/// quarterly 91d) which leads to conflicting PAR model parameterisations.
 pub(super) fn check_season_id_consistency(data: &ParsedData, ctx: &mut ValidationContext) {
     let Some(season_map) = &data.stages.policy_graph.season_map else {
         return;
@@ -69,13 +69,19 @@ pub(super) fn check_season_id_consistency(data: &ParsedData, ctx: &mut Validatio
         debug_assert!(!members.is_empty(), "guarded by len() >= 2 above");
         let min_d = members.iter().map(|&(_, d)| d).min().unwrap_or(0);
         let max_d = members.iter().map(|&(_, d)| d).max().unwrap_or(0);
-        if max_d - min_d > 7 {
+        if max_d - min_d > crate::stages::SUB_PERIOD_TOLERANCE_DAYS {
             let mut details_parts: Vec<String> = members
                 .iter()
                 .map(|&(id, d)| format!("stage {id} ({d}d)"))
                 .collect();
             details_parts.sort_unstable();
             let details = details_parts.join(", ");
+            let level_note = if season_map.is_multi_resolution() {
+                " (season_definitions layers multiple resolution levels; verify \
+                  each stage's declared season_id matches its intended level)"
+            } else {
+                ""
+            };
             ctx.add_error(
                 ErrorKind::BusinessRuleViolation,
                 "stages.json",
@@ -83,7 +89,7 @@ pub(super) fn check_season_id_consistency(data: &ParsedData, ctx: &mut Validatio
                 format!(
                     "stages sharing season_id {sid} have incompatible durations: {details}; \
                      stages within the same season must have the same temporal resolution \
-                     (e.g., all monthly or all weekly)",
+                     (e.g., all monthly or all weekly){level_note}",
                 ),
             );
         }
@@ -964,6 +970,118 @@ mod tests {
         assert!(
             msg.contains("7d") && msg.contains("30d"),
             "error message must include both stage durations; got: {msg}"
+        );
+    }
+
+    /// Given a `Custom` multi-resolution `season_map` (monthly + quarterly
+    /// definitions, `d30-multi-resolution-monthly-quarterly`-shaped) where two
+    /// stages mistakenly share quarterly `season_id` 12 despite incompatible
+    /// durations, the Rule 29 error names the mismatch AND notes the
+    /// season_map layers multiple resolution levels.
+    #[test]
+    fn test_resolution_consistency_multi_resolution_map_notes_layering() {
+        use cobre_core::temporal::SeasonCycleType;
+
+        let mut seasons: Vec<SeasonDefinition> = (0..12)
+            .map(|i| SeasonDefinition {
+                id: i,
+                label: format!("Month{}", i + 1),
+                month_start: (i as u32) + 1,
+                day_start: Some(1),
+                month_end: Some((i as u32) + 1),
+                day_end: Some(31),
+            })
+            .collect();
+        seasons.push(SeasonDefinition {
+            id: 12,
+            label: "Q3".to_string(),
+            month_start: 7,
+            day_start: Some(1),
+            month_end: Some(9),
+            day_end: Some(30),
+        });
+        let season_map = SeasonMap {
+            cycle_type: SeasonCycleType::Custom,
+            seasons,
+        };
+        assert!(
+            season_map.is_multi_resolution(),
+            "precondition: Q3 overlaps the monthly definitions"
+        );
+
+        let specs = vec![
+            (
+                0,
+                chrono::NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
+                chrono::NaiveDate::from_ymd_opt(2024, 10, 1).unwrap(),
+                12,
+            ), // 92d quarterly
+            (
+                1,
+                chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                chrono::NaiveDate::from_ymd_opt(2024, 1, 31).unwrap(),
+                12,
+            ), // 30d, mistakenly labeled season_id 12
+        ];
+        let stages: Vec<Stage> = specs
+            .into_iter()
+            .enumerate()
+            .map(|(index, (id, start_date, end_date, season_id))| Stage {
+                id,
+                index,
+                start_date,
+                end_date,
+                season_id: Some(season_id),
+                blocks: vec![],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: true,
+                    inflow_lags: false,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+            })
+            .collect();
+        let stages_data = StagesData {
+            stages,
+            policy_graph: PolicyGraph {
+                graph_type: PolicyGraphType::FiniteHorizon,
+                annual_discount_rate: 0.06,
+                transitions: vec![],
+                season_map: Some(season_map),
+            },
+        };
+        let data = make_data_5b(
+            vec![make_hydro_ordered_penalties(1)],
+            stages_data,
+            vec![make_bus_with_deficit(1, 10.0)],
+            vec![],
+            vec![],
+            None,
+        );
+        let mut ctx = ValidationContext::new();
+        check_season_id_consistency(&data, &mut ctx);
+
+        let rule29_errors: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| {
+                e.kind == ErrorKind::BusinessRuleViolation
+                    && e.message.contains("incompatible durations")
+            })
+            .collect();
+        assert_eq!(
+            rule29_errors.len(),
+            1,
+            "expected exactly one rule-29 error for season_id 12; got: {rule29_errors:?}"
+        );
+        let msg = &rule29_errors[0].message;
+        assert!(
+            msg.contains("layers multiple resolution levels"),
+            "a multi-resolution season_map must be noted in the message; got: {msg}"
         );
     }
 

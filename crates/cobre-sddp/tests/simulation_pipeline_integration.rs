@@ -3,7 +3,7 @@
 //! Uses a [`MockSolver`] and [`StubComm`] to exercise the simulation pipeline
 //! end-to-end without a real LP solver or MPI communicator. Covers scenario
 //! count, error propagation, cost accumulation, event emission, load patching,
-//! inflow truncation, baked-template acceptance, and warm-start basis handling.
+//! inflow truncation, frozen-template acceptance, and warm-start basis handling.
 
 #![allow(
     clippy::unwrap_used,
@@ -16,6 +16,9 @@
     clippy::float_cmp,
     clippy::cast_precision_loss
 )]
+// `..Default::default()` in the make_* Spec calls is the intentional future-field
+// seam from `common::builders` — a no-op today, not dead code.
+#![allow(clippy::needless_update)]
 
 use std::collections::HashMap;
 use std::sync::mpsc;
@@ -23,7 +26,8 @@ use std::sync::mpsc;
 use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::scenario::SamplingScheme;
 use cobre_solver::{
-    Basis, LpSolution, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
+    Basis, BasisStatus, LpSolution, RowBatch, SolverError, SolverInterface, SolverStatistics,
+    StageTemplate,
 };
 use cobre_stochastic::StochasticContext;
 
@@ -39,9 +43,12 @@ use cobre_sddp::{
     workspace::{SolverWorkspace, WorkspaceSizing},
 };
 
+mod common;
+use common::builders::{BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage};
+
 // ── Stub communicator ────────────────────────────────────────────────────────
 
-/// Mirrors the gated `indexer::test_fixtures::state_layout_for` via the public
+/// Mirrors the gated `test_support::state_layout_for` via the public
 /// [`StateLayout::new`] constructor: this external test crate cannot see the
 /// parent crate's `#[cfg(test)]` surface, so it rebuilds byte-identical patch
 /// columns on the default feature set.
@@ -49,6 +56,8 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
     StateLayout::new(
         hydro_count,
         max_par_order,
+        0,
+        Vec::new(),
         0,
         0,
         vec![],
@@ -305,7 +314,7 @@ fn make_stochastic_context(n_stages: usize) -> StochasticContext {
     use std::collections::BTreeMap;
 
     use chrono::NaiveDate;
-    use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
+    use cobre_core::entities::hydro::{HydroGenerationModel, HydroPenalties};
     use cobre_core::scenario::{
         CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, InflowModel,
     };
@@ -313,85 +322,96 @@ fn make_stochastic_context(n_stages: usize) -> StochasticContext {
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
         StageStateConfig,
     };
-    use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
+    use cobre_core::{DeficitSegment, EntityId, SystemBuilder};
     use cobre_stochastic::context::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
-    let bus = Bus {
-        id: EntityId(0),
-        name: "B0".to_string(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 1000.0,
-        }],
-        excess_cost: 0.0,
-    };
-    let hydro = Hydro {
-        id: EntityId(1),
-        name: "H1".to_string(),
-        bus_id: EntityId(0),
-        downstream_id: None,
-        entry_stage_id: None,
-        exit_stage_id: None,
-        min_storage_hm3: 0.0,
-        max_storage_hm3: 100.0,
-        min_outflow_m3s: 0.0,
-        max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity,
-        min_turbined_m3s: 0.0,
-        max_turbined_m3s: 100.0,
-        specific_productivity_mw_per_m3s_per_m: None,
-        min_generation_mw: 0.0,
-        max_generation_mw: 100.0,
-        tailrace: None,
-        hydraulic_losses: None,
-        efficiency: None,
-        evaporation_coefficients_mm: None,
-        evaporation_reference_volumes_hm3: None,
-        diversion: None,
-        filling: None,
-        penalties: HydroPenalties {
-            spillage_cost: 0.0,
-            diversion_cost: 0.0,
-            turbined_cost: 0.0,
-            storage_violation_below_cost: 0.0,
-            filling_target_violation_cost: 0.0,
-            turbined_violation_below_cost: 0.0,
-            outflow_violation_below_cost: 0.0,
-            outflow_violation_above_cost: 0.0,
-            generation_violation_below_cost: 0.0,
-            evaporation_violation_cost: 0.0,
-            water_withdrawal_violation_cost: 0.0,
-            water_withdrawal_violation_pos_cost: 0.0,
-            water_withdrawal_violation_neg_cost: 0.0,
-            evaporation_violation_pos_cost: 0.0,
-            evaporation_violation_neg_cost: 0.0,
-            inflow_nonnegativity_cost: 1000.0,
+    let bus = make_bus(
+        EntityId(0),
+        BusSpec {
+            name: "B0".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 1000.0,
+            }],
+            excess_cost: 0.0,
+            ..Default::default()
         },
-    };
-    let make_stage = |idx: usize, id: i32| Stage {
-        index: idx,
-        id,
-        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-        season_id: Some(0),
-        blocks: vec![Block {
-            index: 0,
-            name: "S".to_string(),
-            duration_hours: 744.0,
-        }],
-        block_mode: BlockMode::Parallel,
-        state_config: StageStateConfig {
-            storage: true,
-            inflow_lags: false,
+    );
+    let hydro = make_hydro(
+        EntityId(1),
+        HydroSpec {
+            name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: EntityId(0),
+            downstream_id: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 100.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 100.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: HydroPenalties {
+                spillage_cost: 0.0,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 0.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+            ..Default::default()
         },
-        risk_config: StageRiskConfig::Expectation,
-        scenario_config: ScenarioSourceConfig {
-            branching_factor: 3,
-            noise_method: NoiseMethod::Saa,
-        },
-    };
+    );
     let stages: Vec<Stage> = (0..n_stages)
-        .map(|i| make_stage(i, i32::try_from(i).unwrap()))
+        .map(|i| {
+            make_stage(
+                i,
+                StageSpec {
+                    start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                    season_id: Some(0),
+                    blocks: vec![Block {
+                        index: 0,
+                        name: "S".to_string(),
+                        duration_hours: 744.0,
+                    }],
+                    block_mode: BlockMode::Parallel,
+                    state_config: StageStateConfig {
+                        storage: true,
+                        inflow_lags: false,
+                    },
+                    risk_config: StageRiskConfig::Expectation,
+                    scenario_config: ScenarioSourceConfig {
+                        branching_factor: 3,
+                        noise_method: NoiseMethod::Saa,
+                    },
+                    ..Default::default()
+                },
+            )
+        })
         .collect();
     let inflow = |stage_id: i32| InflowModel {
         hydro_id: EntityId(1),
@@ -484,7 +504,7 @@ fn single_workspace(solver: MockSolver) -> Vec<SolverWorkspace<MockSolver>> {
         0,
         0,
         solver,
-        PatchBuffer::new(1, 0, 0, 0, 0, 0),
+        PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
         1,
         WorkspaceSizing {
             hydro_count: 1,
@@ -555,6 +575,9 @@ fn simulate_single_rank_4_scenarios_produces_4_results() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -570,7 +593,6 @@ fn simulate_single_rank_4_scenarios_produces_4_results() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -684,6 +706,9 @@ fn simulate_infeasible_returns_lp_infeasible_error() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -699,7 +724,6 @@ fn simulate_infeasible_returns_lp_infeasible_error() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -804,6 +828,9 @@ fn simulate_infeasible_at_scenario2_stage3() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -819,7 +846,6 @@ fn simulate_infeasible_at_scenario2_stage3() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -922,6 +948,9 @@ fn simulate_channel_closed_returns_error() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -937,7 +966,6 @@ fn simulate_channel_closed_returns_error() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -1042,6 +1070,9 @@ fn simulate_total_cost_equals_sum_of_stage_costs() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1057,7 +1088,6 @@ fn simulate_total_cost_equals_sum_of_stage_costs() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -1159,6 +1189,9 @@ fn simulate_cost_buffer_scenario_ids_match_assigned_range() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1174,7 +1207,6 @@ fn simulate_cost_buffer_scenario_ids_match_assigned_range() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -1276,6 +1308,9 @@ fn simulate_channel_receives_results_in_scenario_order() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1291,7 +1326,6 @@ fn simulate_channel_receives_results_in_scenario_order() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -1389,6 +1423,9 @@ fn test_simulation_parallel_cost_determinism() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1404,7 +1441,6 @@ fn test_simulation_parallel_cost_determinism() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -1441,7 +1477,7 @@ fn test_simulation_parallel_cost_determinism() {
                 0,
                 idx,
                 MockSolver::always_ok(solution.clone()),
-                PatchBuffer::new(1, 0, 0, 0, 0, 0),
+                PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
                 1,
                 WorkspaceSizing {
                     hydro_count: 1,
@@ -1480,6 +1516,9 @@ fn test_simulation_parallel_cost_determinism() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1495,7 +1534,6 @@ fn test_simulation_parallel_cost_determinism() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -1622,6 +1660,9 @@ fn simulate_emits_progress_events() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1637,7 +1678,6 @@ fn simulate_emits_progress_events() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -1760,6 +1800,9 @@ fn simulate_no_events_when_sender_is_none() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1775,7 +1818,6 @@ fn simulate_no_events_when_sender_is_none() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -1883,6 +1925,9 @@ fn simulate_progress_events_received_before_return() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1898,7 +1943,6 @@ fn simulate_progress_events_received_before_return() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -2017,6 +2061,9 @@ fn simulate_progress_scenario_cost_equals_total_cost() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -2032,7 +2079,6 @@ fn simulate_progress_scenario_cost_equals_total_cost() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -2149,6 +2195,9 @@ fn simulate_emits_simulation_finished_as_last_event() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -2164,7 +2213,6 @@ fn simulate_emits_simulation_finished_as_last_event() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -2293,6 +2341,9 @@ fn simulate_progress_scenario_cost_is_finite() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -2308,7 +2359,6 @@ fn simulate_progress_scenario_cost_is_finite() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -2355,18 +2405,18 @@ fn simulate_progress_scenario_cost_is_finite() {
     }
 }
 
-// ── baked-template acceptance tests ────────────────────────────
+// ── frozen-template acceptance tests ────────────────────────────
 
-/// When `baked_templates` is `Some`,
+/// When `frozen_templates` is `Some`,
 /// `add_rows` is never called (zero `add_rows_count`) and `load_model` is
 /// called exactly `n_scenarios * n_stages` times.
 #[test]
-fn simulate_baked_path_issues_zero_add_rows() {
+fn simulate_frozen_path_issues_zero_add_rows() {
     let n_stages = 2;
     let n_scenarios = 3u32;
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
-    // For MockSolver the baked content is irrelevant; reuse the minimal template.
-    let baked: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
+    // For MockSolver the frozen content is irrelevant; reuse the minimal template.
+    let frozen: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
 
     let state = state_layout_for(1, 0);
@@ -2420,6 +2470,9 @@ fn simulate_baked_path_issues_zero_add_rows() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -2435,7 +2488,6 @@ fn simulate_baked_path_issues_zero_add_rows() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -2459,29 +2511,29 @@ fn simulate_baked_path_issues_zero_add_rows() {
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
         },
-        Some(baked.as_slice()),
+        Some(frozen.as_slice()),
         &[],
         &comm,
     );
 
-    assert!(result.is_ok(), "baked path must succeed: {result:?}");
+    assert!(result.is_ok(), "frozen path must succeed: {result:?}");
     let expected_load_count = n_scenarios as usize * n_stages;
     let solver = workspaces[0].solver.inner();
     assert_eq!(
         solver.add_rows_count, 0,
-        "baked path must call add_rows 0 times; got {}",
+        "frozen path must call add_rows 0 times; got {}",
         solver.add_rows_count
     );
     assert_eq!(
         solver.load_count, expected_load_count,
-        "baked path must call load_model {} times; got {}",
+        "frozen path must call load_model {} times; got {}",
         expected_load_count, solver.load_count
     );
 }
 
-/// Fallback path (`baked_templates: None`): `add_rows` is gated by
+/// Fallback path (`frozen_templates: None`): `add_rows` is gated by
 /// `if cut_batch.num_rows > 0`, so with a 0-cut FCF `add_rows_count == 0` while
-/// `load_count == n_scenarios * n_stages` (same `load_model` count as the baked path).
+/// `load_count == n_scenarios * n_stages` (same `load_model` count as the frozen path).
 #[test]
 fn simulate_fallback_path_issues_expected_add_rows() {
     let n_stages = 2;
@@ -2540,6 +2592,9 @@ fn simulate_fallback_path_issues_expected_add_rows() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -2555,7 +2610,6 @@ fn simulate_fallback_path_issues_expected_add_rows() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -2600,11 +2654,11 @@ fn simulate_fallback_path_issues_expected_add_rows() {
     );
 }
 
-/// When `baked_templates` is `Some`
+/// When `frozen_templates` is `Some`
 /// but the slice length differs from `num_stages`, `simulate` returns
 /// `SimulationError::InvalidConfiguration` whose message contains both lengths.
 #[test]
-fn simulate_baked_length_mismatch_returns_error() {
+fn simulate_frozen_length_mismatch_returns_error() {
     let n_stages = 3;
     let templates: Vec<StageTemplate> = (0..n_stages).map(|_| minimal_template_1_0()).collect();
     let base_rows: Vec<usize> = vec![0; n_stages];
@@ -2629,7 +2683,7 @@ fn simulate_baked_length_mismatch_returns_error() {
     let hprod = hydro_productivities_1hydro(n_stages);
     let ec = zero_energy_conversion(1, n_stages);
 
-    let wrong_baked: Vec<StageTemplate> =
+    let wrong_frozen: Vec<StageTemplate> =
         (0..n_stages - 1).map(|_| minimal_template_1_0()).collect();
 
     let mut workspaces = single_workspace(solver);
@@ -2663,6 +2717,9 @@ fn simulate_baked_length_mismatch_returns_error() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -2678,7 +2735,6 @@ fn simulate_baked_length_mismatch_returns_error() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -2702,7 +2758,7 @@ fn simulate_baked_length_mismatch_returns_error() {
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
         },
-        Some(wrong_baked.as_slice()),
+        Some(wrong_frozen.as_slice()),
         &[],
         &comm,
     );
@@ -2726,12 +2782,12 @@ fn simulate_baked_length_mismatch_returns_error() {
 /// reproduces the stored cut statuses verbatim.
 #[test]
 fn simulate_with_captured_basis_preserves_row_statuses() {
-    // Arbitrary non-zero sentinels; the test only checks they pass through unchanged.
-    const CUT_STATUS_0: i32 = 7;
-    const CUT_STATUS_1: i32 = 11;
-    const CUT_STATUS_2: i32 = 13;
-    // Base rows use HIGHS_BASIS_STATUS_BASIC = 1.
-    const BASE_STATUS: i32 = 1;
+    // Arbitrary distinct statuses; the test only checks they pass through unchanged.
+    const CUT_STATUS_0: BasisStatus = BasisStatus::Superbasic;
+    const CUT_STATUS_1: BasisStatus = BasisStatus::Zero;
+    const CUT_STATUS_2: BasisStatus = BasisStatus::Fixed;
+    // Base rows use BasisStatus::Basic.
+    const BASE_STATUS: BasisStatus = BasisStatus::Basic;
 
     let n_stages = 1;
     let n_scenarios = 1u32;
@@ -2755,7 +2811,8 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
         "pool must have exactly 3 active cuts at slots 10, 11, 12"
     );
     assert_eq!(
-        fcf.pools[0].populated_count, 13,
+        fcf.pools[0].populated(),
+        13,
         "populated_count must be 13 (slot 12 + 1)"
     );
 
@@ -2767,7 +2824,7 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
         CUT_STATUS_1,
         CUT_STATUS_2,
     ];
-    cb.basis.col_status = vec![1_i32; 4];
+    cb.basis.col_status = vec![BasisStatus::Basic; 4];
     cb.cut_row_slots.extend_from_slice(&[10u32, 11, 12]);
     cb.state_at_capture.push(1.0);
 
@@ -2822,6 +2879,9 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -2837,7 +2897,6 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {
@@ -2861,7 +2920,7 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
         },
-        // fallback path (no baked templates); reconstruction uses pool.active_cuts()
+        // fallback path (no frozen templates); reconstruction uses pool.active_cuts()
         None,
         &stage_bases,
         &comm,
@@ -2887,7 +2946,7 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
         .as_ref()
         .expect("recorded_basis must be Some after a warm-start solve");
 
-    // Under the active-only bake model the LP carries one row per active cut;
+    // Under the active-only freeze model the LP carries one row per active cut;
     // inactive populated slots are absent, so the basis length is base_rows +
     // active_count.
     let active_count = fcf.pools[0].active_count();
@@ -2983,6 +3042,9 @@ fn simulate_with_empty_stage_bases_cold_starts() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
+            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
+                &state, n_stages,
+            ),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -2998,7 +3060,6 @@ fn simulate_with_empty_stage_bases_cold_starts() {
             recent_accum_seed: &[],
             recent_weight_seed: 0.0,
             dcs: None,
-            noise_key_diag: None,
         },
         &config,
         SimulationOutputSpec {

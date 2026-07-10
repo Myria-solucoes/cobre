@@ -361,6 +361,10 @@
           "description": "Human-readable plant name.",
           "type": "string"
         },
+        "operational_start_date": {
+          "description": "Date the entity enters service (ISO 8601 `YYYY-MM-DD`).",
+          "type": "string"
+        },
         "outflow": {
           "$ref": "#/$defs/RawOutflow",
           "description": "Total outflow bounds."
@@ -399,11 +403,21 @@
             }
           ],
           "description": "Tailrace elevation model. Absent or null = no tailrace."
+        },
+        "travel_time_hours": {
+          "default": null,
+          "description": "Travel time on the cascade arc to `downstream_id` \\[hours\\]. Absent or\nnull = instantaneous (v1 excludes diversion and pumping arcs).",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
         }
       },
       "required": [
         "id",
         "name",
+        "operational_start_date",
         "bus_id",
         "reservoir",
         "outflow",

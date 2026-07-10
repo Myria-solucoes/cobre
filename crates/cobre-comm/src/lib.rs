@@ -24,8 +24,9 @@
 //!   (`MPI_Win_allocate_shared` / `MPI_Win_shared_query`); see the tracking
 //!   note in `traits.rs` for open design tensions.
 //!
-//! The backend is selected at build time via Cargo feature flags, with optional
-//! runtime override through the `COBRE_COMM_BACKEND` environment variable.
+//! Available backends are determined at build time via Cargo feature flags; the
+//! active backend is chosen at runtime by the explicit [`BackendKind`] passed to
+//! [`create_communicator`].
 //!
 //! ## Design principles
 //!

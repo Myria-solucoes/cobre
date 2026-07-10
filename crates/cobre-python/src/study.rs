@@ -94,7 +94,7 @@ pub struct Study {
 ///
 /// `Policy` carries enough state to drive `simulate` directly without reloading
 /// a checkpoint from disk: the [`TrainingResult`] (which owns the per-stage
-/// basis cache and the baked stage templates) and a clone of the trained
+/// basis cache and the frozen stage templates) and a clone of the trained
 /// [`FutureCostFunction`] (the cut pool). A `Policy.load`-ed handle and a
 /// trained one therefore expose the same shape.
 ///
@@ -102,7 +102,7 @@ pub struct Study {
 /// (`iterations`, `final_lower_bound`, `final_upper_bound`).
 #[pyclass(name = "Policy")]
 pub struct Policy {
-    /// The training result (basis cache + baked templates) `simulate` warm-starts
+    /// The training result (basis cache + frozen templates) `simulate` warm-starts
     /// from.
     training_result: TrainingResult,
     /// The trained (or loaded) study FCF (the cut pool). `Study::simulate`
@@ -484,46 +484,33 @@ impl Study {
     /// construction-time `output_dir`), reconstructs the
     /// [`FutureCostFunction`] and a synthetic [`TrainingResult`] via the shared
     /// [`reconstruct_policy_from_checkpoint`] helper, and packages them into a
-    /// [`Policy`]. The returned policy carries `baked_templates = None`;
-    /// [`Study::simulate`] re-bakes the stage templates from the FCF at startup,
+    /// [`Policy`]. The returned policy carries `frozen_templates = None`;
+    /// [`Study::simulate`] re-freezes the stage templates from the FCF at startup,
     /// exactly as the monolithic simulation-only path does.
     ///
-    /// `validate_compatibility` overrides `config.policy.validate_compatibility`
-    /// when supplied; otherwise the config value (default `true`) controls
-    /// whether the checkpoint metadata is validated against this study's state
-    /// dimension and stage count.
+    /// Validation is unconditional: the checkpoint is always checked against
+    /// this study's state dimension, stage count, and terminal entity manifest
+    /// via [`cobre_sddp::validate_policy_load`].
     ///
     /// # Errors
     ///
     /// - `RuntimeError` when the policy directory does not exist (message
     ///   containing `"Policy directory not found"`), when the checkpoint cannot
     ///   be read, or when FCF reconstruction fails.
-    /// - `ValueError` when policy validation fails (incompatible state dimension
-    ///   or stage count), mapped from the descriptive message.
-    #[pyo3(signature = (output_dir=None, validate_compatibility=None))]
+    /// - `ValueError` when policy validation fails (incompatible state dimension,
+    ///   stage count, or entity manifest), mapped from the descriptive message.
+    #[pyo3(signature = (output_dir=None))]
     #[allow(clippy::needless_pass_by_value)]
-    fn load_policy(
-        &self,
-        py: Python<'_>,
-        output_dir: Option<PathBuf>,
-        validate_compatibility: Option<bool>,
-    ) -> PyResult<Policy> {
+    fn load_policy(&self, py: Python<'_>, output_dir: Option<PathBuf>) -> PyResult<Policy> {
         let out_dir = output_dir.unwrap_or_else(|| self.output_dir.clone());
         let policy_dir = out_dir.join(&self.setup.policy_path);
-
-        // The helper keys off `config.policy.validate_compatibility`, so the
-        // override is applied to a config clone rather than passed separately.
-        let mut config = self.config.clone();
-        if let Some(validate) = validate_compatibility {
-            config.policy.validate_compatibility = validate;
-        }
 
         let setup = &self.setup;
         let system = self.system.as_ref();
 
         // The reconstruction reads parquet/JSON from disk; release the GIL.
         let reconstructed: Result<(FutureCostFunction, TrainingResult), String> =
-            py.detach(|| reconstruct_policy_from_checkpoint(setup, system, &config, &policy_dir));
+            py.detach(|| reconstruct_policy_from_checkpoint(setup, system, &policy_dir));
 
         let (fcf, training_result) =
             reconstructed.map_err(|msg| convert_error(ErrorSource::Message(msg)))?;
@@ -541,9 +528,9 @@ impl Study {
     /// [`StudySetup::replace_fcf`] before simulating, so a trained `Policy` (from
     /// [`Study::train`]) and a loaded `Policy` (from [`Study::load_policy`]) feed
     /// the IDENTICAL simulate path: the unchanged [`run_simulation_phase_py`]
-    /// reads the policy's `baked_templates` and `basis_cache`. A trained policy
-    /// carries `baked_templates = Some(...)`; a loaded one carries `None` and the
-    /// study re-bakes the stage templates from the FCF at startup — exactly the
+    /// reads the policy's `frozen_templates` and `basis_cache`. A trained policy
+    /// carries `frozen_templates = Some(...)`; a loaded one carries `None` and the
+    /// study re-freezes the stage templates from the FCF at startup — exactly the
     /// monolithic behavior.
     ///
     /// `output_dir` defaults to this study's construction-time `output_dir`.

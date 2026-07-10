@@ -51,10 +51,13 @@ compile_error!(
 #[cfg(not(any(feature = "highs", feature = "clp")))]
 compile_error!("no LP backend selected: enable exactly one of `highs` or `clp`.");
 
-pub mod ffi;
+pub(crate) mod ffi;
 
 #[cfg(feature = "clp")]
-pub use ffi::clp as clp_ffi;
+pub(crate) use ffi::clp as clp_ffi;
+
+pub mod basis_status;
+pub use basis_status::BasisStatus;
 
 pub mod trait_def;
 pub use trait_def::SolverInterface;
@@ -67,8 +70,8 @@ pub use types::{
 pub mod profile;
 pub use profile::{DEFAULT_PROFILE_HEURISTIC_SENTINEL, DEFAULT_PROFILE_IPM_UNBOUNDED_SENTINEL};
 
-pub mod baking;
-pub use baking::{BakingScratch, bake_rows_into_template};
+pub mod freeze;
+pub use freeze::{FreezeScratch, freeze_rows_into_template};
 
 pub mod backends;
 pub use backends::profiled::ProfiledSolver;
@@ -81,7 +84,7 @@ pub use backends::clp::{ClpAlgorithm, ClpProfile, ClpSolver, clp_version};
 
 // Module-path shims exposing `cobre_solver::highs` / `cobre_solver::clp` for
 // downstream code that imports a backend by module rather than via the re-exports
-// above; mirrors the `clp_ffi` shim for `ffi::clp`.
+// above.
 #[cfg(feature = "clp")]
 pub use backends::clp;
 #[cfg(feature = "highs")]
@@ -159,18 +162,176 @@ pub fn active_solver_metadata_id() -> &'static str {
     "highs"
 }
 
-#[cfg(all(feature = "test-support", feature = "highs"))]
+#[cfg(feature = "test-support")]
 pub mod test_support {
-    //! Test-only utilities for configuring solver options from integration tests.
+    //! Test-only utilities for configuring solver options and probing the raw
+    //! C API from integration tests.
     //!
-    //! Do **not** enable this feature in production builds. The re-exported functions
-    //! call into the `HiGHS` C API directly and bypass all safe-wrapper validation,
-    //! so the module is HiGHS-only (gated on both `test-support` and `highs`).
+    //! Do **not** enable this feature in production builds. Every item here is
+    //! a thin, verbatim pass-through into the sealed `crate::ffi` module,
+    //! bypassing all safe-wrapper validation, so integration tests can poke
+    //! solver options or exercise the raw C API below the safe wrapper.
 
-    pub use crate::ffi::{
-        cobre_highs_get_double_option, cobre_highs_get_int_option, cobre_highs_set_double_option,
-        cobre_highs_set_int_option, cobre_highs_set_string_option,
-    };
+    #[cfg(feature = "highs")]
+    mod highs_bridge {
+        use std::os::raw::{c_char, c_double, c_int, c_void};
+
+        /// # Safety
+        /// Same contract as `crate::ffi::cobre_highs_get_double_option`.
+        pub unsafe fn cobre_highs_get_double_option(
+            highs: *const c_void,
+            option: *const c_char,
+            value: *mut c_double,
+        ) -> c_int {
+            // SAFETY: verbatim forward; caller upholds the wrapped fn's contract.
+            unsafe { crate::ffi::cobre_highs_get_double_option(highs, option, value) }
+        }
+
+        /// # Safety
+        /// Same contract as `crate::ffi::cobre_highs_get_int_option`.
+        pub unsafe fn cobre_highs_get_int_option(
+            highs: *const c_void,
+            option: *const c_char,
+            value: *mut c_int,
+        ) -> c_int {
+            // SAFETY: verbatim forward; caller upholds the wrapped fn's contract.
+            unsafe { crate::ffi::cobre_highs_get_int_option(highs, option, value) }
+        }
+
+        /// # Safety
+        /// Same contract as `crate::ffi::cobre_highs_set_double_option`.
+        pub unsafe fn cobre_highs_set_double_option(
+            highs: *mut c_void,
+            option: *const c_char,
+            value: c_double,
+        ) -> c_int {
+            // SAFETY: verbatim forward; caller upholds the wrapped fn's contract.
+            unsafe { crate::ffi::cobre_highs_set_double_option(highs, option, value) }
+        }
+
+        /// # Safety
+        /// Same contract as `crate::ffi::cobre_highs_set_int_option`.
+        pub unsafe fn cobre_highs_set_int_option(
+            highs: *mut c_void,
+            option: *const c_char,
+            value: c_int,
+        ) -> c_int {
+            // SAFETY: verbatim forward; caller upholds the wrapped fn's contract.
+            unsafe { crate::ffi::cobre_highs_set_int_option(highs, option, value) }
+        }
+
+        /// # Safety
+        /// Same contract as `crate::ffi::cobre_highs_set_string_option`.
+        pub unsafe fn cobre_highs_set_string_option(
+            highs: *mut c_void,
+            option: *const c_char,
+            value: *const c_char,
+        ) -> c_int {
+            // SAFETY: verbatim forward; caller upholds the wrapped fn's contract.
+            unsafe { crate::ffi::cobre_highs_set_string_option(highs, option, value) }
+        }
+    }
+    #[cfg(feature = "highs")]
+    pub use highs_bridge::*;
+
+    #[cfg(feature = "clp")]
+    mod clp_bridge {
+        use std::os::raw::{c_double, c_int, c_void};
+
+        /// Thin pass-through of `crate::ffi::clp::CLP_STATUS_OPTIMAL`.
+        pub const CLP_STATUS_OPTIMAL: i32 = crate::ffi::clp::CLP_STATUS_OPTIMAL;
+
+        /// # Safety
+        /// Same contract as `crate::ffi::clp::cobre_clp_create`.
+        #[must_use]
+        pub unsafe fn cobre_clp_create() -> *mut c_void {
+            // SAFETY: verbatim forward; the wrapped fn takes no arguments.
+            unsafe { crate::ffi::clp::cobre_clp_create() }
+        }
+
+        /// # Safety
+        /// Same contract as `crate::ffi::clp::cobre_clp_destroy`.
+        pub unsafe fn cobre_clp_destroy(model: *mut c_void) {
+            // SAFETY: verbatim forward; caller upholds the wrapped fn's contract.
+            unsafe { crate::ffi::clp::cobre_clp_destroy(model) }
+        }
+
+        /// # Safety
+        /// Same contract as `crate::ffi::clp::cobre_clp_set_log_level`.
+        pub unsafe fn cobre_clp_set_log_level(model: *mut c_void, value: c_int) {
+            // SAFETY: verbatim forward; caller upholds the wrapped fn's contract.
+            unsafe { crate::ffi::clp::cobre_clp_set_log_level(model, value) }
+        }
+
+        /// # Safety
+        /// Same contract as `crate::ffi::clp::cobre_clp_load_problem`.
+        // Rationale: mirrors `cobre_clp_load_problem`'s C signature verbatim; the
+        // probe test needs the 1:1 forwarding contract, not a re-shaped API.
+        #[allow(clippy::too_many_arguments)]
+        pub unsafe fn cobre_clp_load_problem(
+            model: *mut c_void,
+            num_cols: c_int,
+            num_rows: c_int,
+            col_starts: *const c_int,
+            row_indices: *const c_int,
+            values: *const c_double,
+            col_lower: *const c_double,
+            col_upper: *const c_double,
+            objective: *const c_double,
+            row_lower: *const c_double,
+            row_upper: *const c_double,
+        ) {
+            // SAFETY: verbatim forward; caller upholds the wrapped fn's contract.
+            unsafe {
+                crate::ffi::clp::cobre_clp_load_problem(
+                    model,
+                    num_cols,
+                    num_rows,
+                    col_starts,
+                    row_indices,
+                    values,
+                    col_lower,
+                    col_upper,
+                    objective,
+                    row_lower,
+                    row_upper,
+                );
+            }
+        }
+
+        /// # Safety
+        /// Same contract as `crate::ffi::clp::cobre_clp_dual`.
+        pub unsafe fn cobre_clp_dual(model: *mut c_void, if_values_pass: c_int) -> c_int {
+            // SAFETY: verbatim forward; caller upholds the wrapped fn's contract.
+            unsafe { crate::ffi::clp::cobre_clp_dual(model, if_values_pass) }
+        }
+
+        /// # Safety
+        /// Same contract as `crate::ffi::clp::cobre_clp_objective_value`.
+        #[must_use]
+        pub unsafe fn cobre_clp_objective_value(model: *const c_void) -> c_double {
+            // SAFETY: verbatim forward; caller upholds the wrapped fn's contract.
+            unsafe { crate::ffi::clp::cobre_clp_objective_value(model) }
+        }
+
+        /// # Safety
+        /// Same contract as `crate::ffi::clp::cobre_clp_status`.
+        #[must_use]
+        pub unsafe fn cobre_clp_status(model: *const c_void) -> c_int {
+            // SAFETY: verbatim forward; caller upholds the wrapped fn's contract.
+            unsafe { crate::ffi::clp::cobre_clp_status(model) }
+        }
+
+        /// # Safety
+        /// Same contract as `crate::ffi::clp::cobre_clp_get_row_price`.
+        #[must_use]
+        pub unsafe fn cobre_clp_get_row_price(model: *const c_void) -> *const c_double {
+            // SAFETY: verbatim forward; caller upholds the wrapped fn's contract.
+            unsafe { crate::ffi::clp::cobre_clp_get_row_price(model) }
+        }
+    }
+    #[cfg(feature = "clp")]
+    pub use clp_bridge::*;
 }
 
 #[cfg(all(test, any(feature = "highs", feature = "clp")))]

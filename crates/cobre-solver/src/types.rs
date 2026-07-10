@@ -5,31 +5,35 @@
 
 use core::fmt;
 
-/// Simplex basis storing raw solver-native `i32` status codes, enabling zero-copy
-/// round-trip warm-starting via `copy_from_slice` without per-element translation.
+use crate::BasisStatus;
+
+/// Simplex basis storing canonical [`BasisStatus`] values, backend-neutral across
+/// `HiGHS` and CLP. Each backend maps to/from its native status codes at the FFI
+/// capture/install boundary (`to_highs_code`/`from_highs_code`,
+/// `to_clp_code`/`from_clp_code`).
 ///
-/// `HiGHS` uses `HighsInt` (4 bytes) for status codes; CLP uses `unsigned char`
-/// (1 byte, widened to `i32` here). The caller must match the buffer dimensions to
-/// the LP model before use.
+/// The caller must match the buffer dimensions to the LP model before use.
 ///
 /// See Solver Abstraction SS9.
 #[derive(Debug, Clone)]
 pub struct Basis {
-    /// Solver-native `i32` status codes for each column (length must equal `num_cols`).
-    pub col_status: Vec<i32>,
+    /// Canonical basis status for each column (length must equal `num_cols`).
+    pub col_status: Vec<BasisStatus>,
 
-    /// Solver-native `i32` status codes for each row, including structural and dynamic rows.
-    pub row_status: Vec<i32>,
+    /// Canonical basis status for each row, including structural and dynamic rows.
+    pub row_status: Vec<BasisStatus>,
 }
 
 impl Basis {
-    /// Creates a `Basis` with zero-filled status buffers of the requested lengths,
-    /// for reuse across solves via [`crate::SolverInterface::get_basis`].
+    /// Creates a `Basis` with status buffers of the requested lengths, filled with
+    /// [`BasisStatus::Lower`] (`to_highs_code() == 0`, matching the historical
+    /// zero-fill default), for reuse across solves via
+    /// [`crate::SolverInterface::get_basis`].
     #[must_use]
     pub fn new(num_cols: usize, num_rows: usize) -> Self {
         Self {
-            col_status: vec![0_i32; num_cols],
-            row_status: vec![0_i32; num_rows],
+            col_status: vec![BasisStatus::Lower; num_cols],
+            row_status: vec![BasisStatus::Lower; num_rows],
         }
     }
 }
@@ -100,9 +104,6 @@ pub struct SolutionView<'a> {
 
 impl SolutionView<'_> {
     /// Clones the borrowed slices into owned [`Vec`]s, producing an [`LpSolution`].
-    ///
-    /// Use this when the solution data must outlive the current solver borrow,
-    /// or when the same solution will be read after a subsequent solver call.
     #[must_use]
     pub fn to_owned(&self) -> LpSolution {
         LpSolution {
@@ -366,10 +367,10 @@ pub struct RowBatch {
 
 impl StageTemplate {
     /// Creates an empty [`StageTemplate`], a reusable output buffer for
-    /// [`crate::baking::bake_rows_into_template`].
+    /// [`crate::freeze::freeze_rows_into_template`].
     ///
     /// An empty template is **not** a valid model for `load_model` (`num_cols == 0`,
-    /// `num_rows == 0`); only pass it there after a `bake_rows_into_template` call
+    /// `num_rows == 0`); only pass it there after a `freeze_rows_into_template` call
     /// has populated it. A `Default` impl is intentionally omitted: an empty
     /// template is a surprising default that invites misuse.
     #[must_use]
@@ -399,9 +400,6 @@ impl StageTemplate {
 
 impl RowBatch {
     /// Reset all buffers to empty without deallocating.
-    ///
-    /// After `clear()`, `num_rows` is 0 and all `Vec` fields have length 0
-    /// but retain their allocated capacity for reuse.
     pub fn clear(&mut self) {
         self.num_rows = 0;
         self.row_starts.clear();
@@ -548,14 +546,15 @@ impl std::error::Error for SolverError {}
 #[cfg(test)]
 mod tests {
     use super::{Basis, RowBatch, SolutionView, SolverError, SolverStatistics, StageTemplate};
+    use crate::BasisStatus;
 
     #[test]
     fn test_basis_new_dimensions_and_zero_fill() {
         let rb = Basis::new(3, 2);
         assert_eq!(rb.col_status.len(), 3);
         assert_eq!(rb.row_status.len(), 2);
-        assert!(rb.col_status.iter().all(|&v| v == 0_i32));
-        assert!(rb.row_status.iter().all(|&v| v == 0_i32));
+        assert!(rb.col_status.iter().all(|&v| v == BasisStatus::Lower));
+        assert!(rb.row_status.iter().all(|&v| v == BasisStatus::Lower));
     }
 
     #[test]
@@ -573,8 +572,8 @@ mod tests {
         assert_eq!(cloned.col_status, rb.col_status);
         assert_eq!(cloned.row_status, rb.row_status);
         let mut cloned2 = rb.clone();
-        cloned2.col_status[0] = 1_i32;
-        assert_eq!(rb.col_status[0], 0_i32);
+        cloned2.col_status[0] = BasisStatus::Basic;
+        assert_eq!(rb.col_status[0], BasisStatus::Lower);
     }
 
     #[test]

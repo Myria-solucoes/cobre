@@ -37,9 +37,9 @@ cuts count as the initial future-cost approximation.
 
 Use `"warm_start"` when you have a policy from a previous run (possibly with
 different parameters) and want to accelerate convergence by reusing its cuts.
-Set `policy.validate_compatibility` to `true` (the default) to have Cobre
-verify that the state dimension and entity layout of the saved policy match the
-current system before loading.
+Cobre always verifies that the state dimension and stage count of the saved
+policy match the current system before loading, rejecting an incompatible
+checkpoint with a descriptive error.
 
 ### Resume
 
@@ -140,10 +140,10 @@ checkpoint and refuses to load it.
 
 The `metadata.json` file records the number of completed iterations,
 lower-bound and upper-bound values, state dimension, number of stages,
-configuration and system hashes (used by `validate_compatibility`), forward
-passes per iteration, and the RNG seed. These fields allow Cobre to verify
-that a saved policy is compatible with the current system before loading it
-in `"warm_start"` or `"resume"` mode.
+configuration and system hashes, forward passes per iteration, and the RNG
+seed. These fields allow Cobre to verify that a saved policy is compatible
+with the current system before loading it in `"warm_start"` or `"resume"`
+mode.
 
 ---
 
@@ -194,8 +194,8 @@ When `boundary` is absent or `null`, no boundary cuts are loaded (the default).
 
 The source checkpoint must have the same state dimension (number of hydro
 plants and maximum PAR order) as the current study. Cobre validates this
-automatically when `validate_compatibility` is `true`. If the dimensions
-don't match, loading fails with a descriptive error.
+automatically. If the dimensions don't match, loading fails with a
+descriptive error.
 
 ### Production coupling workflow
 

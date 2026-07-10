@@ -19,6 +19,18 @@
 #   \bW[0-9]+ (reset|rebake|workstream|phase)\b — context-anchored workstream
 #                          phase language: "W2 reset", "W3 rebake", etc. Bare
 #                          "W2" / "W3" without the anchored phrase is allowed.
+#   \bW-[0-9]+\b      — hyphenated workstream ID form: "W-1", "W-5", etc.,
+#                          distinct from the "W2 reset" phase form above. Added
+#                          after a "W-5" tag slipped past the phase-anchored form.
+#
+# NOT gated (lexical collision — caught by review + the epic/plan hygiene sweep,
+# not a regex): owner-decision tokens "D<n>" (D0-D8) are lexically identical to
+# the comment-rule directives D1-D5 (.claude/rules/comments.md), which ARE
+# legitimately cited inline ("Determinism (D5)"). A bare \bD[0-9]\b gate would
+# false-positive on every such directive citation, so plan D-decisions are
+# stripped by the comment/plan hygiene sweep and review, not this script. The
+# 2-digit deterministic case ids ("D06", "D15") never collide (single-digit
+# gate) and are always allowed.
 #
 # Scope: production source under crates/*/src/ (including the umbrella
 #   crates/cobre/src and the reserved stub crates), test/bench source under
@@ -58,7 +70,7 @@ source "${REPO_ROOT}/scripts/ci/lib/comment_scan.sh"
 command -v cs_emit_production_lines >/dev/null \
     || { echo "FATAL: scripts/ci/lib/comment_scan.sh did not load its helpers." >&2; exit 2; }
 
-readonly PATTERN='[Ee]pic[ -][0-9]+|[Tt]icket[ -][0-9]+|T0[0-9][0-9]|\bsprint\b|\bF[0-9]?-[0-9]{2,}\b|\bW[0-9]+ (reset|rebake|workstream|phase)\b'
+readonly PATTERN='[Ee]pic[ -][0-9]+|[Tt]icket[ -][0-9]+|T0[0-9][0-9]|\bsprint\b|\bF[0-9]?-[0-9]{2,}\b|\bW[0-9]+ (reset|rebake|workstream|phase)\b|\bW-[0-9]+\b'
 
 # .rs source directories: scanned per-file with the cfg(test) tail-block
 # exclusion (see header). The umbrella crates/cobre/src and the reserved stub

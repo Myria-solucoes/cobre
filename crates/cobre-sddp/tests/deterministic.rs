@@ -18,99 +18,19 @@
 use std::path::Path;
 use std::sync::mpsc;
 
-use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_core::scenario::ScenarioSource;
 use cobre_io::{
     PolicyCheckpointMetadata, PolicyCutRecord, StageCutsPayload, write_policy_checkpoint,
 };
 use cobre_sddp::{
-    StudySetup, aggregate_simulation,
-    hydro_models::prepare_hydro_models,
-    setup::{StudyParams, prepare_stochastic},
+    StudySetup, aggregate_simulation, hydro_models::prepare_hydro_models, setup::prepare_stochastic,
 };
 use cobre_solver::ActiveSolver;
 use cobre_solver::SolverInterface;
 
 mod common;
-
-/// Single-rank communicator whose `allgatherv`/`allreduce` copy send→recv
-/// verbatim, so the pipeline runs without MPI.
-struct StubComm;
-
-impl Communicator for StubComm {
-    fn allgatherv<T: CommData>(
-        &self,
-        send: &[T],
-        recv: &mut [T],
-        _counts: &[usize],
-        _displs: &[usize],
-    ) -> Result<(), CommError> {
-        recv[..send.len()].clone_from_slice(send);
-        Ok(())
-    }
-
-    fn allreduce<T: CommData>(
-        &self,
-        send: &[T],
-        recv: &mut [T],
-        _op: ReduceOp,
-    ) -> Result<(), CommError> {
-        recv.clone_from_slice(send);
-        Ok(())
-    }
-
-    fn broadcast<T: CommData>(&self, _buf: &mut [T], _root: usize) -> Result<(), CommError> {
-        Ok(())
-    }
-
-    fn barrier(&self) -> Result<(), CommError> {
-        Ok(())
-    }
-
-    fn rank(&self) -> usize {
-        0
-    }
-
-    fn size(&self) -> usize {
-        1
-    }
-
-    fn abort(&self, error_code: i32) -> ! {
-        std::process::exit(error_code)
-    }
-}
-
-/// Build a [`StudySetup`] for a case directory. Does no parquet I/O — the
-/// caller's `prepare_hydro_models` already folded any override into
-/// `hydro_models`, which is why `_case_dir` is unused.
-fn build_setup_for_case(
-    _case_dir: &Path,
-    config: &cobre_io::Config,
-    system: &cobre_core::System,
-    stochastic: cobre_stochastic::StochasticContext,
-    hydro_models: cobre_sddp::PrepareHydroModelsResult,
-) -> StudySetup {
-    let sentinel = std::path::Path::new("config.json");
-    let training_source = config
-        .training_scenario_source(sentinel)
-        .expect("training_scenario_source must parse");
-    let simulation_source = config
-        .simulation_scenario_source(sentinel)
-        .expect("simulation_scenario_source must parse");
-
-    let params = StudyParams::from_config(config).expect("StudyParams::from_config must succeed");
-    let construction = params.into_construction_config();
-
-    StudySetup::from_broadcast_params(
-        system,
-        stochastic,
-        construction,
-        hydro_models,
-        &training_source,
-        &simulation_source,
-    )
-    .expect("StudySetup::from_broadcast_params must build")
-}
+use common::StubComm;
+use common::build_setup_for_case;
 
 /// Train a case (`StubComm`, seed 42, 1 thread) and return the result plus the
 /// live solver, so callers can inspect `solver.statistics()` after training.
@@ -141,8 +61,12 @@ fn run_deterministic_with_solver(case_dir: &Path) -> (cobre_sddp::TrainingResult
     (outcome.result, solver)
 }
 
-/// Train a case (`StubComm`, `ActiveSolver`, seed 42, 1 thread) and return the result.
-fn run_deterministic(case_dir: &Path) -> cobre_sddp::TrainingResult {
+/// Train a case (`StubComm`, `ActiveSolver`, seed 42, 1 thread) and return the
+/// setup (for post-train state introspection via `stage_state()`, or driving
+/// a subsequent simulation), the canonicalized system, and the training result.
+fn run_deterministic_with_setup(
+    case_dir: &Path,
+) -> (StudySetup, cobre_core::System, cobre_sddp::TrainingResult) {
     let config_path = case_dir.join("config.json");
     let config = cobre_io::parse_config(&config_path).expect("config must parse");
 
@@ -166,7 +90,12 @@ fn run_deterministic(case_dir: &Path) -> cobre_sddp::TrainingResult {
         .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
         .expect("train must return Ok");
     assert!(outcome.error.is_none(), "expected no training error");
-    outcome.result
+    (setup, system, outcome.result)
+}
+
+/// Train a case (`StubComm`, `ActiveSolver`, seed 42, 1 thread) and return the result.
+fn run_deterministic(case_dir: &Path) -> cobre_sddp::TrainingResult {
+    run_deterministic_with_solver(case_dir).0
 }
 
 /// Train with 1-scenario simulation enabled, then simulate, returning the
@@ -227,7 +156,7 @@ fn run_with_simulation(
             &comm,
             &result_tx,
             None,
-            result.baked_templates.as_deref(),
+            result.frozen_templates.as_deref(),
             &result.basis_cache,
         )
         .expect("simulate must return Ok");
@@ -619,8 +548,9 @@ fn d06_fpha_variable_head() {
 /// the constant tailrace at 300 m), giving a net head of ~50–100 m. Factor losses
 /// of 3% and constant efficiency of 92% are applied.
 ///
-/// No exact cost is asserted: the computed fitting pipeline uses a different
-/// discretization grid and plane count than D06's precomputed planes.
+/// The asserted cost is the converged optimum (LB == UB), distinct from D06's
+/// value because the computed fitting uses a different discretization grid and
+/// plane count than D06's precomputed planes. Backend-agnostic to tolerance.
 #[cfg_attr(
     not(feature = "slow-tests"),
     ignore = "slow: run with --features slow-tests"
@@ -644,6 +574,7 @@ fn d07_fpha_computed() {
         "D07: final_lb={} must be positive",
         result.final_lb
     );
+    assert_cost(result.final_lb, 3_657_537.696_594_757, 1.0, "D07");
 }
 
 // ---------------------------------------------------------------------------
@@ -1058,7 +989,7 @@ fn d09_multi_deficit() {
 ///
 /// ## Penalty cost unit (verified from `lp::builder::template`)
 ///
-/// From `build_stage_templates` in `lp::builder::template`:
+/// From `build_stage_templates_resolving_layout` in `lp::builder::template`:
 /// ```text
 /// let obj_coeff = penalty_cost * total_stage_hours;
 /// objective[col] = obj_coeff;
@@ -1294,7 +1225,7 @@ fn d11_warm_start_verification() {
     );
 }
 
-/// Checkpoint round-trip for the D02 system: exercises the full FlatBuffers
+/// Checkpoint round-trip for the D02 system: exercises the full `FlatBuffers`
 /// persistence pipeline (train → write → read → simulate from the loaded FCF).
 ///
 /// ## Why the simulation cost should equal the training LB
@@ -1359,18 +1290,17 @@ fn d12_checkpoint_round_trip() {
         .pools
         .iter()
         .map(|pool| {
-            (0..pool.populated_count)
+            (0..pool.populated())
                 .map(|slot| {
-                    let meta = &pool.metadata[slot];
+                    let meta = pool.metadata(slot);
                     PolicyCutRecord {
                         cut_id: slot as u64,
                         slot_index: slot as u32,
                         iteration: meta.iteration_generated as u32,
                         forward_pass_index: meta.forward_pass_index,
-                        intercept: pool.intercepts[slot],
-                        coefficients: &pool.coefficients
-                            [slot * pool.state_dimension..(slot + 1) * pool.state_dimension],
-                        is_active: pool.active[slot],
+                        intercept: pool.intercept(slot),
+                        coefficients: pool.coefficient_row(slot),
+                        is_active: pool.is_active(slot),
                     }
                 })
                 .collect()
@@ -1381,8 +1311,8 @@ fn d12_checkpoint_round_trip() {
         .pools
         .iter()
         .map(|pool| {
-            (0..pool.populated_count)
-                .filter(|&slot| pool.active[slot])
+            (0..pool.populated())
+                .filter(|&slot| pool.is_active(slot))
                 .map(|slot| slot as u32)
                 .collect()
         })
@@ -1399,7 +1329,8 @@ fn d12_checkpoint_round_trip() {
             warm_start_count: pool.warm_start_count,
             cuts: &cut_records_per_stage[stage_idx],
             active_cut_indices: &active_indices_per_stage[stage_idx],
-            populated_count: pool.populated_count as u32,
+            populated_count: pool.populated() as u32,
+            entity_manifest: &[],
         })
         .collect();
 
@@ -1419,6 +1350,8 @@ fn d12_checkpoint_round_trip() {
         warm_start_counts,
         rng_seed: 42,
         total_visited_states: 0,
+        training_block_mode: "parallel".to_string(),
+        training_block_mode_per_stage: vec![],
     };
 
     write_policy_checkpoint(
@@ -1470,7 +1403,7 @@ fn d12_checkpoint_round_trip() {
             &comm,
             &result_tx,
             None,
-            result.baked_templates.as_deref(),
+            result.frozen_templates.as_deref(),
             &result.basis_cache,
         )
         .expect("simulate must return Ok");
@@ -2099,23 +2032,6 @@ fn incremental_lb_reduces_load_model_count() {
     );
 }
 
-/// Bit-for-bit equivalence spot check for the incremental cut-management path:
-/// D01's converged trace must match its expected cost. All D-cases share this
-/// pipeline, so D01 passing exercises the same incremental LB management.
-#[test]
-fn incremental_bit_for_bit_d01_trace() {
-    let case_dir = Path::new("../../examples/deterministic/d01-thermal-dispatch");
-    let (result, _solver) = run_deterministic_with_solver(case_dir);
-
-    assert_cost(result.final_lb, 182_500.0, 1e-6, "D01-trace");
-
-    assert!(
-        result.final_gap.abs() < 1e-6,
-        "D01-trace: gap={:.2e} should be < 1e-6",
-        result.final_gap
-    );
-}
-
 /// Multi-hydro PAR(2) regression test with inflow truncation.
 ///
 /// ## Case setup
@@ -2215,12 +2131,10 @@ fn d20_operational_violations() {
     assert_eq!(summary.n_scenarios, 1);
     assert_cost(summary.mean_cost, D20_EXPECTED_COST, 1e-2, "D20-sim");
 
-    // Verify operational violation slacks are non-zero in at least one stage.
     assert_eq!(scenario_results.len(), 1);
     let scenario = &scenario_results[0];
     assert_eq!(scenario.stages.len(), 2);
 
-    // Verify operational violation slacks fire in at least one stage.
     let mut found_outflow_below = false;
     let mut found_turbine_below = false;
     for stage_result in &scenario.stages {
@@ -2311,7 +2225,6 @@ fn d21_min_outflow_regression() {
     writer.write(&inflow_batch).expect("write inflow batch");
     writer.close().expect("close inflow writer");
 
-    // Train + simulate.
     let (result, scenario_results, summary) = run_with_simulation(case_dir);
 
     assert!(
@@ -2690,7 +2603,6 @@ fn d23_bidirectional_withdrawal() {
     writer.write(&bounds_batch).expect("write bounds batch");
     writer.close().expect("close bounds writer");
 
-    // Train + simulate.
     let (result, scenario_results, _summary) = run_with_simulation(case_dir);
 
     assert!(
@@ -3305,7 +3217,7 @@ fn d29_weekly_par_noise_sharing() {
             &comm,
             &result_tx,
             None,
-            result.baked_templates.as_deref(),
+            result.frozen_templates.as_deref(),
             &result.basis_cache,
         )
         .expect("simulation must succeed");
@@ -3335,9 +3247,9 @@ fn d29_weekly_par_noise_sharing() {
 /// - Training completes at least 1 iteration with a positive lower bound.
 ///
 /// Full structural and downstream-lag-transition assertions are in the dedicated
-/// `multi_resolution_integration.rs` test file, which verifies composition
-/// correctness including noise group IDs, accumulate_downstream flags,
-/// rebuild_from_downstream, and simulation.
+/// `hydro_sim.rs` test file (the `multi_resolution_integration` module), which
+/// verifies composition correctness including noise group IDs,
+/// accumulate_downstream flags, rebuild_from_downstream, and simulation.
 #[cfg_attr(
     not(feature = "slow-tests"),
     ignore = "slow: run with --features slow-tests"
@@ -3393,13 +3305,13 @@ fn d30_multi_resolution_loads_and_trains() {
 
 // ── integration test ──────────────────────────────────────────────
 
-/// The baked-template simulation path must produce bit-for-bit identical
+/// The frozen-template simulation path must produce bit-for-bit identical
 /// per-scenario costs to the legacy fallback path (rel error == 0.0, within
-/// 1e-12), confirming `bake_rows_into_template` builds a mathematically
+/// 1e-12), confirming `freeze_rows_into_template` builds a mathematically
 /// equivalent LP to `load_model + add_rows`. Trained on D01, which runs >= 2
-/// iterations so `baked_templates` is `Some`.
+/// iterations so `frozen_templates` is `Some`.
 #[test]
-fn baked_vs_fallback_simulation_costs_are_identical() {
+fn frozen_vs_fallback_simulation_costs_are_identical() {
     let case_dir = Path::new("../../examples/deterministic/d01-thermal-dispatch");
     let config_path = case_dir.join("config.json");
     let config = cobre_io::parse_config(&config_path).expect("config must parse");
@@ -3437,8 +3349,8 @@ fn baked_vs_fallback_simulation_costs_are_identical() {
     let training_result = outcome.result;
 
     assert!(
-        training_result.baked_templates.is_some(),
-        "D01 training must produce baked templates (requires >= 2 iterations)"
+        training_result.frozen_templates.is_some(),
+        "D01 training must produce frozen templates (requires >= 2 iterations)"
     );
 
     let mut pool = setup
@@ -3446,21 +3358,21 @@ fn baked_vs_fallback_simulation_costs_are_identical() {
         .expect("simulation workspace pool must build");
 
     let io_capacity = setup.simulation_config.io_channel_capacity.max(1);
-    let (tx_baked, rx_baked) = mpsc::sync_channel(io_capacity);
-    let drain_baked = std::thread::spawn(move || rx_baked.into_iter().collect::<Vec<_>>());
+    let (tx_frozen, rx_frozen) = mpsc::sync_channel(io_capacity);
+    let drain_frozen = std::thread::spawn(move || rx_frozen.into_iter().collect::<Vec<_>>());
 
-    let baked_run = setup
+    let frozen_run = setup
         .simulate(
             &mut pool.workspaces,
             &comm,
-            &tx_baked,
+            &tx_frozen,
             None,
-            training_result.baked_templates.as_deref(),
+            training_result.frozen_templates.as_deref(),
             &training_result.basis_cache,
         )
-        .expect("baked-path simulate must return Ok");
-    drop(tx_baked);
-    drop(drain_baked.join().expect("drain thread must not panic"));
+        .expect("frozen-path simulate must return Ok");
+    drop(tx_frozen);
+    drop(drain_frozen.join().expect("drain thread must not panic"));
 
     let (tx_fallback, rx_fallback) = mpsc::sync_channel(io_capacity);
     let drain_fallback = std::thread::spawn(move || rx_fallback.into_iter().collect::<Vec<_>>());
@@ -3479,13 +3391,13 @@ fn baked_vs_fallback_simulation_costs_are_identical() {
     drop(drain_fallback.join().expect("drain thread must not panic"));
 
     assert_eq!(
-        baked_run.costs.len(),
+        frozen_run.costs.len(),
         fallback_run.costs.len(),
         "both runs must return the same number of scenarios"
     );
 
     for ((b_id, b_cost, _), (f_id, f_cost, _)) in
-        baked_run.costs.iter().zip(fallback_run.costs.iter())
+        frozen_run.costs.iter().zip(fallback_run.costs.iter())
     {
         assert_eq!(b_id, f_id, "scenario IDs must match between runs");
         let rel_err = if b_cost.abs() > 1e-10 {
@@ -3495,7 +3407,3138 @@ fn baked_vs_fallback_simulation_costs_are_identical() {
         };
         assert!(
             rel_err < 1e-12,
-            "scenario {b_id}: baked cost {b_cost} != fallback cost {f_cost} (rel_err={rel_err})"
+            "scenario {b_id}: frozen cost {b_cost} != fallback cost {f_cost} (rel_err={rel_err})"
+        );
+    }
+}
+
+/// D43: storage-only (lag-dropped) cut convergence.
+///
+/// ## System
+///
+/// 1 bus, 1 hydro (H0, constant productivity 0.8 MW/(m3/s), 0–500 hm3 storage),
+/// 1 thermal (300 MW @ 100 $/MWh), 4 monthly stages, load 220 MW constant.
+/// PACF with `max_order=2` fits a PAR(2) model (global `n_state = N*(1+L) = 3`).
+///
+/// ## Storage-only stage
+///
+/// Stage 2 sets `state_variables.inflow_lags = false`. Pool `t` is sized by stage
+/// `t+1`'s config, so stage 2's storage-only config sizes **pool 1** at cut
+/// dimension `N = 1` (the AR lags are dropped from that pool's cuts) while the
+/// lag-enabled pools stay at `N*(1+L) = 3`. The reduced cut, rendered through the
+/// per-pool outgoing projection, touches only the storage column.
+///
+/// ## Convergence
+///
+/// The lag-dropped cut is an approximation change; this case proves it still
+/// closes the LB/UB gap. The run terminates on `bound_stalling` (the LB
+/// stabilizes — it does not plateau below the UB), with LB == UB to machine
+/// precision.
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+#[test]
+fn d43_storage_only_cut_converges() {
+    let case_dir = Path::new("../../examples/deterministic/d43-storage-only-cut");
+
+    // Pool dimensions: stage 2's storage-only config sizes pool 1 down to N,
+    // while the lag-enabled pools carry storage + lags.
+    let config = cobre_io::parse_config(&case_dir.join("config.json")).expect("config must parse");
+    let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
+    let pr = prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
+        .expect("prepare_stochastic must succeed");
+    let system = pr.system;
+    let stochastic = pr.stochastic;
+    let hydro_models =
+        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
+    let mut setup = build_setup_for_case(case_dir, &config, &system, stochastic, hydro_models);
+    let n_hydros = setup.stage_state().hydro_count;
+    let global_n_state = setup.stage_state().n_state;
+    assert!(
+        global_n_state > n_hydros,
+        "D43: PACF must fit PAR(p>0) so the lag drop is non-trivial (n_state={global_n_state}, N={n_hydros})",
+    );
+    // ONLY pool 1 is reduced (sized by stage 2's storage-only config); every
+    // sibling stays at the full global dimension. Pinning all four catches both an
+    // under-reduction (pool 1 not dropped) and an over-eager reduction (a sibling
+    // wrongly dropped).
+    assert_eq!(
+        setup.fcf.pools[1].state_dimension, n_hydros,
+        "D43: storage-only pool 1 must have cut dimension N (lags dropped)",
+    );
+    for t in [0usize, 2, 3] {
+        assert_eq!(
+            setup.fcf.pools[t].state_dimension, global_n_state,
+            "D43: lag-enabled pool {t} must stay at the full global dimension",
+        );
+    }
+
+    // Convergence: the storage-only cut closes the LB/UB gap and the run stops on
+    // bound stalling (not the iteration cap), proving the LB does not plateau.
+    let comm = StubComm;
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+    let outcome = setup
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+        .expect("train must return Ok");
+    assert!(outcome.error.is_none(), "D43: expected no training error");
+    let result = outcome.result;
+    assert_eq!(
+        result.reason, "bound_stalling",
+        "D43: must converge via bound_stalling, not exhaust the iteration cap (reason={})",
+        result.reason,
+    );
+    assert!(
+        result.final_gap < 1e-6,
+        "D43: LB/UB gap must close (gap={})",
+        result.final_gap,
+    );
+    assert_cost(result.final_lb, 11_658_487.253_236_46, 1.0, "D43");
+
+    // The cut(s) stored in the reduced pool carry the reduced length: a cut on a
+    // storage-only pool has exactly N coefficients, not the global n_state. This is
+    // what discriminates the per-stage-dimension-aware storage from a revert to
+    // full-dimension (the bound alone is neutral — an exact reduction stores
+    // numerically the same cut a full pool would).
+    let reduced_pool = &setup.fcf.pools[1];
+    assert!(
+        reduced_pool.active_count() > 0,
+        "D43: the reduced pool must hold at least one trained cut to inspect",
+    );
+    for (slot, _intercept, coefficients) in reduced_pool.active_cuts() {
+        assert_eq!(
+            coefficients.len(),
+            n_hydros,
+            "D43: stored cut at pool-1 slot {slot} must have reduced length N={n_hydros}",
+        );
+    }
+}
+
+/// D44: sub-stage-delay bucket dual and per-stage thermal split.
+///
+/// ## System
+///
+/// Cascade `U -> J`, 2 stages of 720 h each, one block, parallel mode. `U` (100
+/// hm3 initial storage) declares `travel_time_hours = 360` on its arc to `J`
+/// (run-of-river, 0 hm3 storage); both carry toy productivity 1 MWh/hm3 (`U`'s
+/// `productivity_mw_per_m3s = 0.0036 = M3S_TO_HM3`, so `generation_mw * hours`
+/// equals the turbined volume in hm3 regardless of stage length). One thermal at
+/// 10 $/MWh serves 200 MWh/stage demand.
+///
+/// `k_0 = k_1 = 1/2` (360 h travel time over a 720 h stage), so `L = 1`: one
+/// bucket dimension for `J`.
+///
+/// ## Hand-derived optimum
+///
+/// Release everything at stage 0 (`x = 100` hm3): the same-stage share (`k_0 =
+/// 50` hm3) reaches `J` immediately, and the delayed share (`k_1 = 50` hm3)
+/// matures onto `J`'s balance row at stage 1 via the bucket. Any water held back
+/// to stage 1 would lose its own `k_1` half past the horizon (no terminal
+/// credit) with no compensating gain, so releasing everything at stage 0 weakly
+/// dominates every other split.
+///
+/// Hydro generation: `U` 100 MWh + `J` 50 MWh = 150 MWh at stage 0 (thermal
+/// covers the remaining 50 MWh of 200 MWh demand); `J` 50 MWh only at stage 1
+/// (thermal covers the remaining 150 MWh). Total cost = (50 + 150) MWh x 10
+/// $/MWh = **2000 $**.
+///
+/// ## Why total cost alone cannot discriminate
+///
+/// A fold implementation (no bucket at all, the crossing `k_1` half absorbed
+/// same-stage instead of delayed) also reaches total cost 2000 — releasing 100
+/// hm3 at stage 0 generates 100 MWh at `J` immediately either way, just shifted
+/// one stage earlier. The bucket subgradient (a fold has no bucket column to
+/// read; a wrong-sign coefficient flips its sign) and the per-stage thermal
+/// split (50/150 vs. a folded 100/100) are what a fold gets wrong, so they are
+/// asserted explicitly below instead of relying on the fold-blind total.
+#[test]
+fn d44_travel_time_substage_transit_bucket_dual() {
+    // The LP builder divides every non-theta objective coefficient by this
+    // factor; `duals_extraction`'s `rc / col_scale` unscaling leaves it in, so
+    // a stored cut coefficient must be multiplied back to read real dollars
+    // (mirrors `extraction.rs`'s `water_value = dual * COST_SCALE_FACTOR`).
+    const COST_SCALE_FACTOR: f64 = 1_000_000.0;
+    const HOURS_PER_STAGE: f64 = 720.0;
+    const M3S_TO_HM3: f64 = 3_600.0 / 1_000_000.0;
+    const TOL: f64 = 1e-6;
+
+    let case_dir = Path::new("../../examples/deterministic/d44-travel-time-substage");
+
+    let config_path = case_dir.join("config.json");
+    let config = cobre_io::parse_config(&config_path).expect("config must parse");
+    let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
+    let pr = prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
+        .expect("prepare_stochastic must succeed");
+    let system = pr.system;
+    let stochastic = pr.stochastic;
+    let hydro_models =
+        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
+    let mut setup = build_setup_for_case(case_dir, &config, &system, stochastic, hydro_models);
+
+    let comm = StubComm;
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+    let outcome = setup
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+        .expect("train must return Ok");
+    assert!(outcome.error.is_none(), "D44: expected no training error");
+    let result = outcome.result;
+
+    assert!(
+        result.final_gap.abs() < 1e-6,
+        "D44: gap={:.2e}",
+        result.final_gap
+    );
+    assert_cost(result.final_lb, 2000.0, TOL, "D44");
+
+    // Bucket subgradient: rc/col_scale on the incoming bucket column, stored
+    // (undivided by COST_SCALE_FACTOR) as pool-0's cut coefficient
+    // (StateLayout::state_to_lp_incoming_column's explicit bucket arm resolves
+    // the pin; the cut coefficient index is the STATE index, identity to the
+    // outgoing column per `transit_buckets_out`).
+    //
+    // J's own storage entering stage 1 (a non-degenerate corroborating check:
+    // both it and the bucket deliver into J's same stage-1 balance row, so
+    // both must price at the same -10 $/hm3 marginal value). U's own storage
+    // entering stage 1 is NOT asserted here — U fully drains at stage 0, so
+    // every term on its stage-1 balance row is forced to exactly zero and its
+    // reduced cost is basis-dependent, not a robust, backend-agnostic pin.
+    let state = setup.stage_state();
+    assert_eq!(
+        state.n_buckets, 1,
+        "D44: exactly one bucket dimension (single arc, L=1)"
+    );
+    let transit_bucket_idx = state.transit_buckets_out.start;
+    let j_canonical_idx = system
+        .hydros()
+        .iter()
+        .position(|h| h.id == cobre_core::EntityId::from(1))
+        .expect("D44: J (hydro id 1) must exist in the canonical hydro order");
+    let storage_j_idx = state.storage.start + j_canonical_idx;
+
+    let pool0 = &setup.fcf.pools[0];
+    assert!(
+        pool0.active_count() > 0,
+        "D44: pool 0 must hold at least one trained cut to inspect"
+    );
+    for (slot, _intercept, coefficients) in pool0.active_cuts() {
+        let transit_bucket_dual = coefficients[transit_bucket_idx] * COST_SCALE_FACTOR;
+        assert!(
+            (transit_bucket_dual - (-10.0)).abs() < TOL,
+            "D44: bucket subgradient at pool-0 slot {slot} must be exactly -10 $/hm3 \
+             (a wrong-sign coefficient would give +10); got {transit_bucket_dual}"
+        );
+        let storage_j_dual = coefficients[storage_j_idx] * COST_SCALE_FACTOR;
+        assert!(
+            (storage_j_dual - (-10.0)).abs() < TOL,
+            "D44: J's own storage water value at pool-0 slot {slot} must also be -10 $/hm3 \
+             (same stage-1 balance row as the bucket delivery); got {storage_j_dual}"
+        );
+    }
+
+    // Per-stage thermal split + delivery split: simulate the trained policy
+    // (config.json already enables simulation with num_scenarios = 1).
+    let mut pool = setup
+        .create_workspace_pool(&comm, 1, ActiveSolver::new)
+        .expect("D44: simulation workspace pool must build");
+    let io_capacity = setup.simulation_config.io_channel_capacity.max(1);
+    let (result_tx, result_rx) = mpsc::sync_channel(io_capacity);
+    let drain_handle = std::thread::spawn(move || result_rx.into_iter().collect::<Vec<_>>());
+    let _local_costs = setup
+        .simulate(
+            &mut pool.workspaces,
+            &comm,
+            &result_tx,
+            None,
+            result.frozen_templates.as_deref(),
+            &result.basis_cache,
+        )
+        .expect("D44: simulate must return Ok");
+    drop(result_tx);
+    let scenario_results = drain_handle.join().expect("drain thread must not panic");
+
+    assert_eq!(scenario_results.len(), 1, "D44: exactly one scenario");
+    let scenario = &scenario_results[0];
+    assert_eq!(scenario.stages.len(), 2, "D44: exactly two stages");
+
+    let thermal_mwh = |stage_id: usize| -> f64 {
+        scenario.stages[stage_id]
+            .thermals
+            .iter()
+            .find(|t| t.thermal_id == 0)
+            .unwrap_or_else(|| panic!("D44: T0 missing from stage {stage_id}"))
+            .generation_mw
+            * HOURS_PER_STAGE
+    };
+    assert!(
+        (thermal_mwh(0) - 50.0).abs() < TOL,
+        "D44: stage 0 thermal generation must be 50 MWh, got {}",
+        thermal_mwh(0)
+    );
+    assert!(
+        (thermal_mwh(1) - 150.0).abs() < TOL,
+        "D44: stage 1 thermal generation must be 150 MWh, got {}",
+        thermal_mwh(1)
+    );
+
+    // Delivery split: stage 0's same-stage k_0 share arrives as J's own
+    // turbined volume (no bucket record for a same-stage deposit); stage 1's
+    // k_1 share is the bucket's maturing delivery (`delayed_arrival_hm3`).
+    let j_stage0 = scenario.stages[0]
+        .hydros
+        .iter()
+        .find(|h| h.hydro_id == 1)
+        .expect("D44: J missing from stage 0");
+    let j_stage0_volume_hm3 = j_stage0.turbined_m3s * M3S_TO_HM3 * HOURS_PER_STAGE;
+    assert!(
+        (j_stage0_volume_hm3 - 50.0).abs() < TOL,
+        "D44: J must receive 50 hm3 at stage 0 (same-stage k_0), got {j_stage0_volume_hm3}"
+    );
+
+    let transit_bucket_stage1 = scenario.stages[1]
+        .transit_buckets
+        .iter()
+        .find(|b| b.hydro_id == 1)
+        .expect("D44: J's bucket record missing from stage 1");
+    assert!(
+        (transit_bucket_stage1.delayed_arrival_hm3 - 50.0).abs() < TOL,
+        "D44: J must receive 50 hm3 at stage 1 via the bucket, got {}",
+        transit_bucket_stage1.delayed_arrival_hm3
+    );
+}
+
+/// Pads `stage_hours` with copies of its trailing duration until the total
+/// covers `travel_time_hours` — mirrors the production padding
+/// (`setup::bucket_topology`'s calendar-extension helper) that lets
+/// `resolve_spread` resolve an anchor whose own remaining calendar runs out
+/// before its arrival window closes; without it `resolve_spread`'s own
+/// `Σ_d k_d = 1` debug_assert panics instead of resolving a real depth.
+fn pad_calendar_for_resolution(stage_hours: &[f64], travel_time_hours: f64) -> Vec<f64> {
+    let last = *stage_hours
+        .last()
+        .expect("D45: calendar must have at least one stage");
+    let mut padded = stage_hours.to_vec();
+    let mut padded_hours = 0.0;
+    while padded_hours < travel_time_hours {
+        padded.push(last);
+        padded_hours += last;
+    }
+    padded
+}
+
+/// D45: mixed-calendar depth-3 counterexample and end-to-end water
+/// conservation.
+///
+/// ## Calendar
+///
+/// One 720 h monthly stage (0) then three 168 h weekly stages (1, 2, 3). The
+/// `U -> J` arc declares `travel_time_hours = 360`. At the monthly anchor the
+/// arrival window `[360, 1080)` overlaps four periods — `k_0 = 1/2`
+/// (same-stage), `k_1 = k_2 = 7/30`, `k_3 = 1/30` — so `L = 3`, not the
+/// closed-form ceiling `ceil(360/720) = 1`, which would drop `8/30` of the
+/// release (the k-factor conservation contract). Four stages is
+/// exactly deep enough for the monthly anchor's depth-3 delivery to land
+/// fully within the horizon (target stage `0 + 3 = 3`, the last one), so this
+/// case's release delivers in full with zero horizon drop — the depth-3
+/// mechanics are directly observable rather than swallowed by the terminal
+/// drop.
+///
+/// ## What each assertion pins
+///
+/// 1. `resolve_spread` at the monthly anchor reproduces the hand-derived
+///    `stage_weights` and `stage_reach == 3` directly (a ceiling-form
+///    regression would report 1).
+/// 2. End-to-end conservation: summed over every stage, `U`'s released
+///    volume (turbined + spilled) equals `J`'s received volume (turbined +
+///    spilled — `J` has zero storage, so its own release equals whatever it
+///    receives that stage, same-stage share plus any bucket maturity) plus
+///    the horizon drop (whatever is still in transit, unconsumed, at the
+///    terminal stage — a bucket slot there targets a stage past the
+///    horizon).
+/// 3. Global-max sizing with per-stage masking: the bucket block's global
+///    depth (`state.n_buckets`) is the deepest per-anchor reach; the
+///    documented per-stage cap (the "terminal credit deferred" contract:
+///    `active.min(n_stages - 1 - stage)`) shrinks that reach stage by stage
+///    down to zero at the terminal stage.
+#[test]
+fn d45_travel_time_mixed_calendar_conservation() {
+    const K_TOL: f64 = 1e-9;
+    const CONSERVATION_TOL: f64 = 1e-6;
+    const M3S_TO_HM3: f64 = 3_600.0 / 1_000_000.0;
+    const TRAVEL_TIME_HOURS: f64 = 360.0;
+    const N_STAGES: usize = 4;
+
+    let stage_hours = [720.0, 168.0, 168.0, 168.0];
+
+    let monthly = cobre_sddp::lead_time::resolve_spread(TRAVEL_TIME_HOURS, 0, &stage_hours, None);
+    assert_eq!(
+        monthly.stage_reach, 3,
+        "D45: the monthly anchor must resolve to depth 3, not the closed-form \
+         ceiling ceil(360/720) = 1 (which would drop 8/30 of the release)"
+    );
+    let expected_k = [0.5, 7.0 / 30.0, 7.0 / 30.0, 1.0 / 30.0];
+    assert_eq!(
+        monthly.stage_weights.len(),
+        expected_k.len(),
+        "D45: stage_weights must have 4 entries"
+    );
+    for (lag, (&actual, &expected)) in monthly
+        .stage_weights
+        .iter()
+        .zip(expected_k.iter())
+        .enumerate()
+    {
+        assert!(
+            (actual - expected).abs() < K_TOL,
+            "D45: stage_weights[{lag}] = {actual}, expected {expected}"
+        );
+    }
+
+    let case_dir = Path::new("../../examples/deterministic/d45-travel-time-mixed-calendar");
+    let (setup, _system, result) = run_deterministic_with_setup(case_dir);
+    assert!(
+        result.final_gap.abs() < 1e-6,
+        "D45: gap={:.2e}",
+        result.final_gap
+    );
+
+    let state = setup.stage_state();
+    assert_eq!(
+        state.n_buckets, 3,
+        "D45: the global bucket depth must be the deepest per-anchor reach (3)"
+    );
+    let padded = pad_calendar_for_resolution(&stage_hours, TRAVEL_TIME_HOURS);
+    let own_depths: Vec<usize> = (0..N_STAGES)
+        .map(|stage| {
+            cobre_sddp::lead_time::resolve_spread(TRAVEL_TIME_HOURS, stage, &padded, None)
+                .stage_reach
+        })
+        .collect();
+    let capped: Vec<usize> = own_depths
+        .iter()
+        .enumerate()
+        .map(|(stage, &depth)| depth.min(N_STAGES - 1 - stage))
+        .collect();
+    assert_eq!(
+        capped,
+        vec![3, 2, 1, 0],
+        "D45: per-stage active range must shrink toward the horizon end \
+         (active.min(n_stages - 1 - stage)), got {own_depths:?} capped to {capped:?}"
+    );
+    assert_eq!(
+        capped[0], state.n_buckets,
+        "D45: stage 0 must reach the full global depth"
+    );
+    assert!(
+        capped[N_STAGES - 1] < state.n_buckets,
+        "D45: the terminal stage's active range must be strictly shorter than \
+         the global depth (masked), got {}",
+        capped[N_STAGES - 1]
+    );
+
+    let comm = StubComm;
+    let mut pool = setup
+        .create_workspace_pool(&comm, 1, ActiveSolver::new)
+        .expect("D45: simulation workspace pool must build");
+    let io_capacity = setup.simulation_config.io_channel_capacity.max(1);
+    let (result_tx, result_rx) = mpsc::sync_channel(io_capacity);
+    let drain_handle = std::thread::spawn(move || result_rx.into_iter().collect::<Vec<_>>());
+    let _local_costs = setup
+        .simulate(
+            &mut pool.workspaces,
+            &comm,
+            &result_tx,
+            None,
+            result.frozen_templates.as_deref(),
+            &result.basis_cache,
+        )
+        .expect("D45: simulate must return Ok");
+    drop(result_tx);
+    let scenario_results = drain_handle.join().expect("drain thread must not panic");
+
+    assert_eq!(scenario_results.len(), 1, "D45: exactly one scenario");
+    let scenario = &scenario_results[0];
+    assert_eq!(scenario.stages.len(), N_STAGES, "D45: exactly four stages");
+
+    let mut released_hm3 = 0.0_f64;
+    let mut delivered_hm3 = 0.0_f64;
+    for stage_result in &scenario.stages {
+        let hours = stage_hours[stage_result.stage_id as usize];
+        let u = stage_result
+            .hydros
+            .iter()
+            .find(|h| h.hydro_id == 0)
+            .unwrap_or_else(|| panic!("D45: U missing from stage {}", stage_result.stage_id));
+        let j = stage_result
+            .hydros
+            .iter()
+            .find(|h| h.hydro_id == 1)
+            .unwrap_or_else(|| panic!("D45: J missing from stage {}", stage_result.stage_id));
+        released_hm3 += (u.turbined_m3s + u.spillage_m3s) * M3S_TO_HM3 * hours;
+        // J has zero storage, so its own release equals its total inflow that
+        // stage: the same-stage k_0 share plus any bucket maturity (both
+        // enter J's water-balance row; there is no separate output field for
+        // the same-stage share alone).
+        delivered_hm3 += (j.turbined_m3s + j.spillage_m3s) * M3S_TO_HM3 * hours;
+    }
+
+    let terminal_stage = scenario.stages.last().expect("D45: at least one stage");
+    let terminal_transit_buckets: Vec<_> = terminal_stage
+        .transit_buckets
+        .iter()
+        .filter(|b| b.hydro_id == 1)
+        .collect();
+    assert_eq!(
+        terminal_transit_buckets.len(),
+        3,
+        "D45: J must carry all 3 globally-sized bucket lag slots even at the terminal stage"
+    );
+    let horizon_drop_hm3: f64 = terminal_transit_buckets
+        .iter()
+        .map(|b| b.in_transit_volume_hm3)
+        .sum();
+
+    let residual = released_hm3 - (delivered_hm3 + horizon_drop_hm3);
+    assert!(
+        residual.abs() < CONSERVATION_TOL,
+        "D45: conservation violated: released={released_hm3}, delivered={delivered_hm3}, \
+         horizon_drop={horizon_drop_hm3}, residual={residual}"
+    );
+}
+
+/// D46: chronological block-resolved attribution. Cascade `U -> J`,
+/// `travel_time_hours = 250` on `U`'s arc; stage 0 is 720 h resolved into 3
+/// chronological blocks of 240 h each, stage 1 a single 720 h receiving
+/// stage. The block-table / K=1-parity / state-dimension pins live in
+/// [`chronological_attribution`]; this proves the same cascade also trains
+/// and converges as a real file-based case.
+#[test]
+fn d46_travel_time_chronological_converges() {
+    let case_dir = Path::new("../../examples/deterministic/d46-travel-time-chronological");
+    let result = run_deterministic(case_dir);
+    assert!(
+        result.final_gap.abs() < 1e-6,
+        "D46: gap={:.2e}",
+        result.final_gap
+    );
+}
+
+/// D47: confluence aggregation. Two upstreams `U1`
+/// (`travel_time_hours = 360`) and `U2` (`travel_time_hours = 1080`) both feed
+/// downstream `J` (run-of-river), 3 uniform 720 h stages, parallel mode.
+///
+/// ## Hand-derived per-arc schedules
+///
+/// `U1`'s arrival window `[360, 1080)` over 720 h stages gives `k = [1/2, 1/2]`
+/// (depth 1): half same-stage, half maturing one stage later. `U2`'s window
+/// `[1080, 1800)` gives `k = [0, 1/2, 1/2]` (depth 2): nothing same-stage, half
+/// maturing one stage later, half two stages later. `L_j = max(1, 2) = 2`, so
+/// `J`'s bucket block must aggregate BOTH arcs into ONE depth-2 block, not one
+/// block per arc (a per-arc block would give `n_buckets = 1 + 2 = 3`).
+///
+/// Releasing everything at stage 0 (weakly optimal — deferring any release
+/// risks losing its own deepest share past the horizon, same argument as the
+/// two-hydro case) puts every arc's full 100 hm3 through its own `k`-schedule:
+/// `J` receives `U1`'s 50 hm3 same-stage share at stage 0; `U1`'s 50 hm3
+/// lag-1 share AND `U2`'s 50 hm3 lag-1 share both mature at stage 1 (100 hm3
+/// total — the confluence sum); `U2`'s 50 hm3 lag-2 share matures at stage 2.
+/// A single-term transition (`Σ_i k_{d,i} D_i^{t−d}`) would mis-time `U2`'s
+/// deeper mass instead of this schedule.
+#[test]
+fn d47_travel_time_confluence_aggregation() {
+    const TOL: f64 = 1e-6;
+    const M3S_TO_HM3: f64 = 3_600.0 / 1_000_000.0;
+    const HOURS_PER_STAGE: f64 = 720.0;
+
+    let stage_hours = [720.0, 720.0, 720.0];
+
+    let u1 = cobre_sddp::lead_time::resolve_spread(360.0, 0, &stage_hours, None);
+    assert_eq!(u1.stage_reach, 1, "U1: depth must be 1");
+    for (lag, (&actual, &expected)) in u1.stage_weights.iter().zip([0.5, 0.5].iter()).enumerate() {
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "U1: stage_weights[{lag}] = {actual}, expected {expected}"
+        );
+    }
+
+    let u2 = cobre_sddp::lead_time::resolve_spread(1080.0, 0, &stage_hours, None);
+    assert_eq!(
+        u2.stage_reach, 2,
+        "U2: depth must be 2 (arrives at lags 1 and 2)"
+    );
+    for (lag, (&actual, &expected)) in u2
+        .stage_weights
+        .iter()
+        .zip([0.0, 0.5, 0.5].iter())
+        .enumerate()
+    {
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "U2: stage_weights[{lag}] = {actual}, expected {expected}"
+        );
+    }
+
+    let case_dir = Path::new("../../examples/deterministic/d47-travel-time-confluence");
+    let (setup, system, result) = run_deterministic_with_setup(case_dir);
+    assert!(
+        result.final_gap.abs() < 1e-6,
+        "D47: gap={:.2e}",
+        result.final_gap
+    );
+
+    let state = setup.stage_state();
+    assert_eq!(
+        state.n_buckets, 2,
+        "D47: n_buckets must be 2 (one merged block of depth max(1,2)); a \
+         one-block-per-arc regression would give 1 + 2 = 3"
+    );
+    let j_canonical_idx = system
+        .hydros()
+        .iter()
+        .position(|h| h.id == cobre_core::EntityId::from(2))
+        .expect("D47: J (hydro id 2) must exist in the canonical hydro order");
+    assert_eq!(
+        state.transit_bucket_column_order,
+        vec![(j_canonical_idx, 1), (j_canonical_idx, 2)],
+        "D47: both bucket slots must belong to J's single block (same plant \
+         index, lags 1 and 2), never a separate block per upstream arc"
+    );
+
+    let comm = StubComm;
+    let mut pool = setup
+        .create_workspace_pool(&comm, 1, ActiveSolver::new)
+        .expect("D47: simulation workspace pool must build");
+    let io_capacity = setup.simulation_config.io_channel_capacity.max(1);
+    let (result_tx, result_rx) = mpsc::sync_channel(io_capacity);
+    let drain_handle = std::thread::spawn(move || result_rx.into_iter().collect::<Vec<_>>());
+    let _local_costs = setup
+        .simulate(
+            &mut pool.workspaces,
+            &comm,
+            &result_tx,
+            None,
+            result.frozen_templates.as_deref(),
+            &result.basis_cache,
+        )
+        .expect("D47: simulate must return Ok");
+    drop(result_tx);
+    let scenario_results = drain_handle.join().expect("drain thread must not panic");
+
+    assert_eq!(scenario_results.len(), 1, "D47: exactly one scenario");
+    let scenario = &scenario_results[0];
+    assert_eq!(scenario.stages.len(), 3, "D47: exactly three stages");
+
+    let expected_arrivals_hm3 = [50.0, 100.0, 50.0];
+    let mut released_hm3 = 0.0_f64;
+    let mut delivered_hm3 = 0.0_f64;
+    for stage_result in &scenario.stages {
+        let stage_id = stage_result.stage_id as usize;
+        let u1_hydro = stage_result
+            .hydros
+            .iter()
+            .find(|h| h.hydro_id == 0)
+            .unwrap_or_else(|| panic!("D47: U1 missing from stage {stage_id}"));
+        let u2_hydro = stage_result
+            .hydros
+            .iter()
+            .find(|h| h.hydro_id == 1)
+            .unwrap_or_else(|| panic!("D47: U2 missing from stage {stage_id}"));
+        let j_hydro = stage_result
+            .hydros
+            .iter()
+            .find(|h| h.hydro_id == 2)
+            .unwrap_or_else(|| panic!("D47: J missing from stage {stage_id}"));
+
+        released_hm3 +=
+            (u1_hydro.turbined_m3s + u1_hydro.spillage_m3s) * M3S_TO_HM3 * HOURS_PER_STAGE;
+        released_hm3 +=
+            (u2_hydro.turbined_m3s + u2_hydro.spillage_m3s) * M3S_TO_HM3 * HOURS_PER_STAGE;
+
+        // J has zero storage, so its own release equals its total arrival that
+        // stage: the summed same-stage shares plus the summed bucket maturities
+        // from BOTH arcs (there is no separate output field splitting them).
+        let j_arrival_hm3 =
+            (j_hydro.turbined_m3s + j_hydro.spillage_m3s) * M3S_TO_HM3 * HOURS_PER_STAGE;
+        delivered_hm3 += j_arrival_hm3;
+        assert!(
+            (j_arrival_hm3 - expected_arrivals_hm3[stage_id]).abs() < TOL,
+            "D47: stage {stage_id} arrival at J must be {} hm3 (the confluence \
+             sum of both arcs' hand-derived shares), got {j_arrival_hm3}",
+            expected_arrivals_hm3[stage_id]
+        );
+    }
+
+    let terminal_stage = scenario.stages.last().expect("D47: at least one stage");
+    let horizon_drop_hm3: f64 = terminal_stage
+        .transit_buckets
+        .iter()
+        .filter(|b| b.hydro_id == 2)
+        .map(|b| b.in_transit_volume_hm3)
+        .sum();
+    let residual = released_hm3 - (delivered_hm3 + horizon_drop_hm3);
+    assert!(
+        residual.abs() < TOL,
+        "D47: conservation violated over both arcs: released={released_hm3}, \
+         delivered={delivered_hm3}, horizon_drop={horizon_drop_hm3}, residual={residual}"
+    );
+}
+
+/// D48: a non-zero windowed IC-defluence seed drives the stage-0/1 in-transit
+/// buckets and measurably lowers the training cost — the coverage capstone for
+/// the windowed-seed derivation.
+///
+/// ## System
+///
+/// Cascade `U -> J`, 3 weekly (168 h) stages, one block, parallel mode. `U`
+/// (id 0) declares `travel_time_hours = 336` on its arc to `J` (id 1,
+/// run-of-river). BOTH hydros carry zero reservoir capacity and zero natural
+/// inflow, so `U` releases nothing in-study: the ONLY water in the system is
+/// the pre-study defluence already in transit, seeded into `J`'s stage-0
+/// buckets from `U`'s `past_defluences`. Both carry toy productivity 1 MWh/hm3
+/// (`productivity = 0.0036 = M3S_TO_HM3`, so a turbined hm3 generates 1 MWh
+/// regardless of stage length). One thermal at 10 $/MWh serves 200 MWh/stage.
+///
+/// ## Windowed seed derivation (window -> k -> volume -> cost)
+///
+/// `U`'s single `past_defluences` window `[2023-12-18, 2024-01-01) = [start_0 -
+/// 336h, start_0)` at 100 m3/s covers exactly the arc's in-transit span
+/// `[start_0 - t_v, start_0)` (so it passes the io coverage gate). The seed
+/// (`build_initial_transit_bucket_state`) unrolls it through `ic_anchor_k`:
+///   - `e_off = start_0 - end_date = 0`, `width = end_date - start_date = 336`.
+///   - `ic_anchor_k` sets `window_start = t_v - e_off - width = 0` and overlaps
+///     `[0, 336)` against the weekly stage clock `[168, 168, 168]` -> `[168,
+///     168]` -> `k = [1/2, 1/2]`.
+///   - `volume = width * M3S_TO_HM3 * value = 336 * 0.0036 * 100 = 120.96 hm3`.
+///   - `seed = k * volume = [60.48, 60.48]` hm3. Bucket lag 1 (`b_1^in`)
+///     delivers 60.48 hm3 at stage 0; lag 2 shifts to lag 1 across the stage-0
+///     ring and delivers 60.48 hm3 at stage 1. Both land inside the horizon
+///     (stage 2 is terminal, receives nothing), so no share is dropped.
+///
+/// ## Hand-derived optimum
+///
+/// `J` turbines each maturing arrival (1 hm3 -> 1 MWh), displacing thermal:
+///   - Stage 0: J 60.48 MWh -> thermal 200 - 60.48 = 139.52 MWh -> 1395.20 $.
+///   - Stage 1: J 60.48 MWh -> thermal 139.52 MWh -> 1395.20 $.
+///   - Stage 2: no arrival -> thermal 200 MWh -> 2000.00 $.
+///   - Total = **4790.40 $**.
+///
+/// ## Zero-seed contrast (the non-zero seed is load-bearing)
+///
+/// With the window value set to 0.0 the seed is all-zero, no water reaches J,
+/// and every stage is full thermal: `3 * 200 * 10 = 6000.00 $ != 4790.40`. The
+/// two costs differ by exactly the delivered energy valued at the thermal price
+/// (`120.96 MWh * 10 $/MWh = 1209.60 $`), so the `final_lb == 4790.40`
+/// assertion fails the instant the seed is dropped or mis-derived — this is the
+/// computed-two-ways check that keeps the case from being a zero-seed tautology.
+#[test]
+fn d48_travel_time_ic_seed_windowed_defluence_cost() {
+    const HOURS_PER_STAGE: f64 = 168.0;
+    const M3S_TO_HM3: f64 = 3_600.0 / 1_000_000.0;
+    const T_V: f64 = 336.0;
+    const WINDOW_WIDTH: f64 = 336.0;
+    const VALUE_M3S: f64 = 100.0;
+    const DEMAND_MWH: f64 = 200.0;
+    const THERMAL_COST: f64 = 10.0;
+    const N_STAGES: usize = 3;
+    const TOL: f64 = 1e-6;
+
+    // window -> k: recompute the IC-anchor split through the same overlap
+    // primitive the seed uses, so the derivation is machine-checked, not a
+    // hand-copied constant. e_off = 0 (the window ends at start_0), so
+    // window_start = t_v - e_off - width = 0.
+    let e_off = 0.0_f64;
+    let window_start = T_V - e_off - WINDOW_WIDTH;
+    let overlaps =
+        cobre_core::window_period_overlaps(window_start, WINDOW_WIDTH, &[168.0, 168.0, 168.0]);
+    let k: Vec<f64> = overlaps.iter().map(|o| o / WINDOW_WIDTH).collect();
+    assert_eq!(
+        k.len(),
+        2,
+        "D48: the window must split across two study stages"
+    );
+    for (lag, &kd) in k.iter().enumerate() {
+        assert!(
+            (kd - 0.5).abs() < TOL,
+            "D48: k[{lag}] must be 1/2 (even split over two 168 h weeks), got {kd}"
+        );
+    }
+
+    // window -> volume -> seed.
+    let volume_hm3 = WINDOW_WIDTH * M3S_TO_HM3 * VALUE_M3S;
+    assert!(
+        (volume_hm3 - 120.96).abs() < TOL,
+        "D48: volume={volume_hm3}"
+    );
+    let seed_hm3: Vec<f64> = k.iter().map(|kd| kd * volume_hm3).collect(); // [60.48, 60.48]
+
+    // seed -> delivered MWh -> cost (1 hm3 turbined at J -> 1 MWh; the seed
+    // delivers seed[d] hm3 at study stage d, and nothing at the terminal stage).
+    let mut delivered_mwh = vec![0.0_f64; N_STAGES];
+    delivered_mwh[0] = seed_hm3[0];
+    delivered_mwh[1] = seed_hm3[1];
+    let mut expected_lb = 0.0_f64;
+    for &delivered in &delivered_mwh {
+        expected_lb += (DEMAND_MWH - delivered) * THERMAL_COST;
+    }
+    assert!(
+        (expected_lb - 4790.4).abs() < TOL,
+        "D48: hand-derived optimum must be 4790.40, got {expected_lb}"
+    );
+
+    // Zero-seed contrast (computed two ways): the all-thermal baseline minus the
+    // seed savings must equal the seeded optimum, and the two must differ.
+    let expected_zero_seed_lb = (N_STAGES as f64) * DEMAND_MWH * THERMAL_COST; // 6000.0
+    let seed_savings = (seed_hm3[0] + seed_hm3[1]) * THERMAL_COST; // 1209.6
+    assert!(
+        (expected_zero_seed_lb - seed_savings - expected_lb).abs() < TOL,
+        "D48: seeded optimum must be the all-thermal baseline less the delivered \
+         energy's thermal value: {expected_zero_seed_lb} - {seed_savings} != {expected_lb}"
+    );
+    assert!(
+        (expected_zero_seed_lb - expected_lb).abs() > 1.0,
+        "D48: the non-zero seed must MOVE the cost (load-bearing, not a tautology): \
+         zero-seed {expected_zero_seed_lb} vs seeded {expected_lb}"
+    );
+
+    let case_dir = Path::new("../../examples/deterministic/d48-travel-time-ic-seed");
+    let (setup, system, result) = run_deterministic_with_setup(case_dir);
+
+    assert!(
+        result.final_gap.abs() < 1e-6,
+        "D48: gap={:.2e}",
+        result.final_gap
+    );
+    assert_cost(result.final_lb, expected_lb, TOL, "D48");
+
+    let state = setup.stage_state();
+    assert_eq!(
+        state.n_buckets, 2,
+        "D48: exactly two bucket dimensions (single arc, IC-anchor depth 2)"
+    );
+    let j_canonical_idx = system
+        .hydros()
+        .iter()
+        .position(|h| h.id == cobre_core::EntityId::from(1))
+        .expect("D48: J (hydro id 1) must exist in the canonical hydro order");
+    assert_eq!(
+        state.transit_bucket_column_order,
+        vec![(j_canonical_idx, 1), (j_canonical_idx, 2)],
+        "D48: both bucket slots must belong to J's single block, lags 1 and 2"
+    );
+
+    // End-to-end delivery split: simulate the trained policy and pin the seeded
+    // arrivals, the per-stage thermal split, and seed conservation.
+    let comm = StubComm;
+    let mut pool = setup
+        .create_workspace_pool(&comm, 1, ActiveSolver::new)
+        .expect("D48: simulation workspace pool must build");
+    let io_capacity = setup.simulation_config.io_channel_capacity.max(1);
+    let (result_tx, result_rx) = mpsc::sync_channel(io_capacity);
+    let drain_handle = std::thread::spawn(move || result_rx.into_iter().collect::<Vec<_>>());
+    let _local_costs = setup
+        .simulate(
+            &mut pool.workspaces,
+            &comm,
+            &result_tx,
+            None,
+            result.frozen_templates.as_deref(),
+            &result.basis_cache,
+        )
+        .expect("D48: simulate must return Ok");
+    drop(result_tx);
+    let scenario_results = drain_handle.join().expect("drain thread must not panic");
+
+    assert_eq!(scenario_results.len(), 1, "D48: exactly one scenario");
+    let scenario = &scenario_results[0];
+    assert_eq!(scenario.stages.len(), N_STAGES, "D48: exactly three stages");
+
+    let j_id = 1;
+    let expected_arrivals_hm3 = [seed_hm3[0], seed_hm3[1], 0.0]; // [60.48, 60.48, 0.0]
+    let expected_thermal_mwh = [
+        DEMAND_MWH - delivered_mwh[0],
+        DEMAND_MWH - delivered_mwh[1],
+        DEMAND_MWH - delivered_mwh[2],
+    ]; // [139.52, 139.52, 200.0]
+
+    let mut delivered_hm3 = 0.0_f64;
+    for stage_result in &scenario.stages {
+        let stage_id = stage_result.stage_id as usize;
+
+        // The seed's maturing arrival at J this stage (lag-1 bucket b_1^in).
+        let j_arrival_hm3 = stage_result
+            .transit_buckets
+            .iter()
+            .find(|b| b.hydro_id == j_id && b.lag == 1)
+            .map_or(0.0, |b| b.delayed_arrival_hm3);
+        delivered_hm3 += j_arrival_hm3;
+        assert!(
+            (j_arrival_hm3 - expected_arrivals_hm3[stage_id]).abs() < TOL,
+            "D48: stage {stage_id} seeded arrival at J must be {} hm3, got {j_arrival_hm3}",
+            expected_arrivals_hm3[stage_id]
+        );
+
+        // J turbines every hm3 it receives (zero storage), and 1 hm3 -> 1 MWh,
+        // so its generation MUST equal the arrival — the water actually offsets
+        // thermal, not merely arrives on paper.
+        let j_hydro = stage_result
+            .hydros
+            .iter()
+            .find(|h| h.hydro_id == j_id)
+            .unwrap_or_else(|| panic!("D48: J missing from stage {stage_id}"));
+        let j_turbined_hm3 = j_hydro.turbined_m3s * M3S_TO_HM3 * HOURS_PER_STAGE;
+        assert!(
+            (j_turbined_hm3 - expected_arrivals_hm3[stage_id]).abs() < TOL,
+            "D48: stage {stage_id} J must turbine the {} hm3 it receives, got {j_turbined_hm3}",
+            expected_arrivals_hm3[stage_id]
+        );
+
+        let thermal_mwh = stage_result
+            .thermals
+            .iter()
+            .find(|t| t.thermal_id == 0)
+            .unwrap_or_else(|| panic!("D48: T0 missing from stage {stage_id}"))
+            .generation_mw
+            * HOURS_PER_STAGE;
+        assert!(
+            (thermal_mwh - expected_thermal_mwh[stage_id]).abs() < TOL,
+            "D48: stage {stage_id} thermal must be {} MWh, got {thermal_mwh}",
+            expected_thermal_mwh[stage_id]
+        );
+    }
+
+    // Seed conservation: the entire seeded volume is delivered within the
+    // horizon (U releases nothing in-study), leaving no residual in transit at
+    // the terminal stage.
+    let horizon_drop_hm3: f64 = scenario
+        .stages
+        .last()
+        .expect("D48: at least one stage")
+        .transit_buckets
+        .iter()
+        .filter(|b| b.hydro_id == j_id)
+        .map(|b| b.in_transit_volume_hm3)
+        .sum();
+    let residual = volume_hm3 - (delivered_hm3 + horizon_drop_hm3);
+    assert!(
+        residual.abs() < TOL,
+        "D48: seed conservation violated: seeded={volume_hm3}, delivered={delivered_hm3}, \
+         horizon_drop={horizon_drop_hm3}, residual={residual}"
+    );
+}
+
+/// D49: arrival-frame chronological delivery density. Cascade `U -> J`,
+/// `travel_time_hours = 200` on `U`'s arc. Stages 0 and 1 are single 168 h
+/// weekly PARALLEL senders; stage 2 is a monthly 720 h CHRONOLOGICAL arrival
+/// stage split into blocks `[20, 100, 600]`. This is the first deterministic
+/// case whose maturing bucket delivers into a chronological stage at a non-zero
+/// index — the branch that resolves the delivery density in the arrival stage's
+/// own frame rather than collapsing to the same-stage (first-stage) uniform
+/// fallback, and rather than the parallel single-row arrival every prior water
+/// case used.
+///
+/// ## What is exercised
+///
+/// Two PARALLEL source stages both mature into the ONE chronological arrival
+/// stage: source stage 1 at lag 1 and source stage 0 at lag 2 — a genuine
+/// multi-lag blend (`>= 2` contributing source lags), and the
+/// parallel-sender -> chronological-arrival cell that used to resolve to a
+/// duration-uniform density.
+///
+/// ## Hand-derived delivery density (`arrival_density`)
+///
+/// The delivered per-block split is the fixed, release-independent blend
+/// `arrival_density_b = (sum_d source_weight_d * source_density_{d,b})
+/// / (sum_d source_weight_d)`, with `source_weight_d` the stage-clock weight of
+/// source stage `A - d` (from `resolve_spread`) and `source_density_d` that
+/// source's lag-`d` delivery density resolved against the arrival stage's OWN
+/// blocks `[20, 100, 600]`:
+///
+/// - source stage 1, lag 1: `source_weight = 1`,
+///   `source_density = [0, 88/168, 80/168]`;
+/// - source stage 0, lag 2: `source_weight = 32/168`,
+///   `source_density = [20/32, 12/32, 0]`.
+///
+/// Total source weight `1 + 32/168 = 200/168`; the blend is `[0.1, 0.5, 0.4]`,
+/// which conserves to 1. This test recomputes both parts from the public
+/// resolvers (`resolve_spread` for the weights, `window_period_overlaps` for
+/// each source density) and cross-checks the closed-form `[0.1, 0.5, 0.4]`, so
+/// the expected split pins the setup precompute, never the solver output.
+///
+/// ## What the LP delivers
+///
+/// `U` starts with 100 hm3 of storage and zero natural inflow; draining it
+/// within the horizon pushes water into transit that matures at stage 2. Any
+/// stage-2 release from `U` would arrive same-stage (contaminating the split),
+/// so releasing early is strictly better (it double-generates — once at `U`,
+/// once at `J` inside the horizon) and `U` empties by stage 1, leaving nothing
+/// to release at stage 2. `J` is run-of-river (zero storage), so its per-block
+/// output equals its per-block arrival, which — since the same-stage release is
+/// zero — is exactly `arrival_density_b` times the maturing bucket. The split
+/// is a fixed LP coefficient, so it holds regardless of how much water matures,
+/// making this backend-agnostic across HiGHS and CLP.
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+#[test]
+fn d49_travel_time_chronological_arrival_density() {
+    const T_V: f64 = 200.0;
+    const M3S_TO_HM3: f64 = 3_600.0 / 1_000_000.0;
+    const N_STAGES: usize = 3;
+    const ARRIVAL_STAGE_IDX: usize = 2;
+    // Exact-rational precompute cross-check vs the closed-form blend.
+    const DERIV_TOL: f64 = 1e-9;
+    // Delivered split vs the precompute (an LP solve stands between them).
+    const SPLIT_TOL: f64 = 1e-6;
+
+    let stage_hours = [168.0, 168.0, 720.0];
+    let arrival_blocks = [20.0, 100.0, 600.0];
+
+    // Stage-clock weights (the source weights) via the public spread resolver.
+    // Two source stages reach the chronological arrival stage: stage 1 at lag 1
+    // and stage 0 at lag 2 — a multi-lag blend.
+    let padded = pad_calendar_for_resolution(&stage_hours, T_V);
+    let stage_weights_0 =
+        cobre_sddp::lead_time::resolve_spread(T_V, 0, &padded, None).stage_weights;
+    let stage_weights_1 =
+        cobre_sddp::lead_time::resolve_spread(T_V, 1, &padded, None).stage_weights;
+    let source_weight_lag1 = stage_weights_1[1];
+    let source_weight_lag2 = stage_weights_0[2];
+    assert!(
+        source_weight_lag1 > 0.0 && source_weight_lag2 > 0.0,
+        "D49: the blend must have >= 2 contributing source lags (lag-1 weight \
+         {source_weight_lag1}, lag-2 weight {source_weight_lag2})"
+    );
+
+    // Lag-`lag` delivery density of `source_stage` resolved against the arrival
+    // stage's OWN blocks — the arrival-frame counterpart of `resolve_spread`,
+    // recomputed here from `window_period_overlaps` exactly as the setup
+    // precompute does, so nothing is read from the solver.
+    let arrival_frame_density = |source_stage: usize, lag: usize| -> Vec<f64> {
+        let h_source = stage_hours[source_stage];
+        let window_start = T_V;
+        let window_end = T_V + h_source;
+        let arrival_start: f64 = stage_hours[source_stage..source_stage + lag].iter().sum();
+        let arrival_end = arrival_start + arrival_blocks.iter().sum::<f64>();
+        let overlap_start = window_start.max(arrival_start);
+        let overlap_end = window_end.min(arrival_end);
+        let width = overlap_end - overlap_start;
+        assert!(
+            width > 0.0,
+            "D49: source stage {source_stage} lag {lag} must reach the arrival stage"
+        );
+        let local_start = overlap_start - arrival_start;
+        let mut row: Vec<f64> =
+            cobre_core::window_period_overlaps(local_start, width, &arrival_blocks)
+                .iter()
+                .map(|overlap| overlap / width)
+                .collect();
+        row.resize(arrival_blocks.len(), 0.0);
+        row
+    };
+    let source_density_lag1 = arrival_frame_density(1, 1);
+    let source_density_lag2 = arrival_frame_density(0, 2);
+
+    let total_source_weight = source_weight_lag1 + source_weight_lag2;
+    let expected_density: Vec<f64> = (0..arrival_blocks.len())
+        .map(|b| {
+            (source_weight_lag1 * source_density_lag1[b]
+                + source_weight_lag2 * source_density_lag2[b])
+                / total_source_weight
+        })
+        .collect();
+
+    // Closed-form cross-check: the hand-derived blend is [0.1, 0.5, 0.4],
+    // conserving to 1.
+    let closed_form = [0.1, 0.5, 0.4];
+    for (b, (&got, &want)) in expected_density.iter().zip(&closed_form).enumerate() {
+        assert!(
+            (got - want).abs() < DERIV_TOL,
+            "D49: hand-derived arrival_density[{b}] = {got}, closed-form {want}"
+        );
+    }
+    let derived_sum: f64 = expected_density.iter().sum();
+    assert!(
+        (derived_sum - 1.0).abs() < DERIV_TOL,
+        "D49: hand-derived arrival_density must conserve to 1.0, got {derived_sum}"
+    );
+
+    let case_dir = Path::new("../../examples/deterministic/d49-travel-time-chronological-arrival");
+    let (setup, system, result) = run_deterministic_with_setup(case_dir);
+    assert!(
+        result.final_gap.abs() < 1e-6,
+        "D49: gap={:.2e}",
+        result.final_gap
+    );
+
+    // The arrival stage must be chronological at a non-zero index (the branch
+    // under test); its senders must be parallel (the parallel-sender cell).
+    let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
+    assert_eq!(
+        study_stages.len(),
+        N_STAGES,
+        "D49: exactly three study stages"
+    );
+    // ARRIVAL_STAGE_IDX == 2 > 0: a non-first, chronological arrival stage is the
+    // only construction that drives the arrival-frame branch rather than the
+    // uniform first-stage fallback.
+    assert_eq!(
+        study_stages[ARRIVAL_STAGE_IDX].block_mode,
+        cobre_core::BlockMode::Chronological,
+        "D49: the arrival stage must be chronological to drive the arrival-frame branch"
+    );
+    assert_eq!(
+        study_stages[0].block_mode,
+        cobre_core::BlockMode::Parallel,
+        "D49: source stage 0 must be parallel"
+    );
+    assert_eq!(
+        study_stages[1].block_mode,
+        cobre_core::BlockMode::Parallel,
+        "D49: source stage 1 must be parallel"
+    );
+
+    let comm = StubComm;
+    let mut pool = setup
+        .create_workspace_pool(&comm, 1, ActiveSolver::new)
+        .expect("D49: simulation workspace pool must build");
+    let io_capacity = setup.simulation_config.io_channel_capacity.max(1);
+    let (result_tx, result_rx) = mpsc::sync_channel(io_capacity);
+    let drain_handle = std::thread::spawn(move || result_rx.into_iter().collect::<Vec<_>>());
+    let _local_costs = setup
+        .simulate(
+            &mut pool.workspaces,
+            &comm,
+            &result_tx,
+            None,
+            result.frozen_templates.as_deref(),
+            &result.basis_cache,
+        )
+        .expect("D49: simulate must return Ok");
+    drop(result_tx);
+    let scenario_results = drain_handle.join().expect("drain thread must not panic");
+
+    assert_eq!(scenario_results.len(), 1, "D49: exactly one scenario");
+    let scenario = &scenario_results[0];
+    assert_eq!(scenario.stages.len(), N_STAGES, "D49: exactly three stages");
+
+    let arrival_stage = scenario
+        .stages
+        .iter()
+        .find(|s| s.stage_id as usize == ARRIVAL_STAGE_IDX)
+        .expect("D49: the arrival stage must be simulated");
+
+    // U must release nothing same-stage at the arrival stage: only then is J's
+    // per-block arrival purely the maturing bucket, so the split reads the
+    // arrival density and not a fresh same-stage deposit.
+    let u_release_hm3: f64 = arrival_stage
+        .hydros
+        .iter()
+        .filter(|h| h.hydro_id == 0)
+        .map(|h| {
+            let b = h
+                .block_id
+                .expect("D49: chronological records carry a block id") as usize;
+            (h.turbined_m3s + h.spillage_m3s) * M3S_TO_HM3 * arrival_blocks[b]
+        })
+        .sum();
+    assert!(
+        u_release_hm3.abs() < SPLIT_TOL,
+        "D49: U must release nothing at the arrival stage so the per-block split \
+         reads the maturing bucket alone, got {u_release_hm3} hm3"
+    );
+
+    // J is run-of-river, so its per-block output (turbined + spilled) equals its
+    // per-block arrival — here the maturing bucket split by arrival_density.
+    let mut delivered_by_block = [0.0_f64; 3];
+    for h in arrival_stage.hydros.iter().filter(|h| h.hydro_id == 1) {
+        let b = h
+            .block_id
+            .expect("D49: chronological records carry a block id") as usize;
+        delivered_by_block[b] += (h.turbined_m3s + h.spillage_m3s) * M3S_TO_HM3 * arrival_blocks[b];
+    }
+    let delivered_total: f64 = delivered_by_block.iter().sum();
+    assert!(
+        delivered_total > 1.0,
+        "D49: the maturing bucket must deliver a positive volume at the arrival \
+         stage (else the split is unobservable), got {delivered_total} hm3"
+    );
+
+    // Cross-check the total against the reported incoming lag-1 bucket.
+    let reported_arrival_hm3 = arrival_stage
+        .transit_buckets
+        .iter()
+        .find(|b| b.hydro_id == 1 && b.lag == 1)
+        .map_or(0.0, |b| b.delayed_arrival_hm3);
+    assert!(
+        (delivered_total - reported_arrival_hm3).abs() < SPLIT_TOL,
+        "D49: J's summed per-block release ({delivered_total}) must equal the \
+         reported maturing arrival ({reported_arrival_hm3})"
+    );
+
+    // The delivered per-block split must equal the hand-derived arrival density.
+    let mut delivered_split_sum = 0.0_f64;
+    for (b, (&delivered, &want)) in delivered_by_block.iter().zip(&expected_density).enumerate() {
+        let split = delivered / delivered_total;
+        delivered_split_sum += split;
+        assert!(
+            (split - want).abs() < SPLIT_TOL,
+            "D49: delivered arrival split[{b}] = {split}, hand-derived arrival_density {want}"
+        );
+    }
+    assert!(
+        (delivered_split_sum - 1.0).abs() < SPLIT_TOL,
+        "D49: the delivered arrival split must conserve to 1.0, got {delivered_split_sum}"
+    );
+
+    // The parallel-sender -> chronological-arrival cell must deliver the
+    // arrival-frame blend, NOT the duration-weighted uniform density the old
+    // sender-frame lookup collapsed a parallel sender to.
+    let arrival_total: f64 = arrival_blocks.iter().sum();
+    let duration_uniform: Vec<f64> = arrival_blocks.iter().map(|&h| h / arrival_total).collect();
+    let split_vs_uniform: f64 = delivered_by_block
+        .iter()
+        .zip(&duration_uniform)
+        .map(|(&delivered, &uniform)| (delivered / delivered_total - uniform).abs())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        split_vs_uniform > 1e-3,
+        "D49: the delivered split must be the arrival-frame blend, not the \
+         duration-weighted uniform density {duration_uniform:?} (max deviation \
+         {split_vs_uniform})"
+    );
+}
+
+/// D50: a PLAIN tributary into a bucketed chronological confluence must not
+/// perturb the maturing bucket's arrival-density split. Confluence `J` (id 2)
+/// is fed by TWO upstreams: `U` (id 1) carries `travel_time_hours = 200` (a
+/// declared travel-time arc, so `J` holds a maturing transit bucket) and `V`
+/// (id 0) is a plain tributary with no `travel_time_hours` (a same-stage arc,
+/// no maturing bucket). `V` sorts before `U` in the id-ordered cascade upstream
+/// list, so the arrival-density resolver visits the plain tributary first.
+///
+/// `cobre-io`'s `check_chronological_confluence_heterogeneous_travel_time`
+/// counts travel-time arcs only, so one travel-time arc plus one plain tributary
+/// is `< 2` and passes config validation — the resolver is the only guard, and
+/// it must skip `V` (which has no `arc_arrival_density` entry) rather than fold
+/// its duration-uniform density into the confluence. The pre-fix resolver
+/// derived a uniform density for the plain tributary and then compared it to
+/// `U`'s non-uniform arrival density: a false heterogeneous-confluence panic in
+/// debug/test, a silent wrong (uniform) split in release. Because `V` sorts
+/// first, the pre-fix release path would seed the split with the uniform density
+/// and keep it, so the delivered-split assertion below catches the release-mode
+/// regression too.
+///
+/// Same calendar and arc as D49 (`T_V = 200`, senders `[168, 168]` parallel,
+/// arrival stage `[20, 100, 600]` chronological), so the hand-derived
+/// `arrival_density` is the same `[0.1, 0.5, 0.4]` blend, recomputed here from
+/// the public resolvers. `V` carries zero water (zero storage, zero inflow, zero
+/// turbine/generation capacity), so `J`'s stage-2 arrival is the maturing bucket
+/// alone and its per-block split reads `U`'s arrival density. The split is a
+/// fixed LP coefficient, so the assertion is backend-agnostic across HiGHS and
+/// CLP.
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+#[test]
+fn d50_travel_time_plain_tributary_confluence_arrival_density() {
+    const T_V: f64 = 200.0;
+    const M3S_TO_HM3: f64 = 3_600.0 / 1_000_000.0;
+    const N_STAGES: usize = 3;
+    const ARRIVAL_STAGE_IDX: usize = 2;
+    const DERIV_TOL: f64 = 1e-9;
+    const SPLIT_TOL: f64 = 1e-6;
+    // Entity ids: V is the plain tributary, U the travel-time arc, J the
+    // bucketed confluence downstream.
+    const V_ID: i32 = 0;
+    const U_ID: i32 = 1;
+    const J_ID: i32 = 2;
+
+    let stage_hours = [168.0, 168.0, 720.0];
+    let arrival_blocks = [20.0, 100.0, 600.0];
+
+    // Hand-derived arrival_density = [0.1, 0.5, 0.4] (identical to D49: same arc,
+    // same calendar), recomputed from the public resolvers so nothing is read
+    // from the solver.
+    let padded = pad_calendar_for_resolution(&stage_hours, T_V);
+    let stage_weights_0 =
+        cobre_sddp::lead_time::resolve_spread(T_V, 0, &padded, None).stage_weights;
+    let stage_weights_1 =
+        cobre_sddp::lead_time::resolve_spread(T_V, 1, &padded, None).stage_weights;
+    let source_weight_lag1 = stage_weights_1[1];
+    let source_weight_lag2 = stage_weights_0[2];
+    assert!(
+        source_weight_lag1 > 0.0 && source_weight_lag2 > 0.0,
+        "D50: the blend must have >= 2 contributing source lags (lag-1 weight \
+         {source_weight_lag1}, lag-2 weight {source_weight_lag2})"
+    );
+
+    let arrival_frame_density = |source_stage: usize, lag: usize| -> Vec<f64> {
+        let h_source = stage_hours[source_stage];
+        let window_start = T_V;
+        let window_end = T_V + h_source;
+        let arrival_start: f64 = stage_hours[source_stage..source_stage + lag].iter().sum();
+        let arrival_end = arrival_start + arrival_blocks.iter().sum::<f64>();
+        let overlap_start = window_start.max(arrival_start);
+        let overlap_end = window_end.min(arrival_end);
+        let width = overlap_end - overlap_start;
+        assert!(
+            width > 0.0,
+            "D50: source stage {source_stage} lag {lag} must reach the arrival stage"
+        );
+        let local_start = overlap_start - arrival_start;
+        let mut row: Vec<f64> =
+            cobre_core::window_period_overlaps(local_start, width, &arrival_blocks)
+                .iter()
+                .map(|overlap| overlap / width)
+                .collect();
+        row.resize(arrival_blocks.len(), 0.0);
+        row
+    };
+    let source_density_lag1 = arrival_frame_density(1, 1);
+    let source_density_lag2 = arrival_frame_density(0, 2);
+
+    let total_source_weight = source_weight_lag1 + source_weight_lag2;
+    let expected_density: Vec<f64> = (0..arrival_blocks.len())
+        .map(|b| {
+            (source_weight_lag1 * source_density_lag1[b]
+                + source_weight_lag2 * source_density_lag2[b])
+                / total_source_weight
+        })
+        .collect();
+
+    let closed_form = [0.1, 0.5, 0.4];
+    for (b, (&got, &want)) in expected_density.iter().zip(&closed_form).enumerate() {
+        assert!(
+            (got - want).abs() < DERIV_TOL,
+            "D50: hand-derived arrival_density[{b}] = {got}, closed-form {want}"
+        );
+    }
+    let derived_sum: f64 = expected_density.iter().sum();
+    assert!(
+        (derived_sum - 1.0).abs() < DERIV_TOL,
+        "D50: hand-derived arrival_density must conserve to 1.0, got {derived_sum}"
+    );
+
+    let case_dir =
+        Path::new("../../examples/deterministic/d50-travel-time-plain-tributary-confluence");
+    let (setup, system, result) = run_deterministic_with_setup(case_dir);
+    assert!(
+        result.final_gap.abs() < 1e-6,
+        "D50: gap={:.2e}",
+        result.final_gap
+    );
+
+    // The triggering topology: J is fed by V (plain, id 0) then U (travel-time,
+    // id 1) in id-order, and only U carries a travel-time arc. This is exactly
+    // the confluence the pre-fix resolver mishandled.
+    let upstream_of_j = system.cascade().upstream(cobre_core::EntityId(J_ID));
+    assert_eq!(
+        upstream_of_j,
+        &[cobre_core::EntityId(V_ID), cobre_core::EntityId(U_ID)],
+        "D50: J must be fed by V (id 0, plain) then U (id 1, travel-time)"
+    );
+    let travel_time_of = |id: i32| {
+        system
+            .hydros()
+            .iter()
+            .find(|h| h.id == cobre_core::EntityId(id))
+            .unwrap_or_else(|| panic!("D50: hydro {id} must be present"))
+            .travel_time_hours
+    };
+    assert!(
+        travel_time_of(V_ID).is_none(),
+        "D50: V (id 0) must be a plain tributary with no travel_time_hours"
+    );
+    assert_eq!(
+        travel_time_of(U_ID),
+        Some(T_V),
+        "D50: U (id 1) must carry the declared travel-time arc"
+    );
+
+    let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
+    assert_eq!(
+        study_stages.len(),
+        N_STAGES,
+        "D50: exactly three study stages"
+    );
+    assert_eq!(
+        study_stages[ARRIVAL_STAGE_IDX].block_mode,
+        cobre_core::BlockMode::Chronological,
+        "D50: the arrival stage must be chronological to drive the arrival-frame branch"
+    );
+    assert_eq!(
+        study_stages[0].block_mode,
+        cobre_core::BlockMode::Parallel,
+        "D50: source stage 0 must be parallel"
+    );
+    assert_eq!(
+        study_stages[1].block_mode,
+        cobre_core::BlockMode::Parallel,
+        "D50: source stage 1 must be parallel"
+    );
+
+    let comm = StubComm;
+    let mut pool = setup
+        .create_workspace_pool(&comm, 1, ActiveSolver::new)
+        .expect("D50: simulation workspace pool must build");
+    let io_capacity = setup.simulation_config.io_channel_capacity.max(1);
+    let (result_tx, result_rx) = mpsc::sync_channel(io_capacity);
+    let drain_handle = std::thread::spawn(move || result_rx.into_iter().collect::<Vec<_>>());
+    let _local_costs = setup
+        .simulate(
+            &mut pool.workspaces,
+            &comm,
+            &result_tx,
+            None,
+            result.frozen_templates.as_deref(),
+            &result.basis_cache,
+        )
+        .expect("D50: simulate must return Ok");
+    drop(result_tx);
+    let scenario_results = drain_handle.join().expect("drain thread must not panic");
+
+    assert_eq!(scenario_results.len(), 1, "D50: exactly one scenario");
+    let scenario = &scenario_results[0];
+    assert_eq!(scenario.stages.len(), N_STAGES, "D50: exactly three stages");
+
+    let arrival_stage = scenario
+        .stages
+        .iter()
+        .find(|s| s.stage_id as usize == ARRIVAL_STAGE_IDX)
+        .expect("D50: the arrival stage must be simulated");
+
+    // The plain tributary V carries zero water, so it releases nothing at the
+    // arrival stage — its presence in the confluence is purely topological and
+    // must not add a same-stage deposit onto J's arrival split.
+    let v_release_hm3: f64 = arrival_stage
+        .hydros
+        .iter()
+        .filter(|h| h.hydro_id == V_ID)
+        .map(|h| {
+            let b = h
+                .block_id
+                .expect("D50: chronological records carry a block id") as usize;
+            (h.turbined_m3s + h.spillage_m3s) * M3S_TO_HM3 * arrival_blocks[b]
+        })
+        .sum();
+    assert!(
+        v_release_hm3.abs() < SPLIT_TOL,
+        "D50: the plain tributary V must release nothing at the arrival stage, got {v_release_hm3} hm3"
+    );
+
+    // U must release nothing same-stage at the arrival stage: only then is J's
+    // per-block arrival purely the maturing bucket, so the split reads the
+    // arrival density and not a fresh same-stage deposit.
+    let u_release_hm3: f64 = arrival_stage
+        .hydros
+        .iter()
+        .filter(|h| h.hydro_id == U_ID)
+        .map(|h| {
+            let b = h
+                .block_id
+                .expect("D50: chronological records carry a block id") as usize;
+            (h.turbined_m3s + h.spillage_m3s) * M3S_TO_HM3 * arrival_blocks[b]
+        })
+        .sum();
+    assert!(
+        u_release_hm3.abs() < SPLIT_TOL,
+        "D50: U must release nothing at the arrival stage so the per-block split \
+         reads the maturing bucket alone, got {u_release_hm3} hm3"
+    );
+
+    // J is run-of-river, so its per-block output (turbined + spilled) equals its
+    // per-block arrival — here the maturing bucket split by arrival_density.
+    let mut delivered_by_block = [0.0_f64; 3];
+    for h in arrival_stage.hydros.iter().filter(|h| h.hydro_id == J_ID) {
+        let b = h
+            .block_id
+            .expect("D50: chronological records carry a block id") as usize;
+        delivered_by_block[b] += (h.turbined_m3s + h.spillage_m3s) * M3S_TO_HM3 * arrival_blocks[b];
+    }
+    let delivered_total: f64 = delivered_by_block.iter().sum();
+    assert!(
+        delivered_total > 1.0,
+        "D50: the maturing bucket must deliver a positive volume at the arrival \
+         stage (else the split is unobservable), got {delivered_total} hm3"
+    );
+
+    let reported_arrival_hm3 = arrival_stage
+        .transit_buckets
+        .iter()
+        .find(|b| b.hydro_id == J_ID && b.lag == 1)
+        .map_or(0.0, |b| b.delayed_arrival_hm3);
+    assert!(
+        (delivered_total - reported_arrival_hm3).abs() < SPLIT_TOL,
+        "D50: J's summed per-block release ({delivered_total}) must equal the \
+         reported maturing arrival ({reported_arrival_hm3})"
+    );
+
+    // The delivered per-block split must equal U's hand-derived arrival density —
+    // NOT the duration-uniform density the plain tributary would have injected.
+    let mut delivered_split_sum = 0.0_f64;
+    for (b, (&delivered, &want)) in delivered_by_block.iter().zip(&expected_density).enumerate() {
+        let split = delivered / delivered_total;
+        delivered_split_sum += split;
+        assert!(
+            (split - want).abs() < SPLIT_TOL,
+            "D50: delivered arrival split[{b}] = {split}, hand-derived arrival_density {want}"
+        );
+    }
+    assert!(
+        (delivered_split_sum - 1.0).abs() < SPLIT_TOL,
+        "D50: the delivered arrival split must conserve to 1.0, got {delivered_split_sum}"
+    );
+
+    let arrival_total: f64 = arrival_blocks.iter().sum();
+    let duration_uniform: Vec<f64> = arrival_blocks.iter().map(|&h| h / arrival_total).collect();
+    let split_vs_uniform: f64 = delivered_by_block
+        .iter()
+        .zip(&duration_uniform)
+        .map(|(&delivered, &uniform)| (delivered / delivered_total - uniform).abs())
+        .fold(0.0_f64, f64::max);
+    assert!(
+        split_vs_uniform > 1e-3,
+        "D50: the delivered split must be U's arrival-frame blend, not the \
+         duration-weighted uniform density {duration_uniform:?} the plain \
+         tributary would have injected (max deviation {split_vs_uniform})"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Behavioral convergence coverage for the non-golden (demoted) hashed cases
+//
+// Each demoted case is single-scenario deterministic, so it converges to a
+// hand-stable optimum with LB == UB. The asserted cost is that converged optimum
+// and is backend-agnostic — HiGHS and CLP agree to the absolute tolerance below.
+// This is the behavioral safety net (tier 2) that lets the bit-exact golden tier
+// shrink to a small feature-combined set without losing regression coverage.
+// ---------------------------------------------------------------------------
+
+/// Generate a deterministic "converges to a known optimum" regression test: train
+/// the case, assert the LB/UB gap closes (`< 1e-6`), and assert the final LB
+/// equals the known optimum within `tolerance`. Used only for cases whose body is
+/// exactly this gap + cost check; cases with extra setup or assertions stay explicit.
+macro_rules! converges_case {
+    ($(#[$meta:meta])* $name:ident, $dir:literal, $label:literal, $expected:expr, $tolerance:expr) => {
+        $(#[$meta])*
+        #[cfg_attr(
+            not(feature = "slow-tests"),
+            ignore = "slow: run with --features slow-tests"
+        )]
+        #[test]
+        fn $name() {
+            let case_dir = Path::new(concat!("../../examples/deterministic/", $dir));
+            let result = run_deterministic(case_dir);
+            assert!(
+                result.final_gap.abs() < 1e-6,
+                concat!($label, ": gap={:.2e}"),
+                result.final_gap
+            );
+            assert_cost(result.final_lb, $expected, $tolerance, $label);
+        }
+    };
+}
+
+converges_case!(
+    /// D17: mixed-sign (per-month) evaporation.
+    d17_converges_to_known_optimum,
+    "d17-evaporation-mixed-sign",
+    "D17",
+    4_380_000.0,
+    1.0
+);
+
+converges_case!(
+    /// D31: backwater reference volume — upstream computed-FPHA plane shift.
+    d31_converges_to_known_optimum,
+    "d31-backwater-reference-volume",
+    "D31",
+    1_475_795.556_870_993_5,
+    1.0
+);
+
+converges_case!(
+    /// D32: reversible (pumping) plant.
+    d32_converges_to_known_optimum,
+    "d32-reversible-plant",
+    "D32",
+    1_126_109.6,
+    1.0
+);
+
+converges_case!(
+    /// D35: pumping-station commissioning window.
+    d35_converges_to_known_optimum,
+    "d35-pumping-commissioning",
+    "D35",
+    1_245_756.166_666_667,
+    1.0
+);
+
+converges_case!(
+    /// D36: thermal + line commissioning window.
+    d36_converges_to_known_optimum,
+    "d36-thermal-line-commissioning",
+    "D36",
+    30_713_514.888_888_91,
+    1.0
+);
+
+converges_case!(
+    /// D37: anticipated thermal under a commissioning window.
+    d37_converges_to_known_optimum,
+    "d37-anticipated-commissioning",
+    "D37",
+    15_444_634.222_222_22,
+    1.0
+);
+
+converges_case!(
+    /// D38: dead-volume filling hydro.
+    d38_converges_to_known_optimum,
+    "d38-dead-volume-filling",
+    "D38",
+    21_821_186.4,
+    1.0
+);
+
+converges_case!(
+    /// D39: PreFilling hydro upstream of a Filling hydro.
+    d39_converges_to_known_optimum,
+    "d39-prefilling-upstream-of-filling",
+    "D39",
+    4_882_544.0,
+    1.0
+);
+
+converges_case!(
+    /// D40: filling cascade.
+    d40_converges_to_known_optimum,
+    "d40-filling-cascade",
+    "D40",
+    27_503_012.0,
+    1.0
+);
+
+converges_case!(
+    /// D42: non-filling hydro commissioning.
+    d42_converges_to_known_optimum,
+    "d42-nonfilling-hydro-commissioning",
+    "D42",
+    10_185_524.0,
+    1.0
+);
+
+/// D33: per-stage varying block counts (convergence companion to
+/// [`d33_per_stage_block_count_varies`], which only checks the structural strides).
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+#[test]
+fn d33_converges_to_known_optimum() {
+    let case_dir = Path::new("../../examples/deterministic/d33-per-stage-block-counts");
+    let result = run_deterministic(case_dir);
+    assert!(
+        result.final_gap.abs() < 1e-6,
+        "D33: gap={:.2e}",
+        result.final_gap
+    );
+    assert_cost(result.final_lb, 553.333_333_333_3, 1e-2, "D33");
+}
+
+/// Chronological-blocks telescoping ⇒ parallel bound-agreement anchor.
+///
+/// Pins the §9 "telescoping ⇒ parallel agreement when interiors are inert" contract
+/// at the solved-bound level: with `γᵥ = 0` (constant productivity), no
+/// storage-dependent evaporation, and non-binding interior storage bounds, a
+/// chronological (`K = 2`) run's converged lower bound equals the matched parallel
+/// run's. The water rows telescope unconditionally (`Sᵏ` cancels to `Sᴷ − S⁰`,
+/// `Σ τ_k = ζ`); the bound agreement holds only because nothing makes the interior
+/// storage path bind.
+mod chronological_telescoping {
+    use cobre_core::scenario::{InflowModel, LoadModel};
+    use cobre_core::temporal::{
+        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
+        StageStateConfig,
+    };
+    use cobre_core::{
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, DeficitSegment,
+        EntityId, HydroGenerationModel, HydroStageBounds, HydroStagePenalties, HydroStorage,
+        InitialConditions, LineStageBounds, LineStagePenalties, NcsStagePenalties,
+        PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
+        ResolvedPenalties, SystemBuilder, ThermalStageBounds,
+    };
+    use cobre_io::config::{
+        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+        InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
+        RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
+        TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+    };
+    use cobre_solver::ActiveSolver;
+
+    use cobre_io::output::policy::read_policy_checkpoint;
+    use cobre_sddp::orchestration::{CheckpointParams, write_checkpoint};
+    use cobre_sddp::policy_export::build_stage_cut_records;
+    use tempfile::TempDir;
+
+    use super::common::builders::{
+        BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage,
+    };
+    use super::common::{StubComm, build_setup_in_code};
+
+    const N_STAGES: usize = 3;
+    const N_ITERATIONS: u32 = 12;
+    const HYDRO_ID: i32 = 1;
+
+    fn zero_hydro_stage_penalties() -> HydroStagePenalties {
+        HydroStagePenalties {
+            spillage_cost: 0.0,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 0.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 0.0,
+        }
+    }
+
+    /// Two-block, constant-productivity hydro + backup thermal on one bus, built under
+    /// `block_mode`. Constant productivity means `γᵥ = 0`; no evaporation coefficients
+    /// means no storage-dependent loss; the wide `[0, 500]` storage bounds never bind —
+    /// the three conditions the inert-interior contract requires.
+    fn build_system(block_mode: BlockMode) -> cobre_core::System {
+        use chrono::NaiveDate;
+
+        let bus = make_bus(
+            EntityId(2),
+            BusSpec {
+                name: "B1".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                deficit_segments: vec![DeficitSegment {
+                    depth_mw: None,
+                    cost_per_mwh: 500.0,
+                }],
+                excess_cost: 0.0,
+            },
+        );
+
+        let hydro = make_hydro(
+            EntityId(HYDRO_ID),
+            HydroSpec {
+                name: "H1".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                bus_id: EntityId(2),
+                min_storage_hm3: 0.0,
+                max_storage_hm3: 500.0,
+                max_turbined_m3s: 100.0,
+                generation_model: HydroGenerationModel::ConstantProductivity,
+                specific_productivity_mw_per_m3s_per_m: Some(0.5),
+                max_generation_mw: 250.0,
+                penalties: zero_hydro_penalties(),
+                ..Default::default()
+            },
+        );
+
+        // Two blocks with distinct durations so the chronological chain is a genuine
+        // K = 2 chain (τ_0 ≠ τ_1) whose telescoped total still recovers the parallel ζ.
+        let blocks = vec![
+            Block {
+                index: 0,
+                name: "B0".to_string(),
+                duration_hours: 300.0,
+            },
+            Block {
+                index: 1,
+                name: "B1".to_string(),
+                duration_hours: 444.0,
+            },
+        ];
+
+        let stages: Vec<Stage> = (0..N_STAGES)
+            .map(|i| {
+                make_stage(
+                    i,
+                    StageSpec {
+                        start_date: NaiveDate::from_ymd_opt(2024, (i % 12 + 1) as u32, 1).unwrap(),
+                        end_date: NaiveDate::from_ymd_opt(2024, ((i % 12 + 1) % 12 + 1) as u32, 1)
+                            .unwrap(),
+                        season_id: Some(0),
+                        blocks: blocks.clone(),
+                        block_mode,
+                        state_config: StageStateConfig {
+                            storage: true,
+                            inflow_lags: false,
+                        },
+                        risk_config: StageRiskConfig::Expectation,
+                        scenario_config: ScenarioSourceConfig {
+                            branching_factor: 1,
+                            noise_method: NoiseMethod::Saa,
+                        },
+                    },
+                )
+            })
+            .collect();
+
+        // Deterministic: zero-variance inflow and load so the optimum is a single
+        // scenario and both modes converge to the same bound.
+        let inflow_models: Vec<InflowModel> = (0..N_STAGES)
+            .map(|i| InflowModel {
+                hydro_id: EntityId(HYDRO_ID),
+                stage_id: i32::try_from(i).expect("stage index fits i32"),
+                mean_m3s: 60.0,
+                std_m3s: 0.0,
+                ar_coefficients: vec![],
+                residual_std_ratio: 1.0,
+                annual: None,
+            })
+            .collect();
+
+        let load_models: Vec<LoadModel> = (0..N_STAGES)
+            .map(|i| LoadModel {
+                bus_id: EntityId(2),
+                stage_id: i32::try_from(i).expect("stage index fits i32"),
+                mean_mw: 120.0,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        let default_hydro_bounds = || HydroStageBounds {
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 500.0,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 250.0,
+            max_diversion_m3s: None,
+            filling_min_rate_m3s: 0.0,
+            water_withdrawal_m3s: 0.0,
+        };
+
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 1,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: N_STAGES,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: default_hydro_bounds(),
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 400.0,
+                    cost_per_mwh: 100.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 1,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: N_STAGES,
+            },
+            &PenaltiesDefaults {
+                hydro: zero_hydro_stage_penalties(),
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        let initial_conditions = InitialConditions {
+            storage: vec![HydroStorage {
+                hydro_id: EntityId(HYDRO_ID),
+                value_hm3: 200.0,
+            }],
+            filling_storage: vec![],
+            past_inflows: vec![],
+            past_anticipated_commitments: vec![],
+            recent_observations: vec![],
+            past_defluences: vec![],
+        };
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .thermals(vec![super::common::builders::make_thermal(
+                EntityId(3),
+                super::common::builders::ThermalSpec {
+                    name: "T_backup".to_string(),
+                    operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    bus_id: EntityId(2),
+                    cost_per_mwh: 100.0,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 400.0,
+                    anticipated_config: None,
+                    ..Default::default()
+                },
+            )])
+            .hydros(vec![hydro])
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .load_models(load_models)
+            .bounds(bounds)
+            .penalties(penalties)
+            .initial_conditions(initial_conditions)
+            .build()
+            .expect("build_system: valid constant-productivity study")
+    }
+
+    fn zero_hydro_penalties() -> cobre_core::entities::hydro::HydroPenalties {
+        cobre_core::entities::hydro::HydroPenalties {
+            spillage_cost: 0.0,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 0.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 0.0,
+        }
+    }
+
+    fn build_config() -> Config {
+        Config {
+            schema: None,
+            modeling: ModelingConfig {
+                inflow_non_negativity: InflowNonNegativityConfig {
+                    method: CfgInflowMethod::None,
+                },
+            },
+            training: TrainingConfig {
+                enabled: true,
+                tree_seed: Some(42),
+                forward_passes: Some(1),
+                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
+                    limit: N_ITERATIONS,
+                }]),
+                stopping_mode: "any".to_string(),
+                cut_selection: RowSelectionConfig::default(),
+                solver: TrainingSolverConfig::default(),
+                scenario_source: None,
+            },
+            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
+            policy: PolicyConfig::default(),
+            simulation: IoSimulationConfig::default(),
+            exports: ExportsConfig::default(),
+            estimation: EstimationConfig::default(),
+        }
+    }
+
+    fn train_final_lb(block_mode: BlockMode) -> f64 {
+        let system = build_system(block_mode);
+        let config = build_config();
+        let mut setup = build_setup_in_code(system, &config);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("train must not return Err");
+        assert!(
+            outcome.error.is_none(),
+            "training error: {:?}",
+            outcome.error
+        );
+        outcome.result.final_lb
+    }
+
+    #[test]
+    fn chronological_telescopes_to_parallel_when_interiors_inert() {
+        let parallel_lb = train_final_lb(BlockMode::Parallel);
+        let chronological_lb = train_final_lb(BlockMode::Chronological);
+        // LP-tolerance agreement: the two are different LPs (chronological adds inert
+        // interior columns and chained rows), so compare to an absolute-relative
+        // tolerance that absorbs HiGHS/CLP FP noise while catching a genuine
+        // divergence (a binding interior path would shift the bound far more).
+        let tol = 1e-6 * parallel_lb.abs().max(1.0);
+        assert!(
+            (chronological_lb - parallel_lb).abs() <= tol,
+            "chronological bound {chronological_lb} must equal parallel bound \
+             {parallel_lb} within LP tolerance {tol} (inert interiors); a divergence \
+             signals the interior storage path bound"
+        );
+    }
+
+    /// Train a policy under `train_mode`, write it to a fresh `TempDir` via the
+    /// shared `write_checkpoint` writer, and read it back.
+    ///
+    /// Returns the trained `StudySetup` (its `fcf` is the source of the written
+    /// cut records), the read-back checkpoint, and the `TempDir` whose drop
+    /// deletes the on-disk policy — kept alive by returning it.
+    fn train_and_checkpoint(
+        train_mode: BlockMode,
+    ) -> (cobre_sddp::StudySetup, cobre_io::PolicyCheckpoint, TempDir) {
+        let config = build_config();
+        let mut setup = build_setup_in_code(build_system(train_mode), &config);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("train must not return Err");
+        assert!(
+            outcome.error.is_none(),
+            "training error: {:?}",
+            outcome.error
+        );
+        let result = outcome.result;
+
+        // System is not `Clone`; rebuild the identical train-mode system for the
+        // checkpoint writer (`build_system` is deterministic).
+        let system = build_system(train_mode);
+        let policy_dir = TempDir::new().expect("TempDir::new");
+        let params = CheckpointParams {
+            max_iterations: setup.loop_params.max_iterations,
+            forward_passes: setup.loop_params.forward_passes,
+            seed: setup.loop_params.seed,
+            export_states: config.exports.states,
+        };
+        write_checkpoint(policy_dir.path(), &setup, &system, &result, &params)
+            .expect("write_checkpoint must succeed");
+        let checkpoint =
+            read_policy_checkpoint(policy_dir.path()).expect("read_policy_checkpoint must succeed");
+
+        (setup, checkpoint, policy_dir)
+    }
+
+    /// Assert every checkpoint cut's coefficients and intercept are bit-for-bit
+    /// identical (`f64::to_bits`, never `==`) to the records written from `fcf`.
+    fn assert_cuts_bit_identical(
+        fcf: &cobre_sddp::FutureCostFunction,
+        checkpoint: &cobre_io::PolicyCheckpoint,
+    ) {
+        let written = build_stage_cut_records(fcf);
+        assert_eq!(
+            written.len(),
+            checkpoint.stage_cuts.len(),
+            "stage count must match between written FCF and read checkpoint"
+        );
+        for (stage, (stage_written, stage_read)) in
+            written.iter().zip(checkpoint.stage_cuts.iter()).enumerate()
+        {
+            assert_eq!(
+                stage_written.len(),
+                stage_read.cuts.len(),
+                "stage {stage}: cut count must match between written and read"
+            );
+            for (cut_idx, (w, r)) in stage_written.iter().zip(stage_read.cuts.iter()).enumerate() {
+                assert_eq!(
+                    w.intercept.to_bits(),
+                    r.intercept.to_bits(),
+                    "stage {stage} cut {cut_idx}: intercept bits differ ({} vs {})",
+                    w.intercept,
+                    r.intercept
+                );
+                assert_eq!(
+                    w.coefficients.len(),
+                    r.coefficients.len(),
+                    "stage {stage} cut {cut_idx}: coefficient length differs"
+                );
+                for (k, (wc, rc)) in w.coefficients.iter().zip(r.coefficients.iter()).enumerate() {
+                    assert_eq!(
+                        wc.to_bits(),
+                        rc.to_bits(),
+                        "stage {stage} cut {cut_idx} coeff {k}: bits differ ({wc} vs {rc})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Train in `train_mode`, checkpoint, then load into a `load_mode` study and
+    /// evaluate `theta` against the load-mode LP.
+    ///
+    /// Asserts (1) the written cut bytes survive the checkpoint round-trip, (2)
+    /// the cross-mode warm-start load succeeds, (3) the loaded cuts are byte-
+    /// identical to the written ones, and (4) a load-mode simulation runs the
+    /// cross-mode FCF without error. Only cut bytes are asserted portable; the
+    /// persisted basis is column-count-dependent (hence mode-dependent) and is
+    /// intentionally not asserted (design §5).
+    fn assert_cross_mode_load_preserves_cut_bytes(train_mode: BlockMode, load_mode: BlockMode) {
+        let (trained_setup, checkpoint, _policy_dir) = train_and_checkpoint(train_mode);
+        assert_cuts_bit_identical(&trained_setup.fcf, &checkpoint);
+
+        let config = build_config();
+        let mut setup2 = build_setup_in_code(build_system(load_mode), &config);
+
+        let warm_fcf = cobre_sddp::FutureCostFunction::new_with_warm_start(
+            &checkpoint.stage_cuts,
+            setup2.loop_params.forward_passes,
+            setup2.loop_params.max_iterations.saturating_add(1),
+        )
+        .expect("cross-mode warm-start load must succeed (cuts are n_blks-independent, design §5)");
+
+        assert_cuts_bit_identical(&warm_fcf, &checkpoint);
+
+        setup2.replace_fcf(warm_fcf);
+        setup2.simulation_config.n_scenarios = 1;
+
+        let comm = StubComm;
+        let mut pool = setup2
+            .create_workspace_pool(&comm, 1, ActiveSolver::new)
+            .expect("simulation workspace pool must build");
+        let io_capacity = setup2.simulation_config.io_channel_capacity.max(1);
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(io_capacity);
+        let drain = std::thread::spawn(move || result_rx.into_iter().collect::<Vec<_>>());
+
+        let run = setup2
+            .simulate(&mut pool.workspaces, &comm, &result_tx, None, None, &[])
+            .expect("cross-mode simulate must succeed (theta evaluates against the load-mode LP)");
+
+        drop(result_tx);
+        drop(drain.join().expect("drain thread must not panic"));
+
+        assert_eq!(
+            run.costs.len(),
+            1,
+            "cross-mode simulate must produce one scenario cost, confirming theta evaluated"
+        );
+    }
+
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow: run with --features slow-tests"
+    )]
+    #[test]
+    fn cross_mode_policy_load_preserves_cut_bytes_parallel_to_chronological() {
+        assert_cross_mode_load_preserves_cut_bytes(BlockMode::Parallel, BlockMode::Chronological);
+    }
+
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow: run with --features slow-tests"
+    )]
+    #[test]
+    fn cross_mode_policy_load_preserves_cut_bytes_chronological_to_parallel() {
+        assert_cross_mode_load_preserves_cut_bytes(BlockMode::Chronological, BlockMode::Parallel);
+    }
+}
+
+/// Chronological block-resolved attribution for a declared travel-time arc: the
+/// resolver's block tables, the `K = 1` chronological-vs-parallel byte-identity
+/// anchor, and the parallel-vs-chronological state-dimension equality
+/// (mode-independent sizing, the shared-density aggregation identity, and the
+/// fixed-delivery-density contract).
+mod chronological_attribution {
+    use cobre_core::scenario::{InflowModel, LoadModel};
+    use cobre_core::temporal::{Block, BlockMode, Stage};
+    use cobre_core::{
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, DeficitSegment,
+        EntityId, HydroGenerationModel, HydroStageBounds, HydroStagePenalties, HydroStorage,
+        InitialConditions, LineStageBounds, LineStagePenalties, NcsStagePenalties,
+        PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
+        ResolvedPenalties, SystemBuilder, ThermalStageBounds,
+    };
+    use cobre_io::config::{
+        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+        InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
+        RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
+        TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+    };
+    use cobre_solver::StageTemplate;
+
+    use super::common::build_setup_in_code;
+    use super::common::builders::{
+        BusSpec, HydroSpec, StageSpec, ThermalSpec, make_bus, make_hydro, make_stage, make_thermal,
+    };
+
+    const U_ID: i32 = 1;
+    const J_ID: i32 = 2;
+    const BUS_ID: i32 = 3;
+    const THERMAL_ID: i32 = 4;
+    const TRAVEL_TIME_HOURS: f64 = 250.0;
+    const N_STAGES: usize = 2;
+    const TOL: f64 = 1e-9;
+
+    fn assert_close(actual: &[f64], expected: &[f64], label: &str) {
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "{label}: length mismatch, got {actual:?}, expected {expected:?}"
+        );
+        for (a, e) in actual.iter().zip(expected) {
+            assert!(
+                (a - e).abs() < TOL,
+                "{label}: value mismatch, got {actual:?}, expected {expected:?}"
+            );
+        }
+    }
+
+    fn zero_hydro_penalties() -> cobre_core::entities::hydro::HydroPenalties {
+        cobre_core::entities::hydro::HydroPenalties {
+            spillage_cost: 0.0,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 0.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 0.0,
+        }
+    }
+
+    fn zero_hydro_stage_penalties() -> HydroStagePenalties {
+        HydroStagePenalties {
+            spillage_cost: 0.0,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 0.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 0.0,
+        }
+    }
+
+    /// Cascade `U -> J` (`U` declares `travel_time_hours`) on one bus with a
+    /// backup thermal, `N_STAGES` stages: stage 0 carries `stage0_blocks` under
+    /// `block_mode` (the anchor under test); stage 1 is a single default-length
+    /// receiving stage for whatever lag the anchor's arrival window reaches.
+    fn build_system(block_mode: BlockMode, stage0_blocks: Vec<Block>) -> cobre_core::System {
+        use chrono::NaiveDate;
+
+        let bus = make_bus(
+            EntityId(BUS_ID),
+            BusSpec {
+                name: "B0".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                deficit_segments: vec![DeficitSegment {
+                    depth_mw: None,
+                    cost_per_mwh: 1000.0,
+                }],
+                excess_cost: 0.0,
+            },
+        );
+
+        let u = make_hydro(
+            EntityId(U_ID),
+            HydroSpec {
+                name: "U".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
+                bus_id: EntityId(BUS_ID),
+                downstream_id: Some(EntityId(J_ID)),
+                travel_time_hours: Some(TRAVEL_TIME_HOURS),
+                min_storage_hm3: 0.0,
+                max_storage_hm3: 150.0,
+                max_turbined_m3s: 100.0,
+                generation_model: HydroGenerationModel::ConstantProductivity,
+                max_generation_mw: 10.0,
+                penalties: zero_hydro_penalties(),
+                ..Default::default()
+            },
+        );
+
+        let j = make_hydro(
+            EntityId(J_ID),
+            HydroSpec {
+                name: "J".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2020, 1, 2).unwrap(),
+                bus_id: EntityId(BUS_ID),
+                downstream_id: None,
+                min_storage_hm3: 0.0,
+                max_storage_hm3: 0.0,
+                max_turbined_m3s: 100.0,
+                generation_model: HydroGenerationModel::ConstantProductivity,
+                max_generation_mw: 10.0,
+                penalties: zero_hydro_penalties(),
+                ..Default::default()
+            },
+        );
+
+        let receiving_stage_blocks = vec![Block {
+            index: 0,
+            name: "SINGLE".to_string(),
+            duration_hours: 720.0,
+        }];
+        let stages: Vec<Stage> = vec![
+            make_stage(
+                0,
+                StageSpec {
+                    start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                    blocks: stage0_blocks,
+                    block_mode,
+                    ..StageSpec::default()
+                },
+            ),
+            make_stage(
+                1,
+                StageSpec {
+                    start_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                    end_date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+                    blocks: receiving_stage_blocks,
+                    block_mode: BlockMode::Parallel,
+                    ..StageSpec::default()
+                },
+            ),
+        ];
+
+        let inflow_models: Vec<InflowModel> = [U_ID, J_ID]
+            .into_iter()
+            .flat_map(|hydro_id| {
+                (0..N_STAGES).map(move |stage_id| InflowModel {
+                    hydro_id: EntityId(hydro_id),
+                    stage_id: i32::try_from(stage_id).expect("stage index fits i32"),
+                    mean_m3s: 0.0,
+                    std_m3s: 0.0,
+                    ar_coefficients: vec![],
+                    residual_std_ratio: 1.0,
+                    annual: None,
+                })
+            })
+            .collect();
+
+        let load_models: Vec<LoadModel> = (0..N_STAGES)
+            .map(|stage_id| LoadModel {
+                bus_id: EntityId(BUS_ID),
+                stage_id: i32::try_from(stage_id).expect("stage index fits i32"),
+                mean_mw: 1.0,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        let default_hydro_bounds = || HydroStageBounds {
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 150.0,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 10.0,
+            max_diversion_m3s: None,
+            filling_min_rate_m3s: 0.0,
+            water_withdrawal_m3s: 0.0,
+        };
+
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 2,
+                n_thermals: 1,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: N_STAGES,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: default_hydro_bounds(),
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 100.0,
+                    cost_per_mwh: 10.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 2,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: N_STAGES,
+            },
+            &PenaltiesDefaults {
+                hydro: zero_hydro_stage_penalties(),
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        let initial_conditions = InitialConditions {
+            storage: vec![
+                HydroStorage {
+                    hydro_id: EntityId(U_ID),
+                    value_hm3: 100.0,
+                },
+                HydroStorage {
+                    hydro_id: EntityId(J_ID),
+                    value_hm3: 0.0,
+                },
+            ],
+            filling_storage: vec![],
+            past_inflows: vec![],
+            past_anticipated_commitments: vec![],
+            recent_observations: vec![],
+            // Empty is safe: `build_initial_transit_bucket_state`'s history selection
+            // falls back to an empty slice (seed 0.0) rather than panicking —
+            // these tests inspect LP structure and state dimension, never a
+            // seeded value.
+            past_defluences: vec![],
+        };
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .thermals(vec![make_thermal(
+                EntityId(THERMAL_ID),
+                ThermalSpec {
+                    name: "T0".to_string(),
+                    operational_start_date: NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
+                    bus_id: EntityId(BUS_ID),
+                    cost_per_mwh: 10.0,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 100.0,
+                    anticipated_config: None,
+                    ..Default::default()
+                },
+            )])
+            .hydros(vec![u, j])
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .load_models(load_models)
+            .bounds(bounds)
+            .penalties(penalties)
+            .initial_conditions(initial_conditions)
+            .build()
+            .expect("build_system: valid cascade with a declared travel-time arc")
+    }
+
+    fn build_config() -> Config {
+        Config {
+            schema: None,
+            modeling: ModelingConfig {
+                inflow_non_negativity: InflowNonNegativityConfig {
+                    method: CfgInflowMethod::None,
+                },
+            },
+            training: TrainingConfig {
+                enabled: true,
+                tree_seed: Some(42),
+                forward_passes: Some(1),
+                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
+                stopping_mode: "any".to_string(),
+                cut_selection: RowSelectionConfig::default(),
+                solver: TrainingSolverConfig::default(),
+                scenario_source: None,
+            },
+            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
+            policy: PolicyConfig::default(),
+            simulation: IoSimulationConfig::default(),
+            exports: ExportsConfig::default(),
+            estimation: EstimationConfig::default(),
+        }
+    }
+
+    fn build_setup(block_mode: BlockMode, stage0_blocks: Vec<Block>) -> cobre_sddp::StudySetup {
+        let system = build_system(block_mode, stage0_blocks);
+        let config = build_config();
+        build_setup_in_code(system, &config)
+    }
+
+    fn single_block(name: &str, duration_hours: f64) -> Vec<Block> {
+        vec![Block {
+            index: 0,
+            name: name.to_string(),
+            duration_hours,
+        }]
+    }
+
+    fn three_chronological_blocks() -> Vec<Block> {
+        vec![
+            Block {
+                index: 0,
+                name: "B0".to_string(),
+                duration_hours: 240.0,
+            },
+            Block {
+                index: 1,
+                name: "B1".to_string(),
+                duration_hours: 240.0,
+            },
+            Block {
+                index: 2,
+                name: "B2".to_string(),
+                duration_hours: 240.0,
+            },
+        ]
+    }
+
+    /// The monthly (720 h) anchor's block-resolved attribution over 3x240 h
+    /// chronological blocks with `travel_time_hours = 250`, reproducing the
+    /// resolver's own pinned reference values (`lead_time::tests::
+    /// test_example_iii_block_factors`) directly — this test's only job is to
+    /// confirm the same reference numbers hold for the exact stage lengths
+    /// `d46-travel-time-chronological` declares.
+    #[test]
+    fn resolve_spread_matches_reference_block_tables() {
+        let stage_lengths_hours = [720.0, 720.0];
+        let block_lengths_hours = [240.0, 240.0, 240.0];
+        let resolution = cobre_sddp::lead_time::resolve_spread(
+            TRAVEL_TIME_HOURS,
+            0,
+            &stage_lengths_hours,
+            Some(&block_lengths_hours),
+        );
+
+        assert_eq!(resolution.stage_reach, 1, "depth must be 1 (k_0, k_1 only)");
+        assert_close(
+            &resolution.stage_weights,
+            &[470.0 / 720.0, 250.0 / 720.0],
+            "stage_weights",
+        );
+
+        assert_close(
+            &resolution.block_deposits[0],
+            &[1.0, 0.0],
+            "block_deposits[0] (B0)",
+        );
+        assert_close(
+            &resolution.block_deposits[1],
+            &[230.0 / 240.0, 10.0 / 240.0],
+            "block_deposits[1] (B1)",
+        );
+        assert_close(
+            &resolution.block_deposits[2],
+            &[0.0, 1.0],
+            "block_deposits[2] (B2)",
+        );
+
+        // within_stage_routing[b] is self-inclusive (index 0 = block b
+        // routing to itself), so within_stage_routing_{B0->B1} =
+        // within_stage_routing[0][1], within_stage_routing_{B0->B2} =
+        // within_stage_routing[0][2], within_stage_routing_{B1->B2} =
+        // within_stage_routing[1][1].
+        assert_close(
+            &resolution.within_stage_routing[0],
+            &[0.0, 230.0 / 240.0, 10.0 / 240.0],
+            "within_stage_routing[0] (B0 self-inclusive)",
+        );
+        assert_close(
+            &resolution.within_stage_routing[1],
+            &[0.0, 230.0 / 240.0],
+            "within_stage_routing[1] (B1 self-inclusive)",
+        );
+        assert_close(
+            &resolution.within_stage_routing[2],
+            &[0.0],
+            "within_stage_routing[2] (B2 self-inclusive)",
+        );
+
+        assert_eq!(resolution.arrival_density.len(), 1);
+        assert_close(
+            &resolution.arrival_density[0],
+            &[240.0 / 250.0, 10.0 / 250.0],
+            "arrival_density (96%/4% split)",
+        );
+    }
+
+    /// Field-by-field byte-identity check: CSC structure, bounds, objective,
+    /// scaling, and the state/transfer/dual-relevant/hydro/PAR-order
+    /// dimensions. Every `f64` slice compares by `to_bits()` — true
+    /// bit-identity, not approximate.
+    fn assert_templates_byte_identical(tpl_a: &StageTemplate, tpl_b: &StageTemplate, stage: usize) {
+        assert_eq!(tpl_a.num_cols, tpl_b.num_cols, "stage {stage}: num_cols");
+        assert_eq!(tpl_a.num_rows, tpl_b.num_rows, "stage {stage}: num_rows");
+        assert_eq!(tpl_a.num_nz, tpl_b.num_nz, "stage {stage}: num_nz");
+        assert_eq!(tpl_a.n_state, tpl_b.n_state, "stage {stage}: n_state");
+        assert_eq!(
+            tpl_a.n_transfer, tpl_b.n_transfer,
+            "stage {stage}: n_transfer"
+        );
+        assert_eq!(
+            tpl_a.n_dual_relevant, tpl_b.n_dual_relevant,
+            "stage {stage}: n_dual_relevant"
+        );
+        assert_eq!(tpl_a.n_hydro, tpl_b.n_hydro, "stage {stage}: n_hydro");
+        assert_eq!(
+            tpl_a.max_par_order, tpl_b.max_par_order,
+            "stage {stage}: max_par_order"
+        );
+
+        assert_eq!(
+            tpl_a.col_starts, tpl_b.col_starts,
+            "stage {stage}: col_starts"
+        );
+        assert_eq!(
+            tpl_a.row_indices, tpl_b.row_indices,
+            "stage {stage}: row_indices"
+        );
+
+        let bits = |xs: &[f64]| xs.iter().map(|v| v.to_bits()).collect::<Vec<u64>>();
+        assert_eq!(
+            bits(&tpl_a.values),
+            bits(&tpl_b.values),
+            "stage {stage}: values"
+        );
+        assert_eq!(
+            bits(&tpl_a.col_lower),
+            bits(&tpl_b.col_lower),
+            "stage {stage}: col_lower"
+        );
+        assert_eq!(
+            bits(&tpl_a.col_upper),
+            bits(&tpl_b.col_upper),
+            "stage {stage}: col_upper"
+        );
+        assert_eq!(
+            bits(&tpl_a.objective),
+            bits(&tpl_b.objective),
+            "stage {stage}: objective"
+        );
+        assert_eq!(
+            bits(&tpl_a.row_lower),
+            bits(&tpl_b.row_lower),
+            "stage {stage}: row_lower"
+        );
+        assert_eq!(
+            bits(&tpl_a.row_upper),
+            bits(&tpl_b.row_upper),
+            "stage {stage}: row_upper"
+        );
+        assert_eq!(
+            bits(&tpl_a.col_scale),
+            bits(&tpl_b.col_scale),
+            "stage {stage}: col_scale"
+        );
+        assert_eq!(
+            bits(&tpl_a.row_scale),
+            bits(&tpl_b.row_scale),
+            "stage {stage}: row_scale"
+        );
+    }
+
+    /// `K = 1` chronological (single 720 h block) must be byte-identical to
+    /// the parallel build, WITH the travel-time arc declared (`χ_{0,d} = k_d`
+    /// — the fixed-delivery-density contract). A single chronological block
+    /// has no interior routing to diverge on, so every stage template must
+    /// match the parallel LP exactly, bit for bit.
+    #[test]
+    fn k1_chronological_byte_identical_to_parallel_with_travel_time_on() {
+        let parallel = build_setup(BlockMode::Parallel, single_block("B0", 720.0));
+        let chronological = build_setup(BlockMode::Chronological, single_block("B0", 720.0));
+
+        let parallel_templates = &parallel.stage_data.stage_templates.templates;
+        let chrono_templates = &chronological.stage_data.stage_templates.templates;
+        assert_eq!(
+            parallel_templates.len(),
+            chrono_templates.len(),
+            "stage count must match between block modes"
+        );
+        for (stage, (p, c)) in parallel_templates
+            .iter()
+            .zip(chrono_templates.iter())
+            .enumerate()
+        {
+            assert_templates_byte_identical(p, c, stage);
+        }
+    }
+
+    /// Mode-independent sizing: the bucket state is a pure function of stage
+    /// lengths, never of `n_blks`/`block_mode`. Builds the
+    /// SAME cascade in parallel (`K = 1`) and chronological (`K = 3`) mode and
+    /// asserts `state.n_state`/`state.n_buckets` are equal — a state dimension
+    /// that instead tracked `n_blks` would silently misalign the trial-state
+    /// broadcast and the cut coefficients between the two modes.
+    #[test]
+    fn state_dimension_equal_across_parallel_and_chronological_with_travel_time_on() {
+        let parallel = build_setup(BlockMode::Parallel, single_block("B0", 720.0));
+        let chronological = build_setup(BlockMode::Chronological, three_chronological_blocks());
+
+        let parallel_state = parallel.stage_state();
+        let chronological_state = chronological.stage_state();
+
+        assert!(
+            parallel_state.n_buckets > 0,
+            "the declared arc must actually size a bucket dimension"
+        );
+        assert_eq!(
+            parallel_state.n_buckets, chronological_state.n_buckets,
+            "n_buckets must not depend on block_mode/n_blks"
+        );
+        assert_eq!(
+            parallel_state.n_state, chronological_state.n_state,
+            "n_state must not depend on block_mode/n_blks"
+        );
+    }
+}
+
+/// End-to-end regression: an FPHA hydro's stage-specific `equivalent_productivity`
+/// (`rho_eq`) override must resolve by the study's DOMAIN `Stage::id`, never by the
+/// 0-based study position. The two coincide on every other deterministic fixture (all
+/// declare 0-based, contiguous-from-zero stage ids), so only a fixture whose domain
+/// ids are offset from position — here: 10, 11, 12 at positions 0, 1, 2 — can surface
+/// a position-keyed read. The fixture also carries VHA geometry + `rho_esp` for the
+/// FPHA hydro, so a mis-keyed lookup falls through to a silently WRONG derived
+/// coefficient rather than the loud `FphaMissingEquivalentProductivity` error — the
+/// hazard this module pins.
+mod nonzero_stage_fpha_override_regression {
+    use std::path::{Path, PathBuf};
+
+    use cobre_core::EntityId;
+    use cobre_core::scenario::ScenarioSource;
+    use cobre_io::HydroEnergyProductivityRow;
+    use cobre_sddp::energy_conversion::build_hydro_energy_productivity_override;
+    use cobre_sddp::hydro_models::prepare_hydro_models;
+    use cobre_sddp::setup::prepare_stochastic;
+    use cobre_sddp::stage_key::StageId;
+    use cobre_sddp::{SimulationHydroResult, SimulationScenarioResult, StudySetup};
+
+    use super::common::parity_hash::compute_parity_hash;
+    use super::common::{build_setup_for_case, run_simulation};
+
+    /// Domain stage id (`Stage::id`) carrying the override row, and the corresponding
+    /// 0-based study position — see `stages.json` / `hydro_energy_productivity.parquet`
+    /// under [`case_dir`]. Position 1 is deliberately NOT equal to domain id 11: that
+    /// gap is what a position-keyed lookup would miss.
+    const OVERRIDE_DOMAIN_STAGE_ID: i32 = 11;
+    const OVERRIDE_STAGE_POSITION: u32 = 1;
+    const OVERRIDE_RHO_EQ: f64 = 4.2;
+    const FPHA_HYDRO_ID: i32 = 0;
+
+    fn case_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/nonzero_stage_fpha_override")
+    }
+
+    /// Return hydro `hydro_id`'s result at study position `position`. The fixture
+    /// trains and simulates exactly one scenario, so exactly one match is expected.
+    fn hydro_result_at(
+        scenario_results: &[SimulationScenarioResult],
+        position: u32,
+        hydro_id: i32,
+    ) -> &SimulationHydroResult {
+        scenario_results
+            .iter()
+            .flat_map(|s| &s.stages)
+            .find(|s| s.stage_id == position)
+            .unwrap_or_else(|| panic!("no stage at position {position}"))
+            .hydros
+            .iter()
+            .find(|h| h.hydro_id == hydro_id)
+            .unwrap_or_else(|| panic!("no hydro {hydro_id} result at stage position {position}"))
+    }
+
+    /// The override's domain stage resolves the override value; its un-overridden
+    /// neighbors resolve the SAME VHA+`rho_esp`-derived value, which differs from the
+    /// override — the distinguishing-value pattern the fixture is built to produce
+    /// (`[derived, OVERRIDE_RHO_EQ, derived]` across positions 0, 1, 2).
+    ///
+    /// Negative control (documented here per the discrimination requirement, not
+    /// executed): reverting the domain-`StageId`-keyed accessors to a position-keyed
+    /// `usize` makes `equivalent_productivity(hydro, stage)` search the override table
+    /// for `stage_id == Some(1)` (the study position) instead of `Some(11)` (the domain
+    /// id). No row matches position 1, so the lookup would fall through to the
+    /// VHA+`rho_esp` derivation exactly like positions 0 and 2 — the `assert_ne`-style
+    /// distinctness check below would then compare two equal `derived` values and fail.
+    /// [`position_keyed_lookup_misses_the_domain_keyed_override_row`] demonstrates that
+    /// exact miss directly, through the same public accessor, without reverting any
+    /// production code.
+    #[test]
+    fn fpha_override_resolves_by_domain_stage_id_end_to_end() {
+        let dir = case_dir();
+        let (_result, scenario_results, _summary) = super::run_with_simulation(&dir);
+
+        let at_override =
+            hydro_result_at(&scenario_results, OVERRIDE_STAGE_POSITION, FPHA_HYDRO_ID);
+        assert_eq!(
+            at_override.equivalent_productivity_mw_per_m3s.to_bits(),
+            OVERRIDE_RHO_EQ.to_bits(),
+            "domain stage_id={OVERRIDE_DOMAIN_STAGE_ID} (position {OVERRIDE_STAGE_POSITION}) \
+             must read the override value exactly"
+        );
+
+        let before =
+            hydro_result_at(&scenario_results, 0, FPHA_HYDRO_ID).equivalent_productivity_mw_per_m3s;
+        let after =
+            hydro_result_at(&scenario_results, 2, FPHA_HYDRO_ID).equivalent_productivity_mw_per_m3s;
+        assert_eq!(
+            before.to_bits(),
+            after.to_bits(),
+            "both un-overridden neighbors must read the SAME VHA+rho_esp-derived value"
+        );
+        assert!(
+            (before - OVERRIDE_RHO_EQ).abs() > 0.5,
+            "the derived neighbor value ({before}) must be clearly distinct from the \
+             override ({OVERRIDE_RHO_EQ}) — otherwise a position-keyed miss would be \
+             indistinguishable from a correct domain-keyed hit"
+        );
+    }
+
+    /// Direct discrimination through the public accessor
+    /// `HydroEnergyProductivityOverride::equivalent_productivity` (never reverting the
+    /// production fix): the SAME override row resolves when keyed by its domain
+    /// `StageId(11)` and misses when keyed by the study POSITION `StageId(1)` — the read
+    /// a position-keyed accessor would have performed pre-fix. This is the negative
+    /// control: a `StageId(1)` key returning `Some(_)` here would mean the accessor no
+    /// longer discriminates domain id from position, and
+    /// [`fpha_override_resolves_by_domain_stage_id_end_to_end`] would then be unable to
+    /// fail under a position-keyed regression.
+    #[test]
+    fn position_keyed_lookup_misses_the_domain_keyed_override_row() {
+        let row = HydroEnergyProductivityRow {
+            hydro_id: EntityId(FPHA_HYDRO_ID),
+            stage_id: Some(OVERRIDE_DOMAIN_STAGE_ID),
+            equivalent_productivity_mw_per_m3s: Some(OVERRIDE_RHO_EQ),
+            reference_outflow_m3s: None,
+            specific_productivity_mw_per_m3s_per_m: None,
+        };
+        let table = build_hydro_energy_productivity_override(&[row]).expect("override builds");
+
+        let position_as_stage_id =
+            StageId(i32::try_from(OVERRIDE_STAGE_POSITION).expect("position fits i32"));
+        assert_eq!(
+            table.equivalent_productivity(EntityId(FPHA_HYDRO_ID), position_as_stage_id),
+            None,
+            "a position-keyed lookup (StageId(1)) must miss the row declared at domain id 11"
+        );
+        assert_eq!(
+            table.equivalent_productivity(
+                EntityId(FPHA_HYDRO_ID),
+                StageId(OVERRIDE_DOMAIN_STAGE_ID)
+            ),
+            Some(OVERRIDE_RHO_EQ),
+            "a domain-id-keyed lookup (StageId(11)) must hit the declared row"
+        );
+    }
+
+    /// Declaration-order invariance: reversing the array order of `hydros.json`'s hydro
+    /// list, `hydro_production_models.json`'s per-hydro entries, and `stages.json`'s
+    /// stage list must not change the parity hash — the override fix must not depend on
+    /// how the study's entities were declared.
+    #[test]
+    fn declaration_order_permutation_parity_hash_is_identical() {
+        let base_dir = case_dir();
+        let permuted_dir = build_declaration_order_permuted_case(&base_dir);
+
+        let (setup_a, results_a) = train_and_simulate_setup(&base_dir);
+        let (setup_b, results_b) = train_and_simulate_setup(permuted_dir.path());
+
+        let hash_a = compute_parity_hash(&setup_a, results_a);
+        let hash_b = compute_parity_hash(&setup_b, results_b);
+
+        assert_eq!(
+            hash_a, hash_b,
+            "declaration-order invariance violated: base hash={hash_a}, permuted hash={hash_b}"
+        );
+    }
+
+    /// Train + one-scenario-simulate `dir` and return the finished [`StudySetup`]
+    /// alongside the drained per-scenario results, so [`compute_parity_hash`] (which
+    /// needs both the FCF and the simulation trajectory) has both in scope.
+    fn train_and_simulate_setup(dir: &Path) -> (StudySetup, Vec<SimulationScenarioResult>) {
+        let config_path = dir.join("config.json");
+        let config = cobre_io::parse_config(&config_path).expect("config must parse");
+        let system = cobre_io::load_case(dir).expect("load_case must succeed");
+
+        let pr = prepare_stochastic(system, dir, &config, 42, &ScenarioSource::default())
+            .expect("prepare_stochastic must succeed");
+        let system = pr.system;
+        let stochastic = pr.stochastic;
+
+        let hydro_models =
+            prepare_hydro_models(&system, dir, false).expect("prepare_hydro_models must succeed");
+
+        let mut config_with_sim = config.clone();
+        config_with_sim.simulation.enabled = true;
+        config_with_sim.simulation.num_scenarios = 1;
+
+        let mut setup =
+            build_setup_for_case(dir, &config_with_sim, &system, stochastic, hydro_models);
+        let scenario_results = run_simulation(&mut setup, 1);
+        (setup, scenario_results)
+    }
+
+    /// Copy `base_dir` into a fresh `TempDir`, reversing the declared array order of
+    /// `stages.json`'s `stages`, `system/hydros.json`'s `hydros`, and
+    /// `system/hydro_production_models.json`'s `production_models`. Every other file is
+    /// copied byte-for-byte, so the two case directories are identical except for the
+    /// declaration order of hydro and stage entities.
+    fn build_declaration_order_permuted_case(base_dir: &Path) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir must succeed");
+        let dst = tmp.path();
+
+        std::fs::create_dir_all(dst.join("scenarios")).expect("create scenarios dir");
+        std::fs::create_dir_all(dst.join("system")).expect("create system dir");
+
+        for rel in [
+            "config.json",
+            "initial_conditions.json",
+            "penalties.json",
+            "scenarios/inflow_seasonal_stats.parquet",
+            "scenarios/load_seasonal_stats.parquet",
+            "system/buses.json",
+            "system/hydro_energy_productivity.parquet",
+            "system/hydro_geometry.parquet",
+            "system/lines.json",
+            "system/thermals.json",
+        ] {
+            std::fs::copy(base_dir.join(rel), dst.join(rel))
+                .unwrap_or_else(|e| panic!("copy {rel}: {e}"));
+        }
+
+        reverse_json_array(
+            &base_dir.join("stages.json"),
+            &dst.join("stages.json"),
+            "stages",
+        );
+        reverse_json_array(
+            &base_dir.join("system/hydros.json"),
+            &dst.join("system/hydros.json"),
+            "hydros",
+        );
+        reverse_json_array(
+            &base_dir.join("system/hydro_production_models.json"),
+            &dst.join("system/hydro_production_models.json"),
+            "production_models",
+        );
+
+        tmp
+    }
+
+    /// Parse `src` as JSON, reverse the top-level array at `array_key`, and write the
+    /// result to `dst` — the declaration-order-permutation primitive every JSON file in
+    /// [`build_declaration_order_permuted_case`] shares.
+    fn reverse_json_array(src: &Path, dst: &Path, array_key: &str) {
+        let text =
+            std::fs::read_to_string(src).unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
+        let mut value: serde_json::Value =
+            serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}", src.display()));
+        value[array_key]
+            .as_array_mut()
+            .unwrap_or_else(|| panic!("{array_key} must be a JSON array in {}", src.display()))
+            .reverse();
+        std::fs::write(
+            dst,
+            serde_json::to_string_pretty(&value).expect("serialize"),
+        )
+        .unwrap_or_else(|e| panic!("write {}: {e}", dst.display()));
+    }
+}
+
+/// End-to-end regression for the `CalendarMonth` evaporation-month fix: a
+/// `Custom`-cycle stage whose `season_id` deliberately differs from its calendar
+/// month must still resolve evaporation by the TRUE calendar month derived from
+/// `start_date`, and a `Weekly`-cycle evaporating stage (`season_id >= 12`) must
+/// not hard-error at setup. Both fixtures route through the full
+/// `cobre_io::load_case` -> `prepare_stochastic` -> `prepare_hydro_models`
+/// pipeline every other deterministic case uses — the season-parsing path the
+/// fix's own unit tests (`production/stage_key.rs`,
+/// `hydro_models/evaporation.rs`) construct `Stage` values directly and never
+/// exercise.
+mod custom_weekly_evaporation_regression {
+    use std::path::{Path, PathBuf};
+
+    use cobre_core::scenario::ScenarioSource;
+    use cobre_sddp::hydro_models::{EvaporationModel, EvaporationModelSet, prepare_hydro_models};
+    use cobre_sddp::setup::prepare_stochastic;
+
+    fn custom_case_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/custom_cycle_evaporation_month_mismatch")
+    }
+
+    fn weekly_case_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/weekly_cycle_evaporation")
+    }
+
+    /// Run `dir` through the same `load_case` -> `prepare_stochastic` ->
+    /// `prepare_hydro_models` pipeline `run_deterministic` uses internally, and
+    /// return the resolved evaporation models. Without the calendar-month
+    /// derivation, the Weekly fixture panics here (`season_id >= 12` ->
+    /// `SddpError::Validation` surfaces through the `.expect` below).
+    fn resolve_evaporation(dir: &Path) -> EvaporationModelSet {
+        let config = cobre_io::parse_config(&dir.join("config.json")).expect("config must parse");
+        let system = cobre_io::load_case(dir).expect("load_case must succeed");
+        let pr = prepare_stochastic(system, dir, &config, 42, &ScenarioSource::default())
+            .expect("prepare_stochastic must succeed");
+        let hydro_models = prepare_hydro_models(&pr.system, dir, false)
+            .expect("prepare_hydro_models must succeed (season_id >= 12 must no longer error)");
+        hydro_models.evaporation
+    }
+
+    /// Both fixtures' hydro shares the VHA curve
+    /// `resolve_evaporation_known_geometry_produces_correct_coefficients`
+    /// (`hydro_models/evaporation.rs`) already pins: volumes `[100, 200, 300, 400,
+    /// 500]` hm3, areas `[1.0, 1.5, 2.0, 2.5, 3.0]` km2, giving an already-verified
+    /// constant slope — so the reference-volume area (`A_REF`) and its derivative
+    /// (`DA_DV`) at the reservoir's midpoint volume (`REFERENCE_VOLUME_HM3`) are
+    /// known constants here rather than recomputed from geometry.
+    const A_REF: f64 = 2.0;
+    const DA_DV: f64 = 0.005;
+    const REFERENCE_VOLUME_HM3: f64 = 300.0;
+    const STAGE_HOURS: f64 = 730.0;
+
+    /// Independent replication (not a call into production code) of the Taylor
+    /// linearization `resolve_evaporation_core` computes for a given
+    /// `monthly_evaporation_mm`, at this fixture's known geometry constants — the
+    /// Tier-4 analytical-derivation pattern.
+    fn expected_coefficients(monthly_evaporation_mm: f64) -> (f64, f64) {
+        let mm_km2_to_m3s = 1.0 / (3.6 * STAGE_HOURS);
+        let slope = mm_km2_to_m3s * monthly_evaporation_mm * DA_DV;
+        let intercept =
+            mm_km2_to_m3s * monthly_evaporation_mm * A_REF - slope * REFERENCE_VOLUME_HM3;
+        (slope, intercept)
+    }
+
+    fn linearized_at(models: &EvaporationModelSet, stage_position: usize) -> (f64, f64) {
+        match models.model(0) {
+            EvaporationModel::Linearized { coefficients, .. } => {
+                let c = &coefficients[stage_position];
+                (c.volume_slope_m3s_per_hm3, c.intercept_m3s)
+            }
+            none @ EvaporationModel::None => {
+                panic!("expected Linearized evaporation, got {none:?}")
+            }
+        }
+    }
+
+    /// `custom_cycle_evaporation_month_mismatch/system/hydros.json`'s
+    /// `evaporation.coefficients_mm`, duplicated here so the expected values
+    /// below are self-contained.
+    const COEFFICIENTS_MM: [f64; 12] = [
+        10.0, 20.0, 1.0, 40.0, 50.0, 60.0, 70.0, 1.0, 90.0, 100.0, 110.0, 120.0,
+    ];
+
+    /// Positive assertion plus analytic negative control (the fix is never
+    /// reverted; the wrong lookup's value is asserted against instead): stage
+    /// 0 (`start_date` 2024-06-01, `season_id = 2`) and stage 1 (`start_date`
+    /// 2024-11-01, `season_id = 7`) each resolve evaporation from
+    /// `coefficients_mm[month_of(stage)]` (index 5 = June = 60.0, index 10 =
+    /// November = 110.0), never `coefficients_mm[season_id]` (index 2 = 1.0,
+    /// index 7 = 1.0 — the value a `season_id`-keyed lookup would read instead).
+    /// A checkout with `month_of` reverted to `stage.season_id` directly would
+    /// make the first two assertions below fail: the resolved intercepts would
+    /// equal `wrong_intercept0`/`wrong_intercept1` instead of
+    /// `expected_intercept0`/`expected_intercept1`.
+    #[test]
+    fn custom_cycle_evaporation_indexes_by_calendar_month_not_season_id() {
+        let dir = custom_case_dir();
+        let models = resolve_evaporation(&dir);
+
+        let (slope0, intercept0) = linearized_at(&models, 0);
+        let (slope1, intercept1) = linearized_at(&models, 1);
+
+        let (expected_slope0, expected_intercept0) = expected_coefficients(COEFFICIENTS_MM[5]);
+        let (expected_slope1, expected_intercept1) = expected_coefficients(COEFFICIENTS_MM[10]);
+        let (_, wrong_intercept0) = expected_coefficients(COEFFICIENTS_MM[2]);
+        let (_, wrong_intercept1) = expected_coefficients(COEFFICIENTS_MM[7]);
+
+        assert!(
+            (slope0 - expected_slope0).abs() < 1e-12
+                && (intercept0 - expected_intercept0).abs() < 1e-9,
+            "stage 0 (June, season_id=2) must use coefficients_mm[5]=60.0: expected \
+             (slope={expected_slope0}, intercept={expected_intercept0}), got \
+             (slope={slope0}, intercept={intercept0})"
+        );
+        assert!(
+            (slope1 - expected_slope1).abs() < 1e-12
+                && (intercept1 - expected_intercept1).abs() < 1e-9,
+            "stage 1 (November, season_id=7) must use coefficients_mm[10]=110.0: expected \
+             (slope={expected_slope1}, intercept={expected_intercept1}), got \
+             (slope={slope1}, intercept={intercept1})"
+        );
+
+        assert!(
+            (intercept0 - wrong_intercept0).abs() > 0.005,
+            "stage 0's resolved intercept ({intercept0}) must be far from the season_id=2-keyed \
+             value ({wrong_intercept0}) — otherwise a season_id-keyed regression would be \
+             indistinguishable from the fix"
+        );
+        assert!(
+            (intercept1 - wrong_intercept1).abs() > 0.005,
+            "stage 1's resolved intercept ({intercept1}) must be far from the season_id=7-keyed \
+             value ({wrong_intercept1}) — otherwise a season_id-keyed regression would be \
+             indistinguishable from the fix"
+        );
+    }
+
+    /// A Weekly-cycle evaporating study (`season_id` 21 and 26, both `>= 12`)
+    /// does not return `SddpError::Validation` at setup, and training
+    /// completes and converges. Without the calendar-month derivation,
+    /// [`super::run_deterministic`] panics on this fixture inside
+    /// `prepare_hydro_models`'s `.expect("prepare_hydro_models must succeed")`.
+    #[test]
+    fn weekly_cycle_evaporation_no_longer_errors_and_setup_completes() {
+        let dir = weekly_case_dir();
+
+        let models = resolve_evaporation(&dir);
+        assert!(
+            matches!(models.model(0), EvaporationModel::Linearized { .. }),
+            "hydro 0 must resolve a Linearized evaporation model, got {:?}",
+            models.model(0)
+        );
+
+        let result = super::run_deterministic(&dir);
+        assert!(
+            result.iterations <= 10,
+            "weekly evaporation case must converge quickly: iterations={}",
+            result.iterations
+        );
+        assert!(
+            result.final_gap.abs() < 1e-6,
+            "weekly evaporation case must still converge: gap={:.2e}",
+            result.final_gap
         );
     }
 }

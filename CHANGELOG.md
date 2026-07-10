@@ -9,6 +9,254 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-10
+
+### Added
+
+- **A stage's blocks can now be solved chronologically, chaining storage across
+  the blocks within a stage instead of treating them as parallel load levels.**
+  `stages.json` gains a per-stage `block_mode`, either `"parallel"` (the default,
+  and the prior behavior) or `"chronological"`; any other value is rejected with a
+  schema error naming the offending stage and value. A chronological stage chains
+  its per-block storage boundaries `S⁰ … Sᴷ` through one water-balance row per
+  block, computes each block's FPHA production and evaporation on that block's own
+  average storage, and freezes the per-block storage identity for a PreFilling
+  hydro. A `parallel` stage, and any single-block (`K = 1`) stage, produce an LP
+  that is bit-for-bit identical to the prior release; the future-cost epigraph and
+  the state-vector dimension are independent of a stage's block count. Simulation's
+  `simulation/hydros/` output reports each block's own storage boundaries and
+  evaporation on a chronological stage — the same columns as before, resolved per
+  block — emitted identically by the CLI and the Python bindings. Because a cut's
+  coefficients do not depend on block count, a policy trained in one block mode can
+  be loaded and simulated in the other; `policy/metadata.json` records the training
+  block mode in `training_block_mode` (and, when it varies across stages,
+  `training_block_mode_per_stage`).
+
+- **Water travel time now delays a hydro release before it reaches its
+  downstream plant.** The `travel_time_hours` field on the upstream hydro's
+  cascade arc to `downstream_id` declares, in hours, how long the arc's release
+  stays in transit before it reaches the downstream plant's water balance; v1
+  covers the main cascade arc only — diversion and pumping-conduit arcs do not
+  carry travel time. The in-transit volume is carried as augmented Benders
+  state — one state slot per downstream plant per maturity — until it matures
+  onto the receiving plant's balance. A hydro whose `travel_time_hours` is
+  absent or `0.0` keeps the existing instantaneous-transfer behavior: no arc is
+  declared and no state is added. `past_defluences` on `InitialConditions`
+  supplies the pre-study releases already in transit at study start for a
+  declared arc; config validation requires history at least as deep as the
+  arc's travel time and either finds it directly, derives a proxy from
+  `past_inflows` with a logged caveat, or rejects the study when neither is
+  available. A declared arc that releases while its downstream plant has not
+  yet reached operating status (still `PreFilling`/`Filling`, or before its
+  `entry_stage_id`) is also rejected at validation. Simulation writes a new
+  `simulation/in_transit/` output (`stage_id`, `hydro_id`, `lag`,
+  `in_transit_volume_hm3`, `delayed_arrival_hm3` per downstream plant per
+  maturity lag), emitted by both the CLI and the Python bindings and absent for
+  a study with no declared travel-time arc. In-transit volume that would mature
+  past the study's last stage is dropped rather than credited to terminal
+  storage — a documented target-stage imprecision at the end of the horizon.
+
+- **A maturing in-transit water bucket now splits its delivery across a
+  chronological arrival stage's own blocks, blended over every source stage
+  whose released water is still arriving there.** When the arrival stage's
+  block partition differs from the stage(s) the water was released from — a
+  coarsening or refining resolution boundary — the delivered volume is
+  resolved directly against the arrival stage's own blocks rather than a
+  density carried over from a sending stage, weighted by each contributing
+  source stage's own share of the maturing volume. A parallel source stage
+  maturing into a chronological arrival stage is covered by the same blend:
+  it no longer falls back to splitting the delivery in proportion to block
+  duration regardless of the travel time. The delivered split remains a
+  single fixed density per maturing bucket — it does not vary by which block
+  released the water that is arriving — a documented, accepted modeling
+  bound.
+
+- **Generic constraints can reference per-block hydro storage and evaporation.**
+  `hydro_storage_initial(h)` and `hydro_storage_final(h)` reference a stage's
+  initial (`S⁰`) and final (`Sᴷ`) storage; supplying a block index —
+  `hydro_storage_initial(h, k)` / `hydro_storage_final(h, k)` — references the
+  storage boundary at the start / end of block `k` (available on chronological
+  stages; a parallel stage exposes only its two endpoints, so an interior block
+  reference there is rejected). `hydro_evaporation(h, k)` selects block `k`'s
+  evaporation, mirroring the block-index convention used by the flow variables;
+  bare `hydro_evaporation(h)` is the stage evaporation in parallel mode (every
+  block shares the stage's storage endpoints) but is rejected on a chronological
+  stage with more than one block, where the blocks differ and a block must be
+  named. A block reference a stage cannot expose is rejected at load with a
+  message naming the constraint, the block, and the stage's block count.
+
+- **A stage can now carry storage-only cuts under a PAR(p) inflow model, so a
+  PAR(p) study can be coupled to a storage-only downstream boundary.** The
+  per-stage `state_variables` block in `stages.json` — `{ "storage": <bool>,
+"inflow_lags": <bool> }`, defaulting to storage-only — now governs the
+  dimension of the cuts a stage emits, not only the state it reports. A stage
+  configured with `inflow_lags: false` produces cuts spanning the storage
+  dimension alone even when the study fits a PAR(p) inflow model, rather than
+  zero-padding the inflow-lag coefficients; in a multi-rank run each stage's cut
+  synchronization derives its wire layout from that stage's own cut dimension. A
+  study that fits a PAR(p > 0) model but disables inflow lags on every stage is
+  surfaced with a model-quality warning. Studies that leave every state dimension
+  enabled produce bit-for-bit identical cuts and results.
+
+- **Every `system/*.json` entity now carries a required `operational_start_date`
+  field (an ISO-8601 `YYYY-MM-DD` calendar date).** Buses, hydros, thermals,
+  lines, non-controllable sources, pumping stations, and energy contracts must
+  each declare the date the entity enters service. The field has no default: a
+  registry file that omits it is rejected, and a value that is not a valid
+  ISO-8601 date produces a schema error naming the file, the field, and the
+  offending string.
+
+- **A study now fails validation instead of silently mis-modeling previously
+  unguarded inflow-PAR and anticipated-thermal configurations.** An
+  anticipated thermal's `lead_time_hours` lead exceeding the study's full
+  horizon is rejected — the plant could never deliver within the horizon, and
+  previously it fell through validation and dispatched as an ordinary thermal
+  with no anticipation. A non-Monthly season cycle supplying an inflow annual
+  component is rejected, because that long-memory extension is
+  Monthly-exclusive by design.
+
+### Changed
+
+- **Operational entities now sort canonically by `(operational_start_date, id)`
+  instead of `(operational_start_date, name)`.** The entity id is the stable
+  canonical key; entity names are user-chosen and vary between authors of the same
+  system, so a rename no longer changes the LP layout, cut ordering, or output
+  column order (whereas an id renumbering now does). A study whose same-date
+  entities were ordered differently by name than by id sees a reordered — but
+  numerically equivalent — LP; the optimum and reported costs are unchanged.
+
+- **Cobre is configured only through config/data files and `cobre` CLI
+  arguments; environment variables are no longer an input channel.** The
+  `COBRE_THREADS`, `COBRE_COLOR`, `COBRE_COMM_BACKEND`, `COBRE_W1_DIAG`,
+  `FORCE_COLOR`, `NO_COLOR`, `COLUMNS`, and `HOSTNAME` reads are removed. Thread
+  count is set with `--threads`; color with `--color <auto|always|never>`
+  (default `auto`, colored only when stderr is a terminal); and the communication
+  backend with `--comm-backend <auto|local|mpi>` (default `auto`). `auto` selects
+  the MPI backend when the process is launched under an MPI launcher
+  (`mpiexec`/`mpirun`/`srun`) and the local backend otherwise — detecting a
+  launcher is a runtime fact, not a configuration channel, so this is retained;
+  `--comm-backend mpi` forces the MPI backend and fails with a clear message on a
+  binary built without MPI support. Terminal width for progress rendering and the
+  hostname recorded in run provenance are now obtained by querying the terminal
+  and the OS directly.
+
+- **Anticipated (pre-committed) thermal dispatch, previously configured only as a
+  stage-count lead, now also accepts a physical-duration lead and anchors every
+  commitment at its delivery stage.** `system/thermals.json`'s `anticipated_config`
+  gains `lead_time_hours` (a duration in hours, resolved against the stage
+  calendar) as an alternative to the existing `lead_stages` (a stage count that
+  never consults the calendar); the two are mutually exclusive. Every committed
+  decision is now bounded, costed, and commissioning-gated at its own delivery
+  stage rather than the stage where it is decided, so a plant whose generation cap
+  differs across stages cannot be committed to a value its delivery stage cannot
+  honor. The in-flight commitment between decision and delivery is carried as
+  augmented Benders state — a ring of per-plant slots advanced by a plain copy each
+  stage, with no out-of-LP shift step. A `lead_time_hours` configuration whose
+  coarser decision stage would anchor more than one delivery stage — a single
+  decision committing several deliveries at once — is rejected at setup:
+  per-delivery-stage simulation output for that configuration is not yet supported.
+
+- **A non-filling hydro's commissioning window is now honored, and spillage is
+  frozen for any hydro that has not yet entered service.** The
+  `entry_stage_id`/`exit_stage_id` window on a non-filling hydro — previously
+  parsed but applied nowhere, and flagged only by a model-quality warning — now
+  takes effect: outside its window the plant is modeled as PreFilling, with its
+  turbine, spillage, and diversion pinned to zero, its storage decoupled by the
+  frozen storage identity, and its inflow passed through to the first active
+  downstream plant (or the network sink), so the river flows past a site that does
+  not yet exist without trapping water or injecting phantom storage. The obsolete
+  parsed-but-inert warning is removed. Independently, spillage is now frozen to
+  zero for every hydro while it is PreFilling — a dam that does not yet exist
+  cannot spill; previously the spillage column was left free during PreFilling,
+  which let the optimizer route phantom water onto a downstream balance. Spillage
+  remains free during Filling, where a real impounding reservoir can shed inflow.
+  Studies with pre-commissioning or PreFilling hydros produce different numerical
+  results as a consequence.
+
+- **Each policy cut and state file now embeds the per-slot identity of its
+  state-vector dimensions.** Every `policy/cuts/stage_NNN.bin` and
+  `policy/states/stage_NNN.bin` carries an entity manifest with one entry per
+  coefficient position, recording the owning entity's type, id, and secondary
+  index (the inflow-lag order or anticipated-commitment ring slot) plus whether
+  that entity was operationally active at the stage. This identity is now read
+  directly from the policy file rather than cross-referenced against a separate
+  sidecar.
+
+- **Loading a trained policy is now always validated against the current study.**
+  Warm-start, resume, simulation-only runs, and the Python bindings route every
+  policy load through a single validation entry point that cannot be disabled.
+  Beyond the state-vector dimension it checks the per-slot entity manifest each
+  policy file now embeds, rejecting a policy whose stored dimensions match the
+  current study by count but attach to different entities — a mismatch the integer
+  dimension check alone accepted.
+
+### Removed
+
+- **The `training/dictionaries/state_dictionary.json` sidecar is no longer
+  written.** Its per-slot state-variable mapping is now embedded in each policy
+  cut and state file (see above). `training/dictionaries/` still contains
+  `codes.json`, `entities.csv`, `variables.csv`, and `bounds.parquet`.
+
+- **The `policy.validate_compatibility` configuration field is removed.**
+  Policy-load validation is now unconditional (see above), so the opt-out no
+  longer exists. A config file that still sets `validate_compatibility` is
+  rejected — the policy config section rejects unknown fields — and the Python
+  bindings no longer accept a `validate_compatibility` argument.
+
+### Fixed
+
+- **A study on a non-monthly (weekly or custom) season cycle that fits an
+  inflow PAR model now advances its inflow-lag state at the end of every
+  period, instead of silently freezing it at the initial condition for the
+  whole run.** Only a monthly season cycle previously accumulated, finalized,
+  and spilled the per-period lag average forward; a weekly or custom cycle
+  computed zero-weight contributions every stage, so the lag state driving the
+  PAR forecast never left its initial value. The day-weighted accumulate /
+  spillover / finalize arithmetic that already covered monthly periods now
+  applies uniformly to ISO-week and user-defined custom periods, including a
+  season map that layers more than one period resolution together (for
+  example, monthly and quarterly definitions in the same map) — each stage
+  advances within its own resolution's period, never a different one.
+
+- **A study whose stage ids do not start at zero now receives the correct FPHA
+  productivity coefficients.** The per-stage productivity-override table was keyed
+  by a stage's position in the solve loop rather than its domain stage id, so a
+  study numbered from anything other than zero silently paired each stage with
+  another stage's energy coefficient (the reference-turbine and specific-productivity
+  conversion paths were affected too). Coefficients are now keyed by the domain
+  stage id; studies numbered from zero are unaffected.
+
+- **Studies on weekly, custom, or mixed-resolution season calendars are no longer
+  mis-modeled in evaporation, inflow-lag advancement, and correlation
+  estimation.** A weekly cycle with evaporation configured no longer fails to
+  build: a block's evaporation now takes its month from the stage's start date
+  rather than reinterpreting the season index, which also corrects custom cycles
+  that indexed the wrong calendar month. On a multi-resolution season map (for
+  example a monthly definition layered with a quarterly one), the opening-tree
+  residual standardization and the external/historical replay samplers now advance
+  the downstream inflow-lag ring the same way the forward pass does, instead of
+  assuming a single primary lag order; a monthly-only study is unchanged. A
+  partial-year study that estimates its own inflow correlation no longer drops the
+  residual seasons that fall outside the study window.
+
+- **A failure on one MPI rank no longer hangs the healthy ranks at a mismatched
+  collective.** Across the backward pass, the lower-bound evaluation, the forward
+  loop, run finalization, and the CLI's post-simulation and post-export steps, a
+  rank-local failure is now reconciled across all ranks before the next collective,
+  so a subset-of-ranks error — a failed worker solve, a stage-zero evaluation
+  failure, or a rank-0 export write to a full or read-only disk — surfaces as a
+  coordinated shutdown rather than a hang. Single-rank runs are unaffected.
+
+- **Reloading a policy checkpoint no longer degrades a CLP warm-start.** Basis
+  statuses now share one canonical representation that the HiGHS and CLP backends
+  translate to and from at the solver boundary, and a basis stored in a policy
+  checkpoint round-trips all of its statuses losslessly — the earlier export folded
+  CLP's superbasic and fixed statuses into a lossy encoding, so a warm-start
+  reconstructed from a reloaded checkpoint began from a weaker basis. A binary from
+  this release reading an older checkpoint, and an older binary reading a checkpoint
+  from this release, both stay safe: an unrecognized status falls back to a cold
+  start rather than being misread. Deterministic results are unchanged.
+
 ## [0.9.1] - 2026-06-26
 
 ### Fixed
@@ -2245,7 +2493,8 @@ disappears from `cobre.results.load_policy` per-cut dicts.
 
 <!-- next-url -->
 
-[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/cobre-rs/cobre/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/cobre-rs/cobre/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/cobre-rs/cobre/compare/v0.8.2...v0.9.0
 [0.8.2]: https://github.com/cobre-rs/cobre/compare/v0.8.1...v0.8.2

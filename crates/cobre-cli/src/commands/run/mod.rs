@@ -9,12 +9,35 @@ mod training;
 
 use std::path::PathBuf;
 
-use clap::Args;
+use clap::{Args, ValueEnum};
 use console::Term;
 
-use cobre_comm::{Communicator, ExecutionTopology};
+use cobre_comm::{BackendKind, Communicator, ExecutionTopology};
 
 use crate::error::CliError;
+
+/// Communication backend selected by `--comm-backend`. Maps to [`BackendKind`].
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+pub enum CommBackendArg {
+    /// Auto-detect (default): the MPI backend when launched under an MPI
+    /// launcher (`mpiexec`/`mpirun`/`srun`), otherwise the local backend.
+    #[default]
+    Auto,
+    /// Single-process local backend.
+    Local,
+    /// MPI backend; requires the binary to be built with the `mpi` feature.
+    Mpi,
+}
+
+impl From<CommBackendArg> for BackendKind {
+    fn from(arg: CommBackendArg) -> Self {
+        match arg {
+            CommBackendArg::Auto => BackendKind::Auto,
+            CommBackendArg::Local => BackendKind::Local,
+            CommBackendArg::Mpi => BackendKind::Mpi,
+        }
+    }
+}
 
 use outputs::{WriteTrainingArgs, write_training_outputs};
 use policy::{apply_training_policy, load_policy_for_simulation};
@@ -37,10 +60,17 @@ pub struct RunArgs {
     #[arg(long)]
     pub quiet: bool,
 
-    /// Worker threads per MPI rank for parallel scenario processing. Resolves
-    /// in order: this flag, then `COBRE_THREADS`, then a default of 1.
+    /// Worker threads per MPI rank for parallel scenario processing.
+    /// Defaults to 1 when omitted.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
     pub threads: Option<u32>,
+
+    /// Communication backend. `auto` (default) selects `mpi` when launched under
+    /// an MPI launcher (`mpiexec`/`mpirun`/`srun`) and `local` otherwise; `local`
+    /// forces single-process; `mpi` forces the MPI backend (requires the binary
+    /// to be built with the `mpi` feature and launched under an MPI launcher).
+    #[arg(long, value_enum, default_value_t = CommBackendArg::Auto)]
+    pub comm_backend: CommBackendArg,
 }
 
 /// Shared context for execute phases (communicator, output, topology, etc.).
@@ -178,16 +208,12 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
             run_simulation_phase(ctx, &system, &mut setup, &training.result, &hostname)?;
         }
     } else if setup.simulation_config.n_scenarios > 0 {
-        let training_result =
-            load_policy_for_simulation(ctx, &system, &mut setup, root_config.as_ref())?;
+        let training_result = load_policy_for_simulation(ctx, &system, &mut setup)?;
         run_simulation_phase(ctx, &system, &mut setup, &training_result, &hostname)?;
-    } else {
-        // Both training and simulation disabled — nothing to do.
-        if ctx.is_root && !ctx.quiet {
-            let _ = ctx
-                .stderr
-                .write_line("Training disabled, simulation disabled — nothing to do.");
-        }
+    } else if ctx.is_root && !ctx.quiet {
+        let _ = ctx
+            .stderr
+            .write_line("Training disabled, simulation disabled — nothing to do.");
     }
 
     Ok(())

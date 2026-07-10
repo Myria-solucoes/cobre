@@ -33,7 +33,6 @@ class Study:
     def load_policy(
         self,
         output_dir: Optional[Union[str, Path]] = None,
-        validate_compatibility: Optional[bool] = None,
     ) -> "Policy": ...
     def simulate(
         self,

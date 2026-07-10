@@ -1,7 +1,7 @@
 //! Integration test: lag-12 LP coefficient for PAR(2)-A vs classical PAR.
 //!
 //! Builds two small synthetic fixtures (2 hydros × 24 stages × 12 seasons) and
-//! calls [`cobre_sddp::build_stage_templates`] on each. No HiGHS solve, no
+//! calls [`cobre_sddp::build_stage_templates_resolving_layout`] on each. No HiGHS solve, no
 //! forward/backward pass, no filesystem I/O. Sub-second runtime; not gated
 //! behind `slow-tests`.
 //!
@@ -31,10 +31,13 @@
     clippy::doc_markdown,
     clippy::too_many_lines
 )]
+// `..Default::default()` in the make_* Spec calls is the intentional future-field
+// seam from `common::builders` — a no-op today, not dead code.
+#![allow(clippy::needless_update)]
 
 use chrono::NaiveDate;
 use cobre_core::{
-    BoundsCountsSpec, BoundsDefaults, Bus, BusStagePenalties, ContractStageBounds, DeficitSegment,
+    BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, DeficitSegment,
     EntityId, HydroStageBounds, HydroStagePenalties, LineStageBounds, LineStagePenalties,
     NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
     ResolvedPenalties, SystemBuilder, ThermalStageBounds,
@@ -47,9 +50,12 @@ use cobre_core::{
 };
 use cobre_sddp::{
     InflowNonNegativityMethod, hydro_models::PrepareHydroModelsResult,
-    lp_builder::build_stage_templates,
+    lp_builder::build_stage_templates_resolving_layout,
 };
 use cobre_stochastic::{PrecomputedPar, normal::precompute::PrecomputedNormal};
+
+mod common;
+use common::builders::{BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage};
 
 // ---------------------------------------------------------------------------
 // Fixture parameters
@@ -116,67 +122,81 @@ fn build_par_a_fixture() -> (cobre_core::System, PrecomputedPar) {
     let hydros: Vec<Hydro> = hydro_ids
         .iter()
         .enumerate()
-        .map(|(i, &id)| Hydro {
-            id,
-            name: format!("H{}", i + 1),
-            bus_id: EntityId(0),
-            downstream_id: None,
-            entry_stage_id: None,
-            exit_stage_id: None,
-            min_storage_hm3: 0.0,
-            max_storage_hm3: 500.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity,
-            min_turbined_m3s: 0.0,
-            max_turbined_m3s: 200.0,
-            specific_productivity_mw_per_m3s_per_m: None,
-            min_generation_mw: 0.0,
-            max_generation_mw: 200.0,
-            tailrace: None,
-            hydraulic_losses: None,
-            efficiency: None,
-            evaporation_coefficients_mm: None,
-            evaporation_reference_volumes_hm3: None,
-            diversion: None,
-            filling: None,
-            penalties: zero_penalties,
+        .map(|(i, &id)| {
+            make_hydro(
+                id,
+                HydroSpec {
+                    name: format!("H{}", i + 1),
+                    operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    bus_id: EntityId(0),
+                    downstream_id: None,
+                    entry_stage_id: None,
+                    exit_stage_id: None,
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 500.0,
+                    min_outflow_m3s: 0.0,
+                    max_outflow_m3s: None,
+                    generation_model: HydroGenerationModel::ConstantProductivity,
+                    min_turbined_m3s: 0.0,
+                    max_turbined_m3s: 200.0,
+                    specific_productivity_mw_per_m3s_per_m: None,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 200.0,
+                    tailrace: None,
+                    hydraulic_losses: None,
+                    efficiency: None,
+                    evaporation_coefficients_mm: None,
+                    evaporation_reference_volumes_hm3: None,
+                    diversion: None,
+                    filling: None,
+                    penalties: zero_penalties,
+                    ..Default::default()
+                },
+            )
         })
         .collect();
 
-    let bus = Bus {
-        id: EntityId(0),
-        name: "B0".to_string(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 1000.0,
-        }],
-        excess_cost: 0.0,
-    };
+    let bus = make_bus(
+        EntityId(0),
+        BusSpec {
+            name: "B0".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 1000.0,
+            }],
+            excess_cost: 0.0,
+            ..Default::default()
+        },
+    );
 
     // season_id = stage_idx % 12
     let study_stages: Vec<Stage> = (0..N_STUDY)
-        .map(|i| Stage {
-            index: i,
-            id: i as i32,
-            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-            season_id: Some(i % N_SEASONS),
-            blocks: vec![Block {
-                index: 0,
-                name: "S".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: true,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
+        .map(|i| {
+            make_stage(
+                i,
+                StageSpec {
+                    start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                    season_id: Some(i % N_SEASONS),
+                    blocks: vec![Block {
+                        index: 0,
+                        name: "S".to_string(),
+                        duration_hours: 744.0,
+                    }],
+                    block_mode: BlockMode::Parallel,
+                    state_config: StageStateConfig {
+                        storage: true,
+                        inflow_lags: true,
+                    },
+                    risk_config: StageRiskConfig::Expectation,
+                    scenario_config: ScenarioSourceConfig {
+                        branching_factor: 1,
+                        noise_method: NoiseMethod::Saa,
+                    },
+                    ..Default::default()
+                },
+            )
         })
         .collect();
 
@@ -354,66 +374,80 @@ fn build_classical_fixture() -> (cobre_core::System, PrecomputedPar) {
     let hydros: Vec<Hydro> = hydro_ids
         .iter()
         .enumerate()
-        .map(|(i, &id)| Hydro {
-            id,
-            name: format!("H{}", i + 1),
-            bus_id: EntityId(0),
-            downstream_id: None,
-            entry_stage_id: None,
-            exit_stage_id: None,
-            min_storage_hm3: 0.0,
-            max_storage_hm3: 500.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity,
-            min_turbined_m3s: 0.0,
-            max_turbined_m3s: 200.0,
-            specific_productivity_mw_per_m3s_per_m: None,
-            min_generation_mw: 0.0,
-            max_generation_mw: 200.0,
-            tailrace: None,
-            hydraulic_losses: None,
-            efficiency: None,
-            evaporation_coefficients_mm: None,
-            evaporation_reference_volumes_hm3: None,
-            diversion: None,
-            filling: None,
-            penalties: zero_penalties,
+        .map(|(i, &id)| {
+            make_hydro(
+                id,
+                HydroSpec {
+                    name: format!("H{}", i + 1),
+                    operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    bus_id: EntityId(0),
+                    downstream_id: None,
+                    entry_stage_id: None,
+                    exit_stage_id: None,
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 500.0,
+                    min_outflow_m3s: 0.0,
+                    max_outflow_m3s: None,
+                    generation_model: HydroGenerationModel::ConstantProductivity,
+                    min_turbined_m3s: 0.0,
+                    max_turbined_m3s: 200.0,
+                    specific_productivity_mw_per_m3s_per_m: None,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 200.0,
+                    tailrace: None,
+                    hydraulic_losses: None,
+                    efficiency: None,
+                    evaporation_coefficients_mm: None,
+                    evaporation_reference_volumes_hm3: None,
+                    diversion: None,
+                    filling: None,
+                    penalties: zero_penalties,
+                    ..Default::default()
+                },
+            )
         })
         .collect();
 
-    let bus = Bus {
-        id: EntityId(0),
-        name: "B0".to_string(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 1000.0,
-        }],
-        excess_cost: 0.0,
-    };
+    let bus = make_bus(
+        EntityId(0),
+        BusSpec {
+            name: "B0".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 1000.0,
+            }],
+            excess_cost: 0.0,
+            ..Default::default()
+        },
+    );
 
     let study_stages: Vec<Stage> = (0..N_STUDY)
-        .map(|i| Stage {
-            index: i,
-            id: i as i32,
-            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-            season_id: Some(i % N_SEASONS),
-            blocks: vec![Block {
-                index: 0,
-                name: "S".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: true,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
+        .map(|i| {
+            make_stage(
+                i,
+                StageSpec {
+                    start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                    season_id: Some(i % N_SEASONS),
+                    blocks: vec![Block {
+                        index: 0,
+                        name: "S".to_string(),
+                        duration_hours: 744.0,
+                    }],
+                    block_mode: BlockMode::Parallel,
+                    state_config: StageStateConfig {
+                        storage: true,
+                        inflow_lags: true,
+                    },
+                    risk_config: StageRiskConfig::Expectation,
+                    scenario_config: ScenarioSourceConfig {
+                        branching_factor: 1,
+                        noise_method: NoiseMethod::Saa,
+                    },
+                    ..Default::default()
+                },
+            )
         })
         .collect();
 
@@ -598,7 +632,7 @@ fn lag_11_lp_coefficient_equals_psi_hat_over_twelve() {
     );
 
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
-    let templates = build_stage_templates(
+    let templates = build_stage_templates_resolving_layout(
         &system,
         InflowNonNegativityMethod::None,
         &par_lp,
@@ -607,7 +641,7 @@ fn lag_11_lp_coefficient_equals_psi_hat_over_twelve() {
         &hydro_models.evaporation,
         &cobre_sddp::ResolvedParameters::default(),
     )
-    .expect("build_stage_templates must succeed for the PAR(2)-A fixture");
+    .expect("build_stage_templates_resolving_layout must succeed for the PAR(2)-A fixture");
 
     let tmpl = &templates.templates[0];
     assert_eq!(
@@ -654,7 +688,7 @@ fn lag_0_lp_coefficient_combines_ar_and_annual() {
     let (system, par_lp) = build_par_a_fixture();
 
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
-    let templates = build_stage_templates(
+    let templates = build_stage_templates_resolving_layout(
         &system,
         InflowNonNegativityMethod::None,
         &par_lp,
@@ -663,7 +697,7 @@ fn lag_0_lp_coefficient_combines_ar_and_annual() {
         &hydro_models.evaporation,
         &cobre_sddp::ResolvedParameters::default(),
     )
-    .expect("build_stage_templates must succeed for the PAR(2)-A fixture");
+    .expect("build_stage_templates_resolving_layout must succeed for the PAR(2)-A fixture");
 
     let tmpl = &templates.templates[0];
 
@@ -709,7 +743,7 @@ fn classical_par_has_no_lag_11_column() {
     );
 
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
-    let templates = build_stage_templates(
+    let templates = build_stage_templates_resolving_layout(
         &system,
         InflowNonNegativityMethod::None,
         &par_lp,
@@ -718,7 +752,7 @@ fn classical_par_has_no_lag_11_column() {
         &hydro_models.evaporation,
         &cobre_sddp::ResolvedParameters::default(),
     )
-    .expect("build_stage_templates must succeed for the classical PAR(2) fixture");
+    .expect("build_stage_templates_resolving_layout must succeed for the classical PAR(2) fixture");
 
     let tmpl = &templates.templates[0];
 

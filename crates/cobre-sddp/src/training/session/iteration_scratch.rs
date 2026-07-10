@@ -7,8 +7,12 @@
 use cobre_solver::{RowBatch, StageTemplate};
 
 use crate::{
-    context::StageContext, cut::CutRowMap, lower_bound::LbEvalScratch, lp_builder::PatchBuffer,
+    context::StageContext,
+    cut::CutRowMap,
+    lower_bound::LbEvalScratch,
+    lp_builder::PatchBuffer,
     trajectory::TrajectoryRecord,
+    workspace::{ScratchBuffers, WorkspaceSizing},
 };
 
 /// Per-training-run iteration scratch owned by `TrainingSession`.
@@ -25,22 +29,27 @@ pub(crate) struct IterationScratch {
     pub cut_batches: Vec<RowBatch>,
     /// Cut row batch used exclusively for lower-bound evaluation (stage 0).
     pub lb_cut_batch: RowBatch,
-    /// Baked stage templates (structural copies of base templates + active cuts).
-    pub baked_templates: Vec<StageTemplate>,
-    /// Row batches used to build the active-cut rows before baking, one per stage.
-    pub bake_row_batches: Vec<RowBatch>,
+    /// Frozen stage templates (structural copies of base templates + active cuts).
+    pub frozen_templates: Vec<StageTemplate>,
+    /// Row batches used to build the active-cut rows before freeze, one per stage.
+    pub freeze_row_batches: Vec<RowBatch>,
     /// Cut row map for the lower-bound LP (tracks row positions within stage 0 template).
     pub lb_cut_row_map: CutRowMap,
     /// Per-evaluation scratch buffers for lower-bound evaluation (reused across iterations).
     pub lb_scratch: LbEvalScratch,
-    /// Reusable scratch buffers for `bake_rows_into_template` (count/emit-pass temporaries).
-    pub(crate) baking_scratch: cobre_solver::BakingScratch,
+    /// Noise/NCS-transform scratch for the lower-bound path, the same shape
+    /// [`StageSolvePrep::run`] reads on every other solve site.
+    ///
+    /// [`StageSolvePrep::run`]: crate::training::stage_solve_prep::StageSolvePrep::run
+    pub lb_noise_scratch: ScratchBuffers,
+    /// Reusable scratch buffers for `freeze_rows_into_template` (count/emit-pass temporaries).
+    pub(crate) freeze_scratch: cobre_solver::FreezeScratch,
 }
 
 impl IterationScratch {
-    /// Allocate and initialise all iteration scratch buffers, pre-baking each
-    /// `baked_templates[t]` as an empty-cut-batch structural copy of
-    /// `stage_ctx.templates[t]` so iteration 1 can use the baked load path.
+    /// Allocate and initialise all iteration scratch buffers, pre-freeze each
+    /// `frozen_templates[t]` as an empty-cut-batch structural copy of
+    /// `stage_ctx.templates[t]` so iteration 1 can use the frozen load path.
     // Rationale: each argument sizes a distinct pre-allocated scratch region with
     // its own sizing formula, so no sub-struct would group a subset of the arity.
     #[allow(clippy::too_many_arguments)]
@@ -52,6 +61,7 @@ impl IterationScratch {
         template_0_num_rows: usize,
         hydro_count: usize,
         max_par_order: usize,
+        n_buckets: usize,
         n_anticipated: usize,
         k_max: usize,
         stage_ctx: &StageContext<'_>,
@@ -67,14 +77,20 @@ impl IterationScratch {
             })
             .collect();
 
-        // The LB path never calls `fill_load_patches` (Category 4), so the
-        // `n_load_buses` and `max_blocks` args are 0. Category 6
-        // (anticipated_state_fixing) capacity MUST be sized by the actual
-        // `n_anticipated * k_max`: passing zero leaves the LB anticipated-state
-        // rows at their `0 == 0` default, silently forcing every
-        // anticipated_state column to zero and ignoring past `initial_state`
-        // commitments.
-        let patch_buf = PatchBuffer::new(hydro_count, max_par_order, 0, 0, n_anticipated, k_max);
+        // The LB path never calls `fill_load_patches` (load), so the
+        // `n_load_buses` and `max_blocks` args are 0. Bucket and anticipated
+        // column capacity MUST be sized by the actual `n_buckets` /
+        // `n_anticipated * k_max`: undersizing leaves those state slots
+        // unpinned or panics in `fill_col_state_patches`.
+        let patch_buf = PatchBuffer::new(
+            hydro_count,
+            max_par_order,
+            0,
+            0,
+            n_buckets,
+            n_anticipated,
+            k_max,
+        );
 
         let cut_batches: Vec<RowBatch> = (0..num_stages)
             .map(|_| RowBatch {
@@ -95,9 +111,9 @@ impl IterationScratch {
             row_upper: Vec::new(),
         };
 
-        let mut baked_templates: Vec<StageTemplate> =
+        let mut frozen_templates: Vec<StageTemplate> =
             (0..num_stages).map(|_| StageTemplate::empty()).collect();
-        let bake_row_batches: Vec<RowBatch> = (0..num_stages)
+        let freeze_row_batches: Vec<RowBatch> = (0..num_stages)
             .map(|_| RowBatch {
                 num_rows: 0,
                 row_starts: Vec::new(),
@@ -108,16 +124,16 @@ impl IterationScratch {
             })
             .collect();
 
-        let mut baking_scratch = cobre_solver::BakingScratch::new();
+        let mut freeze_scratch = cobre_solver::FreezeScratch::new();
 
-        // Pre-bake with an empty cut batch (a structural copy of the base
-        // template) so iteration 1's passes can use the baked load path.
+        // Pre-freeze with an empty cut batch (a structural copy of the base
+        // template) so iteration 1's passes can use the frozen load path.
         for t in 0..num_stages {
-            cobre_solver::bake_rows_into_template(
+            cobre_solver::freeze_rows_into_template(
                 &stage_ctx.templates[t],
-                &bake_row_batches[t],
-                &mut baked_templates[t],
-                &mut baking_scratch,
+                &freeze_row_batches[t],
+                &mut frozen_templates[t],
+                &mut freeze_scratch,
             );
         }
 
@@ -125,16 +141,28 @@ impl IterationScratch {
 
         let lb_scratch = LbEvalScratch::new();
 
+        // The LB path never patches load-bus/NCS-column-index reuse across
+        // stages (always stage 0), so `n_load_buses`/`max_blocks`/pool-capacity
+        // sizing hints are irrelevant here; every `ScratchBuffers` field grows
+        // on demand regardless.
+        let lb_noise_scratch = ScratchBuffers::new(WorkspaceSizing {
+            hydro_count,
+            max_par_order,
+            downstream_par_order: stage_ctx.downstream_par_order,
+            ..WorkspaceSizing::default()
+        });
+
         Self {
             patch_buf,
             records,
             cut_batches,
             lb_cut_batch,
-            baked_templates,
-            bake_row_batches,
+            frozen_templates,
+            freeze_row_batches,
             lb_cut_row_map,
             lb_scratch,
-            baking_scratch,
+            lb_noise_scratch,
+            freeze_scratch,
         }
     }
 }
@@ -235,6 +263,7 @@ mod tests {
             max_par_order,
             0,
             0,
+            0,
             &stage_ctx,
         );
 
@@ -254,22 +283,22 @@ mod tests {
             "cut_batches must have one RowBatch per stage"
         );
         assert_eq!(
-            scratch.bake_row_batches.len(),
+            scratch.freeze_row_batches.len(),
             num_stages,
-            "bake_row_batches must have one RowBatch per stage"
+            "freeze_row_batches must have one RowBatch per stage"
         );
         assert_eq!(
-            scratch.baked_templates.len(),
+            scratch.frozen_templates.len(),
             num_stages,
-            "baked_templates must have one StageTemplate per stage"
+            "frozen_templates must have one StageTemplate per stage"
         );
     }
 
-    /// Verify that `IterationScratch::new` pre-bakes all templates so that
-    /// each `baked_templates[t]` matches the structural shape of
+    /// Verify that `IterationScratch::new` pre-freezes all templates so that
+    /// each `frozen_templates[t]` matches the structural shape of
     /// `stage_ctx.templates[t]`.
     #[test]
-    fn iteration_scratch_new_pre_bakes_templates() {
+    fn iteration_scratch_new_pre_freezes_templates() {
         let max_local_fwd = 2;
         let num_stages = 3;
         let n_state = 4;
@@ -291,27 +320,28 @@ mod tests {
             max_par_order,
             0,
             0,
+            0,
             &stage_ctx,
         );
 
         for t in 0..num_stages {
             assert_eq!(
-                scratch.baked_templates[t].num_rows, stage_ctx.templates[t].num_rows,
-                "baked_templates[{t}].num_rows must match stage_ctx template"
+                scratch.frozen_templates[t].num_rows, stage_ctx.templates[t].num_rows,
+                "frozen_templates[{t}].num_rows must match stage_ctx template"
             );
             assert_eq!(
-                scratch.baked_templates[t].num_cols, stage_ctx.templates[t].num_cols,
-                "baked_templates[{t}].num_cols must match stage_ctx template"
+                scratch.frozen_templates[t].num_cols, stage_ctx.templates[t].num_cols,
+                "frozen_templates[{t}].num_cols must match stage_ctx template"
             );
         }
     }
 
     /// Regression: `IterationScratch::new` must size the lower-bound
-    /// patch buffer's Category 6 capacity to `n_anticipated * k_max`.
+    /// patch buffer's anticipated capacity to `n_anticipated * k_max`.
     ///
     /// Before the fix the trailing two arguments were hard-coded zero, so the
     /// LB patch buffer had no slots for the `anticipated_state_fixing` rows.
-    /// `fill_forward_patches` then skipped Category 6 silently and the LP's
+    /// `fill_forward_patches` then silently skipped the anticipated patches and the LP's
     /// `anticipated_state_fixing` rows kept their template default of `0 == 0`,
     /// forcing every `anticipated_state` column to zero in the LB solve and
     /// ignoring past commitments stored in `initial_state`.
@@ -342,6 +372,7 @@ mod tests {
             template_0_num_rows,
             hydro_count,
             max_par_order,
+            0,
             n_anticipated,
             k_max,
             &stage_ctx,
@@ -354,17 +385,17 @@ mod tests {
         assert_eq!(
             scratch.patch_buf.indices.len(),
             expected_capacity,
-            "patch_buf indices length must include A*K slots for Category 6",
+            "patch_buf indices length must include A*K slots for anticipated state",
         );
         assert_eq!(
             scratch.patch_buf.lower.len(),
             expected_capacity,
-            "patch_buf lower length must include A*K slots for Category 6",
+            "patch_buf lower length must include A*K slots for anticipated state",
         );
         assert_eq!(
             scratch.patch_buf.upper.len(),
             expected_capacity,
-            "patch_buf upper length must include A*K slots for Category 6",
+            "patch_buf upper length must include A*K slots for anticipated state",
         );
 
         // forward_patch_count starts at `N` before any load or
@@ -374,14 +405,14 @@ mod tests {
         assert_eq!(
             scratch.patch_buf.forward_patch_count(),
             expected_pre_fill_count,
-            "forward_patch_count must include the A*K Category 6 slots",
+            "forward_patch_count must include the A*K anticipated-state slots",
         );
     }
 
     /// Regression (zero-anticipated case): when the study has no
     /// anticipated thermals, the patch buffer must size identically to the
     /// pre-anticipated layout. This guards against accidentally allocating
-    /// Category 6 capacity when the indexer reports `n_anticipated == 0`.
+    /// anticipated-state capacity when the indexer reports `n_anticipated == 0`.
     #[test]
     fn iteration_scratch_new_patch_buffer_zero_anticipated_unchanged() {
         let max_local_fwd = 1;
@@ -405,6 +436,7 @@ mod tests {
             max_par_order,
             0,
             0,
+            0,
             &stage_ctx,
         );
 
@@ -414,6 +446,47 @@ mod tests {
             scratch.patch_buf.indices.len(),
             expected_capacity,
             "zero-anticipated patch_buf must match the pre-anticipated layout",
+        );
+    }
+
+    /// Regression: `IterationScratch::new` must size the lower-bound patch
+    /// buffer's column region to include `n_buckets` travel-time bucket slots —
+    /// omitting it leaves no room for the bucket incoming columns, so
+    /// `fill_col_state_patches` panics (undersized buffer) once a bucket-aware
+    /// layout reaches the LB path.
+    #[test]
+    fn iteration_scratch_new_sizes_patch_buffer_for_transit_buckets() {
+        let max_local_fwd = 1;
+        let num_stages = 2;
+        let n_state = 5;
+        let fcf_pool_0_capacity = 4;
+        let template_0_num_rows = 4;
+        let hydro_count = 2;
+        let max_par_order = 1;
+        let n_buckets = 3;
+
+        let templates = vec![minimal_template(); num_stages];
+        let stage_ctx = make_stage_ctx(&templates);
+
+        let scratch = IterationScratch::new(
+            max_local_fwd,
+            num_stages,
+            n_state,
+            fcf_pool_0_capacity,
+            template_0_num_rows,
+            hydro_count,
+            max_par_order,
+            n_buckets,
+            0,
+            0,
+            &stage_ctx,
+        );
+
+        // Column-bound region: N*(1+L) + n_buckets + A*K = 2*2 + 3 + 0 = 7.
+        assert_eq!(
+            scratch.patch_buf.state_col_patch_count(),
+            hydro_count * (1 + max_par_order) + n_buckets,
+            "patch_buf column region must include n_buckets bucket slots",
         );
     }
 }

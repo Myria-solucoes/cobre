@@ -48,18 +48,18 @@ slow-tests = []
 ## Expose crate-internal test fixtures (EquipmentCounts builders) to other
 ## crates' integration tests.
 ##
-## The shared `indexer::test_fixtures` builders are gated on
+## The shared `test_support` builders are gated on
 ## `#[cfg(any(test, feature = "test-support"))]`, so plain `cargo test` sees
 ## them via `test` and downstream integration tests see them via this feature.
 ## Must NOT be enabled in production builds.
 test-support = []
 
 [dependencies]
-cobre-core = { version = "0.9.1", path = "../cobre-core" }
-cobre-solver = { version = "0.9.1", path = "../cobre-solver", default-features = false }
-cobre-comm = { version = "0.9.1", path = "../cobre-comm" }
-cobre-stochastic = { version = "0.9.1", path = "../cobre-stochastic" }
-cobre-io = { version = "0.9.1", path = "../cobre-io" }
+cobre-core = { version = "0.10.0", path = "../cobre-core" }
+cobre-solver = { version = "0.10.0", path = "../cobre-solver", default-features = false }
+cobre-comm = { version = "0.10.0", path = "../cobre-comm" }
+cobre-stochastic = { version = "0.10.0", path = "../cobre-stochastic" }
+cobre-io = { version = "0.10.0", path = "../cobre-io" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 dhat = { version = "0.3", optional = true }
 matrixmultiply = { workspace = true }
@@ -94,6 +94,10 @@ harness = false
 
 [[bench]]
 name = "cut_application_anticipated_state"
+harness = false
+
+[[bench]]
+name = "cut_selection"
 harness = false
 
 [[bench]]

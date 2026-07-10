@@ -8,7 +8,6 @@
 //!
 //! Designed to be solver-agnostic for scenario-based iterative optimization.
 
-// Allow unwrap/expect/panic in tests (explicit panics communicate test failures).
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 mod error;

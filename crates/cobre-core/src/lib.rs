@@ -58,8 +58,8 @@ pub use constraints::generic_constraint::{
     ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
 };
 pub use constraints::initial_conditions::{
-    AnticipatedCommitmentHistory, HydroPastInflows, HydroStorage, InitialConditions,
-    RecentObservation,
+    AnticipatedCommitmentHistory, HydroPastDefluence, HydroPastInflows, HydroStorage,
+    InitialConditions, RecentObservation,
 };
 pub use constraints::training_event::{
     StageRowSelectionRecord, StoppingRuleResult, TrainingEvent, WORKER_TIMING_SLOT_BWD_SETUP,
@@ -96,7 +96,7 @@ pub use model::scenario::{
 pub use model::temporal::{
     Block, BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig,
     SeasonCycleType, SeasonDefinition, SeasonMap, Stage, StageRiskConfig, StageStateConfig,
-    Transition,
+    Transition, window_period_overlaps,
 };
 pub use stats::welford::WelfordAccumulator;
 pub use system::{System, SystemBuilder};

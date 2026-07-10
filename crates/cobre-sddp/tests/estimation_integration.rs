@@ -15,6 +15,9 @@
     clippy::cast_possible_wrap,
     clippy::too_many_lines
 )]
+// `..Default::default()` in the make_* Spec calls is the intentional future-field
+// seam from `common::builders` — a no-op today, not dead code.
+#![allow(clippy::needless_update)]
 
 use std::path::Path;
 use std::sync::Arc;
@@ -24,8 +27,8 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use chrono::NaiveDate;
 use cobre_core::{
-    Bus, DeficitSegment, EntityId, SystemBuilder,
-    entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties},
+    DeficitSegment, EntityId, SystemBuilder,
+    entities::hydro::{HydroGenerationModel, HydroPenalties},
     temporal::{
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
         StageStateConfig,
@@ -35,6 +38,9 @@ use cobre_io::Config;
 use cobre_sddp::estimate_from_history;
 use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
+
+mod common;
+use common::builders::{BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -70,13 +76,20 @@ fn date_to_date32(date: NaiveDate) -> i32 {
 /// `[1st, 1st-of-next-month)` window. Values use a seasonal sine-wave pattern to
 /// give non-trivial autocorrelation structure for PAR(p) fitting.
 fn write_inflow_history(path: &Path) {
+    write_inflow_history_n_years(path, N_YEARS);
+}
+
+/// [`write_inflow_history`], parameterized over the number of years so a caller
+/// can grow the per-season observation count past a fixed minimum-sample
+/// threshold in the correlation-estimation path.
+fn write_inflow_history_n_years(path: &Path, n_years: usize) {
     let schema = inflow_history_schema();
 
     let mut hydro_ids: Vec<i32> = Vec::new();
     let mut dates: Vec<i32> = Vec::new();
     let mut values: Vec<f64> = Vec::new();
 
-    for year in 0..N_YEARS {
+    for year in 0..n_years {
         for month in 0..N_SEASONS {
             let cal_year = START_YEAR + year as i32;
             let cal_month = (month as u32) + 1;
@@ -163,59 +176,67 @@ fn create_minimal_case_skeleton(case_dir: &Path, order_selection: &str, max_orde
 /// falls within a stage's `[start_date, end_date)` window — mirroring what
 /// `load_case` produces from per-stage `season_id` fields.
 fn build_system_with_one_hydro() -> cobre_core::System {
-    let bus = Bus {
-        id: EntityId::from(BUS_ID),
-        name: "B1".to_string(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: Some(f64::INFINITY),
-            cost_per_mwh: 3000.0,
-        }],
-        excess_cost: 0.0,
-    };
-
-    let hydro = Hydro {
-        id: EntityId::from(HYDRO_ID),
-        name: "H1".to_string(),
-        bus_id: EntityId::from(BUS_ID),
-        downstream_id: None,
-        entry_stage_id: None,
-        exit_stage_id: None,
-        min_storage_hm3: 0.0,
-        max_storage_hm3: 5000.0,
-        min_outflow_m3s: 0.0,
-        max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity,
-        min_turbined_m3s: 0.0,
-        max_turbined_m3s: 1000.0,
-        specific_productivity_mw_per_m3s_per_m: None,
-        min_generation_mw: 0.0,
-        max_generation_mw: 900.0,
-        tailrace: None,
-        hydraulic_losses: None,
-        efficiency: None,
-        evaporation_coefficients_mm: None,
-        evaporation_reference_volumes_hm3: None,
-        diversion: None,
-        filling: None,
-        penalties: HydroPenalties {
-            spillage_cost: 0.0,
-            diversion_cost: 0.0,
-            turbined_cost: 0.0,
-            storage_violation_below_cost: 1000.0,
-            filling_target_violation_cost: 0.0,
-            turbined_violation_below_cost: 0.0,
-            outflow_violation_below_cost: 0.0,
-            outflow_violation_above_cost: 0.0,
-            generation_violation_below_cost: 0.0,
-            evaporation_violation_cost: 0.0,
-            water_withdrawal_violation_cost: 0.0,
-            water_withdrawal_violation_pos_cost: 0.0,
-            water_withdrawal_violation_neg_cost: 0.0,
-            evaporation_violation_pos_cost: 0.0,
-            evaporation_violation_neg_cost: 0.0,
-            inflow_nonnegativity_cost: 1000.0,
+    let bus = make_bus(
+        EntityId::from(BUS_ID),
+        BusSpec {
+            name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: Some(f64::INFINITY),
+                cost_per_mwh: 3000.0,
+            }],
+            excess_cost: 0.0,
+            ..Default::default()
         },
-    };
+    );
+
+    let hydro = make_hydro(
+        EntityId::from(HYDRO_ID),
+        HydroSpec {
+            name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: EntityId::from(BUS_ID),
+            downstream_id: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 5000.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 1000.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 900.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: HydroPenalties {
+                spillage_cost: 0.0,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 1000.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+            ..Default::default()
+        },
+    );
 
     let mut stages: Vec<Stage> = Vec::with_capacity(N_YEARS * N_SEASONS);
     let mut stage_index: usize = 0;
@@ -233,28 +254,30 @@ fn build_system_with_one_hydro() -> cobre_core::System {
             };
             let end_date = NaiveDate::from_ymd_opt(end_year, end_month, 1).unwrap();
 
-            stages.push(Stage {
-                index: stage_index,
-                id: stage_index as i32,
-                start_date,
-                end_date,
-                season_id: Some(month),
-                blocks: vec![Block {
-                    index: 0,
-                    name: format!("M{month:02}"),
-                    duration_hours: 720.0,
-                }],
-                block_mode: BlockMode::Parallel,
-                state_config: StageStateConfig {
-                    storage: true,
-                    inflow_lags: false,
+            stages.push(make_stage(
+                stage_index,
+                StageSpec {
+                    start_date,
+                    end_date,
+                    season_id: Some(month),
+                    blocks: vec![Block {
+                        index: 0,
+                        name: format!("M{month:02}"),
+                        duration_hours: 720.0,
+                    }],
+                    block_mode: BlockMode::Parallel,
+                    state_config: StageStateConfig {
+                        storage: true,
+                        inflow_lags: false,
+                    },
+                    risk_config: StageRiskConfig::Expectation,
+                    scenario_config: ScenarioSourceConfig {
+                        branching_factor: 1,
+                        noise_method: NoiseMethod::Saa,
+                    },
+                    ..Default::default()
                 },
-                risk_config: StageRiskConfig::Expectation,
-                scenario_config: ScenarioSourceConfig {
-                    branching_factor: 1,
-                    noise_method: NoiseMethod::Saa,
-                },
-            });
+            ));
             stage_index += 1;
         }
     }
@@ -501,7 +524,7 @@ fn write_par1_inflow_history(path: &Path, n_hydros: usize) {
 /// `[1st, 1st-of-next)` window.
 fn build_system_for_par1(n_hydros: usize) -> cobre_core::System {
     use cobre_core::{
-        Bus, DeficitSegment, EntityId, SystemBuilder,
+        DeficitSegment, EntityId, SystemBuilder,
         entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties},
         temporal::{
             Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
@@ -509,59 +532,69 @@ fn build_system_for_par1(n_hydros: usize) -> cobre_core::System {
         },
     };
 
-    let bus = Bus {
-        id: EntityId::from(BUS_ID),
-        name: "B1".to_string(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: Some(f64::INFINITY),
-            cost_per_mwh: 3000.0,
-        }],
-        excess_cost: 0.0,
-    };
+    let bus = make_bus(
+        EntityId::from(BUS_ID),
+        BusSpec {
+            name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: Some(f64::INFINITY),
+                cost_per_mwh: 3000.0,
+            }],
+            excess_cost: 0.0,
+            ..Default::default()
+        },
+    );
 
     let hydros: Vec<Hydro> = (0..n_hydros)
-        .map(|h| Hydro {
-            id: EntityId::from((h + 1) as i32),
-            name: format!("H{}", h + 1),
-            bus_id: EntityId::from(BUS_ID),
-            downstream_id: None,
-            entry_stage_id: None,
-            exit_stage_id: None,
-            min_storage_hm3: 0.0,
-            max_storage_hm3: 5000.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity,
-            min_turbined_m3s: 0.0,
-            max_turbined_m3s: 1000.0,
-            specific_productivity_mw_per_m3s_per_m: None,
-            min_generation_mw: 0.0,
-            max_generation_mw: 900.0,
-            tailrace: None,
-            hydraulic_losses: None,
-            efficiency: None,
-            evaporation_coefficients_mm: None,
-            evaporation_reference_volumes_hm3: None,
-            diversion: None,
-            filling: None,
-            penalties: HydroPenalties {
-                spillage_cost: 0.0,
-                diversion_cost: 0.0,
-                turbined_cost: 0.0,
-                storage_violation_below_cost: 1000.0,
-                filling_target_violation_cost: 0.0,
-                turbined_violation_below_cost: 0.0,
-                outflow_violation_below_cost: 0.0,
-                outflow_violation_above_cost: 0.0,
-                generation_violation_below_cost: 0.0,
-                evaporation_violation_cost: 0.0,
-                water_withdrawal_violation_cost: 0.0,
-                water_withdrawal_violation_pos_cost: 0.0,
-                water_withdrawal_violation_neg_cost: 0.0,
-                evaporation_violation_pos_cost: 0.0,
-                evaporation_violation_neg_cost: 0.0,
-                inflow_nonnegativity_cost: 1000.0,
-            },
+        .map(|h| {
+            make_hydro(
+                EntityId::from((h + 1) as i32),
+                HydroSpec {
+                    name: format!("H{}", h + 1),
+                    operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    bus_id: EntityId::from(BUS_ID),
+                    downstream_id: None,
+                    entry_stage_id: None,
+                    exit_stage_id: None,
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 5000.0,
+                    min_outflow_m3s: 0.0,
+                    max_outflow_m3s: None,
+                    generation_model: HydroGenerationModel::ConstantProductivity,
+                    min_turbined_m3s: 0.0,
+                    max_turbined_m3s: 1000.0,
+                    specific_productivity_mw_per_m3s_per_m: None,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 900.0,
+                    tailrace: None,
+                    hydraulic_losses: None,
+                    efficiency: None,
+                    evaporation_coefficients_mm: None,
+                    evaporation_reference_volumes_hm3: None,
+                    diversion: None,
+                    filling: None,
+                    penalties: HydroPenalties {
+                        spillage_cost: 0.0,
+                        diversion_cost: 0.0,
+                        turbined_cost: 0.0,
+                        storage_violation_below_cost: 1000.0,
+                        filling_target_violation_cost: 0.0,
+                        turbined_violation_below_cost: 0.0,
+                        outflow_violation_below_cost: 0.0,
+                        outflow_violation_above_cost: 0.0,
+                        generation_violation_below_cost: 0.0,
+                        evaporation_violation_cost: 0.0,
+                        water_withdrawal_violation_cost: 0.0,
+                        water_withdrawal_violation_pos_cost: 0.0,
+                        water_withdrawal_violation_neg_cost: 0.0,
+                        evaporation_violation_pos_cost: 0.0,
+                        evaporation_violation_neg_cost: 0.0,
+                        inflow_nonnegativity_cost: 1000.0,
+                    },
+                    ..Default::default()
+                },
+            )
         })
         .collect();
 
@@ -570,54 +603,56 @@ fn build_system_for_par1(n_hydros: usize) -> cobre_core::System {
     for year in 0..N_OBS_PER_SEASON {
         let cal_year = 2000 + year as i32;
 
-        // January stage: season_id = 0
-        stages.push(Stage {
-            index: stage_index,
-            id: stage_index as i32,
-            start_date: chrono::NaiveDate::from_ymd_opt(cal_year, 1, 1).unwrap(),
-            end_date: chrono::NaiveDate::from_ymd_opt(cal_year, 2, 1).unwrap(),
-            season_id: Some(0),
-            blocks: vec![Block {
-                index: 0,
-                name: "JAN".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
+        stages.push(make_stage(
+            stage_index,
+            StageSpec {
+                start_date: chrono::NaiveDate::from_ymd_opt(cal_year, 1, 1).unwrap(),
+                end_date: chrono::NaiveDate::from_ymd_opt(cal_year, 2, 1).unwrap(),
+                season_id: Some(0),
+                blocks: vec![Block {
+                    index: 0,
+                    name: "JAN".to_string(),
+                    duration_hours: 744.0,
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: true,
+                    inflow_lags: false,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+                ..Default::default()
             },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
-        });
+        ));
         stage_index += 1;
 
-        // February stage: season_id = 1
-        stages.push(Stage {
-            index: stage_index,
-            id: stage_index as i32,
-            start_date: chrono::NaiveDate::from_ymd_opt(cal_year, 2, 1).unwrap(),
-            end_date: chrono::NaiveDate::from_ymd_opt(cal_year, 3, 1).unwrap(),
-            season_id: Some(1),
-            blocks: vec![Block {
-                index: 0,
-                name: "FEB".to_string(),
-                duration_hours: 672.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
+        stages.push(make_stage(
+            stage_index,
+            StageSpec {
+                start_date: chrono::NaiveDate::from_ymd_opt(cal_year, 2, 1).unwrap(),
+                end_date: chrono::NaiveDate::from_ymd_opt(cal_year, 3, 1).unwrap(),
+                season_id: Some(1),
+                blocks: vec![Block {
+                    index: 0,
+                    name: "FEB".to_string(),
+                    duration_hours: 672.0,
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: true,
+                    inflow_lags: false,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+                ..Default::default()
             },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
-        });
+        ));
         stage_index += 1;
     }
 
@@ -771,14 +806,20 @@ fn build_system_for_par1_with_user_stats() -> cobre_core::System {
     let stages_owned = stages.to_vec();
     let hydros_owned = base.hydros().to_vec();
     let buses_owned = (0..base.n_buses())
-        .map(|_| Bus {
-            id: EntityId::from(BUS_ID),
-            name: "B1".to_string(),
-            deficit_segments: vec![DeficitSegment {
-                depth_mw: Some(f64::INFINITY),
-                cost_per_mwh: 3000.0,
-            }],
-            excess_cost: 0.0,
+        .map(|_| {
+            make_bus(
+                EntityId::from(BUS_ID),
+                BusSpec {
+                    name: "B1".to_string(),
+                    operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    deficit_segments: vec![DeficitSegment {
+                        depth_mw: Some(f64::INFINITY),
+                        cost_per_mwh: 3000.0,
+                    }],
+                    excess_cost: 0.0,
+                    ..Default::default()
+                },
+            )
         })
         .take(1)
         .collect::<Vec<_>>();
@@ -914,4 +955,334 @@ fn test_estimation_round_trip_two_hydros() {
             m.stage_id
         );
     }
+}
+
+// ── UserArHistoryStats (pre-study synthesis) integration tests ────────────────
+
+/// Calendar year the partial-year study's stages fall in; well inside
+/// `write_inflow_history`'s `[START_YEAR, START_YEAR + N_YEARS)` range so the
+/// pre-study lag window (into the prior calendar months) has observations on
+/// both sides.
+const PARTIAL_STUDY_YEAR: i32 = 2005;
+
+/// Build a 12-season monthly `SeasonMap` (season id `m` maps to calendar month
+/// `m + 1`), required for `synthesize_prestudy_stages`'s out-of-window fallback.
+fn monthly_season_map() -> cobre_core::SeasonMap {
+    use cobre_core::{SeasonCycleType, SeasonDefinition, SeasonMap};
+    let seasons = (0..N_SEASONS)
+        .map(|m| SeasonDefinition {
+            id: m,
+            label: format!("M{m}"),
+            month_start: u32::try_from(m + 1).unwrap(),
+            day_start: None,
+            month_end: None,
+            day_end: None,
+        })
+        .collect();
+    SeasonMap {
+        cycle_type: SeasonCycleType::Monthly,
+        seasons,
+    }
+}
+
+/// Build a `System` with one hydro and `n` monthly study stages spanning
+/// seasons `[first_season, first_season + n)` of `PARTIAL_STUDY_YEAR`, carrying
+/// a 12-season `SeasonMap` on `policy_graph` — the fixture
+/// `run_user_ar_estimation`'s pre-study synthesis needs to resolve out-of-window
+/// lag seasons.
+fn build_season_mapped_system(first_season: usize, n: usize) -> cobre_core::System {
+    use cobre_core::{PolicyGraph, PolicyGraphType};
+
+    let bus = make_bus(
+        EntityId::from(BUS_ID),
+        BusSpec {
+            name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(PARTIAL_STUDY_YEAR, 1, 1).unwrap(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: Some(f64::INFINITY),
+                cost_per_mwh: 3000.0,
+            }],
+            excess_cost: 0.0,
+            ..Default::default()
+        },
+    );
+
+    let hydro = make_hydro(
+        EntityId::from(HYDRO_ID),
+        HydroSpec {
+            name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(PARTIAL_STUDY_YEAR, 1, 1).unwrap(),
+            bus_id: EntityId::from(BUS_ID),
+            downstream_id: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 5000.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 1000.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 900.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: HydroPenalties {
+                spillage_cost: 0.0,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 1000.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+            ..Default::default()
+        },
+    );
+
+    let stages: Vec<Stage> = (0..n)
+        .map(|k| {
+            let season = first_season + k;
+            let month = u32::try_from(season % N_SEASONS + 1).unwrap();
+            let cal_year = PARTIAL_STUDY_YEAR + i32::try_from(season / N_SEASONS).unwrap();
+            let (end_year, end_month) = if month == 12 {
+                (cal_year + 1, 1u32)
+            } else {
+                (cal_year, month + 1)
+            };
+            make_stage(
+                k,
+                StageSpec {
+                    start_date: NaiveDate::from_ymd_opt(cal_year, month, 1).unwrap(),
+                    end_date: NaiveDate::from_ymd_opt(end_year, end_month, 1).unwrap(),
+                    season_id: Some(season % N_SEASONS),
+                    blocks: vec![Block {
+                        index: 0,
+                        name: "SINGLE".to_string(),
+                        duration_hours: 720.0,
+                    }],
+                    block_mode: BlockMode::Parallel,
+                    state_config: StageStateConfig {
+                        storage: true,
+                        inflow_lags: false,
+                    },
+                    risk_config: StageRiskConfig::Expectation,
+                    scenario_config: ScenarioSourceConfig {
+                        branching_factor: 1,
+                        noise_method: NoiseMethod::Saa,
+                    },
+                },
+            )
+        })
+        .collect();
+
+    let policy_graph = PolicyGraph {
+        graph_type: PolicyGraphType::FiniteHorizon,
+        annual_discount_rate: 0.0,
+        transitions: Vec::new(),
+        season_map: Some(monthly_season_map()),
+    };
+
+    SystemBuilder::new()
+        .buses(vec![bus])
+        .hydros(vec![hydro])
+        .stages(stages)
+        .policy_graph(policy_graph)
+        .build()
+        .expect("valid season-mapped system")
+}
+
+/// Write `inflow_ar_coefficients.parquet` with a fixed PAR(`max_order`) model for
+/// `HYDRO_ID` across stages `0..n_stages`, driving the R=1 manifest flag for the
+/// `UserArHistoryStats` path (H=1, S=0, R=1).
+fn write_user_inflow_ar_coefficients(case_dir: &Path, n_stages: i32, max_order: i32) {
+    use cobre_io::output::write_inflow_ar_coefficients;
+    use cobre_io::scenarios::InflowArCoefficientRow;
+
+    let mut rows = Vec::with_capacity(usize::try_from(n_stages * max_order).unwrap());
+    for stage_id in 0..n_stages {
+        for lag in 1..=max_order {
+            rows.push(InflowArCoefficientRow {
+                hydro_id: EntityId::from(HYDRO_ID),
+                stage_id,
+                lag,
+                coefficient: 0.1 * f64::from(lag),
+                residual_std_ratio: 0.9,
+            });
+        }
+    }
+
+    write_inflow_ar_coefficients(
+        &case_dir.join("scenarios/inflow_ar_coefficients.parquet"),
+        &rows,
+    )
+    .expect("write_inflow_ar_coefficients must succeed");
+}
+
+/// `UserArHistoryStats`, partial-year study (Sep–Dec, seasons 8–11): the first
+/// study stage's lag-1 season (7 = August) has no study stage of its own, so
+/// `run_user_ar_estimation` must synthesize a pre-study stage (id −1) and carry
+/// a history-derived, non-zero `mean_m3s` there, proving the
+/// `synthesize_prestudy_stages` call is wired into the estimation path.
+///
+/// An in-memory-edit discrimination control (temporarily reverting
+/// `run_user_ar_estimation` to its pre-fix body, confirming this assertion then
+/// fails with `mean_at_lag1 == 0.0`, then restoring the file byte-identical) is
+/// performed out-of-band during implementation, not as an automated test path.
+#[test]
+fn user_ar_prestudy_synthesizes_history_derived_lag_stats() {
+    let dir = TempDir::new().unwrap();
+    let case_dir = dir.path();
+
+    create_minimal_case_skeleton(case_dir, "pacf", 2);
+    write_inflow_history(&case_dir.join("scenarios/inflow_history.parquet"));
+    write_user_inflow_ar_coefficients(case_dir, 4, 2);
+
+    let system = build_season_mapped_system(8, 4);
+    let config = parse_config(case_dir);
+
+    let (updated, report, path) = estimate_from_history(system, case_dir, &config)
+        .expect("UserArHistoryStats estimation must succeed");
+
+    assert_eq!(
+        path,
+        cobre_sddp::EstimationPath::UserArHistoryStats,
+        "expected UserArHistoryStats path, got {path:?}"
+    );
+    let report = report.expect("UserArHistoryStats must return Some(EstimationReport)");
+    assert_eq!(
+        report.method, "user_provided",
+        "method must be user_provided"
+    );
+
+    // Stage id -1 is the synthesized pre-study stage for season 7 (August), the
+    // first study stage's lag-1 season. A missing entry (pre-fix: no synthesis)
+    // maps to 0.0 via map_or, matching PrecomputedPar::build's own zero fallback.
+    let mean_at_lag1 = updated
+        .inflow_models()
+        .iter()
+        .find(|m| m.hydro_id == EntityId::from(HYDRO_ID) && m.stage_id == -1)
+        .map_or(0.0, |m| m.mean_m3s);
+
+    assert!(
+        mean_at_lag1.abs() > f64::EPSILON,
+        "pre-study stage -1 (season 7 / August) must carry a non-zero \
+         history-derived mean_m3s, got {mean_at_lag1}; a zero here means \
+         run_user_ar_estimation is not synthesizing pre-study stages before \
+         estimating seasonal stats"
+    );
+}
+
+/// `UserArHistoryStats`, full-year study (all 12 seasons covered): pre-study
+/// synthesis is a no-op (`synthesize_prestudy_stages` returns empty when every
+/// season already has a study stage), so no negative-`stage_id` `InflowModel`
+/// entries appear — the fix leaves the full-year path unchanged.
+#[test]
+fn user_ar_prestudy_full_year_study_synthesizes_nothing() {
+    let dir = TempDir::new().unwrap();
+    let case_dir = dir.path();
+
+    create_minimal_case_skeleton(case_dir, "pacf", 2);
+    write_inflow_history(&case_dir.join("scenarios/inflow_history.parquet"));
+    write_user_inflow_ar_coefficients(case_dir, 12, 2);
+
+    let system = build_season_mapped_system(0, 12);
+    let config = parse_config(case_dir);
+
+    let (updated, _report, path) = estimate_from_history(system, case_dir, &config)
+        .expect("full-year UserArHistoryStats estimation must succeed");
+
+    assert_eq!(
+        path,
+        cobre_sddp::EstimationPath::UserArHistoryStats,
+        "expected UserArHistoryStats path, got {path:?}"
+    );
+
+    let models = updated.inflow_models();
+    assert_eq!(
+        models.len(),
+        12,
+        "full-year study must produce exactly 12 models (one per season), got {}",
+        models.len()
+    );
+    assert!(
+        models.iter().all(|m| m.stage_id >= 0),
+        "full-year study must synthesize no pre-study stages: found negative \
+         stage_id(s) {:?}",
+        models
+            .iter()
+            .filter(|m| m.stage_id < 0)
+            .map(|m| m.stage_id)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// `UserArHistoryStats`, partial-year study, correlation estimated (no
+/// `scenarios/correlation.json`): September (season 8, the study's first
+/// stage) needs both its AR lags — August and July, seasons 7 and 6 — neither
+/// of which has a study stage of its own; only the pre-study-synthesized
+/// stages carry them. Passing the study-only stage set (rather than the
+/// pre-study-extended set already used for seasonal-stats estimation) to the
+/// correlation call drops every September residual, since the lag lookup
+/// misses both seasons. A history long enough to cross the correlation
+/// module's fixed 30-residual-per-season minimum turns that into an
+/// observable difference: a `season_08` profile appears once the fix is
+/// applied and never appears under the study-only regression.
+///
+/// An in-memory-edit discrimination control (temporarily reverting
+/// `run_user_ar_estimation`'s correlation call to pass `stages` instead of
+/// `extended`, confirming this assertion then fails, then restoring the file
+/// byte-identical) is performed out-of-band during implementation, not as an
+/// automated test path.
+#[test]
+fn user_ar_prestudy_correlation_uses_extended_stages() {
+    const HISTORY_YEARS: usize = 32;
+
+    let dir = TempDir::new().unwrap();
+    let case_dir = dir.path();
+
+    create_minimal_case_skeleton(case_dir, "pacf", 2);
+    write_inflow_history_n_years(
+        &case_dir.join("scenarios/inflow_history.parquet"),
+        HISTORY_YEARS,
+    );
+    write_user_inflow_ar_coefficients(case_dir, 4, 2);
+
+    let system = build_season_mapped_system(8, 4);
+    let config = parse_config(case_dir);
+
+    let (updated, _report, path) = estimate_from_history(system, case_dir, &config)
+        .expect("UserArHistoryStats estimation must succeed");
+
+    assert_eq!(
+        path,
+        cobre_sddp::EstimationPath::UserArHistoryStats,
+        "expected UserArHistoryStats path, got {path:?}"
+    );
+
+    let correlation = updated.correlation();
+    assert!(
+        correlation.profiles.contains_key("season_08"),
+        "expected a season_08 (September) correlation profile once {HISTORY_YEARS} \
+         years of history cross the correlation module's minimum-sample threshold; \
+         a missing profile means correlation estimation dropped every September \
+         residual because its AR lags (August, July) require seasonal stats that \
+         only the pre-study-extended stage set carries, got profiles {:?}",
+        correlation.profiles.keys().collect::<Vec<_>>()
+    );
 }

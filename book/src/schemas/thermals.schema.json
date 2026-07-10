@@ -1,20 +1,40 @@
 {
   "$defs": {
     "RawAnticipatedConfig": {
-      "additionalProperties": false,
-      "description": "Intermediate type for anticipated dispatch configuration.",
-      "properties": {
-        "lead_stages": {
-          "description": "Number of stages of dispatch anticipation. Must be ≥ 1.\n\nUsing `u32` here causes serde to reject negative JSON literals with a\n`ParseError` before validation runs.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "description": "Stage-count lead; the calendar is never consulted. Must be ≥ 1.",
+          "properties": {
+            "lead_stages": {
+              "description": "Number of stages of dispatch anticipation. Must be ≥ 1.\n\nUsing `u32` here causes serde to reject negative JSON literals with a\n`ParseError` before validation runs.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "lead_stages"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Physical lead time in hours, delivery-anchored. Must be finite and > 0.0.",
+          "properties": {
+            "lead_time_hours": {
+              "description": "Physical lead time in hours. Must be finite and > 0.0.",
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "lead_time_hours"
+          ],
+          "type": "object"
         }
-      },
-      "required": [
-        "lead_stages"
       ],
-      "type": "object"
+      "description": "Intermediate type for anticipated dispatch configuration.\n\nUntagged with per-variant `deny_unknown_fields`: the `{\"lead_stages\": N}` /\n`{\"lead_time_hours\": H}` object shapes and the structural mutual-exclusion\nbetween them live here; `cobre_core::AnticipatedConfig` keeps a plain\n(non-`untagged`) derive so it stays postcard-broadcast-safe."
     },
     "RawThermal": {
       "additionalProperties": false,
@@ -71,11 +91,16 @@
         "name": {
           "description": "Human-readable plant name.",
           "type": "string"
+        },
+        "operational_start_date": {
+          "description": "Date the entity enters service (ISO 8601 `YYYY-MM-DD`).",
+          "type": "string"
         }
       },
       "required": [
         "id",
         "name",
+        "operational_start_date",
         "bus_id",
         "cost_per_mwh",
         "generation"
