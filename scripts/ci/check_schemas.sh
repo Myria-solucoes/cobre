@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify that book/src/schemas/ is in sync with what `cobre schema export` produces.
+# Verify that schemas/ is in sync with what `cobre schema export` produces.
 # Exits non-zero on any drift, printing the diff for the failing files.
 #
 # Usage:
@@ -28,15 +28,15 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 "$BIN" schema export --output-dir "$TMP_DIR" > /dev/null
 
-if diff -ruN "$REPO_ROOT/book/src/schemas/" "$TMP_DIR/" > "$TMP_DIR/drift.diff"; then
-  echo "Schemas in book/src/schemas/ match \`cobre schema export\` output. ✓"
+if diff -ruN "$REPO_ROOT/schemas/" "$TMP_DIR/" > "$TMP_DIR/drift.diff"; then
+  echo "Schemas in schemas/ match \`cobre schema export\` output. ✓"
   exit 0
 fi
 
-echo "ERROR: book/src/schemas/ drifts from \`cobre schema export\` output."
+echo "ERROR: schemas/ drifts from \`cobre schema export\` output."
 echo "Run \`scripts/ci/check_schemas.sh --build\` locally, then regenerate with:"
 echo "  cargo build --release --bin cobre"
-echo "  ./target/release/cobre schema export --output-dir book/src/schemas"
+echo "  ./target/release/cobre schema export --output-dir schemas"
 echo ""
 echo "--- Drift diff ---"
 cat "$TMP_DIR/drift.diff"

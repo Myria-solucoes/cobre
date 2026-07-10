@@ -3,7 +3,9 @@
 
 Enforces `.claude/rules/doc-integrity.md` §5 (sober reference register — no
 marketing/hype voice) and §2/§4 (no hand-frozen "typical"/"about N" numbers)
-across `book/src/`, `README.md`, and `CONTRIBUTING.md`.
+across `README.md` and `CONTRIBUTING.md`. (The former `book/src/` scan root
+was retired with book/ — mdBook decommission; the unified docs site at
+docs.cobre-rs.dev owns prose voice for user-facing content now.)
 
 Scans PROSE only: fenced code blocks (``` / ~~~), inline `code` spans, and HTML
 comments are blanked before matching, so code samples, identifiers, and config
@@ -33,9 +35,9 @@ import re
 import sys
 from pathlib import Path
 
-# Files scanned, relative to the repo root. book/src is globbed; the two
-# top-level docs are listed explicitly. `.claude/rules/*` is intentionally NOT
-# scanned: doc-integrity.md quotes every banned phrase as part of its own rule.
+# Files scanned, relative to the repo root. `.claude/rules/*` is intentionally
+# NOT scanned: doc-integrity.md quotes every banned phrase as part of its own
+# rule.
 _TOP_LEVEL_DOCS: tuple[str, ...] = ("README.md", "CONTRIBUTING.md")
 
 # §5 banned constructs. Each entry is (label, regex). Kept deliberately tight:
@@ -186,7 +188,7 @@ def scan(root: Path) -> tuple[list[tuple[Path, int, str, str]], int]:
 
     Each violation is (path, lineno, rule_label, matched_text).
     """
-    targets: list[Path] = sorted((root / "book" / "src").rglob("*.md"))
+    targets: list[Path] = []
     for name in _TOP_LEVEL_DOCS:
         p = root / name
         if p.exists():
@@ -222,7 +224,7 @@ def scan(root: Path) -> tuple[list[tuple[Path, int, str, str]], int]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Check book/README/CONTRIBUTING prose for hype and unpinned numbers."
+        description="Check README/CONTRIBUTING prose for hype and unpinned numbers."
     )
     parser.add_argument("--root", type=Path, default=Path("."))
     args = parser.parse_args()

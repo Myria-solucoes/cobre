@@ -1,6 +1,5 @@
 ---
 paths:
-  - "book/**/*.md"
   - "*.md"
   - "CONTRIBUTING.md"
   - "CHANGELOG.md"
@@ -11,7 +10,7 @@ paths:
 # Cobre Prose Documentation Integrity Rules
 
 Governs every Markdown file that serves as a user-facing or agent-facing artifact:
-`book/`, `CLAUDE.md`, `.claude/rules/*`, `CONTRIBUTING.md`, `CHANGELOG.md`,
+`CLAUDE.md`, `.claude/rules/*`, `CONTRIBUTING.md`, `CHANGELOG.md`,
 and root-level `*.md` files. The rule auto-loads on the matching globs.
 
 For the code-comment counterpart (Four Voices, Earned-Comment Test, directives
@@ -31,7 +30,6 @@ Transfer strength tracks **(machine reader) × (low teaching mandate)**.
 | **CHANGELOG / THIRD_PARTY_NOTICES / CoC**    | release / license / community                          | **strong** for Plan-leakage; Provenance **inverted** (CHANGELOG _is_ history — the carve-out); Durability adapted (NOTICES is a maintained single-owner mirror). |
 | **CONTRIBUTING.md**                          | external contributors                                  | **adapted**: every path/command/flag must resolve; Self-executable-instruction applies; teaching repetition is signal, not bloat.                                |
 | **README.md**                                | newcomers / evaluators                                 | **adapted**: Plan-leakage full; Durability in spirit; narrative/teaching voice is the job, **promotional/hype voice is not (§5)**; Length N/A.                   |
-| **book/**                                    | end users (modelers)                                   | **adapted**: executable-claim integrity dominates the real debt; teaching mandate supersedes Length; **the §5 anti-hype voice register applies**.                |
 
 ### Which of the six concerns transfer
 
@@ -49,7 +47,7 @@ Transfer strength tracks **(machine reader) × (low teaching mandate)**.
   - **Voice machinery** (the Four Voices, Intra-Comment Surgery, the contract/
     rationale-seam distinction) — category error; the prose reader cannot see a
     code seam. The teaching/narrative register (explaining, second-person
-    instructions, worked examples) is the _correct_ register for README/book/CoC/
+    instructions, worked examples) is the _correct_ register for README/CoC/
     CONTRIBUTING. These structural concerns are governed by
     `.claude/rules/comments.md` for `.rs` files and do not apply to Markdown prose.
   - **Caveat — this does NOT exempt voice.** "Narrative is the correct register"
@@ -75,7 +73,7 @@ Transfer strength tracks **(machine reader) × (low teaching mandate)**.
 Corollaries:
 
 - `env!(CARGO_PKG_VERSION)` is **not** the prose answer — rendered Markdown is not
-  compiled. The answer is a guard script (e.g. `check_book_version.py`).
+  compiled. The answer is a guard script (e.g. `check_schemas.sh`).
 - "State the invariant" beats "pin a source" when no generator exists: write
   "every CLI output is mirrored in Python" (a rule a gate enforces), not
   "currently none are missing" (a snapshot that rots); write "one analytic case
@@ -91,9 +89,10 @@ A code comment is co-located with one code site, so these cannot arise there:
 1. **Single-source fan-out (cache coherency).** One authoritative fact cached
    into N audience docs that drift apart. _Rule:_ one owner per fact; every other
    doc is a shape-only pointer or a guard-pinned literal.
-   _Example:_ MSRV 1.86 (book) vs 1.88 (Cargo.toml) — this specific recurrence
-   is now prevented by a guard, but the failure mode remains live for any
-   multi-doc fact without a comparable guard.
+   _Example (historical):_ MSRV 1.86 (book) vs 1.88 (Cargo.toml) — the guard
+   that caught this (`check_book_version.py`) was retired with book/ (mdBook
+   decommission); the failure mode remains live for any multi-doc fact without
+   a comparable guard.
 
 2. **Stale current-state snapshots presented as standing truth.** A census or
    completeness claim that rots silently (no adjacent diff forces an edit).
@@ -108,9 +107,10 @@ A code comment is co-located with one code site, so these cannot arise there:
    commands, flags, and copy-paste code blocks a reader runs. _Rule:_ every cited
    **repo-relative** path/command/flag must resolve against the live tree or
    binary. **Scope bound (critical):** repo-relative prefixes only — **never**
-   "every cited filename resolves", because the book legitimately cites the external
-   `cobre-docs` spec/theory pages absent from this repo. The path/link checker
-   (when wired) enforces this bound; it is the spec the checker must honor.
+   "every cited filename resolves", because README/CONTRIBUTING legitimately
+   cite the external `cobre-docs` spec/theory pages absent from this repo. The
+   path/link checker (`check-doc-paths.sh`) enforces this bound; it is the spec
+   the checker must honor.
 
 5. **Self-executable agent instruction.** A command an agent-facing doc tells the
    reader to run must itself _succeed_ — verified by running it, not by
@@ -123,9 +123,10 @@ A code comment is co-located with one code site, so these cannot arise there:
    reads as canonical. _Corollary:_ a partial guard lies; a passing guard is
    evidence only for the fact-class it parses. Audit guard **coverage**, not just
    pass/fail.
-   _Examples:_ `allow-attribute-inventory.md` tracked at root;
-   `check_book_version.py` green while MSRV drift survives; a schema-count assert
-   that passes while the actual count has grown.
+   _Examples:_ `allow-attribute-inventory.md` tracked at root; a version-drift
+   guard green while the underlying prose has since been deleted along with
+   its scan target; a schema-count assert that passes while the actual count
+   has grown.
 
 ---
 
@@ -171,7 +172,7 @@ A code comment is co-located with one code site, so these cannot arise there:
 
 ## 5. Voice register — sober reference, not marketing
 
-`book/`, `README.md`, and the other narrative docs **teach**; they do not **sell**.
+`README.md` and the other narrative docs **teach**; they do not **sell**.
 The teaching/narrative register (§1) is welcome — explain, address the reader
 directly, walk through worked examples. **Promotional / marketing register is
 not.** A reader should never feel pitched to. Capabilities and mechanisms are

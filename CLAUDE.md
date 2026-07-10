@@ -47,7 +47,7 @@ These are non-negotiable. Violations must be fixed before committing.
 - **`slow-tests` feature** — long-running tests (D-case sweep, FPHA plane-selection, forward-sampler convergence) are gated behind `#[cfg_attr(not(feature = "slow-tests"), ignore = ...)]`. Default `cargo test --workspace` skips them; pass `--features slow-tests` to include them.
 - **No plan-structure references in user-facing artifacts** — identifiers such
   as `Epic 09`, `ticket-007`, or `architecture-unification plan` must not
-  appear in `CHANGELOG.md`, release notes, `book/`, public rustdoc, or
+  appear in `CHANGELOG.md`, release notes, public rustdoc, or
   comments in shipped code. Plans live in `plans/` (gitignored); public
   artifacts describe behavior, not how the work was organized. Git commit
   messages may reference plan structure — they target git-log readers, not
@@ -77,7 +77,7 @@ compile.
 
 Comment & documentation rules for all `.rs` files are codified in `.claude/rules/comments.md`, which auto-loads when editing any `**/*.rs` file. It governs the default-off Deletion Test, the refactor/relocate/hoist gates, the Four Voices, and directives D1–D5 / N1–N6.
 
-Prose documentation integrity rules (scope matrix, the single adaptation, and the six prose-only failure modes) are codified in `.claude/rules/doc-integrity.md`, which auto-loads when editing Markdown files in `book/`, `CONTRIBUTING.md`, `CHANGELOG.md`, and root-level `*.md`.
+Prose documentation integrity rules (scope matrix, the single adaptation, and the six prose-only failure modes) are codified in `.claude/rules/doc-integrity.md`, which auto-loads when editing Markdown files in `CONTRIBUTING.md`, `CHANGELOG.md`, and root-level `*.md`.
 
 When modifying hot-path code (`training/forward/`, `training/backward/`,
 `training/training.rs`, `simulation/pipeline.rs`, `training/lower_bound.rs`),
@@ -125,7 +125,7 @@ When adding new output files, check both CLI and Python write paths:
 
 | Resource              | Location            | Purpose                                      |
 | --------------------- | ------------------- | -------------------------------------------- |
-| Software book         | `book/`             | User-facing documentation (mdBook)           |
+| Unified docs site     | `https://docs.cobre-rs.dev/`                     | User-facing documentation (methodology + software) |
 | Methodology reference | `~/git/cobre-docs/` | Specs, theory, math                          |
 | CHANGELOG             | `CHANGELOG.md`      | Per-release feature list                     |
 | Design docs           | `docs/design/`      | Design proposals & performance investigations (not all implemented) |

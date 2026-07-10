@@ -8,14 +8,14 @@
 # has no compiler to catch the drift. This gate is that mechanical check.
 #
 # Scanned sources (exactly):
-#   README.md, CONTRIBUTING.md, CLAUDE.md, and every *.md under book/src/.
+#   README.md, CONTRIBUTING.md, CLAUDE.md.
 #
-# Two checks:
+# One check:
 #
 #   1. Repo-relative tree-path tokens. A backtick-quoted or bare token that
 #      begins with a RECOGNIZED top-level repo-relative prefix:
 #
-#          crates/  scripts/  book/  examples/  docs/  .github/  .claude/
+#          crates/  scripts/  examples/  docs/  .github/  .claude/
 #
 #      OR is one of the bare top-level repo filenames:
 #
@@ -27,20 +27,18 @@
 #
 #      `src/` is intentionally NOT a prefix: there is no top-level src/ dir in
 #      this repo (sources live under crates/*/src/). A token like `src/gemm.rs`
-#      (CLAUDE.md) or `src/highs.rs` / `src/types.rs` / `src/trait_def.rs`
-#      (book/src/crates/solver.md) is intentional CRATE-RELATIVE shorthand that
-#      legitimately does not resolve at repo root. Including `src/` would
-#      produce guaranteed false positives on legitimate shorthand and violate
-#      §6.4's "never require every cited filename resolves" bound.
+#      (CLAUDE.md) is intentional CRATE-RELATIVE shorthand that legitimately
+#      does not resolve at repo root. Including `src/` would produce guaranteed
+#      false positives on legitimate shorthand and violate §6.4's "never
+#      require every cited filename resolves" bound.
 #
 #      Glob tokens (containing */** ) assert a directory class, not a literal
 #      file. Resolve the longest wildcard-free ancestor (e.g. crates/cobre-sddp/
 #      for `crates/cobre-sddp/**/*.rs`); a rotted directory prefix still fails.
 #
-#   2. Intra-book relative links. A `[text](relative/path.md)` link in any
-#      book/src/**/*.md is resolved relative to the containing .md's directory;
-#      the resolved target must exist. URL / mailto / anchor-only targets are
-#      skipped.
+#   (The former Check 2 — intra-book relative link resolution — was retired
+#   with book/ (mdBook decommission); the unified docs site at
+#   docs.cobre-rs.dev owns link integrity for user-facing prose now.)
 #
 # Exclusions (MUST NOT be flagged), per §6.4's scope bound:
 #   - Absolute URLs: http://, https://, mailto:, ftp://.
@@ -54,13 +52,12 @@
 #     top-level filename. User-data input-file names (config.json, thermals.json,
 #     system/hydros.json, output/...) are out of scope BY CONSTRUCTION — they
 #     lack a tree prefix and are never resolved.
-#   - Vendored / generated book assets: book/*.min.js and book/output/**.
 #
 # Reporting: each hit is printed as `FILE:LINE: <matched token span>` — the
 #   token span only (grep -noE style), never the whole prose line.
 #
 # Exit codes:
-#   0 — All repo-relative paths/links resolve.
+#   0 — All repo-relative paths resolve.
 #   1 — One or more do not resolve, OR a required scanned source is missing.
 
 set -euo pipefail
@@ -75,15 +72,11 @@ readonly SCAN_FILES=(
     "CLAUDE.md"
 )
 
-# Glob root for the book's prose: every *.md under book/src/.
-readonly BOOK_SRC="${REPO_ROOT}/book/src"
-
 # Recognized top-level repo-relative directory prefixes (a token must begin with
 # one of `<prefix>/` to be in scope). `src/` is deliberately absent (see header).
 readonly REPO_PREFIXES=(
     "crates"
     "scripts"
-    "book"
     "examples"
     "docs"
     ".github"
@@ -223,40 +216,11 @@ check_path_tokens() {
         if ! token_resolves "$norm"; then
             violations+="${rel}:${ln}: ${token}"$'\n'
         fi
-    done < <(grep -noP '(?<![A-Za-z0-9_./(-])(crates|scripts|book|examples|docs|\.github|\.claude)/[A-Za-z0-9_./*#=-]+|(?<![A-Za-z0-9_./(-])(Cargo\.toml|Cargo\.lock|deny\.toml|rust-toolchain\.toml)' "$file" 2>/dev/null || true)
+    done < <(grep -noP '(?<![A-Za-z0-9_./(-])(crates|scripts|examples|docs|\.github|\.claude)/[A-Za-z0-9_./*#=-]+|(?<![A-Za-z0-9_./(-])(Cargo\.toml|Cargo\.lock|deny\.toml|rust-toolchain\.toml)' "$file" 2>/dev/null || true)
 }
 
-# --- Check 2: intra-book relative [text](target) links ----------------------
-# Resolve each link target relative to the containing .md's directory; report a
-# missing target. URL / mailto / anchor-only / cobre-docs targets are skipped.
-check_book_links() {
-    local file="$1"
-    local rel="$2"
-    local dir
-    dir="$(dirname "$file")"
-    local ln linkraw tgt base
-
-    while IFS=: read -r ln linkraw; do
-        [[ -n "$linkraw" ]] || continue
-        # Strip the `](` prefix and trailing `)`.
-        tgt="${linkraw#\](}"
-        tgt="${tgt%)}"
-        [[ -n "$tgt" ]] || continue
-        is_excluded "$tgt" && continue
-        case "$tgt" in
-            \#*) continue ;;   # anchor-only target
-        esac
-        # Only resolve intra-book document/asset links; an anchor may trail.
-        base="${tgt%%#*}"
-        [[ -n "$base" ]] || continue
-        if [[ ! -e "${dir}/${base}" ]]; then
-            violations+="${rel}:${ln}: ${tgt}"$'\n'
-        fi
-    done < <(grep -noE '\]\([^)]+\)' "$file" 2>/dev/null || true)
-}
-
-# --- Drive both checks over every scanned source ----------------------------
-# Explicit single-file sources first (hard error if a required source is gone).
+# --- Drive the check over every scanned source ------------------------------
+# Explicit single-file sources (hard error if a required source is gone).
 for rel in "${SCAN_FILES[@]}"; do
     file="${REPO_ROOT}/${rel}"
     if [[ ! -f "$file" ]]; then
@@ -265,19 +229,6 @@ for rel in "${SCAN_FILES[@]}"; do
     fi
     check_path_tokens "$file" "$rel"
 done
-
-# Every *.md under book/src/, excluding generated/vendored book assets (which
-# live under book/output/ and book/*.min.js — outside book/src/ — so the find
-# scope already omits them; the -path prune is a defensive belt).
-if [[ ! -d "$BOOK_SRC" ]]; then
-    echo "FAIL: required scanned source directory is missing: book/src/"
-    exit 1
-fi
-while IFS= read -r -d '' file; do
-    rel="${file#"${REPO_ROOT}/"}"
-    check_path_tokens "$file" "$rel"
-    check_book_links "$file" "$rel"
-done < <(find "$BOOK_SRC" -name '*.md' -not -path '*/output/*' -print0)
 
 # Strip the trailing newline accumulated above, then de-duplicate: a token may
 # be reported by both the backtick pass and the bare pass (e.g. a backtick-quoted

@@ -290,12 +290,8 @@ jobs:
         run: bash scripts/ci/check-allow-rationale.sh
       - name: Check Python parity
         run: python3 scripts/ci/check_python_parity.py --max 0
-      - name: Check book version references
-        run: python3 scripts/ci/check_book_version.py
       - name: Check doc voice (no hype / unpinned numbers)
         run: python3 scripts/ci/check_doc_voice.py
-      - name: Check doc counts (pinned column/field counts match their tables)
-        run: python3 scripts/ci/check_doc_counts.py
       - name: Advisory — code-quality hotspot report
         # ADVISORY: always exits 0. Prints a ranked "where to act first" table
         # (churn x size x suppression density x in-body banners) to the job log.
@@ -340,15 +336,15 @@ jobs:
       - name: Verify schema freshness
         run: ./scripts/ci/check_schemas.sh --build
 
-  # Locks the DOCUMENTED structural invariants of a fresh `cobre init` -> `run`
-  # -> `report` (template file count, training/metadata.json keys,
-  # policy/metadata.json warm-start keys, the `cobre report` key set) against the
-  # live binary, so the book cannot silently drift from CLI output. Minimal
-  # setup: only the default-feature (HiGHS) `cobre` binary is needed — no MPICH
-  # or flatc, since the default CLI build enables neither `mpi` nor
-  # `flatc-conformance`. `jq` is preinstalled on `ubuntu-latest`. Scoped to the
-  # documented invariants the assert_cmd suite does not already pin; it does not
-  # re-run command-execution coverage.
+  # Locks structural invariants of a fresh `cobre init` -> `run` -> `report`
+  # (template file count, training/metadata.json keys, policy/metadata.json
+  # warm-start keys, the `cobre report` key set) against the live binary, so the
+  # CLI's on-disk/stdout output shape cannot silently drift. Minimal setup: only
+  # the default-feature (HiGHS) `cobre` binary is needed — no MPICH or flatc,
+  # since the default CLI build enables neither `mpi` nor `flatc-conformance`.
+  # `jq` is preinstalled on `ubuntu-latest`. Scoped to structural invariants the
+  # assert_cmd suite does not already pin exactly; it does not re-run
+  # command-execution coverage.
   docs-examples:
     name: Docs Examples
     runs-on: ubuntu-latest
@@ -359,7 +355,7 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Verify documented init/run/report invariants
+      - name: Verify init/run/report structural invariants
         run: ./scripts/ci/check-docs-examples.sh --build
 
   # Docs build once on the primary (HiGHS) backend; NOT duplicated onto CLP.
@@ -402,47 +398,6 @@ jobs:
       - run: cargo doc --workspace --no-deps --features "${{ env.NON_SOLVER_FEATURES }}"
         env:
           RUSTDOCFLAGS: -Dwarnings
-
-  # Build the mdBook on every PR/push so book breakage (broken includes, bad
-  # preprocessor config, malformed Markdown) fails the PR instead of landing on
-  # main and only surfacing at deploy time. Build-only: the deploy workflow
-  # (Deploy docs) owns publishing and stays push-to-main. Install steps mirror
-  # that workflow's mdBook + mdbook-mermaid setup.
-  book:
-    name: Book Build
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v6
-      - name: Install mdBook
-        uses: taiki-e/install-action@v2
-        with:
-          tool: mdbook
-      - name: Install mdbook-mermaid
-        run: cargo install mdbook-mermaid --locked
-      # mdbook v0.5.x exits 0 even when a `{{#include}}` target is missing or a
-      # SUMMARY entry is dangling — it only logs an `ERROR` line and carries on.
-      # So the gate has two independent failure conditions:
-      #   1. mdbook's own non-zero exit (preserved via `set -o pipefail` so the
-      #      `tee` pipe does not mask it).
-      #   2. any `ERROR`-prefixed log line, which catches the broken-include /
-      #      dangling-link case that exits 0.
-      # Only lines beginning with `ERROR` are fatal; the mdbook-mermaid
-      # version-mismatch line is logged as `Warning:` and stays non-fatal.
-      - name: Build book
-        env:
-          # Force env_logger's plain "LEVEL target: msg" format (no timestamp
-          # prefix) so the `^ERROR` match below reliably fires regardless of CI
-          # terminal detection — mdbook exits 0 on broken includes / dangling
-          # SUMMARY links, so this grep is the real gate.
-          RUST_LOG_STYLE: never
-        run: |
-          set -euo pipefail
-          mdbook build book 2>&1 | tee /tmp/mdbook-build.log
-          if grep -qE '^ERROR' /tmp/mdbook-build.log; then
-            echo "::error::mdbook logged an ERROR (broken include or dangling SUMMARY link); see the log above."
-            exit 1
-          fi
 
   # cargo-audit reads Cargo.lock and the advisory DB; it does not compile any
   # crate, so it never trips cobre-solver's both-backends `compile_error!`.

@@ -25,8 +25,8 @@
 #   - Files whose path contains target/ (build artefacts).
 #   - Files whose basename contains "test" (test code may name forbidden
 #     tokens for negative tests).
-#   - Files under plans/, docs/, book/ are not in scope by construction
-#     (the find predicates only walk Cargo.toml and the two src/ subtrees).
+#   - Files under plans/, docs/ are not in scope by construction (the find
+#     predicates only walk Cargo.toml and the two src/ subtrees).
 #   - The crates/cobre-solver/examples/ tree is naturally excluded because
 #     the .rs scan is scoped to crates/*/src/ only — the audit_mm_dispatch
 #     example legitimately references matrixmultiply::dgemm.

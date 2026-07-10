@@ -6,13 +6,9 @@
 # .claude/rules/doc-integrity.md §5 "stale snapshots / executable claims" and
 # .claude/rules/comments.md §5): shipped documentation must not contain an
 # unfilled placeholder. A placeholder that ships is a promise the reader cannot
-# cash — it reads as a fact while being a hole. Two source classes are scanned:
+# cash — it reads as a fact while being a hole. One source class is scanned:
 #
-#   1. Authored book prose — every *.md under book/src/. The --include='*.md'
-#      glob excludes vendored *.min.js assets, and pointing at book/src (NOT
-#      book/) excludes the generated book/output/ tree.
-#
-#   2. Production rustdoc — `///` and `//!` doc-comment lines in crates/*/src
+#   1. Production rustdoc — `///` and `//!` doc-comment lines in crates/*/src
 #      .rs files, with the cfg(test) tail-block awk pre-filter (borrowed from
 #      check-no-plan-leaks.sh / check-comment-refs.sh) dropping everything from
 #      the first `#[cfg(test)]` line onward. A placeholder in a test-only
@@ -26,14 +22,16 @@
 #   followed by production code would incorrectly skip that trailing code. In
 #   practice cobre files follow the tail-block convention.
 #
+#   (The former book-prose pass — every *.md under book/src/ — was retired with
+#   book/ (mdBook decommission); the unified docs site at docs.cobre-rs.dev owns
+#   placeholder hygiene for user-facing prose now.)
+#
 # Flagged patterns:
 #   \bTBD\b         — the literal token TBD, word-boundary anchored so a
 #                     substring (e.g. `aTBDb`) does not over-match.
 #   to be inserted  — the phrase, case-insensitively.
 #
-# Exclusions (critical): book/*.min.js (vendored mermaid engine ships
-#   `Error("TBD")`), the entire generated book/output/ tree, and any
-#   non-.md / non-.rs file. The scan roots and --include glob enforce these.
+# Exclusions (critical): any non-.rs file. The scan roots enforce this.
 #
 # Reporting: each hit is printed as `FILE:LINE: <matched token span>` — the
 #   token span only (grep -noE style), not the whole line.
@@ -55,11 +53,6 @@ command -v cs_emit_production_lines >/dev/null \
 # Placeholder token patterns. grep -noE extracts the matched span only.
 readonly PLACEHOLDER_PATTERN='\bTBD\b|[Tt][Oo] [Bb][Ee] [Ii][Nn][Ss][Ee][Rr][Tt][Ee][Dd]'
 
-# Book prose scan root: book/src only (NOT book/), so the generated
-# book/output/ tree is out of reach. The --include='*.md' glob then drops the
-# vendored *.min.js assets that legitimately carry `TBD`.
-readonly BOOK_SRC="${REPO_ROOT}/book/src"
-
 # .rs source directories: scanned per-file with the cfg(test) tail-block
 # exclusion (see header). Mirrors check-no-plan-leaks.sh SCAN_DIRS.
 readonly SCAN_DIRS=(
@@ -76,19 +69,6 @@ readonly SCAN_DIRS=(
 )
 
 violations=""
-
-# --- Book prose pass -------------------------------------------------------
-# Recursive grep over book/src/*.md with token-span extraction (-noE) and
-# FILE:LINE: location (-H -n). --include='*.md' + the book/src root enforce the
-# exclusion classes. -r needs no -H; -n gives line, -o gives span; grep
-# prefixes FILE:LINE: automatically under -r.
-if [[ -d "$BOOK_SRC" ]]; then
-    book_hits=$(grep -rnoE --include='*.md' "$PLACEHOLDER_PATTERN" \
-        "$BOOK_SRC" 2>/dev/null || true)
-    if [[ -n "$book_hits" ]]; then
-        violations+="${book_hits}"$'\n'
-    fi
-fi
 
 # --- Production rustdoc pass ------------------------------------------------
 # Stage 1 (awk): truncate each .rs file at the cfg(test) tail block and emit

@@ -363,7 +363,7 @@ is a concrete edit (re-verify line numbers first — they drift):
 | 11  | `CONTRIBUTING.md:17`                                                                                 | `mdbook-katex` → `mdbook-mermaid`; `CONTRIBUTING.md:181-182` `tests/cli_version.rs` → `cli_smoke.rs`                                                                                                                                                                                                                |
 | 12  | `README.md:28`                                                                                       | qualify the MCP claim ("reserved/experimental"); reconcile the book host to one canonical URL                                                                                                                                                                                                                       |
 | 13  | `git mv allow-attribute-inventory.md plans/`                                                         | relocate the dated snapshot out of the repo root (note: `git mv` keeps it _tracked_ inside the gitignored `plans/`; use `git rm --cached` + plain move if it should become untracked like the rest of `plans/`)                                                                                                     |
-| 14  | book parquet column counts                                                                           | convergence 13→14, iteration_timing 18→19 (+ `output-format.md:300` 15→16 timing columns), cut_selection 9→10 at `output-format.md:427` **and** `performance-accelerators.md:226`; land with the Phase-2 `cli_schema.rs` exact-diff guard or restate as "the committed `book/src/schemas/*.json` are authoritative" |
+| 14  | book parquet column counts                                                                           | convergence 13→14, iteration_timing 18→19 (+ `output-format.md:300` 15→16 timing columns), cut_selection 9→10 at `output-format.md:427` **and** `performance-accelerators.md:226`; land with the Phase-2 `cli_schema.rs` exact-diff guard or restate as "the committed `schemas/*.json` are authoritative" |
 | 15  | `book/src/crates/sddp.md:626-644`                                                                    | wire-format section: `CUT_WIRE_VERSION` 2 → 1, 24-byte header → 25, drop the phantom Activity-update record and the version-rejection claim (the code-side mirror `cut/mod.rs` "24-byte header" belongs to the commenting-philosophy §7 cleanup pass)                                                               |
 
 ### Phase 2 — worth building (only the guards that pay for themselves)
@@ -374,7 +374,7 @@ is a concrete edit (re-verify line numbers first — they drift):
   absolute URLs and the external `cobre-docs` refs (per `commenting-philosophy.md`
   E3). Catches `_manifest.json`×5, `tests/cli_version.rs`, `lp_builder.rs`.
 - **Strengthen the two lying guards:** make `cli_schema.rs` exact-diff the
-  committed `book/src/schemas/*.json` set (18 today) instead of `len() >= 8`;
+  committed `schemas/*.json` set (18 today) instead of `len() >= 8`;
   extend `check_book_version.py` to also pin MSRV (`Rust 1.\d+` near
   "MSRV"/"rust-version" vs `Cargo.toml`).
 

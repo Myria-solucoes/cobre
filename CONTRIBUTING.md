@@ -14,7 +14,6 @@ Optional (needed for specific crates):
 
 - **MPICH** (for `cobre-comm` MPI backend): `libmpich-dev` on Debian/Ubuntu
 - **Python 3.12+** and **maturin** (for `cobre-python` builds): `pip install maturin`
-- **mdBook** (for the documentation site): `cargo install mdbook mdbook-mermaid`
 
 ### Building
 
@@ -300,27 +299,24 @@ chore(ferrompi): update to v0.3.0
 ### Improving Documentation
 
 Documentation improvements are always welcome. The Rust API docs live inline
-in source code (rustdoc). The user-facing book lives in this repository under
-`book/` — preview it locally with:
-
-```bash
-mdbook serve book --open
-```
-
-The methodology specification corpus lives in the separate
+in source code (rustdoc); crate-internal reference docs live in this repo's
+per-crate READMEs (`crates/*/README.md`). User-facing guides, tutorials, and
+reference pages live on the software docs site,
+[docs.cobre-rs.dev](https://docs.cobre-rs.dev/). The methodology specification
+corpus lives in the separate
 [cobre-docs](https://github.com/cobre-rs/cobre-docs) repository.
 
 #### JSON schemas and the cobre-docs vendored copy
 
 The input JSON schemas are generated from the `cobre-io` Rust types — code is
 the source of truth. They are exported with `cobre schema export`, committed
-under `book/src/schemas/`, and CI guards their freshness (`scripts/ci/check_schemas.sh`,
+under `schemas/`, and CI guards their freshness (`scripts/ci/check_schemas.sh`,
 via the `schemas` job in `.github/workflows/ci.yml`). If a schema-bearing type
 changes, regenerate them:
 
 ```bash
 cargo build --release --bin cobre
-./target/release/cobre schema export --output-dir book/src/schemas
+./target/release/cobre schema export --output-dir schemas
 ```
 
 The cobre-docs site **vendors** these schemas for its Reference pages. When the
@@ -359,20 +355,22 @@ See `.claude/architecture-rules.md` for the full Python parity checklist.
 
 ### JSON Schemas
 
-The JSON schemas under `book/src/schemas/` are generated
+The JSON schemas under `schemas/` are generated
 (`schemars::schema_for!` in `crates/cobre-io/src/schema.rs`) from the raw
 config/output types. After adding or renaming a field, changing a
 `#[derive(JsonSchema)]` type, or editing a schemars-visible doc comment,
 regenerate them:
 
 ```bash
-cargo run -p cobre-cli -- schema export --output-dir book/src/schemas
+cargo run -p cobre-cli -- schema export --output-dir schemas
 ```
 
 CI only asserts that the _set of filenames_ matches the export — it does not
 compare content, so a stale schema passes silently. The human-readable
-`book/src/reference/case-format.md` is a separate hand-maintained mirror of the
-same contracts; update it in the same change.
+case-format reference on the docs site
+([docs.cobre-rs.dev](https://docs.cobre-rs.dev/reference/case-format.html)) is
+a separate hand-maintained mirror of the same contracts; update it in the same
+change.
 
 ### Crate-Specific Guidelines
 
@@ -473,7 +471,6 @@ Before tagging a new release:
    ```
 3. Run quality checks:
    ```bash
-   python3 scripts/ci/check_book_version.py
    python3 scripts/ci/check_python_parity.py --max 0
    ```
 4. Run `cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings`,

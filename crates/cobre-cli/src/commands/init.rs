@@ -261,7 +261,7 @@ mod tests {
 
         let config_content = std::fs::read_to_string(target.join("config.json")).unwrap();
         assert!(
-            config_content.contains("https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/config.schema.json"),
+            config_content.contains("https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/schemas/config.schema.json"),
             "generated config.json must contain the $schema URL"
         );
     }
@@ -279,7 +279,7 @@ mod tests {
         assert!(execute(args).is_ok());
 
         let base =
-            "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/";
+            "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/schemas/";
 
         let checks: &[(&str, &str)] = &[
             ("system/buses.json", "buses.schema.json"),

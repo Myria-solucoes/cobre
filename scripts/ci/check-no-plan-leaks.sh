@@ -2,7 +2,7 @@
 #
 # check-no-plan-leaks.sh — Plan-structure leak gate.
 #
-# Scans shipped artefacts (production source, book, CHANGELOG) for
+# Scans shipped artefacts (production source, CHANGELOG, README) for
 # plan-structure tokens that must not appear in user-facing
 # content per CLAUDE.md hard rule:
 #
@@ -34,7 +34,7 @@
 #
 # Scope: production source under crates/*/src/ (including the umbrella
 #   crates/cobre/src and the reserved stub crates), test/bench source under
-#   crates/*/tests/ and crates/*/benches/, book/, CHANGELOG.md, and README.md.
+#   crates/*/tests/ and crates/*/benches/, CHANGELOG.md, and README.md.
 #   Vendored *.min.js files are excluded from every pass.
 #
 # Excluded: plans/ (gitignored), .github/, target/, .git/, Cargo.lock,
@@ -53,7 +53,7 @@
 #   followed by production code would incorrectly skip that trailing code. In
 #   practice, cobre files follow the tail-block convention.
 #
-#   Non-.rs targets (book/, CHANGELOG.md, README.md) have no cfg(test) concept
+#   Non-.rs targets (CHANGELOG.md, README.md) have no cfg(test) concept
 #   and stay on the plain whole-file grep path.
 #
 # Exit codes:
@@ -108,7 +108,6 @@ readonly SCAN_DIRS
 
 # Non-.rs targets: scanned whole-file with plain grep (no cfg(test) concept).
 readonly SCAN_FILES=(
-    "${REPO_ROOT}/book"
     "${REPO_ROOT}/CHANGELOG.md"
     "${REPO_ROOT}/README.md"
 )
@@ -130,9 +129,8 @@ for dir in "${SCAN_DIRS[@]}"; do
     done < <(find "$dir" -name "*.rs" -print0)
 done
 
-# Non-.rs targets: plain whole-file recursive grep. Vendored *.min.js files
-# (e.g. under book/) are excluded — the widened PATTERN could otherwise match
-# minified JS tokens.
+# Non-.rs targets: plain whole-file recursive grep. *.min.js files are
+# excluded — the widened PATTERN could otherwise match minified JS tokens.
 file_violations=$(grep -rnE "$PATTERN" \
     --exclude='*.min.js' "${SCAN_FILES[@]}" 2>/dev/null \
     || true)
@@ -149,7 +147,7 @@ if [[ -n "$violations" ]]; then
     echo "$violations"
     echo ""
     echo "Per CLAUDE.md, plan-structure references must not appear"
-    echo "in shipped source, the book, or the CHANGELOG. Rewrite"
+    echo "in shipped source, README, or the CHANGELOG. Rewrite"
     echo "in behavioural terms or move to plans/ (gitignored)."
     echo ""
     echo "For workstream feature IDs (F2-002, F3-006, ...) and anchored"

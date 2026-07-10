@@ -7,7 +7,7 @@
 //!
 //! ```json
 //! {
-//!   "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/thermals.schema.json",
+//!   "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/schemas/thermals.schema.json",
 //!   "thermals": [
 //!     {
 //!       "id": 0,
@@ -337,7 +337,7 @@ mod tests {
     /// Canonical valid `thermals.json` with 2 thermals: one with anticipated config
     /// (id=1), one without (id=0).
     const VALID_JSON: &str = r#"{
-      "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/thermals.schema.json",
+      "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/schemas/thermals.schema.json",
       "thermals": [
         {
           "id": 0,

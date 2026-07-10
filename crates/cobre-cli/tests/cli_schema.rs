@@ -40,16 +40,16 @@ fn test_schema_export_writes_files() {
         .filter(|e| e.file_name().to_string_lossy().ends_with(".schema.json"))
         .collect();
 
-    // Compare emitted vs committed `book/src/schemas/` basenames as sets derived
+    // Compare emitted vs committed `schemas/` basenames as sets derived
     // at test time — never a hard-coded count — so a dropped/added/renamed schema fails.
     let emitted: BTreeSet<String> = schema_files
         .iter()
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
 
-    let committed_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../book/src/schemas");
+    let committed_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas");
     let committed: BTreeSet<String> = std::fs::read_dir(&committed_dir)
-        .expect("read book/src/schemas")
+        .expect("read schemas")
         .filter_map(std::result::Result::ok)
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|n| n.ends_with(".schema.json"))
@@ -58,7 +58,7 @@ fn test_schema_export_writes_files() {
     assert_eq!(
         emitted,
         committed,
-        "emitted schema set must equal committed book/src/schemas set; \
+        "emitted schema set must equal committed schemas set; \
          emitted-only: {:?}; committed-only: {:?}",
         emitted.difference(&committed).collect::<Vec<_>>(),
         committed.difference(&emitted).collect::<Vec<_>>(),

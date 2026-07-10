@@ -1,26 +1,28 @@
 #!/usr/bin/env bash
-# Lock the DOCUMENTED structural invariants of a fresh `cobre init` -> `run` ->
-# `report` against the live binary, so the book cannot silently drift from what
-# the CLI actually produces.
+# Lock structural invariants of a fresh `cobre init` -> `run` -> `report`
+# against the live binary, so the CLI's on-disk/stdout output shape cannot
+# silently drift.
 #
-# What it asserts (each is a claim made in book/src/, named in the failure
-# message that fires when it drifts):
+# Formerly framed as "book cannot drift from the CLI" (each invariant below
+# was a claim made in book/src/); the book was retired (mdBook decommission)
+# but these constants were always hardcoded here, not re-read from book/ at
+# run time, so the gate's value is independent of the book's existence — it is
+# now a plain CLI output-shape regression gate. What it asserts (bump the
+# constant here when the CLI's output shape intentionally changes, or the
+# gate fails):
 #   1. `cobre init --template 1dtoy` materializes exactly EXPECTED_INPUT_FILES
-#      regular files (book/src/tutorial/quickstart.md: "Cobre writes N input
-#      files"; book/src/tutorial/anatomy-of-a-case.md). Single source of truth
-#      below — bump it here AND in the book together when a template file is
-#      added, or this gate fails.
-#   2. training/metadata.json EXISTS and carries every documented top-level key
-#      (book/src/reference/output-format.md, "training/metadata.json"). Routed
-#      here per the file each key actually lives in: warm_start_* are NOT here.
-#   3. policy/metadata.json EXISTS and carries warm_start_counts + warm_start_cuts
-#      (book/src/reference/output-format.md, "policy/metadata.json").
-#   4. `cobre report` stdout JSON has EXACTLY the documented ReportOutput key set
-#      (book/src/guide/cli-reference.md + tutorial/understanding-results.md).
+#      regular files. Single source of truth below.
+#   2. training/metadata.json EXISTS and carries every TRAINING_METADATA_KEYS
+#      top-level key. Routed here per the file each key actually lives in:
+#      warm_start_* are NOT here.
+#   3. policy/metadata.json EXISTS and carries warm_start_counts + warm_start_cuts.
+#   4. `cobre report` stdout JSON has EXACTLY the REPORT_KEYS_SORTED key set.
 #
-# This gate is scoped to the DOCUMENTED structural invariants the assert_cmd
-# integration suite (init.rs / cli_run.rs / cli_report.rs / cli_e2e_*) does not
-# already pin; it deliberately does not re-cover command-execution behavior.
+# This gate is scoped to structural invariants the assert_cmd integration
+# suite (init.rs / cli_run.rs / cli_report.rs / cli_e2e_*) does not already
+# pin exactly (exact input-file count, exact top-level key SETS rather than
+# individual key/value spot-checks); it deliberately does not re-cover
+# command-execution behavior.
 #
 # Usage:
 #   scripts/ci/check-docs-examples.sh           — assumes ./target/release/cobre is built
@@ -30,14 +32,12 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
-# ── Single source of truth for the documented init file count ─────────────────
-# The book states this verbatim ("Cobre writes 11 input files"). Keep them in
-# lockstep: a future template addition must update BOTH the book prose and this
-# constant, and this gate fails until it does.
+# ── Single source of truth for the expected init file count ───────────────────
+# A future template addition must update this constant, or this gate fails.
 readonly EXPECTED_INPUT_FILES=11
 readonly TEMPLATE="1dtoy"
 
-# Documented top-level keys of training/metadata.json (output-format.md). Per
+# Expected top-level keys of training/metadata.json. Per
 # the routing decision, warm_start_* belong to policy/metadata.json, NOT here.
 readonly TRAINING_METADATA_KEYS=(
   cobre_version
@@ -58,14 +58,14 @@ readonly TRAINING_METADATA_KEYS=(
   distribution
 )
 
-# Documented keys that policy/metadata.json must carry (output-format.md).
+# Expected keys that policy/metadata.json must carry.
 readonly POLICY_METADATA_KEYS=(
   warm_start_counts
   warm_start_cuts
 )
 
-# Documented ReportOutput top-level key set (cli-reference.md). Sorted; the
-# `cobre report` stdout must match this set EXACTLY (no missing, no extra).
+# Expected ReportOutput top-level key set. Sorted; the `cobre report` stdout
+# must match this set EXACTLY (no missing, no extra).
 readonly REPORT_KEYS_SORTED='bounds,cost,output_directory,simulation,status,training'
 
 BUILD=0
@@ -92,44 +92,44 @@ CASE_DIR="$TMP_DIR/case"
 OUT_DIR="$TMP_DIR/output"
 
 fail() {
-  echo "ERROR: documented invariant drifted — $1" >&2
+  echo "ERROR: structural invariant drifted — $1" >&2
   exit 1
 }
 
-# ── Invariant 1: init materializes exactly the documented file count ──────────
+# ── Invariant 1: init materializes exactly the expected file count ───────────
 "$BIN" init --template "$TEMPLATE" "$CASE_DIR" >/dev/null
 actual_files="$(find "$CASE_DIR" -type f | wc -l | tr -d '[:space:]')"
 if [[ "$actual_files" -ne "$EXPECTED_INPUT_FILES" ]]; then
-  fail "\`cobre init --template $TEMPLATE\` wrote $actual_files input files, but the book documents $EXPECTED_INPUT_FILES (book/src/tutorial/quickstart.md). Update both the book prose and EXPECTED_INPUT_FILES in this script."
+  fail "\`cobre init --template $TEMPLATE\` wrote $actual_files input files, expected $EXPECTED_INPUT_FILES. Update EXPECTED_INPUT_FILES in this script if the template intentionally changed."
 fi
-echo "init file count: $actual_files == $EXPECTED_INPUT_FILES (documented) ✓"
+echo "init file count: $actual_files == $EXPECTED_INPUT_FILES (expected) ✓"
 
 # Drive a fresh run so the metadata/report assertions read live output.
 "$BIN" run "$CASE_DIR" --output "$OUT_DIR" --quiet --color never >/dev/null
 
-# ── Invariant 2: training/metadata.json exists + documented top-level keys ────
+# ── Invariant 2: training/metadata.json exists + expected top-level keys ─────
 training_meta="$OUT_DIR/training/metadata.json"
-[[ -f "$training_meta" ]] || fail "training/metadata.json was not written (book/src/reference/output-format.md documents it)."
+[[ -f "$training_meta" ]] || fail "training/metadata.json was not written."
 for key in "${TRAINING_METADATA_KEYS[@]}"; do
   jq -e "has(\"$key\")" "$training_meta" >/dev/null \
-    || fail "training/metadata.json is missing documented top-level key \`$key\` (book/src/reference/output-format.md, training/metadata.json table)."
+    || fail "training/metadata.json is missing expected top-level key \`$key\`."
 done
-echo "training/metadata.json: ${#TRAINING_METADATA_KEYS[@]} documented top-level keys present (incl. row_pool) ✓"
+echo "training/metadata.json: ${#TRAINING_METADATA_KEYS[@]} expected top-level keys present (incl. row_pool) ✓"
 
 # ── Invariant 3: policy/metadata.json exists + warm_start_* keys ──────────────
 policy_meta="$OUT_DIR/policy/metadata.json"
-[[ -f "$policy_meta" ]] || fail "policy/metadata.json was not written (book/src/reference/output-format.md documents it)."
+[[ -f "$policy_meta" ]] || fail "policy/metadata.json was not written."
 for key in "${POLICY_METADATA_KEYS[@]}"; do
   jq -e "has(\"$key\")" "$policy_meta" >/dev/null \
-    || fail "policy/metadata.json is missing documented key \`$key\` (book/src/reference/output-format.md, policy/metadata.json table)."
+    || fail "policy/metadata.json is missing expected key \`$key\`."
 done
-echo "policy/metadata.json: documented keys present (${POLICY_METADATA_KEYS[*]}) ✓"
+echo "policy/metadata.json: expected keys present (${POLICY_METADATA_KEYS[*]}) ✓"
 
-# ── Invariant 4: report stdout has EXACTLY the documented ReportOutput keys ───
+# ── Invariant 4: report stdout has EXACTLY the expected ReportOutput keys ─────
 report_keys="$("$BIN" report "$OUT_DIR" --color never | jq -r 'keys | sort | join(",")')"
 if [[ "$report_keys" != "$REPORT_KEYS_SORTED" ]]; then
-  fail "\`cobre report\` top-level keys are {$report_keys}, but the book documents {$REPORT_KEYS_SORTED} (book/src/guide/cli-reference.md, cobre report)."
+  fail "\`cobre report\` top-level keys are {$report_keys}, expected {$REPORT_KEYS_SORTED}."
 fi
-echo "cobre report key set: {$report_keys} == documented ✓"
+echo "cobre report key set: {$report_keys} == expected ✓"
 
-echo "All documented init/run/report structural invariants hold. ✓"
+echo "All init/run/report structural invariants hold. ✓"

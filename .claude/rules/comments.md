@@ -385,7 +385,7 @@ would do.
   forms), commit hashes, dead paths, `MEMORY.md` / `.claude/` paths. Reference by
   symbol, intra-doc link, or named test. Stable external spec anchors (`§x.y`) into
   a source-of-truth root are allowed. For a symbol+line hybrid, strip the line.
-- **N4 — No plan/workstream leakage** in shipped code, `book/`, `CHANGELOG`, or
+- **N4 — No plan/workstream leakage** in shipped code, `README.md`, `CHANGELOG`, or
   inline test/bench comments. Ban `Epic`/`ticket`/`T0NN`/`sprint` and workstream
   forms `F-NNN`, `FN-NNN`, `W-N`. When a banned token is a trailing tag on a
   contract/rationale line, amputate only the tag, preserve the invariant. Plan refs

@@ -11,7 +11,7 @@
 //!
 //! ```json
 //! {
-//!   "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/pumping_stations.schema.json",
+//!   "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/schemas/pumping_stations.schema.json",
 //!   "pumping_stations": [
 //!     {
 //!       "id": 0,
@@ -270,7 +270,7 @@ mod tests {
     #[test]
     fn test_parse_valid_pumping_stations() {
         let json = r#"{
-          "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/pumping_stations.schema.json",
+          "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/schemas/pumping_stations.schema.json",
           "pumping_stations": [
             {
               "id": 0,

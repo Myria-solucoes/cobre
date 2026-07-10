@@ -379,7 +379,7 @@ mod tests {
     }
 
     const VALID_JSON: &str = r#"{
-      "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/penalties.schema.json",
+      "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/schemas/penalties.schema.json",
       "bus": {
         "deficit_segments": [
           { "depth_mw": 500.0, "cost": 1000.0 },

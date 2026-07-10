@@ -7,7 +7,7 @@
 //!
 //! ```json
 //! {
-//!   "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/buses.schema.json",
+//!   "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/schemas/buses.schema.json",
 //!   "buses": [
 //!     { "id": 0, "name": "South" },
 //!     {
@@ -320,7 +320,7 @@ mod tests {
     /// Canonical valid `buses.json` with 2 buses: one with entity-level deficit
     /// overrides (id=1), one without (id=0).
     const VALID_JSON: &str = r#"{
-      "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/buses.schema.json",
+      "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/schemas/buses.schema.json",
       "buses": [
         { "id": 0, "name": "South", "operational_start_date": "2024-01-01" },
         {

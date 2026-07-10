@@ -26,7 +26,7 @@
 //!
 //! ```json
 //! {
-//!   "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/initial_conditions.schema.json",
+//!   "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/schemas/initial_conditions.schema.json",
 //!   "storage": [
 //!     { "hydro_id": 0, "value_hm3": 15000.0 },
 //!     { "hydro_id": 1, "value_hm3": 8500.0 }
@@ -796,7 +796,7 @@ mod tests {
 
     /// Canonical valid `initial_conditions.json` with 2 storage and 1 filling entry.
     const VALID_JSON: &str = r#"{
-      "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/book/src/schemas/initial_conditions.schema.json",
+      "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/schemas/initial_conditions.schema.json",
       "storage": [
         { "hydro_id": 0, "value_hm3": 15000.0 },
         { "hydro_id": 1, "value_hm3": 8500.0 }
