@@ -46,7 +46,7 @@ graph TD
     sddp --> cli
 ```
 
-For the full dependency graph and crate responsibilities, see the [methodology reference](https://cobre-rs.github.io/cobre-docs/specs/overview/implementation-ordering.html).
+For the full dependency graph and crate responsibilities, see [ARCHITECTURE.md](https://github.com/cobre-rs/cobre/blob/main/ARCHITECTURE.md).
 
 ## Feature Summary
 
