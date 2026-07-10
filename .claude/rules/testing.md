@@ -6,9 +6,8 @@ paths:
 
 # Cobre Testing Rules
 
-How Cobre is tested, to balance coverage, precision, and maintainability. The full
-analysis, smell inventory, and migration plan live in
-`docs/design/testing-strategy.md`; this file is the standing contract. Generic
+How Cobre is tested, to balance coverage, precision, and maintainability; this
+file is the standing contract. Generic
 cross-language testing pillars (test pyramid, few binaries, one builder, property
 tests for ordering, benches≠tests, uniform slow-gating) live in the global Rust
 rule; the rules below are the Cobre-specific ones.
@@ -56,6 +55,29 @@ rule; the rules below are the Cobre-specific ones.
   bit-exact for the golden HiGHS path only.
 - **Test output goes to `TempDir`.** No test writes into
   `examples/deterministic/*/output/`; generated artifacts self-delete.
+
+## Re-baselining parity hashes
+
+- Baselines live in TWO committed dirs under `crates/cobre-sddp/tests/fixtures/`:
+  `parity_baselines/` (HiGHS) and `parity_baselines_clp/` (CLP — an independent
+  set; CLP's simplex legitimately reaches different-but-valid vertices on
+  degenerate optima). A deliberate re-baseline regenerates BOTH dirs in the same
+  change — updating only one lets the other backend's slow-gated suite rot
+  silently.
+
+  ```bash
+  COBRE_PARITY_REGEN=1 cargo test -p cobre-sddp --features slow-tests --test parity
+  COBRE_PARITY_REGEN=1 cargo test -p cobre-sddp --no-default-features \
+    --features "clp slow-tests" --test parity
+  ```
+
+- Parity hashes are environment-sensitive (floating-point / solver-build
+  divergence). Before trusting a local regen, run the suite WITHOUT regen and
+  confirm every case the change should not affect reproduces its committed hash.
+  When unchanged cases fail locally, judge the change by result-neutrality —
+  capture the actual hashes on the original code and on the changed code; an
+  empty diff between the two proves the change bit-for-bit safe — not by
+  baseline match.
 
 ## Cost discipline — Cobre links a solver into every test binary
 

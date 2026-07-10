@@ -181,6 +181,27 @@ the binary via `assert_cmd`, organized by subcommand
 (`tests/cli_run.rs`, `tests/cli_validate.rs`, `tests/cli_report.rs`,
 `tests/cli_smoke.rs`). Each verifies exit codes, output, and file creation.
 
+### Testing cobre-python
+
+`cobre-python` is excluded from the workspace, so address it with
+`--manifest-path crates/cobre-python/Cargo.toml` (not `-p cobre-python`) for any
+cargo command — this includes `cargo fmt` and `cargo clippy`, which the
+workspace-wide invocations skip. The crate is built with PyO3's
+`extension-module` + `abi3` features, which deliberately omit libpython linkage,
+so `cargo test` on this crate fails to link by design. The supported test path —
+the one CI runs — builds the extension into a virtualenv and runs pytest:
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install maturin pytest pyarrow
+(cd crates/cobre-python && maturin develop --release)
+pytest crates/cobre-python/tests/
+```
+
+GIL-bound conversion helpers (Python↔JSON value mapping, result dict shapes) are
+covered by the pytest suite rather than Rust unit tests — extend the pytest
+suite when touching them.
+
 ### Project Structure
 
 ```
@@ -317,6 +338,23 @@ When adding a new output:
 
 See `.claude/architecture-rules.md` for the full Python parity checklist.
 
+### JSON Schemas
+
+The JSON schemas under `book/src/schemas/` are generated
+(`schemars::schema_for!` in `crates/cobre-io/src/schema.rs`) from the raw
+config/output types. After adding or renaming a field, changing a
+`#[derive(JsonSchema)]` type, or editing a schemars-visible doc comment,
+regenerate them:
+
+```bash
+cargo run -p cobre-cli -- schema export --output-dir book/src/schemas
+```
+
+CI only asserts that the _set of filenames_ matches the export — it does not
+compare content, so a stale schema passes silently. The human-readable
+`book/src/reference/case-format.md` is a separate hand-maintained mirror of the
+same contracts; update it in the same change.
+
 ### Crate-Specific Guidelines
 
 #### cobre-core
@@ -405,9 +443,14 @@ Before tagging a new release:
    job goes red on the stale baselines:
    ```bash
    COBRE_PARITY_REGEN=1 cargo test -p cobre-sddp --features slow-tests --test parity
-   # This rewrites the committed baselines under
-   # crates/cobre-sddp/tests/fixtures/parity_baselines/ (the single source of
-   # truth); review the .sha256 diff and commit it in the same change.
+   COBRE_PARITY_REGEN=1 cargo test -p cobre-sddp --no-default-features \
+     --features "clp slow-tests" --test parity
+   # These rewrite the committed baselines under
+   # crates/cobre-sddp/tests/fixtures/parity_baselines/ (HiGHS) and
+   # crates/cobre-sddp/tests/fixtures/parity_baselines_clp/ (CLP). The two dirs
+   # are the single source of truth and are re-baselined TOGETHER — updating
+   # only one lets the other backend's slow-gated suite rot silently. Review
+   # the .sha256 diffs and commit them in the same change.
    ```
 3. Run quality checks:
    ```bash

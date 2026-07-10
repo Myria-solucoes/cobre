@@ -22,7 +22,20 @@ These are non-negotiable. Violations must be fixed before committing.
 - **Never use `Box<dyn Trait>`** — enum dispatch for closed variant sets
 - **Never allocate on hot paths** — pre-allocate workspaces, reuse buffers
 - **Declaration-order invariance** — results must be bit-for-bit identical
-  regardless of input entity ordering
+  regardless of input entity ordering. Together with run-to-run
+  reproducibility (same inputs → bit-for-bit same outputs, across fresh
+  solver instances) this defines Cobre determinism. Cross-algorithm
+  equivalence is NOT part of the contract: a hot/warm-started solve may
+  report a different-but-equally-valid optimal vertex than a cold solve
+  (same objective and primals, different duals). Assert reproducibility
+  and order-invariance — never hot == cold
+  (`crates/cobre-solver/tests/clp_determinism.rs` is the reference harness)
+- **Unwired config is reserved, not dead** — several config sections are
+  loaded, validated, and schema-exported without yet being consumed (e.g.
+  the hydro storage-violation / filling-target penalties: storage bounds
+  are HARD in the LP today, so those output columns are always 0). They
+  reserve seams for planned features — do not remove unconsumed config in
+  a dead-code sweep without owner sign-off
 - **Infrastructure crate genericity** — `cobre-core`, `cobre-io`, `cobre-solver`,
   `cobre-stochastic`, `cobre-comm` must contain zero algorithm-specific references
   (no "sddp", "SDDP", "Benders" in types, functions, or doc comments)
