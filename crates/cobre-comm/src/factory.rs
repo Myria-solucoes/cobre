@@ -1,14 +1,17 @@
 //! Factory function for creating the active communication backend.
 //!
 //! [`create_communicator`] is the single runtime entry point for constructing a
-//! [`Communicator`](crate::Communicator). The caller passes an explicit
-//! [`BackendKind`]; no environment variable or launcher probe selects the
-//! backend.
+//! [`Communicator`](crate::Communicator). The caller passes a [`BackendKind`].
+//! No configuration environment variable participates in the choice, but
+//! [`BackendKind::Auto`] probes for an MPI launcher — a runtime fact set by
+//! `mpiexec`/`mpirun`/`srun`, not a configuration channel — and selects the MPI
+//! backend when one is detected.
 
-/// Explicit backend selector passed by the caller to [`create_communicator`].
+/// Backend selector passed by the caller to [`create_communicator`].
 ///
-/// The communication backend is chosen solely by this value; there is no
-/// environment-variable or MPI-launcher auto-detection.
+/// [`BackendKind::Mpi`] and [`BackendKind::Local`] force a backend;
+/// [`BackendKind::Auto`] detects one from the launch environment. No
+/// configuration environment variable participates in the choice.
 ///
 /// # Examples
 ///
@@ -21,8 +24,9 @@
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
-    /// Unspecified / unknown backend label, used only for persisted-provenance
-    /// reconstruction; never a valid selection input to [`create_communicator`].
+    /// Detect the backend from the launch environment: the MPI backend when an
+    /// MPI launcher is detected, otherwise the local backend. Also the label
+    /// used when reconstructing an unrecognized persisted backend string.
     Auto,
     /// MPI backend; fails at runtime if the `mpi` feature is not compiled in.
     Mpi,
@@ -193,21 +197,52 @@ pub fn available_backends() -> Vec<String> {
     backends
 }
 
+/// Returns `true` if any MPI launcher environment variable is present (checked
+/// via `var_os`, so non-UTF-8 values still count).
+///
+/// These are set by the launcher (`mpiexec`/`mpirun`/`srun`) as a runtime fact
+/// about how the process was started, not a configuration channel. Always
+/// compiled (no cfg gate) so it is testable in no-feature builds, where it is
+/// unused outside tests — hence the dead-code allow.
+#[cfg_attr(not(feature = "mpi"), allow(dead_code))]
+fn mpi_launch_detected() -> bool {
+    const MPI_ENV_VARS: [&str; 6] = [
+        "PMI_RANK",
+        "PMI_SIZE",
+        "OMPI_COMM_WORLD_RANK",
+        "OMPI_COMM_WORLD_SIZE",
+        "MPI_LOCALRANKID",
+        "SLURM_PROCID",
+    ];
+    MPI_ENV_VARS
+        .iter()
+        .any(|var| std::env::var_os(var).is_some())
+}
+
+/// Auto-detect the backend from the launch environment: the MPI backend when an
+/// MPI launcher is detected (so a run started under `mpiexec`/`mpirun`/`srun`
+/// distributes without an explicit `--comm-backend mpi`), otherwise the local
+/// backend.
+#[cfg(feature = "mpi")]
+fn auto_detect() -> Result<CommBackend, crate::BackendError> {
+    if mpi_launch_detected() {
+        return Ok(CommBackend::Mpi(Box::new(crate::FerrompiBackend::new()?)));
+    }
+    Ok(CommBackend::Local(crate::LocalBackend))
+}
+
 /// Construct the active communication backend (no-feature build).
 ///
-/// When the `mpi` feature is not compiled in, the explicit `kind` selects:
+/// When the `mpi` feature is not compiled in, `kind` selects:
 ///
-/// - [`BackendKind::Local`] → `Ok(LocalBackend)`
+/// - [`BackendKind::Local`] or [`BackendKind::Auto`] → `Ok(LocalBackend)`
+///   (auto-detect can only resolve to local with no MPI compiled in)
 /// - [`BackendKind::Mpi`] → `Err(BackendError::BackendNotAvailable)`
-/// - [`BackendKind::Auto`] → `Err(BackendError::InvalidBackend)` (a provenance
-///   label, never a valid selection input)
 ///
 /// # Errors
 ///
 /// - [`crate::BackendError::BackendNotAvailable`]: a known backend was requested
 ///   but not compiled into this binary.
-/// - [`crate::BackendError::InvalidBackend`]: the selector is not a valid
-///   backend choice.
 ///
 /// # Examples
 ///
@@ -226,32 +261,26 @@ pub fn available_backends() -> Vec<String> {
 #[cfg(not(feature = "mpi"))]
 pub fn create_communicator(kind: BackendKind) -> Result<crate::LocalBackend, crate::BackendError> {
     match kind {
-        BackendKind::Local => Ok(crate::LocalBackend),
+        // No MPI compiled in, so auto-detect can only resolve to local.
+        BackendKind::Local | BackendKind::Auto => Ok(crate::LocalBackend),
         BackendKind::Mpi => Err(crate::BackendError::BackendNotAvailable {
             requested: "mpi".to_string(),
             available: available_backends(),
-        }),
-        BackendKind::Auto => Err(crate::BackendError::InvalidBackend {
-            requested: "auto".to_string(),
-            available: vec!["mpi", "local"].into_iter().map(String::from).collect(),
         }),
     }
 }
 
 /// Construct the active communication backend (MPI build).
 ///
-/// When the `mpi` feature is compiled in, the explicit `kind` selects the
-/// [`CommBackend`]:
+/// When the `mpi` feature is compiled in, `kind` selects the [`CommBackend`]:
 ///
 /// - [`BackendKind::Mpi`] → `CommBackend::Mpi(FerrompiBackend::new()?)`
 /// - [`BackendKind::Local`] → `CommBackend::Local(LocalBackend)`
-/// - [`BackendKind::Auto`] → `Err(BackendError::InvalidBackend)` (a provenance
-///   label, never a valid selection input)
+/// - [`BackendKind::Auto`] → the MPI backend when an MPI launcher is detected,
+///   otherwise the local backend
 ///
 /// # Errors
 ///
-/// - [`crate::BackendError::InvalidBackend`]: the selector is not a valid
-///   backend choice.
 /// - [`crate::BackendError::InitializationFailed`]: the selected backend failed
 ///   to initialize (propagated from [`crate::FerrompiBackend::new`]).
 ///
@@ -272,10 +301,7 @@ pub fn create_communicator(kind: BackendKind) -> Result<CommBackend, crate::Back
     match kind {
         BackendKind::Mpi => Ok(CommBackend::Mpi(Box::new(crate::FerrompiBackend::new()?))),
         BackendKind::Local => Ok(CommBackend::Local(crate::LocalBackend)),
-        BackendKind::Auto => Err(crate::BackendError::InvalidBackend {
-            requested: "auto".to_string(),
-            available: vec!["mpi", "local"].into_iter().map(String::from).collect(),
-        }),
+        BackendKind::Auto => auto_detect(),
     }
 }
 
@@ -315,17 +341,34 @@ mod tests {
         assert_eq!(backend.size(), 1);
     }
 
-    /// No-feature build: [`BackendKind::Auto`] (provenance-only label) →
-    /// `Err(InvalidBackend)`.
+    /// No-feature build: [`BackendKind::Auto`] resolves to the local backend
+    /// (auto-detect cannot select MPI when none is compiled in).
     #[test]
     #[cfg(not(feature = "mpi"))]
-    fn test_create_communicator_no_feature_invalid() {
-        let err = super::create_communicator(BackendKind::Auto)
-            .expect_err("auto is not a valid selection");
-        assert!(
-            matches!(err, crate::BackendError::InvalidBackend { .. }),
-            "unexpected error: {err:?}"
-        );
+    fn test_create_communicator_no_feature_auto_is_local() {
+        use crate::Communicator;
+
+        let backend = super::create_communicator(BackendKind::Auto)
+            .expect("auto resolves to local with no MPI feature");
+        assert_eq!(backend.rank(), 0);
+        assert_eq!(backend.size(), 1);
+    }
+
+    /// MPI build: [`BackendKind::Auto`] resolves to the local backend when no
+    /// MPI launcher is present. `cargo test` does not run under `mpiexec`, so
+    /// no launcher variable is set; the guard skips the case a launcher is.
+    #[test]
+    #[cfg(feature = "mpi")]
+    fn test_create_communicator_mpi_auto_local_without_launcher() {
+        use crate::Communicator;
+
+        if super::mpi_launch_detected() {
+            return;
+        }
+        let backend = super::create_communicator(BackendKind::Auto)
+            .expect("auto resolves to local without a launcher");
+        assert_eq!(backend.rank(), 0);
+        assert_eq!(backend.size(), 1);
     }
 
     /// No-feature build: [`BackendKind::Mpi`] → `Err(BackendNotAvailable)`

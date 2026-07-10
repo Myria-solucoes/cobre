@@ -14,14 +14,12 @@ mod no_feature_factory {
         assert_eq!(backend.size(), 1);
     }
 
-    /// `BackendKind::Auto` is a provenance-only label: `InvalidBackend`.
+    /// `BackendKind::Auto` resolves to the local backend with no MPI compiled in.
     #[test]
-    fn test_factory_no_feature_auto_invalid() {
-        let err = create_communicator(BackendKind::Auto).expect_err("must fail");
-        assert!(
-            matches!(err, BackendError::InvalidBackend { .. }),
-            "got {err:?}"
-        );
+    fn test_factory_no_feature_auto_is_local() {
+        let backend = create_communicator(BackendKind::Auto).expect("auto -> local");
+        assert_eq!(backend.rank(), 0);
+        assert_eq!(backend.size(), 1);
     }
 
     #[test]
@@ -47,7 +45,7 @@ mod no_feature_factory {
 
 #[cfg(feature = "mpi")]
 mod any_feature_factory {
-    use cobre_comm::{BackendError, BackendKind, CommBackend, Communicator, create_communicator};
+    use cobre_comm::{BackendKind, CommBackend, Communicator, create_communicator};
 
     #[test]
     fn test_factory_any_feature_local() {
@@ -56,17 +54,12 @@ mod any_feature_factory {
         assert_eq!(backend.rank(), 0);
     }
 
-    /// `BackendKind::Auto` is a provenance-only label: `InvalidBackend`.
-    /// `CommBackend` is not `Debug`, so match instead of `expect_err`.
+    /// `BackendKind::Auto` resolves to a concrete backend from the launch
+    /// environment — local when `cargo test` runs outside an MPI launcher.
     #[test]
-    fn test_factory_any_feature_auto_invalid() {
-        let Err(err) = create_communicator(BackendKind::Auto) else {
-            panic!("must fail")
-        };
-        assert!(
-            matches!(err, BackendError::InvalidBackend { .. }),
-            "got {err:?}"
-        );
+    fn test_factory_any_feature_auto_resolves() {
+        let comm = create_communicator(BackendKind::Auto).expect("auto resolves");
+        assert_eq!(comm.rank(), 0);
     }
 }
 

@@ -211,54 +211,39 @@ finalization happen on the same thread, making the impl sound.
 ## Factory function: `create_communicator`
 
 ```rust,no_run
-pub fn create_communicator() -> Result<impl Communicator, BackendError>
+pub fn create_communicator(kind: BackendKind) -> Result<impl Communicator, BackendError>
 ```
 
 `create_communicator` is the single entry point for constructing a communicator
-at startup. It selects the backend according to:
-
-1. The `COBRE_COMM_BACKEND` environment variable (runtime override).
-2. The Cargo features compiled into the binary (auto-detection).
-3. A fallback to `LocalBackend` when no distributed backend is available or
-   detected.
+at startup. The caller passes an explicit `BackendKind`; no configuration
+environment variable participates in the choice. The `cobre` CLI maps
+`--comm-backend <auto|local|mpi>` (default `auto`) onto this argument.
 
 ### `BackendKind` enum
 
-`BackendKind` is provided for library-mode callers (such as `cobre-python` or
-`cobre-mcp`) that need to select a backend programmatically rather than through
-environment variables:
+| Variant              | Behavior                                                                            |
+| -------------------- | ----------------------------------------------------------------------------------- |
+| `BackendKind::Auto`  | Detect from the launch environment: MPI when an MPI launcher is present, else local |
+| `BackendKind::Mpi`   | Request the MPI backend; fails if the `mpi` feature is not compiled in              |
+| `BackendKind::Local` | Always use `LocalBackend`, even when MPI is available                               |
 
-| Variant              | Behavior                                                           |
-| -------------------- | ------------------------------------------------------------------ |
-| `BackendKind::Auto`  | Let the factory choose the best available backend (default)        |
-| `BackendKind::Mpi`   | Request the MPI backend; fails if `mpi` feature is not compiled in |
-| `BackendKind::Local` | Always use `LocalBackend`, even when MPI is available              |
+### Launcher auto-detection (`BackendKind::Auto`)
 
-### `COBRE_COMM_BACKEND` environment variable
-
-| Value     | Behavior                                                                        |
-| --------- | ------------------------------------------------------------------------------- |
-| (unset)   | Auto-detect: MPI if MPI launcher env vars are present, otherwise `LocalBackend` |
-| `"auto"`  | Same as unset                                                                   |
-| `"mpi"`   | Use `FerrompiBackend`; fails if `mpi` feature is not compiled in                |
-| `"local"` | Always use `LocalBackend`                                                       |
-| `"tcp"`   | Deferred; returns `BackendNotAvailable` (no implementation yet)                 |
-| `"shm"`   | Deferred; returns `BackendNotAvailable` (no implementation yet)                 |
-
-Auto-detection checks for the presence of MPI launcher environment variables
+`Auto` checks for the presence of MPI launcher environment variables
 (`PMI_RANK`, `PMI_SIZE`, `OMPI_COMM_WORLD_RANK`, `OMPI_COMM_WORLD_SIZE`,
-`MPI_LOCALRANKID`, `SLURM_PROCID`). If any of these is set, the factory
-attempts to initialize the MPI backend.
+`MPI_LOCALRANKID`, `SLURM_PROCID`) — runtime facts set by `mpiexec`/`mpirun`/`srun`,
+not a configuration channel. If any is set (and the `mpi` feature is compiled
+in), the MPI backend is initialized; otherwise the local backend is used. A run
+started under a launcher therefore distributes without an explicit
+`--comm-backend mpi`.
 
 ### Example
 
 ```rust,no_run
-use cobre_comm::{create_communicator, Communicator};
+use cobre_comm::{BackendKind, create_communicator, Communicator};
 
-// With COBRE_COMM_BACKEND unset (auto-detect):
-// - returns FerrompiBackend if launched via mpirun/mpiexec
-// - returns LocalBackend otherwise
-let comm = create_communicator().expect("backend selection failed");
+// Auto-detect: FerrompiBackend when launched via mpirun/mpiexec, else LocalBackend.
+let comm = create_communicator(BackendKind::Auto).expect("backend selection failed");
 println!("rank {} of {}", comm.rank(), comm.size());
 ```
 
@@ -275,10 +260,10 @@ compiled in. It implements both `Communicator` and `SharedMemoryProvider` by
 delegating each method to the active inner backend:
 
 ```rust,no_run
-use cobre_comm::{create_communicator, Communicator};
+use cobre_comm::{BackendKind, create_communicator, Communicator};
 
-// With COBRE_COMM_BACKEND=local, the factory returns CommBackend::Local.
-let comm = create_communicator().expect("backend selection failed");
+// With BackendKind::Local, the factory returns CommBackend::Local.
+let comm = create_communicator(BackendKind::Local).expect("backend selection failed");
 let send = [42.0_f64];
 let mut recv = [0.0_f64];
 comm.allgatherv(&send, &mut recv, &[1], &[0]).unwrap();
@@ -304,12 +289,12 @@ Returned by all fallible methods on `Communicator` and `SharedMemoryProvider`.
 Returned by `create_communicator` when the backend cannot be selected or
 initialized.
 
-| Variant                | When it occurs                                                                                                    |
-| ---------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `BackendNotAvailable`  | The requested backend is not compiled into this binary (e.g., `COBRE_COMM_BACKEND=mpi` without the `mpi` feature) |
-| `InvalidBackend`       | The `COBRE_COMM_BACKEND` value does not match any known backend name                                              |
-| `InitializationFailed` | The backend was correctly selected but failed to initialize (e.g., MPI runtime not installed)                     |
-| `MissingConfiguration` | Required environment variables for the selected backend are not set (relevant for future `tcp`/`shm` backends)    |
+| Variant                | When it occurs                                                                                                 |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `BackendNotAvailable`  | The requested backend is not compiled into this binary (e.g., `BackendKind::Mpi` without the `mpi` feature)    |
+| `InvalidBackend`       | The requested backend name does not match any known backend                                                    |
+| `InitializationFailed` | The backend was correctly selected but failed to initialize (e.g., MPI runtime not installed)                  |
+| `MissingConfiguration` | Required environment variables for the selected backend are not set (relevant for future `tcp`/`shm` backends) |
 
 ## Deferred features
 
