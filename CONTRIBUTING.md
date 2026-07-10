@@ -310,6 +310,25 @@ mdbook serve book --open
 The methodology specification corpus lives in the separate
 [cobre-docs](https://github.com/cobre-rs/cobre-docs) repository.
 
+#### JSON schemas and the cobre-docs vendored copy
+
+The input JSON schemas are generated from the `cobre-io` Rust types — code is
+the source of truth. They are exported with `cobre schema export`, committed
+under `book/src/schemas/`, and CI guards their freshness (`scripts/ci/check_schemas.sh`,
+via the `schemas` job in `.github/workflows/ci.yml`). If a schema-bearing type
+changes, regenerate them:
+
+```bash
+cargo build --release --bin cobre
+./target/release/cobre schema export --output-dir book/src/schemas
+```
+
+The cobre-docs site **vendors** these schemas for its Reference pages. When the
+schemas change in a release, refresh the vendored copy in cobre-docs
+(`npm run refresh:schemas` there) so the published reference stays in sync. The
+freshness gate stays here in `cobre`, next to the generating types; cobre-docs
+only consumes the exported output.
+
 ## Coding Guidelines
 
 ### General
