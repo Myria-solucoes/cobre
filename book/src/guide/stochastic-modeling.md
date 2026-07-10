@@ -192,8 +192,8 @@ In general:
   statistics — zero variance makes the model non-identifiable.
 
 For the theoretical derivation of the PAR(p) model, see
-[Stochastic Modeling](https://cobre-rs.github.io/cobre-docs/theory/stochastic-modeling.html)
-and [PAR(p) Autoregressive Models](https://cobre-rs.github.io/cobre-docs/theory/par-model.html)
+[PAR(p) Inflow Model](https://methodology.cobre-rs.dev/math/par-inflow-model/)
+and [PAR(p) Inflow Model](https://methodology.cobre-rs.dev/math/par-inflow-model/)
 in the methodology reference.
 
 ---
@@ -222,7 +222,7 @@ columns — `hydro_id`, `stage_id`, `annual_coefficient`, `annual_mean_m3s`, and
 `InflowModel` carries the same three values at runtime.
 
 For the mathematical derivation of the PAR(p)-A model, see
-[PAR(p) Autoregressive Models](https://cobre-rs.github.io/cobre-docs/theory/par-model.html)
+[PAR(p) Inflow Model](https://methodology.cobre-rs.dev/math/par-inflow-model/)
 in the methodology reference.
 
 ---
@@ -1368,7 +1368,7 @@ is clamped to zero and a slack penalised by
 backstop for extreme tail realisations.
 
 For the mathematical theory behind all three methods, see the
-[Inflow Non-Negativity](https://cobre-rs.github.io/cobre-docs/theory/inflow-non-negativity.html)
+[Inflow Non-Negativity](https://methodology.cobre-rs.dev/math/inflow-nonnegativity/)
 page in the methodology reference, or Oliveira et al. (2022), _Energies_
 15(3):1115.
 

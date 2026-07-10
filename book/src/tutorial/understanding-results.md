@@ -62,7 +62,7 @@ training stopped:
 
 > **Theory reference**: For the mathematical definition of lower and upper bounds,
 > optimality gap, and stopping criteria, see
-> [Convergence](https://cobre-rs.github.io/cobre-docs/theory/convergence.html)
+> [Upper Bound Evaluation](https://methodology.cobre-rs.dev/math/upper-bound-evaluation/)
 > in the methodology reference.
 
 ---

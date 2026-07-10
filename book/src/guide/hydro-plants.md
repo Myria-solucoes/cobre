@@ -27,7 +27,7 @@ complete field reference with all optional fields documented.
 
 > **Theory reference**: For the mathematical formulation of hydro modeling and the
 > SDDP algorithm that drives dispatch decisions, see
-> [SDDP Theory](https://cobre-rs.github.io/cobre-docs/theory/sddp-theory.html)
+> [Hydro Production Function Models](https://methodology.cobre-rs.dev/math/hydro-production-models/)
 > in the methodology reference.
 
 ---
