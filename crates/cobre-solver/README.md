@@ -276,7 +276,7 @@ the CLP backend's suite in isolation.
 
 | Resource   | URL                                                        |
 | ---------- | ---------------------------------------------------------- |
-| Book       | <https://cobre-rs.github.io/cobre/crates/solver.html>      |
+| Docs site  | <https://docs.cobre-rs.dev/>                               |
 | API Docs   | <https://docs.rs/cobre-solver/latest/cobre_solver/>        |
 | Repository | <https://github.com/cobre-rs/cobre>                        |
 | CHANGELOG  | <https://github.com/cobre-rs/cobre/blob/main/CHANGELOG.md> |

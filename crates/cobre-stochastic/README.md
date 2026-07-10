@@ -102,7 +102,7 @@ and doc-tests for all public types.
 
 | Resource   | URL                                                       |
 | ---------- | --------------------------------------------------------- |
-| Book       | https://cobre-rs.github.io/cobre/crates/stochastic.html   |
+| Docs site  | <https://docs.cobre-rs.dev/>                              |
 | API Docs   | https://docs.rs/cobre-stochastic/latest/cobre_stochastic/ |
 | Repository | https://github.com/cobre-rs/cobre                         |
 | CHANGELOG  | https://github.com/cobre-rs/cobre/blob/main/CHANGELOG.md  |

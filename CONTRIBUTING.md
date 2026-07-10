@@ -223,7 +223,7 @@ cobre/
 └── docs/                    # Internal project documentation
 ```
 
-The full specification corpus lives in the separate [cobre-docs](https://github.com/cobre-rs/cobre-docs) repository ([deployed docs](https://cobre-rs.github.io/cobre-docs/)).
+The full specification corpus lives in the separate [cobre-docs](https://github.com/cobre-rs/cobre-docs) repository ([deployed docs](https://docs.cobre-rs.dev/)).
 
 ## How to Contribute
 
@@ -312,7 +312,9 @@ The input JSON schemas are generated from the `cobre-io` Rust types — code is
 the source of truth. They are exported with `cobre schema export`, committed
 under `schemas/`, and CI guards their freshness (`scripts/ci/check_schemas.sh`,
 via the `schemas` job in `.github/workflows/ci.yml`). If a schema-bearing type
-changes, regenerate them:
+changes — including adding or renaming a field, changing a
+`#[derive(JsonSchema)]` type, or editing a schemars-visible doc comment —
+regenerate them:
 
 ```bash
 cargo build --release --bin cobre
@@ -352,25 +354,6 @@ When adding a new output:
 3. The pre-commit hook runs this check automatically
 
 See `.claude/architecture-rules.md` for the full Python parity checklist.
-
-### JSON Schemas
-
-The JSON schemas under `schemas/` are generated
-(`schemars::schema_for!` in `crates/cobre-io/src/schema.rs`) from the raw
-config/output types. After adding or renaming a field, changing a
-`#[derive(JsonSchema)]` type, or editing a schemars-visible doc comment,
-regenerate them:
-
-```bash
-cargo run -p cobre-cli -- schema export --output-dir schemas
-```
-
-CI only asserts that the _set of filenames_ matches the export — it does not
-compare content, so a stale schema passes silently. The human-readable
-case-format reference on the docs site
-([docs.cobre-rs.dev](https://docs.cobre-rs.dev/reference/case-format.html)) is
-a separate hand-maintained mirror of the same contracts; update it in the same
-change.
 
 ### Crate-Specific Guidelines
 
@@ -437,7 +420,7 @@ If you're a **power systems engineer** new to Rust:
 
 If you're a **Rust developer** new to power systems:
 
-- The [cobre-docs site](https://cobre-rs.github.io/cobre-docs/) has algorithm documentation and a user guide
+- The [docs site](https://docs.cobre-rs.dev/) has algorithm documentation and a user guide
 - Ask questions in [Discussions](https://github.com/cobre-rs/cobre/discussions) — no question is too basic
 
 If you're a **researcher** with algorithmic improvements:
@@ -473,11 +456,15 @@ Before tagging a new release:
    ```bash
    python3 scripts/ci/check_python_parity.py --max 0
    ```
-4. Run `cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings`,
+4. If `schemas/` changed since the last release, refresh the vendored copy in
+   the `cobre-docs` repository (`npm run refresh:schemas` there) so the
+   published reference stays in sync — see
+   [JSON schemas and the cobre-docs vendored copy](#json-schemas-and-the-cobre-docs-vendored-copy)
+5. Run `cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings`,
    then repeat clippy for the CLP backend:
    `cargo clippy --workspace --all-targets --no-default-features --features clp -- -D warnings`
    (the two backends are mutually exclusive — see [Solver Backend Selection](#solver-backend-selection))
-5. Tag: `git tag v<version>`
+6. Tag: `git tag v<version>`
 
 ## License
 

@@ -119,12 +119,18 @@ When adding new output files, check both CLI and Python write paths:
 → `crates/cobre-cli/src/commands/run/outputs.rs` (`write_training_outputs` / `write_simulation_outputs` functions)
 → `crates/cobre-python/src/run.rs` (`run_via_study` / `run_training_phase_py` functions)
 
+When changing schema-bearing `cobre-io` types (fields, `#[derive(JsonSchema)]`
+types, or schemars-visible doc comments), regenerate the committed schemas —
+CI's `schemas` job diffs `schemas/` against the live export and fails on drift:
+→ `cargo build --release --bin cobre && ./target/release/cobre schema export --output-dir schemas`
+
 ---
 
 ## Key References
 
 | Resource              | Location            | Purpose                                      |
 | --------------------- | ------------------- | -------------------------------------------- |
+| Workspace map         | `ARCHITECTURE.md`   | Crate responsibilities, dependency boundaries, build-time choices |
 | Unified docs site     | `https://docs.cobre-rs.dev/`                     | User-facing documentation (methodology + software) |
 | Methodology reference | `~/git/cobre-docs/` | Specs, theory, math                          |
 | CHANGELOG             | `CHANGELOG.md`      | Per-release feature list                     |

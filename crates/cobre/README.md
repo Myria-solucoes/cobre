@@ -27,7 +27,7 @@ makes the dependency graph explicit.
 
 | Resource               | URL                                                        |
 | ---------------------- | ---------------------------------------------------------- |
-| Book — crates overview | <https://cobre-rs.github.io/cobre/crates/overview.html>    |
+| Workspace map          | <https://github.com/cobre-rs/cobre/blob/main/ARCHITECTURE.md> |
 | Repository             | <https://github.com/cobre-rs/cobre>                        |
 | Changelog              | <https://github.com/cobre-rs/cobre/blob/main/CHANGELOG.md> |
 

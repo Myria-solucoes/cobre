@@ -41,8 +41,7 @@ pip install cobre-python
 
 | Resource      | Link                                                                    |
 | ------------- | ----------------------------------------------------------------------- |
-| Software Book | [docs.cobre-rs.dev](https://docs.cobre-rs.dev/)                         |
-| Methodology   | [cobre-rs.github.io/cobre-docs](https://cobre-rs.github.io/cobre-docs/) |
+| Documentation | [docs.cobre-rs.dev](https://docs.cobre-rs.dev/)                         |
 | API Docs      | [docs.rs/cobre-sddp](https://docs.rs/cobre-sddp)                        |
 | PyPI          | [pypi.org/project/cobre-python](https://pypi.org/project/cobre-python/) |
 

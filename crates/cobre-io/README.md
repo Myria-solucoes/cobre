@@ -134,7 +134,7 @@ influence model assembly.
 
 | Resource   | URL                                                      |
 | ---------- | -------------------------------------------------------- |
-| Book       | https://cobre-rs.github.io/cobre/crates/io.html          |
+| Docs site  | <https://docs.cobre-rs.dev/>                             |
 | API Docs   | https://docs.rs/cobre-io/latest/cobre_io/                |
 | Repository | https://github.com/cobre-rs/cobre                        |
 | CHANGELOG  | https://github.com/cobre-rs/cobre/blob/main/CHANGELOG.md |

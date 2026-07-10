@@ -198,7 +198,7 @@ contract, verified against `LocalBackend` through the public API only) and
 
 | Resource   | URL                                                        |
 | ---------- | ---------------------------------------------------------- |
-| Book       | <https://cobre-rs.github.io/cobre/crates/comm.html>        |
+| Docs site  | <https://docs.cobre-rs.dev/>                               |
 | API Docs   | <https://docs.rs/cobre-comm/latest/cobre_comm/>            |
 | Repository | <https://github.com/cobre-rs/cobre>                        |
 | CHANGELOG  | <https://github.com/cobre-rs/cobre/blob/main/CHANGELOG.md> |

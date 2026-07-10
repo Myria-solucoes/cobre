@@ -117,7 +117,7 @@ cobre run my_study --output my_study/results
 
 | Resource             | URL                                                         |
 | -------------------- | ----------------------------------------------------------- |
-| Book — CLI reference | <https://cobre-rs.github.io/cobre/guide/cli-reference.html> |
+| CLI reference        | <https://docs.cobre-rs.dev/reference/cli-reference/>       |
 | Repository           | <https://github.com/cobre-rs/cobre>                         |
 | Changelog            | <https://github.com/cobre-rs/cobre/blob/main/CHANGELOG.md>  |
 

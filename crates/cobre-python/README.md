@@ -60,6 +60,5 @@ Apache-2.0 — see [LICENSE](https://github.com/cobre-rs/cobre/blob/main/LICENSE
 ## Links
 
 - [Repository](https://github.com/cobre-rs/cobre)
-- [Software Book](https://cobre-rs.github.io/cobre/)
-- [Documentation](https://cobre-rs.github.io/cobre-docs/)
+- [Documentation](https://docs.cobre-rs.dev/)
 - [Bug Tracker](https://github.com/cobre-rs/cobre/issues)

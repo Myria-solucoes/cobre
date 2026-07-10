@@ -8,10 +8,8 @@ starting point, not a replacement for each crate's own README — follow the
 links at the end of each section for the full detail.
 
 For the mathematical/methodology reference (SDDP formulation, cut derivation,
-risk measures, hydro production models), see the
-[methodology reference](https://cobre-rs.github.io/cobre-docs/). For
-user-facing installation and CLI usage, see the
-[software book](https://cobre-rs.github.io/cobre/).
+risk measures, hydro production models) and for user-facing installation and
+CLI usage, see the [unified docs site](https://docs.cobre-rs.dev/).
 
 ## Crate responsibilities
 
@@ -227,6 +225,5 @@ they do not reach those crates only transitively through `cobre-sddp`.
 | Resource              | URL                                                        |
 | --------------------- | ---------------------------------------------------------- |
 | Repository            | <https://github.com/cobre-rs/cobre>                        |
-| Software book         | <https://cobre-rs.github.io/cobre/>                        |
-| Methodology reference | <https://cobre-rs.github.io/cobre-docs/>                   |
+| Unified docs site     | <https://docs.cobre-rs.dev/>                               |
 | CHANGELOG             | <https://github.com/cobre-rs/cobre/blob/main/CHANGELOG.md> |

@@ -83,7 +83,7 @@ and doc-tests for all public types with constructible examples.
 
 | Resource                    | URL                                                        |
 | --------------------------- | ---------------------------------------------------------- |
-| Book — SDDP crate reference | <https://cobre-rs.github.io/cobre/crates/sddp.html>        |
+| Docs site                   | <https://docs.cobre-rs.dev/>                               |
 | API docs                    | <https://docs.rs/cobre-sddp/latest/cobre_sddp/>            |
 | Repository                  | <https://github.com/cobre-rs/cobre>                        |
 | Changelog                   | <https://github.com/cobre-rs/cobre/blob/main/CHANGELOG.md> |
