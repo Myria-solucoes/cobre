@@ -1,11 +1,13 @@
 # Terminal Recordings
 
-This directory contains scripts and tape files for generating terminal recordings
-that demonstrate Cobre in action. The recordings are intended for use in the README
-and documentation pages.
+This directory contains VHS tape files for generating terminal recordings (GIFs)
+that demonstrate the Cobre CLI in action.
 
-Generated recordings (`.gif` and `.cast` files) are committed so they can be
-embedded in the README and documentation. Temporary files (`demo/`) are gitignored.
+Generated GIFs are committed here as the source of truth. The documentation site
+([cobre-docs](https://github.com/cobre-rs/cobre-docs)) vendors them from a tagged
+release via `npm run refresh:recordings -- --ref <tag>` — so after regenerating a
+GIF for a CLI change, cut a release and re-run that command in cobre-docs.
+Temporary files (`demo/`) are gitignored.
 
 ## Prerequisites
 
@@ -35,15 +37,7 @@ brew install vhs
 go install github.com/charmbracelet/vhs@latest
 ```
 
-### asciinema (for `.sh` scripts)
-
-asciinema records terminal sessions into `.cast` files.
-
-```sh
-pip install asciinema
-```
-
-### jq (for report.sh and validation-error.tape)
+### jq (for validation-error.tape)
 
 ```sh
 # macOS
@@ -115,28 +109,7 @@ The `multithreading.tape` runs the same 1dtoy case twice in sequence — first w
 `--threads 1`, then with `--threads 4` — so the post-run summary timing lines appear
 back-to-back in the recording for a direct comparison.
 
-## asciinema Recordings
-
-Run the shell scripts from the repository root. Scripts write `.cast` files into
-`recordings/` and clean up temporary directories on exit.
-
-```sh
-# Training run (progress bar and banner)
-bash recordings/training.sh
-# Output: recordings/training.cast
-
-# Report output piped through jq
-bash recordings/report.sh
-# Output: recordings/report.cast
-```
-
-To replay a cast locally:
-
-```sh
-asciinema play recordings/training.cast
-```
-
-## Embedding in the README
+## Embedding
 
 Reference GIF output in Markdown:
 
@@ -148,10 +121,4 @@ For SVG output (smaller file size, no browser autoplay restrictions):
 
 ```markdown
 ![Quick Start](recordings/quickstart.svg)
-```
-
-To share via asciinema.org, upload a cast file:
-
-```sh
-asciinema upload recordings/training.cast
 ```
