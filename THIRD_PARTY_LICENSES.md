@@ -9,7 +9,7 @@ propagated Apache-2.0 `NOTICE` text lives in `NOTICE`.
 
 ## Overview
 
-- Apache License 2.0: 163 crate(s)
+- Apache License 2.0: 168 crate(s)
 - MIT License: 31 crate(s)
 - Creative Commons Zero v1.0 Universal: 1 crate(s)
 - Unicode License v3: 1 crate(s)
@@ -1102,6 +1102,7 @@ Used by:
 - colorchoice 1.0.5
 - is_terminal_polyfill 1.70.2
 - once_cell_polyfill 1.70.2
+- terminal_size 0.4.4
 
 ```
                                  Apache License
@@ -1752,6 +1753,8 @@ Used by:
 - crossbeam-epoch 0.9.18
 - crossbeam-utils 0.8.21
 - either 1.16.0
+- errno 0.3.14
+- gethostname 1.1.0
 - gimli 0.32.3
 - hash32 0.2.1
 - hashbrown 0.17.1
@@ -1759,6 +1762,7 @@ Used by:
 - heck 0.5.0
 - js-sys 0.3.103
 - lazy_static 1.5.0
+- linux-raw-sys 0.12.1
 - lock_api 0.4.14
 - log 0.4.33
 - matrixmultiply 0.3.10
@@ -1779,6 +1783,7 @@ Used by:
 - regex 1.12.4
 - rustc-demangle 0.1.27
 - rustc-hash 1.1.0
+- rustix 1.1.4
 - scopeguard 1.2.0
 - smallvec 1.15.2
 - stable_deref_trait 1.2.1
@@ -3247,19 +3252,19 @@ limitations under the License.
 ## Apache License 2.0
 
 Used by:
-- cobre 0.9.1
-- cobre-cli 0.9.1
-- cobre-comm 0.9.1
-- cobre-core 0.9.1
-- cobre-emt 0.9.1
-- cobre-flow 0.9.1
-- cobre-io 0.9.1
-- cobre-mcp 0.9.1
-- cobre-sddp 0.9.1
-- cobre-solver 0.9.1
-- cobre-stochastic 0.9.1
-- cobre-tui 0.9.1
-- cobre-uc 0.9.1
+- cobre 0.10.0
+- cobre-cli 0.10.0
+- cobre-comm 0.10.0
+- cobre-core 0.10.0
+- cobre-emt 0.10.0
+- cobre-flow 0.10.0
+- cobre-io 0.10.0
+- cobre-mcp 0.10.0
+- cobre-sddp 0.10.0
+- cobre-solver 0.10.0
+- cobre-stochastic 0.10.0
+- cobre-tui 0.10.0
+- cobre-uc 0.10.0
 - android_system_properties 0.1.5
 - dhat 0.3.3
 - dyn-clone 1.0.20

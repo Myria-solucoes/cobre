@@ -22,7 +22,7 @@ summary to stderr:
 
 ```
  ━━━━━━━━━━━●
- ━━━━━━━━━━━●⚡  COBRE v0.9.1
+ ━━━━━━━━━━━●⚡  COBRE v0.10.0
  ━━━━━━━━━━━●   Power systems in Rust
 
 Created my_first_study case directory from template '1dtoy':

@@ -147,7 +147,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Initial reservoir storage conditions, past inflow values, and recent\nobservations for all hydro plants in the case.\n\nTwo arrays specify starting volumes at simulation time zero:\n- `storage` — operating hydros (those participating in generation dispatch).\n- `filling_storage` — filling hydros (reservoirs under construction or filling).\n\nAn optional array provides past inflow values for PAR(p) lag initialization:\n- `past_inflows` — ordered from most recent (lag 1) to oldest (lag p).\n\nAn optional array provides observed inflow data for mid-season study starts:\n- `recent_observations` — date-ranged observations that seed the lag accumulator.\n\nA hydro may appear in at most one of the two storage arrays. Duplicate\n`hydro_id` values within the same array are rejected. Cross-reference\nvalidation (checking that IDs exist in the hydro registry) is deferred to\na later validation layer.",
+  "description": "Intermediate serde type for `initial_conditions.json`, deserialized then\nvalidated before conversion to [`InitialConditions`].",
   "properties": {
     "$schema": {
       "description": "JSON schema URI — informational, not validated.",

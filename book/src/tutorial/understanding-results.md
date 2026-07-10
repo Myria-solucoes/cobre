@@ -134,7 +134,7 @@ training. The 1dtoy run produces:
 
 ```json
 {
-  "cobre_version": "0.9.1",
+  "cobre_version": "0.10.0",
   "hostname": "<hostname>",
   "solver": "highs",
   "solver_version": "<solver version>",
