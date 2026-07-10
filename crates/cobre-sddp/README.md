@@ -38,9 +38,46 @@ use, prefer `cobre-cli`, which wraps this crate.
   Both `Level1` and `Lml1` use `tie_tolerance` (default `1e-10`) to control how closely a cut must
   approach the per-state maximum to be retained. The `memory_window` config field is deprecated and
   silently ignored; use `tie_tolerance` instead.
+
 - **`SimulationConfig`** — parameters for the post-training simulation run
 - **`ConvergenceMonitor`** — tracks lower bound, statistical upper bound, and
   gap closure across iterations
+
+## Error handling (`SddpError`)
+
+All fallible operations return `Result<T, SddpError>` (`Send + Sync + 'static`).
+
+| Variant               | Trigger                                                                                                                   |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `Solver`              | An LP subproblem solve failed (wraps `cobre_solver::SolverError`) after all retries                                       |
+| `Communication`       | An MPI collective operation failed (wraps `cobre_comm::CommError`)                                                        |
+| `Stochastic`          | Scenario generation or PAR model validation failed                                                                        |
+| `Io`                  | Case directory loading or validation failed (wraps `cobre_io::LoadError`)                                                 |
+| `Validation`          | Algorithm configuration is semantically invalid                                                                           |
+| `Infeasible`          | An LP subproblem was provably infeasible (carries `stage`, `iteration`, `scenario`) — distinct from `Solver`, a hard stop |
+| `Simulation`          | A simulation-phase operation failed (LP failure, I/O, or policy issue)                                                    |
+| `WireVersionMismatch` | A postcard-encoded broadcast payload's wire `version` does not match this binary — restart all ranks with the same binary |
+
+## Feature flags
+
+| Feature      | Default | Description                                                                                                                                                                     |
+| ------------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `highs`      | on      | Selects the HiGHS LP solver backend (`cobre-solver/highs`); gates the per-phase `HighsProfile` impl and the `FORWARD_PROFILE`/`BACKWARD_PROFILE`/`SIMULATION_PROFILE` constants |
+| `clp`        | off     | Selects the CLP/CoinUtils LP solver backend (`cobre-solver/clp`); gates the per-phase `ClpProfile` impl                                                                         |
+| `dhat-heap`  | off     | Enables DHAT heap profiling — replaces the global allocator, so never enable by default; only for the `dhat_baseline` example                                                   |
+| `slow-tests` | off     | Opts in to the slow test suite (D-case sweep, FPHA plane-selection, forward-sampler convergence), ignored by default so `cargo test --workspace` stays fast                     |
+
+## Testing
+
+```
+cargo test -p cobre-sddp
+```
+
+No external system libraries are required beyond the workspace default (HiGHS
+is always available; MPI is optional via the `mpi` feature of `cobre-comm`).
+The suite covers unit tests for each module's core logic, integration tests
+using `LocalBackend` (single-rank) for the communication-involving modules,
+and doc-tests for all public types with constructible examples.
 
 ## Links
 
