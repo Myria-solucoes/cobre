@@ -1750,7 +1750,7 @@ Used by:
 - core-foundation-sys 0.8.7
 - critical-section 1.2.0
 - crossbeam-deque 0.8.6
-- crossbeam-epoch 0.9.18
+- crossbeam-epoch 0.9.20
 - crossbeam-utils 0.8.21
 - either 1.16.0
 - errno 0.3.14
