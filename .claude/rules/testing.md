@@ -66,9 +66,10 @@ rule; the rules below are the Cobre-specific ones.
   silently.
 
   ```bash
-  COBRE_PARITY_REGEN=1 cargo test -p cobre-sddp --features slow-tests --test parity
-  COBRE_PARITY_REGEN=1 cargo test -p cobre-sddp --no-default-features \
-    --features "clp slow-tests" --test parity
+  cargo nextest run -p cobre-sddp --features slow-tests --test parity \
+    -E 'test(parity_regen)' --run-ignored ignored-only
+  cargo nextest run -p cobre-sddp --no-default-features --features "clp slow-tests" \
+    --test parity -E 'test(parity_regen)' --run-ignored ignored-only
   ```
 
 - Parity hashes are environment-sensitive (floating-point / solver-build

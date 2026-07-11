@@ -6,10 +6,8 @@ on:
     branches: [main, develop]
     paths:
       - "crates/cobre-comm/**"
-      - "crates/cobre-cli/src/commands/run.rs"
-      - "crates/cobre-sddp/src/training.rs"
-      - "crates/cobre-sddp/src/forward.rs"
-      - "crates/cobre-sddp/src/backward.rs"
+      - "crates/cobre-cli/src/commands/run/**"
+      - "crates/cobre-sddp/src/training/**"
       - "crates/cobre-sddp/src/simulation/**"
       - "tests/slurm/**"
       - ".github/workflows/mpi-slurm.yml"
@@ -19,10 +17,8 @@ on:
       - "**[0-9]+.[0-9]+.[0-9]+*"
     paths:
       - "crates/cobre-comm/**"
-      - "crates/cobre-cli/src/commands/run.rs"
-      - "crates/cobre-sddp/src/training.rs"
-      - "crates/cobre-sddp/src/forward.rs"
-      - "crates/cobre-sddp/src/backward.rs"
+      - "crates/cobre-cli/src/commands/run/**"
+      - "crates/cobre-sddp/src/training/**"
       - "crates/cobre-sddp/src/simulation/**"
       - "tests/slurm/**"
       - ".github/workflows/mpi-slurm.yml"
@@ -122,7 +118,7 @@ jobs:
       - name: Run SLURM integration tests
         run: |
           set -euo pipefail
-          docker compose -f tests/slurm/docker-compose.yml exec controller bash /shared/run-tests.sh
+          docker compose -f tests/slurm/docker-compose.yml exec controller bash /shared/run-tests.sh --mode ${{ github.event_name == 'workflow_dispatch' && 'full' || 'reduced' }}
 
       - name: Diagnostic output
         if: failure()

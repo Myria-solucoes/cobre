@@ -25,20 +25,69 @@
 
 mod common;
 
+/// Fixed base seed for the declaration-order-shuffle axis. Permutation `i`'s
+/// seed is `SHUFFLE_BASE_SEED.wrapping_add(i as u64)`; the single permutation
+/// folded into each `parity_hash_<case>` test uses `i = 0`. See
+/// [`common::permute`]'s module doc for the classification map and coverage
+/// bound the permutations exercise.
+const SHUFFLE_BASE_SEED: u64 = 0x5EED_C0BE_5EED_C0BE;
+
+/// Permutation count for the `shuffle_matrix_<case>` tests, dispatched only via
+/// `.github/workflows/invariance-shuffle.yml` (`--run-ignored ignored-only`).
+const FULL_SHUFFLE_PERMUTATIONS: usize = 8;
+
 #[cfg(feature = "highs")]
 mod parity_hash_highs {
     //! HiGHS golden parity-hash regression. Each case's train + simulate output
     //! is digested over the whitelist owned by
     //! [`compute_parity_hash`](super::common::parity_hash::compute_parity_hash);
     //! the hash pins bit-for-bit determinism and declaration-order invariance, so a
-    //! changed hash means a real output change. `COBRE_PARITY_REGEN=1` writes the
-    //! baseline instead of verifying it. The selection rationale for the five golden
-    //! cases lives on [`case_dir`](super::common::parity_hash::case_dir).
+    //! changed hash means a real output change. The `parity_regen_*` tests below
+    //! write the baseline instead of asserting it; they are unconditionally
+    //! `#[ignore]`d and must be run explicitly. The selection rationale for the
+    //! five golden cases lives on [`case_dir`](super::common::parity_hash::case_dir).
+    //!
+    //! Each `parity_hash_<case>` folds in ONE seeded declaration-order
+    //! permutation (asserted against the in-memory base hash, not a committed
+    //! baseline); the sibling `shuffle_matrix_<case>` tests run the full
+    //! `FULL_SHUFFLE_PERMUTATIONS`-permutation matrix and are unconditionally
+    //! `#[ignore]`d — see [`super::SHUFFLE_BASE_SEED`]/[`super::FULL_SHUFFLE_PERMUTATIONS`].
 
     use cobre_solver::highs::HighsSolver;
 
-    fn run_case(label: &str) {
-        super::common::parity_hash::run_golden_case("parity_baselines", label, HighsSolver::new);
+    fn run_case(label: &str) -> String {
+        super::common::parity_hash::run_golden_case("parity_baselines", label, HighsSolver::new)
+    }
+
+    fn regen_case(label: &str) {
+        super::common::parity_hash::regen_golden_case("parity_baselines", label, HighsSolver::new);
+    }
+
+    /// The base case plus one seeded permutation, asserted against the
+    /// in-memory base hash — the default-CI fold-in of the shuffle axis.
+    fn run_case_with_permutation(label: &str) {
+        let base_hash = run_case(label);
+        super::common::parity_hash::assert_permutation_hash(
+            label,
+            super::SHUFFLE_BASE_SEED,
+            &base_hash,
+            HighsSolver::new,
+        );
+    }
+
+    /// The base case plus [`super::FULL_SHUFFLE_PERMUTATIONS`] seeded
+    /// permutations, each asserted against the in-memory base hash.
+    fn run_shuffle_matrix(label: &str) {
+        let base_hash = run_case(label);
+        for i in 0..super::FULL_SHUFFLE_PERMUTATIONS {
+            let seed = super::SHUFFLE_BASE_SEED.wrapping_add(i as u64);
+            super::common::parity_hash::assert_permutation_hash(
+                label,
+                seed,
+                &base_hash,
+                HighsSolver::new,
+            );
+        }
     }
 
     #[test]
@@ -47,7 +96,7 @@ mod parity_hash_highs {
         ignore = "slow: run with --features slow-tests"
     )]
     fn parity_hash_d06() {
-        run_case("D06");
+        run_case_with_permutation("D06");
     }
 
     #[test]
@@ -56,7 +105,7 @@ mod parity_hash_highs {
         ignore = "slow: run with --features slow-tests"
     )]
     fn parity_hash_d15() {
-        run_case("D15");
+        run_case_with_permutation("D15");
     }
 
     #[test]
@@ -65,7 +114,7 @@ mod parity_hash_highs {
         ignore = "slow: run with --features slow-tests"
     )]
     fn parity_hash_d30() {
-        run_case("D30");
+        run_case_with_permutation("D30");
     }
 
     #[test]
@@ -74,7 +123,7 @@ mod parity_hash_highs {
         ignore = "slow: run with --features slow-tests"
     )]
     fn parity_hash_d34() {
-        run_case("D34");
+        run_case_with_permutation("D34");
     }
 
     #[test]
@@ -83,7 +132,67 @@ mod parity_hash_highs {
         ignore = "slow: run with --features slow-tests"
     )]
     fn parity_hash_d41() {
-        run_case("D41");
+        run_case_with_permutation("D41");
+    }
+
+    #[test]
+    #[ignore = "full shuffle matrix — dispatched via invariance-shuffle.yml"]
+    fn shuffle_matrix_d06() {
+        run_shuffle_matrix("D06");
+    }
+
+    #[test]
+    #[ignore = "full shuffle matrix — dispatched via invariance-shuffle.yml"]
+    fn shuffle_matrix_d15() {
+        run_shuffle_matrix("D15");
+    }
+
+    #[test]
+    #[ignore = "full shuffle matrix — dispatched via invariance-shuffle.yml"]
+    fn shuffle_matrix_d30() {
+        run_shuffle_matrix("D30");
+    }
+
+    #[test]
+    #[ignore = "full shuffle matrix — dispatched via invariance-shuffle.yml"]
+    fn shuffle_matrix_d34() {
+        run_shuffle_matrix("D34");
+    }
+
+    #[test]
+    #[ignore = "full shuffle matrix — dispatched via invariance-shuffle.yml"]
+    fn shuffle_matrix_d41() {
+        run_shuffle_matrix("D41");
+    }
+
+    #[test]
+    #[ignore = "rewrites committed parity baselines — run explicitly on the canonical machine"]
+    fn parity_regen_d06() {
+        regen_case("D06");
+    }
+
+    #[test]
+    #[ignore = "rewrites committed parity baselines — run explicitly on the canonical machine"]
+    fn parity_regen_d15() {
+        regen_case("D15");
+    }
+
+    #[test]
+    #[ignore = "rewrites committed parity baselines — run explicitly on the canonical machine"]
+    fn parity_regen_d30() {
+        regen_case("D30");
+    }
+
+    #[test]
+    #[ignore = "rewrites committed parity baselines — run explicitly on the canonical machine"]
+    fn parity_regen_d34() {
+        regen_case("D34");
+    }
+
+    #[test]
+    #[ignore = "rewrites committed parity baselines — run explicitly on the canonical machine"]
+    fn parity_regen_d41() {
+        regen_case("D41");
     }
 }
 
@@ -101,8 +210,43 @@ mod parity_hash_clp {
 
     use cobre_solver::clp::ClpSolver;
 
-    fn run_case(label: &str) {
-        super::common::parity_hash::run_golden_case("parity_baselines_clp", label, ClpSolver::new);
+    fn run_case(label: &str) -> String {
+        super::common::parity_hash::run_golden_case("parity_baselines_clp", label, ClpSolver::new)
+    }
+
+    fn regen_case(label: &str) {
+        super::common::parity_hash::regen_golden_case(
+            "parity_baselines_clp",
+            label,
+            ClpSolver::new,
+        );
+    }
+
+    /// The base case plus one seeded permutation, asserted against the
+    /// in-memory base hash — the default-CI fold-in of the shuffle axis.
+    fn run_case_with_permutation(label: &str) {
+        let base_hash = run_case(label);
+        super::common::parity_hash::assert_permutation_hash(
+            label,
+            super::SHUFFLE_BASE_SEED,
+            &base_hash,
+            ClpSolver::new,
+        );
+    }
+
+    /// The base case plus [`super::FULL_SHUFFLE_PERMUTATIONS`] seeded
+    /// permutations, each asserted against the in-memory base hash.
+    fn run_shuffle_matrix(label: &str) {
+        let base_hash = run_case(label);
+        for i in 0..super::FULL_SHUFFLE_PERMUTATIONS {
+            let seed = super::SHUFFLE_BASE_SEED.wrapping_add(i as u64);
+            super::common::parity_hash::assert_permutation_hash(
+                label,
+                seed,
+                &base_hash,
+                ClpSolver::new,
+            );
+        }
     }
 
     #[test]
@@ -111,7 +255,7 @@ mod parity_hash_clp {
         ignore = "slow: run with --features slow-tests"
     )]
     fn parity_hash_d06() {
-        run_case("D06");
+        run_case_with_permutation("D06");
     }
 
     #[test]
@@ -120,7 +264,7 @@ mod parity_hash_clp {
         ignore = "slow: run with --features slow-tests"
     )]
     fn parity_hash_d15() {
-        run_case("D15");
+        run_case_with_permutation("D15");
     }
 
     #[test]
@@ -129,7 +273,7 @@ mod parity_hash_clp {
         ignore = "slow: run with --features slow-tests"
     )]
     fn parity_hash_d30() {
-        run_case("D30");
+        run_case_with_permutation("D30");
     }
 
     #[test]
@@ -138,7 +282,7 @@ mod parity_hash_clp {
         ignore = "slow: run with --features slow-tests"
     )]
     fn parity_hash_d34() {
-        run_case("D34");
+        run_case_with_permutation("D34");
     }
 
     #[test]
@@ -147,7 +291,67 @@ mod parity_hash_clp {
         ignore = "slow: run with --features slow-tests"
     )]
     fn parity_hash_d41() {
-        run_case("D41");
+        run_case_with_permutation("D41");
+    }
+
+    #[test]
+    #[ignore = "full shuffle matrix — dispatched via invariance-shuffle.yml"]
+    fn shuffle_matrix_d06() {
+        run_shuffle_matrix("D06");
+    }
+
+    #[test]
+    #[ignore = "full shuffle matrix — dispatched via invariance-shuffle.yml"]
+    fn shuffle_matrix_d15() {
+        run_shuffle_matrix("D15");
+    }
+
+    #[test]
+    #[ignore = "full shuffle matrix — dispatched via invariance-shuffle.yml"]
+    fn shuffle_matrix_d30() {
+        run_shuffle_matrix("D30");
+    }
+
+    #[test]
+    #[ignore = "full shuffle matrix — dispatched via invariance-shuffle.yml"]
+    fn shuffle_matrix_d34() {
+        run_shuffle_matrix("D34");
+    }
+
+    #[test]
+    #[ignore = "full shuffle matrix — dispatched via invariance-shuffle.yml"]
+    fn shuffle_matrix_d41() {
+        run_shuffle_matrix("D41");
+    }
+
+    #[test]
+    #[ignore = "rewrites committed parity baselines — run explicitly on the canonical machine"]
+    fn parity_regen_d06() {
+        regen_case("D06");
+    }
+
+    #[test]
+    #[ignore = "rewrites committed parity baselines — run explicitly on the canonical machine"]
+    fn parity_regen_d15() {
+        regen_case("D15");
+    }
+
+    #[test]
+    #[ignore = "rewrites committed parity baselines — run explicitly on the canonical machine"]
+    fn parity_regen_d30() {
+        regen_case("D30");
+    }
+
+    #[test]
+    #[ignore = "rewrites committed parity baselines — run explicitly on the canonical machine"]
+    fn parity_regen_d34() {
+        regen_case("D34");
+    }
+
+    #[test]
+    #[ignore = "rewrites committed parity baselines — run explicitly on the canonical machine"]
+    fn parity_regen_d41() {
+        regen_case("D41");
     }
 }
 
@@ -207,7 +411,7 @@ mod self_reproducibility_regression {
         let hydro_models =
             prepare_hydro_models(&system, &dir, false).expect("prepare_hydro_models must succeed");
 
-        let mut config_with_sim = config.clone();
+        let mut config_with_sim = config;
         config_with_sim.simulation.enabled = true;
         config_with_sim.simulation.num_scenarios = 1;
 
@@ -438,7 +642,7 @@ mod b6a_hydro_inflow_parity {
 
         // Enable simulation so the cascade `hydro_inflow` row is exercised on the
         // simulation LP as well as the training LP, mirroring the D-case harness.
-        let mut config_with_sim = config.clone();
+        let mut config_with_sim = config;
         config_with_sim.simulation.enabled = true;
         config_with_sim.simulation.num_scenarios = 1;
 
@@ -1155,13 +1359,7 @@ mod determinism {
         let (result_tx, result_rx) = mpsc::sync_channel(64);
 
         // Drain the channel in a background thread to avoid blocking simulate().
-        let drain_thread = std::thread::spawn(move || {
-            let mut results = Vec::new();
-            while let Ok(r) = result_rx.recv() {
-                results.push(r);
-            }
-            results
-        });
+        let drain_thread = std::thread::spawn(move || result_rx.into_iter().collect::<Vec<_>>());
 
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(n_workspaces)

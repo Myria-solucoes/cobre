@@ -20,6 +20,7 @@ use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context
 pub mod anticipated_structural_assertions;
 pub mod builders;
 pub mod parity_hash;
+pub mod permute;
 
 /// Single-rank `Communicator` stub: broadcasts/reductions copy data locally;
 /// other collectives are no-ops.
