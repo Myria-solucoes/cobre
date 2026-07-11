@@ -2229,7 +2229,7 @@ fn contract_columns_reserve_import_then_export_blocks() {
 /// exit stage.
 #[test]
 fn commissioning_active_gates_on_stage_id_with_half_open_window() {
-    use crate::lp_builder::commissioning_active;
+    use cobre_core::commissioning::commissioning_active;
     // p0 no window: active at every stage.
     for id in [0, 1, 2, 3, 4, 100] {
         assert!(

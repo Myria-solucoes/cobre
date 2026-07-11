@@ -485,7 +485,11 @@ impl StateLayout {
             study_stage_ids.len(),
         );
         let (entry, exit) = anticipated_windows[local_idx];
-        crate::lp_builder::commissioning_active(entry, exit, study_stage_ids[delivery_stage])
+        cobre_core::commissioning::commissioning_active(
+            entry,
+            exit,
+            study_stage_ids[delivery_stage],
+        )
     }
 
     /// Plant `local_idx`'s delivery-anchored resolution: the setup-threaded
@@ -549,9 +553,7 @@ impl StateLayout {
         let mut mask =
             Vec::with_capacity(self.hydro_count + n_lag_active + self.n_buckets + n_ant_active);
 
-        for h in 0..self.hydro_count {
-            mask.push(h);
-        }
+        mask.extend(0..self.hydro_count);
 
         for lag in 0..self.max_par_order {
             for (h, &lag_count) in lag_counts.iter().enumerate() {
@@ -597,8 +599,7 @@ mod tests {
         k_max: usize,
         anticipated_lead_stages: Vec<usize>,
     ) -> StateLayout {
-        let lag_counts = vec![max_par_order; hydro_count];
-        StateLayout::new(
+        finalized_with_transit_buckets(
             hydro_count,
             max_par_order,
             0,
@@ -606,7 +607,6 @@ mod tests {
             n_anticipated,
             k_max,
             anticipated_lead_stages,
-            &lag_counts,
         )
     }
 

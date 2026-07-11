@@ -15,10 +15,10 @@ use cobre_io::output::{
     write_noise_openings,
 };
 use cobre_io::scenarios::LoadSeasonalStatsRow;
+use cobre_io::scenarios::estimation::EstimationReport;
 use cobre_stochastic::StochasticContext;
 
 use crate::TrainingResult;
-use crate::estimation::EstimationReport;
 use crate::policy_export::{
     build_active_indices, build_stage_basis_records, build_stage_cut_records,
     build_stage_cuts_payloads, build_stage_entity_manifest, build_stage_states_payloads,

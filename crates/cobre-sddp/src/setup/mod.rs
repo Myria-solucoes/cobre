@@ -182,7 +182,8 @@ pub struct StudySetup {
     /// at every trajectory start in the forward pass and simulation pipeline instead
     /// of zero-filling. All-zero (a plain zero reset) when `recent_observations` is
     /// empty.
-    pub(crate) recent_observation_seed: crate::lag_transition::RecentObservationSeed,
+    pub(crate) recent_observation_seed:
+        cobre_stochastic::par::lag_transition::RecentObservationSeed,
 
     /// PAR order of the downstream (coarser) resolution model. Non-zero only when
     /// the study includes stages with `season_id >= 12` (a monthly-to-quarterly
@@ -691,12 +692,12 @@ pub(crate) fn resolve_state_layout(
     par_lp: &PrecomputedPar,
     transit_bucket_topology: &bucket_topology::TransitBucketTopology,
 ) -> Result<(StateLayout, usize, Vec<usize>), SddpError> {
-    let mut anticipated_thermal_indices: Vec<usize> = Vec::new();
-    for (t_idx, thermal) in system.thermals().iter().enumerate() {
-        if thermal.anticipated_config.is_some() {
-            anticipated_thermal_indices.push(t_idx);
-        }
-    }
+    let anticipated_thermal_indices: Vec<usize> = system
+        .thermals()
+        .iter()
+        .enumerate()
+        .filter_map(|(t_idx, thermal)| thermal.anticipated_config.is_some().then_some(t_idx))
+        .collect();
     let n_anticipated = anticipated_thermal_indices.len();
 
     // Single resolve_point consumer: map each anticipated plant's config to a
@@ -1015,7 +1016,7 @@ const FULL_STATE_CONFIG: cobre_core::temporal::StageStateConfig =
 struct LagData {
     stage_lag_transitions: Vec<cobre_core::temporal::StageLagTransition>,
     noise_group_ids: Vec<u32>,
-    recent_observation_seed: crate::lag_transition::RecentObservationSeed,
+    recent_observation_seed: cobre_stochastic::par::lag_transition::RecentObservationSeed,
     downstream_par_order: usize,
 }
 
@@ -1039,19 +1040,22 @@ fn precompute_lag_data(
     };
     // Proxy: the global `max_par_order` stands in for the quarterly PAR order until a
     // separate quarterly stochastic context exists.
-    let downstream_par_order =
-        crate::lag_transition::derive_downstream_par_order(stages, stochastic.par().max_order());
-    let stage_lag_transitions = crate::lag_transition::precompute_stage_lag_transitions(
+    let downstream_par_order = cobre_stochastic::par::lag_transition::derive_downstream_par_order(
         stages,
-        season_map_ref,
-        downstream_par_order,
+        stochastic.par().max_order(),
     );
-    let noise_group_ids = crate::lag_transition::precompute_noise_groups(stages);
+    let stage_lag_transitions =
+        cobre_stochastic::par::lag_transition::precompute_stage_lag_transitions(
+            stages,
+            season_map_ref,
+            downstream_par_order,
+        );
+    let noise_group_ids = cobre_stochastic::par::lag_transition::precompute_noise_groups(stages);
 
     let recent_observation_seed = if stages.is_empty() {
-        crate::lag_transition::RecentObservationSeed::zero(system.hydros().len())
+        cobre_stochastic::par::lag_transition::RecentObservationSeed::zero(system.hydros().len())
     } else {
-        crate::lag_transition::compute_recent_observation_seed(
+        cobre_stochastic::par::lag_transition::compute_recent_observation_seed(
             &system.initial_conditions().recent_observations,
             &stages[0],
             season_map_ref,

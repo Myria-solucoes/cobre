@@ -11,6 +11,7 @@ pub mod contribution;
 pub mod evaluate;
 pub mod fitting;
 pub mod lag_kernel;
+pub mod lag_transition;
 pub mod precompute;
 pub mod validation;
 
@@ -37,6 +38,10 @@ pub use fitting::{
 };
 pub use lag_kernel::{
     DownstreamLagAccum, EntityMajor, LagIndex, LagMajor, PrimaryLagAccum, advance_lag_chain,
+};
+pub use lag_transition::{
+    RecentObservationSeed, compute_recent_observation_seed, derive_downstream_par_order,
+    precompute_noise_groups, precompute_stage_lag_transitions,
 };
 pub use precompute::PrecomputedPar;
 pub use validation::{ParValidationReport, ParWarning, validate_par_parameters};

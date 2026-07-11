@@ -131,13 +131,13 @@ fn fill_anticipated_slot_definition_entries(
 pub(super) fn is_prefilling(ctx: &TemplateBuildCtx<'_>, stage: &Stage, h_idx: usize) -> bool {
     let hydro = &ctx.hydros[h_idx];
     matches!(
-        crate::lp_builder::filling_phase(
+        cobre_core::commissioning::filling_phase(
             hydro.filling.as_ref(),
             hydro.entry_stage_id,
             hydro.exit_stage_id,
             stage.id,
         ),
-        crate::lp_builder::Phase::PreFilling
+        cobre_core::commissioning::Phase::PreFilling
     )
 }
 
@@ -176,7 +176,10 @@ pub(super) fn resolve_shortcircuit_target(
 ///
 /// A `PreFilling` hydro's row collapses to the frozen-storage identity `v_h − v_h_in = 0`,
 /// its water interactions routed to the first non-`PreFilling` downstream by
-/// [`fill_prefilling_shortcircuit`] (the contract home).
+/// [`fill_prefilling_shortcircuit`] (the contract home). The forbidden alternative —
+/// zeroing `h`'s flow columns (turbine/spillage/diversion) while leaving its inflow on
+/// this row untouched — traps the water and makes the LP infeasible whenever the site
+/// has inflow.
 ///
 /// In `BlockMode::Chronological` the single row becomes `K` chained rows
 /// ([`fill_chronological_water_entries`]) that telescope to this parallel row, so

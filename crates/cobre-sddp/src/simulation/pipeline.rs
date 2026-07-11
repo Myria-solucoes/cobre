@@ -623,7 +623,7 @@ fn extract_sim_stage_result(
             let windows = ctx.ncs_stochastic_windows;
             for (slot, &col) in dense_col.iter().enumerate() {
                 let (entry, exit) = windows[slot];
-                if !crate::lp_builder::commissioning_active(entry, exit, stage_id) {
+                if !cobre_core::commissioning::commissioning_active(entry, exit, stage_id) {
                     continue;
                 }
                 let dst = col * stage_n_blks;

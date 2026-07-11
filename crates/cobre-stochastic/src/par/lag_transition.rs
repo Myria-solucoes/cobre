@@ -49,7 +49,7 @@ impl RecentObservationSeed {
 /// `recent_obs`, a `None` `first_stage.season_id`, or empty `hydros` all return
 /// a zero seed. Unknown `hydro_id` values are silently skipped, matching
 /// `build_initial_state`.
-pub(crate) fn compute_recent_observation_seed(
+pub fn compute_recent_observation_seed(
     recent_obs: &[RecentObservation],
     first_stage: &Stage,
     season_map: &SeasonMap,
@@ -131,12 +131,7 @@ pub(crate) fn month_exclusive_end(year: i32, month: u32) -> NaiveDate {
 /// Returns the total hours in the calendar month identified by `year` and
 /// `month` (1–12). Each day is exactly 24 hours (timezone-free calendar dates, no DST).
 pub(crate) fn month_total_hours(year: i32, month: u32) -> f64 {
-    let first = NaiveDate::from_ymd_opt(year, month, 1)
-        .unwrap_or_else(|| unreachable!("month-start date is always valid"));
-    let next = month_exclusive_end(year, month);
-    let days = u32::try_from((next - first).num_days())
-        .unwrap_or_else(|_| unreachable!("days in a month always fit in u32"));
-    f64::from(days) * 24.0
+    f64::from(days_in_month(year, month)) * 24.0
 }
 
 /// Determine the calendar year whose occurrence of `season_month` overlaps the

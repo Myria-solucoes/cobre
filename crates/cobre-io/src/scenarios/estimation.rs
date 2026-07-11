@@ -1,6 +1,6 @@
 //! Automatic PAR(p) parameter estimation from historical inflow observations.
 //!
-//! This module bridges `cobre-io` (case loading) and `cobre-stochastic` (PAR fitting).
+//! This module bridges case loading (this crate) and PAR fitting (`cobre-stochastic`).
 //! It inspects the input file manifest, resolves which of seven input paths applies
 //! (see [`EstimationPath`]), and dispatches to the appropriate estimation function.
 //!
@@ -55,15 +55,6 @@ use std::path::Path;
 
 use chrono::{Months, NaiveDate};
 use cobre_core::{EntityId, System};
-use cobre_io::{
-    Config, FileManifest, LoadError, ValidationContext, parse_inflow_ar_coefficients,
-    parse_inflow_history,
-    scenarios::{
-        InflowAnnualComponentRow, InflowArCoefficientRow, InflowSeasonalStatsRow,
-        assemble_inflow_models,
-    },
-    validate_structure,
-};
 use cobre_stochastic::{
     StochasticError,
     par::aggregate::aggregate_observations_to_season,
@@ -74,8 +65,18 @@ use cobre_stochastic::{
     },
 };
 
-// Re-exported so the public `cobre_sddp::` surface resolves `EstimationReport`
-// through this shell module; also the module's own binding of the type.
+use crate::{
+    Config, FileManifest, LoadError, ValidationContext, parse_inflow_ar_coefficients,
+    parse_inflow_history,
+    scenarios::{
+        InflowAnnualComponentRow, InflowArCoefficientRow, InflowSeasonalStatsRow,
+        assemble_inflow_models,
+    },
+    validate_structure,
+};
+
+// `EstimationReport` lives in `cobre_stochastic::par::fitting`; re-exported here
+// so callers resolve it alongside `EstimationPath`/`estimate_from_history`.
 pub use cobre_stochastic::par::fitting::EstimationReport;
 
 /// Classification of the estimation path taken for a given input file manifest.
@@ -108,7 +109,7 @@ impl EstimationPath {
     /// combinations (AR present without history or stats) fall back to
     /// `Deterministic` because AR coefficients alone cannot drive estimation.
     #[must_use]
-    pub fn resolve(manifest: &cobre_io::FileManifest) -> Self {
+    pub fn resolve(manifest: &crate::FileManifest) -> Self {
         match (
             manifest.scenarios_inflow_history_parquet,
             manifest.scenarios_inflow_seasonal_stats_parquet,
@@ -254,7 +255,7 @@ fn run_estimation(
             season_map,
             use_annual_component: matches!(
                 config.estimation.order_selection,
-                cobre_io::config::OrderSelectionMethod::PacfAnnual
+                crate::config::OrderSelectionMethod::PacfAnnual
             ),
         },
     )?;
@@ -315,14 +316,12 @@ fn run_partial_estimation(
     let observations = load_and_aggregate_observations(case_dir, study_stages, season_map)?;
 
     if system.inflow_models().is_empty() {
-        return Err(EstimationError::Load(
-            cobre_io::LoadError::ConstraintError {
-                description: "manifest indicates inflow_seasonal_stats.parquet is present \
+        return Err(EstimationError::Load(crate::LoadError::ConstraintError {
+            description: "manifest indicates inflow_seasonal_stats.parquet is present \
                           but system.inflow_models() is empty; \
                           no user stats available for partial estimation"
-                    .to_string(),
-            },
-        ));
+                .to_string(),
+        }));
     }
 
     // Fitting stats: used only for the YW solve below, never for LP assembly.
@@ -340,7 +339,7 @@ fn run_partial_estimation(
             season_map,
             use_annual_component: matches!(
                 config.estimation.order_selection,
-                cobre_io::config::OrderSelectionMethod::PacfAnnual
+                crate::config::OrderSelectionMethod::PacfAnnual
             ),
         },
     )?;
@@ -429,16 +428,14 @@ fn validate_partial_estimation_coverage(
     missing_stats.sort();
     if !missing_stats.is_empty() {
         let ids: Vec<String> = missing_stats.iter().map(|id| id.0.to_string()).collect();
-        return Err(EstimationError::Load(
-            cobre_io::LoadError::ConstraintError {
-                description: format!(
-                    "partial estimation: AR coefficients were estimated for hydro(s) \
+        return Err(EstimationError::Load(crate::LoadError::ConstraintError {
+            description: format!(
+                "partial estimation: AR coefficients were estimated for hydro(s) \
                      [{ids}] but inflow_seasonal_stats.parquet has no entry for them; \
                      all hydros with estimated AR must have user-provided stats",
-                    ids = ids.join(", ")
-                ),
-            },
-        ));
+                ids = ids.join(", ")
+            ),
+        }));
     }
 
     // Direction B: user stats but no AR estimated → white noise fallback.

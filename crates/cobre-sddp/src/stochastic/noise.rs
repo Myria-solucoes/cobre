@@ -412,7 +412,7 @@ pub(crate) fn gather_dense_ncs_bounds(
         "upper_src too short for windows: every slot strides by block_count",
     );
     for (slot, &(entry, exit)) in windows.iter().enumerate() {
-        if crate::lp_builder::commissioning_active(entry, exit, stage_id) {
+        if cobre_core::commissioning::commissioning_active(entry, exit, stage_id) {
             let base = slot * block_count;
             lower_out.extend_from_slice(&lower_src[base..base + block_count]);
             upper_out.extend_from_slice(&upper_src[base..base + block_count]);

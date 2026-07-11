@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 
+use cobre_core::commissioning::{Phase, filling_phase};
 use cobre_core::{
     BlockMode, Bus, CascadeTopology, ConstraintSense, EnergyContract, EntityId, GenericConstraint,
     Hydro, Line, LoadModel, NonControllableSource, PumpingStation, ResolvedBounds,
@@ -17,7 +18,7 @@ use crate::lead_time::{AnticipatedResolution, SpreadResolution};
 
 use super::{
     EVAP_COLS_PER_HYDRO, EVAP_F_MINUS_OFFSET, EVAP_F_PLUS_OFFSET, EVAP_FLOW_OFFSET,
-    GenericConstraintRowEntry, M3S_TO_HM3, Phase, filling_phase,
+    GenericConstraintRowEntry, M3S_TO_HM3,
 };
 
 /// Pre-resolved bound, penalty, and factor tables shared across all stages.

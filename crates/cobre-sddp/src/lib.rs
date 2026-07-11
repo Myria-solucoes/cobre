@@ -79,11 +79,9 @@ pub(crate) use production::fpha_fitting;
 pub use production::{energy_conversion, hydro_models, stage_key};
 
 // Re-export shim exposing the `stochastic/` cluster modules at crate-root paths
-// for raw-path callers the curated re-exports below do not cover.
-// `lag_transition::precompute_stage_lag_transitions` is intentionally absent
-// from the curated re-export — this shim is its sole resolution path. `noise`
-// and `stochastic_summary` stay `pub(crate)`.
-pub use stochastic::{estimation, inflow_method, lag_transition};
+// for raw-path callers the curated re-exports below do not cover. `noise` and
+// `stochastic_summary` stay `pub(crate)`.
+pub use stochastic::inflow_method;
 pub(crate) use stochastic::{noise, stochastic_summary};
 
 // Re-export shim exposing the `training/` pass modules at crate-root paths for
@@ -117,7 +115,9 @@ pub use production::energy_conversion::{EnergyConversionSet, HydroEnergyProducti
 // ── error ─────────────────────────────────────────────────────────────────────
 pub use error::SddpError;
 // ── estimation ────────────────────────────────────────────────────────────────
-pub use stochastic::estimation::{EstimationPath, EstimationReport, estimate_from_history};
+pub use cobre_io::scenarios::estimation::{
+    EstimationPath, EstimationReport, estimate_from_history,
+};
 // ── forward ───────────────────────────────────────────────────────────────────
 pub use training::forward::SyncResult;
 // ── hydro_models ──────────────────────────────────────────────────────────────

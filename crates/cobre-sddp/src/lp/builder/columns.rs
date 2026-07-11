@@ -85,13 +85,13 @@ fn fill_storage_columns(
         // disappears at `Operating`, restoring the hard floor.
         let floor_off = hydro.filling.is_some()
             || matches!(
-                crate::lp_builder::filling_phase(
+                cobre_core::commissioning::filling_phase(
                     hydro.filling.as_ref(),
                     hydro.entry_stage_id,
                     hydro.exit_stage_id,
                     stage.id,
                 ),
-                crate::lp_builder::Phase::PreFilling
+                cobre_core::commissioning::Phase::PreFilling
             );
         let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
         let storage_lower = if floor_off { 0.0 } else { hb.min_storage_hm3 };
@@ -189,13 +189,14 @@ fn fill_turbine_columns(
     for h_idx in 0..layout.n_h {
         let hydro = &ctx.hydros[h_idx];
         let suspended = matches!(
-            crate::lp_builder::filling_phase(
+            cobre_core::commissioning::filling_phase(
                 hydro.filling.as_ref(),
                 hydro.entry_stage_id,
                 hydro.exit_stage_id,
                 stage.id,
             ),
-            crate::lp_builder::Phase::PreFilling | crate::lp_builder::Phase::Filling
+            cobre_core::commissioning::Phase::PreFilling
+                | cobre_core::commissioning::Phase::Filling
         );
         let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
         let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
@@ -237,13 +238,13 @@ fn fill_spillage_columns(
     for h_idx in 0..layout.n_h {
         let hydro = &ctx.hydros[h_idx];
         let prefilling = matches!(
-            crate::lp_builder::filling_phase(
+            cobre_core::commissioning::filling_phase(
                 hydro.filling.as_ref(),
                 hydro.entry_stage_id,
                 hydro.exit_stage_id,
                 stage.id,
             ),
-            crate::lp_builder::Phase::PreFilling
+            cobre_core::commissioning::Phase::PreFilling
         );
         let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
         for blk in 0..layout.n_blks {
@@ -271,13 +272,14 @@ fn fill_diversion_columns(
     for (h_idx, hydro) in ctx.hydros.iter().enumerate() {
         let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
         let suspended = matches!(
-            crate::lp_builder::filling_phase(
+            cobre_core::commissioning::filling_phase(
                 hydro.filling.as_ref(),
                 hydro.entry_stage_id,
                 hydro.exit_stage_id,
                 stage.id,
             ),
-            crate::lp_builder::Phase::PreFilling | crate::lp_builder::Phase::Filling
+            cobre_core::commissioning::Phase::PreFilling
+                | cobre_core::commissioning::Phase::Filling
         );
         // CONTRACT: read the per-stage RESOLVED `max_diversion_m3s`, NOT the
         // declaration-time `hydro.diversion.max_flow_m3s` — the entity read silently
@@ -325,7 +327,7 @@ pub(super) fn fill_thermal_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     for (t_idx, thermal) in ctx.thermals.iter().enumerate() {
-        let active = crate::lp_builder::commissioning_active(
+        let active = cobre_core::commissioning::commissioning_active(
             thermal.entry_stage_id,
             thermal.exit_stage_id,
             stage.id,
@@ -456,7 +458,7 @@ fn fill_line_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     for (l_idx, line) in ctx.lines.iter().enumerate() {
-        let active = crate::lp_builder::commissioning_active(
+        let active = cobre_core::commissioning::commissioning_active(
             line.entry_stage_id,
             line.exit_stage_id,
             stage.id,
@@ -750,7 +752,7 @@ fn fill_ncs_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     for (ncs_sys_idx, ncs) in ctx.non_controllable_sources.iter().enumerate() {
-        let active = crate::lp_builder::commissioning_active(
+        let active = cobre_core::commissioning::commissioning_active(
             ncs.entry_stage_id,
             ncs.exit_stage_id,
             stage.id,
@@ -795,7 +797,7 @@ pub(super) fn fill_pumping_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     for (p_sys, station) in ctx.pumping_stations.iter().enumerate() {
-        let active = crate::lp_builder::commissioning_active(
+        let active = cobre_core::commissioning::commissioning_active(
             station.entry_stage_id,
             station.exit_stage_id,
             stage.id,
@@ -837,7 +839,7 @@ fn fill_contract_columns(
 ) {
     let grid = layout.block_grid();
     for (c_sys, contract) in ctx.contracts.iter().enumerate() {
-        let active = crate::lp_builder::commissioning_active(
+        let active = cobre_core::commissioning::commissioning_active(
             contract.entry_stage_id,
             contract.exit_stage_id,
             stage.id,

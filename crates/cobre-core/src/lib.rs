@@ -37,6 +37,7 @@
     )
 )]
 
+pub mod commissioning;
 pub mod constraints;
 pub mod entities;
 pub mod entity_id;
