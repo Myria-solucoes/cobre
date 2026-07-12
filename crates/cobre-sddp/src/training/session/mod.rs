@@ -405,6 +405,23 @@ where
         #[allow(clippy::cast_possible_truncation)]
         let iteration_time_ms = iter_start.elapsed().as_millis() as u64;
 
+        // Sum across ranks: forward/backward solves partition across ranks and the
+        // lower bound runs only on rank 0, so the per-rank sum scales with rank
+        // count while the global total is rank-count invariant.
+        let lp_solves = {
+            #[allow(clippy::cast_precision_loss)]
+            let local =
+                [(forward_result.lp_solves + backward_result.lp_solves + lb_lp_solves) as f64];
+            let mut global = [0.0_f64; 1];
+            self.comm
+                .allreduce(&local, &mut global, ReduceOp::Sum)
+                .map_err(SddpError::Communication)?;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            {
+                global[0].round() as u64
+            }
+        };
+
         emit(
             self.runtime.event_sender(),
             TrainingEvent::IterationSummary {
@@ -416,7 +433,7 @@ where
                 iteration_time_ms,
                 forward_ms: forward_result.elapsed_ms,
                 backward_ms: backward_result.elapsed_ms,
-                lp_solves: forward_result.lp_solves + backward_result.lp_solves + lb_lp_solves,
+                lp_solves,
                 solve_time_ms: fwd_solve_time_ms + bwd_solve_time_ms + lb_solve_time_ms,
                 lower_bound_eval_ms: lb_wall_ms,
                 fwd_setup_time_ms: forward_result.setup_time_ms,
