@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use cobre_core::{EntityId, System};
+use cobre_core::{EntityId, System, month_of};
 use cobre_io::extensions::HydroGeometryRow;
 
 use super::load_artifacts_for_hydro_models;
@@ -17,7 +17,6 @@ use super::types::{
     LinearizedEvaporation,
 };
 use crate::SddpError;
-use crate::stage_key::month_of;
 // ── Evaporation model resolution ──────────────────────────────────────────────
 
 /// Resolve per-hydro linearized evaporation models from reservoir geometry.
@@ -41,7 +40,7 @@ use crate::stage_key::month_of;
 ///
 /// `reference_volume = (v_min + v_max) / 2` is the linearization reference volume.
 /// `stage_hours` is the sum of all block durations in the stage.
-/// `month` is the 0-based calendar month [`month_of`](crate::stage_key::month_of)
+/// `month` is the 0-based calendar month [`month_of`](cobre_core::month_of)
 /// derives from `stage.start_date` — not `stage.season_id`, whose meaning is
 /// cycle-dependent (`Monthly`, `Weekly`, `Custom`) and only equals the calendar
 /// month under the `Monthly` convention.
@@ -528,7 +527,6 @@ mod tests {
         }
     }
 
-    /// interpolate_area: exact match on the first geometry point returns that area.
     #[test]
     fn interpolate_area_exact_first_point() {
         let rows = make_geo_rows(&[(100.0, 1.0), (200.0, 1.5), (300.0, 2.0)]);
@@ -540,7 +538,6 @@ mod tests {
         );
     }
 
-    /// interpolate_area: exact match on the last geometry point returns that area.
     #[test]
     fn interpolate_area_exact_last_point() {
         let rows = make_geo_rows(&[(100.0, 1.0), (200.0, 1.5), (300.0, 2.0)]);
@@ -552,7 +549,6 @@ mod tests {
         );
     }
 
-    /// interpolate_area: exact match on a middle geometry point returns that area.
     #[test]
     fn interpolate_area_exact_middle_point() {
         let rows = make_geo_rows(&[(100.0, 1.0), (200.0, 1.5), (300.0, 2.0)]);
@@ -586,7 +582,6 @@ mod tests {
         );
     }
 
-    /// interpolate_area: volume below first point clamps to first area.
     #[test]
     fn interpolate_area_clamps_below_first_point() {
         let rows = make_geo_rows(&[(100.0, 1.0), (200.0, 1.5), (300.0, 2.0)]);
@@ -598,7 +593,6 @@ mod tests {
         );
     }
 
-    /// interpolate_area: volume above last point clamps to last area.
     #[test]
     fn interpolate_area_clamps_above_last_point() {
         let rows = make_geo_rows(&[(100.0, 1.0), (200.0, 1.5), (300.0, 2.0)]);
@@ -634,7 +628,6 @@ mod tests {
         );
     }
 
-    /// area_derivative: single-point geometry returns 0.0.
     #[test]
     fn area_derivative_single_point_returns_zero() {
         let rows = make_geo_rows(&[(200.0, 1.5)]);
@@ -646,7 +639,6 @@ mod tests {
         );
     }
 
-    /// area_derivative: at or below the first point uses the first interval.
     #[test]
     fn area_derivative_at_or_below_first_point_uses_first_interval() {
         let rows = make_geo_rows(&[(100.0, 1.0), (200.0, 1.5), (300.0, 2.0)]);
@@ -659,7 +651,6 @@ mod tests {
         );
     }
 
-    /// area_derivative: at or above the last point uses the last interval.
     #[test]
     fn area_derivative_at_or_above_last_point_uses_last_interval() {
         let rows = make_geo_rows(&[(100.0, 1.0), (200.0, 1.5), (300.0, 2.0)]);

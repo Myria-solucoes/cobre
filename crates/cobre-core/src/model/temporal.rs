@@ -16,7 +16,9 @@
 use chrono::{Datelike, NaiveDate};
 
 pub mod overlap;
+pub mod stage_key;
 pub use overlap::window_period_overlaps;
+pub use stage_key::{CalendarMonth, StageId, StudyPos, month_of};
 
 // ---------------------------------------------------------------------------
 // Supporting enums

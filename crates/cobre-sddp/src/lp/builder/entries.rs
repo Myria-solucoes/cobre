@@ -1562,7 +1562,7 @@ mod parameter_resolution_tests {
         HydroStageBounds, HydroStagePenalties, LineStageBounds, LineStagePenalties,
         NcsStagePenalties, ParameterKind, PenaltiesCountsSpec, PenaltiesDefaults,
         PumpingStageBounds, ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedPenalties,
-        ScalarParameter, SlackConfig, SystemBuilder, ThermalStageBounds,
+        ScalarParameter, SlackConfig, StageId, SystemBuilder, ThermalStageBounds,
     };
     use cobre_core::{LinearTerm, VariableRef};
     use cobre_stochastic::normal::precompute::PrecomputedNormal;
@@ -1573,7 +1573,6 @@ mod parameter_resolution_tests {
     use crate::hydro_models::PrepareHydroModelsResult;
     use crate::inflow_method::InflowNonNegativityMethod;
     use crate::resolved_parameters::build_resolved_parameters;
-    use crate::stage_key::StageId;
 
     /// `StageId(0)..StageId(n_stages - 1)`: the 0-based domain ids these
     /// fixtures use (no `Computed` parameter reads the override table here).

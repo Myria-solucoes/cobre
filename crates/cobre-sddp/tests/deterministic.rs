@@ -25,8 +25,7 @@ use cobre_io::{
 use cobre_sddp::{
     StudySetup, aggregate_simulation, hydro_models::prepare_hydro_models, setup::prepare_stochastic,
 };
-use cobre_solver::ActiveSolver;
-use cobre_solver::SolverInterface;
+use cobre_solver::{ActiveSolver, SolverInterface};
 
 mod common;
 use common::StubComm;
@@ -6130,13 +6129,12 @@ mod chronological_attribution {
 mod nonzero_stage_fpha_override_regression {
     use std::path::{Path, PathBuf};
 
-    use cobre_core::EntityId;
     use cobre_core::scenario::ScenarioSource;
+    use cobre_core::{EntityId, StageId};
     use cobre_io::HydroEnergyProductivityRow;
     use cobre_sddp::energy_conversion::build_hydro_energy_productivity_override;
     use cobre_sddp::hydro_models::prepare_hydro_models;
     use cobre_sddp::setup::prepare_stochastic;
-    use cobre_sddp::stage_key::StageId;
     use cobre_sddp::{SimulationHydroResult, SimulationScenarioResult, StudySetup};
 
     use super::common::parity_hash::compute_parity_hash;
@@ -6320,7 +6318,7 @@ mod nonzero_stage_fpha_override_regression {
 /// not hard-error at setup. Both fixtures route through the full
 /// `cobre_io::load_case` -> `prepare_stochastic` -> `prepare_hydro_models`
 /// pipeline every other deterministic case uses — the season-parsing path the
-/// fix's own unit tests (`production/stage_key.rs`,
+/// fix's own unit tests (`model/temporal/stage_key.rs` in `cobre-core`,
 /// `hydro_models/evaporation.rs`) construct `Stage` values directly and never
 /// exercise.
 mod custom_weekly_evaporation_regression {

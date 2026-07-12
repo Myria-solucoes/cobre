@@ -2,13 +2,12 @@
 
 use std::collections::HashMap;
 
-use cobre_core::{CascadeTopology, EntityId, Hydro, HydroGenerationModel};
+use cobre_core::{CascadeTopology, EntityId, Hydro, HydroGenerationModel, StageId};
 use cobre_io::{HydroGeometryRow, HydroReferenceVolumeFractions};
 
 use super::productivity_override::HydroEnergyProductivityOverride;
 use super::types::{EnergyConversion, EnergyConversionError, EnergyConversionSet};
 use crate::fpha_fitting::{ForebayTable, evaluate_losses, evaluate_tailrace};
-use crate::stage_key::StageId;
 
 /// Build the [`EnergyConversionSet`] for the case.
 ///
@@ -51,6 +50,7 @@ pub fn build_energy_conversion_set<S: std::hash::BuildHasher>(
         let v_min = hydro.min_storage_hm3;
         let v_max = hydro.max_storage_hm3;
         let q_max = hydro.max_turbined_m3s;
+        let is_fpha = matches!(hydro.generation_model, HydroGenerationModel::Fpha);
 
         if v_max < v_min {
             return Err(EnergyConversionError::InvalidStorageRange {
@@ -66,7 +66,7 @@ pub fn build_energy_conversion_set<S: std::hash::BuildHasher>(
             });
         }
 
-        let fpha_derivation = if matches!(hydro.generation_model, HydroGenerationModel::Fpha) {
+        let fpha_derivation = if is_fpha {
             match (
                 vha_rows_by_hydro.get(&hydro.id),
                 hydro.specific_productivity_mw_per_m3s_per_m,
@@ -90,7 +90,7 @@ pub fn build_energy_conversion_set<S: std::hash::BuildHasher>(
         for (stage_pos, &stage_id) in stage_ids.iter().enumerate() {
             let reference_volume_hm3 = reference_volume_fractions.get(hydro.id, stage_pos);
 
-            let productivity = if matches!(hydro.generation_model, HydroGenerationModel::Fpha) {
+            let productivity = if is_fpha {
                 0.0
             } else {
                 production_models.map_or(0.0, |pm| match pm.model(h_idx, stage_pos) {
@@ -103,7 +103,7 @@ pub fn build_energy_conversion_set<S: std::hash::BuildHasher>(
             let mut conversion =
                 derive_conversion_for_hydro(hydro, reference_volume_hm3, productivity);
 
-            if matches!(hydro.generation_model, HydroGenerationModel::Fpha) {
+            if is_fpha {
                 // FPHA ρ_eq: parquet override wins over the VHA + ρ_esp derivation.
                 // Keyed by the domain StageId (matches how the table is built and
                 // how cobre_io's validator keys it) — never the study position.

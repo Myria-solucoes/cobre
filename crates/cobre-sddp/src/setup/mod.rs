@@ -52,7 +52,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use cobre_core::{
-    AnticipatedConfig, EntityId, Hydro, Stage, System, Thermal,
+    AnticipatedConfig, EntityId, Hydro, Stage, StageId, System, Thermal,
     scenario::{SamplingScheme, ScenarioSource},
 };
 use cobre_io::build_hydro_reference_volumes_resolved;
@@ -73,7 +73,6 @@ use crate::{
     lp_builder::build_stage_templates,
     risk_measure::RiskMeasure,
     simulation::EntityCounts,
-    stage_key::StageId,
     stopping_rule::{StoppingRule, StoppingRuleSet},
     workspace::CapturedBasis,
 };

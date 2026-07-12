@@ -76,7 +76,7 @@ pub use policy::{orchestration, policy_export, resolved_parameters, scaling_repo
 // from the curated re-export — this shim is its sole resolution path.
 // `fpha_fitting` stays `pub(crate)`.
 pub(crate) use production::fpha_fitting;
-pub use production::{energy_conversion, hydro_models, stage_key};
+pub use production::{energy_conversion, hydro_models};
 
 // Re-export shim exposing the `stochastic/` cluster modules at crate-root paths
 // for raw-path callers the curated re-exports below do not cover. `noise` and
@@ -167,8 +167,6 @@ pub use solver_stats::{
     pack_delta_scalars, pack_scenario_stats, solver_stats_log_to_rows, unpack_delta_scalars,
     unpack_scenario_stats,
 };
-// ── stage_key ─────────────────────────────────────────────────────────────────
-pub use production::stage_key::{CalendarMonth, StageId, StudyPos};
 // ── stochastic_summary ────────────────────────────────────────────────────────
 pub use stochastic::stochastic_summary::{
     ArOrderSummary, StochasticSource, StochasticSummary, build_stochastic_summary,

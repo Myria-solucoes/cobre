@@ -11,11 +11,10 @@
 
 use std::collections::HashMap;
 
-use cobre_core::{ComputedParameter, EntityId, Hydro, ParameterKind, ScalarParameter};
+use cobre_core::{ComputedParameter, EntityId, Hydro, ParameterKind, ScalarParameter, StageId};
 use thiserror::Error;
 
 use crate::energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride};
-use crate::stage_key::StageId;
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -142,11 +141,10 @@ impl ResolvedParameters {
 /// # Examples
 ///
 /// ```
-/// use cobre_core::{EntityId, ParameterKind, ScalarParameter};
+/// use cobre_core::{EntityId, ParameterKind, ScalarParameter, StageId};
 /// use cobre_sddp::energy_conversion::{
 ///     EnergyConversionSet, HydroEnergyProductivityOverride,
 /// };
-/// use cobre_sddp::stage_key::StageId;
 /// use cobre_sddp::resolved_parameters::build_resolved_parameters;
 ///
 /// let params = vec![ScalarParameter {
@@ -424,9 +422,8 @@ struct ResolvedParametersWireEnvelope {
 ///     build_resolved_parameters, deserialize_resolved_parameters,
 ///     serialize_resolved_parameters,
 /// };
-/// use cobre_core::{EntityId, ParameterKind, ScalarParameter};
+/// use cobre_core::{EntityId, ParameterKind, ScalarParameter, StageId};
 /// use cobre_sddp::energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride};
-/// use cobre_sddp::stage_key::StageId;
 ///
 /// let params = vec![ScalarParameter {
 ///     id: EntityId(1),
@@ -477,9 +474,8 @@ pub fn serialize_resolved_parameters(
 /// use cobre_sddp::resolved_parameters::{
 ///     deserialize_resolved_parameters, serialize_resolved_parameters,
 /// };
-/// use cobre_core::{EntityId, ParameterKind, ScalarParameter};
+/// use cobre_core::{EntityId, ParameterKind, ScalarParameter, StageId};
 /// use cobre_sddp::energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride};
-/// use cobre_sddp::stage_key::StageId;
 /// use cobre_sddp::resolved_parameters::build_resolved_parameters;
 ///
 /// let params = vec![ScalarParameter {
