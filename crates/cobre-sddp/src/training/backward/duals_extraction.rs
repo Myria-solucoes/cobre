@@ -10,23 +10,12 @@ use crate::indexer::{CutStateProjection, StateDim};
 
 use super::SuccessorSpec;
 
-/// Extract state and cut duals from the live solver view into pre-warmed scratch
-/// buffers, returning the LP objective. `state_duals` holds the unscaled
-/// incoming-state reduced costs of the stage's enabled cut-state dimensions (the
-/// module-level `col_scale`-division contract), iterated over `cut_state`; a
-/// disabled dimension's reduced cost is computed in the LP but not extracted.
-/// `cut_duals` holds the cut-row slice
-/// `[template_num_rows, template_num_rows + num_cuts)`.
-pub(crate) fn extract_duals_from_view(
+fn fill_state_duals(
     view: &SolutionView<'_>,
     cut_state: &CutStateProjection,
     col_scale: &[f64],
-    succ: &SuccessorSpec<'_>,
     state_duals: &mut Vec<f64>,
-    cut_duals: &mut Vec<f64>,
-) -> f64 {
-    let objective = view.objective;
-
+) {
     // Divided, not multiplied (module-level contract). Empty col_scale ⇒ raw rc.
     state_duals.clear();
     for j in 0..cut_state.n_state() {
@@ -46,6 +35,26 @@ pub(crate) fn extract_duals_from_view(
         cut_state.n_state(),
         "state_duals must contain exactly cut_state.n_state() entries after fill"
     );
+}
+
+/// Extract state and cut duals from the live solver view into pre-warmed scratch
+/// buffers, returning the LP objective. `state_duals` holds the unscaled
+/// incoming-state reduced costs of the stage's enabled cut-state dimensions (the
+/// module-level `col_scale`-division contract), iterated over `cut_state`; a
+/// disabled dimension's reduced cost is computed in the LP but not extracted.
+/// `cut_duals` holds the cut-row slice
+/// `[template_num_rows, template_num_rows + num_cuts)`.
+pub(crate) fn extract_duals_from_view(
+    view: &SolutionView<'_>,
+    cut_state: &CutStateProjection,
+    col_scale: &[f64],
+    succ: &SuccessorSpec<'_>,
+    state_duals: &mut Vec<f64>,
+    cut_duals: &mut Vec<f64>,
+) -> f64 {
+    let objective = view.objective;
+
+    fill_state_duals(view, cut_state, col_scale, state_duals);
 
     cut_duals.clear();
     if succ.num_cuts_at_successor > 0 {
@@ -72,24 +81,7 @@ pub(crate) fn extract_state_duals_only(
 ) -> f64 {
     let objective = view.objective;
 
-    state_duals.clear();
-    for j in 0..cut_state.n_state() {
-        let col = cut_state
-            .state_to_lp_incoming_column(StateDim::new(j))
-            .get();
-        let rc = view.reduced_costs[col];
-        let unscaled = if col_scale.is_empty() {
-            rc
-        } else {
-            rc / col_scale[col]
-        };
-        state_duals.push(unscaled);
-    }
-    debug_assert_eq!(
-        state_duals.len(),
-        cut_state.n_state(),
-        "state_duals must contain exactly cut_state.n_state() entries after fill"
-    );
+    fill_state_duals(view, cut_state, col_scale, state_duals);
 
     objective
 }

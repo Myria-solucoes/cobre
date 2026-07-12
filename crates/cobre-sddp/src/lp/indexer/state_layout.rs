@@ -354,6 +354,27 @@ impl StateLayout {
     /// `inflow_lags.start + (l − 1)·N + h`. Classifying first — rather than
     /// falling through an `if`/`else` chain — is what keeps buckets/
     /// anticipated from ever reaching the lag decode.
+    ///
+    /// A bare `usize` cannot skip the [`StateDim`] wrap at this resolver
+    /// boundary:
+    ///
+    /// ```compile_fail
+    /// use cobre_sddp::indexer::StateLayout;
+    ///
+    /// let state = StateLayout::new(1, 0, 0, Vec::new(), 0, 0, Vec::new(), &[0]);
+    /// let _col = state.state_to_lp_column(0); // bare usize handed where StateDim is required
+    /// ```
+    ///
+    /// Nor can an already-resolved [`OutCol`] re-enter as the unresolved
+    /// dimension:
+    ///
+    /// ```compile_fail
+    /// use cobre_sddp::indexer::{StateDim, StateLayout};
+    ///
+    /// let state = StateLayout::new(1, 0, 0, Vec::new(), 0, 0, Vec::new(), &[0]);
+    /// let col = state.state_to_lp_column(StateDim::new(0));
+    /// let _reentered = state.state_to_lp_column(col); // OutCol handed where StateDim is required
+    /// ```
     #[inline]
     #[must_use]
     pub fn state_to_lp_column(&self, j: StateDim) -> OutCol {

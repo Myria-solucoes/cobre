@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use cobre_core::{CascadeTopology, EntityId, Hydro, HydroGenerationModel, StageId};
+use cobre_core::{CascadeTopology, EntityId, Hydro, HydroGenerationModel, StageId, StudyPos};
 use cobre_io::{HydroGeometryRow, HydroReferenceVolumeFractions};
 
 use super::productivity_override::HydroEnergyProductivityOverride;
@@ -88,7 +88,8 @@ pub fn build_energy_conversion_set<S: std::hash::BuildHasher>(
 
         let mut row: Vec<EnergyConversion> = Vec::with_capacity(n_stages);
         for (stage_pos, &stage_id) in stage_ids.iter().enumerate() {
-            let reference_volume_hm3 = reference_volume_fractions.get(hydro.id, stage_pos);
+            let reference_volume_hm3 =
+                reference_volume_fractions.get(hydro.id, StudyPos(stage_pos));
 
             let productivity = if is_fpha {
                 0.0
@@ -205,9 +206,8 @@ fn derive_conversion_for_hydro(
 
 /// Equivalent head `h_eq = h_fore(V_ref) − h_tail(Q_ref) − h_loss`.
 ///
-/// Returns `None` when `h_eq <= 0.0`; [`fpha_equivalent_head`] surfaces that case
-/// as an error instead.
-fn equivalent_head(hydro: &Hydro, table: &ForebayTable, v_ref: f64, q_ref: f64) -> Option<f64> {
+/// May be non-positive; [`fpha_equivalent_head`] surfaces that case as an error.
+fn equivalent_head(hydro: &Hydro, table: &ForebayTable, v_ref: f64, q_ref: f64) -> f64 {
     let h_fore = table.height(v_ref);
     let h_tail = hydro
         .tailrace
@@ -217,8 +217,7 @@ fn equivalent_head(hydro: &Hydro, table: &ForebayTable, v_ref: f64, q_ref: f64) 
         .hydraulic_losses
         .as_ref()
         .map_or(0.0, |m| evaluate_losses(m, h_fore - h_tail, q_ref));
-    let h_eq = h_fore - h_tail - h_loss;
-    (h_eq > 0.0).then_some(h_eq)
+    h_fore - h_tail - h_loss
 }
 
 /// FPHA equivalent head ([`equivalent_head`]), erroring on non-positive results.
@@ -231,21 +230,13 @@ fn fpha_equivalent_head(
     q_ref: f64,
     table: &ForebayTable,
 ) -> Result<f64, EnergyConversionError> {
-    if let Some(h_eq) = equivalent_head(hydro, table, v_ref, q_ref) {
+    let h_eq = equivalent_head(hydro, table, v_ref, q_ref);
+    if h_eq > 0.0 {
         Ok(h_eq)
     } else {
-        let h_fore = table.height(v_ref);
-        let h_tail = hydro
-            .tailrace
-            .as_ref()
-            .map_or(0.0, |t| evaluate_tailrace(t, q_ref));
-        let h_loss = hydro
-            .hydraulic_losses
-            .as_ref()
-            .map_or(0.0, |m| evaluate_losses(m, h_fore - h_tail, q_ref));
         Err(EnergyConversionError::NonPositiveEquivalentHead {
             hydro_id: hydro.id,
-            h_eq: h_fore - h_tail - h_loss,
+            h_eq,
         })
     }
 }
@@ -340,11 +331,11 @@ mod tests {
         fraction: f64,
         n_stages: usize,
     ) -> HydroReferenceVolumeFractions {
-        let resolved: Vec<(EntityId, usize, f64)> = hydros
+        let resolved: Vec<(EntityId, StudyPos, f64)> = hydros
             .iter()
             .flat_map(|h| {
                 let v = h.min_storage_hm3 + fraction * (h.max_storage_hm3 - h.min_storage_hm3);
-                (0..n_stages).map(move |s| (h.id, s, v))
+                (0..n_stages).map(move |s| (h.id, StudyPos(s), v))
             })
             .collect();
         build_hydro_reference_volumes_resolved(&resolved, 0.0)
@@ -541,10 +532,10 @@ mod tests {
         // (fraction 0.70 → 170 hm³) on the [100, 200] band, resolved per stage.
         let id = hydros[0].id;
         let per_stage_hm3 = vec![
-            (id, 0, 150.0),
-            (id, 1, 170.0),
-            (id, 2, 150.0),
-            (id, 3, 170.0),
+            (id, StudyPos(0), 150.0),
+            (id, StudyPos(1), 170.0),
+            (id, StudyPos(2), 150.0),
+            (id, StudyPos(3), 170.0),
         ];
         let resolver = build_hydro_reference_volumes_resolved(&per_stage_hm3, 0.0);
         let pm = production_set(&[0.9], n_stages);

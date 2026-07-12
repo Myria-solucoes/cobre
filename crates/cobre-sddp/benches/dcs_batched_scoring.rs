@@ -176,7 +176,7 @@ fn make_candidate_pool(k: usize, n_state: usize, seed: u64) -> CutPool {
     pool
 }
 
-/// Primal vector for `StageIndexer::new(n_state, 0)`: state columns 0..n_state,
+/// Primal vector: state columns 0..n_state,
 /// theta at column 3*n_state, driven strongly negative so most candidates are
 /// violated (so the bench exercises the sort + selection alongside scoring).
 fn make_primal(n_state: usize, seed: u64) -> Vec<f64> {

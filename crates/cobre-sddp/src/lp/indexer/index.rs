@@ -61,6 +61,15 @@ impl Row {
 /// A state-vector dimension index `j ∈ [0, n_state)` — not an LP address;
 /// resolve it through the owning state layout's resolver before indexing an
 /// LP buffer.
+///
+/// A raw `StateDim` cannot stand in for the [`OutCol`] a resolver returns:
+///
+/// ```compile_fail
+/// use cobre_sddp::indexer::{OutCol, StateDim};
+///
+/// let dim = StateDim::new(0);
+/// let _unresolved: OutCol = dim; // StateDim substituted for a resolved OutCol
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct StateDim(usize);
@@ -104,6 +113,18 @@ impl InCol {
 }
 
 /// An outgoing-state LP column — the forward-pass/DCS cut-row render target.
+///
+/// An [`InCol`] cannot stand in for it: the render path (e.g.
+/// `cut::row::push_scaled_coefficient`'s `col: OutCol` parameter) rejects the
+/// incoming-column role the pin/dual-extraction path uses.
+///
+/// ```compile_fail
+/// use cobre_sddp::indexer::{InCol, OutCol};
+///
+/// fn render(_outgoing: OutCol) {}
+///
+/// render(InCol::new(3)); // render path handed an InCol, not the OutCol it requires
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct OutCol(usize);

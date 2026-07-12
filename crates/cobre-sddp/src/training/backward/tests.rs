@@ -2236,7 +2236,7 @@ fn backward_solver_error_propagates() {
     );
 }
 
-// ── New test: parallel cut determinism ────────────────────────────────────
+// ── Parallel cut determinism ──────────────────────────────────────────────
 
 /// AC: When `run_backward_pass` runs with 1 workspace vs 4 workspaces given
 /// the same input data, the FCF pools contain identical cuts (same intercept,
@@ -4124,10 +4124,9 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
         ) -> Result<(), CommError> {
             // Fill each rank's slot in recv using the provided counts/displs.
             // Both ranks contribute `send` (rank-1 is a synthetic copy of rank-0).
-            for (r, (&count, &displ)) in counts.iter().zip(displs).enumerate() {
+            for (&count, &displ) in counts.iter().zip(displs) {
                 let src = &send[..count.min(send.len())];
                 recv[displ..displ + src.len()].copy_from_slice(src);
-                let _ = r; // suppress unused warning in cfg(test)
             }
             Ok(())
         }

@@ -60,6 +60,18 @@ impl CutStateProjection {
     /// anticipated order (the default-identity contract) via
     /// `StateLayout`'s `state_dim_range`, the sole owner of the boundary
     /// arithmetic.
+    ///
+    /// The per-slot fan-in cannot swap roles: an outgoing column pushed onto
+    /// the incoming-column vector fails to compile.
+    ///
+    /// ```compile_fail
+    /// use cobre_sddp::indexer::{InCol, StateDim, StateLayout};
+    ///
+    /// let global = StateLayout::new(1, 0, 0, Vec::new(), 0, 0, Vec::new(), &[0]);
+    /// let outgoing = global.lp_column_for_state(StateDim::new(0));
+    /// let mut incoming_columns: Vec<InCol> = Vec::new();
+    /// incoming_columns.push(outgoing); // fan-in swap: outgoing pushed onto the incoming-column vec
+    /// ```
     #[must_use]
     pub fn new(global: &StateLayout, state_config: StageStateConfig) -> Self {
         let mut incoming_columns = Vec::new();

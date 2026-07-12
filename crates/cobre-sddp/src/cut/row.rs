@@ -109,7 +109,7 @@ pub fn build_cut_row_batch_into(
     let n_cut_state = cut_state.n_state();
     let theta_col = state.theta;
 
-    let num_cuts: usize = fcf.pools[stage].active_count();
+    let num_cuts = fcf.pools[stage].active_count();
 
     if num_cuts == 0 {
         batch.row_starts.push(0_i32);

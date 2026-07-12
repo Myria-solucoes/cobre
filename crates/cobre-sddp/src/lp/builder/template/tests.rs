@@ -3288,45 +3288,45 @@ fn chronological_water_balance_telescopes_to_parallel() {
     );
 }
 
-/// `StageGeometry::block_storage_col` resolves the same column as the source
-/// `StageLayout::block_storage_col` for every boundary `k ∈ 0..=K` and every hydro,
-/// so the discarded-`StageLayout` accessor is faithfully mirrored onto the per-stage
-/// geometry the simulation read-path carries. Also pins the open-coded parallel
+/// `StageGeometry::block_storage_col` resolves S⁰, every interior boundary, and
+/// Sᴷ to hand-computed expectations sourced independently of
+/// `StorageBoundaryGrid::col` itself — `StateLayout`'s own `storage_in`/`storage`
+/// ranges for the endpoints, the equipment cursor's `storage_internal_start` for
+/// the interior — so a regression in `col`'s match arms fails this test, not just
+/// an identity of the owner with itself. Also pins the open-coded parallel
 /// endpoint pair (`entries.rs`'s `fill_fpha_entries`/`fill_evaporation_entries`,
 /// `BlockMode::Parallel` arm) to the `k = 0`/`k = K` formula arms.
 ///
-/// Seam A of the geometry cross-check guard's two pairwise seams — paired with
+/// Seam A of the geometry cross-check guard — pairs with
 /// `hydro_storage_boundary_resolves_each_boundary` (Seam B, in
-/// `generic_constraints::tests`, comparing `GenericResolverGeom` against a
-/// `StageGeometry` built from the same state/`n_blks`/`storage_internal_start`).
-/// No single test reaches all three `block_storage_col` copies (the resolver's copy
-/// is private to `generic_constraints.rs`), but Seam A ∧ Seam B ⇒ three-way
-/// agreement over the swept space, because both seams compare through this shared
-/// `StageGeometry::block_storage_col` formula.
+/// `generic_constraints::tests`), each independently anchored against its own
+/// hand-computed oracle rather than compared to each other.
 #[test]
 fn stage_geometry_block_storage_col_matches_layout() {
     let n_blks = 3_usize;
     let (layout, _, _) = block_layout_and_template(BlockMode::Chronological, n_blks);
     let geometry = layout.geometry(BlockMode::Chronological);
     let storage_in_start = layout.col_storage_in_start();
+    let storage_internal_start = layout.equipment.storage_internal_start;
     let storage_final_start = layout.state.storage.start;
 
     for h in 0..layout.n_h {
-        for k in 0..=n_blks {
-            assert_eq!(
-                geometry.block_storage_col(h, k),
-                layout.block_storage_col(h, k),
-                "block_storage_col mismatch at hydro {h}, boundary {k}"
-            );
-        }
         assert_eq!(
-            layout.block_storage_col(h, 0),
+            geometry.block_storage_col(h, 0),
             storage_in_start + h,
             "S⁰ endpoint (the parallel-fill open-coded pair) must resolve to \
              storage_in_start + h at hydro {h}"
         );
+        for k in 1..n_blks {
+            assert_eq!(
+                geometry.block_storage_col(h, k),
+                storage_internal_start + h * (n_blks - 1) + (k - 1),
+                "interior boundary S{k} must resolve to storage_internal_start + \
+                 h * (n_blks - 1) + (k - 1) at hydro {h}"
+            );
+        }
         assert_eq!(
-            layout.block_storage_col(h, n_blks),
+            geometry.block_storage_col(h, n_blks),
             storage_final_start + h,
             "Sᴷ endpoint (the parallel-fill open-coded pair) must resolve to \
              storage_final_start + h at hydro {h}"
@@ -3454,309 +3454,6 @@ fn stage_layout_geometry_field_equals_layout_source_at_k3() {
         layout.filling.filled_min_storage_floor_hydro_indices,
         "filled_min_storage_floor_hydro_indices"
     );
-}
-
-// ── Seam A property-based sweep ─────────────────────────────────────────────
-//
-// `stage_geometry_block_storage_col_matches_layout` above is the anchored,
-// readable exemplar; `block_storage_col_agreement_layout_geometry` below sweeps
-// the small layout param space (`n_h`, `n_blks`, `BlockMode`, `n_buckets`,
-// `n_anticipated × k_max`, the inflow-penalty flag, FPHA/evaporation membership
-// subsets) the interactions between these dimensions live in, not any single
-// fixture.
-
-use cobre_core::{
-    CascadeTopology, ResolvedExchangeFactors, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
-    ResolvedNcsBounds, ResolvedNcsFactors,
-};
-use proptest::prelude::*;
-
-/// Owns every entity/model backing a parametrized `TemplateBuildCtx` over a
-/// variable hydro count, mirroring `TwoHydroFixtures`
-/// (`super::super::layout::tests`) generalized from a fixed count of two.
-struct SeamAProptestFixtures {
-    hydros: Vec<Hydro>,
-    cascade: CascadeTopology,
-    bounds: ResolvedBounds,
-    penalties: ResolvedPenalties,
-    resolved_generic_bounds: ResolvedGenericConstraintBounds,
-    resolved_load_factors: ResolvedLoadFactors,
-    resolved_exchange_factors: ResolvedExchangeFactors,
-    resolved_ncs_bounds: ResolvedNcsBounds,
-    resolved_ncs_factors: ResolvedNcsFactors,
-    resolved_parameters: ResolvedParameters,
-    par_lp: PrecomputedPar,
-    production_models: ProductionModelSet,
-    evaporation_models: crate::hydro_models::EvaporationModelSet,
-}
-
-impl SeamAProptestFixtures {
-    /// `fpha_flags`/`evap_flags` (each length `n_h`) select which hydros carry an
-    /// FPHA production model / a linearized evaporation model; every hydro is
-    /// non-filling (`filling: None`), so `identify_fpha_hydros`/`identify_evap_hydros`
-    /// gate purely on these model sets, matching production's membership rule.
-    fn new(n_h: usize, fpha_flags: &[bool], evap_flags: &[bool]) -> Self {
-        use crate::hydro_models::{EvaporationModel, FphaPlane, LinearizedEvaporation};
-
-        let hydros: Vec<Hydro> = (0..n_h).map(|i| fixture_hydro(i as i32 + 1)).collect();
-        let cascade = CascadeTopology::build(&hydros);
-
-        let models: Vec<Vec<ResolvedProductionModel>> = (0..n_h)
-            .map(|h| {
-                vec![if fpha_flags[h] {
-                    ResolvedProductionModel::Fpha {
-                        planes: vec![FphaPlane {
-                            intercept: 1.0,
-                            gamma_v: 0.2,
-                            gamma_q: 0.5,
-                            gamma_s: 0.05,
-                        }],
-                    }
-                } else {
-                    ResolvedProductionModel::ConstantProductivity { productivity: 1.0 }
-                }]
-            })
-            .collect();
-
-        let evap_models: Vec<EvaporationModel> = (0..n_h)
-            .map(|h| {
-                if evap_flags[h] {
-                    EvaporationModel::Linearized {
-                        coefficients: vec![LinearizedEvaporation {
-                            intercept_m3s: 0.1,
-                            volume_slope_m3s_per_hm3: 0.01,
-                        }],
-                        reference_volumes_hm3: vec![100.0],
-                    }
-                } else {
-                    EvaporationModel::None
-                }
-            })
-            .collect();
-
-        Self {
-            hydros,
-            cascade,
-            bounds: ResolvedBounds::empty(),
-            penalties: ResolvedPenalties::empty(),
-            resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
-            resolved_load_factors: ResolvedLoadFactors::empty(),
-            resolved_exchange_factors: ResolvedExchangeFactors::empty(),
-            resolved_ncs_bounds: ResolvedNcsBounds::empty(),
-            resolved_ncs_factors: ResolvedNcsFactors::empty(),
-            resolved_parameters: ResolvedParameters {
-                per_param: vec![],
-                id_to_slot: vec![],
-            },
-            par_lp: PrecomputedPar::default(),
-            production_models: ProductionModelSet::new(models, n_h, 1),
-            evaporation_models: crate::hydro_models::EvaporationModelSet::new(evap_models),
-        }
-    }
-
-    /// Zero thermals/lines/buses/pumping/contracts/generic-constraints: only the
-    /// hydro/state-region dimensions (`n_buckets`, `n_anticipated`, `k_max`) and the
-    /// inflow-penalty flag reach `storage_internal_start`/`col_storage_in_start`, so
-    /// every other family collapses to its empty case.
-    fn make_ctx(
-        &self,
-        n_buckets: usize,
-        n_anticipated: usize,
-        k_max: usize,
-        has_inflow_penalty: bool,
-    ) -> super::super::layout::TemplateBuildCtx<'_> {
-        super::super::layout::TemplateBuildCtx {
-            hydros: &self.hydros,
-            thermals: &[],
-            lines: &[],
-            buses: &[],
-            load_models: &[],
-            cascade: &self.cascade,
-            resolved: super::super::layout::ResolvedTables {
-                bounds: &self.bounds,
-                penalties: &self.penalties,
-                resolved_generic_bounds: &self.resolved_generic_bounds,
-                resolved_load_factors: &self.resolved_load_factors,
-                resolved_exchange_factors: &self.resolved_exchange_factors,
-                resolved_ncs_bounds: &self.resolved_ncs_bounds,
-                resolved_ncs_factors: &self.resolved_ncs_factors,
-                resolved_parameters: &self.resolved_parameters,
-            },
-            hydro_pos: std::collections::BTreeMap::new(),
-            thermal_pos: std::collections::BTreeMap::new(),
-            line_pos: std::collections::BTreeMap::new(),
-            bus_pos: std::collections::BTreeMap::new(),
-            par_lp: &self.par_lp,
-            production_models: &self.production_models,
-            evaporation_models: &self.evaporation_models,
-            generic_constraints: &[],
-            non_controllable_sources: &[],
-            pumping_stations: &[],
-            pumping_pos: std::collections::BTreeMap::new(),
-            n_pumping: 0,
-            contracts: &[],
-            contract_pos: std::collections::BTreeMap::new(),
-            n_contract_import: 0,
-            n_contract_export: 0,
-            diversion_upstream: std::collections::HashMap::new(),
-            arc_stage_weights: std::collections::HashMap::new(),
-            arc_spread_chrono: std::collections::HashMap::new(),
-            arc_arrival_density: std::collections::HashMap::new(),
-            per_stage_mask: if n_buckets > 0 {
-                vec![vec![n_buckets - 1]]
-            } else {
-                Vec::new()
-            },
-            n_hydros: self.hydros.len(),
-            n_thermals: 0,
-            n_lines: 0,
-            n_buses: 0,
-            max_par_order: 0,
-            n_anticipated,
-            k_max,
-            anticipated_lead_stages: vec![k_max; n_anticipated],
-            anticipated_thermal_indices: (0..n_anticipated).collect(),
-            anticipated_windows: vec![(None, None); n_anticipated],
-            anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
-            study_stage_ids: Vec::new(),
-            has_penalty: has_inflow_penalty,
-            cumulative_discount_factors: vec![1.0],
-            total_hours_per_stage: vec![744.0],
-            filling_v_target: std::collections::BTreeMap::new(),
-        }
-    }
-}
-
-/// Single study stage (`id = 0`) with `n_blks` equal-duration blocks under
-/// `block_mode`.
-fn seam_a_proptest_stage(block_mode: BlockMode, n_blks: usize) -> Stage {
-    Stage {
-        index: 0,
-        id: 0,
-        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-        season_id: Some(0),
-        blocks: (0..n_blks)
-            .map(|index| Block {
-                index,
-                name: format!("BLK{index}"),
-                duration_hours: 744.0,
-            })
-            .collect(),
-        block_mode,
-        state_config: StageStateConfig {
-            storage: false,
-            inflow_lags: false,
-        },
-        risk_config: StageRiskConfig::Expectation,
-        scenario_config: ScenarioSourceConfig {
-            branching_factor: 1,
-            noise_method: NoiseMethod::Saa,
-        },
-    }
-}
-
-/// Build a `StageLayout`/`StageGeometry` pair from the swept parameters and assert
-/// `block_storage_col` agreement (Seam A) plus the endpoint-pair identity, for
-/// every `(h, k)`.
-// Rationale: each param is an independent proptest-swept dimension; a params
-// struct would relocate the arity into the proptest body, not reduce it.
-#[allow(clippy::too_many_arguments)]
-fn assert_seam_a_agreement(
-    n_h: usize,
-    n_blks: usize,
-    block_mode: BlockMode,
-    n_buckets: usize,
-    n_anticipated: usize,
-    k_max: usize,
-    has_inflow_penalty: bool,
-    fpha_flags: &[bool],
-    evap_flags: &[bool],
-) {
-    let fixtures = SeamAProptestFixtures::new(n_h, fpha_flags, evap_flags);
-    let ctx = fixtures.make_ctx(n_buckets, n_anticipated, k_max, has_inflow_penalty);
-
-    let transit_bucket_column_order: Vec<(usize, usize)> =
-        (0..n_buckets).map(|lag| (0_usize, lag)).collect();
-    let effective_lag_count = vec![0_usize; n_h];
-    let state = crate::indexer::StateLayout::new(
-        n_h,
-        0,
-        n_buckets,
-        transit_bucket_column_order,
-        n_anticipated,
-        k_max,
-        vec![k_max; n_anticipated],
-        &effective_lag_count,
-    );
-
-    let stage = seam_a_proptest_stage(block_mode, n_blks);
-    let layout = StageLayout::new(&ctx, &state, &stage, 0);
-    let geometry = layout.geometry(block_mode);
-    let storage_in_start = layout.col_storage_in_start();
-    let storage_final_start = layout.state.storage.start;
-
-    for h in 0..n_h {
-        for k in 0..=n_blks {
-            assert_eq!(
-                geometry.block_storage_col(h, k),
-                layout.block_storage_col(h, k),
-                "seam A mismatch at hydro {h}, boundary {k} (n_h={n_h}, n_blks={n_blks}, \
-                 block_mode={block_mode:?}, n_buckets={n_buckets}, \
-                 n_anticipated={n_anticipated}, k_max={k_max})"
-            );
-        }
-        assert_eq!(
-            layout.block_storage_col(h, 0),
-            storage_in_start + h,
-            "seam A S⁰ endpoint mismatch at hydro {h}"
-        );
-        assert_eq!(
-            layout.block_storage_col(h, n_blks),
-            storage_final_start + h,
-            "seam A Sᴷ endpoint mismatch at hydro {h}"
-        );
-    }
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(48))]
-
-    /// Property-based Seam A sweep: `StageLayout`/`StageGeometry`
-    /// `block_storage_col` agreement plus the endpoint-pair identity, over the small
-    /// layout param space. Pure address arithmetic, no solver — runs in the default
-    /// test pass.
-    #[test]
-    fn block_storage_col_agreement_layout_geometry(
-        n_h in 0_usize..4,
-        n_blks in 1_usize..4,
-        chronological in any::<bool>(),
-        n_buckets in 0_usize..3,
-        n_anticipated in 0_usize..2,
-        k_max in 1_usize..3,
-        has_inflow_penalty in any::<bool>(),
-        fpha_mask in any::<u8>(),
-        evap_mask in any::<u8>(),
-    ) {
-        let block_mode = if chronological {
-            BlockMode::Chronological
-        } else {
-            BlockMode::Parallel
-        };
-        let fpha_flags: Vec<bool> = (0..n_h).map(|i| (fpha_mask >> i) & 1 == 1).collect();
-        let evap_flags: Vec<bool> = (0..n_h).map(|i| (evap_mask >> i) & 1 == 1).collect();
-        assert_seam_a_agreement(
-            n_h,
-            n_blks,
-            block_mode,
-            n_buckets,
-            n_anticipated,
-            k_max,
-            has_inflow_penalty,
-            &fpha_flags,
-            &evap_flags,
-        );
-    }
 }
 
 /// Four-stage, one-bus system combining an import contract, an export contract,

@@ -12,7 +12,7 @@ use std::path::Path;
 
 use rayon::prelude::*;
 
-use cobre_core::{EntityId, StageId, System, entities::hydro::HydroGenerationModel};
+use cobre_core::{EntityId, StageId, StudyPos, System, entities::hydro::HydroGenerationModel};
 use cobre_io::HydroReferenceVolumeFractions;
 use cobre_io::extensions::{
     FphaColumnLayout, FphaHyperplaneRow, HydroGeometryRow, ProductionModelConfig, ReferenceVolume,
@@ -38,7 +38,7 @@ type ResolveProductionResult = (
     crate::energy_conversion::HydroEnergyProductivityOverride,
     Vec<(EntityId, ProductionModelSource)>,
     Vec<cobre_io::FphaHyperplaneRow>,
-    Vec<(EntityId, usize, f64)>,
+    Vec<(EntityId, StudyPos, f64)>,
     Vec<FphaFitDeviationEntry>,
     Vec<cobre_io::FphaDeviationPointRow>,
 );
@@ -138,7 +138,7 @@ pub fn resolve_production_models_from_artifacts(
     // The same resolved table feeds the energy-conversion reference in
     // `setup::build_energy_and_templates`, so the backwater level and the
     // productivity reference share one source of truth.
-    let reference_volumes_hm3: Vec<(EntityId, usize, f64)> = system
+    let reference_volumes_hm3: Vec<(EntityId, StudyPos, f64)> = system
         .hydros()
         .iter()
         .flat_map(|hydro| {
@@ -152,7 +152,7 @@ pub fn resolve_production_models_from_artifacts(
                 // both consumers (`resolve_downstream_level`,
                 // `build_energy_conversion_set`) query by study position;
                 // `stage.index` shifts every key by the pre-study-stage count.
-                (hydro.id, stage_pos, resolved)
+                (hydro.id, StudyPos(stage_pos), resolved)
             })
         })
         .collect();
@@ -367,13 +367,13 @@ fn build_geometry_map(
 /// reference volume. `None` when there is no downstream plant, or the downstream
 /// plant is absent / has no geometry.
 ///
-/// `stage_pos` is the 0-based study-horizon position (NOT `stage.index`), keyed to
-/// match the reference-volume resolver and `build_energy_conversion_set`. The
-/// resolver already holds `v_ref` resolved to absolute hm³, so it is consumed
-/// verbatim — do NOT re-apply the `v_min + fraction·(..)` span formula here.
+/// `stage_pos` is keyed to match the reference-volume resolver and
+/// `build_energy_conversion_set`. The resolver already holds `v_ref` resolved to
+/// absolute hm³, so it is consumed verbatim — do NOT re-apply the
+/// `v_min + fraction·(..)` span formula here.
 fn resolve_downstream_level(
     hydro: &cobre_core::entities::hydro::Hydro,
-    stage_pos: usize,
+    stage_pos: StudyPos,
     system: &System,
     geometry_map: &HashMap<EntityId, Vec<&HydroGeometryRow>>,
     reference_volume_fractions: &HydroReferenceVolumeFractions,
@@ -463,7 +463,7 @@ fn fit_planes_for_hydro(
 /// `families_map`, else the entity [`cobre_core::TailraceModel`] fallback.
 fn resolve_tailrace_source(
     hydro: &cobre_core::entities::hydro::Hydro,
-    stage_pos: usize,
+    stage_pos: StudyPos,
     families_map: &HashMap<EntityId, TailraceFamilies>,
     geometry_map: &HashMap<EntityId, Vec<&HydroGeometryRow>>,
     reference_volume_fractions: &HydroReferenceVolumeFractions,
@@ -553,7 +553,7 @@ fn fit_computed_planes_per_stage(
 
         let tailrace_source = resolve_tailrace_source(
             hydro,
-            stage_pos,
+            StudyPos(stage_pos),
             families_map,
             geometry_map,
             reference_volume_fractions,

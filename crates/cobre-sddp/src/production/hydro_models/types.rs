@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use cobre_core::{EntityId, System};
+use cobre_core::{EntityId, StudyPos, System};
 use serde::{Deserialize, Serialize};
 
 // ── Hyperplane types ──────────────────────────────────────────────────────────
@@ -366,9 +366,9 @@ pub struct PrepareHydroModelsResult {
     /// site but hold an identical copy via the deterministic preprocessing path.
     pub fpha_export_rows: Vec<cobre_io::FphaHyperplaneRow>,
     /// Per-`(hydro, study-stage)` reference operating volume in absolute hm³
-    /// (`(hydro_id, stage_index, volume_hm3)`, 0-based `stage_index`). The
-    /// energy-conversion build and the FPHA backwater path read this one source.
-    pub reference_volumes_hm3: Vec<(EntityId, usize, f64)>,
+    /// (`(hydro_id, stage_pos, volume_hm3)`). The energy-conversion build and the
+    /// FPHA backwater path read this one source.
+    pub reference_volumes_hm3: Vec<(EntityId, StudyPos, f64)>,
     /// Per-hydro VHA geometry (volume → forebay height), sorted by ascending
     /// volume. The energy-conversion build derives `ρ_eq` from this + `ρ_esp` for an
     /// FPHA plant with no parquet `equivalent_productivity` override (the parquet
@@ -435,8 +435,7 @@ impl PrepareHydroModelsResult {
         // Resolve through `resolve_reference_volume_hm3(None, ..)` — the single
         // owner of the default fraction — not an inline formula, so the undeclared
         // value stays bit-identical to the JSON-fed path.
-        let study_stage_count = n_stages;
-        let reference_volumes_hm3: Vec<(EntityId, usize, f64)> = system
+        let reference_volumes_hm3: Vec<(EntityId, StudyPos, f64)> = system
             .hydros()
             .iter()
             .flat_map(|hydro| {
@@ -445,7 +444,7 @@ impl PrepareHydroModelsResult {
                     hydro.min_storage_hm3,
                     hydro.max_storage_hm3,
                 );
-                (0..study_stage_count).map(move |stage_index| (hydro.id, stage_index, resolved))
+                (0..n_stages).map(move |stage_index| (hydro.id, StudyPos(stage_index), resolved))
             })
             .collect();
 
