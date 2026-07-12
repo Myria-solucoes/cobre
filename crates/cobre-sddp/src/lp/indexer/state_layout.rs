@@ -15,7 +15,7 @@
 
 use std::ops::Range;
 
-use super::RangeCursor;
+use super::{InCol, OutCol, RangeCursor, StateDim};
 use crate::lead_time::AnticipatedResolution;
 
 /// Stage-invariant state-vector layout for one SDDP stage subproblem.
@@ -356,7 +356,8 @@ impl StateLayout {
     /// anticipated from ever reaching the lag decode.
     #[inline]
     #[must_use]
-    pub fn state_to_lp_column(&self, j: usize) -> usize {
+    pub fn state_to_lp_column(&self, j: StateDim) -> OutCol {
+        let j = j.get();
         // REGION_ORDER's four ranges partition [0, n_state) contiguously
         // (`state_dim_ranges_partition_n_state_contiguously`), so `find` only
         // misses for an out-of-range `j`; `unwrap_or` keeps this function
@@ -366,7 +367,7 @@ impl StateLayout {
             .find(|&region| self.state_dim_range(region).contains(&j))
             .unwrap_or(StateRegion::Anticipated);
 
-        match region {
+        OutCol::new(match region {
             StateRegion::Storage | StateRegion::Buckets | StateRegion::Anticipated => j,
             StateRegion::Lag => {
                 let n = self.hydro_count;
@@ -379,7 +380,7 @@ impl StateLayout {
                     n + (lag - 1) * n + h
                 }
             }
-        }
+        })
     }
 
     /// Fill [`Self::state_to_lp_column_map`] by calling
@@ -389,7 +390,8 @@ impl StateLayout {
         self.state_to_lp_column_map.clear();
         self.state_to_lp_column_map.reserve(self.n_state);
         for j in 0..self.n_state {
-            self.state_to_lp_column_map.push(self.state_to_lp_column(j));
+            self.state_to_lp_column_map
+                .push(self.state_to_lp_column(StateDim::new(j)).get());
         }
         debug_assert_eq!(self.state_to_lp_column_map.len(), self.n_state);
     }
@@ -400,13 +402,14 @@ impl StateLayout {
     /// `j ∈ [0, n_state)`).
     #[inline]
     #[must_use]
-    pub fn lp_column_for_state(&self, j: usize) -> usize {
+    pub fn lp_column_for_state(&self, j: StateDim) -> OutCol {
+        let j = j.get();
         debug_assert_eq!(
             self.state_to_lp_column_map.len(),
             self.n_state,
             "state_to_lp_column_map must be finalized to n_state length"
         );
-        self.state_to_lp_column_map[j]
+        OutCol::new(self.state_to_lp_column_map[j])
     }
 
     /// Map a state-vector index to its **incoming-state** LP column — the column
@@ -431,7 +434,8 @@ impl StateLayout {
     /// [`state_to_lp_column`]: Self::state_to_lp_column
     #[inline]
     #[must_use]
-    pub fn state_to_lp_incoming_column(&self, j: usize) -> usize {
+    pub fn state_to_lp_incoming_column(&self, j: StateDim) -> InCol {
+        let j = j.get();
         // Same REGION_ORDER classification `state_to_lp_column` uses; see its
         // partition-coverage note.
         let region = REGION_ORDER
@@ -440,12 +444,12 @@ impl StateLayout {
             .unwrap_or(StateRegion::Anticipated);
         let offset = j - self.state_dim_range(region).start;
 
-        match region {
+        InCol::new(match region {
             StateRegion::Storage => self.storage_in.start + offset,
             StateRegion::Lag => self.inflow_lags.start + offset,
             StateRegion::Buckets => self.transit_buckets_in.start + offset,
             StateRegion::Anticipated => self.anticipated_state.start + offset,
-        }
+        })
     }
 
     /// Whether anticipated plant `local_idx` emits a decision column and an
@@ -637,7 +641,7 @@ impl StateLayout {
 
 #[cfg(test)]
 mod tests {
-    use super::StateLayout;
+    use super::{InCol, OutCol, StateDim, StateLayout};
 
     /// Build a [`StateLayout`] finalized the way production `resolve_state_layout`
     /// does: full `max_par_order` lag stride for every hydro (the coverage the
@@ -699,8 +703,8 @@ mod tests {
         assert_eq!(idx.state_to_lp_column_map.len(), idx.n_state);
         for j in 0..idx.n_state {
             assert_eq!(
-                idx.lp_column_for_state(j),
-                idx.state_to_lp_column(j),
+                idx.lp_column_for_state(StateDim::new(j)),
+                idx.state_to_lp_column(StateDim::new(j)),
                 "finalized map must match the resolver at j={j}"
             );
         }
@@ -726,7 +730,10 @@ mod tests {
                 "constructor must finalize the column map to n_state length"
             );
             for j in 0..idx.n_state {
-                assert_eq!(idx.lp_column_for_state(j), idx.state_to_lp_column_map[j]);
+                assert_eq!(
+                    idx.lp_column_for_state(StateDim::new(j)),
+                    OutCol::new(idx.state_to_lp_column_map[j])
+                );
             }
         }
     }
@@ -741,7 +748,7 @@ mod tests {
         assert_eq!(idx.nonzero_state_indices, vec![0, 1, 2]);
         assert_eq!(idx.nonzero_state_indices.len(), idx.n_state);
         for j in 0..idx.n_state {
-            assert_eq!(idx.lp_column_for_state(j), j);
+            assert_eq!(idx.lp_column_for_state(StateDim::new(j)), OutCol::new(j));
         }
     }
 
@@ -830,10 +837,10 @@ mod tests {
         let idx = finalized(1, 0, 1, 2, vec![2]);
         assert_eq!(idx.anticipated_slots_out, 1..3);
         // Storage index: identity.
-        assert_eq!(idx.state_to_lp_column(0), 0);
+        assert_eq!(idx.state_to_lp_column(StateDim::new(0)), OutCol::new(0));
         // Both ring slots: identity.
-        assert_eq!(idx.state_to_lp_column(1), 1);
-        assert_eq!(idx.state_to_lp_column(2), 2);
+        assert_eq!(idx.state_to_lp_column(StateDim::new(1)), OutCol::new(1));
+        assert_eq!(idx.state_to_lp_column(StateDim::new(2)), OutCol::new(2));
     }
 
     /// `anticipated_slots_out` indices resolve by identity when
@@ -848,13 +855,16 @@ mod tests {
         let idx = finalized(1, 1, 1, 2, vec![2]);
         assert_eq!(idx.anticipated_slots_out, 2..4);
         // Storage: identity.
-        assert_eq!(idx.state_to_lp_column(0), 0);
+        assert_eq!(idx.state_to_lp_column(StateDim::new(0)), OutCol::new(0));
         // Lag block: remapped (unaffected by the anticipated-ring change).
         // j=1: offset=0, h=0, lag=0 → z_inflow.start + 0.
-        assert_eq!(idx.state_to_lp_column(1), idx.z_inflow.start);
+        assert_eq!(
+            idx.state_to_lp_column(StateDim::new(1)),
+            OutCol::new(idx.z_inflow.start)
+        );
         // Both ring slots: identity.
-        assert_eq!(idx.state_to_lp_column(2), 2);
-        assert_eq!(idx.state_to_lp_column(3), 3);
+        assert_eq!(idx.state_to_lp_column(StateDim::new(2)), OutCol::new(2));
+        assert_eq!(idx.state_to_lp_column(StateDim::new(3)), OutCol::new(3));
     }
 
     /// Lag-remap branch is preserved when `n_anticipated == 0` and
@@ -867,11 +877,11 @@ mod tests {
         let idx = finalized(1, 1, 0, 0, vec![]);
         assert_eq!(idx.n_anticipated, 0);
         // Storage: identity.
-        assert_eq!(idx.state_to_lp_column(0), 0);
+        assert_eq!(idx.state_to_lp_column(StateDim::new(0)), OutCol::new(0));
         // Lag block j=1: offset=0, h=0, lag=0 → z_inflow.start + 0.
         // For N=1, L=0 anticipated: z_inflow = N*(1+L)..N*(2+L) = 2..3.
         assert_eq!(idx.z_inflow.start, 2);
-        assert_eq!(idx.state_to_lp_column(1), 2);
+        assert_eq!(idx.state_to_lp_column(StateDim::new(1)), OutCol::new(2));
     }
 
     /// Every anticipated ring slot resolves by identity, regardless of which
@@ -889,8 +899,8 @@ mod tests {
         assert_eq!(idx.anticipated_slots_out, 0..6);
         for j in idx.anticipated_slots_out.clone() {
             assert_eq!(
-                idx.state_to_lp_column(j),
-                j,
+                idx.state_to_lp_column(StateDim::new(j)),
+                OutCol::new(j),
                 "anticipated ring slot {j} must resolve by identity"
             );
         }
@@ -904,7 +914,7 @@ mod tests {
         // N=3, L=2, A=2, k_max=3, uniform K_p = 3.
         let idx = finalized(3, 2, 2, 3, vec![3, 3]);
         for j in idx.anticipated_slots_out.clone() {
-            let col = idx.state_to_lp_column(j);
+            let col = idx.state_to_lp_column(StateDim::new(j)).get();
             assert_eq!(col, j, "identity resolution");
             assert!(
                 col >= idx.transit_buckets_out.end,
@@ -931,8 +941,8 @@ mod tests {
         assert_eq!(idx.storage_in.start, 12);
         for j in 0..3_usize {
             assert_eq!(
-                idx.state_to_lp_incoming_column(j),
-                idx.storage_in.start + j,
+                idx.state_to_lp_incoming_column(StateDim::new(j)),
+                InCol::new(idx.storage_in.start + j),
                 "j={j}: expected storage_in.start + {j}"
             );
         }
@@ -948,8 +958,8 @@ mod tests {
         assert_eq!(idx.inflow_lags.start, 3);
         for j in 3..9_usize {
             assert_eq!(
-                idx.state_to_lp_incoming_column(j),
-                idx.inflow_lags.start + (j - 3),
+                idx.state_to_lp_incoming_column(StateDim::new(j)),
+                InCol::new(idx.inflow_lags.start + (j - 3)),
                 "j={j}: expected inflow_lags.start + {}",
                 j - 3
             );
@@ -971,8 +981,8 @@ mod tests {
         assert_eq!(idx.n_state, 2);
         for j in 0..2_usize {
             assert_eq!(
-                idx.state_to_lp_incoming_column(j),
-                idx.anticipated_state.start + j,
+                idx.state_to_lp_incoming_column(StateDim::new(j)),
+                InCol::new(idx.anticipated_state.start + j),
                 "j={j}: expected anticipated_state.start + {j}"
             );
         }
@@ -994,43 +1004,43 @@ mod tests {
         assert_eq!(idx.n_state, 11);
         // j=0: storage range → storage_in.start + 0.
         assert_eq!(
-            idx.state_to_lp_incoming_column(0),
-            idx.storage_in.start,
+            idx.state_to_lp_incoming_column(StateDim::new(0)),
+            InCol::new(idx.storage_in.start),
             "j=0"
         );
         // j=2: storage range → storage_in.start + 2.
         assert_eq!(
-            idx.state_to_lp_incoming_column(2),
-            idx.storage_in.start + 2,
+            idx.state_to_lp_incoming_column(StateDim::new(2)),
+            InCol::new(idx.storage_in.start + 2),
             "j=2"
         );
         // j=3: first lag → inflow_lags.start + 0.
         assert_eq!(
-            idx.state_to_lp_incoming_column(3),
-            idx.inflow_lags.start,
+            idx.state_to_lp_incoming_column(StateDim::new(3)),
+            InCol::new(idx.inflow_lags.start),
             "j=3"
         );
         // j=8: last lag → inflow_lags.start + 5.
         assert_eq!(
-            idx.state_to_lp_incoming_column(8),
-            idx.inflow_lags.start + 5,
+            idx.state_to_lp_incoming_column(StateDim::new(8)),
+            InCol::new(idx.inflow_lags.start + 5),
             "j=8"
         );
         // j=9: first anticipated-state → anticipated_state.start + 0.
         assert_eq!(
-            idx.state_to_lp_incoming_column(9),
-            idx.anticipated_state.start,
+            idx.state_to_lp_incoming_column(StateDim::new(9)),
+            InCol::new(idx.anticipated_state.start),
             "j=9"
         );
         // j=10: last anticipated-state → anticipated_state.start + 1.
         assert_eq!(
-            idx.state_to_lp_incoming_column(10),
-            idx.anticipated_state.start + 1,
+            idx.state_to_lp_incoming_column(StateDim::new(10)),
+            InCol::new(idx.anticipated_state.start + 1),
             "j=10"
         );
         // All returned columns must be within the LP's column range.
         for j in 0..idx.n_state {
-            let col = idx.state_to_lp_incoming_column(j);
+            let col = idx.state_to_lp_incoming_column(StateDim::new(j)).get();
             assert!(
                 col < idx.theta + 1,
                 "j={j}: column {col} out of range (theta={})",
@@ -1052,40 +1062,43 @@ mod tests {
         let idx = finalized(2, 1, 0, 0, vec![]);
         // Storage range: incoming ≠ outgoing.
         assert_ne!(
-            idx.state_to_lp_incoming_column(0),
-            idx.state_to_lp_column(0),
+            idx.state_to_lp_incoming_column(StateDim::new(0)).get(),
+            idx.state_to_lp_column(StateDim::new(0)).get(),
             "storage range should differ: incoming={} outgoing={}",
-            idx.state_to_lp_incoming_column(0),
-            idx.state_to_lp_column(0)
+            idx.state_to_lp_incoming_column(StateDim::new(0)).get(),
+            idx.state_to_lp_column(StateDim::new(0)).get()
         );
         // j=0: incoming returns storage_in.start, outgoing returns 0.
-        assert_eq!(idx.state_to_lp_incoming_column(0), idx.storage_in.start);
-        assert_eq!(idx.state_to_lp_column(0), 0);
+        assert_eq!(
+            idx.state_to_lp_incoming_column(StateDim::new(0)),
+            InCol::new(idx.storage_in.start)
+        );
+        assert_eq!(idx.state_to_lp_column(StateDim::new(0)), OutCol::new(0));
 
         // Lag range (j=2, j=3): incoming returns inflow_lags column;
         // outgoing returns z_inflow (lag=0) or lag-out (lag>=1) column.
         // j=2: lag 0, hydro 0. incoming = inflow_lags.start + 0.
         //                       outgoing = z_inflow.start + 0.
         assert_eq!(
-            idx.state_to_lp_incoming_column(2),
-            idx.inflow_lags.start,
+            idx.state_to_lp_incoming_column(StateDim::new(2)),
+            InCol::new(idx.inflow_lags.start),
             "j=2 incoming should be inflow_lags.start"
         );
         assert_eq!(
-            idx.state_to_lp_column(2),
-            idx.z_inflow.start,
+            idx.state_to_lp_column(StateDim::new(2)),
+            OutCol::new(idx.z_inflow.start),
             "j=2 outgoing should be z_inflow.start"
         );
         assert_ne!(
-            idx.state_to_lp_incoming_column(2),
-            idx.state_to_lp_column(2),
+            idx.state_to_lp_incoming_column(StateDim::new(2)).get(),
+            idx.state_to_lp_column(StateDim::new(2)).get(),
             "lag range should differ for j=2"
         );
         // j=3: lag 0, hydro 1. incoming = inflow_lags.start + 1.
         //                       outgoing = z_inflow.start + 1.
         assert_ne!(
-            idx.state_to_lp_incoming_column(3),
-            idx.state_to_lp_column(3),
+            idx.state_to_lp_incoming_column(StateDim::new(3)).get(),
+            idx.state_to_lp_column(StateDim::new(3)).get(),
             "lag range should differ for j=3"
         );
     }
@@ -1347,15 +1360,15 @@ mod tests {
         assert_eq!(idx.transit_buckets_out, 6..9);
         for j in idx.transit_buckets_out.clone() {
             assert_eq!(
-                idx.state_to_lp_column(j),
-                j,
+                idx.state_to_lp_column(StateDim::new(j)),
+                OutCol::new(j),
                 "bucket state index {j} must map to its LP column by identity"
             );
         }
         // The last lag index (j=5, just below the bucket block) still resolves
         // via the lag remap, proving the bucket check does not swallow lag
         // indices.
-        assert_eq!(idx.state_to_lp_column(5), 3);
+        assert_eq!(idx.state_to_lp_column(StateDim::new(5)), OutCol::new(3));
     }
 
     /// Bucket-arm resolution for `state_to_lp_incoming_column`: bucket indices
@@ -1372,24 +1385,24 @@ mod tests {
 
         // Bucket state indices: j=4, j=5 (lag_end = N*(1+L) = 4).
         assert_eq!(
-            idx.state_to_lp_incoming_column(4),
-            idx.transit_buckets_in.start
+            idx.state_to_lp_incoming_column(StateDim::new(4)),
+            InCol::new(idx.transit_buckets_in.start)
         );
         assert_eq!(
-            idx.state_to_lp_incoming_column(5),
-            idx.transit_buckets_in.start + 1
+            idx.state_to_lp_incoming_column(StateDim::new(5)),
+            InCol::new(idx.transit_buckets_in.start + 1)
         );
         assert_ne!(
-            idx.state_to_lp_incoming_column(4),
-            idx.anticipated_state.start,
+            idx.state_to_lp_incoming_column(StateDim::new(4)),
+            InCol::new(idx.anticipated_state.start),
             "bucket index must not resolve to the anticipated catch-all"
         );
 
         // The first anticipated-state index (j=6) still resolves via the
         // catch-all, immediately after the bucket range.
         assert_eq!(
-            idx.state_to_lp_incoming_column(6),
-            idx.anticipated_state.start
+            idx.state_to_lp_incoming_column(StateDim::new(6)),
+            InCol::new(idx.anticipated_state.start)
         );
     }
 
@@ -1404,7 +1417,11 @@ mod tests {
         assert_eq!(idx.n_state, 3);
         assert_eq!(idx.state_to_lp_column_map.len(), idx.n_state);
         for j in 0..idx.n_state {
-            assert_eq!(idx.lp_column_for_state(j), j, "bucket-only identity map");
+            assert_eq!(
+                idx.lp_column_for_state(StateDim::new(j)),
+                OutCol::new(j),
+                "bucket-only identity map"
+            );
         }
     }
 
@@ -1479,8 +1496,8 @@ mod tests {
 
         for j in 0..idx.n_state {
             assert_eq!(
-                idx.lp_column_for_state(j),
-                idx.state_to_lp_column(j),
+                idx.lp_column_for_state(StateDim::new(j)),
+                idx.state_to_lp_column(StateDim::new(j)),
                 "A==0 collapse must not disturb the storage/lag/bucket resolvers"
             );
         }

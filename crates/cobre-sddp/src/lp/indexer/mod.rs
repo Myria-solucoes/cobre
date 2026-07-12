@@ -48,6 +48,10 @@
 //! - `layout` — the per-stage geometry satellite types [`EvaporationIndices`]
 //!   and [`FphaRowRange`] (locating one hydro's evaporation columns/row and FPHA
 //!   row block within a stage LP).
+//! - `index` — the base typed vocabulary [`Col`]/[`Row`]/[`StateDim`] and the
+//!   [`InCol`]/[`OutCol`] incoming/outgoing column-role split. Every
+//!   `StateLayout`/`CutStateProjection` incoming and outgoing resolver, plus
+//!   [`CutStateProjection::render_pairs`], resolves through it.
 //! - `block_grid` — the [`BlockGrid`] typed block-stride address primitive and
 //!   its three shape methods ([`BlockGrid::flat`], [`BlockGrid::fpha_plane`],
 //!   [`BlockGrid::deficit`]).
@@ -78,6 +82,7 @@
 
 mod block_grid;
 mod cut_state_projection;
+mod index;
 mod layout;
 mod range_cursor;
 mod state_layout;
@@ -86,6 +91,7 @@ mod study_dimensions;
 
 pub use block_grid::BlockGrid;
 pub use cut_state_projection::CutStateProjection;
+pub use index::{Col, InCol, OutCol, Row, StateDim};
 pub use layout::{EvaporationIndices, FphaRowRange};
 pub(crate) use range_cursor::RangeCursor;
 pub use state_layout::StateLayout;

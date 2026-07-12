@@ -6466,7 +6466,9 @@ fn cut_row_from_state_matches_reference_loop() {
     for (_slot, intercept, coeffs) in fcf.active_cuts(0) {
         from_state.row_starts.push(0);
         for &j in mask {
-            let lp_col = state.lp_column_for_state(j);
+            let lp_col = state
+                .lp_column_for_state(crate::indexer::StateDim::new(j))
+                .get();
             from_state
                 .col_indices
                 .push(i32::try_from(lp_col).expect("col fits i32"));

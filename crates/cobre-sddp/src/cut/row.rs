@@ -11,7 +11,7 @@
 use cobre_solver::{RowBatch, SolverInterface};
 
 use crate::cut::FutureCostFunction;
-use crate::indexer::{CutStateProjection, StateLayout};
+use crate::indexer::{CutStateProjection, OutCol, StateLayout};
 
 /// Push one cut-row coefficient: `-coeff * col_scale[j]` (sign negation per the
 /// module-doc Benders contract). Sole owner of the negate-and-scale rule, shared
@@ -19,10 +19,11 @@ use crate::indexer::{CutStateProjection, StateLayout};
 #[inline]
 pub(crate) fn push_scaled_coefficient(
     batch: &mut RowBatch,
-    j: usize,
+    col: OutCol,
     coeff: f64,
     col_scale: &[f64],
 ) {
+    let j = col.get();
     debug_assert!(
         i32::try_from(j).is_ok(),
         "column index j={j} exceeds i32::MAX"

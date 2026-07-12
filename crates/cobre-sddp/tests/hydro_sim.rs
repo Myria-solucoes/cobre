@@ -877,7 +877,11 @@ mod sparse_dense {
         let theta_col = state.theta;
         let expected_cols: Vec<i32> = mask
             .iter()
-            .map(|&j| state.state_to_lp_column(j) as i32)
+            .map(|&j| {
+                state
+                    .state_to_lp_column(cobre_sddp::indexer::StateDim::new(j))
+                    .get() as i32
+            })
             .chain(std::iter::once(theta_col as i32))
             .collect();
         assert_eq!(

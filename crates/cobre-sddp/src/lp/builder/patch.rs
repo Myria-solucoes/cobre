@@ -1,4 +1,4 @@
-use crate::indexer::{BlockGrid, StateLayout};
+use crate::indexer::{BlockGrid, StateDim, StateLayout};
 
 /// Pre-allocated row-bound and column-bound patch arrays for one SDDP stage LP solve.
 ///
@@ -251,7 +251,9 @@ impl PatchBuffer {
         );
 
         for (j, &sv) in state.iter().enumerate() {
-            let col = state_layout.state_to_lp_incoming_column(j);
+            let col = state_layout
+                .state_to_lp_incoming_column(StateDim::new(j))
+                .get();
             let scaled = if col_scale.is_empty() {
                 sv
             } else {

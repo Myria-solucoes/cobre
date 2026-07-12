@@ -5064,7 +5064,11 @@ fn cut_coefficient_sign_convention_slot_zero_k2() {
     // Slot 0 (j = anticipated_slots_out.start) resolves by identity — the
     // in-LP ring's definition row (not `state_to_lp_column`) resolves the
     // ring transition, so the cut renders directly onto the outgoing column.
-    let lp_col = state.state_to_lp_column(state.anticipated_slots_out.start);
+    let lp_col = state
+        .state_to_lp_column(crate::indexer::StateDim::new(
+            state.anticipated_slots_out.start,
+        ))
+        .get();
     assert_eq!(lp_col, state.anticipated_slots_out.start);
 
     let pos = batch

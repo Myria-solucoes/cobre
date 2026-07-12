@@ -14,7 +14,7 @@ use cobre_io::output::policy::{
 };
 
 use crate::cut::FutureCostFunction;
-use crate::indexer::{CutStateProjection, StateLayout};
+use crate::indexer::{CutStateProjection, StateDim, StateLayout};
 use crate::lp_builder::delivery_ring::DeliveryRing;
 use crate::training::TrainingResult;
 
@@ -93,7 +93,9 @@ pub fn build_stage_entity_manifest(
 
     let mut manifest = Vec::with_capacity(projection.n_state());
     for j in 0..projection.n_state() {
-        let col = projection.state_to_lp_incoming_column(j);
+        let col = projection
+            .state_to_lp_incoming_column(StateDim::new(j))
+            .get();
         let slot = if global_layout.storage_in.contains(&col) {
             let h = col - global_layout.storage_in.start;
             let hydro = &hydros[h];

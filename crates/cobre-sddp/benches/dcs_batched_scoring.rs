@@ -18,7 +18,7 @@
 use cobre_sddp::cut::{CutPool, CutRowMap};
 use cobre_sddp::cut_selection::CutMetadata;
 use cobre_sddp::dcs::{DcsParams, DcsScoringScratch, score_violated_candidates};
-use cobre_sddp::indexer::{CutStateProjection, StateLayout};
+use cobre_sddp::indexer::{CutStateProjection, StateDim, StateLayout};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
@@ -116,7 +116,7 @@ fn score_per_candidate_baseline(
 
     unscaled_state.clear();
     for j in 0..n_state {
-        let c = state.state_to_lp_column(j);
+        let c = state.state_to_lp_column(StateDim::new(j)).get();
         let x_raw = if col_scale.is_empty() {
             primal[c]
         } else {

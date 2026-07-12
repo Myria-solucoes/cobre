@@ -6,7 +6,7 @@
 
 use cobre_solver::SolutionView;
 
-use crate::indexer::CutStateProjection;
+use crate::indexer::{CutStateProjection, StateDim};
 
 use super::SuccessorSpec;
 
@@ -30,7 +30,9 @@ pub(crate) fn extract_duals_from_view(
     // Divided, not multiplied (module-level contract). Empty col_scale ⇒ raw rc.
     state_duals.clear();
     for j in 0..cut_state.n_state() {
-        let col = cut_state.state_to_lp_incoming_column(j);
+        let col = cut_state
+            .state_to_lp_incoming_column(StateDim::new(j))
+            .get();
         let rc = view.reduced_costs[col];
         let unscaled = if col_scale.is_empty() {
             rc
@@ -72,7 +74,9 @@ pub(crate) fn extract_state_duals_only(
 
     state_duals.clear();
     for j in 0..cut_state.n_state() {
-        let col = cut_state.state_to_lp_incoming_column(j);
+        let col = cut_state
+            .state_to_lp_incoming_column(StateDim::new(j))
+            .get();
         let rc = view.reduced_costs[col];
         let unscaled = if col_scale.is_empty() {
             rc
@@ -96,7 +100,7 @@ mod tests {
     use cobre_solver::SolutionView;
 
     use super::extract_state_duals_only;
-    use crate::indexer::{CutStateProjection, StateLayout};
+    use crate::indexer::{CutStateProjection, StateDim, StateLayout};
     use cobre_core::temporal::StageStateConfig;
 
     const ALL_ENABLED: StageStateConfig = StageStateConfig {
@@ -154,7 +158,7 @@ mod tests {
         for (j, &dual) in state_duals.iter().enumerate() {
             assert_eq!(
                 dual,
-                global.state_to_lp_incoming_column(j) as f64,
+                global.state_to_lp_incoming_column(StateDim::new(j)).get() as f64,
                 "storage slot {j} reads its storage_in column reduced cost"
             );
         }
@@ -176,7 +180,7 @@ mod tests {
         let _ = extract_state_duals_only(&view, &cut_state, &[], &mut via_cut_state);
 
         let global_loop: Vec<f64> = (0..global.n_state)
-            .map(|j| rc[global.state_to_lp_incoming_column(j)])
+            .map(|j| rc[global.state_to_lp_incoming_column(StateDim::new(j)).get()])
             .collect();
 
         assert_eq!(via_cut_state, global_loop);

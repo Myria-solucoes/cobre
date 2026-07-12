@@ -2990,7 +2990,7 @@ mod pumping_water_tests {
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
     use crate::hydro_models::{EvaporationModel, EvaporationModelSet, ProductionModelSet};
-    use crate::indexer::StateLayout;
+    use crate::indexer::{StateDim, StateLayout};
     use crate::lead_time::{SpreadResolution, resolve_spread};
     use crate::resolved_parameters::ResolvedParameters;
 
@@ -6853,7 +6853,9 @@ mod pumping_water_tests {
         let template = out.template;
 
         let h2_idx = fixtures.hydro_pos[&EntityId(2)];
-        let col_v_in = state.state_to_lp_incoming_column(h2_idx);
+        let col_v_in = state
+            .state_to_lp_incoming_column(StateDim::new(h2_idx))
+            .get();
 
         // Solve twice with different pinned v̂_{H2}; assert the incoming-storage
         // reduced cost is 0 at both and the objective is unchanged. col_scale is

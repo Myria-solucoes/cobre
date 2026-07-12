@@ -4,7 +4,7 @@
 
 use cobre_core::temporal::StageStateConfig;
 
-use super::{REGION_ORDER, StateLayout, StateRegion};
+use super::{InCol, OutCol, REGION_ORDER, StateDim, StateLayout, StateRegion};
 
 /// A storage-scoped view of the global state vector exposing only the cut-state
 /// dimensions a stage enables, plus travel-time buckets and anticipated state
@@ -38,11 +38,11 @@ use super::{REGION_ORDER, StateLayout, StateRegion};
 #[derive(Debug, Clone)]
 pub struct CutStateProjection {
     /// LP incoming column per cut slot `j` (extraction hot path).
-    incoming_columns: Vec<usize>,
+    incoming_columns: Vec<InCol>,
 
     /// LP outgoing column per cut slot `j` (DCS scoring); parallel to
     /// [`Self::incoming_columns`].
-    outgoing_columns: Vec<usize>,
+    outgoing_columns: Vec<OutCol>,
 
     /// Reduced coefficient index `j` per render pair, nonzero-subset order;
     /// parallel to [`Self::render_columns`].
@@ -50,7 +50,7 @@ pub struct CutStateProjection {
 
     /// LP outgoing column per render pair; parallel to
     /// [`Self::render_coeff_indices`].
-    render_columns: Vec<usize>,
+    render_columns: Vec<OutCol>,
 }
 
 impl CutStateProjection {
@@ -69,8 +69,8 @@ impl CutStateProjection {
 
         let mut push_dim = |g: usize| {
             let reduced_j = incoming_columns.len();
-            let outgoing = global.lp_column_for_state(g);
-            incoming_columns.push(global.state_to_lp_incoming_column(g));
+            let outgoing = global.lp_column_for_state(StateDim::new(g));
+            incoming_columns.push(global.state_to_lp_incoming_column(StateDim::new(g)));
             outgoing_columns.push(outgoing);
             // Drop padding slots, never zero-fill: keeps the default render
             // bit-identical to the global nonzero_state_indices render.
@@ -131,7 +131,8 @@ impl CutStateProjection {
     /// Panics if `j >= n_state()`.
     #[inline]
     #[must_use]
-    pub fn state_to_lp_incoming_column(&self, j: usize) -> usize {
+    pub fn state_to_lp_incoming_column(&self, j: StateDim) -> InCol {
+        let j = j.get();
         debug_assert!(
             j < self.n_state(),
             "cut state index {j} out of bounds (n_state = {})",
@@ -154,7 +155,8 @@ impl CutStateProjection {
     /// Panics if `j >= n_state()`.
     #[inline]
     #[must_use]
-    pub fn state_to_lp_outgoing_column(&self, j: usize) -> usize {
+    pub fn state_to_lp_outgoing_column(&self, j: StateDim) -> OutCol {
+        let j = j.get();
         debug_assert!(
             j < self.n_state(),
             "cut state index {j} out of bounds (n_state = {})",
@@ -173,7 +175,7 @@ impl CutStateProjection {
     /// the global `nonzero_state_indices` render — same reduced index, same column.
     #[inline]
     #[must_use]
-    pub fn render_pairs(&self) -> impl ExactSizeIterator<Item = (usize, usize)> + '_ {
+    pub fn render_pairs(&self) -> impl ExactSizeIterator<Item = (usize, OutCol)> + '_ {
         self.render_coeff_indices
             .iter()
             .copied()
@@ -192,7 +194,7 @@ impl CutStateProjection {
 
 #[cfg(test)]
 mod tests {
-    use super::{CutStateProjection, StageStateConfig};
+    use super::{CutStateProjection, InCol, OutCol, StageStateConfig, StateDim};
     use crate::indexer::StateLayout;
 
     fn finalized(
@@ -256,8 +258,8 @@ mod tests {
         assert_eq!(cut.n_state(), global.n_state);
         for j in 0..global.n_state {
             assert_eq!(
-                cut.state_to_lp_incoming_column(j),
-                global.state_to_lp_incoming_column(j),
+                cut.state_to_lp_incoming_column(StateDim::new(j)),
+                global.state_to_lp_incoming_column(StateDim::new(j)),
                 "default projection must match the global resolver at j={j}"
             );
         }
@@ -271,8 +273,8 @@ mod tests {
         assert_eq!(cut.n_state(), 3);
         for j in 0..3 {
             assert_eq!(
-                cut.state_to_lp_incoming_column(j),
-                global.storage_in.start + j,
+                cut.state_to_lp_incoming_column(StateDim::new(j)),
+                InCol::new(global.storage_in.start + j),
                 "storage-only slot {j} must map to storage_in.start + {j}"
             );
         }
@@ -288,14 +290,14 @@ mod tests {
         assert_eq!(cut.n_state(), 4);
         for j in 0..2 {
             assert_eq!(
-                cut.state_to_lp_incoming_column(j),
-                global.storage_in.start + j
+                cut.state_to_lp_incoming_column(StateDim::new(j)),
+                InCol::new(global.storage_in.start + j)
             );
         }
         for i in 0..2 {
             assert_eq!(
-                cut.state_to_lp_incoming_column(2 + i),
-                global.anticipated_state.start + i,
+                cut.state_to_lp_incoming_column(StateDim::new(2 + i)),
+                InCol::new(global.anticipated_state.start + i),
                 "anticipated slot {i} must map to anticipated_state.start + {i}"
             );
         }
@@ -317,8 +319,8 @@ mod tests {
         assert_eq!(cut.n_state(), global.hydro_count * global.max_par_order);
         for i in 0..cut.n_state() {
             assert_eq!(
-                cut.state_to_lp_incoming_column(i),
-                global.inflow_lags.start + i,
+                cut.state_to_lp_incoming_column(StateDim::new(i)),
+                InCol::new(global.inflow_lags.start + i),
                 "first enabled dimension is the inflow lags: slot {i}"
             );
         }
@@ -334,17 +336,17 @@ mod tests {
         assert_eq!(cut.n_state(), global.n_state);
         for j in 0..global.n_state {
             assert_eq!(
-                cut.state_to_lp_outgoing_column(j),
-                global.lp_column_for_state(j),
+                cut.state_to_lp_outgoing_column(StateDim::new(j)),
+                global.lp_column_for_state(StateDim::new(j)),
                 "default outgoing projection must match the global resolver at j={j}"
             );
         }
 
-        let rendered: Vec<(usize, usize)> = cut.render_pairs().collect();
-        let global_render: Vec<(usize, usize)> = global
+        let rendered: Vec<(usize, OutCol)> = cut.render_pairs().collect();
+        let global_render: Vec<(usize, OutCol)> = global
             .nonzero_state_indices
             .iter()
-            .map(|&g| (g, global.lp_column_for_state(g)))
+            .map(|&g| (g, global.lp_column_for_state(StateDim::new(g))))
             .collect();
         assert_eq!(
             rendered, global_render,
@@ -361,15 +363,23 @@ mod tests {
         assert_eq!(cut.n_state(), 3);
         assert_eq!(cut.render_len(), 3);
 
-        let rendered: Vec<(usize, usize)> = cut.render_pairs().collect();
+        let rendered: Vec<(usize, OutCol)> = cut.render_pairs().collect();
         // Storage is identity under the outgoing resolver: state_to_lp_column(j)=j.
-        assert_eq!(rendered, vec![(0, 0), (1, 1), (2, 2)]);
+        assert_eq!(
+            rendered,
+            vec![
+                (0, OutCol::new(0)),
+                (1, OutCol::new(1)),
+                (2, OutCol::new(2))
+            ]
+        );
 
         // No rendered column lands in the lag block [N, N*(1+L)) = [3, 9).
         for (_, col) in &rendered {
             assert!(
-                !global.inflow_lags.contains(col),
-                "storage-only render must touch no lag column (got {col})"
+                !global.inflow_lags.contains(&col.get()),
+                "storage-only render must touch no lag column (got {})",
+                col.get()
             );
         }
     }
@@ -390,11 +400,11 @@ mod tests {
             "padding slots must be dropped, so render_len < n_state"
         );
 
-        let rendered: Vec<(usize, usize)> = cut.render_pairs().collect();
-        let global_render: Vec<(usize, usize)> = global
+        let rendered: Vec<(usize, OutCol)> = cut.render_pairs().collect();
+        let global_render: Vec<(usize, OutCol)> = global
             .nonzero_state_indices
             .iter()
-            .map(|&g| (g, global.lp_column_for_state(g)))
+            .map(|&g| (g, global.lp_column_for_state(StateDim::new(g))))
             .collect();
         assert_eq!(rendered, global_render);
     }
@@ -413,23 +423,23 @@ mod tests {
 
         for j in 0..2 {
             assert_eq!(
-                cut.state_to_lp_incoming_column(j),
-                global.storage_in.start + j,
+                cut.state_to_lp_incoming_column(StateDim::new(j)),
+                InCol::new(global.storage_in.start + j),
                 "storage slot {j} must map to storage_in.start + {j}"
             );
         }
         for i in 0..2 {
             assert_eq!(
-                cut.state_to_lp_incoming_column(2 + i),
-                global.transit_buckets_in.start + i,
+                cut.state_to_lp_incoming_column(StateDim::new(2 + i)),
+                InCol::new(global.transit_buckets_in.start + i),
                 "bucket slot {i} must map to transit_buckets_in.start + {i} despite \
                  inflow_lags disabled"
             );
         }
         for i in 0..2 {
             assert_eq!(
-                cut.state_to_lp_incoming_column(4 + i),
-                global.anticipated_state.start + i,
+                cut.state_to_lp_incoming_column(StateDim::new(4 + i)),
+                InCol::new(global.anticipated_state.start + i),
                 "anticipated slot {i} must map to anticipated_state.start + {i}"
             );
         }
@@ -447,11 +457,11 @@ mod tests {
         assert_eq!(global.transit_buckets_out, 4..6);
         assert_eq!(cut.n_state(), global.n_state);
 
-        let rendered: Vec<(usize, usize)> = cut.render_pairs().collect();
-        let global_render: Vec<(usize, usize)> = global
+        let rendered: Vec<(usize, OutCol)> = cut.render_pairs().collect();
+        let global_render: Vec<(usize, OutCol)> = global
             .nonzero_state_indices
             .iter()
-            .map(|&g| (g, global.lp_column_for_state(g)))
+            .map(|&g| (g, global.lp_column_for_state(StateDim::new(g))))
             .collect();
         assert_eq!(
             rendered, global_render,
@@ -462,7 +472,7 @@ mod tests {
         let transit_bucket_positions: Vec<usize> = rendered
             .iter()
             .enumerate()
-            .filter(|&(_, &(_, col))| global.transit_buckets_out.contains(&col))
+            .filter(|&(_, &(_, col))| global.transit_buckets_out.contains(&col.get()))
             .map(|(pos, _)| pos)
             .collect();
         assert_eq!(
@@ -485,17 +495,17 @@ mod tests {
         assert_eq!(cut.n_state(), global.n_state);
         for j in 0..global.n_state {
             assert_eq!(
-                cut.state_to_lp_incoming_column(j),
-                global.state_to_lp_incoming_column(j),
+                cut.state_to_lp_incoming_column(StateDim::new(j)),
+                global.state_to_lp_incoming_column(StateDim::new(j)),
                 "B==0 default projection must match the global resolver at j={j}"
             );
         }
 
-        let rendered: Vec<(usize, usize)> = cut.render_pairs().collect();
-        let global_render: Vec<(usize, usize)> = global
+        let rendered: Vec<(usize, OutCol)> = cut.render_pairs().collect();
+        let global_render: Vec<(usize, OutCol)> = global
             .nonzero_state_indices
             .iter()
-            .map(|&g| (g, global.lp_column_for_state(g)))
+            .map(|&g| (g, global.lp_column_for_state(StateDim::new(g))))
             .collect();
         assert_eq!(
             rendered, global_render,

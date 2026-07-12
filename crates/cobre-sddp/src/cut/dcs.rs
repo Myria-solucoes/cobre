@@ -22,7 +22,7 @@ use crate::cut::{CutPool, CutRowMap};
 use crate::cut_selection::CutSelectionStrategy;
 use crate::error::SddpError;
 use crate::gemm::gemm_block;
-use crate::indexer::{CutStateProjection, StateLayout};
+use crate::indexer::{CutStateProjection, StateDim, StateLayout};
 use crate::workspace::CapturedBasis;
 
 /// Dynamic Cut Selection hyperparameters.
@@ -271,7 +271,9 @@ pub fn score_violated_candidates(
 
     scratch.unscaled_state.clear();
     for j in 0..n_state {
-        let c = cut_state.state_to_lp_outgoing_column(j);
+        let c = cut_state
+            .state_to_lp_outgoing_column(StateDim::new(j))
+            .get();
         let x_raw = if col_scale.is_empty() {
             primal[c]
         } else {
@@ -760,7 +762,7 @@ mod tests {
     };
     use crate::cut::{CutPool, CutRowMap};
     use crate::cut_selection::{CutMetadata, CutSelectionStrategy};
-    use crate::indexer::{CutStateProjection, StateLayout};
+    use crate::indexer::{CutStateProjection, StateDim, StateLayout};
 
     /// All-enabled per-pool projection of `idx`: every scoring/append test uses a
     /// full-dimension pool, so this reproduces the global outgoing render.
@@ -1282,7 +1284,9 @@ mod tests {
         };
         let mut unscaled_state = Vec::with_capacity(n_state);
         for j in 0..n_state {
-            let c = cut_state.state_to_lp_outgoing_column(j);
+            let c = cut_state
+                .state_to_lp_outgoing_column(StateDim::new(j))
+                .get();
             let x_raw = if col_scale.is_empty() {
                 primal[c]
             } else {
