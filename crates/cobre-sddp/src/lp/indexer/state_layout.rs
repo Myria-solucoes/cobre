@@ -15,6 +15,7 @@
 
 use std::ops::Range;
 
+use super::RangeCursor;
 use crate::lead_time::AnticipatedResolution;
 
 /// Stage-invariant state-vector layout for one SDDP stage subproblem.
@@ -166,12 +167,6 @@ impl StateLayout {
     /// canonical `(plant, lag)` order (`len() == n_buckets`); `n_buckets == 0`
     /// reproduces the pre-bucket layout byte-for-byte.
     ///
-    /// This chain deliberately keeps its own `0..0` empty-range convention
-    /// rather than threading the per-stage column/row allocator
-    /// `StageLayout` uses: it is shorter and stage-invariant, and converting
-    /// it would require auditing call sites outside this module — a deferred
-    /// follow-up, not an oversight.
-    ///
     /// # Panics (debug builds only)
     ///
     /// Inherits the [`Self::set_nonzero_mask`] and
@@ -201,50 +196,37 @@ impl StateLayout {
         let l = max_par_order;
         let n_ant_state = n_anticipated * k_max;
 
-        // Optional blocks empty-normalise to `0..0`; use the `*_end` bindings,
-        // not `range.end`, for downstream arithmetic so the shift survives the
-        // collapse.
-        let storage = 0..n;
-        let inflow_lags = n..n * (1 + l);
-
-        let transit_buckets_out_start = n * (1 + l);
-        let transit_buckets_out_end = transit_buckets_out_start + n_buckets;
+        // Optional blocks collapse to the literal `0..0`, not `RangeCursor::alloc`'s
+        // `pos..pos` — skipping `alloc` when a count is `0` is safe because a
+        // zero-length allocation leaves `cursor.pos()` unchanged either way, so
+        // every downstream offset is identical regardless of which branch runs.
+        let mut cursor = RangeCursor::new(0);
+        let storage = cursor.alloc(n);
+        let inflow_lags = cursor.alloc(n * l);
         let transit_buckets_out = if n_buckets > 0 {
-            transit_buckets_out_start..transit_buckets_out_end
+            cursor.alloc(n_buckets)
         } else {
             0..0
         };
-
-        let anticipated_slots_out_start = transit_buckets_out_end;
-        let anticipated_slots_out_end = anticipated_slots_out_start + n_ant_state;
         let anticipated_slots_out = if n_ant_state > 0 {
-            anticipated_slots_out_start..anticipated_slots_out_end
+            cursor.alloc(n_ant_state)
         } else {
             0..0
         };
-
-        let z_inflow_start = anticipated_slots_out_end;
-        let z_inflow = z_inflow_start..z_inflow_start + n;
-        let storage_in_start = z_inflow.end;
-        let storage_in = storage_in_start..storage_in_start + n;
-
-        let transit_buckets_in_start = storage_in.end;
-        let transit_buckets_in_end = transit_buckets_in_start + n_buckets;
+        let z_inflow = cursor.alloc(n);
+        let storage_in = cursor.alloc(n);
         let transit_buckets_in = if n_buckets > 0 {
-            transit_buckets_in_start..transit_buckets_in_end
+            cursor.alloc(n_buckets)
         } else {
             0..0
         };
-
-        let anticipated_state_start = transit_buckets_in_end;
-        let anticipated_state_end = anticipated_state_start + n_ant_state;
         let anticipated_state = if n_ant_state > 0 {
-            anticipated_state_start..anticipated_state_end
+            cursor.alloc(n_ant_state)
         } else {
             0..0
         };
 
-        let theta = anticipated_state_end;
+        let theta = cursor.pos();
 
         // Outgoing and incoming ring blocks describe the SAME `A*k_max` state
         // dimensions, so `n_ant_state` enters `n_state` once, not twice.

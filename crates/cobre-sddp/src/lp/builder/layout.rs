@@ -14,7 +14,9 @@ use crate::generic_constraints::GenericResolverGeom;
 use crate::hydro_models::{
     EvaporationModel, EvaporationModelSet, ProductionModelSet, ResolvedProductionModel,
 };
-use crate::indexer::{BlockGrid, EvaporationIndices, StateLayout, StorageBoundaryGrid};
+use crate::indexer::{
+    BlockGrid, EvaporationIndices, RangeCursor, StateLayout, StorageBoundaryGrid,
+};
 use crate::lead_time::{AnticipatedResolution, SpreadResolution};
 
 use super::template::StageGeometry;
@@ -1027,39 +1029,6 @@ fn enumerate_generic_constraint_rows(
         n_generic_rows,
         n_generic_slack_cols,
         generic_constraint_rows,
-    }
-}
-
-/// A running column/row offset allocator: [`Self::alloc`] returns `pos..pos +
-/// len` and advances the cursor by `len`, so a family's start is never
-/// re-threaded by hand and adjacency between consecutive families — the next
-/// family's start equals the previous family's end — is structural, not a
-/// hand-copied `.end`.
-///
-/// `RangeCursor` is the single owner of the empty-range convention used by
-/// [`StageLayout::new`]'s column and row chains: `alloc(0)` returns `pos..pos`,
-/// the live cursor position, never `0..0` — `0..0` loses the position an
-/// empty-block-cursor field (`generation_col_start`/`evap_col_start`/
-/// `post_equipment_col_start`/`post_equipment_row_start`) or an `n_h == 0`
-/// accessor fallback needs; `pos..pos` carries it, so those reads and
-/// fallbacks collapse to a bare `.start`/`.end` with no branch.
-struct RangeCursor {
-    pos: usize,
-}
-
-impl RangeCursor {
-    fn new(start: usize) -> Self {
-        Self { pos: start }
-    }
-
-    fn alloc(&mut self, len: usize) -> Range<usize> {
-        let start = self.pos;
-        self.pos += len;
-        start..self.pos
-    }
-
-    fn pos(&self) -> usize {
-        self.pos
     }
 }
 

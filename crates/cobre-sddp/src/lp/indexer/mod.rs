@@ -51,6 +51,9 @@
 //! - `block_grid` — the [`BlockGrid`] typed block-stride address primitive and
 //!   its three shape methods ([`BlockGrid::flat`], [`BlockGrid::fpha_plane`],
 //!   [`BlockGrid::deficit`]).
+//! - `range_cursor` — the `RangeCursor` running column/row offset allocator
+//!   shared by [`StageLayout`](crate::lp_builder)'s per-stage equipment chains
+//!   and [`StateLayout`]'s stage-invariant state-vector chain.
 //! - `storage_boundary_grid` — the [`StorageBoundaryGrid`] typed
 //!   storage-boundary address primitive ([`StorageBoundaryGrid::col`]), the
 //!   single owner of `block_storage_col`'s endpoint/interior split.
@@ -76,6 +79,7 @@
 mod block_grid;
 mod cut_state_projection;
 mod layout;
+mod range_cursor;
 mod state_layout;
 mod storage_boundary_grid;
 mod study_dimensions;
@@ -83,6 +87,7 @@ mod study_dimensions;
 pub use block_grid::BlockGrid;
 pub use cut_state_projection::CutStateProjection;
 pub use layout::{EvaporationIndices, FphaRowRange};
+pub(crate) use range_cursor::RangeCursor;
 pub use state_layout::StateLayout;
 pub(crate) use state_layout::{REGION_ORDER, StateRegion};
 pub use storage_boundary_grid::StorageBoundaryGrid;

@@ -54,9 +54,10 @@ fn make_geom<'a>(
     )
 }
 
-/// Like [`make_geom`], but with explicit contract column ranges. The
-/// `geometry` fixture hardcodes both contract ranges to `0..0`, so the contract
-/// resolution / `block_col_range` tests inject their own non-empty ranges here.
+/// Like [`make_geom`], but with explicit contract column ranges. `GeometryDims`
+/// has no contract fields, so `geometry`'s contract ranges are always empty; the
+/// contract resolution / `block_col_range` tests inject their own non-empty
+/// ranges here.
 fn make_geom_with_contracts<'a>(
     indexer: &'a StageGeometry,
     state: &'a StateLayout,
@@ -320,9 +321,6 @@ fn call_with_cascade(
 /// Threads real pumping data the way the production `fill_pumping_water_entries`
 /// caller does, so the pumping arms exercise their real column arithmetic and
 /// consumption-rate coefficient instead of the empty fixture used by [`call`].
-// Mirrors the production resolver's argument surface it exercises; bundling
-// into a struct would diverge the test from the real call shape.
-#[allow(clippy::too_many_arguments)]
 fn call_pumping(
     var_ref: VariableRef,
     block_idx: usize,
@@ -2379,9 +2377,11 @@ fn hydro_inflow_is_block_dependent() {
 //
 // A K=3 chronological geom: `make_indexer` (n_blks=3) + `make_state` (N=4,
 // storage=[0,4), storage_in.start=8), overriding `storage_internal_start` to a
-// non-zero interior anchor so the interior-boundary formula is exercised (the
-// `test_support::geometry` fixture hardcodes it to 0). Interior stride is
-// `n_blks - 1 = 2`; for hydro pos 0 the boundaries are S⁰=8, S¹=12, S²=13, S³=0.
+// non-zero interior anchor so the interior-boundary formula is exercised (`geometry`
+// always builds `BlockMode::Parallel`, which has no interior columns, so its
+// `storage_internal_start` must be overridden regardless of its own value).
+// Interior stride is `n_blks - 1 = 2`; for hydro pos 0 the boundaries are S⁰=8,
+// S¹=12, S²=13, S³=0.
 
 const STORAGE_INTERNAL_START: usize = 12;
 
