@@ -85,13 +85,13 @@ fn fill_storage_columns(
         // disappears at `Operating`, restoring the hard floor.
         let floor_off = hydro.filling.is_some()
             || matches!(
-                crate::lp_builder::filling_phase(
+                cobre_core::commissioning::filling_phase(
                     hydro.filling.as_ref(),
                     hydro.entry_stage_id,
                     hydro.exit_stage_id,
                     stage.id,
                 ),
-                crate::lp_builder::Phase::PreFilling
+                cobre_core::commissioning::Phase::PreFilling
             );
         let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
         let storage_lower = if floor_off { 0.0 } else { hb.min_storage_hm3 };
@@ -122,7 +122,7 @@ fn fill_transit_bucket_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) 
         let col_base = state.transit_buckets_out.start + range.start;
         let ring = super::entries::transit_bucket_ring(state, range.clone());
         ring.freeze_masked_columns(
-            &layout.transit_bucket_row_pos[range],
+            &layout.rows.transit_bucket_row_pos[range],
             col_base,
             (0.0, f64::INFINITY),
             bufs,
@@ -189,13 +189,14 @@ fn fill_turbine_columns(
     for h_idx in 0..layout.n_h {
         let hydro = &ctx.hydros[h_idx];
         let suspended = matches!(
-            crate::lp_builder::filling_phase(
+            cobre_core::commissioning::filling_phase(
                 hydro.filling.as_ref(),
                 hydro.entry_stage_id,
                 hydro.exit_stage_id,
                 stage.id,
             ),
-            crate::lp_builder::Phase::PreFilling | crate::lp_builder::Phase::Filling
+            cobre_core::commissioning::Phase::PreFilling
+                | cobre_core::commissioning::Phase::Filling
         );
         let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
         let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
@@ -237,13 +238,13 @@ fn fill_spillage_columns(
     for h_idx in 0..layout.n_h {
         let hydro = &ctx.hydros[h_idx];
         let prefilling = matches!(
-            crate::lp_builder::filling_phase(
+            cobre_core::commissioning::filling_phase(
                 hydro.filling.as_ref(),
                 hydro.entry_stage_id,
                 hydro.exit_stage_id,
                 stage.id,
             ),
-            crate::lp_builder::Phase::PreFilling
+            cobre_core::commissioning::Phase::PreFilling
         );
         let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
         for blk in 0..layout.n_blks {
@@ -271,13 +272,14 @@ fn fill_diversion_columns(
     for (h_idx, hydro) in ctx.hydros.iter().enumerate() {
         let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
         let suspended = matches!(
-            crate::lp_builder::filling_phase(
+            cobre_core::commissioning::filling_phase(
                 hydro.filling.as_ref(),
                 hydro.entry_stage_id,
                 hydro.exit_stage_id,
                 stage.id,
             ),
-            crate::lp_builder::Phase::PreFilling | crate::lp_builder::Phase::Filling
+            cobre_core::commissioning::Phase::PreFilling
+                | cobre_core::commissioning::Phase::Filling
         );
         // CONTRACT: read the per-stage RESOLVED `max_diversion_m3s`, NOT the
         // declaration-time `hydro.diversion.max_flow_m3s` — the entity read silently
@@ -325,7 +327,7 @@ pub(super) fn fill_thermal_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     for (t_idx, thermal) in ctx.thermals.iter().enumerate() {
-        let active = crate::lp_builder::commissioning_active(
+        let active = cobre_core::commissioning::commissioning_active(
             thermal.entry_stage_id,
             thermal.exit_stage_id,
             stage.id,
@@ -342,7 +344,7 @@ pub(super) fn fill_thermal_columns(
         for blk in 0..layout.n_blks {
             let col = layout
                 .block_grid()
-                .flat(layout.col_thermal_start(), t_idx, blk);
+                .flat(layout.equipment.thermal.start, t_idx, blk);
             if active {
                 bufs.col_lower[col] = tb.min_generation_mw;
                 bufs.col_upper[col] = tb.max_generation_mw;
@@ -456,7 +458,7 @@ fn fill_line_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     for (l_idx, line) in ctx.lines.iter().enumerate() {
-        let active = crate::lp_builder::commissioning_active(
+        let active = cobre_core::commissioning::commissioning_active(
             line.entry_stage_id,
             line.exit_stage_id,
             stage.id,
@@ -509,7 +511,7 @@ fn fill_deficit_and_excess_columns(
         for blk in 0..layout.n_blks {
             let col_exc = layout
                 .block_grid()
-                .flat(layout.col_excess_start(), b_idx, blk);
+                .flat(layout.equipment.excess.start, b_idx, blk);
             let block_hours = stage.blocks[blk].duration_hours;
             bufs.col_upper[col_exc] = f64::INFINITY;
             bufs.objective[col_exc] = bp.excess_cost * block_hours;
@@ -528,7 +530,7 @@ fn fill_inflow_slack_columns(
 ) {
     if ctx.has_penalty {
         for h_idx in 0..layout.n_h {
-            let col = layout.col_inflow_slack_start() + h_idx;
+            let col = layout.slack.inflow_slack.start + h_idx;
             let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
             bufs.objective[col] = hp.inflow_nonnegativity_cost * total_stage_hours;
         }
@@ -631,7 +633,7 @@ fn fill_withdrawal_slack_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     for h_idx in 0..layout.n_h {
-        let col = layout.col_withdrawal_neg_start() + h_idx;
+        let col = layout.slack.withdrawal_slack_neg.start + h_idx;
         let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
         let t = hb.water_withdrawal_m3s;
         bufs.col_upper[col] = if t > 0.0 {
@@ -645,7 +647,7 @@ fn fill_withdrawal_slack_columns(
         bufs.objective[col] = hp.water_withdrawal_violation_neg_cost * total_stage_hours;
     }
     for h_idx in 0..layout.n_h {
-        let col = layout.col_withdrawal_pos_start() + h_idx;
+        let col = layout.slack.withdrawal_slack_pos.start + h_idx;
         let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
         let t = hb.water_withdrawal_m3s;
         bufs.col_upper[col] = if t > 0.0 {
@@ -750,7 +752,7 @@ fn fill_ncs_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     for (ncs_sys_idx, ncs) in ctx.non_controllable_sources.iter().enumerate() {
-        let active = crate::lp_builder::commissioning_active(
+        let active = cobre_core::commissioning::commissioning_active(
             ncs.entry_stage_id,
             ncs.exit_stage_id,
             stage.id,
@@ -762,7 +764,7 @@ fn fill_ncs_columns(
         for blk in 0..layout.n_blks {
             let col = layout
                 .block_grid()
-                .flat(layout.col_ncs_start, ncs_sys_idx, blk);
+                .flat(layout.equipment.col_ncs_start, ncs_sys_idx, blk);
             if active {
                 let factor = ctx
                     .resolved
@@ -795,7 +797,7 @@ pub(super) fn fill_pumping_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     for (p_sys, station) in ctx.pumping_stations.iter().enumerate() {
-        let active = crate::lp_builder::commissioning_active(
+        let active = cobre_core::commissioning::commissioning_active(
             station.entry_stage_id,
             station.exit_stage_id,
             stage.id,
@@ -804,7 +806,7 @@ pub(super) fn fill_pumping_columns(
         for blk in 0..layout.n_blks {
             let col = layout
                 .block_grid()
-                .flat(layout.col_pumping_start, p_sys, blk);
+                .flat(layout.equipment.col_pumping_start, p_sys, blk);
             if active {
                 bufs.col_lower[col] = pb.min_flow_m3s;
                 bufs.col_upper[col] = pb.max_flow_m3s;
@@ -837,7 +839,7 @@ fn fill_contract_columns(
 ) {
     let grid = layout.block_grid();
     for (c_sys, contract) in ctx.contracts.iter().enumerate() {
-        let active = crate::lp_builder::commissioning_active(
+        let active = cobre_core::commissioning::commissioning_active(
             contract.entry_stage_id,
             contract.exit_stage_id,
             stage.id,
@@ -846,8 +848,14 @@ fn fill_contract_columns(
         let (contract_type, family_slot) =
             crate::generic_constraints::contract_family_slot(ctx.contracts, c_sys);
         let (base, family_count) = match contract_type {
-            ContractType::Import => (layout.col_contract_import_start, layout.n_contract_import),
-            ContractType::Export => (layout.col_contract_export_start, layout.n_contract_export),
+            ContractType::Import => (
+                layout.equipment.col_contract_import_start,
+                layout.equipment.n_contract_import,
+            ),
+            ContractType::Export => (
+                layout.equipment.col_contract_export_start,
+                layout.equipment.n_contract_export,
+            ),
         };
         debug_assert!(
             family_slot < family_count,
@@ -883,8 +891,13 @@ fn fill_filling_target_columns(
     layout: &StageLayout,
     bufs: &mut ColumnBufs<'_>,
 ) {
-    let col_start = layout.col_filling_target_start();
-    for (local_idx, &h_idx) in layout.filling_target_hydro_indices.iter().enumerate() {
+    let col_start = layout.filling.col_filling_target_start;
+    for (local_idx, &h_idx) in layout
+        .filling
+        .filling_target_hydro_indices
+        .iter()
+        .enumerate()
+    {
         let col = col_start + local_idx;
         let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
         bufs.col_lower[col] = 0.0;
@@ -906,8 +919,9 @@ fn fill_filled_min_storage_floor_columns(
     layout: &StageLayout,
     bufs: &mut ColumnBufs<'_>,
 ) {
-    let col_start = layout.col_filled_min_storage_floor_start();
+    let col_start = layout.filling.col_filled_min_storage_floor_start;
     for (local_idx, &h_idx) in layout
+        .filling
         .filled_min_storage_floor_hydro_indices
         .iter()
         .enumerate()
@@ -1249,14 +1263,14 @@ mod interior_storage_bound_tests {
         // The actual interior columns are the `storage_internal` range members
         // (empty in parallel mode and at K = 1); `block_storage_col(0, k)` for
         // interior `k` resolves into this range only in chronological K ≥ 2.
-        let interior: Vec<usize> = layout.storage_internal.clone().collect();
+        let interior: Vec<usize> = layout.equipment.storage_internal.clone().collect();
         RawFill {
             col_lower,
             col_upper,
             objective,
             endpoint: layout.block_storage_col(0, layout.n_blks),
             interior,
-            storage_internal_empty: layout.storage_internal.is_empty(),
+            storage_internal_empty: layout.equipment.storage_internal.is_empty(),
         }
     }
 
@@ -1403,7 +1417,7 @@ mod interior_storage_bound_tests {
             let l = StageLayout::new(&par_ctx, &par_state, &stage, STAGE_IDX);
             (
                 l.block_storage_col(0, l.n_blks),
-                l.storage_internal.is_empty(),
+                l.equipment.storage_internal.is_empty(),
             )
         };
         assert!(
@@ -1739,7 +1753,7 @@ mod diversion_bound_tests {
             objective: &mut objective,
         };
         fill_diversion_columns(&ctx, &stage, STAGE_IDX, &layout, &mut bufs);
-        (col_upper, layout.n_blks, layout.col_diversion_start())
+        (col_upper, layout.n_blks, layout.equipment.diversion.start)
     }
 
     /// A per-stage resolved override distinct from the declaration value flows
@@ -2124,7 +2138,7 @@ mod filling_phase_gating_tests {
         fill_fpha_generation_columns(&ctx, STAGE_IDX, &layout, &mut bufs);
         let offsets = [
             layout.turbine_col(0, 0),
-            layout.col_diversion_start(),
+            layout.equipment.diversion.start,
             // FPHA-local index 0 (the sole FPHA hydro); for a non-FPHA fixture
             // there is no generation column, so callers must not read this slot.
             if layout.fpha_hydro_indices.is_empty() {
@@ -2153,7 +2167,7 @@ mod filling_phase_gating_tests {
             objective: &mut objective,
         };
         fill_spillage_columns(&ctx, &stage, STAGE_IDX, &layout, &mut bufs);
-        (col_upper, layout.col_spillage_start(), layout.n_blks)
+        (col_upper, layout.equipment.spillage.start, layout.n_blks)
     }
 
     fn filling_config() -> FillingConfig {
@@ -2525,8 +2539,8 @@ mod filling_phase_gating_tests {
             objective: &mut objective,
         };
         super::fill_filling_target_columns(&ctx, STAGE_IDX, &layout, &mut bufs);
-        let n_targets = layout.filling_target_hydro_indices.len();
-        let col_start = layout.col_filling_target_start();
+        let n_targets = layout.filling.filling_target_hydro_indices.len();
+        let col_start = layout.filling.col_filling_target_start;
         (
             col_lower,
             col_upper,
@@ -2660,8 +2674,8 @@ mod filling_phase_gating_tests {
             objective: &mut objective,
         };
         super::fill_filled_min_storage_floor_columns(&ctx, STAGE_IDX, &layout, &mut bufs);
-        let n_floors = layout.filled_min_storage_floor_hydro_indices.len();
-        let col_start = layout.col_filled_min_storage_floor_start();
+        let n_floors = layout.filling.filled_min_storage_floor_hydro_indices.len();
+        let col_start = layout.filling.col_filled_min_storage_floor_start;
         (
             col_lower,
             col_upper,
@@ -3009,7 +3023,7 @@ mod anticipated_objective_tests {
         // R3: anticipated thermal (t_idx 0) objective stays at the 0.0 default;
         // its per-block bounds are still written by fill_thermal_columns.
         for blk in 0..n_blks {
-            let col = layout.col_thermal_start() + blk;
+            let col = layout.equipment.thermal.start + blk;
             assert_eq!(
                 objective[col], 0.0,
                 "anticipated thermal objective must be 0.0 at col {col}",
@@ -3021,7 +3035,7 @@ mod anticipated_objective_tests {
         }
         // R3 control: standard thermal (t_idx 1) is priced as cost * block_hours.
         for blk in 0..n_blks {
-            let col = layout.col_thermal_start() + n_blks + blk;
+            let col = layout.equipment.thermal.start + n_blks + blk;
             let expected = STD_COST_PER_MWH * stage.blocks[blk].duration_hours;
             assert_eq!(
                 objective[col], expected,
@@ -4454,8 +4468,8 @@ mod contract_column_tests {
             col_lower,
             col_upper,
             objective,
-            layout.col_contract_import_start,
-            layout.col_contract_export_start,
+            layout.equipment.col_contract_import_start,
+            layout.equipment.col_contract_export_start,
         )
     }
 

@@ -12,6 +12,7 @@ pub mod annual_component;
 pub mod ar_coefficients;
 pub mod assembly;
 pub mod correlation;
+pub mod estimation;
 pub mod external;
 pub mod inflow_history;
 pub mod inflow_stats;
@@ -25,6 +26,7 @@ pub use annual_component::{InflowAnnualComponentRow, parse_inflow_annual_compone
 pub use ar_coefficients::{InflowArCoefficientRow, parse_inflow_ar_coefficients};
 pub use assembly::{assemble_inflow_models, assemble_load_models};
 pub use correlation::parse_correlation;
+pub use estimation::{EstimationError, EstimationPath, estimate_from_history};
 pub use external::{
     ExternalLoadRow, ExternalNcsRow, ExternalScenarioRow, parse_external_inflow_scenarios,
     parse_external_load_scenarios, parse_external_ncs_scenarios,

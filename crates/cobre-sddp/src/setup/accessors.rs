@@ -114,7 +114,7 @@ impl StudySetup {
                 self.ncs_stochastic_windows
                     .iter()
                     .map(|&(entry, exit)| {
-                        !crate::lp_builder::commissioning_active(entry, exit, stage.id)
+                        !cobre_core::commissioning::commissioning_active(entry, exit, stage.id)
                     })
                     .collect()
             })

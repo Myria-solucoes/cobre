@@ -7,6 +7,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
 use cobre_core::System;
+use cobre_core::commissioning::{commissioning_active, hydro_operating_active};
 use cobre_io::output::policy::{
     ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL, EntitySlot, PolicyBasisRecord, PolicyCutRecord,
     StageCutsPayload, StageStatesPayload,
@@ -15,7 +16,6 @@ use cobre_io::output::policy::{
 use crate::cut::FutureCostFunction;
 use crate::indexer::{CutStateProjection, StateLayout};
 use crate::lp_builder::delivery_ring::DeliveryRing;
-use crate::lp_builder::{commissioning_active, hydro_operating_active};
 use crate::training::TrainingResult;
 
 /// `EntityType::HydroStorage` discriminant from `schemas/policy.fbs`.
@@ -46,6 +46,8 @@ fn year_month_anchor(date: chrono::NaiveDate) -> i32 {
 /// classified by the global [`StateLayout`] region containing its incoming-state
 /// column ([`CutStateProjection::state_to_lp_incoming_column`]), never by
 /// re-deriving column arithmetic.
+///
+/// Each hydro-region slot's `was_active` comes from [`hydro_operating_active`].
 ///
 /// # Panics (debug builds only)
 ///
@@ -397,8 +399,8 @@ mod tests {
     };
     use crate::indexer::{CutStateProjection, StateLayout};
     use crate::lead_time::{AnticipatedResolution, LeadTime};
-    use crate::lp_builder::hydro_operating_active;
     use crate::test_support;
+    use cobre_core::commissioning::hydro_operating_active;
     use cobre_core::temporal::StageStateConfig;
     use cobre_core::{
         AnticipatedConfig, Block, BlockMode, Bus, DeficitSegment, EntityId, Hydro,
@@ -438,6 +440,42 @@ mod tests {
             evaporation_violation_pos_cost: 0.0,
             evaporation_violation_neg_cost: 0.0,
             inflow_nonnegativity_cost: 1000.0,
+        }
+    }
+
+    fn bounds_defaults() -> BoundsDefaults {
+        BoundsDefaults {
+            hydro: HydroStageBounds {
+                min_storage_hm3: 0.0,
+                max_storage_hm3: 100.0,
+                min_turbined_m3s: 0.0,
+                max_turbined_m3s: 50.0,
+                min_outflow_m3s: 0.0,
+                max_outflow_m3s: None,
+                min_generation_mw: 0.0,
+                max_generation_mw: 45.0,
+                max_diversion_m3s: None,
+                filling_min_rate_m3s: 0.0,
+                water_withdrawal_m3s: 0.0,
+            },
+            thermal: ThermalStageBounds {
+                min_generation_mw: 0.0,
+                max_generation_mw: 100.0,
+                cost_per_mwh: 0.0,
+            },
+            line: LineStageBounds {
+                direct_mw: 500.0,
+                reverse_mw: 500.0,
+            },
+            pumping: PumpingStageBounds {
+                min_flow_m3s: 0.0,
+                max_flow_m3s: 0.0,
+            },
+            contract: ContractStageBounds {
+                min_mw: 0.0,
+                max_mw: 0.0,
+                price_per_mwh: 0.0,
+            },
         }
     }
 
@@ -543,39 +581,7 @@ mod tests {
                 n_stages: 1,
                 k_max: 2,
             },
-            &BoundsDefaults {
-                hydro: HydroStageBounds {
-                    min_storage_hm3: 0.0,
-                    max_storage_hm3: 100.0,
-                    min_turbined_m3s: 0.0,
-                    max_turbined_m3s: 50.0,
-                    min_outflow_m3s: 0.0,
-                    max_outflow_m3s: None,
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 45.0,
-                    max_diversion_m3s: None,
-                    filling_min_rate_m3s: 0.0,
-                    water_withdrawal_m3s: 0.0,
-                },
-                thermal: ThermalStageBounds {
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 100.0,
-                    cost_per_mwh: 0.0,
-                },
-                line: LineStageBounds {
-                    direct_mw: 500.0,
-                    reverse_mw: 500.0,
-                },
-                pumping: PumpingStageBounds {
-                    min_flow_m3s: 0.0,
-                    max_flow_m3s: 0.0,
-                },
-                contract: ContractStageBounds {
-                    min_mw: 0.0,
-                    max_mw: 0.0,
-                    price_per_mwh: 0.0,
-                },
-            },
+            &bounds_defaults(),
         );
         SystemBuilder::new()
             .buses(vec![make_bus()])
@@ -810,39 +816,7 @@ mod tests {
                 n_stages: 3,
                 k_max: 2,
             },
-            &BoundsDefaults {
-                hydro: HydroStageBounds {
-                    min_storage_hm3: 0.0,
-                    max_storage_hm3: 100.0,
-                    min_turbined_m3s: 0.0,
-                    max_turbined_m3s: 50.0,
-                    min_outflow_m3s: 0.0,
-                    max_outflow_m3s: None,
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 45.0,
-                    max_diversion_m3s: None,
-                    filling_min_rate_m3s: 0.0,
-                    water_withdrawal_m3s: 0.0,
-                },
-                thermal: ThermalStageBounds {
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 100.0,
-                    cost_per_mwh: 0.0,
-                },
-                line: LineStageBounds {
-                    direct_mw: 500.0,
-                    reverse_mw: 500.0,
-                },
-                pumping: PumpingStageBounds {
-                    min_flow_m3s: 0.0,
-                    max_flow_m3s: 0.0,
-                },
-                contract: ContractStageBounds {
-                    min_mw: 0.0,
-                    max_mw: 0.0,
-                    price_per_mwh: 0.0,
-                },
-            },
+            &bounds_defaults(),
         );
         SystemBuilder::new()
             .buses(vec![make_bus()])
@@ -872,39 +846,7 @@ mod tests {
                 n_stages: 3,
                 k_max: 2,
             },
-            &BoundsDefaults {
-                hydro: HydroStageBounds {
-                    min_storage_hm3: 0.0,
-                    max_storage_hm3: 100.0,
-                    min_turbined_m3s: 0.0,
-                    max_turbined_m3s: 50.0,
-                    min_outflow_m3s: 0.0,
-                    max_outflow_m3s: None,
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 45.0,
-                    max_diversion_m3s: None,
-                    filling_min_rate_m3s: 0.0,
-                    water_withdrawal_m3s: 0.0,
-                },
-                thermal: ThermalStageBounds {
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 100.0,
-                    cost_per_mwh: 0.0,
-                },
-                line: LineStageBounds {
-                    direct_mw: 500.0,
-                    reverse_mw: 500.0,
-                },
-                pumping: PumpingStageBounds {
-                    min_flow_m3s: 0.0,
-                    max_flow_m3s: 0.0,
-                },
-                contract: ContractStageBounds {
-                    min_mw: 0.0,
-                    max_mw: 0.0,
-                    price_per_mwh: 0.0,
-                },
-            },
+            &bounds_defaults(),
         );
         SystemBuilder::new()
             .buses(vec![make_bus()])

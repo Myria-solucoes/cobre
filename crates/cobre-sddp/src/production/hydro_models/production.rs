@@ -12,7 +12,7 @@ use std::path::Path;
 
 use rayon::prelude::*;
 
-use cobre_core::{EntityId, System, entities::hydro::HydroGenerationModel};
+use cobre_core::{EntityId, StageId, System, entities::hydro::HydroGenerationModel};
 use cobre_io::HydroReferenceVolumeFractions;
 use cobre_io::extensions::{
     FphaColumnLayout, FphaHyperplaneRow, HydroGeometryRow, ProductionModelConfig, ReferenceVolume,
@@ -29,7 +29,6 @@ use crate::fpha_fitting::{
     ForebayTable, FphaDeviationPoint, FphaFitDeviation, FphaFitResult, TailraceFamilies,
     TailraceSource, build_tailrace_families_map, fit_fpha_planes,
 };
-use crate::stage_key::StageId;
 // ── FPHA production model resolution ─────────────────────────────────────────
 
 /// Return type for [`resolve_production_models`]. Export rows are non-empty only

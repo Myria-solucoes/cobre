@@ -237,13 +237,13 @@ pub(super) fn compute_noise_scale(
             // defaults missing entries to `Operating` via `.get()`, never a panic.
             let is_prefilling = hydros.get(h_idx).is_some_and(|hydro| {
                 matches!(
-                    crate::lp_builder::filling_phase(
+                    cobre_core::commissioning::filling_phase(
                         hydro.filling.as_ref(),
                         hydro.entry_stage_id,
                         hydro.exit_stage_id,
                         stage.id,
                     ),
-                    crate::lp_builder::Phase::PreFilling
+                    cobre_core::commissioning::Phase::PreFilling
                 )
             });
             let sigma = if !is_prefilling && par_lp.n_stages() > 0 && par_lp.n_hydros() == n_hydros

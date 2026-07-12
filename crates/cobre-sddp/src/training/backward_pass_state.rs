@@ -630,7 +630,8 @@ struct StageDerivedParams {
 
 /// Per-stage output produced by `run_one_backward_stage`.
 struct StageOutput {
-    /// Number of cuts generated at this stage (always equals `local_work`).
+    /// Global cuts generated at this stage across all ranks (rank-count invariant);
+    /// this rank's `local_work` plus every peer's share gathered by the cut sync.
     cuts_generated: usize,
     /// Per-`(rank, worker_id, opening)` solver delta entries for this stage.
     stage_entries: Vec<StageWorkerOpeningDelta>,
@@ -814,17 +815,23 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
     // points, so a failure on a strict subset makes every rank return Err here
     // rather than let a healthy rank block in `sync_packed_records` /
     // `sync_stage_metadata` / `gather_stage_solver_stats` while a peer skipped them.
-    let cuts_generated = reconcile_result(local_solve, inputs.comm, &mut state.reconcile_scratch)?;
+    reconcile_result(local_solve, inputs.comm, &mut state.reconcile_scratch)?;
 
     let sync_start = Instant::now();
     let n_local = inputs
         .cut_sync_bufs
         .pack_local_records(inputs.fcf, t, inputs.iteration);
-    inputs
-        .cut_sync_bufs
-        .sync_packed_records(t, n_local, inputs.fcf, inputs.comm)?;
+    let remote_cuts =
+        inputs
+            .cut_sync_bufs
+            .sync_packed_records(t, n_local, inputs.fcf, inputs.comm)?;
     #[allow(clippy::cast_possible_truncation)]
     let cut_sync_ms = sync_start.elapsed().as_millis() as u64;
+
+    // Global cuts added to the replicated pool this stage: this rank's share plus
+    // every peer's, NOT `n_local` alone — the local count scales with rank count
+    // while the global total is rank-count invariant.
+    let cuts_generated = n_local + remote_cuts;
 
     state.sync_stage_metadata(
         successor,

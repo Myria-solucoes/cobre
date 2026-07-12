@@ -495,12 +495,16 @@ fn rebuild_historical_library_non_root(
                 &noop_season_map
             };
         let downstream_par_order =
-            cobre_sddp::lag_transition::derive_downstream_par_order(&study_stages, max_order);
-        let stage_lag_transitions = cobre_sddp::lag_transition::precompute_stage_lag_transitions(
-            &study_stages,
-            season_map_for_transitions,
-            downstream_par_order,
-        );
+            cobre_stochastic::par::lag_transition::derive_downstream_par_order(
+                &study_stages,
+                max_order,
+            );
+        let stage_lag_transitions =
+            cobre_stochastic::par::lag_transition::precompute_stage_lag_transitions(
+                &study_stages,
+                season_map_for_transitions,
+                downstream_par_order,
+            );
         cobre_stochastic::standardize_historical_windows(
             &mut lib,
             system.inflow_history(),

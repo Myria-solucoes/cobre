@@ -1,7 +1,7 @@
 //! Typed stage keys distinguishing the domain stage identifier, the 0-based
 //! study-horizon position, and the calendar month a stage falls in.
 //!
-//! [`cobre_core::temporal::Stage`] carries `id` (the domain identifier from
+//! [Stage] carries `id` (the domain identifier from
 //! `stages.json`, not guaranteed contiguous or 0-based), `index` (a position
 //! over the FULL canonical stage vector, pre-study stages included), and
 //! `season_id` (a season-cycle index whose meaning — calendar month, week, or
@@ -9,14 +9,14 @@
 //! always the calendar month). A bare `usize`/`i32` distinguishes neither
 //! "look up by domain id" from "look up by study position" nor "season-cycle
 //! index" from "calendar month": a mismatch keys by the wrong convention and
-//! still compiles (the FPHA productivity table is built and validated by
-//! domain id, `cobre_io::validation::productivity_resolution`; `season_id` is
-//! not the calendar month on `Weekly`/`Custom` cycles). [`StageId`],
-//! [`StudyPos`], and [`CalendarMonth`] make each convention a distinct type so a
-//! mismatched call site is a compile error, not a silent wrong-stage lookup.
+//! still compiles (a downstream table keyed by domain id relies on this
+//! distinction; `season_id` is not the calendar month on `Weekly`/`Custom`
+//! cycles). [`StageId`], [`StudyPos`], and [`CalendarMonth`] make each
+//! convention a distinct type so a mismatched call site is a compile error,
+//! not a silent wrong-stage lookup.
 
+use crate::temporal::Stage;
 use chrono::Datelike;
-use cobre_core::temporal::Stage;
 
 /// A study's domain stage identifier (`Stage::id`), independent of storage
 /// position. Not guaranteed 0-based or contiguous.
@@ -58,10 +58,10 @@ pub fn month_of(stage: &Stage) -> CalendarMonth {
 
 #[cfg(test)]
 mod tests {
-    use chrono::NaiveDate;
-    use cobre_core::temporal::{
+    use crate::temporal::{
         BlockMode, NoiseMethod, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
     };
+    use chrono::NaiveDate;
 
     use super::*;
 

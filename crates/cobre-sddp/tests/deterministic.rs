@@ -25,8 +25,7 @@ use cobre_io::{
 use cobre_sddp::{
     StudySetup, aggregate_simulation, hydro_models::prepare_hydro_models, setup::prepare_stochastic,
 };
-use cobre_solver::ActiveSolver;
-use cobre_solver::SolverInterface;
+use cobre_solver::{ActiveSolver, SolverInterface};
 
 mod common;
 use common::StubComm;
@@ -1940,8 +1939,6 @@ fn d16_par1_lag_shift() {
 /// this test additionally checks the call count invariant.
 #[test]
 fn model_persistence_regression_d01() {
-    use cobre_solver::SolverInterface;
-
     let case_dir = Path::new("../../examples/deterministic/d01-thermal-dispatch");
     let (result, solver) = run_deterministic_with_solver(case_dir);
 
@@ -1989,8 +1986,6 @@ fn model_persistence_regression_d01() {
 /// We verify that load_model_count is strictly less than the non-incremental total.
 #[test]
 fn incremental_lb_reduces_load_model_count() {
-    use cobre_solver::SolverInterface;
-
     let case_dir = Path::new("../../examples/deterministic/d03-two-hydro-cascade");
     let (result, solver) = run_deterministic_with_solver(case_dir);
 
@@ -3002,8 +2997,6 @@ fn d26_estimated_par2() {
 )]
 #[test]
 fn d26_estimated_par2_order_selection() {
-    use cobre_sddp::prepare_stochastic;
-
     let case_dir = Path::new("../../examples/deterministic/d26-estimated-par2");
     let config_path = case_dir.join("config.json");
     let config = cobre_io::parse_config(&config_path).expect("config must parse");
@@ -6136,17 +6129,22 @@ mod chronological_attribution {
 mod nonzero_stage_fpha_override_regression {
     use std::path::{Path, PathBuf};
 
-    use cobre_core::EntityId;
     use cobre_core::scenario::ScenarioSource;
+    use cobre_core::{EntityId, StageId};
     use cobre_io::HydroEnergyProductivityRow;
     use cobre_sddp::energy_conversion::build_hydro_energy_productivity_override;
     use cobre_sddp::hydro_models::prepare_hydro_models;
     use cobre_sddp::setup::prepare_stochastic;
-    use cobre_sddp::stage_key::StageId;
     use cobre_sddp::{SimulationHydroResult, SimulationScenarioResult, StudySetup};
 
     use super::common::parity_hash::compute_parity_hash;
+    use super::common::permute::permute_case;
     use super::common::{build_setup_for_case, run_simulation};
+
+    /// Fixed seed for this fixture's fast, non-golden default-CI declaration-
+    /// order-invariance probe; the full seeded-shuffle matrix lives in
+    /// `tests/parity.rs`'s `shuffle_matrix_<case>` tests.
+    const PERMUTATION_SEED: u64 = 20_260_711;
 
     /// Domain stage id (`Stage::id`) carrying the override row, and the corresponding
     /// 0-based study position — see `stages.json` / `hydro_energy_productivity.parquet`
@@ -6262,14 +6260,17 @@ mod nonzero_stage_fpha_override_regression {
         );
     }
 
-    /// Declaration-order invariance: reversing the array order of `hydros.json`'s hydro
-    /// list, `hydro_production_models.json`'s per-hydro entries, and `stages.json`'s
-    /// stage list must not change the parity hash — the override fix must not depend on
-    /// how the study's entities were declared.
+    /// Declaration-order invariance: a seeded permutation of every
+    /// [`permute_case`]-classified registry (hydros, production models,
+    /// stages, storage/filling entries) must not change the parity hash — the
+    /// override fix must not depend on how the study's entities were
+    /// declared. The full seeded-shuffle matrix (more registries, more
+    /// permutations) lives in `tests/parity.rs`'s `shuffle_matrix_<case>`
+    /// tests; this is the fast, non-golden default-CI probe for this fixture.
     #[test]
     fn declaration_order_permutation_parity_hash_is_identical() {
         let base_dir = case_dir();
-        let permuted_dir = build_declaration_order_permuted_case(&base_dir);
+        let permuted_dir = permute_case(&base_dir, PERMUTATION_SEED);
 
         let (setup_a, results_a) = train_and_simulate_setup(&base_dir);
         let (setup_b, results_b) = train_and_simulate_setup(permuted_dir.path());
@@ -6308,72 +6309,6 @@ mod nonzero_stage_fpha_override_regression {
         let scenario_results = run_simulation(&mut setup, 1);
         (setup, scenario_results)
     }
-
-    /// Copy `base_dir` into a fresh `TempDir`, reversing the declared array order of
-    /// `stages.json`'s `stages`, `system/hydros.json`'s `hydros`, and
-    /// `system/hydro_production_models.json`'s `production_models`. Every other file is
-    /// copied byte-for-byte, so the two case directories are identical except for the
-    /// declaration order of hydro and stage entities.
-    fn build_declaration_order_permuted_case(base_dir: &Path) -> tempfile::TempDir {
-        let tmp = tempfile::tempdir().expect("tempdir must succeed");
-        let dst = tmp.path();
-
-        std::fs::create_dir_all(dst.join("scenarios")).expect("create scenarios dir");
-        std::fs::create_dir_all(dst.join("system")).expect("create system dir");
-
-        for rel in [
-            "config.json",
-            "initial_conditions.json",
-            "penalties.json",
-            "scenarios/inflow_seasonal_stats.parquet",
-            "scenarios/load_seasonal_stats.parquet",
-            "system/buses.json",
-            "system/hydro_energy_productivity.parquet",
-            "system/hydro_geometry.parquet",
-            "system/lines.json",
-            "system/thermals.json",
-        ] {
-            std::fs::copy(base_dir.join(rel), dst.join(rel))
-                .unwrap_or_else(|e| panic!("copy {rel}: {e}"));
-        }
-
-        reverse_json_array(
-            &base_dir.join("stages.json"),
-            &dst.join("stages.json"),
-            "stages",
-        );
-        reverse_json_array(
-            &base_dir.join("system/hydros.json"),
-            &dst.join("system/hydros.json"),
-            "hydros",
-        );
-        reverse_json_array(
-            &base_dir.join("system/hydro_production_models.json"),
-            &dst.join("system/hydro_production_models.json"),
-            "production_models",
-        );
-
-        tmp
-    }
-
-    /// Parse `src` as JSON, reverse the top-level array at `array_key`, and write the
-    /// result to `dst` — the declaration-order-permutation primitive every JSON file in
-    /// [`build_declaration_order_permuted_case`] shares.
-    fn reverse_json_array(src: &Path, dst: &Path, array_key: &str) {
-        let text =
-            std::fs::read_to_string(src).unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
-        let mut value: serde_json::Value =
-            serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}", src.display()));
-        value[array_key]
-            .as_array_mut()
-            .unwrap_or_else(|| panic!("{array_key} must be a JSON array in {}", src.display()))
-            .reverse();
-        std::fs::write(
-            dst,
-            serde_json::to_string_pretty(&value).expect("serialize"),
-        )
-        .unwrap_or_else(|e| panic!("write {}: {e}", dst.display()));
-    }
 }
 
 /// End-to-end regression for the `CalendarMonth` evaporation-month fix: a
@@ -6383,7 +6318,7 @@ mod nonzero_stage_fpha_override_regression {
 /// not hard-error at setup. Both fixtures route through the full
 /// `cobre_io::load_case` -> `prepare_stochastic` -> `prepare_hydro_models`
 /// pipeline every other deterministic case uses — the season-parsing path the
-/// fix's own unit tests (`production/stage_key.rs`,
+/// fix's own unit tests (`model/temporal/stage_key.rs` in `cobre-core`,
 /// `hydro_models/evaporation.rs`) construct `Stage` values directly and never
 /// exercise.
 mod custom_weekly_evaporation_regression {

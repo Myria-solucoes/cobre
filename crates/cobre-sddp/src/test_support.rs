@@ -9,7 +9,9 @@
 //! plain `cargo test` and by downstream integration tests via the `test-support`
 //! feature.
 
-use crate::indexer::{CutStateProjection, EvaporationIndices, StateLayout, StudyDimensions};
+use crate::indexer::{
+    CutStateProjection, EvaporationIndices, StateLayout, StorageBoundaryGrid, StudyDimensions,
+};
 use crate::lp_builder::{
     EVAP_COLS_PER_HYDRO, EVAP_F_MINUS_OFFSET, EVAP_F_PLUS_OFFSET, EVAP_FLOW_OFFSET, StageGeometry,
 };
@@ -148,6 +150,8 @@ pub fn geometry(
 
     // `2 * n_ant_state`: the anticipated ring's outgoing + incoming blocks.
     let theta = hydro_count * (3 + max_par_order) + 2 * n_ant_state;
+    // `StateLayout::storage_in.start` under the same n_buckets == 0 assumption as `theta`.
+    let storage_in_base = hydro_count * (2 + max_par_order) + n_ant_state;
     let decision_start = theta + 1;
 
     let z_inflow_row_start = 0_usize;
@@ -265,7 +269,7 @@ pub fn geometry(
         filled_min_storage_floor_col: 0..0,
         z_inflow_row_start,
         n_blks,
-        storage_internal_start: 0,
+        storage_boundary_grid: StorageBoundaryGrid::new(storage_in_base, 0, 0, n_blks),
         block_mode: cobre_core::BlockMode::Parallel,
         fpha_hydro_indices,
         evap_hydro_indices,

@@ -134,7 +134,8 @@ the canonical order, but every write still iterates the IC record list (not
 the map) — a map iteration order is unspecified and would violate
 declaration-order invariance if used to drive writes.
 Read: `setup/mod.rs` (`id_to_position`, `build_initial_state`),
-`stochastic/lag_transition.rs` (`compute_recent_observation_seed`). Pinned by
+`crates/cobre-stochastic/src/par/lag_transition.rs`
+(`compute_recent_observation_seed`). Pinned by
 `test_initial_state_seeds_correctly_under_staggered_commissioning_dates`,
 `build_initial_state_anticipated_seed_correct_under_staggered_commissioning_dates`,
 and `test_seed_correct_under_staggered_commissioning_dates`, each using a

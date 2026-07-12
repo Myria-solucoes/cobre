@@ -1,26 +1,59 @@
 //! Shared `#[cfg(test)]` fixtures for the split builder representation modules.
 
+use std::collections::HashMap;
+
 use chrono::NaiveDate;
 use cobre_core::{
     Block, BlockMode, HydroPenalties, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
     StageStateConfig, System,
 };
+use cobre_stochastic::par::precompute::PrecomputedPar;
 
 use crate::indexer::StateLayout;
-use crate::lead_time::AnticipatedResolution;
+use crate::lead_time::{AnticipatedResolution, SpreadResolution};
 
 use super::layout::TemplateBuildCtx;
 
-/// Resolve the anticipated-resolution / lead-stages / per-stage-mask inputs through
-/// the same setup entry points production uses, so a builder-module test's
-/// `TemplateBuildCtx` matches what setup builds for the same system.
+/// Resolve the anticipated-resolution / lead-stages / per-stage-mask / arc-table /
+/// `max_par_order` inputs through the same setup entry points production uses
+/// (`resolve_state_layout`'s formula for `max_par_order`,
+/// `build_transit_bucket_topology`'s single arc-table derivation), so a
+/// builder-module test's `TemplateBuildCtx` matches what setup builds for the same
+/// system.
+// Rationale: the tuple threads distinct single-owner fixture outputs to one
+// call site; a named struct would add ceremony without reducing the shape.
+#[allow(clippy::type_complexity)]
 pub(super) fn ctx_anticipated_and_mask_inputs(
     system: &System,
-) -> (AnticipatedResolution, Vec<usize>, Vec<Vec<usize>>) {
+    par_lp: &PrecomputedPar,
+) -> (
+    AnticipatedResolution,
+    Vec<usize>,
+    Vec<Vec<usize>>,
+    HashMap<usize, Vec<Vec<f64>>>,
+    HashMap<usize, Vec<Option<SpreadResolution>>>,
+    HashMap<usize, Vec<Option<Vec<f64>>>>,
+    usize,
+) {
     let (resolution, lead_stages) = crate::setup::resolve_anticipated_commitments_core(system);
-    let per_stage_mask =
-        crate::setup::bucket_topology::build_transit_bucket_topology(system).per_stage_mask;
-    (resolution, lead_stages, per_stage_mask)
+    let topology = crate::setup::bucket_topology::build_transit_bucket_topology(system);
+    let max_par_order = system
+        .inflow_models()
+        .iter()
+        .filter(|m| m.stage_id >= 0)
+        .map(|m| m.ar_coefficients.len())
+        .max()
+        .unwrap_or(0)
+        .max(par_lp.max_order());
+    (
+        resolution,
+        lead_stages,
+        topology.per_stage_mask,
+        topology.arc_stage_weights,
+        topology.arc_spread_chrono,
+        topology.arc_arrival_density,
+        max_par_order,
+    )
 }
 
 /// Build the role-(a) [`StateLayout`] a `StageLayout` borrows, from a test

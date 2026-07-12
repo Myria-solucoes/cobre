@@ -17,7 +17,7 @@ use super::{
     contract_family_slot, resolve_variable_ref, variable_ref_is_block_independent,
 };
 use crate::hydro_models::{FphaPlane, ProductionModelSet, ResolvedProductionModel};
-use crate::indexer::StateLayout;
+use crate::indexer::{StateLayout, StorageBoundaryGrid};
 use crate::lp_builder::StageGeometry;
 
 // ── Test helpers ──────────────────────────────────────────────────────────
@@ -76,7 +76,7 @@ fn make_geom_with_contracts<'a>(
     let reverse: &'a std::collections::HashMap<usize, usize> = Box::leak(Box::new(reverse));
     GenericResolverGeom {
         state,
-        storage_internal_start: indexer.storage_internal_start,
+        storage_boundary_grid: indexer.storage_boundary_grid,
         turbine: &indexer.turbine,
         spillage: &indexer.spillage,
         diversion: &indexer.diversion,
@@ -2391,16 +2391,35 @@ fn make_chronological_geom<'a>(
     state: &'a StateLayout,
 ) -> GenericResolverGeom<'a> {
     let mut geom = make_geom(indexer, state, 2, &[]);
-    geom.storage_internal_start = STORAGE_INTERNAL_START;
+    geom.storage_boundary_grid = StorageBoundaryGrid::new(
+        state.storage_in.start,
+        state.storage.start,
+        STORAGE_INTERNAL_START,
+        indexer.n_blks,
+    );
     geom
 }
 
 /// Resolve every boundary (`k = 0`, interior, `k = K`) of both variants on a K=3
 /// chronological geom against the mirrored `block_storage_col`.
+///
+/// Seam B of the geometry cross-check guard's two pairwise seams — pairs with
+/// `stage_geometry_block_storage_col_matches_layout` (Seam A, in
+/// `super::super::builder::template::tests`). `indexer` (a `StageGeometry`) and
+/// `geom` (the resolver, private to this module) both build their
+/// `StorageBoundaryGrid` from the same `state`/`STORAGE_INTERNAL_START` inputs,
+/// so `geom.block_storage_col` and `indexer.block_storage_col` share one owner,
+/// not two independent copies.
 #[test]
 fn hydro_storage_boundary_resolves_each_boundary() {
-    let indexer = make_indexer();
+    let mut indexer = make_indexer();
     let state = make_state();
+    indexer.storage_boundary_grid = StorageBoundaryGrid::new(
+        state.storage_in.start,
+        state.storage.start,
+        STORAGE_INTERNAL_START,
+        indexer.n_blks,
+    );
     let geom = make_chronological_geom(&indexer, &state);
     let prod = make_production_models();
     let hpos = make_hydro_pos();
@@ -2424,7 +2443,7 @@ fn hydro_storage_boundary_resolves_each_boundary() {
         &lpos,
     );
     assert_eq!(initial_0, vec![(geom.block_storage_col(0, 0), 1.0)]);
-    assert_eq!(initial_0, vec![(state.storage_in.start + 0, 1.0)]);
+    assert_eq!(initial_0, vec![(indexer.block_storage_col(0, 0), 1.0)]);
 
     // Initial{1} = S¹ = storage_internal_start + 0 = 12 (interior boundary).
     let initial_1 = call(
@@ -2441,7 +2460,7 @@ fn hydro_storage_boundary_resolves_each_boundary() {
         &lpos,
     );
     assert_eq!(initial_1, vec![(geom.block_storage_col(0, 1), 1.0)]);
-    assert_eq!(initial_1, vec![(STORAGE_INTERNAL_START, 1.0)]);
+    assert_eq!(initial_1, vec![(indexer.block_storage_col(0, 1), 1.0)]);
 
     // Final{2} = S³ = Sᴷ = storage.start + 0 = 0 (K=3, last block).
     let final_2 = call(
@@ -2458,7 +2477,129 @@ fn hydro_storage_boundary_resolves_each_boundary() {
         &lpos,
     );
     assert_eq!(final_2, vec![(geom.block_storage_col(0, 3), 1.0)]);
-    assert_eq!(final_2, vec![(state.storage.start + 0, 1.0)]);
+    assert_eq!(final_2, vec![(indexer.block_storage_col(0, 3), 1.0)]);
+}
+
+// ── Seam B property-based sweep ─────────────────────────────────────────────
+//
+// `hydro_storage_boundary_resolves_each_boundary` above is the anchored,
+// readable exemplar; `block_storage_col_agreement_geometry_resolver` below
+// sweeps the small layout param space (`n_h`, `n_blks`, `BlockMode`,
+// `n_buckets`, `n_anticipated × k_max`, the inflow-penalty flag, FPHA/
+// evaporation membership subsets) shared with Seam A
+// (`super::super::builder::template::tests`).
+
+use proptest::prelude::*;
+
+/// Build a `StateLayout` plus a matching `GenericResolverGeom`/`StageGeometry`
+/// pair sharing `n_blks`/`storage_internal_start` — the SAME pairing
+/// `hydro_storage_boundary_resolves_each_boundary` pins — and assert the
+/// endpoint-pair identity (S⁰, Sᴷ) for every hydro; `resolver.block_storage_col`
+/// and `indexer.block_storage_col` share one `StorageBoundaryGrid` owner, so a
+/// per-`(h, k)` agreement sweep would be tautological. `storage_internal_start`
+/// is derived from `state` the same way `StageLayout::new` derives it
+/// (`state.control_region_start()`), so `n_buckets`/`n_anticipated`/`k_max`
+/// reach the swept arithmetic exactly as they do for Seam A.
+fn assert_seam_b_agreement(
+    n_h: usize,
+    n_blks: usize,
+    chronological: bool,
+    n_buckets: usize,
+    n_anticipated: usize,
+    k_max: usize,
+    has_inflow_penalty: bool,
+    fpha_flags: &[bool],
+    evap_flags: &[bool],
+) {
+    let effective_lag_count = vec![0_usize; n_h];
+    let transit_bucket_column_order: Vec<(usize, usize)> =
+        (0..n_buckets).map(|lag| (0_usize, lag)).collect();
+    let state = StateLayout::new(
+        n_h,
+        0,
+        n_buckets,
+        transit_bucket_column_order,
+        n_anticipated,
+        k_max,
+        vec![k_max; n_anticipated],
+        &effective_lag_count,
+    );
+
+    let fpha_hydro_indices: Vec<usize> = (0..n_h).filter(|&h| fpha_flags[h]).collect();
+    let evap_hydro_indices: Vec<usize> = (0..n_h).filter(|&h| evap_flags[h]).collect();
+    let fpha_planes = vec![1_usize; fpha_hydro_indices.len()];
+
+    let mut indexer = crate::test_support::geometry(
+        &crate::test_support::GeometryDims {
+            hydro_count: n_h,
+            n_blks,
+            has_inflow_penalty,
+            ..Default::default()
+        },
+        fpha_hydro_indices,
+        &fpha_planes,
+        evap_hydro_indices,
+    );
+    indexer.storage_boundary_grid = StorageBoundaryGrid::new(
+        state.storage_in.start,
+        state.storage.start,
+        state.control_region_start(),
+        n_blks,
+    );
+    indexer.block_mode = if chronological {
+        cobre_core::BlockMode::Chronological
+    } else {
+        cobre_core::BlockMode::Parallel
+    };
+
+    let resolver = make_geom(&indexer, &state, 1, &[]);
+
+    for h in 0..n_h {
+        assert_eq!(
+            resolver.block_storage_col(h, 0),
+            state.storage_in.start + h,
+            "seam B S⁰ endpoint mismatch at hydro {h}"
+        );
+        assert_eq!(
+            resolver.block_storage_col(h, n_blks),
+            state.storage.start + h,
+            "seam B Sᴷ endpoint mismatch at hydro {h}"
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(48))]
+
+    /// Property-based Seam B sweep: the endpoint-pair identity (S⁰, Sᴷ) between
+    /// `GenericResolverGeom` and `StageGeometry`, over the small layout param
+    /// space. Pure address arithmetic, no solver — runs in the default test pass.
+    #[test]
+    fn block_storage_col_agreement_geometry_resolver(
+        n_h in 0_usize..4,
+        n_blks in 1_usize..4,
+        chronological in any::<bool>(),
+        n_buckets in 0_usize..3,
+        n_anticipated in 0_usize..2,
+        k_max in 1_usize..3,
+        has_inflow_penalty in any::<bool>(),
+        fpha_mask in any::<u8>(),
+        evap_mask in any::<u8>(),
+    ) {
+        let fpha_flags: Vec<bool> = (0..n_h).map(|i| (fpha_mask >> i) & 1 == 1).collect();
+        let evap_flags: Vec<bool> = (0..n_h).map(|i| (evap_mask >> i) & 1 == 1).collect();
+        assert_seam_b_agreement(
+            n_h,
+            n_blks,
+            chronological,
+            n_buckets,
+            n_anticipated,
+            k_max,
+            has_inflow_penalty,
+            &fpha_flags,
+            &evap_flags,
+        );
+    }
 }
 
 /// `HydroStorageFinal{K-1}` resolves to the SAME column as `HydroStorage` (Sᴷ).

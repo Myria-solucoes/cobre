@@ -1,5 +1,8 @@
-//! Bucket topology: canonical column order, global bucket count, and
-//! per-stage reachability mask for water travel-time in-transit buckets.
+//! Bucket topology: canonical column order, global bucket count, per-stage
+//! reachability mask, and the three resolved arc tables (stage-clock weights,
+//! chronological spread, arrival density) for water travel-time in-transit
+//! buckets — the single derivation site the LP builder threads from, never
+//! re-derives.
 //!
 //! Depths resolve on the stage clock ([`resolve_spread`] for in-study anchors,
 //! [`window_period_overlaps`] for the pre-study IC anchor); `n_blks`/block mode
@@ -37,6 +40,15 @@ pub(crate) struct TransitBucketTopology {
     /// downstream plant, in the same order as [`Self::per_plant_depth`], at
     /// study stage `t` (`0` when no lag is reachable at that stage).
     pub(crate) per_stage_mask: Vec<Vec<usize>>,
+    /// Per-declared-arc PARALLEL-mode stage-clock weights; see
+    /// [`build_arc_stage_weights`].
+    pub(crate) arc_stage_weights: HashMap<usize, Vec<Vec<f64>>>,
+    /// Per-declared-arc, per-chronological-stage full [`SpreadResolution`]; see
+    /// [`build_arc_spread_chrono`].
+    pub(crate) arc_spread_chrono: HashMap<usize, Vec<Option<SpreadResolution>>>,
+    /// Per-declared-arc, per-chronological-arrival-stage delivery density; see
+    /// [`build_arc_arrival_density`].
+    pub(crate) arc_arrival_density: HashMap<usize, Vec<Option<Vec<f64>>>>,
 }
 
 /// Study-stage (`id >= 0`) durations in canonical (ascending `id`) stage-index
@@ -187,11 +199,18 @@ pub(crate) fn build_transit_bucket_topology(system: &System) -> TransitBucketTop
         "n_buckets must be zero exactly when no arc is declared"
     );
 
+    let arc_stage_weights = build_arc_stage_weights(system);
+    let arc_spread_chrono = build_arc_spread_chrono(system);
+    let arc_arrival_density = build_arc_arrival_density(system, &arc_stage_weights);
+
     TransitBucketTopology {
         n_buckets,
         per_plant_depth,
         column_order,
         per_stage_mask,
+        arc_stage_weights,
+        arc_spread_chrono,
+        arc_arrival_density,
     }
 }
 

@@ -214,13 +214,16 @@ fn build_opening_tree_library(
         };
         &noop_season_map
     };
-    let downstream_par_order =
-        crate::lag_transition::derive_downstream_par_order(&study_stages, max_order);
-    let stage_lag_transitions = crate::lag_transition::precompute_stage_lag_transitions(
+    let downstream_par_order = cobre_stochastic::par::lag_transition::derive_downstream_par_order(
         &study_stages,
-        effective_season_map,
-        downstream_par_order,
+        max_order,
     );
+    let stage_lag_transitions =
+        cobre_stochastic::par::lag_transition::precompute_stage_lag_transitions(
+            &study_stages,
+            effective_season_map,
+            downstream_par_order,
+        );
     cobre_stochastic::standardize_historical_windows(
         &mut lib,
         system.inflow_history(),
@@ -361,7 +364,7 @@ pub fn prepare_stochastic(
     training_source: &ScenarioSource,
 ) -> Result<PrepareStochasticResult, SddpError> {
     let (system, estimation_report, estimation_path) =
-        crate::estimation::estimate_from_history(system, case_dir, config)?;
+        cobre_io::scenarios::estimation::estimate_from_history(system, case_dir, config)?;
 
     let user_opening_tree = load_user_opening_tree_inner(case_dir, &system)?;
 
@@ -401,7 +404,7 @@ pub fn prepare_stochastic(
             .filter(|s| s.id >= 0)
             .cloned()
             .collect();
-        crate::lag_transition::precompute_noise_groups(&study_stages)
+        cobre_stochastic::par::lag_transition::precompute_noise_groups(&study_stages)
     };
 
     let forward_seed = training_source.seed.map(i64::unsigned_abs);
@@ -435,7 +438,6 @@ pub fn prepare_stochastic(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lag_transition::{derive_downstream_par_order, precompute_stage_lag_transitions};
     use chrono::NaiveDate;
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, HydroPastInflows,
@@ -451,6 +453,9 @@ mod tests {
             Block, BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig,
             SeasonCycleType, SeasonDefinition, SeasonMap, Stage, StageRiskConfig, StageStateConfig,
         },
+    };
+    use cobre_stochastic::par::lag_transition::{
+        derive_downstream_par_order, precompute_stage_lag_transitions,
     };
     use cobre_stochastic::{
         PrecomputedPar,

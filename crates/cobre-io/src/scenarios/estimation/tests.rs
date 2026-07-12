@@ -195,7 +195,7 @@ fn test_estimate_no_history_returns_unchanged() {
 
 #[test]
 fn test_estimation_path_resolve_all_8_combinations() {
-    use cobre_io::FileManifest;
+    use crate::FileManifest;
 
     let make = |history: bool, stats: bool, ar: bool| FileManifest {
         scenarios_inflow_history_parquet: history,
@@ -593,7 +593,7 @@ fn test_partial_estimation_returns_report() {
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 fn default_config() -> Config {
-    use cobre_io::config::{EstimationConfig, OrderSelectionMethod};
+    use crate::config::{EstimationConfig, OrderSelectionMethod};
     let mut cfg: Config = serde_json::from_str(MINIMAL_CONFIG_JSON).unwrap();
     cfg.estimation = EstimationConfig {
         max_order: 2,
@@ -859,7 +859,7 @@ fn ar_estimates_to_rows_includes_prestudy_stages() {
 
 #[test]
 fn full_estimation_produces_prestudy_inflow_models() {
-    use cobre_io::scenarios::assemble_inflow_models;
+    use crate::scenarios::assemble_inflow_models;
 
     let stages = vec![
         make_expansion_stage(0, -2, Some(1)),
@@ -2072,7 +2072,7 @@ fn write_monthly_inflow_history_two_hydros(path: &std::path::Path, n_years: usiz
 
 #[test]
 fn estimate_from_history_pacf_annual_populates_annual_field() {
-    use cobre_io::config::{EstimationConfig, OrderSelectionMethod};
+    use crate::config::{EstimationConfig, OrderSelectionMethod};
     use tempfile::TempDir;
 
     const N_YEARS: usize = 5;
@@ -2117,7 +2117,7 @@ fn estimate_from_history_pacf_annual_populates_annual_field() {
 
 #[test]
 fn estimate_from_history_pacf_classical_keeps_annual_none() {
-    use cobre_io::config::{EstimationConfig, OrderSelectionMethod};
+    use crate::config::{EstimationConfig, OrderSelectionMethod};
     use tempfile::TempDir;
 
     const N_YEARS: usize = 5;

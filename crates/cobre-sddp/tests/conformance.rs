@@ -832,14 +832,21 @@ mod lb_conformance {
     /// public-API integration test.
     #[test]
     fn evaluate_lower_bound_monotonicity_with_additional_cuts() {
-        let state = state_layout_for(1, 0);
         let state_layout = state_layout_for(1, 0);
         let template = minimal_template();
         let templates = vec![template];
         let base_rows = vec![1_usize];
-        let fcf = make_fcf(2, state.n_state);
-        let initial_state = vec![0.0_f64; state.n_state];
-        let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0);
+        let fcf = make_fcf(2, state_layout.n_state);
+        let initial_state = vec![0.0_f64; state_layout.n_state];
+        let mut patch_buf = PatchBuffer::new(
+            state_layout.hydro_count,
+            state_layout.max_par_order,
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
         let opening_tree = simple_opening_tree(2);
         let rm = RiskMeasure::Expectation;
         let comm = LocalComm;
@@ -999,6 +1006,8 @@ fn build_geometry(
     // theta = N*(3+L); control region starts at theta + 1 (no anticipated thermals).
     let theta = hydro_count * (3 + max_par_order);
     let turbine_start = theta + 1;
+    // StateLayout::storage_in.start under the same no-anticipated-thermals assumption.
+    let storage_in_base = hydro_count * (2 + max_par_order);
     let spillage_start = turbine_start + hydro_count * n_blks;
     let diversion_start = spillage_start + hydro_count * n_blks;
     let thermal_start = diversion_start + hydro_count * n_blks;
@@ -1089,7 +1098,12 @@ fn build_geometry(
         filled_min_storage_floor_col: 0..0,
         z_inflow_row_start: 0,
         n_blks,
-        storage_internal_start: 0,
+        storage_boundary_grid: cobre_sddp::indexer::StorageBoundaryGrid::new(
+            storage_in_base,
+            0,
+            0,
+            n_blks,
+        ),
         block_mode: cobre_core::BlockMode::Parallel,
         fpha_hydro_indices,
         evap_hydro_indices: Vec::new(),

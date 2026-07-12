@@ -127,6 +127,34 @@ pub struct StateLayout {
     pub state_to_lp_column_map: Vec<usize>,
 }
 
+/// One of the four stage-invariant state-vector regions, in the canonical walk
+/// order [`REGION_ORDER`] declares.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum StateRegion {
+    /// Outgoing storage volumes — [`StateLayout::state_dim_storage_range`].
+    Storage,
+    /// AR inflow lags — [`StateLayout::state_dim_lag_range`].
+    Lag,
+    /// Travel-time in-transit buckets — [`StateLayout::state_dim_bucket_range`].
+    Buckets,
+    /// Anticipated-ring slots — [`StateLayout::state_dim_anticipated_range`].
+    Anticipated,
+}
+
+/// The single owner of the `storage → lag → buckets → anticipated`
+/// state-region walk order. [`StateLayout::state_to_lp_column`],
+/// [`StateLayout::state_to_lp_incoming_column`],
+/// [`StateLayout::set_nonzero_mask`], and [`super::CutStateProjection::new`]
+/// all dispatch over this array via [`StateLayout::state_dim_range`]; a
+/// variant added to [`StateRegion`] fails to compile at any of those sites
+/// (each matches it exhaustively, no `_` catch-all) until handled.
+pub(crate) const REGION_ORDER: [StateRegion; 4] = [
+    StateRegion::Storage,
+    StateRegion::Lag,
+    StateRegion::Buckets,
+    StateRegion::Anticipated,
+];
+
 impl StateLayout {
     /// Construct a finalized [`StateLayout`] from the state dimensions and the
     /// per-hydro effective lag-slot counts.
@@ -137,6 +165,12 @@ impl StateLayout {
     /// why `order(h)` is wrong). `transit_bucket_column_order` is the buckets'
     /// canonical `(plant, lag)` order (`len() == n_buckets`); `n_buckets == 0`
     /// reproduces the pre-bucket layout byte-for-byte.
+    ///
+    /// This chain deliberately keeps its own `0..0` empty-range convention
+    /// rather than threading the per-stage column/row allocator
+    /// `StageLayout` uses: it is shorter and stage-invariant, and converting
+    /// it would require auditing call sites outside this module — a deferred
+    /// follow-up, not an oversight.
     ///
     /// # Panics (debug builds only)
     ///
@@ -275,10 +309,10 @@ impl StateLayout {
     }
 
     // ── Canonical state-dimension region boundaries ─────────────────────────
-    // GLOBAL STATE INDEX space, not LP columns. `CutStateProjection::new` and
-    // `state_to_lp_incoming_column` read these instead of re-deriving the
-    // boundaries locally, so neither can drift from the order
-    // `set_nonzero_mask` walks (storage → lag → bucket → anticipated).
+    // GLOBAL STATE INDEX space, not LP columns. `REGION_ORDER` is the single
+    // owner of the storage → lag → bucket → anticipated walk order;
+    // `state_dim_range` dispatches each `StateRegion` to the accessor below,
+    // so every REGION_ORDER-driven call site shares one boundary derivation.
 
     /// State-dimension region `[0, N)` — storage.
     #[inline]
@@ -312,36 +346,57 @@ impl StateLayout {
         start..start + self.n_anticipated * self.k_max
     }
 
+    /// Resolve `region`'s state-dimension range through the matching
+    /// `state_dim_*_range` accessor above — the exhaustive dispatch every
+    /// [`REGION_ORDER`]-driven call site uses instead of re-deriving region
+    /// boundaries inline.
+    #[inline]
+    #[must_use]
+    pub(crate) fn state_dim_range(&self, region: StateRegion) -> Range<usize> {
+        match region {
+            StateRegion::Storage => self.state_dim_storage_range(),
+            StateRegion::Lag => self.state_dim_lag_range(),
+            StateRegion::Buckets => self.state_dim_bucket_range(),
+            StateRegion::Anticipated => self.state_dim_anticipated_range(),
+        }
+    }
+
     /// Map a state-vector index to the LP column it references in a cut.
     ///
-    /// Storage, `transit_buckets_out`, and `anticipated_slots_out` map by
+    /// Classifies `j` into its `StateRegion` via `REGION_ORDER` before any
+    /// lag arithmetic runs, then resolves through an exhaustive match:
+    /// storage, `transit_buckets_out`, and `anticipated_slots_out` map by
     /// identity. Lag indices remap to the outgoing state after
     /// `shift_lag_state`: lag 0 is realised inflow → `z_inflow.start + h`; lag
     /// `l ≥ 1` is the previous stage's lag `l − 1` →
-    /// `inflow_lags.start + (l − 1)·N + h`.
+    /// `inflow_lags.start + (l − 1)·N + h`. Classifying first — rather than
+    /// falling through an `if`/`else` chain — is what keeps buckets/
+    /// anticipated from ever reaching the lag decode.
     #[inline]
     #[must_use]
     pub fn state_to_lp_column(&self, j: usize) -> usize {
-        let n = self.hydro_count;
-        if j < n {
-            return j;
-        }
-        // Must precede the lag arithmetic: the modular lag decode would
-        // silently misresolve bucket/anticipated-ring indices once
-        // `max_par_order > 0`.
-        if self.transit_buckets_out.contains(&j) || self.anticipated_slots_out.contains(&j) {
-            return j;
-        }
-        if self.max_par_order == 0 {
-            return j;
-        }
-        let offset = j - n;
-        let h = offset % n;
-        let lag = offset / n;
-        if lag == 0 {
-            self.z_inflow.start + h
-        } else {
-            n + (lag - 1) * n + h
+        // REGION_ORDER's four ranges partition [0, n_state) contiguously
+        // (`state_dim_ranges_partition_n_state_contiguously`), so `find` only
+        // misses for an out-of-range `j`; `unwrap_or` keeps this function
+        // total instead of adding a panic path for that case.
+        let region = REGION_ORDER
+            .into_iter()
+            .find(|&region| self.state_dim_range(region).contains(&j))
+            .unwrap_or(StateRegion::Anticipated);
+
+        match region {
+            StateRegion::Storage | StateRegion::Buckets | StateRegion::Anticipated => j,
+            StateRegion::Lag => {
+                let n = self.hydro_count;
+                let offset = j - n;
+                let h = offset % n;
+                let lag = offset / n;
+                if lag == 0 {
+                    self.z_inflow.start + h
+                } else {
+                    n + (lag - 1) * n + h
+                }
+            }
         }
     }
 
@@ -395,17 +450,19 @@ impl StateLayout {
     #[inline]
     #[must_use]
     pub fn state_to_lp_incoming_column(&self, j: usize) -> usize {
-        let storage_end = self.state_dim_storage_range().end;
-        let lag_end = self.state_dim_lag_range().end;
-        let transit_bucket_end = self.state_dim_bucket_range().end;
-        if j < storage_end {
-            self.storage_in.start + j
-        } else if j < lag_end {
-            self.inflow_lags.start + (j - storage_end)
-        } else if j < transit_bucket_end {
-            self.transit_buckets_in.start + (j - lag_end)
-        } else {
-            self.anticipated_state.start + (j - transit_bucket_end)
+        // Same REGION_ORDER classification `state_to_lp_column` uses; see its
+        // partition-coverage note.
+        let region = REGION_ORDER
+            .into_iter()
+            .find(|&region| self.state_dim_range(region).contains(&j))
+            .unwrap_or(StateRegion::Anticipated);
+        let offset = j - self.state_dim_range(region).start;
+
+        match region {
+            StateRegion::Storage => self.storage_in.start + offset,
+            StateRegion::Lag => self.inflow_lags.start + offset,
+            StateRegion::Buckets => self.transit_buckets_in.start + offset,
+            StateRegion::Anticipated => self.anticipated_state.start + offset,
         }
     }
 
@@ -485,7 +542,11 @@ impl StateLayout {
             study_stage_ids.len(),
         );
         let (entry, exit) = anticipated_windows[local_idx];
-        crate::lp_builder::commissioning_active(entry, exit, study_stage_ids[delivery_stage])
+        cobre_core::commissioning::commissioning_active(
+            entry,
+            exit,
+            study_stage_ids[delivery_stage],
+        )
     }
 
     /// Plant `local_idx`'s delivery-anchored resolution: the setup-threaded
@@ -549,26 +610,36 @@ impl StateLayout {
         let mut mask =
             Vec::with_capacity(self.hydro_count + n_lag_active + self.n_buckets + n_ant_active);
 
-        for h in 0..self.hydro_count {
-            mask.push(h);
-        }
-
-        for lag in 0..self.max_par_order {
-            for (h, &lag_count) in lag_counts.iter().enumerate() {
-                debug_assert!(lag_count <= self.max_par_order);
-                if lag < lag_count {
-                    mask.push(self.inflow_lags.start + lag * self.hydro_count + h);
+        // REGION_ORDER fixes the walk order; storage and buckets have no
+        // padding to exclude and extend their full range, while lag and
+        // anticipated keep their own per-region active-slot filter (padding
+        // stays excluded — see the doc comment above).
+        for region in REGION_ORDER {
+            match region {
+                StateRegion::Storage | StateRegion::Buckets => {
+                    mask.extend(self.state_dim_range(region));
                 }
-            }
-        }
-
-        mask.extend(self.transit_buckets_out.clone());
-
-        for slot in 0..self.k_max {
-            for (plant, &k_i) in anticipated_lead_stages.iter().enumerate() {
-                debug_assert!(k_i <= self.k_max);
-                if slot < k_i {
-                    mask.push(self.anticipated_slots_out.start + slot * self.n_anticipated + plant);
+                StateRegion::Lag => {
+                    let start = self.state_dim_range(region).start;
+                    for lag in 0..self.max_par_order {
+                        for (h, &lag_count) in lag_counts.iter().enumerate() {
+                            debug_assert!(lag_count <= self.max_par_order);
+                            if lag < lag_count {
+                                mask.push(start + lag * self.hydro_count + h);
+                            }
+                        }
+                    }
+                }
+                StateRegion::Anticipated => {
+                    let start = self.state_dim_range(region).start;
+                    for slot in 0..self.k_max {
+                        for (plant, &k_i) in anticipated_lead_stages.iter().enumerate() {
+                            debug_assert!(k_i <= self.k_max);
+                            if slot < k_i {
+                                mask.push(start + slot * self.n_anticipated + plant);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -597,8 +668,7 @@ mod tests {
         k_max: usize,
         anticipated_lead_stages: Vec<usize>,
     ) -> StateLayout {
-        let lag_counts = vec![max_par_order; hydro_count];
-        StateLayout::new(
+        finalized_with_transit_buckets(
             hydro_count,
             max_par_order,
             0,
@@ -606,7 +676,6 @@ mod tests {
             n_anticipated,
             k_max,
             anticipated_lead_stages,
-            &lag_counts,
         )
     }
 

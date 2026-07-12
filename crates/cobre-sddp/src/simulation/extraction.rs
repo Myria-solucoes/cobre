@@ -818,12 +818,8 @@ fn extract_hydro_per_block<'a>(
         // (`S⁰`), block `K−1` outgoing == `ctx.storage_final` (`Sᴷ`).
         let (storage_initial, storage_final) = match spec.geometry.block_mode {
             BlockMode::Chronological => {
-                let in_col = spec
-                    .geometry
-                    .block_storage_col(h, b, spec.state.storage_in.start);
-                let out_col =
-                    spec.geometry
-                        .block_storage_col(h, b + 1, spec.state.storage_in.start);
+                let in_col = spec.geometry.block_storage_col(h, b);
+                let out_col = spec.geometry.block_storage_col(h, b + 1);
                 debug_assert!(
                     in_col < view.primal.len() && out_col < view.primal.len(),
                     "per-block storage cols {in_col}/{out_col} out of primal bounds {}",
