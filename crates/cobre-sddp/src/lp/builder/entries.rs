@@ -44,7 +44,7 @@ pub(super) fn fill_anticipated_fishing_entries(
         let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
         let mut block_hours_total: f64 = 0.0;
         for blk in 0..n_blks {
-            let col_gen = grid.flat(layout.col_thermal_start(), thermal_idx, blk);
+            let col_gen = grid.flat(layout.equipment.thermal.start, thermal_idx, blk);
             let block_hours = stage.blocks[blk].duration_hours;
             col_entries[col_gen].push((row, block_hours));
             block_hours_total += block_hours;
@@ -219,7 +219,7 @@ fn fill_parallel_water_entries(
     let n_blks = layout.n_blks;
     let lag_order = layout.lag_order;
     let zeta = layout.zeta;
-    let row_water = layout.row_water_balance_start();
+    let row_water = layout.rows.water_balance.start;
     let col_storage_in_start = layout.col_storage_in_start();
     let col_inflow_lags_start = layout.col_inflow_lags_start();
 
@@ -295,7 +295,7 @@ fn fill_parallel_water_entries(
             if is_prefilling(ctx, stage, h_idx) {
                 continue;
             }
-            let col = layout.col_inflow_slack_start() + h_idx;
+            let col = layout.slack.inflow_slack.start + h_idx;
             let row = row_water + h_idx;
             col_entries[col].push((row, -zeta));
         }
@@ -311,7 +311,7 @@ fn fill_parallel_water_entries(
         if is_prefilling(ctx, stage, h_idx) {
             continue;
         }
-        let col = layout.col_withdrawal_neg_start() + h_idx;
+        let col = layout.slack.withdrawal_slack_neg.start + h_idx;
         let row = row_water + h_idx;
         col_entries[col].push((row, -zeta));
     }
@@ -320,7 +320,7 @@ fn fill_parallel_water_entries(
         if is_prefilling(ctx, stage, h_idx) {
             continue;
         }
-        let col = layout.col_withdrawal_pos_start() + h_idx;
+        let col = layout.slack.withdrawal_slack_pos.start + h_idx;
         let row = row_water + h_idx;
         col_entries[col].push((row, zeta));
     }
@@ -372,11 +372,11 @@ fn fill_transit_bucket_definition_entries(
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
     let state = layout.state;
-    let row_start = layout.row_transit_bucket_definition_start();
+    let row_start = layout.rows.transit_bucket_definition.start;
     for range in transit_bucket_plant_ranges(state) {
         let ring = transit_bucket_ring(state, range.clone());
         ring.emit_shift_rows(
-            &layout.transit_bucket_row_pos[range],
+            &layout.rows.transit_bucket_row_pos[range],
             row_start,
             col_entries,
         );
@@ -438,7 +438,7 @@ fn fill_arc_release_block_entries(
         )
     });
     let ring = transit_bucket_ring(layout.state, range.clone());
-    let row_transit_bucket_def_start = layout.row_transit_bucket_definition_start();
+    let row_transit_bucket_def_start = layout.rows.transit_bucket_definition.start;
     for (d, &stage_weight) in stage_weights.iter().enumerate().skip(1) {
         if stage_weight == 0.0 {
             continue;
@@ -446,7 +446,7 @@ fn fill_arc_release_block_entries(
         let slot = range.start + ring.slot_target(0, d);
         // A lag beyond this stage's reachable cap has no definition row: the share is
         // dropped, never misdirected onto another lag's row (Terminal credit deferred).
-        let Some(pos) = layout.transit_bucket_row_pos[slot] else {
+        let Some(pos) = layout.rows.transit_bucket_row_pos[slot] else {
             continue;
         };
         let row_def = row_transit_bucket_def_start + pos;
@@ -494,7 +494,7 @@ fn fill_chronological_water_entries(
     let n_h = layout.n_h;
     let n_blks = layout.n_blks;
     let lag_order = layout.lag_order;
-    let row_water = layout.row_water_balance_start();
+    let row_water = layout.rows.water_balance.start;
     let col_inflow_lags_start = layout.col_inflow_lags_start();
     let has_par = ctx.par_lp.n_stages() > 0 && ctx.par_lp.n_hydros() == n_h;
 
@@ -574,10 +574,10 @@ fn fill_chronological_water_entries(
             }
 
             if ctx.has_penalty {
-                col_entries[layout.col_inflow_slack_start() + h_idx].push((row, -tau_k));
+                col_entries[layout.slack.inflow_slack.start + h_idx].push((row, -tau_k));
             }
-            col_entries[layout.col_withdrawal_neg_start() + h_idx].push((row, -tau_k));
-            col_entries[layout.col_withdrawal_pos_start() + h_idx].push((row, tau_k));
+            col_entries[layout.slack.withdrawal_slack_neg.start + h_idx].push((row, -tau_k));
+            col_entries[layout.slack.withdrawal_slack_pos.start + h_idx].push((row, tau_k));
         }
     }
 
@@ -677,7 +677,7 @@ fn fill_arc_release_chrono_block_entries(
         )
     });
     let ring = transit_bucket_ring(layout.state, range.clone());
-    let row_transit_bucket_def_start = layout.row_transit_bucket_definition_start();
+    let row_transit_bucket_def_start = layout.rows.transit_bucket_definition.start;
     for (d, &deposit_d) in block_deposit.iter().enumerate().skip(1) {
         if deposit_d == 0.0 {
             continue;
@@ -685,7 +685,7 @@ fn fill_arc_release_chrono_block_entries(
         let slot = range.start + ring.slot_target(0, d);
         // A lag beyond this stage's reachable cap has no row to deposit into (dropped,
         // never misdirected — Terminal credit deferred).
-        let Some(pos) = layout.transit_bucket_row_pos[slot] else {
+        let Some(pos) = layout.rows.transit_bucket_row_pos[slot] else {
             continue;
         };
         let row_def = row_transit_bucket_def_start + pos;
@@ -789,7 +789,7 @@ fn fill_prefilling_shortcircuit(
         return;
     };
     let n_blks = layout.n_blks;
-    let row_water = layout.row_water_balance_start();
+    let row_water = layout.rows.water_balance.start;
     let z_h = layout.col_z_inflow_start() + h_idx;
 
     let row_d_for = |blk: usize| match stage.block_mode {
@@ -838,9 +838,14 @@ fn fill_prefilling_shortcircuit(
 /// — that double-counts the soft floor (a guard test asserts no `lp/builder` file
 /// references the dual-extraction entry point).
 fn fill_filling_target_entries(layout: &StageLayout, col_entries: &mut [Vec<(usize, f64)>]) {
-    let row_start = layout.row_filling_target_start();
-    let col_start = layout.col_filling_target_start();
-    for (local_idx, &h_idx) in layout.filling_target_hydro_indices.iter().enumerate() {
+    let row_start = layout.filling.row_filling_target_start;
+    let col_start = layout.filling.col_filling_target_start;
+    for (local_idx, &h_idx) in layout
+        .filling
+        .filling_target_hydro_indices
+        .iter()
+        .enumerate()
+    {
         let row = row_start + local_idx;
         col_entries[h_idx].push((row, 1.0));
         col_entries[col_start + local_idx].push((row, 1.0));
@@ -858,9 +863,10 @@ fn fill_filled_min_storage_floor_entries(
     layout: &StageLayout,
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
-    let row_start = layout.row_filled_min_storage_floor_start();
-    let col_start = layout.col_filled_min_storage_floor_start();
+    let row_start = layout.filling.row_filled_min_storage_floor_start;
+    let col_start = layout.filling.col_filled_min_storage_floor_start;
     for (local_idx, &h_idx) in layout
+        .filling
         .filled_min_storage_floor_hydro_indices
         .iter()
         .enumerate()
@@ -884,7 +890,7 @@ pub(super) fn fill_pumping_water_entries(
 ) {
     let n_blks = layout.n_blks;
     let grid = layout.block_grid();
-    let row_water = layout.row_water_balance_start();
+    let row_water = layout.rows.water_balance.start;
     for (p_sys, station) in ctx.pumping_stations.iter().enumerate() {
         // Per-side guards are defense-in-depth (`validate_pumping_station_refs` guarantees
         // resolution on a production `System`). Do NOT promote to an unconditional
@@ -893,7 +899,7 @@ pub(super) fn fill_pumping_water_entries(
         let destination = ctx.hydro_pos.get(&station.destination_hydro_id).copied();
         for blk in 0..n_blks {
             let tau_h = stage.blocks[blk].duration_hours * M3S_TO_HM3;
-            let col = grid.flat(layout.col_pumping_start, p_sys, blk);
+            let col = grid.flat(layout.equipment.col_pumping_start, p_sys, blk);
             if let Some(s_idx) = source {
                 col_entries[col].push((row_water + s_idx, tau_h));
             }
@@ -919,7 +925,7 @@ pub(super) fn fill_load_balance_entries(
 ) {
     let n_blks = layout.n_blks;
     let grid = layout.block_grid();
-    let row_load = layout.row_load_balance_start();
+    let row_load = layout.rows.load_balance.start;
 
     for (h_idx, hydro) in ctx.hydros.iter().enumerate() {
         if let Some(local_idx) = layout.fpha_local_index[h_idx] {
@@ -960,7 +966,7 @@ pub(super) fn fill_load_balance_entries(
         if let Some(&b_idx) = ctx.bus_pos.get(&thermal.bus_id) {
             for blk in 0..n_blks {
                 let row = grid.flat(row_load, b_idx, blk);
-                let col = grid.flat(layout.col_thermal_start(), t_idx, blk);
+                let col = grid.flat(layout.equipment.thermal.start, t_idx, blk);
                 col_entries[col].push((row, 1.0));
             }
         }
@@ -990,7 +996,7 @@ pub(super) fn fill_load_balance_entries(
         if let Some(&b_idx) = ctx.bus_pos.get(&station.bus_id) {
             for blk in 0..n_blks {
                 let row = grid.flat(row_load, b_idx, blk);
-                let col = grid.flat(layout.col_pumping_start, p_sys, blk);
+                let col = grid.flat(layout.equipment.col_pumping_start, p_sys, blk);
                 col_entries[col].push((row, -station.consumption_mw_per_m3s));
             }
         }
@@ -1003,8 +1009,8 @@ pub(super) fn fill_load_balance_entries(
         let (contract_type, family_slot) =
             crate::generic_constraints::contract_family_slot(ctx.contracts, c_sys);
         let (base, sign) = match contract_type {
-            ContractType::Import => (layout.col_contract_import_start, 1.0),
-            ContractType::Export => (layout.col_contract_export_start, -1.0),
+            ContractType::Import => (layout.equipment.col_contract_import_start, 1.0),
+            ContractType::Export => (layout.equipment.col_contract_export_start, -1.0),
         };
         if let Some(&b_idx) = ctx.bus_pos.get(&contract.bus_id) {
             for blk in 0..n_blks {
@@ -1022,7 +1028,7 @@ pub(super) fn fill_load_balance_entries(
                 let col_def = layout.deficit_col(b_idx, seg_idx, blk);
                 col_entries[col_def].push((row, 1.0));
             }
-            let col_exc = grid.flat(layout.col_excess_start(), b_idx, blk);
+            let col_exc = grid.flat(layout.equipment.excess.start, b_idx, blk);
             col_entries[col_exc].push((row, -1.0));
         }
     }
@@ -1049,14 +1055,16 @@ pub(super) fn fill_fpha_entries(
     layout: &StageLayout,
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
-    let col_storage_in_start = layout.col_storage_in_start();
     for_each_fpha_plane(
         ctx,
         stage_idx,
         layout,
         |local_idx, h_idx, blk, _p_idx, plane, row| {
             let (col_v_in, col_v) = match stage.block_mode {
-                BlockMode::Parallel => (col_storage_in_start + h_idx, h_idx),
+                BlockMode::Parallel => (
+                    layout.block_storage_col(h_idx, 0),
+                    layout.block_storage_col(h_idx, layout.n_blks),
+                ),
                 BlockMode::Chronological => (
                     layout.block_storage_col(h_idx, blk),
                     layout.block_storage_col(h_idx, blk + 1),
@@ -1093,7 +1101,6 @@ pub(super) fn fill_evaporation_entries(
     layout: &StageLayout,
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
-    let col_storage_in_start = layout.col_storage_in_start();
     let n_blks = layout.n_blks;
     let row_evap_start = layout.row_evap_start();
 
@@ -1125,7 +1132,10 @@ pub(super) fn fill_evaporation_entries(
         for k in 1..=n_blks {
             let blk = k - 1;
             let (col_v_in, col_v) = match stage.block_mode {
-                BlockMode::Parallel => (col_storage_in_start + h_idx, h_idx),
+                BlockMode::Parallel => (
+                    layout.block_storage_col(h_idx, 0),
+                    layout.block_storage_col(h_idx, layout.n_blks),
+                ),
                 BlockMode::Chronological => (
                     layout.block_storage_col(h_idx, k - 1),
                     layout.block_storage_col(h_idx, k),
@@ -1171,32 +1181,11 @@ pub(super) fn fill_generic_constraint_entries(
     let objective = &mut *buffers.objective;
     let row_lower = &mut *buffers.row_lower;
     let row_upper = &mut *buffers.row_upper;
-    if layout.n_generic_rows == 0 {
+    if layout.rows.n_generic_rows == 0 {
         return;
     }
 
-    let geom = crate::generic_constraints::GenericResolverGeom {
-        state: layout.state,
-        storage_internal_start: layout.storage_internal_start,
-        turbine: &layout.turbine,
-        spillage: &layout.spillage,
-        diversion: &layout.diversion,
-        thermal: &layout.thermal,
-        line_fwd: &layout.line_fwd,
-        line_rev: &layout.line_rev,
-        excess: &layout.excess,
-        contract_import: &layout.contract_import,
-        contract_export: &layout.contract_export,
-        generation: &layout.generation,
-        deficit: &layout.deficit,
-        max_deficit_segments: layout.max_deficit_segments,
-        n_blks: layout.n_blks,
-        evap_indices: &layout.evap_indices,
-        evap_hydro_indices: &layout.evap_hydro_indices,
-        fpha_hydro_indices: &layout.fpha_hydro_indices,
-        anticipated_decision_start: layout.anticipated.col_anticipated_decision_start,
-        anticipated_local_by_sys_pos: &layout.anticipated_local_by_sys_pos,
-    };
+    let geom = layout.resolver_geom();
     let positions = crate::generic_constraints::EntityPositionMaps {
         hydro: &ctx.hydro_pos,
         thermal: &ctx.thermal_pos,
@@ -1208,7 +1197,7 @@ pub(super) fn fill_generic_constraint_entries(
         diversion_upstream: &ctx.diversion_upstream,
     };
     let pumping_refs = crate::generic_constraints::PumpingRefs {
-        col_pumping_start: layout.col_pumping_start,
+        col_pumping_start: layout.equipment.col_pumping_start,
         pumping_stations: ctx.pumping_stations,
         pumping_pos: &ctx.pumping_pos,
     };
@@ -1218,7 +1207,7 @@ pub(super) fn fill_generic_constraint_entries(
     };
 
     for (entry_idx, entry) in layout.generic_constraint_rows.iter().enumerate() {
-        let row = layout.row_generic_start + entry_idx;
+        let row = layout.rows.row_generic_start + entry_idx;
         let constraint = &ctx.generic_constraints[entry.constraint_idx];
         // A collapsed stage-level row is priced by the stage's total hours (it stands in
         // for one row per block); the total is penalty-conserving either way.
@@ -1311,8 +1300,8 @@ pub(super) fn fill_ncs_load_balance_entries(
             continue;
         };
         for blk in 0..layout.n_blks {
-            let col = grid.flat(layout.col_ncs_start, ncs_sys_idx, blk);
-            let row = grid.flat(layout.row_load_balance_start(), bus_idx, blk);
+            let col = grid.flat(layout.equipment.col_ncs_start, ncs_sys_idx, blk);
+            let row = grid.flat(layout.rows.load_balance.start, bus_idx, blk);
             col_entries[col].push((row, 1.0));
         }
     }
@@ -1332,7 +1321,7 @@ pub(super) fn fill_z_inflow_entries(
     let col_inflow_lags_start = layout.col_inflow_lags_start();
 
     for h_idx in 0..n_h {
-        let row = layout.row_z_inflow_start() + h_idx;
+        let row = layout.rows.z_inflow_row_start + h_idx;
 
         let col_z = layout.col_z_inflow_start() + h_idx;
         col_entries[col_z].push((row, 1.0));
@@ -1368,7 +1357,11 @@ pub(super) fn fill_operational_violation_entries(
 
     for (h_idx, fpha_local_entry) in layout.fpha_local_index.iter().enumerate() {
         for blk in 0..n_blks {
-            let row = grid.flat(layout.row_min_outflow_start(), h_idx, blk);
+            let row = grid.flat(
+                layout.slack.oper_violation.min_outflow_rows.start,
+                h_idx,
+                blk,
+            );
             let col_q = layout.turbine_col(h_idx, blk);
             col_entries[col_q].push((row, 1.0));
             let col_s = layout.spillage_col(h_idx, blk);
@@ -1380,7 +1373,11 @@ pub(super) fn fill_operational_violation_entries(
         }
 
         for blk in 0..n_blks {
-            let row = grid.flat(layout.row_max_outflow_start(), h_idx, blk);
+            let row = grid.flat(
+                layout.slack.oper_violation.max_outflow_rows.start,
+                h_idx,
+                blk,
+            );
             let col_q = layout.turbine_col(h_idx, blk);
             col_entries[col_q].push((row, 1.0));
             let col_s = layout.spillage_col(h_idx, blk);
@@ -1392,7 +1389,11 @@ pub(super) fn fill_operational_violation_entries(
         }
 
         for blk in 0..n_blks {
-            let row = grid.flat(layout.row_min_turbine_start(), h_idx, blk);
+            let row = grid.flat(
+                layout.slack.oper_violation.min_turbine_rows.start,
+                h_idx,
+                blk,
+            );
             let col_q = layout.turbine_col(h_idx, blk);
             col_entries[col_q].push((row, 1.0));
             let col_slack = layout.turbine_below_col(h_idx, blk);
@@ -1401,7 +1402,11 @@ pub(super) fn fill_operational_violation_entries(
 
         if let Some(&local_fpha_idx) = fpha_local_entry.as_ref() {
             for blk in 0..n_blks {
-                let row = grid.flat(layout.row_min_generation_start(), h_idx, blk);
+                let row = grid.flat(
+                    layout.slack.oper_violation.min_generation_rows.start,
+                    h_idx,
+                    blk,
+                );
                 let col_g = layout.generation_col(local_fpha_idx, blk);
                 col_entries[col_g].push((row, 1.0));
                 let col_slack = layout.generation_below_col(h_idx, blk);
@@ -1419,7 +1424,11 @@ pub(super) fn fill_operational_violation_entries(
                 }
             };
             for blk in 0..n_blks {
-                let row = grid.flat(layout.row_min_generation_start(), h_idx, blk);
+                let row = grid.flat(
+                    layout.slack.oper_violation.min_generation_rows.start,
+                    h_idx,
+                    blk,
+                );
                 let col_q = layout.turbine_col(h_idx, blk);
                 col_entries[col_q].push((row, rho));
                 let col_slack = layout.generation_below_col(h_idx, blk);
@@ -2347,7 +2356,7 @@ mod zero_cost_tests {
         // Anticipated thermal 0: objective skipped (stays 0.0), bounds still set.
         // Thermal 0's block columns start at col_thermal_start (t_idx 0 offset).
         for blk in 0..n_blks {
-            let col = layout.col_thermal_start() + blk;
+            let col = layout.equipment.thermal.start + blk;
             assert_eq!(
                 bufs.objective[col], 0.0,
                 "anticipated thermal 0 objective must stay 0.0 at col {col}",
@@ -2359,7 +2368,7 @@ mod zero_cost_tests {
         }
         // Standard thermal 1: objective priced as cost * block_hours.
         for blk in 0..n_blks {
-            let col = layout.col_thermal_start() + n_blks + blk;
+            let col = layout.equipment.thermal.start + n_blks + blk;
             let expected = STD_COST * stage.blocks[blk].duration_hours;
             assert_eq!(
                 bufs.objective[col], expected,
@@ -2387,8 +2396,8 @@ mod zero_cost_tests {
             layout.anticipated.n_anticipated_fishing_rows
         );
 
-        let mut row_lower = vec![f64::NAN; layout.num_rows];
-        let mut row_upper = vec![f64::NAN; layout.num_rows];
+        let mut row_lower = vec![f64::NAN; layout.rows.num_rows];
+        let mut row_upper = vec![f64::NAN; layout.rows.num_rows];
 
         fill_anticipated_fishing_rows(&layout, &mut row_lower, &mut row_upper);
 
@@ -2429,8 +2438,8 @@ mod zero_cost_tests {
             layout.anticipated.n_anticipated_fishing_rows
         );
 
-        let mut row_lower = vec![f64::NAN; layout.num_rows];
-        let mut row_upper = vec![f64::NAN; layout.num_rows];
+        let mut row_lower = vec![f64::NAN; layout.rows.num_rows];
+        let mut row_upper = vec![f64::NAN; layout.rows.num_rows];
 
         fill_anticipated_fishing_rows(&layout, &mut row_lower, &mut row_upper);
 
@@ -2596,8 +2605,8 @@ mod zero_cost_tests {
             layout.anticipated.n_anticipated_state_out_def_rows
         );
 
-        let mut row_lower = vec![f64::NEG_INFINITY; layout.num_rows];
-        let mut row_upper = vec![f64::INFINITY; layout.num_rows];
+        let mut row_lower = vec![f64::NEG_INFINITY; layout.rows.num_rows];
+        let mut row_upper = vec![f64::INFINITY; layout.rows.num_rows];
         fill_anticipated_state_out_def_rows(&layout, &mut row_lower, &mut row_upper);
 
         for k in 0..2 {
@@ -2844,8 +2853,8 @@ mod zero_cost_tests {
                  the columns are not)"
             );
 
-            let mut row_lower = vec![f64::NAN; layout.num_rows];
-            let mut row_upper = vec![f64::NAN; layout.num_rows];
+            let mut row_lower = vec![f64::NAN; layout.rows.num_rows];
+            let mut row_upper = vec![f64::NAN; layout.rows.num_rows];
             fill_anticipated_fishing_rows(&layout, &mut row_lower, &mut row_upper);
             fill_anticipated_state_out_def_rows(&layout, &mut row_lower, &mut row_upper);
 
@@ -2857,7 +2866,9 @@ mod zero_cost_tests {
             // at all from either anticipated row family — unconstrained by
             // any fishing coupling.
             for blk in 0..layout.n_blks {
-                let col_gen = layout.block_grid().flat(layout.col_thermal_start(), 0, blk);
+                let col_gen = layout
+                    .block_grid()
+                    .flat(layout.equipment.thermal.start, 0, blk);
                 assert!(
                     col_entries[col_gen].is_empty(),
                     "stage {stage_idx} blk {blk}: thermal generation column must carry no \
@@ -3653,7 +3664,7 @@ mod pumping_water_tests {
         let n_blks = layout.n_blks;
         for (p_idx, s) in ctx.pumping_stations.iter().enumerate() {
             for blk in 0..n_blks {
-                let col = layout.col_pumping_start + p_idx * n_blks + blk;
+                let col = layout.equipment.col_pumping_start + p_idx * n_blks + blk;
                 assert_eq!(
                     bufs.col_lower[col], s.min_flow_m3s,
                     "station {p_idx} blk {blk}: lower bound must be min_flow"
@@ -3690,12 +3701,12 @@ mod pumping_water_tests {
         let n_blks = layout.n_blks;
         let source_pos = ctx.hydro_pos[&EntityId(1)];
         let dest_pos = ctx.hydro_pos[&EntityId(2)];
-        let row_source = layout.row_water_balance_start() + source_pos;
-        let row_dest = layout.row_water_balance_start() + dest_pos;
+        let row_source = layout.rows.water_balance.start + source_pos;
+        let row_dest = layout.rows.water_balance.start + dest_pos;
 
         for blk in 0..n_blks {
             let tau_h = stage.blocks[blk].duration_hours * M3S_TO_HM3;
-            let col = layout.col_pumping_start + blk;
+            let col = layout.equipment.col_pumping_start + blk;
             assert_eq!(
                 col_entries[col],
                 vec![(row_source, tau_h), (row_dest, -tau_h)],
@@ -3723,10 +3734,10 @@ mod pumping_water_tests {
 
         let n_blks = layout.n_blks;
         let dest_pos = ctx.hydro_pos[&EntityId(2)];
-        let row_dest = layout.row_water_balance_start() + dest_pos;
+        let row_dest = layout.rows.water_balance.start + dest_pos;
         for blk in 0..n_blks {
             let tau_h = stage.blocks[blk].duration_hours * M3S_TO_HM3;
-            let col = layout.col_pumping_start + blk;
+            let col = layout.equipment.col_pumping_start + blk;
             assert_eq!(
                 col_entries[col],
                 vec![(row_dest, -tau_h)],
@@ -3754,10 +3765,10 @@ mod pumping_water_tests {
 
         let n_blks = layout.n_blks;
         let source_pos = ctx.hydro_pos[&EntityId(1)];
-        let row_source = layout.row_water_balance_start() + source_pos;
+        let row_source = layout.rows.water_balance.start + source_pos;
         for blk in 0..n_blks {
             let tau_h = stage.blocks[blk].duration_hours * M3S_TO_HM3;
-            let col = layout.col_pumping_start + blk;
+            let col = layout.equipment.col_pumping_start + blk;
             assert_eq!(
                 col_entries[col],
                 vec![(row_source, tau_h)],
@@ -3788,8 +3799,8 @@ mod pumping_water_tests {
         let n_blks = layout.n_blks;
         let b_idx = ctx.bus_pos[&EntityId(1)];
         for blk in 0..n_blks {
-            let row = layout.row_load_balance_start() + b_idx * n_blks + blk;
-            let col = layout.col_pumping_start + blk;
+            let row = layout.rows.load_balance.start + b_idx * n_blks + blk;
+            let col = layout.equipment.col_pumping_start + blk;
             assert!(
                 col_entries[col].contains(&(row, -0.75)),
                 "blk {blk}: pumping column {col} must carry (row {row}, -0.75); got {:?}",
@@ -3842,8 +3853,8 @@ mod pumping_water_tests {
         let n_blks = layout.n_blks;
         let b_idx = ctx.bus_pos[&EntityId(1)];
         for blk in 0..n_blks {
-            let row = layout.row_load_balance_start() + b_idx * n_blks + blk;
-            let col = layout.col_contract_import_start + blk;
+            let row = layout.rows.load_balance.start + b_idx * n_blks + blk;
+            let col = layout.equipment.col_contract_import_start + blk;
             assert_eq!(
                 col_entries[col],
                 vec![(row, 1.0)],
@@ -3872,8 +3883,8 @@ mod pumping_water_tests {
         let n_blks = layout.n_blks;
         let b_idx = ctx.bus_pos[&EntityId(1)];
         for blk in 0..n_blks {
-            let row = layout.row_load_balance_start() + b_idx * n_blks + blk;
-            let col = layout.col_contract_export_start + blk;
+            let row = layout.rows.load_balance.start + b_idx * n_blks + blk;
+            let col = layout.equipment.col_contract_export_start + blk;
             assert_eq!(
                 col_entries[col],
                 vec![(row, -1.0)],
@@ -3906,9 +3917,9 @@ mod pumping_water_tests {
         let n_blks = layout.n_blks;
         let b_idx = ctx.bus_pos[&EntityId(1)];
         for blk in 0..n_blks {
-            let row = layout.row_load_balance_start() + b_idx * n_blks + blk;
-            let import_col = layout.col_contract_import_start + blk;
-            let export_col = layout.col_contract_export_start + blk;
+            let row = layout.rows.load_balance.start + b_idx * n_blks + blk;
+            let import_col = layout.equipment.col_contract_import_start + blk;
+            let export_col = layout.equipment.col_contract_export_start + blk;
             assert_eq!(
                 col_entries[import_col],
                 vec![(row, 1.0)],
@@ -3947,9 +3958,9 @@ mod pumping_water_tests {
         let n_blks = layout.n_blks;
         let b_idx = ctx.bus_pos[&EntityId(1)];
         for blk in 0..n_blks {
-            let row = layout.row_load_balance_start() + b_idx * n_blks + blk;
-            let slot0_col = layout.col_contract_import_start + blk;
-            let slot1_col = layout.col_contract_import_start + n_blks + blk;
+            let row = layout.rows.load_balance.start + b_idx * n_blks + blk;
+            let slot0_col = layout.equipment.col_contract_import_start + blk;
+            let slot1_col = layout.equipment.col_contract_import_start + n_blks + blk;
             assert_eq!(
                 col_entries[slot0_col],
                 vec![(row, 1.0)],
@@ -3982,7 +3993,7 @@ mod pumping_water_tests {
 
         let n_blks = layout.n_blks;
         for blk in 0..n_blks {
-            let col = layout.col_contract_import_start + blk;
+            let col = layout.equipment.col_contract_import_start + blk;
             assert!(
                 col_entries[col].is_empty(),
                 "blk {blk}: contract on an unmapped bus must write no load-balance entry"
@@ -4055,7 +4066,7 @@ mod pumping_water_tests {
 
         let n_blks = layout.n_blks;
         for blk in 0..n_blks {
-            let col = layout.col_pumping_start + blk;
+            let col = layout.equipment.col_pumping_start + blk;
             assert!(
                 col_entries[col].is_empty(),
                 "blk {blk}: station on an unmapped bus must write no load-balance entry"
@@ -4085,7 +4096,7 @@ mod pumping_water_tests {
             // layout has no pumping columns, so compare the shared prefix that both
             // layouts share (generation/thermal/line/deficit/excess columns are all
             // indexed before the pumping block).
-            (layout.col_pumping_start, col_entries)
+            (layout.equipment.col_pumping_start, col_entries)
         };
 
         let (pump_start_empty, entries_empty) = build(vec![]);
@@ -4233,8 +4244,8 @@ mod pumping_water_tests {
             let mut entries = build_stage_matrix_entries(&ctx, &stage, 0, &layout);
             let mut col_upper = vec![f64::INFINITY; layout.num_cols];
             let mut objective = vec![0.0_f64; layout.num_cols];
-            let mut row_lower = vec![f64::NEG_INFINITY; layout.num_rows];
-            let mut row_upper = vec![f64::INFINITY; layout.num_rows];
+            let mut row_lower = vec![f64::NEG_INFINITY; layout.rows.num_rows];
+            let mut row_upper = vec![f64::INFINITY; layout.rows.num_rows];
             let mut buffers = LpMatrixBuffers {
                 col_entries: &mut entries,
                 col_upper: &mut col_upper,
@@ -4314,7 +4325,7 @@ mod pumping_water_tests {
         // expands to one generic row per block; probe every block.
         let n_blks = layout_a.n_blks;
         assert_eq!(
-            layout_a.n_generic_rows, n_blks,
+            layout_a.rows.n_generic_rows, n_blks,
             "block-dependent generic constraint must expand to one row per block"
         );
         let grid = layout_a.block_grid();
@@ -4322,7 +4333,7 @@ mod pumping_water_tests {
         let l_pos = 0; // line id 100 sorts to position 0.
         let b_pos = 1; // bus id 2 sorts to position 1 (buses 1,2,3).
         for blk in 0..n_blks {
-            let row = i32::try_from(layout_a.row_generic_start + blk).unwrap();
+            let row = i32::try_from(layout_a.rows.row_generic_start + blk).unwrap();
             let coeff_at = |col: usize| -> f64 {
                 let start = usize::try_from(csc_a.0[col]).unwrap();
                 let end = usize::try_from(csc_a.0[col + 1]).unwrap();
@@ -4335,7 +4346,7 @@ mod pumping_water_tests {
             };
 
             // ThermalGeneration(10): +1.0 on thermal 10's column.
-            let thermal_col = grid.flat(layout_a.col_thermal_start(), t_pos, blk);
+            let thermal_col = grid.flat(layout_a.equipment.thermal.start, t_pos, blk);
             assert_eq!(
                 coeff_at(thermal_col),
                 1.0,
@@ -4495,7 +4506,7 @@ mod pumping_water_tests {
 
         let up_idx = 0; // H_up id 1.
         let down_idx = 1; // H_down id 2.
-        let down_row = i32::try_from(layout.row_water_balance_start() + down_idx).unwrap();
+        let down_row = i32::try_from(layout.rows.water_balance.start + down_idx).unwrap();
         for blk in 0..layout.n_blks {
             // tau_h is the identical expression the production fill uses; the two
             // blocks carry distinct durations (300 vs 444), so a per-block divisor
@@ -4609,7 +4620,7 @@ mod pumping_water_tests {
         };
         // Lag column for (lag 0, downstream hydro): col_inflow_lags_start + 0*n_h + h.
         let lag_col = ar_layout.col_inflow_lags_start() + down_idx;
-        let ar_row = i32::try_from(ar_layout.row_water_balance_start() + down_idx).unwrap();
+        let ar_row = i32::try_from(ar_layout.rows.water_balance.start + down_idx).unwrap();
         assert_eq!(
             ar_coeff_at(lag_col, ar_row),
             -(ar_layout.zeta * psi_val),
@@ -4694,8 +4705,8 @@ mod pumping_water_tests {
         let layout = StageLayout::new(&ctx, &state, &stage, 0);
         let csc = build_sorted_csc(&ctx, &stage, 0, &layout);
 
-        let down_row = i32::try_from(layout.row_water_balance_start() + down_idx).unwrap();
-        let def_row = i32::try_from(layout.row_transit_bucket_definition_start()).unwrap();
+        let down_row = i32::try_from(layout.rows.water_balance.start + down_idx).unwrap();
+        let def_row = i32::try_from(layout.rows.transit_bucket_definition.start).unwrap();
         let col_first_slot_in = state.transit_buckets_in.start;
         let col_first_slot_out = state.transit_buckets_out.start;
 
@@ -4790,8 +4801,8 @@ mod pumping_water_tests {
         let layout = StageLayout::new(&ctx, &state, &stage, 0);
         let csc = build_sorted_csc(&ctx, &stage, 0, &layout);
 
-        let down_row = i32::try_from(layout.row_water_balance_start() + down_idx).unwrap();
-        let def_row = i32::try_from(layout.row_transit_bucket_definition_start()).unwrap();
+        let down_row = i32::try_from(layout.rows.water_balance.start + down_idx).unwrap();
+        let def_row = i32::try_from(layout.rows.transit_bucket_definition.start).unwrap();
 
         for blk in 0..layout.n_blks {
             let tau_h = stage.blocks[blk].duration_hours * M3S_TO_HM3;
@@ -4877,13 +4888,13 @@ mod pumping_water_tests {
         let csc_exited = build_sorted_csc(&ctx, &stage_exited, 0, &layout_exited);
 
         let down_row_active =
-            i32::try_from(layout_active.row_water_balance_start() + down_idx).unwrap();
+            i32::try_from(layout_active.rows.water_balance.start + down_idx).unwrap();
         let def_row_active =
-            i32::try_from(layout_active.row_transit_bucket_definition_start()).unwrap();
+            i32::try_from(layout_active.rows.transit_bucket_definition.start).unwrap();
         let down_row_exited =
-            i32::try_from(layout_exited.row_water_balance_start() + down_idx).unwrap();
+            i32::try_from(layout_exited.rows.water_balance.start + down_idx).unwrap();
         let def_row_exited =
-            i32::try_from(layout_exited.row_transit_bucket_definition_start()).unwrap();
+            i32::try_from(layout_exited.rows.transit_bucket_definition.start).unwrap();
 
         for blk in 0..layout_active.n_blks {
             for (col_active, col_exited) in [
@@ -4982,7 +4993,7 @@ mod pumping_water_tests {
         let layout = StageLayout::new(&ctx, &state, &stage, 0);
         let csc = build_sorted_csc(&ctx, &stage, 0, &layout);
 
-        let def_row = i32::try_from(layout.row_transit_bucket_definition_start()).unwrap();
+        let def_row = i32::try_from(layout.rows.transit_bucket_definition.start).unwrap();
         for blk in 0..layout.n_blks {
             let tau_h = stage.blocks[blk].duration_hours * M3S_TO_HM3;
             assert_eq!(
@@ -5058,7 +5069,7 @@ mod pumping_water_tests {
         let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
         fill_transit_bucket_definition_entries(&layout, &mut col_entries);
 
-        let row_start = layout.row_transit_bucket_definition_start();
+        let row_start = layout.rows.transit_bucket_definition.start;
         let out = state.transit_buckets_out.start;
         let inn = state.transit_buckets_in.start;
 
@@ -5111,18 +5122,17 @@ mod pumping_water_tests {
         // No bucket-row gap: load_balance starts exactly where water_balance
         // ends, and the bucket-definition row cursor collapses onto it.
         assert_eq!(
-            layout.row_transit_bucket_definition_start(),
-            layout.row_load_balance_start(),
+            layout.rows.transit_bucket_definition.start, layout.rows.load_balance.start,
             "B==0 must leave no bucket-definition rows between water_balance and load_balance"
         );
         assert_eq!(
-            layout.row_load_balance_start(),
-            layout.row_water_balance_start() + layout.n_h,
+            layout.rows.load_balance.start,
+            layout.rows.water_balance.start + layout.n_h,
             "B==0 must reproduce today's row_water_balance_start + n_hydros offset"
         );
 
         let csc = build_sorted_csc(&ctx, &stage, 0, &layout);
-        let down_row = i32::try_from(layout.row_water_balance_start() + down_idx).unwrap();
+        let down_row = i32::try_from(layout.rows.water_balance.start + down_idx).unwrap();
         for blk in 0..layout.n_blks {
             let tau_h = stage.blocks[blk].duration_hours * M3S_TO_HM3;
             assert_eq!(
@@ -5263,8 +5273,8 @@ mod pumping_water_tests {
         let layout = StageLayout::new(&ctx, &state, &stage, 0);
         let csc = build_sorted_csc(&ctx, &stage, 0, &layout);
 
-        let def_row = i32::try_from(layout.row_transit_bucket_definition_start()).unwrap();
-        let row_water = layout.row_water_balance_start();
+        let def_row = i32::try_from(layout.rows.transit_bucket_definition.start).unwrap();
+        let row_water = layout.rows.water_balance.start;
         let row_b1 = i32::try_from(row_water + down_idx * 3 + 1).unwrap();
         let row_b2 = i32::try_from(row_water + down_idx * 3 + 2).unwrap();
         let tau = |b: usize| stage.blocks[b].duration_hours * M3S_TO_HM3;
@@ -5388,7 +5398,7 @@ mod pumping_water_tests {
             "K=1 must carry the same column count in both modes"
         );
         assert_eq!(
-            par_layout.num_rows, chr_layout.num_rows,
+            par_layout.rows.num_rows, chr_layout.rows.num_rows,
             "K=1 must carry the same row count in both modes"
         );
         assert_eq!(
@@ -5668,7 +5678,7 @@ mod pumping_water_tests {
         let layout = StageLayout::new(&ctx, &state, &stage, 0);
         let csc = build_sorted_csc(&ctx, &stage, 0, &layout);
 
-        let row_water = i32::try_from(layout.row_water_balance_start() + down_idx).unwrap();
+        let row_water = i32::try_from(layout.rows.water_balance.start + down_idx).unwrap();
         let col_first_slot_in = state.transit_buckets_in.start;
         assert_eq!(
             coeff_at(&csc, col_first_slot_in, row_water),
@@ -5785,15 +5795,15 @@ mod pumping_water_tests {
         // row per block, so the constraint participates as `n_blks` rows.
         let n_blks = layout.n_blks;
         assert_eq!(
-            layout.n_generic_rows, n_blks,
+            layout.rows.n_generic_rows, n_blks,
             "block-dependent pumping constraint must expand to one row per block"
         );
 
         let mut col_entries: Vec<Vec<(usize, f64)>> = vec![Vec::new(); layout.num_cols];
         let mut col_upper = vec![f64::INFINITY; layout.num_cols];
         let mut objective = vec![0.0_f64; layout.num_cols];
-        let mut row_lower = vec![f64::NEG_INFINITY; layout.num_rows];
-        let mut row_upper = vec![f64::INFINITY; layout.num_rows];
+        let mut row_lower = vec![f64::NEG_INFINITY; layout.rows.num_rows];
+        let mut row_upper = vec![f64::INFINITY; layout.rows.num_rows];
         let mut buffers = LpMatrixBuffers {
             col_entries: &mut col_entries,
             col_upper: &mut col_upper,
@@ -5808,8 +5818,8 @@ mod pumping_water_tests {
         // with the flow (1.0) and power (consumption) terms aliasing the SAME column.
         // p_idx = 0 (the only station), so col = col_pumping_start + blk.
         for blk in 0..n_blks {
-            let row = layout.row_generic_start + blk;
-            let col = layout.col_pumping_start + blk;
+            let row = layout.rows.row_generic_start + blk;
+            let col = layout.equipment.col_pumping_start + blk;
             let summed: f64 = col_entries[col]
                 .iter()
                 .filter(|&&(r, _)| r == row)
@@ -5955,6 +5965,7 @@ mod pumping_water_tests {
         // single `filling_target` row — used below to prove routed inflow does NOT
         // land on it.
         let d_target_local = layout
+            .filling
             .filling_target_hydro_indices
             .iter()
             .position(|&h| h == d_idx)
@@ -5962,11 +5973,11 @@ mod pumping_water_tests {
         let offsets = PfuOffsets {
             zeta: layout.zeta,
             z_u: layout.col_z_inflow_start() + u_idx,
-            water_row_u: layout.row_water_balance_start() + u_idx,
-            water_row_d: layout.row_water_balance_start() + d_idx,
-            z_inflow_row_u: layout.row_z_inflow_start() + u_idx,
-            filling_target_row_d: layout.row_filling_target_start() + d_target_local,
-            n_target_rows: layout.filling_target_hydro_indices.len(),
+            water_row_u: layout.rows.water_balance.start + u_idx,
+            water_row_d: layout.rows.water_balance.start + d_idx,
+            z_inflow_row_u: layout.rows.z_inflow_row_start + u_idx,
+            filling_target_row_d: layout.filling.row_filling_target_start + d_target_local,
+            n_target_rows: layout.filling.filling_target_hydro_indices.len(),
             storage_in_u: layout.col_storage_in_start() + u_idx,
         };
         (csc, offsets)
@@ -6083,12 +6094,12 @@ mod pumping_water_tests {
             assemble_csc(&entries)
         };
         let offsets = TargetOffsets {
-            n_target_rows: layout.filling_target_hydro_indices.len(),
-            target_row: layout.row_filling_target_start(),
-            sigma_fill_col: layout.col_filling_target_start(),
+            n_target_rows: layout.filling.filling_target_hydro_indices.len(),
+            target_row: layout.filling.row_filling_target_start,
+            sigma_fill_col: layout.filling.col_filling_target_start,
             // The outgoing storage column v_h is the dense system index h2_idx.
             v_h_col: h2_idx,
-            num_rows: layout.num_rows,
+            num_rows: layout.rows.num_rows,
             num_cols: layout.num_cols,
         };
         (csc, row_lower, row_upper, offsets)
@@ -6233,9 +6244,9 @@ mod pumping_water_tests {
         let state = state_layout_for(&ctx);
         let layout = StageLayout::new(&ctx, &state, &stage, 0);
         let (row_lower, _row_upper) = super::super::rows::fill_stage_rows(&ctx, &stage, 0, &layout);
-        let row = layout.row_filling_target_start();
+        let row = layout.filling.row_filling_target_start;
         assert_eq!(
-            layout.filling_target_hydro_indices.len(),
+            layout.filling.filling_target_hydro_indices.len(),
             1,
             "one σ_fill row at the early Filling stage (id 2)"
         );
@@ -6263,13 +6274,16 @@ mod pumping_water_tests {
         let state = state_layout_for(&ctx);
         let layout = StageLayout::new(&ctx, &state, &stage, 0);
         assert_eq!(
-            layout.filling_target_hydro_indices.len(),
+            layout.filling.filling_target_hydro_indices.len(),
             0,
             "control system has no filling hydro ⇒ no σ_fill row/column"
         );
         // The σ_fill row/column cursors degenerate to the structural bounds.
-        assert_eq!(layout.row_filling_target_start(), layout.num_rows);
-        assert_eq!(layout.col_filling_target_start(), layout.num_cols);
+        assert_eq!(
+            layout.filling.row_filling_target_start,
+            layout.rows.num_rows
+        );
+        assert_eq!(layout.filling.col_filling_target_start, layout.num_cols);
     }
 
     /// Cut-validity guard (§4 trap 3): the `σ_fill` soft row couples to the storage
@@ -6388,12 +6402,12 @@ mod pumping_water_tests {
             assemble_csc(&entries)
         };
         let offsets = FloorOffsets {
-            n_floor_rows: layout.filled_min_storage_floor_hydro_indices.len(),
-            floor_row: layout.row_filled_min_storage_floor_start(),
-            sigma_minus_col: layout.col_filled_min_storage_floor_start(),
+            n_floor_rows: layout.filling.filled_min_storage_floor_hydro_indices.len(),
+            floor_row: layout.filling.row_filled_min_storage_floor_start,
+            sigma_minus_col: layout.filling.col_filled_min_storage_floor_start,
             // The outgoing storage column v_h is the dense system index h2_idx.
             v_h_col: h2_idx,
-            num_rows: layout.num_rows,
+            num_rows: layout.rows.num_rows,
             num_cols: layout.num_cols,
         };
         (csc, row_lower, row_upper, offsets)
@@ -6494,13 +6508,19 @@ mod pumping_water_tests {
         let state = state_layout_for(&ctx);
         let layout = StageLayout::new(&ctx, &state, &stage, 0);
         assert_eq!(
-            layout.filled_min_storage_floor_hydro_indices.len(),
+            layout.filling.filled_min_storage_floor_hydro_indices.len(),
             0,
             "control system has no filling hydro ⇒ no σ^{{v-}} row/column"
         );
         // The σ^{v-} row/column cursors degenerate to the structural bounds.
-        assert_eq!(layout.row_filled_min_storage_floor_start(), layout.num_rows);
-        assert_eq!(layout.col_filled_min_storage_floor_start(), layout.num_cols);
+        assert_eq!(
+            layout.filling.row_filled_min_storage_floor_start,
+            layout.rows.num_rows
+        );
+        assert_eq!(
+            layout.filling.col_filled_min_storage_floor_start,
+            layout.num_cols
+        );
     }
 
     /// The `σ^{v-}` row lands STRICTLY BELOW `num_rows` (inside the structural
@@ -6598,8 +6618,8 @@ mod pumping_water_tests {
             zeta: layout.zeta,
             n_blks: layout.n_blks,
             h2_idx,
-            water_row_h2: layout.row_water_balance_start() + h2_idx,
-            water_row_h3: layout.row_water_balance_start() + h3_idx,
+            water_row_h2: layout.rows.water_balance.start + h2_idx,
+            water_row_h3: layout.rows.water_balance.start + h3_idx,
             col_storage_in_h2: layout.col_storage_in_start() + h2_idx,
             z_h2: layout.col_z_inflow_start() + h2_idx,
             h1_turbine: (0..layout.n_blks)
@@ -6764,7 +6784,7 @@ mod pumping_water_tests {
             assemble_csc(&entries)
         };
         let h1_idx = fixtures.hydro_pos[&EntityId(1)];
-        let row_h = layout.row_water_balance_start() + h2_idx;
+        let row_h = layout.rows.water_balance.start + h2_idx;
         let z_h2 = layout.col_z_inflow_start() + h2_idx;
 
         // Frozen identity intact on H2's own row.
@@ -6783,14 +6803,14 @@ mod pumping_water_tests {
         // H2's water exits the system: z_{H2} appears on NO water-balance row, and
         // H1's releases appear only on H1's own row (no downstream to feed).
         for h in 0..layout.n_h {
-            let r = layout.row_water_balance_start() + h;
+            let r = layout.rows.water_balance.start + h;
             assert_eq!(
                 csc_at(&csc, z_h2, r),
                 0.0,
                 "z_{{H2}} must not land on any water row in the sink case (row {r})"
             );
         }
-        let row_h1 = layout.row_water_balance_start() + h1_idx;
+        let row_h1 = layout.rows.water_balance.start + h1_idx;
         for blk in 0..layout.n_blks {
             let tau_h = [300.0_f64, 444.0][blk] * M3S_TO_HM3;
             // H1's own +τ on its own row is unchanged; it lands on NO other water row.
@@ -6897,12 +6917,12 @@ mod pumping_water_tests {
             assemble_csc(&entries)
         };
         let h2_idx_c = control.hydro_pos[&EntityId(2)];
-        let row_h2_c = layout.row_water_balance_start() + h2_idx_c;
+        let row_h2_c = layout.rows.water_balance.start + h2_idx_c;
 
         // num_rows identical (no extra structural rows from the short-circuit; it
         // only moves coefficients, never adds rows).
         assert_eq!(
-            layout.num_rows,
+            layout.rows.num_rows,
             ru_f.len(),
             "num_rows identical whether H2 is PreFilling or non-filling"
         );
@@ -6992,8 +7012,8 @@ mod pumping_water_tests {
             zeta: layout.zeta,
             n_blks: layout.n_blks,
             h2_idx,
-            water_row_h2: layout.row_water_balance_start() + h2_idx,
-            water_row_h3: layout.row_water_balance_start() + h3_idx,
+            water_row_h2: layout.rows.water_balance.start + h2_idx,
+            water_row_h3: layout.rows.water_balance.start + h3_idx,
             col_storage_in_h2: layout.col_storage_in_start() + h2_idx,
             z_h2: layout.col_z_inflow_start() + h2_idx,
             h1_turbine: (0..layout.n_blks)
@@ -7080,7 +7100,7 @@ mod pumping_water_tests {
             }
             assemble_csc(&entries)
         };
-        let row_h = layout.row_water_balance_start() + h2_idx;
+        let row_h = layout.rows.water_balance.start + h2_idx;
         let z_h2 = layout.col_z_inflow_start() + h2_idx;
 
         assert_eq!(csc_at(&csc, h2_idx, row_h), 1.0, "v_{{H2}} +1.0");
@@ -7092,7 +7112,7 @@ mod pumping_water_tests {
         assert_eq!(row_lower[row_h], 0.0, "frozen RHS 0");
         assert_eq!(row_upper[row_h], 0.0, "frozen RHS 0");
         for h in 0..layout.n_h {
-            let r = layout.row_water_balance_start() + h;
+            let r = layout.rows.water_balance.start + h;
             assert_eq!(
                 csc_at(&csc, z_h2, r),
                 0.0,
@@ -7196,9 +7216,9 @@ mod pumping_water_tests {
             zeta: layout.zeta,
             h1_idx,
             h2_idx,
-            water_row_h1: layout.row_water_balance_start() + h1_idx,
-            water_row_h2: layout.row_water_balance_start() + h2_idx,
-            water_row_h3: layout.row_water_balance_start() + h3_idx,
+            water_row_h1: layout.rows.water_balance.start + h1_idx,
+            water_row_h2: layout.rows.water_balance.start + h2_idx,
+            water_row_h3: layout.rows.water_balance.start + h3_idx,
             col_storage_in_h1: layout.col_storage_in_start() + h1_idx,
             col_storage_in_h2: layout.col_storage_in_start() + h2_idx,
             z_h1: layout.col_z_inflow_start() + h1_idx,
@@ -7355,7 +7375,7 @@ mod pumping_water_tests {
         // Both links' inflow exits the system: neither z column lands on ANY water
         // row (no non-PreFilling downstream exists to receive it).
         for h in 0..layout.n_h {
-            let r = layout.row_water_balance_start() + h;
+            let r = layout.rows.water_balance.start + h;
             assert_eq!(
                 csc_at(&csc, z_h1, r),
                 0.0,
@@ -7372,7 +7392,7 @@ mod pumping_water_tests {
         // withdrawal demand was folded onto any frozen RHS (the sink transfers
         // nothing).
         for (h_idx, label) in [(h1_idx, "H1"), (h2_idx, "H2")] {
-            let row = layout.row_water_balance_start() + h_idx;
+            let row = layout.rows.water_balance.start + h_idx;
             assert_eq!(csc_at(&csc, h_idx, row), 1.0, "{label}: v +1.0");
             assert_eq!(
                 csc_at(&csc, layout.col_storage_in_start() + h_idx, row),
@@ -7475,7 +7495,7 @@ mod pumping_water_tests {
 
         for k in 1..=n_blks {
             let blk = k - 1;
-            let row = layout.row_water_balance_start() + h * n_blks + blk;
+            let row = layout.rows.water_balance.start + h * n_blks + blk;
             assert_eq!(
                 csc_at(&csc, layout.block_storage_col(h, k), row),
                 1.0,
@@ -7515,8 +7535,8 @@ mod pumping_water_tests {
         for k in 1..=n_blks {
             let blk = k - 1;
             let tau_k = [300.0_f64, 444.0][blk] * M3S_TO_HM3;
-            let row_d = layout.row_water_balance_start() + off.d_idx * n_blks + blk;
-            let row_h = layout.row_water_balance_start() + off.h2_idx * n_blks + blk;
+            let row_d = layout.rows.water_balance.start + off.d_idx * n_blks + blk;
+            let row_h = layout.rows.water_balance.start + off.h2_idx * n_blks + blk;
 
             assert_eq!(
                 csc_at(&csc, off.z_h2, row_d),
@@ -7556,8 +7576,8 @@ mod pumping_water_tests {
         for k in 1..=n_blks {
             let blk = k - 1;
             let tau_k = [300.0_f64, 444.0][blk] * M3S_TO_HM3;
-            let row_d = layout.row_water_balance_start() + off.d_idx * n_blks + blk;
-            let row_d0 = layout0.row_water_balance_start() + off0.d_idx * n_blks + blk;
+            let row_d = layout.rows.water_balance.start + off.d_idx * n_blks + blk;
+            let row_d0 = layout0.rows.water_balance.start + off0.d_idx * n_blks + blk;
             assert_eq!(
                 row_upper0[row_d0] - row_upper[row_d],
                 tau_k * withdrawal_h,
@@ -7774,7 +7794,7 @@ mod pumping_water_tests {
 
             let flow_col = layout.evap_flow_col(local, blk);
             // Flow enters block k's water row with +τ_k.
-            let water_row = layout.row_water_balance_start() + h * n_blks + blk;
+            let water_row = layout.rows.water_balance.start + h * n_blks + blk;
             assert_eq!(
                 csc_at(&csc, flow_col, water_row),
                 tau_k,
@@ -7849,7 +7869,7 @@ mod pumping_water_tests {
         let flow_col = layout.evap_flow_col(local, 0);
         let zeta = (300.0_f64 + 444.0) * M3S_TO_HM3;
         assert_eq!(
-            csc_at(&csc, flow_col, layout.row_water_balance_start() + h),
+            csc_at(&csc, flow_col, layout.rows.water_balance.start + h),
             zeta,
             "parallel evap flow carries +ζ on the single water row"
         );

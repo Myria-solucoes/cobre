@@ -69,7 +69,7 @@ use crate::{
     horizon_mode::HorizonMode,
     hydro_models::PrepareHydroModelsResult,
     indexer::{CutStateProjection, StateLayout, StudyDimensions},
-    lead_time::{AnticipatedResolution, LeadTime, PointResolution},
+    lead_time::{AnticipatedResolution, LeadTime, PointResolution, SpreadResolution},
     lp_builder::build_stage_templates,
     risk_measure::RiskMeasure,
     simulation::EntityCounts,
@@ -201,11 +201,14 @@ pub struct StudySetup {
     pub(crate) hydro_min_storage_hm3: Vec<f64>,
 
     /// Water travel-time in-transit bucket topology: canonical column order,
-    /// global bucket count, and per-stage reachability mask. Empty
+    /// global bucket count, per-stage reachability mask, and the three
+    /// resolved arc tables (stage-clock weights, chronological spread,
+    /// arrival density) — the single derivation site for all of them. Empty
     /// (`n_buckets == 0`) when the system declares no travel-time arc.
-    // Voice 4: no read site consumes this yet — the state layout reads
-    // `n_buckets`/`column_order` to size and order the bucket block. The
-    // `#[allow(dead_code)]` refires once that reader lands.
+    // Voice 4: every field is consumed via the constructor's threaded LOCAL
+    // (state-layout sizing, the LP builder's arc-table threading, the bucket
+    // IC seed) before this STORED field is set below; no post-construction
+    // reader exists yet. `#[allow(dead_code)]` refires once one lands.
     #[allow(dead_code)]
     pub(crate) transit_bucket_topology: bucket_topology::TransitBucketTopology,
 
@@ -330,6 +333,9 @@ impl StudySetup {
             &scalar_parameters,
             &state_layout,
             &transit_bucket_topology.per_stage_mask,
+            &transit_bucket_topology.arc_stage_weights,
+            &transit_bucket_topology.arc_spread_chrono,
+            &transit_bucket_topology.arc_arrival_density,
         )?;
 
         let study_dims = build_study_dimensions(
@@ -596,6 +602,12 @@ struct EnergyAndTemplates {
 /// - [`SddpError::Validation`] — on energy-conversion / resolved-parameter
 ///   construction failure, or when the post-processed template list is empty.
 /// - [`SddpError::Solver`] — propagated from `build_stage_templates`.
+// Rationale (too_many_arguments): each of the three arc-table parameters threads
+// the single setup-owned derivation (`build_transit_bucket_topology`) into
+// `build_stage_templates`, mirroring the existing `per_stage_mask` thread; a
+// wrapper struct used at this one call site would rename the coupling, not
+// remove it.
+#[allow(clippy::too_many_arguments)]
 fn build_energy_and_templates(
     system: &System,
     inflow_method: crate::InflowNonNegativityMethod,
@@ -604,6 +616,9 @@ fn build_energy_and_templates(
     scalar_parameters: &[cobre_core::ScalarParameter],
     state_layout: &StateLayout,
     per_stage_mask: &[Vec<usize>],
+    arc_stage_weights: &HashMap<usize, Vec<Vec<f64>>>,
+    arc_spread_chrono: &HashMap<usize, Vec<Option<SpreadResolution>>>,
+    arc_arrival_density: &HashMap<usize, Vec<Option<Vec<f64>>>>,
 ) -> Result<EnergyAndTemplates, SddpError> {
     let study_stage_ids: Vec<StageId> = system
         .stages()
@@ -657,9 +672,13 @@ fn build_energy_and_templates(
         &resolved_parameters,
         state_layout,
         per_stage_mask,
+        arc_stage_weights,
+        arc_spread_chrono,
+        arc_arrival_density,
     )?;
 
-    let scaling_report = template_postprocess::postprocess_templates(&mut stage_templates, system);
+    let scaling_report =
+        template_postprocess::postprocess_templates(&mut stage_templates, system, state_layout);
 
     if stage_templates.templates.is_empty() {
         return Err(SddpError::Validation(

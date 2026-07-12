@@ -2530,8 +2530,6 @@ fn extract_thermals_no_block_committed_reads_slot0_when_seed_zero() {
 /// [`ThermalReverseLookup`] via `extract_stage_result_with_lookups`
 /// produces bit-for-bit identical results to the standard
 /// [`extract_stage_result`] path (which builds the lookup internally).
-///
-/// If the two paths ever diverge, this test catches it immediately.
 #[test]
 fn extract_stage_result_prebuilt_lookup_matches_standard_path() {
     use super::{HydroReverseLookup, ThermalReverseLookup, extract_stage_result_with_lookups};
@@ -4033,13 +4031,7 @@ fn cost_breakdown_sums_to_immediate_with_active_export_contract_via_cost_result(
         cost.contract_cost
     );
 
-    let mut accum = ScenarioCategoryCosts {
-        resource_cost: 0.0,
-        recourse_cost: 0.0,
-        violation_cost: 0.0,
-        regularization_cost: 0.0,
-        imputed_cost: 0.0,
-    };
+    let mut accum = zero_accum();
     accumulate_category_costs(cost, &mut accum);
     let macro_sum = accum.resource_cost
         + accum.recourse_cost
@@ -5052,7 +5044,7 @@ fn entity_counts_1_hydro() -> EntityCounts {
 /// spillage `[t0 + K, t0 + 2K)`, then `K` evaporation triples. In parallel mode the
 /// interior family is empty and turbine begins at 4.
 fn single_hydro_block_geometry(block_mode: cobre_core::BlockMode, k: usize) -> StageGeometry {
-    use crate::indexer::EvaporationIndices;
+    use crate::indexer::{EvaporationIndices, StorageBoundaryGrid};
     let n_interior = match block_mode {
         cobre_core::BlockMode::Chronological => k - 1,
         cobre_core::BlockMode::Parallel => 0,
@@ -5072,11 +5064,17 @@ fn single_hydro_block_geometry(block_mode: cobre_core::BlockMode, k: usize) -> S
             }
         })
         .collect();
+    let state = crate::test_support::state_layout(1, 0);
     StageGeometry {
         turbine: turbine_start..spillage_start,
         spillage: spillage_start..evap_start,
         n_blks: k,
-        storage_internal_start,
+        storage_boundary_grid: StorageBoundaryGrid::new(
+            state.storage_in.start,
+            state.storage.start,
+            storage_internal_start,
+            k,
+        ),
         block_mode,
         evap_indices,
         evap_hydro_indices: vec![0],

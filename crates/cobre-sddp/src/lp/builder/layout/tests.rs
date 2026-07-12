@@ -25,9 +25,34 @@ use crate::resolved_parameters::ResolvedParameters;
 
 use super::super::test_support::{state_layout_for, zero_hydro_penalties};
 use super::{
-    EVAP_COLS_PER_HYDRO, EVAP_F_MINUS_OFFSET, EVAP_F_PLUS_OFFSET, EVAP_FLOW_OFFSET, ResolvedTables,
-    StageLayout, TemplateBuildCtx, build_transit_bucket_row_pos,
+    EVAP_COLS_PER_HYDRO, EVAP_F_MINUS_OFFSET, EVAP_F_PLUS_OFFSET, EVAP_FLOW_OFFSET, RangeCursor,
+    ResolvedTables, StageLayout, TemplateBuildCtx, build_transit_bucket_row_pos,
 };
+
+// ── RangeCursor ──────────────────────────────────────────────────────────
+
+/// Consecutive `alloc` calls return adjacent ranges (`r1.end == r2.start`),
+/// `alloc(0)` returns `pos..pos` (never `0..0`), and `pos()` reads the running
+/// cursor without advancing it.
+#[test]
+fn range_cursor_adjacency_and_empty_alloc_carries_position() {
+    let mut cursor = RangeCursor::new(10);
+    assert_eq!(cursor.pos(), 10);
+
+    let r1 = cursor.alloc(3);
+    assert_eq!(r1, 10..13);
+    assert_eq!(cursor.pos(), 13);
+
+    let r2 = cursor.alloc(5);
+    assert_eq!(r2, 13..18);
+    assert_eq!(r1.end, r2.start, "consecutive allocations must be adjacent");
+
+    let peeked = cursor.pos();
+    let empty = cursor.alloc(0);
+    assert_eq!(empty, 18..18, "alloc(0) must return pos..pos, never 0..0");
+    assert_eq!(empty.start, empty.end);
+    assert_eq!(cursor.pos(), peeked, "alloc(0) must not advance the cursor");
+}
 
 // ── Fixture helpers ───────────────────────────────────────────────────────
 
@@ -253,7 +278,7 @@ fn stage_layout_zero_anticipated_matches_pre_anticipated_offsets() {
 
     let idx = crate::test_support::state_layout(ctx.n_hydros, ctx.max_par_order);
     assert_eq!(
-        layout.col_turbine_start(),
+        layout.equipment.turbine.start,
         idx.theta + 1,
         "col_turbine_start must equal idx.theta + 1 with zero anticipated"
     );
@@ -399,15 +424,15 @@ fn chronological_storage_internal_sizing() {
 
     let parallel = StageLayout::new(&ctx, &state, &stage_with_blocks(BlockMode::Parallel, 3), 0);
     assert_eq!(
-        parallel.storage_internal.start, parallel.storage_internal.end,
+        parallel.equipment.storage_internal.start, parallel.equipment.storage_internal.end,
         "parallel K=3 storage_internal is empty"
     );
     assert_eq!(
-        parallel.storage_internal_start, anchor,
+        parallel.equipment.storage_internal_start, anchor,
         "parallel storage_internal_start anchors at control_region_start()"
     );
     assert_eq!(
-        parallel.turbine.start, anchor,
+        parallel.equipment.turbine.start, anchor,
         "parallel turbine.start anchors at control_region_start()"
     );
 
@@ -418,15 +443,15 @@ fn chronological_storage_internal_sizing() {
         0,
     );
     assert_eq!(
-        chrono_k1.storage_internal.start, chrono_k1.storage_internal.end,
+        chrono_k1.equipment.storage_internal.start, chrono_k1.equipment.storage_internal.end,
         "chronological K=1 storage_internal is empty"
     );
     assert_eq!(
-        chrono_k1.storage_internal_start, anchor,
+        chrono_k1.equipment.storage_internal_start, anchor,
         "chronological K=1 storage_internal_start anchors at control_region_start()"
     );
     assert_eq!(
-        chrono_k1.turbine.start, anchor,
+        chrono_k1.equipment.turbine.start, anchor,
         "chronological K=1 turbine.start anchors at control_region_start()"
     );
 
@@ -437,16 +462,16 @@ fn chronological_storage_internal_sizing() {
         0,
     );
     assert_eq!(
-        chrono_k3.storage_internal_start, anchor,
+        chrono_k3.equipment.storage_internal_start, anchor,
         "chronological K=3 storage_internal_start anchors at control_region_start()"
     );
     assert_eq!(
-        chrono_k3.storage_internal.end - chrono_k3.storage_internal.start,
+        chrono_k3.equipment.storage_internal.end - chrono_k3.equipment.storage_internal.start,
         4,
         "chronological K=3 storage_internal spans n_h * (K - 1) = 2 * 2 columns"
     );
     assert_eq!(
-        chrono_k3.turbine.start, chrono_k3.storage_internal.end,
+        chrono_k3.equipment.turbine.start, chrono_k3.equipment.storage_internal.end,
         "chronological K=3 turbine.start re-anchors to storage_internal.end"
     );
 }
@@ -482,17 +507,17 @@ fn block_storage_col_resolves_all_boundaries() {
     let interior_2 = chrono_k3.block_storage_col(h, 2);
     assert_eq!(
         interior_1,
-        chrono_k3.storage_internal_start + h * 2,
+        chrono_k3.equipment.storage_internal_start + h * 2,
         "k = 1 resolves to storage_internal_start + h * (K - 1) + 0"
     );
     assert_eq!(
         interior_2,
-        chrono_k3.storage_internal_start + h * 2 + 1,
+        chrono_k3.equipment.storage_internal_start + h * 2 + 1,
         "k = 2 resolves to storage_internal_start + h * (K - 1) + 1"
     );
     assert!(
-        chrono_k3.storage_internal.contains(&interior_1)
-            && chrono_k3.storage_internal.contains(&interior_2),
+        chrono_k3.equipment.storage_internal.contains(&interior_1)
+            && chrono_k3.equipment.storage_internal.contains(&interior_2),
         "both interior columns lie within the storage_internal range"
     );
 
@@ -503,7 +528,7 @@ fn block_storage_col_resolves_all_boundaries() {
         0,
     );
     assert!(
-        chrono_k1.storage_internal.is_empty(),
+        chrono_k1.equipment.storage_internal.is_empty(),
         "K = 1 has no interior storage columns"
     );
     for h in 0..ctx.n_hydros {
@@ -532,12 +557,12 @@ fn chronological_water_balance_row_count() {
 
     let parallel = StageLayout::new(&ctx, &state, &stage_with_blocks(BlockMode::Parallel, 3), 0);
     assert_eq!(
-        parallel.water_balance.end - parallel.water_balance.start,
+        parallel.rows.water_balance.end - parallel.rows.water_balance.start,
         2,
         "parallel n_h=2 n_blks=3 water_balance spans n_h = 2 rows"
     );
     assert_eq!(
-        parallel.load_balance.start, parallel.water_balance.end,
+        parallel.rows.load_balance.start, parallel.rows.water_balance.end,
         "parallel load_balance.start chains off water_balance.end"
     );
 
@@ -548,12 +573,12 @@ fn chronological_water_balance_row_count() {
         0,
     );
     assert_eq!(
-        chrono_k3.water_balance.end - chrono_k3.water_balance.start,
+        chrono_k3.rows.water_balance.end - chrono_k3.rows.water_balance.start,
         6,
         "chronological n_h=2 n_blks=3 water_balance spans n_h * n_blks = 6 rows"
     );
     assert_eq!(
-        chrono_k3.load_balance.start, chrono_k3.water_balance.end,
+        chrono_k3.rows.load_balance.start, chrono_k3.rows.water_balance.end,
         "chronological K=3 load_balance.start chains off water_balance.end"
     );
 
@@ -564,12 +589,12 @@ fn chronological_water_balance_row_count() {
         0,
     );
     assert_eq!(
-        chrono_k1.water_balance.end - chrono_k1.water_balance.start,
+        chrono_k1.rows.water_balance.end - chrono_k1.rows.water_balance.start,
         2,
         "chronological n_h=2 n_blks=1 water_balance spans n_h = 2 rows, identical to parallel"
     );
     assert_eq!(
-        chrono_k1.load_balance.start, chrono_k1.water_balance.end,
+        chrono_k1.rows.load_balance.start, chrono_k1.rows.water_balance.end,
         "chronological K=1 load_balance.start chains off water_balance.end"
     );
 }
@@ -900,7 +925,9 @@ impl FillingMembershipFixtures {
         let ctx = self.make_ctx();
         let stage = stage_with_id(stage_id);
         let state = state_layout_for(&ctx);
-        StageLayout::new(&ctx, &state, &stage, 0).filling_target_hydro_indices
+        StageLayout::new(&ctx, &state, &stage, 0)
+            .filling
+            .filling_target_hydro_indices
     }
 
     /// `filled_min_storage_floor_hydro_indices` for a stage built at `stage_id`.
@@ -908,7 +935,9 @@ impl FillingMembershipFixtures {
         let ctx = self.make_ctx();
         let stage = stage_with_id(stage_id);
         let state = state_layout_for(&ctx);
-        StageLayout::new(&ctx, &state, &stage, 0).filled_min_storage_floor_hydro_indices
+        StageLayout::new(&ctx, &state, &stage, 0)
+            .filling
+            .filled_min_storage_floor_hydro_indices
     }
 
     /// `num_rows` for a stage built at `stage_id` — the structural row count
@@ -917,7 +946,7 @@ impl FillingMembershipFixtures {
         let ctx = self.make_ctx();
         let stage = stage_with_id(stage_id);
         let state = state_layout_for(&ctx);
-        StageLayout::new(&ctx, &state, &stage, 0).num_rows
+        StageLayout::new(&ctx, &state, &stage, 0).rows.num_rows
     }
 }
 
@@ -965,7 +994,10 @@ fn non_filling_system_no_filling_target_num_rows_unchanged() {
         let stage = stage_with_id(stage_id);
         let state = state_layout_for(&ctx);
         let layout = StageLayout::new(&ctx, &state, &stage, 0);
-        (layout.filling_target_hydro_indices.clone(), layout.num_rows)
+        (
+            layout.filling.filling_target_hydro_indices.clone(),
+            layout.rows.num_rows,
+        )
     };
     let (reference_targets, reference_num_rows) = layout_at(0);
     assert_eq!(
@@ -1002,24 +1034,24 @@ fn filling_target_row_and_col_below_structural_bounds() {
     let state = state_layout_for(&ctx);
     let layout = StageLayout::new(&ctx, &state, &stage, 0);
 
-    let n_targets = layout.filling_target_hydro_indices.len();
+    let n_targets = layout.filling.filling_target_hydro_indices.len();
     assert_eq!(n_targets, 2, "both filling hydros carry the target at id 2");
 
-    let row_start = layout.row_filling_target_start();
+    let row_start = layout.filling.row_filling_target_start;
     for local_idx in 0..n_targets {
         assert!(
-            row_start + local_idx < layout.num_rows,
+            row_start + local_idx < layout.rows.num_rows,
             "σ_fill row {} must be < num_rows {}",
             row_start + local_idx,
-            layout.num_rows
+            layout.rows.num_rows
         );
     }
     assert_eq!(
-        row_start, layout.min_generation_rows.end,
+        row_start, layout.slack.oper_violation.min_generation_rows.end,
         "σ_fill rows follow the operational-violation rows directly"
     );
 
-    let col_start = layout.col_filling_target_start();
+    let col_start = layout.filling.col_filling_target_start;
     for local_idx in 0..n_targets {
         assert!(
             col_start + local_idx < layout.num_cols,
@@ -1033,8 +1065,7 @@ fn filling_target_row_and_col_below_structural_bounds() {
     // is empty: its start coincides with num_cols and the σ_fill block is the
     // last occupied family, so num_cols = col_filling_target_start + n_targets.
     assert_eq!(
-        layout.col_filled_min_storage_floor_start(),
-        layout.num_cols,
+        layout.filling.col_filled_min_storage_floor_start, layout.num_cols,
         "σ^{{v-}} column block empty at the terminal Filling stage"
     );
     assert_eq!(
@@ -1058,7 +1089,7 @@ fn filling_target_adds_rows_at_every_filling_stage() {
         let state = state_layout_for(&ctx);
         let layout = StageLayout::new(&ctx, &state, &stage, 0);
         assert!(
-            layout.filling_target_hydro_indices.is_empty(),
+            layout.filling.filling_target_hydro_indices.is_empty(),
             "no σ_fill target rows at non-Filling id {stage_id}"
         );
         // Anchor unaffected: same fixture exercised in num_rows_at below.
@@ -1124,8 +1155,11 @@ fn non_filling_system_no_filled_min_storage_floor_num_rows_unchanged() {
         let state = state_layout_for(&ctx);
         let layout = StageLayout::new(&ctx, &state, &stage, 0);
         (
-            layout.filled_min_storage_floor_hydro_indices.clone(),
-            layout.num_rows,
+            layout
+                .filling
+                .filled_min_storage_floor_hydro_indices
+                .clone(),
+            layout.rows.num_rows,
         )
     };
     let (reference_floors, reference_num_rows) = layout_at(0);
@@ -1297,45 +1331,41 @@ fn stage_layout_operational_violation_rows_are_contiguous_blocks() {
         "fixture must have hydros so the rows are non-empty"
     );
 
-    assert_eq!(layout.min_outflow_rows.len(), n_op, "min_outflow row count");
-    assert_eq!(layout.max_outflow_rows.len(), n_op, "max_outflow row count");
-    assert_eq!(layout.min_turbine_rows.len(), n_op, "min_turbine row count");
     assert_eq!(
-        layout.min_generation_rows.len(),
+        layout.slack.oper_violation.min_outflow_rows.len(),
+        n_op,
+        "min_outflow row count"
+    );
+    assert_eq!(
+        layout.slack.oper_violation.max_outflow_rows.len(),
+        n_op,
+        "max_outflow row count"
+    );
+    assert_eq!(
+        layout.slack.oper_violation.min_turbine_rows.len(),
+        n_op,
+        "min_turbine row count"
+    );
+    assert_eq!(
+        layout.slack.oper_violation.min_generation_rows.len(),
         n_op,
         "min_generation row count"
     );
 
     assert_eq!(
-        layout.max_outflow_rows.start, layout.min_outflow_rows.end,
+        layout.slack.oper_violation.max_outflow_rows.start,
+        layout.slack.oper_violation.min_outflow_rows.end,
         "max_outflow must follow min_outflow contiguously"
     );
     assert_eq!(
-        layout.min_turbine_rows.start, layout.max_outflow_rows.end,
+        layout.slack.oper_violation.min_turbine_rows.start,
+        layout.slack.oper_violation.max_outflow_rows.end,
         "min_turbine must follow max_outflow contiguously"
     );
     assert_eq!(
-        layout.min_generation_rows.start,
-        layout.max_outflow_rows.end + n_op,
+        layout.slack.oper_violation.min_generation_rows.start,
+        layout.slack.oper_violation.max_outflow_rows.end + n_op,
         "min_generation must start one min_turbine block (n_op rows) after max_outflow ends"
-    );
-
-    assert_eq!(
-        layout.min_outflow_rows.start,
-        layout.row_min_outflow_start(),
-        "min_outflow_rows.start must equal row_min_outflow_start() when n_h > 0"
-    );
-    assert_eq!(
-        layout.max_outflow_rows.start,
-        layout.row_max_outflow_start()
-    );
-    assert_eq!(
-        layout.min_turbine_rows.start,
-        layout.row_min_turbine_start()
-    );
-    assert_eq!(
-        layout.min_generation_rows.start,
-        layout.row_min_generation_start()
     );
 }
 
@@ -1353,11 +1383,6 @@ fn stage_layout_operational_violation_rows_are_contiguous_blocks() {
 /// region.
 #[test]
 fn anticipated_decision_columns_placed_between_thermal_and_line_fwd() {
-    use chrono::NaiveDate;
-    use cobre_core::{
-        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
-    };
-
     let fixtures = ZeroEntityFixtures::new();
     // ZeroEntityFixtures builds n_thermals=0, so the thermal per-block block is
     // empty and col_anticipated_decision_start == col_thermal_start. The two
@@ -1415,13 +1440,12 @@ fn anticipated_decision_columns_placed_between_thermal_and_line_fwd() {
     // col_line_fwd_start = col_anticipated_decision_start + n_anticipated
     //   (state_out lives in the state region, not the control region)
     assert_eq!(
-        layout.anticipated.col_anticipated_decision_start,
-        layout.col_thermal_start(),
+        layout.anticipated.col_anticipated_decision_start, layout.equipment.thermal.start,
         "col_anticipated_decision_start must equal col_thermal_start \
              when n_thermals=0 (no thermal per-block cols)"
     );
     assert_eq!(
-        layout.col_line_fwd_start(),
+        layout.equipment.line_fwd.start,
         layout.anticipated.col_anticipated_decision_start + n_anticipated,
         "col_line_fwd_start == col_anticipated_decision_start + n_anticipated \
              (state_out relocated out of the control region)"
@@ -1435,7 +1459,7 @@ fn anticipated_decision_columns_placed_between_thermal_and_line_fwd() {
              N*(1+L) + B"
     );
     assert_eq!(
-        layout.col_line_fwd_start() - layout.col_thermal_start(),
+        layout.equipment.line_fwd.start - layout.equipment.thermal.start,
         n_anticipated,
         "gap from thermal_start to line_fwd_start must be exactly n_anticipated \
              (only the anticipated_decision block remains in the control region)"
@@ -1480,8 +1504,7 @@ fn stage_layout_with_anticipated_shifts_decision_region() {
     // col_turbine_start = theta + 1 = 13
     let expected_col_turbine_start = n_hydros * (3 + max_par_order) + 2 * expected_n_ant_state + 1;
     assert_eq!(
-        layout.col_turbine_start(),
-        expected_col_turbine_start,
+        layout.equipment.turbine.start, expected_col_turbine_start,
         "col_turbine_start == N*(3+L) + 2*B + 2*n_ant_state + 1"
     );
 }
@@ -1521,7 +1544,7 @@ fn anticipated_fishing_row_offset_after_operational_violations() {
     let n_op_rows = 0_usize;
     assert_eq!(
         layout.anticipated.row_anticipated_fishing_start,
-        layout.row_min_generation_start() + n_op_rows,
+        layout.slack.oper_violation.min_generation_rows.start + n_op_rows,
         "row_anticipated_fishing_start must equal row_min_generation_start + n_op_rows"
     );
     assert_eq!(
@@ -1582,7 +1605,7 @@ fn num_rows_drops_by_n_state_with_anticipated_thermals() {
     // num_rows for this zero-hydro fixture: only the anticipated_fishing
     // block contributes (2 active plants at stage 0). All other row blocks
     // are 0 (no hydros, no buses, no FPHA, no evap).
-    let observed = layout.num_rows;
+    let observed = layout.rows.num_rows;
     assert_eq!(
         observed, 2,
         "num_rows equals anticipated_fishing_rows (2) for this fixture"
@@ -1598,8 +1621,7 @@ fn num_rows_drops_by_n_state_with_anticipated_thermals() {
     // equals ctx.n_hydros (no n_state offset). With state-fixing rows it
     // would be n_state + ctx.n_hydros.
     assert_eq!(
-        layout.row_water_balance_start(),
-        ctx.n_hydros,
+        layout.rows.water_balance.start, ctx.n_hydros,
         "row_water_balance_start does not include the n_state offset"
     );
 }
@@ -1792,7 +1814,7 @@ fn test_layout_state_out_block_adjacent_to_decision() {
              N*(1+L) + B"
     );
     assert_eq!(
-        layout.col_line_fwd_start(),
+        layout.equipment.line_fwd.start,
         layout.anticipated.col_anticipated_decision_start + 2,
         "line_fwd must be immediately after the anticipated_decision block"
     );
@@ -2031,7 +2053,6 @@ impl PumpingFixtures {
 
     /// Build a stage with `n_blks` equal-duration blocks.
     fn stage_with_blocks(n_blks: usize) -> Stage {
-        use cobre_core::Block;
         Stage {
             index: 0,
             id: 0,
@@ -2081,12 +2102,12 @@ fn pumping_layout_inert_when_no_stations() {
         0,
         "fixture has no pumping stations"
     );
-    assert_eq!(layout.n_pumping, 0, "layout.n_pumping must be 0");
+    assert_eq!(layout.equipment.n_pumping, 0, "layout.n_pumping must be 0");
 
     // The empty pumping block does not advance the cursor: its start equals
     // the NCS-region end. With zero active NCS, col_ncs_end == col_ncs_start.
     assert_eq!(
-        layout.col_pumping_start, layout.col_ncs_start,
+        layout.equipment.col_pumping_start, layout.equipment.col_ncs_start,
         "col_pumping_start must equal col_ncs_start (col_ncs_end) when no stations"
     );
 
@@ -2094,13 +2115,13 @@ fn pumping_layout_inert_when_no_stations() {
     // theta == 0, every equipment/slack/NCS region empty starting at theta+1.
     let idx = crate::test_support::state_layout(ctx.n_hydros, ctx.max_par_order);
     let expected_start = idx.theta + 1;
-    assert_eq!(layout.col_turbine_start(), expected_start);
-    assert_eq!(layout.col_thermal_start(), expected_start);
-    assert_eq!(layout.col_line_fwd_start(), expected_start);
-    assert_eq!(layout.col_deficit_start(), expected_start);
-    assert_eq!(layout.col_excess_start(), expected_start);
-    assert_eq!(layout.col_ncs_start, expected_start);
-    assert_eq!(layout.col_pumping_start, expected_start);
+    assert_eq!(layout.equipment.turbine.start, expected_start);
+    assert_eq!(layout.equipment.thermal.start, expected_start);
+    assert_eq!(layout.equipment.line_fwd.start, expected_start);
+    assert_eq!(layout.equipment.deficit.start, expected_start);
+    assert_eq!(layout.equipment.excess.start, expected_start);
+    assert_eq!(layout.equipment.col_ncs_start, expected_start);
+    assert_eq!(layout.equipment.col_pumping_start, expected_start);
     assert_eq!(
         layout.num_cols, expected_start,
         "num_cols must be unshifted"
@@ -2120,7 +2141,7 @@ fn pumping_layout_reserves_block_major_columns() {
     let stage = PumpingFixtures::stage_with_blocks(n_blks);
     let state = state_layout_for(&baseline_ctx);
     let baseline = StageLayout::new(&baseline_ctx, &state, &stage, 0);
-    assert_eq!(baseline.n_pumping, 0);
+    assert_eq!(baseline.equipment.n_pumping, 0);
 
     let fixtures = PumpingFixtures::new(n_pumping, 3);
     let ctx = fixtures.make_ctx();
@@ -2132,9 +2153,12 @@ fn pumping_layout_reserves_block_major_columns() {
     let state = state_layout_for(&ctx);
     let layout = StageLayout::new(&ctx, &state, &stage, 0);
 
-    assert_eq!(layout.n_pumping, n_pumping, "layout.n_pumping == 2");
     assert_eq!(
-        layout.col_pumping_start, layout.col_ncs_start,
+        layout.equipment.n_pumping, n_pumping,
+        "layout.n_pumping == 2"
+    );
+    assert_eq!(
+        layout.equipment.col_pumping_start, layout.equipment.col_ncs_start,
         "col_pumping_start must follow the NCS region"
     );
     // Block-major width: n_pumping * n_blks == 2 * 3 == 6.
@@ -2145,7 +2169,7 @@ fn pumping_layout_reserves_block_major_columns() {
     );
     assert_eq!(
         layout.num_cols,
-        layout.col_pumping_start + n_pumping * n_blks,
+        layout.equipment.col_pumping_start + n_pumping * n_blks,
         "the 6-column block ends at num_cols (no generic-slack columns here)"
     );
 }
@@ -2167,18 +2191,17 @@ fn contract_columns_empty_keep_generic_slack_at_pumping_end() {
     let state = state_layout_for(&ctx);
     let layout = StageLayout::new(&ctx, &state, &stage, 0);
 
-    let col_pumping_end = layout.col_pumping_start + layout.n_pumping * n_blks;
+    let col_pumping_end = layout.equipment.col_pumping_start + layout.equipment.n_pumping * n_blks;
     assert_eq!(
-        layout.col_contract_import_start, col_pumping_end,
+        layout.equipment.col_contract_import_start, col_pumping_end,
         "empty import block starts at col_pumping_end"
     );
     assert_eq!(
-        layout.col_contract_export_start, col_pumping_end,
+        layout.equipment.col_contract_export_start, col_pumping_end,
         "empty export block collapses onto col_pumping_end"
     );
     assert_eq!(
-        layout.col_filling_target_start(),
-        col_pumping_end,
+        layout.filling.col_filling_target_start, col_pumping_end,
         "generic-slack start is unshifted for a contract-free system"
     );
 }
@@ -2202,18 +2225,18 @@ fn contract_columns_reserve_import_then_export_blocks() {
     let state = state_layout_for(&ctx);
     let layout = StageLayout::new(&ctx, &state, &stage, 0);
 
-    let col_pumping_end = layout.col_pumping_start + layout.n_pumping * n_blks;
+    let col_pumping_end = layout.equipment.col_pumping_start + layout.equipment.n_pumping * n_blks;
     assert_eq!(
-        layout.col_contract_import_start, col_pumping_end,
+        layout.equipment.col_contract_import_start, col_pumping_end,
         "import block starts at col_pumping_end"
     );
     assert_eq!(
-        layout.col_contract_export_start,
+        layout.equipment.col_contract_export_start,
         col_pumping_end + 6,
         "export block follows the 6-column import block"
     );
     assert_eq!(
-        layout.col_filling_target_start(),
+        layout.filling.col_filling_target_start,
         col_pumping_end + 9,
         "generic-slack start shifts by (2 + 1) * 3 == 9"
     );
@@ -2275,8 +2298,8 @@ fn column_accessors_match_open_coded_formulas() {
     for entity in [0_usize, 1, 2, 5] {
         for blk in 0..n_blks {
             assert_eq!(
-                layout.block_col(layout.col_turbine_start(), entity, blk),
-                layout.col_turbine_start() + entity * n_blks + blk,
+                layout.block_col(layout.equipment.turbine.start, entity, blk),
+                layout.equipment.turbine.start + entity * n_blks + blk,
                 "block_col(entity={entity}, blk={blk})"
             );
         }
@@ -2286,52 +2309,52 @@ fn column_accessors_match_open_coded_formulas() {
         for blk in 0..n_blks {
             assert_eq!(
                 layout.turbine_col(entity, blk),
-                layout.col_turbine_start() + entity * n_blks + blk,
+                layout.equipment.turbine.start + entity * n_blks + blk,
                 "turbine_col"
             );
             assert_eq!(
                 layout.spillage_col(entity, blk),
-                layout.col_spillage_start() + entity * n_blks + blk,
+                layout.equipment.spillage.start + entity * n_blks + blk,
                 "spillage_col"
             );
             assert_eq!(
                 layout.diversion_col(entity, blk),
-                layout.col_diversion_start() + entity * n_blks + blk,
+                layout.equipment.diversion.start + entity * n_blks + blk,
                 "diversion_col"
             );
             assert_eq!(
                 layout.generation_col(entity, blk),
-                layout.col_generation_start() + entity * n_blks + blk,
+                layout.equipment.generation_col_start + entity * n_blks + blk,
                 "generation_col"
             );
             assert_eq!(
                 layout.line_fwd_col(entity, blk),
-                layout.col_line_fwd_start() + entity * n_blks + blk,
+                layout.equipment.line_fwd.start + entity * n_blks + blk,
                 "line_fwd_col"
             );
             assert_eq!(
                 layout.line_rev_col(entity, blk),
-                layout.col_line_rev_start() + entity * n_blks + blk,
+                layout.equipment.line_rev.start + entity * n_blks + blk,
                 "line_rev_col"
             );
             assert_eq!(
                 layout.outflow_below_col(entity, blk),
-                layout.col_outflow_below_start() + entity * n_blks + blk,
+                layout.slack.oper_violation.outflow_below_slack.start + entity * n_blks + blk,
                 "outflow_below_col"
             );
             assert_eq!(
                 layout.outflow_above_col(entity, blk),
-                layout.col_outflow_above_start() + entity * n_blks + blk,
+                layout.slack.oper_violation.outflow_above_slack.start + entity * n_blks + blk,
                 "outflow_above_col"
             );
             assert_eq!(
                 layout.turbine_below_col(entity, blk),
-                layout.col_turbine_below_start() + entity * n_blks + blk,
+                layout.slack.oper_violation.turbine_below_slack.start + entity * n_blks + blk,
                 "turbine_below_col"
             );
             assert_eq!(
                 layout.generation_below_col(entity, blk),
-                layout.col_generation_below_start() + entity * n_blks + blk,
+                layout.slack.oper_violation.generation_below_slack.start + entity * n_blks + blk,
                 "generation_below_col"
             );
         }
@@ -2343,7 +2366,7 @@ fn column_accessors_match_open_coded_formulas() {
     for local_idx in [0_usize, 1, 4] {
         for blk in 0..n_blks {
             let triple_base =
-                layout.col_evap_start() + (local_idx * n_blks + blk) * EVAP_COLS_PER_HYDRO;
+                layout.equipment.evap_col_start + (local_idx * n_blks + blk) * EVAP_COLS_PER_HYDRO;
             assert_eq!(
                 layout.evap_flow_col(local_idx, blk),
                 triple_base + EVAP_FLOW_OFFSET,
@@ -2381,8 +2404,8 @@ fn column_accessors_match_open_coded_formulas() {
             for blk in 0..n_blks {
                 assert_eq!(
                     layout.deficit_col(b_idx, seg_idx, blk),
-                    layout.col_deficit_start()
-                        + b_idx * layout.max_deficit_segments() * n_blks
+                    layout.equipment.deficit.start
+                        + b_idx * layout.equipment.max_deficit_segments * n_blks
                         + seg_idx * n_blks
                         + blk,
                     "deficit_col(b={b_idx}, seg={seg_idx}, blk={blk})"
@@ -2395,11 +2418,11 @@ fn column_accessors_match_open_coded_formulas() {
 // ── post-equipment column cursor (no-hydro fork fallback) ───────────────────
 
 /// With `n_hydros == 0` every withdrawal / operational-violation / NCS column
-/// region is empty, so all their starts collapse onto the single
-/// post-equipment column cursor `col_evap_start`. A multi-block stage keeps
-/// that cursor non-trivial (not the degenerate one-column case), so a stale
-/// `> 0`-branch cursor leaking into the empty-hydro fallback would shift these
-/// starts off `col_evap_start` and fail here.
+/// region is empty, so `RangeCursor::alloc(0)` leaves all their starts at the
+/// single post-equipment column cursor `col_evap_start`. A multi-block stage
+/// keeps that cursor non-trivial (not the degenerate one-column case), so a
+/// hand-computed offset that reintroduces a `0..0` empty-range fallback would
+/// shift these starts off `col_evap_start` and fail here.
 #[test]
 fn post_equipment_col_start_matches_evap_col_start_when_no_hydros() {
     let fixtures = ZeroEntityFixtures::new();
@@ -2411,51 +2434,45 @@ fn post_equipment_col_start_matches_evap_col_start_when_no_hydros() {
     assert_eq!(ctx.n_hydros, 0, "fixture must have zero hydros");
     assert_eq!(layout.n_blks, 4, "fixture must build a 4-block layout");
 
-    let post_equipment = layout.col_evap_start();
+    let post_equipment = layout.equipment.evap_col_start;
     assert_eq!(
-        layout.col_ncs_start, post_equipment,
+        layout.equipment.col_ncs_start, post_equipment,
         "col_ncs_start must collapse onto col_evap_start when n_hydros == 0"
     );
     assert_eq!(
-        layout.col_withdrawal_neg_start(),
-        post_equipment,
+        layout.slack.withdrawal_slack_neg.start, post_equipment,
         "col_withdrawal_neg_start"
     );
     assert_eq!(
-        layout.col_withdrawal_pos_start(),
-        post_equipment,
+        layout.slack.withdrawal_slack_pos.start, post_equipment,
         "col_withdrawal_pos_start"
     );
     assert_eq!(
-        layout.col_outflow_below_start(),
-        post_equipment,
+        layout.slack.oper_violation.outflow_below_slack.start, post_equipment,
         "col_outflow_below_start"
     );
     assert_eq!(
-        layout.col_outflow_above_start(),
-        post_equipment,
+        layout.slack.oper_violation.outflow_above_slack.start, post_equipment,
         "col_outflow_above_start"
     );
     assert_eq!(
-        layout.col_turbine_below_start(),
-        post_equipment,
+        layout.slack.oper_violation.turbine_below_slack.start, post_equipment,
         "col_turbine_below_start"
     );
     assert_eq!(
-        layout.col_generation_below_start(),
-        post_equipment,
+        layout.slack.oper_violation.generation_below_slack.start, post_equipment,
         "col_generation_below_start"
     );
 }
 
 // ── post-equipment row cursor (no-hydro fork fallback) ──────────────────────
 
-/// With `n_hydros == 0` every operational-violation row block is empty, so all
-/// four row starts collapse onto the single post-equipment row cursor
-/// `fpha_rows_end() + n_evap_hydros`. A multi-block stage keeps that cursor
-/// non-trivial (not the degenerate one-row case), so a stale `> 0`-branch
-/// cursor leaking into the empty-hydro fallback would shift these starts off
-/// the shared post-equipment row cursor and fail here.
+/// With `n_hydros == 0` every operational-violation row block is empty, so
+/// `RangeCursor::alloc(0)` leaves all four row starts at the single
+/// post-equipment row cursor `fpha_rows_end() + n_evap_hydros`. A multi-block
+/// stage keeps that cursor non-trivial (not the degenerate one-row case), so a
+/// hand-computed offset that reintroduces a `0..0` empty-range fallback would
+/// shift these starts off the shared post-equipment row cursor and fail here.
 #[test]
 fn post_equipment_row_start_matches_evap_rows_end_when_no_hydros() {
     let fixtures = ZeroEntityFixtures::new();
@@ -2467,25 +2484,21 @@ fn post_equipment_row_start_matches_evap_rows_end_when_no_hydros() {
     assert_eq!(ctx.n_hydros, 0, "fixture must have zero hydros");
     assert_eq!(layout.n_blks, 4, "fixture must build a 4-block layout");
 
-    let post_equipment = layout.post_equipment_row_start;
+    let post_equipment = layout.rows.post_equipment_row_start;
     assert_eq!(
-        layout.row_min_outflow_start(),
-        post_equipment,
+        layout.slack.oper_violation.min_outflow_rows.start, post_equipment,
         "row_min_outflow_start must collapse onto the post-equipment row cursor when n_hydros == 0"
     );
     assert_eq!(
-        layout.row_max_outflow_start(),
-        post_equipment,
+        layout.slack.oper_violation.max_outflow_rows.start, post_equipment,
         "row_max_outflow_start"
     );
     assert_eq!(
-        layout.row_min_turbine_start(),
-        post_equipment,
+        layout.slack.oper_violation.min_turbine_rows.start, post_equipment,
         "row_min_turbine_start"
     );
     assert_eq!(
-        layout.row_min_generation_start(),
-        post_equipment,
+        layout.slack.oper_violation.min_generation_rows.start, post_equipment,
         "row_min_generation_start"
     );
 }
@@ -2493,20 +2506,23 @@ fn post_equipment_row_start_matches_evap_rows_end_when_no_hydros() {
 // ── Group-2 accessors: hydro-free divergence guard ──────────────────────────
 
 /// With `n_hydros == 0`, every Group-2 accessor must return the post-equipment
-/// cursor — `post_equipment_col_start()` for the eight column accessors,
-/// `post_equipment_row_start()` for the five row accessors. A bare
-/// `self.indexer.<range>.start` returns the `0` of the normalised `0..0` empty
-/// range; the equality assertions here pin the accessor to the real cursor
-/// instead, which is the silent misbuild this split exists to prevent.
+/// cursor — `post_equipment_col_start` for the eight column accessors,
+/// `post_equipment_row_start` for the five row accessors. Each accessor is a
+/// bare `self.<range>.start`/`.end`, correct only because `StageLayout::new`
+/// allocates every one of these families through `RangeCursor::alloc`:
+/// `alloc(0)` returns `pos..pos`, so an empty family's `.start` already equals
+/// the post-equipment cursor. A hand-computed offset that reintroduces a
+/// `0..0` fallback (losing the cursor position) would fail these equality
+/// assertions.
 ///
 /// The column cursor is additionally asserted `!= 0`: the theta and state columns
-/// always precede the equipment/slack region, so `post_equipment_col_start()` is
-/// provably positive and a spurious bare-`.start` `0` is directly detectable. The
-/// row cursor is NOT asserted `!= 0`: with zero hydros AND zero buses no rows
-/// precede the operational-violation block, so `post_equipment_row_start()` is
-/// legitimately `0` here (asserting `!= 0` would test a false invariant). The
-/// non-zero-row divergence is covered end-to-end by the D01 hydro-free parity
-/// case, whose load-balance rows make the row cursor positive.
+/// always precede the equipment/slack region, so `post_equipment_col_start` is
+/// provably positive and a spurious `0` is directly detectable. The row cursor is
+/// NOT asserted `!= 0`: with zero hydros AND zero buses no rows precede the
+/// operational-violation block, so `post_equipment_row_start` is legitimately `0`
+/// here (asserting `!= 0` would test a false invariant). The non-zero-row
+/// divergence is covered end-to-end by the D01 hydro-free parity case, whose
+/// load-balance rows make the row cursor positive.
 #[test]
 fn group2_accessors_return_post_equipment_cursor_when_no_hydros() {
     let fixtures = ZeroEntityFixtures::new();
@@ -2521,24 +2537,36 @@ fn group2_accessors_return_post_equipment_cursor_when_no_hydros() {
     // Column cursor: the eight column accessors collapse onto
     // `post_equipment_col_start` (== `col_evap_start()`) with no hydros, and
     // that cursor is provably positive (theta + state columns precede it).
-    let post_col = layout.post_equipment_col_start;
+    let post_col = layout.equipment.post_equipment_col_start;
     assert_ne!(post_col, 0, "post-equipment column cursor must not be 0");
     for (value, name) in [
-        (layout.col_generation_start(), "col_generation_start"),
-        (layout.col_evap_start(), "col_evap_start"),
         (
-            layout.col_withdrawal_neg_start(),
+            layout.equipment.generation_col_start,
+            "col_generation_start",
+        ),
+        (layout.equipment.evap_col_start, "col_evap_start"),
+        (
+            layout.slack.withdrawal_slack_neg.start,
             "col_withdrawal_neg_start",
         ),
         (
-            layout.col_withdrawal_pos_start(),
+            layout.slack.withdrawal_slack_pos.start,
             "col_withdrawal_pos_start",
         ),
-        (layout.col_outflow_below_start(), "col_outflow_below_start"),
-        (layout.col_outflow_above_start(), "col_outflow_above_start"),
-        (layout.col_turbine_below_start(), "col_turbine_below_start"),
         (
-            layout.col_generation_below_start(),
+            layout.slack.oper_violation.outflow_below_slack.start,
+            "col_outflow_below_start",
+        ),
+        (
+            layout.slack.oper_violation.outflow_above_slack.start,
+            "col_outflow_above_start",
+        ),
+        (
+            layout.slack.oper_violation.turbine_below_slack.start,
+            "col_turbine_below_start",
+        ),
+        (
+            layout.slack.oper_violation.generation_below_slack.start,
             "col_generation_below_start",
         ),
     ] {
@@ -2552,14 +2580,23 @@ fn group2_accessors_return_post_equipment_cursor_when_no_hydros() {
     // `post_equipment_row_start` (= `fpha_rows_end + n_evap_hydros`) when
     // `n_evap_hydros == 0`. The four operational-violation row accessors collapse
     // onto that same cursor. Each must equal it, never a bare `.start`.
-    let post_row = layout.post_equipment_row_start;
+    let post_row = layout.rows.post_equipment_row_start;
     for (value, name) in [
         (layout.row_evap_start(), "row_evap_start"),
-        (layout.row_min_outflow_start(), "row_min_outflow_start"),
-        (layout.row_max_outflow_start(), "row_max_outflow_start"),
-        (layout.row_min_turbine_start(), "row_min_turbine_start"),
         (
-            layout.row_min_generation_start(),
+            layout.slack.oper_violation.min_outflow_rows.start,
+            "row_min_outflow_start",
+        ),
+        (
+            layout.slack.oper_violation.max_outflow_rows.start,
+            "row_max_outflow_start",
+        ),
+        (
+            layout.slack.oper_violation.min_turbine_rows.start,
+            "row_min_turbine_start",
+        ),
+        (
+            layout.slack.oper_violation.min_generation_rows.start,
             "row_min_generation_start",
         ),
     ] {

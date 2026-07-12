@@ -27,7 +27,7 @@ use cobre_core::{
 };
 
 use crate::hydro_models::{ProductionModelSet, ResolvedProductionModel};
-use crate::indexer::{BlockGrid, EvaporationIndices, StateLayout};
+use crate::indexer::{BlockGrid, EvaporationIndices, StateLayout, StorageBoundaryGrid};
 
 /// Borrowed LP-column geometry the generic-constraint resolver reads — the
 /// resolver's window onto a `StageLayout` (private to `builder`) without exposing it.
@@ -44,9 +44,9 @@ use crate::indexer::{BlockGrid, EvaporationIndices, StateLayout};
 pub(crate) struct GenericResolverGeom<'a> {
     /// Role-(a) state-region handle (storage + z-inflow column owner).
     pub state: &'a StateLayout,
-    /// Role-(a)-adjacent: control-region anchor for the interior storage
-    /// boundaries `S¹ … Sᴷ⁻¹`, feeding [`Self::block_storage_col`]'s `_` arm.
-    pub storage_internal_start: usize,
+    /// Role-(a)-adjacent: storage-boundary address primitive, feeding
+    /// [`Self::block_storage_col`].
+    pub storage_boundary_grid: StorageBoundaryGrid,
     /// Turbine column range (one per hydro per block).
     pub turbine: &'a Range<usize>,
     /// Spillage column range.
@@ -93,21 +93,14 @@ impl GenericResolverGeom<'_> {
         BlockGrid::new(self.n_blks, self.max_deficit_segments)
     }
 
-    /// Storage column at chronological boundary `k ∈ 0..=K` (`K = self.n_blks`) for
-    /// hydro `h`, mirroring `StageLayout::block_storage_col` so the resolver reaches
-    /// per-block boundaries without a `StageLayout`. The two endpoints are STATE
-    /// columns — `k = 0 → S⁰` (`storage_in.start + h`), `k = K → Sᴷ`
-    /// (`storage.start + h`) — while `k ∈ 1..K` are interior CONTROL columns
-    /// (stride `n_blks − 1`). The `k == self.n_blks` arm MUST precede the interior
-    /// `_` arm, else `_` captures the outgoing endpoint and addresses an interior
-    /// column past the family.
+    /// Storage column at chronological boundary `k ∈ 0..=n_blks` for hydro `h`,
+    /// so the resolver reaches per-block boundaries without a `StageLayout`;
+    /// delegates to
+    /// [`StorageBoundaryGrid::col`](crate::indexer::StorageBoundaryGrid::col),
+    /// the single owner of the endpoints-vs-interior split.
     #[inline]
     fn block_storage_col(&self, h: usize, k: usize) -> usize {
-        match k {
-            0 => self.state.storage_in.start + h,
-            k if k == self.n_blks => self.state.storage.start + h,
-            _ => self.storage_internal_start + h * (self.n_blks - 1) + (k - 1),
-        }
+        self.storage_boundary_grid.col(h, k)
     }
 }
 

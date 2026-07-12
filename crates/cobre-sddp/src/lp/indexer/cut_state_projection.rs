@@ -4,7 +4,7 @@
 
 use cobre_core::temporal::StageStateConfig;
 
-use super::StateLayout;
+use super::{REGION_ORDER, StateLayout, StateRegion};
 
 /// A storage-scoped view of the global state vector exposing only the cut-state
 /// dimensions a stage enables, plus travel-time buckets and anticipated state
@@ -20,11 +20,11 @@ use super::StateLayout;
 /// [`Self::state_to_lp_incoming_column`] equals the global incoming resolver for
 /// every `j`, and [`Self::render_pairs`] reproduces the global
 /// `nonzero_state_indices` render exactly. Holds because the construction walks
-/// the state index space in storage → lag → buckets → anticipated order — the
-/// same order [`StateLayout::set_nonzero_mask`] builds its mask in. The forbidden
-/// alternative is reordering dimensions (e.g. anticipated before buckets),
-/// landing a cut coefficient on the wrong LP column and silently corrupting every
-/// existing study.
+/// the state index space in `REGION_ORDER`'s storage → lag → buckets →
+/// anticipated order — the single owner [`StateLayout::set_nonzero_mask`] also
+/// walks. The forbidden alternative is reordering dimensions (e.g. anticipated
+/// before buckets), landing a cut coefficient on the wrong LP column and
+/// silently corrupting every existing study.
 ///
 /// ## Incoming vs outgoing vs render
 ///
@@ -56,9 +56,10 @@ pub struct CutStateProjection {
 impl CutStateProjection {
     /// Project the global [`StateLayout`] onto the cut-state dimensions
     /// `state_config` enables, with travel-time buckets and anticipated state
-    /// always included, walking storage → lag → buckets → anticipated (the
-    /// default-identity contract). Region bounds come from `StateLayout`'s region
-    /// accessors, the sole owner of the boundary arithmetic.
+    /// always included, walking `REGION_ORDER`'s storage → lag → buckets →
+    /// anticipated order (the default-identity contract) via
+    /// `StateLayout`'s `state_dim_range`, the sole owner of the boundary
+    /// arithmetic.
     #[must_use]
     pub fn new(global: &StateLayout, state_config: StageStateConfig) -> Self {
         let mut incoming_columns = Vec::new();
@@ -79,24 +80,21 @@ impl CutStateProjection {
             }
         };
 
-        if state_config.storage {
-            for g in global.state_dim_storage_range() {
-                push_dim(g);
+        for region in REGION_ORDER {
+            let enabled = match region {
+                StateRegion::Storage => state_config.storage,
+                StateRegion::Lag => state_config.inflow_lags,
+                // Buckets and anticipated are always included, never gated by
+                // state_config: gating here would shrink pool state_dimension
+                // and misalign the intercept dot against the global trial
+                // state.
+                StateRegion::Buckets | StateRegion::Anticipated => true,
+            };
+            if enabled {
+                for g in global.state_dim_range(region) {
+                    push_dim(g);
+                }
             }
-        }
-        if state_config.inflow_lags {
-            for g in global.state_dim_lag_range() {
-                push_dim(g);
-            }
-        }
-        // Buckets and anticipated are always included, never gated by
-        // state_config: gating here would shrink pool state_dimension and
-        // misalign the intercept dot against the global trial state.
-        for g in global.state_dim_bucket_range() {
-            push_dim(g);
-        }
-        for g in global.state_dim_anticipated_range() {
-            push_dim(g);
         }
 
         debug_assert!(
