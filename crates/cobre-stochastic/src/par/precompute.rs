@@ -30,8 +30,8 @@
 //! length-12 polynomial is:
 //!
 //! ```text
-//! ψ̂ = ψ · σ_m / σ^A          (annual unit conversion)
-//! φ̂_j = φ_j · σ_m / σ_{m-j}  (classical AR lag conversion)
+//! ψ̂ = ψ · s_m / σ^A          (annual unit conversion; σ^A = annual-average std)
+//! φ̂_j = φ_j · s_m / s_{m-j}  (classical AR lag conversion)
 //!
 //! psi[stage,h,j] = φ̂_{j+1} + ψ̂/12   for j ∈ [0, ar_order)
 //! psi[stage,h,j] =           ψ̂/12   for j ∈ [ar_order, 12)
@@ -1588,7 +1588,7 @@ mod tests {
     #[test]
     fn par_a_on_hand_computed_uniform_seasons() {
         // Single stage, single hydro. All seasonal stats are equal:
-        //   μ_m = σ_m = σ^A = 30, ψ = 0.6, φ_1 = 0.3.
+        //   μ_m = s_m = σ^A = 30, ψ = 0.6, φ_1 = 0.3.
         //
         // Expected:
         //   ψ̂ = 0.6 * 30 / 30 = 0.6
@@ -1724,9 +1724,9 @@ mod tests {
         // Hydro 1 (h_idx=0): psi[0] = φ̂_1 + ψ̂/12, psi[1..12] = ψ̂/12.
         let psi_h1 = lp.psi_slice(0, 0);
         assert_eq!(psi_h1.len(), 12);
-        // ψ̂ = ψ · σ_m / σ^A = 0.5 * 30/30 = 0.5
+        // ψ̂ = ψ · s_m / σ^A = 0.5 * 30/30 = 0.5
         let annual_coeff_h1 = 0.5_f64 * 30.0 / 30.0;
-        // φ̂_1 = φ_1 · σ_m / σ_{m-1} = 0.3 * 30/30 = 0.3
+        // φ̂_1 = φ_1 · s_m / s_{m-1} = 0.3 * 30/30 = 0.3
         let ar_coeff_h1 = 0.3_f64 * 30.0 / 30.0;
         assert!(
             (psi_h1[0] - (ar_coeff_h1 + annual_coeff_h1 / 12.0)).abs() < 1e-10,
@@ -1747,7 +1747,7 @@ mod tests {
         // Hydro 2 (h_idx=1): no annual, classical φ̂ at lag 0, zeros at [1..12].
         let psi_h2 = lp.psi_slice(0, 1);
         assert_eq!(psi_h2.len(), 12);
-        // φ̂_1 = φ_1 · σ_m / σ_{m-1} = 0.4 * 20/20 = 0.4
+        // φ̂_1 = φ_1 · s_m / s_{m-1} = 0.4 * 20/20 = 0.4
         let ar_coeff_h2 = 0.4_f64 * 20.0 / 20.0;
         assert!(
             (psi_h2[0] - ar_coeff_h2).abs() < 1e-10,

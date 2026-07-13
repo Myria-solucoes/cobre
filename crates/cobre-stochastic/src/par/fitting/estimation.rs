@@ -476,8 +476,8 @@ fn estimate_ar_with_pacf_annual(
                 &a_year_starts,
             );
 
-            // σ_a in the runtime `psi_hat = ψ · σ_m / σ_a` must be the std of
-            // A_{t-1} — the entry at `prev_season`, not `season`.
+            // The annual std σ^A in the runtime `psi_hat = ψ · s_m / σ^A` must be
+            // the std of A_{t-1} — the entry at `prev_season`, not `season`.
             let (ann_mean, ann_std) = annual_stats_by_season[prev_season];
             estimates.push(ArCoefficientEstimate {
                 hydro_id,

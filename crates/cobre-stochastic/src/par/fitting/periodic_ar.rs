@@ -93,6 +93,13 @@ pub fn estimate_periodic_ar_coefficients(
     }
 
     let sigma2_final = *sigma2_per_order.last().unwrap_or(&1.0);
+    // sigma2 = residual_std_ratio² = 1 − Σ φ_ℓ ρ(ℓ): the fraction of the season's
+    // (unit) standardized variance left unexplained by the AR fit. sigma2 ≤ 0 means
+    // Σ φ_ℓ ρ(ℓ) ≥ 1 — a degenerate near-unit-root fit where the AR part explains
+    // ~all seasonal variance. We fall back to ratio = 1.0 (σ = s_m, maximum noise)
+    // rather than 0: injecting full seasonal noise is conservative (never collapses
+    // inflow to a deterministic value), at the cost of not tripping the r² < 0.01
+    // overfit warning in validation.rs.
     let residual_std_ratio = if sigma2_final > 0.0 {
         sigma2_final.sqrt().clamp(f64::EPSILON, 1.0)
     } else {
@@ -180,6 +187,8 @@ pub fn estimate_periodic_ar_annual_coefficients(
             .map(|(s, r)| s * r)
             .sum::<f64>();
 
+    // sigma2 ≤ 0: degenerate near-unit-root fit (Σ solution·ρ ≥ 1); fall back to
+    // ratio = 1.0 (max noise, conservative) as in `estimate_periodic_ar_coefficients`.
     let residual_std_ratio = if sigma2 > 0.0 {
         sigma2.sqrt().clamp(f64::EPSILON, 1.0)
     } else {
