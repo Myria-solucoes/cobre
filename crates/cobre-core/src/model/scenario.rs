@@ -225,6 +225,23 @@ pub struct AnnualComponent {
 /// Raw input-facing values loaded from `inflow_seasonal_stats.parquet` and
 /// `inflow_ar_coefficients.parquet`; see each field for units and standardization.
 ///
+/// ## Two planes
+///
+/// The fields split into two planes. The **conditioning plane** — `mean_m3s`
+/// (`μ_m`) and `std_m3s` (`s_m`), both m³/s — carries the level and magnitude of
+/// the series and may be re-conditioned per study (e.g. a climate scenario
+/// shifting both mean and variability). The **dynamics plane** —
+/// `ar_coefficients` (`ψ*`, standardized) and `residual_std_ratio`
+/// (`r_m = σ_m / s_m`), both dimensionless — is the shape of the temporal
+/// dependence, fixed per fit. Runtime re-couples them: `ψ = ψ* · s_m / s_{m-ℓ}`
+/// and `σ_m = s_m · r_m`.
+///
+/// The coefficients are standardized by the **seasonal std** `s_m`, not the
+/// innovation std `σ_m` (the two differ whenever `r_m` varies across seasons). An
+/// externally-fitted model must therefore store `ar_coefficients = ψ · s_{m-ℓ} / s_m`
+/// and `residual_std_ratio = σ_m / s_m` against the same `s_m` it reports in
+/// `std_m3s`.
+///
 /// ## Declaration-order invariance
 ///
 /// The `System` holds a `Vec<InflowModel>` sorted by `(hydro_id, stage_id)`.

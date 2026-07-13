@@ -11,8 +11,18 @@
 //! | `hydro_id`           | INT32  | Yes      | Hydro plant ID                               |
 //! | `stage_id`           | INT32  | Yes      | Stage ID                                     |
 //! | `lag`                | INT32  | Yes      | Lag index (1-based)                          |
-//! | `coefficient`        | DOUBLE | Yes      | AR coefficient (standardized, dimensionless) |
-//! | `residual_std_ratio` | DOUBLE | Yes      | Residual std ratio in (0, 1]                 |
+//! | `coefficient`        | DOUBLE | Yes      | AR coeff ψ*, standardized by the seasonal std sₘ (dimensionless) |
+//! | `residual_std_ratio` | DOUBLE | Yes      | Residual std ratio σₘ/sₘ, in (0, 1]          |
+//!
+//! ## Standardization basis (external fits)
+//!
+//! `coefficient` is the AR coefficient of the process normalized by the seasonal
+//! **sample std** sₘ (the `std_m3s` column of `inflow_seasonal_stats.parquet`),
+//! not by the innovation std σₘ. A model fitted outside Cobre must store
+//! `coefficient = ψ · s_{m-ℓ}/s_m` and `residual_std_ratio = σₘ/sₘ` against the
+//! same sₘ it reports in `std_m3s`; runtime reconstructs original-unit ψ and σ
+//! from the stored sₘ (`cobre-stochastic::par::precompute`), so an inconsistent
+//! sₘ silently rescales the model. See the PAR(p) methodology, "Two planes".
 //!
 //! ## Output ordering
 //!
