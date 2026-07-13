@@ -295,7 +295,7 @@ pub fn append_new_cuts_to_lp<S: SolverInterface>(
 /// - `slots`: the slot ids to append, in caller order (the appended LP rows
 ///   follow this order).
 /// - `col_scale`: column scaling factors (empty slice ⇒ no scaling).
-/// - `row_map`: per-(stage, solve) [`CutRowMap`](CutRowMap) to update.
+/// - `row_map`: per-(stage, solve) [`CutRowMap`] to update.
 ///
 /// # Panics
 ///

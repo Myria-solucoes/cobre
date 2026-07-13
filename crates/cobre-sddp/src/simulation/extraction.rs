@@ -14,7 +14,7 @@
 //! ```
 //!
 //! The equipment column layout is defined per stage by `StageLayout`, threaded
-//! into extraction as [`StageGeometry`](StageGeometry).
+//! into extraction as [`StageGeometry`].
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -1163,7 +1163,7 @@ fn extract_buses(
 /// Extract a [`SimulationStageResult`] from a raw LP solution at one stage.
 ///
 /// Reads role-(b) equipment column values from `view.primal` using the ranges
-/// stored in `spec.geometry` (the per-stage [`StageGeometry`](StageGeometry));
+/// stored in `spec.geometry` (the per-stage [`StageGeometry`]);
 /// role-(a) state columns resolve via `spec.state` ([`StateLayout`]). When a
 /// family has zero entities its range is empty (`0..0`) and that result defaults
 /// to zero.

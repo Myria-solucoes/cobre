@@ -140,7 +140,7 @@ pub fn validate_policy_load(
 /// `row_status` is `[template rows…, cut rows…]`, the trailing `num_cut_rows` in
 /// capture-time [`CutPool::active_cuts`](crate::cut::pool::CutPool::active_cuts)
 /// order (active slots, increasing). Slot identity is recovered by matching each
-/// basis record to its [`StageCutsReadResult`](cobre_io::StageCutsReadResult) by
+/// basis record to its [`StageCutsReadResult`] by
 /// `stage_id` and taking the active records' `slot_index` in increasing order, so
 /// `reconstruct_basis` preserves stored cut-row statuses across cut-set churn.
 ///
