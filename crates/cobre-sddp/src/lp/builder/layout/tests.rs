@@ -20,7 +20,7 @@ use cobre_core::{
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
 use crate::hydro_models::{EvaporationModelSet, ProductionModelSet};
-use crate::indexer::{EvapLocal, FphaLocal, HydroSys, LineSys};
+use crate::indexer::{BlockIdx, Boundary, EvapLocal, FphaLocal, HydroSys, LineSys};
 use crate::resolved_parameters::ResolvedParameters;
 
 use super::super::test_support::{state_layout_for, zero_hydro_penalties};
@@ -497,17 +497,17 @@ fn block_storage_col_resolves_all_boundaries() {
     );
     let h = 1;
     assert_eq!(
-        chrono_k3.block_storage_col(HydroSys::new(h), 0),
+        chrono_k3.block_storage_col(HydroSys::new(h), Boundary::Incoming),
         chrono_k3.col_storage_in_start() + h,
         "k = 0 resolves to the incoming-state column storage_in[h]"
     );
     assert_eq!(
-        chrono_k3.block_storage_col(HydroSys::new(h), 3),
+        chrono_k3.block_storage_col(HydroSys::new(h), Boundary::Outgoing),
         h,
         "k = K resolves to the outgoing-state column storage[h] = storage.start + h = h"
     );
-    let interior_1 = chrono_k3.block_storage_col(HydroSys::new(h), 1);
-    let interior_2 = chrono_k3.block_storage_col(HydroSys::new(h), 2);
+    let interior_1 = chrono_k3.block_storage_col(HydroSys::new(h), Boundary::Interior(1));
+    let interior_2 = chrono_k3.block_storage_col(HydroSys::new(h), Boundary::Interior(2));
     assert_eq!(
         interior_1,
         chrono_k3.equipment.storage_internal_start + h * 2,
@@ -536,12 +536,12 @@ fn block_storage_col_resolves_all_boundaries() {
     );
     for h in 0..ctx.n_hydros {
         assert_eq!(
-            chrono_k1.block_storage_col(HydroSys::new(h), 0),
+            chrono_k1.block_storage_col(HydroSys::new(h), Boundary::Incoming),
             chrono_k1.col_storage_in_start() + h,
             "K = 1 endpoint k = 0 resolves to storage_in[h]"
         );
         assert_eq!(
-            chrono_k1.block_storage_col(HydroSys::new(h), 1),
+            chrono_k1.block_storage_col(HydroSys::new(h), Boundary::Outgoing),
             h,
             "K = 1 endpoint k = K = 1 resolves to storage[h] = h"
         );
@@ -2308,7 +2308,7 @@ fn column_accessors_match_open_coded_formulas() {
     for entity in [0_usize, 1, 2, 5] {
         for blk in 0..n_blks {
             assert_eq!(
-                layout.block_col(layout.equipment.turbine.start, entity, blk),
+                layout.block_col(layout.equipment.turbine.start, entity, BlockIdx::new(blk)),
                 layout.equipment.turbine.start + entity * n_blks + blk,
                 "block_col(entity={entity}, blk={blk})"
             );
@@ -2318,52 +2318,52 @@ fn column_accessors_match_open_coded_formulas() {
     for entity in [0_usize, 1, 3] {
         for blk in 0..n_blks {
             assert_eq!(
-                layout.turbine_col(HydroSys::new(entity), blk),
+                layout.turbine_col(HydroSys::new(entity), BlockIdx::new(blk)),
                 layout.equipment.turbine.start + entity * n_blks + blk,
                 "turbine_col"
             );
             assert_eq!(
-                layout.spillage_col(HydroSys::new(entity), blk),
+                layout.spillage_col(HydroSys::new(entity), BlockIdx::new(blk)),
                 layout.equipment.spillage.start + entity * n_blks + blk,
                 "spillage_col"
             );
             assert_eq!(
-                layout.diversion_col(HydroSys::new(entity), blk),
+                layout.diversion_col(HydroSys::new(entity), BlockIdx::new(blk)),
                 layout.equipment.diversion.start + entity * n_blks + blk,
                 "diversion_col"
             );
             assert_eq!(
-                layout.generation_col(FphaLocal::new(entity), blk),
+                layout.generation_col(FphaLocal::new(entity), BlockIdx::new(blk)),
                 layout.equipment.generation_col_start + entity * n_blks + blk,
                 "generation_col"
             );
             assert_eq!(
-                layout.line_fwd_col(LineSys::new(entity), blk),
+                layout.line_fwd_col(LineSys::new(entity), BlockIdx::new(blk)),
                 layout.equipment.line_fwd.start + entity * n_blks + blk,
                 "line_fwd_col"
             );
             assert_eq!(
-                layout.line_rev_col(LineSys::new(entity), blk),
+                layout.line_rev_col(LineSys::new(entity), BlockIdx::new(blk)),
                 layout.equipment.line_rev.start + entity * n_blks + blk,
                 "line_rev_col"
             );
             assert_eq!(
-                layout.outflow_below_col(HydroSys::new(entity), blk),
+                layout.outflow_below_col(HydroSys::new(entity), BlockIdx::new(blk)),
                 layout.slack.oper_violation.outflow_below_slack.start + entity * n_blks + blk,
                 "outflow_below_col"
             );
             assert_eq!(
-                layout.outflow_above_col(HydroSys::new(entity), blk),
+                layout.outflow_above_col(HydroSys::new(entity), BlockIdx::new(blk)),
                 layout.slack.oper_violation.outflow_above_slack.start + entity * n_blks + blk,
                 "outflow_above_col"
             );
             assert_eq!(
-                layout.turbine_below_col(HydroSys::new(entity), blk),
+                layout.turbine_below_col(HydroSys::new(entity), BlockIdx::new(blk)),
                 layout.slack.oper_violation.turbine_below_slack.start + entity * n_blks + blk,
                 "turbine_below_col"
             );
             assert_eq!(
-                layout.generation_below_col(HydroSys::new(entity), blk),
+                layout.generation_below_col(HydroSys::new(entity), BlockIdx::new(blk)),
                 layout.slack.oper_violation.generation_below_slack.start + entity * n_blks + blk,
                 "generation_below_col"
             );
@@ -2379,28 +2379,28 @@ fn column_accessors_match_open_coded_formulas() {
             let triple_base =
                 layout.equipment.evap_col_start + (local_idx * n_blks + blk) * EVAP_COLS_PER_HYDRO;
             assert_eq!(
-                layout.evap_flow_col(local, blk),
+                layout.evap_flow_col(local, BlockIdx::new(blk)),
                 triple_base + EVAP_FLOW_OFFSET,
                 "evap_flow_col"
             );
             assert_eq!(
-                layout.evap_f_plus_col(local, blk),
+                layout.evap_f_plus_col(local, BlockIdx::new(blk)),
                 triple_base + EVAP_F_PLUS_OFFSET,
                 "evap_f_plus_col"
             );
             assert_eq!(
-                layout.evap_f_minus_col(local, blk),
+                layout.evap_f_minus_col(local, BlockIdx::new(blk)),
                 triple_base + EVAP_F_MINUS_OFFSET,
                 "evap_f_minus_col"
             );
             // The three columns are consecutive and ordered flow < plus < minus.
             assert_eq!(
-                layout.evap_f_plus_col(local, blk),
-                layout.evap_flow_col(local, blk) + 1
+                layout.evap_f_plus_col(local, BlockIdx::new(blk)),
+                layout.evap_flow_col(local, BlockIdx::new(blk)) + 1
             );
             assert_eq!(
-                layout.evap_f_minus_col(local, blk),
-                layout.evap_flow_col(local, blk) + 2
+                layout.evap_f_minus_col(local, BlockIdx::new(blk)),
+                layout.evap_flow_col(local, BlockIdx::new(blk)) + 2
             );
         }
     }
@@ -2414,7 +2414,7 @@ fn column_accessors_match_open_coded_formulas() {
         for seg_idx in [0_usize, 1] {
             for blk in 0..n_blks {
                 assert_eq!(
-                    layout.deficit_col(b_idx, seg_idx, blk),
+                    layout.deficit_col(b_idx, seg_idx, BlockIdx::new(blk)),
                     layout.equipment.deficit.start
                         + b_idx * layout.equipment.max_deficit_segments * n_blks
                         + seg_idx * n_blks

@@ -1,14 +1,16 @@
 //! Base typed vocabulary for LP addresses and state-vector dimensions.
 //!
 //! A bare `usize` does not distinguish an LP column from an LP row, a
-//! state-vector dimension from an LP column, or an incoming-state column from
-//! an outgoing-state one — any of those mismatches still compiles and silently
-//! addresses the wrong cell. [`Col`], [`Row`], and [`StateDim`] make each
-//! concern its own type; [`InCol`]/[`OutCol`] further split the column role the
-//! state-path resolvers return, so a render call site handed an incoming
-//! column (or vice versa) is a compile error, not a silently wrong cut
-//! coefficient. None of the five carries arithmetic: offset formulas stay with
-//! the owning value type ([`BlockGrid`](super::BlockGrid),
+//! state-vector dimension from an LP column, an incoming-state column from
+//! an outgoing-state one, or a block index from any of those — any of those
+//! mismatches still compiles and silently addresses the wrong cell. [`Col`],
+//! [`Row`], and [`StateDim`] make each concern its own type; [`InCol`]/[`OutCol`]
+//! further split the column role the state-path resolvers return, so a render
+//! call site handed an incoming column (or vice versa) is a compile error, not
+//! a silently wrong cut coefficient; [`BlockIdx`] makes the block operand of
+//! every [`BlockGrid`](super::BlockGrid) shape method its own type. None of the
+//! six carries arithmetic: offset formulas stay with the owning value type
+//! ([`BlockGrid`](super::BlockGrid),
 //! [`StorageBoundaryGrid`](super::StorageBoundaryGrid), `RangeCursor`,
 //! `DeliveryRing`) — these types only gate which `usize` crosses which
 //! boundary. Every type is `#[repr(transparent)]` and extracts its raw
@@ -112,6 +114,29 @@ impl InCol {
     }
 }
 
+/// A block index `blk ∈ 0..n_blks` — the block operand of every
+/// [`BlockGrid`](super::BlockGrid) shape method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct BlockIdx(usize);
+
+impl BlockIdx {
+    /// Wrap a raw block index.
+    #[inline]
+    #[must_use]
+    pub fn new(blk: usize) -> Self {
+        Self(blk)
+    }
+
+    /// Extract the raw block index immediately before a `BlockGrid` offset
+    /// formula.
+    #[inline]
+    #[must_use]
+    pub fn get(self) -> usize {
+        self.0
+    }
+}
+
 /// An outgoing-state LP column — the forward-pass/DCS cut-row render target.
 ///
 /// An [`InCol`] cannot stand in for it: the render path (e.g.
@@ -145,14 +170,64 @@ impl OutCol {
     }
 }
 
+/// The chronological storage-boundary classification `k ∈ 0..=n_blks`:
+/// `Incoming` (`k = 0`) and `Outgoing` (`k = n_blks`) are STATE columns,
+/// `Interior(k)` (`k ∈ 1..n_blks`) is a CONTROL column. Matched exhaustively
+/// by [`StorageBoundaryGrid::col`](super::StorageBoundaryGrid::col) with no
+/// `_` arm, so the outgoing endpoint cannot be silently absorbed by an
+/// interior catch-all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Boundary {
+    /// The incoming-state boundary `k = 0` (`S⁰`).
+    Incoming,
+    /// An interior control boundary, carrying the raw `k ∈ 1..n_blks`.
+    Interior(usize),
+    /// The outgoing-state boundary `k = n_blks` (`Sᴷ`).
+    Outgoing,
+}
+
+impl Boundary {
+    /// Classify a dynamic `k ∈ 0..=n_blks` into its [`Boundary`] variant.
+    #[inline]
+    #[must_use]
+    pub fn from_index(k: usize, n_blks: usize) -> Boundary {
+        if k == 0 {
+            Boundary::Incoming
+        } else if k == n_blks {
+            Boundary::Outgoing
+        } else {
+            Boundary::Interior(k)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Col, InCol, OutCol, Row, StateDim};
+    use super::{BlockIdx, Boundary, Col, InCol, OutCol, Row, StateDim};
+
+    #[test]
+    fn boundary_from_index_classifies_endpoints_and_interior() {
+        const K: usize = 5;
+        assert_eq!(Boundary::from_index(0, K), Boundary::Incoming);
+        assert_eq!(Boundary::from_index(K, K), Boundary::Outgoing);
+        for k in 1..K {
+            assert_eq!(Boundary::from_index(k, K), Boundary::Interior(k));
+        }
+    }
 
     #[test]
     fn col_is_zero_cost_and_round_trips() {
         assert_eq!(std::mem::size_of::<Col>(), std::mem::size_of::<usize>());
         assert_eq!(Col::new(42).get(), 42);
+    }
+
+    #[test]
+    fn block_idx_is_zero_cost_and_round_trips() {
+        assert_eq!(
+            std::mem::size_of::<BlockIdx>(),
+            std::mem::size_of::<usize>()
+        );
+        assert_eq!(BlockIdx::new(2).get(), 2);
     }
 
     #[test]

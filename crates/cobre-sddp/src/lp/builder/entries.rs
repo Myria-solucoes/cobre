@@ -2,7 +2,9 @@ use cobre_core::{BlockMode, CoefficientRef, ConstraintSense, ContractType, Entit
 
 use crate::generic_constraints::resolve_variable_ref;
 use crate::hydro_models::{EvaporationModel, ResolvedProductionModel};
-use crate::indexer::{AnticipatedLocal, EvapLocal, HydroSys, LineSys, StateLayout};
+use crate::indexer::{
+    AnticipatedLocal, BlockIdx, Boundary, EvapLocal, HydroSys, LineSys, StateLayout,
+};
 
 use super::M3S_TO_HM3;
 use super::delivery_ring::DeliveryRing;
@@ -44,7 +46,11 @@ pub(super) fn fill_anticipated_fishing_entries(
         let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
         let mut block_hours_total: f64 = 0.0;
         for blk in 0..n_blks {
-            let col_gen = grid.flat(layout.equipment.thermal.start, thermal_idx.get(), blk);
+            let col_gen = grid.flat(
+                layout.equipment.thermal.start,
+                thermal_idx.get(),
+                BlockIdx::new(blk),
+            );
             let block_hours = stage.blocks[blk].duration_hours;
             col_entries[col_gen].push((row, block_hours));
             block_hours_total += block_hours;
@@ -251,11 +257,11 @@ fn fill_parallel_water_entries(
 
         for blk in 0..n_blks {
             let tau_h = stage.blocks[blk].duration_hours * M3S_TO_HM3;
-            let col_turbine = layout.turbine_col(HydroSys::new(h_idx), blk);
+            let col_turbine = layout.turbine_col(HydroSys::new(h_idx), BlockIdx::new(blk));
             col_entries[col_turbine].push((row, tau_h));
-            let col_spillage = layout.spillage_col(HydroSys::new(h_idx), blk);
+            let col_spillage = layout.spillage_col(HydroSys::new(h_idx), BlockIdx::new(blk));
             col_entries[col_spillage].push((row, tau_h));
-            let col_diversion = layout.diversion_col(HydroSys::new(h_idx), blk);
+            let col_diversion = layout.diversion_col(HydroSys::new(h_idx), BlockIdx::new(blk));
             col_entries[col_diversion].push((row, tau_h));
             for &up_id in ctx.cascade.upstream(hydro.id) {
                 if let Some(&u_idx) = ctx.hydro_pos.get(&up_id) {
@@ -274,7 +280,7 @@ fn fill_parallel_water_entries(
             }
             if let Some(sources) = ctx.diversion_upstream.get(&hydro.id) {
                 for &d_idx in sources {
-                    let col_div = layout.diversion_col(HydroSys::new(d_idx), blk);
+                    let col_div = layout.diversion_col(HydroSys::new(d_idx), BlockIdx::new(blk));
                     col_entries[col_div].push((row, -tau_h));
                 }
             }
@@ -304,7 +310,8 @@ fn fill_parallel_water_entries(
     }
 
     for (local_idx, &h) in layout.evap_hydro_indices.iter().enumerate() {
-        let col_evaporation_flow = layout.evap_flow_col(EvapLocal::new(local_idx), 0);
+        let col_evaporation_flow =
+            layout.evap_flow_col(EvapLocal::new(local_idx), BlockIdx::new(0));
         let row = row_water + h.get();
         col_entries[col_evaporation_flow].push((row, zeta));
     }
@@ -405,8 +412,8 @@ fn fill_arc_release_block_entries(
     row_balance: usize,
     col_entries: &mut [Vec<(usize, f64)>],
 ) {
-    let col_turbine = layout.turbine_col(HydroSys::new(u_idx), blk);
-    let col_spillage = layout.spillage_col(HydroSys::new(u_idx), blk);
+    let col_turbine = layout.turbine_col(HydroSys::new(u_idx), BlockIdx::new(blk));
+    let col_spillage = layout.spillage_col(HydroSys::new(u_idx), BlockIdx::new(blk));
 
     let Some(stage_weights) = ctx
         .arc_stage_weights
@@ -506,9 +513,12 @@ fn fill_chronological_water_entries(
         if is_prefilling(ctx, stage, h_idx) {
             for k in 1..=n_blks {
                 let row = row_water + h_idx * n_blks + (k - 1);
-                col_entries[layout.block_storage_col(HydroSys::new(h_idx), k)].push((row, 1.0));
-                col_entries[layout.block_storage_col(HydroSys::new(h_idx), k - 1)]
-                    .push((row, -1.0));
+                col_entries[layout
+                    .block_storage_col(HydroSys::new(h_idx), Boundary::from_index(k, n_blks))]
+                .push((row, 1.0));
+                col_entries[layout
+                    .block_storage_col(HydroSys::new(h_idx), Boundary::from_index(k - 1, n_blks))]
+                .push((row, -1.0));
             }
             fill_prefilling_shortcircuit(ctx, stage, h_idx, layout, col_entries);
             continue;
@@ -540,12 +550,19 @@ fn fill_chronological_water_entries(
             let row = row_water + h_idx * n_blks + blk;
             let tau_k = stage.blocks[blk].duration_hours * M3S_TO_HM3;
 
-            col_entries[layout.block_storage_col(HydroSys::new(h_idx), k)].push((row, 1.0));
-            col_entries[layout.block_storage_col(HydroSys::new(h_idx), k - 1)].push((row, -1.0));
+            col_entries
+                [layout.block_storage_col(HydroSys::new(h_idx), Boundary::from_index(k, n_blks))]
+            .push((row, 1.0));
+            col_entries[layout
+                .block_storage_col(HydroSys::new(h_idx), Boundary::from_index(k - 1, n_blks))]
+            .push((row, -1.0));
 
-            col_entries[layout.turbine_col(HydroSys::new(h_idx), blk)].push((row, tau_k));
-            col_entries[layout.spillage_col(HydroSys::new(h_idx), blk)].push((row, tau_k));
-            col_entries[layout.diversion_col(HydroSys::new(h_idx), blk)].push((row, tau_k));
+            col_entries[layout.turbine_col(HydroSys::new(h_idx), BlockIdx::new(blk))]
+                .push((row, tau_k));
+            col_entries[layout.spillage_col(HydroSys::new(h_idx), BlockIdx::new(blk))]
+                .push((row, tau_k));
+            col_entries[layout.diversion_col(HydroSys::new(h_idx), BlockIdx::new(blk))]
+                .push((row, tau_k));
             for &up_id in ctx.cascade.upstream(hydro.id) {
                 if let Some(&u_idx) = ctx.hydro_pos.get(&up_id) {
                     fill_arc_release_chrono_block_entries(
@@ -563,7 +580,7 @@ fn fill_chronological_water_entries(
             }
             if let Some(sources) = ctx.diversion_upstream.get(&hydro.id) {
                 for &d_idx in sources {
-                    col_entries[layout.diversion_col(HydroSys::new(d_idx), blk)]
+                    col_entries[layout.diversion_col(HydroSys::new(d_idx), BlockIdx::new(blk))]
                         .push((row, -tau_k));
                 }
             }
@@ -591,7 +608,7 @@ fn fill_chronological_water_entries(
             let blk = k - 1;
             let tau_k = stage.blocks[blk].duration_hours * M3S_TO_HM3;
             let row = row_water + h.get() * n_blks + blk;
-            col_entries[layout.evap_flow_col(local_idx, blk)].push((row, tau_k));
+            col_entries[layout.evap_flow_col(local_idx, BlockIdx::new(blk))].push((row, tau_k));
         }
     }
 }
@@ -619,8 +636,8 @@ fn fill_arc_release_chrono_block_entries(
     let n_blks = layout.n_blks;
     let row_base = row_water + h_idx * n_blks;
     let tau_k = stage.blocks[blk].duration_hours * M3S_TO_HM3;
-    let col_turbine = layout.turbine_col(HydroSys::new(u_idx), blk);
-    let col_spillage = layout.spillage_col(HydroSys::new(u_idx), blk);
+    let col_turbine = layout.turbine_col(HydroSys::new(u_idx), BlockIdx::new(blk));
+    let col_spillage = layout.spillage_col(HydroSys::new(u_idx), BlockIdx::new(blk));
 
     let Some(resolution) = ctx
         .arc_spread_chrono
@@ -821,13 +838,15 @@ fn fill_prefilling_shortcircuit(
         let row_d = row_d_for(blk);
         for &up_id in ctx.cascade.upstream(hydro.id) {
             if let Some(&u_idx) = ctx.hydro_pos.get(&up_id) {
-                col_entries[layout.turbine_col(HydroSys::new(u_idx), blk)].push((row_d, -tau_k));
-                col_entries[layout.spillage_col(HydroSys::new(u_idx), blk)].push((row_d, -tau_k));
+                col_entries[layout.turbine_col(HydroSys::new(u_idx), BlockIdx::new(blk))]
+                    .push((row_d, -tau_k));
+                col_entries[layout.spillage_col(HydroSys::new(u_idx), BlockIdx::new(blk))]
+                    .push((row_d, -tau_k));
             }
         }
         if let Some(sources) = ctx.diversion_upstream.get(&hydro.id) {
             for &src_idx in sources {
-                col_entries[layout.diversion_col(HydroSys::new(src_idx), blk)]
+                col_entries[layout.diversion_col(HydroSys::new(src_idx), BlockIdx::new(blk))]
                     .push((row_d, -tau_k));
             }
         }
@@ -905,7 +924,11 @@ pub(super) fn fill_pumping_water_entries(
         let destination = ctx.hydro_pos.get(&station.destination_hydro_id).copied();
         for blk in 0..n_blks {
             let tau_h = stage.blocks[blk].duration_hours * M3S_TO_HM3;
-            let col = grid.flat(layout.equipment.col_pumping_start, p_sys, blk);
+            let col = grid.flat(
+                layout.equipment.col_pumping_start,
+                p_sys,
+                BlockIdx::new(blk),
+            );
             if let Some(s_idx) = source {
                 col_entries[col].push((row_water + s_idx, tau_h));
             }
@@ -943,7 +966,7 @@ pub(super) fn fill_load_balance_entries(
                 "FPHA local-index table inconsistent with production model for hydro {h_idx}"
             );
             if let Some(&b_idx) = ctx.bus_pos.get(&hydro.bus_id) {
-                for blk in 0..n_blks {
+                for blk in (0..n_blks).map(BlockIdx::new) {
                     let row = grid.flat(row_load, b_idx, blk);
                     let col = layout.generation_col(local_idx, blk);
                     col_entries[col].push((row, 1.0));
@@ -959,7 +982,7 @@ pub(super) fn fill_load_balance_entries(
                 }
             };
             if let Some(&b_idx) = ctx.bus_pos.get(&hydro.bus_id) {
-                for blk in 0..n_blks {
+                for blk in (0..n_blks).map(BlockIdx::new) {
                     let row = grid.flat(row_load, b_idx, blk);
                     let col = layout.turbine_col(HydroSys::new(h_idx), blk);
                     col_entries[col].push((row, rho));
@@ -970,7 +993,7 @@ pub(super) fn fill_load_balance_entries(
 
     for (t_idx, thermal) in ctx.thermals.iter().enumerate() {
         if let Some(&b_idx) = ctx.bus_pos.get(&thermal.bus_id) {
-            for blk in 0..n_blks {
+            for blk in (0..n_blks).map(BlockIdx::new) {
                 let row = grid.flat(row_load, b_idx, blk);
                 let col = grid.flat(layout.equipment.thermal.start, t_idx, blk);
                 col_entries[col].push((row, 1.0));
@@ -981,7 +1004,7 @@ pub(super) fn fill_load_balance_entries(
     for (l_idx, line) in ctx.lines.iter().enumerate() {
         let src_idx = ctx.bus_pos.get(&line.source_bus_id).copied();
         let tgt_idx = ctx.bus_pos.get(&line.target_bus_id).copied();
-        for blk in 0..n_blks {
+        for blk in (0..n_blks).map(BlockIdx::new) {
             let col_fwd = layout.line_fwd_col(LineSys::new(l_idx), blk);
             let col_rev = layout.line_rev_col(LineSys::new(l_idx), blk);
             if let Some(tgt) = tgt_idx {
@@ -1000,7 +1023,7 @@ pub(super) fn fill_load_balance_entries(
     // Written for every station: a dormant station's pumping column is `[0, 0]`.
     for (p_sys, station) in ctx.pumping_stations.iter().enumerate() {
         if let Some(&b_idx) = ctx.bus_pos.get(&station.bus_id) {
-            for blk in 0..n_blks {
+            for blk in (0..n_blks).map(BlockIdx::new) {
                 let row = grid.flat(row_load, b_idx, blk);
                 let col = grid.flat(layout.equipment.col_pumping_start, p_sys, blk);
                 col_entries[col].push((row, -station.consumption_mw_per_m3s));
@@ -1019,7 +1042,7 @@ pub(super) fn fill_load_balance_entries(
             ContractType::Export => (layout.equipment.col_contract_export_start, -1.0),
         };
         if let Some(&b_idx) = ctx.bus_pos.get(&contract.bus_id) {
-            for blk in 0..n_blks {
+            for blk in (0..n_blks).map(BlockIdx::new) {
                 let row = grid.flat(row_load, b_idx, blk);
                 let col = grid.flat(base, family_slot, blk);
                 col_entries[col].push((row, sign));
@@ -1028,7 +1051,7 @@ pub(super) fn fill_load_balance_entries(
     }
 
     for (b_idx, bus) in ctx.buses.iter().enumerate() {
-        for blk in 0..n_blks {
+        for blk in (0..n_blks).map(BlockIdx::new) {
             let row = grid.flat(row_load, b_idx, blk);
             for seg_idx in 0..bus.deficit_segments.len() {
                 let col_def = layout.deficit_col(b_idx, seg_idx, blk);
@@ -1068,12 +1091,15 @@ pub(super) fn fill_fpha_entries(
         |local_idx, h_idx, blk, _p_idx, plane, row| {
             let (col_v_in, col_v) = match stage.block_mode {
                 BlockMode::Parallel => (
-                    layout.block_storage_col(h_idx, 0),
-                    layout.block_storage_col(h_idx, layout.n_blks),
+                    layout.block_storage_col(h_idx, Boundary::Incoming),
+                    layout.block_storage_col(h_idx, Boundary::Outgoing),
                 ),
                 BlockMode::Chronological => (
-                    layout.block_storage_col(h_idx, blk),
-                    layout.block_storage_col(h_idx, blk + 1),
+                    layout.block_storage_col(h_idx, Boundary::from_index(blk.get(), layout.n_blks)),
+                    layout.block_storage_col(
+                        h_idx,
+                        Boundary::from_index(blk.get() + 1, layout.n_blks),
+                    ),
                 ),
             };
             let col_q = layout.turbine_col(h_idx, blk);
@@ -1141,18 +1167,18 @@ pub(super) fn fill_evaporation_entries(
             let blk = k - 1;
             let (col_v_in, col_v) = match stage.block_mode {
                 BlockMode::Parallel => (
-                    layout.block_storage_col(h, 0),
-                    layout.block_storage_col(h, layout.n_blks),
+                    layout.block_storage_col(h, Boundary::Incoming),
+                    layout.block_storage_col(h, Boundary::Outgoing),
                 ),
                 BlockMode::Chronological => (
-                    layout.block_storage_col(h, k - 1),
-                    layout.block_storage_col(h, k),
+                    layout.block_storage_col(h, Boundary::from_index(k - 1, n_blks)),
+                    layout.block_storage_col(h, Boundary::from_index(k, n_blks)),
                 ),
             };
             let local = EvapLocal::new(local_idx);
-            let col_evaporation_flow = layout.evap_flow_col(local, blk);
-            let col_f_plus = layout.evap_f_plus_col(local, blk);
-            let col_f_minus = layout.evap_f_minus_col(local, blk);
+            let col_evaporation_flow = layout.evap_flow_col(local, BlockIdx::new(blk));
+            let col_f_plus = layout.evap_f_plus_col(local, BlockIdx::new(blk));
+            let col_f_minus = layout.evap_f_minus_col(local, BlockIdx::new(blk));
             let row = row_evap_start + local_idx * n_blks + blk;
 
             col_entries[col_evaporation_flow].push((row, 1.0));
@@ -1308,7 +1334,7 @@ pub(super) fn fill_ncs_load_balance_entries(
         let Some(&bus_idx) = ctx.bus_pos.get(&ncs.bus_id) else {
             continue;
         };
-        for blk in 0..layout.n_blks {
+        for blk in (0..layout.n_blks).map(BlockIdx::new) {
             let col = grid.flat(layout.equipment.col_ncs_start, ncs_sys_idx, blk);
             let row = grid.flat(layout.rows.load_balance.start, bus_idx, blk);
             col_entries[col].push((row, 1.0));
@@ -1365,7 +1391,7 @@ pub(super) fn fill_operational_violation_entries(
     let grid = layout.block_grid();
 
     for (h_idx, fpha_local_entry) in layout.fpha_local_index.iter().enumerate() {
-        for blk in 0..n_blks {
+        for blk in (0..n_blks).map(BlockIdx::new) {
             let row = grid.flat(
                 layout.slack.oper_violation.min_outflow_rows.start,
                 h_idx,
@@ -1381,7 +1407,7 @@ pub(super) fn fill_operational_violation_entries(
             col_entries[col_slack].push((row, 1.0));
         }
 
-        for blk in 0..n_blks {
+        for blk in (0..n_blks).map(BlockIdx::new) {
             let row = grid.flat(
                 layout.slack.oper_violation.max_outflow_rows.start,
                 h_idx,
@@ -1397,7 +1423,7 @@ pub(super) fn fill_operational_violation_entries(
             col_entries[col_slack].push((row, -1.0));
         }
 
-        for blk in 0..n_blks {
+        for blk in (0..n_blks).map(BlockIdx::new) {
             let row = grid.flat(
                 layout.slack.oper_violation.min_turbine_rows.start,
                 h_idx,
@@ -1410,7 +1436,7 @@ pub(super) fn fill_operational_violation_entries(
         }
 
         if let Some(&local_fpha_idx) = fpha_local_entry.as_ref() {
-            for blk in 0..n_blks {
+            for blk in (0..n_blks).map(BlockIdx::new) {
                 let row = grid.flat(
                     layout.slack.oper_violation.min_generation_rows.start,
                     h_idx,
@@ -1432,7 +1458,7 @@ pub(super) fn fill_operational_violation_entries(
                     );
                 }
             };
-            for blk in 0..n_blks {
+            for blk in (0..n_blks).map(BlockIdx::new) {
                 let row = grid.flat(
                     layout.slack.oper_violation.min_generation_rows.start,
                     h_idx,
@@ -2089,6 +2115,7 @@ mod zero_cost_tests {
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
     use crate::hydro_models::{EvaporationModelSet, ProductionModelSet};
+    use crate::indexer::BlockIdx;
     use crate::resolved_parameters::ResolvedParameters;
 
     use super::super::columns::{ColumnBufs, fill_stage_columns, fill_thermal_columns};
@@ -2877,9 +2904,10 @@ mod zero_cost_tests {
             // at all from either anticipated row family — unconstrained by
             // any fishing coupling.
             for blk in 0..layout.n_blks {
-                let col_gen = layout
-                    .block_grid()
-                    .flat(layout.equipment.thermal.start, 0, blk);
+                let col_gen =
+                    layout
+                        .block_grid()
+                        .flat(layout.equipment.thermal.start, 0, BlockIdx::new(blk));
                 assert!(
                     col_entries[col_gen].is_empty(),
                     "stage {stage_idx} blk {blk}: thermal generation column must carry no \
@@ -3002,7 +3030,7 @@ mod pumping_water_tests {
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
     use crate::hydro_models::{EvaporationModel, EvaporationModelSet, ProductionModelSet};
-    use crate::indexer::{EvapLocal, HydroSys, LineSys, StateDim, StateLayout};
+    use crate::indexer::{BlockIdx, Boundary, EvapLocal, HydroSys, LineSys, StateDim, StateLayout};
     use crate::lead_time::{SpreadResolution, resolve_spread};
     use crate::resolved_parameters::ResolvedParameters;
 
@@ -4357,7 +4385,8 @@ mod pumping_water_tests {
             };
 
             // ThermalGeneration(10): +1.0 on thermal 10's column.
-            let thermal_col = grid.flat(layout_a.equipment.thermal.start, t_pos, blk);
+            let thermal_col =
+                grid.flat(layout_a.equipment.thermal.start, t_pos, BlockIdx::new(blk));
             assert_eq!(
                 coeff_at(thermal_col),
                 1.0,
@@ -4366,20 +4395,20 @@ mod pumping_water_tests {
             );
             // LineExchange(100): +1.0 on the forward column, -1.0 on the reverse.
             assert_eq!(
-                coeff_at(layout_a.line_fwd_col(LineSys::new(l_pos), blk)),
+                coeff_at(layout_a.line_fwd_col(LineSys::new(l_pos), BlockIdx::new(blk))),
                 1.0,
                 "blk {blk}: generic row must carry +1.0 on line 100's forward column \
                  (resolver path through line_pos)"
             );
             assert_eq!(
-                coeff_at(layout_a.line_rev_col(LineSys::new(l_pos), blk)),
+                coeff_at(layout_a.line_rev_col(LineSys::new(l_pos), BlockIdx::new(blk))),
                 -1.0,
                 "blk {blk}: generic row must carry -1.0 on line 100's reverse column"
             );
             // BusDeficit(2): +1.0 on each of bus 2's two deficit-segment columns.
             for seg in 0..2 {
                 assert_eq!(
-                    coeff_at(layout_a.deficit_col(b_pos, seg, blk)),
+                    coeff_at(layout_a.deficit_col(b_pos, seg, BlockIdx::new(blk))),
                     1.0,
                     "blk {blk}: generic row must carry +1.0 on bus 2 deficit segment {seg} \
                      (resolver path through bus_pos)"
@@ -4525,19 +4554,28 @@ mod pumping_water_tests {
             let tau_h = two_block_stage(0, [300.0, 444.0]).blocks[blk].duration_hours * M3S_TO_HM3;
 
             assert_eq!(
-                coeff_at(layout.turbine_col(HydroSys::new(up_idx), blk), down_row),
+                coeff_at(
+                    layout.turbine_col(HydroSys::new(up_idx), BlockIdx::new(blk)),
+                    down_row
+                ),
                 -tau_h,
                 "blk {blk}: upstream turbine column must carry -tau_h on the \
                  downstream water row (cascade-upstream inflow)"
             );
             assert_eq!(
-                coeff_at(layout.spillage_col(HydroSys::new(up_idx), blk), down_row),
+                coeff_at(
+                    layout.spillage_col(HydroSys::new(up_idx), BlockIdx::new(blk)),
+                    down_row
+                ),
                 -tau_h,
                 "blk {blk}: upstream spillage column must carry -tau_h on the \
                  downstream water row (cascade-upstream inflow)"
             );
             assert_eq!(
-                coeff_at(layout.turbine_col(HydroSys::new(down_idx), blk), down_row),
+                coeff_at(
+                    layout.turbine_col(HydroSys::new(down_idx), BlockIdx::new(blk)),
+                    down_row
+                ),
                 tau_h,
                 "blk {blk}: downstream's OWN turbine column must carry +tau_h on \
                  its water row (self-outflow) — the +τ/−τ sign contrast"
@@ -4726,7 +4764,7 @@ mod pumping_water_tests {
             assert_eq!(
                 coeff_at(
                     &csc,
-                    layout.turbine_col(HydroSys::new(up_idx), blk),
+                    layout.turbine_col(HydroSys::new(up_idx), BlockIdx::new(blk)),
                     down_row
                 ),
                 -0.5 * tau_h,
@@ -4735,7 +4773,7 @@ mod pumping_water_tests {
             assert_eq!(
                 coeff_at(
                     &csc,
-                    layout.spillage_col(HydroSys::new(up_idx), blk),
+                    layout.spillage_col(HydroSys::new(up_idx), BlockIdx::new(blk)),
                     down_row
                 ),
                 -0.5 * tau_h,
@@ -4744,7 +4782,7 @@ mod pumping_water_tests {
             assert_eq!(
                 coeff_at(
                     &csc,
-                    layout.turbine_col(HydroSys::new(up_idx), blk),
+                    layout.turbine_col(HydroSys::new(up_idx), BlockIdx::new(blk)),
                     def_row
                 ),
                 -0.5 * tau_h,
@@ -4753,7 +4791,7 @@ mod pumping_water_tests {
             assert_eq!(
                 coeff_at(
                     &csc,
-                    layout.spillage_col(HydroSys::new(up_idx), blk),
+                    layout.spillage_col(HydroSys::new(up_idx), BlockIdx::new(blk)),
                     def_row
                 ),
                 -0.5 * tau_h,
@@ -4836,7 +4874,7 @@ mod pumping_water_tests {
             assert_eq!(
                 coeff_at(
                     &csc,
-                    layout.spillage_col(HydroSys::new(up_idx), blk),
+                    layout.spillage_col(HydroSys::new(up_idx), BlockIdx::new(blk)),
                     down_row
                 ),
                 -0.5 * tau_h,
@@ -4846,7 +4884,7 @@ mod pumping_water_tests {
             assert_eq!(
                 coeff_at(
                     &csc,
-                    layout.spillage_col(HydroSys::new(up_idx), blk),
+                    layout.spillage_col(HydroSys::new(up_idx), BlockIdx::new(blk)),
                     def_row
                 ),
                 -0.5 * tau_h,
@@ -4859,7 +4897,7 @@ mod pumping_water_tests {
             super::super::columns::fill_stage_columns(&ctx, &stage, 0, &layout);
         for blk in 0..layout.n_blks {
             assert_eq!(
-                col_upper[layout.spillage_col(HydroSys::new(up_idx), blk)],
+                col_upper[layout.spillage_col(HydroSys::new(up_idx), BlockIdx::new(blk))],
                 f64::INFINITY,
                 "blk {blk}: a Filling upstream's spillage column must stay free (D40), not frozen"
             );
@@ -4934,12 +4972,12 @@ mod pumping_water_tests {
         for blk in 0..layout_active.n_blks {
             for (col_active, col_exited) in [
                 (
-                    layout_active.turbine_col(HydroSys::new(up_idx), blk),
-                    layout_exited.turbine_col(HydroSys::new(up_idx), blk),
+                    layout_active.turbine_col(HydroSys::new(up_idx), BlockIdx::new(blk)),
+                    layout_exited.turbine_col(HydroSys::new(up_idx), BlockIdx::new(blk)),
                 ),
                 (
-                    layout_active.spillage_col(HydroSys::new(up_idx), blk),
-                    layout_exited.spillage_col(HydroSys::new(up_idx), blk),
+                    layout_active.spillage_col(HydroSys::new(up_idx), BlockIdx::new(blk)),
+                    layout_exited.spillage_col(HydroSys::new(up_idx), BlockIdx::new(blk)),
                 ),
             ] {
                 assert_eq!(
@@ -4965,16 +5003,20 @@ mod pumping_water_tests {
             super::super::columns::fill_stage_columns(&ctx, &stage_exited, 0, &layout_exited);
         for blk in 0..layout_active.n_blks {
             assert!(
-                col_upper_active[layout_active.turbine_col(HydroSys::new(up_idx), blk)] > 0.0,
+                col_upper_active
+                    [layout_active.turbine_col(HydroSys::new(up_idx), BlockIdx::new(blk))]
+                    > 0.0,
                 "blk {blk}: the active upstream's turbine column must be free before exit"
             );
             assert_eq!(
-                col_upper_exited[layout_exited.turbine_col(HydroSys::new(up_idx), blk)],
+                col_upper_exited
+                    [layout_exited.turbine_col(HydroSys::new(up_idx), BlockIdx::new(blk))],
                 0.0,
                 "blk {blk}: the exited upstream's turbine column must be pinned to 0"
             );
             assert_eq!(
-                col_upper_exited[layout_exited.spillage_col(HydroSys::new(up_idx), blk)],
+                col_upper_exited
+                    [layout_exited.spillage_col(HydroSys::new(up_idx), BlockIdx::new(blk))],
                 0.0,
                 "blk {blk}: the exited upstream's spillage column must be pinned to 0 \
                  (post-exit reverts to PreFilling, which freezes spillage too)"
@@ -5034,7 +5076,7 @@ mod pumping_water_tests {
             assert_eq!(
                 coeff_at(
                     &csc,
-                    layout.turbine_col(HydroSys::new(up_a_idx), blk),
+                    layout.turbine_col(HydroSys::new(up_a_idx), BlockIdx::new(blk)),
                     def_row
                 ),
                 -0.5 * tau_h,
@@ -5043,7 +5085,7 @@ mod pumping_water_tests {
             assert_eq!(
                 coeff_at(
                     &csc,
-                    layout.spillage_col(HydroSys::new(up_a_idx), blk),
+                    layout.spillage_col(HydroSys::new(up_a_idx), BlockIdx::new(blk)),
                     def_row
                 ),
                 -0.5 * tau_h
@@ -5051,7 +5093,7 @@ mod pumping_water_tests {
             assert_eq!(
                 coeff_at(
                     &csc,
-                    layout.turbine_col(HydroSys::new(up_b_idx), blk),
+                    layout.turbine_col(HydroSys::new(up_b_idx), BlockIdx::new(blk)),
                     def_row
                 ),
                 -0.75 * tau_h,
@@ -5060,7 +5102,7 @@ mod pumping_water_tests {
             assert_eq!(
                 coeff_at(
                     &csc,
-                    layout.spillage_col(HydroSys::new(up_b_idx), blk),
+                    layout.spillage_col(HydroSys::new(up_b_idx), BlockIdx::new(blk)),
                     def_row
                 ),
                 -0.75 * tau_h
@@ -5189,7 +5231,7 @@ mod pumping_water_tests {
             assert_eq!(
                 coeff_at(
                     &csc,
-                    layout.turbine_col(HydroSys::new(up_idx), blk),
+                    layout.turbine_col(HydroSys::new(up_idx), BlockIdx::new(blk)),
                     down_row
                 ),
                 -tau_h,
@@ -5198,7 +5240,7 @@ mod pumping_water_tests {
             assert_eq!(
                 coeff_at(
                     &csc,
-                    layout.spillage_col(HydroSys::new(up_idx), blk),
+                    layout.spillage_col(HydroSys::new(up_idx), BlockIdx::new(blk)),
                     down_row
                 ),
                 -tau_h,
@@ -5340,39 +5382,71 @@ mod pumping_water_tests {
 
         // Block B0: routes 230/240 to B1, 10/240 to B2; no crossing deposit.
         assert_eq!(
-            coeff_at(&csc, layout.turbine_col(HydroSys::new(up_idx), 0), row_b1),
+            coeff_at(
+                &csc,
+                layout.turbine_col(HydroSys::new(up_idx), BlockIdx::new(0)),
+                row_b1
+            ),
             -(230.0 / 240.0) * tau(0)
         );
         assert_eq!(
-            coeff_at(&csc, layout.spillage_col(HydroSys::new(up_idx), 0), row_b1),
+            coeff_at(
+                &csc,
+                layout.spillage_col(HydroSys::new(up_idx), BlockIdx::new(0)),
+                row_b1
+            ),
             -(230.0 / 240.0) * tau(0)
         );
         assert_eq!(
-            coeff_at(&csc, layout.turbine_col(HydroSys::new(up_idx), 0), row_b2),
+            coeff_at(
+                &csc,
+                layout.turbine_col(HydroSys::new(up_idx), BlockIdx::new(0)),
+                row_b2
+            ),
             -(10.0 / 240.0) * tau(0)
         );
         assert_eq!(
-            coeff_at(&csc, layout.turbine_col(HydroSys::new(up_idx), 0), def_row),
+            coeff_at(
+                &csc,
+                layout.turbine_col(HydroSys::new(up_idx), BlockIdx::new(0)),
+                def_row
+            ),
             0.0
         );
 
         // Block B1: routes 230/240 to B2; deposits 10/240 into the bucket.
         assert_eq!(
-            coeff_at(&csc, layout.turbine_col(HydroSys::new(up_idx), 1), row_b2),
+            coeff_at(
+                &csc,
+                layout.turbine_col(HydroSys::new(up_idx), BlockIdx::new(1)),
+                row_b2
+            ),
             -(230.0 / 240.0) * tau(1)
         );
         assert_eq!(
-            coeff_at(&csc, layout.turbine_col(HydroSys::new(up_idx), 1), def_row),
+            coeff_at(
+                &csc,
+                layout.turbine_col(HydroSys::new(up_idx), BlockIdx::new(1)),
+                def_row
+            ),
             -(10.0 / 240.0) * tau(1)
         );
 
         // Block B2: nothing in-stage; deposits its full release into the bucket.
         assert_eq!(
-            coeff_at(&csc, layout.turbine_col(HydroSys::new(up_idx), 2), def_row),
+            coeff_at(
+                &csc,
+                layout.turbine_col(HydroSys::new(up_idx), BlockIdx::new(2)),
+                def_row
+            ),
             -tau(2)
         );
         assert_eq!(
-            coeff_at(&csc, layout.spillage_col(HydroSys::new(up_idx), 2), def_row),
+            coeff_at(
+                &csc,
+                layout.spillage_col(HydroSys::new(up_idx), BlockIdx::new(2)),
+                def_row
+            ),
             -tau(2)
         );
     }
@@ -6685,16 +6759,16 @@ mod pumping_water_tests {
             col_storage_in_h2: layout.col_storage_in_start() + h2_idx,
             z_h2: layout.col_z_inflow_start() + h2_idx,
             h1_turbine: (0..layout.n_blks)
-                .map(|blk| layout.turbine_col(HydroSys::new(h1_idx), blk))
+                .map(|blk| layout.turbine_col(HydroSys::new(h1_idx), BlockIdx::new(blk)))
                 .collect(),
             h1_spillage: (0..layout.n_blks)
-                .map(|blk| layout.spillage_col(HydroSys::new(h1_idx), blk))
+                .map(|blk| layout.spillage_col(HydroSys::new(h1_idx), BlockIdx::new(blk)))
                 .collect(),
             h2_turbine: (0..layout.n_blks)
-                .map(|blk| layout.turbine_col(HydroSys::new(h2_idx), blk))
+                .map(|blk| layout.turbine_col(HydroSys::new(h2_idx), BlockIdx::new(blk)))
                 .collect(),
             h2_spillage: (0..layout.n_blks)
-                .map(|blk| layout.spillage_col(HydroSys::new(h2_idx), blk))
+                .map(|blk| layout.spillage_col(HydroSys::new(h2_idx), BlockIdx::new(blk)))
                 .collect(),
         };
         (csc, row_lower, row_upper, offsets)
@@ -6877,12 +6951,20 @@ mod pumping_water_tests {
             let tau_h = [300.0_f64, 444.0][blk] * M3S_TO_HM3;
             // H1's own +τ on its own row is unchanged; it lands on NO other water row.
             assert_eq!(
-                csc_at(&csc, layout.turbine_col(HydroSys::new(h1_idx), blk), row_h1),
+                csc_at(
+                    &csc,
+                    layout.turbine_col(HydroSys::new(h1_idx), BlockIdx::new(blk)),
+                    row_h1
+                ),
                 tau_h,
                 "blk {blk}: H1's own turbine still carries +τ on its own row"
             );
             assert_eq!(
-                csc_at(&csc, layout.turbine_col(HydroSys::new(h1_idx), blk), row_h),
+                csc_at(
+                    &csc,
+                    layout.turbine_col(HydroSys::new(h1_idx), BlockIdx::new(blk)),
+                    row_h
+                ),
                 0.0,
                 "blk {blk}: H1's turbine does not feed the absent sink H2"
             );
@@ -7001,7 +7083,7 @@ mod pumping_water_tests {
             assert_eq!(
                 csc_at(
                     &csc_c,
-                    layout.turbine_col(HydroSys::new(h2_idx_c), blk),
+                    layout.turbine_col(HydroSys::new(h2_idx_c), BlockIdx::new(blk)),
                     row_h2_c
                 ),
                 tau_h,
@@ -7085,16 +7167,16 @@ mod pumping_water_tests {
             col_storage_in_h2: layout.col_storage_in_start() + h2_idx,
             z_h2: layout.col_z_inflow_start() + h2_idx,
             h1_turbine: (0..layout.n_blks)
-                .map(|blk| layout.turbine_col(HydroSys::new(h1_idx), blk))
+                .map(|blk| layout.turbine_col(HydroSys::new(h1_idx), BlockIdx::new(blk)))
                 .collect(),
             h1_spillage: (0..layout.n_blks)
-                .map(|blk| layout.spillage_col(HydroSys::new(h1_idx), blk))
+                .map(|blk| layout.spillage_col(HydroSys::new(h1_idx), BlockIdx::new(blk)))
                 .collect(),
             h2_turbine: (0..layout.n_blks)
-                .map(|blk| layout.turbine_col(HydroSys::new(h2_idx), blk))
+                .map(|blk| layout.turbine_col(HydroSys::new(h2_idx), BlockIdx::new(blk)))
                 .collect(),
             h2_spillage: (0..layout.n_blks)
-                .map(|blk| layout.spillage_col(HydroSys::new(h2_idx), blk))
+                .map(|blk| layout.spillage_col(HydroSys::new(h2_idx), BlockIdx::new(blk)))
                 .collect(),
         };
         (csc, row_lower, row_upper, offsets)
@@ -7540,10 +7622,10 @@ mod pumping_water_tests {
             z_h2: layout.col_z_inflow_start() + h2_idx,
             col_storage_in_h2: layout.col_storage_in_start() + h2_idx,
             h1_turbine: (0..layout.n_blks)
-                .map(|blk| layout.turbine_col(HydroSys::new(h1_idx), blk))
+                .map(|blk| layout.turbine_col(HydroSys::new(h1_idx), BlockIdx::new(blk)))
                 .collect(),
             h1_spillage: (0..layout.n_blks)
-                .map(|blk| layout.spillage_col(HydroSys::new(h1_idx), blk))
+                .map(|blk| layout.spillage_col(HydroSys::new(h1_idx), BlockIdx::new(blk)))
                 .collect(),
         };
         (csc, row_lower, row_upper, layout, offsets)
@@ -7565,12 +7647,20 @@ mod pumping_water_tests {
             let blk = k - 1;
             let row = layout.rows.water_balance.start + h * n_blks + blk;
             assert_eq!(
-                csc_at(&csc, layout.block_storage_col(HydroSys::new(h), k), row),
+                csc_at(
+                    &csc,
+                    layout.block_storage_col(HydroSys::new(h), Boundary::from_index(k, n_blks)),
+                    row
+                ),
                 1.0,
                 "block {k}: Sᵏ carries +1.0 on the frozen-identity row"
             );
             assert_eq!(
-                csc_at(&csc, layout.block_storage_col(HydroSys::new(h), k - 1), row),
+                csc_at(
+                    &csc,
+                    layout.block_storage_col(HydroSys::new(h), Boundary::from_index(k - 1, n_blks)),
+                    row
+                ),
                 -1.0,
                 "block {k}: Sᵏ⁻¹ carries −1.0 on the frozen-identity row"
             );
@@ -7796,26 +7886,35 @@ mod pumping_water_tests {
             build_fpha_evap_case(cobre_core::BlockMode::Chronological, &[300.0, 444.0]);
         let h = 0_usize;
         let half_gamma_v = -FPHA_GAMMA_V / 2.0;
+        let n_blks = 2_usize;
         // One plane, so block `k`'s FPHA row is at row_fpha_start + blk.
-        for k in 1..=2 {
+        for k in 1..=n_blks {
             let blk = k - 1;
             let row = layout.row_fpha_start() + blk;
             assert_eq!(
-                csc_at(&csc, layout.block_storage_col(HydroSys::new(h), k - 1), row),
+                csc_at(
+                    &csc,
+                    layout.block_storage_col(HydroSys::new(h), Boundary::from_index(k - 1, n_blks)),
+                    row
+                ),
                 half_gamma_v,
                 "block {k}: −γᵥ/2 on Sᵏ⁻¹"
             );
             assert_eq!(
-                csc_at(&csc, layout.block_storage_col(HydroSys::new(h), k), row),
+                csc_at(
+                    &csc,
+                    layout.block_storage_col(HydroSys::new(h), Boundary::from_index(k, n_blks)),
+                    row
+                ),
                 half_gamma_v,
                 "block {k}: −γᵥ/2 on Sᵏ"
             );
         }
         // S⁰, the interior boundary S¹, and Sᴷ are three distinct columns, so the
         // two block rows average genuinely block-local storage (no aliasing).
-        let s0 = layout.block_storage_col(HydroSys::new(h), 0);
-        let s1 = layout.block_storage_col(HydroSys::new(h), 1);
-        let s2 = layout.block_storage_col(HydroSys::new(h), 2);
+        let s0 = layout.block_storage_col(HydroSys::new(h), Boundary::Incoming);
+        let s1 = layout.block_storage_col(HydroSys::new(h), Boundary::Interior(1));
+        let s2 = layout.block_storage_col(HydroSys::new(h), Boundary::Outgoing);
         assert_ne!(s0, s1, "S⁰ and S¹ distinct");
         assert_ne!(s1, s2, "S¹ and Sᴷ distinct");
         assert_ne!(s0, s2, "S⁰ and Sᴷ distinct");
@@ -7849,7 +7948,7 @@ mod pumping_water_tests {
             assert_eq!(
                 csc_at(
                     &csc,
-                    layout.block_storage_col(HydroSys::new(h), k - 1),
+                    layout.block_storage_col(HydroSys::new(h), Boundary::from_index(k - 1, n_blks)),
                     evap_row
                 ),
                 half_slope,
@@ -7858,7 +7957,7 @@ mod pumping_water_tests {
             assert_eq!(
                 csc_at(
                     &csc,
-                    layout.block_storage_col(HydroSys::new(h), k),
+                    layout.block_storage_col(HydroSys::new(h), Boundary::from_index(k, n_blks)),
                     evap_row
                 ),
                 half_slope,
@@ -7868,7 +7967,7 @@ mod pumping_water_tests {
             assert_eq!(rl[evap_row], EVAP_INTERCEPT, "block {k}: evap RHS lower");
             assert_eq!(ru[evap_row], EVAP_INTERCEPT, "block {k}: evap RHS upper");
 
-            let flow_col = layout.evap_flow_col(EvapLocal::new(local), blk);
+            let flow_col = layout.evap_flow_col(EvapLocal::new(local), BlockIdx::new(blk));
             // Flow enters block k's water row with +τ_k.
             let water_row = layout.rows.water_balance.start + h * n_blks + blk;
             assert_eq!(
@@ -7883,12 +7982,12 @@ mod pumping_water_tests {
             // hours (not the stage-total, which would inflate the penalty K-fold).
             let block_hours = [300.0_f64, 444.0][blk];
             assert_eq!(
-                objective[layout.evap_f_plus_col(EvapLocal::new(local), blk)],
+                objective[layout.evap_f_plus_col(EvapLocal::new(local), BlockIdx::new(blk))],
                 7.0 * block_hours,
                 "block {k}: f_plus objective"
             );
             assert_eq!(
-                objective[layout.evap_f_minus_col(EvapLocal::new(local), blk)],
+                objective[layout.evap_f_minus_col(EvapLocal::new(local), BlockIdx::new(blk))],
                 11.0 * block_hours,
                 "block {k}: f_minus objective"
             );
@@ -7942,7 +8041,7 @@ mod pumping_water_tests {
         assert_eq!(rl[evap_row], EVAP_INTERCEPT);
 
         // Flow enters the single water row with +ζ (Σ_k τ_k).
-        let flow_col = layout.evap_flow_col(EvapLocal::new(local), 0);
+        let flow_col = layout.evap_flow_col(EvapLocal::new(local), BlockIdx::new(0));
         let zeta = (300.0_f64 + 444.0) * M3S_TO_HM3;
         assert_eq!(
             csc_at(&csc, flow_col, layout.rows.water_balance.start + h),

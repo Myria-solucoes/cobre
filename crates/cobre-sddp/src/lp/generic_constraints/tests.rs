@@ -17,7 +17,7 @@ use super::{
     contract_family_slot, resolve_variable_ref, variable_ref_is_block_independent,
 };
 use crate::hydro_models::{FphaPlane, ProductionModelSet, ResolvedProductionModel};
-use crate::indexer::{StateLayout, StorageBoundaryGrid};
+use crate::indexer::{Boundary, StateLayout, StorageBoundaryGrid};
 use crate::lp_builder::StageGeometry;
 
 // ── Test helpers ──────────────────────────────────────────────────────────
@@ -2509,7 +2509,10 @@ fn hydro_storage_boundary_none_resolves_stage_endpoint() {
             &bpos,
             &lpos,
         );
-        assert_eq!(initial, vec![(geom.block_storage_col(0, 0), 1.0)]);
+        assert_eq!(
+            initial,
+            vec![(geom.block_storage_col(0, Boundary::Incoming), 1.0)]
+        );
 
         let final_ = call(
             VariableRef::HydroStorageFinal {
@@ -2524,7 +2527,10 @@ fn hydro_storage_boundary_none_resolves_stage_endpoint() {
             &bpos,
             &lpos,
         );
-        assert_eq!(final_, vec![(geom.block_storage_col(0, 3), 1.0)]);
+        assert_eq!(
+            final_,
+            vec![(geom.block_storage_col(0, Boundary::Outgoing), 1.0)]
+        );
     }
 }
 

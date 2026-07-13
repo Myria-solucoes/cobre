@@ -1,5 +1,5 @@
 use crate::hydro_models::{FphaPlane, ResolvedProductionModel};
-use crate::indexer::{FphaLocal, HydroSys};
+use crate::indexer::{BlockIdx, FphaLocal, HydroSys};
 
 use super::layout::{StageLayout, TemplateBuildCtx};
 
@@ -25,7 +25,7 @@ pub(super) fn for_each_fpha_plane<F>(
     layout: &StageLayout,
     mut visit: F,
 ) where
-    F: FnMut(FphaLocal, HydroSys, usize, usize, &FphaPlane, usize),
+    F: FnMut(FphaLocal, HydroSys, BlockIdx, usize, &FphaPlane, usize),
 {
     let n_blks = layout.n_blks;
     let grid = layout.block_grid();
@@ -49,7 +49,7 @@ pub(super) fn for_each_fpha_plane<F>(
             "plane count mismatch for FPHA hydro {} at stage {stage_idx}",
             h.get()
         );
-        for blk in 0..n_blks {
+        for blk in (0..n_blks).map(BlockIdx::new) {
             for (p_idx, plane) in planes.iter().enumerate() {
                 // Block OUTER (stride n_planes), plane INNER — the opposite nesting
                 // of the flat shape; the distinct `fpha_plane` method prevents a

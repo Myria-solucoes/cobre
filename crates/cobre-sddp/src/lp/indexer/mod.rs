@@ -50,7 +50,11 @@
 //! - `index` — the base typed vocabulary [`Col`]/[`Row`]/[`StateDim`] and the
 //!   [`InCol`]/[`OutCol`] incoming/outgoing column-role split. Every
 //!   `StateLayout`/`CutStateProjection` incoming and outgoing resolver, plus
-//!   [`CutStateProjection::render_pairs`], resolves through it.
+//!   [`CutStateProjection::render_pairs`], resolves through it. [`BlockIdx`]
+//!   is the block operand every [`BlockGrid`] shape method takes. [`Boundary`]
+//!   is the chronological storage-boundary operand
+//!   [`StorageBoundaryGrid::col`] takes, classified from a dynamic `k` via
+//!   [`Boundary::from_index`].
 //! - `block_grid` — the [`BlockGrid`] typed block-stride address primitive and
 //!   its three shape methods ([`BlockGrid::flat`], [`BlockGrid::fpha_plane`],
 //!   [`BlockGrid::deficit`]).
@@ -100,7 +104,7 @@ pub use entity_index::{
     AnticipatedLocal, EvapLocal, FillingTargetLocal, FloorLocal, FphaLocal, HydroSys, LineSys,
     ThermalSys,
 };
-pub use index::{Col, InCol, OutCol, Row, StateDim};
+pub use index::{BlockIdx, Boundary, Col, InCol, OutCol, Row, StateDim};
 pub use layout::{EvaporationIndices, FphaRowRange};
 pub(crate) use range_cursor::RangeCursor;
 pub use state_layout::StateLayout;

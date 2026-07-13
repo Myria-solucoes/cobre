@@ -15,8 +15,8 @@ use crate::hydro_models::{
     EvaporationModel, EvaporationModelSet, ProductionModelSet, ResolvedProductionModel,
 };
 use crate::indexer::{
-    AnticipatedLocal, BlockGrid, EvapLocal, EvaporationIndices, FphaLocal, HydroSys, LineSys,
-    RangeCursor, StateLayout, StorageBoundaryGrid, ThermalSys,
+    AnticipatedLocal, BlockGrid, BlockIdx, Boundary, EvapLocal, EvaporationIndices, FphaLocal,
+    HydroSys, LineSys, RangeCursor, StateLayout, StorageBoundaryGrid, ThermalSys,
 };
 use crate::lead_time::{AnticipatedResolution, SpreadResolution};
 
@@ -1354,7 +1354,7 @@ impl<'a> StageLayout<'a> {
     /// LP. Delegates to [`BlockGrid::flat`](crate::indexer::BlockGrid::flat), the
     /// single owner of the stride arithmetic.
     #[inline]
-    pub(crate) fn block_col(&self, start: usize, entity: usize, blk: usize) -> usize {
+    pub(crate) fn block_col(&self, start: usize, entity: usize, blk: BlockIdx) -> usize {
         self.block_grid().flat(start, entity, blk)
     }
 
@@ -1368,43 +1368,43 @@ impl<'a> StageLayout<'a> {
 
     /// Turbine-flow column for hydro `h`, block `blk`.
     #[inline]
-    pub(crate) fn turbine_col(&self, h: HydroSys, blk: usize) -> usize {
+    pub(crate) fn turbine_col(&self, h: HydroSys, blk: BlockIdx) -> usize {
         self.block_col(self.equipment.turbine.start, h.get(), blk)
     }
 
     /// Spillage column for hydro `h`, block `blk`.
     #[inline]
-    pub(crate) fn spillage_col(&self, h: HydroSys, blk: usize) -> usize {
+    pub(crate) fn spillage_col(&self, h: HydroSys, blk: BlockIdx) -> usize {
         self.block_col(self.equipment.spillage.start, h.get(), blk)
     }
 
     /// Diversion-flow column for hydro `h`, block `blk`.
     #[inline]
-    pub(crate) fn diversion_col(&self, h: HydroSys, blk: usize) -> usize {
+    pub(crate) fn diversion_col(&self, h: HydroSys, blk: BlockIdx) -> usize {
         self.block_col(self.equipment.diversion.start, h.get(), blk)
     }
 
     /// FPHA generation column for FPHA-local index `local_idx`, block `blk`.
     #[inline]
-    pub(crate) fn generation_col(&self, local_idx: FphaLocal, blk: usize) -> usize {
+    pub(crate) fn generation_col(&self, local_idx: FphaLocal, blk: BlockIdx) -> usize {
         self.block_col(self.equipment.generation_col_start, local_idx.get(), blk)
     }
 
     /// Forward line-flow column for line `l`, block `blk`.
     #[inline]
-    pub(crate) fn line_fwd_col(&self, l: LineSys, blk: usize) -> usize {
+    pub(crate) fn line_fwd_col(&self, l: LineSys, blk: BlockIdx) -> usize {
         self.block_col(self.equipment.line_fwd.start, l.get(), blk)
     }
 
     /// Reverse line-flow column for line `l`, block `blk`.
     #[inline]
-    pub(crate) fn line_rev_col(&self, l: LineSys, blk: usize) -> usize {
+    pub(crate) fn line_rev_col(&self, l: LineSys, blk: BlockIdx) -> usize {
         self.block_col(self.equipment.line_rev.start, l.get(), blk)
     }
 
     /// Outflow-below-minimum slack column for hydro `h`, block `blk`.
     #[inline]
-    pub(crate) fn outflow_below_col(&self, h: HydroSys, blk: usize) -> usize {
+    pub(crate) fn outflow_below_col(&self, h: HydroSys, blk: BlockIdx) -> usize {
         self.block_col(
             self.slack.oper_violation.outflow_below_slack.start,
             h.get(),
@@ -1414,7 +1414,7 @@ impl<'a> StageLayout<'a> {
 
     /// Outflow-above-maximum slack column for hydro `h`, block `blk`.
     #[inline]
-    pub(crate) fn outflow_above_col(&self, h: HydroSys, blk: usize) -> usize {
+    pub(crate) fn outflow_above_col(&self, h: HydroSys, blk: BlockIdx) -> usize {
         self.block_col(
             self.slack.oper_violation.outflow_above_slack.start,
             h.get(),
@@ -1424,7 +1424,7 @@ impl<'a> StageLayout<'a> {
 
     /// Turbine-below-minimum slack column for hydro `h`, block `blk`.
     #[inline]
-    pub(crate) fn turbine_below_col(&self, h: HydroSys, blk: usize) -> usize {
+    pub(crate) fn turbine_below_col(&self, h: HydroSys, blk: BlockIdx) -> usize {
         self.block_col(
             self.slack.oper_violation.turbine_below_slack.start,
             h.get(),
@@ -1434,7 +1434,7 @@ impl<'a> StageLayout<'a> {
 
     /// Generation-below-minimum slack column for hydro `h`, block `blk`.
     #[inline]
-    pub(crate) fn generation_below_col(&self, h: HydroSys, blk: usize) -> usize {
+    pub(crate) fn generation_below_col(&self, h: HydroSys, blk: BlockIdx) -> usize {
         self.block_col(
             self.slack.oper_violation.generation_below_slack.start,
             h.get(),
@@ -1448,35 +1448,36 @@ impl<'a> StageLayout<'a> {
     /// The transposed `blk * n_evap_hydros + local_idx` stride compiles and silently
     /// aliases one hydro's block onto another's.
     #[inline]
-    fn evap_triple_base(&self, local_idx: usize, blk: usize) -> usize {
+    fn evap_triple_base(&self, local_idx: usize, blk: BlockIdx) -> usize {
+        let blk = blk.get();
         self.equipment.evap_col_start + (local_idx * self.n_blks + blk) * EVAP_COLS_PER_HYDRO
     }
 
     /// Evaporation-outflow column for `(evap hydro local_idx, block blk)` (the
     /// [`EVAP_FLOW_OFFSET`] column of the block's triple).
     #[inline]
-    pub(crate) fn evap_flow_col(&self, local_idx: EvapLocal, blk: usize) -> usize {
+    pub(crate) fn evap_flow_col(&self, local_idx: EvapLocal, blk: BlockIdx) -> usize {
         self.evap_triple_base(local_idx.get(), blk) + EVAP_FLOW_OFFSET
     }
 
     /// `f_evap_plus` (under-evaporation slack) column for `(evap hydro local_idx,
     /// block blk)` (the [`EVAP_F_PLUS_OFFSET`] column of the block's triple).
     #[inline]
-    pub(crate) fn evap_f_plus_col(&self, local_idx: EvapLocal, blk: usize) -> usize {
+    pub(crate) fn evap_f_plus_col(&self, local_idx: EvapLocal, blk: BlockIdx) -> usize {
         self.evap_triple_base(local_idx.get(), blk) + EVAP_F_PLUS_OFFSET
     }
 
     /// `f_evap_minus` (over-evaporation slack) column for `(evap hydro local_idx,
     /// block blk)` (the [`EVAP_F_MINUS_OFFSET`] column of the block's triple).
     #[inline]
-    pub(crate) fn evap_f_minus_col(&self, local_idx: EvapLocal, blk: usize) -> usize {
+    pub(crate) fn evap_f_minus_col(&self, local_idx: EvapLocal, blk: BlockIdx) -> usize {
         self.evap_triple_base(local_idx.get(), blk) + EVAP_F_MINUS_OFFSET
     }
 
     /// Deficit column for bus `b_idx`, segment `seg_idx`, block `blk`. Three-term
     /// stride owned by [`BlockGrid::deficit`](crate::indexer::BlockGrid::deficit).
     #[inline]
-    pub(crate) fn deficit_col(&self, b_idx: usize, seg_idx: usize, blk: usize) -> usize {
+    pub(crate) fn deficit_col(&self, b_idx: usize, seg_idx: usize, blk: BlockIdx) -> usize {
         self.block_grid()
             .deficit(self.equipment.deficit.start, b_idx, seg_idx, blk)
     }
@@ -1494,13 +1495,12 @@ impl<'a> StageLayout<'a> {
         )
     }
 
-    /// Storage column at chronological boundary `k ∈ 0..=n_blks` for hydro `h`;
-    /// delegates to [`StorageBoundaryGrid::col`], the single owner of the
-    /// endpoints-vs-interior split. At `n_blks = 1` only the two endpoints
-    /// resolve (no interior).
+    /// Storage column at chronological `boundary` for hydro `h`; delegates to
+    /// [`StorageBoundaryGrid::col`], the single owner of the endpoints-vs-interior
+    /// split. At `n_blks = 1` only the two endpoints resolve (no interior).
     #[inline]
-    pub(crate) fn block_storage_col(&self, h: HydroSys, k: usize) -> usize {
-        self.storage_boundary_grid().col(h.get(), k)
+    pub(crate) fn block_storage_col(&self, h: HydroSys, boundary: Boundary) -> usize {
+        self.storage_boundary_grid().col(h.get(), boundary)
     }
 
     // ── Role-(a) accessors (read through the borrowed StateLayout handle) ─────────

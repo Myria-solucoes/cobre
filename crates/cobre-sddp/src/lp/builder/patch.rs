@@ -1,4 +1,4 @@
-use crate::indexer::{BlockGrid, StateDim, StateLayout};
+use crate::indexer::{BlockGrid, BlockIdx, StateDim, StateLayout};
 
 /// Pre-allocated row-bound and column-bound patch arrays for one SDDP stage LP solve.
 ///
@@ -332,10 +332,10 @@ impl PatchBuffer {
 
         for (i, &bus_pos) in bus_positions.iter().enumerate() {
             for blk in 0..n_blocks {
-                let row = grid.flat(load_row_start, bus_pos, blk);
+                let row = grid.flat(load_row_start, bus_pos, BlockIdx::new(blk));
                 // Host-array index `i * n_blks + blk` routed through the same
                 // `grid.flat` (start = 0) to keep one owner of the stride.
-                let rhs = load_rhs[grid.flat(0, i, blk)];
+                let rhs = load_rhs[grid.flat(0, i, BlockIdx::new(blk))];
                 let scaled = if row_scale.is_empty() {
                     rhs
                 } else {

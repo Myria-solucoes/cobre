@@ -329,15 +329,19 @@ pub struct StageGeometry {
 }
 
 impl StageGeometry {
-    /// Storage column at chronological boundary `k ∈ 0..=n_blks` for hydro `h`,
-    /// so the simulation read-path resolves per-block boundaries without a
+    /// Storage column at chronological `boundary` for hydro `h`, so the
+    /// simulation read-path resolves per-block boundaries without a
     /// `StageLayout`; delegates to
     /// [`StorageBoundaryGrid::col`](crate::indexer::StorageBoundaryGrid::col),
     /// the single owner of the endpoints-vs-interior split.
     #[inline]
     #[must_use]
-    pub fn block_storage_col(&self, h: crate::indexer::HydroSys, k: usize) -> usize {
-        self.storage_boundary_grid.col(h.get(), k)
+    pub fn block_storage_col(
+        &self,
+        h: crate::indexer::HydroSys,
+        boundary: crate::indexer::Boundary,
+    ) -> usize {
+        self.storage_boundary_grid.col(h.get(), boundary)
     }
 }
 

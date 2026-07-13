@@ -1,6 +1,7 @@
 use cobre_core::{BlockMode, Stage};
 
 use crate::hydro_models::EvaporationModel;
+use crate::indexer::BlockIdx;
 
 use super::fpha_cursor::for_each_fpha_plane;
 use super::layout::{StageLayout, TemplateBuildCtx};
@@ -334,7 +335,7 @@ fn fill_load_balance_rows(
                 .resolved
                 .resolved_load_factors
                 .factor(b_idx, stage_idx, blk);
-            let row = grid.flat(layout.rows.load_balance.start, b_idx, blk);
+            let row = grid.flat(layout.rows.load_balance.start, b_idx, BlockIdx::new(blk));
             let rhs = mean_mw * factor;
             row_lower[row] = rhs;
             row_upper[row] = rhs;
@@ -476,7 +477,7 @@ fn fill_operational_violation_rows(
         ];
         for (row_start, lower, upper) in families {
             for blk in 0..layout.n_blks {
-                let row = grid.flat(row_start, h_idx, blk);
+                let row = grid.flat(row_start, h_idx, BlockIdx::new(blk));
                 row_lower[row] = lower;
                 row_upper[row] = upper;
             }
