@@ -39,6 +39,9 @@ use crate::{
     },
 };
 
+use serde_json::Error;
+use serde_json::Value;
+
 /// Generate JSON Schema documents for all user-facing case directory input files.
 ///
 /// Returns a list of `(filename, schema_value)` pairs, where `filename` is the
@@ -85,7 +88,7 @@ use crate::{
 /// let config_schema = schemas.iter().find(|(name, _)| name == "config.schema.json");
 /// assert!(config_schema.is_some());
 /// ```
-pub fn generate_schemas() -> Result<Vec<(String, serde_json::Value)>, serde_json::Error> {
+pub fn generate_schemas() -> Result<Vec<(String, Value)>, Error> {
     let pairs: Vec<(&str, schemars::Schema)> = vec![
         ("config.schema.json", schemars::schema_for!(Config)),
         ("buses.schema.json", schemars::schema_for!(RawBusFile)),

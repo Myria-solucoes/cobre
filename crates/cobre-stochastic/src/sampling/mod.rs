@@ -11,6 +11,9 @@
 //! use cobre_stochastic::sampling::{ForwardSampler, build_forward_sampler};
 //! ```
 
+use crate::context::ClassSchemes;
+
+use std::fmt;
 pub mod class_sampler;
 pub mod external;
 pub mod historical;
@@ -124,7 +127,7 @@ impl<'a> ForwardSampler<'a> {
 }
 
 impl std::fmt::Debug for ForwardSampler<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ForwardSampler")
             .field("dims", &self.dims)
             .finish_non_exhaustive()
@@ -248,7 +251,7 @@ impl ForwardSampler<'_> {
 #[derive(Debug, Clone, Copy)]
 pub struct ForwardSamplerConfig<'a> {
     /// Per-class sampling scheme selections.
-    pub class_schemes: crate::context::ClassSchemes,
+    pub class_schemes: ClassSchemes,
     /// Stochastic context providing tree, seeds, correlation, and entity order.
     pub ctx: &'a StochasticContext,
     /// Study stages in index order; required by `OutOfSample` to read per-stage

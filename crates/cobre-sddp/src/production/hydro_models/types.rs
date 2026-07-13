@@ -19,7 +19,12 @@
 use std::collections::HashMap;
 
 use cobre_core::{EntityId, StudyPos, System};
+use cobre_io::FphaDeviationPointRow;
+use cobre_io::FphaHyperplaneRow;
+use cobre_io::HydroGeometryRow;
 use serde::{Deserialize, Serialize};
+
+use crate::energy_conversion::HydroEnergyProductivityOverride;
 
 // ── Hyperplane types ──────────────────────────────────────────────────────────
 
@@ -356,7 +361,7 @@ pub struct PrepareHydroModelsResult {
     /// [`crate::energy_conversion::build_energy_conversion_set`] still needs the raw
     /// override entries to override its VHA + `ρ_esp` derivation; for non-FPHA
     /// hydros the override is already folded into `production`.
-    pub productivity_override: crate::energy_conversion::HydroEnergyProductivityOverride,
+    pub productivity_override: HydroEnergyProductivityOverride,
     /// Resolved evaporation models for all hydro plants.
     pub evaporation: EvaporationModelSet,
     /// Provenance records for all hydro plants.
@@ -364,7 +369,7 @@ pub struct PrepareHydroModelsResult {
     /// Computed-FPHA hyperplane rows. The CLI/Python entry point writes these to
     /// `hydro_models/fpha_hyperplanes.parquet`; non-root MPI ranks reach no write
     /// site but hold an identical copy via the deterministic preprocessing path.
-    pub fpha_export_rows: Vec<cobre_io::FphaHyperplaneRow>,
+    pub fpha_export_rows: Vec<FphaHyperplaneRow>,
     /// Per-`(hydro, study-stage)` reference operating volume in absolute hm³
     /// (`(hydro_id, stage_pos, volume_hm3)`). The energy-conversion build and the
     /// FPHA backwater path read this one source.
@@ -374,7 +379,7 @@ pub struct PrepareHydroModelsResult {
     /// FPHA plant with no parquet `equivalent_productivity` override (the parquet
     /// value takes priority). Empty when the case ships no `hydro_geometry`, leaving
     /// the override required.
-    pub vha_geometry_by_hydro: HashMap<EntityId, Vec<cobre_io::HydroGeometryRow>>,
+    pub vha_geometry_by_hydro: HashMap<EntityId, Vec<HydroGeometryRow>>,
     /// Computed-FPHA fit deviations, one entry per distinct fit. The CLI/Python
     /// write site rolls these into the [`cobre_io::DeviationSummary`] in
     /// `training/metadata.json`; an empty vector yields no metadata section.
@@ -383,7 +388,7 @@ pub struct PrepareHydroModelsResult {
     /// grid point at spillage = 0. Empty unless the run opts in via
     /// `config.exports.fpha_deviation_points`; the write site emits
     /// `hydro_models/fpha_deviation_points.parquet` only for a non-empty vector.
-    pub fpha_deviation_point_rows: Vec<cobre_io::FphaDeviationPointRow>,
+    pub fpha_deviation_point_rows: Vec<FphaDeviationPointRow>,
 }
 
 impl PrepareHydroModelsResult {
@@ -450,8 +455,7 @@ impl PrepareHydroModelsResult {
 
         Self {
             production,
-            productivity_override:
-                crate::energy_conversion::HydroEnergyProductivityOverride::default(),
+            productivity_override: HydroEnergyProductivityOverride::default(),
             evaporation,
             provenance: HydroModelProvenance {
                 production_sources,

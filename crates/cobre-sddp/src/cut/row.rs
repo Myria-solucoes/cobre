@@ -10,6 +10,8 @@
 
 use cobre_solver::{RowBatch, SolverInterface};
 
+use crate::cut::CutPool;
+use crate::cut::CutRowMap;
 use crate::cut::FutureCostFunction;
 use crate::indexer::{CutStateProjection, OutCol, StateLayout};
 
@@ -217,7 +219,7 @@ pub fn build_cut_row_batch(
 /// Panics if `total_nnz` exceeds `i32::MAX` (LP exceeds the `HiGHS` API limit).
 /// In debug builds, also panics if `stage >= fcf.pools.len()`.
 ///
-/// [`CutRowMap`]: crate::cut::CutRowMap
+/// [`CutRowMap`]: CutRowMap
 #[allow(clippy::similar_names)] // `state` (role-a handle) vs `stage` index — both established names
 pub fn append_new_cuts_to_lp<S: SolverInterface>(
     solver: &mut S,
@@ -226,7 +228,7 @@ pub fn append_new_cuts_to_lp<S: SolverInterface>(
     state: &StateLayout,
     cut_state: &CutStateProjection,
     col_scale: &[f64],
-    row_map: &mut crate::cut::CutRowMap,
+    row_map: &mut CutRowMap,
     batch_buf: &mut RowBatch,
 ) -> usize {
     batch_buf.clear();
@@ -293,23 +295,23 @@ pub fn append_new_cuts_to_lp<S: SolverInterface>(
 /// - `slots`: the slot ids to append, in caller order (the appended LP rows
 ///   follow this order).
 /// - `col_scale`: column scaling factors (empty slice ⇒ no scaling).
-/// - `row_map`: per-(stage, solve) [`CutRowMap`](crate::cut::CutRowMap) to update.
+/// - `row_map`: per-(stage, solve) [`CutRowMap`](CutRowMap) to update.
 ///
 /// # Panics
 ///
 /// Panics if the total non-zero count exceeds `i32::MAX` (the `HiGHS` API
 /// limit), matching [`append_new_cuts_to_lp`].
 ///
-/// [`CutPool`]: crate::cut::CutPool
+/// [`CutPool`]: CutPool
 #[allow(clippy::similar_names)] // `state` (role-a handle) vs `stage` index — both established names
 pub fn append_slots_to_lp<S: SolverInterface>(
     solver: &mut S,
-    pool: &crate::cut::CutPool,
+    pool: &CutPool,
     slots: &[u32],
     state: &StateLayout,
     cut_state: &CutStateProjection,
     col_scale: &[f64],
-    row_map: &mut crate::cut::CutRowMap,
+    row_map: &mut CutRowMap,
     batch_buf: &mut RowBatch,
 ) -> usize {
     batch_buf.clear();

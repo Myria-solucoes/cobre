@@ -7,6 +7,8 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
+use serde_json::Map;
+use serde_json::Value;
 
 /// Convert an arbitrary JSON-compatible Python object into a [`serde_json::Value`].
 ///
@@ -14,7 +16,7 @@ use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 ///
 /// Returns [`PyValueError`] when `obj` is an unsupported type, a `float` is
 /// `NaN`/infinite, an integer is outside `i64`/`u64`, or a `dict` key is not a `str`.
-pub fn py_to_json_value(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
+pub fn py_to_json_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     if obj.is_none() {
         return Ok(serde_json::Value::Null);
     }
@@ -85,7 +87,7 @@ pub fn py_to_json_value(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
 /// [`py_to_json_value`] conversion.
 pub fn pydict_to_json_map(
     dict: &Bound<'_, PyDict>,
-) -> PyResult<serde_json::Map<String, serde_json::Value>> {
+) -> PyResult<Map<String, Value>> {
     let mut map = serde_json::Map::with_capacity(dict.len());
     for (key, value) in dict.iter() {
         let key_str = key.cast::<PyString>().map_err(|_| {

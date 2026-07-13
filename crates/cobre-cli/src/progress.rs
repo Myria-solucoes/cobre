@@ -22,6 +22,7 @@
 //! assert!(events.is_empty());
 //! ```
 
+use std::io;
 use std::sync::mpsc;
 use std::thread;
 
@@ -228,35 +229,35 @@ impl TermLike for MpiTerm {
         self.width
     }
 
-    fn move_cursor_up(&self, n: usize) -> std::io::Result<()> {
+    fn move_cursor_up(&self, n: usize) -> io::Result<()> {
         self.inner.move_cursor_up(n)
     }
 
-    fn move_cursor_down(&self, n: usize) -> std::io::Result<()> {
+    fn move_cursor_down(&self, n: usize) -> io::Result<()> {
         self.inner.move_cursor_down(n)
     }
 
-    fn move_cursor_right(&self, n: usize) -> std::io::Result<()> {
+    fn move_cursor_right(&self, n: usize) -> io::Result<()> {
         self.inner.move_cursor_right(n)
     }
 
-    fn move_cursor_left(&self, n: usize) -> std::io::Result<()> {
+    fn move_cursor_left(&self, n: usize) -> io::Result<()> {
         self.inner.move_cursor_left(n)
     }
 
-    fn write_line(&self, s: &str) -> std::io::Result<()> {
+    fn write_line(&self, s: &str) -> io::Result<()> {
         self.inner.write_line(s)
     }
 
-    fn write_str(&self, s: &str) -> std::io::Result<()> {
+    fn write_str(&self, s: &str) -> io::Result<()> {
         self.inner.write_str(s)
     }
 
-    fn clear_line(&self) -> std::io::Result<()> {
+    fn clear_line(&self) -> io::Result<()> {
         self.inner.clear_line()
     }
 
-    fn flush(&self) -> std::io::Result<()> {
+    fn flush(&self) -> io::Result<()> {
         self.inner.flush()
     }
 }

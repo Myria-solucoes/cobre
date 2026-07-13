@@ -13,6 +13,7 @@
 //! [`solve_par_noise`]: crate::par::evaluate::solve_par_noise
 
 use std::collections::HashSet;
+use std::hash::BuildHasher;
 
 use cobre_core::{
     EntityId, HydroPastInflows,
@@ -613,7 +614,7 @@ pub fn standardize_external_ncs(
 /// );
 /// assert!(result.is_ok());
 /// ```
-pub fn validate_external_library<S: std::hash::BuildHasher>(
+pub fn validate_external_library<S: BuildHasher>(
     library: &ExternalScenarioLibrary,
     entity_ids: &[EntityId],
     row_entity_ids: &HashSet<EntityId, S>,

@@ -11,6 +11,18 @@ use std::sync::Arc;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+use cobre_core::Bus;
+use cobre_core::EnergyContract;
+use cobre_core::Hydro;
+use cobre_core::Line;
+use cobre_core::NonControllableSource;
+use cobre_core::PumpingStation;
+use cobre_core::System;
+use cobre_core::Thermal;
+use cobre_core::HydroGenerationModel::ConstantProductivity;
+use cobre_core::HydroGenerationModel::Fpha;
+use cobre_core::HydroGenerationModel::LinearizedHead;
+
 // ─── Bus ─────────────────────────────────────────────────────────────────────
 
 /// Electrical network node where energy balance is maintained.
@@ -19,7 +31,7 @@ use pyo3::types::PyDict;
 #[pyclass(name = "Bus", frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyBus {
-    inner: cobre_core::Bus,
+    inner: Bus,
 }
 
 #[pymethods]
@@ -67,7 +79,7 @@ impl PyBus {
 }
 
 impl PyBus {
-    pub(crate) fn from_rust(bus: cobre_core::Bus) -> Self {
+    pub(crate) fn from_rust(bus: Bus) -> Self {
         Self { inner: bus }
     }
 }
@@ -78,7 +90,7 @@ impl PyBus {
 #[pyclass(name = "Line", frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyLine {
-    inner: cobre_core::Line,
+    inner: Line,
 }
 
 #[pymethods]
@@ -139,7 +151,7 @@ impl PyLine {
 }
 
 impl PyLine {
-    pub(crate) fn from_rust(line: cobre_core::Line) -> Self {
+    pub(crate) fn from_rust(line: Line) -> Self {
         Self { inner: line }
     }
 }
@@ -150,7 +162,7 @@ impl PyLine {
 #[pyclass(name = "Thermal", frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyThermal {
-    inner: cobre_core::Thermal,
+    inner: Thermal,
 }
 
 #[pymethods]
@@ -197,7 +209,7 @@ impl PyThermal {
 }
 
 impl PyThermal {
-    pub(crate) fn from_rust(thermal: cobre_core::Thermal) -> Self {
+    pub(crate) fn from_rust(thermal: Thermal) -> Self {
         Self { inner: thermal }
     }
 }
@@ -210,7 +222,7 @@ impl PyThermal {
 #[pyclass(name = "Hydro", frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyHydro {
-    inner: cobre_core::Hydro,
+    inner: Hydro,
 }
 
 #[pymethods]
@@ -266,9 +278,9 @@ impl PyHydro {
     #[getter]
     fn productivity_mw_per_m3s(&self) -> Option<f64> {
         match self.inner.generation_model {
-            cobre_core::HydroGenerationModel::ConstantProductivity
-            | cobre_core::HydroGenerationModel::LinearizedHead
-            | cobre_core::HydroGenerationModel::Fpha => None,
+            ConstantProductivity
+            | LinearizedHead
+            | Fpha => None,
         }
     }
 
@@ -281,7 +293,7 @@ impl PyHydro {
 }
 
 impl PyHydro {
-    pub(crate) fn from_rust(hydro: cobre_core::Hydro) -> Self {
+    pub(crate) fn from_rust(hydro: Hydro) -> Self {
         Self { inner: hydro }
     }
 }
@@ -292,7 +304,7 @@ impl PyHydro {
 #[pyclass(name = "EnergyContract", frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyEnergyContract {
-    inner: cobre_core::EnergyContract,
+    inner: EnergyContract,
 }
 
 #[pymethods]
@@ -316,7 +328,7 @@ impl PyEnergyContract {
 }
 
 impl PyEnergyContract {
-    pub(crate) fn from_rust(contract: cobre_core::EnergyContract) -> Self {
+    pub(crate) fn from_rust(contract: EnergyContract) -> Self {
         Self { inner: contract }
     }
 }
@@ -327,7 +339,7 @@ impl PyEnergyContract {
 #[pyclass(name = "PumpingStation", frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyPumpingStation {
-    inner: cobre_core::PumpingStation,
+    inner: PumpingStation,
 }
 
 #[pymethods]
@@ -351,7 +363,7 @@ impl PyPumpingStation {
 }
 
 impl PyPumpingStation {
-    pub(crate) fn from_rust(station: cobre_core::PumpingStation) -> Self {
+    pub(crate) fn from_rust(station: PumpingStation) -> Self {
         Self { inner: station }
     }
 }
@@ -362,7 +374,7 @@ impl PyPumpingStation {
 #[pyclass(name = "NonControllableSource", frozen, skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyNonControllableSource {
-    inner: cobre_core::NonControllableSource,
+    inner: NonControllableSource,
 }
 
 #[pymethods]
@@ -386,7 +398,7 @@ impl PyNonControllableSource {
 }
 
 impl PyNonControllableSource {
-    pub(crate) fn from_rust(source: cobre_core::NonControllableSource) -> Self {
+    pub(crate) fn from_rust(source: NonControllableSource) -> Self {
         Self { inner: source }
     }
 }
@@ -398,7 +410,7 @@ impl PyNonControllableSource {
 /// Cannot be constructed from Python — use `cobre.io.load_case()` to obtain one.
 #[pyclass(name = "System", frozen)]
 pub struct PySystem {
-    inner: Arc<cobre_core::System>,
+    inner: Arc<System>,
 }
 
 #[pymethods]
@@ -523,7 +535,7 @@ impl PySystem {
 }
 
 impl PySystem {
-    pub(crate) fn from_rust(system: cobre_core::System) -> Self {
+    pub(crate) fn from_rust(system: System) -> Self {
         Self {
             inner: Arc::new(system),
         }
@@ -531,7 +543,7 @@ impl PySystem {
 
     /// Wrap an already-shared [`cobre_core::System`] via a refcount bump rather
     /// than a full clone (used by [`crate::study::Study`]'s `system` getter).
-    pub(crate) fn from_arc(inner: Arc<cobre_core::System>) -> Self {
+    pub(crate) fn from_arc(inner: Arc<System>) -> Self {
         Self { inner }
     }
 }

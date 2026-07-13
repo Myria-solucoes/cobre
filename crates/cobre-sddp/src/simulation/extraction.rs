@@ -14,7 +14,7 @@
 //! ```
 //!
 //! The equipment column layout is defined per stage by `StageLayout`, threaded
-//! into extraction as [`StageGeometry`](crate::lp_builder::StageGeometry).
+//! into extraction as [`StageGeometry`](StageGeometry).
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -28,6 +28,7 @@ use crate::indexer::{
     AnticipatedLocal, BlockGrid, BlockIdx, Boundary, EvapLocal, FillingTargetLocal, FloorLocal,
     FphaLocal, HydroSys, StateLayout, StudyDimensions,
 };
+use crate::lp_builder::StageGeometry;
 use crate::lp_builder::{COST_SCALE_FACTOR, GenericConstraintRowEntry};
 use crate::simulation::types::{
     ScenarioCategoryCosts, SimulationBusResult, SimulationContractResult, SimulationCostResult,
@@ -57,7 +58,7 @@ pub(crate) struct HydroReverseLookup {
 
 impl HydroReverseLookup {
     /// Build the reverse lookup for one stage from its [`StageGeometry`].
-    pub(crate) fn build(geometry: &crate::lp_builder::StageGeometry, n_hydros: usize) -> Self {
+    pub(crate) fn build(geometry: &StageGeometry, n_hydros: usize) -> Self {
         let mut fpha = vec![None; n_hydros];
         for (local, &sys) in geometry.fpha_hydro_indices.iter().enumerate() {
             fpha[sys.get()] = Some(FphaLocal::new(local));
@@ -89,7 +90,7 @@ impl HydroReverseLookup {
     /// Build one [`HydroReverseLookup`] per stage from the per-stage geometry table,
     /// once per simulation run so per-`(scenario, stage)` extraction never reallocates.
     pub(crate) fn build_per_stage(
-        geometry_per_stage: &[crate::lp_builder::StageGeometry],
+        geometry_per_stage: &[StageGeometry],
         n_hydros: usize,
     ) -> Vec<Self> {
         geometry_per_stage
@@ -420,7 +421,7 @@ pub struct StageExtractionSpec<'a> {
     pub n_blks: usize,
     /// Stage-correct equipment geometry, resolved per stage from `StageLayout`
     /// (via `StageTemplates::geometry_per_stage`).
-    pub geometry: &'a crate::lp_builder::StageGeometry,
+    pub geometry: &'a StageGeometry,
     /// Entity ID lists and productivities needed to build result records.
     pub entity_counts: &'a EntityCounts,
     /// Volumetric inflow per hydro (m³/s), one entry per hydro plant.
@@ -1162,7 +1163,7 @@ fn extract_buses(
 /// Extract a [`SimulationStageResult`] from a raw LP solution at one stage.
 ///
 /// Reads role-(b) equipment column values from `view.primal` using the ranges
-/// stored in `spec.geometry` (the per-stage [`StageGeometry`](crate::lp_builder::StageGeometry));
+/// stored in `spec.geometry` (the per-stage [`StageGeometry`](StageGeometry));
 /// role-(a) state columns resolve via `spec.state` ([`StateLayout`]). When a
 /// family has zero entities its range is empty (`0..0`) and that result defaults
 /// to zero.
@@ -1320,9 +1321,9 @@ impl HydroViolationCosts {
 /// Compute the 6 per-constraint hydro violation costs from a solution view.
 fn compute_hydro_violation_costs(
     study_dims: &StudyDimensions,
-    equipment: &crate::lp_builder::StageGeometry,
+    equipment: &StageGeometry,
     col_cost: impl Fn(usize) -> f64,
-    range_sum: impl Fn(std::ops::Range<usize>) -> f64,
+    range_sum: impl Fn(Range<usize>) -> f64,
 ) -> HydroViolationCosts {
     let evaporation = equipment
         .evap_indices
@@ -1370,7 +1371,7 @@ fn compute_hydro_violation_costs(
 fn compute_cost_result(
     view: &SolutionView<'_>,
     study_dims: &StudyDimensions,
-    equipment: &crate::lp_builder::StageGeometry,
+    equipment: &StageGeometry,
     state: &StateLayout,
     col_scale: &[f64],
     generic_violation_cost: f64,
@@ -1387,7 +1388,7 @@ fn compute_cost_result(
         }
     };
     let col_cost = |col: usize| view.primal[col] * view.objective_coeffs[col] / scale_factor(col);
-    let range_sum = |r: std::ops::Range<usize>| -> f64 { r.map(col_cost).sum() };
+    let range_sum = |r: Range<usize>| -> f64 { r.map(col_cost).sum() };
 
     let theta_obj_coeff = view
         .objective_coeffs

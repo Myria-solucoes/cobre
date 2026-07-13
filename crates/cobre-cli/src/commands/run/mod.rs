@@ -1,6 +1,15 @@
 //! `cobre run <CASE_DIR>` subcommand: load, train the SDDP policy, optionally
 //! simulate, and write outputs.
 
+use cobre_io::DistributionInfo;
+use cobre_io::HostLayout;
+use cobre_io::OutputContext;
+use cobre_io::now_iso8601;
+use cobre_sddp::SolverStatsDelta;
+use cobre_sddp::build_deviation_summary;
+use cobre_solver::active_solver_metadata_id;
+
+use crate::progress::RenderMode;
 mod outputs;
 mod policy;
 mod setup;
@@ -91,7 +100,7 @@ pub(super) struct RunContext<C: Communicator> {
     pub(super) stderr: Term,
     /// Rendering strategy for progress events; non-TTY stderr gets append-only
     /// lines instead of cursor-driven bars.
-    pub(super) render_mode: crate::progress::RenderMode,
+    pub(super) render_mode: RenderMode,
     /// Execution topology gathered during communicator setup.
     pub(super) topology: ExecutionTopology,
     /// Solver version string.
@@ -148,9 +157,9 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
 
     if training_enabled {
         apply_training_policy(ctx, &system, &mut setup, root_config.as_ref(), policy_mode)?;
-        let training_started_at = cobre_io::now_iso8601();
+        let training_started_at = now_iso8601();
         let training = run_training_phase(ctx, &mut setup)?;
-        let training_completed_at = cobre_io::now_iso8601();
+        let training_completed_at = now_iso8601();
 
         // Write training outputs before simulation so they persist even if
         // simulation fails.
@@ -158,15 +167,15 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
             let config = root_config.take().ok_or_else(|| CliError::Internal {
                 message: "root_config was None on rank 0 — internal invariant violated".to_string(),
             })?;
-            let training_ctx = cobre_io::OutputContext {
+            let training_ctx = OutputContext {
                 hostname: hostname.clone(),
-                solver: cobre_solver::active_solver_metadata_id().to_string(),
+                solver: active_solver_metadata_id().to_string(),
                 solver_version: Some(ctx.solver_version.clone()),
                 started_at: training_started_at,
                 completed_at: training_completed_at,
                 distribution: build_distribution_info(&ctx.topology, ctx.n_threads, mpi_world_size),
                 setup: setup_timings,
-                production_fit_deviation: cobre_sddp::build_deviation_summary(
+                production_fit_deviation: build_deviation_summary(
                     &setup.hydro_models.fpha_fit_deviations,
                 ),
             };
@@ -228,7 +237,7 @@ fn execute_inner<C: Communicator>(ctx: &RunContext<C>, args: &RunArgs) -> Result
 /// # Errors
 ///
 /// Returns [`CliError`] when any guarded counter exceeds `2^53`.
-pub(super) fn check_stats_overflow(delta: &cobre_sddp::SolverStatsDelta) -> Result<(), CliError> {
+pub(super) fn check_stats_overflow(delta: &SolverStatsDelta) -> Result<(), CliError> {
     const F64_INTEGER_LIMIT: u64 = 1u64 << 53;
     for (label, value) in [
         ("lp_solves", delta.lp_solves),
@@ -266,9 +275,9 @@ pub(super) fn build_distribution_info(
     topology: &ExecutionTopology,
     n_threads: usize,
     ranks_participated: u32,
-) -> cobre_io::DistributionInfo {
+) -> DistributionInfo {
     use cobre_comm::BackendKind;
-    cobre_io::DistributionInfo {
+    DistributionInfo {
         backend: match topology.backend {
             BackendKind::Mpi => "mpi",
             BackendKind::Local => "local",
@@ -289,11 +298,11 @@ pub(super) fn build_distribution_info(
 
 /// Map per-host rank assignments into [`cobre_io::HostLayout`] carriers,
 /// preserving the topology's host ordering (first-rank order).
-fn host_layouts(topology: &ExecutionTopology) -> Vec<cobre_io::HostLayout> {
+fn host_layouts(topology: &ExecutionTopology) -> Vec<HostLayout> {
     topology
         .hosts
         .iter()
-        .map(|h| cobre_io::HostLayout {
+        .map(|h| HostLayout {
             hostname: h.hostname.clone(),
             ranks: h
                 .ranks

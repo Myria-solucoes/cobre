@@ -21,6 +21,9 @@
 //! assert!((intercept - 20.0).abs() < 1e-10);
 //! ```
 
+use cobre_core::StageRiskConfig;
+use cobre_core::StageRiskConfig::CVaR;
+use cobre_core::StageRiskConfig::Expectation;
 /// Per-worker scratch buffers for `CVaR` weight computation, reused across
 /// backward-pass stages so the allocation is paid once. Owned exclusively per
 /// rayon worker (a field of `BackwardAccumulators`), so no synchronisation.
@@ -97,10 +100,10 @@ pub enum RiskMeasure {
 }
 
 impl From<cobre_core::StageRiskConfig> for RiskMeasure {
-    fn from(config: cobre_core::StageRiskConfig) -> Self {
+    fn from(config: StageRiskConfig) -> Self {
         match config {
-            cobre_core::StageRiskConfig::Expectation => Self::Expectation,
-            cobre_core::StageRiskConfig::CVaR { alpha, lambda } => Self::CVaR { alpha, lambda },
+            Expectation => Self::Expectation,
+            CVaR { alpha, lambda } => Self::CVaR { alpha, lambda },
         }
     }
 }

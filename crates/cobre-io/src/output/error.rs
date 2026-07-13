@@ -4,6 +4,7 @@
 //! Each variant carries enough context for the caller to produce a diagnostic message
 //! without re-reading the output files.
 
+use std::io::Error;
 use std::path::{Path, PathBuf};
 
 /// Errors that can occur during output writing operations.
@@ -30,7 +31,7 @@ pub enum OutputError {
         /// Path to the file that could not be written.
         path: PathBuf,
         /// Underlying I/O error.
-        source: std::io::Error,
+        source: Error,
     },
 
     /// Arrow/Parquet encoding failure.
@@ -76,7 +77,7 @@ impl OutputError {
     /// let err = OutputError::io("simulation/costs/data.parquet", io_err);
     /// assert!(err.to_string().contains("simulation/costs/data.parquet"));
     /// ```
-    pub fn io(path: impl AsRef<Path>, source: std::io::Error) -> Self {
+    pub fn io(path: impl AsRef<Path>, source: Error) -> Self {
         Self::IoError {
             path: path.as_ref().to_path_buf(),
             source,

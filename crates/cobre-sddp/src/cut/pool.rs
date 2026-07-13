@@ -42,7 +42,10 @@
 //! ```
 
 use crate::cut::WARM_START_ITERATION;
+use crate::cut_selection::CutActivityUpdates;
 use crate::cut_selection::CutMetadata;
+
+use cobre_io::OwnedPolicyCutRecord;
 
 /// Pre-allocated per-stage cut pool for the Future Cost Function (FCF).
 ///
@@ -536,7 +539,7 @@ impl CutPool {
     /// silently drops reactivation entries. Idempotency follows [`set_active`].
     ///
     /// [`set_active`]: CutPool::set_active
-    /// [`CutActivityUpdates`]: crate::cut_selection::CutActivityUpdates
+    /// [`CutActivityUpdates`]: CutActivityUpdates
     ///
     /// # Example
     ///
@@ -564,7 +567,7 @@ impl CutPool {
     /// assert!(pool.is_active(2));
     /// assert_eq!(pool.active_count(), 2);
     /// ```
-    pub fn apply_updates(&mut self, updates: &crate::cut_selection::CutActivityUpdates) {
+    pub fn apply_updates(&mut self, updates: &CutActivityUpdates) {
         for &slot in &updates.updates {
             self.set_active(slot, false);
         }
@@ -777,10 +780,7 @@ impl CutPool {
     /// assert_eq!(pool.active_count(), 1);
     /// ```
     #[must_use]
-    pub fn from_deserialized(
-        state_dimension: usize,
-        records: &[cobre_io::OwnedPolicyCutRecord],
-    ) -> Self {
+    pub fn from_deserialized(state_dimension: usize, records: &[OwnedPolicyCutRecord]) -> Self {
         let capacity = records.len();
         let mut coefficients = Vec::with_capacity(capacity * state_dimension);
         let mut intercepts = Vec::with_capacity(capacity);
@@ -857,7 +857,7 @@ impl CutPool {
         state_dimension: usize,
         forward_passes: u32,
         max_iterations: u64,
-        records: &[cobre_io::OwnedPolicyCutRecord],
+        records: &[OwnedPolicyCutRecord],
     ) -> Self {
         let warm_start_count = records.len();
         #[allow(clippy::cast_possible_truncation)]

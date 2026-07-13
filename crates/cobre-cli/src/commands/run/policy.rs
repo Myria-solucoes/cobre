@@ -4,7 +4,22 @@ use std::path::Path;
 
 use cobre_comm::Communicator;
 use cobre_core::System;
+use cobre_io::Config;
+use cobre_io::EntitySlot;
+use cobre_io::PolicyMode;
+use cobre_io::PolicyMode::Fresh;
+use cobre_io::PolicyMode::Resume;
+use cobre_io::PolicyMode::WarmStart;
+use cobre_io::output::policy::read_policy_checkpoint;
+use cobre_sddp::FutureCostFunction;
+use cobre_sddp::PolicyLoadKind::FullFcf;
+use cobre_sddp::PolicyStageManifest;
 use cobre_sddp::StudySetup;
+use cobre_sddp::TrainingResult;
+use cobre_sddp::build_basis_cache_from_checkpoint;
+use cobre_sddp::inject_boundary_cuts;
+use cobre_sddp::load_boundary_cuts;
+use cobre_sddp::validate_policy_load;
 
 use crate::error::CliError;
 
@@ -24,10 +39,8 @@ fn load_and_validate_checkpoint(
     system: &System,
     setup: &StudySetup,
 ) -> Result<cobre_io::PolicyCheckpoint, CliError> {
-    let checkpoint = cobre_io::output::policy::read_policy_checkpoint(policy_dir).map_err(|e| {
-        CliError::Internal {
-            message: format!("failed to read policy checkpoint: {e}"),
-        }
+    let checkpoint = read_policy_checkpoint(policy_dir).map_err(|e| CliError::Internal {
+        message: format!("failed to read policy checkpoint: {e}"),
     })?;
 
     // Rationale: the cast cannot truncate — `n_stages` is the validated study
@@ -41,24 +54,22 @@ fn load_and_validate_checkpoint(
     // The terminal pool is always full-config, so its manifest witnesses every
     // state family's slot identity — a terminal-only comparison covers all stages.
     let current_manifest = setup.build_terminal_entity_manifest(system);
-    let checkpoint_terminal_manifest: &[cobre_io::EntitySlot] = checkpoint
+    let checkpoint_terminal_manifest: &[EntitySlot] = checkpoint
         .stage_cuts
         .last()
         .map_or(&[], |s| s.entity_manifest.as_slice());
 
-    let source = cobre_sddp::PolicyStageManifest {
+    let source = PolicyStageManifest {
         state_dimension: checkpoint.metadata.state_dimension,
         num_stages: checkpoint.metadata.num_stages,
         slots: checkpoint_terminal_manifest,
     };
-    let current = cobre_sddp::PolicyStageManifest {
+    let current = PolicyStageManifest {
         state_dimension: state_dim,
         num_stages: n_stages,
         slots: &current_manifest,
     };
-    let report =
-        cobre_sddp::validate_policy_load(&source, &current, cobre_sddp::PolicyLoadKind::FullFcf)
-            .map_err(CliError::from)?;
+    let report = validate_policy_load(&source, &current, FullFcf).map_err(CliError::from)?;
 
     if ctx.is_root && !ctx.quiet {
         for msg in &report.warnings {
@@ -76,7 +87,7 @@ fn load_checkpoint_into_setup(
     setup: &mut StudySetup,
 ) -> Result<(), CliError> {
     // Reserve one extra slot for cuts added in the final iteration.
-    let warm_fcf = cobre_sddp::FutureCostFunction::new_with_warm_start(
+    let warm_fcf = FutureCostFunction::new_with_warm_start(
         &checkpoint.stage_cuts,
         setup.loop_params.forward_passes,
         setup.loop_params.max_iterations.saturating_add(1),
@@ -86,7 +97,7 @@ fn load_checkpoint_into_setup(
     // No stored bases (checkpoint written without `store_basis`) → iteration 1
     // cold-starts.
     if !checkpoint.stage_bases.is_empty() {
-        let basis_cache = cobre_sddp::build_basis_cache_from_checkpoint(
+        let basis_cache = build_basis_cache_from_checkpoint(
             setup.stage_data.stage_templates.templates.len(),
             &checkpoint.stage_bases,
             &checkpoint.stage_cuts,
@@ -101,11 +112,11 @@ pub(super) fn apply_training_policy(
     ctx: &RunContext<impl Communicator>,
     system: &System,
     setup: &mut StudySetup,
-    root_config: Option<&cobre_io::Config>,
-    policy_mode: cobre_io::PolicyMode,
+    root_config: Option<&Config>,
+    policy_mode: PolicyMode,
 ) -> Result<(), CliError> {
     match policy_mode {
-        cobre_io::PolicyMode::WarmStart => {
+        WarmStart => {
             let policy_dir = ctx.output_dir.join(&setup.policy_path);
             if !policy_dir.exists() {
                 return Err(CliError::Internal {
@@ -130,7 +141,7 @@ pub(super) fn apply_training_policy(
                 ));
             }
         }
-        cobre_io::PolicyMode::Resume => {
+        Resume => {
             let policy_dir = ctx.output_dir.join(&setup.policy_path);
             if !policy_dir.exists() {
                 return Err(CliError::Internal {
@@ -165,7 +176,7 @@ pub(super) fn apply_training_policy(
                 ));
             }
         }
-        cobre_io::PolicyMode::Fresh => {}
+        Fresh => {}
     }
 
     // Must run after the match: warm-start replaces the whole FCF first, then
@@ -186,7 +197,7 @@ pub(super) fn apply_training_policy(
                 let _ = stderr.write_line(&format!("warning: {msg}"));
             }
         };
-        let boundary_records = cobre_sddp::load_boundary_cuts(
+        let boundary_records = load_boundary_cuts(
             &boundary_path,
             bp.source_stage,
             state_dim,
@@ -194,7 +205,7 @@ pub(super) fn apply_training_policy(
             &mut on_warning,
         )
         .map_err(CliError::from)?;
-        cobre_sddp::inject_boundary_cuts(setup, &boundary_records);
+        inject_boundary_cuts(setup, &boundary_records);
         if ctx.is_root && !ctx.quiet {
             let _ = ctx.stderr.write_line(&format!(
                 "Boundary cuts: loaded {} cuts from stage {} of {}",
@@ -213,7 +224,7 @@ pub(super) fn load_policy_for_simulation(
     ctx: &RunContext<impl Communicator>,
     system: &System,
     setup: &mut StudySetup,
-) -> Result<cobre_sddp::TrainingResult, CliError> {
+) -> Result<TrainingResult, CliError> {
     if ctx.is_root && !ctx.quiet {
         let _ = ctx
             .stderr
@@ -233,17 +244,17 @@ pub(super) fn load_policy_for_simulation(
 
     let checkpoint = load_and_validate_checkpoint(ctx, &policy_dir, system, setup)?;
 
-    let loaded_fcf = cobre_sddp::FutureCostFunction::from_deserialized(&checkpoint.stage_cuts)
-        .map_err(CliError::from)?;
+    let loaded_fcf =
+        FutureCostFunction::from_deserialized(&checkpoint.stage_cuts).map_err(CliError::from)?;
     setup.replace_fcf(loaded_fcf);
 
-    let basis_cache = cobre_sddp::build_basis_cache_from_checkpoint(
+    let basis_cache = build_basis_cache_from_checkpoint(
         setup.stage_data.stage_templates.templates.len(),
         &checkpoint.stage_bases,
         &checkpoint.stage_cuts,
     );
 
-    Ok(cobre_sddp::TrainingResult::new(
+    Ok(TrainingResult::new(
         checkpoint.metadata.final_lower_bound,
         checkpoint
             .metadata

@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use std::fmt;
+
 /// Policy initialization mode (`config.json → policy.mode`).
 ///
 /// Controls whether the training phase starts from scratch, warm-starts from
@@ -19,7 +21,7 @@ pub enum PolicyMode {
 }
 
 impl std::fmt::Display for PolicyMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PolicyMode::Fresh => f.write_str("fresh"),
             PolicyMode::WarmStart => f.write_str("warm_start"),

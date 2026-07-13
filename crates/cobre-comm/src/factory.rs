@@ -7,6 +7,24 @@
 //! `mpiexec`/`mpirun`/`srun`, not a configuration channel — and selects the MPI
 //! backend when one is detected.
 
+use crate::BackendError;
+#[cfg(not(feature = "mpi"))]
+use crate::BackendError::BackendNotAvailable;
+#[cfg(feature = "mpi")]
+use crate::CommData;
+#[cfg(feature = "mpi")]
+use crate::CommError;
+#[cfg(feature = "mpi")]
+use crate::ExecutionTopology;
+#[cfg(feature = "mpi")]
+use crate::FerrompiBackend;
+#[cfg(all(feature = "mpi", feature = "shared-memory"))]
+use crate::HeapRegion;
+use crate::LocalBackend;
+#[cfg(feature = "mpi")]
+use crate::ReduceOp;
+#[cfg(all(feature = "mpi", feature = "shared-memory"))]
+use crate::traits::LocalCommKind;
 /// Backend selector passed by the caller to [`create_communicator`].
 ///
 /// [`BackendKind::Mpi`] and [`BackendKind::Local`] force a backend;
@@ -44,10 +62,10 @@ pub enum BackendKind {
 #[cfg(feature = "mpi")]
 pub enum CommBackend {
     /// MPI backend powered by ferrompi.
-    Mpi(Box<crate::FerrompiBackend>),
+    Mpi(Box<FerrompiBackend>),
 
     /// Single-process local backend (always-available fallback).
-    Local(crate::LocalBackend),
+    Local(LocalBackend),
 }
 
 #[cfg(feature = "mpi")]
@@ -61,13 +79,13 @@ const fn _assert_comm_backend_send_sync() {
 
 #[cfg(feature = "mpi")]
 impl crate::Communicator for CommBackend {
-    fn allgatherv<T: crate::CommData>(
+    fn allgatherv<T: CommData>(
         &self,
         send: &[T],
         recv: &mut [T],
         counts: &[usize],
         displs: &[usize],
-    ) -> Result<(), crate::CommError> {
+    ) -> Result<(), CommError> {
         match self {
             #[cfg(feature = "mpi")]
             Self::Mpi(backend) => backend.allgatherv(send, recv, counts, displs),
@@ -75,12 +93,12 @@ impl crate::Communicator for CommBackend {
         }
     }
 
-    fn allreduce<T: crate::CommData>(
+    fn allreduce<T: CommData>(
         &self,
         send: &[T],
         recv: &mut [T],
-        op: crate::ReduceOp,
-    ) -> Result<(), crate::CommError> {
+        op: ReduceOp,
+    ) -> Result<(), CommError> {
         match self {
             #[cfg(feature = "mpi")]
             Self::Mpi(backend) => backend.allreduce(send, recv, op),
@@ -88,11 +106,7 @@ impl crate::Communicator for CommBackend {
         }
     }
 
-    fn broadcast<T: crate::CommData>(
-        &self,
-        buf: &mut [T],
-        root: usize,
-    ) -> Result<(), crate::CommError> {
+    fn broadcast<T: CommData>(&self, buf: &mut [T], root: usize) -> Result<(), CommError> {
         match self {
             #[cfg(feature = "mpi")]
             Self::Mpi(backend) => backend.broadcast(buf, root),
@@ -100,7 +114,7 @@ impl crate::Communicator for CommBackend {
         }
     }
 
-    fn barrier(&self) -> Result<(), crate::CommError> {
+    fn barrier(&self) -> Result<(), CommError> {
         match self {
             #[cfg(feature = "mpi")]
             Self::Mpi(backend) => backend.barrier(),
@@ -137,19 +151,19 @@ impl crate::Communicator for CommBackend {
 impl crate::SharedMemoryProvider for CommBackend {
     /// `HeapRegion<T>` directly (not an enum wrapper): both inner backends
     /// already unify on it as their `Region<T>`.
-    type Region<T: crate::CommData> = crate::HeapRegion<T>;
+    type Region<T: CommData> = HeapRegion<T>;
 
-    fn create_shared_region<T: crate::CommData>(
+    fn create_shared_region<T: CommData>(
         &self,
         count: usize,
-    ) -> Result<Self::Region<T>, crate::CommError> {
+    ) -> Result<Self::Region<T>, CommError> {
         match self {
             Self::Mpi(backend) => backend.create_shared_region(count),
             Self::Local(backend) => backend.create_shared_region(count),
         }
     }
 
-    fn split_local(&self) -> Result<crate::traits::LocalCommKind, crate::CommError> {
+    fn split_local(&self) -> Result<LocalCommKind, CommError> {
         match self {
             Self::Mpi(backend) => backend.split_local(),
             Self::Local(backend) => backend.split_local(),
@@ -166,7 +180,7 @@ impl crate::SharedMemoryProvider for CommBackend {
 
 #[cfg(feature = "mpi")]
 impl crate::TopologyProvider for CommBackend {
-    fn topology(&self) -> &crate::ExecutionTopology {
+    fn topology(&self) -> &ExecutionTopology {
         match self {
             #[cfg(feature = "mpi")]
             Self::Mpi(backend) => backend.topology(),
@@ -224,11 +238,11 @@ fn mpi_launch_detected() -> bool {
 /// distributes without an explicit `--comm-backend mpi`), otherwise the local
 /// backend.
 #[cfg(feature = "mpi")]
-fn auto_detect() -> Result<CommBackend, crate::BackendError> {
+fn auto_detect() -> Result<CommBackend, BackendError> {
     if mpi_launch_detected() {
-        return Ok(CommBackend::Mpi(Box::new(crate::FerrompiBackend::new()?)));
+        return Ok(CommBackend::Mpi(Box::new(FerrompiBackend::new()?)));
     }
-    Ok(CommBackend::Local(crate::LocalBackend))
+    Ok(CommBackend::Local(LocalBackend))
 }
 
 /// Construct the active communication backend (no-feature build).
@@ -259,11 +273,11 @@ fn auto_detect() -> Result<CommBackend, crate::BackendError> {
 /// # }
 /// ```
 #[cfg(not(feature = "mpi"))]
-pub fn create_communicator(kind: BackendKind) -> Result<crate::LocalBackend, crate::BackendError> {
+pub fn create_communicator(kind: BackendKind) -> Result<LocalBackend, BackendError> {
     match kind {
         // No MPI compiled in, so auto-detect can only resolve to local.
-        BackendKind::Local | BackendKind::Auto => Ok(crate::LocalBackend),
-        BackendKind::Mpi => Err(crate::BackendError::BackendNotAvailable {
+        BackendKind::Local | BackendKind::Auto => Ok(LocalBackend),
+        BackendKind::Mpi => Err(BackendNotAvailable {
             requested: "mpi".to_string(),
             available: available_backends(),
         }),
@@ -297,10 +311,10 @@ pub fn create_communicator(kind: BackendKind) -> Result<crate::LocalBackend, cra
 /// # }
 /// ```
 #[cfg(feature = "mpi")]
-pub fn create_communicator(kind: BackendKind) -> Result<CommBackend, crate::BackendError> {
+pub fn create_communicator(kind: BackendKind) -> Result<CommBackend, BackendError> {
     match kind {
-        BackendKind::Mpi => Ok(CommBackend::Mpi(Box::new(crate::FerrompiBackend::new()?))),
-        BackendKind::Local => Ok(CommBackend::Local(crate::LocalBackend)),
+        BackendKind::Mpi => Ok(CommBackend::Mpi(Box::new(FerrompiBackend::new()?))),
+        BackendKind::Local => Ok(CommBackend::Local(LocalBackend)),
         BackendKind::Auto => auto_detect(),
     }
 }

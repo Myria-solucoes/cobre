@@ -250,7 +250,7 @@ impl StochasticContext {
         &mut self,
         keys: &[Vec<f64>],
         direction: SweepDirection,
-    ) -> Result<(), crate::StochasticError> {
+    ) -> Result<(), StochasticError> {
         self.opening_tree.set_solve_order(keys, direction)
     }
 

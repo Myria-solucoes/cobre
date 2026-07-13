@@ -175,7 +175,18 @@ impl OutCol {
 /// `Interior(k)` (`k ∈ 1..n_blks`) is a CONTROL column. Matched exhaustively
 /// by [`StorageBoundaryGrid::col`](super::StorageBoundaryGrid::col) with no
 /// `_` arm, so the outgoing endpoint cannot be silently absorbed by an
-/// interior catch-all.
+/// interior catch-all:
+///
+/// ```compile_fail
+/// use cobre_sddp::indexer::Boundary;
+///
+/// fn interior_catch_all(b: Boundary) -> usize {
+///     match b {
+///         Boundary::Incoming => 0,
+///         Boundary::Interior(k) => k, // Outgoing omitted, no `_` arm
+///     }
+/// }
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Boundary {
     /// The incoming-state boundary `k = 0` (`S⁰`).

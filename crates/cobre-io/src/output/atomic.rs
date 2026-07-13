@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
+use serde::Serialize;
 
 use super::error::OutputError;
 use super::parquet_config::ParquetWriterConfig;
@@ -64,7 +65,7 @@ pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<(), Output
 /// file fails.
 pub(crate) fn write_json_atomic(
     path: &Path,
-    value: &impl serde::Serialize,
+    value: &impl Serialize,
     entity: &str,
 ) -> Result<(), OutputError> {
     let tmp = tmp_path(path);
@@ -83,7 +84,7 @@ pub(crate) fn write_json_atomic(
 /// on `Ok`, so a flush error can never install a target file.
 fn serialize_json_then_flush<W: Write>(
     sink: W,
-    value: &impl serde::Serialize,
+    value: &impl Serialize,
     entity: &str,
     tmp: &Path,
 ) -> Result<(), OutputError> {

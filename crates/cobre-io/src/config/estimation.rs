@@ -1,5 +1,6 @@
 //! Time series estimation configuration types for `config.json → estimation`.
 
+use serde::Deserializer;
 use serde::{Deserialize, Serialize};
 
 /// Order selection criterion for autoregressive model fitting.
@@ -39,7 +40,7 @@ pub enum OrderSelectionMethod {
 }
 
 impl<'de> serde::Deserialize<'de> for OrderSelectionMethod {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
         match s.as_str() {
             "pacf" => Ok(Self::Pacf),

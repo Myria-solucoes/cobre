@@ -27,6 +27,8 @@ use crate::{
 
 use super::insample;
 
+use std::fmt;
+
 /// Per-call arguments for [`ClassSampler::fill`].
 #[derive(Debug, Clone, Copy)]
 pub struct ClassSampleRequest {
@@ -82,7 +84,7 @@ pub enum ClassSampler<'a> {
 }
 
 impl std::fmt::Debug for ClassSampler<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ClassSampler::InSample {
                 base_seed,

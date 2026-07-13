@@ -22,6 +22,9 @@
 //! and duplicate-key validation are deferred to Layer 3.
 //! Semantic bound validation (e.g., min < max) is deferred.
 
+use cobre_core::EntityId;
+
+use std::collections::HashMap;
 pub mod bounds;
 pub mod exchange_factors;
 pub mod generic;
@@ -257,7 +260,7 @@ pub fn load_penalty_overrides_ncs(
 /// Load `constraints/generic_constraints.json` when the path is known, or
 /// return an empty `Vec` when the file is absent (optional file).
 ///
-/// `name_to_id` maps parameter definition names to their [`cobre_core::EntityId`].
+/// `name_to_id` maps parameter definition names to their [`EntityId`].
 /// Pass `&HashMap::new()` when no parameters have been loaded; expressions that
 /// contain `@name` tokens will then fail with a schema error. The real mapping
 /// is wired in by the caller once the parameter loader output is available.
@@ -278,7 +281,7 @@ pub fn load_penalty_overrides_ncs(
 #[allow(clippy::implicit_hasher)]
 pub fn load_generic_constraints(
     path: Option<&Path>,
-    name_to_id: &std::collections::HashMap<String, cobre_core::EntityId>,
+    name_to_id: &HashMap<String, EntityId>,
 ) -> Result<Vec<GenericConstraint>, LoadError> {
     match path {
         None => Ok(Vec::new()),

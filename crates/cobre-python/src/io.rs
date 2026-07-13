@@ -34,8 +34,15 @@ use cobre_io::LoadError;
 use cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts;
 use cobre_sddp::validate_phases::{PrepPhase, prep_phase_metadata};
 use cobre_sddp::{StudyParams, prepare_stochastic};
+use cobre_io::ReportEntry;
+use cobre_io::Config;
+use cobre_io::parse_config;
+use cobre_io::validate_case_with_artifacts;
 
 use crate::model::PySystem;
+use crate::convert::pydict_to_json_map;
+use crate::errors::ErrorSource::Load;
+use crate::errors::convert_error;
 
 // ── Error conversion ──────────────────────────────────────────────────────────
 
@@ -69,16 +76,16 @@ fn load_validate_config(
                 std::fs::read_to_string(config_path).map_err(|e| LoadError::io(config_path, e))?;
             let base: serde_json::Value = serde_json::from_str(&raw)
                 .map_err(|e| LoadError::parse(config_path, e.to_string()))?;
-            cobre_io::Config::with_overrides(&base, map)
+            Config::with_overrides(&base, map)
         }
-        _ => cobre_io::parse_config(config_path),
+        _ => parse_config(config_path),
     }
 }
 
 /// Convert a [`LoadError`] to the appropriate Python exception — a thin shim over
 /// the single [`crate::errors::convert_error`] mapping site.
 fn convert_load_error(err: &LoadError) -> PyErr {
-    crate::errors::convert_error(crate::errors::ErrorSource::Load(err))
+    convert_error(Load(err))
 }
 
 /// Build the `"warnings"` list (`list[dict]`) shared by the two validate
@@ -90,7 +97,7 @@ fn convert_load_error(err: &LoadError) -> PyErr {
 /// from a single place.
 pub(crate) fn build_warnings_list<'py>(
     py: Python<'py>,
-    warnings: &[cobre_io::ReportEntry],
+    warnings: &[ReportEntry],
 ) -> PyResult<Bound<'py, PyList>> {
     let warnings_list = PyList::empty(py);
     for entry in warnings {
@@ -203,7 +210,7 @@ pub fn validate(
     // the one path that may raise despite this function otherwise returning errors
     // as data.
     let overrides = config_overrides
-        .map(|d| crate::convert::pydict_to_json_map(&d))
+        .map(|d| pydict_to_json_map(&d))
         .transpose()?;
 
     let dict = PyDict::new(py);
@@ -233,7 +240,7 @@ pub fn validate(
 
     // The _with_artifacts variant yields the pre-parsed CaseArtifacts bundle phase
     // 10 reuses without re-reading disk.
-    let (loaded, report) = match cobre_io::validate_case_with_artifacts(&path) {
+    let (loaded, report) = match validate_case_with_artifacts(&path) {
         Ok(result) => result,
         Err(err) => {
             return_error!(load_error_kind(&err), err.to_string());

@@ -53,6 +53,10 @@ impl StorageBoundaryGrid {
     /// two endpoints are STATE columns — [`Boundary::Incoming`] → `S⁰` and
     /// [`Boundary::Outgoing`] → `Sᴷ` — while [`Boundary::Interior`] is a
     /// CONTROL column (stride `n_blks − 1`, not `n_blks`).
+    ///
+    /// This match never gains a `_` arm — [`Boundary`]'s own doc-pinned
+    /// example proves a catch-all would silently absorb the `Outgoing`
+    /// endpoint.
     #[inline]
     #[must_use]
     pub fn col(&self, h: usize, boundary: Boundary) -> usize {

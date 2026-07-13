@@ -13,10 +13,16 @@
 //! resolves onto the correct column at every stage regardless of per-stage
 //! block counts.
 
+use std::borrow::Cow;
 use std::ops::Range;
 
 use super::{AnticipatedLocal, InCol, OutCol, RangeCursor, StateDim};
 use crate::lead_time::AnticipatedResolution;
+use crate::lead_time::LeadTime::Stages;
+use crate::lead_time::PointResolution;
+use crate::lead_time::resolve_point;
+
+use cobre_core::commissioning::commissioning_active;
 
 /// Stage-invariant state-vector layout for one SDDP stage subproblem.
 ///
@@ -550,11 +556,7 @@ impl StateLayout {
             study_stage_ids.len(),
         );
         let (entry, exit) = anticipated_windows[local_idx];
-        cobre_core::commissioning::commissioning_active(
-            entry,
-            exit,
-            study_stage_ids[delivery_stage],
-        )
+        commissioning_active(entry, exit, study_stage_ids[delivery_stage])
     }
 
     /// Plant `local_idx`'s delivery-anchored resolution: the setup-threaded
@@ -568,17 +570,13 @@ impl StateLayout {
         &self,
         local_idx: AnticipatedLocal,
         n_stages: usize,
-    ) -> std::borrow::Cow<'_, crate::lead_time::PointResolution> {
+    ) -> Cow<'_, PointResolution> {
         let local_idx = local_idx.get();
         if !self.anticipated_resolution.per_plant.is_empty() {
             return std::borrow::Cow::Borrowed(&self.anticipated_resolution.per_plant[local_idx]);
         }
         let lead = u32::try_from(self.anticipated_lead_stages[local_idx]).unwrap_or(u32::MAX);
-        std::borrow::Cow::Owned(crate::lead_time::resolve_point(
-            crate::lead_time::LeadTime::Stages(lead),
-            &[],
-            n_stages,
-        ))
+        std::borrow::Cow::Owned(resolve_point(Stages(lead), &[], n_stages))
     }
 
     /// Compute and store [`Self::nonzero_state_indices`] from per-hydro

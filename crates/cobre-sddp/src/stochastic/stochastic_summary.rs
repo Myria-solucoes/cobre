@@ -6,11 +6,14 @@
 //! These types live in `cobre-sddp` (not `cobre-cli`) so Python bindings and
 //! other callers reuse them without the CLI's `console::style` display deps.
 
+use cobre_core::EntityId;
+use cobre_core::InflowModel;
 use cobre_core::{System, scenario::SamplingScheme};
 use cobre_io::output::{FittingReductionEntry, FittingReport, HydroFittingEntry};
 use cobre_io::scenarios::{
     InflowAnnualComponentRow, InflowArCoefficientRow, InflowSeasonalStatsRow,
 };
+use cobre_stochastic::par::fitting::HydroEstimationEntry;
 use cobre_stochastic::{ComponentProvenance, StochasticContext};
 
 use crate::EstimationReport;
@@ -288,40 +291,33 @@ pub fn estimation_report_to_fitting_report(report: &EstimationReport) -> Fitting
     let hydros = report
         .entries
         .iter()
-        .map(
-            |(id, entry): (
-                &cobre_core::EntityId,
-                &cobre_stochastic::par::fitting::HydroEstimationEntry,
-            )| {
-                (
-                    id.0.to_string(),
-                    HydroFittingEntry {
-                        selected_order: entry.selected_order,
-                        coefficients: entry.coefficients.clone(),
-                        contribution_reductions: entry
-                            .contribution_reductions
-                            .iter()
-                            .map(|r| FittingReductionEntry {
-                                season_id: r.season_id,
-                                original_order: r.original_order,
-                                reduced_order: r.reduced_order,
-                                contributions: r.contributions.clone(),
-                                reason: r.reason.as_str().to_string(),
-                            })
-                            .collect(),
-                    },
-                )
-            },
-        )
+        .map(|(id, entry): (&EntityId, &HydroEstimationEntry)| {
+            (
+                id.0.to_string(),
+                HydroFittingEntry {
+                    selected_order: entry.selected_order,
+                    coefficients: entry.coefficients.clone(),
+                    contribution_reductions: entry
+                        .contribution_reductions
+                        .iter()
+                        .map(|r| FittingReductionEntry {
+                            season_id: r.season_id,
+                            original_order: r.original_order,
+                            reduced_order: r.reduced_order,
+                            contributions: r.contributions.clone(),
+                            reason: r.reason.as_str().to_string(),
+                        })
+                        .collect(),
+                },
+            )
+        })
         .collect();
     FittingReport { hydros }
 }
 
 /// Convert inflow models to seasonal stats rows (one row per model).
 #[must_use]
-pub fn inflow_models_to_stats_rows(
-    models: &[cobre_core::scenario::InflowModel],
-) -> Vec<InflowSeasonalStatsRow> {
+pub fn inflow_models_to_stats_rows(models: &[InflowModel]) -> Vec<InflowSeasonalStatsRow> {
     models
         .iter()
         .map(|m| InflowSeasonalStatsRow {
@@ -338,9 +334,7 @@ pub fn inflow_models_to_stats_rows(
 /// Each model's `ar_coefficients` expands into rows with 1-based lag indices.
 /// White-noise models (AR order 0) produce no rows.
 #[must_use]
-pub fn inflow_models_to_ar_rows(
-    models: &[cobre_core::scenario::InflowModel],
-) -> Vec<InflowArCoefficientRow> {
+pub fn inflow_models_to_ar_rows(models: &[InflowModel]) -> Vec<InflowArCoefficientRow> {
     models
         .iter()
         .flat_map(|m| {
@@ -372,7 +366,7 @@ pub fn inflow_models_to_ar_rows(
 /// canonical ordering is required before writing.
 #[must_use]
 pub fn inflow_models_to_annual_component_rows(
-    models: &[cobre_core::scenario::InflowModel],
+    models: &[InflowModel],
 ) -> Vec<InflowAnnualComponentRow> {
     models
         .iter()

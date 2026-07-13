@@ -9,6 +9,8 @@ use std::path::Path;
 use super::atomic::write_json_atomic;
 use super::error::OutputError;
 
+use serde::Serialize;
+
 /// Write a scaling report as pretty-printed JSON, atomically.
 ///
 /// Generic over `Serialize` so the report struct stays in the calling algorithm
@@ -18,10 +20,7 @@ use super::error::OutputError;
 ///
 /// Returns [`OutputError::IoError`] on filesystem failures, or
 /// [`OutputError::SerializationError`] if JSON serialization fails.
-pub fn write_scaling_report(
-    path: &Path,
-    report: &impl serde::Serialize,
-) -> Result<(), OutputError> {
+pub fn write_scaling_report(path: &Path, report: &impl Serialize) -> Result<(), OutputError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| OutputError::io(parent, e))?;
     }

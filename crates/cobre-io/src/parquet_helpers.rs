@@ -2,6 +2,7 @@
 //! logic used by every Parquet parser in `cobre-io`.
 
 use arrow::array::{Array, Date32Array, Float64Array, Int32Array, UInt32Array};
+use arrow::record_batch::RecordBatch;
 use std::path::Path;
 
 use crate::LoadError;
@@ -10,7 +11,7 @@ use crate::LoadError;
 ///
 /// Returns `SchemaError` if the column is absent or has the wrong Arrow type.
 pub(crate) fn extract_required_int32<'a>(
-    batch: &'a arrow::record_batch::RecordBatch,
+    batch: &'a RecordBatch,
     name: &str,
     path: &Path,
 ) -> Result<&'a Int32Array, LoadError> {
@@ -37,7 +38,7 @@ pub(crate) fn extract_required_int32<'a>(
 ///
 /// Returns `SchemaError` if the column is absent or has the wrong Arrow type.
 pub(crate) fn extract_required_float64<'a>(
-    batch: &'a arrow::record_batch::RecordBatch,
+    batch: &'a RecordBatch,
     name: &str,
     path: &Path,
 ) -> Result<&'a Float64Array, LoadError> {
@@ -64,7 +65,7 @@ pub(crate) fn extract_required_float64<'a>(
 ///
 /// Returns `SchemaError` if the column exists but has the wrong Arrow type.
 pub(crate) fn extract_optional_int32<'a>(
-    batch: &'a arrow::record_batch::RecordBatch,
+    batch: &'a RecordBatch,
     name: &str,
     path: &Path,
 ) -> Result<Option<&'a Int32Array>, LoadError> {
@@ -89,7 +90,7 @@ pub(crate) fn extract_optional_int32<'a>(
 ///
 /// Returns `SchemaError` if the column exists but has the wrong Arrow type.
 pub(crate) fn extract_optional_float64<'a>(
-    batch: &'a arrow::record_batch::RecordBatch,
+    batch: &'a RecordBatch,
     name: &str,
     path: &Path,
 ) -> Result<Option<&'a Float64Array>, LoadError> {
@@ -114,7 +115,7 @@ pub(crate) fn extract_optional_float64<'a>(
 ///
 /// Returns `SchemaError` if the column is absent or has the wrong Arrow type.
 pub(crate) fn extract_required_uint32<'a>(
-    batch: &'a arrow::record_batch::RecordBatch,
+    batch: &'a RecordBatch,
     name: &str,
     path: &Path,
 ) -> Result<&'a UInt32Array, LoadError> {
@@ -141,7 +142,7 @@ pub(crate) fn extract_required_uint32<'a>(
 ///
 /// Returns `SchemaError` if the column is absent or has the wrong Arrow type.
 pub(crate) fn extract_required_date32<'a>(
-    batch: &'a arrow::record_batch::RecordBatch,
+    batch: &'a RecordBatch,
     name: &str,
     path: &Path,
 ) -> Result<&'a Date32Array, LoadError> {

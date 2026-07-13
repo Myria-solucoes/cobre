@@ -4,12 +4,18 @@
 //! [`WorkspacePool`] allocates one workspace per worker thread.
 //! [`BasisStore`] provides per-scenario, per-stage basis storage for warm-starting LP solves.
 
+use cobre_core::WorkerPhaseTimings;
+use cobre_solver::SolverStatistics;
 use cobre_solver::{Basis, BasisStatus, ProfiledSolver, SolverInterface};
 
+use crate::SddpError;
+use crate::SddpError::Validation;
 use crate::backward::StagedCut;
 use crate::dcs::DcsSolveScratch;
 use crate::lp_builder::PatchBuffer;
 use crate::risk_measure::{BackwardOutcome, RiskMeasureScratch};
+use crate::solve::partition;
+use crate::solver_stats::SolverStatsDelta;
 
 // ---------------------------------------------------------------------------
 // CapturedBasis
@@ -192,9 +198,9 @@ impl CapturedBasis {
         i32_cursor: &mut usize,
         f64_buf: &[f64],
         f64_cursor: &mut usize,
-    ) -> Result<Option<Self>, crate::SddpError> {
+    ) -> Result<Option<Self>, SddpError> {
         if *i32_cursor >= i32_buf.len() {
-            return Err(crate::SddpError::Validation(format!(
+            return Err(Validation(format!(
                 "try_from_broadcast_payload: buffer truncated at stage {stage} \
                  (pos={}, len={})",
                 *i32_cursor,
@@ -210,21 +216,21 @@ impl CapturedBasis {
 
         // Version byte is present only on the Some path, after the sentinel.
         if *i32_cursor >= i32_buf.len() {
-            return Err(crate::SddpError::Validation(format!(
+            return Err(Validation(format!(
                 "try_from_broadcast_payload: buffer truncated reading version at stage {stage}"
             )));
         }
         let version = i32_buf[*i32_cursor];
         *i32_cursor += 1;
         if version != BASIS_BROADCAST_WIRE_VERSION {
-            return Err(crate::SddpError::Validation(format!(
+            return Err(Validation(format!(
                 "try_from_broadcast_payload: unsupported wire version {version} at stage \
                  {stage} (expected {BASIS_BROADCAST_WIRE_VERSION})"
             )));
         }
 
         if *i32_cursor + 5 > i32_buf.len() {
-            return Err(crate::SddpError::Validation(format!(
+            return Err(Validation(format!(
                 "try_from_broadcast_payload: buffer truncated reading lengths at stage {stage}"
             )));
         }
@@ -240,7 +246,7 @@ impl CapturedBasis {
         *i32_cursor += 1;
 
         if *i32_cursor + col_len > i32_buf.len() {
-            return Err(crate::SddpError::Validation(format!(
+            return Err(Validation(format!(
                 "try_from_broadcast_payload: buffer truncated reading col_status at stage \
                  {stage} (need {col_len}, have {})",
                 i32_buf.len() - *i32_cursor
@@ -253,7 +259,7 @@ impl CapturedBasis {
         *i32_cursor += col_len;
 
         if *i32_cursor + row_len > i32_buf.len() {
-            return Err(crate::SddpError::Validation(format!(
+            return Err(Validation(format!(
                 "try_from_broadcast_payload: buffer truncated reading row_status at stage \
                  {stage} (need {row_len}, have {})",
                 i32_buf.len() - *i32_cursor
@@ -266,7 +272,7 @@ impl CapturedBasis {
         *i32_cursor += row_len;
 
         if *i32_cursor + cut_slot_count > i32_buf.len() {
-            return Err(crate::SddpError::Validation(format!(
+            return Err(Validation(format!(
                 "try_from_broadcast_payload: buffer truncated reading cut_row_slots at stage \
                  {stage} (need {cut_slot_count}, have {})",
                 i32_buf.len() - *i32_cursor
@@ -281,7 +287,7 @@ impl CapturedBasis {
         *i32_cursor += cut_slot_count;
 
         if *f64_cursor + state_len > f64_buf.len() {
-            return Err(crate::SddpError::Validation(format!(
+            return Err(Validation(format!(
                 "try_from_broadcast_payload: f64 buffer truncated reading state_at_capture at \
                  stage {stage} (need {state_len}, have {})",
                 f64_buf.len() - *f64_cursor
@@ -291,7 +297,7 @@ impl CapturedBasis {
         *f64_cursor += state_len;
 
         Ok(Some(Self {
-            basis: cobre_solver::Basis {
+            basis: Basis {
                 col_status,
                 row_status,
             },
@@ -390,7 +396,7 @@ pub(crate) struct BackwardAccumulators {
     /// Per-worker per-opening solver-statistics accumulator (length
     /// `n_openings`). Re-initialised once per stage; merged into the per-stage
     /// `Vec<SolverStatsDelta>` in `BackwardResult::stage_stats`.
-    pub(crate) per_opening_stats: Vec<crate::solver_stats::SolverStatsDelta>,
+    pub(crate) per_opening_stats: Vec<SolverStatsDelta>,
     /// Per-opening scratch for state-fixing-row duals; grows to `indexer.n_state`.
     pub(crate) state_duals_buf: Vec<f64>,
     /// Per-opening scratch for cut-row duals; grows to
@@ -411,10 +417,10 @@ pub(crate) struct BackwardAccumulators {
     pub(crate) dcs_initial_resident: Vec<u32>,
     /// Per-opening before-solve statistics snapshot, filled via `statistics_into`
     /// (reusing the histogram allocation) and diffed against `stats_after_buf`.
-    pub(crate) stats_before_buf: cobre_solver::SolverStatistics,
+    pub(crate) stats_before_buf: SolverStatistics,
     /// Per-opening after-solve statistics snapshot; counterpart to
     /// `stats_before_buf`.
-    pub(crate) stats_after_buf: cobre_solver::SolverStatistics,
+    pub(crate) stats_after_buf: SolverStatistics,
 }
 
 impl BackwardAccumulators {
@@ -443,8 +449,8 @@ impl BackwardAccumulators {
             risk_scratch: RiskMeasureScratch::new(),
             dcs_solve,
             dcs_initial_resident: Vec::with_capacity(initial_pool_capacity),
-            stats_before_buf: cobre_solver::SolverStatistics::default(),
-            stats_after_buf: cobre_solver::SolverStatistics::default(),
+            stats_before_buf: SolverStatistics::default(),
+            stats_after_buf: SolverStatistics::default(),
         }
     }
 }
@@ -568,7 +574,7 @@ pub struct SolverWorkspace<S: SolverInterface> {
     /// `backward_wall_ms` → `WORKER_TIMING_SLOT_BWD_WALL`,
     /// `bwd_setup_ms` → `WORKER_TIMING_SLOT_BWD_SETUP`,
     /// `fwd_setup_ms` → `WORKER_TIMING_SLOT_FWD_SETUP`.
-    pub worker_timing_buf: cobre_core::WorkerPhaseTimings,
+    pub worker_timing_buf: WorkerPhaseTimings,
 }
 
 impl<S: SolverInterface> SolverWorkspace<S> {
@@ -599,7 +605,7 @@ impl<S: SolverInterface> SolverWorkspace<S> {
                 sizing.initial_pool_capacity,
                 sizing.n_state,
             ),
-            worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+            worker_timing_buf: WorkerPhaseTimings::default(),
         }
     }
 }
@@ -722,7 +728,7 @@ impl<S: SolverInterface> WorkspacePool<S> {
                         sizing.initial_pool_capacity,
                         sizing.n_state,
                     ),
-                    worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+                    worker_timing_buf: WorkerPhaseTimings::default(),
                 }
             })
             .collect();
@@ -773,7 +779,7 @@ impl<S: SolverInterface> WorkspacePool<S> {
                     sizing.initial_pool_capacity,
                     sizing.n_state,
                 ),
-                worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+                worker_timing_buf: WorkerPhaseTimings::default(),
             });
         }
         Ok(Self { workspaces })
@@ -893,7 +899,7 @@ impl BasisStore {
         let mut offset = 0usize;
 
         for w in 0..n_workers {
-            let (start, end) = crate::solve::partition(total_scenarios, n_workers, w);
+            let (start, end) = partition(total_scenarios, n_workers, w);
             let count = end - start;
             let chunk = count * self.num_stages;
             let (bases_left, bases_rest) = bases_rem.split_at_mut(chunk);

@@ -3,11 +3,13 @@
 //! Single home for the noise→RHS transforms so a fix to one applies to every
 //! call site (forward, backward, lower-bound).
 
+use cobre_core::commissioning::commissioning_active;
 use cobre_core::temporal::StageLagTransition;
 use cobre_solver::SolverInterface;
 use cobre_stochastic::par::lag_kernel::{LagMajor, advance_lag_chain};
 use cobre_stochastic::{StochasticContext, evaluate_par_batch, solve_par_noise_batch};
 
+use crate::indexer::StateLayout;
 use crate::{
     InflowNonNegativityMethod,
     context::{StageContext, TrainingContext},
@@ -230,7 +232,7 @@ pub(crate) fn accumulate_and_shift_lag_state(
     state: &mut [f64],
     incoming_lags: &[f64],
     unscaled_primal: &[f64],
-    layout: &crate::indexer::StateLayout,
+    layout: &StateLayout,
     stage_lag: &StageLagTransition,
     lag: &mut LagAccumState<'_>,
     ds: &mut DownstreamAccumState<'_>,
@@ -412,7 +414,7 @@ pub(crate) fn gather_dense_ncs_bounds(
         "upper_src too short for windows: every slot strides by block_count",
     );
     for (slot, &(entry, exit)) in windows.iter().enumerate() {
-        if cobre_core::commissioning::commissioning_active(entry, exit, stage_id) {
+        if commissioning_active(entry, exit, stage_id) {
             let base = slot * block_count;
             lower_out.extend_from_slice(&lower_src[base..base + block_count]);
             upper_out.extend_from_slice(&upper_src[base..base + block_count]);

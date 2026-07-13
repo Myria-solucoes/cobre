@@ -1279,17 +1279,12 @@ fn non_filling_hydro_membership_bit_identical_across_stages() {
     // The `FphaMixFixtures` hydros are all non-filling (one FPHA at system
     // index 1, two constant), so its membership must be invariant to stage_id.
     let fixtures = FphaMixFixtures::new();
-    let reference_fpha = {
+    let (reference_fpha, reference_evap) = {
         let ctx = fixtures.make_ctx();
         let stage = stage_with_id(0);
         let state = state_layout_for(&ctx);
-        StageLayout::new(&ctx, &state, &stage, 0).fpha_hydro_indices
-    };
-    let reference_evap = {
-        let ctx = fixtures.make_ctx();
-        let stage = stage_with_id(0);
-        let state = state_layout_for(&ctx);
-        StageLayout::new(&ctx, &state, &stage, 0).evap_hydro_indices
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+        (layout.fpha_hydro_indices, layout.evap_hydro_indices)
     };
 
     // The non-filling FPHA hydro is at system index 1; evaporation is empty.

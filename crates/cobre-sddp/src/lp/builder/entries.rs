@@ -10,6 +10,13 @@ use super::M3S_TO_HM3;
 use super::delivery_ring::DeliveryRing;
 use super::fpha_cursor::for_each_fpha_plane;
 use super::layout::{StageLayout, TemplateBuildCtx};
+use crate::generic_constraints::CascadeRefs;
+use crate::generic_constraints::ContractRefs;
+use crate::generic_constraints::EntityPositionMaps;
+use crate::generic_constraints::PumpingRefs;
+use crate::generic_constraints::contract_family_slot;
+
+use std::ops::Range;
 
 /// The one dense anticipated-thermal ring (`n_lanes = n_anticipated`,
 /// slot-major/plant-minor) every anticipated call site shares — the single owner
@@ -338,7 +345,7 @@ fn fill_parallel_water_entries(
 /// Each downstream plant's contiguous bucket sub-range (relative to
 /// `transit_buckets_out`/`transit_buckets_in`'s own start), in
 /// `transit_bucket_column_order`'s plant-major order.
-pub(super) fn transit_bucket_plant_ranges(state: &StateLayout) -> Vec<std::ops::Range<usize>> {
+pub(super) fn transit_bucket_plant_ranges(state: &StateLayout) -> Vec<Range<usize>> {
     let order = &state.transit_bucket_column_order;
     let mut ranges = Vec::new();
     let mut start = 0;
@@ -357,10 +364,7 @@ pub(super) fn transit_bucket_plant_ranges(state: &StateLayout) -> Vec<std::ops::
 /// One plant's [`DeliveryRing`] (`n_lanes = 1`) over its LOCAL bucket sub-`range`
 /// (relative to `transit_buckets_out`/`transit_buckets_in`'s own start) — the single
 /// owner of the ragged-to-dense addressing every bucket call site shares.
-pub(super) fn transit_bucket_ring(
-    state: &StateLayout,
-    range: std::ops::Range<usize>,
-) -> DeliveryRing {
+pub(super) fn transit_bucket_ring(state: &StateLayout, range: Range<usize>) -> DeliveryRing {
     let depth = range.len();
     DeliveryRing::new(
         state.transit_buckets_out.start + range.start..state.transit_buckets_out.start + range.end,
@@ -467,10 +471,7 @@ fn fill_arc_release_block_entries(
 /// The bucket sub-range `[start, end)` (relative to `transit_buckets_out`/
 /// `transit_buckets_in`'s own start) for downstream plant `plant_idx`, or `None` when
 /// it declares no incoming arc.
-fn plant_transit_bucket_range(
-    state: &StateLayout,
-    plant_idx: usize,
-) -> Option<std::ops::Range<usize>> {
+fn plant_transit_bucket_range(state: &StateLayout, plant_idx: usize) -> Option<Range<usize>> {
     let start = state
         .transit_bucket_column_order
         .iter()
@@ -1035,8 +1036,7 @@ pub(super) fn fill_load_balance_entries(
     // stored price sign; flipping it would make an export feed the bus. Written for every
     // contract: a dormant contract's column is `[0, 0]`.
     for (c_sys, contract) in ctx.contracts.iter().enumerate() {
-        let (contract_type, family_slot) =
-            crate::generic_constraints::contract_family_slot(ctx.contracts, c_sys);
+        let (contract_type, family_slot) = contract_family_slot(ctx.contracts, c_sys);
         let (base, sign) = match contract_type {
             ContractType::Import => (layout.equipment.col_contract_import_start, 1.0),
             ContractType::Export => (layout.equipment.col_contract_export_start, -1.0),
@@ -1221,22 +1221,22 @@ pub(super) fn fill_generic_constraint_entries(
     }
 
     let geom = layout.resolver_geom();
-    let positions = crate::generic_constraints::EntityPositionMaps {
+    let positions = EntityPositionMaps {
         hydro: &ctx.hydro_pos,
         thermal: &ctx.thermal_pos,
         bus: &ctx.bus_pos,
         line: &ctx.line_pos,
     };
-    let cascade_refs = crate::generic_constraints::CascadeRefs {
+    let cascade_refs = CascadeRefs {
         cascade: ctx.cascade,
         diversion_upstream: &ctx.diversion_upstream,
     };
-    let pumping_refs = crate::generic_constraints::PumpingRefs {
+    let pumping_refs = PumpingRefs {
         col_pumping_start: layout.equipment.col_pumping_start,
         pumping_stations: ctx.pumping_stations,
         pumping_pos: &ctx.pumping_pos,
     };
-    let contract_refs = crate::generic_constraints::ContractRefs {
+    let contract_refs = ContractRefs {
         contracts: ctx.contracts,
         contract_pos: &ctx.contract_pos,
     };

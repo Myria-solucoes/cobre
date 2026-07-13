@@ -19,6 +19,9 @@ use std::time::Instant;
 
 use cobre_comm::Communicator;
 use cobre_core::TrainingEvent;
+use cobre_solver::ActiveProfile;
+use cobre_solver::FreezeScratch;
+use cobre_solver::freeze_rows_into_template;
 use cobre_solver::{RowBatch, SolverInterface, StageTemplate};
 use cobre_stochastic::context::ClassSchemes;
 use cobre_stochastic::{
@@ -26,6 +29,8 @@ use cobre_stochastic::{
 };
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 
+use crate::simulation::pipeline::SimScenarioLoadSpec;
+use crate::solver_phase::Phase::Simulation;
 use crate::{
     FutureCostFunction,
     context::{StageContext, TrainingContext},
@@ -171,7 +176,7 @@ impl SimulationState {
                 row_lower: Vec::new(),
                 row_upper: Vec::new(),
             },
-            freeze_scratch: cobre_solver::FreezeScratch::new(),
+            freeze_scratch: FreezeScratch::new(),
         }
     }
 
@@ -201,7 +206,7 @@ impl SimulationState {
         inputs: &mut SimulationInputs<'_, S, C>,
     ) -> Result<SimulationRunResult, SimulationError>
     where
-        S: SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
+        S: SolverInterface<Profile = ActiveProfile> + Send,
     {
         let training_ctx = inputs.training_ctx;
         let TrainingContext {
@@ -271,7 +276,7 @@ impl SimulationState {
         // Apply the simulation solver profile before the parallel region. For CLP
         // this selects the primal simplex, which eliminates the dual simplex's
         // false-infeasibility on the warm-started, fully-frozen cut-laden LPs.
-        let simulation_profile = crate::solver_phase::Phase::Simulation.profile();
+        let simulation_profile = Simulation.profile();
         for ws in inputs.workspaces.iter_mut() {
             ws.solver.set_profile(&simulation_profile);
         }
@@ -397,7 +402,7 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
         let global_scenario = SIMULATION_SEED_OFFSET.saturating_add(scenario_id);
 
         let stats_before = ws.solver.statistics();
-        let load_spec = crate::simulation::pipeline::SimScenarioLoadSpec {
+        let load_spec = SimScenarioLoadSpec {
             frozen_templates: params.frozen_templates,
             stage_bases: params.stage_bases,
         };
@@ -520,12 +525,7 @@ fn refreeze_templates_if_needed(
             &ctx.templates[t].col_scale,
         );
         let mut frozen = StageTemplate::empty();
-        cobre_solver::freeze_rows_into_template(
-            &ctx.templates[t],
-            freeze_batch,
-            &mut frozen,
-            freeze_scratch,
-        );
+        freeze_rows_into_template(&ctx.templates[t], freeze_batch, &mut frozen, freeze_scratch);
         owned.push(frozen);
     }
     *owned_frozen = Some(owned);

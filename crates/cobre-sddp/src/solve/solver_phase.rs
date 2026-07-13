@@ -19,10 +19,11 @@
 //! trait is local and the implemented profile types are foreign, which the
 //! orphan rule permits.
 
+#[cfg(feature = "highs")]
+use cobre_solver::HighsProfile;
+use cobre_solver::{ActiveProfile, DEFAULT_PROFILE_HEURISTIC_SENTINEL};
 #[cfg(feature = "clp")]
 use cobre_solver::{ClpAlgorithm, ClpProfile};
-#[cfg(feature = "highs")]
-use cobre_solver::{DEFAULT_PROFILE_HEURISTIC_SENTINEL, HighsProfile};
 
 /// The three algorithmic phases of the SDDP algorithm.
 ///
@@ -106,7 +107,7 @@ impl PhaseProfiles for ClpProfile {
         scaling: 0,
         primal_feasibility_tolerance: 1e-9,
         dual_feasibility_tolerance: 1e-9,
-        simplex_iteration_limit: cobre_solver::DEFAULT_PROFILE_HEURISTIC_SENTINEL,
+        simplex_iteration_limit: DEFAULT_PROFILE_HEURISTIC_SENTINEL,
         algorithm: ClpAlgorithm::Dual,
         dual_pricing_mode: 1,         // full dual steepest-edge
         factorization_frequency: 200, // refactor cadence
@@ -116,7 +117,7 @@ impl PhaseProfiles for ClpProfile {
         scaling: 0,
         primal_feasibility_tolerance: 1e-9,
         dual_feasibility_tolerance: 1e-9,
-        simplex_iteration_limit: cobre_solver::DEFAULT_PROFILE_HEURISTIC_SENTINEL,
+        simplex_iteration_limit: DEFAULT_PROFILE_HEURISTIC_SENTINEL,
         algorithm: ClpAlgorithm::Dual,
         dual_pricing_mode: 1,         // full dual steepest-edge
         factorization_frequency: 200, // refactor cadence
@@ -131,7 +132,7 @@ impl PhaseProfiles for ClpProfile {
         scaling: 0,
         primal_feasibility_tolerance: 1e-9,
         dual_feasibility_tolerance: 1e-9,
-        simplex_iteration_limit: cobre_solver::DEFAULT_PROFILE_HEURISTIC_SENTINEL,
+        simplex_iteration_limit: DEFAULT_PROFILE_HEURISTIC_SENTINEL,
         algorithm: ClpAlgorithm::Primal,
         dual_pricing_mode: 1,         // full dual steepest-edge
         factorization_frequency: 200, // refactor cadence
@@ -181,15 +182,15 @@ pub const SIMULATION_PROFILE: HighsProfile = HighsProfile {
 };
 
 impl Phase {
-    /// Returns the [`cobre_solver::ActiveProfile`] to apply when entering this
+    /// Returns the [`ActiveProfile`] to apply when entering this
     /// phase, delegating to the active backend's [`PhaseProfiles`] impl. Pass it
     /// to `ProfiledSolver::set_profile` at phase entry.
     #[must_use]
-    pub fn profile(self) -> cobre_solver::ActiveProfile {
+    pub fn profile(self) -> ActiveProfile {
         match self {
-            Phase::Forward => <cobre_solver::ActiveProfile as PhaseProfiles>::FORWARD,
-            Phase::Backward => <cobre_solver::ActiveProfile as PhaseProfiles>::BACKWARD,
-            Phase::Simulation => <cobre_solver::ActiveProfile as PhaseProfiles>::SIMULATION,
+            Phase::Forward => <ActiveProfile as PhaseProfiles>::FORWARD,
+            Phase::Backward => <ActiveProfile as PhaseProfiles>::BACKWARD,
+            Phase::Simulation => <ActiveProfile as PhaseProfiles>::SIMULATION,
         }
     }
 }

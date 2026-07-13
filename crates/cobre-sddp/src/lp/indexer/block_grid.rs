@@ -64,7 +64,15 @@ impl BlockGrid {
 
     /// Flat block-major address: `start + entity * n_blks + blk`.
     ///
-    /// Entity OUTER (stride `n_blks`), block INNER.
+    /// Entity OUTER (stride `n_blks`), block INNER. A swapped
+    /// `flat(start, blk, entity)` call passing a bare `usize` in the block
+    /// slot fails to compile — the block operand requires [`BlockIdx`]:
+    ///
+    /// ```compile_fail
+    /// use cobre_sddp::indexer::BlockGrid;
+    ///
+    /// BlockGrid::new(2, 1).flat(0, 1, 2usize); // block operand requires BlockIdx, not usize
+    /// ```
     #[inline]
     #[must_use]
     pub fn flat(&self, start: usize, entity: usize, blk: BlockIdx) -> usize {

@@ -12,6 +12,8 @@ use cobre_comm::Communicator;
 use cobre_solver::{RowBatch, SolverError, SolverInterface};
 use cobre_stochastic::{evaluate_par_batch, solve_par_noise_batch};
 
+use crate::cut::CutRowMap;
+use crate::cut::row::append_new_cuts_to_lp;
 use crate::{
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
@@ -65,7 +67,7 @@ pub struct LbEvalScratchBundle<'a> {
     /// Stage-0 cut row batch for the lower-bound LP.
     pub lb_cut_batch: &'a mut RowBatch,
     /// Cut row map for append-only lower-bound LP management.
-    pub lb_cut_row_map: Option<&'a mut crate::cut::CutRowMap>,
+    pub lb_cut_row_map: Option<&'a mut CutRowMap>,
     /// Noise/NCS-transform scratch, shared in shape with every other solve site.
     pub noise_scratch: &'a mut ScratchBuffers,
     /// Rank-0 risk-measure aggregation scratch.
@@ -79,7 +81,7 @@ impl<'a> LbEvalScratchBundle<'a> {
     pub fn from_scratch_fields(
         patch_buf: &'a mut PatchBuffer,
         lb_cut_batch: &'a mut RowBatch,
-        lb_cut_row_map: Option<&'a mut crate::cut::CutRowMap>,
+        lb_cut_row_map: Option<&'a mut CutRowMap>,
         noise_scratch: &'a mut ScratchBuffers,
         lb_scratch: &'a mut LbEvalScratch,
     ) -> Self {
@@ -100,7 +102,7 @@ fn lb_init_rank0<S: SolverInterface>(
     ctx: &StageContext<'_>,
     training_ctx: &TrainingContext<'_>,
     lb_cut_batch: &mut RowBatch,
-    lb_cut_row_map: Option<&mut crate::cut::CutRowMap>,
+    lb_cut_row_map: Option<&mut CutRowMap>,
 ) {
     let state_layout = training_ctx.state;
     let cut_state = &training_ctx.cut_state_layouts[0];
@@ -112,7 +114,7 @@ fn lb_init_rank0<S: SolverInterface>(
         if row_map.total_cut_rows() == 0 {
             solver.load_model(template);
         }
-        crate::cut::row::append_new_cuts_to_lp(
+        append_new_cuts_to_lp(
             solver,
             fcf,
             0,

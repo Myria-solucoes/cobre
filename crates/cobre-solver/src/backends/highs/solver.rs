@@ -2,6 +2,11 @@
 //! `highs_version` free function. The warm-start `solve_inner` orchestration is
 //! determinism-sensitive.
 
+use crate::ffi::cobre_highs_version_major;
+use crate::ffi::cobre_highs_version_minor;
+use crate::ffi::cobre_highs_version_patch;
+#[cfg(feature = "test-support")]
+use std::ffi::CStr;
 use std::os::raw::c_void;
 use std::time::Instant;
 
@@ -530,9 +535,9 @@ pub fn highs_version() -> String {
     // SAFETY: These are pure query functions with no arguments. The HiGHS C API
     // documents them as safe to call without any prior initialisation; they read
     // only compile-time constants embedded in the library.
-    let major = unsafe { crate::ffi::cobre_highs_version_major() };
-    let minor = unsafe { crate::ffi::cobre_highs_version_minor() };
-    let patch = unsafe { crate::ffi::cobre_highs_version_patch() };
+    let major = unsafe { cobre_highs_version_major() };
+    let minor = unsafe { cobre_highs_version_minor() };
+    let patch = unsafe { cobre_highs_version_patch() };
     format!("{major}.{minor}.{patch}")
 }
 
@@ -551,7 +556,7 @@ impl HighsSolver {
     /// not store the pointer beyond that lifetime, must not call
     /// `cobre_highs_destroy` on it, and must not alias it across threads.
     #[must_use]
-    pub fn raw_handle(&self) -> *mut std::os::raw::c_void {
+    pub fn raw_handle(&self) -> *mut c_void {
         self.handle
     }
 
@@ -580,7 +585,7 @@ impl HighsSolver {
     /// Returns `None` if the option name is unknown to `HiGHS`; `Some(value)`
     /// on success.
     #[must_use]
-    pub fn get_double_option(&self, option: &std::ffi::CStr) -> Option<f64> {
+    pub fn get_double_option(&self, option: &CStr) -> Option<f64> {
         let mut out = 0.0_f64;
         // SAFETY: handle is valid non-null HiGHS pointer; option is a valid
         // null-terminated C string borrowed for the duration of the call;
@@ -600,7 +605,7 @@ impl HighsSolver {
     /// Returns `None` if the option name is unknown to `HiGHS`; `Some(value)`
     /// on success.
     #[must_use]
-    pub fn get_int_option(&self, option: &std::ffi::CStr) -> Option<i32> {
+    pub fn get_int_option(&self, option: &CStr) -> Option<i32> {
         let mut out = 0_i32;
         // SAFETY: handle is valid non-null HiGHS pointer; option is a valid
         // null-terminated C string borrowed for the duration of the call;

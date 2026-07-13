@@ -6,7 +6,7 @@
 //!
 //! [`StochasticError::InvalidParParameters`]: crate::StochasticError::InvalidParParameters
 
-use cobre_core::scenario::InflowModel;
+use cobre_core::InflowModel;
 
 use crate::StochasticError;
 

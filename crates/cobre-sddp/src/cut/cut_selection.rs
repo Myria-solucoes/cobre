@@ -44,7 +44,10 @@
 
 use rayon::prelude::*;
 
+use crate::cut::CutPool;
 use crate::gemm::gemm_block;
+
+use cobre_io::config::RowSelectionConfig;
 
 /// Number of trial points evaluated per `crate::gemm::gemm_block` call.
 ///
@@ -84,7 +87,7 @@ pub struct CutMetadata {
 /// Set of cut activity updates at a single stage.
 ///
 /// The caller applies the changes to the activity bitmap via
-/// [`crate::cut::CutPool::apply_updates`].
+/// [`CutPool::apply_updates`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct CutActivityUpdates {
     /// Stage index (0-based) that this update set belongs to.
@@ -256,7 +259,7 @@ impl CutSelectionStrategy {
     #[must_use]
     pub fn select(
         &self,
-        pool: &crate::cut::CutPool,
+        pool: &CutPool,
         visited_states: &[f64],
         current_iteration: u64,
     ) -> CutActivityUpdates {
@@ -280,7 +283,7 @@ impl CutSelectionStrategy {
     #[must_use]
     pub fn select_for_stage(
         &self,
-        pool: &crate::cut::CutPool,
+        pool: &CutPool,
         visited_states: &[f64],
         current_iteration: u64,
         stage_index: u32,
@@ -475,7 +478,7 @@ fn validate_check_frequency(check_frequency: u32) -> Result<u32, String> {
     Ok(check_frequency)
 }
 
-/// Parse a [`cobre_io::config::RowSelectionConfig`] into an optional
+/// Parse a [`RowSelectionConfig`] into an optional
 /// [`CutSelectionStrategy`].
 ///
 /// Returns `None` when `selection` is absent (row selection disabled).
@@ -491,7 +494,7 @@ fn validate_check_frequency(check_frequency: u32) -> Result<u32, String> {
 ///
 /// [`SelectionMethod`]: cobre_io::config::SelectionMethod
 pub fn parse_cut_selection_config(
-    config: &cobre_io::config::RowSelectionConfig,
+    config: &RowSelectionConfig,
 ) -> Result<Option<CutSelectionStrategy>, String> {
     use cobre_io::config::SelectionMethod;
 

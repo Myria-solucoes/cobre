@@ -7,9 +7,9 @@
 
 use std::collections::HashMap;
 
+use cobre_core::Stage;
 use cobre_core::entities::NonControllableSource;
 use cobre_core::resolved::ResolvedNcsFactors;
-use cobre_core::temporal::Stage;
 
 use crate::scenarios::NcsFactorEntry;
 

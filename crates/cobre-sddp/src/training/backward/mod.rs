@@ -52,8 +52,11 @@
 //! deterministic FCF insertion regardless of thread completion order.
 
 use cobre_solver::RowBatch;
+use cobre_solver::StageTemplate;
 
 use crate::{cut::pool::CutPool, indexer::CutStateProjection, solver_stats::SolverStatsDelta};
+
+use std::ops::Range;
 
 mod duals_extraction;
 mod lp_setup;
@@ -162,7 +165,7 @@ pub(crate) struct StagedCut {
     /// rayon worker that produced this cut; the FCF merge resolves the slice
     /// after the parallel region returns via
     /// `workspaces[w].backward_accum.agg_arena[coefficients_range]`.
-    pub(crate) coefficients_range: std::ops::Range<usize>,
+    pub(crate) coefficients_range: Range<usize>,
 
     /// Global forward-pass index (`fwd_offset + m`), stored as `u32` for the
     /// FCF slot formula.
@@ -193,7 +196,7 @@ pub(crate) struct SuccessorSpec<'a> {
     pub(crate) template_num_rows: usize,
     /// Frozen LP template for the successor stage. Always populated — freeze
     /// is complete before the backward pass begins.
-    pub(crate) frozen_template: &'a cobre_solver::StageTemplate,
+    pub(crate) frozen_template: &'a StageTemplate,
     /// Ordered slot indices of the active cuts at the successor stage.
     pub(crate) successor_active_slots: &'a [usize],
     /// Minimum dual multiplier for a cut to count as binding.

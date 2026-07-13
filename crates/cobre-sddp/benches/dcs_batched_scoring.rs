@@ -15,6 +15,7 @@
     clippy::doc_markdown
 )]
 
+use cobre_core::StageStateConfig;
 use cobre_sddp::cut::{CutPool, CutRowMap};
 use cobre_sddp::cut_selection::CutMetadata;
 use cobre_sddp::dcs::{DcsParams, DcsScoringScratch, score_violated_candidates};
@@ -191,7 +192,7 @@ fn bench_one(c: &mut Criterion, k: usize, n_state: usize) {
     let state = StateLayout::new(n_state, 0, 0, Vec::new(), 0, 0, vec![], &vec![0; n_state]);
     let cut_state = CutStateProjection::new(
         &state,
-        cobre_core::temporal::StageStateConfig {
+        StageStateConfig {
             storage: true,
             inflow_lags: true,
         },

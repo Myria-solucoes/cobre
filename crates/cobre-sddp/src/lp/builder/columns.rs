@@ -1,3 +1,4 @@
+use cobre_core::commissioning::commissioning_active;
 use cobre_core::{ContractType, Stage};
 
 use crate::hydro_models::{EvaporationModel, ResolvedProductionModel};
@@ -8,6 +9,7 @@ use crate::indexer::{
 
 use super::EVAPORATION_FLOW_SAFETY_MARGIN;
 use super::layout::{StageLayout, TemplateBuildCtx};
+use crate::generic_constraints::contract_family_slot;
 
 /// Mutable column-bound and objective buffers shared by all fill helpers.
 pub(super) struct ColumnBufs<'a> {
@@ -331,11 +333,7 @@ pub(super) fn fill_thermal_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     for (t_idx, thermal) in ctx.thermals.iter().enumerate() {
-        let active = cobre_core::commissioning::commissioning_active(
-            thermal.entry_stage_id,
-            thermal.exit_stage_id,
-            stage.id,
-        );
+        let active = commissioning_active(thermal.entry_stage_id, thermal.exit_stage_id, stage.id);
         let tb = ctx.resolved.bounds.thermal_bounds(t_idx, stage_idx);
         let marginal_cost_per_mwh = tb.cost_per_mwh;
         let is_anticipated =
@@ -465,11 +463,7 @@ fn fill_line_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     for (l_idx, line) in ctx.lines.iter().enumerate() {
-        let active = cobre_core::commissioning::commissioning_active(
-            line.entry_stage_id,
-            line.exit_stage_id,
-            stage.id,
-        );
+        let active = commissioning_active(line.entry_stage_id, line.exit_stage_id, stage.id);
         let lb = ctx.resolved.bounds.line_bounds(l_idx, stage_idx);
         let lp = ctx.resolved.penalties.line_penalties(l_idx, stage_idx);
         for blk in 0..layout.n_blks {
@@ -771,11 +765,7 @@ fn fill_ncs_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     for (ncs_sys_idx, ncs) in ctx.non_controllable_sources.iter().enumerate() {
-        let active = cobre_core::commissioning::commissioning_active(
-            ncs.entry_stage_id,
-            ncs.exit_stage_id,
-            stage.id,
-        );
+        let active = commissioning_active(ncs.entry_stage_id, ncs.exit_stage_id, stage.id);
         let avail_gen = ctx
             .resolved
             .resolved_ncs_bounds
@@ -818,11 +808,7 @@ pub(super) fn fill_pumping_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     for (p_sys, station) in ctx.pumping_stations.iter().enumerate() {
-        let active = cobre_core::commissioning::commissioning_active(
-            station.entry_stage_id,
-            station.exit_stage_id,
-            stage.id,
-        );
+        let active = commissioning_active(station.entry_stage_id, station.exit_stage_id, stage.id);
         let pb = ctx.resolved.bounds.pumping_bounds(p_sys, stage_idx);
         for blk in (0..layout.n_blks).map(BlockIdx::new) {
             let col = layout
@@ -860,14 +846,10 @@ fn fill_contract_columns(
 ) {
     let grid = layout.block_grid();
     for (c_sys, contract) in ctx.contracts.iter().enumerate() {
-        let active = cobre_core::commissioning::commissioning_active(
-            contract.entry_stage_id,
-            contract.exit_stage_id,
-            stage.id,
-        );
+        let active =
+            commissioning_active(contract.entry_stage_id, contract.exit_stage_id, stage.id);
         let cb = ctx.resolved.bounds.contract_bounds(c_sys, stage_idx);
-        let (contract_type, family_slot) =
-            crate::generic_constraints::contract_family_slot(ctx.contracts, c_sys);
+        let (contract_type, family_slot) = contract_family_slot(ctx.contracts, c_sys);
         let (base, family_count) = match contract_type {
             ContractType::Import => (
                 layout.equipment.col_contract_import_start,

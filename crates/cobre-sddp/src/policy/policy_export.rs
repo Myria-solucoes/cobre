@@ -6,7 +6,9 @@
 
 #![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
+use crate::visited_states::VisitedStatesArchive;
 use cobre_core::System;
+use cobre_core::Thermal;
 use cobre_core::commissioning::{commissioning_active, hydro_operating_active};
 use cobre_io::output::policy::{
     ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL, EntitySlot, PolicyBasisRecord, PolicyCutRecord,
@@ -62,7 +64,7 @@ pub fn build_stage_entity_manifest(
     let n = global_layout.hydro_count;
     let n_anticipated = global_layout.n_anticipated;
     let hydros = system.hydros();
-    let anticipated_thermals: Vec<&cobre_core::Thermal> = system
+    let anticipated_thermals: Vec<&Thermal> = system
         .thermals()
         .iter()
         .filter(|t| t.anticipated_config.is_some())
@@ -366,7 +368,7 @@ pub fn build_stage_basis_records<'a>(
 /// carry, attached to stage `t`'s states payload.
 #[must_use]
 pub fn build_stage_states_payloads<'a>(
-    archive: Option<&'a crate::visited_states::VisitedStatesArchive>,
+    archive: Option<&'a VisitedStatesArchive>,
     stage_manifests: &'a [Vec<EntitySlot>],
 ) -> Vec<StageStatesPayload<'a>> {
     let Some(archive) = archive else {

@@ -25,6 +25,8 @@ use super::{
     EVAP_COLS_PER_HYDRO, EVAP_F_MINUS_OFFSET, EVAP_F_PLUS_OFFSET, EVAP_FLOW_OFFSET,
     GenericConstraintRowEntry, M3S_TO_HM3,
 };
+use crate::generic_constraints::expression_is_block_independent;
+use crate::resolved_parameters::ResolvedParameters;
 
 /// Pre-resolved bound, penalty, and factor tables shared across all stages.
 pub(crate) struct ResolvedTables<'a> {
@@ -44,7 +46,7 @@ pub(crate) struct ResolvedTables<'a> {
     pub(crate) resolved_ncs_factors: &'a ResolvedNcsFactors,
     /// `(parameter_id, stage_idx)` → resolved `f64`, queried for a
     /// [`cobre_core::CoefficientRef::Parameter`] term.
-    pub(crate) resolved_parameters: &'a crate::resolved_parameters::ResolvedParameters,
+    pub(crate) resolved_parameters: &'a ResolvedParameters,
 }
 
 /// System-level context shared across all stages during template construction.
@@ -945,8 +947,7 @@ fn enumerate_generic_constraint_rows(
             .resolved_generic_bounds
             .bounds_for_stage(constraint_idx, stage.id);
 
-        let collapse_stage_level =
-            crate::generic_constraints::expression_is_block_independent(&constraint.expression);
+        let collapse_stage_level = expression_is_block_independent(&constraint.expression);
 
         // Bind the constraint-invariant fields once so the three arms below stay
         // field-for-field identical (only per-row fields vary).

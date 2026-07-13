@@ -23,6 +23,8 @@
 //! println!("forward_passes = {:?}", cfg.training.forward_passes);
 //! ```
 
+use serde_json::Map;
+use serde_json::Value;
 pub mod estimation;
 pub mod exports;
 pub mod modeling;
@@ -390,8 +392,8 @@ impl Config {
     /// - [`LoadError::SchemaError`] if the merged value fails to deserialize into
     ///   [`Config`] (e.g. an unknown field) or fails `validate_config`.
     pub fn with_overrides(
-        base: &serde_json::Value,
-        overrides: &serde_json::Map<String, serde_json::Value>,
+        base: &Value,
+        overrides: &Map<String, Value>,
     ) -> Result<Config, LoadError> {
         if !base.is_object() {
             return Err(LoadError::SchemaError {
@@ -426,11 +428,7 @@ impl Config {
     /// Returns [`LoadError::SchemaError`] (with `field` set to the offending
     /// `dotted_key`) when any path segment is empty — i.e. an empty key, a leading or
     /// trailing dot, or a doubled dot such as `"training..seed"`.
-    fn set_dotted(
-        target: &mut serde_json::Value,
-        dotted_key: &str,
-        value: serde_json::Value,
-    ) -> Result<(), LoadError> {
+    fn set_dotted(target: &mut Value, dotted_key: &str, value: Value) -> Result<(), LoadError> {
         let segments: Vec<&str> = dotted_key.split('.').collect();
         if segments.iter().any(|s| s.is_empty()) {
             return Err(LoadError::SchemaError {

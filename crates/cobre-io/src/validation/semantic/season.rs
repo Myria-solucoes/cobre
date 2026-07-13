@@ -3,6 +3,9 @@
 use std::collections::{HashMap, HashSet};
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
+use crate::stages::SUB_PERIOD_TOLERANCE_DAYS;
+
+use cobre_core::SeasonMap;
 
 // ── Rules 27+29: Season ID range coverage and resolution consistency ──────────
 
@@ -69,7 +72,7 @@ pub(super) fn check_season_id_consistency(data: &ParsedData, ctx: &mut Validatio
         debug_assert!(!members.is_empty(), "guarded by len() >= 2 above");
         let min_d = members.iter().map(|&(_, d)| d).min().unwrap_or(0);
         let max_d = members.iter().map(|&(_, d)| d).max().unwrap_or(0);
-        if max_d - min_d > crate::stages::SUB_PERIOD_TOLERANCE_DAYS {
+        if max_d - min_d > SUB_PERIOD_TOLERANCE_DAYS {
             let mut details_parts: Vec<String> = members
                 .iter()
                 .map(|&(id, d)| format!("stage {id} ({d}d)"))
@@ -231,7 +234,7 @@ pub(super) fn check_observation_season_alignment(data: &ParsedData, ctx: &mut Va
 /// coefficients pre-computed).
 pub(super) fn check_season_observation_coverage(
     data: &ParsedData,
-    season_map: &cobre_core::temporal::SeasonMap,
+    season_map: &SeasonMap,
     ctx: &mut ValidationContext,
 ) {
     use cobre_core::scenario::SamplingScheme;
@@ -301,7 +304,7 @@ pub(super) fn check_season_observation_coverage(
 /// any stage, helping users detect accidental gaps.
 pub(super) fn check_season_contiguity(
     data: &ParsedData,
-    season_map: &cobre_core::temporal::SeasonMap,
+    season_map: &SeasonMap,
     ctx: &mut ValidationContext,
 ) {
     let referenced_ids: HashSet<usize> = data

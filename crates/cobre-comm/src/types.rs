@@ -2,6 +2,7 @@
 //!
 //! Provides shared types for all backends: [`ReduceOp`], [`CommError`], [`BackendError`].
 
+use std::error::Error;
 /// Element-wise reduction operations for `allreduce`, mapping to MPI ops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReduceOp {
@@ -102,7 +103,7 @@ pub enum BackendError {
         /// Name of the backend that failed to initialize (e.g., `"mpi"`).
         backend: String,
         /// The underlying error from the backend initialization.
-        source: Box<dyn std::error::Error + Send + Sync>,
+        source: Box<dyn Error + Send + Sync>,
     },
 
     /// Required environment variables for the selected backend are not set.

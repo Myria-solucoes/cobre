@@ -5,6 +5,7 @@
 //! [`LocalCommunicator`](crate::LocalCommunicator) with identity-copy semantics
 //! for data-moving operations and no-op semantics for synchronization.
 
+use crate::ExecutionTopology;
 use crate::{CommData, CommError, Communicator, ReduceOp};
 
 #[cfg(feature = "shared-memory")]
@@ -236,7 +237,7 @@ impl crate::TopologyProvider for LocalBackend {
     ///
     /// Stored in a process-wide `OnceLock` because `LocalBackend` is a ZST with
     /// no per-instance storage to hold it.
-    fn topology(&self) -> &crate::ExecutionTopology {
+    fn topology(&self) -> &ExecutionTopology {
         use std::sync::OnceLock;
 
         use crate::BackendKind;

@@ -1,6 +1,7 @@
 //! Energy-conversion builder: derives the [`EnergyConversionSet`] for the case.
 
 use std::collections::HashMap;
+use std::hash::BuildHasher;
 
 use cobre_core::{CascadeTopology, EntityId, Hydro, HydroGenerationModel, StageId, StudyPos};
 use cobre_io::{HydroGeometryRow, HydroReferenceVolumeFractions};
@@ -8,6 +9,9 @@ use cobre_io::{HydroGeometryRow, HydroReferenceVolumeFractions};
 use super::productivity_override::HydroEnergyProductivityOverride;
 use super::types::{EnergyConversion, EnergyConversionError, EnergyConversionSet};
 use crate::fpha_fitting::{ForebayTable, evaluate_losses, evaluate_tailrace};
+use crate::hydro_models::ProductionModelSet;
+use crate::hydro_models::ResolvedProductionModel::ConstantProductivity;
+use crate::hydro_models::ResolvedProductionModel::Fpha;
 
 /// Build the [`EnergyConversionSet`] for the case.
 ///
@@ -32,14 +36,14 @@ use crate::fpha_fitting::{ForebayTable, evaluate_losses, evaluate_tailrace};
 /// - [`EnergyConversionError::CascadeIndexMismatch`] — cascade built from different hydro set.
 /// - [`EnergyConversionError::DanglingDownstream`] — dangling downstream reference.
 #[allow(clippy::missing_errors_doc)]
-pub fn build_energy_conversion_set<S: std::hash::BuildHasher>(
+pub fn build_energy_conversion_set<S: BuildHasher>(
     hydros: &[Hydro],
     stage_ids: &[StageId],
     cascade: &CascadeTopology,
     reference_volume_fractions: &HydroReferenceVolumeFractions,
     vha_rows_by_hydro: &HashMap<EntityId, Vec<HydroGeometryRow>, S>,
     override_table: Option<&HydroEnergyProductivityOverride>,
-    production_models: Option<&crate::hydro_models::ProductionModelSet>,
+    production_models: Option<&ProductionModelSet>,
 ) -> Result<EnergyConversionSet, EnergyConversionError> {
     let n_hydros = hydros.len();
     let n_stages = stage_ids.len();
@@ -95,10 +99,8 @@ pub fn build_energy_conversion_set<S: std::hash::BuildHasher>(
                 0.0
             } else {
                 production_models.map_or(0.0, |pm| match pm.model(h_idx, stage_pos) {
-                    crate::hydro_models::ResolvedProductionModel::ConstantProductivity {
-                        productivity,
-                    } => *productivity,
-                    crate::hydro_models::ResolvedProductionModel::Fpha { .. } => 0.0,
+                    ConstantProductivity { productivity } => *productivity,
+                    Fpha { .. } => 0.0,
                 })
             };
             let mut conversion =

@@ -10,6 +10,9 @@ use std::path::Path;
 use super::atomic::write_json_atomic;
 use super::error::OutputError;
 
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+
 /// Write a model provenance report as pretty-printed JSON, atomically.
 ///
 /// Generic over `Serialize` so the report struct stays in the calling algorithm
@@ -19,10 +22,7 @@ use super::error::OutputError;
 ///
 /// Returns [`OutputError::IoError`] on filesystem failures, or
 /// [`OutputError::SerializationError`] if JSON serialization fails.
-pub fn write_provenance_report(
-    path: &Path,
-    report: &impl serde::Serialize,
-) -> Result<(), OutputError> {
+pub fn write_provenance_report(path: &Path, report: &impl Serialize) -> Result<(), OutputError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| OutputError::io(parent, e))?;
     }
@@ -42,9 +42,7 @@ pub fn write_provenance_report(
 /// [`std::io::ErrorKind::NotFound`], so callers can treat the section as absent
 /// and degrade gracefully. Returns [`OutputError::ManifestError`] if the file
 /// contains malformed JSON.
-pub fn read_provenance_report<T: serde::de::DeserializeOwned>(
-    path: &Path,
-) -> Result<T, OutputError> {
+pub fn read_provenance_report<T: DeserializeOwned>(path: &Path) -> Result<T, OutputError> {
     let content = std::fs::read_to_string(path).map_err(|e| OutputError::io(path, e))?;
     serde_json::from_str(&content).map_err(|e| OutputError::ManifestError {
         manifest_type: "model_provenance".to_string(),

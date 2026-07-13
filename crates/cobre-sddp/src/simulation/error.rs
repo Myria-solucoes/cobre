@@ -5,6 +5,8 @@
 
 use crate::SddpError;
 
+use cobre_stochastic::StochasticError;
+
 /// Errors that can occur during simulation execution.
 #[derive(Debug, thiserror::Error)]
 pub enum SimulationError {
@@ -57,7 +59,7 @@ pub enum SimulationError {
 
     /// Forward sampler construction or sampling failure.
     #[error("stochastic error: {0}")]
-    Stochastic(#[from] cobre_stochastic::StochasticError),
+    Stochastic(#[from] StochasticError),
 
     /// Invalid configuration passed to `simulate`, e.g. frozen-template slice length
     /// does not match `num_stages`.

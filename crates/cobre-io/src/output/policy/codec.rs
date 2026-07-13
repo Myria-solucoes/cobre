@@ -20,6 +20,8 @@ use super::records::{
     StageStatesReadResult,
 };
 
+use std::path::Path;
+
 // ── FlatBuffers vtable slot offsets ──────────────────────────────────────────
 //
 // The slot 12 gap on `Cut` is the deprecated `domination_count` field; it MUST
@@ -804,7 +806,7 @@ pub fn deserialize_stage_states(buf: &[u8]) -> Result<StageStatesReadResult, Out
 /// The returned `Vec` is unsorted — callers must sort by `stage_id` after this call
 /// (`read_dir` order is not guaranteed; sorting upholds declaration-order invariance).
 pub(super) fn read_sorted_bin_files<T, F>(
-    dir: &std::path::Path,
+    dir: &Path,
     ctx: &str,
     deser_fn: F,
 ) -> Result<Vec<T>, OutputError>

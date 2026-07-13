@@ -18,8 +18,6 @@ use cobre_core::{EntityId, StudyPos};
 /// `(hydro_id, stage_pos)` pair, built via [`build_hydro_reference_volumes_resolved`].
 #[derive(Debug, Clone)]
 pub struct HydroReferenceVolumeFractions {
-    // `get` returns a present key's value directly — no formula is applied here;
-    // the caller already resolved the declared input against the plant band.
     resolved_hm3: HashMap<(EntityId, usize), f64>,
     default_value: f64,
 }
@@ -29,10 +27,10 @@ impl HydroReferenceVolumeFractions {
     /// scalar default for an unpopulated key.
     #[must_use]
     pub fn get(&self, hydro_id: EntityId, stage_pos: StudyPos) -> f64 {
-        if let Some(&v) = self.resolved_hm3.get(&(hydro_id, stage_pos.0)) {
-            return v;
-        }
-        self.default_value
+        self.resolved_hm3
+            .get(&(hydro_id, stage_pos.0))
+            .copied()
+            .unwrap_or(self.default_value)
     }
 }
 

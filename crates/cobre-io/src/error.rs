@@ -4,6 +4,7 @@
 //! internal parsing function. Each variant carries enough context for the caller to
 //! produce a diagnostic message without re-reading the input files.
 
+use std::io::Error;
 use std::path::{Path, PathBuf};
 
 /// Errors that can occur during case loading.
@@ -33,7 +34,7 @@ pub enum LoadError {
         /// Path to the file that could not be read.
         path: PathBuf,
         /// Underlying I/O error.
-        source: std::io::Error,
+        source: Error,
     },
 
     /// JSON or Parquet parsing failure (malformed content, encoding error).
@@ -115,7 +116,7 @@ impl LoadError {
     /// let err = LoadError::io("system/hydros.json", io_err);
     /// assert!(err.to_string().contains("system/hydros.json"));
     /// ```
-    pub fn io(path: impl AsRef<Path>, source: std::io::Error) -> Self {
+    pub fn io(path: impl AsRef<Path>, source: Error) -> Self {
         Self::IoError {
             path: path.as_ref().to_path_buf(),
             source,

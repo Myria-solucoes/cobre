@@ -1,6 +1,9 @@
 //! Accessor methods and context builders for [`StudySetup`].
 
+use cobre_core::System;
+use cobre_core::commissioning::commissioning_active;
 use cobre_core::scenario::SamplingScheme;
+use cobre_io::EntitySlot;
 
 use crate::{
     context::{StageContext, TrainingContext},
@@ -12,6 +15,8 @@ use crate::{
 };
 
 use super::StudySetup;
+use crate::dcs::DcsParams;
+use crate::policy_export::build_stage_entity_manifest;
 
 impl StudySetup {
     /// Replace the FCF with a pre-loaded policy.
@@ -79,12 +84,9 @@ impl StudySetup {
     ///
     /// `system` is passed explicitly because [`StudySetup`] does not own it.
     #[must_use]
-    pub fn build_terminal_entity_manifest(
-        &self,
-        system: &cobre_core::System,
-    ) -> Vec<cobre_io::EntitySlot> {
+    pub fn build_terminal_entity_manifest(&self, system: &System) -> Vec<EntitySlot> {
         let terminal_idx = self.stage_data.cut_state_layouts.len() - 1;
-        crate::policy_export::build_stage_entity_manifest(
+        build_stage_entity_manifest(
             system,
             &self.stage_data.state,
             &self.stage_data.cut_state_layouts[terminal_idx],
@@ -113,9 +115,7 @@ impl StudySetup {
             .map(|stage| {
                 self.ncs_stochastic_windows
                     .iter()
-                    .map(|&(entry, exit)| {
-                        !cobre_core::commissioning::commissioning_active(entry, exit, stage.id)
-                    })
+                    .map(|&(entry, exit)| !commissioning_active(entry, exit, stage.id))
                     .collect()
             })
             .collect()
@@ -247,7 +247,7 @@ impl StudySetup {
                 .cut_management
                 .cut_selection
                 .as_ref()
-                .and_then(crate::dcs::DcsParams::from_strategy),
+                .and_then(DcsParams::from_strategy),
         }
     }
 }

@@ -1,5 +1,6 @@
 //! Error types for the `cobre-sddp` crate.
 
+use cobre_comm::CommError;
 use cobre_io::LoadError;
 use cobre_io::scenarios::estimation::EstimationError;
 use cobre_solver::SolverError;
@@ -32,7 +33,7 @@ pub enum SddpError {
 
     /// A distributed communication operation failed.
     #[error("communication error: {0}")]
-    Communication(#[from] cobre_comm::CommError),
+    Communication(#[from] CommError),
 
     /// Stochastic model construction or scenario generation failed.
     #[error("stochastic error: {0}")]

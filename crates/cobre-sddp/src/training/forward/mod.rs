@@ -13,6 +13,7 @@
 use std::sync::mpsc::Sender;
 
 use cobre_core::TrainingEvent;
+use cobre_solver::ActiveProfile;
 use cobre_solver::{SolverInterface, StageTemplate};
 
 use crate::{
@@ -189,7 +190,7 @@ pub fn run_forward_pass<S>(
     records: &mut [TrajectoryRecord],
 ) -> Result<ForwardResult, SddpError>
 where
-    S: SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
+    S: SolverInterface<Profile = ActiveProfile> + Send,
 {
     use crate::forward_pass_state::{ForwardPassInputs, ForwardPassState};
     let n_workers = workspaces.len().max(1);

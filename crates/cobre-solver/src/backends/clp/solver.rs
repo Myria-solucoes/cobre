@@ -5,6 +5,7 @@ use std::os::raw::c_void;
 use std::time::Instant;
 
 use super::config::ClpProfile;
+use crate::Basis;
 use crate::{
     DEFAULT_PROFILE_HEURISTIC_SENTINEL, clp_ffi,
     types::{SolutionView, SolverError, SolverStatistics},
@@ -209,7 +210,7 @@ impl ClpSolver {
     ///
     /// Panics if `b.col_status.len() != self.num_cols`; the LP column count is
     /// fixed at `load_model`, so a column mismatch is a genuine shape bug.
-    pub(super) fn install_basis(&mut self, b: &crate::Basis) -> Result<(), SolverError> {
+    pub(super) fn install_basis(&mut self, b: &Basis) -> Result<(), SolverError> {
         // CLP's per-element setters silently accept an inconsistent offered basis
         // and `Clp_dual` repairs it, so — unlike `HighsSolver::solve` — there is no
         // consistency check and no `SolverError::BasisInconsistent` surface here.
