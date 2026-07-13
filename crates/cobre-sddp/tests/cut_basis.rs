@@ -1567,7 +1567,12 @@ mod warm_start {
         let checkpoint = read_policy_checkpoint(&policy_dir).expect("read checkpoint");
         let mut setup_phase2 = build_setup(&case_dir, &config_full);
 
+        let proof = cobre_sddp::test_support::trivial_full_fcf_proof(
+            checkpoint.metadata.state_dimension,
+            checkpoint.metadata.num_stages,
+        );
         let warm_fcf = FutureCostFunction::new_with_warm_start(
+            &proof,
             &checkpoint.stage_cuts,
             setup_phase2.loop_params.forward_passes,
             setup_phase2.loop_params.max_iterations.saturating_add(1),
@@ -1622,7 +1627,12 @@ mod warm_start {
 
         // Capacity must match from_broadcast_params's saturating_add(1) or the slot
         // layout diverges.
+        let proof = cobre_sddp::test_support::trivial_full_fcf_proof(
+            checkpoint.metadata.state_dimension,
+            checkpoint.metadata.num_stages,
+        );
         let warm_fcf = FutureCostFunction::new_with_warm_start(
+            &proof,
             &checkpoint.stage_cuts,
             setup_warm.loop_params.forward_passes,
             setup_warm.loop_params.max_iterations.saturating_add(1),

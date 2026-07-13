@@ -26,6 +26,9 @@ use crate::hydro_models::{
 use crate::indexer::{CutStateProjection, StateLayout, StudyDimensions, ThermalSys};
 use crate::lead_time::AnticipatedResolution;
 use crate::lp_builder::{ResolvedTables, StageGeometry, StageLayout, TemplateBuildCtx};
+use crate::policy::policy_load::{
+    FullFcf, PolicyLoadProof, PolicyStageManifest, validate_policy_load,
+};
 use crate::resolved_parameters::ResolvedParameters;
 use cobre_solver::StageTemplate;
 
@@ -579,4 +582,30 @@ pub fn study_dims_for(dims: &GeometryDims) -> StudyDimensions {
         anticipated_thermal_indices: dims.anticipated_thermal_indices.clone(),
         n_pumping: 0,
     }
+}
+
+/// Trivial matching [`PolicyLoadProof`] typed to [`FullFcf`] for tests
+/// exercising FCF reconstruction rather than cross-study compatibility: identical
+/// `state_dimension`/`num_stages` on both sides with an empty manifest (the
+/// "identity could not be verified" warning path). [`validate_policy_load`] is
+/// the only constructor of [`PolicyLoadProof`], so tests route through it here
+/// rather than a forged literal.
+///
+/// # Panics
+///
+/// Never in practice — see the rationale below.
+#[allow(clippy::expect_used)]
+// Rationale: matching state_dimension/num_stages with an empty manifest on
+// both sides cannot hit validate_policy_load's error paths (state_dimension
+// and num_stages equality hold trivially; an empty manifest short-circuits
+// identity comparison with a warning, never an error).
+#[must_use]
+pub fn trivial_full_fcf_proof(state_dimension: u32, num_stages: u32) -> PolicyLoadProof<FullFcf> {
+    let manifest = PolicyStageManifest {
+        state_dimension,
+        num_stages,
+        slots: &[],
+    };
+    validate_policy_load::<FullFcf>(&manifest, &manifest)
+        .expect("trivial matching manifest cannot fail validate_policy_load")
 }

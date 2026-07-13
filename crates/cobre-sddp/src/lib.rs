@@ -135,8 +135,9 @@ pub use lp::builder::build_stage_templates_resolving_layout;
 pub use lp::builder::{StageTemplates, build_stage_templates};
 // ── policy_load ───────────────────────────────────────────────────────────────
 pub use policy::policy_load::{
-    CompatibilityReport, PolicyLoadKind, PolicyStageManifest, build_basis_cache_from_checkpoint,
-    compare_manifest_slot_identity, inject_boundary_cuts, load_boundary_cuts, validate_policy_load,
+    BoundaryInjection, FullFcf, PolicyLoadKind, PolicyLoadProof, PolicyStageManifest,
+    ValidatedBoundaryCuts, build_basis_cache_from_checkpoint, compare_manifest_slot_identity,
+    inject_boundary_cuts, load_boundary_cuts, validate_policy_load,
 };
 // ── provenance ────────────────────────────────────────────────────────────────
 pub use policy::provenance::{

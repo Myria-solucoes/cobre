@@ -138,7 +138,11 @@ mod simulation_only {
             "stage_cuts count must match"
         );
 
-        let loaded_fcf = FutureCostFunction::from_deserialized(&checkpoint.stage_cuts)
+        let proof = cobre_sddp::test_support::trivial_full_fcf_proof(
+            checkpoint.metadata.state_dimension,
+            checkpoint.metadata.num_stages,
+        );
+        let loaded_fcf = FutureCostFunction::from_deserialized(&proof, &checkpoint.stage_cuts)
             .expect("from_deserialized");
 
         assert_eq!(

@@ -2,9 +2,15 @@
 //!
 //! [`validate_policy_load`] is the single entry point for compatibility
 //! validation; every load path (full-FCF warm-start/resume/simulation-only and
-//! boundary-cut injection) routes through it.
+//! boundary-cut injection) routes through it and returns a [`PolicyLoadProof`]
+//! kind-typed to [`FullFcf`] or [`BoundaryInjection`] — the only way to obtain
+//! one, so [`FutureCostFunction::new_with_warm_start`],
+//! [`FutureCostFunction::from_deserialized`], and [`inject_boundary_cuts`]
+//! cannot compile against unvalidated data.
 //!
 //! [`FutureCostFunction`]: crate::FutureCostFunction
+//! [`FutureCostFunction::new_with_warm_start`]: crate::FutureCostFunction::new_with_warm_start
+//! [`FutureCostFunction::from_deserialized`]: crate::FutureCostFunction::from_deserialized
 
 use cobre_io::EntitySlot;
 use cobre_io::OwnedPolicyBasisRecord;
@@ -19,6 +25,8 @@ use crate::cut::pool::CutPool;
 use crate::setup::StudySetup;
 use crate::workspace::CapturedBasis;
 
+use std::marker::PhantomData;
+use std::ops::Deref;
 use std::path::Path;
 
 /// Resolve the per-stage warm-start cut counts from a loaded policy checkpoint.
@@ -67,44 +75,71 @@ pub struct PolicyStageManifest<'a> {
     pub slots: &'a [EntitySlot],
 }
 
-/// Which policy-load path is being validated; selects the `num_stages` rule in
-/// [`validate_policy_load`]'s check matrix (`state_dimension` and per-slot
-/// identity are checked unconditionally on both variants).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PolicyLoadKind {
-    /// Full future-cost-function load (warm-start, resume, simulation-only):
-    /// `num_stages` must match `current` exactly.
-    FullFcf,
-    /// Single-stage boundary-cut injection into the terminal pool: `num_stages`
-    /// is unchecked (a monthly source may feed a weekly+monthly current study).
-    BoundaryInjection,
+mod sealed {
+    pub trait Sealed {}
 }
 
-/// Non-fatal findings from [`validate_policy_load`]; warnings never abort the load.
-#[derive(Debug, Clone, Default)]
-pub struct CompatibilityReport {
+/// Selects [`validate_policy_load`]'s check matrix (`state_dimension` and
+/// per-slot identity are checked unconditionally for every kind). Sealed so
+/// [`FullFcf`] and [`BoundaryInjection`] are the only implementors, making a
+/// [`PolicyLoadProof<K>`] a proof of validation under exactly one real kind —
+/// never a third, uncatalogued one.
+pub trait PolicyLoadKind: sealed::Sealed {
+    /// Whether `num_stages` equality is hard-rejected for this kind.
+    const CHECK_NUM_STAGES: bool;
+}
+
+/// Full future-cost-function load (warm-start, resume, simulation-only):
+/// `num_stages` must match `current` exactly.
+#[derive(Debug, Clone, Copy)]
+pub struct FullFcf;
+
+impl sealed::Sealed for FullFcf {}
+impl PolicyLoadKind for FullFcf {
+    const CHECK_NUM_STAGES: bool = true;
+}
+
+/// Single-stage boundary-cut injection into the terminal pool: `num_stages`
+/// is unchecked (a monthly source may feed a weekly+monthly current study).
+#[derive(Debug, Clone, Copy)]
+pub struct BoundaryInjection;
+
+impl sealed::Sealed for BoundaryInjection {}
+impl PolicyLoadKind for BoundaryInjection {
+    const CHECK_NUM_STAGES: bool = false;
+}
+
+/// Unforgeable, kind-typed evidence that [`validate_policy_load`] accepted a
+/// `source`/`current` pair for load kind `K`. The private marker field means a
+/// struct literal cannot be written outside this module, so a consumer
+/// requiring `&PolicyLoadProof<K>` cannot compile against unvalidated data —
+/// and a proof typed to the wrong `K` cannot substitute, since `K` is a
+/// distinct type per kind.
+#[derive(Debug)]
+pub struct PolicyLoadProof<K: PolicyLoadKind> {
     /// Human-readable warning messages, in emission order.
     pub warnings: Vec<String>,
+    _kind: PhantomData<K>,
 }
 
 /// Validate that `source`'s state layout is compatible with `current`'s, per
-/// `kind`'s check matrix: `state_dimension` equality and per-slot identity
-/// (delegated to [`compare_manifest_slot_identity`]) are hard-rejected on both
-/// variants; `num_stages` equality is hard-rejected only on
-/// [`PolicyLoadKind::FullFcf`]. `col_scale`/scaling is never a compatibility
-/// dimension. This is the single entry point for policy-load validation; every
-/// load path calls it.
+/// `K`'s check matrix: `state_dimension` equality and per-slot identity
+/// (delegated to [`compare_manifest_slot_identity`]) are hard-rejected for
+/// every kind; `num_stages` equality is hard-rejected only when
+/// `K::CHECK_NUM_STAGES` ([`FullFcf`]). `col_scale`/scaling is never a
+/// compatibility dimension. This is the single entry point for policy-load
+/// validation — its success is the only way to construct a
+/// [`PolicyLoadProof<K>`], so every load path routes through it.
 ///
 /// # Errors
 ///
 /// Returns [`SddpError::Validation`] on a `state_dimension` mismatch, a
-/// `num_stages` mismatch under [`PolicyLoadKind::FullFcf`], or a per-slot
-/// identity mismatch (see [`compare_manifest_slot_identity`]).
-pub fn validate_policy_load(
+/// `num_stages` mismatch under [`FullFcf`], or a per-slot identity mismatch
+/// (see [`compare_manifest_slot_identity`]).
+pub fn validate_policy_load<K: PolicyLoadKind>(
     source: &PolicyStageManifest<'_>,
     current: &PolicyStageManifest<'_>,
-    kind: PolicyLoadKind,
-) -> Result<CompatibilityReport, SddpError> {
+) -> Result<PolicyLoadProof<K>, SddpError> {
     if source.state_dimension != current.state_dimension {
         return Err(SddpError::Validation(format!(
             "policy state_dimension mismatch: policy has {}, current system has {}",
@@ -112,7 +147,7 @@ pub fn validate_policy_load(
         )));
     }
 
-    if kind == PolicyLoadKind::FullFcf && source.num_stages != current.num_stages {
+    if K::CHECK_NUM_STAGES && source.num_stages != current.num_stages {
         return Err(SddpError::Validation(format!(
             "policy num_stages mismatch: policy has {}, current system has {}",
             source.num_stages, current.num_stages
@@ -124,7 +159,10 @@ pub fn validate_policy_load(
         warnings.push(msg.to_string());
     })?;
 
-    Ok(CompatibilityReport { warnings })
+    Ok(PolicyLoadProof {
+        warnings,
+        _kind: PhantomData,
+    })
 }
 
 /// Build a basis cache from deserialized checkpoint basis records.
@@ -293,7 +331,9 @@ pub fn compare_manifest_slot_identity(
 /// empty manifest (pre-manifest checkpoint) leaves the `state_dimension` check
 /// standing and warns; a `was_active == false` boundary slot whose current
 /// counterpart is active warns and loads. Delegates to [`validate_policy_load`]
-/// with [`PolicyLoadKind::BoundaryInjection`] for the per-slot identity reject.
+/// typed to [`BoundaryInjection`] for the per-slot identity reject, and wraps
+/// the result in a [`ValidatedBoundaryCuts`] — the sole constructor
+/// [`inject_boundary_cuts`] accepts.
 ///
 /// # Errors
 ///
@@ -309,7 +349,7 @@ pub fn load_boundary_cuts(
     current_state_dimension: u32,
     current_manifest: &[EntitySlot],
     on_warning: &mut dyn FnMut(&str),
-) -> Result<Vec<OwnedPolicyCutRecord>, SddpError> {
+) -> Result<ValidatedBoundaryCuts, SddpError> {
     let checkpoint = read_policy_checkpoint(boundary_path).map_err(|e| {
         SddpError::Validation(format!(
             "failed to read boundary policy checkpoint at {}: {e}",
@@ -344,21 +384,56 @@ pub fn load_boundary_cuts(
         num_stages: checkpoint.metadata.num_stages,
         slots: current_manifest,
     };
-    let report = validate_policy_load(&source, &current, PolicyLoadKind::BoundaryInjection)?;
-    for warning in &report.warnings {
+    let proof = validate_policy_load::<BoundaryInjection>(&source, &current)?;
+    for warning in &proof.warnings {
         on_warning(warning);
     }
 
-    Ok(stage_result.cuts.clone())
+    Ok(ValidatedBoundaryCuts {
+        records: stage_result.cuts.clone(),
+    })
+}
+
+/// Boundary cut records that passed [`validate_policy_load`]'s
+/// [`BoundaryInjection`] check matrix. The private field means the only way to
+/// obtain one is [`load_boundary_cuts`], so [`inject_boundary_cuts`] cannot
+/// compile against a bare, unvalidated `Vec<OwnedPolicyCutRecord>`. Derefs to
+/// `[OwnedPolicyCutRecord]` for read access.
+#[derive(Debug, Clone)]
+pub struct ValidatedBoundaryCuts {
+    records: Vec<OwnedPolicyCutRecord>,
+}
+
+impl Deref for ValidatedBoundaryCuts {
+    type Target = [OwnedPolicyCutRecord];
+
+    fn deref(&self) -> &Self::Target {
+        &self.records
+    }
 }
 
 /// Inject boundary cuts into the terminal stage of the study's FCF.
 ///
 /// Replaces the terminal stage's [`CutPool`] with one pre-populated from
-/// `boundary_records`, retaining capacity for new training cuts. The resulting
+/// `boundary_cuts`, retaining capacity for new training cuts. The resulting
 /// nonzero `warm_start_count` is what makes the forward pass treat the terminal
 /// stage as boundary-loaded (`terminal_has_boundary_cuts`) and skip theta zeroing.
-pub fn inject_boundary_cuts(setup: &mut StudySetup, boundary_records: &[OwnedPolicyCutRecord]) {
+///
+/// `boundary_cuts` must come from [`load_boundary_cuts`] — its private field
+/// means a bare `Vec<OwnedPolicyCutRecord>`/slice cannot substitute, so an
+/// unvalidated boundary load cannot compile.
+///
+/// ```compile_fail
+/// use cobre_sddp::{StudySetup, inject_boundary_cuts};
+///
+/// fn call_with_bare_records(
+///     setup: &mut StudySetup,
+///     records: &[cobre_io::OwnedPolicyCutRecord],
+/// ) {
+///     inject_boundary_cuts(setup, records); // bare records, not ValidatedBoundaryCuts
+/// }
+/// ```
+pub fn inject_boundary_cuts(setup: &mut StudySetup, boundary_cuts: &ValidatedBoundaryCuts) {
     let fcf = &mut setup.fcf;
     let terminal_idx = fcf.pools.len() - 1;
     let state_dimension = fcf.state_dimension;
@@ -376,7 +451,7 @@ pub fn inject_boundary_cuts(setup: &mut StudySetup, boundary_records: &[OwnedPol
         state_dimension,
         forward_passes,
         max_iterations,
-        boundary_records,
+        boundary_cuts,
     );
 }
 
@@ -386,8 +461,8 @@ mod tests {
     use cobre_io::{EntitySlot, PolicyCheckpointMetadata, StageCutsPayload};
 
     use super::{
-        PolicyLoadKind, PolicyStageManifest, compare_manifest_slot_identity, load_boundary_cuts,
-        resolve_warm_start_counts, validate_policy_load,
+        BoundaryInjection, FullFcf, PolicyStageManifest, compare_manifest_slot_identity,
+        load_boundary_cuts, resolve_warm_start_counts, validate_policy_load,
     };
     use crate::SddpError;
 
@@ -501,7 +576,7 @@ mod tests {
             returned_intercepts, intercepts,
             "intercepts should match written values"
         );
-        for cut in &cuts {
+        for cut in cuts.iter() {
             assert_eq!(
                 cut.coefficients.len(),
                 10,
@@ -930,7 +1005,7 @@ mod tests {
             slots: &slots,
         };
 
-        let report = validate_policy_load(&source, &current, PolicyLoadKind::FullFcf).unwrap();
+        let report = validate_policy_load::<FullFcf>(&source, &current).unwrap();
 
         assert!(
             report.warnings.is_empty(),
@@ -954,7 +1029,7 @@ mod tests {
             slots: &slots,
         };
 
-        let result = validate_policy_load(&source, &current, PolicyLoadKind::FullFcf);
+        let result = validate_policy_load::<FullFcf>(&source, &current);
 
         assert!(result.is_err(), "state_dimension mismatch must reject");
         let msg = result.unwrap_err().to_string();
@@ -979,7 +1054,7 @@ mod tests {
             slots: &slots,
         };
 
-        let full_fcf_result = validate_policy_load(&source, &current, PolicyLoadKind::FullFcf);
+        let full_fcf_result = validate_policy_load::<FullFcf>(&source, &current);
         assert!(
             full_fcf_result.is_err(),
             "num_stages mismatch must reject FullFcf"
@@ -989,8 +1064,7 @@ mod tests {
         assert!(msg.contains("12"), "should include source value: {msg}");
         assert!(msg.contains("24"), "should include current value: {msg}");
 
-        let boundary_result =
-            validate_policy_load(&source, &current, PolicyLoadKind::BoundaryInjection);
+        let boundary_result = validate_policy_load::<BoundaryInjection>(&source, &current);
         assert!(
             boundary_result.is_ok(),
             "num_stages is unchecked under BoundaryInjection: {boundary_result:?}"
@@ -1014,7 +1088,7 @@ mod tests {
             slots: &slots,
         };
 
-        let result = validate_policy_load(&source, &current, PolicyLoadKind::FullFcf);
+        let result = validate_policy_load::<FullFcf>(&source, &current);
 
         assert!(result.is_err(), "both-dimension mismatch must reject");
         let msg = result.unwrap_err().to_string();
@@ -1041,7 +1115,7 @@ mod tests {
             slots: &current_slots,
         };
 
-        let result = validate_policy_load(&source, &current, PolicyLoadKind::FullFcf);
+        let result = validate_policy_load::<FullFcf>(&source, &current);
 
         assert!(result.is_err(), "slot identity mismatch must reject");
         let msg = result.unwrap_err().to_string();
@@ -1073,7 +1147,7 @@ mod tests {
             slots: &current_slots,
         };
 
-        let result = validate_policy_load(&source, &current, PolicyLoadKind::BoundaryInjection);
+        let result = validate_policy_load::<BoundaryInjection>(&source, &current);
 
         assert!(result.is_err(), "slot identity mismatch must reject");
         let msg = result.unwrap_err().to_string();
@@ -1097,7 +1171,7 @@ mod tests {
             slots: &current_slots,
         };
 
-        let report = validate_policy_load(&source, &current, PolicyLoadKind::FullFcf).unwrap();
+        let report = validate_policy_load::<FullFcf>(&source, &current).unwrap();
 
         assert_eq!(report.warnings.len(), 1, "absence must surface one warning");
         assert!(

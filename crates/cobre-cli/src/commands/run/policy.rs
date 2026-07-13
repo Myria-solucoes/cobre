@@ -11,8 +11,9 @@ use cobre_io::PolicyMode::Fresh;
 use cobre_io::PolicyMode::Resume;
 use cobre_io::PolicyMode::WarmStart;
 use cobre_io::output::policy::read_policy_checkpoint;
+use cobre_sddp::FullFcf;
 use cobre_sddp::FutureCostFunction;
-use cobre_sddp::PolicyLoadKind::FullFcf;
+use cobre_sddp::PolicyLoadProof;
 use cobre_sddp::PolicyStageManifest;
 use cobre_sddp::StudySetup;
 use cobre_sddp::TrainingResult;
@@ -28,17 +29,22 @@ use super::RunContext;
 /// Load a policy checkpoint from disk and validate its compatibility.
 ///
 /// Validation is unconditional: every warm-start, resume, and simulation-only
-/// load routes through [`cobre_sddp::validate_policy_load`] with
-/// [`cobre_sddp::PolicyLoadKind::FullFcf`], checking `state_dimension` and
-/// `num_stages`, then the checkpoint terminal manifest against the current
-/// study's terminal manifest — rejecting a same-dimension-different-entity
-/// policy the dims check alone would pass.
+/// load routes through [`cobre_sddp::validate_policy_load`] typed to
+/// [`FullFcf`], checking `state_dimension` and `num_stages`, then the
+/// checkpoint terminal manifest against the current study's terminal manifest
+/// — rejecting a same-dimension-different-entity policy the dims check alone
+/// would pass. Returns the checkpoint alongside the resulting
+/// [`PolicyLoadProof<FullFcf>`], the sole credential
+/// [`FutureCostFunction::new_with_warm_start`](cobre_sddp::FutureCostFunction::new_with_warm_start)
+/// and
+/// [`FutureCostFunction::from_deserialized`](cobre_sddp::FutureCostFunction::from_deserialized)
+/// accept.
 fn load_and_validate_checkpoint(
     ctx: &RunContext<impl Communicator>,
     policy_dir: &Path,
     system: &System,
     setup: &StudySetup,
-) -> Result<cobre_io::PolicyCheckpoint, CliError> {
+) -> Result<(cobre_io::PolicyCheckpoint, PolicyLoadProof<FullFcf>), CliError> {
     let checkpoint = read_policy_checkpoint(policy_dir).map_err(|e| CliError::Internal {
         message: format!("failed to read policy checkpoint: {e}"),
     })?;
@@ -69,25 +75,28 @@ fn load_and_validate_checkpoint(
         num_stages: n_stages,
         slots: &current_manifest,
     };
-    let report = validate_policy_load(&source, &current, FullFcf).map_err(CliError::from)?;
+    let proof = validate_policy_load::<FullFcf>(&source, &current).map_err(CliError::from)?;
 
     if ctx.is_root && !ctx.quiet {
-        for msg in &report.warnings {
+        for msg in &proof.warnings {
             let _ = ctx.stderr.write_line(&format!("warning: {msg}"));
         }
     }
 
-    Ok(checkpoint)
+    Ok((checkpoint, proof))
 }
 
 /// Build the warm-start FCF from a loaded checkpoint and seed the basis cache.
-/// Shared by the warm-start and resume paths.
+/// Shared by the warm-start and resume paths. `proof` is the credential
+/// [`load_and_validate_checkpoint`] produced for this same `checkpoint`.
 fn load_checkpoint_into_setup(
     checkpoint: &cobre_io::PolicyCheckpoint,
+    proof: &PolicyLoadProof<FullFcf>,
     setup: &mut StudySetup,
 ) -> Result<(), CliError> {
     // Reserve one extra slot for cuts added in the final iteration.
     let warm_fcf = FutureCostFunction::new_with_warm_start(
+        proof,
         &checkpoint.stage_cuts,
         setup.loop_params.forward_passes,
         setup.loop_params.max_iterations.saturating_add(1),
@@ -132,8 +141,9 @@ pub(super) fn apply_training_policy(
                     .stderr
                     .write_line("Loading prior policy for warm-start training...");
             }
-            let checkpoint = load_and_validate_checkpoint(ctx, &policy_dir, system, setup)?;
-            load_checkpoint_into_setup(&checkpoint, setup)?;
+            let (checkpoint, proof) =
+                load_and_validate_checkpoint(ctx, &policy_dir, system, setup)?;
+            load_checkpoint_into_setup(&checkpoint, &proof, setup)?;
             if ctx.is_root && !ctx.quiet {
                 let warm_count = setup.fcf.pools[0].warm_start_count;
                 let _ = ctx.stderr.write_line(&format!(
@@ -157,7 +167,8 @@ pub(super) fn apply_training_policy(
                     .stderr
                     .write_line("Loading prior checkpoint for resume training...");
             }
-            let checkpoint = load_and_validate_checkpoint(ctx, &policy_dir, system, setup)?;
+            let (checkpoint, proof) =
+                load_and_validate_checkpoint(ctx, &policy_dir, system, setup)?;
             let completed = u64::from(checkpoint.metadata.completed_iterations);
             if completed >= setup.loop_params.max_iterations && ctx.is_root && !ctx.quiet {
                 let _ = ctx.stderr.write_line(&format!(
@@ -166,7 +177,7 @@ pub(super) fn apply_training_policy(
                     setup.loop_params.max_iterations
                 ));
             }
-            load_checkpoint_into_setup(&checkpoint, setup)?;
+            load_checkpoint_into_setup(&checkpoint, &proof, setup)?;
             setup.set_start_iteration(completed);
             if ctx.is_root && !ctx.quiet {
                 let warm_count = setup.fcf.pools[0].warm_start_count;
@@ -242,10 +253,10 @@ pub(super) fn load_policy_for_simulation(
         });
     }
 
-    let checkpoint = load_and_validate_checkpoint(ctx, &policy_dir, system, setup)?;
+    let (checkpoint, proof) = load_and_validate_checkpoint(ctx, &policy_dir, system, setup)?;
 
-    let loaded_fcf =
-        FutureCostFunction::from_deserialized(&checkpoint.stage_cuts).map_err(CliError::from)?;
+    let loaded_fcf = FutureCostFunction::from_deserialized(&proof, &checkpoint.stage_cuts)
+        .map_err(CliError::from)?;
     setup.replace_fcf(loaded_fcf);
 
     let basis_cache = build_basis_cache_from_checkpoint(

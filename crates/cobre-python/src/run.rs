@@ -68,8 +68,9 @@ use cobre_io::write_simulation_solver_stats;
 use cobre_io::write_solver_stats;
 use cobre_io::write_training_results;
 use cobre_io::{ParquetWriterConfig, SolverStatsRow};
+use cobre_sddp::FullFcf;
 use cobre_sddp::FutureCostFunction;
-use cobre_sddp::PolicyLoadKind::FullFcf;
+use cobre_sddp::PolicyLoadProof;
 use cobre_sddp::PolicyStageManifest;
 use cobre_sddp::SddpError;
 use cobre_sddp::TrainingResult;
@@ -944,7 +945,9 @@ pub(crate) fn build_study_setup(
 /// manifest vs. [`StudySetup::build_terminal_entity_manifest`]) — the single
 /// manifest-construction shape shared by warm-start, resume, and
 /// simulation-only loads. Warnings are drained to stderr (single-process,
-/// non-fatal).
+/// non-fatal). Returns the resulting [`PolicyLoadProof<FullFcf>`], the sole
+/// credential `FutureCostFunction::new_with_warm_start`/`from_deserialized`
+/// accept.
 ///
 /// # Errors
 ///
@@ -954,7 +957,7 @@ fn validate_loaded_policy(
     checkpoint: &cobre_io::PolicyCheckpoint,
     system: &System,
     setup: &StudySetup,
-) -> Result<(), String> {
+) -> Result<PolicyLoadProof<FullFcf>, String> {
     #[allow(clippy::cast_possible_truncation)]
     let n_stages = system.stages().iter().filter(|s| s.id >= 0).count() as u32;
     #[allow(clippy::cast_possible_truncation)]
@@ -976,14 +979,14 @@ fn validate_loaded_policy(
         num_stages: n_stages,
         slots: &current_manifest,
     };
-    let report = validate_policy_load(&source, &current, FullFcf)
+    let proof = validate_policy_load::<FullFcf>(&source, &current)
         .map_err(|e| format!("policy validation error: {e}"))?;
 
-    for msg in &report.warnings {
+    for msg in &proof.warnings {
         eprintln!("cobre-python: policy validation warning: {msg}");
     }
 
-    Ok(())
+    Ok(proof)
 }
 
 /// Apply the configured policy mode (warm-start / resume / boundary cuts) to
@@ -1020,10 +1023,11 @@ pub(crate) fn apply_training_policy_mode(
         let checkpoint = read_policy_checkpoint(&policy_dir)
             .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
 
-        validate_loaded_policy(&checkpoint, system, setup)?;
+        let proof = validate_loaded_policy(&checkpoint, system, setup)?;
 
         // Reserve one extra slot for cuts added in the final iteration.
         let warm_fcf = FutureCostFunction::new_with_warm_start(
+            &proof,
             &checkpoint.stage_cuts,
             setup.loop_params.forward_passes,
             setup.loop_params.max_iterations.saturating_add(1),
@@ -1054,12 +1058,13 @@ pub(crate) fn apply_training_policy_mode(
         let checkpoint = read_policy_checkpoint(&policy_dir)
             .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
 
-        validate_loaded_policy(&checkpoint, system, setup)?;
+        let proof = validate_loaded_policy(&checkpoint, system, setup)?;
 
         let completed = u64::from(checkpoint.metadata.completed_iterations);
 
         // Reserve one extra slot for cuts added in the final iteration.
         let warm_fcf = FutureCostFunction::new_with_warm_start(
+            &proof,
             &checkpoint.stage_cuts,
             setup.loop_params.forward_passes,
             setup.loop_params.max_iterations.saturating_add(1),
@@ -1143,9 +1148,9 @@ pub(crate) fn reconstruct_policy_from_checkpoint(
     let checkpoint = read_policy_checkpoint(policy_dir)
         .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
 
-    validate_loaded_policy(&checkpoint, system, setup)?;
+    let proof = validate_loaded_policy(&checkpoint, system, setup)?;
 
-    let loaded_fcf = FutureCostFunction::from_deserialized(&checkpoint.stage_cuts)
+    let loaded_fcf = FutureCostFunction::from_deserialized(&proof, &checkpoint.stage_cuts)
         .map_err(|e| format!("FCF reconstruction error: {e}"))?;
 
     let basis_cache = build_basis_cache_from_checkpoint(

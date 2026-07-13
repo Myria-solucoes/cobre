@@ -5481,7 +5481,12 @@ mod chronological_telescoping {
         let config = build_config();
         let mut setup2 = build_setup_in_code(build_system(load_mode), &config);
 
+        let proof = cobre_sddp::test_support::trivial_full_fcf_proof(
+            checkpoint.metadata.state_dimension,
+            checkpoint.metadata.num_stages,
+        );
         let warm_fcf = FutureCostFunction::new_with_warm_start(
+            &proof,
             &checkpoint.stage_cuts,
             setup2.loop_params.forward_passes,
             setup2.loop_params.max_iterations.saturating_add(1),
