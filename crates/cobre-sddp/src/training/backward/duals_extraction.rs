@@ -6,7 +6,7 @@
 
 use cobre_solver::SolutionView;
 
-use crate::indexer::{CutStateProjection, StateDim};
+use crate::indexer::{CutSlot, CutStateProjection};
 
 use super::SuccessorSpec;
 
@@ -18,10 +18,8 @@ fn fill_state_duals(
 ) {
     // Divided, not multiplied (module-level contract). Empty col_scale ⇒ raw rc.
     state_duals.clear();
-    for j in 0..cut_state.n_state() {
-        let col = cut_state
-            .state_to_lp_incoming_column(StateDim::new(j))
-            .get();
+    for j in 0..cut_state.n_slots() {
+        let col = cut_state.incoming_column(CutSlot::new(j)).get();
         let rc = view.reduced_costs[col];
         let unscaled = if col_scale.is_empty() {
             rc
@@ -32,8 +30,8 @@ fn fill_state_duals(
     }
     debug_assert_eq!(
         state_duals.len(),
-        cut_state.n_state(),
-        "state_duals must contain exactly cut_state.n_state() entries after fill"
+        cut_state.n_slots(),
+        "state_duals must contain exactly cut_state.n_slots() entries after fill"
     );
 }
 
@@ -138,7 +136,7 @@ mod tests {
     fn storage_only_yields_n_length_subgradient_with_storage_columns() {
         let global = state_layout(3, 2);
         let cut_state = CutStateProjection::new(&global, STORAGE_ONLY);
-        assert_eq!(cut_state.n_state(), 3);
+        assert_eq!(cut_state.n_slots(), 3);
 
         let rc: Vec<f64> = (0..=global.theta).map(|c| c as f64).collect();
         let view = indexed_view(&rc);
@@ -157,13 +155,13 @@ mod tests {
     }
 
     /// All-enabled `CutStateProjection` reproduces the pre-change global-loop result:
-    /// `n_state()` equals the global `n_state` and every slot reads the same LP
+    /// `n_slots()` equals the global `n_state` and every slot reads the same LP
     /// column the global `StateLayout` resolver would.
     #[test]
     fn all_enabled_reproduces_global_loop_result() {
         let global = state_layout(3, 2);
         let cut_state = CutStateProjection::new(&global, ALL_ENABLED);
-        assert_eq!(cut_state.n_state(), global.n_state);
+        assert_eq!(cut_state.n_slots(), global.n_state);
 
         let rc: Vec<f64> = (0..=global.theta).map(|c| c as f64).collect();
         let view = indexed_view(&rc);

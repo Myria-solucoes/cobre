@@ -325,9 +325,6 @@ impl BackwardPassState {
                 ws.solver.current_profile() == &backward_profile,
                 "solver profile must equal the profile passed to set_profile"
             );
-        }
-
-        for ws in inputs.workspaces.iter_mut() {
             ws.worker_timing_buf = WorkerPhaseTimings::default();
         }
 
@@ -798,7 +795,7 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
             let range = cut.coefficients_range.clone();
             let arena = &inputs.workspaces[*w].backward_accum.agg_arena;
             debug_assert!(
-                range.len() == cut_state_projection.n_state() && range.end <= arena.len(),
+                range.len() == cut_state_projection.n_slots() && range.end <= arena.len(),
                 "coefficients_range must span exactly the pool's cut n_state and lie within the worker arena"
             );
             inputs.fcf.add_cut(
@@ -889,7 +886,7 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
     // across stages are resized to EXACTLY this each stage, never grown to a
     // per-worker max: a reduced stage after a full one must shrink, or
     // `write_opening_outcome`'s `copy_from_slice` reads stale full-length data.
-    let cut_n_state = succ.cut_state.n_state();
+    let cut_n_state = succ.cut_state.n_slots();
     let pop = succ.successor_populated_count;
     let n_workers = workspaces.len().max(1);
 

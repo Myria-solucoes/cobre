@@ -41,18 +41,22 @@ use cobre_io::StageCutsReadResult;
 /// All-stages container for the Future Cost Function (FCF): one [`CutPool`] per
 /// stage. Per-cut logic is delegated to [`CutPool`].
 ///
-/// Each pool carries its own [`CutPool::state_dimension`]; a stage whose cuts
-/// span fewer state dimensions (a successor with `inflow_lags: false`) sizes a
-/// smaller pool. [`Self::state_dimension`] remains the global state-vector
-/// length used by the cross-cutting checkpoint and boundary paths, equal to
-/// every pool's dimension when all stages enable all dimensions (the default).
+/// Each pool carries its own [`CutPool::state_dimension`] — its cut-slot-space
+/// dimension, the length each stored cut's `coefficients` slice spans
+/// ([`CutStateProjection::n_slots`](crate::indexer::CutStateProjection::n_slots));
+/// a stage whose cuts span fewer state dimensions (a successor with
+/// `inflow_lags: false`) sizes a smaller pool. [`Self::state_dimension`] remains
+/// the global state-vector length (`StateLayout::n_state`) the checkpoint and
+/// boundary paths validate on — the space `validate_policy_load`'s
+/// `state_dimension` check operates in — equal to every pool's dimension when
+/// all stages enable all dimensions (the default).
 #[derive(Debug, Clone)]
 pub struct FutureCostFunction {
     /// One cut pool per stage, indexed 0-based.
     pub pools: Vec<CutPool>,
 
     /// Global state-vector length (`StateLayout::n_state`); a pool's own
-    /// `state_dimension` may be smaller.
+    /// cut-slot-space [`CutPool::state_dimension`] may be smaller.
     pub state_dimension: usize,
 
     /// Forward passes per training iteration. Immutable after construction.

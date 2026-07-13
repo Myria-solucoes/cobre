@@ -30,7 +30,7 @@ pub struct StageData {
 
     /// Per-pool cut-state projection, indexed by stage (pool) `t`, paired 1:1
     /// with [`crate::FutureCostFunction::pools`] (`pool t` sized by
-    /// `cut_state_layouts[t].n_state()`) — the single owner of each pool's
+    /// `cut_state_layouts[t].n_slots()`) — the single owner of each pool's
     /// cut-state dimension.
     pub(crate) cut_state_layouts: Vec<CutStateProjection>,
 

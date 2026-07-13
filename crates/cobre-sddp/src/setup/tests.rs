@@ -6853,7 +6853,7 @@ fn cut_pool_sizing_all_enabled_matches_global_n_state() {
     assert_eq!(setup.fcf.state_dimension, global_n_state);
 }
 
-/// Each pool's `CutStateProjection` has `n_state()` equal to the pool's
+/// Each pool's `CutStateProjection` has `n_slots()` equal to the pool's
 /// `state_dimension` — the pairing the backward pass relies on to extract duals
 /// at the right dimension.
 #[test]
@@ -6876,9 +6876,9 @@ fn cut_state_layouts_stored_one_per_pool_and_reachable() {
     );
     for (t, layout) in setup.stage_data.cut_state_layouts.iter().enumerate() {
         assert_eq!(
-            layout.n_state(),
+            layout.n_slots(),
             setup.fcf.pools[t].state_dimension,
-            "cut_state_layouts[{t}].n_state() must match pool {t} dimension",
+            "cut_state_layouts[{t}].n_slots() must match pool {t} dimension",
         );
     }
 

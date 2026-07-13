@@ -7,9 +7,11 @@
 //! [`Row`], and [`StateDim`] make each concern its own type; [`InCol`]/[`OutCol`]
 //! further split the column role the state-path resolvers return, so a render
 //! call site handed an incoming column (or vice versa) is a compile error, not
-//! a silently wrong cut coefficient; [`BlockIdx`] makes the block operand of
-//! every [`BlockGrid`](super::BlockGrid) shape method its own type. None of the
-//! six carries arithmetic: offset formulas stay with the owning value type
+//! a silently wrong cut coefficient; [`CutSlot`] indexes the enabled cut-state
+//! subset a projection reindexes into, distinct from [`StateDim`]; [`BlockIdx`]
+//! makes the block operand of
+//! every [`BlockGrid`](super::BlockGrid) shape method its own type. None of these
+//! carries arithmetic: offset formulas stay with the owning value type
 //! ([`BlockGrid`](super::BlockGrid),
 //! [`StorageBoundaryGrid`](super::StorageBoundaryGrid), `RangeCursor`,
 //! `DeliveryRing`) — these types only gate which `usize` crosses which
@@ -85,6 +87,29 @@ impl StateDim {
     }
 
     /// Extract the raw state-vector dimension index.
+    #[inline]
+    #[must_use]
+    pub fn get(self) -> usize {
+        self.0
+    }
+}
+
+/// Index into a stage's enabled cut-state subset — distinct from
+/// [`StateDim`], the global state-vector dimension: under a non-identity
+/// projection the two diverge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct CutSlot(usize);
+
+impl CutSlot {
+    /// Wrap a raw cut-slot index.
+    #[inline]
+    #[must_use]
+    pub fn new(slot: usize) -> Self {
+        Self(slot)
+    }
+
+    /// Extract the raw cut-slot index.
     #[inline]
     #[must_use]
     pub fn get(self) -> usize {
@@ -214,7 +239,7 @@ impl Boundary {
 
 #[cfg(test)]
 mod tests {
-    use super::{BlockIdx, Boundary, Col, InCol, OutCol, Row, StateDim};
+    use super::{BlockIdx, Boundary, Col, CutSlot, InCol, OutCol, Row, StateDim};
 
     #[test]
     fn boundary_from_index_classifies_endpoints_and_interior() {
@@ -230,6 +255,12 @@ mod tests {
     fn col_is_zero_cost_and_round_trips() {
         assert_eq!(std::mem::size_of::<Col>(), std::mem::size_of::<usize>());
         assert_eq!(Col::new(42).get(), 42);
+    }
+
+    #[test]
+    fn cut_slot_is_zero_cost_and_round_trips() {
+        assert_eq!(std::mem::size_of::<CutSlot>(), std::mem::size_of::<usize>());
+        assert_eq!(CutSlot::new(11).get(), 11);
     }
 
     #[test]

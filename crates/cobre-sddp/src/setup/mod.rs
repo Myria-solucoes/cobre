@@ -376,7 +376,7 @@ impl StudySetup {
         let cut_state_layouts = build_cut_state_layouts(system, &state_layout, n_stages);
         let pool_state_dimensions: Vec<usize> = cut_state_layouts
             .iter()
-            .map(CutStateProjection::n_state)
+            .map(CutStateProjection::n_slots)
             .collect();
         let fcf = FutureCostFunction::new_per_stage(
             &pool_state_dimensions,

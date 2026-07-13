@@ -16,7 +16,7 @@ use cobre_io::output::policy::{
 };
 
 use crate::cut::FutureCostFunction;
-use crate::indexer::{CutStateProjection, StateDim, StateLayout};
+use crate::indexer::{CutSlot, CutStateProjection, StateLayout};
 use crate::lp_builder::delivery_ring::DeliveryRing;
 use crate::training::TrainingResult;
 
@@ -46,14 +46,14 @@ fn year_month_anchor(date: chrono::NaiveDate) -> i32 {
 /// `j` describes the entity owning positional coefficient `j` — the order a
 /// consumer matches the manifest against the cut coefficients. Each slot is
 /// classified by the global [`StateLayout`] region containing its incoming-state
-/// column ([`CutStateProjection::state_to_lp_incoming_column`]), never by
+/// column ([`CutStateProjection::incoming_column`]), never by
 /// re-deriving column arithmetic.
 ///
 /// Each hydro-region slot's `was_active` comes from [`hydro_operating_active`].
 ///
 /// # Panics (debug builds only)
 ///
-/// Panics if the built manifest length differs from `projection.n_state()`.
+/// Panics if the built manifest length differs from `projection.n_slots()`.
 #[must_use]
 pub fn build_stage_entity_manifest(
     system: &System,
@@ -93,11 +93,9 @@ pub fn build_stage_entity_manifest(
             })
     };
 
-    let mut manifest = Vec::with_capacity(projection.n_state());
-    for j in 0..projection.n_state() {
-        let col = projection
-            .state_to_lp_incoming_column(StateDim::new(j))
-            .get();
+    let mut manifest = Vec::with_capacity(projection.n_slots());
+    for j in 0..projection.n_slots() {
+        let col = projection.incoming_column(CutSlot::new(j)).get();
         let slot = if global_layout.storage_in.contains(&col) {
             let h = col - global_layout.storage_in.start;
             let hydro = &hydros[h];
@@ -207,8 +205,8 @@ pub fn build_stage_entity_manifest(
 
     debug_assert_eq!(
         manifest.len(),
-        projection.n_state(),
-        "manifest length must equal projection.n_state()"
+        projection.n_slots(),
+        "manifest length must equal projection.n_slots()"
     );
     manifest
 }
@@ -617,7 +615,7 @@ mod tests {
 
         let manifest = build_stage_entity_manifest(&system, &global, &projection, 0);
 
-        assert_eq!(manifest.len(), projection.n_state());
+        assert_eq!(manifest.len(), projection.n_slots());
         assert_eq!(manifest.len(), 8);
 
         assert_eq!(manifest[0].entity_type, ENTITY_TYPE_HYDRO_STORAGE);
@@ -681,7 +679,7 @@ mod tests {
 
         let manifest = build_stage_entity_manifest(&system, &global, &projection, 0);
 
-        assert_eq!(manifest.len(), projection.n_state());
+        assert_eq!(manifest.len(), projection.n_slots());
         assert_eq!(
             manifest.len(),
             10,
@@ -724,7 +722,7 @@ mod tests {
 
         let manifest = build_stage_entity_manifest(&system, &global, &projection, 0);
 
-        assert_eq!(manifest.len(), projection.n_state());
+        assert_eq!(manifest.len(), projection.n_slots());
         assert_eq!(manifest.len(), 4);
         assert!(
             manifest

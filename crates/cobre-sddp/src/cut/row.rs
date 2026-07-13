@@ -48,7 +48,7 @@ pub(crate) fn push_scaled_coefficient(
 /// non-zeros and bounds. Shared by [`append_new_cuts_to_lp`] and the DCS
 /// [`append_slots_to_lp`] so the two cannot drift apart.
 ///
-/// `coefficients` has length `cut_state.n_state()` (the pool's enabled cut-state
+/// `coefficients` has length `cut_state.n_slots()` (the pool's enabled cut-state
 /// dimensions); the row places each enabled non-padding coefficient onto the
 /// outgoing column [`CutStateProjection::render_pairs`] yields. `theta` is the global
 /// scalar column (stage-invariant).
@@ -62,7 +62,7 @@ pub(crate) fn push_cut_row(
     col_scale: &[f64],
 ) {
     for (j, lp_col) in cut_state.render_pairs() {
-        push_scaled_coefficient(batch, lp_col, coefficients[j], col_scale);
+        push_scaled_coefficient(batch, lp_col, coefficients[j.get()], col_scale);
     }
 
     debug_assert!(
@@ -108,7 +108,7 @@ pub fn build_cut_row_batch_into(
 ) {
     batch.clear();
 
-    let n_cut_state = cut_state.n_state();
+    let n_cut_state = cut_state.n_slots();
     let theta_col = state.theta;
 
     let num_cuts = fcf.pools[stage].active_count();
@@ -141,7 +141,7 @@ pub fn build_cut_row_batch_into(
         // incoming lags at lag 1+, so the cut references z_inflow and incoming lag
         // l−1. Padding slots are dropped (no row entry), never zero-filled.
         for (j, lp_col) in cut_state.render_pairs() {
-            push_scaled_coefficient(batch, lp_col, coefficients[j], col_scale);
+            push_scaled_coefficient(batch, lp_col, coefficients[j.get()], col_scale);
         }
 
         debug_assert!(
@@ -233,7 +233,7 @@ pub fn append_new_cuts_to_lp<S: SolverInterface>(
 ) -> usize {
     batch_buf.clear();
 
-    let n_cut_state = cut_state.n_state();
+    let n_cut_state = cut_state.n_slots();
     let theta_col = state.theta;
     let nnz_per_cut = cut_state.render_len() + 1;
 
@@ -320,10 +320,10 @@ pub fn append_slots_to_lp<S: SolverInterface>(
     // by that, render via the matching per-pool projection.
     debug_assert_eq!(
         pool.state_dimension,
-        cut_state.n_state(),
-        "append_slots_to_lp: pool.state_dimension {} != cut_state.n_state() {}",
+        cut_state.n_slots(),
+        "append_slots_to_lp: pool.state_dimension {} != cut_state.n_slots() {}",
         pool.state_dimension,
-        cut_state.n_state(),
+        cut_state.n_slots(),
     );
     let theta_col = state.theta;
     let nnz_per_cut = cut_state.render_len() + 1;

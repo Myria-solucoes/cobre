@@ -104,7 +104,7 @@ pub use entity_index::{
     AnticipatedLocal, EvapLocal, FillingTargetLocal, FloorLocal, FphaLocal, HydroSys, LineSys,
     ThermalSys,
 };
-pub use index::{BlockIdx, Boundary, Col, InCol, OutCol, Row, StateDim};
+pub use index::{BlockIdx, Boundary, Col, CutSlot, InCol, OutCol, Row, StateDim};
 pub use layout::{EvaporationIndices, FphaRowRange};
 pub(crate) use range_cursor::RangeCursor;
 pub use state_layout::StateLayout;

@@ -51,8 +51,7 @@
 //! `StagedCut` buffer, sorted by `trial_point_idx` after the parallel region for
 //! deterministic FCF insertion regardless of thread completion order.
 
-use cobre_solver::RowBatch;
-use cobre_solver::StageTemplate;
+use cobre_solver::{RowBatch, StageTemplate};
 
 use crate::{cut::pool::CutPool, indexer::CutStateProjection, solver_stats::SolverStatsDelta};
 
@@ -208,6 +207,6 @@ pub(crate) struct SuccessorSpec<'a> {
     /// Cut-state projection for the pool this stage's cut is inserted into (pool
     /// `t`, sized from `stages[t+1].state_config`): the LP incoming-state columns
     /// dual extraction reads and the dimension every per-stage backward buffer is
-    /// sized to. `n_state()` equals `successor_pool.state_dimension`.
+    /// sized to. `n_slots()` equals `successor_pool.state_dimension`.
     pub(crate) cut_state: &'a CutStateProjection,
 }
