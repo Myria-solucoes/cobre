@@ -25,6 +25,7 @@ use cobre_core::{
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
 use crate::hydro_models::PrepareHydroModelsResult;
+use crate::indexer::HydroSys;
 use crate::inflow_method::InflowNonNegativityMethod;
 use crate::resolved_parameters::ResolvedParameters;
 
@@ -3180,13 +3181,25 @@ fn chronological_water_balance_chained_rows() {
         vals[0]
     };
 
-    assert_eq!(entry(layout.block_storage_col(h, 1), row0), 1.0);
-    assert_eq!(entry(layout.block_storage_col(h, 0), row0), -1.0);
-    assert_eq!(entry(layout.turbine_col(h, 0), row0), tau[0]);
+    assert_eq!(
+        entry(layout.block_storage_col(HydroSys::new(h), 1), row0),
+        1.0
+    );
+    assert_eq!(
+        entry(layout.block_storage_col(HydroSys::new(h), 0), row0),
+        -1.0
+    );
+    assert_eq!(entry(layout.turbine_col(HydroSys::new(h), 0), row0), tau[0]);
 
-    assert_eq!(entry(layout.block_storage_col(h, 2), row1), 1.0);
-    assert_eq!(entry(layout.block_storage_col(h, 1), row1), -1.0);
-    assert_eq!(entry(layout.turbine_col(h, 1), row1), tau[1]);
+    assert_eq!(
+        entry(layout.block_storage_col(HydroSys::new(h), 2), row1),
+        1.0
+    );
+    assert_eq!(
+        entry(layout.block_storage_col(HydroSys::new(h), 1), row1),
+        -1.0
+    );
+    assert_eq!(entry(layout.turbine_col(HydroSys::new(h), 1), row1), tau[1]);
 }
 
 /// AC#2: summing the `K` chronological water rows coefficient-wise (over every
@@ -3224,12 +3237,12 @@ fn chronological_water_balance_telescopes_to_parallel() {
     // Storage endpoints: Sᴷ (outgoing) telescopes to +1, S⁰ (incoming) to −1.
     assert_telescopes(
         h,
-        chr_layout.block_storage_col(h, n_blks),
+        chr_layout.block_storage_col(HydroSys::new(h), n_blks),
         "outgoing storage Sᴷ",
     );
     assert_telescopes(
         par_layout.col_storage_in_start() + h,
-        chr_layout.block_storage_col(h, 0),
+        chr_layout.block_storage_col(HydroSys::new(h), 0),
         "incoming storage S⁰",
     );
 
@@ -3237,18 +3250,18 @@ fn chronological_water_balance_telescopes_to_parallel() {
     // block's τ_k sum reproduces the parallel ζ-scaled flow coefficient.
     for blk in 0..n_blks {
         assert_telescopes(
-            par_layout.turbine_col(h, blk),
-            chr_layout.turbine_col(h, blk),
+            par_layout.turbine_col(HydroSys::new(h), blk),
+            chr_layout.turbine_col(HydroSys::new(h), blk),
             "turbine",
         );
         assert_telescopes(
-            par_layout.spillage_col(h, blk),
-            chr_layout.spillage_col(h, blk),
+            par_layout.spillage_col(HydroSys::new(h), blk),
+            chr_layout.spillage_col(HydroSys::new(h), blk),
             "spillage",
         );
         assert_telescopes(
-            par_layout.diversion_col(h, blk),
-            chr_layout.diversion_col(h, blk),
+            par_layout.diversion_col(HydroSys::new(h), blk),
+            chr_layout.diversion_col(HydroSys::new(h), blk),
             "diversion",
         );
     }
@@ -3269,7 +3282,7 @@ fn chronological_water_balance_telescopes_to_parallel() {
     // Interior boundaries Sⁱ (chronological-only) appear +1 in row i−1 and −1 in
     // row i, so they net to zero across the K rows.
     for k in 1..n_blks {
-        let summed = chr_sum(chr_layout.block_storage_col(h, k));
+        let summed = chr_sum(chr_layout.block_storage_col(HydroSys::new(h), k));
         assert!(
             summed.abs() < 1e-12,
             "interior boundary S{k} must cancel across the K rows, got {summed}"
@@ -3312,21 +3325,21 @@ fn stage_geometry_block_storage_col_matches_layout() {
 
     for h in 0..layout.n_h {
         assert_eq!(
-            geometry.block_storage_col(h, 0),
+            geometry.block_storage_col(HydroSys::new(h), 0),
             storage_in_start + h,
             "S⁰ endpoint (the parallel-fill open-coded pair) must resolve to \
              storage_in_start + h at hydro {h}"
         );
         for k in 1..n_blks {
             assert_eq!(
-                geometry.block_storage_col(h, k),
+                geometry.block_storage_col(HydroSys::new(h), k),
                 storage_internal_start + h * (n_blks - 1) + (k - 1),
                 "interior boundary S{k} must resolve to storage_internal_start + \
                  h * (n_blks - 1) + (k - 1) at hydro {h}"
             );
         }
         assert_eq!(
-            geometry.block_storage_col(h, n_blks),
+            geometry.block_storage_col(HydroSys::new(h), n_blks),
             storage_final_start + h,
             "Sᴷ endpoint (the parallel-fill open-coded pair) must resolve to \
              storage_final_start + h at hydro {h}"
@@ -3809,12 +3822,12 @@ fn chronological_d06_gamma_v_on_both_block_columns() {
         let blk = k - 1;
         let row = layout.row_fpha_start() + blk;
         assert_eq!(
-            entry(layout.block_storage_col(h, k - 1), row),
+            entry(layout.block_storage_col(HydroSys::new(h), k - 1), row),
             half_gamma_v,
             "block {k}: −γᵥ/2 on Sᵏ⁻¹ (D06 both-columns)"
         );
         assert_eq!(
-            entry(layout.block_storage_col(h, k), row),
+            entry(layout.block_storage_col(HydroSys::new(h), k), row),
             half_gamma_v,
             "block {k}: −γᵥ/2 on Sᵏ (D06 both-columns)"
         );
@@ -3837,9 +3850,9 @@ fn chronological_interior_storage_scale_matches_endpoint() {
 
     // The outgoing endpoint Sᴷ (`block_storage_col(h, K)`) is the reference storage
     // column whose scale every interior boundary must match.
-    let endpoint_scale = col_scale[layout.block_storage_col(h, n_blks)];
+    let endpoint_scale = col_scale[layout.block_storage_col(HydroSys::new(h), n_blks)];
     for k in 1..n_blks {
-        let interior_col = layout.block_storage_col(h, k);
+        let interior_col = layout.block_storage_col(HydroSys::new(h), k);
         assert_eq!(
             col_scale[interior_col].to_bits(),
             endpoint_scale.to_bits(),
@@ -4150,12 +4163,12 @@ fn chronological_prefilling_d38_d42_per_block() {
         let blk = k - 1;
         let row = layout.rows.water_balance.start + h_pre * n_blks + blk;
         assert_eq!(
-            entry(layout.block_storage_col(h_pre, k), row),
+            entry(layout.block_storage_col(HydroSys::new(h_pre), k), row),
             1.0,
             "PreFilling block {k}: +1 on Sᵏ (frozen identity, D38/D39/D42)"
         );
         assert_eq!(
-            entry(layout.block_storage_col(h_pre, k - 1), row),
+            entry(layout.block_storage_col(HydroSys::new(h_pre), k - 1), row),
             -1.0,
             "PreFilling block {k}: −1 on Sᵏ⁻¹ (frozen identity, D38/D39/D42)"
         );
@@ -4168,13 +4181,13 @@ fn chronological_prefilling_d38_d42_per_block() {
             "PreFilling block {k}: frozen-identity RHS upper == 0"
         );
 
-        let spill_pre = layout.spillage_col(h_pre, blk);
+        let spill_pre = layout.spillage_col(HydroSys::new(h_pre), blk);
         assert_eq!(
             (t.col_lower[spill_pre], t.col_upper[spill_pre]),
             (0.0, 0.0),
             "PreFilling block {k}: spillage frozen [0,0] (no dam to spill from, D38/D39/D42)"
         );
-        let turb_pre = layout.turbine_col(h_pre, blk);
+        let turb_pre = layout.turbine_col(HydroSys::new(h_pre), blk);
         assert_eq!(
             (t.col_lower[turb_pre], t.col_upper[turb_pre]),
             (0.0, 0.0),
@@ -4182,7 +4195,7 @@ fn chronological_prefilling_d38_d42_per_block() {
         );
 
         // A Filling hydro's spillage is the legitimate D40 relief valve: free upward.
-        let spill_fill = layout.spillage_col(h_fill, blk);
+        let spill_fill = layout.spillage_col(HydroSys::new(h_fill), blk);
         assert_eq!(
             t.col_lower[spill_fill], 0.0,
             "Filling block {k}: spillage lower == 0"
@@ -4213,14 +4226,14 @@ fn chronological_filling_target_on_final_storage() {
     let h_fill = 1_usize;
     assert_eq!(
         chr_layout.filling.filling_target_hydro_indices,
-        vec![h_fill],
+        vec![HydroSys::new(h_fill)],
         "exactly the Filling hydro H3 emits a σ_fill target at stage 0"
     );
 
     // The σ_fill row places +1 on the OUTGOING storage column, which in chronological
     // mode is the stage-final Sᴷ (block_storage_col aliases the outgoing endpoint to
     // the dense hydro index h_fill).
-    let sk_col = chr_layout.block_storage_col(h_fill, n_blks);
+    let sk_col = chr_layout.block_storage_col(HydroSys::new(h_fill), n_blks);
     assert_eq!(
         sk_col, h_fill,
         "block_storage_col(h, K) aliases the outgoing endpoint (= dense hydro index)"
@@ -4264,7 +4277,7 @@ fn chronological_filling_target_on_final_storage() {
 
     // Per-block spillage stays the free D40 relief valve, not frozen.
     for blk in 0..n_blks {
-        let spill = chr_layout.spillage_col(h_fill, blk);
+        let spill = chr_layout.spillage_col(HydroSys::new(h_fill), blk);
         assert_eq!(
             (chr_t.col_lower[spill], chr_t.col_upper[spill]),
             (0.0, f64::INFINITY),

@@ -27,7 +27,7 @@ use cobre_core::{
 };
 
 use crate::hydro_models::{ProductionModelSet, ResolvedProductionModel};
-use crate::indexer::{BlockGrid, EvaporationIndices, StateLayout, StorageBoundaryGrid};
+use crate::indexer::{BlockGrid, EvaporationIndices, HydroSys, StateLayout, StorageBoundaryGrid};
 
 /// Borrowed LP-column geometry the generic-constraint resolver reads — the
 /// resolver's window onto a `StageLayout` (private to `builder`) without exposing it.
@@ -77,9 +77,9 @@ pub(crate) struct GenericResolverGeom<'a> {
     /// [`Self::evap_hydro_indices`].
     pub evap_indices: &'a [EvaporationIndices],
     /// System hydro indices of the evaporation hydros at this stage.
-    pub evap_hydro_indices: &'a [usize],
+    pub evap_hydro_indices: &'a [HydroSys],
     /// System hydro indices of the FPHA hydros at this stage.
-    pub fpha_hydro_indices: &'a [usize],
+    pub fpha_hydro_indices: &'a [HydroSys],
     /// First anticipated-decision column (`anticipated_decision.start`).
     pub anticipated_decision_start: usize,
     /// Reverse map: global thermal position → anticipated-local index.
@@ -572,7 +572,11 @@ fn resolve_hydro_evaporation(
     };
     // Linear scan: cold template-build path over a handful of evap hydros, so an
     // O(1) reverse map is not warranted (unlike `resolve_anticipated_decision`).
-    let Some(local_idx) = geom.evap_hydro_indices.iter().position(|&p| p == sys_pos) else {
+    let Some(local_idx) = geom
+        .evap_hydro_indices
+        .iter()
+        .position(|&p| p.get() == sys_pos)
+    else {
         return vec![];
     };
     // `evap_indices` is block-major (`local * n_blks + blk`); `None` maps to block 0.
@@ -634,7 +638,10 @@ fn resolve_hydro_generation(
         ResolvedProductionModel::Fpha { .. } => {
             // Linear scan: cold template-build path over a handful of FPHA hydros, so
             // an O(1) reverse map is not warranted (see `resolve_hydro_evaporation`).
-            if let Some(fpha_local_idx) = geom.fpha_hydro_indices.iter().position(|&p| p == sys_pos)
+            if let Some(fpha_local_idx) = geom
+                .fpha_hydro_indices
+                .iter()
+                .position(|&p| p.get() == sys_pos)
             {
                 let effective_blk = block_id.unwrap_or(block_idx);
                 let col = grid.flat(geom.generation.start, fpha_local_idx, effective_blk);

@@ -24,7 +24,10 @@ use cobre_core::ConstraintSense;
 use cobre_core::EntityId;
 
 use crate::energy_conversion::EnergyConversionSet;
-use crate::indexer::{BlockGrid, StateLayout, StudyDimensions};
+use crate::indexer::{
+    BlockGrid, EvapLocal, FillingTargetLocal, FloorLocal, FphaLocal, HydroSys, StateLayout,
+    StudyDimensions,
+};
 use crate::lp_builder::{COST_SCALE_FACTOR, GenericConstraintRowEntry};
 use crate::simulation::types::{
     ScenarioCategoryCosts, SimulationBusResult, SimulationContractResult, SimulationCostResult,
@@ -43,13 +46,13 @@ use crate::simulation::types::{
 /// `None`; the column is `geometry.<family>_col.start + slot`.
 pub(crate) struct HydroReverseLookup {
     /// FPHA-local slot per hydro, `None` if not FPHA at this stage.
-    pub(crate) fpha: Vec<Option<usize>>,
+    pub(crate) fpha: Vec<Option<FphaLocal>>,
     /// Evaporation-local slot per hydro, `None` if no evaporation at this stage.
-    pub(crate) evap: Vec<Option<usize>>,
+    pub(crate) evap: Vec<Option<EvapLocal>>,
     /// `σ_fill`-target slot per hydro, `None` if it owns no target column at this stage.
-    pub(crate) filling_target: Vec<Option<usize>>,
+    pub(crate) filling_target: Vec<Option<FillingTargetLocal>>,
     /// `σ^{v-}` operating-floor slot per hydro, `None` if it owns no floor column at this stage.
-    pub(crate) filled_min_storage_floor: Vec<Option<usize>>,
+    pub(crate) filled_min_storage_floor: Vec<Option<FloorLocal>>,
 }
 
 impl HydroReverseLookup {
@@ -57,15 +60,15 @@ impl HydroReverseLookup {
     pub(crate) fn build(geometry: &crate::lp_builder::StageGeometry, n_hydros: usize) -> Self {
         let mut fpha = vec![None; n_hydros];
         for (local, &sys) in geometry.fpha_hydro_indices.iter().enumerate() {
-            fpha[sys] = Some(local);
+            fpha[sys.get()] = Some(FphaLocal::new(local));
         }
         let mut evap = vec![None; n_hydros];
         for (local, &sys) in geometry.evap_hydro_indices.iter().enumerate() {
-            evap[sys] = Some(local);
+            evap[sys.get()] = Some(EvapLocal::new(local));
         }
         let mut filling_target = vec![None; n_hydros];
         for (local, &sys) in geometry.filling_target_hydro_indices.iter().enumerate() {
-            filling_target[sys] = Some(local);
+            filling_target[sys.get()] = Some(FillingTargetLocal::new(local));
         }
         let mut filled_min_storage_floor = vec![None; n_hydros];
         for (local, &sys) in geometry
@@ -73,7 +76,7 @@ impl HydroReverseLookup {
             .iter()
             .enumerate()
         {
-            filled_min_storage_floor[sys] = Some(local);
+            filled_min_storage_floor[sys.get()] = Some(FloorLocal::new(local));
         }
         Self {
             fpha,
@@ -96,16 +99,34 @@ impl HydroReverseLookup {
     }
 }
 
-/// Read the primal of a SPARSE per-hydro filling-slack column, or `0.0` when
-/// `local_idx` is `None` (the hydro owns no column in that family at this stage).
+/// Read the primal of the sparse `σ_fill` filling-target-slack column, or `0.0`
+/// when `local` is `None` (the hydro owns no column in that family at this stage).
 #[inline]
-fn read_filling_slack_primal(
+fn read_filling_target_slack_primal(
     primal: &[f64],
     col_range: &Range<usize>,
-    local_idx: Option<usize>,
+    local: Option<FillingTargetLocal>,
 ) -> f64 {
-    let Some(local) = local_idx else { return 0.0 };
-    let col = col_range.start + local;
+    let Some(local) = local else { return 0.0 };
+    let col = col_range.start + local.get();
+    debug_assert!(
+        col < col_range.end && col < primal.len(),
+        "filling-slack col {col} out of range {col_range:?} / primal len {}",
+        primal.len(),
+    );
+    primal.get(col).copied().unwrap_or(0.0)
+}
+
+/// Read the primal of the sparse `σ^{v-}` operating-floor-slack column, or `0.0`
+/// when `local` is `None` (the hydro owns no column in that family at this stage).
+#[inline]
+fn read_floor_slack_primal(
+    primal: &[f64],
+    col_range: &Range<usize>,
+    local: Option<FloorLocal>,
+) -> f64 {
+    let Some(local) = local else { return 0.0 };
+    let col = col_range.start + local.get();
     debug_assert!(
         col < col_range.end && col < primal.len(),
         "filling-slack col {col} out of range {col_range:?} / primal len {}",
@@ -554,7 +575,7 @@ fn extract_hydro_no_turbine(
         if let Some(local_evap_idx) = lookup.evap[h] {
             // The aggregate `block_id: None` row reports block 0; it is not a
             // per-block path (`extract_hydro_per_block` owns the per-block read).
-            let ei = &spec.geometry.evap_indices[local_evap_idx * spec.geometry.n_blks];
+            let ei = &spec.geometry.evap_indices[local_evap_idx.get() * spec.geometry.n_blks];
             let evaporation_flow = view.primal[ei.evaporation_flow_col];
             let neg = view.primal[ei.f_evap_plus_col]; // f_evap_plus = under-evaporation
             let pos = view.primal[ei.f_evap_minus_col]; // f_evap_minus = over-evaporation
@@ -571,12 +592,12 @@ fn extract_hydro_no_turbine(
     let storage_initial = view.primal[state.storage_in.start + h];
     let storage_final = view.primal[state.storage.start + h];
 
-    let filling_target_violation = read_filling_slack_primal(
+    let filling_target_violation = read_filling_target_slack_primal(
         view.primal,
         &spec.geometry.filling_target_col,
         lookup.filling_target[h],
     );
-    let storage_violation_below = read_filling_slack_primal(
+    let storage_violation_below = read_floor_slack_primal(
         view.primal,
         &spec.geometry.filled_min_storage_floor_col,
         lookup.filled_min_storage_floor[h],
@@ -636,10 +657,10 @@ struct HydroStageContext {
     withdrawal_neg: f64,
     withdrawal_pos: f64,
     water_value: f64,
-    fpha_local: Option<usize>,
+    fpha_local: Option<FphaLocal>,
     /// Evaporation-local slot, `None` for a hydro with no evaporation at this stage;
     /// the closure reads `evap_indices[evap_local * n_blks + b]` per block.
-    evap_local: Option<usize>,
+    evap_local: Option<EvapLocal>,
     equivalent_productivity_mw_per_m3s: f64,
     accumulated_productivity_mw_per_m3s: f64,
     incremental_inflow_energy_mw: f64,
@@ -702,7 +723,7 @@ impl HydroStageContext {
             if let Some(lei) = evap_local {
                 // Block-major `evap_indices`; block 0 is the parallel-mode stage-level
                 // read. `extract_hydro_per_block` resolves each block's own triple.
-                let ei = &spec.geometry.evap_indices[lei * spec.geometry.n_blks];
+                let ei = &spec.geometry.evap_indices[lei.get() * spec.geometry.n_blks];
                 let evaporation_flow = view.primal[ei.evaporation_flow_col];
                 let neg = view.primal[ei.f_evap_plus_col]; // f_evap_plus = under-evaporation
                 let pos = view.primal[ei.f_evap_minus_col]; // f_evap_minus = over-evaporation
@@ -710,12 +731,12 @@ impl HydroStageContext {
             } else {
                 (Some(0.0), 0.0, 0.0)
             };
-        let filling_target_violation = read_filling_slack_primal(
+        let filling_target_violation = read_filling_target_slack_primal(
             view.primal,
             &spec.geometry.filling_target_col,
             lookup.filling_target[h],
         );
-        let storage_violation_below = read_filling_slack_primal(
+        let storage_violation_below = read_floor_slack_primal(
             view.primal,
             &spec.geometry.filled_min_storage_floor_col,
             lookup.filled_min_storage_floor[h],
@@ -794,7 +815,7 @@ fn extract_hydro_per_block<'a>(
         // FPHA hydros read generation from the LP `g_{h,k}` column; constant-
         // productivity hydros compute it as turbined * productivity.
         let generation_mw = if let Some(local_fpha_idx) = ctx.fpha_local {
-            view.primal[grid.flat(spec.geometry.generation.start, local_fpha_idx, b)]
+            view.primal[grid.flat(spec.geometry.generation.start, local_fpha_idx.get(), b)]
         } else {
             turbined * spec.hydro_productivities[h]
         };
@@ -818,8 +839,8 @@ fn extract_hydro_per_block<'a>(
         // (`S⁰`), block `K−1` outgoing == `ctx.storage_final` (`Sᴷ`).
         let (storage_initial, storage_final) = match spec.geometry.block_mode {
             BlockMode::Chronological => {
-                let in_col = spec.geometry.block_storage_col(h, b);
-                let out_col = spec.geometry.block_storage_col(h, b + 1);
+                let in_col = spec.geometry.block_storage_col(HydroSys::new(h), b);
+                let out_col = spec.geometry.block_storage_col(HydroSys::new(h), b + 1);
                 debug_assert!(
                     in_col < view.primal.len() && out_col < view.primal.len(),
                     "per-block storage cols {in_col}/{out_col} out of primal bounds {}",
@@ -840,7 +861,7 @@ fn extract_hydro_per_block<'a>(
         let (evaporation_m3s, evaporation_violation_neg_m3s, evaporation_violation_pos_m3s) =
             match (spec.geometry.block_mode, ctx.evap_local) {
                 (BlockMode::Chronological, Some(local)) => {
-                    let ei = &spec.geometry.evap_indices[local * spec.geometry.n_blks + b];
+                    let ei = &spec.geometry.evap_indices[local.get() * spec.geometry.n_blks + b];
                     debug_assert!(
                         ei.evaporation_flow_col < view.primal.len()
                             && ei.f_evap_plus_col < view.primal.len()

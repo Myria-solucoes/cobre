@@ -1,4 +1,5 @@
 use crate::hydro_models::{FphaPlane, ResolvedProductionModel};
+use crate::indexer::{FphaLocal, HydroSys};
 
 use super::layout::{StageLayout, TemplateBuildCtx};
 
@@ -24,26 +25,29 @@ pub(super) fn for_each_fpha_plane<F>(
     layout: &StageLayout,
     mut visit: F,
 ) where
-    F: FnMut(usize, usize, usize, usize, &FphaPlane, usize),
+    F: FnMut(FphaLocal, HydroSys, usize, usize, &FphaPlane, usize),
 {
     let n_blks = layout.n_blks;
     let grid = layout.block_grid();
     let mut fpha_block_start = layout.row_fpha_start();
-    for (local_idx, &h_idx) in layout.fpha_hydro_indices.iter().enumerate() {
-        let planes = match ctx.production_models.model(h_idx, stage_idx) {
+    for (local_idx, &h) in layout.fpha_hydro_indices.iter().enumerate() {
+        let planes = match ctx.production_models.model(h.get(), stage_idx) {
             ResolvedProductionModel::Fpha { planes, .. } => planes,
             ResolvedProductionModel::ConstantProductivity { .. } => {
                 debug_assert!(
                     false,
-                    "fpha_hydro_indices contains hydro {h_idx} but model is ConstantProductivity"
+                    "fpha_hydro_indices contains hydro {} but model is ConstantProductivity",
+                    h.get()
                 );
                 continue;
             }
         };
         let n_planes = planes.len();
         debug_assert_eq!(
-            n_planes, layout.fpha_planes_per_hydro[local_idx],
-            "plane count mismatch for FPHA hydro {h_idx} at stage {stage_idx}"
+            n_planes,
+            layout.fpha_planes_per_hydro[local_idx],
+            "plane count mismatch for FPHA hydro {} at stage {stage_idx}",
+            h.get()
         );
         for blk in 0..n_blks {
             for (p_idx, plane) in planes.iter().enumerate() {
@@ -51,7 +55,7 @@ pub(super) fn for_each_fpha_plane<F>(
                 // of the flat shape; the distinct `fpha_plane` method prevents a
                 // silent transpose of the two.
                 let row = grid.fpha_plane(fpha_block_start, blk, p_idx, n_planes);
-                visit(local_idx, h_idx, blk, p_idx, plane, row);
+                visit(FphaLocal::new(local_idx), h, blk, p_idx, plane, row);
             }
         }
         fpha_block_start = grid.advance_fpha_base(fpha_block_start, n_planes);

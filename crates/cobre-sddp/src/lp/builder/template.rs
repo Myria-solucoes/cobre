@@ -311,21 +311,21 @@ pub struct StageGeometry {
     pub block_mode: BlockMode,
     /// System hydro indices using FPHA at this stage, in slot order. FPHA
     /// membership is per `(hydro, stage)`, so this is the stage-correct list.
-    pub fpha_hydro_indices: Vec<usize>,
+    pub fpha_hydro_indices: Vec<crate::indexer::HydroSys>,
     /// System hydro indices with linearized evaporation at this stage, in slot
     /// order. Parallel to `evap_indices`.
-    pub evap_hydro_indices: Vec<usize>,
+    pub evap_hydro_indices: Vec<crate::indexer::HydroSys>,
     /// System hydro indices owning a `σ_fill`-target slack column at this stage (the
     /// Filling-phase hydros), in slot order. Parallel to `filling_target_col` (slot
     /// `i` → `filling_target_col.start + i`). The family is SPARSE — one column per
     /// filling hydro — so extraction resolves a system hydro's column via this
     /// system→slot list, never by the dense system index `h`.
-    pub filling_target_hydro_indices: Vec<usize>,
+    pub filling_target_hydro_indices: Vec<crate::indexer::HydroSys>,
     /// System hydro indices owning a `σ^{v-}` operating-floor slack column at this
     /// stage (the Operating-phase filling hydros), in slot order. Parallel to
     /// `filled_min_storage_floor_col`; SPARSE like `filling_target_hydro_indices`,
     /// resolved the same way.
-    pub filled_min_storage_floor_hydro_indices: Vec<usize>,
+    pub filled_min_storage_floor_hydro_indices: Vec<crate::indexer::HydroSys>,
 }
 
 impl StageGeometry {
@@ -336,8 +336,8 @@ impl StageGeometry {
     /// the single owner of the endpoints-vs-interior split.
     #[inline]
     #[must_use]
-    pub fn block_storage_col(&self, h: usize, k: usize) -> usize {
-        self.storage_boundary_grid.col(h, k)
+    pub fn block_storage_col(&self, h: crate::indexer::HydroSys, k: usize) -> usize {
+        self.storage_boundary_grid.col(h.get(), k)
     }
 }
 

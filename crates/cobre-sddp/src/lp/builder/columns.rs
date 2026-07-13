@@ -1,6 +1,7 @@
 use cobre_core::{ContractType, Stage};
 
 use crate::hydro_models::{EvaporationModel, ResolvedProductionModel};
+use crate::indexer::{EvapLocal, FillingTargetLocal, FloorLocal, FphaLocal, HydroSys};
 
 use super::EVAPORATION_FLOW_SAFETY_MARGIN;
 use super::layout::{StageLayout, TemplateBuildCtx};
@@ -103,7 +104,7 @@ fn fill_storage_columns(
         // frozen-identity chain pins each interior to the inert IC, so a hard floor above
         // IC would reject the pin.
         for k in 1..layout.n_blks {
-            let col = layout.block_storage_col(h_idx, k);
+            let col = layout.block_storage_col(HydroSys::new(h_idx), k);
             bufs.col_lower[col] = storage_lower;
             bufs.col_upper[col] = hb.max_storage_hm3;
         }
@@ -210,7 +211,7 @@ fn fill_turbine_columns(
             _ => hb.max_turbined_m3s,
         };
         for blk in 0..layout.n_blks {
-            let col = layout.turbine_col(h_idx, blk);
+            let col = layout.turbine_col(HydroSys::new(h_idx), blk);
             bufs.col_lower[col] = 0.0;
             bufs.col_upper[col] = if suspended { 0.0 } else { turb_upper };
             let block_hours = stage.blocks[blk].duration_hours;
@@ -248,7 +249,7 @@ fn fill_spillage_columns(
         );
         let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
         for blk in 0..layout.n_blks {
-            let col = layout.spillage_col(h_idx, blk);
+            let col = layout.spillage_col(HydroSys::new(h_idx), blk);
             bufs.col_upper[col] = if prefilling { 0.0 } else { f64::INFINITY };
             let block_hours = stage.blocks[blk].duration_hours;
             bufs.objective[col] = hp.spillage_cost * block_hours;
@@ -294,7 +295,7 @@ fn fill_diversion_columns(
                 .unwrap_or(0.0)
         };
         for blk in 0..layout.n_blks {
-            let col = layout.diversion_col(h_idx, blk);
+            let col = layout.diversion_col(HydroSys::new(h_idx), blk);
             bufs.col_lower[col] = 0.0;
             bufs.col_upper[col] = max_div;
             if max_div > 0.0 {
@@ -549,8 +550,9 @@ fn fill_fpha_generation_columns(
     layout: &StageLayout,
     bufs: &mut ColumnBufs<'_>,
 ) {
-    for (local_idx, &h_idx) in layout.fpha_hydro_indices.iter().enumerate() {
-        let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
+    for (local_idx, &h) in layout.fpha_hydro_indices.iter().enumerate() {
+        let local_idx = FphaLocal::new(local_idx);
+        let hb = ctx.resolved.bounds.hydro_bounds(h.get(), stage_idx);
         for blk in 0..layout.n_blks {
             let col = layout.generation_col(local_idx, blk);
             bufs.col_lower[col] = 0.0;
@@ -574,24 +576,26 @@ fn fill_evaporation_columns(
     layout: &StageLayout,
     bufs: &mut ColumnBufs<'_>,
 ) {
-    for (local_idx, &h_idx) in layout.evap_hydro_indices.iter().enumerate() {
-        let (q_max_abs, hp) = match ctx.evaporation_models.model(h_idx) {
+    for (local_idx, &h) in layout.evap_hydro_indices.iter().enumerate() {
+        let local_idx = EvapLocal::new(local_idx);
+        let (q_max_abs, hp) = match ctx.evaporation_models.model(h.get()) {
             EvaporationModel::Linearized { coefficients, .. } => {
                 let coeff = &coefficients[stage_idx];
-                let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
+                let hb = ctx.resolved.bounds.hydro_bounds(h.get(), stage_idx);
                 let q_max_abs = (coeff.intercept_m3s
                     + coeff.volume_slope_m3s_per_hm3 * hb.max_storage_hm3)
                     .abs()
                     * EVAPORATION_FLOW_SAFETY_MARGIN;
                 (
                     q_max_abs,
-                    ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx),
+                    ctx.resolved.penalties.hydro_penalties(h.get(), stage_idx),
                 )
             }
             EvaporationModel::None => {
                 debug_assert!(
                     false,
-                    "evap_hydro_indices contains hydro {h_idx} but model is None"
+                    "evap_hydro_indices contains hydro {} but model is None",
+                    h.get()
                 );
                 continue;
             }
@@ -892,14 +896,15 @@ fn fill_filling_target_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     let col_start = layout.filling.col_filling_target_start;
-    for (local_idx, &h_idx) in layout
+    for (local_idx, &h) in layout
         .filling
         .filling_target_hydro_indices
         .iter()
         .enumerate()
     {
-        let col = col_start + local_idx;
-        let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
+        let local_idx = FillingTargetLocal::new(local_idx);
+        let col = col_start + local_idx.get();
+        let hp = ctx.resolved.penalties.hydro_penalties(h.get(), stage_idx);
         bufs.col_lower[col] = 0.0;
         bufs.col_upper[col] = f64::INFINITY;
         bufs.objective[col] = hp.filling_target_violation_cost;
@@ -920,14 +925,15 @@ fn fill_filled_min_storage_floor_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     let col_start = layout.filling.col_filled_min_storage_floor_start;
-    for (local_idx, &h_idx) in layout
+    for (local_idx, &h) in layout
         .filling
         .filled_min_storage_floor_hydro_indices
         .iter()
         .enumerate()
     {
-        let col = col_start + local_idx;
-        let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
+        let local_idx = FloorLocal::new(local_idx);
+        let col = col_start + local_idx.get();
+        let hp = ctx.resolved.penalties.hydro_penalties(h.get(), stage_idx);
         bufs.col_lower[col] = 0.0;
         bufs.col_upper[col] = f64::INFINITY;
         bufs.objective[col] = hp.storage_violation_below_cost;
@@ -973,6 +979,7 @@ mod interior_storage_bound_tests {
     use super::super::layout::ResolvedTables;
     use super::super::test_support::state_layout_for;
     use super::{ColumnBufs, StageLayout, TemplateBuildCtx, fill_storage_columns};
+    use crate::indexer::HydroSys;
 
     const N_STAGES: usize = 1;
     const STAGE_IDX: usize = 0;
@@ -1268,7 +1275,7 @@ mod interior_storage_bound_tests {
             col_lower,
             col_upper,
             objective,
-            endpoint: layout.block_storage_col(0, layout.n_blks),
+            endpoint: layout.block_storage_col(HydroSys::new(0), layout.n_blks),
             interior,
             storage_internal_empty: layout.equipment.storage_internal.is_empty(),
         }
@@ -1343,7 +1350,7 @@ mod interior_storage_bound_tests {
             &template.values,
         );
         for k in 1..layout.n_blks {
-            let col = layout.block_storage_col(0, k);
+            let col = layout.block_storage_col(HydroSys::new(0), k);
             assert_eq!(
                 col_scale[col], 1.0,
                 "interior col {col} scale must be the empty-column scale 1.0 while it carries no row coefficients"
@@ -1416,7 +1423,7 @@ mod interior_storage_bound_tests {
             let stage = stage_with_blocks(BlockMode::Parallel);
             let l = StageLayout::new(&par_ctx, &par_state, &stage, STAGE_IDX);
             (
-                l.block_storage_col(0, l.n_blks),
+                l.block_storage_col(HydroSys::new(0), l.n_blks),
                 l.equipment.storage_internal.is_empty(),
             )
         };
@@ -1827,6 +1834,7 @@ mod filling_phase_gating_tests {
         EvaporationModel, EvaporationModelSet, FphaPlane, ProductionModelSet,
         ResolvedProductionModel,
     };
+    use crate::indexer::{FphaLocal, HydroSys};
     use crate::resolved_parameters::ResolvedParameters;
 
     use super::super::layout::ResolvedTables;
@@ -2137,14 +2145,14 @@ mod filling_phase_gating_tests {
         fill_diversion_columns(&ctx, &stage, STAGE_IDX, &layout, &mut bufs);
         fill_fpha_generation_columns(&ctx, STAGE_IDX, &layout, &mut bufs);
         let offsets = [
-            layout.turbine_col(0, 0),
+            layout.turbine_col(HydroSys::new(0), 0),
             layout.equipment.diversion.start,
             // FPHA-local index 0 (the sole FPHA hydro); for a non-FPHA fixture
             // there is no generation column, so callers must not read this slot.
             if layout.fpha_hydro_indices.is_empty() {
                 usize::MAX
             } else {
-                layout.generation_col(0, 0)
+                layout.generation_col(FphaLocal::new(0), 0)
             },
         ];
         (col_lower, col_upper, offsets)
@@ -3809,6 +3817,7 @@ mod evaporation_slack_objective_tests {
         EvaporationModel, EvaporationModelSet, LinearizedEvaporation, ProductionModelSet,
         ResolvedProductionModel,
     };
+    use crate::indexer::EvapLocal;
     use crate::resolved_parameters::ResolvedParameters;
 
     use super::super::layout::ResolvedTables;
@@ -4117,10 +4126,10 @@ mod evaporation_slack_objective_tests {
         };
         fill_evaporation_columns(&ctx, stage, STAGE_IDX, &layout, &mut bufs);
         let f_plus = (0..layout.n_blks)
-            .map(|blk| objective[layout.evap_f_plus_col(0, blk)])
+            .map(|blk| objective[layout.evap_f_plus_col(EvapLocal::new(0), blk)])
             .collect();
         let f_minus = (0..layout.n_blks)
-            .map(|blk| objective[layout.evap_f_minus_col(0, blk)])
+            .map(|blk| objective[layout.evap_f_minus_col(EvapLocal::new(0), blk)])
             .collect();
         EvapFill {
             f_plus,

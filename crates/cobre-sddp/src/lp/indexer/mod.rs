@@ -75,6 +75,11 @@
 //!   projection of [`StateLayout`] exposing only the cut-state dimensions a
 //!   stage's `StageStateConfig` enables (anticipated state always included),
 //!   delegating each column to [`StateLayout::state_to_lp_incoming_column`].
+//! - `entity_index` — the entity system/local index vocabulary
+//!   ([`HydroSys`]/[`ThermalSys`]/[`LineSys`], [`FphaLocal`]/[`EvapLocal`]/
+//!   [`FillingTargetLocal`]/[`FloorLocal`]/[`AnticipatedLocal`]), distinguishing
+//!   an entity's canonical system position from its position within a
+//!   per-stage local identity list.
 //!
 //! Every public symbol is re-exported here so the `cobre_sddp::indexer::Symbol`
 //! and `crate::indexer::Symbol` module paths resolve to the same item regardless
@@ -82,6 +87,7 @@
 
 mod block_grid;
 mod cut_state_projection;
+mod entity_index;
 mod index;
 mod layout;
 mod range_cursor;
@@ -91,6 +97,10 @@ mod study_dimensions;
 
 pub use block_grid::BlockGrid;
 pub use cut_state_projection::CutStateProjection;
+pub use entity_index::{
+    AnticipatedLocal, EvapLocal, FillingTargetLocal, FloorLocal, FphaLocal, HydroSys, LineSys,
+    ThermalSys,
+};
 pub use index::{Col, InCol, OutCol, Row, StateDim};
 pub use layout::{EvaporationIndices, FphaRowRange};
 pub(crate) use range_cursor::RangeCursor;

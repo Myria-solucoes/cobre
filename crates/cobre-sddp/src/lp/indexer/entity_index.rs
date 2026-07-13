@@ -1,0 +1,265 @@
+//! Entity system/local index vocabulary.
+//!
+//! A bare `usize` does not distinguish an entity's canonical *system* position
+//! (its `0..n_h`-style slot in `System::hydros`/`thermals`/`lines`) from its
+//! *local* position within a per-stage sparse identity list (e.g. its slot in
+//! `fpha_hydro_indices`) — the `fpha_local` vs `h_sys` confusion this
+//! vocabulary forbids still compiles and silently addresses the wrong LP
+//! column. [`HydroSys`], [`ThermalSys`], and [`LineSys`] carry a system
+//! position; [`FphaLocal`], [`EvapLocal`], [`FillingTargetLocal`],
+//! [`FloorLocal`], and [`AnticipatedLocal`] each carry a position within their
+//! own named local list. None of the eight carries arithmetic: offset
+//! formulas stay with the owning value type — these types only gate which
+//! `usize` crosses which boundary.
+//!
+//! `BusSys`, `NcsSys`, and `ContractSys` are deliberately NOT introduced: their
+//! fills are pure `grid.flat(...)` arithmetic webs with no dedicated resolver
+//! seam (`fill_ncs_load_balance_entries`, the contract loops in
+//! `fill_load_balance_entries`, and every bus row read `grid.flat(...)`
+//! directly), so a system-index type for them would have no call site and
+//! ship as a dead type.
+
+/// A hydro's canonical system position (its slot in `System::hydros`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct HydroSys(usize);
+
+impl HydroSys {
+    /// Wrap a raw hydro system-index position.
+    #[inline]
+    #[must_use]
+    pub fn new(v: usize) -> Self {
+        Self(v)
+    }
+
+    /// Extract the raw hydro system-index position.
+    #[inline]
+    #[must_use]
+    pub fn get(self) -> usize {
+        self.0
+    }
+}
+
+/// A thermal's canonical system position (its slot in `System::thermals`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct ThermalSys(usize);
+
+impl ThermalSys {
+    /// Wrap a raw thermal system-index position.
+    #[inline]
+    #[must_use]
+    pub fn new(v: usize) -> Self {
+        Self(v)
+    }
+
+    /// Extract the raw thermal system-index position.
+    #[inline]
+    #[must_use]
+    pub fn get(self) -> usize {
+        self.0
+    }
+}
+
+/// A line's canonical system position (its slot in `System::lines`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct LineSys(usize);
+
+impl LineSys {
+    /// Wrap a raw line system-index position.
+    #[inline]
+    #[must_use]
+    pub fn new(v: usize) -> Self {
+        Self(v)
+    }
+
+    /// Extract the raw line system-index position.
+    #[inline]
+    #[must_use]
+    pub fn get(self) -> usize {
+        self.0
+    }
+}
+
+/// A hydro's position within a stage's `fpha_hydro_indices` local list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct FphaLocal(usize);
+
+impl FphaLocal {
+    /// Wrap a raw FPHA-local index.
+    #[inline]
+    #[must_use]
+    pub fn new(v: usize) -> Self {
+        Self(v)
+    }
+
+    /// Extract the raw FPHA-local index.
+    #[inline]
+    #[must_use]
+    pub fn get(self) -> usize {
+        self.0
+    }
+}
+
+/// A hydro's position within a stage's evaporation-model local list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct EvapLocal(usize);
+
+impl EvapLocal {
+    /// Wrap a raw evaporation-local index.
+    #[inline]
+    #[must_use]
+    pub fn new(v: usize) -> Self {
+        Self(v)
+    }
+
+    /// Extract the raw evaporation-local index.
+    #[inline]
+    #[must_use]
+    pub fn get(self) -> usize {
+        self.0
+    }
+}
+
+/// A hydro's position within a stage's filling-target local list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct FillingTargetLocal(usize);
+
+impl FillingTargetLocal {
+    /// Wrap a raw filling-target-local index.
+    #[inline]
+    #[must_use]
+    pub fn new(v: usize) -> Self {
+        Self(v)
+    }
+
+    /// Extract the raw filling-target-local index.
+    #[inline]
+    #[must_use]
+    pub fn get(self) -> usize {
+        self.0
+    }
+}
+
+/// A hydro's position within a stage's storage-floor local list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct FloorLocal(usize);
+
+impl FloorLocal {
+    /// Wrap a raw storage-floor-local index.
+    #[inline]
+    #[must_use]
+    pub fn new(v: usize) -> Self {
+        Self(v)
+    }
+
+    /// Extract the raw storage-floor-local index.
+    #[inline]
+    #[must_use]
+    pub fn get(self) -> usize {
+        self.0
+    }
+}
+
+/// A thermal's position within a stage's anticipated-commitment local list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct AnticipatedLocal(usize);
+
+impl AnticipatedLocal {
+    /// Wrap a raw anticipated-local index.
+    #[inline]
+    #[must_use]
+    pub fn new(v: usize) -> Self {
+        Self(v)
+    }
+
+    /// Extract the raw anticipated-local index.
+    #[inline]
+    #[must_use]
+    pub fn get(self) -> usize {
+        self.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        AnticipatedLocal, EvapLocal, FillingTargetLocal, FloorLocal, FphaLocal, HydroSys, LineSys,
+        ThermalSys,
+    };
+
+    #[test]
+    fn hydro_sys_is_zero_cost_and_round_trips() {
+        assert_eq!(
+            std::mem::size_of::<HydroSys>(),
+            std::mem::size_of::<usize>()
+        );
+        assert_eq!(HydroSys::new(3).get(), 3);
+    }
+
+    #[test]
+    fn thermal_sys_is_zero_cost_and_round_trips() {
+        assert_eq!(
+            std::mem::size_of::<ThermalSys>(),
+            std::mem::size_of::<usize>()
+        );
+        assert_eq!(ThermalSys::new(11).get(), 11);
+    }
+
+    #[test]
+    fn line_sys_is_zero_cost_and_round_trips() {
+        assert_eq!(std::mem::size_of::<LineSys>(), std::mem::size_of::<usize>());
+        assert_eq!(LineSys::new(4).get(), 4);
+    }
+
+    #[test]
+    fn fpha_local_is_zero_cost_and_round_trips() {
+        assert_eq!(
+            std::mem::size_of::<FphaLocal>(),
+            std::mem::size_of::<usize>()
+        );
+        assert_eq!(FphaLocal::new(2).get(), 2);
+    }
+
+    #[test]
+    fn evap_local_is_zero_cost_and_round_trips() {
+        assert_eq!(
+            std::mem::size_of::<EvapLocal>(),
+            std::mem::size_of::<usize>()
+        );
+        assert_eq!(EvapLocal::new(6).get(), 6);
+    }
+
+    #[test]
+    fn filling_target_local_is_zero_cost_and_round_trips() {
+        assert_eq!(
+            std::mem::size_of::<FillingTargetLocal>(),
+            std::mem::size_of::<usize>()
+        );
+        assert_eq!(FillingTargetLocal::new(8).get(), 8);
+    }
+
+    #[test]
+    fn floor_local_is_zero_cost_and_round_trips() {
+        assert_eq!(
+            std::mem::size_of::<FloorLocal>(),
+            std::mem::size_of::<usize>()
+        );
+        assert_eq!(FloorLocal::new(1).get(), 1);
+    }
+
+    #[test]
+    fn anticipated_local_is_zero_cost_and_round_trips() {
+        assert_eq!(
+            std::mem::size_of::<AnticipatedLocal>(),
+            std::mem::size_of::<usize>()
+        );
+        assert_eq!(AnticipatedLocal::new(5).get(), 5);
+    }
+}

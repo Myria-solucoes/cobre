@@ -15,7 +15,8 @@ use crate::hydro_models::{
     EvaporationModel, EvaporationModelSet, ProductionModelSet, ResolvedProductionModel,
 };
 use crate::indexer::{
-    BlockGrid, EvaporationIndices, RangeCursor, StateLayout, StorageBoundaryGrid,
+    BlockGrid, EvapLocal, EvaporationIndices, FphaLocal, HydroSys, RangeCursor, StateLayout,
+    StorageBoundaryGrid,
 };
 use crate::lead_time::{AnticipatedResolution, SpreadResolution};
 
@@ -474,7 +475,7 @@ pub(crate) struct FillingLayout {
     /// Parallel to both the `filling_target` row and `σ_fill` column blocks: local
     /// index `i` → row `row_filling_target_start + i`, column
     /// `col_filling_target_start + i`.
-    pub(crate) filling_target_hydro_indices: Vec<usize>,
+    pub(crate) filling_target_hydro_indices: Vec<HydroSys>,
     /// First soft `σ^{v-}` operating-floor row (one per Operating-phase filling
     /// hydro); sibling to `filling_target` in the pre-cut region. Same
     /// `row >= num_rows` aliasing invariant as `row_filling_target_start`.
@@ -488,7 +489,7 @@ pub(crate) struct FillingLayout {
     /// Parallel to both the `filled_min_storage_floor` row and column blocks. DISTINCT
     /// from `filling_target_hydro_indices` (`σ_fill`, Filling phase); the two
     /// never overlap (Operating vs Filling).
-    pub(crate) filled_min_storage_floor_hydro_indices: Vec<usize>,
+    pub(crate) filled_min_storage_floor_hydro_indices: Vec<HydroSys>,
 }
 
 /// Pre-computed column and row layout offsets for a single stage LP.
@@ -536,15 +537,15 @@ pub(crate) struct StageLayout<'a> {
     /// `total_stage_hours * M3S_TO_HM3`; the water-balance noise/inflow scale.
     pub(crate) zeta: f64,
     /// Indices (into `ctx.hydros`) of hydros using FPHA at this stage.
-    pub(crate) fpha_hydro_indices: Vec<usize>,
+    pub(crate) fpha_hydro_indices: Vec<HydroSys>,
     /// Inverse of `fpha_hydro_indices`: system hydro index → FPHA-local index,
     /// length `n_h` (`None` at non-FPHA hydros). Single owner of the reverse map,
     /// read by the matrix-fill helpers in place of rebuilding it per call.
-    pub(crate) fpha_local_index: Vec<Option<usize>>,
+    pub(crate) fpha_local_index: Vec<Option<FphaLocal>>,
     /// Hyperplane count per FPHA hydro at this stage.
     pub(crate) fpha_planes_per_hydro: Vec<usize>,
     /// Indices (into `ctx.hydros`) of hydros with linearized evaporation at this stage.
-    pub(crate) evap_hydro_indices: Vec<usize>,
+    pub(crate) evap_hydro_indices: Vec<HydroSys>,
     /// Per-`(evaporation hydro, block)` column/row indices, block-major
     /// (`local * n_blks + blk`). At `n_blks == 1` the slot for evap hydro `i` is
     /// `i`, parallel to `evap_hydro_indices`.
@@ -770,8 +771,8 @@ fn identify_fpha_hydros(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
     stage_id: i32,
-) -> (Vec<usize>, Vec<usize>) {
-    let mut fpha_hydro_indices: Vec<usize> = Vec::new();
+) -> (Vec<HydroSys>, Vec<usize>) {
+    let mut fpha_hydro_indices: Vec<HydroSys> = Vec::new();
     let mut fpha_planes_per_hydro: Vec<usize> = Vec::new();
     for h_idx in 0..ctx.n_hydros {
         let hydro = &ctx.hydros[h_idx];
@@ -789,7 +790,7 @@ fn identify_fpha_hydros(
         if let ResolvedProductionModel::Fpha { planes, .. } =
             ctx.production_models.model(h_idx, stage_idx)
         {
-            fpha_hydro_indices.push(h_idx);
+            fpha_hydro_indices.push(HydroSys::new(h_idx));
             fpha_planes_per_hydro.push(planes.len());
         }
     }
@@ -804,7 +805,7 @@ fn identify_fpha_hydros(
 /// `Filling` — the opposite of the FPHA rule (excluded in `PreFilling` *and*
 /// `Filling`); the two must not be unified. A non-filling hydro with no window is
 /// `Operating` at every stage (parity-neutral).
-fn identify_evap_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> Vec<usize> {
+fn identify_evap_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> Vec<HydroSys> {
     (0..ctx.n_hydros)
         .filter(|&h_idx| {
             let hydro = &ctx.hydros[h_idx];
@@ -824,6 +825,7 @@ fn identify_evap_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> Vec<usize>
                 EvaporationModel::Linearized { .. }
             )
         })
+        .map(HydroSys::new)
         .collect()
 }
 
@@ -837,7 +839,7 @@ fn identify_evap_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> Vec<usize>
 /// drops every intermediate floor. `PreFilling`/`Operating` are excluded by
 /// [`filling_phase`] (`filled_min_storage_floor` takes over at/after `entry`). A
 /// non-filling hydro is `Operating` at every stage (parity-neutral).
-fn identify_filling_target_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> Vec<usize> {
+fn identify_filling_target_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> Vec<HydroSys> {
     (0..ctx.n_hydros)
         .filter(|&h_idx| {
             let hydro = &ctx.hydros[h_idx];
@@ -852,6 +854,7 @@ fn identify_filling_target_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> 
                     Phase::Filling
                 )
         })
+        .map(HydroSys::new)
         .collect()
 }
 
@@ -871,7 +874,7 @@ fn identify_filling_target_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> 
 fn identify_filled_min_storage_floor_hydros(
     ctx: &TemplateBuildCtx<'_>,
     stage_id: i32,
-) -> Vec<usize> {
+) -> Vec<HydroSys> {
     (0..ctx.n_hydros)
         .filter(|&h_idx| {
             let hydro = &ctx.hydros[h_idx];
@@ -885,6 +888,7 @@ fn identify_filled_min_storage_floor_hydros(
                 Phase::Operating
             ) && hydro.filling.is_some()
         })
+        .map(HydroSys::new)
         .collect()
 }
 
@@ -1055,9 +1059,9 @@ impl<'a> StageLayout<'a> {
         let filled_min_storage_floor_hydro_indices =
             identify_filled_min_storage_floor_hydros(ctx, stage.id);
 
-        let mut fpha_local_index: Vec<Option<usize>> = vec![None; n_h];
-        for (local_idx, &h_idx) in fpha_hydro_indices.iter().enumerate() {
-            fpha_local_index[h_idx] = Some(local_idx);
+        let mut fpha_local_index: Vec<Option<FphaLocal>> = vec![None; n_h];
+        for (local_idx, &h) in fpha_hydro_indices.iter().enumerate() {
+            fpha_local_index[h.get()] = Some(FphaLocal::new(local_idx));
         }
 
         let max_deficit_segments = ctx
@@ -1361,28 +1365,28 @@ impl<'a> StageLayout<'a> {
         BlockGrid::new(self.n_blks, self.equipment.max_deficit_segments)
     }
 
-    /// Turbine-flow column for hydro `h_idx`, block `blk`.
+    /// Turbine-flow column for hydro `h`, block `blk`.
     #[inline]
-    pub(crate) fn turbine_col(&self, h_idx: usize, blk: usize) -> usize {
-        self.block_col(self.equipment.turbine.start, h_idx, blk)
+    pub(crate) fn turbine_col(&self, h: HydroSys, blk: usize) -> usize {
+        self.block_col(self.equipment.turbine.start, h.get(), blk)
     }
 
-    /// Spillage column for hydro `h_idx`, block `blk`.
+    /// Spillage column for hydro `h`, block `blk`.
     #[inline]
-    pub(crate) fn spillage_col(&self, h_idx: usize, blk: usize) -> usize {
-        self.block_col(self.equipment.spillage.start, h_idx, blk)
+    pub(crate) fn spillage_col(&self, h: HydroSys, blk: usize) -> usize {
+        self.block_col(self.equipment.spillage.start, h.get(), blk)
     }
 
-    /// Diversion-flow column for hydro `h_idx`, block `blk`.
+    /// Diversion-flow column for hydro `h`, block `blk`.
     #[inline]
-    pub(crate) fn diversion_col(&self, h_idx: usize, blk: usize) -> usize {
-        self.block_col(self.equipment.diversion.start, h_idx, blk)
+    pub(crate) fn diversion_col(&self, h: HydroSys, blk: usize) -> usize {
+        self.block_col(self.equipment.diversion.start, h.get(), blk)
     }
 
     /// FPHA generation column for FPHA-local index `local_idx`, block `blk`.
     #[inline]
-    pub(crate) fn generation_col(&self, local_idx: usize, blk: usize) -> usize {
-        self.block_col(self.equipment.generation_col_start, local_idx, blk)
+    pub(crate) fn generation_col(&self, local_idx: FphaLocal, blk: usize) -> usize {
+        self.block_col(self.equipment.generation_col_start, local_idx.get(), blk)
     }
 
     /// Forward line-flow column for line `l_idx`, block `blk`.
@@ -1450,22 +1454,22 @@ impl<'a> StageLayout<'a> {
     /// Evaporation-outflow column for `(evap hydro local_idx, block blk)` (the
     /// [`EVAP_FLOW_OFFSET`] column of the block's triple).
     #[inline]
-    pub(crate) fn evap_flow_col(&self, local_idx: usize, blk: usize) -> usize {
-        self.evap_triple_base(local_idx, blk) + EVAP_FLOW_OFFSET
+    pub(crate) fn evap_flow_col(&self, local_idx: EvapLocal, blk: usize) -> usize {
+        self.evap_triple_base(local_idx.get(), blk) + EVAP_FLOW_OFFSET
     }
 
     /// `f_evap_plus` (under-evaporation slack) column for `(evap hydro local_idx,
     /// block blk)` (the [`EVAP_F_PLUS_OFFSET`] column of the block's triple).
     #[inline]
-    pub(crate) fn evap_f_plus_col(&self, local_idx: usize, blk: usize) -> usize {
-        self.evap_triple_base(local_idx, blk) + EVAP_F_PLUS_OFFSET
+    pub(crate) fn evap_f_plus_col(&self, local_idx: EvapLocal, blk: usize) -> usize {
+        self.evap_triple_base(local_idx.get(), blk) + EVAP_F_PLUS_OFFSET
     }
 
     /// `f_evap_minus` (over-evaporation slack) column for `(evap hydro local_idx,
     /// block blk)` (the [`EVAP_F_MINUS_OFFSET`] column of the block's triple).
     #[inline]
-    pub(crate) fn evap_f_minus_col(&self, local_idx: usize, blk: usize) -> usize {
-        self.evap_triple_base(local_idx, blk) + EVAP_F_MINUS_OFFSET
+    pub(crate) fn evap_f_minus_col(&self, local_idx: EvapLocal, blk: usize) -> usize {
+        self.evap_triple_base(local_idx.get(), blk) + EVAP_F_MINUS_OFFSET
     }
 
     /// Deficit column for bus `b_idx`, segment `seg_idx`, block `blk`. Three-term
@@ -1494,8 +1498,8 @@ impl<'a> StageLayout<'a> {
     /// endpoints-vs-interior split. At `n_blks = 1` only the two endpoints
     /// resolve (no interior).
     #[inline]
-    pub(crate) fn block_storage_col(&self, h: usize, k: usize) -> usize {
-        self.storage_boundary_grid().col(h, k)
+    pub(crate) fn block_storage_col(&self, h: HydroSys, k: usize) -> usize {
+        self.storage_boundary_grid().col(h.get(), k)
     }
 
     // ── Role-(a) accessors (read through the borrowed StateLayout handle) ─────────
