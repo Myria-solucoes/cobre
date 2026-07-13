@@ -167,7 +167,7 @@ fn find_productivity_for_stage(config: &ProductionModelConfig, stage: &Stage) ->
 mod tests {
     use chrono::NaiveDate;
     use cobre_core::{
-        EntityId,
+        DeficitSegment, EntityId, Hydro,
         entities::{Bus, HydroGenerationModel, HydroPenalties},
         initial_conditions::InitialConditions,
         penalty::GlobalPenaltyDefaults,
@@ -220,8 +220,8 @@ mod tests {
         }
     }
 
-    fn make_hydro(id: i32, model: HydroGenerationModel) -> cobre_core::entities::Hydro {
-        cobre_core::entities::Hydro {
+    fn make_hydro(id: i32, model: HydroGenerationModel) -> Hydro {
+        Hydro {
             id: EntityId(id),
             name: format!("Hydro {id}"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -303,8 +303,6 @@ mod tests {
     }
 
     fn base_parsed_data() -> ParsedData {
-        use cobre_core::entities::DeficitSegment;
-
         let config = Config {
             schema: None,
             modeling: ModelingConfig::default(),
@@ -326,7 +324,7 @@ mod tests {
         };
 
         let global_penalties = GlobalPenaltyDefaults {
-            bus_deficit_segments: vec![cobre_core::entities::DeficitSegment {
+            bus_deficit_segments: vec![DeficitSegment {
                 depth_mw: None,
                 cost_per_mwh: 1.0,
             }],

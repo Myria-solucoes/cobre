@@ -310,8 +310,6 @@ fn max_par_order_z_inflow_row_has_twelve_lag_entries() {
 #[test]
 #[allow(clippy::cast_precision_loss)] // fixture values are small integers; no precision is lost
 fn parameter_coefficient_persists_across_stage_template_uses() {
-    use PatchBuffer;
-
     // Realistic-scale system: N=3, L=2, M=2, B_max=3.
     // Row capacity = N + M*B_max + N = 3 + 2*3 + 3 = 12.
     let n: usize = 3;

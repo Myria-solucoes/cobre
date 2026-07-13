@@ -23,8 +23,9 @@ use cobre_core::{
 };
 use cobre_io::extensions::{
     FittingWindow, FphaColumnLayout, FphaHyperplaneRow, HydroGeometryRow, ProductionModelConfig,
-    SeasonConfig, SelectionMode, StageRange, TailraceCurveRow,
+    SeasonConfig, SelectionMode, StageRange, TailraceCurveRow, parse_fpha_hyperplanes,
 };
+use cobre_io::output::write_fpha_hyperplanes;
 
 use super::*;
 
@@ -76,8 +77,8 @@ fn zero_penalties() -> HydroPenalties {
     }
 }
 
-fn make_hydro(id: i32, model: HydroGenerationModel) -> cobre_core::entities::hydro::Hydro {
-    cobre_core::entities::hydro::Hydro {
+fn make_hydro(id: i32, model: HydroGenerationModel) -> Hydro {
+    Hydro {
         id: EntityId::from(id),
         name: format!("Hydro{id}"),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -199,7 +200,7 @@ fn fpha_entity_without_config_entry_returns_validation_error() {
     let hydro = make_hydro(0, HydroGenerationModel::Fpha);
     let err = determine_source(&hydro, None).expect_err("should fail");
     assert!(
-        matches!(err, crate::SddpError::Validation(ref msg) if
+        matches!(err, SddpError::Validation(ref msg) if
                 msg.contains("fpha") || msg.contains("no entry") || msg.contains("hydro_production_models")),
         "expected Validation error mentioning missing config entry, got {err:?}"
     );
@@ -219,7 +220,7 @@ fn computed_source_returns_computed_from_geometry() {
 }
 
 /// A hydro with all computed-source prerequisites (tailrace, losses, efficiency).
-fn make_computed_hydro(id: i32) -> cobre_core::entities::hydro::Hydro {
+fn make_computed_hydro(id: i32) -> Hydro {
     let mut hydro = make_hydro(id, HydroGenerationModel::Fpha);
     hydro.tailrace = Some(TailraceModel::Polynomial {
         coefficients: vec![300.0],
@@ -601,7 +602,7 @@ fn zero_hyperplanes_for_stage_returns_validation_error() {
     .expect_err("should fail with zero hyperplanes");
 
     assert!(
-        matches!(err, crate::SddpError::Validation(_)),
+        matches!(err, SddpError::Validation(_)),
         "expected Validation error, got {err:?}"
     );
 }
@@ -795,16 +796,15 @@ fn test_resolve_stage_model_uses_parquet_override_when_json_omits_productivity()
         },
     };
     let empty_map = std::collections::HashMap::new();
-    let override_table = crate::energy_conversion::build_hydro_energy_productivity_override(&[
-        cobre_io::HydroEnergyProductivityRow {
+    let override_table =
+        build_hydro_energy_productivity_override(&[cobre_io::HydroEnergyProductivityRow {
             hydro_id: EntityId::from(0),
             stage_id: Some(0),
             equivalent_productivity_mw_per_m3s: Some(0.42),
             reference_outflow_m3s: None,
             specific_productivity_mw_per_m3s_per_m: None,
-        },
-    ])
-    .expect("override builds");
+        }])
+        .expect("override builds");
 
     let model = super::resolve_stage_model(
         &hydro,
@@ -1124,7 +1124,7 @@ fn precomputed_config_returns_precomputed_source() {
 
 /// Sobradinho-style hydro with all computed prerequisites — the known-valid fit
 /// fixture (mirrors `fpha_fitting.rs`).
-fn make_sobradinho_computed_hydro(id: i32) -> cobre_core::entities::hydro::Hydro {
+fn make_sobradinho_computed_hydro(id: i32) -> Hydro {
     let mut hydro = make_hydro(id, HydroGenerationModel::Fpha);
     hydro.name = format!("Sobradinho{id}");
     hydro.min_storage_hm3 = 100.0;
@@ -1300,11 +1300,9 @@ fn computed_export_rows_round_trip_through_parquet() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("fpha_hyperplanes.parquet");
-    cobre_io::output::write_fpha_hyperplanes(&path, &export_rows)
-        .expect("write_fpha_hyperplanes must succeed");
+    write_fpha_hyperplanes(&path, &export_rows).expect("write_fpha_hyperplanes must succeed");
 
-    let read_rows =
-        cobre_io::extensions::parse_fpha_hyperplanes(&path).expect("re-read must succeed");
+    let read_rows = parse_fpha_hyperplanes(&path).expect("re-read must succeed");
     assert_eq!(
         read_rows.len(),
         fitted_planes.len(),
@@ -1567,9 +1565,7 @@ fn empty_families_map() -> HashMap<EntityId, TailraceFamilies> {
 /// A minimal single-hydro `System` + flat reference-fraction resolver for
 /// `fit_computed_planes_per_stage`. The hydro has no `downstream_id`, so the
 /// downstream level resolves to `None` (unused with an empty families map).
-fn entity_fit_context(
-    hydro: &cobre_core::entities::hydro::Hydro,
-) -> (System, HydroReferenceVolumeFractions) {
+fn entity_fit_context(hydro: &Hydro) -> (System, HydroReferenceVolumeFractions) {
     let system = SystemBuilder::new()
         .buses(vec![make_bus()])
         .hydros(vec![hydro.clone()])
@@ -1869,7 +1865,7 @@ fn coverage_gap_returns_validation_error() {
     )
     .expect_err("a coverage gap must error, not silently drop the stage");
     assert!(
-        matches!(err, crate::SddpError::Validation(ref msg) if msg.contains("stage 2")),
+        matches!(err, SddpError::Validation(ref msg) if msg.contains("stage 2")),
         "expected Validation naming the uncovered stage, got {err:?}"
     );
 }
@@ -1962,7 +1958,7 @@ fn make_bus() -> Bus {
 /// the resolved-hm³ semantics the downstream-level consumer reads.
 fn flat_reference_fractions(
     default_fraction: f64,
-    hydros: &[cobre_core::entities::hydro::Hydro],
+    hydros: &[Hydro],
 ) -> HydroReferenceVolumeFractions {
     let resolved: Vec<(EntityId, StudyPos, f64)> = hydros
         .iter()
@@ -1971,7 +1967,7 @@ fn flat_reference_fractions(
             (0..8).map(move |s| (h.id, StudyPos(s), v))
         })
         .collect();
-    cobre_io::extensions::build_hydro_reference_volumes_resolved(&resolved, 0.0)
+    build_hydro_reference_volumes_resolved(&resolved, 0.0)
 }
 
 fn geometry_map_for(rows: &[HydroGeometryRow]) -> HashMap<EntityId, Vec<&HydroGeometryRow>> {
@@ -2196,7 +2192,7 @@ fn dedup_key_separates_distinct_downstream_levels() {
     // (→ low level), stage 1 fraction 1.0 (→ high level), keyed by stage index.
     let down_v_min = downstream.min_storage_hm3;
     let down_span = downstream.max_storage_hm3 - downstream.min_storage_hm3;
-    let fractions = cobre_io::extensions::build_hydro_reference_volumes_resolved(
+    let fractions = build_hydro_reference_volumes_resolved(
         &[
             (
                 EntityId::from(1),
@@ -2333,7 +2329,7 @@ fn fit_computed_planes_per_stage_records_every_distinct_fit() {
     stage1.season_id = Some(1);
     let down_v_min = downstream.min_storage_hm3;
     let down_span = downstream.max_storage_hm3 - downstream.min_storage_hm3;
-    let fractions = cobre_io::extensions::build_hydro_reference_volumes_resolved(
+    let fractions = build_hydro_reference_volumes_resolved(
         &[
             (
                 EntityId::from(1),

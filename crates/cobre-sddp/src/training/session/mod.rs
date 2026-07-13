@@ -34,6 +34,7 @@ use cobre_solver::SolverInterface;
 
 use crate::{
     SddpError, TrainingConfig,
+    backward::BackwardResult,
     backward_pass_state::{BackwardPassInputs, BackwardPassState},
     context::{StageContext, TrainingContext},
     convergence::convergence::ConvergenceMonitor,
@@ -41,7 +42,7 @@ use crate::{
     cut::row::build_cut_row_batch_into,
     cut_selection::CutActivityUpdates,
     cut_sync::CutSyncBuffers,
-    forward::sync_forward,
+    forward::{ForwardResult, SyncResult, sync_forward},
     forward_pass_state::{ForwardPassInputs, ForwardPassState},
     lower_bound::LbEvalScratchBundle,
     lower_bound::evaluate_lower_bound,
@@ -115,7 +116,7 @@ pub(crate) struct TrainingSession<'a, S: SolverInterface + Send, C: Communicator
     basis_store: BasisStore,
     exchange_bufs: ExchangeBuffers,
     cut_sync_bufs: CutSyncBuffers,
-    visited_archive: Option<crate::visited_states::VisitedStatesArchive>,
+    visited_archive: Option<VisitedStatesArchive>,
     scratch: IterationScratch,
     convergence_monitor: ConvergenceMonitor,
 
@@ -619,14 +620,7 @@ where
     fn run_forward_phase(
         &mut self,
         iteration: u64,
-    ) -> Result<
-        (
-            crate::forward::ForwardResult,
-            crate::forward::SyncResult,
-            f64,
-        ),
-        SddpError,
-    > {
+    ) -> Result<(ForwardResult, SyncResult, f64), SddpError> {
         let fwd_stats_before = aggregate_solver_statistics(
             self.fwd_pool
                 .workspaces
@@ -757,10 +751,7 @@ where
     // Rationale: the `i32::try_from(*omega).expect(...)` cannot fire — opening
     // indices derive from `branching_factor: u16` and stay well below `i32::MAX`.
     #[allow(clippy::expect_used)]
-    fn run_backward_phase(
-        &mut self,
-        iteration: u64,
-    ) -> Result<(crate::backward::BackwardResult, f64), SddpError> {
+    fn run_backward_phase(&mut self, iteration: u64) -> Result<(BackwardResult, f64), SddpError> {
         // Borrow bwd_state and each disjoint `self.scratch` sub-field separately
         // so they can be co-borrowed mutably without a whole-struct conflict.
         let bwd = &mut self.bwd_state;
@@ -1176,7 +1167,7 @@ mod tests {
     use cobre_core::{
         Bus, EntityId, SystemBuilder, TrainingEvent, WorkerTimingPhase,
         scenario::{
-            CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile,
+            CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, InflowModel,
             SamplingScheme,
         },
         temporal::{
@@ -1199,9 +1190,11 @@ mod tests {
         cut::fcf::FutureCostFunction,
         error::SddpError,
         horizon_mode::HorizonMode,
-        indexer::{StateLayout, StudyDimensions},
+        indexer::{CutStateProjection, StateLayout, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
         risk_measure::RiskMeasure,
+        solver_stats::WORKER_STATS_ENTRY_STRIDE,
+        test_support,
     };
 
     // ── Shared helpers (mirrors training.rs test helpers) ──────────────────
@@ -1419,7 +1412,7 @@ mod tests {
         let stages: Vec<Stage> = (0..n_stages).map(make_stage).collect();
 
         let inflow_models: Vec<_> = (0..n_stages)
-            .map(|i| cobre_core::scenario::InflowModel {
+            .map(|i| InflowModel {
                 hydro_id: EntityId(1),
                 stage_id: i as i32,
                 mean_m3s: 100.0,
@@ -1489,11 +1482,11 @@ mod tests {
                     duration_hours: 744.0,
                 }],
                 block_mode: BlockMode::Parallel,
-                state_config: cobre_core::temporal::StageStateConfig {
+                state_config: StageStateConfig {
                     storage: true,
                     inflow_lags: false,
                 },
-                risk_config: cobre_core::temporal::StageRiskConfig::Expectation,
+                risk_config: StageRiskConfig::Expectation,
                 scenario_config: ScenarioSourceConfig {
                     branching_factor: 1,
                     noise_method: NoiseMethod::Saa,
@@ -1590,7 +1583,7 @@ mod tests {
         horizon: &'a HorizonMode,
         study_dims: &'a StudyDimensions,
         state: &'a StateLayout,
-        cut_state_layouts: &'a [crate::indexer::CutStateProjection],
+        cut_state_layouts: &'a [CutStateProjection],
         stochastic: &'a StochasticContext,
         initial_state: &'a [f64],
         stages: &'a [Stage],
@@ -1624,7 +1617,7 @@ mod tests {
     #[test]
     fn training_session_new_preallocates_all_buffers() {
         let n_stages = 2;
-        let state = crate::test_support::state_layout(1, 0);
+        let state = test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1639,9 +1632,8 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let study_dims = crate::test_support::study_dims();
-        let cut_state_layouts =
-            crate::test_support::all_enabled_cut_state_layouts(&state, n_stages);
+        let study_dims = test_support::study_dims();
+        let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, n_stages);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,
@@ -1682,7 +1674,7 @@ mod tests {
         );
         // send_stride = n_workers_local * max_openings * WORKER_STATS_ENTRY_STRIDE
         // n_fwd_threads=1 → n_workers_local=1; max_openings=1 for this fixture
-        let expected_send_stride = crate::solver_stats::WORKER_STATS_ENTRY_STRIDE;
+        let expected_send_stride = WORKER_STATS_ENTRY_STRIDE;
         assert_eq!(
             session.bwd_state.bwd_stats_send_buf.len(),
             expected_send_stride,
@@ -1696,7 +1688,7 @@ mod tests {
     #[test]
     fn training_session_finalize_emits_training_finished() {
         let n_stages = 2;
-        let state = crate::test_support::state_layout(1, 0);
+        let state = test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1715,9 +1707,8 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let study_dims = crate::test_support::study_dims();
-        let cut_state_layouts =
-            crate::test_support::all_enabled_cut_state_layouts(&state, n_stages);
+        let study_dims = test_support::study_dims();
+        let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, n_stages);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,
@@ -1759,7 +1750,7 @@ mod tests {
     #[test]
     fn training_session_finalize_with_error_emits_training_finished_with_error_reason() {
         let n_stages = 2;
-        let state = crate::test_support::state_layout(1, 0);
+        let state = test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1778,9 +1769,8 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let study_dims = crate::test_support::study_dims();
-        let cut_state_layouts =
-            crate::test_support::all_enabled_cut_state_layouts(&state, n_stages);
+        let study_dims = test_support::study_dims();
+        let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, n_stages);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,
@@ -1825,7 +1815,7 @@ mod tests {
     #[test]
     fn training_session_run_iteration_returns_continue_when_not_converged() {
         let n_stages = 2;
-        let state = crate::test_support::state_layout(1, 0);
+        let state = test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1842,9 +1832,8 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let study_dims = crate::test_support::study_dims();
-        let cut_state_layouts =
-            crate::test_support::all_enabled_cut_state_layouts(&state, n_stages);
+        let study_dims = test_support::study_dims();
+        let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, n_stages);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,
@@ -1880,7 +1869,7 @@ mod tests {
     #[test]
     fn training_session_run_iteration_returns_converged_when_gap_closes() {
         let n_stages = 2;
-        let state = crate::test_support::state_layout(1, 0);
+        let state = test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1897,9 +1886,8 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let study_dims = crate::test_support::study_dims();
-        let cut_state_layouts =
-            crate::test_support::all_enabled_cut_state_layouts(&state, n_stages);
+        let study_dims = test_support::study_dims();
+        let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, n_stages);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,
@@ -1950,7 +1938,7 @@ mod tests {
     #[test]
     fn training_session_run_iteration_emits_correct_event_sequence() {
         let n_stages = 2;
-        let state = crate::test_support::state_layout(1, 0);
+        let state = test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1969,9 +1957,8 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let study_dims = crate::test_support::study_dims();
-        let cut_state_layouts =
-            crate::test_support::all_enabled_cut_state_layouts(&state, n_stages);
+        let study_dims = test_support::study_dims();
+        let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, n_stages);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,

@@ -1,4 +1,4 @@
-use cobre_core::commissioning::commissioning_active;
+use cobre_core::commissioning::{Phase, commissioning_active, filling_phase};
 use cobre_core::{ContractType, Stage};
 
 use crate::hydro_models::{EvaporationModel, ResolvedProductionModel};
@@ -91,13 +91,13 @@ fn fill_storage_columns(
         // disappears at `Operating`, restoring the hard floor.
         let floor_off = hydro.filling.is_some()
             || matches!(
-                cobre_core::commissioning::filling_phase(
+                filling_phase(
                     hydro.filling.as_ref(),
                     hydro.entry_stage_id,
                     hydro.exit_stage_id,
                     stage.id,
                 ),
-                cobre_core::commissioning::Phase::PreFilling
+                Phase::PreFilling
             );
         let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
         let storage_lower = if floor_off { 0.0 } else { hb.min_storage_hm3 };
@@ -195,14 +195,13 @@ fn fill_turbine_columns(
     for h_idx in 0..layout.n_h {
         let hydro = &ctx.hydros[h_idx];
         let suspended = matches!(
-            cobre_core::commissioning::filling_phase(
+            filling_phase(
                 hydro.filling.as_ref(),
                 hydro.entry_stage_id,
                 hydro.exit_stage_id,
                 stage.id,
             ),
-            cobre_core::commissioning::Phase::PreFilling
-                | cobre_core::commissioning::Phase::Filling
+            Phase::PreFilling | Phase::Filling
         );
         let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
         let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
@@ -244,13 +243,13 @@ fn fill_spillage_columns(
     for h_idx in 0..layout.n_h {
         let hydro = &ctx.hydros[h_idx];
         let prefilling = matches!(
-            cobre_core::commissioning::filling_phase(
+            filling_phase(
                 hydro.filling.as_ref(),
                 hydro.entry_stage_id,
                 hydro.exit_stage_id,
                 stage.id,
             ),
-            cobre_core::commissioning::Phase::PreFilling
+            Phase::PreFilling
         );
         let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
         for blk in 0..layout.n_blks {
@@ -278,14 +277,13 @@ fn fill_diversion_columns(
     for (h_idx, hydro) in ctx.hydros.iter().enumerate() {
         let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
         let suspended = matches!(
-            cobre_core::commissioning::filling_phase(
+            filling_phase(
                 hydro.filling.as_ref(),
                 hydro.entry_stage_id,
                 hydro.exit_stage_id,
                 stage.id,
             ),
-            cobre_core::commissioning::Phase::PreFilling
-                | cobre_core::commissioning::Phase::Filling
+            Phase::PreFilling | Phase::Filling
         );
         // CONTRACT: read the per-stage RESOLVED `max_diversion_m3s`, NOT the
         // declaration-time `hydro.diversion.max_flow_m3s` — the entity read silently
@@ -965,14 +963,16 @@ mod interior_storage_bound_tests {
         ContractStageBounds, EntityId, Hydro, HydroStageBounds, HydroStagePenalties,
         LineStageBounds, LineStagePenalties, NcsStagePenalties, NoiseMethod, PenaltiesCountsSpec,
         PenaltiesDefaults, PumpingStageBounds, ResolvedBounds, ResolvedExchangeFactors,
-        ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties,
-        ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig, ThermalStageBounds,
+        ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
+        ResolvedNcsFactors, ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig,
+        StageStateConfig, ThermalStageBounds,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
     use crate::hydro_models::{
         EvaporationModel, EvaporationModelSet, ProductionModelSet, ResolvedProductionModel,
     };
+    use crate::lead_time::AnticipatedResolution;
     use crate::resolved_parameters::ResolvedParameters;
 
     use super::super::layout::ResolvedTables;
@@ -1177,7 +1177,7 @@ mod interior_storage_bound_tests {
                     N_STAGES,
                 ),
                 evaporation_models: EvaporationModelSet::new(vec![EvaporationModel::None]),
-                resolved_generic_bounds: cobre_core::ResolvedGenericConstraintBounds::empty(),
+                resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
                 resolved_load_factors: ResolvedLoadFactors::empty(),
                 resolved_exchange_factors: ResolvedExchangeFactors::empty(),
                 resolved_ncs_bounds: ResolvedNcsBounds::empty(),
@@ -1240,7 +1240,7 @@ mod interior_storage_bound_tests {
                 anticipated_lead_stages: vec![],
                 anticipated_thermal_indices: vec![],
                 anticipated_windows: vec![],
-                anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
+                anticipated_resolution: AnticipatedResolution::default(),
                 study_stage_ids: vec![],
                 has_penalty: false,
                 cumulative_discount_factors: vec![1.0],
@@ -1479,12 +1479,15 @@ mod diversion_bound_tests {
         ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties,
         ThermalStageBounds,
     };
-    use cobre_core::{BusStagePenalties, LineStagePenalties, NcsStagePenalties};
+    use cobre_core::{
+        BusStagePenalties, LineStagePenalties, NcsStagePenalties, ResolvedGenericConstraintBounds,
+    };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
     use crate::hydro_models::{
         EvaporationModel, EvaporationModelSet, ProductionModelSet, ResolvedProductionModel,
     };
+    use crate::lead_time::AnticipatedResolution;
     use crate::resolved_parameters::ResolvedParameters;
 
     use super::super::layout::ResolvedTables;
@@ -1660,7 +1663,7 @@ mod diversion_bound_tests {
                     N_STAGES,
                 ),
                 evaporation_models: EvaporationModelSet::new(vec![EvaporationModel::None]),
-                resolved_generic_bounds: cobre_core::ResolvedGenericConstraintBounds::empty(),
+                resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
                 resolved_load_factors: ResolvedLoadFactors::empty(),
                 resolved_exchange_factors: ResolvedExchangeFactors::empty(),
                 resolved_ncs_bounds: ResolvedNcsBounds::empty(),
@@ -1728,7 +1731,7 @@ mod diversion_bound_tests {
                 anticipated_lead_stages: vec![],
                 anticipated_thermal_indices: vec![],
                 anticipated_windows: vec![],
-                anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
+                anticipated_resolution: AnticipatedResolution::default(),
                 study_stage_ids: vec![],
                 has_penalty: false,
                 cumulative_discount_factors: vec![1.0],
@@ -1824,8 +1827,9 @@ mod filling_phase_gating_tests {
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, CascadeTopology, ContractStageBounds,
         EntityId, Hydro, HydroStageBounds, HydroStagePenalties, LineStageBounds,
         LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
-        PumpingStageBounds, ResolvedBounds, ResolvedExchangeFactors, ResolvedLoadFactors,
-        ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, ThermalStageBounds,
+        PumpingStageBounds, ResolvedBounds, ResolvedExchangeFactors,
+        ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
+        ResolvedNcsFactors, ResolvedPenalties, ThermalStageBounds,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -1834,6 +1838,7 @@ mod filling_phase_gating_tests {
         ResolvedProductionModel,
     };
     use crate::indexer::{BlockIdx, FphaLocal, HydroSys};
+    use crate::lead_time::AnticipatedResolution;
     use crate::resolved_parameters::ResolvedParameters;
 
     use super::super::layout::ResolvedTables;
@@ -2041,7 +2046,7 @@ mod filling_phase_gating_tests {
                     N_STAGES,
                 ),
                 evaporation_models: EvaporationModelSet::new(vec![EvaporationModel::None]),
-                resolved_generic_bounds: cobre_core::ResolvedGenericConstraintBounds::empty(),
+                resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
                 resolved_load_factors: ResolvedLoadFactors::empty(),
                 resolved_exchange_factors: ResolvedExchangeFactors::empty(),
                 resolved_ncs_bounds: ResolvedNcsBounds::empty(),
@@ -2104,7 +2109,7 @@ mod filling_phase_gating_tests {
                 anticipated_lead_stages: vec![],
                 anticipated_thermal_indices: vec![],
                 anticipated_windows: vec![],
-                anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
+                anticipated_resolution: AnticipatedResolution::default(),
                 study_stage_ids: vec![],
                 has_penalty: false,
                 cumulative_discount_factors: vec![1.0],
@@ -2806,6 +2811,7 @@ mod anticipated_objective_tests {
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
     use crate::hydro_models::{EvaporationModelSet, ProductionModelSet};
+    use crate::lead_time::AnticipatedResolution;
     use crate::resolved_parameters::ResolvedParameters;
 
     use super::super::layout::ResolvedTables;
@@ -2953,7 +2959,7 @@ mod anticipated_objective_tests {
                 // strict horizon clause. `study_stage_ids` lists the N_STAGES
                 // study-stage ids so the in-range delivery lookup is safe.
                 anticipated_windows: vec![(None, None)],
-                anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
+                anticipated_resolution: AnticipatedResolution::default(),
                 study_stage_ids: (0..N_STAGES as i32).collect(),
                 has_penalty: false,
                 cumulative_discount_factors: vec![1.0, 0.9, 0.81, 0.729, 0.6561, 0.59049],
@@ -3241,7 +3247,7 @@ mod anticipated_objective_tests {
                 anticipated_lead_stages: vec![self.k_max],
                 anticipated_thermal_indices: vec![ThermalSys::new(0)],
                 anticipated_windows: vec![(None, None)],
-                anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
+                anticipated_resolution: AnticipatedResolution::default(),
                 study_stage_ids: (0..self.n_stages as i32).collect(),
                 has_penalty: false,
                 cumulative_discount_factors: self.discount.clone(),
@@ -3339,8 +3345,9 @@ mod block_family_slack_tests {
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, CascadeTopology, ContractStageBounds,
         EntityId, Hydro, HydroStageBounds, HydroStagePenalties, LineStageBounds,
         LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
-        PumpingStageBounds, ResolvedBounds, ResolvedExchangeFactors, ResolvedLoadFactors,
-        ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, ThermalStageBounds,
+        PumpingStageBounds, ResolvedBounds, ResolvedExchangeFactors,
+        ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
+        ResolvedNcsFactors, ResolvedPenalties, ThermalStageBounds,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -3348,6 +3355,7 @@ mod block_family_slack_tests {
         EvaporationModel, EvaporationModelSet, ProductionModelSet, ResolvedProductionModel,
     };
     use crate::indexer::{BlockIdx, HydroSys};
+    use crate::lead_time::AnticipatedResolution;
     use crate::resolved_parameters::ResolvedParameters;
 
     use super::super::layout::ResolvedTables;
@@ -3627,7 +3635,7 @@ mod block_family_slack_tests {
                     EvaporationModel::None;
                     N_HYDROS
                 ]),
-                resolved_generic_bounds: cobre_core::ResolvedGenericConstraintBounds::empty(),
+                resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
                 resolved_load_factors: ResolvedLoadFactors::empty(),
                 resolved_exchange_factors: ResolvedExchangeFactors::empty(),
                 resolved_ncs_bounds: ResolvedNcsBounds::empty(),
@@ -3692,7 +3700,7 @@ mod block_family_slack_tests {
                 anticipated_lead_stages: vec![],
                 anticipated_thermal_indices: vec![],
                 anticipated_windows: vec![],
-                anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
+                anticipated_resolution: AnticipatedResolution::default(),
                 study_stage_ids: vec![],
                 has_penalty: false,
                 cumulative_discount_factors: vec![1.0],
@@ -3809,8 +3817,9 @@ mod evaporation_slack_objective_tests {
         ContractStageBounds, EntityId, Hydro, HydroStageBounds, HydroStagePenalties,
         LineStageBounds, LineStagePenalties, NcsStagePenalties, NoiseMethod, PenaltiesCountsSpec,
         PenaltiesDefaults, PumpingStageBounds, ResolvedBounds, ResolvedExchangeFactors,
-        ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties,
-        ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig, ThermalStageBounds,
+        ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
+        ResolvedNcsFactors, ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig,
+        StageStateConfig, ThermalStageBounds,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -3819,6 +3828,7 @@ mod evaporation_slack_objective_tests {
         ResolvedProductionModel,
     };
     use crate::indexer::{BlockIdx, EvapLocal};
+    use crate::lead_time::AnticipatedResolution;
     use crate::resolved_parameters::ResolvedParameters;
 
     use super::super::layout::ResolvedTables;
@@ -4033,7 +4043,7 @@ mod evaporation_slack_objective_tests {
                     N_STAGES,
                 ),
                 evaporation_models,
-                resolved_generic_bounds: cobre_core::ResolvedGenericConstraintBounds::empty(),
+                resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
                 resolved_load_factors: ResolvedLoadFactors::empty(),
                 resolved_exchange_factors: ResolvedExchangeFactors::empty(),
                 resolved_ncs_bounds: ResolvedNcsBounds::empty(),
@@ -4096,7 +4106,7 @@ mod evaporation_slack_objective_tests {
                 anticipated_lead_stages: vec![],
                 anticipated_thermal_indices: vec![],
                 anticipated_windows: vec![],
-                anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
+                anticipated_resolution: AnticipatedResolution::default(),
                 study_stage_ids: vec![],
                 has_penalty: false,
                 cumulative_discount_factors: vec![1.0],
@@ -4224,12 +4234,13 @@ mod contract_column_tests {
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, CascadeTopology, ContractStageBounds, EntityId,
         HydroStageBounds, LineStageBounds, PumpingStageBounds, ResolvedBounds,
-        ResolvedExchangeFactors, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
-        ResolvedPenalties, ThermalStageBounds,
+        ResolvedExchangeFactors, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
+        ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, ThermalStageBounds,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
     use crate::hydro_models::{EvaporationModelSet, ProductionModelSet};
+    use crate::lead_time::AnticipatedResolution;
     use crate::resolved_parameters::ResolvedParameters;
 
     use super::super::layout::ResolvedTables;
@@ -4332,7 +4343,7 @@ mod contract_column_tests {
                 penalties: ResolvedPenalties::empty(),
                 production_models: ProductionModelSet::new(vec![], 0, 1),
                 evaporation_models: EvaporationModelSet::new(vec![]),
-                resolved_generic_bounds: cobre_core::ResolvedGenericConstraintBounds::empty(),
+                resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
                 resolved_load_factors: ResolvedLoadFactors::empty(),
                 resolved_exchange_factors: ResolvedExchangeFactors::empty(),
                 resolved_ncs_bounds: ResolvedNcsBounds::empty(),
@@ -4417,7 +4428,7 @@ mod contract_column_tests {
                 anticipated_lead_stages: vec![],
                 anticipated_thermal_indices: vec![],
                 anticipated_windows: vec![],
-                anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
+                anticipated_resolution: AnticipatedResolution::default(),
                 study_stage_ids: vec![],
                 has_penalty: false,
                 cumulative_discount_factors: vec![1.0; N_STAGES],

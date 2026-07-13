@@ -195,6 +195,8 @@ fn extract_max_iterations(config: &Config) -> Option<u32> {
 mod tests {
     use super::*;
     use crate::output::{IterationRecord, RowPoolStatistics, TrainingOutput};
+    use crate::{MetadataSimulationSolveStats, MetadataTrainingSolveStats};
+    use cobre_core::SystemBuilder;
 
     fn make_iteration_record(iteration: u32) -> IterationRecord {
         IterationRecord {
@@ -254,12 +256,12 @@ mod tests {
             },
             cut_selection_records: vec![],
             worker_timing_records: vec![],
-            training_solve_stats: crate::MetadataTrainingSolveStats::default(),
+            training_solve_stats: MetadataTrainingSolveStats::default(),
         }
     }
 
     fn make_system() -> cobre_core::System {
-        cobre_core::SystemBuilder::new()
+        SystemBuilder::new()
             .build()
             .expect("empty system must be valid")
     }
@@ -311,7 +313,7 @@ mod tests {
             total_time_ms: 1_000,
             partitions_written: vec!["simulation/costs/part-00.parquet".to_string()],
             cost: None,
-            solve_stats: crate::MetadataSimulationSolveStats::default(),
+            solve_stats: MetadataSimulationSolveStats::default(),
         }
     }
 
@@ -398,7 +400,7 @@ mod tests {
             total_time_ms: 1_500,
             partitions_written: vec!["simulation/costs/part-00.parquet".to_string()],
             cost: None,
-            solve_stats: crate::MetadataSimulationSolveStats::default(),
+            solve_stats: MetadataSimulationSolveStats::default(),
         };
 
         let result = write_results(
@@ -567,7 +569,7 @@ mod tests {
             total_time_ms: 0,
             partitions_written: vec![],
             cost: None,
-            solve_stats: crate::MetadataSimulationSolveStats::default(),
+            solve_stats: MetadataSimulationSolveStats::default(),
         };
 
         write_results(
@@ -617,7 +619,7 @@ mod tests {
             total_time_ms: 0,
             partitions_written: vec![],
             cost: None,
-            solve_stats: crate::MetadataSimulationSolveStats::default(),
+            solve_stats: MetadataSimulationSolveStats::default(),
         };
 
         write_results(
@@ -822,7 +824,7 @@ mod tests {
         training.final_lower_bound = 48_500.0;
         training.final_upper_bound = Some(49_000.0);
         training.final_upper_bound_std = Some(250.0);
-        training.training_solve_stats = crate::MetadataTrainingSolveStats {
+        training.training_solve_stats = MetadataTrainingSolveStats {
             total_lp_solves: Some(120),
             first_try: Some(110),
             retried: Some(10),
@@ -866,7 +868,7 @@ mod tests {
             cvar: 15_000.0,
             cvar_alpha: 0.95,
         });
-        sim.solve_stats = crate::MetadataSimulationSolveStats {
+        sim.solve_stats = MetadataSimulationSolveStats {
             total_lp_solves: Some(200),
             first_try: Some(190),
             retried: Some(9),

@@ -438,7 +438,8 @@ mod tests {
         scenario::{InflowHistoryRow, InflowModel, LoadModel},
         temporal::{
             Block, BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig,
-            SeasonCycleType, SeasonDefinition, SeasonMap, Stage, StageRiskConfig, StageStateConfig,
+            SeasonCycleType, SeasonDefinition, SeasonMap, Stage, StageLagTransition,
+            StageRiskConfig, StageStateConfig,
         },
     };
     use cobre_stochastic::par::lag_transition::{
@@ -795,7 +796,7 @@ mod tests {
     /// reproduces the ring-aware, fixed behavior.
     fn ring_fixture_incoming_lag_at_stage4(
         fx: &RingFixture,
-        transitions: &[cobre_core::temporal::StageLagTransition],
+        transitions: &[StageLagTransition],
         downstream_par_order: usize,
     ) -> f64 {
         let layout = LagMajor {

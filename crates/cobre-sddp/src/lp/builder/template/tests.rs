@@ -22,12 +22,18 @@ use cobre_core::{
     ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig, SystemBuilder, Thermal,
     ThermalStageBounds,
 };
+use cobre_stochastic::PrecomputedNormal;
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
 use crate::hydro_models::PrepareHydroModelsResult;
-use crate::indexer::{AnticipatedLocal, BlockIdx, Boundary, HydroSys, ThermalSys};
+use crate::indexer::{AnticipatedLocal, BlockIdx, Boundary, HydroSys, StateLayout, ThermalSys};
 use crate::inflow_method::InflowNonNegativityMethod;
+use crate::lead_time::AnticipatedResolution;
 use crate::resolved_parameters::ResolvedParameters;
+use crate::setup::bucket_topology::build_transit_bucket_topology;
+use crate::setup::template_postprocess::postprocess_templates;
+use crate::setup::{resolve_anticipated_commitments, resolve_state_layout};
+use crate::test_support::state_layout_full;
 
 use super::super::test_support::{ctx_anticipated_and_mask_inputs, state_layout_for};
 
@@ -530,7 +536,7 @@ fn build_stage_templates_records_layout_pumping_col_start_per_stage() {
     let system = system_with_pumping_stations(stations);
     let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
     let par_lp = PrecomputedPar::default();
-    let normal_lp = cobre_stochastic::normal::precompute::PrecomputedNormal::default();
+    let normal_lp = PrecomputedNormal::default();
     let resolved_params = empty_resolved_params();
 
     let templates = super::build_stage_templates_resolving_layout(
@@ -1651,7 +1657,7 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
             ctx_a.anticipated_thermal_indices[0],
         ],
         anticipated_windows: vec![ctx_a.anticipated_windows[1], ctx_a.anticipated_windows[0]],
-        anticipated_resolution: crate::lead_time::AnticipatedResolution {
+        anticipated_resolution: AnticipatedResolution {
             per_plant: vec![
                 ctx_a.anticipated_resolution.per_plant[1].clone(),
                 ctx_a.anticipated_resolution.per_plant[0].clone(),
@@ -1932,10 +1938,10 @@ fn postprocessed_stage_templates_carry_discounted_factors() {
     let system = discounted_multi_stage_system();
     let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
     let par_lp = PrecomputedPar::default();
-    let normal_lp = cobre_stochastic::normal::precompute::PrecomputedNormal::default();
+    let normal_lp = PrecomputedNormal::default();
     let resolved_params = empty_resolved_params();
-    let topology = crate::setup::bucket_topology::build_transit_bucket_topology(&system);
-    let (state_layout, _, _) = crate::setup::resolve_state_layout(&system, &par_lp, &topology)
+    let topology = build_transit_bucket_topology(&system);
+    let (state_layout, _, _) = resolve_state_layout(&system, &par_lp, &topology)
         .expect("resolve_state_layout: valid test fixture");
 
     let mut templates = super::build_stage_templates(
@@ -1954,11 +1960,7 @@ fn postprocessed_stage_templates_carry_discounted_factors() {
     )
     .expect("build_stage_templates: valid system");
 
-    let _report = crate::setup::template_postprocess::postprocess_templates(
-        &mut templates,
-        &system,
-        &state_layout,
-    );
+    let _report = postprocess_templates(&mut templates, &system, &state_layout);
 
     let cumulative = templates.cumulative_discount_factors();
     assert_eq!(
@@ -3057,13 +3059,7 @@ fn theta_and_n_state_invariant_to_block_mode() {
     let k_max = 0_usize;
     let n_blks = 3_usize;
 
-    let state = crate::test_support::state_layout_full(
-        hydro_count,
-        max_par_order,
-        n_anticipated,
-        k_max,
-        vec![],
-    );
+    let state = state_layout_full(hydro_count, max_par_order, n_anticipated, k_max, vec![]);
     let parallel_theta = state.theta;
     let parallel_n_state = state.n_state;
 
@@ -4518,8 +4514,7 @@ fn template_anticipated_resolution_matches_setup_lead_time() {
         "template's threaded resolution must resolve the calendar-derived decider"
     );
 
-    let (setup_resolution, setup_lead_stages) =
-        crate::setup::resolve_anticipated_commitments(&system);
+    let (setup_resolution, setup_lead_stages) = resolve_anticipated_commitments(&system);
     assert_eq!(
         setup_lead_stages, ctx.anticipated_lead_stages,
         "setup vs template anticipated_lead_stages"
@@ -4542,7 +4537,7 @@ fn template_anticipated_resolution_matches_setup_lead_time() {
 /// system (`template_anticipated_resolution_matches_setup_lead_time`).
 #[test]
 fn pre_fix_template_state_layout_yields_differing_all_self_delivered_decider() {
-    let pre_fix_state = crate::indexer::StateLayout::new(0, 0, 0, Vec::new(), 1, 0, vec![0], &[]);
+    let pre_fix_state = StateLayout::new(0, 0, 0, Vec::new(), 1, 0, vec![0], &[]);
     let pre_fix_decider = pre_fix_state
         .anticipated_resolution_for(AnticipatedLocal::new(0), 3)
         .decider
@@ -4601,8 +4596,7 @@ fn template_leadstages_byte_identical_to_setup_and_fallback() {
         .decider
         .clone();
 
-    let (setup_resolution, setup_lead_stages) =
-        crate::setup::resolve_anticipated_commitments(&system);
+    let (setup_resolution, setup_lead_stages) = resolve_anticipated_commitments(&system);
     assert_eq!(setup_lead_stages, ctx.anticipated_lead_stages);
     assert_eq!(setup_resolution.per_plant[0].decider, template_decider);
 
@@ -4691,10 +4685,10 @@ fn build_stage_templates_never_emits_k0_advisory_itself() {
 
     let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
     let par_lp = PrecomputedPar::default();
-    let normal_lp = cobre_stochastic::normal::precompute::PrecomputedNormal::default();
+    let normal_lp = PrecomputedNormal::default();
     let resolved_params = empty_resolved_params();
-    let topology = crate::setup::bucket_topology::build_transit_bucket_topology(&system);
-    let (state_layout, _, _) = crate::setup::resolve_state_layout(&system, &par_lp, &topology)
+    let topology = build_transit_bucket_topology(&system);
+    let (state_layout, _, _) = resolve_state_layout(&system, &par_lp, &topology)
         .expect("resolve_state_layout: valid test fixture");
     let per_stage_mask = topology.per_stage_mask;
 

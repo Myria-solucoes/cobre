@@ -35,7 +35,7 @@ use cobre_core::{
     },
 };
 use cobre_io::Config;
-use cobre_sddp::estimate_from_history;
+use cobre_sddp::{EstimationPath, estimate_from_history};
 use parquet::arrow::ArrowWriter;
 use tempfile::TempDir;
 
@@ -693,11 +693,7 @@ fn test_estimation_round_trip_par1() {
     );
 
     for m in models {
-        assert_eq!(
-            m.hydro_id,
-            cobre_core::EntityId::from(1),
-            "hydro_id should be 1"
-        );
+        assert_eq!(m.hydro_id, EntityId::from(1), "hydro_id should be 1");
 
         assert!(
             m.mean_m3s.is_finite() && m.mean_m3s > 0.0,
@@ -852,7 +848,7 @@ fn test_partial_estimation_end_to_end() {
 
     assert_eq!(
         path,
-        cobre_sddp::EstimationPath::PartialEstimation,
+        EstimationPath::PartialEstimation,
         "expected PartialEstimation path, got {path:?}"
     );
 
@@ -1161,7 +1157,7 @@ fn user_ar_prestudy_synthesizes_history_derived_lag_stats() {
 
     assert_eq!(
         path,
-        cobre_sddp::EstimationPath::UserArHistoryStats,
+        EstimationPath::UserArHistoryStats,
         "expected UserArHistoryStats path, got {path:?}"
     );
     let report = report.expect("UserArHistoryStats must return Some(EstimationReport)");
@@ -1209,7 +1205,7 @@ fn user_ar_prestudy_full_year_study_synthesizes_nothing() {
 
     assert_eq!(
         path,
-        cobre_sddp::EstimationPath::UserArHistoryStats,
+        EstimationPath::UserArHistoryStats,
         "expected UserArHistoryStats path, got {path:?}"
     );
 
@@ -1271,7 +1267,7 @@ fn user_ar_prestudy_correlation_uses_extended_stages() {
 
     assert_eq!(
         path,
-        cobre_sddp::EstimationPath::UserArHistoryStats,
+        EstimationPath::UserArHistoryStats,
         "expected UserArHistoryStats path, got {path:?}"
     );
 

@@ -232,6 +232,7 @@ where
 #[allow(clippy::unwrap_used, clippy::float_cmp)]
 mod tests {
     use super::{BroadcastOpeningTree, broadcast_value};
+    use crate::error::CliError;
 
     #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
     struct Simple {
@@ -282,7 +283,7 @@ mod tests {
         assert!(result.is_err(), "expected Err when root passes None");
         let err = result.unwrap_err();
         assert!(
-            matches!(err, crate::error::CliError::Internal { .. }),
+            matches!(err, CliError::Internal { .. }),
             "expected CliError::Internal, got: {err:?}"
         );
     }

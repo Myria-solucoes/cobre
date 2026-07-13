@@ -270,6 +270,7 @@ mod tests {
     use cobre_core::temporal::NoiseMethod;
 
     use crate::{
+        StochasticError, derive_forward_seed, sample_forward,
         sampling::{ExternalScenarioLibrary, HistoricalScenarioLibrary},
         tree::opening_tree::OpeningTree,
     };
@@ -326,7 +327,7 @@ mod tests {
             assert!(v.is_finite(), "output value {v} is not finite");
         }
 
-        let (_opening_idx, full_slice) = crate::sampling::insample::sample_forward(
+        let (_opening_idx, full_slice) = sample_forward(
             &tree.view(),
             42,
             req.iteration,
@@ -424,7 +425,7 @@ mod tests {
 
         let result = sampler.fill(&req, &mut output, &mut perm);
         assert!(
-            matches!(result, Err(crate::StochasticError::InsufficientData { .. })),
+            matches!(result, Err(StochasticError::InsufficientData { .. })),
             "expected InsufficientData error, got: {result:?}"
         );
     }
@@ -574,7 +575,7 @@ mod tests {
 
         sampler.fill(&req, &mut output, &mut perm).unwrap();
 
-        let hash = crate::noise::seed::derive_forward_seed(
+        let hash = derive_forward_seed(
             super::EXTERNAL_SELECTION_BASE_SEED,
             req.iteration,
             req.scenario,
@@ -756,8 +757,7 @@ mod tests {
 
     #[test]
     fn test_out_of_sample_apply_initial_state_noop() {
-        let noise_methods: Box<[cobre_core::temporal::NoiseMethod]> =
-            vec![cobre_core::temporal::NoiseMethod::Saa].into_boxed_slice();
+        let noise_methods: Box<[NoiseMethod]> = vec![NoiseMethod::Saa].into_boxed_slice();
         let sampler = ClassSampler::OutOfSample {
             forward_seed: 7,
             dim: 3,

@@ -761,7 +761,7 @@ mod tests {
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
         StageStateConfig,
     };
-    use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
+    use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder, WorkerPhaseTimings};
     use cobre_solver::{
         Basis, LpSolution, ProfiledSolver, RowBatch, SolverError, SolverInterface,
         SolverStatistics, StageTemplate,
@@ -776,8 +776,10 @@ mod tests {
         horizon_mode::HorizonMode,
         indexer::StateLayout,
         inflow_method::InflowNonNegativityMethod,
+        lp_builder::PatchBuffer,
+        test_support::{state_layout, study_dims},
         trajectory::TrajectoryRecord,
-        workspace::{BackwardAccumulators, BasisStore, SolverWorkspace},
+        workspace::{BackwardAccumulators, BasisStore, ScratchBuffers, SolverWorkspace},
     };
 
     // ── Minimal mock solver ────────────────────────────────────────────────
@@ -883,25 +885,14 @@ mod tests {
         }
     }
 
-    fn single_workspace(
-        solver: MockSolver,
-        state: &crate::indexer::StateLayout,
-    ) -> SolverWorkspace<MockSolver> {
+    fn single_workspace(solver: MockSolver, state: &StateLayout) -> SolverWorkspace<MockSolver> {
         SolverWorkspace {
             rank: 0,
             worker_id: 0,
             solver: ProfiledSolver::new(solver),
-            patch_buf: crate::lp_builder::PatchBuffer::new(
-                state.hydro_count,
-                state.max_par_order,
-                0,
-                0,
-                0,
-                0,
-                0,
-            ),
+            patch_buf: PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(state.n_state),
-            scratch: crate::workspace::ScratchBuffers {
+            scratch: ScratchBuffers {
                 noise_buf: Vec::with_capacity(state.hydro_count),
                 inflow_m3s_buf: Vec::with_capacity(state.hydro_count),
                 lag_matrix_buf: Vec::with_capacity(state.max_par_order * state.hydro_count),
@@ -934,7 +925,7 @@ mod tests {
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
-            worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+            worker_timing_buf: WorkerPhaseTimings::default(),
         }
     }
 
@@ -1100,7 +1091,7 @@ mod tests {
         fcf: FutureCostFunction,
         horizon: HorizonMode,
         stochastic: cobre_stochastic::StochasticContext,
-        stages: Vec<cobre_core::temporal::Stage>,
+        stages: Vec<Stage>,
         workspaces: Vec<SolverWorkspace<MockSolver>>,
         basis_store: BasisStore,
         records: Vec<TrajectoryRecord>,
@@ -1110,7 +1101,7 @@ mod tests {
         fn new() -> Self {
             let n_stages = 2_usize;
             let n_scenarios = 2_usize;
-            let state = crate::test_support::state_layout(1, 0);
+            let state = state_layout(1, 0);
             let stochastic = make_stochastic_context_2_stages();
             let stages = make_stages_2();
             let solution = fixed_solution_1_0();
@@ -1198,7 +1189,7 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::test_support::study_dims();
+        let study_dims = study_dims();
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
@@ -1274,7 +1265,7 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::test_support::study_dims();
+        let study_dims = study_dims();
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
@@ -1405,7 +1396,7 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::test_support::study_dims();
+        let study_dims = study_dims();
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
@@ -1539,7 +1530,7 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::test_support::study_dims();
+        let study_dims = study_dims();
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,

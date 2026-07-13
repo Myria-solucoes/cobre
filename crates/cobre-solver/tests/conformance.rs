@@ -709,7 +709,7 @@ fn test_solver_highs_lifecycle_repeated_patch_solve() {
     solver.set_row_bounds(&[0], &[8.0], &[8.0]);
     let result = solver.solve(None);
     assert!(
-        matches!(result, Err(cobre_solver::SolverError::Infeasible)),
+        matches!(result, Err(SolverError::Infeasible)),
         "step 4: expected Err(SolverError::Infeasible), got {:?}",
         result.map(|s| s.objective)
     );
@@ -751,7 +751,7 @@ fn test_solver_highs_solve_infeasible() {
     let result = solver.solve(None).map(|s| s.objective);
 
     assert!(
-        matches!(result, Err(cobre_solver::SolverError::Infeasible)),
+        matches!(result, Err(SolverError::Infeasible)),
         "expected Err(SolverError::Infeasible), got {result:?}"
     );
 
@@ -809,7 +809,7 @@ fn test_solver_highs_solve_unbounded() {
     let result = solver.solve(None).map(|s| s.objective);
 
     assert!(
-        matches!(result, Err(cobre_solver::SolverError::Unbounded)),
+        matches!(result, Err(SolverError::Unbounded)),
         "expected Err(SolverError::Unbounded), got {result:?}"
     );
 

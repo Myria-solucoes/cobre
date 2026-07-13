@@ -11,6 +11,8 @@ use cobre_stochastic::par::precompute::PrecomputedPar;
 
 use crate::indexer::StateLayout;
 use crate::lead_time::{AnticipatedResolution, SpreadResolution};
+use crate::setup::bucket_topology::build_transit_bucket_topology;
+use crate::setup::resolve_anticipated_commitments_core;
 
 use super::layout::TemplateBuildCtx;
 
@@ -35,8 +37,8 @@ pub(super) fn ctx_anticipated_and_mask_inputs(
     HashMap<usize, Vec<Option<Vec<f64>>>>,
     usize,
 ) {
-    let (resolution, lead_stages) = crate::setup::resolve_anticipated_commitments_core(system);
-    let topology = crate::setup::bucket_topology::build_transit_bucket_topology(system);
+    let (resolution, lead_stages) = resolve_anticipated_commitments_core(system);
+    let topology = build_transit_bucket_topology(system);
     let max_par_order = system
         .inflow_models()
         .iter()

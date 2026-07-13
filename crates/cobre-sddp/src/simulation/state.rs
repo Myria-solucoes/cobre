@@ -35,6 +35,7 @@ use crate::{
     FutureCostFunction,
     context::{StageContext, TrainingContext},
     cut::row::build_cut_row_batch_into,
+    indexer::{CutStateProjection, StateLayout},
     simulation::{
         config::SimulationConfig,
         error::SimulationError,
@@ -497,8 +498,8 @@ fn build_sim_sampler<'a>(
 fn refreeze_templates_if_needed(
     fcf: &FutureCostFunction,
     ctx: &StageContext<'_>,
-    state: &crate::indexer::StateLayout,
-    cut_state_layouts: &[crate::indexer::CutStateProjection],
+    state: &StateLayout,
+    cut_state_layouts: &[CutStateProjection],
     num_stages: usize,
     caller_frozen: Option<&[StageTemplate]>,
     freeze_batch: &mut RowBatch,

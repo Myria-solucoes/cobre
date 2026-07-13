@@ -11,6 +11,7 @@ use std::path::Path;
 use std::process::Command;
 
 use assert_cmd::prelude::*;
+use cobre_io::scenarios::parse_inflow_annual_component;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
@@ -340,7 +341,7 @@ fn cli_run_writes_inflow_annual_component_when_par_a_active() {
         "stochastic/inflow_annual_component.parquet must exist"
     );
 
-    let rows = cobre_io::scenarios::parse_inflow_annual_component(&parquet_path).unwrap();
+    let rows = parse_inflow_annual_component(&parquet_path).unwrap();
     assert_eq!(
         rows.len(),
         0,

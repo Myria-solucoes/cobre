@@ -1017,7 +1017,7 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
 mod tests {
     use super::*;
     use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
-    use cobre_core::scenario::SamplingScheme;
+    use cobre_core::scenario::{InflowModel, SamplingScheme};
     use cobre_solver::{
         Basis, LpSolution, ProfiledSolver, RowBatch, SolverError, SolverInterface,
         SolverStatistics, StageTemplate,
@@ -1032,8 +1032,9 @@ mod tests {
         risk_measure::RiskMeasure,
         solver_stats::WORKER_STATS_ENTRY_STRIDE,
         state_exchange::ExchangeBuffers,
+        test_support::{all_enabled_cut_state_layouts, state_layout, study_dims},
         trajectory::TrajectoryRecord,
-        workspace::{BackwardAccumulators, BasisStore, SolverWorkspace},
+        workspace::{BackwardAccumulators, BasisStore, ScratchBuffers, SolverWorkspace},
     };
 
     // ── test stubs ──────────────────────────────────────────────────────────
@@ -1194,7 +1195,7 @@ mod tests {
             solver: ProfiledSolver::new(solver),
             patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
-            scratch: crate::workspace::ScratchBuffers {
+            scratch: ScratchBuffers {
                 noise_buf: Vec::new(),
                 inflow_m3s_buf: Vec::new(),
                 lag_matrix_buf: Vec::new(),
@@ -1366,7 +1367,7 @@ mod tests {
 
         let stages: Vec<Stage> = (0..n_stages).map(make_stage).collect();
         let inflow_models: Vec<_> = (0..n_stages)
-            .map(|idx| cobre_core::scenario::InflowModel {
+            .map(|idx| InflowModel {
                 hydro_id: EntityId(1),
                 stage_id: idx as i32,
                 mean_m3s: 100.0,
@@ -1477,7 +1478,7 @@ mod tests {
         let n_stages = 2_usize;
         let n_openings = 2_usize;
         let stochastic = make_stochastic_context(n_stages, n_openings);
-        let state = crate::test_support::state_layout(1, 0);
+        let state = state_layout(1, 0);
         let templates = vec![minimal_template_1_0(); n_stages];
         // Production carries a separate frozen-template buffer alongside
         // `ctx.templates`; mirror that here so `frozen` does not alias the
@@ -1525,13 +1526,11 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::test_support::study_dims();
+        let study_dims = study_dims();
         let training_ctx = TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
             study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1616,7 +1615,7 @@ mod tests {
         let n_stages = 2_usize;
         let n_openings = 2_usize;
         let stochastic = make_stochastic_context(n_stages, n_openings);
-        let state = crate::test_support::state_layout(1, 0);
+        let state = state_layout(1, 0);
         let templates = vec![minimal_template_1_0(); n_stages];
         let frozen_templates = templates.clone();
         let base_rows = vec![1_usize; n_stages];
@@ -1661,13 +1660,11 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::test_support::study_dims();
+        let study_dims = study_dims();
         let training_ctx = TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
             study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,

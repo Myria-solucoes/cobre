@@ -760,6 +760,9 @@ mod tests {
         DcsParams, DcsScoringScratch, DcsSolveContext, DcsSolveScratch, build_initial_resident_set,
         lazy_solve_preloaded, score_violated_candidates,
     };
+    use cobre_core::temporal::StageStateConfig;
+
+    use crate::cut::row::append_slots_to_lp;
     use crate::cut::{CutPool, CutRowMap};
     use crate::cut_selection::{CutMetadata, CutSelectionStrategy};
     use crate::indexer::{CutStateProjection, StateDim, StateLayout};
@@ -769,7 +772,7 @@ mod tests {
     fn cut_state(idx: &StateLayout) -> CutStateProjection {
         CutStateProjection::new(
             idx,
-            cobre_core::temporal::StageStateConfig {
+            StageStateConfig {
                 storage: true,
                 inflow_lags: true,
             },
@@ -1765,7 +1768,7 @@ mod tests {
         };
         let all_slots: Vec<u32> = (0..pool.populated() as u32).collect();
         let cs = cut_state(state);
-        crate::cut::row::append_slots_to_lp(
+        append_slots_to_lp(
             &mut solver,
             pool,
             &all_slots,

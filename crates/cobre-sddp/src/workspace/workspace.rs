@@ -960,7 +960,8 @@ impl BasisStoreSliceMut<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BasisStore, CapturedBasis, ScratchBuffers, SolverWorkspace, WorkspacePool, WorkspaceSizing,
+        BasisStore, CapturedBasis, PatchBuffer, ScratchBuffers, SolverWorkspace, WorkspacePool,
+        WorkspaceSizing,
     };
     use cobre_solver::{
         Basis, BasisStatus, SolutionView, SolverError, SolverInterface, SolverStatistics,
@@ -2317,7 +2318,7 @@ mod tests {
             0,
             0,
             MockSolver,
-            crate::lp_builder::PatchBuffer::new(0, 0, 0, 0, 0, 0, 0),
+            PatchBuffer::new(0, 0, 0, 0, 0, 0, 0),
             0,
             WorkspaceSizing::default(),
         );

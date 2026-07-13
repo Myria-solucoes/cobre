@@ -164,7 +164,7 @@ pub fn build_deviation_summary(entries: &[FphaFitDeviationEntry]) -> Option<Devi
 mod tests {
     use chrono::NaiveDate;
     use cobre_core::{
-        Bus, DeficitSegment, EntityId, SystemBuilder,
+        Bus, DeficitSegment, EntityId, Hydro, SystemBuilder,
         entities::hydro::{HydroGenerationModel, HydroPenalties},
         scenario::CorrelationModel,
         temporal::{
@@ -173,6 +173,7 @@ mod tests {
         },
     };
 
+    use crate::HydroEnergyProductivityOverride;
     use crate::production::hydro_models::*;
 
     fn zero_penalties() -> HydroPenalties {
@@ -196,8 +197,8 @@ mod tests {
         }
     }
 
-    fn make_hydro(id: i32) -> cobre_core::entities::hydro::Hydro {
-        cobre_core::entities::hydro::Hydro {
+    fn make_hydro(id: i32) -> Hydro {
+        Hydro {
             id: EntityId::from(id),
             name: format!("Hydro{id}"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -252,10 +253,7 @@ mod tests {
         }
     }
 
-    fn make_system(
-        hydros: Vec<cobre_core::entities::hydro::Hydro>,
-        stages: Vec<Stage>,
-    ) -> cobre_core::System {
+    fn make_system(hydros: Vec<Hydro>, stages: Vec<Stage>) -> cobre_core::System {
         let bus = Bus {
             id: EntityId(10),
             name: "B10".to_string(),
@@ -316,8 +314,7 @@ mod tests {
             .collect();
         PrepareHydroModelsResult {
             production,
-            productivity_override:
-                crate::energy_conversion::HydroEnergyProductivityOverride::default(),
+            productivity_override: HydroEnergyProductivityOverride::default(),
             evaporation: EvaporationModelSet::new(evap_models),
             provenance: HydroModelProvenance {
                 production_sources,

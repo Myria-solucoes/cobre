@@ -33,6 +33,7 @@ use crate::{
         NcsNoiseOffsets, build_dense_ncs_col_indices, gather_dense_ncs_bounds,
         transform_inflow_noise, transform_ncs_noise,
     },
+    test_support::{all_enabled_cut_state_layouts, state_layout, study_dims},
     workspace::{ScratchBuffers, WorkspaceSizing},
 };
 
@@ -270,7 +271,7 @@ impl SolverInterface for RecordingSolver {
 
 #[test]
 fn run_matches_open_coded_forward_block_for_minimal_fixture() {
-    let state = crate::test_support::state_layout(1, 0);
+    let state = state_layout(1, 0);
     let stochastic = make_stochastic_context();
     let template = minimal_forward_template();
     let templates = vec![template.clone()];
@@ -300,11 +301,11 @@ fn run_matches_open_coded_forward_block_for_minimal_fixture() {
         downstream_par_order: 0,
     };
     let horizon = HorizonMode::Finite { num_stages: 1 };
-    let study_dims = crate::test_support::study_dims();
+    let study_dims = study_dims();
     let training_ctx = TrainingContext {
         horizon: &horizon,
         state: &state,
-        cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(&state, 1),
+        cut_state_layouts: &all_enabled_cut_state_layouts(&state, 1),
         study_dims: &study_dims,
         inflow_method: &InflowNonNegativityMethod::None,
         stochastic: &stochastic,
@@ -518,7 +519,7 @@ fn make_ncs_stochastic_context() -> (StochasticContext, Stage) {
 #[test]
 fn run_wires_ncs_patch_matching_pre_collapse_inline_pattern() {
     let (stoch, ncs_stage) = make_ncs_stochastic_context();
-    let state = crate::test_support::state_layout(0, 0);
+    let state = state_layout(0, 0);
     let template = StageTemplate {
         num_cols: 1,
         num_rows: 0,
@@ -578,7 +579,7 @@ fn run_wires_ncs_patch_matching_pre_collapse_inline_pattern() {
     let training_ctx = TrainingContext {
         horizon: &horizon,
         state: &state,
-        cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(&state, 1),
+        cut_state_layouts: &all_enabled_cut_state_layouts(&state, 1),
         study_dims: &study_dims,
         inflow_method: &InflowNonNegativityMethod::None,
         stochastic: &stoch,
@@ -698,7 +699,7 @@ fn run_wires_ncs_patch_matching_pre_collapse_inline_pattern() {
 /// `Transform` would otherwise patch.
 #[test]
 fn run_skips_load_and_inflow_transform_under_absent_and_prebuilt() {
-    let state = crate::test_support::state_layout(1, 0);
+    let state = state_layout(1, 0);
     let stochastic = make_stochastic_context();
     let template = minimal_forward_template();
     let templates = vec![template];
@@ -728,11 +729,11 @@ fn run_skips_load_and_inflow_transform_under_absent_and_prebuilt() {
         downstream_par_order: 0,
     };
     let horizon = HorizonMode::Finite { num_stages: 1 };
-    let study_dims = crate::test_support::study_dims();
+    let study_dims = study_dims();
     let training_ctx = TrainingContext {
         horizon: &horizon,
         state: &state,
-        cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(&state, 1),
+        cut_state_layouts: &all_enabled_cut_state_layouts(&state, 1),
         study_dims: &study_dims,
         inflow_method: &InflowNonNegativityMethod::None,
         stochastic: &stochastic,

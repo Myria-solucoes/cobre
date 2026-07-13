@@ -99,7 +99,7 @@ pub enum RiskMeasure {
     },
 }
 
-impl From<cobre_core::StageRiskConfig> for RiskMeasure {
+impl From<StageRiskConfig> for RiskMeasure {
     fn from(config: StageRiskConfig) -> Self {
         match config {
             Expectation => Self::Expectation,
@@ -353,6 +353,8 @@ pub(crate) fn aggregate_weighted_into(
 #[cfg(test)]
 #[allow(clippy::cast_precision_loss)] // test helpers use small n values
 mod tests {
+    use cobre_core::StageRiskConfig;
+
     use super::{BackwardOutcome, RiskMeasure};
 
     fn outcome(intercept: f64, obj: f64) -> BackwardOutcome {
@@ -636,14 +638,14 @@ mod tests {
 
     #[test]
     fn test_from_stage_risk_config_expectation() {
-        let config = cobre_core::StageRiskConfig::Expectation;
+        let config = StageRiskConfig::Expectation;
         let rm = RiskMeasure::from(config);
         assert!(matches!(rm, RiskMeasure::Expectation));
     }
 
     #[test]
     fn test_from_stage_risk_config_cvar() {
-        let config = cobre_core::StageRiskConfig::CVaR {
+        let config = StageRiskConfig::CVaR {
             alpha: 0.95,
             lambda: 0.5,
         };

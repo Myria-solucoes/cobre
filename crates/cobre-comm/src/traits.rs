@@ -428,6 +428,8 @@ mod tests {
 
     #[cfg(feature = "shared-memory")]
     use super::{LocalCommunicator, SharedMemoryProvider, SharedRegion};
+    #[cfg(feature = "shared-memory")]
+    use crate::LocalBackend;
 
     /// Compile-time assertion that a type satisfies `CommData`.
     ///
@@ -648,7 +650,7 @@ mod tests {
             }
 
             fn split_local(&self) -> Result<super::LocalCommKind, CommError> {
-                Ok(super::LocalCommKind::Local(crate::local::LocalBackend))
+                Ok(super::LocalCommKind::Local(LocalBackend))
             }
 
             fn is_leader(&self) -> bool {
@@ -701,7 +703,7 @@ mod tests {
             }
 
             fn split_local(&self) -> Result<super::LocalCommKind, CommError> {
-                Ok(super::LocalCommKind::Local(crate::local::LocalBackend))
+                Ok(super::LocalCommKind::Local(LocalBackend))
             }
 
             fn is_leader(&self) -> bool {

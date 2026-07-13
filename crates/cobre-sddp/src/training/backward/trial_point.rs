@@ -13,6 +13,7 @@ use crate::{
     context::{StageContext, TrainingContext},
     dcs::{DcsParams, DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
     risk_measure::RiskMeasure,
+    stage_solve::{StageInputs, run_stage_solve},
     state_exchange::ExchangeBuffers,
     workspace::{BasisStoreSliceMut, SolverWorkspace},
 };
@@ -189,7 +190,7 @@ impl StageOpeningSolver {
         } else {
             None
         };
-        let inputs = crate::stage_solve::StageInputs {
+        let inputs = StageInputs {
             stage_context: ctx,
             pool: succ.successor_pool,
             stored_basis,
@@ -198,7 +199,7 @@ impl StageOpeningSolver {
             iteration: Some(iteration),
         };
 
-        let view = crate::stage_solve::run_stage_solve(ws, &inputs)?;
+        let view = run_stage_solve(ws, &inputs)?;
 
         // Statistics must be captured after `view` is dropped (the `let _ = view`
         // below).

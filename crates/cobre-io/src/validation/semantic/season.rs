@@ -343,7 +343,7 @@ mod tests {
     use super::super::validate_semantic_stages_penalties_scenarios;
     use super::*;
     use crate::{
-        scenarios::InflowHistoryRow,
+        scenarios::{InflowArCoefficientRow, InflowHistoryRow, InflowSeasonalStatsRow},
         stages::StagesData,
         validation::{ErrorKind, ValidationContext},
     };
@@ -1568,13 +1568,13 @@ mod tests {
         let history = make_history_rows(1, 12);
         let mut data = make_data_estimation(vec![make_hydro(1, None)], stages, history);
         // Supply both stats and AR coefficients to deactivate estimation.
-        data.inflow_seasonal_stats = vec![crate::scenarios::InflowSeasonalStatsRow {
+        data.inflow_seasonal_stats = vec![InflowSeasonalStatsRow {
             hydro_id: EntityId::from(1),
             stage_id: 0,
             mean_m3s: 100.0,
             std_m3s: 10.0,
         }];
-        data.inflow_ar_coefficients = vec![crate::scenarios::InflowArCoefficientRow {
+        data.inflow_ar_coefficients = vec![InflowArCoefficientRow {
             hydro_id: EntityId::from(1),
             stage_id: 0,
             lag: 1,

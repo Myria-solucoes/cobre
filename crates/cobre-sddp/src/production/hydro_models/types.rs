@@ -486,6 +486,7 @@ mod tests {
     use cobre_core::EntityId;
 
     use super::*;
+    use crate::HydroEnergyProductivityOverride;
 
     /// 4-hydro 12-stage system with 2 FPHA and 2 constant hydros: model(h, s) returns correct variant.
     #[test]
@@ -646,8 +647,7 @@ mod tests {
         let evap_set = EvaporationModelSet::new(vec![EvaporationModel::None]);
         let result = PrepareHydroModelsResult {
             production: prod_set,
-            productivity_override:
-                crate::energy_conversion::HydroEnergyProductivityOverride::default(),
+            productivity_override: HydroEnergyProductivityOverride::default(),
             evaporation: evap_set,
             provenance: prov,
             fpha_export_rows: Vec::new(),

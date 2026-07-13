@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use cobre_core::{AnticipatedCommitmentHistory, AnticipatedConfig, EntityId, VariableRef};
+use cobre_core::{AnticipatedCommitmentHistory, AnticipatedConfig, EntityId, Thermal, VariableRef};
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 
@@ -307,7 +307,7 @@ fn required_anticipated_commitment_count(
 /// Every `values_mw[j]` must lie within `[min_generation_mw, max_generation_mw]`;
 /// an out-of-bounds seed makes the LP infeasible at that stage's fishing equality.
 fn check_committed_value_bounds(
-    thermal: &cobre_core::entities::Thermal,
+    thermal: &Thermal,
     thermal_id: EntityId,
     values_mw: &[f64],
     ctx: &mut ValidationContext,
@@ -345,7 +345,7 @@ fn check_committed_value_bounds(
 /// `k`-th pre-study-committed delivery stage for either lead mode (see
 /// `required_anticipated_commitment_count`), so no per-mode branch is needed here.
 fn check_seed_within_window(
-    thermal: &cobre_core::entities::Thermal,
+    thermal: &Thermal,
     thermal_id: EntityId,
     values_mw: &[f64],
     study_stage_ids: &[i32],
@@ -522,12 +522,13 @@ pub(super) fn check_thermal_bounds_override_stage_range(
 )]
 mod tests {
     use cobre_core::temporal::{Block, PolicyGraph, PolicyGraphType, Stage};
-    use cobre_core::{AnticipatedCommitmentHistory, EntityId, entities::AnticipatedConfig};
+    use cobre_core::{AnticipatedCommitmentHistory, AnticipatedConfig, EntityId, Thermal};
 
     use super::super::test_support::*;
     use super::super::validate_semantic_hydro_thermal;
     use super::required_anticipated_commitment_count;
     use crate::stages::StagesData;
+    use crate::validation::schema::ParsedData;
     use crate::validation::{ErrorKind, ValidationContext};
 
     // ── Helper: build a thermal with anticipated_config ───────────────────────
@@ -537,8 +538,8 @@ mod tests {
         lead_stages: u32,
         entry_stage_id: Option<i32>,
         exit_stage_id: Option<i32>,
-    ) -> cobre_core::entities::Thermal {
-        cobre_core::entities::Thermal {
+    ) -> Thermal {
+        Thermal {
             anticipated_config: Some(AnticipatedConfig::LeadStages(lead_stages)),
             entry_stage_id,
             exit_stage_id,
@@ -552,8 +553,8 @@ mod tests {
         lead_time_hours: f64,
         entry_stage_id: Option<i32>,
         exit_stage_id: Option<i32>,
-    ) -> cobre_core::entities::Thermal {
-        cobre_core::entities::Thermal {
+    ) -> Thermal {
+        Thermal {
             anticipated_config: Some(AnticipatedConfig::LeadTime(lead_time_hours)),
             entry_stage_id,
             exit_stage_id,
@@ -576,10 +577,10 @@ mod tests {
     /// per-stage calendar (`durations_hours`, one entry per study stage,
     /// `id = 0..durations_hours.len()`), instead of the empty-block default.
     fn make_data_anticipated_with_durations(
-        thermals: Vec<cobre_core::entities::Thermal>,
+        thermals: Vec<Thermal>,
         durations_hours: &[f64],
         past_anticipated_commitments: Vec<AnticipatedCommitmentHistory>,
-    ) -> crate::validation::schema::ParsedData {
+    ) -> ParsedData {
         let stages: Vec<Stage> = durations_hours
             .iter()
             .enumerate()
@@ -604,10 +605,10 @@ mod tests {
     /// Supplies `n_stages` stages with IDs `0..n_stages`, one or more thermals,
     /// and places the given `past_anticipated_commitments` in `initial_conditions`.
     fn make_data_anticipated(
-        thermals: Vec<cobre_core::entities::Thermal>,
+        thermals: Vec<Thermal>,
         n_stages: usize,
         past_anticipated_commitments: Vec<AnticipatedCommitmentHistory>,
-    ) -> crate::validation::schema::ParsedData {
+    ) -> ParsedData {
         let stage_ids: Vec<i32> = (0..n_stages as i32).collect();
         let mut data = make_data(
             vec![],
@@ -1274,7 +1275,7 @@ mod tests {
     /// is emitted.
     #[test]
     fn test_window_on_plain_thermal_accepted() {
-        let thermal = cobre_core::entities::Thermal {
+        let thermal = Thermal {
             entry_stage_id: Some(1),
             exit_stage_id: Some(2),
             ..make_thermal(1, 0.0, 100.0)
@@ -1396,8 +1397,8 @@ mod tests {
     #[test]
     fn test_committed_value_below_min_gen_bounds_error() {
         // Build a thermal with min_mw=100.0.
-        let thermal = cobre_core::entities::Thermal {
-            anticipated_config: Some(cobre_core::entities::AnticipatedConfig::LeadStages(2)),
+        let thermal = Thermal {
+            anticipated_config: Some(AnticipatedConfig::LeadStages(2)),
             ..make_thermal(5, 100.0, 500.0)
         };
         let history = AnticipatedCommitmentHistory {
@@ -1442,8 +1443,8 @@ mod tests {
     /// (0.0 is within [0.0, 400.0]).
     #[test]
     fn test_committed_values_all_zero_ok() {
-        let thermal = cobre_core::entities::Thermal {
-            anticipated_config: Some(cobre_core::entities::AnticipatedConfig::LeadStages(3)),
+        let thermal = Thermal {
+            anticipated_config: Some(AnticipatedConfig::LeadStages(3)),
             ..make_thermal(7, 0.0, 400.0)
         };
         let history = AnticipatedCommitmentHistory {
@@ -1466,8 +1467,8 @@ mod tests {
     /// (the minimum is inclusive).
     #[test]
     fn test_committed_value_zero_accepted() {
-        let thermal = cobre_core::entities::Thermal {
-            anticipated_config: Some(cobre_core::entities::AnticipatedConfig::LeadStages(1)),
+        let thermal = Thermal {
+            anticipated_config: Some(AnticipatedConfig::LeadStages(1)),
             ..make_thermal(9, 0.0, 400.0)
         };
         let history = AnticipatedCommitmentHistory {
@@ -1495,8 +1496,8 @@ mod tests {
     /// identifies "values_mw[0]" with value 400.
     #[test]
     fn test_committed_value_above_max_bounds_error() {
-        let thermal = cobre_core::entities::Thermal {
-            anticipated_config: Some(cobre_core::entities::AnticipatedConfig::LeadStages(1)),
+        let thermal = Thermal {
+            anticipated_config: Some(AnticipatedConfig::LeadStages(1)),
             ..make_thermal(11, 100.0, 350.0)
         };
         let history = AnticipatedCommitmentHistory {
@@ -1544,8 +1545,8 @@ mod tests {
     /// Expected: ctx.errors() is empty.
     #[test]
     fn test_f3_002_nonzero_values_mw_in_bounds_accepted_k1() {
-        let thermal = cobre_core::entities::Thermal {
-            anticipated_config: Some(cobre_core::entities::AnticipatedConfig::LeadStages(1)),
+        let thermal = Thermal {
+            anticipated_config: Some(AnticipatedConfig::LeadStages(1)),
             ..make_thermal(2, 0.0, 350.0)
         };
         let history = AnticipatedCommitmentHistory {
@@ -1589,8 +1590,8 @@ mod tests {
     /// reintroducing a same-dispatch-as-zero-seed warning.
     #[test]
     fn test_nonzero_in_bounds_seed_emits_no_semantic_ambiguity_warning() {
-        let thermal = cobre_core::entities::Thermal {
-            anticipated_config: Some(cobre_core::entities::AnticipatedConfig::LeadStages(2)),
+        let thermal = Thermal {
+            anticipated_config: Some(AnticipatedConfig::LeadStages(2)),
             ..make_thermal(3, 0.0, 350.0)
         };
         let history = AnticipatedCommitmentHistory {
@@ -1718,10 +1719,7 @@ mod tests {
 
     /// Build a `ParsedData` with `n_stages` study stages, one thermal,
     /// and the given `thermal_bounds` rows.
-    fn make_data_thermal_bounds(
-        n_stages: usize,
-        rows: Vec<crate::ThermalBoundsRow>,
-    ) -> crate::validation::schema::ParsedData {
+    fn make_data_thermal_bounds(n_stages: usize, rows: Vec<crate::ThermalBoundsRow>) -> ParsedData {
         let thermal = make_thermal(1, 0.0, 100.0);
         let stage_ids: Vec<i32> = (0..n_stages as i32).collect();
         let mut data = make_data(
@@ -2059,7 +2057,7 @@ mod tests {
             VariableRef, entities::AnticipatedConfig,
         };
 
-        let thermal = cobre_core::entities::Thermal {
+        let thermal = Thermal {
             anticipated_config: Some(AnticipatedConfig::LeadStages(2)),
             ..make_thermal(3, 0.0, 500.0)
         };
@@ -2127,7 +2125,7 @@ mod tests {
             VariableRef, entities::AnticipatedConfig,
         };
 
-        let thermal = cobre_core::entities::Thermal {
+        let thermal = Thermal {
             anticipated_config: Some(AnticipatedConfig::LeadStages(1)),
             ..make_thermal(5, 0.0, 300.0)
         };

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::NaiveDate;
-use cobre_core::EntityId;
+use cobre_core::{EntityId, SeasonMap, Stage};
 
 use super::{
     ArEstimationConfig, ContributionReduction, PacfReductionParams, ReductionReason,
@@ -203,7 +203,7 @@ fn make_two_season_stage(
     season_id: usize,
     year: i32,
     first_half: bool,
-) -> cobre_core::temporal::Stage {
+) -> Stage {
     use cobre_core::temporal::{
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
     };
@@ -220,7 +220,7 @@ fn make_two_season_stage(
         )
     };
 
-    cobre_core::temporal::Stage {
+    Stage {
         index,
         id,
         start_date,
@@ -245,8 +245,8 @@ fn make_two_season_stage(
 }
 
 /// Build a 2-season `SeasonMap` (H1: Jan–Jun, H2: Jul–Dec).
-fn two_season_map() -> cobre_core::temporal::SeasonMap {
-    use cobre_core::temporal::{SeasonCycleType, SeasonDefinition, SeasonMap};
+fn two_season_map() -> SeasonMap {
+    use cobre_core::temporal::{SeasonCycleType, SeasonDefinition};
     SeasonMap {
         cycle_type: SeasonCycleType::Custom,
         seasons: vec![
@@ -272,7 +272,7 @@ fn two_season_map() -> cobre_core::temporal::SeasonMap {
 
 /// Build a 12-season monthly stage sequence spanning `n_years` starting from
 /// year 2000. Stage IDs are 0-based sequential; season IDs cycle 0..12.
-fn make_monthly_stages_for_annual(n_years: usize) -> Vec<cobre_core::temporal::Stage> {
+fn make_monthly_stages_for_annual(n_years: usize) -> Vec<Stage> {
     use cobre_core::temporal::{
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
     };
@@ -283,7 +283,7 @@ fn make_monthly_stages_for_annual(n_years: usize) -> Vec<cobre_core::temporal::S
             let y = 2000 + year as i32;
             let m = month as u32 + 1;
             let (ey, em) = if m == 12 { (y + 1, 1u32) } else { (y, m + 1) };
-            stages.push(cobre_core::temporal::Stage {
+            stages.push(Stage {
                 index: idx,
                 id: idx as i32,
                 start_date: NaiveDate::from_ymd_opt(y, m, 1).unwrap(),

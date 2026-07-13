@@ -213,10 +213,12 @@ fn accumulate_batch(batch: &RecordBatch, totals: &mut BatchTotals) -> Result<(),
 )]
 mod tests {
     use super::*;
+    use crate::MetadataTrainingSolveStats;
     use crate::output::{
         IterationRecord, OutputContext, RowPoolStatistics, SimulationOutput, TrainingOutput,
         write_results,
     };
+    use cobre_core::SystemBuilder;
 
     fn make_iteration_record(iteration: u32, lp_solves: u32) -> IterationRecord {
         IterationRecord {
@@ -276,12 +278,12 @@ mod tests {
             },
             cut_selection_records: vec![],
             worker_timing_records: vec![],
-            training_solve_stats: crate::MetadataTrainingSolveStats::default(),
+            training_solve_stats: MetadataTrainingSolveStats::default(),
         }
     }
 
     fn make_system() -> cobre_core::System {
-        cobre_core::SystemBuilder::new()
+        SystemBuilder::new()
             .build()
             .expect("empty system must be valid")
     }

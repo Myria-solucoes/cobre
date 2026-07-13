@@ -529,10 +529,11 @@ fn check_defluence_coverage(
 mod tests {
     use super::super::test_support::*;
     use super::*;
+    use crate::scenarios::InflowAnnualComponentRow;
     use crate::stages::StagesData;
     use cobre_core::entities::Hydro;
     use cobre_core::temporal::{Block, PolicyGraph, PolicyGraphType, Stage};
-    use cobre_core::{EntityId, HydroPastDefluence};
+    use cobre_core::{EntityId, HydroPastDefluence, RecentObservation, SeasonMap};
 
     fn make_hydro_with_travel_time(id: i32, downstream_id: i32, t: Option<f64>) -> Hydro {
         let mut h = make_hydro(id, Some(downstream_id));
@@ -1096,7 +1097,7 @@ mod tests {
 
     // ── Row 13: recent_observations non-Monthly seed-gap advisory ────────────
 
-    fn season_map_with_cycle(cycle: SeasonCycleType) -> cobre_core::temporal::SeasonMap {
+    fn season_map_with_cycle(cycle: SeasonCycleType) -> SeasonMap {
         use cobre_core::temporal::{SeasonDefinition, SeasonMap};
         SeasonMap {
             cycle_type: cycle,
@@ -1111,8 +1112,8 @@ mod tests {
         }
     }
 
-    fn recent_obs(hydro_id: i32) -> cobre_core::initial_conditions::RecentObservation {
-        cobre_core::initial_conditions::RecentObservation {
+    fn recent_obs(hydro_id: i32) -> RecentObservation {
+        RecentObservation {
             hydro_id: EntityId::from(hydro_id),
             start_date: chrono::NaiveDate::from_ymd_opt(2023, 12, 1).unwrap(),
             end_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -1123,7 +1124,7 @@ mod tests {
     /// A `ParsedData` with one hydro, three stages (`season_id = Some(0)` on the
     /// first), and the given `season_map`. `inflow_ar_coefficients` is left empty
     /// — callers set it via [`make_ar_row`] to declare PAR usage.
-    fn par_cycle_data(season_map: cobre_core::temporal::SeasonMap) -> ParsedData {
+    fn par_cycle_data(season_map: SeasonMap) -> ParsedData {
         let mut data = make_data(
             vec![make_hydro(1, None)],
             vec![],
@@ -1225,8 +1226,8 @@ mod tests {
 
     // ── Row 14: non-monthly annual component reject ──────────────────────────
 
-    fn annual_component_row(hydro_id: i32) -> crate::scenarios::InflowAnnualComponentRow {
-        crate::scenarios::InflowAnnualComponentRow {
+    fn annual_component_row(hydro_id: i32) -> InflowAnnualComponentRow {
+        InflowAnnualComponentRow {
             hydro_id: EntityId::from(hydro_id),
             stage_id: 0,
             annual_coefficient: -0.25,

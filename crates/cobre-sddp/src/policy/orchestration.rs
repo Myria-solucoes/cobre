@@ -8,6 +8,7 @@
 
 use std::path::Path;
 
+use cobre_io::EntitySlot;
 use cobre_io::output::policy::{PolicyCheckpointMetadata, write_policy_checkpoint};
 use cobre_io::output::{
     OutputError, write_correlation_json, write_fitting_report, write_inflow_annual_component,
@@ -101,7 +102,7 @@ pub fn write_checkpoint(
     let state_dimension = fcf.state_dimension;
 
     let global_layout = setup.stage_state();
-    let stage_manifests: Vec<Vec<cobre_io::output::policy::EntitySlot>> = (0..n_stages)
+    let stage_manifests: Vec<Vec<EntitySlot>> = (0..n_stages)
         .map(|t| {
             build_stage_entity_manifest(
                 system,

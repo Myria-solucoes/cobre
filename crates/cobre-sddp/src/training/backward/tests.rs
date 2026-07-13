@@ -5,7 +5,7 @@ use crate::SddpError;
 /// `TrainingSession` through every fixture.
 #[cfg(test)]
 fn run_backward_pass<S, C: Communicator>(
-    inputs: &mut crate::backward_pass_state::BackwardPassInputs<'_, S, C>,
+    inputs: &mut BackwardPassInputs<'_, S, C>,
 ) -> Result<BackwardResult, SddpError>
 where
     S: SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
@@ -19,7 +19,7 @@ where
         .unwrap_or(0);
     let real_states_capacity =
         inputs.exchange.real_total_scenarios() * inputs.training_ctx.state.n_state;
-    let mut bwd_state = crate::backward_pass_state::BackwardPassState::new(
+    let mut bwd_state = BackwardPassState::new(
         n_workers_local,
         n_ranks,
         bwd_max_openings,
@@ -35,19 +35,25 @@ use cobre_solver::{
 };
 
 use cobre_core::scenario::SamplingScheme;
+use cobre_core::{StageStateConfig, WorkerPhaseTimings};
 
 use super::BackwardResult;
 use crate::{
+    backward_pass_state::{BackwardPassInputs, BackwardPassState},
+    build_cut_row_batch_into,
     context::{StageContext, TrainingContext},
-    cut::FutureCostFunction,
+    cut::{FutureCostFunction, row::build_cut_row_batch},
     cut_sync::CutSyncBuffers,
     horizon_mode::HorizonMode,
+    indexer::{CutStateProjection, StateDim},
     inflow_method::InflowNonNegativityMethod,
-    risk_measure::RiskMeasure,
+    lp_builder::PatchBuffer,
+    risk_measure::{BackwardOutcome, RiskMeasure},
     solver_stats::SolverStatsDelta,
     state_exchange::ExchangeBuffers,
+    test_support,
     trajectory::TrajectoryRecord,
-    workspace::{BackwardAccumulators, BasisStore, SolverWorkspace},
+    workspace::{BackwardAccumulators, BasisStore, CapturedBasis, ScratchBuffers, SolverWorkspace},
 };
 
 fn empty_cut_batches(n_stages: usize) -> Vec<RowBatch> {
@@ -294,14 +300,13 @@ fn staged_cut_coefficients<'a>(cut: &super::StagedCut, arena: &'a [f64]) -> &'a 
 /// The workspace is sized for `n_hydro=1`, `max_par_order=0`, and `n_state`
 /// state dimensions.
 fn single_workspace(solver: MockSolver, n_state: usize) -> Vec<SolverWorkspace<MockSolver>> {
-    use crate::lp_builder::PatchBuffer;
     vec![SolverWorkspace {
         rank: 0,
         worker_id: 0,
         solver: ProfiledSolver::new(solver),
         patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
         current_state: Vec::with_capacity(n_state),
-        scratch: crate::workspace::ScratchBuffers {
+        scratch: ScratchBuffers {
             noise_buf: Vec::new(),
             inflow_m3s_buf: Vec::new(),
             lag_matrix_buf: Vec::new(),
@@ -334,7 +339,7 @@ fn single_workspace(solver: MockSolver, n_state: usize) -> Vec<SolverWorkspace<M
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
-        worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+        worker_timing_buf: WorkerPhaseTimings::default(),
     }]
 }
 
@@ -345,14 +350,13 @@ fn transit_bucket_only_workspace(
     solver: MockSolver,
     n_buckets: usize,
 ) -> SolverWorkspace<MockSolver> {
-    use crate::lp_builder::PatchBuffer;
     SolverWorkspace {
         rank: 0,
         worker_id: 0,
         solver: ProfiledSolver::new(solver),
         patch_buf: PatchBuffer::new(0, 0, 0, 0, n_buckets, 0, 0),
         current_state: Vec::new(),
-        scratch: crate::workspace::ScratchBuffers {
+        scratch: ScratchBuffers {
             noise_buf: Vec::new(),
             inflow_m3s_buf: Vec::new(),
             lag_matrix_buf: Vec::new(),
@@ -385,7 +389,7 @@ fn transit_bucket_only_workspace(
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
-        worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+        worker_timing_buf: WorkerPhaseTimings::default(),
     }
 }
 
@@ -412,7 +416,7 @@ fn basis_store_with_one(
     // path; the reconstruction copies the template rows verbatim and
     // emits an empty cut block.
     let base_row_count = basis.row_status.len();
-    *store.get_mut(scenario, stage) = Some(crate::workspace::CapturedBasis {
+    *store.get_mut(scenario, stage) = Some(CapturedBasis {
         basis,
         base_row_count,
         cut_row_slots: Vec::new(),
@@ -683,7 +687,7 @@ fn single_stage_system_produces_no_cuts() {
     // A 1-stage system has no stages with a successor, so the backward
     // sweep (0..0) is empty — zero cuts are generated.
     let stochastic = make_stochastic_context(1, 2);
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0()];
     let base_rows = vec![1_usize];
 
@@ -706,7 +710,7 @@ fn single_stage_system_produces_no_cuts() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
-    let result = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
+    let result = run_backward_pass(&mut BackwardPassInputs {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
@@ -739,10 +743,8 @@ fn single_stage_system_produces_no_cuts() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -781,7 +783,7 @@ fn two_stage_system_two_trial_points_generates_two_cuts_at_stage_0() {
     let n_stages = 2_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -808,7 +810,7 @@ fn two_stage_system_two_trial_points_generates_two_cuts_at_stage_0() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
-    let result = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
+    let result = run_backward_pass(&mut BackwardPassInputs {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
@@ -841,10 +843,8 @@ fn two_stage_system_two_trial_points_generates_two_cuts_at_stage_0() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -889,7 +889,7 @@ fn cut_inserted_with_correct_stage_iteration_and_forward_pass_index() {
     let n_stages = 2_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -913,7 +913,7 @@ fn cut_inserted_with_correct_stage_iteration_and_forward_pass_index() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
-    let _ = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
+    let _ = run_backward_pass(&mut BackwardPassInputs {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
@@ -946,10 +946,8 @@ fn cut_inserted_with_correct_stage_iteration_and_forward_pass_index() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -991,7 +989,7 @@ fn no_cuts_generated_at_last_stage() {
     let n_stages = 5_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -1013,7 +1011,7 @@ fn no_cuts_generated_at_last_stage() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
-    let result = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
+    let result = run_backward_pass(&mut BackwardPassInputs {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
@@ -1046,10 +1044,8 @@ fn no_cuts_generated_at_last_stage() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -1092,7 +1088,7 @@ fn no_cuts_generated_at_last_stage() {
 fn elapsed_ms_is_non_negative() {
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 2);
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -1114,7 +1110,7 @@ fn elapsed_ms_is_non_negative() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
-    let result = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
+    let result = run_backward_pass(&mut BackwardPassInputs {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
@@ -1147,10 +1143,8 @@ fn elapsed_ms_is_non_negative() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -1188,7 +1182,7 @@ fn elapsed_ms_is_non_negative() {
 fn infeasible_solver_returns_sddp_infeasible_error() {
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -1210,7 +1204,7 @@ fn infeasible_solver_returns_sddp_infeasible_error() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
-    let result = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
+    let result = run_backward_pass(&mut BackwardPassInputs {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
@@ -1243,10 +1237,8 @@ fn infeasible_solver_returns_sddp_infeasible_error() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -1276,7 +1268,7 @@ fn infeasible_solver_returns_sddp_infeasible_error() {
     });
 
     assert!(
-        matches!(result, Err(crate::SddpError::Infeasible { .. })),
+        matches!(result, Err(SddpError::Infeasible { .. })),
         "expected SddpError::Infeasible, got: {result:?}",
     );
 }
@@ -1285,7 +1277,7 @@ fn infeasible_solver_returns_sddp_infeasible_error() {
 fn expectation_aggregation_mean_of_per_opening_intercepts() {
     // Given 3 openings with uniform probability 1/3 and per-opening
     // intercepts [10.0, 20.0, 30.0], the aggregated intercept must be 20.0.
-    use crate::risk_measure::BackwardOutcome as BO;
+    use BackwardOutcome as BO;
 
     let outcomes = vec![
         BO {
@@ -1331,7 +1323,7 @@ fn cut_coefficients_and_intercept_match_dual_extraction_formula() {
     //   coefficients = [-3.0]
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -1354,7 +1346,7 @@ fn cut_coefficients_and_intercept_match_dual_extraction_formula() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
-    let _ = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
+    let _ = run_backward_pass(&mut BackwardPassInputs {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
@@ -1387,10 +1379,8 @@ fn cut_coefficients_and_intercept_match_dual_extraction_formula() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -1452,7 +1442,7 @@ fn cut_gradient_sign_physically_correct() {
     //   (more storage → higher cut value → wrong incentive).
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -1476,7 +1466,7 @@ fn cut_gradient_sign_physically_correct() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
-    let _ = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
+    let _ = run_backward_pass(&mut BackwardPassInputs {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
@@ -1509,10 +1499,8 @@ fn cut_gradient_sign_physically_correct() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -1578,7 +1566,7 @@ fn cut_is_tight_at_trial_point() {
     // This test verifies the tightness property.
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -1603,7 +1591,7 @@ fn cut_is_tight_at_trial_point() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
-    let _ = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
+    let _ = run_backward_pass(&mut BackwardPassInputs {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
@@ -1636,10 +1624,8 @@ fn cut_is_tight_at_trial_point() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -1693,7 +1679,7 @@ fn single_rank_backward_pass_with_local_backend_produces_correct_fcf() {
     let n_stages = 3_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -1715,7 +1701,7 @@ fn single_rank_backward_pass_with_local_backend_produces_correct_fcf() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
-    let result = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
+    let result = run_backward_pass(&mut BackwardPassInputs {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
@@ -1748,10 +1734,8 @@ fn single_rank_backward_pass_with_local_backend_produces_correct_fcf() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -1804,7 +1788,7 @@ fn forward_pass_index_matches_global_scenario_index() {
     // The key invariant: forward_pass_index = m = 5.
     let n_stages = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -1838,7 +1822,7 @@ fn forward_pass_index_matches_global_scenario_index() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
-    let _ = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
+    let _ = run_backward_pass(&mut BackwardPassInputs {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
@@ -1871,10 +1855,8 @@ fn forward_pass_index_matches_global_scenario_index() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -1921,7 +1903,7 @@ fn warm_start_uses_prepopulated_forward_basis() {
     let n_stages = 2_usize;
     let n_openings = 1_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -1947,7 +1929,7 @@ fn warm_start_uses_prepopulated_forward_basis() {
     let mut basis_store = basis_store_with_one(exchange.local_count(), n_stages, 0, 1, pre_basis);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
-    let _ = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
+    let _ = run_backward_pass(&mut BackwardPassInputs {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
@@ -1980,10 +1962,8 @@ fn warm_start_uses_prepopulated_forward_basis() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -2026,7 +2006,7 @@ fn multi_opening_subsequent_openings_use_internal_hotstart() {
     let n_stages = 2_usize;
     let n_openings = 3_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -2050,7 +2030,7 @@ fn multi_opening_subsequent_openings_use_internal_hotstart() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
-    let _ = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
+    let _ = run_backward_pass(&mut BackwardPassInputs {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
@@ -2083,10 +2063,8 @@ fn multi_opening_subsequent_openings_use_internal_hotstart() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -2132,7 +2110,7 @@ fn backward_solver_error_propagates() {
     let n_stages = 2_usize;
     let n_openings = 1_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -2158,7 +2136,7 @@ fn backward_solver_error_propagates() {
     let mut basis_store = basis_store_with_one(exchange.local_count(), n_stages, 0, 1, pre_basis);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
-    let result = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
+    let result = run_backward_pass(&mut BackwardPassInputs {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
@@ -2191,10 +2169,8 @@ fn backward_solver_error_propagates() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -2224,7 +2200,7 @@ fn backward_solver_error_propagates() {
     });
 
     assert!(
-        matches!(result, Err(crate::SddpError::Infeasible { .. })),
+        matches!(result, Err(SddpError::Infeasible { .. })),
         "expected SddpError::Infeasible, got: {result:?}",
     );
     // The BasisStore is not mutated by the backward pass — the working_basis
@@ -2248,14 +2224,12 @@ fn backward_solver_error_propagates() {
     clippy::cast_precision_loss
 )]
 fn test_backward_pass_parallel_cut_determinism() {
-    use crate::lp_builder::PatchBuffer;
-
     let n_stages = 3_usize;
     let n_openings = 2_usize;
     let n_trial_points = 8_usize;
 
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -2284,7 +2258,7 @@ fn test_backward_pass_parallel_cut_determinism() {
         solver: ProfiledSolver::new(solver_1),
         patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
         current_state: Vec::with_capacity(n_state),
-        scratch: crate::workspace::ScratchBuffers {
+        scratch: ScratchBuffers {
             noise_buf: Vec::new(),
             inflow_m3s_buf: Vec::new(),
             lag_matrix_buf: Vec::new(),
@@ -2317,7 +2291,7 @@ fn test_backward_pass_parallel_cut_determinism() {
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
-        worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+        worker_timing_buf: WorkerPhaseTimings::default(),
     }];
     let mut basis_store_1 = empty_basis_store(exchange.local_count(), n_stages);
     let ctx = StageContext {
@@ -2345,7 +2319,7 @@ fn test_backward_pass_parallel_cut_determinism() {
         downstream_par_order: 0,
     };
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
-    let _ = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
+    let _ = run_backward_pass(&mut BackwardPassInputs {
         workspaces: &mut workspaces_1,
         basis_store: &mut basis_store_1,
         ctx: &ctx,
@@ -2355,10 +2329,8 @@ fn test_backward_pass_parallel_cut_determinism() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -2398,7 +2370,7 @@ fn test_backward_pass_parallel_cut_determinism() {
             solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
             patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
-            scratch: crate::workspace::ScratchBuffers {
+            scratch: ScratchBuffers {
                 noise_buf: Vec::new(),
                 inflow_m3s_buf: Vec::new(),
                 lag_matrix_buf: Vec::new(),
@@ -2431,12 +2403,12 @@ fn test_backward_pass_parallel_cut_determinism() {
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
-            worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+            worker_timing_buf: WorkerPhaseTimings::default(),
         })
         .collect();
     let mut basis_store_4 = empty_basis_store(exchange.local_count(), n_stages);
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
-    let _ = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
+    let _ = run_backward_pass(&mut BackwardPassInputs {
         workspaces: &mut workspaces_4,
         basis_store: &mut basis_store_4,
         ctx: &ctx,
@@ -2446,10 +2418,8 @@ fn test_backward_pass_parallel_cut_determinism() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -2709,10 +2679,10 @@ fn backward_pass_load_patches_applied() {
     let n_openings = 2_usize;
     // mean_mw=300 guarantees a positive realization for any reasonable eta draw.
     let stochastic = make_stochastic_context_with_load(n_stages, n_openings, 300.0, 30.0);
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
 
     // PatchBuffer: n_hydros=1, max_par_order=0, n_load_buses=1, max_blocks=1.
-    let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 1, 1, 0, 0, 0);
+    let patch_buf = PatchBuffer::new(1, 0, 1, 1, 0, 0, 0);
 
     // Template: 2 rows (row 0 = state-fixing, row 1 = water-balance).
     // base_rows=[1] → inflow RHS row starts at index 1.
@@ -2761,7 +2731,7 @@ fn backward_pass_load_patches_applied() {
         solver: ProfiledSolver::new(MockSolver::always_ok(solution)),
         patch_buf,
         current_state: Vec::with_capacity(n_state),
-        scratch: crate::workspace::ScratchBuffers {
+        scratch: ScratchBuffers {
             noise_buf: Vec::new(),
             inflow_m3s_buf: Vec::new(),
             lag_matrix_buf: Vec::new(),
@@ -2794,7 +2764,7 @@ fn backward_pass_load_patches_applied() {
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
-        worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+        worker_timing_buf: WorkerPhaseTimings::default(),
     };
     let mut workspaces = vec![ws];
 
@@ -2807,7 +2777,7 @@ fn backward_pass_load_patches_applied() {
     let block_counts_per_stage = vec![1_usize; n_stages];
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
-    let _ = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
+    let _ = run_backward_pass(&mut BackwardPassInputs {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
@@ -2840,10 +2810,8 @@ fn backward_pass_load_patches_applied() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -2897,10 +2865,10 @@ fn backward_pass_no_load_buses_unchanged() {
     let n_stages = 2_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
 
     // PatchBuffer with no load buses: n_load_buses=0, max_blocks=1.
-    let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 0, 0, 0, 0, 0);
+    let patch_buf = PatchBuffer::new(1, 0, 0, 0, 0, 0, 0);
 
     let template = StageTemplate {
         num_cols: 3,
@@ -2944,7 +2912,7 @@ fn backward_pass_no_load_buses_unchanged() {
         solver: ProfiledSolver::new(MockSolver::always_ok(solution)),
         patch_buf,
         current_state: Vec::with_capacity(n_state),
-        scratch: crate::workspace::ScratchBuffers {
+        scratch: ScratchBuffers {
             noise_buf: Vec::new(),
             inflow_m3s_buf: Vec::new(),
             lag_matrix_buf: Vec::new(),
@@ -2977,14 +2945,14 @@ fn backward_pass_no_load_buses_unchanged() {
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
-        worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+        worker_timing_buf: WorkerPhaseTimings::default(),
     };
     let mut workspaces = vec![ws];
     let comm = StubComm;
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
-    let _ = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
+    let _ = run_backward_pass(&mut BackwardPassInputs {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
@@ -3017,10 +2985,8 @@ fn backward_pass_no_load_buses_unchanged() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -3076,9 +3042,9 @@ fn backward_pass_cut_coefficients_unaffected() {
     let n_stages = 2_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context_with_load(n_stages, n_openings, 200.0, 20.0);
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
 
-    let patch_buf = crate::lp_builder::PatchBuffer::new(1, 0, 1, 1, 0, 0, 0);
+    let patch_buf = PatchBuffer::new(1, 0, 1, 1, 0, 0, 0);
 
     let template = StageTemplate {
         num_cols: 3,
@@ -3122,7 +3088,7 @@ fn backward_pass_cut_coefficients_unaffected() {
         solver: ProfiledSolver::new(MockSolver::always_ok(solution)),
         patch_buf,
         current_state: Vec::with_capacity(n_state),
-        scratch: crate::workspace::ScratchBuffers {
+        scratch: ScratchBuffers {
             noise_buf: Vec::new(),
             inflow_m3s_buf: Vec::new(),
             lag_matrix_buf: Vec::new(),
@@ -3155,7 +3121,7 @@ fn backward_pass_cut_coefficients_unaffected() {
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
-        worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+        worker_timing_buf: WorkerPhaseTimings::default(),
     };
     let mut workspaces = vec![ws];
     let comm = StubComm;
@@ -3166,7 +3132,7 @@ fn backward_pass_cut_coefficients_unaffected() {
     let block_counts_per_stage = vec![1_usize; n_stages];
 
     let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
-    let result = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
+    let result = run_backward_pass(&mut BackwardPassInputs {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
@@ -3199,10 +3165,8 @@ fn backward_pass_cut_coefficients_unaffected() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -3273,7 +3237,7 @@ fn per_stage_cut_sync_invariant_after_bug1_fix() {
     let n_stages = 4_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -3295,7 +3259,7 @@ fn per_stage_cut_sync_invariant_after_bug1_fix() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
 
     let mut csb = CutSyncBuffers::new(n_state, forward_passes as usize, 1);
-    let result = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
+    let result = run_backward_pass(&mut BackwardPassInputs {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
@@ -3328,10 +3292,8 @@ fn per_stage_cut_sync_invariant_after_bug1_fix() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -3407,7 +3369,7 @@ fn metadata_sync_updates_active_count_and_last_active_iter() {
     let n_stages = 3_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
 
@@ -3433,7 +3395,7 @@ fn metadata_sync_updates_active_count_and_last_active_iter() {
     // Run a single backward iteration. The backward loop visits t=1
     // (cuts go to pool[1]), then t=0 (cuts go to pool[0], binding
     // checked against pool[1]).
-    let result = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
+    let result = run_backward_pass(&mut BackwardPassInputs {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
@@ -3466,10 +3428,8 @@ fn metadata_sync_updates_active_count_and_last_active_iter() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -3546,13 +3506,11 @@ fn metadata_sync_updates_active_count_and_last_active_iter() {
 /// cuts are generated and the ordering invariant is meaningful.
 #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
 fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
-    use crate::lp_builder::PatchBuffer;
-
     let n_stages = 2_usize;
     let local_work = 6_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
     let n_state = state.n_state; // 1
@@ -3587,7 +3545,7 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
             solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
             patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
-            scratch: crate::workspace::ScratchBuffers {
+            scratch: ScratchBuffers {
                 noise_buf: Vec::new(),
                 inflow_m3s_buf: Vec::new(),
                 lag_matrix_buf: Vec::new(),
@@ -3620,7 +3578,7 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
-            worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+            worker_timing_buf: WorkerPhaseTimings::default(),
         })
         .collect();
 
@@ -3628,7 +3586,7 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
     let comm = StubComm;
     let mut csb = CutSyncBuffers::new(n_state, local_work, 1);
 
-    let result = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
+    let result = run_backward_pass(&mut BackwardPassInputs {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
@@ -3661,10 +3619,8 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -3929,14 +3885,12 @@ fn decompose_scheduling_clamped_when_worker_exceeds_wall() {
     clippy::cast_possible_truncation
 )]
 fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
-    use crate::lp_builder::PatchBuffer;
-
     let n_stages = 2_usize;
     let n_openings = 4_usize;
     let n_workers = 2_usize;
     let local_work = 4_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
     let n_state = state.n_state;
@@ -3957,7 +3911,7 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
             solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
             patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
-            scratch: crate::workspace::ScratchBuffers {
+            scratch: ScratchBuffers {
                 noise_buf: Vec::new(),
                 inflow_m3s_buf: Vec::new(),
                 lag_matrix_buf: Vec::new(),
@@ -3990,7 +3944,7 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
-            worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+            worker_timing_buf: WorkerPhaseTimings::default(),
         })
         .collect();
 
@@ -3999,7 +3953,7 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
         FutureCostFunction::new(n_stages, n_state, local_work as u32, 64, &vec![0; n_stages]);
     let mut csb = CutSyncBuffers::new(n_state, local_work, 1);
 
-    let result = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
+    let result = run_backward_pass(&mut BackwardPassInputs {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
@@ -4032,10 +3986,8 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -4108,8 +4060,6 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
     clippy::cast_possible_truncation
 )]
 fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
-    use crate::lp_builder::PatchBuffer;
-
     /// Stub communicator simulating np=2: `allgatherv` fills recv with
     /// `[send, send]` (rank-0 and a synthetic rank-1 copy).
     struct DualRankStubComm;
@@ -4167,7 +4117,7 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
     let n_workers = 1_usize;
     let local_work = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0(); n_stages];
     let base_rows = vec![1_usize; n_stages];
     let n_state = state.n_state;
@@ -4188,7 +4138,7 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
             solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
             patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
-            scratch: crate::workspace::ScratchBuffers {
+            scratch: ScratchBuffers {
                 noise_buf: Vec::new(),
                 inflow_m3s_buf: Vec::new(),
                 lag_matrix_buf: Vec::new(),
@@ -4221,7 +4171,7 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
-            worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+            worker_timing_buf: WorkerPhaseTimings::default(),
         })
         .collect();
 
@@ -4230,7 +4180,7 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
         FutureCostFunction::new(n_stages, n_state, local_work as u32, 64, &vec![0; n_stages]);
     let mut csb = CutSyncBuffers::new(n_state, local_work, 1);
 
-    let result = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
+    let result = run_backward_pass(&mut BackwardPassInputs {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
@@ -4263,10 +4213,8 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -4330,7 +4278,7 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
 /// `ws.solver.warm_start_calls`.
 #[allow(clippy::too_many_lines)]
 fn run_one_trial_point_with_stores(
-    basis_store: &mut crate::workspace::BasisStore,
+    basis_store: &mut BasisStore,
 ) -> Result<Vec<SolverWorkspace<MockSolver>>, crate::SddpError> {
     use crate::context::StageContext;
 
@@ -4338,18 +4286,16 @@ fn run_one_trial_point_with_stores(
     let n_openings = 1_usize;
     let n_state = 1_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
-    let state = crate::test_support::state_layout(n_state, 0);
+    let state = test_support::state_layout(n_state, 0);
 
     let solver = MockSolver::always_ok(solution_1_0(100.0, -5.0));
     let mut workspaces = single_workspace(solver, n_state);
     let ws = &mut workspaces[0];
-    ws.backward_accum
-        .outcomes
-        .push(crate::risk_measure::BackwardOutcome {
-            intercept: 0.0,
-            coefficients: vec![0.0; n_state],
-            objective_value: 0.0,
-        });
+    ws.backward_accum.outcomes.push(BackwardOutcome {
+        intercept: 0.0,
+        coefficients: vec![0.0; n_state],
+        objective_value: 0.0,
+    });
     ws.backward_accum
         .per_opening_stats
         .push(SolverStatsDelta::default());
@@ -4391,11 +4337,11 @@ fn run_one_trial_point_with_stores(
         num_stages: n_stages,
     };
     let risk_measures = vec![RiskMeasure::Expectation; n_stages];
-    let study_dims = crate::test_support::study_dims();
+    let study_dims = test_support::study_dims();
     let training_ctx = TrainingContext {
         horizon: &horizon,
         state: &state,
-        cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(&state, n_stages),
+        cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
         study_dims: &study_dims,
         inflow_method: &InflowNonNegativityMethod::None,
         stochastic: &stochastic,
@@ -4429,9 +4375,9 @@ fn run_one_trial_point_with_stores(
         row_upper: Vec::new(),
     };
 
-    let cut_state_projection = crate::indexer::CutStateProjection::new(
+    let cut_state_projection = CutStateProjection::new(
         &state,
-        cobre_core::temporal::StageStateConfig {
+        StageStateConfig {
             storage: true,
             inflow_lags: true,
         },
@@ -4495,7 +4441,7 @@ fn run_one_trial_point_with_stores(
 /// availability, which genuinely varies per opening).
 #[test]
 fn patch_opening_bounds_pins_transit_bucket_incoming_columns_per_stage_visit() {
-    let state = crate::test_support::state_layout_with_transit_buckets(
+    let state = test_support::state_layout_with_transit_buckets(
         0,
         0,
         2,
@@ -4507,8 +4453,7 @@ fn patch_opening_bounds_pins_transit_bucket_incoming_columns_per_stage_visit() {
     assert_eq!(state.n_state, 2);
 
     let stochastic = make_stochastic_context(1, 1);
-    let template =
-        crate::test_support::transit_bucket_only_template(state.theta + 1, state.n_state);
+    let template = test_support::transit_bucket_only_template(state.theta + 1, state.n_state);
 
     let templates: &'static _ = Box::leak(Box::new(vec![template]));
     let base_rows: &'static _ = Box::leak(Box::new(vec![0_usize]));
@@ -4538,11 +4483,11 @@ fn patch_opening_bounds_pins_transit_bucket_incoming_columns_per_stage_visit() {
     };
 
     let horizon = HorizonMode::Finite { num_stages: 1 };
-    let study_dims = crate::test_support::study_dims();
+    let study_dims = test_support::study_dims();
     let training_ctx = TrainingContext {
         horizon: &horizon,
         state: &state,
-        cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(&state, 1),
+        cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, 1),
         study_dims: &study_dims,
         inflow_method: &InflowNonNegativityMethod::None,
         stochastic: &stochastic,
@@ -4604,8 +4549,6 @@ fn resolve_backward_basis_returns_some_when_slot_is_populated() {
 
 #[test]
 fn resolve_backward_basis_returns_none_when_slot_is_empty() {
-    use crate::workspace::BasisStore;
-
     let mut store = BasisStore::new(1, 2);
     let slices = store.split_workers_mut(1);
     let slice = &slices[0];
@@ -4621,8 +4564,6 @@ fn resolve_backward_basis_returns_none_when_slot_is_empty() {
 
 #[test]
 fn backward_write_populates_basis_store_at_omega_zero() {
-    use crate::workspace::BasisStore;
-
     let mut basis_store = BasisStore::new(1, 2);
     let workspaces = run_one_trial_point_with_stores(&mut basis_store).unwrap();
 
@@ -4705,12 +4646,10 @@ fn backward_write_preserves_slot_on_infeasibility_at_omega_zero() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn handshake_passes_with_local_backend() {
-    use crate::lp_builder::PatchBuffer;
-
     let n_stages = 1_usize;
     let n_workers = 2_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0()];
     let base_rows = vec![1_usize];
     let n_state = state.n_state;
@@ -4732,7 +4671,7 @@ fn handshake_passes_with_local_backend() {
             solver: ProfiledSolver::new(MockSolver::always_ok(solution.clone())),
             patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
-            scratch: crate::workspace::ScratchBuffers {
+            scratch: ScratchBuffers {
                 noise_buf: Vec::new(),
                 inflow_m3s_buf: Vec::new(),
                 lag_matrix_buf: Vec::new(),
@@ -4765,7 +4704,7 @@ fn handshake_passes_with_local_backend() {
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
-            worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+            worker_timing_buf: WorkerPhaseTimings::default(),
         })
         .collect();
 
@@ -4773,7 +4712,7 @@ fn handshake_passes_with_local_backend() {
     let mut csb = CutSyncBuffers::new(n_state, 1, 1);
     let comm = StubComm;
 
-    let result = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
+    let result = run_backward_pass(&mut BackwardPassInputs {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
@@ -4806,10 +4745,8 @@ fn handshake_passes_with_local_backend() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -4918,7 +4855,7 @@ fn handshake_rejects_nonuniform_workers() {
 
     let n_stages = 1_usize;
     let stochastic = make_stochastic_context(n_stages, 1);
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     let templates = vec![minimal_template_1_0()];
     let base_rows = vec![1_usize];
     let n_state = state.n_state;
@@ -4938,7 +4875,7 @@ fn handshake_rejects_nonuniform_workers() {
     let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
     let mut csb = CutSyncBuffers::new(n_state, 1, 1);
 
-    let result = run_backward_pass(&mut crate::backward_pass_state::BackwardPassInputs {
+    let result = run_backward_pass(&mut BackwardPassInputs {
         workspaces: &mut workspaces,
         basis_store: &mut basis_store,
         ctx: &StageContext {
@@ -4971,10 +4908,8 @@ fn handshake_rejects_nonuniform_workers() {
         training_ctx: &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
@@ -5004,7 +4939,7 @@ fn handshake_rejects_nonuniform_workers() {
     });
 
     match result {
-        Err(crate::SddpError::Validation(ref msg)) => {
+        Err(SddpError::Validation(ref msg)) => {
             assert!(
                 msg.contains("non-uniform n_workers_local"),
                 "error message must contain 'non-uniform n_workers_local'; got: {msg}"
@@ -5034,7 +4969,7 @@ fn handshake_rejects_nonuniform_workers() {
 /// owner of the resolver).
 #[test]
 fn cut_coefficient_sign_convention_slot_zero_k2() {
-    let state = crate::test_support::state_layout_full(0, 0, 1, 2, vec![2]);
+    let state = test_support::state_layout_full(0, 0, 1, 2, vec![2]);
     assert_eq!(state.anticipated_slots_out.start, 0);
     assert_eq!(state.n_state, 2);
 
@@ -5051,12 +4986,12 @@ fn cut_coefficient_sign_convention_slot_zero_k2() {
         row_lower: Vec::new(),
         row_upper: Vec::new(),
     };
-    crate::cut::row::build_cut_row_batch_into(
+    build_cut_row_batch_into(
         &mut batch,
         &fcf,
         1,
         &state,
-        &crate::test_support::cut_state_projection(&state),
+        &test_support::cut_state_projection(&state),
         &[],
     );
 
@@ -5064,9 +4999,7 @@ fn cut_coefficient_sign_convention_slot_zero_k2() {
     // in-LP ring's definition row (not `state_to_lp_column`) resolves the
     // ring transition, so the cut renders directly onto the outgoing column.
     let lp_col = state
-        .state_to_lp_column(crate::indexer::StateDim::new(
-            state.anticipated_slots_out.start,
-        ))
+        .state_to_lp_column(StateDim::new(state.anticipated_slots_out.start))
         .get();
     assert_eq!(lp_col, state.anticipated_slots_out.start);
 
@@ -5087,7 +5020,6 @@ fn cut_coefficient_sign_convention_slot_zero_k2() {
 
 use crate::cut_selection::{CutMetadata, CutSelectionStrategy};
 use crate::dcs::DcsParams;
-use crate::lp_builder::PatchBuffer;
 use crate::workspace::WorkspaceSizing;
 use cobre_solver::ActiveSolver;
 
@@ -5206,7 +5138,7 @@ fn run_dcs_backward_trial_point_at(
     iteration: u64,
     x_hat: f64,
 ) -> (super::StagedCut, Vec<f64>, Vec<u64>) {
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     let n_state = state.n_state;
     let n_stages = 2;
     let core = dcs_core_template();
@@ -5218,11 +5150,11 @@ fn run_dcs_backward_trial_point_at(
 
     let mut fcf = dcs_two_stage_fcf();
     // All-cuts batch for the frozen path (delta == all cuts here).
-    let cut_batch = crate::cut::row::build_cut_row_batch(
+    let cut_batch = build_cut_row_batch(
         &fcf,
         1,
         &state,
-        &crate::test_support::cut_state_projection(&state),
+        &test_support::cut_state_projection(&state),
         &[],
     );
     let successor_active_slots: Vec<usize> = (0..fcf.pools[1].populated()).collect();
@@ -5256,11 +5188,11 @@ fn run_dcs_backward_trial_point_at(
         noise_group_ids: &[],
         downstream_par_order: 0,
     };
-    let study_dims = crate::test_support::study_dims();
+    let study_dims = test_support::study_dims();
     let training_ctx = TrainingContext {
         horizon: &horizon,
         state: &state,
-        cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(&state, n_stages),
+        cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
         study_dims: &study_dims,
         inflow_method: &InflowNonNegativityMethod::None,
         stochastic: &stochastic,
@@ -5279,9 +5211,9 @@ fn run_dcs_backward_trial_point_at(
     };
 
     let probabilities = vec![1.0_f64];
-    let cut_state_projection = crate::indexer::CutStateProjection::new(
+    let cut_state_projection = CutStateProjection::new(
         &state,
-        cobre_core::temporal::StageStateConfig {
+        StageStateConfig {
             storage: true,
             inflow_lags: true,
         },
@@ -5316,13 +5248,11 @@ fn run_dcs_backward_trial_point_at(
     // expects (mirrors process_stage_backward's per-stage setup).
     let n_openings = succ.probabilities.len();
     while ws.backward_accum.outcomes.len() < n_openings {
-        ws.backward_accum
-            .outcomes
-            .push(crate::risk_measure::BackwardOutcome {
-                intercept: 0.0,
-                coefficients: vec![0.0_f64; n_state],
-                objective_value: 0.0,
-            });
+        ws.backward_accum.outcomes.push(BackwardOutcome {
+            intercept: 0.0,
+            coefficients: vec![0.0_f64; n_state],
+            objective_value: 0.0,
+        });
     }
     let pop = succ.successor_populated_count;
     if ws.backward_accum.slot_increments.len() < pop {
@@ -5709,7 +5639,7 @@ fn dcs_frozen_template_with_one_cut() -> StageTemplate {
 #[allow(clippy::too_many_lines)]
 fn backward_dcs_frozen_cuts_present_no_duplicate_rows() {
     let iteration = 5;
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     let n_state = state.n_state;
     let n_stages = 2;
 
@@ -5729,11 +5659,11 @@ fn backward_dcs_frozen_cuts_present_no_duplicate_rows() {
     // binding cut, the delta is the remaining (non-frozen) cuts. For the DCS
     // exactness comparison we only need the all-cuts reference, computed
     // from the full pool against the cut-free base below.
-    let cut_batch = crate::cut::row::build_cut_row_batch(
+    let cut_batch = build_cut_row_batch(
         &fcf,
         1,
         &state,
-        &crate::test_support::cut_state_projection(&state),
+        &test_support::cut_state_projection(&state),
         &[],
     );
     let successor_active_slots: Vec<usize> = (0..fcf.pools[1].populated()).collect();
@@ -5767,11 +5697,11 @@ fn backward_dcs_frozen_cuts_present_no_duplicate_rows() {
         noise_group_ids: &[],
         downstream_par_order: 0,
     };
-    let study_dims = crate::test_support::study_dims();
+    let study_dims = test_support::study_dims();
     let training_ctx = TrainingContext {
         horizon: &horizon,
         state: &state,
-        cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(&state, n_stages),
+        cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
         study_dims: &study_dims,
         inflow_method: &InflowNonNegativityMethod::None,
         stochastic: &stochastic,
@@ -5793,9 +5723,9 @@ fn backward_dcs_frozen_cuts_present_no_duplicate_rows() {
     // `frozen_template` carries a frozen cut row (num_rows = 2); the cut-free
     // base has template_num_rows = 1. This is the freeze-active shape that
     // exposed the bug.
-    let cut_state_projection = crate::indexer::CutStateProjection::new(
+    let cut_state_projection = CutStateProjection::new(
         &state,
-        cobre_core::temporal::StageStateConfig {
+        StageStateConfig {
             storage: true,
             inflow_lags: true,
         },
@@ -5830,13 +5760,11 @@ fn backward_dcs_frozen_cuts_present_no_duplicate_rows() {
     opening_solver.prepare(ws, &ctx, &succ, iteration);
     let n_openings = succ.probabilities.len();
     while ws.backward_accum.outcomes.len() < n_openings {
-        ws.backward_accum
-            .outcomes
-            .push(crate::risk_measure::BackwardOutcome {
-                intercept: 0.0,
-                coefficients: vec![0.0_f64; n_state],
-                objective_value: 0.0,
-            });
+        ws.backward_accum.outcomes.push(BackwardOutcome {
+            intercept: 0.0,
+            coefficients: vec![0.0_f64; n_state],
+            objective_value: 0.0,
+        });
     }
     let pop = succ.successor_populated_count;
     if ws.backward_accum.slot_increments.len() < pop {

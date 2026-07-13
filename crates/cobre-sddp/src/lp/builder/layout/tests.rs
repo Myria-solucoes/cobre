@@ -20,8 +20,10 @@ use cobre_core::{
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
 use crate::hydro_models::{EvaporationModelSet, ProductionModelSet};
-use crate::indexer::{BlockIdx, Boundary, EvapLocal, FphaLocal, HydroSys, LineSys};
+use crate::indexer::{BlockIdx, Boundary, EvapLocal, FphaLocal, HydroSys, LineSys, ThermalSys};
+use crate::lead_time::AnticipatedResolution;
 use crate::resolved_parameters::ResolvedParameters;
+use crate::test_support::state_layout;
 
 use super::super::test_support::{state_layout_for, zero_hydro_penalties};
 use super::{
@@ -161,11 +163,11 @@ impl ZeroEntityFixtures {
             // to the bounds' study-stage count so the gate's in-range
             // delivery-stage lookup never indexes out of bounds.
             anticipated_windows: vec![(None, None); n_anticipated],
-            anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
+            anticipated_resolution: AnticipatedResolution::default(),
             study_stage_ids: (0..i32::try_from(self.bounds.n_stages()).unwrap_or(0)).collect(),
             anticipated_thermal_indices: anticipated_thermal_indices
                 .into_iter()
-                .map(crate::indexer::ThermalSys::new)
+                .map(ThermalSys::new)
                 .collect(),
             has_penalty: false,
             // Tests that use ZeroEntityFixtures don't exercise discount
@@ -279,7 +281,7 @@ fn stage_layout_zero_anticipated_matches_pre_anticipated_offsets() {
     assert_eq!(layout.n_anticipated, 0, "n_anticipated");
     assert_eq!(layout.k_max, 0, "k_max");
 
-    let idx = crate::test_support::state_layout(ctx.n_hydros, ctx.max_par_order);
+    let idx = state_layout(ctx.n_hydros, ctx.max_par_order);
     assert_eq!(
         layout.equipment.turbine.start,
         idx.theta + 1,
@@ -391,7 +393,7 @@ impl TwoHydroFixtures {
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
             anticipated_windows: vec![],
-            anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
+            anticipated_resolution: AnticipatedResolution::default(),
             study_stage_ids: vec![],
             has_penalty: false,
             cumulative_discount_factors: vec![1.0],
@@ -720,7 +722,7 @@ impl FphaMixFixtures {
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
             anticipated_windows: vec![],
-            anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
+            anticipated_resolution: AnticipatedResolution::default(),
             study_stage_ids: vec![],
             has_penalty: false,
             cumulative_discount_factors: vec![1.0],
@@ -897,7 +899,7 @@ impl FillingMembershipFixtures {
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
             anticipated_windows: vec![],
-            anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
+            anticipated_resolution: AnticipatedResolution::default(),
             study_stage_ids: vec![],
             has_penalty: false,
             cumulative_discount_factors: vec![1.0],
@@ -1775,13 +1777,13 @@ impl AntFixturesWithNStages {
             anticipated_lead_stages,
             anticipated_thermal_indices: anticipated_thermal_indices
                 .into_iter()
-                .map(crate::indexer::ThermalSys::new)
+                .map(ThermalSys::new)
                 .collect(),
             // Windowless: one `(None, None)` per plant, so the decision gate
             // reduces to the strict horizon clause. `study_stage_ids` covers
             // the study-stage count so the in-range delivery lookup is safe.
             anticipated_windows: vec![(None, None); n_anticipated],
-            anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
+            anticipated_resolution: AnticipatedResolution::default(),
             study_stage_ids: (0..i32::try_from(n_stages).unwrap_or(0)).collect(),
             has_penalty: false,
             cumulative_discount_factors: vec![1.0; n_stages],
@@ -2047,7 +2049,7 @@ impl PumpingFixtures {
             anticipated_lead_stages: vec![],
             anticipated_thermal_indices: vec![],
             anticipated_windows: vec![],
-            anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
+            anticipated_resolution: AnticipatedResolution::default(),
             study_stage_ids: vec![],
             has_penalty: false,
             cumulative_discount_factors: vec![1.0; n_stages],
@@ -2071,15 +2073,15 @@ impl PumpingFixtures {
                     duration_hours: 248.0,
                 })
                 .collect(),
-            block_mode: cobre_core::BlockMode::Parallel,
+            block_mode: BlockMode::Parallel,
             state_config: cobre_core::StageStateConfig {
                 storage: false,
                 inflow_lags: false,
             },
-            risk_config: cobre_core::StageRiskConfig::Expectation,
+            risk_config: StageRiskConfig::Expectation,
             scenario_config: cobre_core::ScenarioSourceConfig {
                 branching_factor: 1,
-                noise_method: cobre_core::NoiseMethod::Saa,
+                noise_method: NoiseMethod::Saa,
             },
         }
     }
@@ -2118,7 +2120,7 @@ fn pumping_layout_inert_when_no_stations() {
 
     // Pre-existing column starts for the zero-entity, single-block layout:
     // theta == 0, every equipment/slack/NCS region empty starting at theta+1.
-    let idx = crate::test_support::state_layout(ctx.n_hydros, ctx.max_par_order);
+    let idx = state_layout(ctx.n_hydros, ctx.max_par_order);
     let expected_start = idx.theta + 1;
     assert_eq!(layout.equipment.turbine.start, expected_start);
     assert_eq!(layout.equipment.thermal.start, expected_start);

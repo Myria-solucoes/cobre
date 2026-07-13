@@ -549,7 +549,7 @@ mod b6a_hydro_inflow_parity {
     use std::sync::mpsc;
 
     use cobre_core::scenario::ScenarioSource;
-    use cobre_core::{ConstraintSense, EntityId, VariableRef};
+    use cobre_core::{CoefficientRef, ConstraintSense, EntityId, VariableRef};
     use cobre_sddp::{
         aggregate_simulation, hydro_models::prepare_hydro_models, setup::prepare_stochastic,
     };
@@ -602,7 +602,7 @@ mod b6a_hydro_inflow_parity {
         );
         assert_eq!(
             term.coefficient,
-            cobre_core::CoefficientRef::Literal(1.0),
+            CoefficientRef::Literal(1.0),
             "the hydro_inflow term coefficient must be the literal +1.0"
         );
         assert!(
@@ -703,7 +703,8 @@ mod b6a_hydro_inflow_parity {
         ignore = "slow: run with --features slow-tests"
     )]
     fn b6a_hydro_inflow_cascade_solves_highs() {
-        run_cascade_inflow_case(cobre_solver::highs::HighsSolver::new);
+        use cobre_solver::highs::HighsSolver;
+        run_cascade_inflow_case(HighsSolver::new);
     }
 
     /// The same cascade `hydro_inflow(1) >= 12.0` constraint solves end-to-end
@@ -715,7 +716,8 @@ mod b6a_hydro_inflow_parity {
         ignore = "slow: run with --features slow-tests"
     )]
     fn b6a_hydro_inflow_cascade_solves_clp() {
-        run_cascade_inflow_case(cobre_solver::clp::ClpSolver::new);
+        use cobre_solver::clp::ClpSolver;
+        run_cascade_inflow_case(ClpSolver::new);
     }
 }
 
@@ -758,7 +760,7 @@ mod determinism {
         energy_conversion::{EnergyConversion, EnergyConversionSet},
         forward::{ForwardResult, sync_forward},
         horizon_mode::HorizonMode,
-        indexer::StateLayout,
+        indexer::{CutStateProjection, StateLayout, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
         lp_builder::PatchBuffer,
         risk_measure::RiskMeasure,
@@ -796,8 +798,8 @@ mod determinism {
         )
     }
 
-    fn study_dims() -> cobre_sddp::indexer::StudyDimensions {
-        cobre_sddp::indexer::StudyDimensions::default()
+    fn study_dims() -> StudyDimensions {
+        StudyDimensions::default()
     }
 
     // ===========================================================================
@@ -1860,13 +1862,13 @@ mod determinism {
     fn all_enabled_cut_state_layouts(
         global: &StateLayout,
         n_stages: usize,
-    ) -> Vec<cobre_sddp::indexer::CutStateProjection> {
+    ) -> Vec<CutStateProjection> {
         let full = StageStateConfig {
             storage: true,
             inflow_lags: true,
         };
         (0..n_stages)
-            .map(|_| cobre_sddp::indexer::CutStateProjection::new(global, full))
+            .map(|_| CutStateProjection::new(global, full))
             .collect()
     }
 }
@@ -1896,8 +1898,8 @@ mod water_travel_time_no_arc_byte_identity {
     use cobre_core::temporal::{BlockMode, Stage};
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, DeficitSegment,
-        EntityId, HydroGenerationModel, HydroStageBounds, HydroStagePenalties, HydroStorage,
-        InitialConditions, LineStageBounds, LineStagePenalties, NcsStagePenalties,
+        EntityId, HydroGenerationModel, HydroPenalties, HydroStageBounds, HydroStagePenalties,
+        HydroStorage, InitialConditions, LineStageBounds, LineStagePenalties, NcsStagePenalties,
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
         ResolvedPenalties, SystemBuilder, ThermalStageBounds,
     };
@@ -1917,8 +1919,8 @@ mod water_travel_time_no_arc_byte_identity {
     const N_STAGES: usize = 3;
     const HYDRO_ID: i32 = 1;
 
-    fn zero_hydro_penalties() -> cobre_core::entities::hydro::HydroPenalties {
-        cobre_core::entities::hydro::HydroPenalties {
+    fn zero_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -2382,11 +2384,8 @@ mod water_travel_time_no_arc_byte_identity {
         ignore = "slow: run with --features slow-tests"
     )]
     fn d06_parity_hash_matches_existing_baseline_highs() {
-        super::common::parity_hash::run_golden_case(
-            "parity_baselines",
-            "D06",
-            cobre_solver::highs::HighsSolver::new,
-        );
+        use cobre_solver::highs::HighsSolver;
+        super::common::parity_hash::run_golden_case("parity_baselines", "D06", HighsSolver::new);
     }
 
     /// CLP counterpart of
@@ -2399,10 +2398,7 @@ mod water_travel_time_no_arc_byte_identity {
         ignore = "slow: run with --features slow-tests"
     )]
     fn d06_parity_hash_matches_existing_baseline_clp() {
-        super::common::parity_hash::run_golden_case(
-            "parity_baselines_clp",
-            "D06",
-            cobre_solver::clp::ClpSolver::new,
-        );
+        use cobre_solver::clp::ClpSolver;
+        super::common::parity_hash::run_golden_case("parity_baselines_clp", "D06", ClpSolver::new);
     }
 }

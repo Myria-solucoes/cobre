@@ -1628,8 +1628,8 @@ mod tests {
 
     use super::{
         aggregate_training_solve_stats, apply_training_policy_mode, build_study_setup,
-        iteration_summary_to_dict, reconstruct_policy_from_checkpoint, run_in_scoped_pool,
-        run_via_study,
+        iteration_summary_to_dict, read_policy_checkpoint, reconstruct_policy_from_checkpoint,
+        run_in_scoped_pool, run_via_study,
     };
 
     /// `build_study_setup` is Python-free, so its happy path can be exercised
@@ -2161,8 +2161,7 @@ mod tests {
         let policy_dir = output_dir.join(&loaded.setup.policy_path);
 
         // The completed-iteration count recorded in the on-disk checkpoint.
-        let checkpoint = cobre_io::output::policy::read_policy_checkpoint(&policy_dir)
-            .expect("read policy checkpoint");
+        let checkpoint = read_policy_checkpoint(&policy_dir).expect("read policy checkpoint");
         let expected_iterations: u64 = checkpoint.metadata.completed_iterations.into();
 
         let (fcf, training_result) =

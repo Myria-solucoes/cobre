@@ -7,7 +7,7 @@
 
 use std::sync::mpsc;
 
-use cobre_core::{TrainingEvent, WorkerTimingPhase};
+use cobre_core::{TrainingEvent, WorkerPhaseTimings, WorkerTimingPhase};
 use cobre_solver::{
     SolverInterface,
     types::{Basis, RowBatch, SolutionView, SolverError, SolverStatistics, StageTemplate},
@@ -88,7 +88,7 @@ fn bench_worker_timing_emit(c: &mut Criterion) {
     c.bench_function("worker_timing_emit 10_workers", |b| {
         b.iter(|| {
             for w in 0..n_workers {
-                let timings = black_box(cobre_core::WorkerPhaseTimings::default());
+                let timings = black_box(WorkerPhaseTimings::default());
                 let event = TrainingEvent::WorkerTiming {
                     rank: 0,
                     worker_id: w,

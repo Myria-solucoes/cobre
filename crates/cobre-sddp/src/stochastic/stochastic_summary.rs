@@ -392,13 +392,15 @@ mod tests {
     use cobre_core::{
         Bus, DeficitSegment, EntityId, SystemBuilder,
         entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties},
-        scenario::{CorrelationModel, InflowModel, SamplingScheme},
+        scenario::{AnnualComponent, CorrelationModel, InflowModel, SamplingScheme},
         temporal::{
             Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
             StageStateConfig,
         },
     };
-    use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
+    use cobre_stochastic::{
+        ArCoefficientEstimate, ClassSchemes, OpeningTreeInputs, build_stochastic_context,
+    };
 
     use super::{
         StochasticSource, build_stochastic_summary, estimation_report_to_fitting_report,
@@ -507,7 +509,7 @@ mod tests {
         }
     }
 
-    fn identity_correlation(entity_ids: &[i32]) -> cobre_core::scenario::CorrelationModel {
+    fn identity_correlation(entity_ids: &[i32]) -> CorrelationModel {
         use cobre_core::scenario::{CorrelationEntity, CorrelationGroup, CorrelationProfile};
         let n = entity_ids.len();
         let matrix: Vec<Vec<f64>> = (0..n)
@@ -530,7 +532,7 @@ mod tests {
                 }],
             },
         );
-        cobre_core::scenario::CorrelationModel {
+        CorrelationModel {
             method: "spectral".to_string(),
             profiles,
             schedule: vec![],
@@ -1191,14 +1193,14 @@ mod tests {
         use std::collections::HashMap;
 
         let estimates = vec![
-            cobre_stochastic::par::fitting::ArCoefficientEstimate {
+            ArCoefficientEstimate {
                 hydro_id: EntityId(1),
                 season_id: 0,
                 coefficients: Vec::new(),
                 residual_std_ratio: 1.0,
                 annual: None,
             },
-            cobre_stochastic::par::fitting::ArCoefficientEstimate {
+            ArCoefficientEstimate {
                 hydro_id: EntityId(1),
                 season_id: 1,
                 coefficients: vec![0.4],
@@ -1247,7 +1249,7 @@ mod tests {
     fn make_annual_model(
         hydro_id: i32,
         stage_id: i32,
-        annual: Option<cobre_core::scenario::AnnualComponent>,
+        annual: Option<AnnualComponent>,
     ) -> InflowModel {
         InflowModel {
             hydro_id: EntityId(hydro_id),

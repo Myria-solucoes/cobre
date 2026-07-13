@@ -1,3 +1,4 @@
+use cobre_core::commissioning::{Phase, filling_phase};
 use cobre_core::{BlockMode, CoefficientRef, ConstraintSense, ContractType, EntityId, Stage};
 
 use crate::generic_constraints::resolve_variable_ref;
@@ -146,13 +147,13 @@ fn fill_anticipated_slot_definition_entries(
 pub(super) fn is_prefilling(ctx: &TemplateBuildCtx<'_>, stage: &Stage, h_idx: usize) -> bool {
     let hydro = &ctx.hydros[h_idx];
     matches!(
-        cobre_core::commissioning::filling_phase(
+        filling_phase(
             hydro.filling.as_ref(),
             hydro.entry_stage_id,
             hydro.exit_stage_id,
             stage.id,
         ),
-        cobre_core::commissioning::Phase::PreFilling
+        Phase::PreFilling
     )
 }
 
@@ -1592,22 +1593,24 @@ mod assemble_csc_tests {
 )]
 mod parameter_resolution_tests {
     use cobre_core::{
-        BoundsCountsSpec, BoundsDefaults, Bus, BusStagePenalties, ConstraintExpression,
-        ConstraintSense, ContractStageBounds, DeficitSegment, EntityId, GenericConstraint,
-        HydroStageBounds, HydroStagePenalties, LineStageBounds, LineStagePenalties,
-        NcsStagePenalties, ParameterKind, PenaltiesCountsSpec, PenaltiesDefaults,
-        PumpingStageBounds, ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedPenalties,
-        ScalarParameter, SlackConfig, StageId, SystemBuilder, ThermalStageBounds,
+        BoundsCountsSpec, BoundsDefaults, Bus, BusStagePenalties, CoefficientRef,
+        ConstraintExpression, ConstraintSense, ContractStageBounds, DeficitSegment, EntityId,
+        GenericConstraint, HydroStageBounds, HydroStagePenalties, LineStageBounds,
+        LineStagePenalties, NcsStagePenalties, ParameterKind, PenaltiesCountsSpec,
+        PenaltiesDefaults, PumpingStageBounds, ResolvedBounds, ResolvedGenericConstraintBounds,
+        ResolvedPenalties, ScalarParameter, SlackConfig, StageId, SystemBuilder,
+        ThermalStageBounds,
     };
     use cobre_core::{LinearTerm, VariableRef};
     use cobre_stochastic::normal::precompute::PrecomputedNormal;
     use cobre_stochastic::par::precompute::PrecomputedPar;
     use std::collections::HashMap;
 
+    use crate::build_stage_templates_resolving_layout;
     use crate::energy_conversion::{EnergyConversionSet, build_hydro_energy_productivity_override};
     use crate::hydro_models::PrepareHydroModelsResult;
     use crate::inflow_method::InflowNonNegativityMethod;
-    use crate::resolved_parameters::build_resolved_parameters;
+    use crate::resolved_parameters::{ResolvedParameters, build_resolved_parameters};
 
     /// `StageId(0)..StageId(n_stages - 1)`: the 0-based domain ids these
     /// fixtures use (no `Computed` parameter reads the override table here).
@@ -1806,11 +1809,11 @@ mod parameter_resolution_tests {
     /// Build templates for the given system using the supplied `ResolvedParameters`.
     fn make_templates(
         system: &cobre_core::System,
-        resolved_params: &crate::resolved_parameters::ResolvedParameters,
+        resolved_params: &ResolvedParameters,
     ) -> Vec<cobre_solver::StageTemplate> {
         let production = PrepareHydroModelsResult::default_from_system(system).production;
         let evaporation = PrepareHydroModelsResult::default_from_system(system).evaporation;
-        crate::lp_builder::build_stage_templates_resolving_layout(
+        build_stage_templates_resolving_layout(
             system,
             InflowNonNegativityMethod::None,
             &PrecomputedPar::default(),
@@ -1825,7 +1828,7 @@ mod parameter_resolution_tests {
 
     /// Build an empty `ResolvedParameters` table (no parameters) with a given
     /// stage-to-season mapping.
-    fn empty_resolved_params(n_stages: usize) -> crate::resolved_parameters::ResolvedParameters {
+    fn empty_resolved_params(n_stages: usize) -> ResolvedParameters {
         let stage_to_season: Vec<i32> = vec![0; n_stages];
         let stage_ids = stage_ids_0_based(n_stages);
         let ec = EnergyConversionSet::new(vec![], vec![], 0, n_stages);
@@ -1848,7 +1851,7 @@ mod parameter_resolution_tests {
         param_id: EntityId,
         value: f64,
         n_stages: usize,
-    ) -> crate::resolved_parameters::ResolvedParameters {
+    ) -> ResolvedParameters {
         let stage_to_season: Vec<i32> = vec![0; n_stages];
         let stage_ids = stage_ids_0_based(n_stages);
         let ec = EnergyConversionSet::new(vec![], vec![], 0, n_stages);
@@ -1872,10 +1875,7 @@ mod parameter_resolution_tests {
     }
 
     /// Build a `ResolvedParameters` table containing a single `PerStage` parameter.
-    fn per_stage_param_resolved(
-        param_id: EntityId,
-        values: Vec<f64>,
-    ) -> crate::resolved_parameters::ResolvedParameters {
+    fn per_stage_param_resolved(param_id: EntityId, values: Vec<f64>) -> ResolvedParameters {
         let n_stages = values.len();
         let stage_to_season: Vec<i32> = vec![0; n_stages];
         let stage_ids = stage_ids_0_based(n_stages);
@@ -1941,7 +1941,7 @@ mod parameter_resolution_tests {
             description: None,
             expression: ConstraintExpression {
                 terms: vec![LinearTerm {
-                    coefficient: cobre_core::CoefficientRef::Literal(coef),
+                    coefficient: CoefficientRef::Literal(coef),
                     scale,
                     variable: VariableRef::ThermalGeneration {
                         thermal_id,
@@ -2115,7 +2115,8 @@ mod zero_cost_tests {
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
     use crate::hydro_models::{EvaporationModelSet, ProductionModelSet};
-    use crate::indexer::BlockIdx;
+    use crate::indexer::{BlockIdx, ThermalSys};
+    use crate::lead_time::{AnticipatedResolution, LeadTime};
     use crate::resolved_parameters::ResolvedParameters;
 
     use super::super::columns::{ColumnBufs, fill_stage_columns, fill_thermal_columns};
@@ -2285,13 +2286,13 @@ mod zero_cost_tests {
                 anticipated_lead_stages,
                 anticipated_thermal_indices: anticipated_thermal_indices
                     .into_iter()
-                    .map(crate::indexer::ThermalSys::new)
+                    .map(ThermalSys::new)
                     .collect(),
                 // Windowless: one `(None, None)` per plant, so the decision gate
                 // reduces to the strict horizon clause. `study_stage_ids` lists the
                 // study-stage ids so the in-range delivery lookup is safe.
                 anticipated_windows: vec![(None, None); n_anticipated],
-                anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
+                anticipated_resolution: AnticipatedResolution::default(),
                 study_stage_ids: (0..i32::try_from(self.bounds.n_stages()).unwrap_or(0)).collect(),
                 has_penalty: false,
                 // Sized to cover every active plant's delivery stage
@@ -2862,8 +2863,8 @@ mod zero_cost_tests {
         let ctx = fixtures.make_ctx(1, 0, vec![0], vec![0], 1);
 
         let mut state = state_layout_for(&ctx);
-        state.set_anticipated_resolution(crate::lead_time::AnticipatedResolution::resolve(
-            &[crate::lead_time::LeadTime::Time(720.0)],
+        state.set_anticipated_resolution(AnticipatedResolution::resolve(
+            &[LeadTime::Time(720.0)],
             &[744.0, 744.0, 744.0, 744.0],
             4,
         ));
@@ -3018,20 +3019,22 @@ mod pumping_water_tests {
     use std::collections::{BTreeMap, HashMap};
 
     use cobre_core::{
-        BoundsCountsSpec, BoundsDefaults, Bus, BusStagePenalties, CascadeTopology, CoefficientRef,
-        ConstraintExpression, ConstraintSense, ContractStageBounds, ContractType, DeficitSegment,
-        EnergyContract, EntityId, GenericConstraint, Hydro, HydroGenerationModel, HydroStageBounds,
-        HydroStagePenalties, Line, LineStageBounds, LineStagePenalties, LinearTerm,
-        NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds,
+        BlockMode, BoundsCountsSpec, BoundsDefaults, Bus, BusStagePenalties, CascadeTopology,
+        CoefficientRef, ConstraintExpression, ConstraintSense, ContractStageBounds, ContractType,
+        DeficitSegment, EnergyContract, EntityId, GenericConstraint, Hydro, HydroGenerationModel,
+        HydroStageBounds, HydroStagePenalties, Line, LineStageBounds, LineStagePenalties,
+        LinearTerm, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds,
         PumpingStation, ResolvedBounds, ResolvedExchangeFactors, ResolvedGenericConstraintBounds,
         ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, SlackConfig,
         Stage, Thermal, ThermalStageBounds, VariableRef,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
-    use crate::hydro_models::{EvaporationModel, EvaporationModelSet, ProductionModelSet};
+    use crate::hydro_models::{
+        EvaporationModel, EvaporationModelSet, ProductionModelSet, ResolvedProductionModel,
+    };
     use crate::indexer::{BlockIdx, Boundary, EvapLocal, HydroSys, LineSys, StateDim, StateLayout};
-    use crate::lead_time::{SpreadResolution, resolve_spread};
+    use crate::lead_time::{AnticipatedResolution, SpreadResolution, resolve_spread};
     use crate::resolved_parameters::ResolvedParameters;
 
     use super::super::M3S_TO_HM3;
@@ -3437,9 +3440,7 @@ mod pumping_water_tests {
             let production_models = ProductionModelSet::new(
                 vec![
                     vec![
-                        crate::hydro_models::ResolvedProductionModel::ConstantProductivity {
-                            productivity: 1.0,
-                        };
+                        ResolvedProductionModel::ConstantProductivity { productivity: 1.0 };
                         N_STAGES
                     ];
                     hydros.len()
@@ -3653,7 +3654,7 @@ mod pumping_water_tests {
                 anticipated_lead_stages: vec![],
                 anticipated_thermal_indices: vec![],
                 anticipated_windows: vec![],
-                anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
+                anticipated_resolution: AnticipatedResolution::default(),
                 study_stage_ids: vec![],
                 has_penalty: false,
                 cumulative_discount_factors: vec![1.0; N_STAGES],
@@ -5316,7 +5317,7 @@ mod pumping_water_tests {
                 duration_hours: h,
             })
             .collect();
-        stage.block_mode = cobre_core::BlockMode::Chronological;
+        stage.block_mode = BlockMode::Chronological;
         stage
     }
 
@@ -5492,7 +5493,7 @@ mod pumping_water_tests {
             ..par_fixtures.make_ctx()
         };
         let mut par_stage = chronological_stage(0, &[720.0]);
-        par_stage.block_mode = cobre_core::BlockMode::Parallel;
+        par_stage.block_mode = BlockMode::Parallel;
         let par_state = StateLayout::new(
             par_ctx.n_hydros,
             par_ctx.max_par_order,
@@ -7601,7 +7602,7 @@ mod pumping_water_tests {
         let ctx = Box::leak(Box::new(fixtures.make_ctx()));
         let mut stage =
             two_block_stage(usize::try_from(RET_PREFILLING_ID).unwrap(), [300.0, 444.0]);
-        stage.block_mode = cobre_core::BlockMode::Chronological;
+        stage.block_mode = BlockMode::Chronological;
         let stage = Box::leak(Box::new(stage));
         let state = Box::leak(Box::new(state_layout_for(ctx)));
         let layout = StageLayout::new(ctx, state, stage, 0);
@@ -7784,8 +7785,8 @@ mod pumping_water_tests {
             (csc, rl, ru)
         };
 
-        let (csc_p, rl_p, ru_p) = build(cobre_core::BlockMode::Parallel);
-        let (csc_c, rl_c, ru_c) = build(cobre_core::BlockMode::Chronological);
+        let (csc_p, rl_p, ru_p) = build(BlockMode::Parallel);
+        let (csc_c, rl_c, ru_c) = build(BlockMode::Chronological);
 
         assert_eq!(
             csc_p.0, csc_c.0,
@@ -7811,7 +7812,7 @@ mod pumping_water_tests {
 
     // ── Per-block FPHA & evaporation (block-local average storage) ───────────────
 
-    use crate::hydro_models::{FphaPlane, LinearizedEvaporation, ResolvedProductionModel};
+    use crate::hydro_models::{FphaPlane, LinearizedEvaporation};
 
     const FPHA_GAMMA_V: f64 = 0.2;
     const EVAP_SLOPE: f64 = 0.03;
@@ -7883,7 +7884,7 @@ mod pumping_water_tests {
     #[test]
     fn chronological_fpha_uses_block_local_average() {
         let (csc, _rl, _ru, _cols, layout) =
-            build_fpha_evap_case(cobre_core::BlockMode::Chronological, &[300.0, 444.0]);
+            build_fpha_evap_case(BlockMode::Chronological, &[300.0, 444.0]);
         let h = 0_usize;
         let half_gamma_v = -FPHA_GAMMA_V / 2.0;
         let n_blks = 2_usize;
@@ -7931,7 +7932,7 @@ mod pumping_water_tests {
     #[test]
     fn chronological_evaporation_per_block() {
         let (csc, rl, ru, cols, layout) =
-            build_fpha_evap_case(cobre_core::BlockMode::Chronological, &[300.0, 444.0]);
+            build_fpha_evap_case(BlockMode::Chronological, &[300.0, 444.0]);
         let (col_lower, col_upper, objective) = cols;
         let h = 0_usize;
         let local = 0_usize;
@@ -8001,9 +8002,9 @@ mod pumping_water_tests {
     #[test]
     fn chronological_k1_fpha_evap_byte_identical() {
         let (csc_p, rl_p, ru_p, (cl_p, cu_p, obj_p), _lp) =
-            build_fpha_evap_case(cobre_core::BlockMode::Parallel, &[372.0]);
+            build_fpha_evap_case(BlockMode::Parallel, &[372.0]);
         let (csc_c, rl_c, ru_c, (cl_c, cu_c, obj_c), _lc) =
-            build_fpha_evap_case(cobre_core::BlockMode::Chronological, &[372.0]);
+            build_fpha_evap_case(BlockMode::Chronological, &[372.0]);
 
         assert_eq!(csc_p.0, csc_c.0, "K=1 col_starts byte-identical");
         assert_eq!(csc_p.1, csc_c.1, "K=1 row_indices byte-identical");
@@ -8022,7 +8023,7 @@ mod pumping_water_tests {
     #[test]
     fn parallel_fpha_evap_uses_stage_endpoints() {
         let (csc, rl, _ru, cols, layout) =
-            build_fpha_evap_case(cobre_core::BlockMode::Parallel, &[300.0, 444.0]);
+            build_fpha_evap_case(BlockMode::Parallel, &[300.0, 444.0]);
         let (col_lower, col_upper, _obj) = cols;
         let h = 0_usize;
         let local = 0_usize;

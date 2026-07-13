@@ -46,7 +46,7 @@ use cobre_sddp::{
     context::{StageContext, TrainingContext},
     cut::fcf::FutureCostFunction,
     horizon_mode::HorizonMode,
-    indexer::StateLayout,
+    indexer::{CutStateProjection, StateLayout, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
     risk_measure::RiskMeasure,
     train,
@@ -76,8 +76,8 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
     )
 }
 
-fn study_dims() -> cobre_sddp::indexer::StudyDimensions {
-    cobre_sddp::indexer::StudyDimensions::default()
+fn study_dims() -> StudyDimensions {
+    StudyDimensions::default()
 }
 
 /// Communicator wrapper that sets `flag` to `true` on the first `allgatherv`
@@ -1849,15 +1849,12 @@ fn frozen_backward_pass_smoke_test() {
 /// see the parent crate's `#[cfg(test)]` surface) builds the default all-enabled
 /// per-pool projection. Every pool projects the full global state, keeping the
 /// extracted subgradient bit-identical to the global-loop result.
-fn all_enabled_cut_state_layouts(
-    global: &StateLayout,
-    n_stages: usize,
-) -> Vec<cobre_sddp::indexer::CutStateProjection> {
+fn all_enabled_cut_state_layouts(global: &StateLayout, n_stages: usize) -> Vec<CutStateProjection> {
     let full = StageStateConfig {
         storage: true,
         inflow_lags: true,
     };
     (0..n_stages)
-        .map(|_| cobre_sddp::indexer::CutStateProjection::new(global, full))
+        .map(|_| CutStateProjection::new(global, full))
         .collect()
 }

@@ -19,6 +19,7 @@ use super::{
 use crate::hydro_models::{FphaPlane, ProductionModelSet, ResolvedProductionModel};
 use crate::indexer::{Boundary, StateLayout, StorageBoundaryGrid};
 use crate::lp_builder::StageGeometry;
+use crate::test_support::{GeometryDims, geometry};
 
 // ── Test helpers ──────────────────────────────────────────────────────────
 
@@ -178,8 +179,8 @@ fn empty_cascade() -> CascadeTopology {
 ///   evap: none
 ///   withdrawal_slack_neg: [85, 89)  withdrawal_slack_pos: [89, 93) (4 hydros)
 fn make_indexer() -> StageGeometry {
-    crate::test_support::geometry(
-        &crate::test_support::GeometryDims {
+    geometry(
+        &GeometryDims {
             hydro_count: 4,
             n_thermals: 2,
             n_lines: 1,
@@ -721,8 +722,8 @@ fn hydro_generation_fpha_second_hydro_block_2() {
 /// evap cols: [15, 18)  → evaporation_flow=15, f_evap_plus=16, f_evap_minus=17
 #[test]
 fn hydro_evaporation_maps_to_evaporation_flow_col() {
-    let evap_indexer = crate::test_support::geometry(
-        &crate::test_support::GeometryDims {
+    let evap_indexer = geometry(
+        &GeometryDims {
             hydro_count: 2,
             n_buses: 1,
             n_blks: 1,
@@ -769,8 +770,8 @@ fn hydro_evaporation_maps_to_evaporation_flow_col() {
 
 #[test]
 fn hydro_evaporation_no_evap_model_returns_empty() {
-    let evap_indexer = crate::test_support::geometry(
-        &crate::test_support::GeometryDims {
+    let evap_indexer = geometry(
+        &GeometryDims {
             hydro_count: 2,
             n_buses: 1,
             n_blks: 1,
@@ -821,8 +822,8 @@ fn hydro_evaporation_no_evap_model_returns_empty() {
 /// an out-of-range block resolves to empty.
 #[test]
 fn hydro_evaporation_none_resolves_block_zero_not_sum() {
-    let evap_indexer = crate::test_support::geometry(
-        &crate::test_support::GeometryDims {
+    let evap_indexer = geometry(
+        &GeometryDims {
             hydro_count: 2,
             n_buses: 1,
             n_blks: 3,
@@ -1726,8 +1727,8 @@ fn line_exchange_unknown_id_returns_empty() {
 ///   deficit: [10, 10+1*1*2) = [10, 12)  (B=1, S=1, K=2)
 ///   excess:  [12, 12+1*2) = [12, 14)
 fn make_indexer_with_anticipated() -> StageGeometry {
-    crate::test_support::geometry(
-        &crate::test_support::GeometryDims {
+    geometry(
+        &GeometryDims {
             n_thermals: 2,
             n_buses: 1,
             n_blks: 2,

@@ -345,6 +345,7 @@ mod d41_energy_contracts_simulation {
     use std::sync::mpsc;
 
     use cobre_core::scenario::ScenarioSource;
+    use cobre_io::config::SimulationConfig;
     use cobre_sddp::simulation::accumulate_category_costs;
     use cobre_sddp::simulation::types::ScenarioCategoryCosts;
     use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
@@ -381,11 +382,11 @@ mod d41_energy_contracts_simulation {
         let config_path = case_dir.join("config.json");
         let mut config = cobre_io::parse_config(&config_path).expect("config must parse");
         // The shipped parity case trains only; enable one sim scenario so the contract extraction path runs.
-        config.simulation = cobre_io::config::SimulationConfig {
+        config.simulation = SimulationConfig {
             enabled: true,
             num_scenarios: 1,
             io_channel_capacity: 8,
-            ..cobre_io::config::SimulationConfig::default()
+            ..SimulationConfig::default()
         };
 
         let system = cobre_io::load_case(&case_dir).expect("load_case must succeed");
@@ -827,7 +828,8 @@ mod sparse_dense {
 
     use cobre_sddp::FutureCostFunction;
     use cobre_sddp::build_cut_row_batch_into;
-    use cobre_sddp::indexer::StateLayout;
+    use cobre_sddp::indexer::{StateDim, StateLayout};
+    use cobre_sddp::test_support::cut_state_projection;
     use cobre_solver::RowBatch;
 
     #[test]
@@ -870,18 +872,14 @@ mod sparse_dense {
             row_lower: Vec::new(),
             row_upper: Vec::new(),
         };
-        let cut_state = cobre_sddp::test_support::cut_state_projection(&state);
+        let cut_state = cut_state_projection(&state);
         build_cut_row_batch_into(&mut batch, &fcf, 0, &state, &cut_state, &col_scale);
 
         assert_eq!(batch.num_rows, 1);
         let theta_col = state.theta;
         let expected_cols: Vec<i32> = mask
             .iter()
-            .map(|&j| {
-                state
-                    .state_to_lp_column(cobre_sddp::indexer::StateDim::new(j))
-                    .get() as i32
-            })
+            .map(|&j| state.state_to_lp_column(StateDim::new(j)).get() as i32)
             .chain(std::iter::once(theta_col as i32))
             .collect();
         assert_eq!(

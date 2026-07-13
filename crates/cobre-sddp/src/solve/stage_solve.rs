@@ -228,6 +228,7 @@ mod tests {
         context::StageContext,
         cut::pool::CutPool,
         lp_builder::PatchBuffer,
+        test_support::state_layout_with_transit_buckets,
         workspace::{CapturedBasis, SolverWorkspace, WorkspaceSizing},
     };
 
@@ -539,15 +540,7 @@ mod tests {
 
     #[test]
     fn debug_assert_bucket_copy_gap_intact_passes_when_bucket_matches_primal() {
-        let layout = crate::test_support::state_layout_with_transit_buckets(
-            0,
-            0,
-            2,
-            vec![(0, 0), (0, 1)],
-            0,
-            0,
-            vec![],
-        );
+        let layout = state_layout_with_transit_buckets(0, 0, 2, vec![(0, 0), (0, 1)], 0, 0, vec![]);
         let primal = vec![7.0, 11.0];
         let assembled = primal.clone();
         super::debug_assert_bucket_copy_gap_intact(&assembled, &primal, &layout);
@@ -556,15 +549,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "bucket/anticipated-ring state must equal the LP primal's identity")]
     fn debug_assert_bucket_copy_gap_intact_panics_when_bucket_diverges() {
-        let layout = crate::test_support::state_layout_with_transit_buckets(
-            0,
-            0,
-            2,
-            vec![(0, 0), (0, 1)],
-            0,
-            0,
-            vec![],
-        );
+        let layout = state_layout_with_transit_buckets(0, 0, 2, vec![(0, 0), (0, 1)], 0, 0, vec![]);
         let primal = vec![7.0, 11.0];
         let mut assembled = primal.clone();
         assembled[1] = 999.0; // simulate an accidental overwrite of the bucket block
@@ -573,15 +558,7 @@ mod tests {
 
     #[test]
     fn debug_assert_bucket_copy_gap_intact_passes_when_anticipated_ring_matches_primal() {
-        let layout = crate::test_support::state_layout_with_transit_buckets(
-            0,
-            0,
-            0,
-            vec![],
-            2,
-            1,
-            vec![1, 1],
-        );
+        let layout = state_layout_with_transit_buckets(0, 0, 0, vec![], 2, 1, vec![1, 1]);
         let primal = vec![3.0, 5.0];
         let assembled = primal.clone();
         super::debug_assert_bucket_copy_gap_intact(&assembled, &primal, &layout);
@@ -590,15 +567,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "bucket/anticipated-ring state must equal the LP primal's identity")]
     fn debug_assert_bucket_copy_gap_intact_panics_when_anticipated_ring_diverges() {
-        let layout = crate::test_support::state_layout_with_transit_buckets(
-            0,
-            0,
-            0,
-            vec![],
-            2,
-            1,
-            vec![1, 1],
-        );
+        let layout = state_layout_with_transit_buckets(0, 0, 0, vec![], 2, 1, vec![1, 1]);
         let primal = vec![3.0, 5.0];
         let mut assembled = primal.clone();
         assembled[0] = 999.0; // simulate an accidental overwrite of the anticipated-ring slot

@@ -10,6 +10,7 @@ use console::Term;
 use cobre_comm::{Communicator, TopologyProvider, create_communicator};
 use cobre_core::EntityId;
 use cobre_core::ScalarParameter;
+use cobre_core::ScenarioSource;
 use cobre_core::System;
 use cobre_core::temporal::SeasonCycleType::Monthly;
 use cobre_core::temporal::SeasonMap;
@@ -458,8 +459,8 @@ fn reconstruct_stochastic_context_non_root(
 /// Build the non-root `HistoricalScenarioLibrary` from broadcast parameters.
 fn rebuild_historical_library_non_root(
     system: &System,
-    training_src: &cobre_core::scenario::ScenarioSource,
-) -> Result<Option<cobre_stochastic::HistoricalScenarioLibrary>, CliError> {
+    training_src: &ScenarioSource,
+) -> Result<Option<HistoricalScenarioLibrary>, CliError> {
     use cobre_core::temporal::NoiseMethod;
 
     // Mirrors `prepare_stochastic` on rank 0: build the library when any stage

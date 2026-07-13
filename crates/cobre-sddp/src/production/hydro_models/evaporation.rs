@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use cobre_core::temporal::Stage;
-use cobre_core::{EntityId, System, month_of};
+use cobre_core::{EntityId, Hydro, System, month_of};
 use cobre_io::CaseArtifacts;
 use cobre_io::extensions::HydroGeometryRow;
 
@@ -151,7 +151,7 @@ pub fn resolve_evaporation_models_from_artifacts(
 // boundaries.
 #[allow(clippy::type_complexity, clippy::too_many_lines)]
 fn resolve_evaporation_core(
-    hydros: &[cobre_core::entities::hydro::Hydro],
+    hydros: &[Hydro],
     geometry_map: &HashMap<EntityId, Vec<&HydroGeometryRow>>,
     study_stages: &[&Stage],
 ) -> Result<
@@ -404,6 +404,8 @@ mod tests {
         },
     };
 
+    use crate::SddpError;
+
     use super::*;
 
     // ── Test helpers ──────────────────────────────────────────────────────────
@@ -430,10 +432,10 @@ mod tests {
     }
 
     /// Helper: build a slice of HydroGeometryRow references for interpolation tests.
-    fn make_geo_rows(volume_area: &[(f64, f64)]) -> Vec<cobre_io::extensions::HydroGeometryRow> {
+    fn make_geo_rows(volume_area: &[(f64, f64)]) -> Vec<HydroGeometryRow> {
         volume_area
             .iter()
-            .map(|&(v, a)| cobre_io::extensions::HydroGeometryRow {
+            .map(|&(v, a)| HydroGeometryRow {
                 hydro_id: EntityId::from(1),
                 volume_hm3: v,
                 height_m: 0.0,
@@ -493,8 +495,8 @@ mod tests {
         min_storage: f64,
         max_storage: f64,
         evap_mm: Option<[f64; 12]>,
-    ) -> cobre_core::entities::hydro::Hydro {
-        cobre_core::entities::hydro::Hydro {
+    ) -> Hydro {
+        Hydro {
             id: EntityId::from(id),
             name: format!("Hydro{id}"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -673,8 +675,7 @@ mod tests {
         ];
 
         // Build the geometry map (empty, since no hydro needs it).
-        let geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
-            HashMap::new();
+        let geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
         let study_stages = [make_stage_with_month(0, 0)];
         let stage_refs: Vec<_> = study_stages.iter().collect();
 
@@ -726,8 +727,7 @@ mod tests {
             (500.0, 3.0),
         ]);
         let geo_refs: Vec<_> = geo_rows.iter().collect();
-        let mut geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
-            HashMap::new();
+        let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
         geometry_map.insert(EntityId::from(0), geo_refs);
 
         let study_stages = [make_stage_with_month(0, 0)]; // January
@@ -797,8 +797,7 @@ mod tests {
 
         let geo_rows = make_geo_rows(&[(100.0, 1.0), (200.0, 1.5), (300.0, 2.0)]);
         let geo_refs: Vec<_> = geo_rows.iter().collect();
-        let mut geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
-            HashMap::new();
+        let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
         geometry_map.insert(EntityId::from(0), geo_refs);
 
         let study_stages = [make_stage_with_month(0, 0)]; // January
@@ -839,8 +838,7 @@ mod tests {
         let hydro = make_hydro_with_evaporation(0, 100.0, 500.0, Some(evap_mm));
 
         // Geometry map has no entry for hydro 0.
-        let geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
-            HashMap::new();
+        let geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
 
         let study_stages = [make_stage_with_month(0, 0)];
         let stage_refs: Vec<_> = study_stages.iter().collect();
@@ -872,8 +870,7 @@ mod tests {
         // Single dead-volume point with zero surface area (no area-volume curve).
         let geo_rows = make_geo_rows(&[(2.93, 0.0)]);
         let refs: Vec<_> = geo_rows.iter().collect();
-        let mut geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
-            HashMap::new();
+        let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
         geometry_map.insert(EntityId::from(0), refs);
 
         let study_stages = [make_stage_with_month(0, 0)];
@@ -913,8 +910,7 @@ mod tests {
         let refs_h0: Vec<_> = geo_rows_h0.iter().collect();
         let refs_h2: Vec<_> = geo_rows_h2.iter().collect();
 
-        let mut geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
-            HashMap::new();
+        let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
         geometry_map.insert(EntityId::from(0), refs_h0);
         geometry_map.insert(EntityId::from(2), refs_h2);
 
@@ -977,8 +973,7 @@ mod tests {
 
         let geo_rows = make_geo_rows(&[(100.0, 1.0), (200.0, 1.5), (300.0, 2.0)]);
         let geo_refs: Vec<_> = geo_rows.iter().collect();
-        let mut geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
-            HashMap::new();
+        let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
         geometry_map.insert(EntityId::from(0), geo_refs);
 
         let stage_refs = vec![&stage_zero_duration];
@@ -987,7 +982,7 @@ mod tests {
             .expect_err("degenerate geometry (zero duration) must return an error");
 
         assert!(
-            matches!(err, crate::SddpError::Validation(_)),
+            matches!(err, SddpError::Validation(_)),
             "expected Validation error for non-finite coefficients, got {err:?}"
         );
     }
@@ -1021,8 +1016,7 @@ mod tests {
             (500.0, 3.0),
         ]);
         let geo_refs: Vec<_> = geo_rows.iter().collect();
-        let mut geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
-            HashMap::new();
+        let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
         geometry_map.insert(EntityId::from(0), geo_refs);
 
         // Two stages: January (744h) and February (672h).
@@ -1130,8 +1124,7 @@ mod tests {
             (500.0, 3.0),
         ]);
         let geo_refs: Vec<_> = geo_rows.iter().collect();
-        let mut geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
-            HashMap::new();
+        let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
         geometry_map.insert(EntityId::from(0), geo_refs);
 
         // Two stages with different months (January = 0, June = 5).
@@ -1191,8 +1184,7 @@ mod tests {
 
         let geo_rows = make_geo_rows(&[(100.0, 1.0), (300.0, 2.0), (500.0, 3.0)]);
         let refs: Vec<_> = geo_rows.iter().collect();
-        let mut geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
-            HashMap::new();
+        let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
         geometry_map.insert(EntityId::from(0), refs.clone());
         geometry_map.insert(EntityId::from(1), refs);
 
@@ -1239,8 +1231,7 @@ mod tests {
             (500.0, 3.0),
         ]);
         let geo_refs: Vec<_> = geo_rows.iter().collect();
-        let mut geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
-            HashMap::new();
+        let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
         geometry_map.insert(EntityId::from(0), geo_refs);
 
         // Custom cycle: season_id=3 (April, a non-monthly bucket) but start_date is in June.
@@ -1287,8 +1278,7 @@ mod tests {
 
         let geo_rows = make_geo_rows(&[(100.0, 1.0), (300.0, 2.0), (500.0, 3.0)]);
         let geo_refs: Vec<_> = geo_rows.iter().collect();
-        let mut geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
-            HashMap::new();
+        let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
         geometry_map.insert(EntityId::from(0), geo_refs);
 
         // Weekly cycle: season_id=48 (>= 12), a week in late December.

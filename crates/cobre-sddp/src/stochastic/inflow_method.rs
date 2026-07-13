@@ -66,7 +66,7 @@ impl InflowNonNegativityMethod {
     }
 }
 
-impl From<&cobre_io::config::InflowNonNegativityConfig> for InflowNonNegativityMethod {
+impl From<&InflowNonNegativityConfig> for InflowNonNegativityMethod {
     /// The config method is a typed enum, so typos are rejected at parse time
     /// before this total conversion runs.
     fn from(cfg: &InflowNonNegativityConfig) -> Self {

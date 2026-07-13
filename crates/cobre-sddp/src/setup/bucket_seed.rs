@@ -117,8 +117,8 @@ mod tests {
     use chrono::Duration;
     use cobre_core::{
         Block, BlockMode, Bus, DeficitSegment, EntityId, Hydro, HydroGenerationModel,
-        HydroPastDefluence, HydroPenalties, NoiseMethod, ScenarioSourceConfig, Stage,
-        StageRiskConfig, StageStateConfig, SystemBuilder,
+        HydroPastDefluence, HydroPenalties, InitialConditions, NoiseMethod, ScenarioSourceConfig,
+        Stage, StageRiskConfig, StageStateConfig, SystemBuilder,
     };
 
     use crate::setup::bucket_topology::build_transit_bucket_topology;
@@ -227,9 +227,9 @@ mod tests {
             .buses(vec![bus])
             .hydros(hydros)
             .stages(stages)
-            .initial_conditions(cobre_core::InitialConditions {
+            .initial_conditions(InitialConditions {
                 past_defluences,
-                ..cobre_core::InitialConditions::default()
+                ..InitialConditions::default()
             })
             .build()
             .expect("valid system")

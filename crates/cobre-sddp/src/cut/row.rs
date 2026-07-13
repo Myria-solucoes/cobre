@@ -377,6 +377,7 @@ pub fn append_slots_to_lp<S: SolverInterface>(
 
 #[cfg(test)]
 mod tests {
+    use cobre_core::temporal::StageStateConfig;
     use cobre_solver::{
         Basis, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
     };
@@ -408,7 +409,7 @@ mod tests {
     fn cut_state(state: &StateLayout) -> CutStateProjection {
         CutStateProjection::new(
             state,
-            cobre_core::temporal::StageStateConfig {
+            StageStateConfig {
                 storage: true,
                 inflow_lags: true,
             },
@@ -569,7 +570,7 @@ mod tests {
     fn append_new_cuts_returns_zero_when_no_new_cuts() {
         use crate::cut::CutRowMap;
 
-        let fcf = crate::cut::FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
+        let fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
         let state = state_layout(1, 0);
         let mut row_map = CutRowMap::new(10, 5);
         let mut batch_buf = empty_row_batch();
@@ -593,7 +594,7 @@ mod tests {
     fn append_new_cuts_appends_all_on_empty_row_map() {
         use crate::cut::CutRowMap;
 
-        let mut fcf = crate::cut::FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
+        let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
         fcf.add_cut(0, 0, 0, 10.0, &[1.0]); // slot 0
         fcf.add_cut(0, 1, 0, 20.0, &[3.0]); // slot 1
 
@@ -624,7 +625,7 @@ mod tests {
     fn append_new_cuts_skips_already_mapped_cuts() {
         use crate::cut::CutRowMap;
 
-        let mut fcf = crate::cut::FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
+        let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
         fcf.add_cut(0, 0, 0, 10.0, &[1.0]); // slot 0
         fcf.add_cut(0, 1, 0, 20.0, &[3.0]); // slot 1
 
@@ -658,7 +659,7 @@ mod tests {
     fn append_new_cuts_matches_build_cut_row_batch_into() {
         use crate::cut::CutRowMap;
 
-        let mut fcf = crate::cut::FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
+        let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
         fcf.add_cut(0, 0, 0, 10.0, &[1.0]); // slot 0
         fcf.add_cut(0, 1, 0, 20.0, &[3.0]); // slot 1
 
@@ -701,7 +702,7 @@ mod tests {
     fn append_new_cuts_with_scaling_matches_build() {
         use crate::cut::CutRowMap;
 
-        let mut fcf = crate::cut::FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
+        let mut fcf = FutureCostFunction::new(2, 1, 1, 10, &[0; 2]);
         fcf.add_cut(0, 0, 0, 10.0, &[1.0]);
 
         let state = state_layout(1, 0);

@@ -2,6 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use cobre_core::Hydro;
+
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 
 // ── Rules 6-10: Penalty ordering ──────────────────────────────────────────────
@@ -77,7 +79,7 @@ pub(super) fn check_penalty_ordering(data: &ParsedData, ctx: &mut ValidationCont
     }
 
     {
-        let max_cv = |h: &cobre_core::entities::Hydro| {
+        let max_cv = |h: &Hydro| {
             let p = &h.penalties;
             p.turbined_violation_below_cost
                 .max(p.outflow_violation_below_cost)
@@ -118,7 +120,7 @@ pub(super) fn check_penalty_ordering(data: &ParsedData, ctx: &mut ValidationCont
 
     {
         if !data.hydros.is_empty() {
-            let min_cv = |h: &cobre_core::entities::Hydro| {
+            let min_cv = |h: &Hydro| {
                 let p = &h.penalties;
                 p.turbined_violation_below_cost
                     .min(p.outflow_violation_below_cost)
@@ -813,14 +815,14 @@ mod tests {
     use super::*;
     use crate::{
         scenarios::{
-            BlockFactor, InflowArCoefficientRow, InflowSeasonalStatsRow, LoadFactorEntry,
-            LoadSeasonalStatsRow,
+            BlockFactor, InflowArCoefficientRow, InflowHistoryRow, InflowSeasonalStatsRow,
+            LoadFactorEntry, LoadSeasonalStatsRow,
         },
         stages::StagesData,
         validation::{ErrorKind, ValidationContext},
     };
     use cobre_core::{
-        EntityId,
+        EntityId, Hydro,
         entities::HydroGenerationModel,
         temporal::{Block, PolicyGraph, PolicyGraphType},
     };
@@ -1397,8 +1399,8 @@ mod tests {
     #[test]
     fn test_estimation_warns_low_observations() {
         // 3 observations for hydro 1: one per January (season 0) over 3 years.
-        let history: Vec<crate::scenarios::InflowHistoryRow> = (0..3)
-            .map(|y| crate::scenarios::InflowHistoryRow {
+        let history: Vec<InflowHistoryRow> = (0..3)
+            .map(|y| InflowHistoryRow {
                 hydro_id: EntityId::from(1),
                 date: chrono::NaiveDate::from_ymd_opt(2000 + y, 1, 15).unwrap(),
                 value_m3s: 100.0,
@@ -1974,7 +1976,7 @@ mod tests {
         start_stage_id: i32,
         entry_stage_id: i32,
         filling_min_rate_m3s: f64,
-    ) -> cobre_core::entities::Hydro {
+    ) -> Hydro {
         use cobre_core::entities::FillingConfig;
         let mut h = make_hydro_ordered_penalties(id);
         h.min_storage_hm3 = min_storage_hm3;

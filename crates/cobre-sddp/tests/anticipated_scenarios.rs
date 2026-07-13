@@ -2274,8 +2274,12 @@ mod d37_anticipated_commissioning_simulation {
     use std::sync::mpsc;
 
     use cobre_core::scenario::ScenarioSource;
+    use cobre_io::Config;
+    use cobre_io::config::SimulationConfig;
+    use cobre_sddp::simulation::SimulationThermalResult;
     use cobre_sddp::{
-        SolverStatsDelta, StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic,
+        SimulationScenarioResult, SolverStatsDelta, StudySetup, hydro_models::prepare_hydro_models,
+        setup::prepare_stochastic,
     };
     use cobre_solver::ActiveSolver;
 
@@ -2290,16 +2294,16 @@ mod d37_anticipated_commissioning_simulation {
             .join("examples/deterministic/d37-anticipated-commissioning")
     }
 
-    fn build_setup(case_dir: &Path) -> (StudySetup, cobre_io::config::Config) {
+    fn build_setup(case_dir: &Path) -> (StudySetup, Config) {
         let config_path = case_dir.join("config.json");
         let mut config = cobre_io::parse_config(&config_path).expect("config must parse");
         // The shipped case disables simulation (parity trains only); enable one
         // deterministic scenario so the thermal extraction paths run.
-        config.simulation = cobre_io::config::SimulationConfig {
+        config.simulation = SimulationConfig {
             enabled: true,
             num_scenarios: 1,
             io_channel_capacity: 8,
-            ..cobre_io::config::SimulationConfig::default()
+            ..SimulationConfig::default()
         };
 
         let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
@@ -2324,10 +2328,7 @@ mod d37_anticipated_commissioning_simulation {
     const N_STAGES: usize = 6;
     const TOL: f64 = 1e-6;
 
-    fn t1_at(
-        scenario: &cobre_sddp::simulation::SimulationScenarioResult,
-        stage: usize,
-    ) -> &cobre_sddp::simulation::SimulationThermalResult {
+    fn t1_at(scenario: &SimulationScenarioResult, stage: usize) -> &SimulationThermalResult {
         scenario.stages[stage]
             .thermals
             .iter()

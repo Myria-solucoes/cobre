@@ -30,9 +30,10 @@ use crate::stage_solve::fill_unscaled;
 use crate::stage_solve::fill_unscaled_dual;
 use crate::stage_solve::run_stage_solve;
 use crate::{
-    FutureCostFunction,
+    FutureCostFunction, SddpError,
     context::{StageContext, TrainingContext},
     dcs::{DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
+    indexer::StateLayout,
     lp_builder::COST_SCALE_FACTOR,
     simulation::{
         config::SimulationConfig,
@@ -293,7 +294,7 @@ impl SimLookups {
 /// [`SimulationError`], carrying the scenario/stage ids. Shared by the frozen
 /// `run_stage_solve` path and the DCS `lazy_solve_preloaded` path so both report
 /// failures identically.
-fn map_sim_solver_error(e: crate::error::SddpError, ids: &SimStageIds) -> SimulationError {
+fn map_sim_solver_error(e: SddpError, ids: &SimStageIds) -> SimulationError {
     match e {
         Infeasible {
             stage, scenario, ..
@@ -556,7 +557,7 @@ fn extract_sim_stage_result(
     view_objective: f64,
     ctx: &StageContext<'_>,
     output: &SimulationOutputSpec<'_>,
-    state: &crate::indexer::StateLayout,
+    state: &StateLayout,
     study_dims: &StudyDimensions,
     ids: &SimStageIds,
     stage_id: i32,

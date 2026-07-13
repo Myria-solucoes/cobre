@@ -32,14 +32,15 @@ use cobre_solver::{
 use cobre_stochastic::StochasticContext;
 
 use cobre_sddp::{
-    CapturedBasis, SimulationError,
+    CapturedBasis, EnergyConversionSet, SimulationError,
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
     horizon_mode::HorizonMode,
-    indexer::StateLayout,
+    indexer::{StateLayout, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
     lp_builder::PatchBuffer,
     simulation::{EntityCounts, SimulationConfig, SimulationOutputSpec},
+    test_support::all_enabled_cut_state_layouts,
     workspace::{SolverWorkspace, WorkspaceSizing},
 };
 
@@ -65,8 +66,8 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
     )
 }
 
-fn study_dims() -> cobre_sddp::indexer::StudyDimensions {
-    cobre_sddp::indexer::StudyDimensions::default()
+fn study_dims() -> StudyDimensions {
+    StudyDimensions::default()
 }
 
 /// Single-rank stub communicator for pipeline tests.
@@ -475,13 +476,10 @@ fn hydro_productivities_1hydro(n_stages: usize) -> Vec<Vec<f64>> {
     vec![vec![1.0]; n_stages]
 }
 
-/// Build a zero-valued [`cobre_sddp::energy_conversion::EnergyConversionSet`] for tests
+/// Build a zero-valued [`EnergyConversionSet`] for tests
 /// that do not assert on energy fields.
-fn zero_energy_conversion(
-    n_hydros: usize,
-    n_stages: usize,
-) -> cobre_sddp::energy_conversion::EnergyConversionSet {
-    use cobre_sddp::energy_conversion::{EnergyConversion, EnergyConversionSet};
+fn zero_energy_conversion(n_hydros: usize, n_stages: usize) -> EnergyConversionSet {
+    use cobre_sddp::energy_conversion::EnergyConversion;
     let zero_ec = EnergyConversion {
         equivalent_productivity_mw_per_m3s: 0.0,
         reference_volume_hm3: 0.0,
@@ -575,9 +573,7 @@ fn simulate_single_rank_4_scenarios_produces_4_results() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -706,9 +702,7 @@ fn simulate_infeasible_returns_lp_infeasible_error() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -828,9 +822,7 @@ fn simulate_infeasible_at_scenario2_stage3() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -948,9 +940,7 @@ fn simulate_channel_closed_returns_error() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1070,9 +1060,7 @@ fn simulate_total_cost_equals_sum_of_stage_costs() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1189,9 +1177,7 @@ fn simulate_cost_buffer_scenario_ids_match_assigned_range() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1308,9 +1294,7 @@ fn simulate_channel_receives_results_in_scenario_order() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1423,9 +1407,7 @@ fn test_simulation_parallel_cost_determinism() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1516,9 +1498,7 @@ fn test_simulation_parallel_cost_determinism() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1660,9 +1640,7 @@ fn simulate_emits_progress_events() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1800,9 +1778,7 @@ fn simulate_no_events_when_sender_is_none() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1925,9 +1901,7 @@ fn simulate_progress_events_received_before_return() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -2061,9 +2035,7 @@ fn simulate_progress_scenario_cost_equals_total_cost() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -2195,9 +2167,7 @@ fn simulate_emits_simulation_finished_as_last_event() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -2341,9 +2311,7 @@ fn simulate_progress_scenario_cost_is_finite() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -2470,9 +2438,7 @@ fn simulate_frozen_path_issues_zero_add_rows() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -2592,9 +2558,7 @@ fn simulate_fallback_path_issues_expected_add_rows() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -2717,9 +2681,7 @@ fn simulate_frozen_length_mismatch_returns_error() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -2879,9 +2841,7 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -3042,9 +3002,7 @@ fn simulate_with_empty_stage_bases_cold_starts() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &cobre_sddp::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
             study_dims: &study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,

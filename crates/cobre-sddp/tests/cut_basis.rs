@@ -30,6 +30,7 @@ mod boundary_cuts {
     use std::path::Path;
 
     use cobre_core::scenario::ScenarioSource;
+    use cobre_io::config::StoppingRuleConfig;
     use cobre_io::output::policy::write_policy_checkpoint;
     use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
     use cobre_solver::ActiveSolver;
@@ -104,9 +105,7 @@ mod boundary_cuts {
 
         let mut config_5iter = config.clone();
         config_5iter.training.stopping_rules =
-            Some(vec![cobre_io::config::StoppingRuleConfig::IterationLimit {
-                limit: 5,
-            }]);
+            Some(vec![StoppingRuleConfig::IterationLimit { limit: 5 }]);
 
         let (mut setup_a, _system_a) = build_setup(&case_dir, &config_5iter);
         let comm = StubComm;
@@ -822,8 +821,8 @@ mod basis_reconstruct_churn {
     use cobre_core::scenario::ScenarioSource;
     use cobre_io::config::{SelectionMethod, StoppingRuleConfig};
     use cobre_sddp::{
-        SolverStatsDelta, SolverStatsLogEntry, StudySetup, hydro_models::prepare_hydro_models,
-        setup::prepare_stochastic,
+        CutPool, FutureCostFunction, SolverStatsDelta, SolverStatsLogEntry, StudySetup,
+        hydro_models::prepare_hydro_models, setup::prepare_stochastic,
     };
     use cobre_solver::ActiveSolver;
 
@@ -1091,12 +1090,8 @@ mod basis_reconstruct_churn {
             "full_churn: phase 1 must complete exactly 1 iteration"
         );
 
-        let cuts_after_iter1: Vec<usize> = setup
-            .fcf
-            .pools
-            .iter()
-            .map(cobre_sddp::cut::CutPool::active_count)
-            .collect();
+        let cuts_after_iter1: Vec<usize> =
+            setup.fcf.pools.iter().map(CutPool::active_count).collect();
         let total_cuts_iter1: usize = cuts_after_iter1.iter().sum();
         assert!(
             total_cuts_iter1 > 0,
@@ -1155,7 +1150,7 @@ mod basis_reconstruct_churn {
             let state_dim = setup.fcf.state_dimension;
             let fwd_passes = setup.loop_params.forward_passes;
             let max_iters = setup.loop_params.max_iterations;
-            let placeholder_fcf = cobre_sddp::FutureCostFunction::new(
+            let placeholder_fcf = FutureCostFunction::new(
                 n_stages,
                 state_dim,
                 fwd_passes,
@@ -1472,6 +1467,7 @@ mod warm_start {
     use std::path::Path;
 
     use cobre_core::scenario::ScenarioSource;
+    use cobre_io::config::StoppingRuleConfig;
     use cobre_io::output::policy::{read_policy_checkpoint, write_policy_checkpoint};
     use cobre_sddp::{
         FutureCostFunction, StudySetup, hydro_models::prepare_hydro_models,
@@ -1548,9 +1544,7 @@ mod warm_start {
 
         let mut config_phase1 = config_full.clone();
         config_phase1.training.stopping_rules =
-            Some(vec![cobre_io::config::StoppingRuleConfig::IterationLimit {
-                limit: 5,
-            }]);
+            Some(vec![StoppingRuleConfig::IterationLimit { limit: 5 }]);
 
         let mut setup_phase1 = build_setup(&case_dir, &config_phase1);
         let comm = StubComm;

@@ -21,6 +21,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use cobre_core::Hydro;
 use cobre_core::entities::HydroGenerationModel;
 
 use super::{ErrorKind, ValidationContext, schema::ParsedData};
@@ -216,7 +217,7 @@ pub(crate) fn validate_dimensional_consistency(data: &ParsedData, ctx: &mut Vali
 // ── Private helpers ───────────────────────────────────────────────────────────
 
 fn collect_fpha_hydro_ids(
-    hydros: &[cobre_core::entities::Hydro],
+    hydros: &[Hydro],
     production_models: &[ProductionModelConfig],
 ) -> HashSet<i32> {
     let mut ids = HashSet::new();
@@ -237,7 +238,7 @@ fn collect_fpha_hydro_ids(
 }
 
 fn collect_head_dependent_hydro_ids(
-    hydros: &[cobre_core::entities::Hydro],
+    hydros: &[Hydro],
     production_models: &[ProductionModelConfig],
 ) -> HashSet<i32> {
     let mut ids = HashSet::new();
@@ -334,8 +335,8 @@ mod tests {
         generation_model: HydroGenerationModel,
         entry_stage_id: Option<i32>,
         exit_stage_id: Option<i32>,
-    ) -> cobre_core::entities::Hydro {
-        cobre_core::entities::Hydro {
+    ) -> Hydro {
+        Hydro {
             id: EntityId(id),
             name: format!("Hydro {id}"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),

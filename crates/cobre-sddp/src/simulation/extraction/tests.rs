@@ -12,11 +12,18 @@ use super::{
     assign_scenarios, extract_contracts, extract_pumping_stations, extract_stage_result,
     extract_stub_collections,
 };
-use crate::indexer::{FillingTargetLocal, FloorLocal, FphaLocal, HydroSys, StudyDimensions};
+use cobre_core::BlockMode;
+
+use crate::energy_conversion::EnergyConversionSet;
+use crate::indexer::{
+    FillingTargetLocal, FloorLocal, FphaLocal, HydroSys, StateLayout, StudyDimensions,
+};
+use crate::lead_time::{AnticipatedResolution, PointResolution};
 use crate::lp_builder::StageGeometry;
 use crate::simulation::types::{
     ScenarioCategoryCosts, SimulationContractResult, SimulationCostResult,
 };
+use crate::test_support;
 
 // -------------------------------------------------------------------------
 // HydroReverseLookup per-stage membership
@@ -149,8 +156,8 @@ fn filling_target_and_floor_slack_primal_present_and_absent() {
 /// the no-turbine branch — exercising that read site directly.
 #[test]
 fn extract_reads_binding_filling_target_slack_no_turbine_branch() {
-    let study_dims = crate::test_support::study_dims();
-    let state = crate::test_support::state_layout(2, 1);
+    let study_dims = test_support::study_dims();
+    let state = test_support::state_layout(2, 1);
     let ec = zero_energy_conversion(2, 1);
 
     // make_primal_2_1 lays out columns [0..9) with theta at 8. Append the single
@@ -165,7 +172,7 @@ fn extract_reads_binding_filling_target_slack_no_turbine_branch() {
     let geom = StageGeometry {
         filling_target_hydro_indices: vec![HydroSys::new(0)],
         filling_target_col: 9..10,
-        ..crate::test_support::geom(2, 1)
+        ..test_support::geom(2, 1)
     };
 
     let result = extract_stage_result(
@@ -227,8 +234,8 @@ fn extract_reads_binding_filling_target_slack_no_turbine_branch() {
 /// `turbine` range routes `extract_hydros` through the per-block branch.
 #[test]
 fn extract_reads_binding_filled_min_storage_floor_slack_per_block_branch() {
-    let study_dims = crate::test_support::study_dims();
-    let state = crate::test_support::state_layout(2, 1);
+    let study_dims = test_support::study_dims();
+    let state = test_support::state_layout(2, 1);
     let ec = zero_energy_conversion(2, 1);
 
     // n_blks = 1, two hydros. Columns [0..9) per make_primal_2_1 (theta at 8).
@@ -254,7 +261,7 @@ fn extract_reads_binding_filled_min_storage_floor_slack_per_block_branch() {
         n_blks: 1,
         filled_min_storage_floor_hydro_indices: vec![HydroSys::new(1)],
         filled_min_storage_floor_col: 13..14,
-        ..crate::test_support::geom(2, 1)
+        ..test_support::geom(2, 1)
     };
 
     let result = extract_stage_result(
@@ -394,11 +401,8 @@ fn assign_scenarios_sum_equals_n_scenarios() {
 
 /// Build a zero-valued [`crate::energy_conversion::EnergyConversionSet`] for tests
 /// that do not assert on energy fields.
-fn zero_energy_conversion(
-    n_hydros: usize,
-    n_stages: usize,
-) -> crate::energy_conversion::EnergyConversionSet {
-    use crate::energy_conversion::{EnergyConversion, EnergyConversionSet};
+fn zero_energy_conversion(n_hydros: usize, n_stages: usize) -> EnergyConversionSet {
+    use crate::energy_conversion::EnergyConversion;
     let zero_ec = EnergyConversion {
         equivalent_productivity_mw_per_m3s: 0.0,
         reference_volume_hm3: 0.0,
@@ -450,9 +454,9 @@ fn make_primal_2_1(
 fn extract_costs_has_one_entry_matching_stage_id() {
     // Acceptance criterion: costs contains exactly one entry whose stage_id
     // matches the input stage and whose future_cost == primal[state.theta].
-    let indexer = crate::test_support::geom(2, 1);
-    let study_dims = crate::test_support::study_dims();
-    let state = crate::test_support::state_layout(2, 1);
+    let indexer = test_support::geom(2, 1);
+    let study_dims = test_support::study_dims();
+    let state = test_support::state_layout(2, 1);
     let primal = make_primal_2_1([100.0, 200.0], [50.0, 60.0], [90.0, 180.0], 999.5);
     let dual = vec![0.0; 4];
     let ec = zero_energy_conversion(2, 1);
@@ -507,9 +511,9 @@ fn extract_costs_has_one_entry_matching_stage_id() {
 #[test]
 fn extract_cost_splits_objective_correctly() {
     // objective = immediate_cost + future_cost
-    let indexer = crate::test_support::geom(2, 1);
-    let study_dims = crate::test_support::study_dims();
-    let state = crate::test_support::state_layout(2, 1);
+    let indexer = test_support::geom(2, 1);
+    let study_dims = test_support::study_dims();
+    let state = test_support::state_layout(2, 1);
     let theta_val = 300.0;
     let objective = 800.0;
     let primal = make_primal_2_1([0.0; 2], [0.0; 2], [0.0; 2], theta_val);
@@ -568,9 +572,9 @@ fn extract_cost_splits_objective_correctly() {
 fn extract_hydro_storage_values_from_primal() {
     // Hydro h=0: storage[0]=100, storage_in[4]=90
     // Hydro h=1: storage[1]=200, storage_in[5]=180
-    let indexer = crate::test_support::geom(2, 1);
-    let study_dims = crate::test_support::study_dims();
-    let state = crate::test_support::state_layout(2, 1);
+    let indexer = test_support::geom(2, 1);
+    let study_dims = test_support::study_dims();
+    let state = test_support::state_layout(2, 1);
     let primal = make_primal_2_1([100.0, 200.0], [50.0, 60.0], [90.0, 180.0], 999.5);
     let dual = vec![0.0; 4];
     let ec = zero_energy_conversion(2, 1);
@@ -629,9 +633,9 @@ fn extract_hydro_storage_values_from_primal() {
 #[test]
 fn extract_inflow_lag_values_from_primal() {
     // inflow_lags[2]=50.0 for hydro 0 lag 0, [3]=60.0 for hydro 1 lag 0
-    let indexer = crate::test_support::geom(2, 1);
-    let study_dims = crate::test_support::study_dims();
-    let state = crate::test_support::state_layout(2, 1);
+    let indexer = test_support::geom(2, 1);
+    let study_dims = test_support::study_dims();
+    let state = test_support::state_layout(2, 1);
     let primal = make_primal_2_1([100.0, 200.0], [50.0, 60.0], [90.0, 180.0], 999.5);
     let dual = vec![0.0; 4];
     let ec = zero_energy_conversion(2, 1);
@@ -691,9 +695,9 @@ fn extract_inflow_lag_values_from_primal() {
 #[test]
 fn extract_no_lags_when_max_par_order_zero() {
     // Stage geometry (N=2, L=0): no inflow_lag columns → empty inflow_lags vec.
-    let indexer = crate::test_support::geom(2, 0);
-    let study_dims = crate::test_support::study_dims();
-    let state = crate::test_support::state_layout(2, 0);
+    let indexer = test_support::geom(2, 0);
+    let study_dims = test_support::study_dims();
+    let state = test_support::state_layout(2, 0);
     // Layout: storage[0..2], z_inflow[2..4], storage_in[4..6], theta=6
     let primal = vec![100.0, 200.0, 0.0, 0.0, 90.0, 180.0, 500.0];
     let dual = vec![];
@@ -756,9 +760,9 @@ fn extract_no_lags_when_max_par_order_zero() {
 
 #[test]
 fn extract_stage_id_propagates_to_all_results() {
-    let indexer = crate::test_support::geom(2, 1);
-    let study_dims = crate::test_support::study_dims();
-    let state = crate::test_support::state_layout(2, 1);
+    let indexer = test_support::geom(2, 1);
+    let study_dims = test_support::study_dims();
+    let state = test_support::state_layout(2, 1);
     let primal = make_primal_2_1([100.0, 200.0], [50.0, 60.0], [90.0, 180.0], 10.0);
     let dual = vec![0.0; 4];
     let stage_id = 7_u32;
@@ -816,9 +820,9 @@ fn extract_stage_id_propagates_to_all_results() {
 
 #[test]
 fn extract_equipment_zero_when_indexer_has_no_equipment_ranges() {
-    let indexer = crate::test_support::geom(2, 1);
-    let study_dims = crate::test_support::study_dims();
-    let state = crate::test_support::state_layout(2, 1);
+    let indexer = test_support::geom(2, 1);
+    let study_dims = test_support::study_dims();
+    let state = test_support::state_layout(2, 1);
     let primal = make_primal_2_1([0.0; 2], [0.0; 2], [0.0; 2], 0.0);
     let dual = vec![0.0; 4];
     let ec = zero_energy_conversion(2, 1);
@@ -901,7 +905,7 @@ fn extract_equipment_zero_when_indexer_has_no_equipment_ranges() {
 #[test]
 fn extract_equipment_reads_primal_when_with_equipment() {
     // N=2, L=1, T=1, Ln=1, B=1, K=1
-    let eq_counts = crate::test_support::GeometryDims {
+    let eq_counts = test_support::GeometryDims {
         hydro_count: 2,
         max_par_order: 1,
         n_thermals: 1,
@@ -914,9 +918,9 @@ fn extract_equipment_reads_primal_when_with_equipment() {
         k_max: 0,
         anticipated_thermal_indices: vec![],
     };
-    let indexer = crate::test_support::geometry(&eq_counts, vec![], &[], vec![]);
-    let study_dims = crate::test_support::study_dims_for(&eq_counts);
-    let state = crate::test_support::state_layout_full(2, 1, 0, 0, vec![]);
+    let indexer = test_support::geometry(&eq_counts, vec![], &[], vec![]);
+    let study_dims = test_support::study_dims_for(&eq_counts);
+    let state = test_support::state_layout_full(2, 1, 0, 0, vec![]);
     // theta = 8, equipment starts at 9
     assert_eq!(state.theta, 8);
     assert_eq!(indexer.turbine, 9..11);
@@ -1092,7 +1096,7 @@ fn extract_equipment_reads_primal_when_with_equipment() {
 #[test]
 fn extract_thermals_marks_anticipated_thermals_when_indices_nonempty() {
     // N=0 hydros, T=2 thermals, B=0 buses, K=1 block, n_anticipated=1 (index 1)
-    let eq_counts = crate::test_support::GeometryDims {
+    let eq_counts = test_support::GeometryDims {
         hydro_count: 0,
         max_par_order: 0,
         n_thermals: 2,
@@ -1105,9 +1109,9 @@ fn extract_thermals_marks_anticipated_thermals_when_indices_nonempty() {
         k_max: 1,
         anticipated_thermal_indices: vec![1],
     };
-    let indexer = crate::test_support::geometry(&eq_counts, vec![], &[], vec![]);
-    let study_dims = crate::test_support::study_dims_for(&eq_counts);
-    let state = crate::test_support::state_layout_full(0, 0, 1, 1, vec![1]);
+    let indexer = test_support::geometry(&eq_counts, vec![], &[], vec![]);
+    let study_dims = test_support::study_dims_for(&eq_counts);
+    let state = test_support::state_layout_full(0, 0, 1, 1, vec![1]);
     // With N=0, L=0, A=1, K_max=1:
     //   anticipated_slots_out = [0, 1)  (outgoing ring, A*K_max = 1 slot)
     //   anticipated_state     = [1, 2)  (incoming, A*K_max = 1 slot)
@@ -1211,7 +1215,7 @@ fn extract_thermals_marks_anticipated_thermals_when_indices_nonempty() {
 #[test]
 fn extract_thermals_marks_no_thermals_anticipated_when_indices_empty() {
     // N=0 hydros, T=2 thermals, B=0 buses, K=1 block, n_anticipated=0
-    let eq_counts = crate::test_support::GeometryDims {
+    let eq_counts = test_support::GeometryDims {
         hydro_count: 0,
         max_par_order: 0,
         n_thermals: 2,
@@ -1224,9 +1228,9 @@ fn extract_thermals_marks_no_thermals_anticipated_when_indices_empty() {
         k_max: 0,
         anticipated_thermal_indices: vec![],
     };
-    let indexer = crate::test_support::geometry(&eq_counts, vec![], &[], vec![]);
-    let study_dims = crate::test_support::study_dims_for(&eq_counts);
-    let state = crate::test_support::state_layout_full(0, 0, 0, 0, vec![]);
+    let indexer = test_support::geometry(&eq_counts, vec![], &[], vec![]);
+    let study_dims = test_support::study_dims_for(&eq_counts);
+    let state = test_support::state_layout_full(0, 0, 0, 0, vec![]);
 
     let n_cols = indexer.generation_below_slack.end.max(3);
     let primal = vec![0.0_f64; n_cols];
@@ -1312,8 +1316,8 @@ fn extract_thermals_marks_no_thermals_anticipated_when_indices_empty() {
 /// The `GeometryDims` both [`make_anticipated_decision_indexer_k2`] and the
 /// matching `study_dims` derive from, so the role-(b) geometry and the
 /// non-state `StudyDimensions` stay aligned from one source.
-fn anticipated_decision_counts_k2() -> crate::test_support::GeometryDims {
-    crate::test_support::GeometryDims {
+fn anticipated_decision_counts_k2() -> test_support::GeometryDims {
+    test_support::GeometryDims {
         n_thermals: 2,
         n_blks: 1,
         n_anticipated: 1,
@@ -1324,7 +1328,7 @@ fn anticipated_decision_counts_k2() -> crate::test_support::GeometryDims {
 }
 
 fn make_anticipated_decision_indexer_k2() -> StageGeometry {
-    crate::test_support::geometry(&anticipated_decision_counts_k2(), vec![], &[], vec![])
+    test_support::geometry(&anticipated_decision_counts_k2(), vec![], &[], vec![])
 }
 
 /// Returns a primal vector sized to cover `anticipated_decision.end`, with
@@ -1343,8 +1347,8 @@ fn make_primal_with_decision_sentinel(geometry: &StageGeometry, sentinel: f64) -
 #[test]
 fn extract_thermals_reads_anticipated_decision_when_in_horizon() {
     let indexer = make_anticipated_decision_indexer_k2();
-    let study_dims = crate::test_support::study_dims_for(&anticipated_decision_counts_k2());
-    let state = crate::test_support::state_layout_full(0, 0, 1, 2, vec![2]);
+    let study_dims = test_support::study_dims_for(&anticipated_decision_counts_k2());
+    let state = test_support::state_layout_full(0, 0, 1, 2, vec![2]);
     let primal = make_primal_with_decision_sentinel(&indexer, 123.5);
     let obj = vec![0.0_f64; primal.len()];
 
@@ -1419,8 +1423,8 @@ fn extract_thermals_reads_anticipated_decision_when_in_horizon() {
 #[test]
 fn extract_thermals_emits_none_at_horizon_boundary() {
     let indexer = make_anticipated_decision_indexer_k2();
-    let study_dims = crate::test_support::study_dims_for(&anticipated_decision_counts_k2());
-    let state = crate::test_support::state_layout_full(0, 0, 1, 2, vec![2]);
+    let study_dims = test_support::study_dims_for(&anticipated_decision_counts_k2());
+    let state = test_support::state_layout_full(0, 0, 1, 2, vec![2]);
     let primal = make_primal_with_decision_sentinel(&indexer, 123.5);
     let obj = vec![0.0_f64; primal.len()];
 
@@ -1493,8 +1497,8 @@ fn extract_thermals_emits_none_at_horizon_boundary() {
 #[test]
 fn extract_thermals_emits_none_one_past_horizon_boundary() {
     let indexer = make_anticipated_decision_indexer_k2();
-    let study_dims = crate::test_support::study_dims_for(&anticipated_decision_counts_k2());
-    let state = crate::test_support::state_layout_full(0, 0, 1, 2, vec![2]);
+    let study_dims = test_support::study_dims_for(&anticipated_decision_counts_k2());
+    let state = test_support::state_layout_full(0, 0, 1, 2, vec![2]);
     let primal = make_primal_with_decision_sentinel(&indexer, 123.5);
     let obj = vec![0.0_f64; primal.len()];
 
@@ -1568,7 +1572,7 @@ fn extract_thermals_emits_none_one_past_horizon_boundary() {
 fn extract_thermals_emits_none_for_non_anticipated_thermals() {
     // N=0, T=2, n_blks=1, n_anticipated=1 (index 1), k_max=1, K_i=1
     // Layout: n_ant_state=1, theta=1, thermal=[2,4), anticipated_decision.start=4
-    let eq_counts = crate::test_support::GeometryDims {
+    let eq_counts = test_support::GeometryDims {
         hydro_count: 0,
         max_par_order: 0,
         n_thermals: 2,
@@ -1581,9 +1585,9 @@ fn extract_thermals_emits_none_for_non_anticipated_thermals() {
         k_max: 1,
         anticipated_thermal_indices: vec![1],
     };
-    let indexer = crate::test_support::geometry(&eq_counts, vec![], &[], vec![]);
-    let study_dims = crate::test_support::study_dims_for(&eq_counts);
-    let state = crate::test_support::state_layout_full(0, 0, 1, 1, vec![1]);
+    let indexer = test_support::geometry(&eq_counts, vec![], &[], vec![]);
+    let study_dims = test_support::study_dims_for(&eq_counts);
+    let state = test_support::state_layout_full(0, 0, 1, 1, vec![1]);
 
     let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
     let mut primal = vec![0.0_f64; n_cols];
@@ -1660,7 +1664,7 @@ fn extract_thermals_emits_none_for_non_anticipated_thermals() {
 ///   `n_ant_state=1`, theta=1, thermal=[2,6), `anticipated_decision.start=6`
 #[test]
 fn extract_thermals_anticipated_decision_is_per_block_invariant() {
-    let eq_counts = crate::test_support::GeometryDims {
+    let eq_counts = test_support::GeometryDims {
         hydro_count: 0,
         max_par_order: 0,
         n_thermals: 1,
@@ -1673,9 +1677,9 @@ fn extract_thermals_anticipated_decision_is_per_block_invariant() {
         k_max: 1,
         anticipated_thermal_indices: vec![0],
     };
-    let indexer = crate::test_support::geometry(&eq_counts, vec![], &[], vec![]);
-    let study_dims = crate::test_support::study_dims_for(&eq_counts);
-    let state = crate::test_support::state_layout_full(0, 0, 1, 1, vec![1]);
+    let indexer = test_support::geometry(&eq_counts, vec![], &[], vec![]);
+    let study_dims = test_support::study_dims_for(&eq_counts);
+    let state = test_support::state_layout_full(0, 0, 1, 1, vec![1]);
 
     let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
     let mut primal = vec![0.0_f64; n_cols];
@@ -1763,7 +1767,7 @@ fn extract_thermals_anticipated_decision_is_per_block_invariant() {
 /// well inside the horizon.
 #[test]
 fn extract_thermals_decision_uses_attached_resolution_delivery_stage() {
-    let eq_counts = crate::test_support::GeometryDims {
+    let eq_counts = test_support::GeometryDims {
         hydro_count: 0,
         max_par_order: 0,
         n_thermals: 1,
@@ -1776,11 +1780,11 @@ fn extract_thermals_decision_uses_attached_resolution_delivery_stage() {
         k_max: 3,
         anticipated_thermal_indices: vec![0],
     };
-    let indexer = crate::test_support::geometry(&eq_counts, vec![], &[], vec![]);
-    let study_dims = crate::test_support::study_dims_for(&eq_counts);
-    let mut state = crate::test_support::state_layout_full(0, 0, 1, 3, vec![3]);
-    state.set_anticipated_resolution(crate::lead_time::AnticipatedResolution {
-        per_plant: vec![crate::lead_time::PointResolution {
+    let indexer = test_support::geometry(&eq_counts, vec![], &[], vec![]);
+    let study_dims = test_support::study_dims_for(&eq_counts);
+    let mut state = test_support::state_layout_full(0, 0, 1, 3, vec![3]);
+    state.set_anticipated_resolution(AnticipatedResolution {
+        per_plant: vec![PointResolution {
             decider: vec![None, Some(0), None],
             decision_sets: vec![vec![1], vec![], vec![]],
             depth: vec![1, 0, 0],
@@ -1875,8 +1879,8 @@ fn extract_thermals_decision_uses_attached_resolution_delivery_stage() {
 /// [`make_anticipated_committed_indexer_k2_3blks`] and the matching
 /// `study_dims` derive from, keeping the role-(b) geometry and the non-state
 /// `StudyDimensions` aligned from one source.
-fn anticipated_committed_counts_k2_3blks() -> crate::test_support::GeometryDims {
-    crate::test_support::GeometryDims {
+fn anticipated_committed_counts_k2_3blks() -> test_support::GeometryDims {
+    test_support::GeometryDims {
         n_thermals: 1,
         n_blks: 3,
         n_anticipated: 1,
@@ -1887,7 +1891,7 @@ fn anticipated_committed_counts_k2_3blks() -> crate::test_support::GeometryDims 
 }
 
 fn make_anticipated_committed_indexer_k2_3blks() -> StageGeometry {
-    crate::test_support::geometry(
+    test_support::geometry(
         &anticipated_committed_counts_k2_3blks(),
         vec![],
         &[],
@@ -1913,7 +1917,7 @@ fn make_anticipated_committed_indexer_k2_3blks() -> StageGeometry {
 #[test]
 fn extract_thermals_per_block_committed_at_delivery_stage() {
     let indexer = make_anticipated_committed_indexer_k2_3blks();
-    let state = crate::test_support::state_layout_full(0, 0, 1, 2, vec![2]);
+    let state = test_support::state_layout_full(0, 0, 1, 2, vec![2]);
     // thermal = [5, 8): col 5 = block 0, col 6 = block 1, col 7 = block 2
     // (theta = N*(3+L) + 2*n_ant_state = 0 + 2*2 = 4, control region starts at 5).
     assert_eq!(indexer.thermal.start, 5);
@@ -1931,7 +1935,7 @@ fn extract_thermals_per_block_committed_at_delivery_stage() {
     primal[7] = 70.0; // thermal 10, block 2
     let obj = vec![0.0_f64; n_cols];
 
-    let study_dims = crate::test_support::study_dims_for(&anticipated_committed_counts_k2_3blks());
+    let study_dims = test_support::study_dims_for(&anticipated_committed_counts_k2_3blks());
     let lookup = super::ThermalReverseLookup::build(&study_dims, 1);
     let spec = StageExtractionSpec {
         study_dims: &study_dims,
@@ -2061,8 +2065,8 @@ fn extract_thermals_per_block_committed_at_delivery_stage() {
 #[test]
 fn extract_thermals_per_block_committed_slot0_when_seed_zero() {
     let indexer = make_anticipated_committed_indexer_k2_3blks();
-    let study_dims = crate::test_support::study_dims_for(&anticipated_committed_counts_k2_3blks());
-    let state = crate::test_support::state_layout_full(0, 0, 1, 2, vec![2]);
+    let study_dims = test_support::study_dims_for(&anticipated_committed_counts_k2_3blks());
+    let state = test_support::state_layout_full(0, 0, 1, 2, vec![2]);
     let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
     let mut primal = vec![0.0_f64; n_cols];
     primal[3] = 50.0; // thermal 10, block 0
@@ -2137,8 +2141,8 @@ fn extract_thermals_per_block_committed_slot0_when_seed_zero() {
 #[test]
 fn extract_thermals_per_block_committed_at_first_delivery_boundary() {
     let indexer = make_anticipated_committed_indexer_k2_3blks();
-    let study_dims = crate::test_support::study_dims_for(&anticipated_committed_counts_k2_3blks());
-    let state = crate::test_support::state_layout_full(0, 0, 1, 2, vec![2]);
+    let study_dims = test_support::study_dims_for(&anticipated_committed_counts_k2_3blks());
+    let state = test_support::state_layout_full(0, 0, 1, 2, vec![2]);
     let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
     let mut primal = vec![0.0_f64; n_cols];
     primal[3] = 50.0;
@@ -2212,7 +2216,7 @@ fn extract_thermals_per_block_committed_at_first_delivery_boundary() {
 #[test]
 fn extract_thermals_per_block_committed_none_for_non_anticipated() {
     // N=0, T=2, n_blks=3, n_anticipated=1 (global index 1), k_max=2, K_i=2
-    let eq_counts = crate::test_support::GeometryDims {
+    let eq_counts = test_support::GeometryDims {
         hydro_count: 0,
         max_par_order: 0,
         n_thermals: 2,
@@ -2225,9 +2229,9 @@ fn extract_thermals_per_block_committed_none_for_non_anticipated() {
         k_max: 2,
         anticipated_thermal_indices: vec![1],
     };
-    let indexer = crate::test_support::geometry(&eq_counts, vec![], &[], vec![]);
-    let study_dims = crate::test_support::study_dims_for(&eq_counts);
-    let state = crate::test_support::state_layout_full(0, 0, 1, 2, vec![2]);
+    let indexer = test_support::geometry(&eq_counts, vec![], &[], vec![]);
+    let study_dims = test_support::study_dims_for(&eq_counts);
+    let state = test_support::state_layout_full(0, 0, 1, 2, vec![2]);
 
     let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
     let mut primal = vec![0.0_f64; n_cols];
@@ -2316,7 +2320,7 @@ fn extract_thermals_per_block_committed_none_for_non_anticipated() {
 #[test]
 fn extract_thermals_no_block_committed_at_delivery_is_zero() {
     // N=0, T=1, n_blks=0 (no-block branch), n_anticipated=1, k_max=1, K_i=1
-    let eq_counts = crate::test_support::GeometryDims {
+    let eq_counts = test_support::GeometryDims {
         hydro_count: 0,
         max_par_order: 0,
         n_thermals: 1,
@@ -2329,9 +2333,9 @@ fn extract_thermals_no_block_committed_at_delivery_is_zero() {
         k_max: 1,
         anticipated_thermal_indices: vec![0],
     };
-    let indexer = crate::test_support::geometry(&eq_counts, vec![], &[], vec![]);
-    let study_dims = crate::test_support::study_dims_for(&eq_counts);
-    let state = crate::test_support::state_layout_full(0, 0, 1, 1, vec![1]);
+    let indexer = test_support::geometry(&eq_counts, vec![], &[], vec![]);
+    let study_dims = test_support::study_dims_for(&eq_counts);
+    let state = test_support::state_layout_full(0, 0, 1, 1, vec![1]);
     assert!(
         indexer.thermal.is_empty(),
         "n_blks=0 must yield empty thermal range"
@@ -2465,7 +2469,7 @@ fn extract_thermals_no_block_committed_at_delivery_is_zero() {
 /// (zero-initialised slot 0).
 #[test]
 fn extract_thermals_no_block_committed_reads_slot0_when_seed_zero() {
-    let eq_counts = crate::test_support::GeometryDims {
+    let eq_counts = test_support::GeometryDims {
         hydro_count: 0,
         max_par_order: 0,
         n_thermals: 1,
@@ -2478,9 +2482,9 @@ fn extract_thermals_no_block_committed_reads_slot0_when_seed_zero() {
         k_max: 1,
         anticipated_thermal_indices: vec![0],
     };
-    let indexer = crate::test_support::geometry(&eq_counts, vec![], &[], vec![]);
-    let study_dims = crate::test_support::study_dims_for(&eq_counts);
-    let state = crate::test_support::state_layout_full(0, 0, 1, 1, vec![1]);
+    let indexer = test_support::geometry(&eq_counts, vec![], &[], vec![]);
+    let study_dims = test_support::study_dims_for(&eq_counts);
+    let state = test_support::state_layout_full(0, 0, 1, 1, vec![1]);
 
     let n_cols = indexer.anticipated_decision.end.max(1);
     let primal = vec![0.0_f64; n_cols];
@@ -2554,7 +2558,7 @@ fn extract_thermals_no_block_committed_reads_slot0_when_seed_zero() {
 fn extract_stage_result_prebuilt_lookup_matches_standard_path() {
     use super::{HydroReverseLookup, ThermalReverseLookup, extract_stage_result_with_lookups};
 
-    let eq_counts = crate::test_support::GeometryDims {
+    let eq_counts = test_support::GeometryDims {
         hydro_count: 0,
         max_par_order: 0,
         n_thermals: 1,
@@ -2567,8 +2571,8 @@ fn extract_stage_result_prebuilt_lookup_matches_standard_path() {
         k_max: 1,
         anticipated_thermal_indices: vec![0],
     };
-    let indexer = crate::test_support::geometry(&eq_counts, vec![], &[], vec![]);
-    let state = crate::test_support::state_layout_full(0, 0, 1, 1, vec![1]);
+    let indexer = test_support::geometry(&eq_counts, vec![], &[], vec![]);
+    let state = test_support::state_layout_full(0, 0, 1, 1, vec![1]);
 
     let n_cols = indexer
         .anticipated_decision
@@ -2605,7 +2609,7 @@ fn extract_stage_result_prebuilt_lookup_matches_standard_path() {
         objective_coeffs: &obj,
         row_lower: &[],
     };
-    let study_dims = crate::test_support::study_dims_for(&eq_counts);
+    let study_dims = test_support::study_dims_for(&eq_counts);
     let spec = StageExtractionSpec {
         study_dims: &study_dims,
         geometry: &indexer,
@@ -2678,9 +2682,9 @@ fn extract_stage_result_prebuilt_lookup_matches_standard_path() {
 
 #[test]
 fn extract_optional_entity_types_are_empty_when_absent() {
-    let indexer = crate::test_support::geom(1, 0);
-    let study_dims = crate::test_support::study_dims();
-    let state = crate::test_support::state_layout(1, 0);
+    let indexer = test_support::geom(1, 0);
+    let study_dims = test_support::study_dims();
+    let state = test_support::state_layout(1, 0);
     let primal = vec![50.0, 0.0, 40.0, 200.0]; // storage, z_inflow, storage_in, theta
     let dual = vec![];
     let counts = EntityCounts {
@@ -2918,7 +2922,7 @@ fn accumulate_regularization_all_four_components() {
 #[test]
 fn test_slack_extraction_with_penalty_active() {
     // N=2, L=1, T=1, Ln=1, B=1, K=1, has_inflow_penalty=true
-    let eq_counts = crate::test_support::GeometryDims {
+    let eq_counts = test_support::GeometryDims {
         hydro_count: 2,
         max_par_order: 1,
         n_thermals: 1,
@@ -2931,9 +2935,9 @@ fn test_slack_extraction_with_penalty_active() {
         k_max: 0,
         anticipated_thermal_indices: vec![],
     };
-    let indexer = crate::test_support::geometry(&eq_counts, vec![], &[], vec![]);
-    let study_dims = crate::test_support::study_dims_for(&eq_counts);
-    let state = crate::test_support::state_layout_full(2, 1, 0, 0, vec![]);
+    let indexer = test_support::geometry(&eq_counts, vec![], &[], vec![]);
+    let study_dims = test_support::study_dims_for(&eq_counts);
+    let state = test_support::state_layout_full(2, 1, 0, 0, vec![]);
 
     assert!(
         study_dims.has_inflow_penalty,
@@ -3038,7 +3042,7 @@ fn test_slack_extraction_with_penalty_active() {
 #[test]
 fn test_slack_extraction_without_penalty_is_zero() {
     // N=2, L=1, T=1, Ln=1, B=1, K=1, has_inflow_penalty=false
-    let eq_counts = crate::test_support::GeometryDims {
+    let eq_counts = test_support::GeometryDims {
         hydro_count: 2,
         max_par_order: 1,
         n_thermals: 1,
@@ -3051,9 +3055,9 @@ fn test_slack_extraction_without_penalty_is_zero() {
         k_max: 0,
         anticipated_thermal_indices: vec![],
     };
-    let indexer = crate::test_support::geometry(&eq_counts, vec![], &[], vec![]);
-    let study_dims = crate::test_support::study_dims_for(&eq_counts);
-    let state = crate::test_support::state_layout_full(2, 1, 0, 0, vec![]);
+    let indexer = test_support::geometry(&eq_counts, vec![], &[], vec![]);
+    let study_dims = test_support::study_dims_for(&eq_counts);
+    let state = test_support::state_layout_full(2, 1, 0, 0, vec![]);
     assert!(
         !study_dims.has_inflow_penalty,
         "has_inflow_penalty must be false"
@@ -3133,7 +3137,7 @@ fn test_slack_extraction_fallback_path_with_penalty() {
     // Zero blocks (turbine.is_empty()) with
     // has_inflow_penalty=true — exercises the empty-equipment-range extraction path.
     // N=2, L=1, T=0, Ln=0, B=0, K=0, has_inflow_penalty=true
-    let eq_counts = crate::test_support::GeometryDims {
+    let eq_counts = test_support::GeometryDims {
         hydro_count: 2,
         max_par_order: 1,
         n_thermals: 0,
@@ -3146,9 +3150,9 @@ fn test_slack_extraction_fallback_path_with_penalty() {
         k_max: 0,
         anticipated_thermal_indices: vec![],
     };
-    let indexer = crate::test_support::geometry(&eq_counts, vec![], &[], vec![]);
-    let study_dims = crate::test_support::study_dims_for(&eq_counts);
-    let state = crate::test_support::state_layout_full(2, 1, 0, 0, vec![]);
+    let indexer = test_support::geometry(&eq_counts, vec![], &[], vec![]);
+    let study_dims = test_support::study_dims_for(&eq_counts);
+    let state = test_support::state_layout_full(2, 1, 0, 0, vec![]);
 
     // turbine is empty (n_blks=0) → fallback path
     assert!(
@@ -3258,8 +3262,8 @@ fn test_slack_extraction_fallback_path_with_penalty() {
 /// The `GeometryDims` both [`make_indexer_2h_1fpha_1blk`] and the matching
 /// `study_dims` derive from, keeping the role-(b) geometry and the non-state
 /// `StudyDimensions` aligned from one source.
-fn counts_2h_1fpha_1blk() -> crate::test_support::GeometryDims {
-    crate::test_support::GeometryDims {
+fn counts_2h_1fpha_1blk() -> test_support::GeometryDims {
+    test_support::GeometryDims {
         hydro_count: 2,
         n_blks: 1,
         ..Default::default()
@@ -3268,7 +3272,7 @@ fn counts_2h_1fpha_1blk() -> crate::test_support::GeometryDims {
 
 fn make_indexer_2h_1fpha_1blk() -> StageGeometry {
     // h0 is FPHA (system index 0), h1 is constant-productivity (system index 1)
-    crate::test_support::geometry(&counts_2h_1fpha_1blk(), vec![0], &[2], vec![])
+    test_support::geometry(&counts_2h_1fpha_1blk(), vec![0], &[2], vec![])
 }
 
 /// Acceptance criterion: FPHA hydro's `generation_mw` equals the LP generation
@@ -3276,8 +3280,8 @@ fn make_indexer_2h_1fpha_1blk() -> StageGeometry {
 #[test]
 fn fpha_generation_read_from_lp_column() {
     let indexer = make_indexer_2h_1fpha_1blk();
-    let study_dims = crate::test_support::study_dims_for(&counts_2h_1fpha_1blk());
-    let state = crate::test_support::state_layout(2, 0);
+    let study_dims = test_support::study_dims_for(&counts_2h_1fpha_1blk());
+    let state = test_support::state_layout(2, 0);
     // generation.start should be after turbine(7..9) + spillage(9..11) + diversion(11..13) = 13
     // generation[0] = generation.start + 0 * 1 + 0 = 13
     assert_eq!(indexer.generation.start, 13, "generation starts at 13");
@@ -3381,8 +3385,8 @@ fn fpha_generation_read_from_lp_column() {
 #[test]
 fn fpha_productivity_placeholder_zero() {
     let indexer = make_indexer_2h_1fpha_1blk();
-    let study_dims = crate::test_support::study_dims_for(&counts_2h_1fpha_1blk());
-    let state = crate::test_support::state_layout(2, 0);
+    let study_dims = test_support::study_dims_for(&counts_2h_1fpha_1blk());
+    let state = test_support::state_layout(2, 0);
     let n_cols = indexer.generation_below_slack.end;
     let primal = vec![0.0_f64; n_cols];
     let obj = vec![0.0_f64; n_cols];
@@ -3467,8 +3471,8 @@ fn fpha_productivity_placeholder_zero() {
 /// The `GeometryDims` both [`make_indexer_1h_evap_1blk`] and the matching
 /// `study_dims` derive from, keeping the role-(b) geometry and the non-state
 /// `StudyDimensions` aligned from one source.
-fn counts_1h_evap_1blk() -> crate::test_support::GeometryDims {
-    crate::test_support::GeometryDims {
+fn counts_1h_evap_1blk() -> test_support::GeometryDims {
+    test_support::GeometryDims {
         hydro_count: 1,
         n_blks: 1,
         ..Default::default()
@@ -3476,15 +3480,15 @@ fn counts_1h_evap_1blk() -> crate::test_support::GeometryDims {
 }
 
 fn make_indexer_1h_evap_1blk() -> StageGeometry {
-    crate::test_support::geometry(&counts_1h_evap_1blk(), vec![], &[], vec![0])
+    test_support::geometry(&counts_1h_evap_1blk(), vec![], &[], vec![0])
 }
 
 /// Acceptance criterion: `evaporation_m3s` equals the LP evaporation-outflow variable value.
 #[test]
 fn evaporation_read_from_lp_column() {
     let indexer = make_indexer_1h_evap_1blk();
-    let study_dims = crate::test_support::study_dims_for(&counts_1h_evap_1blk());
-    let state = crate::test_support::state_layout(1, 0);
+    let study_dims = test_support::study_dims_for(&counts_1h_evap_1blk());
+    let state = test_support::state_layout(1, 0);
     assert_eq!(indexer.evap_hydro_indices, vec![HydroSys::new(0)]);
     let ei = &indexer.evap_indices[0];
     assert_eq!(ei.evaporation_flow_col, 7);
@@ -3577,8 +3581,8 @@ fn evaporation_read_from_lp_column() {
 #[test]
 fn evaporation_violation_is_sum_of_slacks() {
     let indexer = make_indexer_1h_evap_1blk();
-    let study_dims = crate::test_support::study_dims_for(&counts_1h_evap_1blk());
-    let state = crate::test_support::state_layout(1, 0);
+    let study_dims = test_support::study_dims_for(&counts_1h_evap_1blk());
+    let state = test_support::state_layout(1, 0);
     let n_cols = indexer.generation_below_slack.end;
     let mut primal = vec![0.0_f64; n_cols];
     primal[0] = 200.0;
@@ -3670,8 +3674,8 @@ fn evaporation_violation_is_sum_of_slacks() {
 #[test]
 fn turbined_cost_in_compute_cost_result() {
     let indexer = make_indexer_2h_1fpha_1blk();
-    let study_dims = crate::test_support::study_dims_for(&counts_2h_1fpha_1blk());
-    let state = crate::test_support::state_layout(2, 0);
+    let study_dims = test_support::study_dims_for(&counts_2h_1fpha_1blk());
+    let state = test_support::state_layout(2, 0);
     // turbine.start = 7 (h0 b0)
     let n_cols = indexer.generation_below_slack.end;
     let mut primal = vec![0.0_f64; n_cols];
@@ -3759,8 +3763,8 @@ fn turbined_cost_in_compute_cost_result() {
 #[test]
 fn cost_breakdown_sums_to_immediate_identity_scale() {
     let indexer = make_indexer_2h_1fpha_1blk();
-    let study_dims = crate::test_support::study_dims_for(&counts_2h_1fpha_1blk());
-    let state = crate::test_support::state_layout(2, 0);
+    let study_dims = test_support::study_dims_for(&counts_2h_1fpha_1blk());
+    let state = test_support::state_layout(2, 0);
     let n_cols = indexer.generation_below_slack.end;
     let mut primal = vec![0.0_f64; n_cols];
     primal[6] = 500.0; // theta
@@ -3867,8 +3871,8 @@ fn cost_breakdown_sums_to_immediate_identity_scale() {
 #[test]
 fn contract_cost_active_import_equals_price_power_hours_via_cost_result() {
     let indexer = make_indexer_2h_1fpha_1blk();
-    let study_dims = crate::test_support::study_dims_for(&counts_2h_1fpha_1blk());
-    let state = crate::test_support::state_layout(2, 0);
+    let study_dims = test_support::study_dims_for(&counts_2h_1fpha_1blk());
+    let state = test_support::state_layout(2, 0);
     let base = indexer.generation_below_slack.end;
     let contract_col = base;
     let geometry = StageGeometry {
@@ -3961,8 +3965,8 @@ fn contract_cost_active_import_equals_price_power_hours_via_cost_result() {
 #[test]
 fn cost_breakdown_sums_to_immediate_with_active_export_contract_via_cost_result() {
     let indexer = make_indexer_2h_1fpha_1blk();
-    let study_dims = crate::test_support::study_dims_for(&counts_2h_1fpha_1blk());
-    let state = crate::test_support::state_layout(2, 0);
+    let study_dims = test_support::study_dims_for(&counts_2h_1fpha_1blk());
+    let state = test_support::state_layout(2, 0);
     let base = indexer.generation_below_slack.end;
     let export_col = base;
     let geometry = StageGeometry {
@@ -4074,8 +4078,8 @@ fn cost_breakdown_sums_to_immediate_with_active_export_contract_via_cost_result(
 #[test]
 fn cost_unscaled_by_col_scale() {
     let indexer = make_indexer_2h_1fpha_1blk();
-    let study_dims = crate::test_support::study_dims_for(&counts_2h_1fpha_1blk());
-    let state = crate::test_support::state_layout(2, 0);
+    let study_dims = test_support::study_dims_for(&counts_2h_1fpha_1blk());
+    let state = test_support::state_layout(2, 0);
     let n_cols = indexer.generation_below_slack.end;
     let mut primal = vec![0.0_f64; n_cols];
     primal[6] = 500.0; // theta
@@ -4161,8 +4165,8 @@ fn cost_unscaled_by_col_scale() {
 #[test]
 fn hydro_violation_cost_decomposition() {
     let indexer = make_indexer_2h_1fpha_1blk();
-    let study_dims = crate::test_support::study_dims_for(&counts_2h_1fpha_1blk());
-    let state = crate::test_support::state_layout(2, 0);
+    let study_dims = test_support::study_dims_for(&counts_2h_1fpha_1blk());
+    let state = test_support::state_layout(2, 0);
     // Layout (see make_indexer_2h_1fpha_1blk):
     //   withdrawal_slack_neg:   14..16
     //   withdrawal_slack_pos:   16..18
@@ -4331,11 +4335,8 @@ fn hydro_violation_cost_decomposition() {
 
 /// Build an [`EnergyConversionSet`] for the (1 hydro, 1 stage) case with
 /// explicit `ρ_eq` and `ρ_acum` values.
-fn one_hydro_energy_set(
-    rho_eq: f64,
-    rho_acum: f64,
-) -> crate::energy_conversion::EnergyConversionSet {
-    use crate::energy_conversion::{EnergyConversion, EnergyConversionSet};
+fn one_hydro_energy_set(rho_eq: f64, rho_acum: f64) -> EnergyConversionSet {
+    use crate::energy_conversion::EnergyConversion;
     let cell = EnergyConversion {
         equivalent_productivity_mw_per_m3s: rho_eq,
         reference_volume_hm3: 0.0,
@@ -4367,9 +4368,9 @@ fn make_primal_1_1(storage: f64, storage_in: f64, theta: f64) -> Vec<f64> {
 fn stored_energy_initial_uses_v_min_offset() {
     // storage_initial = 110, V_min = 100, ρ_acum = 4.0 →
     // stored_energy_initial = (110 - 100) * 4 * 1e6 / 3600 ≈ 11_111.111…
-    let indexer = crate::test_support::geom(1, 1);
-    let study_dims = crate::test_support::study_dims();
-    let state = crate::test_support::state_layout(1, 1);
+    let indexer = test_support::geom(1, 1);
+    let study_dims = test_support::study_dims();
+    let state = test_support::state_layout(1, 1);
     let primal = make_primal_1_1(120.0, 110.0, 0.0);
     let dual = vec![0.0; 2];
     let ec = one_hydro_energy_set(0.9, 4.0);
@@ -4440,9 +4441,9 @@ fn stored_energy_initial_uses_v_min_offset() {
 fn incremental_inflow_energy_uses_rho_acum() {
     // ρ_acum = 4.0, incremental_inflow = 50.0 →
     // incremental_inflow_energy = 4.0 * 50.0 = 200.0 (exactly).
-    let indexer = crate::test_support::geom(1, 1);
-    let study_dims = crate::test_support::study_dims();
-    let state = crate::test_support::state_layout(1, 1);
+    let indexer = test_support::geom(1, 1);
+    let study_dims = test_support::study_dims();
+    let state = test_support::state_layout(1, 1);
     let primal = make_primal_1_1(120.0, 110.0, 0.0);
     let dual = vec![0.0; 2];
     let ec = one_hydro_energy_set(0.9, 4.0);
@@ -4502,9 +4503,9 @@ fn stage_path_propagates_productivity_values() {
     // from the supplied EnergyConversionSet and surface them on the
     // result. The per-block path shares the same HydroStageContext,
     // so by construction it cannot disagree.
-    let indexer = crate::test_support::geom(1, 1);
-    let study_dims = crate::test_support::study_dims();
-    let state = crate::test_support::state_layout(1, 1);
+    let indexer = test_support::geom(1, 1);
+    let study_dims = test_support::study_dims();
+    let state = test_support::state_layout(1, 1);
     let primal = make_primal_1_1(120.0, 110.0, 0.0);
     let dual = vec![0.0; 2];
     let ec = one_hydro_energy_set(0.85, 3.5);
@@ -4591,12 +4592,12 @@ fn entity_counts_one_pumping_station() -> EntityCounts {
 fn pumping_only_spec<'a>(
     study_dims: &'a StudyDimensions,
     geometry: &'a StageGeometry,
-    state: &'a crate::indexer::StateLayout,
+    state: &'a StateLayout,
     entity_counts: &'a EntityCounts,
     pumping_col_start: usize,
     n_pumping: usize,
     consumption: &'a [f64],
-    ec: &'a crate::energy_conversion::EnergyConversionSet,
+    ec: &'a EnergyConversionSet,
     diversion: &'a HashMap<cobre_core::EntityId, Vec<usize>>,
 ) -> StageExtractionSpec<'a> {
     StageExtractionSpec {
@@ -4640,7 +4641,7 @@ fn pumping_only_spec<'a>(
 /// no `col_scale` division) and `power_consumption_mw = flow * consumption`.
 #[test]
 fn extract_pumping_two_blocks_reads_per_block_flow_and_power() {
-    let state = crate::test_support::state_layout(0, 0);
+    let state = test_support::state_layout(0, 0);
     let entity_counts = entity_counts_one_pumping_station();
     let ec = zero_energy_conversion(0, 1);
     let diversion = HashMap::new();
@@ -4663,7 +4664,7 @@ fn extract_pumping_two_blocks_reads_per_block_flow_and_power() {
         n_blks: 2,
         ..StageGeometry::default()
     };
-    let study_dims = crate::test_support::study_dims();
+    let study_dims = test_support::study_dims();
     let spec = pumping_only_spec(
         &study_dims,
         &equipment,
@@ -4698,8 +4699,8 @@ fn extract_pumping_two_blocks_reads_per_block_flow_and_power() {
 /// runs), independent of `n_blks`.
 #[test]
 fn extract_pumping_zero_stations_is_empty() {
-    let mut indexer = crate::test_support::geom(0, 0);
-    let state = crate::test_support::state_layout(0, 0);
+    let mut indexer = test_support::geom(0, 0);
+    let state = test_support::state_layout(0, 0);
     indexer.n_blks = 2;
     let entity_counts = EntityCounts {
         hydro_ids: vec![],
@@ -4724,7 +4725,7 @@ fn extract_pumping_zero_stations_is_empty() {
     };
 
     let equipment = StageGeometry::default();
-    let study_dims = crate::test_support::study_dims();
+    let study_dims = test_support::study_dims();
     let spec = pumping_only_spec(
         &study_dims,
         &equipment,
@@ -4744,7 +4745,7 @@ fn extract_pumping_zero_stations_is_empty() {
 /// `n_blks == 0` also yields an empty `Vec` even with an active station.
 #[test]
 fn extract_pumping_zero_blocks_is_empty() {
-    let state = crate::test_support::state_layout(0, 0);
+    let state = test_support::state_layout(0, 0);
     let entity_counts = entity_counts_one_pumping_station();
     let ec = zero_energy_conversion(0, 1);
     let diversion = HashMap::new();
@@ -4760,7 +4761,7 @@ fn extract_pumping_zero_blocks_is_empty() {
     };
 
     let equipment = StageGeometry::default();
-    let study_dims = crate::test_support::study_dims();
+    let study_dims = test_support::study_dims();
     let spec = pumping_only_spec(
         &study_dims,
         &equipment,
@@ -4802,12 +4803,12 @@ fn entity_counts_contracts(contract_ids: Vec<i32>) -> EntityCounts {
 fn contract_only_spec<'a>(
     study_dims: &'a StudyDimensions,
     geometry: &'a StageGeometry,
-    state: &'a crate::indexer::StateLayout,
+    state: &'a StateLayout,
     entity_counts: &'a EntityCounts,
     block_hours: &'a [f64],
     contract_prices: &'a [f64],
     contract_is_import: &'a [bool],
-    ec: &'a crate::energy_conversion::EnergyConversionSet,
+    ec: &'a EnergyConversionSet,
     diversion: &'a HashMap<cobre_core::EntityId, Vec<usize>>,
 ) -> StageExtractionSpec<'a> {
     StageExtractionSpec {
@@ -4847,7 +4848,7 @@ fn contract_only_spec<'a>(
 /// `total_cost == 200 * 40 * 730`, and `operative_state_code == 1`.
 #[test]
 fn extract_contract_import_reads_primal_and_cost() {
-    let state = crate::test_support::state_layout(0, 0);
+    let state = test_support::state_layout(0, 0);
     let entity_counts = entity_counts_contracts(vec![7]);
     let ec = zero_energy_conversion(0, 1);
     let diversion = HashMap::new();
@@ -4868,7 +4869,7 @@ fn extract_contract_import_reads_primal_and_cost() {
         contract_export: 5..5,
         ..StageGeometry::default()
     };
-    let study_dims = crate::test_support::study_dims();
+    let study_dims = test_support::study_dims();
     let block_hours = [730.0_f64];
     let prices = [200.0_f64];
     let is_import = [true];
@@ -4901,7 +4902,7 @@ fn extract_contract_import_reads_primal_and_cost() {
 /// from the export family base.
 #[test]
 fn extract_contract_export_yields_negative_cost() {
-    let state = crate::test_support::state_layout(0, 0);
+    let state = test_support::state_layout(0, 0);
     let entity_counts = entity_counts_contracts(vec![8]);
     let ec = zero_energy_conversion(0, 1);
     let diversion = HashMap::new();
@@ -4922,7 +4923,7 @@ fn extract_contract_export_yields_negative_cost() {
         contract_export: 4..5,
         ..StageGeometry::default()
     };
-    let study_dims = crate::test_support::study_dims();
+    let study_dims = test_support::study_dims();
     let block_hours = [730.0_f64];
     let prices = [-150.0_f64];
     let is_import = [false];
@@ -4953,7 +4954,7 @@ fn extract_contract_export_yields_negative_cost() {
 /// commissioning flag).
 #[test]
 fn extract_contract_dormant_zero_row_keeps_state_code_1() {
-    let state = crate::test_support::state_layout(0, 0);
+    let state = test_support::state_layout(0, 0);
     let entity_counts = entity_counts_contracts(vec![3]);
     let ec = zero_energy_conversion(0, 1);
     let diversion = HashMap::new();
@@ -4974,7 +4975,7 @@ fn extract_contract_dormant_zero_row_keeps_state_code_1() {
         contract_export: 5..5,
         ..StageGeometry::default()
     };
-    let study_dims = crate::test_support::study_dims();
+    let study_dims = test_support::study_dims();
     let block_hours = [730.0_f64];
     let prices = [200.0_f64];
     let is_import = [true];
@@ -5002,7 +5003,7 @@ fn extract_contract_dormant_zero_row_keeps_state_code_1() {
 /// `extract_stub_collections`.
 #[test]
 fn extract_stub_collections_contract_free_is_empty() {
-    let state = crate::test_support::state_layout(0, 0);
+    let state = test_support::state_layout(0, 0);
     let entity_counts = entity_counts_contracts(vec![]);
     let ec = zero_energy_conversion(0, 1);
     let diversion = HashMap::new();
@@ -5020,7 +5021,7 @@ fn extract_stub_collections_contract_free_is_empty() {
         n_blks: 1,
         ..StageGeometry::default()
     };
-    let study_dims = crate::test_support::study_dims();
+    let study_dims = test_support::study_dims();
     let spec = contract_only_spec(
         &study_dims,
         &geometry,
@@ -5063,11 +5064,11 @@ fn entity_counts_1_hydro() -> EntityCounts {
 /// interior storage `S¹ … Sᴷ⁻¹` at `[4, 4 + (K−1))`, then turbine `[t0, t0 + K)`,
 /// spillage `[t0 + K, t0 + 2K)`, then `K` evaporation triples. In parallel mode the
 /// interior family is empty and turbine begins at 4.
-fn single_hydro_block_geometry(block_mode: cobre_core::BlockMode, k: usize) -> StageGeometry {
+fn single_hydro_block_geometry(block_mode: BlockMode, k: usize) -> StageGeometry {
     use crate::indexer::{EvaporationIndices, StorageBoundaryGrid};
     let n_interior = match block_mode {
-        cobre_core::BlockMode::Chronological => k - 1,
-        cobre_core::BlockMode::Parallel => 0,
+        BlockMode::Chronological => k - 1,
+        BlockMode::Parallel => 0,
     };
     let storage_internal_start = 4;
     let turbine_start = storage_internal_start + n_interior;
@@ -5084,7 +5085,7 @@ fn single_hydro_block_geometry(block_mode: cobre_core::BlockMode, k: usize) -> S
             }
         })
         .collect();
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     StageGeometry {
         turbine: turbine_start..spillage_start,
         spillage: spillage_start..evap_start,
@@ -5107,9 +5108,9 @@ fn single_hydro_block_geometry(block_mode: cobre_core::BlockMode, k: usize) -> S
 #[test]
 fn extract_chronological_per_block_storage() {
     let k = 3_usize;
-    let geom = single_hydro_block_geometry(cobre_core::BlockMode::Chronological, k);
-    let study_dims = crate::test_support::study_dims();
-    let state = crate::test_support::state_layout(1, 0);
+    let geom = single_hydro_block_geometry(BlockMode::Chronological, k);
+    let study_dims = test_support::study_dims();
+    let state = test_support::state_layout(1, 0);
     let ec = zero_energy_conversion(1, 1);
 
     // Boundary values: S⁰=10 (storage_in col 2), S¹=20 (col 4), S²=30 (col 5),
@@ -5194,9 +5195,9 @@ fn extract_chronological_per_block_storage() {
 #[test]
 fn extract_parallel_per_block_storage_byte_identical() {
     let k = 3_usize;
-    let geom = single_hydro_block_geometry(cobre_core::BlockMode::Parallel, k);
-    let study_dims = crate::test_support::study_dims();
-    let state = crate::test_support::state_layout(1, 0);
+    let geom = single_hydro_block_geometry(BlockMode::Parallel, k);
+    let study_dims = test_support::study_dims();
+    let state = test_support::state_layout(1, 0);
     let ec = zero_energy_conversion(1, 1);
 
     let n_cols = geom.spillage.end + k * 3;
@@ -5257,11 +5258,11 @@ fn extract_parallel_per_block_storage_byte_identical() {
 /// `(S − V_min) · ρ_acum · ENERGY_FACTOR`, with `V_min` / `ρ_acum` block-invariant.
 #[test]
 fn extract_chronological_per_block_stored_energy() {
-    use crate::energy_conversion::{EnergyConversion, EnergyConversionSet};
+    use crate::energy_conversion::EnergyConversion;
     let k = 3_usize;
-    let geom = single_hydro_block_geometry(cobre_core::BlockMode::Chronological, k);
-    let study_dims = crate::test_support::study_dims();
-    let state = crate::test_support::state_layout(1, 0);
+    let geom = single_hydro_block_geometry(BlockMode::Chronological, k);
+    let study_dims = test_support::study_dims();
+    let state = test_support::state_layout(1, 0);
 
     let rho_acum = 2.0_f64;
     let v_min = 5.0_f64;
@@ -5339,9 +5340,9 @@ fn extract_chronological_per_block_stored_energy() {
 #[test]
 fn extract_chronological_per_block_evaporation() {
     let k = 3_usize;
-    let geom = single_hydro_block_geometry(cobre_core::BlockMode::Chronological, k);
-    let study_dims = crate::test_support::study_dims();
-    let state = crate::test_support::state_layout(1, 0);
+    let geom = single_hydro_block_geometry(BlockMode::Chronological, k);
+    let study_dims = test_support::study_dims();
+    let state = test_support::state_layout(1, 0);
     let ec = zero_energy_conversion(1, 1);
 
     let n_cols = geom.spillage.end + k * 3;
@@ -5418,9 +5419,9 @@ fn extract_chronological_per_block_evaporation() {
 #[test]
 fn extract_parallel_per_block_evaporation_byte_identical() {
     let k = 3_usize;
-    let geom = single_hydro_block_geometry(cobre_core::BlockMode::Parallel, k);
-    let study_dims = crate::test_support::study_dims();
-    let state = crate::test_support::state_layout(1, 0);
+    let geom = single_hydro_block_geometry(BlockMode::Parallel, k);
+    let study_dims = test_support::study_dims();
+    let state = test_support::state_layout(1, 0);
     let ec = zero_energy_conversion(1, 1);
 
     let n_cols = geom.spillage.end + k * 3;
@@ -5520,9 +5521,9 @@ fn make_transit_bucket_primal(transit_buckets_out: &[f64], transit_buckets_in: &
 /// only at `lag == 1`.
 #[test]
 fn extract_transit_buckets_shape_canonical_order_and_delayed_arrival() {
-    let geometry = crate::test_support::geom(2, 1);
-    let study_dims = crate::test_support::study_dims();
-    let state = crate::test_support::state_layout_with_transit_buckets(
+    let geometry = test_support::geom(2, 1);
+    let study_dims = test_support::study_dims();
+    let state = test_support::state_layout_with_transit_buckets(
         2,
         1,
         2,
@@ -5596,9 +5597,9 @@ fn extract_transit_buckets_shape_canonical_order_and_delayed_arrival() {
 /// the whole table off for a non-travel-time study.
 #[test]
 fn extract_transit_buckets_absent_when_n_buckets_zero() {
-    let geometry = crate::test_support::geom(2, 1);
-    let study_dims = crate::test_support::study_dims();
-    let state = crate::test_support::state_layout(2, 1);
+    let geometry = test_support::geom(2, 1);
+    let study_dims = test_support::study_dims();
+    let state = test_support::state_layout(2, 1);
     let primal = make_primal_2_1([100.0, 200.0], [50.0, 60.0], [90.0, 180.0], 999.5);
     let dual = vec![0.0; 4];
     let ec = zero_energy_conversion(2, 1);
@@ -5654,10 +5655,10 @@ fn extract_transit_buckets_absent_when_n_buckets_zero() {
 /// hydro input ordering.
 #[test]
 fn extract_transit_buckets_rows_follow_canonical_column_order() {
-    let geometry = crate::test_support::geom(2, 1);
-    let study_dims = crate::test_support::study_dims();
+    let geometry = test_support::geom(2, 1);
+    let study_dims = test_support::study_dims();
     // Plant 0 (hydro_id 10) depth 2, plant 1 (hydro_id 20) depth 1.
-    let state = crate::test_support::state_layout_with_transit_buckets(
+    let state = test_support::state_layout_with_transit_buckets(
         2,
         1,
         3,

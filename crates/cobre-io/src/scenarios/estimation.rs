@@ -54,7 +54,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use chrono::{Months, NaiveDate};
-use cobre_core::{EntityId, Stage, System};
+use cobre_core::{EntityId, SeasonMap, Stage, System};
 use cobre_stochastic::{
     StochasticError,
     par::aggregate::aggregate_observations_to_season,
@@ -67,8 +67,8 @@ use cobre_stochastic::{
 
 use crate::LoadError::ConstraintError;
 use crate::{
-    Config, FileManifest, LoadError, ValidationContext, parse_inflow_ar_coefficients,
-    parse_inflow_history,
+    Config, FileManifest, LoadError, OrderSelectionMethod, ValidationContext,
+    parse_inflow_ar_coefficients, parse_inflow_history,
     scenarios::{
         InflowAnnualComponentRow, InflowArCoefficientRow, InflowSeasonalStatsRow,
         assemble_inflow_models,
@@ -256,7 +256,7 @@ fn run_estimation(
             season_map,
             use_annual_component: matches!(
                 config.estimation.order_selection,
-                crate::config::OrderSelectionMethod::PacfAnnual
+                OrderSelectionMethod::PacfAnnual
             ),
         },
     )?;
@@ -340,7 +340,7 @@ fn run_partial_estimation(
             season_map,
             use_annual_component: matches!(
                 config.estimation.order_selection,
-                crate::config::OrderSelectionMethod::PacfAnnual
+                OrderSelectionMethod::PacfAnnual
             ),
         },
     )?;
@@ -387,7 +387,7 @@ fn run_partial_estimation(
 fn load_and_aggregate_observations(
     case_dir: &Path,
     stages: &[Stage],
-    season_map: Option<&cobre_core::temporal::SeasonMap>,
+    season_map: Option<&SeasonMap>,
 ) -> Result<Vec<(EntityId, NaiveDate, f64)>, EstimationError> {
     let history_path = case_dir.join("scenarios/inflow_history.parquet");
     let history = parse_inflow_history(&history_path)?;
@@ -767,7 +767,7 @@ fn check_std_ratio_divergence(
 fn synthesize_prestudy_stages(
     stages: &[Stage],
     max_order: usize,
-    season_map: Option<&cobre_core::temporal::SeasonMap>,
+    season_map: Option<&SeasonMap>,
 ) -> Vec<Stage> {
     let Some(sm) = season_map else {
         return Vec::new();

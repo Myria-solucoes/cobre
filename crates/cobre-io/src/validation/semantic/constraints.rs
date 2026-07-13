@@ -218,7 +218,9 @@ mod tests {
 
     use super::super::test_support::*;
     use super::super::validate_semantic_hydro_thermal;
+    use crate::ValidationEntry;
     use crate::constraints::GenericConstraintBoundsRow;
+    use crate::validation::schema::ParsedData;
     use crate::validation::{ErrorKind, ValidationContext};
 
     fn make_blocks(k: usize) -> Vec<Block> {
@@ -234,11 +236,7 @@ mod tests {
     /// Build `ParsedData` with a single stage of `k` blocks in `block_mode` and a
     /// generic constraint whose sole term references the given variant, active on
     /// stage 0 (a bound row exists, so the per-block check runs).
-    fn make_data_storage_ref(
-        block_mode: BlockMode,
-        k: usize,
-        variable: VariableRef,
-    ) -> crate::validation::schema::ParsedData {
+    fn make_data_storage_ref(block_mode: BlockMode, k: usize, variable: VariableRef) -> ParsedData {
         let mut data = make_data(
             vec![make_hydro(1, None)],
             vec![],
@@ -278,9 +276,7 @@ mod tests {
         }
     }
 
-    fn interior_errors(
-        data: &crate::validation::schema::ParsedData,
-    ) -> Vec<crate::ValidationEntry> {
+    fn interior_errors(data: &ParsedData) -> Vec<ValidationEntry> {
         let mut ctx = ValidationContext::new();
         validate_semantic_hydro_thermal(data, &mut ctx);
         ctx.errors()

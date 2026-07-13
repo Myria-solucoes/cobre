@@ -19,9 +19,10 @@ use std::sync::mpsc;
 
 use chrono::NaiveDate;
 use cobre_core::{
-    DeficitSegment, EntityId, TrainingEvent,
+    DeficitSegment, EntityId, SystemBuilder, TrainingEvent,
     scenario::{
-        CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, SamplingScheme,
+        CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, LoadModel,
+        SamplingScheme,
     },
     temporal::{
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
@@ -36,17 +37,19 @@ use cobre_stochastic::{
 };
 
 use cobre_io::{
-    Config, PolicyCheckpointMetadata, PolicyCutRecord, SimulationOutput, StageCutsPayload,
-    write_policy_checkpoint, write_results,
+    Config, EstimationConfig, MetadataSimulationSolveStats, PolicyCheckpointMetadata,
+    PolicyCutRecord, PolicyMode, SimulationOutput, StageCutsPayload, write_policy_checkpoint,
+    write_results,
 };
 use cobre_sddp::{
-    StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig, build_training_output,
+    PrepareHydroModelsResult, ResolvedParameters, StoppingMode, StoppingRule, StoppingRuleSet,
+    TrainingConfig, build_training_output,
     config::{CutManagementConfig, EventConfig, LoopConfig},
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
     energy_conversion::{EnergyConversion, EnergyConversionSet},
     horizon_mode::HorizonMode,
-    indexer::StateLayout,
+    indexer::{CutStateProjection, StateLayout, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
     lp_builder::PatchBuffer,
     risk_measure::RiskMeasure,
@@ -85,8 +88,8 @@ fn study_dims_for(
     n_buses: usize,
     hydro_count: usize,
     has_inflow_penalty: bool,
-) -> cobre_sddp::indexer::StudyDimensions {
-    cobre_sddp::indexer::StudyDimensions {
+) -> StudyDimensions {
+    StudyDimensions {
         n_thermals,
         n_lines,
         n_buses,
@@ -285,7 +288,7 @@ fn make_stochastic_context(n_stages: usize, n_openings: usize) -> StochasticCont
         schedule: vec![],
     };
 
-    let system = cobre_core::SystemBuilder::new()
+    let system = SystemBuilder::new()
         .buses(vec![bus])
         .hydros(vec![hydro])
         .stages(stages)
@@ -411,7 +414,7 @@ fn make_config() -> Config {
         upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
         policy: PolicyConfig {
             path: "./policy".to_string(),
-            mode: cobre_io::PolicyMode::Fresh,
+            mode: PolicyMode::Fresh,
             checkpointing: CheckpointingConfig::default(),
             boundary: None,
         },
@@ -422,7 +425,7 @@ fn make_config() -> Config {
             scenario_source: None,
         },
         exports: ExportsConfig::default(),
-        estimation: cobre_io::EstimationConfig::default(),
+        estimation: EstimationConfig::default(),
     }
 }
 
@@ -552,7 +555,7 @@ fn make_system() -> cobre_core::System {
         schedule: vec![],
     };
 
-    cobre_core::SystemBuilder::new()
+    SystemBuilder::new()
         .buses(vec![bus])
         .hydros(vec![hydro])
         .stages(stages)
@@ -876,7 +879,7 @@ fn train_simulate_write_cycle() {
         total_time_ms: 0,
         partitions_written: vec![],
         cost: None,
-        solve_stats: cobre_io::MetadataSimulationSolveStats::default(),
+        solve_stats: MetadataSimulationSolveStats::default(),
     };
 
     let system = make_system();
@@ -1163,8 +1166,8 @@ fn make_min_outflow_system() -> cobre_core::System {
         })
         .collect();
 
-    let load_models: Vec<cobre_core::scenario::LoadModel> = (0..n_stages)
-        .map(|i| cobre_core::scenario::LoadModel {
+    let load_models: Vec<LoadModel> = (0..n_stages)
+        .map(|i| LoadModel {
             bus_id: EntityId(0),
             stage_id: i as i32,
             mean_mw: 100.0,
@@ -1271,7 +1274,7 @@ fn make_min_outflow_system() -> cobre_core::System {
         schedule: vec![],
     };
 
-    cobre_core::SystemBuilder::new()
+    SystemBuilder::new()
         .buses(vec![bus])
         .hydros(vec![hydro])
         .stages(stages)
@@ -1296,7 +1299,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
 
     let stochastic = make_stochastic_context(n_stages, 1);
 
-    let hydro_models = cobre_sddp::PrepareHydroModelsResult::default_from_system(&system);
+    let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
 
     let templates_result = build_stage_templates_resolving_layout(
         &system,
@@ -1305,7 +1308,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
         stochastic.normal(),
         &hydro_models.production,
         &hydro_models.evaporation,
-        &cobre_sddp::ResolvedParameters::default(),
+        &ResolvedParameters::default(),
     )
     .expect("build_stage_templates_resolving_layout must succeed");
 
@@ -1571,15 +1574,12 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
 /// see the parent crate's `#[cfg(test)]` surface) builds the default all-enabled
 /// per-pool projection. Every pool projects the full global state, keeping the
 /// extracted subgradient bit-identical to the global-loop result.
-fn all_enabled_cut_state_layouts(
-    global: &StateLayout,
-    n_stages: usize,
-) -> Vec<cobre_sddp::indexer::CutStateProjection> {
+fn all_enabled_cut_state_layouts(global: &StateLayout, n_stages: usize) -> Vec<CutStateProjection> {
     let full = StageStateConfig {
         storage: true,
         inflow_lags: true,
     };
     (0..n_stages)
-        .map(|_| cobre_sddp::indexer::CutStateProjection::new(global, full))
+        .map(|_| CutStateProjection::new(global, full))
         .collect()
 }

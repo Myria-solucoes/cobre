@@ -29,6 +29,7 @@
 use cobre_core::ContractType::Import;
 use cobre_core::temporal::SeasonCycleType::Monthly;
 use cobre_core::temporal::SeasonMap;
+use cobre_core::temporal::StageLagTransition;
 use cobre_core::temporal::StageStateConfig;
 use cobre_io::Config;
 use cobre_stochastic::par::RecentObservationSeed;
@@ -37,8 +38,10 @@ use cobre_stochastic::par::lag_transition::derive_downstream_par_order;
 use cobre_stochastic::par::lag_transition::precompute_noise_groups;
 use cobre_stochastic::par::lag_transition::precompute_stage_lag_transitions;
 
+use crate::StageTemplates;
 use crate::config::LoopParams;
 use crate::resolved_parameters::build_resolved_parameters;
+use crate::scaling_report::ScalingReport;
 use crate::simulation::SimulationConfig;
 use crate::stochastic::noise_key::build_noise_key_table;
 mod accessors;
@@ -535,7 +538,7 @@ struct NcsEntityData {
 /// in the system's `non_controllable_sources`.
 fn build_ncs_entity_data(
     system: &System,
-    stage_templates: &crate::lp_builder::StageTemplates,
+    stage_templates: &StageTemplates,
     stochastic: &StochasticContext,
 ) -> Result<NcsEntityData, SddpError> {
     let entity_counts = build_entity_counts(system);
@@ -595,8 +598,8 @@ fn build_ncs_entity_data(
 /// Grouped output of [`build_energy_and_templates`].
 struct EnergyAndTemplates {
     energy_conversion: EnergyConversionSet,
-    stage_templates: crate::lp_builder::StageTemplates,
-    scaling_report: crate::scaling_report::ScalingReport,
+    stage_templates: StageTemplates,
+    scaling_report: ScalingReport,
 }
 
 /// Build the energy-conversion set, the resolved parameter table, and the
@@ -827,7 +830,7 @@ pub(crate) fn resolve_state_layout(
 /// `ncs_col_starts`, the one dimension genuinely derived from the built LP.
 fn build_study_dimensions(
     system: &System,
-    stage_templates: &crate::lp_builder::StageTemplates,
+    stage_templates: &StageTemplates,
     inflow_method: crate::InflowNonNegativityMethod,
     hydro_count: usize,
     anticipated_thermal_indices: Vec<usize>,
@@ -1044,7 +1047,7 @@ const FULL_STATE_CONFIG: StageStateConfig = StageStateConfig {
 
 /// Grouped output of [`precompute_lag_data`].
 struct LagData {
-    stage_lag_transitions: Vec<cobre_core::temporal::StageLagTransition>,
+    stage_lag_transitions: Vec<StageLagTransition>,
     noise_group_ids: Vec<u32>,
     recent_observation_seed: RecentObservationSeed,
     downstream_par_order: usize,
@@ -1112,7 +1115,7 @@ fn build_scenario_libraries(
     stages: &[Stage],
     hydro_ids: &[EntityId],
     stochastic: &StochasticContext,
-    stage_lag_transitions: &[cobre_core::temporal::StageLagTransition],
+    stage_lag_transitions: &[StageLagTransition],
     training_source: &ScenarioSource,
     simulation_source: &ScenarioSource,
     forward_passes: u32,

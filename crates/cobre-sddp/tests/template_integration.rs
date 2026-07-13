@@ -27,6 +27,7 @@ use cobre_core::{
     ContractStageBounds, DeficitSegment, EntityId, HydroStageBounds, HydroStagePenalties,
     LineStageBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
     PumpingStageBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalStageBounds,
+    scenario::InflowModel,
 };
 use cobre_stochastic::normal::precompute::PrecomputedNormal;
 use cobre_stochastic::par::precompute::PrecomputedPar;
@@ -1768,7 +1769,7 @@ fn multi_segment_system(buses: Vec<Bus>, block_hours: f64) -> cobre_core::System
     use chrono::NaiveDate;
     use cobre_core::scenario::LoadModel;
     use cobre_core::temporal::{
-        Block, BlockMode, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
+        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
     };
 
     let n_buses = buses.len();
@@ -1801,7 +1802,7 @@ fn multi_segment_system(buses: Vec<Bus>, block_hours: f64) -> cobre_core::System
             risk_config: StageRiskConfig::Expectation,
             scenario_config: ScenarioSourceConfig {
                 branching_factor: 1,
-                noise_method: cobre_core::temporal::NoiseMethod::Saa,
+                noise_method: NoiseMethod::Saa,
             },
             ..Default::default()
         },
@@ -2841,10 +2842,7 @@ fn build_active_violations_template() -> cobre_sddp::StageTemplates {
 /// lets `PrecomputedPar::build` resolve lag-stage statistics via the season fallback
 /// even with no pre-study inflow models.
 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-fn two_hydro_par_system(
-    ar_order: usize,
-    inflow_models: Vec<cobre_core::scenario::InflowModel>,
-) -> cobre_core::System {
+fn two_hydro_par_system(ar_order: usize, inflow_models: Vec<InflowModel>) -> cobre_core::System {
     use chrono::NaiveDate;
     use cobre_core::entities::hydro::{HydroGenerationModel, HydroPenalties};
     use cobre_core::scenario::LoadModel;

@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use clap::Args;
 use console::{Term, style};
 
+use crate::banner::print_banner;
 use crate::error::CliError;
 use crate::templates;
 
@@ -133,7 +134,7 @@ fn execute_scaffold(
         })?;
     }
 
-    crate::banner::print_banner(&stderr);
+    print_banner(&stderr);
     print_summary(&stderr, template, directory);
 
     Ok(())

@@ -21,6 +21,8 @@ use crate::HostInfo;
 use crate::LocalCommKind;
 #[cfg(feature = "shared-memory")]
 use crate::LocalCommKind::Ferrompi;
+#[cfg(feature = "shared-memory")]
+use crate::LocalCommunicator;
 use crate::MpiRuntimeInfo;
 use crate::ReduceOp;
 use crate::ReduceOp::BitwiseOr;
@@ -207,7 +209,7 @@ impl crate::TopologyProvider for FerrompiBackend {
 pub struct FerrompiLocalComm(ferrompi::Communicator);
 
 #[cfg(feature = "shared-memory")]
-impl crate::traits::LocalCommunicator for FerrompiLocalComm {
+impl LocalCommunicator for FerrompiLocalComm {
     fn rank(&self) -> usize {
         #[allow(clippy::cast_sign_loss)]
         {

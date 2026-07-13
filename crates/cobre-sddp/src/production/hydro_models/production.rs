@@ -13,7 +13,9 @@ use std::path::Path;
 use rayon::prelude::*;
 
 use cobre_core::temporal::Stage;
-use cobre_core::{EntityId, StageId, StudyPos, System, entities::hydro::HydroGenerationModel};
+use cobre_core::{
+    EntityId, Hydro, StageId, StudyPos, System, entities::hydro::HydroGenerationModel,
+};
 use cobre_io::CaseArtifacts;
 use cobre_io::FphaDeviationPointRow;
 use cobre_io::HydroReferenceVolumeFractions;
@@ -29,7 +31,9 @@ use super::types::{
     ResolvedProductionModel,
 };
 use crate::SddpError;
-use crate::energy_conversion::build_hydro_energy_productivity_override;
+use crate::energy_conversion::{
+    HydroEnergyProductivityOverride, build_hydro_energy_productivity_override,
+};
 use crate::fpha_fitting::{
     ForebayTable, FphaDeviationPoint, FphaFitDeviation, FphaFitResult, TailraceFamilies,
     TailraceSource, build_tailrace_families_map, fit_fpha_planes,
@@ -40,9 +44,9 @@ use crate::fpha_fitting::{
 /// when at least one hydro uses `source: "computed"`; this function never does I/O.
 type ResolveProductionResult = (
     ProductionModelSet,
-    crate::energy_conversion::HydroEnergyProductivityOverride,
+    HydroEnergyProductivityOverride,
     Vec<(EntityId, ProductionModelSource)>,
-    Vec<cobre_io::FphaHyperplaneRow>,
+    Vec<FphaHyperplaneRow>,
     Vec<(EntityId, StudyPos, f64)>,
     Vec<FphaFitDeviationEntry>,
     Vec<FphaDeviationPointRow>,
@@ -163,7 +167,7 @@ pub fn resolve_production_models_from_artifacts(
 
     let mut all_models: Vec<Vec<ResolvedProductionModel>> = Vec::with_capacity(n_hydros);
     let mut provenance: Vec<(EntityId, ProductionModelSource)> = Vec::with_capacity(n_hydros);
-    let mut export_rows: Vec<cobre_io::FphaHyperplaneRow> = Vec::new();
+    let mut export_rows: Vec<FphaHyperplaneRow> = Vec::new();
     let mut fpha_fit_deviations: Vec<FphaFitDeviationEntry> = Vec::new();
     // Per-sampled-point deviation rows, concatenated below in the same sequential
     // canonical-order flatten as `export_rows`. Empty unless the opt-in is on.
@@ -258,7 +262,7 @@ struct FphaDeviationDiagnostic {
 struct PerHydroFit {
     stage_models: Vec<ResolvedProductionModel>,
     provenance: (EntityId, ProductionModelSource),
-    export_rows: Vec<cobre_io::FphaHyperplaneRow>,
+    export_rows: Vec<FphaHyperplaneRow>,
     fpha_deviations: Vec<FphaDeviationDiagnostic>,
     /// Per-sampled-point rows; empty unless `collect_deviation_points` is on.
     deviation_point_rows: Vec<FphaDeviationPointRow>,
@@ -275,13 +279,13 @@ struct PerHydroFit {
 // context struct would only relocate the same fields.
 #[allow(clippy::too_many_arguments)]
 fn fit_one_hydro(
-    hydro: &cobre_core::entities::hydro::Hydro,
+    hydro: &Hydro,
     config_map: &HashMap<EntityId, &ProductionModelConfig>,
     geometry_map: &HashMap<EntityId, Vec<&HydroGeometryRow>>,
     families_map: &HashMap<EntityId, TailraceFamilies>,
     reference_volume_fractions: &HydroReferenceVolumeFractions,
     hyperplane_map: &HashMap<(EntityId, Option<i32>), Vec<&FphaHyperplaneRow>>,
-    override_table: &crate::energy_conversion::HydroEnergyProductivityOverride,
+    override_table: &HydroEnergyProductivityOverride,
     study_stages: &[&Stage],
     plane_reduction: Option<&PlaneReductionConfig>,
     system: &System,
@@ -292,7 +296,7 @@ fn fit_one_hydro(
 
     let source = determine_source(hydro, config_entry)?;
 
-    let mut export_rows: Vec<cobre_io::FphaHyperplaneRow> = Vec::new();
+    let mut export_rows: Vec<FphaHyperplaneRow> = Vec::new();
     let mut fpha_deviations: Vec<FphaDeviationDiagnostic> = Vec::new();
     let mut deviation_point_rows: Vec<FphaDeviationPointRow> = Vec::new();
 
@@ -374,7 +378,7 @@ fn build_geometry_map(
 /// absolute hm³, so it is consumed verbatim — do NOT re-apply the
 /// `v_min + fraction·(..)` span formula here.
 fn resolve_downstream_level(
-    hydro: &cobre_core::entities::hydro::Hydro,
+    hydro: &Hydro,
     stage_pos: StudyPos,
     system: &System,
     geometry_map: &HashMap<EntityId, Vec<&HydroGeometryRow>>,
@@ -429,7 +433,7 @@ fn long_term_mean_inflow(system: &System, hydro_id: EntityId) -> f64 {
 /// the hull/α/secant procedure. `plane_reduction` `None` skips the merge pass.
 /// `entry_level_bits` seeds the `Distance` reduction arm (with `hydro.id.0`).
 fn fit_planes_for_hydro(
-    hydro: &cobre_core::entities::hydro::Hydro,
+    hydro: &Hydro,
     config: &FphaColumnLayout,
     geometry_map: &HashMap<EntityId, Vec<&HydroGeometryRow>>,
     long_term_mean_inflow_m3s: f64,
@@ -464,7 +468,7 @@ fn fit_planes_for_hydro(
 /// families coupled to the resolved downstream level when the plant is in
 /// `families_map`, else the entity [`cobre_core::TailraceModel`] fallback.
 fn resolve_tailrace_source(
-    hydro: &cobre_core::entities::hydro::Hydro,
+    hydro: &Hydro,
     stage_pos: StudyPos,
     families_map: &HashMap<EntityId, TailraceFamilies>,
     geometry_map: &HashMap<EntityId, Vec<&HydroGeometryRow>>,
@@ -523,7 +527,7 @@ type FittedCacheEntry<'a> = (
 // would only relocate the same fields.
 #[allow(clippy::too_many_arguments)]
 fn fit_computed_planes_per_stage(
-    hydro: &cobre_core::entities::hydro::Hydro,
+    hydro: &Hydro,
     config_entry: Option<&ProductionModelConfig>,
     geometry_map: &HashMap<EntityId, Vec<&HydroGeometryRow>>,
     families_map: &HashMap<EntityId, TailraceFamilies>,
@@ -533,7 +537,7 @@ fn fit_computed_planes_per_stage(
     long_term_mean_inflow_m3s: f64,
     plane_reduction: Option<&PlaneReductionConfig>,
     collect_deviation_points: bool,
-    export_rows: &mut Vec<cobre_io::FphaHyperplaneRow>,
+    export_rows: &mut Vec<FphaHyperplaneRow>,
     diagnostics: &mut Vec<FphaDeviationDiagnostic>,
     deviation_point_rows: &mut Vec<FphaDeviationPointRow>,
 ) -> Result<Vec<Vec<FphaPlane>>, SddpError> {
@@ -722,7 +726,7 @@ pub(crate) fn resolve_reference_volume_hm3(
 ///
 /// Returns `SddpError::Validation` naming the first missing prerequisite and the hydro.
 fn validate_computed_prerequisites(
-    hydro: &cobre_core::entities::hydro::Hydro,
+    hydro: &Hydro,
     geometry_map: &HashMap<EntityId, Vec<&HydroGeometryRow>>,
 ) -> Result<(), SddpError> {
     let missing = if hydro.tailrace.is_none() {
@@ -752,7 +756,7 @@ fn validate_computed_prerequisites(
 /// Determine the [`ProductionModelSource`] for one hydro (the high-level
 /// classification only), rejecting unsupported cases before any Parquet load.
 fn determine_source(
-    hydro: &cobre_core::entities::hydro::Hydro,
+    hydro: &Hydro,
     config_entry: Option<&ProductionModelConfig>,
 ) -> Result<ProductionModelSource, SddpError> {
     if let Some(config) = config_entry {
@@ -788,13 +792,13 @@ fn determine_source(
 /// loop (when `source == ComputedFromGeometry`), so the fitting pipeline does not
 /// re-run per stage.
 fn resolve_stage_model(
-    hydro: &cobre_core::entities::hydro::Hydro,
+    hydro: &Hydro,
     stage: &Stage,
     config_entry: Option<&ProductionModelConfig>,
     source: ProductionModelSource,
     hyperplane_map: &HashMap<(EntityId, Option<i32>), Vec<&FphaHyperplaneRow>>,
     cached_computed_planes: Option<&[FphaPlane]>,
-    productivity_override: Option<&crate::energy_conversion::HydroEnergyProductivityOverride>,
+    productivity_override: Option<&HydroEnergyProductivityOverride>,
 ) -> Result<ResolvedProductionModel, SddpError> {
     // `cobre_io::validation::productivity_resolution` rejects both-JSON-and-parquet
     // at load time, so this override lookup never silently masks a JSON value.
@@ -1016,7 +1020,7 @@ fn resolve_stage<'a>(
 /// `(hydro_id, None)` all-stage rows. Each `FphaPlane` intercept is the pre-scaled
 /// `gamma_0 * kappa`.
 fn build_fpha_model(
-    hydro: &cobre_core::entities::hydro::Hydro,
+    hydro: &Hydro,
     stage: &Stage,
     _source: ProductionModelSource,
     hyperplane_map: &HashMap<(EntityId, Option<i32>), Vec<&FphaHyperplaneRow>>,
@@ -1065,7 +1069,7 @@ fn build_fpha_model(
 /// - `gamma_q > 0` — more turbined flow → more generation
 /// - `kappa ∈ (0, 1]` — correction factor range
 fn validate_hyperplane_row(
-    hydro: &cobre_core::entities::hydro::Hydro,
+    hydro: &Hydro,
     stage: &Stage,
     row: &FphaHyperplaneRow,
 ) -> Result<(), SddpError> {

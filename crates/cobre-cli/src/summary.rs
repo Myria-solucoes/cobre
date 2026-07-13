@@ -1161,7 +1161,7 @@ mod tests {
 
     use super::{HydroModelSummary, format_hydro_model_summary_string, print_hydro_model_summary};
     use cobre_core::EntityId;
-    use cobre_sddp::FphaHydroDetail;
+    use cobre_sddp::{FphaHydroDetail, ProductionModelSource};
 
     fn make_hydro_model_summary_mixed() -> HydroModelSummary {
         HydroModelSummary {
@@ -1172,13 +1172,13 @@ mod tests {
                 FphaHydroDetail {
                     hydro_id: EntityId(3),
                     name: "Hydro3".to_string(),
-                    source: cobre_sddp::ProductionModelSource::PrecomputedHyperplanes,
+                    source: ProductionModelSource::PrecomputedHyperplanes,
                     n_planes: 5,
                 },
                 FphaHydroDetail {
                     hydro_id: EntityId(4),
                     name: "Hydro4".to_string(),
-                    source: cobre_sddp::ProductionModelSource::PrecomputedHyperplanes,
+                    source: ProductionModelSource::PrecomputedHyperplanes,
                     n_planes: 5,
                 },
             ],
@@ -1272,13 +1272,13 @@ mod tests {
                 FphaHydroDetail {
                     hydro_id: EntityId(1),
                     name: "Hydro1".to_string(),
-                    source: cobre_sddp::ProductionModelSource::PrecomputedHyperplanes,
+                    source: ProductionModelSource::PrecomputedHyperplanes,
                     n_planes: 4,
                 },
                 FphaHydroDetail {
                     hydro_id: EntityId(2),
                     name: "Hydro2".to_string(),
-                    source: cobre_sddp::ProductionModelSource::ComputedFromGeometry,
+                    source: ProductionModelSource::ComputedFromGeometry,
                     n_planes: 3,
                 },
             ],

@@ -8,6 +8,7 @@
 
 mod helpers;
 
+use cobre_core::AnticipatedConfig;
 use cobre_core::EntityId;
 use cobre_io::{deserialize_system, load_case, serialize_system};
 use tempfile::TempDir;
@@ -743,7 +744,7 @@ fn test_lead_time_single_decider_on_disk_load() {
     let ant = &system.thermals()[THERMAL_IDX_ANT];
     assert_eq!(
         ant.anticipated_config,
-        Some(cobre_core::AnticipatedConfig::LeadTime(744.0)),
+        Some(AnticipatedConfig::LeadTime(744.0)),
         "loaded thermal must carry the LeadTime(744.0) config"
     );
 

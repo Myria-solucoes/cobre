@@ -23,8 +23,8 @@ use console::Term;
 use cobre_comm::{BackendKind, ExecutionTopology, HostInfo, MpiRuntimeInfo, SlurmJobInfo};
 use cobre_io::{
     ConvergenceSummary, DistributionInfo, OutputError, SimulationMetadata, TrainingMetadata,
-    read_convergence_summary, read_hydro_model_summary, read_provenance_report,
-    read_simulation_metadata, read_training_metadata,
+    output::read_initial_gap_percent, read_convergence_summary, read_hydro_model_summary,
+    read_provenance_report, read_simulation_metadata, read_training_metadata,
 };
 use cobre_sddp::{HydroModelSummary, ModelProvenanceReport};
 
@@ -79,7 +79,7 @@ pub fn execute(args: SummaryArgs) -> Result<(), CliError> {
     let convergence_path = output_dir.join("training/convergence.parquet");
     let convergence = read_convergence_summary(&convergence_path)
         .unwrap_or_else(|_| convergence_fallback(&metadata));
-    let initial_gap_percent = cobre_io::output::read_initial_gap_percent(&convergence_path);
+    let initial_gap_percent = read_initial_gap_percent(&convergence_path);
 
     let hydro_models_path = output_dir.join("training/hydro_models.json");
     let hydro_models: Option<HydroModelSummary> =

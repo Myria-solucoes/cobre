@@ -12,7 +12,8 @@
 
 use super::*;
 use cobre_core::scenario::{CorrelationModel, InflowModel};
-use cobre_core::{EntityId, SystemBuilder};
+use cobre_core::{EntityId, Hydro, HydroPenalties, SeasonMap, Stage, SystemBuilder};
+use cobre_stochastic::PrecomputedPar;
 
 // ── Helper to build a minimal System ─────────────────────────────────────
 
@@ -389,7 +390,7 @@ fn write_unit_test_inflow_history(path: &std::path::Path, hydro_id: i32, n_years
 /// `inflow_ar_coefficients.parquet` (the `PartialEstimation` precondition).
 #[allow(clippy::cast_possible_wrap)]
 fn build_system_with_user_stats(n_years: usize) -> System {
-    use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
+    use cobre_core::entities::hydro::HydroGenerationModel;
     use cobre_core::scenario::InflowModel;
     use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
 
@@ -670,8 +671,6 @@ fn test_estimation_report_structure() {
 
 #[test]
 fn test_estimation_report_empty_for_pacf() {
-    use cobre_core::temporal::Stage;
-
     let observations: Vec<(EntityId, chrono::NaiveDate, f64)> = vec![];
     let seasonal_stats: Vec<SeasonalStats> = vec![];
     let stages: Vec<Stage> = vec![];
@@ -700,17 +699,13 @@ fn test_estimation_report_empty_for_pacf() {
 
 // ── Pre-study stage expansion tests ─────────────────────────────────────
 
-fn make_expansion_stage(
-    index: usize,
-    id: i32,
-    season_id: Option<usize>,
-) -> cobre_core::temporal::Stage {
+fn make_expansion_stage(index: usize, id: i32, season_id: Option<usize>) -> Stage {
     use chrono::NaiveDate;
     use cobre_core::temporal::{
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
     };
 
-    cobre_core::temporal::Stage {
+    Stage {
         index,
         id,
         start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -985,7 +980,7 @@ fn make_two_season_stage(
     season_id: usize,
     year: i32,
     first_half: bool,
-) -> cobre_core::temporal::Stage {
+) -> Stage {
     use chrono::NaiveDate;
     use cobre_core::temporal::{
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
@@ -1003,7 +998,7 @@ fn make_two_season_stage(
         )
     };
 
-    cobre_core::temporal::Stage {
+    Stage {
         index,
         id,
         start_date,
@@ -1039,7 +1034,7 @@ fn test_ar_rows_to_estimates_groups_by_season() {
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
     };
 
-    let make_stage = |id: i32, season_id: usize| cobre_core::temporal::Stage {
+    let make_stage = |id: i32, season_id: usize| Stage {
         index: id as usize,
         id,
         start_date: chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
@@ -1167,7 +1162,7 @@ fn test_ar_rows_to_estimates_groups_by_season() {
 fn write_unit_test_ar_coefficients(
     path: &std::path::Path,
     hydro_id: i32,
-    stages: &[cobre_core::temporal::Stage],
+    stages: &[Stage],
     coefficient: f64,
     residual_std_ratio: f64,
 ) {
@@ -1215,7 +1210,7 @@ fn write_unit_test_ar_coefficients(
 /// `UserArHistoryStats` case), where `assemble_inflow_models` returns empty.
 #[allow(clippy::cast_possible_wrap)]
 fn build_system_empty_models(n_years: usize) -> System {
-    use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
+    use cobre_core::entities::hydro::HydroGenerationModel;
     use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
 
     let hydro_id = EntityId(1);
@@ -1463,8 +1458,8 @@ fn test_user_ar_estimation_returns_user_provided_report() {
 
 // ── Bidirectional coverage validation tests ─────────────────
 
-fn make_hydro(hydro_id: EntityId, bus_id: EntityId) -> cobre_core::entities::hydro::Hydro {
-    use cobre_core::entities::hydro::{Hydro, HydroGenerationModel};
+fn make_hydro(hydro_id: EntityId, bus_id: EntityId) -> Hydro {
+    use cobre_core::entities::hydro::HydroGenerationModel;
     Hydro {
         id: hydro_id,
         name: format!("H{}", hydro_id.0),
@@ -1491,7 +1486,7 @@ fn make_hydro(hydro_id: EntityId, bus_id: EntityId) -> cobre_core::entities::hyd
         evaporation_reference_volumes_hm3: None,
         diversion: None,
         filling: None,
-        penalties: cobre_core::entities::hydro::HydroPenalties {
+        penalties: HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -1819,7 +1814,7 @@ fn collect_std_ratio_warnings(
     );
     let n = user_stds.len();
 
-    let stages: Vec<cobre_core::temporal::Stage> = (0..n)
+    let stages: Vec<Stage> = (0..n)
         .map(|i| {
             let year = 1970_i32;
             let first_half = i % 2 == 0;
@@ -1933,7 +1928,7 @@ use cobre_core::temporal::{
 };
 
 /// 12-season monthly stages over `n_years` from year 2000; season_id cycles 0..12.
-fn make_monthly_stages_for_annual(n_years: usize) -> Vec<cobre_core::temporal::Stage> {
+fn make_monthly_stages_for_annual(n_years: usize) -> Vec<Stage> {
     let mut stages = Vec::new();
     let mut idx = 0usize;
     for year in 0..n_years {
@@ -1941,7 +1936,7 @@ fn make_monthly_stages_for_annual(n_years: usize) -> Vec<cobre_core::temporal::S
             let y = 2000 + year as i32;
             let m = month as u32 + 1;
             let (ey, em) = if m == 12 { (y + 1, 1u32) } else { (y, m + 1) };
-            stages.push(cobre_core::temporal::Stage {
+            stages.push(Stage {
                 index: idx,
                 id: idx as i32,
                 start_date: NaiveDate::from_ymd_opt(y, m, 1).unwrap(),
@@ -2205,8 +2200,8 @@ fn estimate_ar_coefficients_with_selection_classical_path_unchanged() {
 }
 
 /// Build a 12-season monthly `SeasonMap` (season id m → calendar month m+1).
-fn monthly_season_map() -> cobre_core::temporal::SeasonMap {
-    use cobre_core::temporal::{SeasonCycleType, SeasonDefinition, SeasonMap};
+fn monthly_season_map() -> SeasonMap {
+    use cobre_core::temporal::{SeasonCycleType, SeasonDefinition};
     let seasons = (0..12usize)
         .map(|m| SeasonDefinition {
             id: m,
@@ -2225,11 +2220,7 @@ fn monthly_season_map() -> cobre_core::temporal::SeasonMap {
 
 /// Build study stages for a partial-year monthly study spanning seasons
 /// `[first_season, first_season + n)` starting in calendar year `start_year`.
-fn partial_year_stages(
-    first_season: usize,
-    n: usize,
-    start_year: i32,
-) -> Vec<cobre_core::temporal::Stage> {
+fn partial_year_stages(first_season: usize, n: usize, start_year: i32) -> Vec<Stage> {
     (0..n)
         .map(|k| {
             let season = first_season + k;
@@ -2239,7 +2230,7 @@ fn partial_year_stages(
             } else {
                 (start_year, m + 1)
             };
-            cobre_core::temporal::Stage {
+            Stage {
                 index: k,
                 id: i32::try_from(k).unwrap(),
                 start_date: NaiveDate::from_ymd_opt(start_year, m, 1).unwrap(),
@@ -2306,7 +2297,7 @@ fn partial_year_par2_synthesizes_prestudy_lag_models() {
         "stage -2 must map to season 6 (Jul)"
     );
 
-    let stages: Vec<cobre_core::temporal::Stage> = study_stages
+    let stages: Vec<Stage> = study_stages
         .iter()
         .cloned()
         .chain(prestudy.iter().cloned())
@@ -2338,15 +2329,14 @@ fn partial_year_par2_synthesizes_prestudy_lag_models() {
     let inflow_models = assemble_inflow_models(stats_rows, coeff_rows, annual_rows)
         .expect("assembly must succeed with pre-study rows present");
 
-    let neg_models: Vec<&cobre_core::scenario::InflowModel> =
-        inflow_models.iter().filter(|m| m.stage_id < 0).collect();
+    let neg_models: Vec<&InflowModel> = inflow_models.iter().filter(|m| m.stage_id < 0).collect();
     assert!(
         neg_models.iter().any(|m| m.stage_id == -1) && neg_models.iter().any(|m| m.stage_id == -2),
         "expected InflowModel entries at stage_id -1 and -2, got {:?}",
         neg_models.iter().map(|m| m.stage_id).collect::<Vec<_>>()
     );
 
-    let par = cobre_stochastic::PrecomputedPar::build(
+    let par = PrecomputedPar::build(
         &inflow_models,
         &study_stages,
         &[h1],

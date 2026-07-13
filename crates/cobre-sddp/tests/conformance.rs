@@ -25,8 +25,10 @@
 #![allow(clippy::needless_update)]
 
 use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
-use cobre_sddp::SyncResult;
-use cobre_sddp::indexer::HydroSys;
+use cobre_core::BlockMode;
+use cobre_sddp::indexer::{HydroSys, StorageBoundaryGrid};
+use cobre_sddp::lp_builder::StageGeometry;
+use cobre_sddp::{FutureCostFunction, SyncResult};
 use cobre_solver::{
     Basis, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
 };
@@ -178,6 +180,8 @@ fn simple_opening_tree(n_openings: usize) -> cobre_stochastic::OpeningTree {
         },
     };
     use cobre_stochastic::correlation::resolve::DecomposedCorrelation;
+    use cobre_stochastic::generate_opening_tree;
+    use cobre_stochastic::tree::OpeningTreeGenerationInputs;
     use std::collections::BTreeMap;
 
     let stage = make_stage(
@@ -228,7 +232,7 @@ fn simple_opening_tree(n_openings: usize) -> cobre_stochastic::OpeningTree {
     let decomposed = DecomposedCorrelation::build(&corr_model).unwrap();
     let entity_order = vec![entity_id];
 
-    cobre_stochastic::tree::generate::generate_opening_tree(
+    generate_opening_tree(
         42,
         &[stage],
         1,
@@ -239,7 +243,7 @@ fn simple_opening_tree(n_openings: usize) -> cobre_stochastic::OpeningTree {
             n_load_buses: 0,
             n_ncs: 0,
         },
-        &cobre_stochastic::tree::generate::OpeningTreeGenerationInputs::default(),
+        &OpeningTreeGenerationInputs::default(),
     )
     .unwrap()
 }
@@ -254,7 +258,7 @@ fn make_sync_result(global_ub_mean: f64) -> SyncResult {
 }
 
 fn make_fcf(n_stages: usize, state_dimension: usize) -> cobre_sddp::FutureCostFunction {
-    cobre_sddp::FutureCostFunction::new(n_stages, state_dimension, 2, 100, &vec![0; n_stages])
+    FutureCostFunction::new(n_stages, state_dimension, 2, 100, &vec![0; n_stages])
 }
 
 // ===========================================================================
@@ -764,6 +768,7 @@ mod convergence_conformance {
 mod lb_conformance {
     //! LB monotonicity conformance: adding cuts can only increase the lower bound.
 
+    use cobre_core::SystemBuilder;
     use cobre_core::scenario::SamplingScheme;
     use cobre_sddp::{
         context::{StageContext, TrainingContext},
@@ -773,10 +778,13 @@ mod lb_conformance {
         lower_bound::{LbEvalScratch, LbEvalScratchBundle, evaluate_lower_bound},
         lp_builder::PatchBuffer,
         risk_measure::RiskMeasure,
+        test_support::cut_state_projection,
         workspace::{ScratchBuffers, WorkspaceSizing},
     };
     use cobre_solver::RowBatch;
-    use cobre_stochastic::StochasticContext;
+    use cobre_stochastic::{
+        ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context,
+    };
 
     use super::{LocalComm, MockSolver, make_fcf, minimal_template, simple_opening_tree};
 
@@ -803,20 +811,18 @@ mod lb_conformance {
     /// of the retired `stochastic: None` field. `user_tree` bypasses generation
     /// entirely, so the injected tree's shape is preserved verbatim.
     fn wrap_opening_tree(tree: cobre_stochastic::OpeningTree) -> StochasticContext {
-        let system = cobre_core::SystemBuilder::new()
-            .build()
-            .expect("empty system is valid");
-        cobre_stochastic::context::build_stochastic_context(
+        let system = SystemBuilder::new().build().expect("empty system is valid");
+        build_stochastic_context(
             &system,
             42,
             None,
             &[],
             &[],
-            cobre_stochastic::context::OpeningTreeInputs {
+            OpeningTreeInputs {
                 user_tree: Some(tree),
                 ..Default::default()
             },
-            cobre_stochastic::context::ClassSchemes {
+            ClassSchemes {
                 inflow: None,
                 load: None,
                 ncs: None,
@@ -880,8 +886,8 @@ mod lb_conformance {
         let horizon = HorizonMode::Finite { num_stages: 2 };
         let study_dims = StudyDimensions::default();
         let cut_state_layouts = vec![
-            cobre_sddp::test_support::cut_state_projection(&state_layout),
-            cobre_sddp::test_support::cut_state_projection(&state_layout),
+            cut_state_projection(&state_layout),
+            cut_state_projection(&state_layout),
         ];
         let inflow_method = InflowNonNegativityMethod::None;
         let training_ctx = TrainingContext {
@@ -985,7 +991,7 @@ mod lb_conformance {
 // ---------------------------------------------------------------------------
 
 /// Mirrors the gated `test_support::geometry` body through the public
-/// [`StageGeometry`](cobre_sddp::lp_builder::StageGeometry) literal, so this
+/// [`StageGeometry`](StageGeometry) literal, so this
 /// external test crate (which does not see the parent crate's `#[cfg(test)]`
 /// surface) resolves byte-identical column ranges on the default feature set. The
 /// operational-violation constraint *row* ranges are NOT reproduced here — they
@@ -1003,7 +1009,7 @@ fn build_geometry(
     max_deficit_segments: usize,
     fpha_hydro_indices: Vec<HydroSys>,
     fpha_planes: &[usize],
-) -> cobre_sddp::lp_builder::StageGeometry {
+) -> StageGeometry {
     // theta = N*(3+L); control region starts at theta + 1 (no anticipated thermals).
     let theta = hydro_count * (3 + max_par_order);
     let turbine_start = theta + 1;
@@ -1062,7 +1068,7 @@ fn build_geometry(
     let load_balance_end = load_balance_start + n_buses * n_blks;
     let _ = fpha_planes; // FPHA row arithmetic is internal; only the column count matters here.
 
-    cobre_sddp::lp_builder::StageGeometry {
+    StageGeometry {
         // θ sits one column before the turbine block (`turbine.start == theta + 1`).
         theta_col: turbine_start - 1,
         turbine: turbine_start..spillage_start,
@@ -1099,13 +1105,8 @@ fn build_geometry(
         filled_min_storage_floor_col: 0..0,
         z_inflow_row_start: 0,
         n_blks,
-        storage_boundary_grid: cobre_sddp::indexer::StorageBoundaryGrid::new(
-            storage_in_base,
-            0,
-            0,
-            n_blks,
-        ),
-        block_mode: cobre_core::BlockMode::Parallel,
+        storage_boundary_grid: StorageBoundaryGrid::new(storage_in_base, 0, 0, n_blks),
+        block_mode: BlockMode::Parallel,
         fpha_hydro_indices,
         evap_hydro_indices: Vec::new(),
         filling_target_hydro_indices: Vec::new(),

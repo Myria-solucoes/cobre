@@ -551,7 +551,7 @@ impl LineRenderer {
 mod tests {
     use std::sync::mpsc;
 
-    use cobre_core::TrainingEvent;
+    use cobre_core::{TrainingEvent, WelfordAccumulator};
 
     use super::{RenderMode, eta_millis, fmt_hms, fmt_time_cell, run_progress_thread};
 
@@ -1001,7 +1001,7 @@ mod tests {
             );
         }
 
-        let mut acc = cobre_core::WelfordAccumulator::new();
+        let mut acc = WelfordAccumulator::new();
         for &c in &costs {
             acc.update(c);
         }

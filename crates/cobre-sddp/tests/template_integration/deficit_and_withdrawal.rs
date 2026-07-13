@@ -8,7 +8,7 @@ fn test_multi_segment_deficit_column_count() {
     use chrono::NaiveDate;
     use cobre_core::scenario::LoadModel;
     use cobre_core::temporal::{
-        Block, BlockMode, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
+        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
     };
 
     let bus0 = make_bus(
@@ -89,7 +89,7 @@ fn test_multi_segment_deficit_column_count() {
             risk_config: StageRiskConfig::Expectation,
             scenario_config: ScenarioSourceConfig {
                 branching_factor: 1,
-                noise_method: cobre_core::temporal::NoiseMethod::Saa,
+                noise_method: NoiseMethod::Saa,
             },
             ..Default::default()
         },

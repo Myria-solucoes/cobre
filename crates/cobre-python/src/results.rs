@@ -35,6 +35,8 @@ use pyo3::exceptions::{PyFileNotFoundError, PyIndexError, PyOSError, PyValueErro
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyList, PyString};
 
+use crate::errors::{ErrorSource, convert_error};
+
 /// Canonicalize a path and return an appropriate Python error on failure.
 fn canonicalize_dir(path: &Path) -> PyResult<PathBuf> {
     path.canonicalize().map_err(|e| {
@@ -880,7 +882,7 @@ where
 /// single [`crate::errors::convert_error`] mapping site (which owns the per-variant
 /// mapping and the read-path `NotFound` fold).
 fn output_error_to_py(err: &cobre_io::OutputError) -> PyErr {
-    crate::errors::convert_error(crate::errors::ErrorSource::Output(err))
+    convert_error(ErrorSource::Output(err))
 }
 
 /// Read an optional simulation-metadata file, treating file-not-found as `None`.

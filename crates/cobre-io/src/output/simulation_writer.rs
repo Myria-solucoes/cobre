@@ -36,6 +36,7 @@ use arrow::array::{BooleanBuilder, Float64Builder, Int8Builder, Int32Builder, Re
 
 use cobre_core::System;
 
+use crate::MetadataSimulationSolveStats;
 use crate::output::SimulationOutput;
 use crate::output::atomic::write_parquet_atomic;
 use crate::output::error::OutputError;
@@ -746,7 +747,7 @@ impl SimulationParquetWriter {
             total_time_ms,
             partitions_written: self.partitions_written,
             cost: None,
-            solve_stats: crate::MetadataSimulationSolveStats::default(),
+            solve_stats: MetadataSimulationSolveStats::default(),
         }
     }
 }

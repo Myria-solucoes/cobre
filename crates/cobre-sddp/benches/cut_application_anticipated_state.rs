@@ -25,6 +25,7 @@
     clippy::cast_precision_loss
 )]
 
+use cobre_core::temporal::StageStateConfig;
 use cobre_sddp::build_cut_row_batch_into;
 use cobre_sddp::cut::fcf::FutureCostFunction;
 use cobre_sddp::indexer::{CutStateProjection, StateLayout};
@@ -36,7 +37,7 @@ use std::hint::black_box;
 fn full_cut_state(state: &StateLayout) -> CutStateProjection {
     CutStateProjection::new(
         state,
-        cobre_core::temporal::StageStateConfig {
+        StageStateConfig {
             storage: true,
             inflow_lags: true,
         },

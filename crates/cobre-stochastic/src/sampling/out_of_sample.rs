@@ -4,10 +4,14 @@
 //! Methods: SAA, LHS, QMC (Sobol/Halton); Selective and `HistoricalResiduals`
 //! fall back to SAA in the forward pass.
 
+#[cfg(test)]
+use cobre_core::EntityId;
 use cobre_core::temporal::NoiseMethod;
 use rand::RngExt;
 use rand_distr::StandardNormal;
 
+#[cfg(test)]
+use crate::DecomposedCorrelation;
 use crate::{
     StochasticError,
     noise::{rng::rng_from_seed, seed::derive_forward_seed_grouped},
@@ -53,8 +57,8 @@ pub(crate) fn sample_fresh(
     spec: FreshNoiseSpec,
     output: &mut [f64],
     perm_scratch: &mut [usize],
-    correlation: &crate::correlation::resolve::DecomposedCorrelation,
-    entity_order: &[cobre_core::EntityId],
+    correlation: &DecomposedCorrelation,
+    entity_order: &[EntityId],
 ) -> Result<(), StochasticError> {
     fill_uncorrelated(spec, None, output, perm_scratch)?;
     #[allow(clippy::cast_possible_wrap)]

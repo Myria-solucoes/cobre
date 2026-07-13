@@ -49,7 +49,7 @@ use cobre_core::{
     },
 };
 use cobre_sddp::{
-    InflowNonNegativityMethod, hydro_models::PrepareHydroModelsResult,
+    InflowNonNegativityMethod, ResolvedParameters, hydro_models::PrepareHydroModelsResult,
     lp_builder::build_stage_templates_resolving_layout,
 };
 use cobre_stochastic::{PrecomputedPar, normal::precompute::PrecomputedNormal};
@@ -639,7 +639,7 @@ fn lag_11_lp_coefficient_equals_psi_hat_over_twelve() {
         &PrecomputedNormal::default(),
         &hydro_models.production,
         &hydro_models.evaporation,
-        &cobre_sddp::ResolvedParameters::default(),
+        &ResolvedParameters::default(),
     )
     .expect("build_stage_templates_resolving_layout must succeed for the PAR(2)-A fixture");
 
@@ -695,7 +695,7 @@ fn lag_0_lp_coefficient_combines_ar_and_annual() {
         &PrecomputedNormal::default(),
         &hydro_models.production,
         &hydro_models.evaporation,
-        &cobre_sddp::ResolvedParameters::default(),
+        &ResolvedParameters::default(),
     )
     .expect("build_stage_templates_resolving_layout must succeed for the PAR(2)-A fixture");
 
@@ -750,7 +750,7 @@ fn classical_par_has_no_lag_11_column() {
         &PrecomputedNormal::default(),
         &hydro_models.production,
         &hydro_models.evaporation,
-        &cobre_sddp::ResolvedParameters::default(),
+        &ResolvedParameters::default(),
     )
     .expect("build_stage_templates_resolving_layout must succeed for the classical PAR(2) fixture");
 

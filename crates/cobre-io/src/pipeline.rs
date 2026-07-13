@@ -10,6 +10,7 @@ use cobre_core::{SystemBuilder, scenario::CorrelationModel};
 
 use crate::{
     LoadError,
+    extensions::load_tailrace_curves,
     report::{ValidationReport, generate_report},
     resolution::{
         BoundsEntitySlices, BoundsOverrides, PenaltiesEntitySlices, PenaltiesOverrides,
@@ -201,7 +202,7 @@ pub(crate) fn run_pipeline_with_artifacts(
     // and emits sub-ULP LP coefficients.
     let tailrace_curves = if manifest.system_tailrace_curves_parquet {
         let tailrace_path = path.join("system").join("tailrace_curves.parquet");
-        crate::extensions::load_tailrace_curves(Some(tailrace_path.as_path()))?
+        load_tailrace_curves(Some(tailrace_path.as_path()))?
     } else {
         Vec::new()
     };

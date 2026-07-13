@@ -488,7 +488,7 @@ mod tests {
         let entry = &ctx.errors()[0];
         assert_eq!(
             entry.kind,
-            crate::validation::ErrorKind::FileNotFound,
+            ErrorKind::FileNotFound,
             "error kind should be FileNotFound"
         );
         assert!(
@@ -566,7 +566,7 @@ mod tests {
         for entry in ctx.errors() {
             assert_eq!(
                 entry.kind,
-                crate::validation::ErrorKind::FileNotFound,
+                ErrorKind::FileNotFound,
                 "all errors should be FileNotFound"
             );
         }

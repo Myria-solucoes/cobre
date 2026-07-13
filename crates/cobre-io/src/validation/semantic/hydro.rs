@@ -564,6 +564,7 @@ pub(super) fn check_fpha_constraints(data: &ParsedData, ctx: &mut ValidationCont
 mod tests {
     use super::super::test_support::*;
     use super::super::validate_semantic_hydro_thermal;
+    use crate::FphaHyperplaneRow;
     use crate::validation::{ErrorKind, ValidationContext};
     use chrono::NaiveDate;
 
@@ -820,10 +821,10 @@ mod tests {
 
     // ── Commissioning hygiene: ordering parity + applied-window silence ────────
 
-    use cobre_core::EntityId;
     use cobre_core::entities::{
         ContractType, EnergyContract, NonControllableSource, PumpingStation,
     };
+    use cobre_core::{EntityId, Line, Thermal};
 
     /// Build a `PumpingStation` with the given entry/exit commissioning window.
     fn make_pumping_lc(id: i32, entry: Option<i32>, exit: Option<i32>) -> PumpingStation {
@@ -1062,12 +1063,8 @@ mod tests {
     }
 
     /// Build a windowed `Line` (entry < exit) for the commissioning tests.
-    fn make_windowed_line(
-        id: i32,
-        entry: Option<i32>,
-        exit: Option<i32>,
-    ) -> cobre_core::entities::Line {
-        cobre_core::entities::Line {
+    fn make_windowed_line(id: i32, entry: Option<i32>, exit: Option<i32>) -> Line {
+        Line {
             id: EntityId::from(id),
             name: format!("Line_{id}"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -1087,7 +1084,7 @@ mod tests {
     /// `ModelQuality` warning.
     #[test]
     fn test_applied_window_entities_emit_no_warning() {
-        let thermal = cobre_core::entities::Thermal {
+        let thermal = Thermal {
             entry_stage_id: Some(1),
             exit_stage_id: Some(2),
             ..make_thermal(1, 0.0, 100.0)
@@ -1794,7 +1791,7 @@ mod tests {
     /// gamma_s == 0.0 is valid (non-positive).
     #[test]
     fn test_fpha_gamma_s_zero_valid() {
-        let rows: Vec<crate::extensions::FphaHyperplaneRow> = (0..3)
+        let rows: Vec<FphaHyperplaneRow> = (0..3)
             .map(|i| {
                 let mut r = make_fpha_row(1, None, i);
                 r.gamma_s = 0.0;
@@ -1898,8 +1895,7 @@ mod tests {
             make_geom_row(1, 20.0, 110.0, 2.0),
             make_geom_row(1, 30.0, 120.0, 3.0),
         ];
-        let fpha: Vec<crate::extensions::FphaHyperplaneRow> =
-            (0..3).map(|i| make_fpha_row(1, Some(0), i)).collect();
+        let fpha: Vec<FphaHyperplaneRow> = (0..3).map(|i| make_fpha_row(1, Some(0), i)).collect();
         let data = make_data(
             vec![make_hydro(1, None)],
             vec![make_thermal(1, 0.0, 500.0)],

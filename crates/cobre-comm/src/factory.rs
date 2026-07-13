@@ -382,13 +382,15 @@ mod tests {
     #[test]
     #[cfg(not(feature = "mpi"))]
     fn test_create_communicator_no_feature_unavailable() {
+        use crate::BackendError::BackendNotAvailable;
+
         let err = super::create_communicator(BackendKind::Mpi)
             .expect_err("unavailable backend must return Err");
         assert!(
-            matches!(err, crate::BackendError::BackendNotAvailable { .. }),
+            matches!(err, BackendNotAvailable { .. }),
             "expected BackendNotAvailable, got {err:?}"
         );
-        if let crate::BackendError::BackendNotAvailable {
+        if let BackendNotAvailable {
             ref requested,
             ref available,
         } = err

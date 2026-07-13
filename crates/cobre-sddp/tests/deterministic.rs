@@ -19,11 +19,13 @@ use std::path::Path;
 use std::sync::mpsc;
 
 use cobre_core::scenario::ScenarioSource;
+use cobre_core::{BlockMode, EntityId};
 use cobre_io::{
     PolicyCheckpointMetadata, PolicyCutRecord, StageCutsPayload, write_policy_checkpoint,
 };
 use cobre_sddp::{
-    StudySetup, aggregate_simulation, hydro_models::prepare_hydro_models, setup::prepare_stochastic,
+    StudySetup, aggregate_simulation, hydro_models::prepare_hydro_models,
+    lead_time::resolve_spread, setup::prepare_stochastic,
 };
 use cobre_solver::{ActiveSolver, SolverInterface};
 
@@ -3311,14 +3313,8 @@ fn frozen_vs_fallback_simulation_costs_are_identical() {
 
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
 
-    let pr = prepare_stochastic(
-        system,
-        case_dir,
-        &config,
-        42,
-        &cobre_core::scenario::ScenarioSource::default(),
-    )
-    .expect("prepare_stochastic must succeed");
+    let pr = prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
+        .expect("prepare_stochastic must succeed");
     let system = pr.system;
     let stochastic = pr.stochastic;
 
@@ -3604,7 +3600,7 @@ fn d44_travel_time_substage_transit_bucket_dual() {
     let j_canonical_idx = system
         .hydros()
         .iter()
-        .position(|h| h.id == cobre_core::EntityId::from(1))
+        .position(|h| h.id == EntityId::from(1))
         .expect("D44: J (hydro id 1) must exist in the canonical hydro order");
     let storage_j_idx = state.storage.start + j_canonical_idx;
 
@@ -3762,7 +3758,7 @@ fn d45_travel_time_mixed_calendar_conservation() {
 
     let stage_hours = [720.0, 168.0, 168.0, 168.0];
 
-    let monthly = cobre_sddp::lead_time::resolve_spread(TRAVEL_TIME_HOURS, 0, &stage_hours, None);
+    let monthly = resolve_spread(TRAVEL_TIME_HOURS, 0, &stage_hours, None);
     assert_eq!(
         monthly.stage_reach, 3,
         "D45: the monthly anchor must resolve to depth 3, not the closed-form \
@@ -3801,10 +3797,7 @@ fn d45_travel_time_mixed_calendar_conservation() {
     );
     let padded = pad_calendar_for_resolution(&stage_hours, TRAVEL_TIME_HOURS);
     let own_depths: Vec<usize> = (0..N_STAGES)
-        .map(|stage| {
-            cobre_sddp::lead_time::resolve_spread(TRAVEL_TIME_HOURS, stage, &padded, None)
-                .stage_reach
-        })
+        .map(|stage| resolve_spread(TRAVEL_TIME_HOURS, stage, &padded, None).stage_reach)
         .collect();
     let capped: Vec<usize> = own_depths
         .iter()
@@ -3944,7 +3937,7 @@ fn d47_travel_time_confluence_aggregation() {
 
     let stage_hours = [720.0, 720.0, 720.0];
 
-    let u1 = cobre_sddp::lead_time::resolve_spread(360.0, 0, &stage_hours, None);
+    let u1 = resolve_spread(360.0, 0, &stage_hours, None);
     assert_eq!(u1.stage_reach, 1, "U1: depth must be 1");
     for (lag, (&actual, &expected)) in u1.stage_weights.iter().zip([0.5, 0.5].iter()).enumerate() {
         assert!(
@@ -3953,7 +3946,7 @@ fn d47_travel_time_confluence_aggregation() {
         );
     }
 
-    let u2 = cobre_sddp::lead_time::resolve_spread(1080.0, 0, &stage_hours, None);
+    let u2 = resolve_spread(1080.0, 0, &stage_hours, None);
     assert_eq!(
         u2.stage_reach, 2,
         "U2: depth must be 2 (arrives at lags 1 and 2)"
@@ -3987,7 +3980,7 @@ fn d47_travel_time_confluence_aggregation() {
     let j_canonical_idx = system
         .hydros()
         .iter()
-        .position(|h| h.id == cobre_core::EntityId::from(2))
+        .position(|h| h.id == EntityId::from(2))
         .expect("D47: J (hydro id 2) must exist in the canonical hydro order");
     assert_eq!(
         state.transit_bucket_column_order,
@@ -4210,7 +4203,7 @@ fn d48_travel_time_ic_seed_windowed_defluence_cost() {
     let j_canonical_idx = system
         .hydros()
         .iter()
-        .position(|h| h.id == cobre_core::EntityId::from(1))
+        .position(|h| h.id == EntityId::from(1))
         .expect("D48: J (hydro id 1) must exist in the canonical hydro order");
     assert_eq!(
         state.transit_bucket_column_order,
@@ -4390,10 +4383,8 @@ fn d49_travel_time_chronological_arrival_density() {
     // Two source stages reach the chronological arrival stage: stage 1 at lag 1
     // and stage 0 at lag 2 — a multi-lag blend.
     let padded = pad_calendar_for_resolution(&stage_hours, T_V);
-    let stage_weights_0 =
-        cobre_sddp::lead_time::resolve_spread(T_V, 0, &padded, None).stage_weights;
-    let stage_weights_1 =
-        cobre_sddp::lead_time::resolve_spread(T_V, 1, &padded, None).stage_weights;
+    let stage_weights_0 = resolve_spread(T_V, 0, &padded, None).stage_weights;
+    let stage_weights_1 = resolve_spread(T_V, 1, &padded, None).stage_weights;
     let source_weight_lag1 = stage_weights_1[1];
     let source_weight_lag2 = stage_weights_0[2];
     assert!(
@@ -4476,17 +4467,17 @@ fn d49_travel_time_chronological_arrival_density() {
     // uniform first-stage fallback.
     assert_eq!(
         study_stages[ARRIVAL_STAGE_IDX].block_mode,
-        cobre_core::BlockMode::Chronological,
+        BlockMode::Chronological,
         "D49: the arrival stage must be chronological to drive the arrival-frame branch"
     );
     assert_eq!(
         study_stages[0].block_mode,
-        cobre_core::BlockMode::Parallel,
+        BlockMode::Parallel,
         "D49: source stage 0 must be parallel"
     );
     assert_eq!(
         study_stages[1].block_mode,
-        cobre_core::BlockMode::Parallel,
+        BlockMode::Parallel,
         "D49: source stage 1 must be parallel"
     );
 
@@ -4654,10 +4645,8 @@ fn d50_travel_time_plain_tributary_confluence_arrival_density() {
     // same calendar), recomputed from the public resolvers so nothing is read
     // from the solver.
     let padded = pad_calendar_for_resolution(&stage_hours, T_V);
-    let stage_weights_0 =
-        cobre_sddp::lead_time::resolve_spread(T_V, 0, &padded, None).stage_weights;
-    let stage_weights_1 =
-        cobre_sddp::lead_time::resolve_spread(T_V, 1, &padded, None).stage_weights;
+    let stage_weights_0 = resolve_spread(T_V, 0, &padded, None).stage_weights;
+    let stage_weights_1 = resolve_spread(T_V, 1, &padded, None).stage_weights;
     let source_weight_lag1 = stage_weights_1[1];
     let source_weight_lag2 = stage_weights_0[2];
     assert!(
@@ -4757,17 +4746,17 @@ fn d50_travel_time_plain_tributary_confluence_arrival_density() {
     );
     assert_eq!(
         study_stages[ARRIVAL_STAGE_IDX].block_mode,
-        cobre_core::BlockMode::Chronological,
+        BlockMode::Chronological,
         "D50: the arrival stage must be chronological to drive the arrival-frame branch"
     );
     assert_eq!(
         study_stages[0].block_mode,
-        cobre_core::BlockMode::Parallel,
+        BlockMode::Parallel,
         "D50: source stage 0 must be parallel"
     );
     assert_eq!(
         study_stages[1].block_mode,
-        cobre_core::BlockMode::Parallel,
+        BlockMode::Parallel,
         "D50: source stage 1 must be parallel"
     );
 
@@ -5058,8 +5047,8 @@ mod chronological_telescoping {
     };
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, DeficitSegment,
-        EntityId, HydroGenerationModel, HydroStageBounds, HydroStagePenalties, HydroStorage,
-        InitialConditions, LineStageBounds, LineStagePenalties, NcsStagePenalties,
+        EntityId, HydroGenerationModel, HydroPenalties, HydroStageBounds, HydroStagePenalties,
+        HydroStorage, InitialConditions, LineStageBounds, LineStagePenalties, NcsStagePenalties,
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
         ResolvedPenalties, SystemBuilder, ThermalStageBounds,
     };
@@ -5071,7 +5060,9 @@ mod chronological_telescoping {
     };
     use cobre_solver::ActiveSolver;
 
+    use cobre_io::PolicyCheckpoint;
     use cobre_io::output::policy::read_policy_checkpoint;
+    use cobre_sddp::FutureCostFunction;
     use cobre_sddp::orchestration::{CheckpointParams, write_checkpoint};
     use cobre_sddp::policy_export::build_stage_cut_records;
     use tempfile::TempDir;
@@ -5309,8 +5300,8 @@ mod chronological_telescoping {
             .expect("build_system: valid constant-productivity study")
     }
 
-    fn zero_hydro_penalties() -> cobre_core::entities::hydro::HydroPenalties {
-        cobre_core::entities::hydro::HydroPenalties {
+    fn zero_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -5400,7 +5391,7 @@ mod chronological_telescoping {
     /// deletes the on-disk policy — kept alive by returning it.
     fn train_and_checkpoint(
         train_mode: BlockMode,
-    ) -> (cobre_sddp::StudySetup, cobre_io::PolicyCheckpoint, TempDir) {
+    ) -> (cobre_sddp::StudySetup, PolicyCheckpoint, TempDir) {
         let config = build_config();
         let mut setup = build_setup_in_code(build_system(train_mode), &config);
         let comm = StubComm;
@@ -5435,10 +5426,7 @@ mod chronological_telescoping {
 
     /// Assert every checkpoint cut's coefficients and intercept are bit-for-bit
     /// identical (`f64::to_bits`, never `==`) to the records written from `fcf`.
-    fn assert_cuts_bit_identical(
-        fcf: &cobre_sddp::FutureCostFunction,
-        checkpoint: &cobre_io::PolicyCheckpoint,
-    ) {
+    fn assert_cuts_bit_identical(fcf: &FutureCostFunction, checkpoint: &PolicyCheckpoint) {
         let written = build_stage_cut_records(fcf);
         assert_eq!(
             written.len(),
@@ -5493,7 +5481,7 @@ mod chronological_telescoping {
         let config = build_config();
         let mut setup2 = build_setup_in_code(build_system(load_mode), &config);
 
-        let warm_fcf = cobre_sddp::FutureCostFunction::new_with_warm_start(
+        let warm_fcf = FutureCostFunction::new_with_warm_start(
             &checkpoint.stage_cuts,
             setup2.loop_params.forward_passes,
             setup2.loop_params.max_iterations.saturating_add(1),
@@ -5556,8 +5544,8 @@ mod chronological_attribution {
     use cobre_core::temporal::{Block, BlockMode, Stage};
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, DeficitSegment,
-        EntityId, HydroGenerationModel, HydroStageBounds, HydroStagePenalties, HydroStorage,
-        InitialConditions, LineStageBounds, LineStagePenalties, NcsStagePenalties,
+        EntityId, HydroGenerationModel, HydroPenalties, HydroStageBounds, HydroStagePenalties,
+        HydroStorage, InitialConditions, LineStageBounds, LineStagePenalties, NcsStagePenalties,
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
         ResolvedPenalties, SystemBuilder, ThermalStageBounds,
     };
@@ -5567,6 +5555,7 @@ mod chronological_attribution {
         RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
         TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
     };
+    use cobre_sddp::lead_time::resolve_spread;
     use cobre_solver::StageTemplate;
 
     use super::common::build_setup_in_code;
@@ -5596,8 +5585,8 @@ mod chronological_attribution {
         }
     }
 
-    fn zero_hydro_penalties() -> cobre_core::entities::hydro::HydroPenalties {
-        cobre_core::entities::hydro::HydroPenalties {
+    fn zero_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -5928,7 +5917,7 @@ mod chronological_attribution {
     fn resolve_spread_matches_reference_block_tables() {
         let stage_lengths_hours = [720.0, 720.0];
         let block_lengths_hours = [240.0, 240.0, 240.0];
-        let resolution = cobre_sddp::lead_time::resolve_spread(
+        let resolution = resolve_spread(
             TRAVEL_TIME_HOURS,
             0,
             &stage_lengths_hours,

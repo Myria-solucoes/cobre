@@ -199,7 +199,7 @@ mod tests {
         ];
         let err = build_hydro_energy_productivity_override(&rows).unwrap_err();
         match err {
-            cobre_io::LoadError::SchemaError { field, .. } => {
+            LoadError::SchemaError { field, .. } => {
                 assert_eq!(field, "hydro_energy_productivity.duplicate_entry");
             }
             other => panic!("expected SchemaError, got: {other:?}"),
