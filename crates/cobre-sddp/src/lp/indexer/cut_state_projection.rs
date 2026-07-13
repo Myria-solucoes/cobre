@@ -4,7 +4,7 @@
 
 use cobre_core::temporal::StageStateConfig;
 
-use super::{CutSlot, InCol, OutCol, REGION_ORDER, StateDim, StateLayout, StateRegion};
+use super::{CutSlot, InCol, OutCol, REGION_ORDER, StateDim, StateLayout};
 
 /// A storage-scoped view of the global state vector exposing only the cut-state
 /// dimensions a stage enables, plus travel-time buckets and anticipated state
@@ -93,16 +93,7 @@ impl CutStateProjection {
         };
 
         for region in REGION_ORDER {
-            let enabled = match region {
-                StateRegion::Storage => state_config.storage,
-                StateRegion::Lag => state_config.inflow_lags,
-                // Buckets and anticipated are always included, never gated by
-                // state_config: gating here would shrink pool state_dimension
-                // and misalign the intercept dot against the global trial
-                // state.
-                StateRegion::Buckets | StateRegion::Anticipated => true,
-            };
-            if enabled {
+            if region.cut_enabled(state_config) {
                 for g in global.state_dim_range(region) {
                     push_dim(g);
                 }
@@ -572,5 +563,175 @@ mod tests {
             rendered, global_render,
             "B==0 render must reproduce the global nonzero_state_indices render"
         );
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use proptest::prelude::*;
+    use proptest::test_runner::RngSeed;
+
+    use super::{CutSlot, CutStateProjection, OutCol, StageStateConfig, StateDim};
+    use crate::indexer::{REGION_ORDER, StateLayout};
+
+    const ALL_ENABLED: StageStateConfig = StageStateConfig {
+        storage: true,
+        inflow_lags: true,
+    };
+
+    /// Fixed cases/seed so a failing shrink is reproducible run-to-run (the
+    /// determinism discipline applied to test generation itself).
+    fn fixed_config() -> ProptestConfig {
+        ProptestConfig {
+            cases: 256,
+            rng_seed: RngSeed::Fixed(42),
+            ..ProptestConfig::default()
+        }
+    }
+
+    /// A valid [`StateLayout`] over the small parameter space (`hydro_count`,
+    /// `max_par_order`, `n_buckets`, `n_anticipated`, `k_max` each `0..=4` or
+    /// `0..=3`), with every dependent-length vector sized and bounded to satisfy
+    /// `StateLayout::new`'s debug-asserts:
+    /// `transit_bucket_column_order.len() == n_buckets`,
+    /// `anticipated_lead_stages.len() == n_anticipated` (each `<= k_max`), and
+    /// `effective_lag_count.len() == hydro_count` (each `<= max_par_order`).
+    fn state_layout_strategy() -> impl Strategy<Value = StateLayout> {
+        (0..=4usize, 0..=3usize, 0..=3usize, 0..=3usize, 0..=3usize)
+            .prop_flat_map(
+                |(hydro_count, max_par_order, n_buckets, n_anticipated, k_max)| {
+                    (
+                        Just(hydro_count),
+                        Just(max_par_order),
+                        Just(n_buckets),
+                        Just(n_anticipated),
+                        Just(k_max),
+                        prop::collection::vec((0..=4usize, 0..=3usize), n_buckets),
+                        prop::collection::vec(0..=k_max, n_anticipated),
+                        prop::collection::vec(0..=max_par_order, hydro_count),
+                    )
+                },
+            )
+            .prop_map(
+                |(
+                    hydro_count,
+                    max_par_order,
+                    n_buckets,
+                    n_anticipated,
+                    k_max,
+                    transit_bucket_column_order,
+                    anticipated_lead_stages,
+                    effective_lag_count,
+                )| {
+                    StateLayout::new(
+                        hydro_count,
+                        max_par_order,
+                        n_buckets,
+                        transit_bucket_column_order,
+                        n_anticipated,
+                        k_max,
+                        anticipated_lead_stages,
+                        &effective_lag_count,
+                    )
+                },
+            )
+    }
+
+    /// A [`StateLayout`] paired with an arbitrary [`StageStateConfig`] gate
+    /// combination, for the gated-projection agreement property.
+    fn state_layout_and_config_strategy() -> impl Strategy<Value = (StateLayout, StageStateConfig)>
+    {
+        (state_layout_strategy(), any::<bool>(), any::<bool>()).prop_map(
+            |(global, storage, inflow_lags)| {
+                (
+                    global,
+                    StageStateConfig {
+                        storage,
+                        inflow_lags,
+                    },
+                )
+            },
+        )
+    }
+
+    proptest! {
+        #![proptest_config(fixed_config())]
+
+        /// Generalizes `state_dim_ranges_partition_n_state_contiguously`: the
+        /// four `state_dim_*_range` regions partition `[0, n_state)` contiguously
+        /// (no gap, no overlap) for every generated shape.
+        #[test]
+        fn partition(global in state_layout_strategy()) {
+            let storage = global.state_dim_storage_range();
+            let lag = global.state_dim_lag_range();
+            let bucket = global.state_dim_bucket_range();
+            let anticipated = global.state_dim_anticipated_range();
+
+            prop_assert_eq!(storage.start, 0);
+            prop_assert_eq!(lag.start, storage.end);
+            prop_assert_eq!(bucket.start, lag.end);
+            prop_assert_eq!(anticipated.start, bucket.end);
+            prop_assert_eq!(anticipated.end, global.n_state);
+        }
+
+        /// Generalizes `default_projection_is_identity` and
+        /// `default_render_matches_global_nonzero_mask`: an all-enabled
+        /// projection reproduces the global resolvers index-for-index, and
+        /// `render_pairs` reproduces the global `nonzero_state_indices` render
+        /// exactly, for every generated shape.
+        #[test]
+        fn default_identity(global in state_layout_strategy()) {
+            let cut = CutStateProjection::new(&global, ALL_ENABLED);
+
+            prop_assert_eq!(cut.n_slots(), global.n_state);
+            for j in 0..global.n_state {
+                prop_assert_eq!(
+                    cut.incoming_column(CutSlot::new(j)),
+                    global.state_to_lp_incoming_column(StateDim::new(j))
+                );
+                prop_assert_eq!(
+                    cut.outgoing_column(CutSlot::new(j)),
+                    global.lp_column_for_state(StateDim::new(j))
+                );
+            }
+
+            let rendered: Vec<(CutSlot, OutCol)> = cut.render_pairs().collect();
+            let global_render: Vec<(CutSlot, OutCol)> = global
+                .nonzero_state_indices
+                .iter()
+                .map(|&g| (CutSlot::new(g), global.lp_column_for_state(StateDim::new(g))))
+                .collect();
+            prop_assert_eq!(rendered, global_render);
+        }
+
+        /// Generalizes `bucket_render_pairs_sit_between_lag_and_anticipated` over
+        /// every gate combination: walking `REGION_ORDER` and skipping
+        /// `cut_enabled == false` regions reproduces, in order, the projection's
+        /// slot-to-column mapping for every surviving global dimension.
+        #[test]
+        fn gated_projection_agreement(
+            (global, state_config) in state_layout_and_config_strategy()
+        ) {
+            let cut = CutStateProjection::new(&global, state_config);
+
+            let mut slot = 0usize;
+            for region in REGION_ORDER {
+                if !region.cut_enabled(state_config) {
+                    continue;
+                }
+                for g in global.state_dim_range(region) {
+                    prop_assert_eq!(
+                        cut.incoming_column(CutSlot::new(slot)),
+                        global.state_to_lp_incoming_column(StateDim::new(g))
+                    );
+                    prop_assert_eq!(
+                        cut.outgoing_column(CutSlot::new(slot)),
+                        global.lp_column_for_state(StateDim::new(g))
+                    );
+                    slot += 1;
+                }
+            }
+            prop_assert_eq!(slot, cut.n_slots());
+        }
     }
 }

@@ -107,7 +107,7 @@ pub use entity_index::{
 pub use index::{BlockIdx, Boundary, Col, CutSlot, InCol, OutCol, Row, StateDim};
 pub use layout::{EvaporationIndices, FphaRowRange};
 pub(crate) use range_cursor::RangeCursor;
+pub(crate) use state_layout::REGION_ORDER;
 pub use state_layout::StateLayout;
-pub(crate) use state_layout::{REGION_ORDER, StateRegion};
 pub use storage_boundary_grid::StorageBoundaryGrid;
 pub use study_dimensions::StudyDimensions;

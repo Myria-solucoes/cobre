@@ -23,6 +23,7 @@ use crate::lead_time::PointResolution;
 use crate::lead_time::resolve_point;
 
 use cobre_core::commissioning::commissioning_active;
+use cobre_core::temporal::StageStateConfig;
 
 /// Stage-invariant state-vector layout for one SDDP stage subproblem.
 ///
@@ -161,6 +162,23 @@ pub(crate) const REGION_ORDER: [StateRegion; 4] = [
     StateRegion::Buckets,
     StateRegion::Anticipated,
 ];
+
+impl StateRegion {
+    /// Whether `region`'s state dimensions are cut-enabled under `config`: storage
+    /// and lag are config-gated; buckets and anticipated are always included.
+    /// Gating buckets/anticipated on `config` shrinks the cut pool's state-dimension
+    /// below the global trial state and misaligns the intercept dot
+    /// ([`super::CutStateProjection::new`]).
+    #[inline]
+    #[must_use]
+    pub(crate) fn cut_enabled(self, config: StageStateConfig) -> bool {
+        match self {
+            StateRegion::Storage => config.storage,
+            StateRegion::Lag => config.inflow_lags,
+            StateRegion::Buckets | StateRegion::Anticipated => true,
+        }
+    }
+}
 
 impl StateLayout {
     /// Construct a finalized [`StateLayout`] from the state dimensions and the
@@ -349,6 +367,39 @@ impl StateLayout {
         }
     }
 
+    /// `region`'s incoming pinned-block start column — the single owner of
+    /// which block [`Self::state_to_lp_incoming_column`] pins.
+    #[inline]
+    #[must_use]
+    pub(crate) fn incoming_block_start(&self, region: StateRegion) -> usize {
+        match region {
+            StateRegion::Storage => self.storage_in.start,
+            StateRegion::Lag => self.inflow_lags.start,
+            StateRegion::Buckets => self.transit_buckets_in.start,
+            StateRegion::Anticipated => self.anticipated_state.start,
+        }
+    }
+
+    /// Classify `j` into its [`StateRegion`] and its offset within that
+    /// region's [`Self::state_dim_range`] — the single scan both
+    /// [`Self::state_to_lp_column`] and [`Self::state_to_lp_incoming_column`]
+    /// consume.
+    ///
+    /// [`REGION_ORDER`]'s four ranges partition `[0, n_state)` contiguously
+    /// (`state_dim_ranges_partition_n_state_contiguously`), so `find` only
+    /// misses for an out-of-range `j`; `unwrap_or` keeps this function total
+    /// instead of adding a panic path for that case.
+    #[inline]
+    #[must_use]
+    pub(crate) fn classify(&self, j: StateDim) -> (StateRegion, usize) {
+        let j = j.get();
+        let region = REGION_ORDER
+            .into_iter()
+            .find(|&region| self.state_dim_range(region).contains(&j))
+            .unwrap_or(StateRegion::Anticipated);
+        (region, j - self.state_dim_range(region).start)
+    }
+
     /// Map a state-vector index to the LP column it references in a cut.
     ///
     /// Classifies `j` into its `StateRegion` via `REGION_ORDER` before any
@@ -384,21 +435,12 @@ impl StateLayout {
     #[inline]
     #[must_use]
     pub fn state_to_lp_column(&self, j: StateDim) -> OutCol {
-        let j = j.get();
-        // REGION_ORDER's four ranges partition [0, n_state) contiguously
-        // (`state_dim_ranges_partition_n_state_contiguously`), so `find` only
-        // misses for an out-of-range `j`; `unwrap_or` keeps this function
-        // total instead of adding a panic path for that case.
-        let region = REGION_ORDER
-            .into_iter()
-            .find(|&region| self.state_dim_range(region).contains(&j))
-            .unwrap_or(StateRegion::Anticipated);
+        let (region, offset) = self.classify(j);
 
         OutCol::new(match region {
-            StateRegion::Storage | StateRegion::Buckets | StateRegion::Anticipated => j,
+            StateRegion::Storage | StateRegion::Buckets | StateRegion::Anticipated => j.get(),
             StateRegion::Lag => {
                 let n = self.hydro_count;
-                let offset = j - n;
                 let h = offset % n;
                 let lag = offset / n;
                 if lag == 0 {
@@ -462,21 +504,8 @@ impl StateLayout {
     #[inline]
     #[must_use]
     pub fn state_to_lp_incoming_column(&self, j: StateDim) -> InCol {
-        let j = j.get();
-        // Same REGION_ORDER classification `state_to_lp_column` uses; see its
-        // partition-coverage note.
-        let region = REGION_ORDER
-            .into_iter()
-            .find(|&region| self.state_dim_range(region).contains(&j))
-            .unwrap_or(StateRegion::Anticipated);
-        let offset = j - self.state_dim_range(region).start;
-
-        InCol::new(match region {
-            StateRegion::Storage => self.storage_in.start + offset,
-            StateRegion::Lag => self.inflow_lags.start + offset,
-            StateRegion::Buckets => self.transit_buckets_in.start + offset,
-            StateRegion::Anticipated => self.anticipated_state.start + offset,
-        })
+        let (region, offset) = self.classify(j);
+        InCol::new(self.incoming_block_start(region) + offset)
     }
 
     /// Whether anticipated plant `local_idx` emits a decision column and an
@@ -573,10 +602,10 @@ impl StateLayout {
     ) -> Cow<'_, PointResolution> {
         let local_idx = local_idx.get();
         if !self.anticipated_resolution.per_plant.is_empty() {
-            return std::borrow::Cow::Borrowed(&self.anticipated_resolution.per_plant[local_idx]);
+            return Cow::Borrowed(&self.anticipated_resolution.per_plant[local_idx]);
         }
         let lead = u32::try_from(self.anticipated_lead_stages[local_idx]).unwrap_or(u32::MAX);
-        std::borrow::Cow::Owned(resolve_point(Stages(lead), &[], n_stages))
+        Cow::Owned(resolve_point(Stages(lead), &[], n_stages))
     }
 
     /// Compute and store [`Self::nonzero_state_indices`] from per-hydro
@@ -1394,8 +1423,8 @@ mod tests {
 
     /// Bucket-arm resolution for `state_to_lp_incoming_column`: bucket indices
     /// resolve to the pinned `transit_buckets_in` column via an explicit arm, not the
-    /// anticipated catch-all — verified with anticipated state present so the
-    /// catch-all `else` is live and would otherwise swallow them.
+    /// anticipated arm — verified with anticipated state present so both arms
+    /// are live and either could otherwise swallow the other's indices.
     #[test]
     fn state_to_lp_incoming_column_transit_bucket_arm_is_pinned_not_anticipated() {
         // N=2, L=1, B=2, A=1 (k_max=2, K=[2]).
@@ -1419,8 +1448,8 @@ mod tests {
             "bucket index must not resolve to the anticipated catch-all"
         );
 
-        // The first anticipated-state index (j=6) still resolves via the
-        // catch-all, immediately after the bucket range.
+        // The first anticipated-state index (j=6) still resolves via its own
+        // arm, immediately after the bucket range.
         assert_eq!(
             idx.state_to_lp_incoming_column(StateDim::new(6)),
             InCol::new(idx.anticipated_state.start)
@@ -1496,7 +1525,7 @@ mod tests {
 
     /// `A * k_max == 0` (no anticipated thermals) collapses `anticipated_slots_out`/
     /// `anticipated_state` to `0..0` and reproduces the pre-anticipated-ring
-    /// layout byte-for-byte (`N=3, L=2, B=2`) — the AC#1 collapse anchor.
+    /// layout byte-for-byte (`N=3, L=2, B=2`).
     #[test]
     fn state_layout_a_zero_collapses_to_pre_anticipated_ring_layout() {
         let idx = finalized_with_transit_buckets(3, 2, 2, vec![(0, 1), (0, 2)], 0, 0, vec![]);
