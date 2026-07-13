@@ -14,7 +14,7 @@
 //! ```
 //!
 //! The equipment column layout is defined per stage by `StageLayout`, threaded
-//! into extraction as [`StageGeometry`](crate::lp_builder::StageGeometry).
+//! into extraction as [`StageGeometry`].
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -24,7 +24,11 @@ use cobre_core::ConstraintSense;
 use cobre_core::EntityId;
 
 use crate::energy_conversion::EnergyConversionSet;
-use crate::indexer::{BlockGrid, StateLayout, StudyDimensions};
+use crate::indexer::{
+    AnticipatedLocal, BlockGrid, BlockIdx, Boundary, EvapLocal, FillingTargetLocal, FloorLocal,
+    FphaLocal, HydroSys, StateLayout, StudyDimensions,
+};
+use crate::lp_builder::StageGeometry;
 use crate::lp_builder::{COST_SCALE_FACTOR, GenericConstraintRowEntry};
 use crate::simulation::types::{
     ScenarioCategoryCosts, SimulationBusResult, SimulationContractResult, SimulationCostResult,
@@ -43,29 +47,29 @@ use crate::simulation::types::{
 /// `None`; the column is `geometry.<family>_col.start + slot`.
 pub(crate) struct HydroReverseLookup {
     /// FPHA-local slot per hydro, `None` if not FPHA at this stage.
-    pub(crate) fpha: Vec<Option<usize>>,
+    pub(crate) fpha: Vec<Option<FphaLocal>>,
     /// Evaporation-local slot per hydro, `None` if no evaporation at this stage.
-    pub(crate) evap: Vec<Option<usize>>,
+    pub(crate) evap: Vec<Option<EvapLocal>>,
     /// `σ_fill`-target slot per hydro, `None` if it owns no target column at this stage.
-    pub(crate) filling_target: Vec<Option<usize>>,
+    pub(crate) filling_target: Vec<Option<FillingTargetLocal>>,
     /// `σ^{v-}` operating-floor slot per hydro, `None` if it owns no floor column at this stage.
-    pub(crate) filled_min_storage_floor: Vec<Option<usize>>,
+    pub(crate) filled_min_storage_floor: Vec<Option<FloorLocal>>,
 }
 
 impl HydroReverseLookup {
     /// Build the reverse lookup for one stage from its [`StageGeometry`].
-    pub(crate) fn build(geometry: &crate::lp_builder::StageGeometry, n_hydros: usize) -> Self {
+    pub(crate) fn build(geometry: &StageGeometry, n_hydros: usize) -> Self {
         let mut fpha = vec![None; n_hydros];
         for (local, &sys) in geometry.fpha_hydro_indices.iter().enumerate() {
-            fpha[sys] = Some(local);
+            fpha[sys.get()] = Some(FphaLocal::new(local));
         }
         let mut evap = vec![None; n_hydros];
         for (local, &sys) in geometry.evap_hydro_indices.iter().enumerate() {
-            evap[sys] = Some(local);
+            evap[sys.get()] = Some(EvapLocal::new(local));
         }
         let mut filling_target = vec![None; n_hydros];
         for (local, &sys) in geometry.filling_target_hydro_indices.iter().enumerate() {
-            filling_target[sys] = Some(local);
+            filling_target[sys.get()] = Some(FillingTargetLocal::new(local));
         }
         let mut filled_min_storage_floor = vec![None; n_hydros];
         for (local, &sys) in geometry
@@ -73,7 +77,7 @@ impl HydroReverseLookup {
             .iter()
             .enumerate()
         {
-            filled_min_storage_floor[sys] = Some(local);
+            filled_min_storage_floor[sys.get()] = Some(FloorLocal::new(local));
         }
         Self {
             fpha,
@@ -86,7 +90,7 @@ impl HydroReverseLookup {
     /// Build one [`HydroReverseLookup`] per stage from the per-stage geometry table,
     /// once per simulation run so per-`(scenario, stage)` extraction never reallocates.
     pub(crate) fn build_per_stage(
-        geometry_per_stage: &[crate::lp_builder::StageGeometry],
+        geometry_per_stage: &[StageGeometry],
         n_hydros: usize,
     ) -> Vec<Self> {
         geometry_per_stage
@@ -96,19 +100,37 @@ impl HydroReverseLookup {
     }
 }
 
-/// Read the primal of a SPARSE per-hydro filling-slack column, or `0.0` when
-/// `local_idx` is `None` (the hydro owns no column in that family at this stage).
+/// Read the primal of the sparse `σ_fill` filling-target-slack column, or `0.0`
+/// when `local` is `None` (the hydro owns no column in that family at this stage).
 #[inline]
-fn read_filling_slack_primal(
+fn read_filling_target_slack_primal(
     primal: &[f64],
     col_range: &Range<usize>,
-    local_idx: Option<usize>,
+    local: Option<FillingTargetLocal>,
 ) -> f64 {
-    let Some(local) = local_idx else { return 0.0 };
-    let col = col_range.start + local;
+    let Some(local) = local else { return 0.0 };
+    let col = col_range.start + local.get();
     debug_assert!(
         col < col_range.end && col < primal.len(),
         "filling-slack col {col} out of range {col_range:?} / primal len {}",
+        primal.len(),
+    );
+    primal.get(col).copied().unwrap_or(0.0)
+}
+
+/// Read the primal of the sparse `σ^{v-}` operating-floor-slack column, or `0.0`
+/// when `local` is `None` (the hydro owns no column in that family at this stage).
+#[inline]
+fn read_floor_slack_primal(
+    primal: &[f64],
+    col_range: &Range<usize>,
+    local: Option<FloorLocal>,
+) -> f64 {
+    let Some(local) = local else { return 0.0 };
+    let col = col_range.start + local.get();
+    debug_assert!(
+        col < col_range.end && col < primal.len(),
+        "floor-slack col {col} out of range {col_range:?} / primal len {}",
         primal.len(),
     );
     primal.get(col).copied().unwrap_or(0.0)
@@ -122,7 +144,7 @@ fn read_filling_slack_primal(
 /// columns — when thermal `t` is anticipated, `None` otherwise.
 pub(crate) struct ThermalReverseLookup {
     /// Anticipated-local slot per thermal, `None` if not anticipated.
-    pub(crate) thermal_is_anticipated: Vec<Option<usize>>,
+    pub(crate) thermal_is_anticipated: Vec<Option<AnticipatedLocal>>,
 }
 
 impl ThermalReverseLookup {
@@ -134,7 +156,7 @@ impl ThermalReverseLookup {
                 sys < n_thermals,
                 "anticipated_thermal_indices entry {sys} >= n_thermals {n_thermals}"
             );
-            thermal_is_anticipated[sys] = Some(local);
+            thermal_is_anticipated[sys] = Some(AnticipatedLocal::new(local));
         }
         Self {
             thermal_is_anticipated,
@@ -191,7 +213,7 @@ fn compute_anticipated_decision_mw(
     }
     // Base is the per-stage `thermal.end` (n_blks-dependent), so use `spec.geometry`,
     // never the global stage-0 indexer — that addresses the wrong column off stage 0.
-    let col = spec.geometry.anticipated_decision.start + local_idx;
+    let col = spec.geometry.anticipated_decision.start + local_idx.get();
     debug_assert!(
         col < view.primal.len(),
         "anticipated_decision col {col} out of primal bounds {}",
@@ -217,7 +239,7 @@ fn compute_anticipated_committed_mw(
     let local_idx = lookup.thermal_is_anticipated[thermal_local]?;
     // Ring buffer lives in the stage-invariant state region, so the base is the
     // role-(a) `StateLayout`, not the geometry indexer. Slot 0 = start + local_idx.
-    let col = spec.state.anticipated_state.start + local_idx;
+    let col = spec.state.anticipated_state.start + local_idx.get();
     debug_assert!(
         col < view.primal.len(),
         "anticipated_state slot-0 col {col} out of primal bounds {}",
@@ -399,7 +421,7 @@ pub struct StageExtractionSpec<'a> {
     pub n_blks: usize,
     /// Stage-correct equipment geometry, resolved per stage from `StageLayout`
     /// (via `StageTemplates::geometry_per_stage`).
-    pub geometry: &'a crate::lp_builder::StageGeometry,
+    pub geometry: &'a StageGeometry,
     /// Entity ID lists and productivities needed to build result records.
     pub entity_counts: &'a EntityCounts,
     /// Volumetric inflow per hydro (m³/s), one entry per hydro plant.
@@ -528,33 +550,48 @@ fn extract_hydro_no_turbine(
         * COST_SCALE_FACTOR;
 
     // Per-block slacks aggregated to stage-level as an hours-weighted average.
-    let (turbined_slack, outflow_slack_below, outflow_slack_above, generation_slack) = if study_dims
-        .has_operational_violations
-    {
-        let grid = spec.block_grid();
-        let n_blks = spec.n_blks;
-        let mut tb = 0.0_f64;
-        let mut ob = 0.0_f64;
-        let mut oa = 0.0_f64;
-        let mut gb = 0.0_f64;
-        let total_hours: f64 = spec.block_hours.iter().sum();
-        for blk in 0..n_blks {
-            let w = spec.block_hours[blk] / total_hours;
-            tb += view.primal[grid.flat(spec.geometry.turbine_below_slack.start, h, blk)] * w;
-            ob += view.primal[grid.flat(spec.geometry.outflow_below_slack.start, h, blk)] * w;
-            oa += view.primal[grid.flat(spec.geometry.outflow_above_slack.start, h, blk)] * w;
-            gb += view.primal[grid.flat(spec.geometry.generation_below_slack.start, h, blk)] * w;
-        }
-        (tb, ob, oa, gb)
-    } else {
-        (0.0, 0.0, 0.0, 0.0)
-    };
+    let (turbined_slack, outflow_slack_below, outflow_slack_above, generation_slack) =
+        if study_dims.has_operational_violations {
+            let grid = spec.block_grid();
+            let n_blks = spec.n_blks;
+            let mut tb = 0.0_f64;
+            let mut ob = 0.0_f64;
+            let mut oa = 0.0_f64;
+            let mut gb = 0.0_f64;
+            let total_hours: f64 = spec.block_hours.iter().sum();
+            for blk in 0..n_blks {
+                let w = spec.block_hours[blk] / total_hours;
+                tb += view.primal[grid.flat(
+                    spec.geometry.turbine_below_slack.start,
+                    h,
+                    BlockIdx::new(blk),
+                )] * w;
+                ob += view.primal[grid.flat(
+                    spec.geometry.outflow_below_slack.start,
+                    h,
+                    BlockIdx::new(blk),
+                )] * w;
+                oa += view.primal[grid.flat(
+                    spec.geometry.outflow_above_slack.start,
+                    h,
+                    BlockIdx::new(blk),
+                )] * w;
+                gb += view.primal[grid.flat(
+                    spec.geometry.generation_below_slack.start,
+                    h,
+                    BlockIdx::new(blk),
+                )] * w;
+            }
+            (tb, ob, oa, gb)
+        } else {
+            (0.0, 0.0, 0.0, 0.0)
+        };
 
     let (evaporation_m3s, evaporation_violation_neg_m3s, evaporation_violation_pos_m3s) =
         if let Some(local_evap_idx) = lookup.evap[h] {
             // The aggregate `block_id: None` row reports block 0; it is not a
             // per-block path (`extract_hydro_per_block` owns the per-block read).
-            let ei = &spec.geometry.evap_indices[local_evap_idx * spec.geometry.n_blks];
+            let ei = &spec.geometry.evap_indices[local_evap_idx.get() * spec.geometry.n_blks];
             let evaporation_flow = view.primal[ei.evaporation_flow_col];
             let neg = view.primal[ei.f_evap_plus_col]; // f_evap_plus = under-evaporation
             let pos = view.primal[ei.f_evap_minus_col]; // f_evap_minus = over-evaporation
@@ -571,12 +608,12 @@ fn extract_hydro_no_turbine(
     let storage_initial = view.primal[state.storage_in.start + h];
     let storage_final = view.primal[state.storage.start + h];
 
-    let filling_target_violation = read_filling_slack_primal(
+    let filling_target_violation = read_filling_target_slack_primal(
         view.primal,
         &spec.geometry.filling_target_col,
         lookup.filling_target[h],
     );
-    let storage_violation_below = read_filling_slack_primal(
+    let storage_violation_below = read_floor_slack_primal(
         view.primal,
         &spec.geometry.filled_min_storage_floor_col,
         lookup.filled_min_storage_floor[h],
@@ -636,10 +673,10 @@ struct HydroStageContext {
     withdrawal_neg: f64,
     withdrawal_pos: f64,
     water_value: f64,
-    fpha_local: Option<usize>,
+    fpha_local: Option<FphaLocal>,
     /// Evaporation-local slot, `None` for a hydro with no evaporation at this stage;
     /// the closure reads `evap_indices[evap_local * n_blks + b]` per block.
-    evap_local: Option<usize>,
+    evap_local: Option<EvapLocal>,
     equivalent_productivity_mw_per_m3s: f64,
     accumulated_productivity_mw_per_m3s: f64,
     incremental_inflow_energy_mw: f64,
@@ -702,7 +739,7 @@ impl HydroStageContext {
             if let Some(lei) = evap_local {
                 // Block-major `evap_indices`; block 0 is the parallel-mode stage-level
                 // read. `extract_hydro_per_block` resolves each block's own triple.
-                let ei = &spec.geometry.evap_indices[lei * spec.geometry.n_blks];
+                let ei = &spec.geometry.evap_indices[lei.get() * spec.geometry.n_blks];
                 let evaporation_flow = view.primal[ei.evaporation_flow_col];
                 let neg = view.primal[ei.f_evap_plus_col]; // f_evap_plus = under-evaporation
                 let pos = view.primal[ei.f_evap_minus_col]; // f_evap_minus = over-evaporation
@@ -710,12 +747,12 @@ impl HydroStageContext {
             } else {
                 (Some(0.0), 0.0, 0.0)
             };
-        let filling_target_violation = read_filling_slack_primal(
+        let filling_target_violation = read_filling_target_slack_primal(
             view.primal,
             &spec.geometry.filling_target_col,
             lookup.filling_target[h],
         );
-        let storage_violation_below = read_filling_slack_primal(
+        let storage_violation_below = read_floor_slack_primal(
             view.primal,
             &spec.geometry.filled_min_storage_floor_col,
             lookup.filled_min_storage_floor[h],
@@ -768,15 +805,15 @@ fn extract_hydro_per_block<'a>(
     let div_sources = spec.diversion_upstream.get(&hydro_entity_id);
 
     (0..n_blks).map(move |b| {
-        let t_col = grid.flat(spec.geometry.turbine.start, h, b);
-        let s_col = grid.flat(spec.geometry.spillage.start, h, b);
+        let t_col = grid.flat(spec.geometry.turbine.start, h, BlockIdx::new(b));
+        let s_col = grid.flat(spec.geometry.spillage.start, h, BlockIdx::new(b));
         let turbined = view.primal[t_col];
         let spillage = view.primal[s_col];
 
         let diverted_outflow = if spec.geometry.diversion.is_empty() {
             0.0
         } else {
-            view.primal[grid.flat(spec.geometry.diversion.start, h, b)]
+            view.primal[grid.flat(spec.geometry.diversion.start, h, BlockIdx::new(b))]
         };
 
         // Diversion columns are flat block-major over the source hydro index, so
@@ -784,7 +821,8 @@ fn extract_hydro_per_block<'a>(
         let diverted_inflow = if let Some(sources) = div_sources {
             let mut total = 0.0;
             for &d_idx in sources {
-                total += view.primal[grid.flat(spec.geometry.diversion.start, d_idx, b)];
+                total +=
+                    view.primal[grid.flat(spec.geometry.diversion.start, d_idx, BlockIdx::new(b))];
             }
             total
         } else {
@@ -794,7 +832,11 @@ fn extract_hydro_per_block<'a>(
         // FPHA hydros read generation from the LP `g_{h,k}` column; constant-
         // productivity hydros compute it as turbined * productivity.
         let generation_mw = if let Some(local_fpha_idx) = ctx.fpha_local {
-            view.primal[grid.flat(spec.geometry.generation.start, local_fpha_idx, b)]
+            view.primal[grid.flat(
+                spec.geometry.generation.start,
+                local_fpha_idx.get(),
+                BlockIdx::new(b),
+            )]
         } else {
             turbined * spec.hydro_productivities[h]
         };
@@ -802,10 +844,17 @@ fn extract_hydro_per_block<'a>(
         let (turbined_slack, outflow_slack_below, outflow_slack_above, generation_slack) =
             if study_dims.has_operational_violations {
                 (
-                    view.primal[grid.flat(spec.geometry.turbine_below_slack.start, h, b)],
-                    view.primal[grid.flat(spec.geometry.outflow_below_slack.start, h, b)],
-                    view.primal[grid.flat(spec.geometry.outflow_above_slack.start, h, b)],
-                    view.primal[grid.flat(spec.geometry.generation_below_slack.start, h, b)],
+                    view.primal
+                        [grid.flat(spec.geometry.turbine_below_slack.start, h, BlockIdx::new(b))],
+                    view.primal
+                        [grid.flat(spec.geometry.outflow_below_slack.start, h, BlockIdx::new(b))],
+                    view.primal
+                        [grid.flat(spec.geometry.outflow_above_slack.start, h, BlockIdx::new(b))],
+                    view.primal[grid.flat(
+                        spec.geometry.generation_below_slack.start,
+                        h,
+                        BlockIdx::new(b),
+                    )],
                 )
             } else {
                 (0.0, 0.0, 0.0, 0.0)
@@ -818,8 +867,13 @@ fn extract_hydro_per_block<'a>(
         // (`S⁰`), block `K−1` outgoing == `ctx.storage_final` (`Sᴷ`).
         let (storage_initial, storage_final) = match spec.geometry.block_mode {
             BlockMode::Chronological => {
-                let in_col = spec.geometry.block_storage_col(h, b);
-                let out_col = spec.geometry.block_storage_col(h, b + 1);
+                let n_blks = spec.geometry.n_blks;
+                let in_col = spec
+                    .geometry
+                    .block_storage_col(HydroSys::new(h), Boundary::from_index(b, n_blks));
+                let out_col = spec
+                    .geometry
+                    .block_storage_col(HydroSys::new(h), Boundary::from_index(b + 1, n_blks));
                 debug_assert!(
                     in_col < view.primal.len() && out_col < view.primal.len(),
                     "per-block storage cols {in_col}/{out_col} out of primal bounds {}",
@@ -840,7 +894,7 @@ fn extract_hydro_per_block<'a>(
         let (evaporation_m3s, evaporation_violation_neg_m3s, evaporation_violation_pos_m3s) =
             match (spec.geometry.block_mode, ctx.evap_local) {
                 (BlockMode::Chronological, Some(local)) => {
-                    let ei = &spec.geometry.evap_indices[local * spec.geometry.n_blks + b];
+                    let ei = &spec.geometry.evap_indices[local.get() * spec.geometry.n_blks + b];
                     debug_assert!(
                         ei.evaporation_flow_col < view.primal.len()
                             && ei.f_evap_plus_col < view.primal.len()
@@ -962,7 +1016,7 @@ fn extract_thermals(
             // Per-plant per-stage scalar; hoisted out of the per-block loop.
             let anticipated_committed_mw = compute_anticipated_committed_mw(view, spec, lookup, t);
             for b in 0..n_blks {
-                let col = grid.flat(spec.geometry.thermal.start, t, b);
+                let col = grid.flat(spec.geometry.thermal.start, t, BlockIdx::new(b));
                 let gen_mw = view.primal[col];
                 #[allow(clippy::cast_possible_truncation)]
                 results.push(SimulationThermalResult {
@@ -1013,8 +1067,8 @@ fn extract_exchanges(
             .enumerate()
             .flat_map(move |(l, &line_id)| {
                 (0..n_blks).map(move |b| {
-                    let fwd_col = grid.flat(spec.geometry.line_fwd.start, l, b);
-                    let rev_col = grid.flat(spec.geometry.line_rev.start, l, b);
+                    let fwd_col = grid.flat(spec.geometry.line_fwd.start, l, BlockIdx::new(b));
+                    let rev_col = grid.flat(spec.geometry.line_rev.start, l, BlockIdx::new(b));
                     let fwd = view.primal[fwd_col];
                     let rev = view.primal[rev_col];
                     #[allow(clippy::cast_possible_truncation)]
@@ -1071,12 +1125,19 @@ fn extract_buses(
                     // shape, so address it with `deficit`, not `flat`.
                     let deficit_mw: f64 = (0..max_segs)
                         .map(|s| {
-                            let col = grid.deficit(spec.geometry.deficit.start, bus_idx, s, b);
+                            let col = grid.deficit(
+                                spec.geometry.deficit.start,
+                                bus_idx,
+                                s,
+                                BlockIdx::new(b),
+                            );
                             view.primal[col]
                         })
                         .sum();
-                    let excess_col = grid.flat(spec.geometry.excess.start, bus_idx, b);
-                    let load_row = grid.flat(spec.geometry.load_balance.start, bus_idx, b);
+                    let excess_col =
+                        grid.flat(spec.geometry.excess.start, bus_idx, BlockIdx::new(b));
+                    let load_row =
+                        grid.flat(spec.geometry.load_balance.start, bus_idx, BlockIdx::new(b));
                     let raw_dual = view.dual.get(load_row).copied().unwrap_or(0.0);
                     let hrs = spec.block_hours.get(b).copied().unwrap_or(0.0);
                     #[allow(clippy::cast_possible_truncation)]
@@ -1102,7 +1163,7 @@ fn extract_buses(
 /// Extract a [`SimulationStageResult`] from a raw LP solution at one stage.
 ///
 /// Reads role-(b) equipment column values from `view.primal` using the ranges
-/// stored in `spec.geometry` (the per-stage [`StageGeometry`](crate::lp_builder::StageGeometry));
+/// stored in `spec.geometry` (the per-stage [`StageGeometry`]);
 /// role-(a) state columns resolve via `spec.state` ([`StateLayout`]). When a
 /// family has zero entities its range is empty (`0..0`) and that result defaults
 /// to zero.
@@ -1260,9 +1321,9 @@ impl HydroViolationCosts {
 /// Compute the 6 per-constraint hydro violation costs from a solution view.
 fn compute_hydro_violation_costs(
     study_dims: &StudyDimensions,
-    equipment: &crate::lp_builder::StageGeometry,
+    equipment: &StageGeometry,
     col_cost: impl Fn(usize) -> f64,
-    range_sum: impl Fn(std::ops::Range<usize>) -> f64,
+    range_sum: impl Fn(Range<usize>) -> f64,
 ) -> HydroViolationCosts {
     let evaporation = equipment
         .evap_indices
@@ -1310,7 +1371,7 @@ fn compute_hydro_violation_costs(
 fn compute_cost_result(
     view: &SolutionView<'_>,
     study_dims: &StudyDimensions,
-    equipment: &crate::lp_builder::StageGeometry,
+    equipment: &StageGeometry,
     state: &StateLayout,
     col_scale: &[f64],
     generic_violation_cost: f64,
@@ -1327,7 +1388,7 @@ fn compute_cost_result(
         }
     };
     let col_cost = |col: usize| view.primal[col] * view.objective_coeffs[col] / scale_factor(col);
-    let range_sum = |r: std::ops::Range<usize>| -> f64 { r.map(col_cost).sum() };
+    let range_sum = |r: Range<usize>| -> f64 { r.map(col_cost).sum() };
 
     let theta_obj_coeff = view
         .objective_coeffs
@@ -1535,10 +1596,10 @@ fn extract_non_controllables(
 
     for (local_idx, &ncs_id) in spec.ncs_entity_ids.iter().enumerate() {
         for blk in 0..n_blks {
-            let col = grid.flat(col_start, local_idx, blk);
+            let col = grid.flat(col_start, local_idx, BlockIdx::new(blk));
             let generation_mw = view.primal[col];
             // `ncs_col_upper` is the same block-major layout zero-based, so `flat` from 0.
-            let col_upper_offset = grid.flat(0, local_idx, blk);
+            let col_upper_offset = grid.flat(0, local_idx, BlockIdx::new(blk));
             debug_assert!(
                 col_upper_offset < spec.ncs_col_upper.len(),
                 "NCS col_upper out of bounds: offset {col_upper_offset}, len {}",
@@ -1608,7 +1669,7 @@ fn extract_pumping_stations(
         let pumping_station_id = spec.entity_counts.pumping_station_ids[p_sys];
         let consumption = spec.pumping_consumption_mw_per_m3s[p_sys];
         for blk in 0..n_blks {
-            let col = grid.flat(col_start, p_sys, blk);
+            let col = grid.flat(col_start, p_sys, BlockIdx::new(blk));
             let pumped_flow_m3s = view.primal[col];
             #[allow(clippy::cast_possible_truncation)]
             results.push(SimulationPumpingResult {
@@ -1674,7 +1735,7 @@ fn extract_contracts(
         };
         let price = spec.contract_prices[c];
         for blk in 0..n_blks {
-            let col = grid.flat(base, family_slot, blk);
+            let col = grid.flat(base, family_slot, BlockIdx::new(blk));
             let power_mw = view.primal[col];
             let dur = spec.block_hours[blk];
             let energy_mwh = power_mw * dur;

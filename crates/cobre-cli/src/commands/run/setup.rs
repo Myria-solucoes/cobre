@@ -8,12 +8,42 @@ use std::path::{Path, PathBuf};
 use console::Term;
 
 use cobre_comm::{Communicator, TopologyProvider, create_communicator};
+use cobre_core::EntityId;
+use cobre_core::ScalarParameter;
 use cobre_core::System;
+use cobre_core::temporal::SeasonCycleType::Monthly;
+use cobre_core::temporal::SeasonMap;
+use cobre_io::BroadcastScalarParameter;
+use cobre_io::Config;
+use cobre_io::PolicyMode;
+use cobre_io::SetupTimings;
+use cobre_io::load_case_with_artifacts;
+use cobre_io::parse_config;
+use cobre_io::write_hydro_model_summary;
+use cobre_io::write_provenance_report;
+use cobre_io::write_scaling_report;
+use cobre_sddp::EstimationPath;
+use cobre_sddp::HydroFitTimings;
+use cobre_sddp::build_provenance_report;
+use cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts;
+use cobre_sddp::orchestration::export_stochastic_artifacts;
+use cobre_sddp::reconcile_global_ok;
 use cobre_sddp::{
     EstimationReport, PrepareHydroModelsResult, PrepareStochasticResult, StudySetup,
     build_hydro_model_summary, prepare_hydro_models, prepare_stochastic,
     setup::{ConstructionConfig, build_ncs_factor_entries, load_load_factors_for_stochastic},
 };
+use cobre_solver::active_solver_name;
+use cobre_solver::active_solver_version;
+use cobre_stochastic::ClassSchemes;
+use cobre_stochastic::HistoricalScenarioLibrary;
+use cobre_stochastic::PrecomputedPar;
+use cobre_stochastic::discover_historical_windows;
+use cobre_stochastic::normal::precompute::BlockFactorPair;
+use cobre_stochastic::normal::precompute::EntityFactorEntry;
+use cobre_stochastic::par::lag_transition::derive_downstream_par_order;
+use cobre_stochastic::par::lag_transition::precompute_stage_lag_transitions;
+use cobre_stochastic::standardize_historical_windows;
 use cobre_stochastic::{
     OpeningTreeInputs, build_stochastic_context, context::OpeningTree,
     provenance::ComponentProvenance,
@@ -26,6 +56,13 @@ use crate::commands::broadcast::{
 };
 
 use super::{RunArgs, RunContext};
+use crate::banner::print_banner;
+use crate::progress::RenderMode;
+use crate::progress::resolve_term_width;
+use crate::summary::print_execution_topology;
+use crate::summary::print_hydro_model_summary;
+use crate::summary::print_provenance_summary;
+use crate::summary::print_setup_summary;
 
 pub(super) fn resolve_thread_count(cli_threads: Option<u32>) -> usize {
     match cli_threads {
@@ -41,9 +78,9 @@ type LoadedCase = (
     PrepareStochasticResult,
     PrepareHydroModelsResult,
     BroadcastConfig,
-    cobre_io::Config,
-    Vec<cobre_core::ScalarParameter>,
-    cobre_io::SetupTimings,
+    Config,
+    Vec<ScalarParameter>,
+    SetupTimings,
 );
 
 /// Load case and config on rank 0, capturing errors for MPI collective participation.
@@ -66,13 +103,12 @@ fn load_case_and_config(
     }
     // Single load: downstream consumers reuse the artifacts returned here instead
     // of re-reading the same files from disk.
-    let mut timings = cobre_io::SetupTimings::default();
+    let mut timings = SetupTimings::default();
 
     let load_start = std::time::Instant::now();
-    let cobre_io::LoadedCase { system, artifacts } =
-        cobre_io::load_case_with_artifacts(&args.case_dir)?;
+    let cobre_io::LoadedCase { system, artifacts } = load_case_with_artifacts(&args.case_dir)?;
     let config_path = args.case_dir.join("config.json");
-    let config = cobre_io::parse_config(&config_path)?;
+    let config = parse_config(&config_path)?;
     timings.load_seconds = load_start.elapsed().as_secs_f64();
 
     let bcast = BroadcastConfig::from_config(&config)?;
@@ -89,8 +125,8 @@ fn load_case_and_config(
     .map_err(CliError::from)?;
     timings.stochastic_fit_seconds = stochastic_start.elapsed().as_secs_f64();
 
-    let mut hydro_timings = cobre_sddp::HydroFitTimings::default();
-    let hydro_models = cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts(
+    let mut hydro_timings = HydroFitTimings::default();
+    let hydro_models = prepare_hydro_models_from_artifacts(
         &prepared.system,
         &artifacts,
         config.exports.fpha_deviation_points,
@@ -115,14 +151,14 @@ fn load_case_and_config(
 pub(super) struct LoadBroadcastResult {
     pub(super) system: System,
     pub(super) setup: StudySetup,
-    pub(super) root_config: Option<cobre_io::Config>,
+    pub(super) root_config: Option<Config>,
     pub(super) root_estimation_report: Option<EstimationReport>,
-    pub(super) root_estimation_path: Option<cobre_sddp::EstimationPath>,
+    pub(super) root_estimation_path: Option<EstimationPath>,
     pub(super) training_enabled: bool,
-    pub(super) policy_mode: cobre_io::PolicyMode,
+    pub(super) policy_mode: PolicyMode,
     /// `None` on non-root ranks, which reconstruct setup independently and never
     /// write metadata.
-    pub(super) setup_timings: Option<cobre_io::SetupTimings>,
+    pub(super) setup_timings: Option<SetupTimings>,
 }
 
 /// Set up the communicator, terminal, rayon pool, and resolve the output directory.
@@ -168,15 +204,15 @@ pub(super) fn setup_communicator(
         });
     }
 
-    let solver_version = cobre_solver::active_solver_version();
+    let solver_version = active_solver_version();
 
     if !quiet {
-        crate::banner::print_banner(&stderr);
-        crate::summary::print_execution_topology(
+        print_banner(&stderr);
+        print_execution_topology(
             &stderr,
             &topology,
             actual_threads,
-            cobre_solver::active_solver_name(),
+            active_solver_name(),
             Some(&solver_version),
         );
     }
@@ -185,8 +221,8 @@ pub(super) fn setup_communicator(
         .output
         .clone()
         .unwrap_or_else(|| args.case_dir.join("output"));
-    let term_width = crate::progress::resolve_term_width();
-    let render_mode = crate::progress::RenderMode::auto();
+    let term_width = resolve_term_width();
+    let render_mode = RenderMode::auto();
 
     Ok(RunContext {
         comm,
@@ -212,7 +248,7 @@ pub(super) fn broadcast_and_build_setup(
 ) -> Result<LoadBroadcastResult, CliError> {
     // Kept out of the broadcast tuple: timings are never broadcast — only rank 0
     // writes metadata.
-    let mut root_setup_timings: Option<cobre_io::SetupTimings> = None;
+    let mut root_setup_timings: Option<SetupTimings> = None;
     let (
         raw_system,
         raw_bcast_config,
@@ -240,15 +276,15 @@ pub(super) fn broadcast_and_build_setup(
                 } else {
                     None
                 };
-                let cobre_sddp::PrepareStochasticResult {
+                let PrepareStochasticResult {
                     system,
                     stochastic,
                     estimation_report,
                     estimation_path,
                 } = prepared;
-                let bcast_params: Vec<cobre_io::BroadcastScalarParameter> = scalar_parameters
+                let bcast_params: Vec<BroadcastScalarParameter> = scalar_parameters
                     .iter()
-                    .map(cobre_io::BroadcastScalarParameter::from)
+                    .map(BroadcastScalarParameter::from)
                     .collect();
                 (
                     Some(system),
@@ -327,9 +363,9 @@ pub(super) fn broadcast_and_build_setup(
 
     let training_enabled = bcast_config.training_enabled;
     let policy_mode = bcast_config.policy_mode;
-    let scalar_parameters: Vec<cobre_core::ScalarParameter> = scalar_parameters_result?
+    let scalar_parameters: Vec<ScalarParameter> = scalar_parameters_result?
         .into_iter()
-        .map(cobre_core::ScalarParameter::from)
+        .map(ScalarParameter::from)
         .collect();
     let setup = build_study_setup(
         &system,
@@ -370,29 +406,26 @@ fn reconstruct_stochastic_context_non_root(
         load_load_factors_for_stochastic(case_dir).map_err(|e| CliError::Internal {
             message: format!("load factor error on non-root rank: {e}"),
         })?;
-    let load_block_pairs: Vec<Vec<cobre_stochastic::normal::precompute::BlockFactorPair>> =
-        load_factor_entries
-            .iter()
-            .map(|e| {
-                e.block_factors
-                    .iter()
-                    .map(|bf| (bf.block_id, bf.factor))
-                    .collect()
-            })
-            .collect();
-    let load_entity_factors: Vec<cobre_stochastic::normal::precompute::EntityFactorEntry<'_>> =
-        load_factor_entries
-            .iter()
-            .zip(load_block_pairs.iter())
-            .map(|(e, pairs)| (e.bus_id, e.stage_id, pairs.as_slice()))
-            .collect();
+    let load_block_pairs: Vec<Vec<BlockFactorPair>> = load_factor_entries
+        .iter()
+        .map(|e| {
+            e.block_factors
+                .iter()
+                .map(|bf| (bf.block_id, bf.factor))
+                .collect()
+        })
+        .collect();
+    let load_entity_factors: Vec<EntityFactorEntry<'_>> = load_factor_entries
+        .iter()
+        .zip(load_block_pairs.iter())
+        .map(|(e, pairs)| (e.bus_id, e.stage_id, pairs.as_slice()))
+        .collect();
 
     let ncs_raw = build_ncs_factor_entries(system);
-    let ncs_entity_factors: Vec<cobre_stochastic::normal::precompute::EntityFactorEntry<'_>> =
-        ncs_raw
-            .iter()
-            .map(|(ncs_id, stage_id, pairs)| (*ncs_id, *stage_id, pairs.as_slice()))
-            .collect();
+    let ncs_entity_factors: Vec<EntityFactorEntry<'_>> = ncs_raw
+        .iter()
+        .map(|(ncs_id, stage_id, pairs)| (*ncs_id, *stage_id, pairs.as_slice()))
+        .collect();
 
     let opening_tree_library = rebuild_historical_library_non_root(system, training_src)?;
 
@@ -411,7 +444,7 @@ fn reconstruct_stochastic_context_non_root(
             // TODO(noise-group-non-root-saa-tree): wire noise_group_ids for non-root SAA tree generation
             noise_group_ids: None,
         },
-        cobre_stochastic::ClassSchemes {
+        ClassSchemes {
             inflow: Some(training_src.inflow_scheme),
             load: Some(training_src.load_scheme),
             ncs: Some(training_src.ncs_scheme),
@@ -443,24 +476,20 @@ fn rebuild_historical_library_non_root(
             .filter(|s| s.id >= 0)
             .cloned()
             .collect();
-        let hydro_ids: Vec<cobre_core::EntityId> = system.hydros().iter().map(|h| h.id).collect();
+        let hydro_ids: Vec<EntityId> = system.hydros().iter().map(|h| h.id).collect();
         let cycle_len = system
             .policy_graph()
             .season_map
             .as_ref()
             .map(|sm| sm.seasons.len());
-        let par = cobre_stochastic::PrecomputedPar::build(
-            system.inflow_models(),
-            &study_stages,
-            &hydro_ids,
-            cycle_len,
-        )
-        .map_err(|e| CliError::Internal {
-            message: format!("PAR build error on non-root rank: {e}"),
-        })?;
+        let par =
+            PrecomputedPar::build(system.inflow_models(), &study_stages, &hydro_ids, cycle_len)
+                .map_err(|e| CliError::Internal {
+                    message: format!("PAR build error on non-root rank: {e}"),
+                })?;
         let max_order = par.max_order();
         let user_pool = training_src.historical_years.as_ref();
-        let window_years = cobre_stochastic::discover_historical_windows(
+        let window_years = discover_historical_windows(
             system.inflow_history(),
             &hydro_ids,
             &study_stages,
@@ -472,7 +501,7 @@ fn rebuild_historical_library_non_root(
         .map_err(|e| CliError::Internal {
             message: format!("historical window discovery error on non-root rank: {e}"),
         })?;
-        let mut lib = cobre_stochastic::HistoricalScenarioLibrary::new(
+        let mut lib = HistoricalScenarioLibrary::new(
             window_years.len(),
             study_stages.len(),
             hydro_ids.len(),
@@ -484,28 +513,23 @@ fn rebuild_historical_library_non_root(
         // not the in-function uniform-monthly fallback, which silently misroutes
         // non-monthly study grids.
         let noop_season_map;
-        let season_map_for_transitions: &cobre_core::temporal::SeasonMap =
+        let season_map_for_transitions: &SeasonMap =
             if let Some(sm) = system.policy_graph().season_map.as_ref() {
                 sm
             } else {
-                noop_season_map = cobre_core::temporal::SeasonMap {
-                    cycle_type: cobre_core::temporal::SeasonCycleType::Monthly,
+                noop_season_map = SeasonMap {
+                    cycle_type: Monthly,
                     seasons: Vec::new(),
                 };
                 &noop_season_map
             };
-        let downstream_par_order =
-            cobre_stochastic::par::lag_transition::derive_downstream_par_order(
-                &study_stages,
-                max_order,
-            );
-        let stage_lag_transitions =
-            cobre_stochastic::par::lag_transition::precompute_stage_lag_transitions(
-                &study_stages,
-                season_map_for_transitions,
-                downstream_par_order,
-            );
-        cobre_stochastic::standardize_historical_windows(
+        let downstream_par_order = derive_downstream_par_order(&study_stages, max_order);
+        let stage_lag_transitions = precompute_stage_lag_transitions(
+            &study_stages,
+            season_map_for_transitions,
+            downstream_par_order,
+        );
+        standardize_historical_windows(
             &mut lib,
             system.inflow_history(),
             &hydro_ids,
@@ -532,7 +556,7 @@ fn build_study_setup(
     bcast_config: &mut BroadcastConfig,
     stochastic: cobre_stochastic::StochasticContext,
     hydro_models: PrepareHydroModelsResult,
-    scalar_parameters: Vec<cobre_core::ScalarParameter>,
+    scalar_parameters: Vec<ScalarParameter>,
 ) -> Result<StudySetup, CliError> {
     let stopping_rule_set = stopping_rules_from_broadcast(bcast_config);
     let cut_selection = bcast_config.cut_selection.take();
@@ -565,10 +589,10 @@ pub(super) fn run_pre_training(
     ctx: &RunContext<impl Communicator>,
     system: &System,
     setup: &StudySetup,
-    root_config: Option<&cobre_io::Config>,
+    root_config: Option<&Config>,
     root_estimation_report: Option<&EstimationReport>,
-    root_estimation_path: Option<cobre_sddp::EstimationPath>,
-    setup_timings: Option<&cobre_io::SetupTimings>,
+    root_estimation_path: Option<EstimationPath>,
+    setup_timings: Option<&SetupTimings>,
 ) -> Result<(), CliError> {
     // Renders before the Hydro models block so the setup timings sit with the
     // other setup summaries.
@@ -576,7 +600,7 @@ pub(super) fn run_pre_training(
         && !ctx.quiet
         && let Some(timings) = setup_timings
     {
-        crate::summary::print_setup_summary(&ctx.stderr, timings);
+        print_setup_summary(&ctx.stderr, timings);
     }
 
     let export_result: Result<(), CliError> = if ctx.is_root {
@@ -596,11 +620,10 @@ pub(super) fn run_pre_training(
     // failure (disk full, permissions) would otherwise strand every peer at the
     // barrier while rank 0 returned early.
     let mut reconcile_scratch = [0_i32];
-    let global_ok =
-        cobre_sddp::reconcile_global_ok(export_result.is_ok(), &ctx.comm, &mut reconcile_scratch)
-            .map_err(|e| CliError::Internal {
-            message: format!("pre-training export reconcile error: {e}"),
-        })?;
+    let global_ok = reconcile_global_ok(export_result.is_ok(), &ctx.comm, &mut reconcile_scratch)
+        .map_err(|e| CliError::Internal {
+        message: format!("pre-training export reconcile error: {e}"),
+    })?;
     export_result?;
     if !global_ok {
         return Err(CliError::Internal {
@@ -623,25 +646,25 @@ fn run_root_exports(
     ctx: &RunContext<impl Communicator>,
     system: &System,
     setup: &StudySetup,
-    root_config: Option<&cobre_io::Config>,
+    root_config: Option<&Config>,
     root_estimation_report: Option<&EstimationReport>,
-    root_estimation_path: Option<cobre_sddp::EstimationPath>,
+    root_estimation_path: Option<EstimationPath>,
 ) -> Result<(), CliError> {
     // Built regardless of `quiet`: it also feeds the persisted sidecar consumed
     // by `cobre summary`, not just the optional print.
     let hydro_summary = build_hydro_model_summary(&setup.hydro_models, system);
     if !ctx.quiet {
-        crate::summary::print_hydro_model_summary(&ctx.stderr, &hydro_summary);
+        print_hydro_model_summary(&ctx.stderr, &hydro_summary);
     }
     let hydro_models_path = ctx.output_dir.join("training/hydro_models.json");
-    cobre_io::write_hydro_model_summary(&hydro_models_path, &hydro_summary).map_err(|e| {
+    write_hydro_model_summary(&hydro_models_path, &hydro_summary).map_err(|e| {
         CliError::Internal {
             message: format!("failed to write hydro model summary: {e}"),
         }
     })?;
 
     if let Some(path) = root_estimation_path {
-        let provenance = cobre_sddp::build_provenance_report(
+        let provenance = build_provenance_report(
             path,
             root_estimation_report,
             setup.stochastic.provenance(),
@@ -649,13 +672,11 @@ fn run_root_exports(
             &setup.hydro_models.provenance,
         );
         if !ctx.quiet {
-            crate::summary::print_provenance_summary(&ctx.stderr, &provenance);
+            print_provenance_summary(&ctx.stderr, &provenance);
         }
         let provenance_path = ctx.output_dir.join("training/model_provenance.json");
-        cobre_io::write_provenance_report(&provenance_path, &provenance).map_err(|e| {
-            CliError::Internal {
-                message: format!("failed to write provenance report: {e}"),
-            }
+        write_provenance_report(&provenance_path, &provenance).map_err(|e| CliError::Internal {
+            message: format!("failed to write provenance report: {e}"),
         })?;
     }
 
@@ -670,7 +691,7 @@ fn run_root_exports(
                 let _ = stderr.write_line(&format!("warning: stochastic export failed ({msg})"));
             }
         };
-        cobre_sddp::orchestration::export_stochastic_artifacts(
+        export_stochastic_artifacts(
             &ctx.output_dir,
             &setup.stochastic,
             system,
@@ -680,11 +701,11 @@ fn run_root_exports(
     }
 
     let scaling_path = ctx.output_dir.join("training/scaling_report.json");
-    cobre_io::write_scaling_report(&scaling_path, &setup.stage_data.scaling_report).map_err(
-        |e| CliError::Internal {
+    write_scaling_report(&scaling_path, &setup.stage_data.scaling_report).map_err(|e| {
+        CliError::Internal {
             message: format!("failed to write scaling report: {e}"),
-        },
-    )?;
+        }
+    })?;
 
     Ok(())
 }

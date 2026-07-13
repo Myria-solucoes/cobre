@@ -26,6 +26,21 @@
 //! # }
 //! ```
 
+use cobre_core::ContractType::Import;
+use cobre_core::temporal::SeasonCycleType::Monthly;
+use cobre_core::temporal::SeasonMap;
+use cobre_core::temporal::StageStateConfig;
+use cobre_io::Config;
+use cobre_stochastic::par::RecentObservationSeed;
+use cobre_stochastic::par::lag_transition::compute_recent_observation_seed;
+use cobre_stochastic::par::lag_transition::derive_downstream_par_order;
+use cobre_stochastic::par::lag_transition::precompute_noise_groups;
+use cobre_stochastic::par::lag_transition::precompute_stage_lag_transitions;
+
+use crate::config::LoopParams;
+use crate::resolved_parameters::build_resolved_parameters;
+use crate::simulation::SimulationConfig;
+use crate::stochastic::noise_key::build_noise_key_table;
 mod accessors;
 pub(crate) mod bucket_seed;
 pub(crate) mod bucket_topology;
@@ -156,10 +171,10 @@ pub struct StudySetup {
     ///
     /// `n_fwd_threads` is excluded (derived at runtime) and supplied as a per-call
     /// argument to [`StudySetup::train`].
-    pub loop_params: crate::config::LoopParams,
+    pub loop_params: LoopParams,
 
     /// Simulation pipeline parameters, stored directly as [`crate::simulation::SimulationConfig`].
-    pub simulation_config: crate::simulation::SimulationConfig,
+    pub simulation_config: SimulationConfig,
 
     /// Relative path to the policy output directory (e.g. `"training/policy"`).
     pub policy_path: String,
@@ -181,8 +196,7 @@ pub struct StudySetup {
     /// at every trajectory start in the forward pass and simulation pipeline instead
     /// of zero-filling. All-zero (a plain zero reset) when `recent_observations` is
     /// empty.
-    pub(crate) recent_observation_seed:
-        cobre_stochastic::par::lag_transition::RecentObservationSeed,
+    pub(crate) recent_observation_seed: RecentObservationSeed,
 
     /// PAR order of the downstream (coarser) resolution model. Non-zero only when
     /// the study includes stages with `season_id >= 12` (a monthly-to-quarterly
@@ -234,7 +248,7 @@ impl StudySetup {
     ///   an invalid config string.
     pub fn new(
         system: &System,
-        config: &cobre_io::Config,
+        config: &Config,
         stochastic: StochasticContext,
         hydro_models: PrepareHydroModelsResult,
     ) -> Result<Self, SddpError> {
@@ -302,8 +316,7 @@ impl StudySetup {
         // Keys are a pure function of the synced tree + fixed σ, so every rank
         // computes the identical permutation and cuts stay bit-identical across
         // thread/rank counts (canonical-ω aggregation is order-independent).
-        let solve_order_keys =
-            crate::stochastic::noise_key::build_noise_key_table(system, &stochastic)?;
+        let solve_order_keys = build_noise_key_table(system, &stochastic)?;
         stochastic
             .set_solve_order(&solve_order_keys, SweepDirection::Descending)
             .map_err(|e| SddpError::Validation(e.to_string()))?;
@@ -460,7 +473,7 @@ impl StudySetup {
             anticipated_windows,
             study_stage_ids,
             scenario_libraries,
-            loop_params: crate::config::LoopParams {
+            loop_params: LoopParams {
                 seed,
                 forward_passes,
                 max_iterations,
@@ -468,7 +481,7 @@ impl StudySetup {
                 max_blocks,
                 stopping_rules: stopping_rule_set,
             },
-            simulation_config: crate::simulation::SimulationConfig {
+            simulation_config: SimulationConfig {
                 n_scenarios,
                 io_channel_capacity,
             },
@@ -650,7 +663,7 @@ fn build_energy_and_templates(
         Some(&hydro_models.production),
     )
     .map_err(|e| SddpError::Validation(e.to_string()))?;
-    let resolved_parameters = crate::resolved_parameters::build_resolved_parameters(
+    let resolved_parameters = build_resolved_parameters(
         scalar_parameters,
         &energy_conversion,
         &hydro_models.productivity_override,
@@ -832,7 +845,7 @@ fn build_study_dimensions(
     // presence; the per-(ncs, block) column base is read per stage from
     // `StageContext::ncs_col_starts`, never a global handle. `n_blks` is deliberately
     // absent — it is per-stage, owned by the per-stage geometry, never study-global.
-    crate::indexer::StudyDimensions {
+    StudyDimensions {
         n_thermals: system.thermals().len(),
         n_lines: system.lines().len(),
         n_buses: system.buses().len(),
@@ -1024,17 +1037,16 @@ fn build_cut_state_layouts(
 
 /// The all-dimensions cut-state config, sizing a pool to the full global
 /// `n_state`. Used for the terminal pool (no successor stage to govern it).
-const FULL_STATE_CONFIG: cobre_core::temporal::StageStateConfig =
-    cobre_core::temporal::StageStateConfig {
-        storage: true,
-        inflow_lags: true,
-    };
+const FULL_STATE_CONFIG: StageStateConfig = StageStateConfig {
+    storage: true,
+    inflow_lags: true,
+};
 
 /// Grouped output of [`precompute_lag_data`].
 struct LagData {
     stage_lag_transitions: Vec<cobre_core::temporal::StageLagTransition>,
     noise_group_ids: Vec<u32>,
-    recent_observation_seed: cobre_stochastic::par::lag_transition::RecentObservationSeed,
+    recent_observation_seed: RecentObservationSeed,
     downstream_par_order: usize,
 }
 
@@ -1050,30 +1062,23 @@ fn precompute_lag_data(
         sm
     } else {
         // No season map: all stages produce zero-weight no-op transitions.
-        noop_season_map = cobre_core::temporal::SeasonMap {
-            cycle_type: cobre_core::temporal::SeasonCycleType::Monthly,
+        noop_season_map = SeasonMap {
+            cycle_type: Monthly,
             seasons: Vec::new(),
         };
         &noop_season_map
     };
     // Proxy: the global `max_par_order` stands in for the quarterly PAR order until a
     // separate quarterly stochastic context exists.
-    let downstream_par_order = cobre_stochastic::par::lag_transition::derive_downstream_par_order(
-        stages,
-        stochastic.par().max_order(),
-    );
+    let downstream_par_order = derive_downstream_par_order(stages, stochastic.par().max_order());
     let stage_lag_transitions =
-        cobre_stochastic::par::lag_transition::precompute_stage_lag_transitions(
-            stages,
-            season_map_ref,
-            downstream_par_order,
-        );
-    let noise_group_ids = cobre_stochastic::par::lag_transition::precompute_noise_groups(stages);
+        precompute_stage_lag_transitions(stages, season_map_ref, downstream_par_order);
+    let noise_group_ids = precompute_noise_groups(stages);
 
     let recent_observation_seed = if stages.is_empty() {
-        cobre_stochastic::par::lag_transition::RecentObservationSeed::zero(system.hydros().len())
+        RecentObservationSeed::zero(system.hydros().len())
     } else {
-        cobre_stochastic::par::lag_transition::compute_recent_observation_seed(
+        compute_recent_observation_seed(
             &system.initial_conditions().recent_observations,
             &stages[0],
             season_map_ref,
@@ -1350,7 +1355,7 @@ fn build_contract_is_import(system: &System) -> Vec<bool> {
     system
         .contracts()
         .iter()
-        .map(|c| c.contract_type == cobre_core::ContractType::Import)
+        .map(|c| c.contract_type == Import)
         .collect()
 }
 

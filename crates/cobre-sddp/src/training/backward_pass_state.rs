@@ -8,11 +8,13 @@ use std::time::Instant;
 
 use cobre_comm::{Communicator, ReduceOp};
 use cobre_core::{TrainingEvent, WorkerPhaseTimings, WorkerTimingPhase};
+use cobre_solver::ActiveProfile;
 use cobre_solver::{RowBatch, SolverInterface, SolverStatistics, StageTemplate};
 use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator,
 };
 
+use crate::risk_measure::BackwardOutcome;
 use crate::{
     backward::{
         BackwardResult, StageOpeningSolver, StageWorkerOpeningDelta, StagedCut, SuccessorSpec,
@@ -293,7 +295,7 @@ impl BackwardPassState {
         inputs: &mut BackwardPassInputs<'_, S, C>,
     ) -> Result<BackwardResult, SddpError>
     where
-        S: SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
+        S: SolverInterface<Profile = ActiveProfile> + Send,
     {
         let training_ctx = inputs.training_ctx;
         let num_stages = training_ctx.horizon.num_stages();
@@ -908,13 +910,11 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
             // never `ws.solver`: the LP load is issued per trial point via
             // `opening_solver.prepare`, not here.
             while ws.backward_accum.outcomes.len() < n_openings {
-                ws.backward_accum
-                    .outcomes
-                    .push(crate::risk_measure::BackwardOutcome {
-                        intercept: 0.0,
-                        coefficients: vec![0.0_f64; cut_n_state],
-                        objective_value: 0.0,
-                    });
+                ws.backward_accum.outcomes.push(BackwardOutcome {
+                    intercept: 0.0,
+                    coefficients: vec![0.0_f64; cut_n_state],
+                    objective_value: 0.0,
+                });
             }
             for outcome in &mut ws.backward_accum.outcomes[..n_openings] {
                 outcome.coefficients.resize(cut_n_state, 0.0_f64);

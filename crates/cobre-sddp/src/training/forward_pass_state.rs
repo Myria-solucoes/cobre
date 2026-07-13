@@ -6,7 +6,9 @@
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
+use cobre_core::WorkerPhaseTimings;
 use cobre_core::{TrainingEvent, WorkerTimingPhase};
+use cobre_solver::ActiveProfile;
 use cobre_solver::{SolverInterface, SolverStatistics, StageTemplate};
 use cobre_stochastic::context::ClassSchemes;
 use cobre_stochastic::{
@@ -17,6 +19,10 @@ use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator,
 };
 
+use crate::training_session::iteration_scratch::IterationScratch;
+use crate::training_session::rank_distribution::RankDistribution;
+use crate::training_session::runtime::RuntimeHandles;
+use crate::workspace::WorkspacePool;
 use crate::{
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
@@ -75,14 +81,14 @@ impl<'a, S: SolverInterface + Send> ForwardPassInputs<'a, S> {
     // without adding indirection or invalidating the disjoint-borrow design.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_session_fields(
-        fwd_pool: &'a mut crate::workspace::WorkspacePool<S>,
+        fwd_pool: &'a mut WorkspacePool<S>,
         basis_store: &'a mut BasisStore,
         ctx: &'a StageContext<'a>,
-        scratch: &'a mut crate::training_session::iteration_scratch::IterationScratch,
+        scratch: &'a mut IterationScratch,
         fcf: &'a FutureCostFunction,
         training_ctx: &'a TrainingContext<'a>,
-        ranks: &crate::training_session::rank_distribution::RankDistribution,
-        runtime: &'a crate::training_session::runtime::RuntimeHandles,
+        ranks: &RankDistribution,
+        runtime: &'a RuntimeHandles,
         iteration: u64,
     ) -> Self {
         let fwd_record_len = ranks.my_actual_fwd * training_ctx.horizon.num_stages();
@@ -267,7 +273,7 @@ impl ForwardPassState {
         inputs: &mut ForwardPassInputs<'_, S>,
     ) -> Result<ForwardResult, SddpError>
     where
-        S: SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
+        S: SolverInterface<Profile = ActiveProfile> + Send,
     {
         let training_ctx = inputs.training_ctx;
         let TrainingContext {
@@ -369,7 +375,7 @@ impl ForwardPassState {
         }
 
         for ws in inputs.workspaces.iter_mut() {
-            ws.worker_timing_buf = cobre_core::WorkerPhaseTimings::default();
+            ws.worker_timing_buf = WorkerPhaseTimings::default();
         }
 
         let parallel_start = Instant::now();

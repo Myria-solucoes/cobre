@@ -19,6 +19,16 @@ use super::layout::{ResolvedTables, StageLayout, TemplateBuildCtx};
 use super::{
     COST_SCALE_FACTOR, GenericConstraintRowEntry, M3S_TO_HM3, columns, entries, rows, scaling,
 };
+use crate::indexer::Boundary;
+use crate::indexer::EvaporationIndices;
+use crate::indexer::HydroSys;
+use crate::indexer::StateLayout;
+use crate::indexer::StorageBoundaryGrid;
+use crate::indexer::ThermalSys;
+#[cfg(any(test, feature = "test-support"))]
+use crate::setup::bucket_topology::build_transit_bucket_topology;
+#[cfg(any(test, feature = "test-support"))]
+use crate::setup::resolve_state_layout;
 
 /// Outcome of [`build_stage_templates`]: one [`StageTemplate`] per study stage
 /// plus the per-stage offsets and counts the forward/backward/simulation passes
@@ -241,7 +251,7 @@ pub struct StageGeometry {
     /// FPHA-generation-block end, so they shift under a non-uniform schedule —
     /// this per-stage copy carries the stage-correct columns. A reader wanting a
     /// hydro's block 0 indexes `local_evap_idx * n_blks`.
-    pub evap_indices: Vec<crate::indexer::EvaporationIndices>,
+    pub evap_indices: Vec<EvaporationIndices>,
     /// Inflow non-negativity slack column range (one per hydro, stage-level).
     pub inflow_slack: Range<usize>,
     /// Under-withdrawal slack column range (one per hydro, stage-level).
@@ -304,40 +314,40 @@ pub struct StageGeometry {
     /// Storage-boundary address primitive for this stage, carrying both state
     /// bases plus the interior control-region anchor mirroring
     /// `StageLayout::storage_boundary_grid`; feeds [`StageGeometry::block_storage_col`].
-    pub storage_boundary_grid: crate::indexer::StorageBoundaryGrid,
+    pub storage_boundary_grid: StorageBoundaryGrid,
     /// Block formulation mode at this stage. Selects per-block storage extraction
     /// (`Chronological` reads each block's own `(Sᵇ, Sᵇ⁺¹)` boundary) versus the
     /// stage-level `(S⁰, Sᴷ)` pair (`Parallel`); defaults to `Parallel`.
     pub block_mode: BlockMode,
     /// System hydro indices using FPHA at this stage, in slot order. FPHA
     /// membership is per `(hydro, stage)`, so this is the stage-correct list.
-    pub fpha_hydro_indices: Vec<usize>,
+    pub fpha_hydro_indices: Vec<HydroSys>,
     /// System hydro indices with linearized evaporation at this stage, in slot
     /// order. Parallel to `evap_indices`.
-    pub evap_hydro_indices: Vec<usize>,
+    pub evap_hydro_indices: Vec<HydroSys>,
     /// System hydro indices owning a `σ_fill`-target slack column at this stage (the
     /// Filling-phase hydros), in slot order. Parallel to `filling_target_col` (slot
     /// `i` → `filling_target_col.start + i`). The family is SPARSE — one column per
     /// filling hydro — so extraction resolves a system hydro's column via this
     /// system→slot list, never by the dense system index `h`.
-    pub filling_target_hydro_indices: Vec<usize>,
+    pub filling_target_hydro_indices: Vec<HydroSys>,
     /// System hydro indices owning a `σ^{v-}` operating-floor slack column at this
     /// stage (the Operating-phase filling hydros), in slot order. Parallel to
     /// `filled_min_storage_floor_col`; SPARSE like `filling_target_hydro_indices`,
     /// resolved the same way.
-    pub filled_min_storage_floor_hydro_indices: Vec<usize>,
+    pub filled_min_storage_floor_hydro_indices: Vec<HydroSys>,
 }
 
 impl StageGeometry {
-    /// Storage column at chronological boundary `k ∈ 0..=n_blks` for hydro `h`,
-    /// so the simulation read-path resolves per-block boundaries without a
+    /// Storage column at chronological `boundary` for hydro `h`, so the
+    /// simulation read-path resolves per-block boundaries without a
     /// `StageLayout`; delegates to
     /// [`StorageBoundaryGrid::col`](crate::indexer::StorageBoundaryGrid::col),
     /// the single owner of the endpoints-vs-interior split.
     #[inline]
     #[must_use]
-    pub fn block_storage_col(&self, h: usize, k: usize) -> usize {
-        self.storage_boundary_grid.col(h, k)
+    pub fn block_storage_col(&self, h: HydroSys, boundary: Boundary) -> usize {
+        self.storage_boundary_grid.col(h.get(), boundary)
     }
 }
 
@@ -378,7 +388,7 @@ pub(super) struct StageBuildOutput {
 #[allow(clippy::similar_names)]
 pub(super) fn build_single_stage_template(
     ctx: &TemplateBuildCtx<'_>,
-    state: &crate::indexer::StateLayout,
+    state: &StateLayout,
     stage: &Stage,
     stage_idx: usize,
 ) -> StageBuildOutput {
@@ -622,7 +632,7 @@ pub fn build_stage_templates(
     production_models: &ProductionModelSet,
     evaporation_models: &EvaporationModelSet,
     resolved_parameters: &ResolvedParameters,
-    state_layout: &crate::indexer::StateLayout,
+    state_layout: &StateLayout,
     per_stage_mask: &[Vec<usize>],
     arc_stage_weights: &HashMap<usize, Vec<Vec<f64>>>,
     arc_spread_chrono: &HashMap<usize, Vec<Option<SpreadResolution>>>,
@@ -726,8 +736,8 @@ pub fn build_stage_templates_resolving_layout(
     evaporation_models: &EvaporationModelSet,
     resolved_parameters: &ResolvedParameters,
 ) -> Result<StageTemplates, SddpError> {
-    let topology = crate::setup::bucket_topology::build_transit_bucket_topology(system);
-    let (state_layout, _, _) = crate::setup::resolve_state_layout(system, par_lp, &topology)?;
+    let topology = build_transit_bucket_topology(system);
+    let (state_layout, _, _) = resolve_state_layout(system, par_lp, &topology)?;
     build_stage_templates(
         system,
         inflow_method,
@@ -922,11 +932,11 @@ fn build_template_build_ctx<'a>(
     // Per anticipated thermal: global index and commissioning window. The window
     // keys the decision gate's operation-window clause on the delivery stage;
     // `(None, None)` means active every delivery stage in horizon.
-    let mut anticipated_thermal_indices: Vec<usize> = Vec::new();
+    let mut anticipated_thermal_indices: Vec<ThermalSys> = Vec::new();
     let mut anticipated_windows: Vec<(Option<i32>, Option<i32>)> = Vec::new();
     for (t_idx, thermal) in system.thermals().iter().enumerate() {
         if thermal.anticipated_config.is_some() {
-            anticipated_thermal_indices.push(t_idx);
+            anticipated_thermal_indices.push(ThermalSys::new(t_idx));
             anticipated_windows.push((thermal.entry_stage_id, thermal.exit_stage_id));
         }
     }

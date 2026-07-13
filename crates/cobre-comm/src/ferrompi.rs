@@ -6,6 +6,28 @@
 //! `mpi` Cargo feature.
 
 use crate::BackendError;
+use crate::BackendKind::Mpi;
+use crate::CommData;
+use crate::CommError;
+use crate::CommError::CollectiveFailed;
+use crate::CommError::InvalidBufferSize;
+use crate::CommError::InvalidCommunicator;
+use crate::CommError::InvalidRoot;
+use crate::ExecutionTopology;
+#[cfg(feature = "shared-memory")]
+use crate::HeapRegion;
+use crate::HostInfo;
+#[cfg(feature = "shared-memory")]
+use crate::LocalCommKind;
+#[cfg(feature = "shared-memory")]
+use crate::LocalCommKind::Ferrompi;
+use crate::MpiRuntimeInfo;
+use crate::ReduceOp;
+use crate::ReduceOp::BitwiseOr;
+use crate::ReduceOp::Max;
+use crate::ReduceOp::Min;
+use crate::ReduceOp::Sum;
+use crate::SlurmJobInfo;
 
 /// MPI communication backend wrapping ferrompi.
 ///
@@ -37,7 +59,7 @@ pub struct FerrompiBackend {
     size: usize,
 
     /// Execution topology, gathered once during `new` and cached.
-    topology: crate::ExecutionTopology,
+    topology: ExecutionTopology,
 }
 
 // SAFETY: ferrompi::Mpi is !Send + !Sync to force MPI_Init/MPI_Finalize onto the
@@ -93,18 +115,18 @@ impl FerrompiBackend {
                 })?;
 
         #[allow(clippy::cast_sign_loss)]
-        let topology = crate::ExecutionTopology {
-            backend: crate::BackendKind::Mpi,
+        let topology = ExecutionTopology {
+            backend: Mpi,
             world_size: size,
             hosts: ferrompi_topo
                 .hosts()
                 .iter()
-                .map(|h| crate::HostInfo {
+                .map(|h| HostInfo {
                     hostname: h.hostname.clone(),
                     ranks: h.ranks.iter().map(|&r| r as usize).collect(),
                 })
                 .collect(),
-            mpi: Some(crate::MpiRuntimeInfo {
+            mpi: Some(MpiRuntimeInfo {
                 library_version: sanitize_library_version(ferrompi_topo.library_version()),
                 standard_version: ferrompi_topo.standard_version().to_string(),
                 thread_level: format!("{:?}", ferrompi_topo.thread_level()),
@@ -138,9 +160,8 @@ impl FerrompiBackend {
 
 /// Extract a concise library identifier from `MPI_Get_library_version`.
 ///
-/// MPI implementations return widely different formats. This function normalizes
-/// them to a single-line display string: for MPICH, parses `"MPICH Version: X.Y.Z"`;
-/// for others, takes the first line trimmed.
+/// MPI implementations return widely different formats, normalized here to a
+/// single-line display string.
 fn sanitize_library_version(raw: &str) -> String {
     let first_line = raw.lines().next().unwrap_or(raw).trim();
 
@@ -154,8 +175,8 @@ fn sanitize_library_version(raw: &str) -> String {
 /// With the `numa` feature enabled, reads SLURM job metadata from the topology.
 /// Without the feature, always returns `None` (env-var reads are not available).
 #[cfg(feature = "numa")]
-fn convert_slurm_info(topo: &ferrompi::TopologyInfo) -> Option<crate::SlurmJobInfo> {
-    topo.slurm().map(|s| crate::SlurmJobInfo {
+fn convert_slurm_info(topo: &ferrompi::TopologyInfo) -> Option<SlurmJobInfo> {
+    topo.slurm().map(|s| SlurmJobInfo {
         job_id: s.job_id.clone(),
         node_list: s.node_list.clone(),
         #[allow(clippy::cast_sign_loss)]
@@ -165,14 +186,14 @@ fn convert_slurm_info(topo: &ferrompi::TopologyInfo) -> Option<crate::SlurmJobIn
 
 /// Without the `numa` feature, SLURM information is not available.
 #[cfg(not(feature = "numa"))]
-fn convert_slurm_info(_topo: &ferrompi::TopologyInfo) -> Option<crate::SlurmJobInfo> {
+fn convert_slurm_info(_topo: &ferrompi::TopologyInfo) -> Option<SlurmJobInfo> {
     None
 }
 
 #[cfg(feature = "mpi")]
 impl crate::TopologyProvider for FerrompiBackend {
     /// Returns the cached execution topology (non-collective, allocation-free).
-    fn topology(&self) -> &crate::ExecutionTopology {
+    fn topology(&self) -> &ExecutionTopology {
         &self.topology
     }
 }
@@ -207,7 +228,7 @@ impl crate::traits::LocalCommunicator for FerrompiLocalComm {
     ///
     /// Returns [`crate::CommError::CollectiveFailed`] if the underlying MPI
     /// barrier call fails.
-    fn barrier(&self) -> Result<(), crate::CommError> {
+    fn barrier(&self) -> Result<(), CommError> {
         self.0
             .barrier()
             .map_err(|e| map_ferrompi_error(&e, "barrier"))
@@ -218,7 +239,7 @@ impl crate::traits::LocalCommunicator for FerrompiLocalComm {
 impl crate::SharedMemoryProvider for FerrompiBackend {
     /// Heap-fallback region type: every rank holds its own `Vec<T>`, no memory
     /// shared across ranks (true `MPI_Win` windows deferred, spec SS4.7).
-    type Region<T: crate::CommData> = crate::HeapRegion<T>;
+    type Region<T: CommData> = HeapRegion<T>;
 
     /// Allocate a `HeapRegion` with `count` zero-initialized elements.
     ///
@@ -226,11 +247,11 @@ impl crate::SharedMemoryProvider for FerrompiBackend {
     ///
     /// Always returns `Ok`. Heap allocation failure follows Rust's standard
     /// behavior (process abort on OOM before returning `Err`).
-    fn create_shared_region<T: crate::CommData>(
+    fn create_shared_region<T: CommData>(
         &self,
         count: usize,
-    ) -> Result<Self::Region<T>, crate::CommError> {
-        Ok(crate::local::HeapRegion::new(count))
+    ) -> Result<Self::Region<T>, CommError> {
+        Ok(HeapRegion::new(count))
     }
 
     /// Create an intra-node communicator via `MPI_Comm_split_type SHARED`.
@@ -240,10 +261,10 @@ impl crate::SharedMemoryProvider for FerrompiBackend {
     /// # Errors
     ///
     /// Returns [`crate::CommError::CollectiveFailed`] if `split_shared()` fails.
-    fn split_local(&self) -> Result<crate::traits::LocalCommKind, crate::CommError> {
+    fn split_local(&self) -> Result<LocalCommKind, CommError> {
         self.world
             .split_shared()
-            .map(|c| crate::traits::LocalCommKind::Ferrompi(FerrompiLocalComm(c)))
+            .map(|c| Ferrompi(FerrompiLocalComm(c)))
             .map_err(|e| map_ferrompi_error(&e, "split_local"))
     }
 
@@ -257,7 +278,7 @@ impl crate::SharedMemoryProvider for FerrompiBackend {
 /// Convert a `ferrompi::Error` to the most specific `CommError` variant,
 /// following the classification in spec backend-ferrompi.md SS5.2.
 #[cfg(feature = "mpi")]
-fn map_ferrompi_error(e: &ferrompi::Error, operation: &'static str) -> crate::CommError {
+fn map_ferrompi_error(e: &ferrompi::Error, operation: &'static str) -> CommError {
     match e {
         ferrompi::Error::Mpi {
             class,
@@ -265,34 +286,34 @@ fn map_ferrompi_error(e: &ferrompi::Error, operation: &'static str) -> crate::Co
             message,
             ..
         } => match class {
-            ferrompi::MpiErrorClass::Comm => crate::CommError::InvalidCommunicator,
-            ferrompi::MpiErrorClass::Root => crate::CommError::InvalidRoot {
+            ferrompi::MpiErrorClass::Comm => InvalidCommunicator,
+            ferrompi::MpiErrorClass::Root => InvalidRoot {
                 // Sentinels: ferrompi carries no root/size; detail is in the message.
                 root: 0,
                 size: 0,
             },
             ferrompi::MpiErrorClass::Buffer | ferrompi::MpiErrorClass::Count => {
-                crate::CommError::InvalidBufferSize {
+                InvalidBufferSize {
                     operation,
                     // Sentinels: ferrompi carries no counts; detail is in the message.
                     expected: 0,
                     actual: 0,
                 }
             }
-            _ => crate::CommError::CollectiveFailed {
+            _ => CollectiveFailed {
                 operation,
                 mpi_error_code: *code,
                 message: message.clone(),
             },
         },
-        ferrompi::Error::InvalidBuffer => crate::CommError::InvalidBufferSize {
+        ferrompi::Error::InvalidBuffer => InvalidBufferSize {
             operation,
             expected: 0,
             actual: 0,
         },
-        ferrompi::Error::AlreadyInitialized => crate::CommError::InvalidCommunicator,
+        ferrompi::Error::AlreadyInitialized => InvalidCommunicator,
         // NotSupported / Internal carry no MPI error code; use -1.
-        _ => crate::CommError::CollectiveFailed {
+        _ => CollectiveFailed {
             operation,
             mpi_error_code: -1,
             message: e.to_string(),
@@ -304,12 +325,12 @@ fn map_ferrompi_error(e: &ferrompi::Error, operation: &'static str) -> crate::Co
 ///
 /// `ferrompi::ReduceOp::Prod` is not exposed in the Cobre trait.
 #[cfg(feature = "mpi")]
-fn map_reduce_op(op: crate::ReduceOp) -> ferrompi::ReduceOp {
+fn map_reduce_op(op: ReduceOp) -> ferrompi::ReduceOp {
     match op {
-        crate::ReduceOp::Sum => ferrompi::ReduceOp::Sum,
-        crate::ReduceOp::Min => ferrompi::ReduceOp::Min,
-        crate::ReduceOp::Max => ferrompi::ReduceOp::Max,
-        crate::ReduceOp::BitwiseOr => ferrompi::ReduceOp::BitwiseOr,
+        Sum => ferrompi::ReduceOp::Sum,
+        Min => ferrompi::ReduceOp::Min,
+        Max => ferrompi::ReduceOp::Max,
+        BitwiseOr => ferrompi::ReduceOp::BitwiseOr,
     }
 }
 
@@ -321,11 +342,11 @@ fn map_reduce_op(op: crate::ReduceOp) -> ferrompi::ReduceOp {
 /// Returns [`crate::CommError::InvalidBufferSize`] if any element in `values`
 /// exceeds `i32::MAX`.
 #[cfg(feature = "mpi")]
-fn to_i32_vec(values: &[usize], operation: &'static str) -> Result<Vec<i32>, crate::CommError> {
+fn to_i32_vec(values: &[usize], operation: &'static str) -> Result<Vec<i32>, CommError> {
     values
         .iter()
         .map(|&v| {
-            i32::try_from(v).map_err(|_| crate::CommError::InvalidBufferSize {
+            i32::try_from(v).map_err(|_| InvalidBufferSize {
                 operation,
                 expected: i32::MAX as usize,
                 actual: v,
@@ -344,29 +365,29 @@ impl crate::Communicator for FerrompiBackend {
     ///   `displs.len() != size`, `send.len() != counts[rank]`, or any element
     ///   overflows `i32`.
     /// - [`crate::CommError::CollectiveFailed`] if the underlying MPI call fails.
-    fn allgatherv<T: crate::CommData>(
+    fn allgatherv<T: CommData>(
         &self,
         send: &[T],
         recv: &mut [T],
         counts: &[usize],
         displs: &[usize],
-    ) -> Result<(), crate::CommError> {
+    ) -> Result<(), CommError> {
         if counts.len() != self.size {
-            return Err(crate::CommError::InvalidBufferSize {
+            return Err(InvalidBufferSize {
                 operation: "allgatherv",
                 expected: self.size,
                 actual: counts.len(),
             });
         }
         if displs.len() != self.size {
-            return Err(crate::CommError::InvalidBufferSize {
+            return Err(InvalidBufferSize {
                 operation: "allgatherv",
                 expected: self.size,
                 actual: displs.len(),
             });
         }
         if send.len() != counts[self.rank] {
-            return Err(crate::CommError::InvalidBufferSize {
+            return Err(InvalidBufferSize {
                 operation: "allgatherv",
                 expected: counts[self.rank],
                 actual: send.len(),
@@ -386,21 +407,21 @@ impl crate::Communicator for FerrompiBackend {
     /// - [`crate::CommError::InvalidBufferSize`] if `send.len() != recv.len()`
     ///   or `send.is_empty()`.
     /// - [`crate::CommError::CollectiveFailed`] if the underlying MPI call fails.
-    fn allreduce<T: crate::CommData>(
+    fn allreduce<T: CommData>(
         &self,
         send: &[T],
         recv: &mut [T],
-        op: crate::ReduceOp,
-    ) -> Result<(), crate::CommError> {
+        op: ReduceOp,
+    ) -> Result<(), CommError> {
         if send.len() != recv.len() {
-            return Err(crate::CommError::InvalidBufferSize {
+            return Err(InvalidBufferSize {
                 operation: "allreduce",
                 expected: send.len(),
                 actual: recv.len(),
             });
         }
         if send.is_empty() {
-            return Err(crate::CommError::InvalidBufferSize {
+            return Err(InvalidBufferSize {
                 operation: "allreduce",
                 expected: 1,
                 actual: 0,
@@ -419,13 +440,9 @@ impl crate::Communicator for FerrompiBackend {
     ///
     /// - [`crate::CommError::InvalidRoot`] if `root >= self.size`.
     /// - [`crate::CommError::CollectiveFailed`] if the underlying MPI call fails.
-    fn broadcast<T: crate::CommData>(
-        &self,
-        buf: &mut [T],
-        root: usize,
-    ) -> Result<(), crate::CommError> {
+    fn broadcast<T: CommData>(&self, buf: &mut [T], root: usize) -> Result<(), CommError> {
         if root >= self.size {
-            return Err(crate::CommError::InvalidRoot {
+            return Err(InvalidRoot {
                 root,
                 size: self.size,
             });
@@ -444,7 +461,7 @@ impl crate::Communicator for FerrompiBackend {
     /// # Errors
     ///
     /// - [`crate::CommError::CollectiveFailed`] if the underlying MPI barrier fails.
-    fn barrier(&self) -> Result<(), crate::CommError> {
+    fn barrier(&self) -> Result<(), CommError> {
         self.world
             .barrier()
             .map_err(|e| map_ferrompi_error(&e, "barrier"))

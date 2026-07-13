@@ -13,6 +13,24 @@
 
 use console::Term;
 
+use cobre_comm::BackendError;
+use cobre_io::LoadError;
+use cobre_io::OutputError;
+use cobre_sddp::SddpError;
+use cobre_sddp::SddpError::Communication;
+use cobre_sddp::SddpError::Infeasible;
+use cobre_sddp::SddpError::Io;
+use cobre_sddp::SddpError::Simulation;
+use cobre_sddp::SddpError::Solver;
+use cobre_sddp::SddpError::Stochastic;
+use cobre_sddp::SddpError::Validation;
+use cobre_sddp::SddpError::WireVersionMismatch;
+use cobre_sddp::SimulationError;
+use cobre_sddp::SimulationError::LpInfeasible;
+use cobre_sddp::SimulationError::SolverError;
+
+use std::io::Error;
+
 /// Errors that can occur during CLI command execution.
 ///
 /// Each variant maps to a specific exit code (see the module-level table).
@@ -48,7 +66,7 @@ pub enum CliError {
     #[error("I/O error in {context}: {source}")]
     Io {
         /// Underlying I/O error.
-        source: std::io::Error,
+        source: Error,
         /// Path or operation description that provides context for the failure.
         context: String,
     },
@@ -163,9 +181,9 @@ impl CliError {
 }
 
 impl From<cobre_io::LoadError> for CliError {
-    fn from(err: cobre_io::LoadError) -> Self {
+    fn from(err: LoadError) -> Self {
         match err {
-            cobre_io::LoadError::IoError { path, source } => Self::Io {
+            LoadError::IoError { path, source } => Self::Io {
                 source,
                 context: path.display().to_string(),
             },
@@ -178,9 +196,9 @@ impl From<cobre_io::LoadError> for CliError {
 }
 
 impl From<cobre_io::OutputError> for CliError {
-    fn from(err: cobre_io::OutputError) -> Self {
+    fn from(err: OutputError) -> Self {
         match err {
-            cobre_io::OutputError::IoError { path, source } => Self::Io {
+            OutputError::IoError { path, source } => Self::Io {
                 source,
                 context: path.display().to_string(),
             },
@@ -192,7 +210,7 @@ impl From<cobre_io::OutputError> for CliError {
 }
 
 impl From<cobre_comm::BackendError> for CliError {
-    fn from(err: cobre_comm::BackendError) -> Self {
+    fn from(err: BackendError) -> Self {
         Self::Internal {
             message: format!("communication backend error: {err}"),
         }
@@ -200,9 +218,9 @@ impl From<cobre_comm::BackendError> for CliError {
 }
 
 impl From<cobre_sddp::SddpError> for CliError {
-    fn from(err: cobre_sddp::SddpError) -> Self {
+    fn from(err: SddpError) -> Self {
         match err {
-            cobre_sddp::SddpError::Infeasible {
+            Infeasible {
                 stage,
                 iteration,
                 scenario,
@@ -211,22 +229,22 @@ impl From<cobre_sddp::SddpError> for CliError {
                     "LP infeasible at stage {stage}, iteration {iteration}, scenario {scenario}"
                 ),
             },
-            cobre_sddp::SddpError::Solver(solver_err) => Self::Solver {
+            Solver(solver_err) => Self::Solver {
                 message: solver_err.to_string(),
             },
-            cobre_sddp::SddpError::Io(load_err) => Self::from(load_err),
-            cobre_sddp::SddpError::Validation(msg) => Self::Validation {
+            Io(load_err) => Self::from(load_err),
+            Validation(msg) => Self::Validation {
                 report: msg,
                 already_rendered: false,
             },
-            cobre_sddp::SddpError::Communication(comm_err) => Self::Internal {
+            Communication(comm_err) => Self::Internal {
                 message: comm_err.to_string(),
             },
-            cobre_sddp::SddpError::Simulation(msg) => Self::Internal { message: msg },
-            cobre_sddp::SddpError::Stochastic(stoch_err) => Self::Internal {
+            Simulation(msg) => Self::Internal { message: msg },
+            Stochastic(stoch_err) => Self::Internal {
                 message: stoch_err.to_string(),
             },
-            cobre_sddp::SddpError::WireVersionMismatch { encoded, expected } => Self::Internal {
+            WireVersionMismatch { encoded, expected } => Self::Internal {
                 message: format!(
                     "wire format version mismatch: encoded={encoded}, expected={expected}; \
                      restart all ranks with the same binary"
@@ -237,9 +255,9 @@ impl From<cobre_sddp::SddpError> for CliError {
 }
 
 impl From<cobre_sddp::SimulationError> for CliError {
-    fn from(err: cobre_sddp::SimulationError) -> Self {
+    fn from(err: SimulationError) -> Self {
         match err {
-            cobre_sddp::SimulationError::LpInfeasible {
+            LpInfeasible {
                 scenario_id,
                 stage_id,
                 solver_message,
@@ -248,7 +266,7 @@ impl From<cobre_sddp::SimulationError> for CliError {
                     "LP infeasible at scenario {scenario_id}, stage {stage_id}: {solver_message}"
                 ),
             },
-            cobre_sddp::SimulationError::SolverError {
+            SolverError {
                 scenario_id,
                 stage_id,
                 solver_message,

@@ -22,6 +22,8 @@
 //! differential-oracle tests that compute the address by hand to verify a
 //! `BlockGrid`-routed accessor, and doc comments mirroring the layout formula.
 
+use super::BlockIdx;
+
 /// Typed block-stride address calculator for one SDDP stage LP.
 ///
 /// A cheap `Copy` value carrying the two stage constants (`n_blks`,
@@ -62,10 +64,19 @@ impl BlockGrid {
 
     /// Flat block-major address: `start + entity * n_blks + blk`.
     ///
-    /// Entity OUTER (stride `n_blks`), block INNER.
+    /// Entity OUTER (stride `n_blks`), block INNER. A swapped
+    /// `flat(start, blk, entity)` call passing a bare `usize` in the block
+    /// slot fails to compile — the block operand requires [`BlockIdx`]:
+    ///
+    /// ```compile_fail
+    /// use cobre_sddp::indexer::BlockGrid;
+    ///
+    /// BlockGrid::new(2, 1).flat(0, 1, 2usize); // block operand requires BlockIdx, not usize
+    /// ```
     #[inline]
     #[must_use]
-    pub fn flat(&self, start: usize, entity: usize, blk: usize) -> usize {
+    pub fn flat(&self, start: usize, entity: usize, blk: BlockIdx) -> usize {
+        let blk = blk.get();
         start + entity * self.n_blks + blk
     }
 
@@ -84,10 +95,11 @@ impl BlockGrid {
     pub fn fpha_plane(
         &self,
         fpha_block_start: usize,
-        blk: usize,
+        blk: BlockIdx,
         p_idx: usize,
         n_planes: usize,
     ) -> usize {
+        let blk = blk.get();
         fpha_block_start + blk * n_planes + p_idx
     }
 
@@ -106,20 +118,21 @@ impl BlockGrid {
     /// segment `seg` MIDDLE (stride `n_blks`), block `blk` INNER.
     #[inline]
     #[must_use]
-    pub fn deficit(&self, deficit_start: usize, b_pos: usize, seg: usize, blk: usize) -> usize {
+    pub fn deficit(&self, deficit_start: usize, b_pos: usize, seg: usize, blk: BlockIdx) -> usize {
+        let blk = blk.get();
         deficit_start + b_pos * self.max_deficit_segments * self.n_blks + seg * self.n_blks + blk
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::BlockGrid;
+    use super::{BlockGrid, BlockIdx};
 
     // Flat shape: 9 + 1*3 + 2 = 14, with n_blks = 3.
     #[test]
     fn flat_block_major_address() {
         let grid = BlockGrid::new(3, 1);
-        assert_eq!(grid.flat(9, 1, 2), 14);
+        assert_eq!(grid.flat(9, 1, BlockIdx::new(2)), 14);
     }
 
     // FPHA-plane shape: 100 + 1*5 + 2 = 107, with n_planes = 5 (block OUTER,
@@ -127,7 +140,7 @@ mod tests {
     #[test]
     fn fpha_plane_address() {
         let grid = BlockGrid::new(3, 1);
-        assert_eq!(grid.fpha_plane(100, 1, 2, 5), 107);
+        assert_eq!(grid.fpha_plane(100, BlockIdx::new(1), 2, 5), 107);
     }
 
     #[test]
@@ -141,7 +154,7 @@ mod tests {
     #[test]
     fn deficit_three_term_address() {
         let grid = BlockGrid::new(3, 2);
-        assert_eq!(grid.deficit(61, 0, 1, 0), 64);
+        assert_eq!(grid.deficit(61, 0, 1, BlockIdx::new(0)), 64);
     }
 
     // Pins the per-shape transpose as unexpressible: each assertion computes the
@@ -154,7 +167,7 @@ mod tests {
         // n_entities=4 the two land on different cells (5 vs 9).
         let grid = BlockGrid::new(3, 2);
         let (n_entities, entity, blk) = (4, 1, 2);
-        let correct_flat = grid.flat(0, entity, blk);
+        let correct_flat = grid.flat(0, entity, BlockIdx::new(blk));
         let transposed_flat = blk * n_entities + entity; // NOT expressible via BlockGrid
         assert_eq!(correct_flat, 5);
         assert_ne!(correct_flat, transposed_flat);
@@ -165,7 +178,7 @@ mod tests {
         // land on different cells (8 vs 7).
         let grid = BlockGrid::new(2, 2);
         let (blk, p_idx, n_planes) = (1, 3, 5);
-        let correct_fpha = grid.fpha_plane(0, blk, p_idx, n_planes);
+        let correct_fpha = grid.fpha_plane(0, BlockIdx::new(blk), p_idx, n_planes);
         let transposed_fpha = p_idx * grid.n_blks + blk; // wrong nesting
         assert_eq!(correct_fpha, 8);
         assert_ne!(correct_fpha, transposed_fpha);
@@ -176,7 +189,7 @@ mod tests {
         // b_pos=1, seg=1, blk=0, S=2, n_blks=3 the two differ (9 vs 8).
         let grid = BlockGrid::new(3, 2);
         let (b_pos, seg, blk) = (1, 1, 0);
-        let correct_def = grid.deficit(0, b_pos, seg, blk);
+        let correct_def = grid.deficit(0, b_pos, seg, BlockIdx::new(blk));
         let transposed_def =
             b_pos * grid.max_deficit_segments * grid.n_blks + seg * grid.max_deficit_segments + blk; // wrong segment stride
         assert_eq!(correct_def, 9);

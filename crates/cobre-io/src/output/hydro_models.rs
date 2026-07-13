@@ -29,6 +29,8 @@ use std::sync::Arc;
 
 use arrow::array::{Float64Builder, Int32Builder, RecordBatch, StringBuilder};
 use arrow::datatypes::{DataType, Field, Schema};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use crate::extensions::{EvaporationModelRow, FphaDeviationPointRow, FphaHyperplaneRow};
 use crate::output::atomic::{write_json_atomic, write_parquet_atomic};
@@ -369,14 +371,8 @@ fn build_fpha_deviation_points_batch(
 ///
 /// Returns [`OutputError::IoError`] on filesystem failures, or
 /// [`OutputError::SerializationError`] if JSON serialization fails.
-pub fn write_hydro_model_summary(
-    path: &Path,
-    summary: &impl serde::Serialize,
-) -> Result<(), OutputError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| OutputError::io(parent, e))?;
-    }
-
+pub fn write_hydro_model_summary(path: &Path, summary: &impl Serialize) -> Result<(), OutputError> {
+    ensure_parent_dir(path)?;
     write_json_atomic(path, summary, "hydro_models")
 }
 
@@ -393,9 +389,7 @@ pub fn write_hydro_model_summary(
 /// [`std::io::ErrorKind::NotFound`], so callers can treat the section as absent
 /// and degrade gracefully. Returns [`OutputError::ManifestError`] if the file
 /// contains malformed JSON.
-pub fn read_hydro_model_summary<T: serde::de::DeserializeOwned>(
-    path: &Path,
-) -> Result<T, OutputError> {
+pub fn read_hydro_model_summary<T: DeserializeOwned>(path: &Path) -> Result<T, OutputError> {
     let content = std::fs::read_to_string(path).map_err(|e| OutputError::io(path, e))?;
     serde_json::from_str(&content).map_err(|e| OutputError::ManifestError {
         manifest_type: "hydro_models".to_string(),

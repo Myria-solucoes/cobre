@@ -6,21 +6,41 @@ use console::Term;
 
 use cobre_comm::{Communicator, ReduceOp};
 use cobre_core::{System, TrainingEvent};
+use cobre_io::MetadataCost;
+use cobre_io::MetadataSimulationSolveStats;
+use cobre_io::OutputContext;
+use cobre_io::ParquetWriterConfig;
+use cobre_io::SimulationOutput;
+use cobre_io::now_iso8601;
+use cobre_io::output::simulation_writer::ScenarioWritePayload;
+use cobre_io::output::simulation_writer::SimulationParquetWriter;
+use cobre_sddp::SOLVER_STATS_DELTA_SCALAR_FIELDS;
+use cobre_sddp::SolverStatsDelta;
 use cobre_sddp::StudySetup;
+use cobre_sddp::TrainingResult;
+use cobre_sddp::aggregate_simulation;
+use cobre_sddp::pack_delta_scalars;
+use cobre_sddp::pack_scenario_stats;
+use cobre_sddp::reconcile_global_ok;
+use cobre_sddp::unpack_delta_scalars;
+use cobre_sddp::unpack_scenario_stats;
 use cobre_solver::ActiveSolver;
+use cobre_solver::active_solver_metadata_id;
 
 use crate::error::CliError;
 use crate::summary::SimulationSummary;
 
 use super::outputs::{WriteSimulationArgs, write_simulation_outputs};
 use super::{RunContext, build_distribution_info, check_stats_overflow};
+use crate::progress::run_progress_thread;
+use crate::summary::print_simulation_summary;
 
 /// Run the simulation phase: workspace pool, Parquet writing, and output.
 pub(super) fn run_simulation_phase(
     ctx: &RunContext<impl Communicator>,
     system: &System,
     setup: &mut StudySetup,
-    training_result: &cobre_sddp::TrainingResult,
+    training_result: &TrainingResult,
     hostname: &str,
 ) -> Result<(), CliError> {
     let solver_factory = ActiveSolver::new;
@@ -41,7 +61,7 @@ pub(super) fn run_simulation_phase(
         drop(sim_event_rx);
         None
     } else {
-        Some(crate::progress::run_progress_thread(
+        Some(run_progress_thread(
             sim_event_rx,
             ctx.render_mode,
             u64::from(n_scenarios),
@@ -52,21 +72,16 @@ pub(super) fn run_simulation_phase(
     let io_capacity = sim_config.io_channel_capacity;
     let (result_tx, result_rx) = mpsc::sync_channel(io_capacity.max(1));
 
-    let parquet_config = cobre_io::ParquetWriterConfig::default();
-    let mut sim_writer = cobre_io::output::simulation_writer::SimulationParquetWriter::new(
-        &ctx.output_dir,
-        system,
-        &parquet_config,
-    )
-    .map_err(CliError::from)?;
+    let parquet_config = ParquetWriterConfig::default();
+    let mut sim_writer = SimulationParquetWriter::new(&ctx.output_dir, system, &parquet_config)
+        .map_err(CliError::from)?;
 
     // Drain straight to Parquet rather than collecting into a Vec and gathering
     // on rank 0 via MPI, which overflows i32 on large cases.
     let drain_handle = std::thread::spawn(move || {
         let mut failed: u32 = 0;
         for scenario_result in result_rx {
-            let payload =
-                cobre_io::output::simulation_writer::ScenarioWritePayload::from(scenario_result);
+            let payload = ScenarioWritePayload::from(scenario_result);
             if let Err(e) = sim_writer.write_scenario(payload) {
                 tracing::error!("simulation write error: {e}");
                 failed += 1;
@@ -75,7 +90,7 @@ pub(super) fn run_simulation_phase(
         (sim_writer, failed)
     });
 
-    let sim_started_at = cobre_io::now_iso8601();
+    let sim_started_at = now_iso8601();
     let sim_start = std::time::Instant::now();
 
     let sim_result = setup
@@ -102,9 +117,11 @@ pub(super) fn run_simulation_phase(
     // strand every healthy rank in that allreduce while the failing ranks skip it.
     let mut reconcile_scratch = [0_i32];
     let local_ok = drain_join.is_ok() && sim_result.is_ok();
-    let global_ok = cobre_sddp::reconcile_global_ok(local_ok, &ctx.comm, &mut reconcile_scratch)
-        .map_err(|e| CliError::Internal {
-            message: format!("simulation outcome reconcile error: {e}"),
+    let global_ok =
+        reconcile_global_ok(local_ok, &ctx.comm, &mut reconcile_scratch).map_err(|e| {
+            CliError::Internal {
+                message: format!("simulation outcome reconcile error: {e}"),
+            }
         })?;
 
     let (sim_writer, write_failures) = drain_join.map_err(|_| CliError::Internal {
@@ -135,22 +152,22 @@ pub(super) fn run_simulation_phase(
     // Aggregate across all ranks so the printed mean/std/CI95 reflect every
     // scenario, not just rank 0's.
     let cost_summary =
-        cobre_sddp::aggregate_simulation(&sim_run_result.costs, sim_config, &ctx.comm).map_err(
-            |e| CliError::Internal {
+        aggregate_simulation(&sim_run_result.costs, sim_config, &ctx.comm).map_err(|e| {
+            CliError::Internal {
                 message: format!("simulation cost aggregation error: {e}"),
-            },
-        )?;
+            }
+        })?;
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let parallelism = (ctx.n_threads as u32).saturating_mul(ctx.comm.size() as u32);
 
-    merged_sim_output.cost = Some(cobre_io::MetadataCost {
+    merged_sim_output.cost = Some(MetadataCost {
         mean_cost: cost_summary.mean_cost,
         std_cost: cost_summary.std_cost,
         cvar: cost_summary.cvar,
         cvar_alpha: cost_summary.cvar_alpha,
     });
-    merged_sim_output.solve_stats = cobre_io::MetadataSimulationSolveStats {
+    merged_sim_output.solve_stats = MetadataSimulationSolveStats {
         total_lp_solves: Some(global_agg.lp_solves),
         first_try: Some(global_agg.first_try_successes),
         retried: Some(
@@ -192,16 +209,16 @@ fn write_sim_outputs_on_root(
     ctx: &RunContext<impl Communicator>,
     hostname: &str,
     sim_started_at: String,
-    merged_sim_output: &cobre_io::SimulationOutput,
-    global_scenario_stats: &[(u32, cobre_sddp::SolverStatsDelta)],
+    merged_sim_output: &SimulationOutput,
+    global_scenario_stats: &[(u32, SolverStatsDelta)],
 ) -> Result<(), CliError> {
     let mpi_world_size = u32::try_from(ctx.topology.world_size).unwrap_or(u32::MAX);
-    let sim_ctx = cobre_io::OutputContext {
+    let sim_ctx = OutputContext {
         hostname: hostname.to_string(),
-        solver: cobre_solver::active_solver_metadata_id().to_string(),
+        solver: active_solver_metadata_id().to_string(),
         solver_version: None,
         started_at: sim_started_at,
-        completed_at: cobre_io::now_iso8601(),
+        completed_at: now_iso8601(),
         distribution: build_distribution_info(&ctx.topology, ctx.n_threads, mpi_world_size),
         setup: None,
         production_fit_deviation: None,
@@ -221,11 +238,11 @@ fn print_sim_summary(
     stderr: &Term,
     n_scenarios: u32,
     sim_time_ms: u64,
-    agg: &cobre_sddp::SolverStatsDelta,
+    agg: &SolverStatsDelta,
     cost_summary: &cobre_sddp::SimulationSummary,
     parallelism: u32,
 ) {
-    crate::summary::print_simulation_summary(
+    print_simulation_summary(
         stderr,
         &SimulationSummary {
             n_scenarios,
@@ -249,8 +266,8 @@ fn print_sim_summary(
 #[allow(clippy::cast_possible_truncation)]
 fn merge_simulation_metadata<C: Communicator>(
     comm: &C,
-    local: &cobre_io::SimulationOutput,
-) -> Result<cobre_io::SimulationOutput, CliError> {
+    local: &SimulationOutput,
+) -> Result<SimulationOutput, CliError> {
     let send_counts = [local.n_scenarios, local.completed, local.failed];
     let mut merged_counts = [0u32; 3];
     comm.allreduce(&send_counts, &mut merged_counts, ReduceOp::Sum)
@@ -313,15 +330,14 @@ fn merge_simulation_metadata<C: Communicator>(
     }
     all_partitions.sort();
 
-    Ok(cobre_io::SimulationOutput {
+    Ok(SimulationOutput {
         n_scenarios: merged_counts[0],
         completed: merged_counts[1],
         failed: merged_counts[2],
         total_time_ms: merged_time[0],
         partitions_written: all_partitions,
-        // Filled later by the summary wiring; defaulted here.
         cost: None,
-        solve_stats: cobre_io::MetadataSimulationSolveStats::default(),
+        solve_stats: MetadataSimulationSolveStats::default(),
     })
 }
 
@@ -333,31 +349,25 @@ fn merge_simulation_metadata<C: Communicator>(
 #[allow(clippy::cast_possible_truncation)]
 fn aggregate_simulation_solver_stats<C: Communicator>(
     comm: &C,
-    local_stats: &[(u32, i32, cobre_sddp::SolverStatsDelta)],
-) -> Result<
-    (
-        cobre_sddp::SolverStatsDelta,
-        Vec<(u32, cobre_sddp::SolverStatsDelta)>,
-    ),
-    CliError,
-> {
-    let local_agg = cobre_sddp::SolverStatsDelta::aggregate(local_stats.iter().map(|(_, _, d)| d));
+    local_stats: &[(u32, i32, SolverStatsDelta)],
+) -> Result<(SolverStatsDelta, Vec<(u32, SolverStatsDelta)>), CliError> {
+    let local_agg = SolverStatsDelta::aggregate(local_stats.iter().map(|(_, _, d)| d));
     check_stats_overflow(&local_agg)?;
-    let send_scalars = cobre_sddp::pack_delta_scalars(&local_agg);
-    let mut recv_scalars = [0.0_f64; cobre_sddp::SOLVER_STATS_DELTA_SCALAR_FIELDS];
+    let send_scalars = pack_delta_scalars(&local_agg);
+    let mut recv_scalars = [0.0_f64; SOLVER_STATS_DELTA_SCALAR_FIELDS];
     comm.allreduce(&send_scalars, &mut recv_scalars, ReduceOp::Sum)
         .map_err(|e| CliError::Internal {
             message: format!("simulation solver stats allreduce error: {e}"),
         })?;
-    let global_agg = cobre_sddp::unpack_delta_scalars(&recv_scalars);
+    let global_agg = unpack_delta_scalars(&recv_scalars);
 
     // Strip the opening field (always -1 here): the MPI wire format omits it.
-    let local_stats_stripped: Vec<(u32, cobre_sddp::SolverStatsDelta)> = local_stats
+    let local_stats_stripped: Vec<(u32, SolverStatsDelta)> = local_stats
         .iter()
         .map(|(id, _opening, delta)| (*id, delta.clone()))
         .collect();
     let n_ranks = comm.size();
-    let local_buf = cobre_sddp::pack_scenario_stats(&local_stats_stripped);
+    let local_buf = pack_scenario_stats(&local_stats_stripped);
     let local_count = local_buf.len();
 
     let send_len = [local_count as u64];
@@ -385,7 +395,7 @@ fn aggregate_simulation_solver_stats<C: Communicator>(
             message: format!("simulation solver stats gather error: {e}"),
         })?;
 
-    let mut global_scenario_stats = cobre_sddp::unpack_scenario_stats(&all_buf);
+    let mut global_scenario_stats = unpack_scenario_stats(&all_buf);
     global_scenario_stats.sort_by_key(|(id, _)| *id);
 
     Ok((global_agg, global_scenario_stats))

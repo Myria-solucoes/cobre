@@ -6,6 +6,9 @@ use std::sync::mpsc::{Sender, SyncSender};
 
 use cobre_comm::Communicator;
 use cobre_core::TrainingEvent;
+use cobre_io::TrainingOutput;
+use cobre_solver::ActiveProfile;
+use cobre_solver::StageTemplate;
 use cobre_solver::{SolverError, SolverInterface};
 
 use crate::{
@@ -22,6 +25,9 @@ use crate::{
 };
 
 use super::StudySetup;
+use crate::build_training_output;
+use crate::simulate;
+use crate::train;
 
 impl StudySetup {
     /// Execute the training loop. Mutates `self.fcf` to store generated cuts.
@@ -40,7 +46,7 @@ impl StudySetup {
         shutdown_flag: Option<&Arc<AtomicBool>>,
     ) -> Result<TrainingOutcome, SddpError>
     where
-        S: SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
+        S: SolverInterface<Profile = ActiveProfile> + Send,
     {
         let training_config = TrainingConfig {
             loop_config: LoopConfig {
@@ -122,7 +128,7 @@ impl StudySetup {
 
         let warm_start_basis_cache = self.warm_start_basis_cache.take();
 
-        crate::train(
+        train(
             solver,
             training_config,
             &mut self.fcf,
@@ -151,11 +157,11 @@ impl StudySetup {
         comm: &C,
         result_tx: &SyncSender<SimulationScenarioResult>,
         event_sender: Option<Sender<TrainingEvent>>,
-        frozen_templates: Option<&[cobre_solver::StageTemplate]>,
+        frozen_templates: Option<&[StageTemplate]>,
         stage_bases: &[Option<CapturedBasis>],
     ) -> Result<SimulationRunResult, SimulationError>
     where
-        S: SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
+        S: SolverInterface<Profile = ActiveProfile> + Send,
     {
         let stage_ctx = self.stage_ctx();
         let training_ctx = self.simulation_ctx();
@@ -188,7 +194,7 @@ impl StudySetup {
             event_sender,
         };
 
-        crate::simulate(
+        simulate(
             workspaces,
             &stage_ctx,
             &self.fcf,
@@ -207,8 +213,8 @@ impl StudySetup {
         &self,
         result: &TrainingResult,
         events: &[TrainingEvent],
-    ) -> cobre_io::TrainingOutput {
-        crate::build_training_output(result, events, &self.fcf)
+    ) -> TrainingOutput {
+        build_training_output(result, events, &self.fcf)
     }
 
     /// Create a [`WorkspacePool`] of `n_threads` workspaces sized for this study.

@@ -17,7 +17,7 @@ use super::{
     contract_family_slot, resolve_variable_ref, variable_ref_is_block_independent,
 };
 use crate::hydro_models::{FphaPlane, ProductionModelSet, ResolvedProductionModel};
-use crate::indexer::{StateLayout, StorageBoundaryGrid};
+use crate::indexer::{Boundary, StateLayout, StorageBoundaryGrid};
 use crate::lp_builder::StageGeometry;
 
 // ── Test helpers ──────────────────────────────────────────────────────────
@@ -54,9 +54,10 @@ fn make_geom<'a>(
     )
 }
 
-/// Like [`make_geom`], but with explicit contract column ranges. The
-/// `geometry` fixture hardcodes both contract ranges to `0..0`, so the contract
-/// resolution / `block_col_range` tests inject their own non-empty ranges here.
+/// Like [`make_geom`], but with explicit contract column ranges. `GeometryDims`
+/// has no contract fields, so `geometry`'s contract ranges are always empty; the
+/// contract resolution / `block_col_range` tests inject their own non-empty
+/// ranges here.
 fn make_geom_with_contracts<'a>(
     indexer: &'a StageGeometry,
     state: &'a StateLayout,
@@ -320,9 +321,6 @@ fn call_with_cascade(
 /// Threads real pumping data the way the production `fill_pumping_water_entries`
 /// caller does, so the pumping arms exercise their real column arithmetic and
 /// consumption-rate coefficient instead of the empty fixture used by [`call`].
-// Mirrors the production resolver's argument surface it exercises; bundling
-// into a struct would diverge the test from the real call shape.
-#[allow(clippy::too_many_arguments)]
 fn call_pumping(
     var_ref: VariableRef,
     block_idx: usize,
@@ -750,46 +748,20 @@ fn hydro_evaporation_maps_to_evaporation_flow_col() {
     let bpos: BTreeMap<EntityId, usize> = [(EntityId(100), 0)].into_iter().collect();
     let lpos: BTreeMap<EntityId, usize> = BTreeMap::new();
 
-    let positions = super::EntityPositionMaps {
-        hydro: &hpos,
-        thermal: &tpos,
-        bus: &bpos,
-        line: &lpos,
-    };
-    let cascade = empty_cascade();
-    let diversion_upstream: HashMap<EntityId, Vec<usize>> = HashMap::new();
-    let cascade_refs = CascadeRefs {
-        cascade: &cascade,
-        diversion_upstream: &diversion_upstream,
-    };
-    let no_stations: Vec<PumpingStation> = Vec::new();
-    let empty_pumping_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
-    let pumping_refs = PumpingRefs {
-        col_pumping_start: 0,
-        pumping_stations: &no_stations,
-        pumping_pos: &empty_pumping_pos,
-    };
     let state = StateLayout::new(2, 0, 0, Vec::new(), 0, 0, vec![], &[0, 0]);
     let geom = make_geom(&evap_indexer, &state, 1, &[]);
-    let no_contracts: Vec<EnergyContract> = Vec::new();
-    let empty_contract_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
-    let contract_refs = ContractRefs {
-        contracts: &no_contracts,
-        contract_pos: &empty_contract_pos,
-    };
-    let result = resolve_variable_ref(
-        &VariableRef::HydroEvaporation {
+    let result = call(
+        VariableRef::HydroEvaporation {
             hydro_id: EntityId(10),
             block_id: None,
         },
         0,
-        0, // stage_idx
         &geom,
         &prod_models,
-        &positions,
-        &cascade_refs,
-        &pumping_refs,
-        &contract_refs,
+        &hpos,
+        &tpos,
+        &bpos,
+        &lpos,
     );
 
     assert_eq!(result, vec![(15, 1.0)]);
@@ -825,46 +797,20 @@ fn hydro_evaporation_no_evap_model_returns_empty() {
     let lpos: BTreeMap<EntityId, usize> = BTreeMap::new();
 
     // Hydro 20 (pos=1) has no evaporation in evap_hydro_indices=[0]
-    let positions = super::EntityPositionMaps {
-        hydro: &hpos,
-        thermal: &tpos,
-        bus: &bpos,
-        line: &lpos,
-    };
-    let cascade = empty_cascade();
-    let diversion_upstream: HashMap<EntityId, Vec<usize>> = HashMap::new();
-    let cascade_refs = CascadeRefs {
-        cascade: &cascade,
-        diversion_upstream: &diversion_upstream,
-    };
-    let no_stations: Vec<PumpingStation> = Vec::new();
-    let empty_pumping_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
-    let pumping_refs = PumpingRefs {
-        col_pumping_start: 0,
-        pumping_stations: &no_stations,
-        pumping_pos: &empty_pumping_pos,
-    };
     let state = StateLayout::new(2, 0, 0, Vec::new(), 0, 0, vec![], &[0, 0]);
     let geom = make_geom(&evap_indexer, &state, 1, &[]);
-    let no_contracts: Vec<EnergyContract> = Vec::new();
-    let empty_contract_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
-    let contract_refs = ContractRefs {
-        contracts: &no_contracts,
-        contract_pos: &empty_contract_pos,
-    };
-    let result = resolve_variable_ref(
-        &VariableRef::HydroEvaporation {
+    let result = call(
+        VariableRef::HydroEvaporation {
             hydro_id: EntityId(20),
             block_id: None,
         },
         0,
-        0,
         &geom,
         &prod_models,
-        &positions,
-        &cascade_refs,
-        &pumping_refs,
-        &contract_refs,
+        &hpos,
+        &tpos,
+        &bpos,
+        &lpos,
     );
 
     assert!(result.is_empty());
@@ -902,48 +848,22 @@ fn hydro_evaporation_none_resolves_block_zero_not_sum() {
     let bpos: BTreeMap<EntityId, usize> = [(EntityId(100), 0)].into_iter().collect();
     let lpos: BTreeMap<EntityId, usize> = BTreeMap::new();
 
-    let positions = super::EntityPositionMaps {
-        hydro: &hpos,
-        thermal: &tpos,
-        bus: &bpos,
-        line: &lpos,
-    };
-    let cascade = empty_cascade();
-    let diversion_upstream: HashMap<EntityId, Vec<usize>> = HashMap::new();
-    let cascade_refs = CascadeRefs {
-        cascade: &cascade,
-        diversion_upstream: &diversion_upstream,
-    };
-    let no_stations: Vec<PumpingStation> = Vec::new();
-    let empty_pumping_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
-    let pumping_refs = PumpingRefs {
-        col_pumping_start: 0,
-        pumping_stations: &no_stations,
-        pumping_pos: &empty_pumping_pos,
-    };
     let state = StateLayout::new(2, 0, 0, Vec::new(), 0, 0, vec![], &[0, 0]);
     let geom = make_geom(&evap_indexer, &state, 3, &[]);
-    let no_contracts: Vec<EnergyContract> = Vec::new();
-    let empty_contract_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
-    let contract_refs = ContractRefs {
-        contracts: &no_contracts,
-        contract_pos: &empty_contract_pos,
-    };
 
     let resolve = |block_id: Option<usize>| {
-        resolve_variable_ref(
-            &VariableRef::HydroEvaporation {
+        call(
+            VariableRef::HydroEvaporation {
                 hydro_id: EntityId(10),
                 block_id,
             },
             0,
-            0,
             &geom,
             &prod_models,
-            &positions,
-            &cascade_refs,
-            &pumping_refs,
-            &contract_refs,
+            &hpos,
+            &tpos,
+            &bpos,
+            &lpos,
         )
     };
 
@@ -2379,9 +2299,11 @@ fn hydro_inflow_is_block_dependent() {
 //
 // A K=3 chronological geom: `make_indexer` (n_blks=3) + `make_state` (N=4,
 // storage=[0,4), storage_in.start=8), overriding `storage_internal_start` to a
-// non-zero interior anchor so the interior-boundary formula is exercised (the
-// `test_support::geometry` fixture hardcodes it to 0). Interior stride is
-// `n_blks - 1 = 2`; for hydro pos 0 the boundaries are S⁰=8, S¹=12, S²=13, S³=0.
+// non-zero interior anchor so the interior-boundary formula is exercised (`geometry`
+// always builds `BlockMode::Parallel`, which has no interior columns, so its
+// `storage_internal_start` must be overridden regardless of its own value).
+// Interior stride is `n_blks - 1 = 2`; for hydro pos 0 the boundaries are S⁰=8,
+// S¹=12, S²=13, S³=0.
 
 const STORAGE_INTERNAL_START: usize = 12;
 
@@ -2400,26 +2322,20 @@ fn make_chronological_geom<'a>(
     geom
 }
 
-/// Resolve every boundary (`k = 0`, interior, `k = K`) of both variants on a K=3
-/// chronological geom against the mirrored `block_storage_col`.
+/// `VariableRef::HydroStorageInitial`/`HydroStorageFinal` resolve to the hand-
+/// computed S⁰/interior/Sᴷ boundary columns for this K=3,
+/// `STORAGE_INTERNAL_START = 12` fixture — literals computed independently of
+/// `StorageBoundaryGrid::col` itself, so a regression in its match arms fails
+/// this test, not just an identity of the owner with itself.
 ///
-/// Seam B of the geometry cross-check guard's two pairwise seams — pairs with
+/// Seam B of the geometry cross-check guard — pairs with
 /// `stage_geometry_block_storage_col_matches_layout` (Seam A, in
-/// `super::super::builder::template::tests`). `indexer` (a `StageGeometry`) and
-/// `geom` (the resolver, private to this module) both build their
-/// `StorageBoundaryGrid` from the same `state`/`STORAGE_INTERNAL_START` inputs,
-/// so `geom.block_storage_col` and `indexer.block_storage_col` share one owner,
-/// not two independent copies.
+/// `super::super::builder::template::tests`), each independently anchored
+/// against its own hand-computed oracle rather than compared to each other.
 #[test]
 fn hydro_storage_boundary_resolves_each_boundary() {
-    let mut indexer = make_indexer();
+    let indexer = make_indexer();
     let state = make_state();
-    indexer.storage_boundary_grid = StorageBoundaryGrid::new(
-        state.storage_in.start,
-        state.storage.start,
-        STORAGE_INTERNAL_START,
-        indexer.n_blks,
-    );
     let geom = make_chronological_geom(&indexer, &state);
     let prod = make_production_models();
     let hpos = make_hydro_pos();
@@ -2428,7 +2344,6 @@ fn hydro_storage_boundary_resolves_each_boundary() {
     let lpos = make_line_pos();
 
     // Hydro EntityId(10) at pos 0; K = 3.
-    // Initial{0} = S⁰ = storage_in.start + 0 = 8.
     let initial_0 = call(
         VariableRef::HydroStorageInitial {
             hydro_id: EntityId(10),
@@ -2442,10 +2357,8 @@ fn hydro_storage_boundary_resolves_each_boundary() {
         &bpos,
         &lpos,
     );
-    assert_eq!(initial_0, vec![(geom.block_storage_col(0, 0), 1.0)]);
-    assert_eq!(initial_0, vec![(indexer.block_storage_col(0, 0), 1.0)]);
+    assert_eq!(initial_0, vec![(8, 1.0)], "S⁰ = storage_in.start + 0");
 
-    // Initial{1} = S¹ = storage_internal_start + 0 = 12 (interior boundary).
     let initial_1 = call(
         VariableRef::HydroStorageInitial {
             hydro_id: EntityId(10),
@@ -2459,10 +2372,12 @@ fn hydro_storage_boundary_resolves_each_boundary() {
         &bpos,
         &lpos,
     );
-    assert_eq!(initial_1, vec![(geom.block_storage_col(0, 1), 1.0)]);
-    assert_eq!(initial_1, vec![(indexer.block_storage_col(0, 1), 1.0)]);
+    assert_eq!(
+        initial_1,
+        vec![(12, 1.0)],
+        "S¹ = STORAGE_INTERNAL_START + 0 (interior boundary)"
+    );
 
-    // Final{2} = S³ = Sᴷ = storage.start + 0 = 0 (K=3, last block).
     let final_2 = call(
         VariableRef::HydroStorageFinal {
             hydro_id: EntityId(10),
@@ -2476,130 +2391,11 @@ fn hydro_storage_boundary_resolves_each_boundary() {
         &bpos,
         &lpos,
     );
-    assert_eq!(final_2, vec![(geom.block_storage_col(0, 3), 1.0)]);
-    assert_eq!(final_2, vec![(indexer.block_storage_col(0, 3), 1.0)]);
-}
-
-// ── Seam B property-based sweep ─────────────────────────────────────────────
-//
-// `hydro_storage_boundary_resolves_each_boundary` above is the anchored,
-// readable exemplar; `block_storage_col_agreement_geometry_resolver` below
-// sweeps the small layout param space (`n_h`, `n_blks`, `BlockMode`,
-// `n_buckets`, `n_anticipated × k_max`, the inflow-penalty flag, FPHA/
-// evaporation membership subsets) shared with Seam A
-// (`super::super::builder::template::tests`).
-
-use proptest::prelude::*;
-
-/// Build a `StateLayout` plus a matching `GenericResolverGeom`/`StageGeometry`
-/// pair sharing `n_blks`/`storage_internal_start` — the SAME pairing
-/// `hydro_storage_boundary_resolves_each_boundary` pins — and assert the
-/// endpoint-pair identity (S⁰, Sᴷ) for every hydro; `resolver.block_storage_col`
-/// and `indexer.block_storage_col` share one `StorageBoundaryGrid` owner, so a
-/// per-`(h, k)` agreement sweep would be tautological. `storage_internal_start`
-/// is derived from `state` the same way `StageLayout::new` derives it
-/// (`state.control_region_start()`), so `n_buckets`/`n_anticipated`/`k_max`
-/// reach the swept arithmetic exactly as they do for Seam A.
-fn assert_seam_b_agreement(
-    n_h: usize,
-    n_blks: usize,
-    chronological: bool,
-    n_buckets: usize,
-    n_anticipated: usize,
-    k_max: usize,
-    has_inflow_penalty: bool,
-    fpha_flags: &[bool],
-    evap_flags: &[bool],
-) {
-    let effective_lag_count = vec![0_usize; n_h];
-    let transit_bucket_column_order: Vec<(usize, usize)> =
-        (0..n_buckets).map(|lag| (0_usize, lag)).collect();
-    let state = StateLayout::new(
-        n_h,
-        0,
-        n_buckets,
-        transit_bucket_column_order,
-        n_anticipated,
-        k_max,
-        vec![k_max; n_anticipated],
-        &effective_lag_count,
+    assert_eq!(
+        final_2,
+        vec![(0, 1.0)],
+        "S³ = Sᴷ = storage.start + 0 (K=3, last block)"
     );
-
-    let fpha_hydro_indices: Vec<usize> = (0..n_h).filter(|&h| fpha_flags[h]).collect();
-    let evap_hydro_indices: Vec<usize> = (0..n_h).filter(|&h| evap_flags[h]).collect();
-    let fpha_planes = vec![1_usize; fpha_hydro_indices.len()];
-
-    let mut indexer = crate::test_support::geometry(
-        &crate::test_support::GeometryDims {
-            hydro_count: n_h,
-            n_blks,
-            has_inflow_penalty,
-            ..Default::default()
-        },
-        fpha_hydro_indices,
-        &fpha_planes,
-        evap_hydro_indices,
-    );
-    indexer.storage_boundary_grid = StorageBoundaryGrid::new(
-        state.storage_in.start,
-        state.storage.start,
-        state.control_region_start(),
-        n_blks,
-    );
-    indexer.block_mode = if chronological {
-        cobre_core::BlockMode::Chronological
-    } else {
-        cobre_core::BlockMode::Parallel
-    };
-
-    let resolver = make_geom(&indexer, &state, 1, &[]);
-
-    for h in 0..n_h {
-        assert_eq!(
-            resolver.block_storage_col(h, 0),
-            state.storage_in.start + h,
-            "seam B S⁰ endpoint mismatch at hydro {h}"
-        );
-        assert_eq!(
-            resolver.block_storage_col(h, n_blks),
-            state.storage.start + h,
-            "seam B Sᴷ endpoint mismatch at hydro {h}"
-        );
-    }
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(48))]
-
-    /// Property-based Seam B sweep: the endpoint-pair identity (S⁰, Sᴷ) between
-    /// `GenericResolverGeom` and `StageGeometry`, over the small layout param
-    /// space. Pure address arithmetic, no solver — runs in the default test pass.
-    #[test]
-    fn block_storage_col_agreement_geometry_resolver(
-        n_h in 0_usize..4,
-        n_blks in 1_usize..4,
-        chronological in any::<bool>(),
-        n_buckets in 0_usize..3,
-        n_anticipated in 0_usize..2,
-        k_max in 1_usize..3,
-        has_inflow_penalty in any::<bool>(),
-        fpha_mask in any::<u8>(),
-        evap_mask in any::<u8>(),
-    ) {
-        let fpha_flags: Vec<bool> = (0..n_h).map(|i| (fpha_mask >> i) & 1 == 1).collect();
-        let evap_flags: Vec<bool> = (0..n_h).map(|i| (evap_mask >> i) & 1 == 1).collect();
-        assert_seam_b_agreement(
-            n_h,
-            n_blks,
-            chronological,
-            n_buckets,
-            n_anticipated,
-            k_max,
-            has_inflow_penalty,
-            &fpha_flags,
-            &evap_flags,
-        );
-    }
 }
 
 /// `HydroStorageFinal{K-1}` resolves to the SAME column as `HydroStorage` (Sᴷ).
@@ -2713,7 +2509,10 @@ fn hydro_storage_boundary_none_resolves_stage_endpoint() {
             &bpos,
             &lpos,
         );
-        assert_eq!(initial, vec![(geom.block_storage_col(0, 0), 1.0)]);
+        assert_eq!(
+            initial,
+            vec![(geom.block_storage_col(0, Boundary::Incoming), 1.0)]
+        );
 
         let final_ = call(
             VariableRef::HydroStorageFinal {
@@ -2728,7 +2527,10 @@ fn hydro_storage_boundary_none_resolves_stage_endpoint() {
             &bpos,
             &lpos,
         );
-        assert_eq!(final_, vec![(geom.block_storage_col(0, 3), 1.0)]);
+        assert_eq!(
+            final_,
+            vec![(geom.block_storage_col(0, Boundary::Outgoing), 1.0)]
+        );
     }
 }
 

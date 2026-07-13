@@ -54,7 +54,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use chrono::{Months, NaiveDate};
-use cobre_core::{EntityId, System};
+use cobre_core::{EntityId, Stage, System};
 use cobre_stochastic::{
     StochasticError,
     par::aggregate::aggregate_observations_to_season,
@@ -65,6 +65,7 @@ use cobre_stochastic::{
     },
 };
 
+use crate::LoadError::ConstraintError;
 use crate::{
     Config, FileManifest, LoadError, ValidationContext, parse_inflow_ar_coefficients,
     parse_inflow_history,
@@ -109,7 +110,7 @@ impl EstimationPath {
     /// combinations (AR present without history or stats) fall back to
     /// `Deterministic` because AR coefficients alone cannot drive estimation.
     #[must_use]
-    pub fn resolve(manifest: &crate::FileManifest) -> Self {
+    pub fn resolve(manifest: &FileManifest) -> Self {
         match (
             manifest.scenarios_inflow_history_parquet,
             manifest.scenarios_inflow_seasonal_stats_parquet,
@@ -226,7 +227,7 @@ fn run_estimation(
     // Empty for a full-year study, so `stages == study_stages` and the estimation
     // is bit-identical to the no-prestudy path.
     let prestudy = synthesize_prestudy_stages(study_stages, max_order, season_map);
-    let stages: Vec<cobre_core::temporal::Stage> = study_stages
+    let stages: Vec<Stage> = study_stages
         .iter()
         .cloned()
         .chain(prestudy.iter().cloned())
@@ -305,7 +306,7 @@ fn run_partial_estimation(
     // Empty for a full-year study, so `stages == study_stages` and the partial
     // estimation is bit-identical to the no-prestudy path.
     let prestudy = synthesize_prestudy_stages(study_stages, max_order, season_map);
-    let stages_owned: Vec<cobre_core::temporal::Stage> = study_stages
+    let stages_owned: Vec<Stage> = study_stages
         .iter()
         .cloned()
         .chain(prestudy.iter().cloned())
@@ -316,7 +317,7 @@ fn run_partial_estimation(
     let observations = load_and_aggregate_observations(case_dir, study_stages, season_map)?;
 
     if system.inflow_models().is_empty() {
-        return Err(EstimationError::Load(crate::LoadError::ConstraintError {
+        return Err(EstimationError::Load(ConstraintError {
             description: "manifest indicates inflow_seasonal_stats.parquet is present \
                           but system.inflow_models() is empty; \
                           no user stats available for partial estimation"
@@ -385,7 +386,7 @@ fn run_partial_estimation(
 /// season resolution when a season map is present.
 fn load_and_aggregate_observations(
     case_dir: &Path,
-    stages: &[cobre_core::temporal::Stage],
+    stages: &[Stage],
     season_map: Option<&cobre_core::temporal::SeasonMap>,
 ) -> Result<Vec<(EntityId, NaiveDate, f64)>, EstimationError> {
     let history_path = case_dir.join("scenarios/inflow_history.parquet");
@@ -413,7 +414,7 @@ type CoverageCheckResult = (Vec<EntityId>, Vec<StdRatioDivergence>);
 fn validate_partial_estimation_coverage(
     system: &System,
     fitting_stats: &[SeasonalStats],
-    stages: &[cobre_core::temporal::Stage],
+    stages: &[Stage],
 ) -> Result<CoverageCheckResult, EstimationError> {
     let estimated_hydro_ids: HashSet<EntityId> =
         fitting_stats.iter().map(|s| s.entity_id).collect();
@@ -428,7 +429,7 @@ fn validate_partial_estimation_coverage(
     missing_stats.sort();
     if !missing_stats.is_empty() {
         let ids: Vec<String> = missing_stats.iter().map(|id| id.0.to_string()).collect();
-        return Err(EstimationError::Load(crate::LoadError::ConstraintError {
+        return Err(EstimationError::Load(ConstraintError {
             description: format!(
                 "partial estimation: AR coefficients were estimated for hydro(s) \
                      [{ids}] but inflow_seasonal_stats.parquet has no entry for them; \
@@ -492,7 +493,7 @@ fn run_user_ar_estimation(
     // Empty for a full-year study, so `extended == stages` and the estimation
     // is bit-identical to the no-prestudy path.
     let prestudy = synthesize_prestudy_stages(stages, max_order, season_map);
-    let extended: Vec<cobre_core::temporal::Stage> = stages
+    let extended: Vec<Stage> = stages
         .iter()
         .cloned()
         .chain(prestudy.iter().cloned())
@@ -563,7 +564,7 @@ fn run_user_ar_estimation(
 /// canonical ordering expected by `estimate_correlation_with_season_map`.
 fn ar_rows_to_estimates(
     rows: &[InflowArCoefficientRow],
-    stages: &[cobre_core::temporal::Stage],
+    stages: &[Stage],
 ) -> Vec<ArCoefficientEstimate> {
     let stage_id_to_season: HashMap<i32, usize> = stages
         .iter()
@@ -639,7 +640,7 @@ fn user_stats_to_rows(system: &System) -> Vec<InflowSeasonalStatsRow> {
 fn check_std_ratio_divergence(
     system: &System,
     fitting_stats: &[SeasonalStats],
-    stages: &[cobre_core::temporal::Stage],
+    stages: &[Stage],
 ) -> Vec<StdRatioDivergence> {
     let stage_id_to_season: HashMap<i32, usize> = stages
         .iter()
@@ -764,10 +765,10 @@ fn check_std_ratio_divergence(
 /// Returns an empty `Vec` when `season_map` is `None`, `max_order == 0`, or
 /// the study has no stage with a `season_id`.
 fn synthesize_prestudy_stages(
-    stages: &[cobre_core::temporal::Stage],
+    stages: &[Stage],
     max_order: usize,
     season_map: Option<&cobre_core::temporal::SeasonMap>,
-) -> Vec<cobre_core::temporal::Stage> {
+) -> Vec<Stage> {
     let Some(sm) = season_map else {
         return Vec::new();
     };
@@ -843,7 +844,7 @@ fn synthesize_prestudy_stages(
 /// Returns an empty `Vec` when `prestudy` is empty (full-year studies).
 fn prestudy_seasonal_rows(
     fitting_stats: &[SeasonalStats],
-    prestudy: &[cobre_core::temporal::Stage],
+    prestudy: &[Stage],
 ) -> Vec<InflowSeasonalStatsRow> {
     if prestudy.is_empty() {
         return Vec::new();
@@ -871,7 +872,7 @@ fn prestudy_seasonal_rows(
 /// at their negative `stage_id` for direct lag-stage hits.
 fn seasonal_stats_to_rows(
     stats: &[SeasonalStats],
-    stages: &[cobre_core::temporal::Stage],
+    stages: &[Stage],
 ) -> Vec<InflowSeasonalStatsRow> {
     let stage_to_season: HashMap<i32, usize> = stages
         .iter()
@@ -921,7 +922,7 @@ fn seasonal_stats_to_rows(
 /// their negative `stage_id` for direct lag lookups.
 fn ar_estimates_to_rows(
     ar_estimates: &[ArCoefficientEstimate],
-    stages: &[cobre_core::temporal::Stage],
+    stages: &[Stage],
 ) -> Vec<InflowArCoefficientRow> {
     let mut season_to_stages: HashMap<usize, Vec<i32>> = HashMap::new();
     for stage in stages {
@@ -966,7 +967,7 @@ fn ar_estimates_to_rows(
 /// an empty `Vec`).
 fn ar_estimates_to_annual_rows(
     ar_estimates: &[ArCoefficientEstimate],
-    stages: &[cobre_core::temporal::Stage],
+    stages: &[Stage],
 ) -> Vec<InflowAnnualComponentRow> {
     let mut season_to_stages: HashMap<usize, Vec<i32>> = HashMap::new();
     for stage in stages {

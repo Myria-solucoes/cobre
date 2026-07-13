@@ -4,6 +4,8 @@
 //! training-run startup and reused every iteration, avoiding per-iteration heap
 //! allocation.
 
+use cobre_solver::FreezeScratch;
+use cobre_solver::freeze_rows_into_template;
 use cobre_solver::{RowBatch, StageTemplate};
 
 use crate::{
@@ -43,7 +45,7 @@ pub(crate) struct IterationScratch {
     /// [`StageSolvePrep::run`]: crate::training::stage_solve_prep::StageSolvePrep::run
     pub lb_noise_scratch: ScratchBuffers,
     /// Reusable scratch buffers for `freeze_rows_into_template` (count/emit-pass temporaries).
-    pub(crate) freeze_scratch: cobre_solver::FreezeScratch,
+    pub(crate) freeze_scratch: FreezeScratch,
 }
 
 impl IterationScratch {
@@ -124,12 +126,10 @@ impl IterationScratch {
             })
             .collect();
 
-        let mut freeze_scratch = cobre_solver::FreezeScratch::new();
+        let mut freeze_scratch = FreezeScratch::new();
 
-        // Pre-freeze with an empty cut batch (a structural copy of the base
-        // template) so iteration 1's passes can use the frozen load path.
         for t in 0..num_stages {
-            cobre_solver::freeze_rows_into_template(
+            freeze_rows_into_template(
                 &stage_ctx.templates[t],
                 &freeze_row_batches[t],
                 &mut frozen_templates[t],

@@ -18,6 +18,7 @@
 //! initialized here. For distributed runs, launch `mpiexec cobre` as a
 //! subprocess.
 
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -26,20 +27,75 @@ use std::sync::mpsc;
 use pyo3::exceptions::PyOSError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use serde_json::Map;
+use serde_json::Value;
 
 use cobre_core::TrainingEvent;
 
+use crate::convert::pydict_to_json_map;
 use crate::errors::{ErrorSource, convert_error};
 
 use cobre_comm::LocalBackend;
+use cobre_core::System;
+use cobre_core::TrainingEvent::IterationSummary;
+use cobre_io::Config;
+use cobre_io::DistributionInfo;
+use cobre_io::EntitySlot;
+use cobre_io::LoadedCase;
+use cobre_io::MetadataCost;
+use cobre_io::MetadataSimulationSolveStats;
+use cobre_io::MetadataTrainingSolveStats;
+use cobre_io::OutputContext;
+use cobre_io::PolicyMode::Resume;
+use cobre_io::PolicyMode::WarmStart;
+use cobre_io::ReportEntry;
+use cobre_io::TrainingOutput;
+use cobre_io::get_hostname;
+use cobre_io::now_iso8601;
+use cobre_io::output::policy::read_policy_checkpoint;
 use cobre_io::output::simulation_writer::{ScenarioWritePayload, SimulationParquetWriter};
+use cobre_io::output::write_evaporation_models;
+use cobre_io::output::write_fpha_deviation_points;
+use cobre_io::output::write_fpha_hyperplanes;
+use cobre_io::parse_config;
+use cobre_io::validate_case_with_artifacts;
+use cobre_io::write_hydro_model_summary;
+use cobre_io::write_provenance_report;
+use cobre_io::write_row_selection_records;
+use cobre_io::write_scaling_report;
+use cobre_io::write_simulation_results;
+use cobre_io::write_simulation_solver_stats;
+use cobre_io::write_solver_stats;
+use cobre_io::write_training_results;
 use cobre_io::{ParquetWriterConfig, SolverStatsRow};
+use cobre_sddp::FutureCostFunction;
+use cobre_sddp::PolicyLoadKind::FullFcf;
+use cobre_sddp::PolicyStageManifest;
+use cobre_sddp::SddpError;
+use cobre_sddp::TrainingResult;
+use cobre_sddp::aggregate_simulation;
+use cobre_sddp::build_basis_cache_from_checkpoint;
+use cobre_sddp::build_deviation_summary;
+use cobre_sddp::build_evaporation_model_rows;
+use cobre_sddp::build_fpha_deviation_point_rows;
+use cobre_sddp::delta_to_stats_row;
+use cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts;
+use cobre_sddp::inject_boundary_cuts;
+use cobre_sddp::load_boundary_cuts;
+use cobre_sddp::orchestration::CheckpointParams;
+use cobre_sddp::orchestration::export_stochastic_artifacts;
+use cobre_sddp::orchestration::write_checkpoint;
+use cobre_sddp::solver_stats_log_to_rows;
+use cobre_sddp::validate_policy_load;
 use cobre_sddp::{
     ArOrderSummary, DEFAULT_SEED, HydroModelSummary, ModelProvenanceReport, SolverStatsDelta,
     StochasticSource, StochasticSummary, StudyParams, StudySetup, build_hydro_model_summary,
     build_provenance_report, build_stochastic_summary, prepare_stochastic,
 };
 use cobre_solver::ActiveSolver;
+use cobre_solver::active_solver_metadata_id;
+use cobre_solver::active_solver_version;
+use cobre_stochastic::sampling::historical::HistoricalScenarioLibrary;
 
 /// Error returned by [`run_via_study`].
 ///
@@ -57,7 +113,7 @@ pub(crate) enum RunError {
     /// stage/iteration/scenario) without losing the message text.
     Sddp {
         /// The typed SDDP error.
-        error: cobre_sddp::SddpError,
+        error: SddpError,
         /// The verbatim descriptive message (preserved so `match=` assertions pass).
         message: String,
     },
@@ -90,7 +146,7 @@ pub(crate) enum PhaseError {
     /// A typed SDDP failure carried verbatim with its descriptive message.
     Sddp {
         /// The typed SDDP error.
-        error: cobre_sddp::SddpError,
+        error: SddpError,
         /// The verbatim descriptive message.
         message: String,
     },
@@ -186,9 +242,9 @@ fn aggregate_training_solve_stats(
 
 /// Result of the training phase within `run_via_study`.
 pub(crate) struct TrainingPhaseResult {
-    pub result: cobre_sddp::TrainingResult,
-    pub output: cobre_io::TrainingOutput,
-    pub error: Option<cobre_sddp::SddpError>,
+    pub result: TrainingResult,
+    pub output: TrainingOutput,
+    pub error: Option<SddpError>,
     pub started_at: String,
 }
 
@@ -201,9 +257,9 @@ pub(crate) struct TrainingPhaseResult {
 /// non-streaming paths.
 fn build_training_phase_result(
     setup: &StudySetup,
-    training_result: cobre_sddp::TrainingResult,
+    training_result: TrainingResult,
     events: &[TrainingEvent],
-    error: Option<cobre_sddp::SddpError>,
+    error: Option<SddpError>,
     started_at: String,
     n_threads: usize,
 ) -> TrainingPhaseResult {
@@ -218,7 +274,7 @@ fn build_training_phase_result(
         .sum();
     let (first_try, retried, failed, forward_solve_seconds, backward_solve_seconds) =
         aggregate_training_solve_stats(&training_result.solver_stats_log);
-    training_output.training_solve_stats = cobre_io::MetadataTrainingSolveStats {
+    training_output.training_solve_stats = MetadataTrainingSolveStats {
         total_lp_solves: Some(total_lp_solves),
         first_try: Some(first_try),
         retried: Some(retried),
@@ -245,7 +301,7 @@ pub(crate) fn run_training_phase_py(
     setup: &mut StudySetup,
     n_threads: usize,
 ) -> Result<TrainingPhaseResult, PhaseError> {
-    let started_at = cobre_io::now_iso8601();
+    let started_at = now_iso8601();
     let mut solver = ActiveSolver::new().map_err(|e| {
         format!(
             "{} initialisation failed: {e}",
@@ -299,7 +355,7 @@ pub(crate) fn run_training_phase_py_streaming(
     n_threads: usize,
     on_iteration: Py<PyAny>,
 ) -> Result<(TrainingPhaseResult, Option<PyErr>), PhaseError> {
-    let started_at = cobre_io::now_iso8601();
+    let started_at = now_iso8601();
     let mut solver = ActiveSolver::new().map_err(|e| {
         format!(
             "{} initialisation failed: {e}",
@@ -414,20 +470,20 @@ fn drain_training_events(
 /// Write the training artifacts: policy checkpoint, training results, solver
 /// stats, and cut selection records.
 pub(crate) fn write_training_artifacts(
-    output_dir: &std::path::Path,
-    system: &cobre_core::System,
-    config: &cobre_io::Config,
+    output_dir: &Path,
+    system: &System,
+    config: &Config,
     setup: &StudySetup,
     training: &TrainingPhaseResult,
     seed: u64,
     n_threads: usize,
 ) -> Result<(), String> {
-    cobre_sddp::orchestration::write_checkpoint(
+    write_checkpoint(
         &output_dir.join(&setup.policy_path),
         setup,
         system,
         &training.result,
-        &cobre_sddp::orchestration::CheckpointParams {
+        &CheckpointParams {
             max_iterations: setup.loop_params.max_iterations,
             forward_passes: setup.loop_params.forward_passes,
             seed,
@@ -437,13 +493,13 @@ pub(crate) fn write_training_artifacts(
     .map_err(|e| format!("policy checkpoint error: {e}"))?;
 
     if !training.result.solver_stats_log.is_empty() {
-        let rows = cobre_sddp::solver_stats_log_to_rows(&training.result.solver_stats_log);
-        cobre_io::write_solver_stats(output_dir, &rows)
+        let rows = solver_stats_log_to_rows(&training.result.solver_stats_log);
+        write_solver_stats(output_dir, &rows)
             .map_err(|e| format!("output write error: solver stats output: {e}"))?;
     }
 
     if !training.output.cut_selection_records.is_empty() {
-        cobre_io::write_row_selection_records(
+        write_row_selection_records(
             output_dir,
             &training.output.cut_selection_records,
             &ParquetWriterConfig::default(),
@@ -451,13 +507,13 @@ pub(crate) fn write_training_artifacts(
         .map_err(|e| format!("output write error: cut selection output: {e}"))?;
     }
 
-    let training_ctx = cobre_io::OutputContext {
-        hostname: cobre_io::get_hostname(),
-        solver: cobre_solver::active_solver_metadata_id().to_string(),
-        solver_version: Some(cobre_solver::active_solver_version()),
+    let training_ctx = OutputContext {
+        hostname: get_hostname(),
+        solver: active_solver_metadata_id().to_string(),
+        solver_version: Some(active_solver_version()),
         started_at: training.started_at.clone(),
-        completed_at: cobre_io::now_iso8601(),
-        distribution: cobre_io::DistributionInfo {
+        completed_at: now_iso8601(),
+        distribution: DistributionInfo {
             backend: "local".to_string(),
             world_size: 1,
             ranks_participated: 1,
@@ -477,11 +533,9 @@ pub(crate) fn write_training_artifacts(
         setup: None,
         // Mirrors the CLI write site so Python and CLI emit the same
         // `production_fit_deviation` section.
-        production_fit_deviation: cobre_sddp::build_deviation_summary(
-            &setup.hydro_models.fpha_fit_deviations,
-        ),
+        production_fit_deviation: build_deviation_summary(&setup.hydro_models.fpha_fit_deviations),
     };
-    cobre_io::write_training_results(output_dir, &training.output, system, config, &training_ctx)
+    write_training_results(output_dir, &training.output, system, config, &training_ctx)
         .map_err(|e| format!("output write error: training results output: {e}"))?;
 
     Ok(())
@@ -492,14 +546,14 @@ pub(crate) fn write_training_artifacts(
 /// Shared call site so both [`run_via_study`] and `Study::train` emit it
 /// identically. Training-only: simulation-only runs do not write it.
 pub(crate) fn write_fpha_hyperplanes_if_any(
-    output_dir: &std::path::Path,
+    output_dir: &Path,
     setup: &StudySetup,
 ) -> Result<(), String> {
     if !setup.hydro_models.fpha_export_rows.is_empty() {
         let fpha_path = output_dir
             .join("hydro_models")
             .join("fpha_hyperplanes.parquet");
-        cobre_io::output::write_fpha_hyperplanes(&fpha_path, &setup.hydro_models.fpha_export_rows)
+        write_fpha_hyperplanes(&fpha_path, &setup.hydro_models.fpha_export_rows)
             .map_err(|e| format!("output write error: failed to write fpha_hyperplanes: {e}"))?;
     }
     Ok(())
@@ -512,16 +566,16 @@ pub(crate) fn write_fpha_hyperplanes_if_any(
 /// to match the CLI's `write_evaporation_models` output (the Python-parity hard
 /// rule); the shared call site is what holds them to it.
 pub(crate) fn write_evaporation_models_if_any(
-    output_dir: &std::path::Path,
+    output_dir: &Path,
     setup: &StudySetup,
-    system: &cobre_core::System,
+    system: &System,
 ) -> Result<(), String> {
-    let rows = cobre_sddp::build_evaporation_model_rows(&setup.hydro_models, system);
+    let rows = build_evaporation_model_rows(&setup.hydro_models, system);
     if !rows.is_empty() {
         let evaporation_path = output_dir
             .join("hydro_models")
             .join("evaporation_models.parquet");
-        cobre_io::output::write_evaporation_models(&evaporation_path, &rows)
+        write_evaporation_models(&evaporation_path, &rows)
             .map_err(|e| format!("output write error: failed to write evaporation_models: {e}"))?;
     }
     Ok(())
@@ -535,21 +589,21 @@ pub(crate) fn write_evaporation_models_if_any(
 /// this to match the CLI's `write_fpha_deviation_points` output (the
 /// Python-parity hard rule); the shared helper is what holds them to it.
 pub(crate) fn write_fpha_deviation_points_if_any(
-    output_dir: &std::path::Path,
+    output_dir: &Path,
     setup: &StudySetup,
-    config: &cobre_io::Config,
+    config: &Config,
 ) -> Result<(), String> {
     if !config.exports.fpha_deviation_points {
         return Ok(());
     }
-    let rows = cobre_sddp::build_fpha_deviation_point_rows(&setup.hydro_models);
+    let rows = build_fpha_deviation_point_rows(&setup.hydro_models);
     if !rows.is_empty() {
         let deviation_points_path = output_dir
             .join("hydro_models")
             .join("fpha_deviation_points.parquet");
-        cobre_io::output::write_fpha_deviation_points(&deviation_points_path, rows).map_err(
-            |e| format!("output write error: failed to write fpha_deviation_points: {e}"),
-        )?;
+        write_fpha_deviation_points(&deviation_points_path, rows).map_err(|e| {
+            format!("output write error: failed to write fpha_deviation_points: {e}")
+        })?;
     }
     Ok(())
 }
@@ -557,12 +611,12 @@ pub(crate) fn write_fpha_deviation_points_if_any(
 /// Run the simulation phase: workspace pool, Parquet writing, and output.
 pub(crate) fn run_simulation_phase_py(
     setup: &mut StudySetup,
-    output_dir: &std::path::Path,
-    system: &cobre_core::System,
-    training_result: &cobre_sddp::TrainingResult,
+    output_dir: &Path,
+    system: &System,
+    training_result: &TrainingResult,
     n_threads: usize,
 ) -> Result<SimSummary, PhaseError> {
-    let sim_started_at = cobre_io::now_iso8601();
+    let sim_started_at = now_iso8601();
     let io_capacity = setup.simulation_config().io_channel_capacity;
     let mut sim_pool = setup
         .create_workspace_pool(&LocalBackend, n_threads, ActiveSolver::new)
@@ -606,7 +660,7 @@ pub(crate) fn run_simulation_phase_py(
             let message = format!("simulation error: {e}");
             PhaseError::Sddp {
                 message,
-                error: cobre_sddp::SddpError::from(e),
+                error: SddpError::from(e),
             }
         });
     drop(result_tx);
@@ -629,7 +683,7 @@ pub(crate) fn run_simulation_phase_py(
         SolverStatsDelta::accumulate_into(&mut agg, delta);
     }
 
-    let cost_summary = cobre_sddp::aggregate_simulation(
+    let cost_summary = aggregate_simulation(
         &sim_run_result.costs,
         setup.simulation_config(),
         &LocalBackend,
@@ -637,13 +691,13 @@ pub(crate) fn run_simulation_phase_py(
     .map_err(|e| format!("simulation error: cost aggregation: {e}"))?;
 
     let parallelism = u32::try_from(n_threads).unwrap_or(u32::MAX);
-    sim_out.cost = Some(cobre_io::MetadataCost {
+    sim_out.cost = Some(MetadataCost {
         mean_cost: cost_summary.mean_cost,
         std_cost: cost_summary.std_cost,
         cvar: cost_summary.cvar,
         cvar_alpha: cost_summary.cvar_alpha,
     });
-    sim_out.solve_stats = cobre_io::MetadataSimulationSolveStats {
+    sim_out.solve_stats = MetadataSimulationSolveStats {
         total_lp_solves: Some(agg.lp_solves),
         first_try: Some(agg.first_try_successes),
         retried: Some(agg.lp_successes.saturating_sub(agg.first_try_successes)),
@@ -658,18 +712,10 @@ pub(crate) fn run_simulation_phase_py(
             .solver_stats
             .iter()
             .map(|(scenario_id, _opening, delta)| {
-                cobre_sddp::delta_to_stats_row(
-                    *scenario_id,
-                    "simulation",
-                    -1,
-                    None,
-                    None,
-                    None,
-                    delta,
-                )
+                delta_to_stats_row(*scenario_id, "simulation", -1, None, None, None, delta)
             })
             .collect();
-        cobre_io::write_simulation_solver_stats(output_dir, &rows)
+        write_simulation_solver_stats(output_dir, &rows)
             .map_err(|e| format!("output write error: simulation solver stats output: {e}"))?;
     }
 
@@ -677,13 +723,13 @@ pub(crate) fn run_simulation_phase_py(
         n_scenarios: sim_out.n_scenarios,
         completed: sim_out.completed,
     };
-    let sim_ctx = cobre_io::OutputContext {
-        hostname: cobre_io::get_hostname(),
-        solver: cobre_solver::active_solver_metadata_id().to_string(),
-        solver_version: Some(cobre_solver::active_solver_version()),
+    let sim_ctx = OutputContext {
+        hostname: get_hostname(),
+        solver: active_solver_metadata_id().to_string(),
+        solver_version: Some(active_solver_version()),
         started_at: sim_started_at,
-        completed_at: cobre_io::now_iso8601(),
-        distribution: cobre_io::DistributionInfo {
+        completed_at: now_iso8601(),
+        distribution: DistributionInfo {
             backend: "local".to_string(),
             world_size: 1,
             ranks_participated: 1,
@@ -702,7 +748,7 @@ pub(crate) fn run_simulation_phase_py(
         // training-only.
         production_fit_deviation: None,
     };
-    cobre_io::write_simulation_results(output_dir, &sim_out, &sim_ctx)
+    write_simulation_results(output_dir, &sim_out, &sim_ctx)
         .map_err(|e| format!("output write error: simulation results output: {e}"))?;
 
     Ok(sim_summary)
@@ -716,19 +762,18 @@ pub(crate) fn run_simulation_phase_py(
 /// `parse_config` performs, so the persisted metadata reflects the effective
 /// (post-override) config.
 fn load_effective_config(
-    config_path: &std::path::Path,
-    overrides: Option<&serde_json::Map<String, serde_json::Value>>,
-) -> Result<cobre_io::Config, String> {
+    config_path: &Path,
+    overrides: Option<&Map<String, Value>>,
+) -> Result<Config, String> {
     match overrides {
         Some(map) if !map.is_empty() => {
             let raw = std::fs::read_to_string(config_path)
                 .map_err(|e| format!("config read error: {e}"))?;
-            let base: serde_json::Value =
+            let base: Value =
                 serde_json::from_str(&raw).map_err(|e| format!("config parse error: {e}"))?;
-            cobre_io::Config::with_overrides(&base, map)
-                .map_err(|e| format!("config override error: {e}"))
+            Config::with_overrides(&base, map).map_err(|e| format!("config override error: {e}"))
         }
-        _ => cobre_io::parse_config(config_path).map_err(|e| format!("config parse error: {e}")),
+        _ => parse_config(config_path).map_err(|e| format!("config parse error: {e}")),
     }
 }
 
@@ -745,9 +790,9 @@ pub(crate) struct LoadedStudy {
     /// context, hydro models, scenario libraries).
     pub setup: StudySetup,
     /// The system after stochastic preprocessing (inflow non-negativity, etc.).
-    pub system: cobre_core::System,
+    pub system: System,
     /// The effective (post-override) configuration.
-    pub config: cobre_io::Config,
+    pub config: Config,
     /// The resolved tree seed.
     pub seed: u64,
     /// The model-provenance report, including the past-inflows digest.
@@ -757,7 +802,7 @@ pub(crate) struct LoadedStudy {
     /// The structural hydro-model summary.
     pub hydro_models_summary: HydroModelSummary,
     /// Validation-pipeline warnings captured during the case load.
-    pub warnings: Vec<cobre_io::ReportEntry>,
+    pub warnings: Vec<ReportEntry>,
 }
 
 /// Run the front half of the solve lifecycle: load the case, resolve the
@@ -779,15 +824,14 @@ pub(crate) struct LoadedStudy {
 /// construction, or sidecar-write failure. The caller maps the message to a
 /// Python exception type via [`crate::errors::convert_error`].
 pub(crate) fn build_study_setup(
-    case_dir: &std::path::Path,
-    output_dir: &std::path::Path,
-    overrides: Option<&serde_json::Map<String, serde_json::Value>>,
+    case_dir: &Path,
+    output_dir: &Path,
+    overrides: Option<&Map<String, Value>>,
 ) -> Result<LoadedStudy, String> {
     // The `validate_*` variant (rather than `load_case_with_artifacts`) captures
     // the warnings so `Study::validate` can replay them without re-reading disk.
-    let (loaded, report) =
-        cobre_io::validate_case_with_artifacts(case_dir).map_err(|e| e.to_string())?;
-    let cobre_io::LoadedCase { system, artifacts } = loaded;
+    let (loaded, report) = validate_case_with_artifacts(case_dir).map_err(|e| e.to_string())?;
+    let LoadedCase { system, artifacts } = loaded;
     let warnings = report.warnings;
 
     let config = load_effective_config(&case_dir.join("config.json"), overrides)?;
@@ -807,7 +851,7 @@ pub(crate) fn build_study_setup(
     let estimation_report = result.estimation_report;
     let estimation_path = result.estimation_path;
 
-    let hydro_models_result = cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts(
+    let hydro_models_result = prepare_hydro_models_from_artifacts(
         &system,
         &artifacts,
         config.exports.fpha_deviation_points,
@@ -843,16 +887,18 @@ pub(crate) fn build_study_setup(
     // detection can compare against a fresh digest on later runs.
     provenance_report
         .inflow
-        .historical_library_past_inflows_digest =
-        setup.scenario_libraries.training.historical.as_ref().map(
-            cobre_stochastic::sampling::historical::HistoricalScenarioLibrary::past_inflows_digest,
-        );
+        .historical_library_past_inflows_digest = setup
+        .scenario_libraries
+        .training
+        .historical
+        .as_ref()
+        .map(HistoricalScenarioLibrary::past_inflows_digest);
 
     if config.exports.stochastic {
         let mut on_warning = |msg: &str| {
             eprintln!("cobre-python: stochastic export warning: {msg}");
         };
-        cobre_sddp::orchestration::export_stochastic_artifacts(
+        export_stochastic_artifacts(
             output_dir,
             &setup.stochastic,
             &system,
@@ -862,11 +908,11 @@ pub(crate) fn build_study_setup(
     }
 
     let scaling_path = output_dir.join("training/scaling_report.json");
-    cobre_io::write_scaling_report(&scaling_path, &setup.stage_data.scaling_report)
+    write_scaling_report(&scaling_path, &setup.stage_data.scaling_report)
         .map_err(|e| format!("output write error: failed to write scaling report: {e}"))?;
 
     let provenance_path = output_dir.join("training/model_provenance.json");
-    cobre_io::write_provenance_report(&provenance_path, &provenance_report)
+    write_provenance_report(&provenance_path, &provenance_report)
         .map_err(|e| format!("output write error: failed to write model provenance: {e}"))?;
 
     let stochastic_summary =
@@ -876,7 +922,7 @@ pub(crate) fn build_study_setup(
     // Sidecar so `cobre summary` can render the Hydro-models section from a
     // completed run.
     let hydro_models_path = output_dir.join("training/hydro_models.json");
-    cobre_io::write_hydro_model_summary(&hydro_models_path, &hydro_models_summary)
+    write_hydro_model_summary(&hydro_models_path, &hydro_models_summary)
         .map_err(|e| format!("output write error: failed to write hydro model summary: {e}"))?;
 
     Ok(LoadedStudy {
@@ -906,7 +952,7 @@ pub(crate) fn build_study_setup(
 /// `state_dimension`, `num_stages`, or entity-manifest mismatch.
 fn validate_loaded_policy(
     checkpoint: &cobre_io::PolicyCheckpoint,
-    system: &cobre_core::System,
+    system: &System,
     setup: &StudySetup,
 ) -> Result<(), String> {
     #[allow(clippy::cast_possible_truncation)]
@@ -915,24 +961,23 @@ fn validate_loaded_policy(
     let state_dim = setup.fcf.state_dimension as u32;
 
     let current_manifest = setup.build_terminal_entity_manifest(system);
-    let checkpoint_terminal_manifest: &[cobre_io::EntitySlot] = checkpoint
+    let checkpoint_terminal_manifest: &[EntitySlot] = checkpoint
         .stage_cuts
         .last()
         .map_or(&[], |s| s.entity_manifest.as_slice());
 
-    let source = cobre_sddp::PolicyStageManifest {
+    let source = PolicyStageManifest {
         state_dimension: checkpoint.metadata.state_dimension,
         num_stages: checkpoint.metadata.num_stages,
         slots: checkpoint_terminal_manifest,
     };
-    let current = cobre_sddp::PolicyStageManifest {
+    let current = PolicyStageManifest {
         state_dimension: state_dim,
         num_stages: n_stages,
         slots: &current_manifest,
     };
-    let report =
-        cobre_sddp::validate_policy_load(&source, &current, cobre_sddp::PolicyLoadKind::FullFcf)
-            .map_err(|e| format!("policy validation error: {e}"))?;
+    let report = validate_policy_load(&source, &current, FullFcf)
+        .map_err(|e| format!("policy validation error: {e}"))?;
 
     for msg in &report.warnings {
         eprintln!("cobre-python: policy validation warning: {msg}");
@@ -958,11 +1003,11 @@ fn validate_loaded_policy(
 /// exception type via [`crate::errors::convert_error`].
 pub(crate) fn apply_training_policy_mode(
     setup: &mut StudySetup,
-    system: &cobre_core::System,
-    config: &cobre_io::Config,
-    output_dir: &std::path::Path,
+    system: &System,
+    config: &Config,
+    output_dir: &Path,
 ) -> Result<(), String> {
-    if config.policy.mode == cobre_io::PolicyMode::WarmStart {
+    if config.policy.mode == WarmStart {
         let policy_dir = output_dir.join(&setup.policy_path);
         if !policy_dir.exists() {
             return Err(format!(
@@ -972,13 +1017,13 @@ pub(crate) fn apply_training_policy_mode(
             ));
         }
 
-        let checkpoint = cobre_io::output::policy::read_policy_checkpoint(&policy_dir)
+        let checkpoint = read_policy_checkpoint(&policy_dir)
             .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
 
         validate_loaded_policy(&checkpoint, system, setup)?;
 
         // Reserve one extra slot for cuts added in the final iteration.
-        let warm_fcf = cobre_sddp::FutureCostFunction::new_with_warm_start(
+        let warm_fcf = FutureCostFunction::new_with_warm_start(
             &checkpoint.stage_cuts,
             setup.loop_params.forward_passes,
             setup.loop_params.max_iterations.saturating_add(1),
@@ -989,14 +1034,14 @@ pub(crate) fn apply_training_policy_mode(
         // warm-start. Empty bases (checkpoint written without `store_basis`) leave
         // iteration 1 to cold-start.
         if !checkpoint.stage_bases.is_empty() {
-            let basis_cache = cobre_sddp::build_basis_cache_from_checkpoint(
+            let basis_cache = build_basis_cache_from_checkpoint(
                 setup.stage_data.stage_templates.templates.len(),
                 &checkpoint.stage_bases,
                 &checkpoint.stage_cuts,
             );
             setup.set_warm_start_basis_cache(basis_cache);
         }
-    } else if config.policy.mode == cobre_io::PolicyMode::Resume {
+    } else if config.policy.mode == Resume {
         let policy_dir = output_dir.join(&setup.policy_path);
         if !policy_dir.exists() {
             return Err(format!(
@@ -1006,7 +1051,7 @@ pub(crate) fn apply_training_policy_mode(
             ));
         }
 
-        let checkpoint = cobre_io::output::policy::read_policy_checkpoint(&policy_dir)
+        let checkpoint = read_policy_checkpoint(&policy_dir)
             .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
 
         validate_loaded_policy(&checkpoint, system, setup)?;
@@ -1014,7 +1059,7 @@ pub(crate) fn apply_training_policy_mode(
         let completed = u64::from(checkpoint.metadata.completed_iterations);
 
         // Reserve one extra slot for cuts added in the final iteration.
-        let warm_fcf = cobre_sddp::FutureCostFunction::new_with_warm_start(
+        let warm_fcf = FutureCostFunction::new_with_warm_start(
             &checkpoint.stage_cuts,
             setup.loop_params.forward_passes,
             setup.loop_params.max_iterations.saturating_add(1),
@@ -1026,7 +1071,7 @@ pub(crate) fn apply_training_policy_mode(
         // warm-start. Empty bases (checkpoint written without `store_basis`) leave
         // iteration 1 to cold-start.
         if !checkpoint.stage_bases.is_empty() {
-            let basis_cache = cobre_sddp::build_basis_cache_from_checkpoint(
+            let basis_cache = build_basis_cache_from_checkpoint(
                 setup.stage_data.stage_templates.templates.len(),
                 &checkpoint.stage_bases,
                 &checkpoint.stage_cuts,
@@ -1044,7 +1089,7 @@ pub(crate) fn apply_training_policy_mode(
         let state_dim = setup.fcf.state_dimension as u32;
         let current_manifest = setup.build_terminal_entity_manifest(system);
         let mut on_warning = |msg: &str| eprintln!("cobre-python: boundary cut warning: {msg}");
-        let boundary_records = cobre_sddp::load_boundary_cuts(
+        let boundary_records = load_boundary_cuts(
             &boundary_path,
             bp.source_stage,
             state_dim,
@@ -1052,7 +1097,7 @@ pub(crate) fn apply_training_policy_mode(
             &mut on_warning,
         )
         .map_err(|e| format!("boundary cut error: {e}"))?;
-        cobre_sddp::inject_boundary_cuts(setup, &boundary_records);
+        inject_boundary_cuts(setup, &boundary_records);
     }
 
     Ok(())
@@ -1084,9 +1129,9 @@ pub(crate) fn apply_training_policy_mode(
 /// [`crate::errors::convert_error`].
 pub(crate) fn reconstruct_policy_from_checkpoint(
     setup: &StudySetup,
-    system: &cobre_core::System,
-    policy_dir: &std::path::Path,
-) -> Result<(cobre_sddp::FutureCostFunction, cobre_sddp::TrainingResult), String> {
+    system: &System,
+    policy_dir: &Path,
+) -> Result<(FutureCostFunction, TrainingResult), String> {
     if !policy_dir.exists() {
         return Err(format!(
             "Policy directory not found: {}. Cannot run simulation-only \
@@ -1095,21 +1140,21 @@ pub(crate) fn reconstruct_policy_from_checkpoint(
         ));
     }
 
-    let checkpoint = cobre_io::output::policy::read_policy_checkpoint(policy_dir)
+    let checkpoint = read_policy_checkpoint(policy_dir)
         .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
 
     validate_loaded_policy(&checkpoint, system, setup)?;
 
-    let loaded_fcf = cobre_sddp::FutureCostFunction::from_deserialized(&checkpoint.stage_cuts)
+    let loaded_fcf = FutureCostFunction::from_deserialized(&checkpoint.stage_cuts)
         .map_err(|e| format!("FCF reconstruction error: {e}"))?;
 
-    let basis_cache = cobre_sddp::build_basis_cache_from_checkpoint(
+    let basis_cache = build_basis_cache_from_checkpoint(
         setup.stage_data.stage_templates.templates.len(),
         &checkpoint.stage_bases,
         &checkpoint.stage_cuts,
     );
 
-    let training_result = cobre_sddp::TrainingResult::new(
+    let training_result = TrainingResult::new(
         checkpoint.metadata.final_lower_bound,
         checkpoint
             .metadata
@@ -1149,11 +1194,11 @@ pub(crate) fn reconstruct_policy_from_checkpoint(
 // splitting would produce pass-through wrappers with no independent invariant.
 #[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
 pub(crate) fn run_via_study(
-    case_dir: &std::path::Path,
+    case_dir: &Path,
     output_dir: PathBuf,
     n_threads: usize,
     skip_simulation: bool,
-    overrides: Option<serde_json::Map<String, serde_json::Value>>,
+    overrides: Option<Map<String, Value>>,
     on_iteration: Option<Py<PyAny>>,
 ) -> Result<RunSummary, RunError> {
     let LoadedStudy {
@@ -1425,7 +1470,7 @@ fn iteration_summary_to_dict<'py>(
     event: &cobre_core::TrainingEvent,
 ) -> PyResult<Option<Bound<'py, PyDict>>> {
     match event {
-        cobre_core::TrainingEvent::IterationSummary {
+        IterationSummary {
             iteration,
             lower_bound,
             upper_bound,
@@ -1492,7 +1537,7 @@ pub fn run(
 
     // Convert the override dict while the GIL is still held, before `py.detach`.
     let overrides = config_overrides
-        .map(|dict| crate::convert::pydict_to_json_map(&dict))
+        .map(|dict| pydict_to_json_map(&dict))
         .transpose()?;
 
     // `on_iteration` is a `Py<PyAny>` (GIL-independent), so it can cross the

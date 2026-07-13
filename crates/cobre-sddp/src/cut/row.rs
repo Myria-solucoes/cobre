@@ -10,8 +10,10 @@
 
 use cobre_solver::{RowBatch, SolverInterface};
 
+use crate::cut::CutPool;
+use crate::cut::CutRowMap;
 use crate::cut::FutureCostFunction;
-use crate::indexer::{CutStateProjection, StateLayout};
+use crate::indexer::{CutStateProjection, OutCol, StateLayout};
 
 /// Push one cut-row coefficient: `-coeff * col_scale[j]` (sign negation per the
 /// module-doc Benders contract). Sole owner of the negate-and-scale rule, shared
@@ -19,10 +21,11 @@ use crate::indexer::{CutStateProjection, StateLayout};
 #[inline]
 pub(crate) fn push_scaled_coefficient(
     batch: &mut RowBatch,
-    j: usize,
+    col: OutCol,
     coeff: f64,
     col_scale: &[f64],
 ) {
+    let j = col.get();
     debug_assert!(
         i32::try_from(j).is_ok(),
         "column index j={j} exceeds i32::MAX"
@@ -108,7 +111,7 @@ pub fn build_cut_row_batch_into(
     let n_cut_state = cut_state.n_state();
     let theta_col = state.theta;
 
-    let num_cuts: usize = fcf.pools[stage].active_count();
+    let num_cuts = fcf.pools[stage].active_count();
 
     if num_cuts == 0 {
         batch.row_starts.push(0_i32);
@@ -216,7 +219,7 @@ pub fn build_cut_row_batch(
 /// Panics if `total_nnz` exceeds `i32::MAX` (LP exceeds the `HiGHS` API limit).
 /// In debug builds, also panics if `stage >= fcf.pools.len()`.
 ///
-/// [`CutRowMap`]: crate::cut::CutRowMap
+/// [`CutRowMap`]: CutRowMap
 #[allow(clippy::similar_names)] // `state` (role-a handle) vs `stage` index — both established names
 pub fn append_new_cuts_to_lp<S: SolverInterface>(
     solver: &mut S,
@@ -225,7 +228,7 @@ pub fn append_new_cuts_to_lp<S: SolverInterface>(
     state: &StateLayout,
     cut_state: &CutStateProjection,
     col_scale: &[f64],
-    row_map: &mut crate::cut::CutRowMap,
+    row_map: &mut CutRowMap,
     batch_buf: &mut RowBatch,
 ) -> usize {
     batch_buf.clear();
@@ -292,23 +295,23 @@ pub fn append_new_cuts_to_lp<S: SolverInterface>(
 /// - `slots`: the slot ids to append, in caller order (the appended LP rows
 ///   follow this order).
 /// - `col_scale`: column scaling factors (empty slice ⇒ no scaling).
-/// - `row_map`: per-(stage, solve) [`CutRowMap`](crate::cut::CutRowMap) to update.
+/// - `row_map`: per-(stage, solve) [`CutRowMap`] to update.
 ///
 /// # Panics
 ///
 /// Panics if the total non-zero count exceeds `i32::MAX` (the `HiGHS` API
 /// limit), matching [`append_new_cuts_to_lp`].
 ///
-/// [`CutPool`]: crate::cut::CutPool
+/// [`CutPool`]: CutPool
 #[allow(clippy::similar_names)] // `state` (role-a handle) vs `stage` index — both established names
 pub fn append_slots_to_lp<S: SolverInterface>(
     solver: &mut S,
-    pool: &crate::cut::CutPool,
+    pool: &CutPool,
     slots: &[u32],
     state: &StateLayout,
     cut_state: &CutStateProjection,
     col_scale: &[f64],
-    row_map: &mut crate::cut::CutRowMap,
+    row_map: &mut CutRowMap,
     batch_buf: &mut RowBatch,
 ) -> usize {
     batch_buf.clear();

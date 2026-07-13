@@ -6,7 +6,9 @@
 
 #![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
+use crate::visited_states::VisitedStatesArchive;
 use cobre_core::System;
+use cobre_core::Thermal;
 use cobre_core::commissioning::{commissioning_active, hydro_operating_active};
 use cobre_io::output::policy::{
     ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL, EntitySlot, PolicyBasisRecord, PolicyCutRecord,
@@ -14,7 +16,7 @@ use cobre_io::output::policy::{
 };
 
 use crate::cut::FutureCostFunction;
-use crate::indexer::{CutStateProjection, StateLayout};
+use crate::indexer::{CutStateProjection, StateDim, StateLayout};
 use crate::lp_builder::delivery_ring::DeliveryRing;
 use crate::training::TrainingResult;
 
@@ -62,7 +64,7 @@ pub fn build_stage_entity_manifest(
     let n = global_layout.hydro_count;
     let n_anticipated = global_layout.n_anticipated;
     let hydros = system.hydros();
-    let anticipated_thermals: Vec<&cobre_core::Thermal> = system
+    let anticipated_thermals: Vec<&Thermal> = system
         .thermals()
         .iter()
         .filter(|t| t.anticipated_config.is_some())
@@ -93,7 +95,9 @@ pub fn build_stage_entity_manifest(
 
     let mut manifest = Vec::with_capacity(projection.n_state());
     for j in 0..projection.n_state() {
-        let col = projection.state_to_lp_incoming_column(j);
+        let col = projection
+            .state_to_lp_incoming_column(StateDim::new(j))
+            .get();
         let slot = if global_layout.storage_in.contains(&col) {
             let h = col - global_layout.storage_in.start;
             let hydro = &hydros[h];
@@ -364,7 +368,7 @@ pub fn build_stage_basis_records<'a>(
 /// carry, attached to stage `t`'s states payload.
 #[must_use]
 pub fn build_stage_states_payloads<'a>(
-    archive: Option<&'a crate::visited_states::VisitedStatesArchive>,
+    archive: Option<&'a VisitedStatesArchive>,
     stage_manifests: &'a [Vec<EntitySlot>],
 ) -> Vec<StageStatesPayload<'a>> {
     let Some(archive) = archive else {

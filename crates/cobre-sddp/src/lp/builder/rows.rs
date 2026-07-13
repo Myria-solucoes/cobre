@@ -1,6 +1,7 @@
 use cobre_core::{BlockMode, Stage};
 
 use crate::hydro_models::EvaporationModel;
+use crate::indexer::BlockIdx;
 
 use super::fpha_cursor::for_each_fpha_plane;
 use super::layout::{StageLayout, TemplateBuildCtx};
@@ -248,7 +249,7 @@ fn fill_filling_target_rows(
     row_upper: &mut [f64],
 ) {
     let row_start = layout.filling.row_filling_target_start;
-    for (local_idx, &h_idx) in layout
+    for (local_idx, &h) in layout
         .filling
         .filling_target_hydro_indices
         .iter()
@@ -258,10 +259,11 @@ fn fill_filling_target_rows(
         // make `v + σ_fill ≥ 0` trivially true and silently neutralize the
         // constraint. Membership and the `build_filling_v_target` precompute share
         // the Filling-phase predicate, so a miss is a construction bug between them.
-        let Some(v_target) = ctx.filling_v_target.get(&(h_idx, stage_id)).copied() else {
+        let Some(v_target) = ctx.filling_v_target.get(&(h.get(), stage_id)).copied() else {
             unreachable!(
-                "no V_target for filling hydro {h_idx} at stage id {stage_id}: \
-                 filling_target membership and the V_target precompute disagree"
+                "no V_target for filling hydro {} at stage id {stage_id}: \
+                 filling_target membership and the V_target precompute disagree",
+                h.get()
             );
         };
         let row = row_start + local_idx;
@@ -294,7 +296,7 @@ fn fill_filled_min_storage_floor_rows(
     row_upper: &mut [f64],
 ) {
     let row_start = layout.filling.row_filled_min_storage_floor_start;
-    for (local_idx, &h_idx) in layout
+    for (local_idx, &h) in layout
         .filling
         .filled_min_storage_floor_hydro_indices
         .iter()
@@ -303,7 +305,7 @@ fn fill_filled_min_storage_floor_rows(
         let min_storage = ctx
             .resolved
             .bounds
-            .hydro_bounds(h_idx, stage_idx)
+            .hydro_bounds(h.get(), stage_idx)
             .min_storage_hm3;
         let row = row_start + local_idx;
         row_lower[row] = min_storage;
@@ -333,7 +335,7 @@ fn fill_load_balance_rows(
                 .resolved
                 .resolved_load_factors
                 .factor(b_idx, stage_idx, blk);
-            let row = grid.flat(layout.rows.load_balance.start, b_idx, blk);
+            let row = grid.flat(layout.rows.load_balance.start, b_idx, BlockIdx::new(blk));
             let rhs = mean_mw * factor;
             row_lower[row] = rhs;
             row_upper[row] = rhs;
@@ -377,8 +379,8 @@ fn fill_evaporation_rows(
     row_upper: &mut [f64],
 ) {
     let n_blks = layout.n_blks;
-    for (local_idx, &h_idx) in layout.evap_hydro_indices.iter().enumerate() {
-        match ctx.evaporation_models.model(h_idx) {
+    for (local_idx, &h) in layout.evap_hydro_indices.iter().enumerate() {
+        match ctx.evaporation_models.model(h.get()) {
             EvaporationModel::Linearized { coefficients, .. } => {
                 debug_assert!(
                     stage_idx < coefficients.len(),
@@ -395,7 +397,8 @@ fn fill_evaporation_rows(
             EvaporationModel::None => {
                 debug_assert!(
                     false,
-                    "evap_hydro_indices contains hydro {h_idx} but model is None"
+                    "evap_hydro_indices contains hydro {} but model is None",
+                    h.get()
                 );
             }
         }
@@ -474,7 +477,7 @@ fn fill_operational_violation_rows(
         ];
         for (row_start, lower, upper) in families {
             for blk in 0..layout.n_blks {
-                let row = grid.flat(row_start, h_idx, blk);
+                let row = grid.flat(row_start, h_idx, BlockIdx::new(blk));
                 row_lower[row] = lower;
                 row_upper[row] = upper;
             }

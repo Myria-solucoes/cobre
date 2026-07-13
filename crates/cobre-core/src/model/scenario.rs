@@ -37,6 +37,8 @@ use std::collections::BTreeMap;
 
 use crate::EntityId;
 
+use chrono::NaiveDate;
+
 /// Forward-pass noise source for multi-stage optimization solvers.
 ///
 /// Determines where the forward-pass scenario realisations come from.
@@ -422,7 +424,7 @@ pub struct InflowHistoryRow {
     /// Hydro plant this observation belongs to.
     pub hydro_id: EntityId,
     /// Date of the observation (timezone-free calendar date).
-    pub date: chrono::NaiveDate,
+    pub date: NaiveDate,
     /// Mean inflow for this observation period in m³/s. Must be finite.
     pub value_m3s: f64,
 }

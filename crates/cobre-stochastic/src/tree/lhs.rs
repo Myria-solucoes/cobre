@@ -7,6 +7,7 @@
 //! Output layout is opening-major: `output[opening * dim + entity]`. Determinism:
 //! the same `(base_seed, stage_id)` always produces identical output.
 
+use rand::Rng;
 use rand::RngExt;
 use rand_distr::Uniform;
 
@@ -17,7 +18,7 @@ use crate::noise::{
 };
 
 /// Shuffle `perm` in place using the Fisher-Yates algorithm in O(n) time.
-pub(crate) fn fisher_yates(perm: &mut [usize], rng: &mut impl rand::Rng) {
+pub(crate) fn fisher_yates(perm: &mut [usize], rng: &mut impl Rng) {
     let n = perm.len();
     for i in (1..n).rev() {
         let j = rng.random_range(0..=i);

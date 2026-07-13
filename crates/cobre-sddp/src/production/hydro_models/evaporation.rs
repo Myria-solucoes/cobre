@@ -8,7 +8,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use cobre_core::temporal::Stage;
 use cobre_core::{EntityId, System, month_of};
+use cobre_io::CaseArtifacts;
 use cobre_io::extensions::HydroGeometryRow;
 
 use super::load_artifacts_for_hydro_models;
@@ -85,7 +87,7 @@ pub fn resolve_evaporation_models(
 #[allow(clippy::type_complexity)]
 pub fn resolve_evaporation_models_from_artifacts(
     system: &System,
-    artifacts: &cobre_io::CaseArtifacts,
+    artifacts: &CaseArtifacts,
 ) -> Result<
     (
         EvaporationModelSet,
@@ -124,8 +126,7 @@ pub fn resolve_evaporation_models_from_artifacts(
 
     let geometry_rows: &[HydroGeometryRow] = &artifacts.hydro_geometry;
 
-    let mut geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
-        HashMap::new();
+    let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
     for row in geometry_rows {
         geometry_map.entry(row.hydro_id).or_default().push(row);
     }
@@ -134,8 +135,7 @@ pub fn resolve_evaporation_models_from_artifacts(
         rows.sort_by(|a, b| a.volume_hm3.total_cmp(&b.volume_hm3));
     }
 
-    let study_stages: Vec<&cobre_core::temporal::Stage> =
-        system.stages().iter().filter(|s| s.id >= 0).collect();
+    let study_stages: Vec<&Stage> = system.stages().iter().filter(|s| s.id >= 0).collect();
 
     resolve_evaporation_core(system.hydros(), &geometry_map, &study_stages)
 }
@@ -152,8 +152,8 @@ pub fn resolve_evaporation_models_from_artifacts(
 #[allow(clippy::type_complexity, clippy::too_many_lines)]
 fn resolve_evaporation_core(
     hydros: &[cobre_core::entities::hydro::Hydro],
-    geometry_map: &HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>>,
-    study_stages: &[&cobre_core::temporal::Stage],
+    geometry_map: &HashMap<EntityId, Vec<&HydroGeometryRow>>,
+    study_stages: &[&Stage],
 ) -> Result<
     (
         EvaporationModelSet,
@@ -176,8 +176,7 @@ fn resolve_evaporation_core(
             continue;
         };
 
-        let geo_rows: &[&cobre_io::extensions::HydroGeometryRow] =
-            geometry_map.get(&hydro.id).map_or(&[], Vec::as_slice);
+        let geo_rows: &[&HydroGeometryRow] = geometry_map.get(&hydro.id).map_or(&[], Vec::as_slice);
 
         // Evaporation needs a usable area-volume curve. A new or being-filled
         // reservoir legitimately may have none (no geometry rows, or a single
@@ -219,15 +218,13 @@ fn resolve_evaporation_core(
 
         // Midpoint-path values, read only when there are no per-season volumes.
         let midpoint_v = f64::midpoint(hydro.min_storage_hm3, hydro.max_storage_hm3);
-        let midpoint_area = if hydro.evaporation_reference_volumes_hm3.is_none() {
-            interpolate_area(geo_rows, midpoint_v)
+        let (midpoint_area, midpoint_slope) = if hydro.evaporation_reference_volumes_hm3.is_none() {
+            (
+                interpolate_area(geo_rows, midpoint_v),
+                area_derivative(geo_rows, midpoint_v),
+            )
         } else {
-            0.0 // unused; per-season path computes per stage
-        };
-        let midpoint_slope = if hydro.evaporation_reference_volumes_hm3.is_none() {
-            area_derivative(geo_rows, midpoint_v)
-        } else {
-            0.0 // unused; per-season path computes per stage
+            (0.0, 0.0)
         };
 
         let mut stage_coefficients: Vec<LinearizedEvaporation> = Vec::with_capacity(n_stages);
@@ -303,7 +300,7 @@ fn resolve_evaporation_core(
 /// geometry table. Out-of-range `v` clamps to the first/last point's area (no
 /// extrapolation). Assumes `geometry` is ascending by `volume_hm3`; returns `0.0`
 /// for an empty slice.
-fn interpolate_area(geometry: &[&cobre_io::extensions::HydroGeometryRow], v: f64) -> f64 {
+fn interpolate_area(geometry: &[&HydroGeometryRow], v: f64) -> f64 {
     if geometry.is_empty() {
         return 0.0;
     }
@@ -347,7 +344,7 @@ fn interpolate_area(geometry: &[&cobre_io::extensions::HydroGeometryRow], v: f64
 /// table, using the enclosing interval's slope (the edge interval when `v` is
 /// out of range). Returns `0.0` for a single-point geometry. Assumes `geometry`
 /// is ascending by `volume_hm3`.
-fn area_derivative(geometry: &[&cobre_io::extensions::HydroGeometryRow], v: f64) -> f64 {
+fn area_derivative(geometry: &[&HydroGeometryRow], v: f64) -> f64 {
     let n = geometry.len();
 
     if n < 2 {

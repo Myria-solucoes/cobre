@@ -13,6 +13,7 @@
 use std::sync::mpsc::Sender;
 
 use cobre_core::TrainingEvent;
+use cobre_solver::ActiveProfile;
 use cobre_solver::{SolverInterface, StageTemplate};
 
 use crate::{
@@ -39,8 +40,6 @@ pub use delta_cut_batch::build_delta_cut_row_batch_into;
 pub use sampler::build_sampler_from_ctx;
 pub use stats_aggregation::sync_forward;
 
-// `pub(crate)`, not `pub`: the items are crate-internal, so a `pub` re-export
-// would be a private-in-public error.
 pub(crate) use basis_capture::write_capture_metadata;
 pub(crate) use stage_solve::run_forward_stage;
 
@@ -189,7 +188,7 @@ pub fn run_forward_pass<S>(
     records: &mut [TrajectoryRecord],
 ) -> Result<ForwardResult, SddpError>
 where
-    S: SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
+    S: SolverInterface<Profile = ActiveProfile> + Send,
 {
     use crate::forward_pass_state::{ForwardPassInputs, ForwardPassState};
     let n_workers = workspaces.len().max(1);

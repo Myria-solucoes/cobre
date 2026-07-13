@@ -6,13 +6,20 @@
 //!
 //! [`FutureCostFunction`]: crate::FutureCostFunction
 
+use cobre_io::EntitySlot;
+use cobre_io::OwnedPolicyBasisRecord;
+use cobre_io::OwnedPolicyCutRecord;
 use cobre_io::PolicyCheckpointMetadata;
+use cobre_io::StageCutsReadResult;
+use cobre_io::read_policy_checkpoint;
 use cobre_solver::{Basis, BasisStatus};
 
 use crate::SddpError;
 use crate::cut::pool::CutPool;
 use crate::setup::StudySetup;
 use crate::workspace::CapturedBasis;
+
+use std::path::Path;
 
 /// Resolve the per-stage warm-start cut counts from a loaded policy checkpoint.
 ///
@@ -57,7 +64,7 @@ pub struct PolicyStageManifest<'a> {
     /// Number of stages in the study.
     pub num_stages: u32,
     /// Per-slot entity identity, in state-vector order.
-    pub slots: &'a [cobre_io::EntitySlot],
+    pub slots: &'a [EntitySlot],
 }
 
 /// Which policy-load path is being validated; selects the `num_stages` rule in
@@ -133,7 +140,7 @@ pub fn validate_policy_load(
 /// `row_status` is `[template rows…, cut rows…]`, the trailing `num_cut_rows` in
 /// capture-time [`CutPool::active_cuts`](crate::cut::pool::CutPool::active_cuts)
 /// order (active slots, increasing). Slot identity is recovered by matching each
-/// basis record to its [`StageCutsReadResult`](cobre_io::StageCutsReadResult) by
+/// basis record to its [`StageCutsReadResult`] by
 /// `stage_id` and taking the active records' `slot_index` in increasing order, so
 /// `reconstruct_basis` preserves stored cut-row statuses across cut-set churn.
 ///
@@ -146,8 +153,8 @@ pub fn validate_policy_load(
 #[must_use]
 pub fn build_basis_cache_from_checkpoint(
     num_stages: usize,
-    stage_bases: &[cobre_io::OwnedPolicyBasisRecord],
-    stage_cuts: &[cobre_io::StageCutsReadResult],
+    stage_bases: &[OwnedPolicyBasisRecord],
+    stage_cuts: &[StageCutsReadResult],
 ) -> Vec<Option<CapturedBasis>> {
     let mut cache: Vec<Option<CapturedBasis>> = vec![None; num_stages];
     for record in stage_bases {
@@ -207,7 +214,7 @@ pub fn build_basis_cache_from_checkpoint(
 /// Positional identity of one state-vector slot; `was_active` is excluded —
 /// adding it would reject a cut whose entity merely changed activity across
 /// studies.
-fn slot_identity(slot: &cobre_io::EntitySlot) -> (u8, i32, u32) {
+fn slot_identity(slot: &EntitySlot) -> (u8, i32, u32) {
     (slot.entity_type, slot.entity_id, slot.subindex)
 }
 
@@ -227,8 +234,8 @@ fn slot_identity(slot: &cobre_io::EntitySlot) -> (u8, i32, u32) {
 /// Returns [`SddpError::Validation`] if `source` and `current` differ in length
 /// or in any slot's `(entity_type, entity_id, subindex)`.
 pub fn compare_manifest_slot_identity(
-    source: &[cobre_io::EntitySlot],
-    current: &[cobre_io::EntitySlot],
+    source: &[EntitySlot],
+    current: &[EntitySlot],
     on_warning: &mut dyn FnMut(&str),
 ) -> Result<(), SddpError> {
     if source.is_empty() || current.is_empty() {
@@ -297,19 +304,18 @@ pub fn compare_manifest_slot_identity(
 /// - A populated boundary manifest disagrees with `current_manifest` in length or
 ///   in any slot's `(entity_type, entity_id, subindex)`
 pub fn load_boundary_cuts(
-    boundary_path: &std::path::Path,
+    boundary_path: &Path,
     source_stage: u32,
     current_state_dimension: u32,
-    current_manifest: &[cobre_io::EntitySlot],
+    current_manifest: &[EntitySlot],
     on_warning: &mut dyn FnMut(&str),
-) -> Result<Vec<cobre_io::OwnedPolicyCutRecord>, SddpError> {
-    let checkpoint =
-        cobre_io::output::policy::read_policy_checkpoint(boundary_path).map_err(|e| {
-            SddpError::Validation(format!(
-                "failed to read boundary policy checkpoint at {}: {e}",
-                boundary_path.display()
-            ))
-        })?;
+) -> Result<Vec<OwnedPolicyCutRecord>, SddpError> {
+    let checkpoint = read_policy_checkpoint(boundary_path).map_err(|e| {
+        SddpError::Validation(format!(
+            "failed to read boundary policy checkpoint at {}: {e}",
+            boundary_path.display()
+        ))
+    })?;
 
     let stage_result = checkpoint
         .stage_cuts
@@ -352,10 +358,7 @@ pub fn load_boundary_cuts(
 /// `boundary_records`, retaining capacity for new training cuts. The resulting
 /// nonzero `warm_start_count` is what makes the forward pass treat the terminal
 /// stage as boundary-loaded (`terminal_has_boundary_cuts`) and skip theta zeroing.
-pub fn inject_boundary_cuts(
-    setup: &mut StudySetup,
-    boundary_records: &[cobre_io::OwnedPolicyCutRecord],
-) {
+pub fn inject_boundary_cuts(setup: &mut StudySetup, boundary_records: &[OwnedPolicyCutRecord]) {
     let fcf = &mut setup.fcf;
     let terminal_idx = fcf.pools.len() - 1;
     let state_dimension = fcf.state_dimension;

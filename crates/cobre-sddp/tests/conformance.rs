@@ -26,6 +26,7 @@
 
 use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
 use cobre_sddp::SyncResult;
+use cobre_sddp::indexer::HydroSys;
 use cobre_solver::{
     Basis, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
 };
@@ -1000,7 +1001,7 @@ fn build_geometry(
     n_blks: usize,
     has_inflow_penalty: bool,
     max_deficit_segments: usize,
-    fpha_hydro_indices: Vec<usize>,
+    fpha_hydro_indices: Vec<HydroSys>,
     fpha_planes: &[usize],
 ) -> cobre_sddp::lp_builder::StageGeometry {
     // theta = N*(3+L); control region starts at theta + 1 (no anticipated thermals).
@@ -1124,7 +1125,7 @@ fn build_geometry(
 #[test]
 fn indexer_constraint_inventory() {
     // N=3, L=1, T=2, Ln=1, B=2, K=2, penalty on, S=2; FPHA hydro 0 with 3 planes.
-    let geometry = build_geometry(3, 1, 2, 1, 2, 2, true, 2, vec![0], &[3]);
+    let geometry = build_geometry(3, 1, 2, 1, 2, 2, true, 2, vec![HydroSys::new(0)], &[3]);
 
     assert!(
         !geometry.outflow_below_slack.is_empty(),
@@ -1195,7 +1196,7 @@ fn constraint_extraction_regression_guard() {
     use std::ops::Range;
 
     // N=2, L=1, T=1, Ln=1, B=1, K=1, penalty on, S=1; FPHA hydro 0 with 2 planes.
-    let geometry = build_geometry(2, 1, 1, 1, 1, 1, true, 1, vec![0], &[2]);
+    let geometry = build_geometry(2, 1, 1, 1, 1, 1, true, 1, vec![HydroSys::new(0)], &[2]);
 
     // The families that feed the hydro violation cost decomposition in
     // accumulate_category_costs().

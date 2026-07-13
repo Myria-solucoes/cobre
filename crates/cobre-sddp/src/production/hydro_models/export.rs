@@ -6,6 +6,7 @@
 //! `evaporation_models.parquet`.
 
 use cobre_core::System;
+use cobre_io::FphaDeviationPointRow;
 use cobre_io::{DeviationSummary, DeviationWorstEntry, EvaporationModelRow};
 
 use super::types::{
@@ -93,7 +94,7 @@ pub fn build_evaporation_model_rows(
 #[must_use]
 pub fn build_fpha_deviation_point_rows(
     result: &PrepareHydroModelsResult,
-) -> &[cobre_io::FphaDeviationPointRow] {
+) -> &[FphaDeviationPointRow] {
     &result.fpha_deviation_point_rows
 }
 

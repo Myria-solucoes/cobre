@@ -3,6 +3,7 @@
 use cobre_core::{PolicyGraph, Stage, System};
 
 use crate::indexer::StateLayout;
+use crate::scaling_report::ScalingReport;
 use crate::scaling_report::{
     LpDimensions, StageScalingReport, build_scaling_report, compute_coefficient_range,
     summarize_scale_factors,
@@ -57,12 +58,12 @@ pub(crate) fn compute_cumulative_discount_factors(per_stage: &[f64]) -> Vec<f64>
 
 /// Apply discount factors, LP scaling, and noise pre-scaling to stage templates.
 ///
-/// Returns a [`crate::scaling_report::ScalingReport`] with pre/post coefficient ranges.
+/// Returns a [`ScalingReport`] with pre/post coefficient ranges.
 pub(crate) fn postprocess_templates(
     stage_templates: &mut StageTemplates,
     system: &System,
     state_layout: &StateLayout,
-) -> crate::scaling_report::ScalingReport {
+) -> ScalingReport {
     // The setter derives cumulative factors in the same call, so the two slices
     // cannot drift.
     {

@@ -6,7 +6,7 @@
 //!
 //! [`StochasticError::InvalidParParameters`]: crate::StochasticError::InvalidParParameters
 
-use cobre_core::scenario::InflowModel;
+use cobre_core::InflowModel;
 
 use crate::StochasticError;
 
@@ -332,8 +332,6 @@ mod tests {
 
     #[test]
     fn validate_with_annual_some_no_warnings() {
-        // AR(1) model with an annual component and a healthy residual ratio.
-        // The annual field must not affect the residual-variance warning.
         let model = make_model_with_annual(1, 0, 30.0, vec![0.3], 0.954);
         let report = validate_par_parameters(&[model]).unwrap();
         assert!(
@@ -344,8 +342,6 @@ mod tests {
 
     #[test]
     fn validate_with_annual_some_low_residual_warns() {
-        // The low residual-variance warning is driven by residual_std_ratio,
-        // not by whether annual is Some or None.
         let model = make_model_with_annual(2, 3, 30.0, vec![0.4], 0.05);
         let report = validate_par_parameters(&[model]).unwrap();
         assert_eq!(
@@ -374,8 +370,6 @@ mod tests {
 
     #[test]
     fn validate_with_annual_some_zero_std_errors() {
-        // std_m3s == 0.0 with ar_order > 0 is always fatal, regardless of
-        // whether an annual component is present.
         let model = make_model_with_annual(5, 7, 0.0, vec![0.3], 0.954);
         let result = validate_par_parameters(&[model]);
         assert!(result.is_err());

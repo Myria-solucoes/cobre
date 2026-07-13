@@ -5,8 +5,11 @@
 //! `print_*` writer ignores write errors (fire-and-forget); each has a paired
 //! `format_*_string` returning the same content without ANSI escapes for tests.
 
+use cobre_comm::ExecutionTopology;
 use cobre_io::SetupTimings;
 use console::Term;
+
+use std::path::Path;
 
 // Rationale: the `#[cfg(test)]` blocks in this module import
 // `HydroProductionProvenance`, `InflowProvenance`, and `ProvenanceSource` via
@@ -101,7 +104,7 @@ fn format_rank_list(ranks: &[usize]) -> String {
 /// optional SLURM line is appended when scheduler metadata is present.
 pub fn print_execution_topology(
     stderr: &Term,
-    topology: &cobre_comm::ExecutionTopology,
+    topology: &ExecutionTopology,
     n_threads: usize,
     solver_name: &str,
     solver_version: Option<&str>,
@@ -812,7 +815,7 @@ pub fn print_simulation_summary(stderr: &Term, sim: &SimulationSummary) {
 }
 
 /// Print the output directory path and write duration to `stderr`.
-pub fn print_output_path(stderr: &Term, output_dir: &std::path::Path, write_secs: f64) {
+pub fn print_output_path(stderr: &Term, output_dir: &Path, write_secs: f64) {
     let _ = stderr.write_line(&format!(
         "{} {}/ {}",
         console::style("Output written to").bold(),

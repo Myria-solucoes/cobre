@@ -20,7 +20,7 @@ use cobre_core::{
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
 use crate::hydro_models::{EvaporationModelSet, ProductionModelSet};
-
+use crate::indexer::{BlockIdx, Boundary, EvapLocal, FphaLocal, HydroSys, LineSys};
 use crate::resolved_parameters::ResolvedParameters;
 
 use super::super::test_support::{state_layout_for, zero_hydro_penalties};
@@ -163,7 +163,10 @@ impl ZeroEntityFixtures {
             anticipated_windows: vec![(None, None); n_anticipated],
             anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
             study_stage_ids: (0..i32::try_from(self.bounds.n_stages()).unwrap_or(0)).collect(),
-            anticipated_thermal_indices,
+            anticipated_thermal_indices: anticipated_thermal_indices
+                .into_iter()
+                .map(crate::indexer::ThermalSys::new)
+                .collect(),
             has_penalty: false,
             // Tests that use ZeroEntityFixtures don't exercise discount
             // factors; provide n_stages = 1 element vecs that won't panic.
@@ -494,17 +497,17 @@ fn block_storage_col_resolves_all_boundaries() {
     );
     let h = 1;
     assert_eq!(
-        chrono_k3.block_storage_col(h, 0),
+        chrono_k3.block_storage_col(HydroSys::new(h), Boundary::Incoming),
         chrono_k3.col_storage_in_start() + h,
         "k = 0 resolves to the incoming-state column storage_in[h]"
     );
     assert_eq!(
-        chrono_k3.block_storage_col(h, 3),
+        chrono_k3.block_storage_col(HydroSys::new(h), Boundary::Outgoing),
         h,
         "k = K resolves to the outgoing-state column storage[h] = storage.start + h = h"
     );
-    let interior_1 = chrono_k3.block_storage_col(h, 1);
-    let interior_2 = chrono_k3.block_storage_col(h, 2);
+    let interior_1 = chrono_k3.block_storage_col(HydroSys::new(h), Boundary::Interior(1));
+    let interior_2 = chrono_k3.block_storage_col(HydroSys::new(h), Boundary::Interior(2));
     assert_eq!(
         interior_1,
         chrono_k3.equipment.storage_internal_start + h * 2,
@@ -533,12 +536,12 @@ fn block_storage_col_resolves_all_boundaries() {
     );
     for h in 0..ctx.n_hydros {
         assert_eq!(
-            chrono_k1.block_storage_col(h, 0),
+            chrono_k1.block_storage_col(HydroSys::new(h), Boundary::Incoming),
             chrono_k1.col_storage_in_start() + h,
             "K = 1 endpoint k = 0 resolves to storage_in[h]"
         );
         assert_eq!(
-            chrono_k1.block_storage_col(h, 1),
+            chrono_k1.block_storage_col(HydroSys::new(h), Boundary::Outgoing),
             h,
             "K = 1 endpoint k = K = 1 resolves to storage[h] = h"
         );
@@ -740,12 +743,12 @@ fn stage_layout_populates_fpha_local_index_inverse_map() {
 
     assert_eq!(
         layout.fpha_hydro_indices,
-        vec![1],
+        vec![HydroSys::new(1)],
         "only the system-index-1 hydro uses FPHA"
     );
     assert_eq!(
         layout.fpha_local_index,
-        vec![None, Some(0), None],
+        vec![None, Some(FphaLocal::new(0)), None],
         "fpha_local_index inverts fpha_hydro_indices over n_h = 3"
     );
 }
@@ -905,7 +908,7 @@ impl FillingMembershipFixtures {
 
     /// `fpha_hydro_indices` for a stage built at `stage_id` (`stage_idx` held
     /// at 0 so the single FPHA/evaporation model row serves every phase).
-    fn fpha_indices_at(&self, stage_id: i32) -> Vec<usize> {
+    fn fpha_indices_at(&self, stage_id: i32) -> Vec<HydroSys> {
         let ctx = self.make_ctx();
         let stage = stage_with_id(stage_id);
         let state = state_layout_for(&ctx);
@@ -913,7 +916,7 @@ impl FillingMembershipFixtures {
     }
 
     /// `evap_hydro_indices` for a stage built at `stage_id`.
-    fn evap_indices_at(&self, stage_id: i32) -> Vec<usize> {
+    fn evap_indices_at(&self, stage_id: i32) -> Vec<HydroSys> {
         let ctx = self.make_ctx();
         let stage = stage_with_id(stage_id);
         let state = state_layout_for(&ctx);
@@ -921,7 +924,7 @@ impl FillingMembershipFixtures {
     }
 
     /// `filling_target_hydro_indices` for a stage built at `stage_id`.
-    fn filling_target_indices_at(&self, stage_id: i32) -> Vec<usize> {
+    fn filling_target_indices_at(&self, stage_id: i32) -> Vec<HydroSys> {
         let ctx = self.make_ctx();
         let stage = stage_with_id(stage_id);
         let state = state_layout_for(&ctx);
@@ -931,7 +934,7 @@ impl FillingMembershipFixtures {
     }
 
     /// `filled_min_storage_floor_hydro_indices` for a stage built at `stage_id`.
-    fn filled_min_storage_floor_indices_at(&self, stage_id: i32) -> Vec<usize> {
+    fn filled_min_storage_floor_indices_at(&self, stage_id: i32) -> Vec<HydroSys> {
         let ctx = self.make_ctx();
         let stage = stage_with_id(stage_id);
         let state = state_layout_for(&ctx);
@@ -965,7 +968,7 @@ fn filling_target_emitted_at_every_filling_stage() {
     for stage_id in [1, 2] {
         assert_eq!(
             fixtures.filling_target_indices_at(stage_id),
-            vec![0, 1],
+            vec![HydroSys::new(0), HydroSys::new(1)],
             "both filling hydros carry the σ_fill target at Filling id {stage_id}"
         );
     }
@@ -974,7 +977,7 @@ fn filling_target_emitted_at_every_filling_stage() {
     for stage_id in [0, 3, 4] {
         assert_eq!(
             fixtures.filling_target_indices_at(stage_id),
-            Vec::<usize>::new(),
+            Vec::<HydroSys>::new(),
             "no σ_fill target at non-Filling id {stage_id}"
         );
     }
@@ -1002,14 +1005,14 @@ fn non_filling_system_no_filling_target_num_rows_unchanged() {
     let (reference_targets, reference_num_rows) = layout_at(0);
     assert_eq!(
         reference_targets,
-        Vec::<usize>::new(),
+        Vec::<HydroSys>::new(),
         "non-filling system emits no σ_fill target"
     );
     for stage_id in [1, 2, 3, 7] {
         let (targets, num_rows) = layout_at(stage_id);
         assert_eq!(
             targets,
-            Vec::<usize>::new(),
+            Vec::<HydroSys>::new(),
             "non-filling σ_fill target empty at id {stage_id}"
         );
         assert_eq!(
@@ -1119,7 +1122,7 @@ fn filled_min_storage_floor_emitted_at_every_operating_stage() {
     for stage_id in [3, 4, 7] {
         assert_eq!(
             fixtures.filled_min_storage_floor_indices_at(stage_id),
-            vec![0, 1],
+            vec![HydroSys::new(0), HydroSys::new(1)],
             "both filling hydros carry σ^{{v-}} at Operating id {stage_id}"
         );
     }
@@ -1128,17 +1131,23 @@ fn filled_min_storage_floor_emitted_at_every_operating_stage() {
     for stage_id in [0, 1, 2] {
         assert_eq!(
             fixtures.filled_min_storage_floor_indices_at(stage_id),
-            Vec::<usize>::new(),
+            Vec::<HydroSys>::new(),
             "no σ^{{v-}} at non-operating id {stage_id}"
         );
     }
 
     // Mutual exclusivity at the boundary: id 2 (entry − 1) carries σ_fill but
     // NOT σ^{v-}; id 3 (entry) carries σ^{v-} but NOT σ_fill.
-    assert_eq!(fixtures.filling_target_indices_at(2), vec![0, 1]);
+    assert_eq!(
+        fixtures.filling_target_indices_at(2),
+        vec![HydroSys::new(0), HydroSys::new(1)]
+    );
     assert!(fixtures.filled_min_storage_floor_indices_at(2).is_empty());
     assert!(fixtures.filling_target_indices_at(3).is_empty());
-    assert_eq!(fixtures.filled_min_storage_floor_indices_at(3), vec![0, 1]);
+    assert_eq!(
+        fixtures.filled_min_storage_floor_indices_at(3),
+        vec![HydroSys::new(0), HydroSys::new(1)]
+    );
 }
 
 /// Parity-neutrality: a non-filling system never emits a `σ^{v-}` floor, so
@@ -1165,14 +1174,14 @@ fn non_filling_system_no_filled_min_storage_floor_num_rows_unchanged() {
     let (reference_floors, reference_num_rows) = layout_at(0);
     assert_eq!(
         reference_floors,
-        Vec::<usize>::new(),
+        Vec::<HydroSys>::new(),
         "non-filling system emits no σ^{{v-}} floor"
     );
     for stage_id in [1, 2, 3, 7] {
         let (floors, num_rows) = layout_at(stage_id);
         assert_eq!(
             floors,
-            Vec::<usize>::new(),
+            Vec::<HydroSys>::new(),
             "non-filling σ^{{v-}} floor empty at id {stage_id}"
         );
         assert_eq!(
@@ -1195,24 +1204,24 @@ fn filling_fpha_hydro_excluded_while_filling_present_when_operating() {
     // hydro 0 (the FPHA hydro) is absent.
     assert_eq!(
         fixtures.fpha_indices_at(1),
-        Vec::<usize>::new(),
+        Vec::<HydroSys>::new(),
         "FPHA filling hydro absent from fpha_hydro_indices during Filling"
     );
     assert_eq!(
         fixtures.fpha_indices_at(2),
-        Vec::<usize>::new(),
+        Vec::<HydroSys>::new(),
         "FPHA filling hydro absent at the last Filling stage"
     );
 
     // Operating (stage_id >= entry_stage_id): hydro 0 re-enters.
     assert_eq!(
         fixtures.fpha_indices_at(3),
-        vec![0],
+        vec![HydroSys::new(0)],
         "FPHA filling hydro present from the first Operating stage"
     );
     assert_eq!(
         fixtures.fpha_indices_at(4),
-        vec![0],
+        vec![HydroSys::new(0)],
         "FPHA filling hydro present at later Operating stages"
     );
 
@@ -1220,7 +1229,7 @@ fn filling_fpha_hydro_excluded_while_filling_present_when_operating() {
     // the FPHA hydro is also excluded.
     assert_eq!(
         fixtures.fpha_indices_at(0),
-        Vec::<usize>::new(),
+        Vec::<HydroSys>::new(),
         "FPHA filling hydro absent during PreFilling"
     );
 }
@@ -1237,26 +1246,26 @@ fn filling_evap_hydro_excluded_only_in_prefilling() {
     // PreFilling (stage_id < start_stage_id): hydro 1 (evaporation) is absent.
     assert_eq!(
         fixtures.evap_indices_at(0),
-        Vec::<usize>::new(),
+        Vec::<HydroSys>::new(),
         "evaporation filling hydro absent during PreFilling (no reservoir surface)"
     );
 
     // Filling: evaporation is normal — the reservoir already has a surface.
     assert_eq!(
         fixtures.evap_indices_at(1),
-        vec![1],
+        vec![HydroSys::new(1)],
         "evaporation filling hydro present during Filling"
     );
     assert_eq!(
         fixtures.evap_indices_at(2),
-        vec![1],
+        vec![HydroSys::new(1)],
         "evaporation filling hydro present at the last Filling stage"
     );
 
     // Operating: evaporation remains normal.
     assert_eq!(
         fixtures.evap_indices_at(3),
-        vec![1],
+        vec![HydroSys::new(1)],
         "evaporation filling hydro present once Operating"
     );
 }
@@ -1270,22 +1279,17 @@ fn non_filling_hydro_membership_bit_identical_across_stages() {
     // The `FphaMixFixtures` hydros are all non-filling (one FPHA at system
     // index 1, two constant), so its membership must be invariant to stage_id.
     let fixtures = FphaMixFixtures::new();
-    let reference_fpha = {
+    let (reference_fpha, reference_evap) = {
         let ctx = fixtures.make_ctx();
         let stage = stage_with_id(0);
         let state = state_layout_for(&ctx);
-        StageLayout::new(&ctx, &state, &stage, 0).fpha_hydro_indices
-    };
-    let reference_evap = {
-        let ctx = fixtures.make_ctx();
-        let stage = stage_with_id(0);
-        let state = state_layout_for(&ctx);
-        StageLayout::new(&ctx, &state, &stage, 0).evap_hydro_indices
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+        (layout.fpha_hydro_indices, layout.evap_hydro_indices)
     };
 
     // The non-filling FPHA hydro is at system index 1; evaporation is empty.
-    assert_eq!(reference_fpha, vec![1]);
-    assert_eq!(reference_evap, Vec::<usize>::new());
+    assert_eq!(reference_fpha, vec![HydroSys::new(1)]);
+    assert_eq!(reference_evap, Vec::<HydroSys>::new());
 
     for stage_id in [1, 2, 3, 7] {
         let ctx = fixtures.make_ctx();
@@ -1385,9 +1389,7 @@ fn stage_layout_operational_violation_rows_are_contiguous_blocks() {
 fn anticipated_decision_columns_placed_between_thermal_and_line_fwd() {
     let fixtures = ZeroEntityFixtures::new();
     // ZeroEntityFixtures builds n_thermals=0, so the thermal per-block block is
-    // empty and col_anticipated_decision_start == col_thermal_start. The two
-    // stage-level anticipated blocks then separate col_thermal_start from
-    // col_line_fwd_start by exactly 2 * n_anticipated columns.
+    // empty and col_anticipated_decision_start == col_thermal_start.
     let n_anticipated = 2_usize;
     let k_max = 1_usize;
     let ctx = fixtures.make_ctx(n_anticipated, k_max, vec![1, 1], vec![0, 0]);
@@ -1771,7 +1773,10 @@ impl AntFixturesWithNStages {
             n_anticipated,
             k_max,
             anticipated_lead_stages,
-            anticipated_thermal_indices,
+            anticipated_thermal_indices: anticipated_thermal_indices
+                .into_iter()
+                .map(crate::indexer::ThermalSys::new)
+                .collect(),
             // Windowless: one `(None, None)` per plant, so the decision gate
             // reduces to the strict horizon clause. `study_stage_ids` covers
             // the study-stage count so the in-range delivery lookup is safe.
@@ -2298,7 +2303,7 @@ fn column_accessors_match_open_coded_formulas() {
     for entity in [0_usize, 1, 2, 5] {
         for blk in 0..n_blks {
             assert_eq!(
-                layout.block_col(layout.equipment.turbine.start, entity, blk),
+                layout.block_col(layout.equipment.turbine.start, entity, BlockIdx::new(blk)),
                 layout.equipment.turbine.start + entity * n_blks + blk,
                 "block_col(entity={entity}, blk={blk})"
             );
@@ -2308,52 +2313,52 @@ fn column_accessors_match_open_coded_formulas() {
     for entity in [0_usize, 1, 3] {
         for blk in 0..n_blks {
             assert_eq!(
-                layout.turbine_col(entity, blk),
+                layout.turbine_col(HydroSys::new(entity), BlockIdx::new(blk)),
                 layout.equipment.turbine.start + entity * n_blks + blk,
                 "turbine_col"
             );
             assert_eq!(
-                layout.spillage_col(entity, blk),
+                layout.spillage_col(HydroSys::new(entity), BlockIdx::new(blk)),
                 layout.equipment.spillage.start + entity * n_blks + blk,
                 "spillage_col"
             );
             assert_eq!(
-                layout.diversion_col(entity, blk),
+                layout.diversion_col(HydroSys::new(entity), BlockIdx::new(blk)),
                 layout.equipment.diversion.start + entity * n_blks + blk,
                 "diversion_col"
             );
             assert_eq!(
-                layout.generation_col(entity, blk),
+                layout.generation_col(FphaLocal::new(entity), BlockIdx::new(blk)),
                 layout.equipment.generation_col_start + entity * n_blks + blk,
                 "generation_col"
             );
             assert_eq!(
-                layout.line_fwd_col(entity, blk),
+                layout.line_fwd_col(LineSys::new(entity), BlockIdx::new(blk)),
                 layout.equipment.line_fwd.start + entity * n_blks + blk,
                 "line_fwd_col"
             );
             assert_eq!(
-                layout.line_rev_col(entity, blk),
+                layout.line_rev_col(LineSys::new(entity), BlockIdx::new(blk)),
                 layout.equipment.line_rev.start + entity * n_blks + blk,
                 "line_rev_col"
             );
             assert_eq!(
-                layout.outflow_below_col(entity, blk),
+                layout.outflow_below_col(HydroSys::new(entity), BlockIdx::new(blk)),
                 layout.slack.oper_violation.outflow_below_slack.start + entity * n_blks + blk,
                 "outflow_below_col"
             );
             assert_eq!(
-                layout.outflow_above_col(entity, blk),
+                layout.outflow_above_col(HydroSys::new(entity), BlockIdx::new(blk)),
                 layout.slack.oper_violation.outflow_above_slack.start + entity * n_blks + blk,
                 "outflow_above_col"
             );
             assert_eq!(
-                layout.turbine_below_col(entity, blk),
+                layout.turbine_below_col(HydroSys::new(entity), BlockIdx::new(blk)),
                 layout.slack.oper_violation.turbine_below_slack.start + entity * n_blks + blk,
                 "turbine_below_col"
             );
             assert_eq!(
-                layout.generation_below_col(entity, blk),
+                layout.generation_below_col(HydroSys::new(entity), BlockIdx::new(blk)),
                 layout.slack.oper_violation.generation_below_slack.start + entity * n_blks + blk,
                 "generation_below_col"
             );
@@ -2364,32 +2369,33 @@ fn column_accessors_match_open_coded_formulas() {
     // EVAP_COLS_PER_HYDRO-strided. The three within-triple offsets must map
     // flow→0, f_plus→1, f_minus→2.
     for local_idx in [0_usize, 1, 4] {
+        let local = EvapLocal::new(local_idx);
         for blk in 0..n_blks {
             let triple_base =
                 layout.equipment.evap_col_start + (local_idx * n_blks + blk) * EVAP_COLS_PER_HYDRO;
             assert_eq!(
-                layout.evap_flow_col(local_idx, blk),
+                layout.evap_flow_col(local, BlockIdx::new(blk)),
                 triple_base + EVAP_FLOW_OFFSET,
                 "evap_flow_col"
             );
             assert_eq!(
-                layout.evap_f_plus_col(local_idx, blk),
+                layout.evap_f_plus_col(local, BlockIdx::new(blk)),
                 triple_base + EVAP_F_PLUS_OFFSET,
                 "evap_f_plus_col"
             );
             assert_eq!(
-                layout.evap_f_minus_col(local_idx, blk),
+                layout.evap_f_minus_col(local, BlockIdx::new(blk)),
                 triple_base + EVAP_F_MINUS_OFFSET,
                 "evap_f_minus_col"
             );
             // The three columns are consecutive and ordered flow < plus < minus.
             assert_eq!(
-                layout.evap_f_plus_col(local_idx, blk),
-                layout.evap_flow_col(local_idx, blk) + 1
+                layout.evap_f_plus_col(local, BlockIdx::new(blk)),
+                layout.evap_flow_col(local, BlockIdx::new(blk)) + 1
             );
             assert_eq!(
-                layout.evap_f_minus_col(local_idx, blk),
-                layout.evap_flow_col(local_idx, blk) + 2
+                layout.evap_f_minus_col(local, BlockIdx::new(blk)),
+                layout.evap_flow_col(local, BlockIdx::new(blk)) + 2
             );
         }
     }
@@ -2403,7 +2409,7 @@ fn column_accessors_match_open_coded_formulas() {
         for seg_idx in [0_usize, 1] {
             for blk in 0..n_blks {
                 assert_eq!(
-                    layout.deficit_col(b_idx, seg_idx, blk),
+                    layout.deficit_col(b_idx, seg_idx, BlockIdx::new(blk)),
                     layout.equipment.deficit.start
                         + b_idx * layout.equipment.max_deficit_segments * n_blks
                         + seg_idx * n_blks

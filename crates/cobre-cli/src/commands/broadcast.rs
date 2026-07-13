@@ -1,12 +1,18 @@
 //! Postcard-serializable types for MPI broadcast from rank 0 to all ranks.
 
+use cobre_comm::Communicator;
 use cobre_core::scenario::ScenarioSource;
+use cobre_io::Config;
+use cobre_io::PolicyMode;
 use cobre_sddp::{
     CutSelectionStrategy, DEFAULT_MAX_ITERATIONS, InflowNonNegativityMethod, StoppingMode,
     StoppingRule, StoppingRuleSet, StudyParams,
 };
 
 use crate::error::CliError;
+
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 /// Postcard-serializable stopping rule.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -39,7 +45,7 @@ pub(crate) struct BroadcastConfig {
     /// When `false`, all ranks skip training and proceed to simulation (or exit).
     pub(crate) training_enabled: bool,
     /// Policy initialization mode.
-    pub(crate) policy_mode: cobre_io::PolicyMode,
+    pub(crate) policy_mode: PolicyMode,
     /// Whether the visited-states archive is allocated for export.
     pub(crate) export_states: bool,
     /// Hard cap on active rows per stage; `None` means no cap. Sourced from
@@ -53,7 +59,7 @@ pub(crate) struct BroadcastConfig {
 }
 
 impl BroadcastConfig {
-    pub(crate) fn from_config(config: &cobre_io::Config) -> Result<Self, CliError> {
+    pub(crate) fn from_config(config: &Config) -> Result<Self, CliError> {
         let params = StudyParams::from_config(config).map_err(CliError::from)?;
         // Sentinel path: the scenario-source helpers use it only for historical-years
         // look-up and error messages, neither exercised here.
@@ -102,8 +108,6 @@ impl BroadcastConfig {
             StoppingMode::Any => BroadcastStoppingMode::Any,
         };
 
-        let cut_selection = params.cut_selection.clone();
-
         Ok(Self {
             seed: params.seed,
             forward_passes: params.forward_passes,
@@ -113,7 +117,7 @@ impl BroadcastConfig {
             io_channel_capacity: u32::try_from(params.io_channel_capacity).unwrap_or(64),
             policy_path: params.policy_path,
             inflow_method: params.inflow_method,
-            cut_selection,
+            cut_selection: params.cut_selection.clone(),
             cut_activity_tolerance: params.cut_activity_tolerance,
             training_enabled: config.training.enabled,
             policy_mode: config.policy.mode,
@@ -174,8 +178,8 @@ pub(crate) fn stopping_rules_from_broadcast(cfg: &BroadcastConfig) -> StoppingRu
 /// Returns [`CliError::Internal`] on serialization, broadcast, or deserialization failure.
 pub(crate) fn broadcast_value<T, C>(value: Option<T>, comm: &C) -> Result<T, CliError>
 where
-    T: serde::Serialize + serde::de::DeserializeOwned,
-    C: cobre_comm::Communicator,
+    T: Serialize + DeserializeOwned,
+    C: Communicator,
 {
     let is_root = comm.rank() == 0;
 

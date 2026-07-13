@@ -31,6 +31,10 @@
 //! ```
 
 use super::pool::CutPool;
+use crate::SddpError;
+use crate::SddpError::Validation;
+
+use cobre_io::StageCutsReadResult;
 
 /// All-stages container for the Future Cost Function (FCF): one [`CutPool`] per
 /// stage. Per-cut logic is delegated to [`CutPool`].
@@ -154,9 +158,7 @@ impl FutureCostFunction {
     /// is inconsistent across stages.
     ///
     /// [`SddpError::Validation`]: crate::SddpError::Validation
-    pub fn from_deserialized(
-        stage_results: &[cobre_io::StageCutsReadResult],
-    ) -> Result<Self, crate::SddpError> {
+    pub fn from_deserialized(stage_results: &[StageCutsReadResult]) -> Result<Self, SddpError> {
         let state_dimension =
             validate_consistent_state_dimension("from_deserialized", stage_results)?;
 
@@ -182,10 +184,10 @@ impl FutureCostFunction {
     ///
     /// [`SddpError::Validation`]: crate::SddpError::Validation
     pub fn new_with_warm_start(
-        stage_results: &[cobre_io::StageCutsReadResult],
+        stage_results: &[StageCutsReadResult],
         forward_passes: u32,
         max_iterations: u64,
-    ) -> Result<Self, crate::SddpError> {
+    ) -> Result<Self, SddpError> {
         let state_dimension =
             validate_consistent_state_dimension("new_with_warm_start", stage_results)?;
 
@@ -346,18 +348,16 @@ impl FutureCostFunction {
 
 fn validate_consistent_state_dimension(
     context: &str,
-    stage_results: &[cobre_io::StageCutsReadResult],
-) -> Result<usize, crate::SddpError> {
+    stage_results: &[StageCutsReadResult],
+) -> Result<usize, SddpError> {
     if stage_results.is_empty() {
-        return Err(crate::SddpError::Validation(format!(
-            "{context}: stage_results is empty"
-        )));
+        return Err(Validation(format!("{context}: stage_results is empty")));
     }
 
     let state_dimension = stage_results[0].state_dimension as usize;
     for sr in &stage_results[1..] {
         if sr.state_dimension as usize != state_dimension {
-            return Err(crate::SddpError::Validation(format!(
+            return Err(Validation(format!(
                 "{context}: inconsistent state_dimension: stage {} has {}, \
                  expected {} (from stage {})",
                 sr.stage_id, sr.state_dimension, state_dimension, stage_results[0].stage_id

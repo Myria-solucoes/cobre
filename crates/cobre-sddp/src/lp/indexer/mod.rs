@@ -20,8 +20,7 @@
 //! ranges that follow `theta` — allocated in that equipment -> slack ->
 //! generic -> filling family order — are owned entirely by
 //! [`StageLayout`](crate::lp_builder); see its own module doc and field docs
-//! for the authoritative ranges. This file does not re-derive them, to avoid
-//! the two copies drifting apart.
+//! for the authoritative ranges.
 //!
 //! The `anticipated_decision` block is stage-level (one column per anticipated
 //! plant, NOT per-block) and has length `A = n_anticipated`. The block collapses
@@ -48,9 +47,20 @@
 //! - `layout` — the per-stage geometry satellite types [`EvaporationIndices`]
 //!   and [`FphaRowRange`] (locating one hydro's evaporation columns/row and FPHA
 //!   row block within a stage LP).
+//! - `index` — the base typed vocabulary [`Col`]/[`Row`]/[`StateDim`] and the
+//!   [`InCol`]/[`OutCol`] incoming/outgoing column-role split. Every
+//!   `StateLayout`/`CutStateProjection` incoming and outgoing resolver, plus
+//!   [`CutStateProjection::render_pairs`], resolves through it. [`BlockIdx`]
+//!   is the block operand every [`BlockGrid`] shape method takes. [`Boundary`]
+//!   is the chronological storage-boundary operand
+//!   [`StorageBoundaryGrid::col`] takes, classified from a dynamic `k` via
+//!   [`Boundary::from_index`].
 //! - `block_grid` — the [`BlockGrid`] typed block-stride address primitive and
 //!   its three shape methods ([`BlockGrid::flat`], [`BlockGrid::fpha_plane`],
 //!   [`BlockGrid::deficit`]).
+//! - `range_cursor` — the `RangeCursor` running column/row offset allocator
+//!   shared by [`StageLayout`](crate::lp_builder)'s per-stage equipment chains
+//!   and [`StateLayout`]'s stage-invariant state-vector chain.
 //! - `storage_boundary_grid` — the [`StorageBoundaryGrid`] typed
 //!   storage-boundary address primitive ([`StorageBoundaryGrid::col`]), the
 //!   single owner of `block_storage_col`'s endpoint/interior split.
@@ -68,6 +78,11 @@
 //!   projection of [`StateLayout`] exposing only the cut-state dimensions a
 //!   stage's `StageStateConfig` enables (anticipated state always included),
 //!   delegating each column to [`StateLayout::state_to_lp_incoming_column`].
+//! - `entity_index` — the entity system/local index vocabulary
+//!   ([`HydroSys`]/[`ThermalSys`]/[`LineSys`], [`FphaLocal`]/[`EvapLocal`]/
+//!   [`FillingTargetLocal`]/[`FloorLocal`]/[`AnticipatedLocal`]), distinguishing
+//!   an entity's canonical system position from its position within a
+//!   per-stage local identity list.
 //!
 //! Every public symbol is re-exported here so the `cobre_sddp::indexer::Symbol`
 //! and `crate::indexer::Symbol` module paths resolve to the same item regardless
@@ -75,14 +90,23 @@
 
 mod block_grid;
 mod cut_state_projection;
+mod entity_index;
+mod index;
 mod layout;
+mod range_cursor;
 mod state_layout;
 mod storage_boundary_grid;
 mod study_dimensions;
 
 pub use block_grid::BlockGrid;
 pub use cut_state_projection::CutStateProjection;
+pub use entity_index::{
+    AnticipatedLocal, EvapLocal, FillingTargetLocal, FloorLocal, FphaLocal, HydroSys, LineSys,
+    ThermalSys,
+};
+pub use index::{BlockIdx, Boundary, Col, InCol, OutCol, Row, StateDim};
 pub use layout::{EvaporationIndices, FphaRowRange};
+pub(crate) use range_cursor::RangeCursor;
 pub use state_layout::StateLayout;
 pub(crate) use state_layout::{REGION_ORDER, StateRegion};
 pub use storage_boundary_grid::StorageBoundaryGrid;

@@ -2236,7 +2236,7 @@ fn backward_solver_error_propagates() {
     );
 }
 
-// ── New test: parallel cut determinism ────────────────────────────────────
+// ── Parallel cut determinism ──────────────────────────────────────────────
 
 /// AC: When `run_backward_pass` runs with 1 workspace vs 4 workspaces given
 /// the same input data, the FCF pools contain identical cuts (same intercept,
@@ -4124,10 +4124,9 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
         ) -> Result<(), CommError> {
             // Fill each rank's slot in recv using the provided counts/displs.
             // Both ranks contribute `send` (rank-1 is a synthetic copy of rank-0).
-            for (r, (&count, &displ)) in counts.iter().zip(displs).enumerate() {
+            for (&count, &displ) in counts.iter().zip(displs) {
                 let src = &send[..count.min(send.len())];
                 recv[displ..displ + src.len()].copy_from_slice(src);
-                let _ = r; // suppress unused warning in cfg(test)
             }
             Ok(())
         }
@@ -5064,7 +5063,11 @@ fn cut_coefficient_sign_convention_slot_zero_k2() {
     // Slot 0 (j = anticipated_slots_out.start) resolves by identity — the
     // in-LP ring's definition row (not `state_to_lp_column`) resolves the
     // ring transition, so the cut renders directly onto the outgoing column.
-    let lp_col = state.state_to_lp_column(state.anticipated_slots_out.start);
+    let lp_col = state
+        .state_to_lp_column(crate::indexer::StateDim::new(
+            state.anticipated_slots_out.start,
+        ))
+        .get();
     assert_eq!(lp_col, state.anticipated_slots_out.start);
 
     let pos = batch

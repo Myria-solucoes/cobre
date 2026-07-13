@@ -12,7 +12,7 @@ use super::{
     assign_scenarios, extract_contracts, extract_pumping_stations, extract_stage_result,
     extract_stub_collections,
 };
-use crate::indexer::StudyDimensions;
+use crate::indexer::{FillingTargetLocal, FloorLocal, FphaLocal, HydroSys, StudyDimensions};
 use crate::lp_builder::StageGeometry;
 use crate::simulation::types::{
     ScenarioCategoryCosts, SimulationContractResult, SimulationCostResult,
@@ -33,12 +33,12 @@ fn build_per_stage_resolves_stage_varying_fpha_membership() {
     // FPHA-generation column block (one column per FPHA hydro here, n_blks = 1);
     // its base differs per stage but only the membership lists drive the lookup.
     let geom_stage0 = StageGeometry {
-        fpha_hydro_indices: vec![0],
+        fpha_hydro_indices: vec![HydroSys::new(0)],
         generation: 100..101,
         ..StageGeometry::default()
     };
     let geom_stage1 = StageGeometry {
-        fpha_hydro_indices: vec![0, 1],
+        fpha_hydro_indices: vec![HydroSys::new(0), HydroSys::new(1)],
         generation: 200..202,
         ..StageGeometry::default()
     };
@@ -50,18 +50,21 @@ fn build_per_stage_resolves_stage_varying_fpha_membership() {
     // Hydro 1 is absent from stage 0's FPHA list and present at FPHA-local slot
     // 1 in stage 1's — the membership genuinely differs by stage.
     assert_eq!(hydro_per_stage[0].fpha[1], None);
-    assert_eq!(hydro_per_stage[1].fpha[1], Some(1));
+    assert_eq!(hydro_per_stage[1].fpha[1], Some(FphaLocal::new(1)));
 
     // Hydro 0 is FPHA at both stages, always at FPHA-local slot 0.
-    assert_eq!(hydro_per_stage[0].fpha[0], Some(0));
-    assert_eq!(hydro_per_stage[1].fpha[0], Some(0));
+    assert_eq!(hydro_per_stage[0].fpha[0], Some(FphaLocal::new(0)));
+    assert_eq!(hydro_per_stage[1].fpha[0], Some(FphaLocal::new(0)));
 
     // The stage-1 FPHA-local slot for hydro 1 is the index an extraction read at
     // stage 1 uses into `geometry[1].generation`: slot 1 addresses column
     // `generation.start + 1` (= 201), the column the solved primal occupies. A
     // stage-0 lookup would have reported `None` and skipped this read entirely.
     let stage1_local = hydro_per_stage[1].fpha[1].expect("hydro 1 is FPHA at stage 1");
-    assert_eq!(geometry_per_stage[1].generation.start + stage1_local, 201);
+    assert_eq!(
+        geometry_per_stage[1].generation.start + stage1_local.get(),
+        201
+    );
 }
 
 // -------------------------------------------------------------------------
@@ -78,9 +81,9 @@ fn filling_reverse_lookup_resolves_sparse_membership() {
     // owns the σ^{v-} operating-floor column. Hydro 1 owns neither — the common
     // non-filling case. The column ranges are sparse: one column each.
     let geom = StageGeometry {
-        filling_target_hydro_indices: vec![2],
+        filling_target_hydro_indices: vec![HydroSys::new(2)],
         filling_target_col: 500..501,
-        filled_min_storage_floor_hydro_indices: vec![0],
+        filled_min_storage_floor_hydro_indices: vec![HydroSys::new(0)],
         filled_min_storage_floor_col: 600..601,
         ..StageGeometry::default()
     };
@@ -88,38 +91,55 @@ fn filling_reverse_lookup_resolves_sparse_membership() {
     let lookup = HydroReverseLookup::build(&geom, n_hydros);
 
     // σ_fill: only hydro 2, at slot 0 ⇒ column 500. Others absent.
-    assert_eq!(lookup.filling_target[2], Some(0));
+    assert_eq!(lookup.filling_target[2], Some(FillingTargetLocal::new(0)));
     assert_eq!(lookup.filling_target[0], None);
     assert_eq!(lookup.filling_target[1], None);
     let target_local = lookup.filling_target[2].expect("hydro 2 owns a σ_fill column");
-    assert_eq!(geom.filling_target_col.start + target_local, 500);
+    assert_eq!(geom.filling_target_col.start + target_local.get(), 500);
 
     // σ^{v-}: only hydro 0, at slot 0 ⇒ column 600. Others absent. Independent of
     // the σ_fill family — hydro 0 has a floor column but no target column.
-    assert_eq!(lookup.filled_min_storage_floor[0], Some(0));
+    assert_eq!(lookup.filled_min_storage_floor[0], Some(FloorLocal::new(0)));
     assert_eq!(lookup.filled_min_storage_floor[1], None);
     assert_eq!(lookup.filled_min_storage_floor[2], None);
     let floor_local = lookup.filled_min_storage_floor[0].expect("hydro 0 owns a σ^{v-} column");
-    assert_eq!(geom.filled_min_storage_floor_col.start + floor_local, 600);
+    assert_eq!(
+        geom.filled_min_storage_floor_col.start + floor_local.get(),
+        600
+    );
 }
 
-/// `read_filling_slack_primal` returns the solved primal at `start + local_idx`
-/// for a present slot and `0.0` for an absent slot (the sparse-family default).
+/// `read_filling_target_slack_primal`/`read_floor_slack_primal` return the solved
+/// primal at `start + local.get()` for a present slot and `0.0` for an absent slot
+/// (the sparse-family default), for both filling-slack families.
 #[test]
-fn read_filling_slack_primal_present_and_absent() {
+fn filling_target_and_floor_slack_primal_present_and_absent() {
     let primal = vec![0.0, 0.0, 7.5, 11.0];
     let range = 2..4;
     // Slot 0 ⇒ column 2 ⇒ 7.5; slot 1 ⇒ column 3 ⇒ 11.0.
     assert_eq!(
-        super::read_filling_slack_primal(&primal, &range, Some(0)),
+        super::read_filling_target_slack_primal(&primal, &range, Some(FillingTargetLocal::new(0))),
         7.5
     );
     assert_eq!(
-        super::read_filling_slack_primal(&primal, &range, Some(1)),
+        super::read_filling_target_slack_primal(&primal, &range, Some(FillingTargetLocal::new(1))),
         11.0
     );
     // Absent ⇒ 0.0 regardless of what the primal vector holds.
-    assert_eq!(super::read_filling_slack_primal(&primal, &range, None), 0.0);
+    assert_eq!(
+        super::read_filling_target_slack_primal(&primal, &range, None),
+        0.0
+    );
+
+    assert_eq!(
+        super::read_floor_slack_primal(&primal, &range, Some(FloorLocal::new(0))),
+        7.5
+    );
+    assert_eq!(
+        super::read_floor_slack_primal(&primal, &range, Some(FloorLocal::new(1))),
+        11.0
+    );
+    assert_eq!(super::read_floor_slack_primal(&primal, &range, None), 0.0);
 }
 
 /// End-to-end (no-turbine / stage-aggregate branch): a filling hydro whose
@@ -143,7 +163,7 @@ fn extract_reads_binding_filling_target_slack_no_turbine_branch() {
     // Hydro 0 is the lone filling hydro at its terminal Filling stage; hydro 1 is
     // non-filling. The σ_fill column block is the single column [9, 10).
     let geom = StageGeometry {
-        filling_target_hydro_indices: vec![0],
+        filling_target_hydro_indices: vec![HydroSys::new(0)],
         filling_target_col: 9..10,
         ..crate::test_support::geom(2, 1)
     };
@@ -232,7 +252,7 @@ fn extract_reads_binding_filled_min_storage_floor_slack_per_block_branch() {
         turbine: 9..11,
         spillage: 11..13,
         n_blks: 1,
-        filled_min_storage_floor_hydro_indices: vec![1],
+        filled_min_storage_floor_hydro_indices: vec![HydroSys::new(1)],
         filled_min_storage_floor_col: 13..14,
         ..crate::test_support::geom(2, 1)
     };
@@ -3261,7 +3281,7 @@ fn fpha_generation_read_from_lp_column() {
     // generation.start should be after turbine(7..9) + spillage(9..11) + diversion(11..13) = 13
     // generation[0] = generation.start + 0 * 1 + 0 = 13
     assert_eq!(indexer.generation.start, 13, "generation starts at 13");
-    assert_eq!(indexer.fpha_hydro_indices, vec![0]);
+    assert_eq!(indexer.fpha_hydro_indices, vec![HydroSys::new(0)]);
 
     let n_cols = indexer.generation_below_slack.end;
     let mut primal = vec![0.0_f64; n_cols];
@@ -3465,7 +3485,7 @@ fn evaporation_read_from_lp_column() {
     let indexer = make_indexer_1h_evap_1blk();
     let study_dims = crate::test_support::study_dims_for(&counts_1h_evap_1blk());
     let state = crate::test_support::state_layout(1, 0);
-    assert_eq!(indexer.evap_hydro_indices, vec![0]);
+    assert_eq!(indexer.evap_hydro_indices, vec![HydroSys::new(0)]);
     let ei = &indexer.evap_indices[0];
     assert_eq!(ei.evaporation_flow_col, 7);
     assert_eq!(ei.f_evap_plus_col, 8);
@@ -5077,7 +5097,7 @@ fn single_hydro_block_geometry(block_mode: cobre_core::BlockMode, k: usize) -> S
         ),
         block_mode,
         evap_indices,
-        evap_hydro_indices: vec![0],
+        evap_hydro_indices: vec![HydroSys::new(0)],
         ..StageGeometry::default()
     }
 }

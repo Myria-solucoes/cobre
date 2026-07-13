@@ -34,6 +34,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::mpsc::Sender;
 
 use cobre_core::TrainingEvent;
 
@@ -167,7 +168,7 @@ impl Default for CutManagementConfig {
 pub struct EventConfig {
     /// Channel sender for training progress events; `None` emits none.
     /// The receiver must be drained on another thread or it blocks the loop.
-    pub event_sender: Option<std::sync::mpsc::Sender<TrainingEvent>>,
+    pub event_sender: Option<Sender<TrainingEvent>>,
 
     /// Iterations between checkpoint writes (`iteration % n == 0`); `None` writes none.
     pub checkpoint_interval: Option<u64>,
@@ -329,7 +330,6 @@ mod tests {
 
         assert!(config.events.event_sender.is_some());
 
-        // Verify the sender in the config can actually send events.
         if let Some(sender) = &config.events.event_sender {
             sender
                 .send(TrainingEvent::TrainingFinished {

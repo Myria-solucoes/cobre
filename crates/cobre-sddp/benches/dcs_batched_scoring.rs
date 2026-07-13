@@ -15,10 +15,11 @@
     clippy::doc_markdown
 )]
 
+use cobre_core::StageStateConfig;
 use cobre_sddp::cut::{CutPool, CutRowMap};
 use cobre_sddp::cut_selection::CutMetadata;
 use cobre_sddp::dcs::{DcsParams, DcsScoringScratch, score_violated_candidates};
-use cobre_sddp::indexer::{CutStateProjection, StateLayout};
+use cobre_sddp::indexer::{CutStateProjection, StateDim, StateLayout};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
@@ -116,7 +117,7 @@ fn score_per_candidate_baseline(
 
     unscaled_state.clear();
     for j in 0..n_state {
-        let c = state.state_to_lp_column(j);
+        let c = state.state_to_lp_column(StateDim::new(j)).get();
         let x_raw = if col_scale.is_empty() {
             primal[c]
         } else {
@@ -176,7 +177,7 @@ fn make_candidate_pool(k: usize, n_state: usize, seed: u64) -> CutPool {
     pool
 }
 
-/// Primal vector for `StageIndexer::new(n_state, 0)`: state columns 0..n_state,
+/// Primal vector: state columns 0..n_state,
 /// theta at column 3*n_state, driven strongly negative so most candidates are
 /// violated (so the bench exercises the sort + selection alongside scoring).
 fn make_primal(n_state: usize, seed: u64) -> Vec<f64> {
@@ -191,7 +192,7 @@ fn bench_one(c: &mut Criterion, k: usize, n_state: usize) {
     let state = StateLayout::new(n_state, 0, 0, Vec::new(), 0, 0, vec![], &vec![0; n_state]);
     let cut_state = CutStateProjection::new(
         &state,
-        cobre_core::temporal::StageStateConfig {
+        StageStateConfig {
             storage: true,
             inflow_lags: true,
         },

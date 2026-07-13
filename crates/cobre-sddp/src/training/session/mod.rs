@@ -3,6 +3,18 @@
 //! [`TrainingSession`] owns all scratch buffers for a single [`crate::training::train`] call.
 //! No hot-path allocations; forward and backward passes encapsulated in their own state structs.
 
+use cobre_comm::CommError::CollectiveFailed;
+use cobre_solver::SolverError;
+use cobre_solver::freeze_rows_into_template;
+
+use crate::cut_selection::CutSelectionStrategy::Dominated;
+use crate::cut_selection::CutSelectionStrategy::Dynamic;
+use crate::cut_selection::CutSelectionStrategy::Level1;
+use crate::cut_selection::CutSelectionStrategy::Lml1;
+use crate::visited_states::VisitedStatesArchive;
+use crate::workspace::CapturedBasis;
+
+use std::ops::RangeInclusive;
 pub(crate) mod iteration_scratch;
 pub(crate) mod rank_distribution;
 pub(crate) mod results;
@@ -133,7 +145,7 @@ where
         stage_ctx: &'a StageContext<'a>,
         training_ctx: &'a TrainingContext<'a>,
         comm: &'a C,
-        solver_factory: impl Fn() -> Result<S, cobre_solver::SolverError>,
+        solver_factory: impl Fn() -> Result<S, SolverError>,
     ) -> Result<Self, SddpError> {
         let horizon = training_ctx.horizon;
         let state = training_ctx.state;
@@ -213,7 +225,7 @@ where
         let needs_archive =
             config.cut_management.cut_selection.is_some() || config.events.export_states;
         let visited_archive = if needs_archive {
-            Some(crate::visited_states::VisitedStatesArchive::new(
+            Some(VisitedStatesArchive::new(
                 ranks.num_stages,
                 ranks.n_state,
                 config.loop_config.max_iterations,
@@ -301,7 +313,7 @@ where
     }
 
     /// Returns the range of iteration indices this session should run.
-    pub(crate) fn iteration_range(&self) -> std::ops::RangeInclusive<u64> {
+    pub(crate) fn iteration_range(&self) -> RangeInclusive<u64> {
         (self.config.loop_config.start_iteration + 1)..=self.config.loop_config.max_iterations
     }
 
@@ -538,7 +550,7 @@ where
         let err = reconcile_error_flag(Err(err), self.comm, &mut self.fwd_state.reconcile_scratch)
             .err()
             .unwrap_or_else(|| {
-                SddpError::Communication(cobre_comm::CommError::CollectiveFailed {
+                SddpError::Communication(CollectiveFailed {
                     operation: "reconcile_error_flag",
                     mpi_error_code: 0,
                     message: "reconcile over a local failure unexpectedly reported agreement"
@@ -922,17 +934,16 @@ where
             // bound documented on [`VisitedStatesArchive::trim_to_window`].
             if let Some(ref mut archive) = self.visited_archive {
                 let check_freq = match strategy {
-                    crate::cut_selection::CutSelectionStrategy::Level1 {
+                    Level1 {
                         check_frequency, ..
                     }
-                    | crate::cut_selection::CutSelectionStrategy::Lml1 {
+                    | Lml1 {
                         check_frequency, ..
                     }
-                    | crate::cut_selection::CutSelectionStrategy::Dominated {
-                        check_frequency,
-                        ..
+                    | Dominated {
+                        check_frequency, ..
                     } => *check_frequency,
-                    crate::cut_selection::CutSelectionStrategy::Dynamic { .. } => {
+                    Dynamic { .. } => {
                         unreachable!(
                             "DCS never runs as a periodic pool pass; should_run is always false"
                         )
@@ -1049,7 +1060,7 @@ where
             {
                 total_rows_frozen += self.scratch.freeze_row_batches[t].num_rows as u64;
             }
-            cobre_solver::freeze_rows_into_template(
+            freeze_rows_into_template(
                 &self.stage_ctx.templates[t],
                 &self.scratch.freeze_row_batches[t],
                 &mut self.scratch.frozen_templates[t],
@@ -1071,7 +1082,7 @@ where
     /// stored cut rows against the current active set by slot identity, so a
     /// seeded basis stays correct even if cut selection diverges. No-op for a
     /// fresh start (no cache).
-    pub(crate) fn seed_basis_store(&mut self, cache: &[Option<crate::workspace::CapturedBasis>]) {
+    pub(crate) fn seed_basis_store(&mut self, cache: &[Option<CapturedBasis>]) {
         let max_local_fwd = self.ranks.max_local_fwd;
         let num_stages = self.ranks.num_stages;
         for (t, slot) in cache.iter().enumerate().take(num_stages) {

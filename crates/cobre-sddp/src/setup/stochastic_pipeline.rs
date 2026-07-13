@@ -3,10 +3,32 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use cobre_core::temporal::SeasonCycleType::Monthly;
+use cobre_core::temporal::SeasonMap;
 use cobre_core::{
     EntityId, System,
     scenario::{SamplingScheme, ScenarioSource},
 };
+use cobre_io::Config;
+use cobre_io::LoadFactorEntry;
+use cobre_io::ValidationContext;
+use cobre_io::scenarios::assemble_opening_tree;
+use cobre_io::scenarios::estimation::estimate_from_history;
+use cobre_io::scenarios::load_noise_openings;
+use cobre_io::scenarios::parse_load_factors;
+use cobre_io::scenarios::validate_noise_openings;
+use cobre_io::validate_structure;
+use cobre_stochastic::BlockFactorPair;
+use cobre_stochastic::ClassSchemes;
+use cobre_stochastic::HistoricalScenarioLibrary;
+use cobre_stochastic::PrecomputedPar;
+use cobre_stochastic::build_stochastic_context;
+use cobre_stochastic::discover_historical_windows;
+use cobre_stochastic::normal::precompute::EntityFactorEntry;
+use cobre_stochastic::par::lag_transition::derive_downstream_par_order;
+use cobre_stochastic::par::lag_transition::precompute_noise_groups;
+use cobre_stochastic::par::lag_transition::precompute_stage_lag_transitions;
+use cobre_stochastic::standardize_historical_windows;
 use cobre_stochastic::{OpeningTreeInputs, StochasticContext, context::OpeningTree};
 
 use crate::{EstimationPath, EstimationReport, SddpError};
@@ -36,8 +58,8 @@ fn load_user_opening_tree_inner(
     case_dir: &Path,
     system: &System,
 ) -> Result<Option<OpeningTree>, SddpError> {
-    let mut ctx = cobre_io::ValidationContext::new();
-    let manifest = cobre_io::validate_structure(case_dir, &mut ctx);
+    let mut ctx = ValidationContext::new();
+    let manifest = validate_structure(case_dir, &mut ctx);
 
     if !manifest.scenarios_noise_openings_parquet {
         return Ok(None);
@@ -45,7 +67,7 @@ fn load_user_opening_tree_inner(
 
     let path = case_dir.join("scenarios").join("noise_openings.parquet");
 
-    let rows = cobre_io::scenarios::load_noise_openings(Some(&path))?;
+    let rows = load_noise_openings(Some(&path))?;
 
     let n_hydros = system.hydros().len();
     let mut load_bus_ids: Vec<EntityId> = system
@@ -69,14 +91,9 @@ fn load_user_opening_tree_inner(
     }
     let openings_per_stage: Vec<usize> = openings_by_stage.values().map(BTreeSet::len).collect();
 
-    cobre_io::scenarios::validate_noise_openings(
-        &rows,
-        expected_dim,
-        expected_stages,
-        &openings_per_stage,
-    )?;
+    validate_noise_openings(&rows, expected_dim, expected_stages, &openings_per_stage)?;
 
-    let tree = cobre_io::scenarios::assemble_opening_tree(rows, expected_dim);
+    let tree = assemble_opening_tree(rows, expected_dim);
     Ok(Some(tree))
 }
 
@@ -85,24 +102,15 @@ fn load_user_opening_tree_inner(
 /// Converts the dense 3D table into `(entity_id, stage_id, block_pairs)` tuples
 /// for `PrecomputedNormal::build`.
 #[must_use]
-pub fn build_ncs_factor_entries(
-    system: &System,
-) -> Vec<(
-    cobre_core::EntityId,
-    i32,
-    Vec<cobre_stochastic::normal::precompute::BlockFactorPair>,
-)> {
-    use cobre_stochastic::normal::precompute::BlockFactorPair;
-
-    let stochastic_ncs: BTreeSet<cobre_core::EntityId> =
-        system.ncs_models().iter().map(|m| m.ncs_id).collect();
+pub fn build_ncs_factor_entries(system: &System) -> Vec<(EntityId, i32, Vec<BlockFactorPair>)> {
+    let stochastic_ncs: BTreeSet<EntityId> = system.ncs_models().iter().map(|m| m.ncs_id).collect();
 
     if stochastic_ncs.is_empty() {
         return Vec::new();
     }
 
     let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
-    let ncs_ids: Vec<cobre_core::EntityId> = system
+    let ncs_ids: Vec<EntityId> = system
         .non_controllable_sources()
         .iter()
         .map(|n| n.id)
@@ -141,12 +149,12 @@ pub fn build_ncs_factor_entries(
 /// Returns [`SddpError`] if the file exists but cannot be read or parsed.
 pub fn load_load_factors_for_stochastic(
     case_dir: &Path,
-) -> Result<Vec<cobre_io::scenarios::LoadFactorEntry>, SddpError> {
+) -> Result<Vec<LoadFactorEntry>, SddpError> {
     let path = case_dir.join("scenarios").join("load_factors.json");
     if !path.exists() {
         return Ok(Vec::new());
     }
-    cobre_io::scenarios::parse_load_factors(&path).map_err(SddpError::from)
+    parse_load_factors(&path).map_err(SddpError::from)
 }
 
 /// Build the `HistoricalScenarioLibrary` for the opening tree when any stage
@@ -176,15 +184,10 @@ fn build_opening_tree_library(
         .season_map
         .as_ref()
         .map(|sm| sm.seasons.len());
-    let par = cobre_stochastic::PrecomputedPar::build(
-        system.inflow_models(),
-        &study_stages,
-        &hydro_ids,
-        cycle_len,
-    )?;
+    let par = PrecomputedPar::build(system.inflow_models(), &study_stages, &hydro_ids, cycle_len)?;
     let max_order = par.max_order();
     let user_pool = training_source.historical_years.as_ref();
-    let window_years = cobre_stochastic::discover_historical_windows(
+    let window_years = discover_historical_windows(
         system.inflow_history(),
         &hydro_ids,
         &study_stages,
@@ -193,7 +196,7 @@ fn build_opening_tree_library(
         system.policy_graph().season_map.as_ref(),
         1,
     )?;
-    let mut lib = cobre_stochastic::HistoricalScenarioLibrary::new(
+    let mut lib = HistoricalScenarioLibrary::new(
         window_years.len(),
         study_stages.len(),
         hydro_ids.len(),
@@ -204,27 +207,15 @@ fn build_opening_tree_library(
     // `max_order` width covers all AR lags.
     let season_map_ref = system.policy_graph().season_map.as_ref();
     // `precompute_stage_lag_transitions` requires a non-optional &SeasonMap.
-    let noop_season_map;
-    let effective_season_map: &cobre_core::temporal::SeasonMap = if let Some(sm) = season_map_ref {
-        sm
-    } else {
-        noop_season_map = cobre_core::temporal::SeasonMap {
-            cycle_type: cobre_core::temporal::SeasonCycleType::Monthly,
-            seasons: Vec::new(),
-        };
-        &noop_season_map
+    let noop_season_map = SeasonMap {
+        cycle_type: Monthly,
+        seasons: Vec::new(),
     };
-    let downstream_par_order = cobre_stochastic::par::lag_transition::derive_downstream_par_order(
-        &study_stages,
-        max_order,
-    );
+    let effective_season_map: &SeasonMap = season_map_ref.unwrap_or(&noop_season_map);
+    let downstream_par_order = derive_downstream_par_order(&study_stages, max_order);
     let stage_lag_transitions =
-        cobre_stochastic::par::lag_transition::precompute_stage_lag_transitions(
-            &study_stages,
-            effective_season_map,
-            downstream_par_order,
-        );
-    cobre_stochastic::standardize_historical_windows(
+        precompute_stage_lag_transitions(&study_stages, effective_season_map, downstream_par_order);
+    standardize_historical_windows(
         &mut lib,
         system.inflow_history(),
         &hydro_ids,
@@ -359,37 +350,33 @@ fn compute_external_scenario_counts(
 pub fn prepare_stochastic(
     system: System,
     case_dir: &Path,
-    config: &cobre_io::Config,
+    config: &Config,
     seed: u64,
     training_source: &ScenarioSource,
 ) -> Result<PrepareStochasticResult, SddpError> {
     let (system, estimation_report, estimation_path) =
-        cobre_io::scenarios::estimation::estimate_from_history(system, case_dir, config)?;
+        estimate_from_history(system, case_dir, config)?;
 
     let user_opening_tree = load_user_opening_tree_inner(case_dir, &system)?;
 
     let load_factor_entries = load_load_factors_for_stochastic(case_dir)?;
-    let block_pairs: Vec<Vec<cobre_stochastic::normal::precompute::BlockFactorPair>> =
-        load_factor_entries
-            .iter()
-            .map(|e| {
-                e.block_factors
-                    .iter()
-                    .map(|bf| (bf.block_id, bf.factor))
-                    .collect()
-            })
-            .collect();
-    let entity_factor_entries: Vec<cobre_stochastic::normal::precompute::EntityFactorEntry<'_>> =
-        load_factor_entries
-            .iter()
-            .zip(block_pairs.iter())
-            .map(|(e, pairs)| (e.bus_id, e.stage_id, pairs.as_slice()))
-            .collect();
+    let block_pairs: Vec<Vec<BlockFactorPair>> = load_factor_entries
+        .iter()
+        .map(|e| {
+            e.block_factors
+                .iter()
+                .map(|bf| (bf.block_id, bf.factor))
+                .collect()
+        })
+        .collect();
+    let entity_factor_entries: Vec<EntityFactorEntry<'_>> = load_factor_entries
+        .iter()
+        .zip(block_pairs.iter())
+        .map(|(e, pairs)| (e.bus_id, e.stage_id, pairs.as_slice()))
+        .collect();
 
     let ncs_factor_entries = build_ncs_factor_entries(&system);
-    let ncs_entity_factor_entries: Vec<
-        cobre_stochastic::normal::precompute::EntityFactorEntry<'_>,
-    > = ncs_factor_entries
+    let ncs_entity_factor_entries: Vec<EntityFactorEntry<'_>> = ncs_factor_entries
         .iter()
         .map(|(ncs_id, stage_id, pairs)| (*ncs_id, *stage_id, pairs.as_slice()))
         .collect();
@@ -404,11 +391,11 @@ pub fn prepare_stochastic(
             .filter(|s| s.id >= 0)
             .cloned()
             .collect();
-        cobre_stochastic::par::lag_transition::precompute_noise_groups(&study_stages)
+        precompute_noise_groups(&study_stages)
     };
 
     let forward_seed = training_source.seed.map(i64::unsigned_abs);
-    let stochastic = cobre_stochastic::build_stochastic_context(
+    let stochastic = build_stochastic_context(
         &system,
         seed,
         forward_seed,
@@ -420,7 +407,7 @@ pub fn prepare_stochastic(
             external_scenario_counts,
             noise_group_ids: Some(opening_tree_noise_group_ids),
         },
-        cobre_stochastic::ClassSchemes {
+        ClassSchemes {
             inflow: Some(training_source.inflow_scheme),
             load: Some(training_source.load_scheme),
             ncs: Some(training_source.ncs_scheme),

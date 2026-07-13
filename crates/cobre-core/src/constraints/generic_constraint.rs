@@ -308,7 +308,7 @@ impl LinearTerm {
     /// `scale` carries the literal multiplier from the expression (e.g. `2.5`
     /// for `"2.5 * @rho_eq * x"`, or `sign` for `"@rho_eq * x"`).
     #[must_use]
-    pub fn parameter(id: crate::EntityId, scale: f64, variable: VariableRef) -> Self {
+    pub fn parameter(id: EntityId, scale: f64, variable: VariableRef) -> Self {
         Self {
             coefficient: CoefficientRef::Parameter(id),
             scale,

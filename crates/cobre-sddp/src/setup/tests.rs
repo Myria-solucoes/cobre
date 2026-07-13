@@ -6321,11 +6321,19 @@ fn stage_data_geometry_role_b_matches_reference_build() {
     };
     let reference = crate::test_support::geometry(
         &dims,
-        geometry.fpha_hydro_indices.clone(),
+        geometry
+            .fpha_hydro_indices
+            .iter()
+            .map(|h| h.get())
+            .collect(),
         // minimal_system has no FPHA planes; mirror the built geometry's
         // FPHA-hydro count with a placeholder plane count per hydro.
         &vec![1usize; geometry.fpha_hydro_indices.len()],
-        geometry.evap_hydro_indices.clone(),
+        geometry
+            .evap_hydro_indices
+            .iter()
+            .map(|h| h.get())
+            .collect(),
     );
 
     assert_eq!(reference.turbine, geometry.turbine, "turbine range");
@@ -6466,7 +6474,9 @@ fn cut_row_from_state_matches_reference_loop() {
     for (_slot, intercept, coeffs) in fcf.active_cuts(0) {
         from_state.row_starts.push(0);
         for &j in mask {
-            let lp_col = state.lp_column_for_state(j);
+            let lp_col = state
+                .lp_column_for_state(crate::indexer::StateDim::new(j))
+                .get();
             from_state
                 .col_indices
                 .push(i32::try_from(lp_col).expect("col fits i32"));
