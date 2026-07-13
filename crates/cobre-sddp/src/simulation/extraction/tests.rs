@@ -16,7 +16,7 @@ use cobre_core::BlockMode;
 
 use crate::energy_conversion::EnergyConversionSet;
 use crate::indexer::{
-    FillingTargetLocal, FloorLocal, FphaLocal, HydroSys, StateLayout, StudyDimensions,
+    FillingTargetLocal, FloorLocal, FphaLocal, HydroSys, StateSpace, StudyDimensions,
 };
 use crate::lead_time::{AnticipatedResolution, PointResolution};
 use crate::lp_builder::StageGeometry;
@@ -1039,7 +1039,7 @@ fn extract_equipment_reads_primal_when_with_equipment() {
     assert_eq!(result.hydros[0].turbined_m3s, 30.0);
     assert_eq!(result.hydros[0].spillage_m3s, 5.0);
     // spillage_cost = 5.0 * 0.1 * COST_SCALE_FACTOR = 500_000.0
-    assert!((result.hydros[0].spillage_cost - 500_000.0).abs() < 1e-12); // 5.0 * 0.1 * 1_000_000
+    assert!((result.hydros[0].spillage_cost - 500_000.0).abs() < 1e-12);
 
     // Hydro generation = turbined * productivity (1.0)
     assert_eq!(result.hydros[0].generation_mw, 30.0); // 30 * 1.0
@@ -1054,7 +1054,7 @@ fn extract_equipment_reads_primal_when_with_equipment() {
     assert_eq!(result.thermals.len(), 1);
     assert_eq!(result.thermals[0].generation_mw, 80.0);
     // generation_cost = 80 * 50 * COST_SCALE_FACTOR = 4_000_000_000.0
-    assert!((result.thermals[0].generation_cost - 4_000_000_000.0).abs() < 1e-3); // 80 * 50 * 1_000_000
+    assert!((result.thermals[0].generation_cost - 4_000_000_000.0).abs() < 1e-3);
     assert_eq!(result.thermals[0].block_id, Some(0));
 
     // Exchange: one entry per (line, block)
@@ -1062,7 +1062,7 @@ fn extract_equipment_reads_primal_when_with_equipment() {
     assert_eq!(result.exchanges[0].direct_flow_mw, 15.0);
     assert_eq!(result.exchanges[0].reverse_flow_mw, 0.0);
     // exchange_cost = 15 * 5 * COST_SCALE_FACTOR = 75_000_000.0
-    assert!((result.exchanges[0].exchange_cost - 75_000_000.0).abs() < 1e-3); // 15 * 5 * 1_000_000
+    assert!((result.exchanges[0].exchange_cost - 75_000_000.0).abs() < 1e-3);
     assert_eq!(result.exchanges[0].block_id, Some(0));
 
     // Bus: one entry per (bus, block)
@@ -1072,7 +1072,7 @@ fn extract_equipment_reads_primal_when_with_equipment() {
     assert_eq!(result.buses[0].excess_mw, 2.0);
     assert_eq!(result.buses[0].block_id, Some(0));
     // spot_price = dual * COST_SCALE_FACTOR / hrs = 108_000 * 1_000_000 / 720 = 150_000_000.0 $/MWh
-    assert!((result.buses[0].spot_price - 150_000_000.0).abs() < 1e-3); // 108_000 * 1_000_000 / 720
+    assert!((result.buses[0].spot_price - 150_000_000.0).abs() < 1e-3);
 
     // water_value = dual[water_balance.start+h] * COST_SCALE_FACTOR
     assert!((result.hydros[0].water_value_per_hm3 - (-120_000_000.0)).abs() < 1e-3);
@@ -1758,7 +1758,7 @@ fn extract_thermals_anticipated_decision_is_per_block_invariant() {
 /// The delivery stage comes from the plant's attached `PointResolution`
 /// (`PointResolution::genuine_decisions_at`), never `stage_idx +
 /// anticipated_lead_stages` — the constant-lead fallback
-/// `StateLayout::anticipated_resolution_for` uses only when no resolution is
+/// `anticipated_resolution_for` uses only when no resolution is
 /// attached.
 ///
 /// `anticipated_lead_stages = [3]` (stale once a resolution is attached) would
@@ -3873,8 +3873,7 @@ fn contract_cost_active_import_equals_price_power_hours_via_cost_result() {
     let indexer = make_indexer_2h_1fpha_1blk();
     let study_dims = test_support::study_dims_for(&counts_2h_1fpha_1blk());
     let state = test_support::state_layout(2, 0);
-    let base = indexer.generation_below_slack.end;
-    let contract_col = base;
+    let contract_col = indexer.generation_below_slack.end;
     let geometry = StageGeometry {
         contract_import: contract_col..contract_col + 1,
         contract_export: contract_col + 1..contract_col + 1,
@@ -3967,8 +3966,7 @@ fn cost_breakdown_sums_to_immediate_with_active_export_contract_via_cost_result(
     let indexer = make_indexer_2h_1fpha_1blk();
     let study_dims = test_support::study_dims_for(&counts_2h_1fpha_1blk());
     let state = test_support::state_layout(2, 0);
-    let base = indexer.generation_below_slack.end;
-    let export_col = base;
+    let export_col = indexer.generation_below_slack.end;
     let geometry = StageGeometry {
         contract_import: export_col..export_col,
         contract_export: export_col..export_col + 1,
@@ -4592,7 +4590,7 @@ fn entity_counts_one_pumping_station() -> EntityCounts {
 fn pumping_only_spec<'a>(
     study_dims: &'a StudyDimensions,
     geometry: &'a StageGeometry,
-    state: &'a StateLayout,
+    state: &'a StateSpace,
     entity_counts: &'a EntityCounts,
     pumping_col_start: usize,
     n_pumping: usize,
@@ -4803,7 +4801,7 @@ fn entity_counts_contracts(contract_ids: Vec<i32>) -> EntityCounts {
 fn contract_only_spec<'a>(
     study_dims: &'a StudyDimensions,
     geometry: &'a StageGeometry,
-    state: &'a StateLayout,
+    state: &'a StateSpace,
     entity_counts: &'a EntityCounts,
     block_hours: &'a [f64],
     contract_prices: &'a [f64],

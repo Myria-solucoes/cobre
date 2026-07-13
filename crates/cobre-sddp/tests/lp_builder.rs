@@ -374,7 +374,7 @@ mod indexer_slim_migration_rejection {
     //!
     //! The role-(b) geometry descriptor `StageIndexer` and its `EquipmentCounts`
     //! constructor input were deleted: the state-vector concern lives on
-    //! `StateLayout`, the non-state study shape on `StudyDimensions`, and the
+    //! `StateSpace`, the non-state study shape on `StudyDimensions`, and the
     //! per-stage equipment geometry on `StageLayout`/`StageGeometry`. This gate scans
     //! the production sources under `src/` and asserts those deleted types do not
     //! reappear — a regression guard that the deletion stays deleted.
@@ -440,7 +440,7 @@ mod indexer_slim_migration_rejection {
             offenders.is_empty(),
             "deletion regression — a deleted indexer type reappeared in production \
              sources (the role-(b) geometry now lives on StageLayout/StageGeometry, \
-             the state vector on StateLayout, the study shape on StudyDimensions):\n{}",
+             the state vector on StateSpace, the study shape on StudyDimensions):\n{}",
             offenders.join("\n")
         );
     }

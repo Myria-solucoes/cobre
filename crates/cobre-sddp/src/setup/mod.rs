@@ -86,7 +86,7 @@ use crate::{
     error::SddpError,
     horizon_mode::HorizonMode,
     hydro_models::PrepareHydroModelsResult,
-    indexer::{CutStateProjection, StateLayout, StudyDimensions},
+    indexer::{CutStateProjection, StateSpace, StudyDimensions},
     lead_time::{AnticipatedResolution, LeadTime, PointResolution, SpreadResolution},
     lp_builder::build_stage_templates,
     risk_measure::RiskMeasure,
@@ -158,7 +158,7 @@ pub struct StudySetup {
     /// Threaded into the simulation
     /// [`StageExtractionSpec`](crate::simulation::extraction::StageExtractionSpec)
     /// so the anticipated-decision read gates on the same
-    /// `StateLayout::is_anticipated_decision_active` predicate the LP builder used,
+    /// `is_anticipated_decision_active` predicate the LP builder used,
     /// keying its operation-window clause on the DELIVERY stage's `stage.id`. Empty
     /// when there are no anticipated thermals.
     pub(crate) anticipated_windows: Vec<(Option<i32>, Option<i32>)>,
@@ -330,7 +330,7 @@ impl StudySetup {
         let transit_bucket_topology = bucket_topology::build_transit_bucket_topology(system);
 
         // Resolved before the LP templates: none of the state dimensions depend on
-        // the built LP, and `build_stage_templates` needs the finished `StateLayout`
+        // the built LP, and `build_stage_templates` needs the finished `StateSpace`
         // threaded in as a parameter (the single role-(a) owner — see
         // `resolve_state_layout`).
         let (state_layout, hydro_count, anticipated_thermal_indices) =
@@ -629,7 +629,7 @@ fn build_energy_and_templates(
     stochastic: &StochasticContext,
     hydro_models: &PrepareHydroModelsResult,
     scalar_parameters: &[cobre_core::ScalarParameter],
-    state_layout: &StateLayout,
+    state_layout: &StateSpace,
     per_stage_mask: &[Vec<usize>],
     arc_stage_weights: &HashMap<usize, Vec<Vec<f64>>>,
     arc_spread_chrono: &HashMap<usize, Vec<Option<SpreadResolution>>>,
@@ -709,7 +709,7 @@ fn build_energy_and_templates(
 }
 
 /// Resolve every anticipated thermal's delivery-anchored commitment and
-/// construct the single role-(a) [`StateLayout`] — before stage templates
+/// construct the single role-(a) [`StateSpace`] — before stage templates
 /// exist, since none of the state dimensions depend on the built LP.
 ///
 /// The returned `hydro_count` and `anticipated_thermal_indices` are the exact
@@ -725,7 +725,7 @@ pub(crate) fn resolve_state_layout(
     system: &System,
     par_lp: &PrecomputedPar,
     transit_bucket_topology: &bucket_topology::TransitBucketTopology,
-) -> Result<(StateLayout, usize, Vec<usize>), SddpError> {
+) -> Result<(StateSpace, usize, Vec<usize>), SddpError> {
     let anticipated_thermal_indices: Vec<usize> = system
         .thermals()
         .iter()
@@ -788,7 +788,7 @@ pub(crate) fn resolve_state_layout(
     // par_lp.n_hydros()`) — production's `par_lp` always covers every system
     // hydro, so the fallback is inert there; a hydro-free `PrecomputedPar` test
     // fixture paired with a hydro-bearing system relies on it to satisfy the
-    // `StateLayout::new` length contract.
+    // `StateSpace::new` length contract.
     let effective_lag_counts: Vec<usize> = if max_par_order > 0 {
         (0..hydro_count)
             .map(|h| {
@@ -803,10 +803,10 @@ pub(crate) fn resolve_state_layout(
         vec![0; hydro_count]
     };
 
-    // `StateLayout` is the sole role-(a) owner; its constructor finalizes the
+    // `StateSpace` is the sole role-(a) owner; its constructor finalizes the
     // nonzero mask unconditionally, so every study (storage-only or pure-thermal)
     // has a finalized mask for the single-path mask-driven cut-row loop.
-    let mut state = StateLayout::new(
+    let mut state = StateSpace::new(
         hydro_count,
         max_par_order,
         transit_bucket_topology.n_buckets,
@@ -825,7 +825,7 @@ pub(crate) fn resolve_state_layout(
 /// and the post-processed stage templates.
 ///
 /// `hydro_count` and `anticipated_thermal_indices` are threaded from
-/// [`resolve_state_layout`] — the same values its [`StateLayout`] was built
+/// [`resolve_state_layout`] — the same values its [`StateSpace`] was built
 /// from — so the only per-stage template field this reads is
 /// `ncs_col_starts`, the one dimension genuinely derived from the built LP.
 fn build_study_dimensions(
@@ -891,7 +891,7 @@ fn first_fanned_plant_id(
 /// The sole `resolve_point` consumer (via [`AnticipatedResolution::resolve`]).
 /// Warn-free: [`resolve_anticipated_commitments`] wraps this with the setup-time
 /// `K = 0` advisory; [`crate::lp_builder::build_stage_templates`] calls this core
-/// directly to attach an identical resolution onto its own `StateLayout` — the
+/// directly to attach an identical resolution onto its own `StateSpace` — the
 /// same accepted redundant-but-deterministic recompute this crate already
 /// applies to the bucket topology, not a second advisory emission. Returns the
 /// per-plant resolution and the anticipated-local constant leads: a
@@ -1003,7 +1003,7 @@ fn leadstages_decision_sets_are_singletons(
 }
 
 /// Build the per-pool [`CutStateProjection`], one per stage (pool) `t`, projecting
-/// the global [`StateLayout`] onto the cut-state dimensions each pool carries.
+/// the global [`StateSpace`] onto the cut-state dimensions each pool carries.
 ///
 /// Pool `t` is sized by `stages[t + 1].state_config` — the cost-to-go this
 /// stage's **successor** generates for it (pool `t` is populated by the backward
@@ -1023,7 +1023,7 @@ fn leadstages_decision_sets_are_singletons(
 /// here.)
 fn build_cut_state_layouts(
     system: &cobre_core::System,
-    state_layout: &StateLayout,
+    state_layout: &StateSpace,
     n_stages: usize,
 ) -> Vec<CutStateProjection> {
     let study_stages: Vec<&Stage> = system.stages().iter().filter(|s| s.id >= 0).collect();
@@ -1406,7 +1406,7 @@ fn id_to_position<T>(entities: &[T], id_of: impl Fn(&T) -> i32) -> HashMap<i32, 
 fn build_initial_state(
     system: &System,
     study_dims: &StudyDimensions,
-    layout: &StateLayout,
+    layout: &StateSpace,
 ) -> Vec<f64> {
     let mut state = vec![0.0_f64; layout.n_state];
     let hydros = system.hydros();
@@ -1444,7 +1444,7 @@ fn build_initial_state(
 
     // Anticipated ring, slot-major: `state[anticipated_slots_out.start + slot *
     // n_anticipated + local_idx]`. This IS the state-vector numbering
-    // (`StateLayout::state_to_lp_column`'s identity domain), the same
+    // (`StateSpace::state_to_lp_column`'s identity domain), the same
     // `anticipated_slots_out` position every other outgoing-state read uses —
     // never `anticipated_state` (the relocated, incoming-only pinned block).
     // Padding slots `[K_i, k_max)` must stay zero — the in-LP ring's row/column
@@ -1500,12 +1500,12 @@ fn build_initial_state(
 }
 
 /// Write the travel-time bucket seed into `state`'s declared `transit_buckets_out`
-/// slots — the same index space [`StateLayout::state_to_lp_incoming_column`]
+/// slots — the same index space [`StateSpace::state_to_lp_incoming_column`]
 /// remaps to the pinned `transit_buckets_in` LP column, so no separate pin wiring is
 /// needed beyond this splice.
 fn splice_transit_bucket_seed(
     state: &mut [f64],
-    layout: &StateLayout,
+    layout: &StateSpace,
     system: &System,
     topology: &bucket_topology::TransitBucketTopology,
 ) {

@@ -8,7 +8,7 @@
 //!   structural LP (CSC matrix, bounds, objective), built once and shared read-only.
 //!
 //! The column/row geometry — regions, ordering, offset arithmetic — is owned per
-//! stage by `StageLayout` (state-vector region on [`crate::indexer::StateLayout`],
+//! stage by `StageLayout` (state-vector region on [`crate::indexer::StateSpace`],
 //! non-state shape on [`crate::indexer::StudyDimensions`]); this module documents
 //! only the per-solve patch sequence layered on top.
 //!
@@ -17,7 +17,7 @@
 //! State pinning lives on **incoming-state columns**, not rows: the LP has no
 //! state-fixing row range. Both forward-pass pinning (`set_col_bounds`) and
 //! backward-pass cut-subgradient extraction resolve the same column via
-//! [`crate::indexer::StateLayout::state_to_lp_incoming_column`].
+//! [`crate::indexer::StateSpace::state_to_lp_incoming_column`].
 //!
 //! ## Patch sequence
 //!

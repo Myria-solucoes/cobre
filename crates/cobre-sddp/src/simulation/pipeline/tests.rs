@@ -2154,7 +2154,7 @@ mod anticipated_ring_matches_forward_propagation {
     use crate::cut::FutureCostFunction;
     use crate::energy_conversion::EnergyConversionSet;
     use crate::horizon_mode::HorizonMode;
-    use crate::indexer::StateLayout;
+    use crate::indexer::StateSpace;
     use crate::inflow_method::InflowNonNegativityMethod;
     use crate::lp_builder::PatchBuffer;
     use crate::simulation::extraction::EntityCounts;
@@ -2304,7 +2304,7 @@ mod anticipated_ring_matches_forward_propagation {
     /// Drive `run_forward_stage` over `N_STAGES` stages, returning the captured
     /// `current_state` after each stage.
     fn run_forward_trajectory(
-        state: &StateLayout,
+        state: &StateSpace,
         templates: &[StageTemplate],
         training_ctx: &TrainingContext<'_>,
         ctx: &StageContext<'_>,
@@ -2365,7 +2365,7 @@ mod anticipated_ring_matches_forward_propagation {
     /// Drive `solve_simulation_stage` over `N_STAGES` stages, returning the
     /// captured `current_state` after each stage.
     fn run_simulation_trajectory(
-        state: &StateLayout,
+        state: &StateSpace,
         templates: &[StageTemplate],
         training_ctx: &TrainingContext<'_>,
         ctx: &StageContext<'_>,

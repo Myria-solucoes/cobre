@@ -8,7 +8,7 @@ use crate::{
     context::StageContext,
     cut::pool::CutPool,
     error::SddpError,
-    indexer::StateLayout,
+    indexer::StateSpace,
     workspace::{CapturedBasis, SolverWorkspace},
 };
 
@@ -195,7 +195,7 @@ pub(crate) fn fill_unscaled_dual(out: &mut Vec<f64>, scaled: &[f64], row_scale: 
 pub(crate) fn debug_assert_bucket_copy_gap_intact(
     assembled_state: &[f64],
     unscaled_primal: &[f64],
-    layout: &StateLayout,
+    layout: &StateSpace,
 ) {
     debug_assert!(
         layout

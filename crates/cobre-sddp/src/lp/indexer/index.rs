@@ -74,7 +74,11 @@ impl Row {
 /// let dim = StateDim::new(0);
 /// let _unresolved: OutCol = dim; // StateDim substituted for a resolved OutCol
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Orderable, unlike every other newtype in this module: it is the sole
+/// sorted-membership key (`nonzero_state_indices.binary_search`), so it alone
+/// derives `Ord`/`PartialOrd`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct StateDim(usize);
 

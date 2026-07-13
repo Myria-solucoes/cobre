@@ -29,8 +29,8 @@ Incoming state is pinned with `set_col_bounds` on the incoming-state LP column.
 There is no state-fixing row range in the LP; incoming state is pinned entirely
 via column bounds. Always resolve the LP
 column — for both pinning and dual extraction — via
-`StateLayout::state_to_lp_incoming_column`; never assume a fixing-row index.
-Read: `lp/indexer/state_layout.rs`.
+`StateSpace::state_to_lp_incoming_column`; never assume a fixing-row index.
+Read: `lp/indexer/state_space.rs`.
 
 ## FPHA uses average storage
 
@@ -200,12 +200,12 @@ carries `k_0` onto the balance row — never a separate once-per-stage family
 (the deposit share itself is emitted at the call site, never through
 `DeliveryRing::emit_deposit`, which only the anticipated ring calls). Incoming
 buckets are pinned via column bounds, resolved through
-`StateLayout::state_to_lp_incoming_column`'s explicit bucket arm, never the
+`StateSpace::state_to_lp_incoming_column`'s explicit bucket arm, never the
 `anticipated_state` catch-all. Subgradient extraction
 divides the incoming bucket column's reduced cost by `col_scale`
 (`extract_duals_from_view`, the same rc/col_scale contract as storage); the
 cut row renders the **outgoing** bucket column through
-`StateLayout::lp_column_for_state`'s identity arm and multiplies `col_scale`
+`StateSpace::lp_column_for_state`'s identity arm and multiplies `col_scale`
 back on via `push_scaled_coefficient` — divided on extract, multiplied on
 render, identical to storage. Swapping which column is pinned/read, or
 dividing on render instead of extract, prices the in-transit water in the
@@ -214,8 +214,8 @@ wrong direction — a wrong bound that still compiles. A fold implementation
 cost as the correct one, so total cost alone cannot discriminate — only the
 dual's sign/magnitude and the per-stage delivery split do.
 Read: `lp/builder/entries.rs` (`fill_transit_bucket_definition_entries`,
-`fill_arc_release_block_entries`, `transit_bucket_ring`), `lp/indexer/state_layout.rs`
-(`StateLayout::state_to_lp_incoming_column`, `StateLayout::lp_column_for_state`),
+`fill_arc_release_block_entries`, `transit_bucket_ring`), `lp/indexer/state_space.rs`
+(`StateSpace::state_to_lp_incoming_column`, `StateSpace::lp_column_for_state`),
 `training/backward/duals_extraction.rs` (`extract_duals_from_view`), `cut/row.rs`
 (`push_scaled_coefficient`, `push_cut_row`). Pinned by the bucket-arm
 column-resolution tests (outgoing resolves by identity, incoming resolves to the
@@ -383,9 +383,9 @@ Pinned by `test_anticipated_lead_time_coverage_pmo_calendar` and
 ### In-LP anticipated ring: definition-row sign & two-sided masking
 
 The anticipated ring is `DeliveryRing`'s other instantiation (the shared
-skeleton above): an outgoing block (`StateLayout::anticipated_slots_out`,
+skeleton above): an outgoing block (`StateSpace::anticipated_slots_out`,
 identity-resolved by `state_to_lp_column`, contributing to `n_state`) and a
-separate incoming block (`StateLayout::anticipated_state`, pinned via
+separate incoming block (`StateSpace::anticipated_state`, pinned via
 `state_to_lp_incoming_column`) — never one dual-purpose range shifted
 out-of-LP. There is no Rust-side shift step: the ring transition is resolved
 entirely by the definition rows below, and `current_state`/`state_at_capture`
@@ -411,7 +411,7 @@ definition row (the row-cap side) AND a frozen `[0, 0]` outgoing column
 (`fill_anticipated_slot_columns`, the column-freeze side — the same
 commissioning-dormant-column convention as NCS/thermal/line/station/contract).
 
-A slot beyond a plant's OWN `StateLayout::anticipated_lead_stages[plant]`
+A slot beyond a plant's OWN `StateSpace::anticipated_lead_stages[plant]`
 bound is structural padding even when `t + slot_idx` itself still lands
 inside the horizon — the multi-plant heterogeneous-lead case, where two
 plants sharing one `k_max`-wide ring have different per-plant reachable
@@ -424,7 +424,7 @@ manifest resolves a ring column back to `(slot, plant)` via
 `DeliveryRing::slot_lane_at` — the exact inverse of `out_col`/`in_col` — never
 a re-derived `offset % n_anticipated`/`offset / n_anticipated` pair.
 
-Read: `lp/indexer/state_layout.rs` (`StateLayout::state_to_lp_column`,
+Read: `lp/indexer/state_space.rs` (`StateSpace::state_to_lp_column`,
 `state_to_lp_incoming_column`), `lp/builder/layout.rs`
 (`build_anticipated_slot_row_pos`), `lp/builder/entries.rs`
 (`fill_anticipated_slot_definition_entries`,
@@ -459,7 +459,7 @@ admitted target-stage imprecision — while the anticipated gate prevents the
 decision from ever existing, so nothing of value is lost. Crediting a masked
 slot as if it held a dropped commitment would introduce value the model
 never computed, for a delivery stage that does not exist.
-Read: `lp/indexer/state_layout.rs` (`is_anticipated_decision_active`,
+Read: `lp/indexer/anticipated_gate.rs` (`is_anticipated_decision_active`,
 `is_anticipated_decision_active_for_delivery`), `lead_time/mod.rs`
 (`PointResolution::decider`), `lp/builder/layout.rs`
 (`build_anticipated_slot_row_pos`), `lp/builder/columns.rs`
@@ -507,8 +507,8 @@ per-trajectory.
 
 Read: `lead_time/mod.rs` (`PointResolution::genuine_decisions_at`,
 `self_delivered_stages`, `is_anticipated_at`, `is_ready_at`),
-`lp/indexer/state_layout.rs`
-(`StateLayout::is_anticipated_decision_active_for_delivery`,
+`lp/indexer/anticipated_gate.rs`
+(`is_anticipated_decision_active_for_delivery`,
 `anticipated_resolution_for`), `lp/builder/layout.rs`
 (`build_anticipated_slot_row_pos`, `build_anticipated_decision_row_pos`,
 `build_anticipated_fishing_row_pos`), `lp/builder/columns.rs`
@@ -568,7 +568,7 @@ surfaced by `warn_thermal_generation_on_anticipated_thermal` and is the general
 hole.
 
 Read: `lp/builder/columns.rs` (`fill_anticipated_columns`),
-`lp/indexer/state_layout.rs` (`is_anticipated_decision_active_for_delivery`),
+`lp/indexer/anticipated_gate.rs` (`is_anticipated_decision_active_for_delivery`),
 `lp/generic_constraints.rs` (`resolve_anticipated_decision`),
 `cobre-io` `validation/semantic/thermal.rs`
 (`warn_thermal_generation_on_anticipated_thermal`). Pinned by

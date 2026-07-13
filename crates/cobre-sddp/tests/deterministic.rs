@@ -3581,7 +3581,7 @@ fn d44_travel_time_substage_transit_bucket_dual() {
 
     // Bucket subgradient: rc/col_scale on the incoming bucket column, stored
     // (undivided by COST_SCALE_FACTOR) as pool-0's cut coefficient
-    // (StateLayout::state_to_lp_incoming_column's explicit bucket arm resolves
+    // (StateSpace::state_to_lp_incoming_column's explicit bucket arm resolves
     // the pin; the cut coefficient index is the STATE index, identity to the
     // outgoing column per `transit_buckets_out`).
     //

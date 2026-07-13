@@ -10,8 +10,8 @@
 ///
 /// - **State-defining dims** (`hydro_count`, `max_par_order`, `n_anticipated`,
 ///   `k_max`, `anticipated_lead_stages`) are owned solely by
-///   [`StateLayout`](super::StateLayout): a count is either state-defining (→
-///   `StateLayout`) or non-state study shape (→ here), never both.
+///   [`StateSpace`](super::StateSpace): a count is either state-defining (→
+///   `StateSpace`) or non-state study shape (→ here), never both.
 /// - **`n_blks`** is *per-stage*, read from a stage's own template. A persisted
 ///   global `n_blks` is the footgun that mis-strides equipment columns at any
 ///   stage whose block count differs from stage 0's.

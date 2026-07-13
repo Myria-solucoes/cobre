@@ -28,7 +28,7 @@ use crate::{
     cut::FutureCostFunction,
     error::SddpError,
     forward::{ForwardResult, StageKey, run_forward_stage},
-    indexer::StateLayout,
+    indexer::StateSpace,
     solve::partition,
     solver_phase::Phase,
     solver_stats::SolverStatsDelta,
@@ -138,7 +138,7 @@ pub(crate) struct ForwardWorkerParams<'a> {
     pub recent_weight_seed: f64,
     /// Stage-invariant state layout; only `inflow_lags.start` is read (the
     /// initial-state lag base).
-    pub state: &'a StateLayout,
+    pub state: &'a StateSpace,
     /// Stage-level LP context (templates, row counts, noise scales).
     pub ctx: &'a StageContext<'a>,
     /// Frozen LP templates including pre-appended prior-iteration cuts.
@@ -774,7 +774,7 @@ mod tests {
         context::{StageContext, TrainingContext},
         cut::FutureCostFunction,
         horizon_mode::HorizonMode,
-        indexer::StateLayout,
+        indexer::StateSpace,
         inflow_method::InflowNonNegativityMethod,
         lp_builder::PatchBuffer,
         test_support::{state_layout, study_dims},
@@ -885,7 +885,7 @@ mod tests {
         }
     }
 
-    fn single_workspace(solver: MockSolver, state: &StateLayout) -> SolverWorkspace<MockSolver> {
+    fn single_workspace(solver: MockSolver, state: &StateSpace) -> SolverWorkspace<MockSolver> {
         SolverWorkspace {
             rank: 0,
             worker_id: 0,
@@ -1083,7 +1083,7 @@ mod tests {
     struct ForwardFixture {
         n_stages: usize,
         n_scenarios: usize,
-        state: StateLayout,
+        state: StateSpace,
         templates: Vec<StageTemplate>,
         base_rows: Vec<usize>,
         initial_state: Vec<f64>,

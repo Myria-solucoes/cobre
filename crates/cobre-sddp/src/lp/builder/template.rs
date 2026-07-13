@@ -22,7 +22,7 @@ use super::{
 use crate::indexer::Boundary;
 use crate::indexer::EvaporationIndices;
 use crate::indexer::HydroSys;
-use crate::indexer::StateLayout;
+use crate::indexer::StateSpace;
 use crate::indexer::StorageBoundaryGrid;
 use crate::indexer::ThermalSys;
 #[cfg(any(test, feature = "test-support"))]
@@ -388,7 +388,7 @@ pub(super) struct StageBuildOutput {
 #[allow(clippy::similar_names)]
 pub(super) fn build_single_stage_template(
     ctx: &TemplateBuildCtx<'_>,
-    state: &StateLayout,
+    state: &StateSpace,
     stage: &Stage,
     stage_idx: usize,
 ) -> StageBuildOutput {
@@ -588,7 +588,7 @@ fn collect_load_bus_indices(system: &System, bus_pos: &BTreeMap<EntityId, usize>
 /// use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
 /// use cobre_sddp::InflowNonNegativityMethod;
 /// use cobre_sddp::hydro_models::PrepareHydroModelsResult;
-/// use cobre_sddp::indexer::StateLayout;
+/// use cobre_sddp::indexer::StateSpace;
 /// use cobre_sddp::lp_builder::build_stage_templates;
 /// use cobre_sddp::resolved_parameters::ResolvedParameters;
 /// use cobre_stochastic::par::precompute::PrecomputedPar;
@@ -607,7 +607,7 @@ fn collect_load_bus_indices(system: &System, bus_pos: &BTreeMap<EntityId, usize>
 /// let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
 /// let resolved_parameters = ResolvedParameters::default();
 /// // No stages, so the state layout is empty too.
-/// let state_layout = StateLayout::new(0, 0, 0, Vec::new(), 0, 0, Vec::new(), &[]);
+/// let state_layout = StateSpace::new(0, 0, 0, Vec::new(), 0, 0, Vec::new(), &[]);
 /// let result = build_stage_templates(&system, method, &par_lp, &normal_lp,
 ///                                    &hydro_models.production, &hydro_models.evaporation,
 ///                                    &resolved_parameters, &state_layout, &[],
@@ -632,7 +632,7 @@ pub fn build_stage_templates(
     production_models: &ProductionModelSet,
     evaporation_models: &EvaporationModelSet,
     resolved_parameters: &ResolvedParameters,
-    state_layout: &StateLayout,
+    state_layout: &StateSpace,
     per_stage_mask: &[Vec<usize>],
     arc_stage_weights: &HashMap<usize, Vec<Vec<f64>>>,
     arc_spread_chrono: &HashMap<usize, Vec<Option<SpreadResolution>>>,
@@ -718,7 +718,7 @@ pub fn build_stage_templates(
 /// through the same setup entry point production uses
 /// (`crate::setup::resolve_state_layout`), then delegates. Production
 /// (`StudySetup`) always threads its own already-resolved
-/// `StateLayout`/`per_stage_mask` directly through [`build_stage_templates`]
+/// `StateSpace`/`per_stage_mask` directly through [`build_stage_templates`]
 /// instead — this wrapper exists so test call sites that build templates from
 /// a bare system do not each need to resolve the layout themselves.
 ///
@@ -836,7 +836,7 @@ pub(super) fn build_filling_v_target(
 // `TemplateBuildCtx` literal; splitting it would scatter the construction the
 // literal reads back, without removing any branching.
 // Rationale: too_many_arguments — each parameter threads a single-owner value
-// from `StateLayout` into the shared `TemplateBuildCtx` (mirroring the existing
+// from `StateSpace` into the shared `TemplateBuildCtx` (mirroring the existing
 // `anticipated_resolution`/`anticipated_lead_stages` threads); a wrapper struct
 // used nowhere else would rename the coupling, not remove it.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]

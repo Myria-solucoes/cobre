@@ -1830,7 +1830,7 @@ mod filling_cut_validity {
         // incoming-state pin via the SAME pin chain every other stage uses (no
         // entry-boundary reset / RHS-fold / `initial_operating_volume`); the no-reset
         // contract is owned by `builder_setup_never_references_entry_boundary_reset`.
-        // Column identity is structural — one study-level `StateLayout` maps each
+        // Column identity is structural — one study-level `StateSpace` maps each
         // storage coordinate to a stage-invariant dense column, so a same-vs-same
         // assertion would be tautological; this block adds the value-continuity check.
         let entry = ENTRY_STAGE_ID as usize;

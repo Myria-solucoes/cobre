@@ -4,7 +4,8 @@ use cobre_core::{BlockMode, CoefficientRef, ConstraintSense, ContractType, Entit
 use crate::generic_constraints::resolve_variable_ref;
 use crate::hydro_models::{EvaporationModel, ResolvedProductionModel};
 use crate::indexer::{
-    AnticipatedLocal, BlockIdx, Boundary, EvapLocal, HydroSys, LineSys, StateLayout,
+    AnticipatedLocal, BlockIdx, Boundary, EvapLocal, HydroSys, LineSys, StateSpace,
+    anticipated_resolution_for,
 };
 
 use super::M3S_TO_HM3;
@@ -89,9 +90,8 @@ pub(super) fn fill_anticipated_state_out_def_entries(
     let ring = anticipated_ring(layout);
     let mut n_active: usize = 0;
     for local_idx in 0..n_ant {
-        let point = layout
-            .state
-            .anticipated_resolution_for(AnticipatedLocal::new(local_idx), n_stages);
+        let point =
+            anticipated_resolution_for(layout.state, AnticipatedLocal::new(local_idx), n_stages);
         let Some(delivery_stage) = point.genuine_decisions_at(stage_idx).next() else {
             continue;
         };
@@ -346,7 +346,7 @@ fn fill_parallel_water_entries(
 /// Each downstream plant's contiguous bucket sub-range (relative to
 /// `transit_buckets_out`/`transit_buckets_in`'s own start), in
 /// `transit_bucket_column_order`'s plant-major order.
-pub(super) fn transit_bucket_plant_ranges(state: &StateLayout) -> Vec<Range<usize>> {
+pub(super) fn transit_bucket_plant_ranges(state: &StateSpace) -> Vec<Range<usize>> {
     let order = &state.transit_bucket_column_order;
     let mut ranges = Vec::new();
     let mut start = 0;
@@ -365,7 +365,7 @@ pub(super) fn transit_bucket_plant_ranges(state: &StateLayout) -> Vec<Range<usiz
 /// One plant's [`DeliveryRing`] (`n_lanes = 1`) over its LOCAL bucket sub-`range`
 /// (relative to `transit_buckets_out`/`transit_buckets_in`'s own start) — the single
 /// owner of the ragged-to-dense addressing every bucket call site shares.
-pub(super) fn transit_bucket_ring(state: &StateLayout, range: Range<usize>) -> DeliveryRing {
+pub(super) fn transit_bucket_ring(state: &StateSpace, range: Range<usize>) -> DeliveryRing {
     let depth = range.len();
     DeliveryRing::new(
         state.transit_buckets_out.start + range.start..state.transit_buckets_out.start + range.end,
@@ -472,7 +472,7 @@ fn fill_arc_release_block_entries(
 /// The bucket sub-range `[start, end)` (relative to `transit_buckets_out`/
 /// `transit_buckets_in`'s own start) for downstream plant `plant_idx`, or `None` when
 /// it declares no incoming arc.
-fn plant_transit_bucket_range(state: &StateLayout, plant_idx: usize) -> Option<Range<usize>> {
+fn plant_transit_bucket_range(state: &StateSpace, plant_idx: usize) -> Option<Range<usize>> {
     let start = state
         .transit_bucket_column_order
         .iter()
@@ -3033,7 +3033,7 @@ mod pumping_water_tests {
     use crate::hydro_models::{
         EvaporationModel, EvaporationModelSet, ProductionModelSet, ResolvedProductionModel,
     };
-    use crate::indexer::{BlockIdx, Boundary, EvapLocal, HydroSys, LineSys, StateDim, StateLayout};
+    use crate::indexer::{BlockIdx, Boundary, EvapLocal, HydroSys, LineSys, StateDim, StateSpace};
     use crate::lead_time::{AnticipatedResolution, SpreadResolution, resolve_spread};
     use crate::resolved_parameters::ResolvedParameters;
 
@@ -4742,7 +4742,7 @@ mod pumping_water_tests {
         };
 
         let stage = two_block_stage(0, [300.0, 444.0]);
-        let state = StateLayout::new(
+        let state = StateSpace::new(
             ctx.n_hydros,
             ctx.max_par_order,
             1,
@@ -4854,7 +4854,7 @@ mod pumping_water_tests {
         };
 
         let stage = two_block_stage(0, [300.0, 444.0]);
-        let state = StateLayout::new(
+        let state = StateSpace::new(
             ctx.n_hydros,
             ctx.max_par_order,
             1,
@@ -4937,7 +4937,7 @@ mod pumping_water_tests {
             per_stage_mask: vec![vec![1]],
             ..fixtures.make_ctx()
         };
-        let state = StateLayout::new(
+        let state = StateSpace::new(
             ctx.n_hydros,
             ctx.max_par_order,
             1,
@@ -5058,7 +5058,7 @@ mod pumping_water_tests {
         };
 
         let stage = two_block_stage(0, [300.0, 444.0]);
-        let state = StateLayout::new(
+        let state = StateSpace::new(
             ctx.n_hydros,
             ctx.max_par_order,
             1,
@@ -5143,7 +5143,7 @@ mod pumping_water_tests {
             ..fixtures.make_ctx()
         };
         let stage = two_block_stage(0, [300.0, 444.0]);
-        let state = StateLayout::new(
+        let state = StateSpace::new(
             ctx.n_hydros,
             ctx.max_par_order,
             4,
@@ -5279,7 +5279,7 @@ mod pumping_water_tests {
         };
 
         let stage = two_block_stage(0, [300.0, 444.0]);
-        let state = StateLayout::new(
+        let state = StateSpace::new(
             ctx.n_hydros,
             ctx.max_par_order,
             1,
@@ -5362,7 +5362,7 @@ mod pumping_water_tests {
         };
 
         let stage = chronological_stage(0, &block_hours);
-        let state = StateLayout::new(
+        let state = StateSpace::new(
             ctx.n_hydros,
             ctx.max_par_order,
             1,
@@ -5494,7 +5494,7 @@ mod pumping_water_tests {
         };
         let mut par_stage = chronological_stage(0, &[720.0]);
         par_stage.block_mode = BlockMode::Parallel;
-        let par_state = StateLayout::new(
+        let par_state = StateSpace::new(
             par_ctx.n_hydros,
             par_ctx.max_par_order,
             1,
@@ -5517,7 +5517,7 @@ mod pumping_water_tests {
             ..chr_fixtures.make_ctx()
         };
         let chr_stage = chronological_stage(0, &[720.0]);
-        let chr_state = StateLayout::new(
+        let chr_state = StateSpace::new(
             chr_ctx.n_hydros,
             chr_ctx.max_par_order,
             1,
@@ -5586,7 +5586,7 @@ mod pumping_water_tests {
         };
 
         let stage = chronological_stage(0, &[720.0]);
-        let state = StateLayout::new(
+        let state = StateSpace::new(
             ctx.n_hydros,
             ctx.max_par_order,
             1,
@@ -5640,7 +5640,7 @@ mod pumping_water_tests {
         };
 
         let stage = chronological_stage(0, &[720.0]);
-        let state = StateLayout::new(
+        let state = StateSpace::new(
             ctx.n_hydros,
             ctx.max_par_order,
             1,
@@ -5802,7 +5802,7 @@ mod pumping_water_tests {
         };
 
         let stage = two_block_stage(0, [300.0, 420.0]);
-        let state = StateLayout::new(
+        let state = StateSpace::new(
             ctx.n_hydros,
             ctx.max_par_order,
             1,
@@ -5857,7 +5857,7 @@ mod pumping_water_tests {
         };
 
         let stage = chronological_stage(0, &[300.0, 420.0]);
-        let state = StateLayout::new(
+        let state = StateSpace::new(
             ctx.n_hydros,
             ctx.max_par_order,
             1,

@@ -9,7 +9,7 @@ use cobre_solver::SolverInterface;
 use cobre_stochastic::par::lag_kernel::{LagMajor, advance_lag_chain};
 use cobre_stochastic::{StochasticContext, evaluate_par_batch, solve_par_noise_batch};
 
-use crate::indexer::StateLayout;
+use crate::indexer::StateSpace;
 use crate::{
     InflowNonNegativityMethod,
     context::{StageContext, TrainingContext},
@@ -177,7 +177,7 @@ pub(crate) fn shift_lag_state(
     state: &mut [f64],
     incoming_lags: &[f64],
     unscaled_primal: &[f64],
-    layout: &StateLayout,
+    layout: &StateSpace,
 ) {
     let n_h = layout.hydro_count;
     let l_max = layout.max_par_order;
@@ -209,7 +209,7 @@ pub(crate) use cobre_stochastic::par::lag_kernel::PrimaryLagAccum as LagAccumSta
 /// finalize_period=true`) this produces bit-for-bit identical results to
 /// [`shift_lag_state`].
 ///
-/// Thin adapter: resolves the LP-`StateLayout` offsets into plain slices, then
+/// Thin adapter: resolves the LP-`StateSpace` offsets into plain slices, then
 /// delegates the accumulate/finalize/shift/downstream-ring algorithm to
 /// [`advance_lag_chain`].
 ///
@@ -232,7 +232,7 @@ pub(crate) fn accumulate_and_shift_lag_state(
     state: &mut [f64],
     incoming_lags: &[f64],
     unscaled_primal: &[f64],
-    layout: &StateLayout,
+    layout: &StateSpace,
     stage_lag: &StageLagTransition,
     lag: &mut LagAccumState<'_>,
     ds: &mut DownstreamAccumState<'_>,
@@ -514,7 +514,7 @@ mod tests {
     use crate::{
         context::{StageContext, TrainingContext},
         horizon_mode::HorizonMode,
-        indexer::StateLayout,
+        indexer::StateSpace,
         inflow_method::InflowNonNegativityMethod,
         noise::{
             NcsNoiseOffsets, apply_ncs_col_bounds, build_dense_ncs_col_indices,
@@ -1749,7 +1749,7 @@ mod tests {
         state: &mut [f64],
         incoming_lags: &[f64],
         z_inflow: f64,
-        layout: &StateLayout,
+        layout: &StateSpace,
         stage_lag: &StageLagTransition,
         lag: &mut LagAccumState<'_>,
         ds: &mut DownstreamAccumState<'_>,
@@ -1764,7 +1764,7 @@ mod tests {
         state: &mut [f64],
         incoming_lags: &[f64],
         z_inflows: [f64; 2],
-        layout: &StateLayout,
+        layout: &StateSpace,
         stage_lag: &StageLagTransition,
         lag: &mut LagAccumState<'_>,
         ds: &mut DownstreamAccumState<'_>,

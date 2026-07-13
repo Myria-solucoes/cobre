@@ -4,7 +4,7 @@ use cobre_core::{ContractType, Stage};
 use crate::hydro_models::{EvaporationModel, ResolvedProductionModel};
 use crate::indexer::{
     AnticipatedLocal, BlockIdx, Boundary, EvapLocal, FillingTargetLocal, FloorLocal, FphaLocal,
-    HydroSys, LineSys,
+    HydroSys, LineSys, anticipated_resolution_for, is_anticipated_decision_active_for_delivery,
 };
 
 use super::EVAPORATION_FLOW_SAFETY_MARGIN;
@@ -397,9 +397,8 @@ pub(super) fn fill_anticipated_columns(
 
     let mut active_count = 0_usize;
     for local_idx in 0..n_ant {
-        let point = layout
-            .state
-            .anticipated_resolution_for(AnticipatedLocal::new(local_idx), n_stages);
+        let point =
+            anticipated_resolution_for(layout.state, AnticipatedLocal::new(local_idx), n_stages);
         let Some(delivery_stage) = point.genuine_decisions_at(stage_idx).next() else {
             continue;
         };
@@ -417,7 +416,8 @@ pub(super) fn fill_anticipated_columns(
         );
         let state_out_col = ring.out_col(slot, local_idx);
 
-        if layout.state.is_anticipated_decision_active_for_delivery(
+        if is_anticipated_decision_active_for_delivery(
+            layout.state,
             AnticipatedLocal::new(local_idx),
             delivery_stage,
             n_stages,
@@ -1252,7 +1252,7 @@ mod interior_storage_bound_tests {
 
     /// Run `fill_storage_columns` against raw, unscaled buffers for `stage`,
     /// returning the bound/objective buffers plus the resolved storage-column
-    /// offsets by value (the borrowed `StateLayout` cannot escape).
+    /// offsets by value (the borrowed `StateSpace` cannot escape).
     fn run_fill(fixtures: &InteriorStorageFixtures, stage: &Stage) -> RawFill {
         let ctx = fixtures.make_ctx();
         let state = state_layout_for(&ctx);
@@ -1746,7 +1746,7 @@ mod diversion_bound_tests {
     ///
     /// Returns the layout's `(n_blks, col_diversion_start)` by value rather than
     /// the `StageLayout` itself: the layout borrows the function-local
-    /// `StateLayout`, so it cannot escape — the caller only needs these two
+    /// `StateSpace`, so it cannot escape — the caller only needs these two
     /// offsets to index `col_upper`.
     fn run_fill(fixtures: &DivFixtures) -> (Vec<f64>, usize, usize) {
         let stage = two_block_stage(STAGE_IDX, [372.0, 372.0]);

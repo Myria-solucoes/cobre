@@ -773,7 +773,7 @@ mod lb_conformance {
     use cobre_sddp::{
         context::{StageContext, TrainingContext},
         horizon_mode::HorizonMode,
-        indexer::{StateLayout, StudyDimensions},
+        indexer::{StateSpace, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
         lower_bound::{LbEvalScratch, LbEvalScratchBundle, evaluate_lower_bound},
         lp_builder::PatchBuffer,
@@ -789,11 +789,11 @@ mod lb_conformance {
     use super::{LocalComm, MockSolver, make_fcf, minimal_template, simple_opening_tree};
 
     /// Mirrors the gated `test_support::state_layout_for` body via the
-    /// public [`StateLayout::new`] constructor, so this external test crate (which
+    /// public [`StateSpace::new`] constructor, so this external test crate (which
     /// does not see the parent crate's `#[cfg(test)]` surface) resolves
     /// byte-identical patch columns on the default feature set.
-    fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
-        StateLayout::new(
+    fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateSpace {
+        StateSpace::new(
             hydro_count,
             max_par_order,
             0,
@@ -1013,7 +1013,7 @@ fn build_geometry(
     // theta = N*(3+L); control region starts at theta + 1 (no anticipated thermals).
     let theta = hydro_count * (3 + max_par_order);
     let turbine_start = theta + 1;
-    // StateLayout::storage_in.start under the same no-anticipated-thermals assumption.
+    // StateSpace::storage_in.start under the same no-anticipated-thermals assumption.
     let storage_in_base = hydro_count * (2 + max_par_order);
     let spillage_start = turbine_start + hydro_count * n_blks;
     let diversion_start = spillage_start + hydro_count * n_blks;

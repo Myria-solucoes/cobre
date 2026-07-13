@@ -17,23 +17,23 @@ use super::{
     contract_family_slot, resolve_variable_ref, variable_ref_is_block_independent,
 };
 use crate::hydro_models::{FphaPlane, ProductionModelSet, ResolvedProductionModel};
-use crate::indexer::{Boundary, StateLayout, StorageBoundaryGrid};
+use crate::indexer::{Boundary, StateSpace, StorageBoundaryGrid};
 use crate::lp_builder::StageGeometry;
 use crate::test_support::{GeometryDims, geometry};
 
 // ── Test helpers ──────────────────────────────────────────────────────────
 
-/// Build the [`StateLayout`] matching [`make_indexer`]'s state dimensions
+/// Build the [`StateSpace`] matching [`make_indexer`]'s state dimensions
 /// (N=4 hydros, L=0 lags, no anticipated thermals), so the role-(a) storage /
 /// z-inflow columns the resolver reads through the handle equal the indexer's.
-fn make_state() -> StateLayout {
-    StateLayout::new(4, 0, 0, Vec::new(), 0, 0, vec![], &[0, 0, 0, 0])
+fn make_state() -> StateSpace {
+    StateSpace::new(4, 0, 0, Vec::new(), 0, 0, vec![], &[0, 0, 0, 0])
 }
 
-/// Build the [`StateLayout`] matching [`make_indexer_with_anticipated`]'s state
+/// Build the [`StateSpace`] matching [`make_indexer_with_anticipated`]'s state
 /// dimensions (N=0 hydros, L=0, A=1 anticipated plant, k_max=2, K=[2]).
-fn make_state_anticipated() -> StateLayout {
-    StateLayout::new(0, 0, 0, Vec::new(), 1, 2, vec![2], &[])
+fn make_state_anticipated() -> StateSpace {
+    StateSpace::new(0, 0, 0, Vec::new(), 1, 2, vec![2], &[])
 }
 
 /// Mirrors the production `GenericResolverGeom` built in `entries.rs`, sourcing
@@ -41,7 +41,7 @@ fn make_state_anticipated() -> StateLayout {
 /// tests exercise the same offsets production does.
 fn make_geom<'a>(
     indexer: &'a StageGeometry,
-    state: &'a StateLayout,
+    state: &'a StateSpace,
     max_deficit_segments: usize,
     anticipated_thermal_indices: &[usize],
 ) -> GenericResolverGeom<'a> {
@@ -61,7 +61,7 @@ fn make_geom<'a>(
 /// ranges here.
 fn make_geom_with_contracts<'a>(
     indexer: &'a StageGeometry,
-    state: &'a StateLayout,
+    state: &'a StateSpace,
     max_deficit_segments: usize,
     anticipated_thermal_indices: &[usize],
     contract_import: &'a std::ops::Range<usize>,
@@ -749,7 +749,7 @@ fn hydro_evaporation_maps_to_evaporation_flow_col() {
     let bpos: BTreeMap<EntityId, usize> = [(EntityId(100), 0)].into_iter().collect();
     let lpos: BTreeMap<EntityId, usize> = BTreeMap::new();
 
-    let state = StateLayout::new(2, 0, 0, Vec::new(), 0, 0, vec![], &[0, 0]);
+    let state = StateSpace::new(2, 0, 0, Vec::new(), 0, 0, vec![], &[0, 0]);
     let geom = make_geom(&evap_indexer, &state, 1, &[]);
     let result = call(
         VariableRef::HydroEvaporation {
@@ -798,7 +798,7 @@ fn hydro_evaporation_no_evap_model_returns_empty() {
     let lpos: BTreeMap<EntityId, usize> = BTreeMap::new();
 
     // Hydro 20 (pos=1) has no evaporation in evap_hydro_indices=[0]
-    let state = StateLayout::new(2, 0, 0, Vec::new(), 0, 0, vec![], &[0, 0]);
+    let state = StateSpace::new(2, 0, 0, Vec::new(), 0, 0, vec![], &[0, 0]);
     let geom = make_geom(&evap_indexer, &state, 1, &[]);
     let result = call(
         VariableRef::HydroEvaporation {
@@ -849,7 +849,7 @@ fn hydro_evaporation_none_resolves_block_zero_not_sum() {
     let bpos: BTreeMap<EntityId, usize> = [(EntityId(100), 0)].into_iter().collect();
     let lpos: BTreeMap<EntityId, usize> = BTreeMap::new();
 
-    let state = StateLayout::new(2, 0, 0, Vec::new(), 0, 0, vec![], &[0, 0]);
+    let state = StateSpace::new(2, 0, 0, Vec::new(), 0, 0, vec![], &[0, 0]);
     let geom = make_geom(&evap_indexer, &state, 3, &[]);
 
     let resolve = |block_id: Option<usize>| {
@@ -2311,7 +2311,7 @@ const STORAGE_INTERNAL_START: usize = 12;
 /// Build the K=3 chronological geom with a non-zero `storage_internal_start`.
 fn make_chronological_geom<'a>(
     indexer: &'a StageGeometry,
-    state: &'a StateLayout,
+    state: &'a StateSpace,
 ) -> GenericResolverGeom<'a> {
     let mut geom = make_geom(indexer, state, 2, &[]);
     geom.storage_boundary_grid = StorageBoundaryGrid::new(

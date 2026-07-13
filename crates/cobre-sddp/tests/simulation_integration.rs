@@ -49,7 +49,7 @@ use cobre_sddp::{
     cut::FutureCostFunction,
     energy_conversion::{EnergyConversion, EnergyConversionSet},
     horizon_mode::HorizonMode,
-    indexer::{CutStateProjection, StateLayout, StudyDimensions},
+    indexer::{CutStateProjection, StateSpace, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
     lp_builder::PatchBuffer,
     risk_measure::RiskMeasure,
@@ -64,10 +64,10 @@ use common::StubComm;
 use common::builders::{BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage};
 
 /// Mirrors the gated `test_support::state_layout_for` via the public
-/// [`StateLayout::new`] constructor: this external test crate cannot see the parent
+/// [`StateSpace::new`] constructor: this external test crate cannot see the parent
 /// crate's `#[cfg(test)]` surface, so it rebuilds byte-identical patch columns here.
-fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
-    StateLayout::new(
+fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateSpace {
+    StateSpace::new(
         hydro_count,
         max_par_order,
         0,
@@ -354,7 +354,7 @@ struct Fixture {
     n_stages: usize,
     templates: Vec<StageTemplate>,
     base_rows: Vec<usize>,
-    state: StateLayout,
+    state: StateSpace,
     initial_state: Vec<f64>,
     stochastic: StochasticContext,
     horizon: HorizonMode,
@@ -1574,7 +1574,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
 /// see the parent crate's `#[cfg(test)]` surface) builds the default all-enabled
 /// per-pool projection. Every pool projects the full global state, keeping the
 /// extracted subgradient bit-identical to the global-loop result.
-fn all_enabled_cut_state_layouts(global: &StateLayout, n_stages: usize) -> Vec<CutStateProjection> {
+fn all_enabled_cut_state_layouts(global: &StateSpace, n_stages: usize) -> Vec<CutStateProjection> {
     let full = StageStateConfig {
         storage: true,
         inflow_lags: true,

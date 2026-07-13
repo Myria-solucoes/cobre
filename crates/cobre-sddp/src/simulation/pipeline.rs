@@ -33,7 +33,7 @@ use crate::{
     FutureCostFunction, SddpError,
     context::{StageContext, TrainingContext},
     dcs::{DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
-    indexer::StateLayout,
+    indexer::StateSpace,
     lp_builder::COST_SCALE_FACTOR,
     simulation::{
         config::SimulationConfig,
@@ -557,7 +557,7 @@ fn extract_sim_stage_result(
     view_objective: f64,
     ctx: &StageContext<'_>,
     output: &SimulationOutputSpec<'_>,
-    state: &StateLayout,
+    state: &StateSpace,
     study_dims: &StudyDimensions,
     ids: &SimStageIds,
     stage_id: i32,

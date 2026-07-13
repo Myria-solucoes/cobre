@@ -760,7 +760,7 @@ mod determinism {
         energy_conversion::{EnergyConversion, EnergyConversionSet},
         forward::{ForwardResult, sync_forward},
         horizon_mode::HorizonMode,
-        indexer::{CutStateProjection, StateLayout, StudyDimensions},
+        indexer::{CutStateProjection, StateSpace, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
         lp_builder::PatchBuffer,
         risk_measure::RiskMeasure,
@@ -782,11 +782,11 @@ mod determinism {
     // ===========================================================================
 
     /// Mirrors the gated `test_support::state_layout_for` via the public
-    /// [`StateLayout::new`] constructor: this external test crate cannot see the
+    /// [`StateSpace::new`] constructor: this external test crate cannot see the
     /// parent crate's `#[cfg(test)]` surface, so it rebuilds byte-identical patch
     /// columns on the default feature set.
-    fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
-        StateLayout::new(
+    fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateSpace {
+        StateSpace::new(
             hydro_count,
             max_par_order,
             0,
@@ -1144,7 +1144,7 @@ mod determinism {
         n_stages: usize,
         templates: Vec<StageTemplate>,
         base_rows: Vec<usize>,
-        state: StateLayout,
+        state: StateSpace,
         initial_state: Vec<f64>,
         stochastic: StochasticContext,
         horizon: HorizonMode,
@@ -1860,7 +1860,7 @@ mod determinism {
     /// per-pool projection. Every pool projects the full global state, keeping the
     /// extracted subgradient bit-identical to the global-loop result.
     fn all_enabled_cut_state_layouts(
-        global: &StateLayout,
+        global: &StateSpace,
         n_stages: usize,
     ) -> Vec<CutStateProjection> {
         let full = StageStateConfig {
@@ -1875,7 +1875,7 @@ mod determinism {
 
 mod water_travel_time_no_arc_byte_identity {
     //! With the water travel-time feature compiled in but no arc declared on any
-    //! hydro, `n_buckets == 0` and the `StateLayout`/LP/cuts/outputs must collapse
+    //! hydro, `n_buckets == 0` and the `StateSpace`/LP/cuts/outputs must collapse
     //! to the pre-bucket baseline byte-for-byte (the `n_buckets` == 0
     //! byte-identity anchor). This module makes that guarantee an explicit
     //! regression at two scales:
@@ -1883,12 +1883,12 @@ mod water_travel_time_no_arc_byte_identity {
     //! - [`synthetic_no_arc_state_layout_matches_pre_transit_bucket_formula`] and
     //!   [`k1_chronological_byte_identical_to_parallel_with_no_arc_declared`]
     //!   build a tiny in-code system (no solver, no baseline) and check the
-    //!   `StateLayout` dimensions and the `K = 1` chronological/parallel
+    //!   `StateSpace` dimensions and the `K = 1` chronological/parallel
     //!   templates directly.
     //! - [`d06_state_layout_matches_pre_transit_bucket_formula`] and
     //!   `d06_parity_hash_matches_existing_baseline_{highs,clp}` exercise a real
     //!   golden deterministic case (D06, which declares no arc): its
-    //!   `StateLayout` and its full train+simulate parity hash, reusing
+    //!   `StateSpace` and its full train+simulate parity hash, reusing
     //!   [`common::parity_hash::run_golden_case`](super::common::parity_hash::run_golden_case)
     //!   against the EXISTING committed baseline — no new baseline is written.
 
@@ -1906,7 +1906,7 @@ mod water_travel_time_no_arc_byte_identity {
     use cobre_sddp::{
         StudySetup,
         hydro_models::prepare_hydro_models,
-        indexer::StateLayout,
+        indexer::StateSpace,
         setup::{StudyParams, prepare_stochastic},
     };
     use cobre_solver::StageTemplate;
@@ -2258,7 +2258,7 @@ mod water_travel_time_no_arc_byte_identity {
     /// pre-bucket `N*(1+L) + A*k_max` — computed from the layout's OWN public
     /// dimensions (`hydro_count`, `max_par_order`, `n_anticipated`, `k_max`), not
     /// a hand-picked literal, so the check holds for any no-arc case.
-    fn assert_no_arc_state_layout(state: &StateLayout) {
+    fn assert_no_arc_state_layout(state: &StateSpace) {
         assert_eq!(state.n_buckets, 0, "no arc declared: n_buckets must be 0");
         assert!(
             state.transit_buckets_out.is_empty(),
@@ -2281,7 +2281,7 @@ mod water_travel_time_no_arc_byte_identity {
         );
     }
 
-    /// Synthetic no-arc system: `StateLayout` collapses to the pre-bucket
+    /// Synthetic no-arc system: `StateSpace` collapses to the pre-bucket
     /// formula with no `.sha256` baseline involved.
     #[test]
     fn synthetic_no_arc_state_layout_matches_pre_transit_bucket_formula() {
@@ -2321,7 +2321,7 @@ mod water_travel_time_no_arc_byte_identity {
 
     /// Build D06's `StudySetup` (mirrors `common::parity_hash::run_golden_case`'s
     /// construction) without training/simulating, so the caller can inspect the
-    /// built `StateLayout` directly.
+    /// built `StateSpace` directly.
     fn build_d06_setup() -> StudySetup {
         let dir = d06_case_dir();
         let config_path = dir.join("config.json");

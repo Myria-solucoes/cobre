@@ -32,7 +32,7 @@ use crate::{
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
     horizon_mode::HorizonMode,
-    indexer::StateLayout,
+    indexer::StateSpace,
     inflow_method::InflowNonNegativityMethod,
     lp_builder::PatchBuffer,
     risk_measure::RiskMeasure,
@@ -542,7 +542,7 @@ fn forward_overhead_scheduling_clamped_to_zero_on_clock_skew() {
     );
 }
 
-fn single_workspace(solver: MockSolver, state: &StateLayout) -> SolverWorkspace<MockSolver> {
+fn single_workspace(solver: MockSolver, state: &StateSpace) -> SolverWorkspace<MockSolver> {
     SolverWorkspace {
         rank: 0,
         worker_id: 0,

@@ -36,7 +36,7 @@ use cobre_sddp::{
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
     horizon_mode::HorizonMode,
-    indexer::{StateLayout, StudyDimensions},
+    indexer::{StateSpace, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
     lp_builder::PatchBuffer,
     simulation::{EntityCounts, SimulationConfig, SimulationOutputSpec},
@@ -50,11 +50,11 @@ use common::builders::{BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make
 // ── Stub communicator ────────────────────────────────────────────────────────
 
 /// Mirrors the gated `test_support::state_layout_for` via the public
-/// [`StateLayout::new`] constructor: this external test crate cannot see the
+/// [`StateSpace::new`] constructor: this external test crate cannot see the
 /// parent crate's `#[cfg(test)]` surface, so it rebuilds byte-identical patch
 /// columns on the default feature set.
-fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
-    StateLayout::new(
+fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateSpace {
+    StateSpace::new(
         hydro_count,
         max_par_order,
         0,

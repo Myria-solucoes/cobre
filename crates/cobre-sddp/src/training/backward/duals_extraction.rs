@@ -90,7 +90,7 @@ mod tests {
     use cobre_solver::SolutionView;
 
     use super::extract_state_duals_only;
-    use crate::indexer::{CutStateProjection, StateDim, StateLayout};
+    use crate::indexer::{CutStateProjection, StateDim, StateSpace};
     use cobre_core::temporal::StageStateConfig;
 
     const ALL_ENABLED: StageStateConfig = StageStateConfig {
@@ -102,9 +102,9 @@ mod tests {
         inflow_lags: false,
     };
 
-    fn state_layout(hydro_count: usize, max_par_order: usize) -> StateLayout {
+    fn state_layout(hydro_count: usize, max_par_order: usize) -> StateSpace {
         let lag_counts = vec![max_par_order; hydro_count];
-        StateLayout::new(
+        StateSpace::new(
             hydro_count,
             max_par_order,
             0,
@@ -156,7 +156,7 @@ mod tests {
 
     /// All-enabled `CutStateProjection` reproduces the pre-change global-loop result:
     /// `n_slots()` equals the global `n_state` and every slot reads the same LP
-    /// column the global `StateLayout` resolver would.
+    /// column the global `StateSpace` resolver would.
     #[test]
     fn all_enabled_reproduces_global_loop_result() {
         let global = state_layout(3, 2);

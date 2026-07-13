@@ -1634,7 +1634,7 @@ fn num_rows_drops_by_n_state_with_anticipated_thermals() {
 
 /// Build a `ResolvedBounds` with zero entities but the given `n_stages`.
 ///
-/// Used to exercise the `StateLayout::is_anticipated_decision_active` gate
+/// Used to exercise the `is_anticipated_decision_active` gate
 /// in `n_anticipated_state_out_def_rows` without needing real entity data.
 fn bounds_with_n_stages(n_stages: usize) -> ResolvedBounds {
     ResolvedBounds::new(

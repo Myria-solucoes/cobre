@@ -1,27 +1,27 @@
-//! Storage-scoped projection of the global [`StateLayout`] onto the cut-state
+//! Storage-scoped projection of the global [`StateSpace`] onto the cut-state
 //! dimensions a stage enables, for cut storage, subgradient extraction (incoming
 //! columns), and cut rendering (outgoing columns).
 
 use cobre_core::temporal::StageStateConfig;
 
-use super::{CutSlot, InCol, OutCol, REGION_ORDER, StateDim, StateLayout};
+use super::{CutSlot, InCol, OutCol, REGION_ORDER, StateDim, StateSpace};
 
 /// A storage-scoped view of the global state vector exposing only the cut-state
 /// dimensions a stage enables, plus travel-time buckets and anticipated state
 /// (always included, never gated by [`StageStateConfig`]).
 ///
-/// A projection **of** a [`StateLayout`], not a sibling layout: it delegates all
+/// A projection **of** a [`StateSpace`], not a sibling layout: it delegates all
 /// column arithmetic to the global layout and never drives the LP.
 ///
 /// ## Default-identity contract
 ///
 /// When `storage: true, inflow_lags: true` the projection is the identity:
-/// [`Self::n_slots`] equals [`StateLayout::n_state`],
+/// [`Self::n_slots`] equals [`StateSpace::n_state`],
 /// [`Self::incoming_column`] equals the global incoming resolver for
 /// every `j`, and [`Self::render_pairs`] reproduces the global
 /// `nonzero_state_indices` render exactly. Holds because the construction walks
 /// the state index space in `REGION_ORDER`'s storage → lag → buckets →
-/// anticipated order — the single owner [`StateLayout::set_nonzero_mask`] also
+/// anticipated order — the single owner [`StateSpace::set_nonzero_mask`] also
 /// walks. The forbidden alternative is reordering dimensions (e.g. anticipated
 /// before buckets), landing a cut coefficient on the wrong LP column and
 /// silently corrupting every existing study.
@@ -54,35 +54,35 @@ pub struct CutStateProjection {
 }
 
 impl CutStateProjection {
-    /// Project the global [`StateLayout`] onto the cut-state dimensions
+    /// Project the global [`StateSpace`] onto the cut-state dimensions
     /// `state_config` enables, with travel-time buckets and anticipated state
     /// always included, walking `REGION_ORDER`'s storage → lag → buckets →
     /// anticipated order (the default-identity contract) via
-    /// `StateLayout`'s `state_dim_range`, the sole owner of the boundary
+    /// `StateSpace`'s `state_dim_range`, the sole owner of the boundary
     /// arithmetic.
     ///
     /// The per-slot fan-in cannot swap roles: an outgoing column pushed onto
     /// the incoming-column vector fails to compile.
     ///
     /// ```compile_fail
-    /// use cobre_sddp::indexer::{InCol, StateDim, StateLayout};
+    /// use cobre_sddp::indexer::{InCol, StateDim, StateSpace};
     ///
-    /// let global = StateLayout::new(1, 0, 0, Vec::new(), 0, 0, Vec::new(), &[0]);
+    /// let global = StateSpace::new(1, 0, 0, Vec::new(), 0, 0, Vec::new(), &[0]);
     /// let outgoing = global.lp_column_for_state(StateDim::new(0));
     /// let mut incoming_columns: Vec<InCol> = Vec::new();
     /// incoming_columns.push(outgoing); // fan-in swap: outgoing pushed onto the incoming-column vec
     /// ```
     #[must_use]
-    pub fn new(global: &StateLayout, state_config: StageStateConfig) -> Self {
+    pub fn new(global: &StateSpace, state_config: StageStateConfig) -> Self {
         let mut incoming_columns = Vec::new();
         let mut outgoing_columns = Vec::new();
         let mut render_coeff_indices = Vec::new();
         let mut render_columns = Vec::new();
 
-        let mut push_dim = |g: usize| {
+        let mut push_dim = |g: StateDim| {
             let reduced_j = incoming_columns.len();
-            let outgoing = global.lp_column_for_state(StateDim::new(g));
-            incoming_columns.push(global.state_to_lp_incoming_column(StateDim::new(g)));
+            let outgoing = global.lp_column_for_state(g);
+            incoming_columns.push(global.state_to_lp_incoming_column(g));
             outgoing_columns.push(outgoing);
             // Drop padding slots, never zero-fill: keeps the default render
             // bit-identical to the global nonzero_state_indices render.
@@ -95,7 +95,7 @@ impl CutStateProjection {
         for region in REGION_ORDER {
             if region.cut_enabled(state_config) {
                 for g in global.state_dim_range(region) {
-                    push_dim(g);
+                    push_dim(StateDim::new(g));
                 }
             }
         }
@@ -136,9 +136,9 @@ impl CutStateProjection {
     ///
     /// ```compile_fail
     /// use cobre_core::temporal::StageStateConfig;
-    /// use cobre_sddp::indexer::{CutStateProjection, StateDim, StateLayout};
+    /// use cobre_sddp::indexer::{CutStateProjection, StateDim, StateSpace};
     ///
-    /// let global = StateLayout::new(1, 0, 0, Vec::new(), 0, 0, Vec::new(), &[0]);
+    /// let global = StateSpace::new(1, 0, 0, Vec::new(), 0, 0, Vec::new(), &[0]);
     /// let cut = CutStateProjection::new(
     ///     &global,
     ///     StageStateConfig { storage: true, inflow_lags: true },
@@ -148,9 +148,9 @@ impl CutStateProjection {
     ///
     /// ```compile_fail
     /// use cobre_core::temporal::StageStateConfig;
-    /// use cobre_sddp::indexer::{CutStateProjection, OutCol, StateLayout};
+    /// use cobre_sddp::indexer::{CutStateProjection, OutCol, StateSpace};
     ///
-    /// let global = StateLayout::new(1, 0, 0, Vec::new(), 0, 0, Vec::new(), &[0]);
+    /// let global = StateSpace::new(1, 0, 0, Vec::new(), 0, 0, Vec::new(), &[0]);
     /// let cut = CutStateProjection::new(
     ///     &global,
     ///     StageStateConfig { storage: true, inflow_lags: true },
@@ -178,7 +178,7 @@ impl CutStateProjection {
     /// indexing the enabled subset in storage → lag → buckets → anticipated
     /// order.
     ///
-    /// The per-pool analogue of [`StateLayout::lp_column_for_state`], spanning the
+    /// The per-pool analogue of [`StateSpace::lp_column_for_state`], spanning the
     /// full enabled range (padding included); see the struct-level "Incoming vs
     /// outgoing vs render" section for the contrast with [`Self::render_pairs`].
     ///
@@ -227,7 +227,7 @@ impl CutStateProjection {
 #[cfg(test)]
 mod tests {
     use super::{CutSlot, CutStateProjection, InCol, OutCol, StageStateConfig, StateDim};
-    use crate::indexer::StateLayout;
+    use crate::indexer::StateSpace;
 
     fn finalized(
         hydro_count: usize,
@@ -235,9 +235,9 @@ mod tests {
         n_anticipated: usize,
         k_max: usize,
         anticipated_lead_stages: Vec<usize>,
-    ) -> StateLayout {
+    ) -> StateSpace {
         let lag_counts = vec![max_par_order; hydro_count];
-        StateLayout::new(
+        StateSpace::new(
             hydro_count,
             max_par_order,
             0,
@@ -258,9 +258,9 @@ mod tests {
         n_anticipated: usize,
         k_max: usize,
         anticipated_lead_stages: Vec<usize>,
-    ) -> StateLayout {
+    ) -> StateSpace {
         let lag_counts = vec![max_par_order; hydro_count];
-        StateLayout::new(
+        StateSpace::new(
             hydro_count,
             max_par_order,
             n_buckets,
@@ -378,12 +378,7 @@ mod tests {
         let global_render: Vec<(CutSlot, OutCol)> = global
             .nonzero_state_indices
             .iter()
-            .map(|&g| {
-                (
-                    CutSlot::new(g),
-                    global.lp_column_for_state(StateDim::new(g)),
-                )
-            })
+            .map(|&g| (CutSlot::new(g.get()), global.lp_column_for_state(g)))
             .collect();
         assert_eq!(
             rendered, global_render,
@@ -427,7 +422,7 @@ mod tests {
     #[test]
     fn render_drops_ar_padding_slots() {
         let lag_counts = [1usize, 3];
-        let global = StateLayout::new(2, 3, 0, Vec::new(), 0, 0, vec![], &lag_counts);
+        let global = StateSpace::new(2, 3, 0, Vec::new(), 0, 0, vec![], &lag_counts);
         let cut = CutStateProjection::new(&global, ALL_ENABLED);
 
         assert_eq!(cut.n_slots(), global.n_state);
@@ -441,12 +436,7 @@ mod tests {
         let global_render: Vec<(CutSlot, OutCol)> = global
             .nonzero_state_indices
             .iter()
-            .map(|&g| {
-                (
-                    CutSlot::new(g),
-                    global.lp_column_for_state(StateDim::new(g)),
-                )
-            })
+            .map(|&g| (CutSlot::new(g.get()), global.lp_column_for_state(g)))
             .collect();
         assert_eq!(rendered, global_render);
     }
@@ -503,12 +493,7 @@ mod tests {
         let global_render: Vec<(CutSlot, OutCol)> = global
             .nonzero_state_indices
             .iter()
-            .map(|&g| {
-                (
-                    CutSlot::new(g),
-                    global.lp_column_for_state(StateDim::new(g)),
-                )
-            })
+            .map(|&g| (CutSlot::new(g.get()), global.lp_column_for_state(g)))
             .collect();
         assert_eq!(
             rendered, global_render,
@@ -531,7 +516,7 @@ mod tests {
     }
 
     /// `B == 0` regression guard for the always-included bucket block: the
-    /// projection reproduces `[0, StateLayout::n_state)` and its render
+    /// projection reproduces `[0, StateSpace::n_state)` and its render
     /// byte-identically to the pre-bucket walk.
     #[test]
     fn b_zero_projection_matches_pre_transit_bucket_walk() {
@@ -552,12 +537,7 @@ mod tests {
         let global_render: Vec<(CutSlot, OutCol)> = global
             .nonzero_state_indices
             .iter()
-            .map(|&g| {
-                (
-                    CutSlot::new(g),
-                    global.lp_column_for_state(StateDim::new(g)),
-                )
-            })
+            .map(|&g| (CutSlot::new(g.get()), global.lp_column_for_state(g)))
             .collect();
         assert_eq!(
             rendered, global_render,
@@ -572,7 +552,7 @@ mod proptests {
     use proptest::test_runner::RngSeed;
 
     use super::{CutSlot, CutStateProjection, OutCol, StageStateConfig, StateDim};
-    use crate::indexer::{REGION_ORDER, StateLayout};
+    use crate::indexer::{REGION_ORDER, StateSpace};
 
     const ALL_ENABLED: StageStateConfig = StageStateConfig {
         storage: true,
@@ -589,14 +569,14 @@ mod proptests {
         }
     }
 
-    /// A valid [`StateLayout`] over the small parameter space (`hydro_count`,
+    /// A valid [`StateSpace`] over the small parameter space (`hydro_count`,
     /// `max_par_order`, `n_buckets`, `n_anticipated`, `k_max` each `0..=4` or
     /// `0..=3`), with every dependent-length vector sized and bounded to satisfy
-    /// `StateLayout::new`'s debug-asserts:
+    /// `StateSpace::new`'s debug-asserts:
     /// `transit_bucket_column_order.len() == n_buckets`,
     /// `anticipated_lead_stages.len() == n_anticipated` (each `<= k_max`), and
     /// `effective_lag_count.len() == hydro_count` (each `<= max_par_order`).
-    fn state_layout_strategy() -> impl Strategy<Value = StateLayout> {
+    fn state_layout_strategy() -> impl Strategy<Value = StateSpace> {
         (0..=4usize, 0..=3usize, 0..=3usize, 0..=3usize, 0..=3usize)
             .prop_flat_map(
                 |(hydro_count, max_par_order, n_buckets, n_anticipated, k_max)| {
@@ -623,7 +603,7 @@ mod proptests {
                     anticipated_lead_stages,
                     effective_lag_count,
                 )| {
-                    StateLayout::new(
+                    StateSpace::new(
                         hydro_count,
                         max_par_order,
                         n_buckets,
@@ -637,10 +617,9 @@ mod proptests {
             )
     }
 
-    /// A [`StateLayout`] paired with an arbitrary [`StageStateConfig`] gate
+    /// A [`StateSpace`] paired with an arbitrary [`StageStateConfig`] gate
     /// combination, for the gated-projection agreement property.
-    fn state_layout_and_config_strategy() -> impl Strategy<Value = (StateLayout, StageStateConfig)>
-    {
+    fn state_layout_and_config_strategy() -> impl Strategy<Value = (StateSpace, StageStateConfig)> {
         (state_layout_strategy(), any::<bool>(), any::<bool>()).prop_map(
             |(global, storage, inflow_lags)| {
                 (
@@ -699,7 +678,7 @@ mod proptests {
             let global_render: Vec<(CutSlot, OutCol)> = global
                 .nonzero_state_indices
                 .iter()
-                .map(|&g| (CutSlot::new(g), global.lp_column_for_state(StateDim::new(g))))
+                .map(|&g| (CutSlot::new(g.get()), global.lp_column_for_state(g)))
                 .collect();
             prop_assert_eq!(rendered, global_render);
         }

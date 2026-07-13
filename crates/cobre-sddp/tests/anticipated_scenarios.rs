@@ -934,7 +934,7 @@ mod anticipated_two_plants_smoke {
 
 mod anticipated_simulation_ring_buffer {
     //! Regression: simulation advances the anticipated ring like the forward pass
-    //! (`StateLayout::state_to_lp_column`). With the anticipated thermal cheaper than
+    //! (`StateSpace::state_to_lp_column`). With the anticipated thermal cheaper than
     //! backup, the matured commitment equals the decision made `K` stages earlier,
     //!
     //! `anticipated_committed_mw(t = K) == anticipated_decision_mw(t = 0)`,
@@ -2256,7 +2256,7 @@ mod d37_anticipated_commissioning_simulation {
     //!
     //! T1 (`K=2`, cheap, `max 150 MW`) carries window `[entry=2, exit=4)` over a
     //! 6-stage horizon (per-stage block schedule 1/3/2/3/1/2). The decision gate
-    //! (`StateLayout::is_anticipated_decision_active`) conjoins the strict horizon
+    //! (`StateSpace::is_anticipated_decision_active`) conjoins the strict horizon
     //! clause (`t + K < n_stages`) with the operation-window clause keyed on the
     //! DELIVERY stage `id(t + K)`:
     //!

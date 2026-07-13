@@ -333,7 +333,7 @@ fn parameter_coefficient_persists_across_stage_template_uses() {
     let base_row: usize = n; // water_balance_start = N
 
     buf.fill_forward_patches(
-        &StateLayout::new(n, l, 0, Vec::new(), 0, 0, vec![], &vec![l; n]),
+        &StateSpace::new(n, l, 0, Vec::new(), 0, 0, vec![], &vec![l; n]),
         &state,
         &noise,
         base_row,

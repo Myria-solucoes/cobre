@@ -1,4 +1,4 @@
-use crate::indexer::{BlockGrid, BlockIdx, StateDim, StateLayout};
+use crate::indexer::{BlockGrid, BlockIdx, StateDim, StateSpace};
 
 /// Pre-allocated row-bound and column-bound patch arrays for one SDDP stage LP solve.
 ///
@@ -14,7 +14,7 @@ use crate::indexer::{BlockGrid, BlockIdx, StateDim, StateLayout};
 ///
 /// [`fill_col_state_patches`](Self::fill_col_state_patches) is the single owner
 /// of the column-bound region: it iterates
-/// [`StateLayout::state_to_lp_incoming_column`] over every state-vector index,
+/// [`StateSpace::state_to_lp_incoming_column`] over every state-vector index,
 /// so storage, AR lags, buckets, and anticipated state all resolve through one
 /// call site rather than parallel hardcoded offsets.
 #[derive(Debug, Clone)]
@@ -174,7 +174,7 @@ impl PatchBuffer {
     /// `noise.len() != layout.hydro_count`.
     pub fn fill_forward_patches(
         &mut self,
-        layout: &StateLayout,
+        layout: &StateSpace,
         state: &[f64],
         noise: &[f64],
         base_row: usize,
@@ -208,7 +208,7 @@ impl PatchBuffer {
     /// state.
     ///
     /// The single owner of the column-bound region: iterates
-    /// [`StateLayout::state_to_lp_incoming_column`] over every state-vector index
+    /// [`StateSpace::state_to_lp_incoming_column`] over every state-vector index
     /// `j ∈ [0, n_state)`, writing one patch per `j` at buffer slot `j` — storage,
     /// AR lags, buckets, and anticipated state all resolve through this one
     /// resolver call rather than parallel hardcoded offsets. A hardcoded
@@ -228,7 +228,7 @@ impl PatchBuffer {
     /// storage and AR lags (contrast with NCS availability, which patches per
     /// opening).
     ///
-    /// [`state_to_lp_incoming_column`]: StateLayout::state_to_lp_incoming_column
+    /// [`state_to_lp_incoming_column`]: StateSpace::state_to_lp_incoming_column
     ///
     /// # Panics
     ///
@@ -238,7 +238,7 @@ impl PatchBuffer {
     /// `state_layout.transit_buckets_in`.
     pub fn fill_col_state_patches(
         &mut self,
-        state_layout: &StateLayout,
+        state_layout: &StateSpace,
         state: &[f64],
         col_scale: &[f64],
     ) {
@@ -416,11 +416,11 @@ impl PatchBuffer {
 )]
 mod tests {
     use super::PatchBuffer;
-    use crate::indexer::{BlockGrid, StateLayout};
+    use crate::indexer::{BlockGrid, StateSpace};
     use crate::test_support::{state_layout, state_layout_full, state_layout_with_transit_buckets};
 
     /// Convenience: make a role-(a) state layout without repeating N/L everywhere.
-    fn idx(n: usize, l: usize) -> StateLayout {
+    fn idx(n: usize, l: usize) -> StateSpace {
         state_layout(n, l)
     }
 
@@ -1148,7 +1148,7 @@ mod tests {
     }
 
     /// A `PatchBuffer` constructed with `n_buckets = 0` panics (index out of
-    /// bounds) when filled against a bucket-aware `StateLayout` — the sizing
+    /// bounds) when filled against a bucket-aware `StateSpace` — the sizing
     /// contract between `PatchBuffer::new`'s `n_buckets` and the layout it
     /// patches must match, or the column-bound region has no room for the
     /// bucket slots.

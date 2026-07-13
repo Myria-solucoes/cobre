@@ -46,7 +46,7 @@ use cobre_io::StageCutsReadResult;
 /// ([`CutStateProjection::n_slots`](crate::indexer::CutStateProjection::n_slots));
 /// a stage whose cuts span fewer state dimensions (a successor with
 /// `inflow_lags: false`) sizes a smaller pool. [`Self::state_dimension`] remains
-/// the global state-vector length (`StateLayout::n_state`) the checkpoint and
+/// the global state-vector length (`StateSpace::n_state`) the checkpoint and
 /// boundary paths validate on — the space `validate_policy_load`'s
 /// `state_dimension` check operates in — equal to every pool's dimension when
 /// all stages enable all dimensions (the default).
@@ -55,7 +55,7 @@ pub struct FutureCostFunction {
     /// One cut pool per stage, indexed 0-based.
     pub pools: Vec<CutPool>,
 
-    /// Global state-vector length (`StateLayout::n_state`); a pool's own
+    /// Global state-vector length (`StateSpace::n_state`); a pool's own
     /// cut-slot-space [`CutPool::state_dimension`] may be smaller.
     pub state_dimension: usize,
 
@@ -108,7 +108,7 @@ impl FutureCostFunction {
     /// `pool_state_dimensions[t]` is the dimension of pool `t` (the count from
     /// `CutStateProjection(stages[t+1].state_config)` for non-terminal pools; the
     /// global `n_state` for the terminal pool). `global_state_dimension` is
-    /// `StateLayout::n_state` — the value stored in [`Self::state_dimension`] and
+    /// `StateSpace::n_state` — the value stored in [`Self::state_dimension`] and
     /// used by the checkpoint/boundary paths, independent of any reduced pool.
     ///
     /// # Parameters

@@ -32,7 +32,7 @@
 //! `p`'s own newest slot `K_p-1` — resolve the ring transition, so cuts apply
 //! directly against the outgoing `anticipated_slots_out` column. The fishing
 //! constraint is emitted at every stage unconditionally, so every slot
-//! participates in the dual chain. See the `StateLayout::state_to_lp_column`
+//! participates in the dual chain. See the `StateSpace::state_to_lp_column`
 //! rustdoc.
 //!
 //! ## Cut activity tracking

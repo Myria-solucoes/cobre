@@ -4965,7 +4965,7 @@ fn handshake_rejects_nonuniform_workers() {
 
 /// Verify cut sign convention: an anticipated ring slot's stored coefficient
 /// 7.5 is negated to -7.5 at the cut-target column. Drives the cut-row
-/// builder against a finalized anticipated [`StateLayout`] (the role-(a)
+/// builder against a finalized anticipated [`StateSpace`] (the role-(a)
 /// owner of the resolver).
 #[test]
 fn cut_coefficient_sign_convention_slot_zero_k2() {

@@ -16,7 +16,7 @@ use super::Boundary;
 ///
 /// A cheap `Copy` value carrying the two state bases and the two stage
 /// constants `block_storage_col`'s three address arms need: the incoming- and
-/// outgoing-state column bases (from [`StateLayout`](super::StateLayout)) and
+/// outgoing-state column bases (from [`StateSpace`](super::StateSpace)) and
 /// the interior control-region anchor plus block count (from `StageLayout`).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StorageBoundaryGrid {
@@ -31,7 +31,7 @@ impl StorageBoundaryGrid {
     /// constants.
     ///
     /// Source `storage_in_base`/`storage_out_base` from the owning stage's
-    /// `StateLayout` (`storage_in.start`/`storage.start`), never a hard-coded
+    /// `StateSpace` (`storage_in.start`/`storage.start`), never a hard-coded
     /// `0`, so the grid cannot disagree with a future region reorder.
     #[inline]
     #[must_use]

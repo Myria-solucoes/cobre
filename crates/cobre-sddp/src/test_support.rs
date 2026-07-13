@@ -1,4 +1,4 @@
-//! Crate-internal test-support builders: role-(a) [`StateLayout`], role-(b)
+//! Crate-internal test-support builders: role-(a) [`StateSpace`], role-(b)
 //! [`StageGeometry`], and [`StudyDimensions`] fixtures shared across the crate's
 //! unit tests and `tests/` integration suites.
 //!
@@ -23,7 +23,7 @@ use cobre_stochastic::par::precompute::PrecomputedPar;
 use crate::hydro_models::{
     EvaporationModel, EvaporationModelSet, FphaPlane, ProductionModelSet, ResolvedProductionModel,
 };
-use crate::indexer::{CutStateProjection, StateLayout, StudyDimensions, ThermalSys};
+use crate::indexer::{CutStateProjection, StateSpace, StudyDimensions, ThermalSys};
 use crate::lead_time::AnticipatedResolution;
 use crate::lp_builder::{ResolvedTables, StageGeometry, StageLayout, TemplateBuildCtx};
 use crate::policy::policy_load::{
@@ -311,7 +311,7 @@ fn geometry_stage(n_blks: usize) -> Stage {
 /// equipment dimensions, FPHA plane counts, and evaporation hydro indices.
 ///
 /// `fpha_hydro_indices` / `fpha_planes` are parallel (equal length). Builds the
-/// production `TemplateBuildCtx`/[`StateLayout`]/[`Stage`] the dimensions
+/// production `TemplateBuildCtx`/[`StateSpace`]/[`Stage`] the dimensions
 /// describe and delegates to `StageLayout::new`/`StageLayout::geometry` — the
 /// single owner of the offset arithmetic.
 #[must_use]
@@ -436,13 +436,13 @@ pub fn geom(_hydro_count: usize, _max_par_order: usize) -> StageGeometry {
     StageGeometry::default()
 }
 
-/// Build a finalized storage+lag [`StateLayout`] (no anticipated thermals) with the
+/// Build a finalized storage+lag [`StateSpace`] (no anticipated thermals) with the
 /// full `max_par_order` lag stride for every hydro — the dense coverage
 /// `crate::setup::resolve_state_layout` finalizes with no per-hydro AR truncation.
 #[must_use]
-pub fn state_layout(hydro_count: usize, max_par_order: usize) -> StateLayout {
+pub fn state_layout(hydro_count: usize, max_par_order: usize) -> StateSpace {
     let effective_lag_count = vec![max_par_order; hydro_count];
-    StateLayout::new(
+    StateSpace::new(
         hydro_count,
         max_par_order,
         0,
@@ -454,7 +454,7 @@ pub fn state_layout(hydro_count: usize, max_par_order: usize) -> StateLayout {
     )
 }
 
-/// Build a finalized [`StateLayout`] from explicit state-vector dimensions,
+/// Build a finalized [`StateSpace`] from explicit state-vector dimensions,
 /// including anticipated thermals. Lag coverage is dense (full `max_par_order`).
 ///
 /// `anticipated_lead_stages` must have length `n_anticipated` and its max (when
@@ -466,9 +466,9 @@ pub fn state_layout_full(
     n_anticipated: usize,
     k_max: usize,
     anticipated_lead_stages: Vec<usize>,
-) -> StateLayout {
+) -> StateSpace {
     let effective_lag_count = vec![max_par_order; hydro_count];
-    StateLayout::new(
+    StateSpace::new(
         hydro_count,
         max_par_order,
         0,
@@ -480,7 +480,7 @@ pub fn state_layout_full(
     )
 }
 
-/// Build a finalized [`StateLayout`] with a declared travel-time bucket block
+/// Build a finalized [`StateSpace`] with a declared travel-time bucket block
 /// (`transit_buckets_out`/`transit_buckets_in`), optionally combined with anticipated
 /// thermals. `effective_lag_count` is dense (full `max_par_order` for every
 /// hydro), matching [`state_layout_full`].
@@ -493,9 +493,9 @@ pub fn state_layout_with_transit_buckets(
     n_anticipated: usize,
     k_max: usize,
     anticipated_lead_stages: Vec<usize>,
-) -> StateLayout {
+) -> StateSpace {
     let effective_lag_count = vec![max_par_order; hydro_count];
-    StateLayout::new(
+    StateSpace::new(
         hydro_count,
         max_par_order,
         n_buckets,
@@ -538,7 +538,7 @@ pub fn transit_bucket_only_template(num_cols: usize, n_state: usize) -> StageTem
 /// keeping the extracted subgradient bit-identical to the unprojected global loop.
 #[must_use]
 pub fn all_enabled_cut_state_layouts(
-    global: &StateLayout,
+    global: &StateSpace,
     n_stages: usize,
 ) -> Vec<CutStateProjection> {
     (0..n_stages)
@@ -548,7 +548,7 @@ pub fn all_enabled_cut_state_layouts(
 
 /// Build a single all-enabled [`CutStateProjection`] projecting the full global state.
 #[must_use]
-pub fn cut_state_projection(global: &StateLayout) -> CutStateProjection {
+pub fn cut_state_projection(global: &StateSpace) -> CutStateProjection {
     CutStateProjection::new(
         global,
         StageStateConfig {

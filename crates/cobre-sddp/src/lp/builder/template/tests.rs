@@ -26,7 +26,10 @@ use cobre_stochastic::PrecomputedNormal;
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
 use crate::hydro_models::PrepareHydroModelsResult;
-use crate::indexer::{AnticipatedLocal, BlockIdx, Boundary, HydroSys, StateLayout, ThermalSys};
+use crate::indexer::{
+    AnticipatedLocal, BlockIdx, Boundary, HydroSys, StateSpace, ThermalSys,
+    anticipated_resolution_for,
+};
 use crate::inflow_method::InflowNonNegativityMethod;
 use crate::lead_time::AnticipatedResolution;
 use crate::resolved_parameters::ResolvedParameters;
@@ -3046,7 +3049,7 @@ fn chronological_k1_byte_identical_to_parallel() {
 }
 
 /// `theta` and `n_state` are pure functions of `(N, L, A, k_max)` and are
-/// `n_blks`-free by construction (`StateLayout::new` never sees `block_mode` or
+/// `n_blks`-free by construction (`StateSpace::new` never sees `block_mode` or
 /// `n_blks`): per-block storage lives strictly in the control region, never in
 /// the state region (§2). Building a chronological `K ≥ 2` stage therefore
 /// changes neither — only the control-region column count grows, by exactly
@@ -3068,7 +3071,7 @@ fn theta_and_n_state_invariant_to_block_mode() {
 
     assert_eq!(
         parallel.n_state, parallel_n_state,
-        "parallel template n_state must equal StateLayout n_state"
+        "parallel template n_state must equal StateSpace n_state"
     );
     assert_eq!(
         chronological.n_state, parallel_n_state,
@@ -3317,7 +3320,7 @@ fn chronological_water_balance_telescopes_to_parallel() {
 
 /// `StageGeometry::block_storage_col` resolves S⁰, every interior boundary, and
 /// Sᴷ to hand-computed expectations sourced independently of
-/// `StorageBoundaryGrid::col` itself — `StateLayout`'s own `storage_in`/`storage`
+/// `StorageBoundaryGrid::col` itself — `StateSpace`'s own `storage_in`/`storage`
 /// ranges for the endpoints, the equipment cursor's `storage_internal_start` for
 /// the interior — so a regression in `col`'s match arms fails this test, not just
 /// an identity of the owner with itself. Also pins the open-coded parallel
@@ -4454,7 +4457,7 @@ fn anticipated_lead_config_system(
 /// against boundaries `[0, 744, 1488, 2232]`, target `= boundaries[m+1] - 744`
 /// lands one boundary before `m` at every `m > 0`), giving `depth = [1, 1,
 /// 0]` and `k_max = 1`. `build_template_build_ctx`'s resolution-derived
-/// `k_max`/`anticipated_lead_stages` and the template `StateLayout`'s
+/// `k_max`/`anticipated_lead_stages` and the template `StateSpace`'s
 /// threaded resolution must match this and setup's own
 /// `resolve_anticipated_commitments` byte-for-byte — not the constant-lead
 /// fallback a `Stages(1)`-equivalent reconstruction happens to coincide with
@@ -4499,17 +4502,15 @@ fn template_anticipated_resolution_matches_setup_lead_time() {
     );
 
     let template_state = super::super::test_support::state_layout_with_resolution(&ctx);
-    assert_eq!(template_state.k_max, 1, "template StateLayout k_max");
+    assert_eq!(template_state.k_max, 1, "template StateSpace k_max");
     assert_eq!(
         template_state.anticipated_lead_stages,
         vec![1],
-        "template StateLayout anticipated_lead_stages"
+        "template StateSpace anticipated_lead_stages"
     );
     let expected_decider = vec![None, Some(0), Some(1)];
     assert_eq!(
-        template_state
-            .anticipated_resolution_for(AnticipatedLocal::new(0), 3)
-            .decider,
+        anticipated_resolution_for(&template_state, AnticipatedLocal::new(0), 3).decider,
         expected_decider,
         "template's threaded resolution must resolve the calendar-derived decider"
     );
@@ -4526,10 +4527,10 @@ fn template_anticipated_resolution_matches_setup_lead_time() {
     );
 }
 
-/// AC2 mutation companion: reproduces the PRE-FIX `StateLayout` template.rs
+/// AC2 mutation companion: reproduces the PRE-FIX `StateSpace` template.rs
 /// used to build for a `LeadTime` plant — `anticipated_lead_stages` derived
 /// via `cfg.lead_stages().unwrap_or(0)` (`0` for `LeadTime`, the pre-fix bug)
-/// and no [`crate::indexer::StateLayout::set_anticipated_resolution`]
+/// and no [`crate::indexer::StateSpace::set_anticipated_resolution`]
 /// attach — and shows its decider differs from the fixed layout's: the
 /// resulting `Stages(0)` fallback resolves every delivery stage as
 /// self-delivered (`decider[m] == m` for all `m`), never the calendar-derived
@@ -4537,9 +4538,8 @@ fn template_anticipated_resolution_matches_setup_lead_time() {
 /// system (`template_anticipated_resolution_matches_setup_lead_time`).
 #[test]
 fn pre_fix_template_state_layout_yields_differing_all_self_delivered_decider() {
-    let pre_fix_state = StateLayout::new(0, 0, 0, Vec::new(), 1, 0, vec![0], &[]);
-    let pre_fix_decider = pre_fix_state
-        .anticipated_resolution_for(AnticipatedLocal::new(0), 3)
+    let pre_fix_state = StateSpace::new(0, 0, 0, Vec::new(), 1, 0, vec![0], &[]);
+    let pre_fix_decider = anticipated_resolution_for(&pre_fix_state, AnticipatedLocal::new(0), 3)
         .decider
         .clone();
     assert_eq!(
@@ -4591,8 +4591,8 @@ fn template_leadstages_byte_identical_to_setup_and_fallback() {
     );
     assert_eq!(ctx.anticipated_lead_stages, vec![1]);
 
-    let template_decider = super::super::test_support::state_layout_with_resolution(&ctx)
-        .anticipated_resolution_for(AnticipatedLocal::new(0), 3)
+    let template_state = super::super::test_support::state_layout_with_resolution(&ctx);
+    let template_decider = anticipated_resolution_for(&template_state, AnticipatedLocal::new(0), 3)
         .decider
         .clone();
 
@@ -4600,8 +4600,8 @@ fn template_leadstages_byte_identical_to_setup_and_fallback() {
     assert_eq!(setup_lead_stages, ctx.anticipated_lead_stages);
     assert_eq!(setup_resolution.per_plant[0].decider, template_decider);
 
-    let fallback_decider = super::super::test_support::state_layout_for(&ctx)
-        .anticipated_resolution_for(AnticipatedLocal::new(0), 3)
+    let fallback_state = super::super::test_support::state_layout_for(&ctx);
+    let fallback_decider = anticipated_resolution_for(&fallback_state, AnticipatedLocal::new(0), 3)
         .decider
         .clone();
     assert_eq!(

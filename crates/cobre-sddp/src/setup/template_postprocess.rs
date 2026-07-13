@@ -2,7 +2,7 @@
 
 use cobre_core::{PolicyGraph, Stage, System};
 
-use crate::indexer::StateLayout;
+use crate::indexer::StateSpace;
 use crate::scaling_report::ScalingReport;
 use crate::scaling_report::{
     LpDimensions, StageScalingReport, build_scaling_report, compute_coefficient_range,
@@ -62,7 +62,7 @@ pub(crate) fn compute_cumulative_discount_factors(per_stage: &[f64]) -> Vec<f64>
 pub(crate) fn postprocess_templates(
     stage_templates: &mut StageTemplates,
     system: &System,
-    state_layout: &StateLayout,
+    state_layout: &StateSpace,
 ) -> ScalingReport {
     // The setter derives cumulative factors in the same call, so the two slices
     // cannot drift.

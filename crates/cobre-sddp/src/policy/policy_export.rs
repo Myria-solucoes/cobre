@@ -16,7 +16,7 @@ use cobre_io::output::policy::{
 };
 
 use crate::cut::FutureCostFunction;
-use crate::indexer::{CutSlot, CutStateProjection, StateLayout};
+use crate::indexer::{CutSlot, CutStateProjection, StateSpace};
 use crate::lp_builder::delivery_ring::DeliveryRing;
 use crate::training::TrainingResult;
 
@@ -45,7 +45,7 @@ fn year_month_anchor(date: chrono::NaiveDate) -> i32 {
 /// Slots are emitted in `projection`'s storage → lag → buckets → anticipated order, so slot
 /// `j` describes the entity owning positional coefficient `j` — the order a
 /// consumer matches the manifest against the cut coefficients. Each slot is
-/// classified by the global [`StateLayout`] region containing its incoming-state
+/// classified by the global [`StateSpace`] region containing its incoming-state
 /// column ([`CutStateProjection::incoming_column`]), never by
 /// re-deriving column arithmetic.
 ///
@@ -57,7 +57,7 @@ fn year_month_anchor(date: chrono::NaiveDate) -> i32 {
 #[must_use]
 pub fn build_stage_entity_manifest(
     system: &System,
-    global_layout: &StateLayout,
+    global_layout: &StateSpace,
     projection: &CutStateProjection,
     stage_id: i32,
 ) -> Vec<EntitySlot> {
@@ -399,7 +399,7 @@ mod tests {
         ENTITY_TYPE_ANTICIPATED_THERMAL_STATE, ENTITY_TYPE_HYDRO_INFLOW_LAG,
         ENTITY_TYPE_HYDRO_STORAGE, ENTITY_TYPE_HYDRO_TRANSIT_BUCKET, build_stage_entity_manifest,
     };
-    use crate::indexer::{CutStateProjection, StateLayout};
+    use crate::indexer::{CutStateProjection, StateSpace};
     use crate::lead_time::{AnticipatedResolution, LeadTime};
     use crate::test_support;
     use cobre_core::commissioning::hydro_operating_active;
@@ -599,7 +599,7 @@ mod tests {
     }
 
     /// The `N=2, L=2, A=1, k_max=2` global layout the fixture system maps onto.
-    fn layout_2h_1ant() -> StateLayout {
+    fn layout_2h_1ant() -> StateSpace {
         test_support::state_layout_full(2, 2, 1, 2, vec![2])
     }
 

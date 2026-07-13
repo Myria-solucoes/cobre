@@ -9,7 +9,7 @@ use cobre_core::{
 };
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
-use crate::indexer::StateLayout;
+use crate::indexer::StateSpace;
 use crate::lead_time::{AnticipatedResolution, SpreadResolution};
 use crate::setup::bucket_topology::build_transit_bucket_topology;
 use crate::setup::resolve_anticipated_commitments_core;
@@ -58,11 +58,11 @@ pub(super) fn ctx_anticipated_and_mask_inputs(
     )
 }
 
-/// Build the role-(a) [`StateLayout`] a `StageLayout` borrows, from a test
+/// Build the role-(a) [`StateSpace`] a `StageLayout` borrows, from a test
 /// [`TemplateBuildCtx`]. Mirrors `crate::setup::resolve_state_layout` (same state
 /// dimensions and PAR-derived lag counts), so the handle is byte-identical to
 /// production's.
-pub(super) fn state_layout_for(ctx: &TemplateBuildCtx<'_>) -> StateLayout {
+pub(super) fn state_layout_for(ctx: &TemplateBuildCtx<'_>) -> StateSpace {
     let effective_lag_counts: Vec<usize> = if ctx.max_par_order > 0 {
         (0..ctx.n_hydros)
             .map(|h| {
@@ -76,7 +76,7 @@ pub(super) fn state_layout_for(ctx: &TemplateBuildCtx<'_>) -> StateLayout {
     } else {
         vec![0; ctx.n_hydros]
     };
-    StateLayout::new(
+    StateSpace::new(
         ctx.n_hydros,
         ctx.max_par_order,
         0,
@@ -91,7 +91,7 @@ pub(super) fn state_layout_for(ctx: &TemplateBuildCtx<'_>) -> StateLayout {
 /// [`state_layout_for`] plus the ctx's attached `AnticipatedResolution`. Tests
 /// asserting `anticipated_resolution_for` byte-identity with production must build
 /// through this — [`state_layout_for`] leaves the constant-lead fallback active.
-pub(super) fn state_layout_with_resolution(ctx: &TemplateBuildCtx<'_>) -> StateLayout {
+pub(super) fn state_layout_with_resolution(ctx: &TemplateBuildCtx<'_>) -> StateSpace {
     let mut state = state_layout_for(ctx);
     state.set_anticipated_resolution(ctx.anticipated_resolution.clone());
     state

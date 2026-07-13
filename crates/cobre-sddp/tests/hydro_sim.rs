@@ -151,7 +151,7 @@ mod simulation_only {
             "active cut count must match after round-trip"
         );
 
-        for (stage, &expected_eval) in original_evals.iter().enumerate().take(n_stages) {
+        for (stage, &expected_eval) in original_evals.iter().enumerate() {
             let loaded_eval = loaded_fcf.evaluate_at_state(stage, &test_state);
             assert_eq!(
                 loaded_eval, expected_eval,
@@ -832,7 +832,7 @@ mod sparse_dense {
 
     use cobre_sddp::FutureCostFunction;
     use cobre_sddp::build_cut_row_batch_into;
-    use cobre_sddp::indexer::{StateDim, StateLayout};
+    use cobre_sddp::indexer::StateSpace;
     use cobre_sddp::test_support::cut_state_projection;
     use cobre_solver::RowBatch;
 
@@ -843,8 +843,8 @@ mod sparse_dense {
         let n_state = n_hydro * (1 + max_par_order);
 
         // The [0, 1, 2] arg is per-hydro effective_lag_count; mixed orders zero out
-        // some lag slots. StateLayout::new finalizes the mask as production setup does.
-        let state = StateLayout::new(
+        // some lag slots. StateSpace::new finalizes the mask as production setup does.
+        let state = StateSpace::new(
             n_hydro,
             max_par_order,
             0,
@@ -883,7 +883,7 @@ mod sparse_dense {
         let theta_col = state.theta;
         let expected_cols: Vec<i32> = mask
             .iter()
-            .map(|&j| state.state_to_lp_column(StateDim::new(j)).get() as i32)
+            .map(|&j| state.state_to_lp_column(j).get() as i32)
             .chain(std::iter::once(theta_col as i32))
             .collect();
         assert_eq!(
@@ -893,7 +893,7 @@ mod sparse_dense {
 
         let expected_values: Vec<f64> = mask
             .iter()
-            .map(|&j| -coeffs[j])
+            .map(|&j| -coeffs[j.get()])
             .chain(std::iter::once(1.0))
             .collect();
         for (i, (actual, expected)) in batch.values.iter().zip(expected_values.iter()).enumerate() {

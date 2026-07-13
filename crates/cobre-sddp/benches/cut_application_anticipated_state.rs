@@ -28,13 +28,13 @@
 use cobre_core::temporal::StageStateConfig;
 use cobre_sddp::build_cut_row_batch_into;
 use cobre_sddp::cut::fcf::FutureCostFunction;
-use cobre_sddp::indexer::{CutStateProjection, StateLayout};
+use cobre_sddp::indexer::{CutStateProjection, StateSpace};
 use cobre_solver::RowBatch;
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
 /// All-enabled per-pool projection (full storage + lags) for the bench layouts.
-fn full_cut_state(state: &StateLayout) -> CutStateProjection {
+fn full_cut_state(state: &StateSpace) -> CutStateProjection {
     CutStateProjection::new(
         state,
         StageStateConfig {
@@ -76,10 +76,10 @@ fn build_row_batch(nnz_per_cut: usize) -> RowBatch {
 }
 
 fn bench_cut_application_baseline(c: &mut Criterion) {
-    // `StateLayout::new` finalizes the mask and column-map cache in its
+    // `StateSpace::new` finalizes the mask and column-map cache in its
     // constructor, mirroring production `build_wired_indexer`.
     let lag_counts: Vec<usize> = vec![L_BASELINE; N];
-    let state = StateLayout::new(N, L_BASELINE, 0, Vec::new(), 0, 0, vec![], &lag_counts);
+    let state = StateSpace::new(N, L_BASELINE, 0, Vec::new(), 0, 0, vec![], &lag_counts);
     debug_assert_eq!(
         state.n_state, N_STATE,
         "baseline n_state must equal {N_STATE}"
@@ -115,9 +115,9 @@ fn bench_cut_application_with_anticipated(c: &mut Criterion) {
     // this keeps the mask fully dense at n_state = 130, matching the baseline.
     let anticipated_lead_stages: Vec<usize> = vec![K_MAX; N_ANTICIPATED];
 
-    // `StateLayout::new` finalizes both layout caches in its constructor.
+    // `StateSpace::new` finalizes both layout caches in its constructor.
     let lag_counts: Vec<usize> = vec![L_ANTICIPATED; N];
-    let state = StateLayout::new(
+    let state = StateSpace::new(
         N,
         L_ANTICIPATED,
         0,

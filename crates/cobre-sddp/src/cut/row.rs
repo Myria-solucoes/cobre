@@ -13,7 +13,7 @@ use cobre_solver::{RowBatch, SolverInterface};
 use crate::cut::CutPool;
 use crate::cut::CutRowMap;
 use crate::cut::FutureCostFunction;
-use crate::indexer::{CutStateProjection, OutCol, StateLayout};
+use crate::indexer::{CutStateProjection, OutCol, StateSpace};
 
 /// Push one cut-row coefficient: `-coeff * col_scale[j]` (sign negation per the
 /// module-doc Benders contract). Sole owner of the negate-and-scale rule, shared
@@ -102,7 +102,7 @@ pub fn build_cut_row_batch_into(
     batch: &mut RowBatch,
     fcf: &FutureCostFunction,
     stage: usize,
-    state: &StateLayout,
+    state: &StateSpace,
     cut_state: &CutStateProjection,
     col_scale: &[f64],
 ) {
@@ -182,7 +182,7 @@ pub fn build_cut_row_batch_into(
 pub fn build_cut_row_batch(
     fcf: &FutureCostFunction,
     stage: usize,
-    state: &StateLayout,
+    state: &StateSpace,
     cut_state: &CutStateProjection,
     col_scale: &[f64],
 ) -> RowBatch {
@@ -225,7 +225,7 @@ pub fn append_new_cuts_to_lp<S: SolverInterface>(
     solver: &mut S,
     fcf: &FutureCostFunction,
     stage: usize,
-    state: &StateLayout,
+    state: &StateSpace,
     cut_state: &CutStateProjection,
     col_scale: &[f64],
     row_map: &mut CutRowMap,
@@ -308,7 +308,7 @@ pub fn append_slots_to_lp<S: SolverInterface>(
     solver: &mut S,
     pool: &CutPool,
     slots: &[u32],
-    state: &StateLayout,
+    state: &StateSpace,
     cut_state: &CutStateProjection,
     col_scale: &[f64],
     row_map: &mut CutRowMap,
@@ -384,15 +384,15 @@ mod tests {
 
     use super::{append_new_cuts_to_lp, build_cut_row_batch, build_cut_row_batch_into};
     use crate::cut::FutureCostFunction;
-    use crate::indexer::{CutStateProjection, StateLayout};
+    use crate::indexer::{CutStateProjection, StateSpace};
 
-    /// Build a finalized storage+lag [`StateLayout`] (no anticipated thermals)
+    /// Build a finalized storage+lag [`StateSpace`] (no anticipated thermals)
     /// with the full `max_par_order` lag stride for every hydro — the dense
     /// coverage production `resolve_state_layout` finalizes for a study with no
     /// per-hydro AR-order truncation.
-    fn state_layout(hydro_count: usize, max_par_order: usize) -> StateLayout {
+    fn state_layout(hydro_count: usize, max_par_order: usize) -> StateSpace {
         let lag_counts = vec![max_par_order; hydro_count];
-        StateLayout::new(
+        StateSpace::new(
             hydro_count,
             max_par_order,
             0,
@@ -406,7 +406,7 @@ mod tests {
 
     /// All-enabled per-pool projection of `state` — these builder tests use
     /// full-dimension pools, so the render reproduces the global nonzero mask.
-    fn cut_state(state: &StateLayout) -> CutStateProjection {
+    fn cut_state(state: &StateSpace) -> CutStateProjection {
         CutStateProjection::new(
             state,
             StageStateConfig {

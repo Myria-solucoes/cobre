@@ -5,7 +5,7 @@
 //! within one stage LP. They are produced by the per-stage
 //! [`StageLayout`](crate::lp_builder) and carried on its
 //! [`StageGeometry`](crate::lp_builder::StageGeometry) snapshot; the role-(a)
-//! state-vector concern lives on [`StateLayout`](super::StateLayout) and the
+//! state-vector concern lives on [`StateSpace`](super::StateSpace) and the
 //! non-state study shape on [`StudyDimensions`](super::StudyDimensions).
 
 /// Column and row indices for one evaporation constraint.

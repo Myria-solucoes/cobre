@@ -45,7 +45,7 @@ use cobre_sddp::{
     energy_conversion::{EnergyConversion, EnergyConversionSet},
     horizon_mode::HorizonMode,
     hydro_models::PrepareHydroModelsResult,
-    indexer::{CutStateProjection, StateLayout, StudyDimensions},
+    indexer::{CutStateProjection, StateSpace, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
     lp_builder::{PatchBuffer, StageGeometry, build_stage_templates_resolving_layout},
     risk_measure::RiskMeasure,
@@ -68,12 +68,12 @@ use common::builders::{BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make
 // Communicator stub
 // ===========================================================================
 
-/// Build the role-(a) [`StateLayout`] via the public [`StateLayout::new`] (full
+/// Build the role-(a) [`StateSpace`] via the public [`StateSpace::new`] (full
 /// `max_par_order` lag stride per hydro). This external test crate cannot see the
 /// parent's `#[cfg(test)]`/`test-support` surface, so it constructs from explicit
 /// dimensions rather than a test helper.
-fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
-    StateLayout::new(
+fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateSpace {
+    StateSpace::new(
         hydro_count,
         max_par_order,
         0,
@@ -389,7 +389,7 @@ struct Fixture {
     /// cloned from `stage_templates.geometry_per_stage[0]`.
     geometry: StageGeometry,
     study_dims: StudyDimensions,
-    state: StateLayout,
+    state: StateSpace,
     initial_state: Vec<f64>,
     horizon: HorizonMode,
     risk_measures: Vec<RiskMeasure>,
@@ -955,7 +955,7 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
 /// see the parent crate's `#[cfg(test)]` surface) builds the default all-enabled
 /// per-pool projection. Every pool projects the full global state, keeping the
 /// extracted subgradient bit-identical to the global-loop result.
-fn all_enabled_cut_state_layouts(global: &StateLayout, n_stages: usize) -> Vec<CutStateProjection> {
+fn all_enabled_cut_state_layouts(global: &StateSpace, n_stages: usize) -> Vec<CutStateProjection> {
     let full = StageStateConfig {
         storage: true,
         inflow_lags: true,

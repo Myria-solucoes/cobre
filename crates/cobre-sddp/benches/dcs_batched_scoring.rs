@@ -19,7 +19,7 @@ use cobre_core::StageStateConfig;
 use cobre_sddp::cut::{CutPool, CutRowMap};
 use cobre_sddp::cut_selection::CutMetadata;
 use cobre_sddp::dcs::{DcsParams, DcsScoringScratch, score_violated_candidates};
-use cobre_sddp::indexer::{CutStateProjection, StateDim, StateLayout};
+use cobre_sddp::indexer::{CutStateProjection, StateDim, StateSpace};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
@@ -93,7 +93,7 @@ fn gemm_block(
 #[allow(clippy::too_many_arguments)]
 fn score_per_candidate_baseline(
     pool: &CutPool,
-    state: &StateLayout,
+    state: &StateSpace,
     primal: &[f64],
     col_scale: &[f64],
     resident: &CutRowMap,
@@ -189,7 +189,7 @@ fn make_primal(n_state: usize, seed: u64) -> Vec<f64> {
 }
 
 fn bench_one(c: &mut Criterion, k: usize, n_state: usize) {
-    let state = StateLayout::new(n_state, 0, 0, Vec::new(), 0, 0, vec![], &vec![0; n_state]);
+    let state = StateSpace::new(n_state, 0, 0, Vec::new(), 0, 0, vec![], &vec![0; n_state]);
     let cut_state = CutStateProjection::new(
         &state,
         StageStateConfig {

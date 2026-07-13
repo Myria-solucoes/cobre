@@ -16,7 +16,8 @@ use crate::hydro_models::{
 };
 use crate::indexer::{
     AnticipatedLocal, BlockGrid, BlockIdx, Boundary, EvapLocal, EvaporationIndices, FphaLocal,
-    HydroSys, LineSys, RangeCursor, StateLayout, StorageBoundaryGrid, ThermalSys,
+    HydroSys, LineSys, RangeCursor, StateSpace, StorageBoundaryGrid, ThermalSys,
+    anticipated_resolution_for, is_anticipated_decision_active_for_delivery,
 };
 use crate::lead_time::{AnticipatedResolution, SpreadResolution};
 
@@ -118,11 +119,11 @@ pub(crate) struct TemplateBuildCtx<'a> {
     /// Per-plant commissioning window `(entry_stage_id, exit_stage_id)`, length
     /// `n_anticipated`, anticipated-local order. The decision gate keys on the
     /// DELIVERY stage's operation window
-    /// ([`StateLayout::is_anticipated_decision_active_for_delivery`]).
+    /// (`is_anticipated_decision_active_for_delivery`).
     pub(crate) anticipated_windows: Vec<(Option<i32>, Option<i32>)>,
     /// Delivery-anchored resolution, threaded from setup's single owner
     /// (`crate::setup::resolve_state_layout`) — the same resolution the role-(a)
-    /// `StateLayout` this build receives already carries.
+    /// `StateSpace` this build receives already carries.
     pub(crate) anticipated_resolution: AnticipatedResolution,
     /// `study_stage_ids[t] = stage.id`, length `n_study_stages`. The decision gate
     /// keys its window clause on the delivery stage's `stage.id`, NOT the stage
@@ -183,7 +184,7 @@ pub(crate) struct AnticipatedLayout {
     pub(crate) col_anticipated_decision_start: usize,
     /// Start of the `anticipated_slots_out` column block (`A * k_max` columns,
     /// slot-major, plant-minor). Sourced from
-    /// `StateLayout::anticipated_slots_out.start`, so the offset is
+    /// `StateSpace::anticipated_slots_out.start`, so the offset is
     /// stage-invariant — keeping the global stage-0 cut map on the correct
     /// column at every stage regardless of this stage's block count.
     pub(crate) col_anticipated_slots_out_start: usize,
@@ -232,7 +233,7 @@ pub(crate) struct AnticipatedLayout {
     /// (`anticipated_slot_row_pos`'s `Some` count).
     pub(crate) n_anticipated_slot_definition_rows: usize,
     /// For each GLOBAL anticipated-ring slot (`slot * n_anticipated + plant`,
-    /// slot-major, matching [`crate::indexer::StateLayout::anticipated_slots_out`]'s
+    /// slot-major, matching [`crate::indexer::StateSpace::anticipated_slots_out`]'s
     /// own layout), this stage's compact row position within the interior-slot
     /// definition-row family, or `None` when the slot's delivery target is a
     /// genuine fresh decision this stage (`PointResolution::genuine_decisions_at`,
@@ -245,7 +246,7 @@ pub(crate) struct AnticipatedLayout {
 /// Equipment column ranges and their block-start cursors: every dispatchable
 /// piece of equipment (storage/turbine/spillage/diversion/thermal/lines/
 /// deficit/excess/generation/evaporation/NCS/pumping/contracts), anchored at
-/// the handle's [`StateLayout::control_region_start`].
+/// the handle's [`StateSpace::control_region_start`].
 pub(crate) struct EquipmentColumns {
     /// Column range for the interior storage boundaries `S¹ … Sᴷ⁻¹` (one column
     /// per `(hydro, interior boundary)`, block-minor); empty `0..0` in parallel
@@ -499,15 +500,15 @@ pub(crate) struct FillingLayout {
 /// Owns the role-(b) geometry (per-stage equipment / slack / row ranges and the
 /// entity counts that stride them) as its own fields, computed in
 /// [`StageLayout::new`] anchored at the handle's
-/// [`StateLayout::control_region_start`]. The stage-invariant role-(a) state
+/// [`StateSpace::control_region_start`]. The stage-invariant role-(a) state
 /// region is NOT duplicated here — it is read through the borrowed [`Self::state`]
 /// handle. The control region begins at `state.control_region_start()`
 /// (`theta + 1`), so the two regions meet there with no overlap.
 pub(crate) struct StageLayout<'a> {
     /// Borrowed handle to the stage-invariant role-(a) state layout; the role-(a)
     /// accessors read through it rather than re-deriving offsets per stage. The
-    /// dependency is one-directional (geometry → `StateLayout`), never the reverse.
-    pub(crate) state: &'a StateLayout,
+    /// dependency is one-directional (geometry → `StateSpace`), never the reverse.
+    pub(crate) state: &'a StateSpace,
     /// Block count for this stage.
     pub(crate) n_blks: usize,
     /// Hydro count.
@@ -626,7 +627,7 @@ fn build_transit_bucket_row_pos(
 /// fold-blindness class this per-slot check rules out). Returns the mapping
 /// and the reachable count.
 fn build_anticipated_slot_row_pos(
-    state: &StateLayout,
+    state: &StateSpace,
     n_stages: usize,
     stage_idx: usize,
 ) -> (Vec<Option<usize>>, usize) {
@@ -636,7 +637,7 @@ fn build_anticipated_slot_row_pos(
         return (Vec::new(), 0);
     }
     let points: Vec<_> = (0..n_anticipated)
-        .map(|plant| state.anticipated_resolution_for(AnticipatedLocal::new(plant), n_stages))
+        .map(|plant| anticipated_resolution_for(state, AnticipatedLocal::new(plant), n_stages))
         .collect();
 
     let mut row_pos = vec![None; n_anticipated * k_max];
@@ -659,10 +660,10 @@ fn build_anticipated_slot_row_pos(
 /// the deposit-row family, or `None` when the plant has no genuine decision
 /// this stage (`PointResolution::genuine_decisions_at(stage_idx).next()`) or
 /// the delivery is commissioning-inactive
-/// (`StateLayout::is_anticipated_decision_active_for_delivery`). Returns the
+/// (`is_anticipated_decision_active_for_delivery`). Returns the
 /// mapping and the active count.
 fn build_anticipated_decision_row_pos(
-    state: &StateLayout,
+    state: &StateSpace,
     n_stages: usize,
     stage_idx: usize,
     anticipated_windows: &[(Option<i32>, Option<i32>)],
@@ -676,7 +677,7 @@ fn build_anticipated_decision_row_pos(
     let mut n_active = 0_usize;
     for (plant, pos) in row_pos.iter_mut().enumerate() {
         let plant = AnticipatedLocal::new(plant);
-        let point = state.anticipated_resolution_for(plant, n_stages);
+        let point = anticipated_resolution_for(state, plant, n_stages);
         let Some(m) = point.genuine_decisions_at(stage_idx).next() else {
             continue;
         };
@@ -685,7 +686,8 @@ fn build_anticipated_decision_row_pos(
             "a K=0 self-delivery (decider[m] == m) must never reach the anticipated \
              ring's deposit-row fill"
         );
-        if state.is_anticipated_decision_active_for_delivery(
+        if is_anticipated_decision_active_for_delivery(
+            state,
             plant,
             m,
             n_stages,
@@ -707,7 +709,7 @@ fn build_anticipated_decision_row_pos(
 /// unconstrained by any fishing coupling. Returns the mapping and the active
 /// count.
 fn build_anticipated_fishing_row_pos(
-    state: &StateLayout,
+    state: &StateSpace,
     n_stages: usize,
     stage_idx: usize,
 ) -> (Vec<Option<usize>>, usize) {
@@ -718,8 +720,7 @@ fn build_anticipated_fishing_row_pos(
     let mut row_pos = vec![None; n_anticipated];
     let mut n_active = 0_usize;
     for (plant, pos) in row_pos.iter_mut().enumerate() {
-        if state
-            .anticipated_resolution_for(AnticipatedLocal::new(plant), n_stages)
+        if anticipated_resolution_for(state, AnticipatedLocal::new(plant), n_stages)
             .is_anticipated_at(stage_idx)
         {
             *pos = Some(n_active);
@@ -1047,7 +1048,7 @@ impl<'a> StageLayout<'a> {
     #[allow(clippy::too_many_lines, clippy::similar_names)]
     pub(crate) fn new(
         ctx: &TemplateBuildCtx<'_>,
-        state: &'a StateLayout,
+        state: &'a StateSpace,
         stage: &Stage,
         stage_idx: usize,
     ) -> Self {
@@ -1504,7 +1505,7 @@ impl<'a> StageLayout<'a> {
         self.storage_boundary_grid().col(h.get(), boundary)
     }
 
-    // ── Role-(a) accessors (read through the borrowed StateLayout handle) ─────────
+    // ── Role-(a) accessors (read through the borrowed StateSpace handle) ─────────
 
     /// Theta (future-cost) column; reads `self.state.theta`.
     #[inline]

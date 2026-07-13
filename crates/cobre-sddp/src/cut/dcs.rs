@@ -22,7 +22,7 @@ use crate::cut::{CutPool, CutRowMap};
 use crate::cut_selection::CutSelectionStrategy;
 use crate::error::SddpError;
 use crate::gemm::gemm_block;
-use crate::indexer::{CutSlot, CutStateProjection, StateLayout};
+use crate::indexer::{CutSlot, CutStateProjection, StateSpace};
 use crate::workspace::CapturedBasis;
 
 /// Dynamic Cut Selection hyperparameters.
@@ -223,7 +223,7 @@ impl DcsScoringScratch {
 #[allow(clippy::too_many_arguments)]
 pub fn score_violated_candidates(
     pool: &CutPool,
-    state: &StateLayout,
+    state: &StateSpace,
     cut_state: &CutStateProjection,
     primal: &[f64],
     col_scale: &[f64],
@@ -572,7 +572,7 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
     solver: &mut ProfiledSolver<S>,
     core: &StageTemplate,
     pool: &CutPool,
-    state: &StateLayout,
+    state: &StateSpace,
     cut_state: &CutStateProjection,
     col_scale: &[f64],
     stored_basis: Option<&CapturedBasis>,
@@ -763,11 +763,11 @@ mod tests {
     use crate::cut::row::append_slots_to_lp;
     use crate::cut::{CutPool, CutRowMap};
     use crate::cut_selection::{CutMetadata, CutSelectionStrategy};
-    use crate::indexer::{CutSlot, CutStateProjection, StateLayout};
+    use crate::indexer::{CutSlot, CutStateProjection, StateSpace};
 
     /// All-enabled per-pool projection of `idx`: every scoring/append test uses a
     /// full-dimension pool, so this reproduces the global outgoing render.
-    fn cut_state(idx: &StateLayout) -> CutStateProjection {
+    fn cut_state(idx: &StateSpace) -> CutStateProjection {
         CutStateProjection::new(
             idx,
             StageStateConfig {
@@ -873,7 +873,7 @@ mod tests {
     // score_violated_candidates fixtures
     // -----------------------------------------------------------------------
 
-    // All scoring tests use n_state = 2 (StateLayout::new(2, 0, 0, [], 0, 0, …)):
+    // All scoring tests use n_state = 2 (StateSpace::new(2, 0, 0, [], 0, 0, …)):
     //   - state columns 0, 1 (identity state_to_lp_column for j < hydro_count)
     //   - theta column 6 (= n * (3 + l) with n = 2, l = 0)
     // So `primal` must be at least length 7.
@@ -881,8 +881,8 @@ mod tests {
     const THETA_COL: usize = 6;
     const PRIMAL_LEN: usize = THETA_COL + 1;
 
-    fn indexer() -> StateLayout {
-        StateLayout::new(2, 0, 0, Vec::new(), 0, 0, vec![], &[0, 0])
+    fn indexer() -> StateSpace {
+        StateSpace::new(2, 0, 0, Vec::new(), 0, 0, vec![], &[0, 0])
     }
 
     /// A pool with capacity 16, state_dimension 2, forward_passes 16, no
@@ -1268,7 +1268,7 @@ mod tests {
     #[allow(clippy::cast_possible_truncation)]
     fn per_row_reference(
         pool: &CutPool,
-        idx: &StateLayout,
+        idx: &StateSpace,
         cut_state: &CutStateProjection,
         primal: &[f64],
         col_scale: &[f64],
@@ -1654,7 +1654,7 @@ mod tests {
     // lazy_solve fixtures
     // -----------------------------------------------------------------------
 
-    // Synthetic LP for StateLayout::new(1, 0, …): n_state = 1, theta = col 3.
+    // Synthetic LP for StateSpace::new(1, 0, …): n_state = 1, theta = col 3.
     //   Columns: 0 = state x0 (pinned to 2.0), 1 and 2 fixed to 0, 3 = theta.
     //   No structural rows (num_rows = 0) — cuts are the only rows.
     //   Objective: minimize theta. So at the optimum theta equals the max cut
@@ -1662,8 +1662,8 @@ mod tests {
     const STATE_X0: f64 = 2.0;
     const LAZY_THETA_COL: usize = 3;
 
-    fn lazy_indexer() -> StateLayout {
-        StateLayout::new(1, 0, 0, Vec::new(), 0, 0, vec![], &[0])
+    fn lazy_indexer() -> StateSpace {
+        StateSpace::new(1, 0, 0, Vec::new(), 0, 0, vec![], &[0])
     }
 
     /// Cut-free core template with x0 pinned to `STATE_X0` and theta free.
@@ -1749,7 +1749,7 @@ mod tests {
     }
 
     /// Reference all-cuts optimum: load core, append every active slot, solve.
-    fn solve_all_cuts(pool: &CutPool, state: &StateLayout) -> (f64, f64) {
+    fn solve_all_cuts(pool: &CutPool, state: &StateSpace) -> (f64, f64) {
         let mut solver = active_profiled();
         let core = core_template();
         solver.load_model(&core);

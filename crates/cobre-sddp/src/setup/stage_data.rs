@@ -3,7 +3,7 @@
 use cobre_core::{Stage, temporal::StageLagTransition};
 
 use crate::{
-    indexer::{CutStateProjection, StateLayout, StudyDimensions},
+    indexer::{CutStateProjection, StateSpace, StudyDimensions},
     lp_builder::StageTemplates,
     scaling_report::ScalingReport,
     simulation::EntityCounts,
@@ -20,7 +20,7 @@ pub struct StageData {
     /// Canonical stage-invariant state / cut column ranges and layout-derived
     /// caches — the single owner of these ("role (a)"); per-stage equipment
     /// geometry ("role (b)") lives on [`crate::lp_builder::StageGeometry`].
-    pub(crate) state: StateLayout,
+    pub(crate) state: StateSpace,
 
     /// Single owner of the study-invariant, non-state LP shape: non-state entity
     /// counts, optional-column presence flags, and the anticipated-thermal

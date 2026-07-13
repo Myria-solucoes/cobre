@@ -1,10 +1,10 @@
 //! The stage-invariant state-vector layout and its LP-column resolvers.
 //!
 //! State pinning uses column bounds, not equality rows:
-//! [`StateLayout::state_to_lp_incoming_column`] is the single authoritative
+//! [`StateSpace::state_to_lp_incoming_column`] is the single authoritative
 //! incoming-state column resolver — the LP column for both pinning and dual
 //! extraction is always resolved through it, never by assuming a fixing-row
-//! index. The companion [`StateLayout::state_to_lp_column`] maps the outgoing
+//! index. The companion [`StateSpace::state_to_lp_column`] maps the outgoing
 //! state vector to the LP columns a forward-pass cut row references.
 //!
 //! Every offset here is a pure function of `N` (`hydro_count`), `L`
@@ -13,16 +13,11 @@
 //! resolves onto the correct column at every stage regardless of per-stage
 //! block counts.
 
-use std::borrow::Cow;
 use std::ops::Range;
 
-use super::{AnticipatedLocal, InCol, OutCol, RangeCursor, StateDim};
+use super::{InCol, OutCol, RangeCursor, StateDim};
 use crate::lead_time::AnticipatedResolution;
-use crate::lead_time::LeadTime::Stages;
-use crate::lead_time::PointResolution;
-use crate::lead_time::resolve_point;
 
-use cobre_core::commissioning::commissioning_active;
 use cobre_core::temporal::StageStateConfig;
 
 /// Stage-invariant state-vector layout for one SDDP stage subproblem.
@@ -47,7 +42,7 @@ use cobre_core::temporal::StageStateConfig;
 /// pinned via [`Self::state_to_lp_incoming_column`]) — never one dual-purpose
 /// range shifted out-of-LP.
 #[derive(Debug, Clone)]
-pub struct StateLayout {
+pub struct StateSpace {
     /// Outgoing storage volumes.
     pub storage: Range<usize>,
 
@@ -69,11 +64,11 @@ pub struct StateLayout {
     pub anticipated_slots_out: Range<usize>,
 
     /// Incoming storage volumes, pinned via
-    /// [`StateLayout::state_to_lp_incoming_column`].
+    /// [`StateSpace::state_to_lp_incoming_column`].
     pub storage_in: Range<usize>,
 
     /// Incoming travel-time bucket volumes, pinned via
-    /// [`StateLayout::state_to_lp_incoming_column`].
+    /// [`StateSpace::state_to_lp_incoming_column`].
     pub transit_buckets_in: Range<usize>,
 
     /// Realized-inflow variables `z_h`, one per hydro.
@@ -81,7 +76,7 @@ pub struct StateLayout {
 
     /// Anticipated ring INCOMING slots, same slot-major/plant-minor layout as
     /// [`Self::anticipated_slots_out`], pinned via
-    /// [`StateLayout::state_to_lp_incoming_column`]. Slot 0 (the commitment
+    /// [`StateSpace::state_to_lp_incoming_column`]. Slot 0 (the commitment
     /// maturing this stage) is also read directly by [`crate::lp_builder`]'s
     /// anticipated-fishing row fill.
     pub anticipated_state: Range<usize>,
@@ -92,7 +87,7 @@ pub struct StateLayout {
     /// State-vector dimension used by cut storage and broadcast payloads —
     /// **not** a valid LP row index. No state-fixing rows exist; do not slice
     /// the LP row buffer as `[0, n_state)`. Resolve the pinning/subgradient
-    /// column via [`StateLayout::state_to_lp_incoming_column`].
+    /// column via [`StateSpace::state_to_lp_incoming_column`].
     pub n_state: usize,
 
     /// Number of operating hydro plants (N).
@@ -128,32 +123,32 @@ pub struct StateLayout {
 
     /// State dimensions whose cut coefficients can be nonzero (padded lag/ring
     /// slots excluded); computed by [`Self::set_nonzero_mask`].
-    pub nonzero_state_indices: Vec<usize>,
+    pub nonzero_state_indices: Vec<StateDim>,
 
     /// Precomputed `state_to_lp_column(j)` for every `j ∈ [0, n_state)` (cut-row
     /// hot path).
-    pub state_to_lp_column_map: Vec<usize>,
+    pub state_to_lp_column_map: Vec<OutCol>,
 }
 
 /// One of the four stage-invariant state-vector regions, in the canonical walk
 /// order [`REGION_ORDER`] declares.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum StateRegion {
-    /// Outgoing storage volumes — [`StateLayout::state_dim_storage_range`].
+    /// Outgoing storage volumes — [`StateSpace::state_dim_storage_range`].
     Storage,
-    /// AR inflow lags — [`StateLayout::state_dim_lag_range`].
+    /// AR inflow lags — [`StateSpace::state_dim_lag_range`].
     Lag,
-    /// Travel-time in-transit buckets — [`StateLayout::state_dim_bucket_range`].
+    /// Travel-time in-transit buckets — [`StateSpace::state_dim_bucket_range`].
     Buckets,
-    /// Anticipated-ring slots — [`StateLayout::state_dim_anticipated_range`].
+    /// Anticipated-ring slots — [`StateSpace::state_dim_anticipated_range`].
     Anticipated,
 }
 
 /// The single owner of the `storage → lag → buckets → anticipated`
-/// state-region walk order. [`StateLayout::state_to_lp_column`],
-/// [`StateLayout::state_to_lp_incoming_column`],
-/// [`StateLayout::set_nonzero_mask`], and [`super::CutStateProjection::new`]
-/// all dispatch over this array via [`StateLayout::state_dim_range`]; a
+/// state-region walk order. [`StateSpace::state_to_lp_column`],
+/// [`StateSpace::state_to_lp_incoming_column`],
+/// [`StateSpace::set_nonzero_mask`], and [`super::CutStateProjection::new`]
+/// all dispatch over this array via [`StateSpace::state_dim_range`]; a
 /// variant added to [`StateRegion`] fails to compile at any of those sites
 /// (each matches it exhaustively, no `_` catch-all) until handled.
 pub(crate) const REGION_ORDER: [StateRegion; 4] = [
@@ -180,8 +175,8 @@ impl StateRegion {
     }
 }
 
-impl StateLayout {
-    /// Construct a finalized [`StateLayout`] from the state dimensions and the
+impl StateSpace {
+    /// Construct a finalized [`StateSpace`] from the state dimensions and the
     /// per-hydro effective lag-slot counts.
     ///
     /// `effective_lag_count` must have length `hydro_count`; each entry is
@@ -416,9 +411,9 @@ impl StateLayout {
     /// boundary:
     ///
     /// ```compile_fail
-    /// use cobre_sddp::indexer::StateLayout;
+    /// use cobre_sddp::indexer::StateSpace;
     ///
-    /// let state = StateLayout::new(1, 0, 0, Vec::new(), 0, 0, Vec::new(), &[0]);
+    /// let state = StateSpace::new(1, 0, 0, Vec::new(), 0, 0, Vec::new(), &[0]);
     /// let _col = state.state_to_lp_column(0); // bare usize handed where StateDim is required
     /// ```
     ///
@@ -426,9 +421,9 @@ impl StateLayout {
     /// dimension:
     ///
     /// ```compile_fail
-    /// use cobre_sddp::indexer::{StateDim, StateLayout};
+    /// use cobre_sddp::indexer::{StateDim, StateSpace};
     ///
-    /// let state = StateLayout::new(1, 0, 0, Vec::new(), 0, 0, Vec::new(), &[0]);
+    /// let state = StateSpace::new(1, 0, 0, Vec::new(), 0, 0, Vec::new(), &[0]);
     /// let col = state.state_to_lp_column(StateDim::new(0));
     /// let _reentered = state.state_to_lp_column(col); // OutCol handed where StateDim is required
     /// ```
@@ -460,13 +455,13 @@ impl StateLayout {
         self.state_to_lp_column_map.reserve(self.n_state);
         for j in 0..self.n_state {
             self.state_to_lp_column_map
-                .push(self.state_to_lp_column(StateDim::new(j)).get());
+                .push(self.state_to_lp_column(StateDim::new(j)));
         }
         debug_assert_eq!(self.state_to_lp_column_map.len(), self.n_state);
     }
 
     /// Read the precomputed `state_to_lp_column(j)` from
-    /// [`Self::state_to_lp_column_map`], which [`StateLayout::new`] always
+    /// [`Self::state_to_lp_column_map`], which [`StateSpace::new`] always
     /// finalizes to `n_state` length (indexed read is in range for
     /// `j ∈ [0, n_state)`).
     #[inline]
@@ -478,7 +473,7 @@ impl StateLayout {
             self.n_state,
             "state_to_lp_column_map must be finalized to n_state length"
         );
-        OutCol::new(self.state_to_lp_column_map[j])
+        self.state_to_lp_column_map[j]
     }
 
     /// Map a state-vector index to its **incoming-state** LP column — the column
@@ -506,106 +501,6 @@ impl StateLayout {
     pub fn state_to_lp_incoming_column(&self, j: StateDim) -> InCol {
         let (region, offset) = self.classify(j);
         InCol::new(self.incoming_block_start(region) + offset)
-    }
-
-    /// Whether anticipated plant `local_idx` emits a decision column and an
-    /// `anticipated_state_out_def` row at `stage_idx` — the single cross-module
-    /// owner of the anticipated-decision gate. Both clauses key on the
-    /// **delivery** stage `t + K_i`:
-    ///
-    /// 1. **Strict horizon** — `stage_idx + K_i < n_stages`. The `<` is strict:
-    ///    a `<=` would price a commitment delivered at `n_stages`, outside
-    ///    `[0, n_stages)`, with no delivery LP.
-    /// 2. **Operation window** — the delivery stage is commissioning-active,
-    ///    `commissioning_active(entry_i, exit_i, id(t + K_i))`. Keying on the
-    ///    DELIVERY stage, not the decision stage `t`, is load-bearing: a
-    ///    pre-entry decision at `entry − K_i` legitimately delivers at `entry`,
-    ///    and keying on `t` would invert which decisions are active.
-    ///
-    /// `anticipated_windows` is indexed by anticipated-local position;
-    /// `study_stage_ids` by study stage index.
-    #[inline]
-    #[must_use]
-    pub fn is_anticipated_decision_active(
-        &self,
-        local_idx: usize,
-        stage_idx: usize,
-        n_stages: usize,
-        anticipated_windows: &[(Option<i32>, Option<i32>)],
-        study_stage_ids: &[i32],
-    ) -> bool {
-        debug_assert!(
-            local_idx < self.anticipated_lead_stages.len(),
-            "local_idx {local_idx} out of bounds (n_anticipated = {})",
-            self.anticipated_lead_stages.len(),
-        );
-        debug_assert_eq!(
-            anticipated_windows.len(),
-            self.anticipated_lead_stages.len(),
-            "anticipated_windows must have one entry per anticipated plant",
-        );
-        let delivery_stage = stage_idx.saturating_add(self.anticipated_lead_stages[local_idx]);
-        self.is_anticipated_decision_active_for_delivery(
-            AnticipatedLocal::new(local_idx),
-            delivery_stage,
-            n_stages,
-            anticipated_windows,
-            study_stage_ids,
-        )
-    }
-
-    /// Whether plant `local_idx`'s commitment maturing at an EXPLICIT
-    /// `delivery_stage` is active — the same horizon + commissioning gate as
-    /// [`Self::is_anticipated_decision_active`], for a decision whose delivery
-    /// stage comes from `PointResolution::genuine_decisions_at` rather than a
-    /// constant lead offset.
-    #[inline]
-    #[must_use]
-    pub fn is_anticipated_decision_active_for_delivery(
-        &self,
-        local_idx: AnticipatedLocal,
-        delivery_stage: usize,
-        n_stages: usize,
-        anticipated_windows: &[(Option<i32>, Option<i32>)],
-        study_stage_ids: &[i32],
-    ) -> bool {
-        let local_idx = local_idx.get();
-        debug_assert!(
-            local_idx < anticipated_windows.len(),
-            "local_idx {local_idx} out of bounds (anticipated_windows.len() = {})",
-            anticipated_windows.len(),
-        );
-        if delivery_stage >= n_stages {
-            return false;
-        }
-        debug_assert!(
-            delivery_stage < study_stage_ids.len(),
-            "delivery_stage {delivery_stage} out of bounds for study_stage_ids \
-             (len {})",
-            study_stage_ids.len(),
-        );
-        let (entry, exit) = anticipated_windows[local_idx];
-        commissioning_active(entry, exit, study_stage_ids[delivery_stage])
-    }
-
-    /// Plant `local_idx`'s delivery-anchored resolution: the setup-threaded
-    /// [`crate::lead_time::PointResolution`] when [`Self::anticipated_resolution`]
-    /// is attached (production always attaches it), else an on-the-fly
-    /// `LeadTime::Stages`-equivalent built from the plant's constant
-    /// [`Self::anticipated_lead_stages`] — the fixture fallback for
-    /// constant-lead tests that thread no resolution.
-    #[must_use]
-    pub(crate) fn anticipated_resolution_for(
-        &self,
-        local_idx: AnticipatedLocal,
-        n_stages: usize,
-    ) -> Cow<'_, PointResolution> {
-        let local_idx = local_idx.get();
-        if !self.anticipated_resolution.per_plant.is_empty() {
-            return Cow::Borrowed(&self.anticipated_resolution.per_plant[local_idx]);
-        }
-        let lead = u32::try_from(self.anticipated_lead_stages[local_idx]).unwrap_or(u32::MAX);
-        Cow::Owned(resolve_point(Stages(lead), &[], n_stages))
     }
 
     /// Compute and store [`Self::nonzero_state_indices`] from per-hydro
@@ -653,7 +548,7 @@ impl StateLayout {
         for region in REGION_ORDER {
             match region {
                 StateRegion::Storage | StateRegion::Buckets => {
-                    mask.extend(self.state_dim_range(region));
+                    mask.extend(self.state_dim_range(region).map(StateDim::new));
                 }
                 StateRegion::Lag => {
                     let start = self.state_dim_range(region).start;
@@ -661,7 +556,7 @@ impl StateLayout {
                         for (h, &lag_count) in lag_counts.iter().enumerate() {
                             debug_assert!(lag_count <= self.max_par_order);
                             if lag < lag_count {
-                                mask.push(start + lag * self.hydro_count + h);
+                                mask.push(StateDim::new(start + lag * self.hydro_count + h));
                             }
                         }
                     }
@@ -672,7 +567,7 @@ impl StateLayout {
                         for (plant, &k_i) in anticipated_lead_stages.iter().enumerate() {
                             debug_assert!(k_i <= self.k_max);
                             if slot < k_i {
-                                mask.push(start + slot * self.n_anticipated + plant);
+                                mask.push(StateDim::new(start + slot * self.n_anticipated + plant));
                             }
                         }
                     }
@@ -691,9 +586,9 @@ impl StateLayout {
 
 #[cfg(test)]
 mod tests {
-    use super::{InCol, OutCol, StateDim, StateLayout};
+    use super::{InCol, OutCol, StateDim, StateSpace};
 
-    /// Build a [`StateLayout`] finalized the way production `resolve_state_layout`
+    /// Build a [`StateSpace`] finalized the way production `resolve_state_layout`
     /// does: full `max_par_order` lag stride for every hydro (the coverage the
     /// dense path emits for test layouts without a PAR model) and the layout's
     /// own `anticipated_lead_stages`.
@@ -703,7 +598,7 @@ mod tests {
         n_anticipated: usize,
         k_max: usize,
         anticipated_lead_stages: Vec<usize>,
-    ) -> StateLayout {
+    ) -> StateSpace {
         finalized_with_transit_buckets(
             hydro_count,
             max_par_order,
@@ -726,9 +621,9 @@ mod tests {
         n_anticipated: usize,
         k_max: usize,
         anticipated_lead_stages: Vec<usize>,
-    ) -> StateLayout {
+    ) -> StateSpace {
         let lag_counts = vec![max_par_order; hydro_count];
-        StateLayout::new(
+        StateSpace::new(
             hydro_count,
             max_par_order,
             n_buckets,
@@ -760,7 +655,7 @@ mod tests {
         }
     }
 
-    /// `StateLayout::new` always finalizes `state_to_lp_column_map` to `n_state`
+    /// `StateSpace::new` always finalizes `state_to_lp_column_map` to `n_state`
     /// length, so `lp_column_for_state` reads the precomputed map directly with
     /// no live-resolver fallback. Cover every distinct layout shape (storage-only,
     /// storage + lags, and storage + lags + anticipated) to pin the
@@ -782,7 +677,7 @@ mod tests {
             for j in 0..idx.n_state {
                 assert_eq!(
                     idx.lp_column_for_state(StateDim::new(j)),
-                    OutCol::new(idx.state_to_lp_column_map[j])
+                    idx.state_to_lp_column_map[j]
                 );
             }
         }
@@ -795,80 +690,14 @@ mod tests {
     fn lp_column_map_storage_only_mask_is_full_range() {
         let idx = finalized(3, 0, 0, 0, vec![]);
 
-        assert_eq!(idx.nonzero_state_indices, vec![0, 1, 2]);
+        assert_eq!(
+            idx.nonzero_state_indices,
+            vec![StateDim::new(0), StateDim::new(1), StateDim::new(2)]
+        );
         assert_eq!(idx.nonzero_state_indices.len(), idx.n_state);
         for j in 0..idx.n_state {
             assert_eq!(idx.lp_column_for_state(StateDim::new(j)), OutCol::new(j));
         }
-    }
-
-    // ── is_anticipated_decision_active tests ───────────────────────────────────
-
-    /// The strict horizon clause is active iff `stage_idx + K_i < n_stages`:
-    /// active strictly inside the horizon, inactive at the `==` boundary and
-    /// beyond. The `==` boundary must be inactive (a `<=` gate would price a
-    /// commitment whose delivery stage falls outside `[0, n_stages)`). With
-    /// windowless plants `(None, None)` the operation-window clause is always
-    /// `true`, so this isolates the horizon clause.
-    #[test]
-    fn is_anticipated_decision_active_strict_horizon_gate() {
-        // Two plants: K_0 = 1, K_1 = 2; k_max = 2; n_stages = 5.
-        let idx = finalized(0, 0, 2, 2, vec![1, 2]);
-        let n_stages = 5;
-        // Windowless: the operation-window clause is identically true.
-        let windows = [(None, None); 2];
-        let stage_ids = [0, 1, 2, 3, 4];
-
-        // Plant 0 (K=1): active while stage_idx + 1 < 5, i.e. stage_idx <= 3.
-        assert!(idx.is_anticipated_decision_active(0, 0, n_stages, &windows, &stage_ids));
-        assert!(idx.is_anticipated_decision_active(0, 3, n_stages, &windows, &stage_ids));
-        // == boundary (stage_idx + K_i == n_stages): inactive.
-        assert!(!idx.is_anticipated_decision_active(0, 4, n_stages, &windows, &stage_ids));
-        // Beyond the boundary: inactive.
-        assert!(!idx.is_anticipated_decision_active(0, 5, n_stages, &windows, &stage_ids));
-
-        // Plant 1 (K=2): active while stage_idx + 2 < 5, i.e. stage_idx <= 2.
-        assert!(idx.is_anticipated_decision_active(1, 2, n_stages, &windows, &stage_ids));
-        // == boundary: inactive.
-        assert!(!idx.is_anticipated_decision_active(1, 3, n_stages, &windows, &stage_ids));
-        // Beyond: inactive.
-        assert!(!idx.is_anticipated_decision_active(1, 4, n_stages, &windows, &stage_ids));
-    }
-
-    /// The operation-window clause gates on the DELIVERY stage's `stage.id`, not
-    /// the decision stage. A single plant (K=2) with window `[entry=2, exit=4)`
-    /// over a 6-stage horizon (stage ids `[0..6)`):
-    ///
-    /// - decision at `t=0` delivers at `id(2)=2` ∈ `[2,4)` → ACTIVE (pre-entry
-    ///   decision: priced at `entry − K`),
-    /// - decision at `t=1` delivers at `id(3)=3` ∈ `[2,4)` → ACTIVE,
-    /// - decision at `t=2` delivers at `id(4)=4` ∉ `[2,4)` (half-open exit) →
-    ///   INACTIVE (post-exit drain begins),
-    /// - decision at `t=3` delivers at `id(5)=5` ∉ `[2,4)` → INACTIVE,
-    /// - decision at `t < 0` not applicable; decision at `t=4` (`t+K=6 == n`) is
-    ///   horizon-inactive regardless of window.
-    ///
-    /// The forbidden alternative — keying on the decision stage `t` — would make
-    /// `t=2` (inside `[2,4)`) active and `t=0` (outside) inactive, the exact
-    /// inversion the shift exists to prevent.
-    #[test]
-    fn is_anticipated_decision_active_delivery_stage_window_gate() {
-        // One plant, K=2, k_max=2; n_stages=6; window [entry=2, exit=4).
-        let idx = finalized(0, 0, 1, 2, vec![2]);
-        let n_stages = 6;
-        let windows = [(Some(2), Some(4))];
-        let stage_ids = [0, 1, 2, 3, 4, 5];
-
-        // Pre-entry decision (t=0): delivers at id 2 ∈ [2,4) → active.
-        assert!(idx.is_anticipated_decision_active(0, 0, n_stages, &windows, &stage_ids));
-        // t=1: delivers at id 3 ∈ [2,4) → active.
-        assert!(idx.is_anticipated_decision_active(0, 1, n_stages, &windows, &stage_ids));
-        // t=2: delivers at id 4 ∉ [2,4) (half-open exit) → inactive (drain).
-        assert!(!idx.is_anticipated_decision_active(0, 2, n_stages, &windows, &stage_ids));
-        // t=3: delivers at id 5 ∉ [2,4) → inactive.
-        assert!(!idx.is_anticipated_decision_active(0, 3, n_stages, &windows, &stage_ids));
-        // t=4: t+K=6 == n_stages → horizon-inactive (short-circuits before window).
-        assert!(!idx.is_anticipated_decision_active(0, 4, n_stages, &windows, &stage_ids));
     }
 
     // ── state_to_lp_column tests ──────────────────────────────────────────────
@@ -1177,10 +1006,13 @@ mod tests {
             "mask length: 4 storage + 0 + 1 + 3 + 6 = 14"
         );
 
-        assert_eq!(&idx.nonzero_state_indices[..4], &[0, 1, 2, 3]);
+        assert_eq!(
+            &idx.nonzero_state_indices[..4],
+            &[0, 1, 2, 3].map(StateDim::new)
+        );
         assert_eq!(
             &idx.nonzero_state_indices[4..],
-            &[5, 6, 7, 10, 11, 14, 15, 19, 23, 27]
+            &[5, 6, 7, 10, 11, 14, 15, 19, 23, 27].map(StateDim::new)
         );
 
         assert!(idx.nonzero_state_indices.windows(2).all(|w| w[0] < w[1]));
@@ -1192,7 +1024,7 @@ mod tests {
         let mut idx = finalized(3, 0, 0, 0, vec![]);
         idx.set_nonzero_mask(&[0, 0, 0], &[]);
         assert_eq!(idx.nonzero_state_indices.len(), 3);
-        assert_eq!(&idx.nonzero_state_indices, &[0, 1, 2]);
+        assert_eq!(&idx.nonzero_state_indices, &[0, 1, 2].map(StateDim::new));
     }
 
     #[test]
@@ -1237,7 +1069,7 @@ mod tests {
         );
 
         // Storage indices.
-        assert_eq!(&idx.nonzero_state_indices[..2], &[0, 1]);
+        assert_eq!(&idx.nonzero_state_indices[..2], &[0, 1].map(StateDim::new));
 
         // Hydro 0 (lag_count = 4): expect lag slots at indices
         //   inflow_lags.start + lag * hydro_count + h = 2 + lag*2 + 0 for lag in 0..4
@@ -1246,11 +1078,11 @@ mod tests {
         //   2 + lag*2 + 1 for lag in 0..12 → {3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25}.
         // Mask is sorted globally. Confirm a few discriminating positions.
         assert!(
-            idx.nonzero_state_indices.contains(&25),
+            idx.nonzero_state_indices.contains(&StateDim::new(25)),
             "lag-11 slot for hydro 1 (the trailing PAR-A annual slot) must be in the mask"
         );
         assert!(
-            !idx.nonzero_state_indices.contains(&10),
+            !idx.nonzero_state_indices.contains(&StateDim::new(10)),
             "lag-4 slot for hydro 0 (classical AR(4)) must NOT be in the mask"
         );
         // Sorted.
@@ -1276,7 +1108,10 @@ mod tests {
 
         // Every slot is occupied, so all 6 indices appear.
         // slot=0: 0, 1; slot=1: 2, 3; slot=2: 4, 5.
-        assert_eq!(idx.nonzero_state_indices, vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(
+            idx.nonzero_state_indices,
+            [0, 1, 2, 3, 4, 5].map(StateDim::new)
+        );
     }
 
     /// `K_i < k_max` for some plants: padded slots are excluded.
@@ -1297,11 +1132,11 @@ mod tests {
         //              slot=2 plant=0 → 13 (K_0=3); plant=1 → padded.
         // The anticipated portion expected: [9, 10, 11, 13].
         let mask = &idx.nonzero_state_indices;
-        let ant_portion: Vec<usize> = mask.iter().copied().filter(|&i| i >= 9).collect();
+        let ant_portion: Vec<usize> = mask.iter().map(|d| d.get()).filter(|&i| i >= 9).collect();
         assert_eq!(ant_portion, vec![9, 10, 11, 13]);
         // Padded slots NOT present.
-        assert!(!mask.contains(&12));
-        assert!(!mask.contains(&14));
+        assert!(!mask.contains(&StateDim::new(12)));
+        assert!(!mask.contains(&StateDim::new(14)));
     }
 
     /// Anticipated-only: no hydros, no lags, only anticipated state.
@@ -1315,7 +1150,7 @@ mod tests {
         idx.set_nonzero_mask(&[], &[2]);
 
         // Only anticipated indices: slot=0 plant=0 → 0; slot=1 plant=0 → 1.
-        assert_eq!(idx.nonzero_state_indices, vec![0, 1]);
+        assert_eq!(idx.nonzero_state_indices, [0, 1].map(StateDim::new));
     }
 
     /// Heterogeneous `K_i` across plants, including a plant with `K_i = k_max`
@@ -1333,7 +1168,10 @@ mod tests {
         // slot=2 plant=0→6 (K_0=4). plant=1 padded. plant=2 padded.
         // slot=3 plant=0→9 (K_0=4). Others padded.
         // Expected: [0, 1, 2, 3, 4, 6, 9].
-        assert_eq!(idx.nonzero_state_indices, vec![0, 1, 2, 3, 4, 6, 9]);
+        assert_eq!(
+            idx.nonzero_state_indices,
+            [0, 1, 2, 3, 4, 6, 9].map(StateDim::new)
+        );
     }
 
     /// `n_anticipated == 0` reproduces the pre-anticipated behaviour exactly.
@@ -1346,7 +1184,7 @@ mod tests {
         // [0,1,2,3] (storage) + [5,6,7,10,11,14,15,19,23,27] (lags).
         assert_eq!(
             idx_with.nonzero_state_indices,
-            vec![0, 1, 2, 3, 5, 6, 7, 10, 11, 14, 15, 19, 23, 27]
+            [0, 1, 2, 3, 5, 6, 7, 10, 11, 14, 15, 19, 23, 27].map(StateDim::new)
         );
     }
 
@@ -1377,7 +1215,7 @@ mod tests {
         idx.set_nonzero_mask(&[], &[3]);
 
         // All k_max slots included: slot 0,1,2 → indices 0,1,2.
-        assert_eq!(idx.nonzero_state_indices, vec![0, 1, 2]);
+        assert_eq!(idx.nonzero_state_indices, [0, 1, 2].map(StateDim::new));
     }
 
     /// `K_i == 0` excludes all slots for that plant (defensive — the parse
@@ -1392,7 +1230,7 @@ mod tests {
 
         // Plant 0 (K_0=2) emits slot=0→0, slot=1→2. Plant 1 (K_1=0) emits
         // nothing. Expected mask: [0, 2].
-        assert_eq!(idx.nonzero_state_indices, vec![0, 2]);
+        assert_eq!(idx.nonzero_state_indices, [0, 2].map(StateDim::new));
     }
 
     // ── Bucket block tests ─────────────────────────────────────────────────
@@ -1490,7 +1328,7 @@ mod tests {
         assert_eq!(idx.transit_buckets_out, 6..8);
         assert_eq!(
             idx.nonzero_state_indices,
-            vec![0, 1, 2, 3, 5, 6, 7],
+            [0, 1, 2, 3, 5, 6, 7].map(StateDim::new),
             "hydro 0's lag-1 slot (index 4) must be excluded while the full \
              bucket block (6, 7) is included"
         );
@@ -1560,8 +1398,8 @@ mod tests {
     /// `n_anticipated` alone), matching the `A * k_max == 0` layout exactly.
     #[test]
     fn anticipated_ring_k_max_zero_collapses_even_with_plants_declared() {
-        let zero_k_max = StateLayout::new(3, 2, 0, Vec::new(), 2, 0, vec![0, 0], &[2, 2, 2]);
-        let no_plants = StateLayout::new(3, 2, 0, Vec::new(), 0, 0, vec![], &[2, 2, 2]);
+        let zero_k_max = StateSpace::new(3, 2, 0, Vec::new(), 2, 0, vec![0, 0], &[2, 2, 2]);
+        let no_plants = StateSpace::new(3, 2, 0, Vec::new(), 0, 0, vec![], &[2, 2, 2]);
 
         assert_eq!(zero_k_max.anticipated_slots_out, 0..0);
         assert_eq!(zero_k_max.anticipated_state, 0..0);

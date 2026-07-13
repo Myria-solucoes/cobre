@@ -2,7 +2,7 @@
 //!
 //! ## Column layout
 //!
-//! The state-region column layout is defined by [`StateLayout`]:
+//! The state-region column layout is defined by [`StateSpace`]:
 //!
 //! ```text
 //! [0, N)             storage      — outgoing storage volumes
@@ -26,7 +26,8 @@ use cobre_core::EntityId;
 use crate::energy_conversion::EnergyConversionSet;
 use crate::indexer::{
     AnticipatedLocal, BlockGrid, BlockIdx, Boundary, EvapLocal, FillingTargetLocal, FloorLocal,
-    FphaLocal, HydroSys, StateLayout, StudyDimensions,
+    FphaLocal, HydroSys, StateSpace, StudyDimensions, anticipated_resolution_for,
+    is_anticipated_decision_active_for_delivery,
 };
 use crate::lp_builder::StageGeometry;
 use crate::lp_builder::{COST_SCALE_FACTOR, GenericConstraintRowEntry};
@@ -168,7 +169,7 @@ impl ThermalReverseLookup {
 /// thermal is not anticipated, has no in-study decision at this stage, or the
 /// decision is inactive at its delivery stage.
 ///
-/// The delivery stage comes from [`StateLayout::anticipated_resolution_for`]'s
+/// The delivery stage comes from `anticipated_resolution_for`'s
 /// delivery-anchored resolution (`PointResolution::genuine_decisions_at`),
 /// never `stage_idx + lead_stages` — the constant-lead shortcut mis-resolves a
 /// calendar-anchored lead on a non-uniform study. Only the single-decider case
@@ -179,7 +180,7 @@ impl ThermalReverseLookup {
 /// never reaches here, and the `debug_assert` below is defence-in-depth against
 /// that guard regressing, not a reachable panic.
 ///
-/// Gates on [`StateLayout::is_anticipated_decision_active_for_delivery`] rather
+/// Gates on `is_anticipated_decision_active_for_delivery` rather
 /// than reading then checking: an inactive column is pinned to `[0, 0]` and the
 /// predicate is the canonical single-owner test.
 #[inline]
@@ -190,9 +191,7 @@ fn compute_anticipated_decision_mw(
     thermal_local: usize,
 ) -> Option<f64> {
     let local_idx = lookup.thermal_is_anticipated[thermal_local]?;
-    let resolution = spec
-        .state
-        .anticipated_resolution_for(local_idx, spec.n_stages);
+    let resolution = anticipated_resolution_for(spec.state, local_idx, spec.n_stages);
     let mut genuine = resolution.genuine_decisions_at(spec.stage_index);
     let delivery_stage = genuine.next()?;
     // TODO(anticipated-fanout-output): gated by resolve_state_layout's max_fanout > 1 reject
@@ -202,7 +201,8 @@ fn compute_anticipated_decision_mw(
          per stage; a fanned-out decision needs per-delivery-stage output \
          extraction, not implemented here"
     );
-    if !spec.state.is_anticipated_decision_active_for_delivery(
+    if !is_anticipated_decision_active_for_delivery(
+        spec.state,
         local_idx,
         delivery_stage,
         spec.n_stages,
@@ -238,7 +238,7 @@ fn compute_anticipated_committed_mw(
 ) -> Option<f64> {
     let local_idx = lookup.thermal_is_anticipated[thermal_local]?;
     // Ring buffer lives in the stage-invariant state region, so the base is the
-    // role-(a) `StateLayout`, not the geometry indexer. Slot 0 = start + local_idx.
+    // role-(a) `StateSpace`, not the geometry indexer. Slot 0 = start + local_idx.
     let col = spec.state.anticipated_state.start + local_idx.get();
     debug_assert!(
         col < view.primal.len(),
@@ -249,7 +249,7 @@ fn compute_anticipated_committed_mw(
 }
 
 /// Extract the travel-time in-transit bucket records for one stage, in the
-/// canonical [`StateLayout::transit_bucket_column_order`] `(downstream plant, lag)`
+/// canonical [`StateSpace::transit_bucket_column_order`] `(downstream plant, lag)`
 /// order — the same column order the LP fill and cut projection use, so the
 /// output row/column order is declaration-order invariant.
 ///
@@ -412,7 +412,7 @@ pub const ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S: f64 = 1.0e6 / 3600.0;
 pub struct StageExtractionSpec<'a> {
     /// Role-(a) state layout: source of the state-region column reads (`storage`,
     /// `storage_in`, `inflow_lags`, `anticipated_state`, `max_par_order`).
-    pub state: &'a StateLayout,
+    pub state: &'a StateSpace,
     /// Single owner of the study-invariant, non-state LP shape (entity counts and
     /// optional-column presence flags).
     pub study_dims: &'a StudyDimensions,
@@ -480,7 +480,7 @@ pub struct StageExtractionSpec<'a> {
     pub n_stages: usize,
     /// Per-plant commissioning window `(entry_stage_id, exit_stage_id)` for
     /// anticipated thermals, by anticipated-local position. Gates the
-    /// anticipated-decision read via [`StateLayout::is_anticipated_decision_active`]
+    /// anticipated-decision read via `is_anticipated_decision_active`
     /// on the same predicate the LP builder used — reading when the gate is `false`
     /// reports a decision for a `[0, 0]`-pinned column. Empty when none.
     pub anticipated_windows: &'a [(Option<i32>, Option<i32>)],
@@ -1013,7 +1013,6 @@ fn extract_thermals(
         for (t, &thermal_id) in spec.entity_counts.thermal_ids.iter().enumerate() {
             let is_anticipated = lookup.thermal_is_anticipated[t].is_some();
             let anticipated_decision_mw = compute_anticipated_decision_mw(view, spec, lookup, t);
-            // Per-plant per-stage scalar; hoisted out of the per-block loop.
             let anticipated_committed_mw = compute_anticipated_committed_mw(view, spec, lookup, t);
             for b in 0..n_blks {
                 let col = grid.flat(spec.geometry.thermal.start, t, BlockIdx::new(b));
@@ -1164,7 +1163,7 @@ fn extract_buses(
 ///
 /// Reads role-(b) equipment column values from `view.primal` using the ranges
 /// stored in `spec.geometry` (the per-stage [`StageGeometry`]);
-/// role-(a) state columns resolve via `spec.state` ([`StateLayout`]). When a
+/// role-(a) state columns resolve via `spec.state` ([`StateSpace`]). When a
 /// family has zero entities its range is empty (`0..0`) and that result defaults
 /// to zero.
 ///
@@ -1372,7 +1371,7 @@ fn compute_cost_result(
     view: &SolutionView<'_>,
     study_dims: &StudyDimensions,
     equipment: &StageGeometry,
-    state: &StateLayout,
+    state: &StateSpace,
     col_scale: &[f64],
     generic_violation_cost: f64,
     cumulative_discount_factor: f64,

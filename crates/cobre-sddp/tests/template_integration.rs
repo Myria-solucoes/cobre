@@ -38,7 +38,7 @@ use cobre_sddp::{
         EvaporationModel, EvaporationModelSet, FphaPlane, LinearizedEvaporation,
         PrepareHydroModelsResult, ProductionModelSet, ResolvedProductionModel,
     },
-    indexer::{BlockGrid, StateLayout},
+    indexer::{BlockGrid, StateSpace},
     inflow_method::InflowNonNegativityMethod,
     lp_builder::PatchBuffer,
     resolved_parameters::ResolvedParameters,
@@ -3223,7 +3223,7 @@ fn one_anticipated_thermal_system(
 /// Compute `col_anticipated_decision_start` for the minimal geometry used by
 /// the anticipated-decision tests (0 hydros, 1 thermal, 1 anticipated, 1 blk).
 ///
-/// Layout derivation (in-LP anticipated ring, `StateLayout::anticipated_slots_out`
+/// Layout derivation (in-LP anticipated ring, `StateSpace::anticipated_slots_out`
 /// / `anticipated_state`):
 /// - `n_ant_state = n_anticipated * k_max = 1 * lead_stages`
 /// - the ring contributes `n_ant_state` outgoing columns AND `n_ant_state`

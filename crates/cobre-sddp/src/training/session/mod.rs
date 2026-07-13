@@ -1190,7 +1190,7 @@ mod tests {
         cut::fcf::FutureCostFunction,
         error::SddpError,
         horizon_mode::HorizonMode,
-        indexer::{CutStateProjection, StateLayout, StudyDimensions},
+        indexer::{CutStateProjection, StateSpace, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
         risk_measure::RiskMeasure,
         solver_stats::WORKER_STATS_ENTRY_STRIDE,
@@ -1582,7 +1582,7 @@ mod tests {
     fn make_training_ctx<'a>(
         horizon: &'a HorizonMode,
         study_dims: &'a StudyDimensions,
-        state: &'a StateLayout,
+        state: &'a StateSpace,
         cut_state_layouts: &'a [CutStateProjection],
         stochastic: &'a StochasticContext,
         initial_state: &'a [f64],

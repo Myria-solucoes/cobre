@@ -4,7 +4,7 @@
 //! `(column_index, coefficient_multiplier)` pairs; the LP builder calls it for each
 //! [`cobre_core::LinearTerm`] of a generic-constraint expression to produce CSC
 //! entries. Column offsets come from the [`GenericResolverGeom`] view (role-(a)
-//! state region through its [`StateLayout`] handle, role-(b) equipment ranges
+//! state region through its [`StateSpace`] handle, role-(b) equipment ranges
 //! directly), with all block-stride arithmetic routed through the single-owner
 //! [`BlockGrid`] primitive.
 //!
@@ -28,7 +28,7 @@ use cobre_core::{
 
 use crate::hydro_models::{ProductionModelSet, ResolvedProductionModel};
 use crate::indexer::{
-    BlockGrid, BlockIdx, Boundary, EvaporationIndices, HydroSys, StateLayout, StorageBoundaryGrid,
+    BlockGrid, BlockIdx, Boundary, EvaporationIndices, HydroSys, StateSpace, StorageBoundaryGrid,
 };
 
 /// Borrowed LP-column geometry the generic-constraint resolver reads — the
@@ -36,7 +36,7 @@ use crate::indexer::{
 ///
 /// ## Role split (the load-bearing distinction for the cut path)
 ///
-/// - **Role (a)** — `state`: storage and z-inflow columns, owned by [`StateLayout`].
+/// - **Role (a)** — `state`: storage and z-inflow columns, owned by [`StateSpace`].
 ///   Resolving a `HydroStorage`/`HydroInflow` term through the handle is what keeps a
 ///   generic constraint's storage/inflow column landing on the same column the cut
 ///   path reads.
@@ -45,7 +45,7 @@ use crate::indexer::{
 ///   anticipated-decision base + reverse map, riding this stage's own block count.
 pub(crate) struct GenericResolverGeom<'a> {
     /// Role-(a) state-region handle (storage + z-inflow column owner).
-    pub state: &'a StateLayout,
+    pub state: &'a StateSpace,
     /// Role-(a)-adjacent: storage-boundary address primitive, feeding
     /// [`Self::block_storage_col`].
     pub storage_boundary_grid: StorageBoundaryGrid,

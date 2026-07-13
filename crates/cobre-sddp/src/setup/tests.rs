@@ -1,6 +1,6 @@
 use super::StudySetup;
 use crate::hydro_models::{PrepareHydroModelsResult, ProductionModelSet, ResolvedProductionModel};
-use crate::indexer::StateLayout;
+use crate::indexer::StateSpace;
 use crate::test_support;
 
 use cobre_core::{
@@ -1954,13 +1954,13 @@ fn study_setup_propagates_fpha_missing_equivalent_productivity() {
     );
 }
 
-fn layout_for_lag_test(hydro_count: usize, max_par_order: usize) -> StateLayout {
+fn layout_for_lag_test(hydro_count: usize, max_par_order: usize) -> StateSpace {
     test_support::state_layout(hydro_count, max_par_order)
 }
 
 /// Must match [`counts_with_anticipated`]: 1 hydro, 0 lags, `n_anticipated`
 /// plants with the given per-plant K.
-fn layout_with_anticipated(n_anticipated: usize, k_values: &[usize]) -> StateLayout {
+fn layout_with_anticipated(n_anticipated: usize, k_values: &[usize]) -> StateSpace {
     let k_max = k_values.iter().copied().max().unwrap_or(0);
     test_support::state_layout_full(1, 0, n_anticipated, k_max, k_values.to_vec())
 }
@@ -5931,16 +5931,16 @@ fn test_anticipated_resolve_point_fanout_calendar() {
 }
 
 /// Assert `state` is finalized and byte-for-byte reproduces a fresh
-/// `StateLayout::new` over the same `(N, L, A, k_max, leads)` — the single-owner
+/// `StateSpace::new` over the same `(N, L, A, k_max, leads)` — the single-owner
 /// property `resolve_state_layout` guarantees. Role-(b) equipment geometry lives
 /// on `StageGeometry`, so there is no state half to compare here.
-fn assert_state_layout_finalized(state: &StateLayout) {
+fn assert_state_layout_finalized(state: &StateSpace) {
     assert_eq!(
         state.state_to_lp_column_map.len(),
         state.n_state,
         "state_to_lp_column_map must be finalized to n_state length"
     );
-    let reference = StateLayout::new(
+    let reference = StateSpace::new(
         state.hydro_count,
         state.max_par_order,
         state.n_buckets,
@@ -5952,7 +5952,7 @@ fn assert_state_layout_finalized(state: &StateLayout) {
     );
     assert_eq!(
         state.state_to_lp_column_map, reference.state_to_lp_column_map,
-        "state_to_lp_column_map must match a fresh StateLayout::new"
+        "state_to_lp_column_map must match a fresh StateSpace::new"
     );
     assert_eq!(state.n_state, reference.n_state, "n_state must match");
     assert_eq!(state.theta, reference.theta, "theta column must match");
@@ -6411,14 +6411,13 @@ fn stage_data_state_matches_indexer_role_a_anticipated() {
 
 /// Cut-row byte-identity: the production `build_cut_row_batch` reading role-(a)
 /// from `StageData.state` matches an independent reference loop over the same
-/// `StateLayout` (mask, `theta`, `lp_column_for_state`) — the substitutability
+/// `StateSpace` (mask, `theta`, `lp_column_for_state`) — the substitutability
 /// guarantee the cut-path repoint relies on (same LP columns, same
 /// negated-scaled coefficients).
 #[test]
 fn cut_row_from_state_matches_reference_loop() {
     use crate::cut::FutureCostFunction;
     use crate::cut::row::build_cut_row_batch;
-    use crate::indexer::StateDim;
 
     let system = minimal_system(3);
     let config = minimal_config(2, 10);
@@ -6480,11 +6479,11 @@ fn cut_row_from_state_matches_reference_loop() {
     for (_slot, intercept, coeffs) in fcf.active_cuts(0) {
         from_state.row_starts.push(0);
         for &j in mask {
-            let lp_col = state.lp_column_for_state(StateDim::new(j)).get();
+            let lp_col = state.lp_column_for_state(j).get();
             from_state
                 .col_indices
                 .push(i32::try_from(lp_col).expect("col fits i32"));
-            from_state.values.push(-coeffs[j]);
+            from_state.values.push(-coeffs[j.get()]);
         }
         from_state
             .col_indices
@@ -6528,7 +6527,7 @@ fn cut_row_from_state_matches_reference_loop() {
 
 /// PAR(2) study (one stage per `state_configs` entry): AR(2) coefficients plus
 /// pre-study inflow models at stage ids -1/-2 give the PAR builder its lag
-/// statistics, so the global `StateLayout` has `n_state = N*(1 + 2)`.
+/// statistics, so the global `StateSpace` has `n_state = N*(1 + 2)`.
 #[allow(clippy::too_many_lines, clippy::cast_possible_wrap)]
 fn par2_system_with_state_configs(state_configs: &[StageStateConfig]) -> cobre_core::System {
     use chrono::NaiveDate;
@@ -6831,7 +6830,7 @@ fn cut_pool_sizing_t_plus_1_reduces_pool_zero_for_lagless_successor() {
 
 /// Result-neutrality: when every stage enables all dimensions (the default
 /// for every shipped case), every pool's `state_dimension` equals the global
-/// `StateLayout::n_state`. This is the bit-identical-to-today guarantee.
+/// `StateSpace::n_state`. This is the bit-identical-to-today guarantee.
 #[test]
 fn cut_pool_sizing_all_enabled_matches_global_n_state() {
     let lags = StageStateConfig {

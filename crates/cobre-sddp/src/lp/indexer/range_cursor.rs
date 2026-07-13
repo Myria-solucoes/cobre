@@ -1,6 +1,6 @@
 //! The [`RangeCursor`] running column/row offset allocator shared by
 //! [`StageLayout::new`](crate::lp_builder::StageLayout)'s per-stage equipment
-//! column/row chains and [`StateLayout::new`](super::StateLayout)'s
+//! column/row chains and [`StateSpace::new`](super::StateSpace)'s
 //! stage-invariant state-vector chain.
 
 use std::ops::Range;
@@ -18,7 +18,7 @@ use std::ops::Range;
 /// `pos..pos` carries it, so those reads and fallbacks collapse to a bare
 /// `.start`/`.end` with no branch. A caller that needs the literal `0..0`
 /// convention for an optional block (e.g.
-/// [`StateLayout::new`](super::StateLayout)) normalises it explicitly at the
+/// [`StateSpace::new`](super::StateSpace)) normalises it explicitly at the
 /// call site — `RangeCursor` itself never returns `0..0`.
 pub(crate) struct RangeCursor {
     pos: usize,

@@ -79,7 +79,7 @@ pub struct CutSyncBuffers {
     displs: Vec<usize>,
 
     /// Maximum cut-coefficient count across all stages (the global
-    /// `StateLayout::n_state`); sizes buffer capacity only.
+    /// `StateSpace::n_state`); sizes buffer capacity only.
     ///
     /// The wire stride for a stage's exchange is
     /// `cut_wire_size(fcf.pools[stage].state_dimension)` — the pool's own

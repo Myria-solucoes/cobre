@@ -9,7 +9,7 @@ use crate::{
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
     energy_conversion::EnergyConversionSet,
-    indexer::StateLayout,
+    indexer::StateSpace,
     simulation::SimulationConfig,
     workspace::CapturedBasis,
 };
@@ -67,7 +67,7 @@ impl StudySetup {
     /// single layout resolves onto the correct column at every stage regardless
     /// of per-stage block counts.
     #[must_use]
-    pub fn stage_state(&self) -> &StateLayout {
+    pub fn stage_state(&self) -> &StateSpace {
         &self.stage_data.state
     }
 

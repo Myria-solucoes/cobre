@@ -7,7 +7,7 @@
 //! both differences live at each ring's own call site, never a second
 //! skeleton implementation.
 //!
-//! [`StateLayout`](crate::indexer::StateLayout) remains the sole owner of the
+//! [`StateSpace`](crate::indexer::StateSpace) remains the sole owner of the
 //! out/in state-index ranges: a [`DeliveryRing`] borrows them for one
 //! construction and never re-derives or persists an independent copy. The
 //! block-mode-coupled per-lag deposit fill stays at each ring's own call
@@ -20,7 +20,7 @@ use super::columns::ColumnBufs;
 /// A lagged-delivery ring over one dense, slot-major/lane-minor state-column
 /// grid: `n_lanes` parallel delivery lanes (plants), each `depth` slots deep.
 /// Borrows its outgoing/incoming column blocks from
-/// [`StateLayout`](crate::indexer::StateLayout) — never a private copy of the
+/// [`StateSpace`](crate::indexer::StateSpace) — never a private copy of the
 /// ranges.
 #[derive(Debug, Clone)]
 pub(crate) struct DeliveryRing {
