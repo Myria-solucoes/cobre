@@ -2,7 +2,7 @@ use cobre_core::{BlockMode, CoefficientRef, ConstraintSense, ContractType, Entit
 
 use crate::generic_constraints::resolve_variable_ref;
 use crate::hydro_models::{EvaporationModel, ResolvedProductionModel};
-use crate::indexer::{EvapLocal, HydroSys, StateLayout};
+use crate::indexer::{AnticipatedLocal, EvapLocal, HydroSys, LineSys, StateLayout};
 
 use super::M3S_TO_HM3;
 use super::delivery_ring::DeliveryRing;
@@ -44,7 +44,7 @@ pub(super) fn fill_anticipated_fishing_entries(
         let thermal_idx = ctx.anticipated_thermal_indices[local_idx];
         let mut block_hours_total: f64 = 0.0;
         for blk in 0..n_blks {
-            let col_gen = grid.flat(layout.equipment.thermal.start, thermal_idx, blk);
+            let col_gen = grid.flat(layout.equipment.thermal.start, thermal_idx.get(), blk);
             let block_hours = stage.blocks[blk].duration_hours;
             col_entries[col_gen].push((row, block_hours));
             block_hours_total += block_hours;
@@ -75,7 +75,9 @@ pub(super) fn fill_anticipated_state_out_def_entries(
     let ring = anticipated_ring(layout);
     let mut n_active: usize = 0;
     for local_idx in 0..n_ant {
-        let point = layout.state.anticipated_resolution_for(local_idx, n_stages);
+        let point = layout
+            .state
+            .anticipated_resolution_for(AnticipatedLocal::new(local_idx), n_stages);
         let Some(delivery_stage) = point.genuine_decisions_at(stage_idx).next() else {
             continue;
         };
@@ -980,8 +982,8 @@ pub(super) fn fill_load_balance_entries(
         let src_idx = ctx.bus_pos.get(&line.source_bus_id).copied();
         let tgt_idx = ctx.bus_pos.get(&line.target_bus_id).copied();
         for blk in 0..n_blks {
-            let col_fwd = layout.line_fwd_col(l_idx, blk);
-            let col_rev = layout.line_rev_col(l_idx, blk);
+            let col_fwd = layout.line_fwd_col(LineSys::new(l_idx), blk);
+            let col_rev = layout.line_rev_col(LineSys::new(l_idx), blk);
             if let Some(tgt) = tgt_idx {
                 let row = grid.flat(row_load, tgt, blk);
                 col_entries[col_fwd].push((row, 1.0));
@@ -1375,7 +1377,7 @@ pub(super) fn fill_operational_violation_entries(
             col_entries[col_s].push((row, 1.0));
             let col_d = layout.diversion_col(HydroSys::new(h_idx), blk);
             col_entries[col_d].push((row, 1.0));
-            let col_slack = layout.outflow_below_col(h_idx, blk);
+            let col_slack = layout.outflow_below_col(HydroSys::new(h_idx), blk);
             col_entries[col_slack].push((row, 1.0));
         }
 
@@ -1391,7 +1393,7 @@ pub(super) fn fill_operational_violation_entries(
             col_entries[col_s].push((row, 1.0));
             let col_d = layout.diversion_col(HydroSys::new(h_idx), blk);
             col_entries[col_d].push((row, 1.0));
-            let col_slack = layout.outflow_above_col(h_idx, blk);
+            let col_slack = layout.outflow_above_col(HydroSys::new(h_idx), blk);
             col_entries[col_slack].push((row, -1.0));
         }
 
@@ -1403,7 +1405,7 @@ pub(super) fn fill_operational_violation_entries(
             );
             let col_q = layout.turbine_col(HydroSys::new(h_idx), blk);
             col_entries[col_q].push((row, 1.0));
-            let col_slack = layout.turbine_below_col(h_idx, blk);
+            let col_slack = layout.turbine_below_col(HydroSys::new(h_idx), blk);
             col_entries[col_slack].push((row, 1.0));
         }
 
@@ -1416,7 +1418,7 @@ pub(super) fn fill_operational_violation_entries(
                 );
                 let col_g = layout.generation_col(local_fpha_idx, blk);
                 col_entries[col_g].push((row, 1.0));
-                let col_slack = layout.generation_below_col(h_idx, blk);
+                let col_slack = layout.generation_below_col(HydroSys::new(h_idx), blk);
                 col_entries[col_slack].push((row, 1.0));
             }
         } else {
@@ -1438,7 +1440,7 @@ pub(super) fn fill_operational_violation_entries(
                 );
                 let col_q = layout.turbine_col(HydroSys::new(h_idx), blk);
                 col_entries[col_q].push((row, rho));
-                let col_slack = layout.generation_below_col(h_idx, blk);
+                let col_slack = layout.generation_below_col(HydroSys::new(h_idx), blk);
                 col_entries[col_slack].push((row, 1.0));
             }
         }
@@ -2254,7 +2256,10 @@ mod zero_cost_tests {
                 n_anticipated,
                 k_max,
                 anticipated_lead_stages,
-                anticipated_thermal_indices,
+                anticipated_thermal_indices: anticipated_thermal_indices
+                    .into_iter()
+                    .map(crate::indexer::ThermalSys::new)
+                    .collect(),
                 // Windowless: one `(None, None)` per plant, so the decision gate
                 // reduces to the strict horizon clause. `study_stage_ids` lists the
                 // study-stage ids so the in-range delivery lookup is safe.
@@ -2997,7 +3002,7 @@ mod pumping_water_tests {
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
     use crate::hydro_models::{EvaporationModel, EvaporationModelSet, ProductionModelSet};
-    use crate::indexer::{EvapLocal, HydroSys, StateDim, StateLayout};
+    use crate::indexer::{EvapLocal, HydroSys, LineSys, StateDim, StateLayout};
     use crate::lead_time::{SpreadResolution, resolve_spread};
     use crate::resolved_parameters::ResolvedParameters;
 
@@ -4361,13 +4366,13 @@ mod pumping_water_tests {
             );
             // LineExchange(100): +1.0 on the forward column, -1.0 on the reverse.
             assert_eq!(
-                coeff_at(layout_a.line_fwd_col(l_pos, blk)),
+                coeff_at(layout_a.line_fwd_col(LineSys::new(l_pos), blk)),
                 1.0,
                 "blk {blk}: generic row must carry +1.0 on line 100's forward column \
                  (resolver path through line_pos)"
             );
             assert_eq!(
-                coeff_at(layout_a.line_rev_col(l_pos, blk)),
+                coeff_at(layout_a.line_rev_col(LineSys::new(l_pos), blk)),
                 -1.0,
                 "blk {blk}: generic row must carry -1.0 on line 100's reverse column"
             );

@@ -20,8 +20,7 @@
 //! ranges that follow `theta` — allocated in that equipment -> slack ->
 //! generic -> filling family order — are owned entirely by
 //! [`StageLayout`](crate::lp_builder); see its own module doc and field docs
-//! for the authoritative ranges. This file does not re-derive them, to avoid
-//! the two copies drifting apart.
+//! for the authoritative ranges.
 //!
 //! The `anticipated_decision` block is stage-level (one column per anticipated
 //! plant, NOT per-block) and has length `A = n_anticipated`. The block collapses

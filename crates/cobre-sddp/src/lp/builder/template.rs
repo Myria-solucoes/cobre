@@ -922,11 +922,11 @@ fn build_template_build_ctx<'a>(
     // Per anticipated thermal: global index and commissioning window. The window
     // keys the decision gate's operation-window clause on the delivery stage;
     // `(None, None)` means active every delivery stage in horizon.
-    let mut anticipated_thermal_indices: Vec<usize> = Vec::new();
+    let mut anticipated_thermal_indices: Vec<crate::indexer::ThermalSys> = Vec::new();
     let mut anticipated_windows: Vec<(Option<i32>, Option<i32>)> = Vec::new();
     for (t_idx, thermal) in system.thermals().iter().enumerate() {
         if thermal.anticipated_config.is_some() {
-            anticipated_thermal_indices.push(t_idx);
+            anticipated_thermal_indices.push(crate::indexer::ThermalSys::new(t_idx));
             anticipated_windows.push((thermal.entry_stage_id, thermal.exit_stage_id));
         }
     }

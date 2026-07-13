@@ -23,7 +23,7 @@ use cobre_stochastic::par::precompute::PrecomputedPar;
 use crate::hydro_models::{
     EvaporationModel, EvaporationModelSet, FphaPlane, ProductionModelSet, ResolvedProductionModel,
 };
-use crate::indexer::{CutStateProjection, StateLayout, StudyDimensions};
+use crate::indexer::{CutStateProjection, StateLayout, StudyDimensions, ThermalSys};
 use crate::lead_time::AnticipatedResolution;
 use crate::lp_builder::{ResolvedTables, StageGeometry, StageLayout, TemplateBuildCtx};
 use crate::resolved_parameters::ResolvedParameters;
@@ -394,7 +394,11 @@ pub fn geometry(
         n_anticipated: dims.n_anticipated,
         k_max: dims.k_max,
         anticipated_lead_stages: anticipated_lead_stages.clone(),
-        anticipated_thermal_indices: dims.anticipated_thermal_indices.clone(),
+        anticipated_thermal_indices: dims
+            .anticipated_thermal_indices
+            .iter()
+            .map(|&t| ThermalSys::new(t))
+            .collect(),
         anticipated_windows: vec![(None, None); dims.n_anticipated],
         anticipated_resolution: AnticipatedResolution::default(),
         study_stage_ids: Vec::new(),
@@ -544,7 +548,7 @@ pub fn all_enabled_cut_state_layouts(
 pub fn cut_state_projection(global: &StateLayout) -> CutStateProjection {
     CutStateProjection::new(
         global,
-        cobre_core::temporal::StageStateConfig {
+        StageStateConfig {
             storage: true,
             inflow_lags: true,
         },

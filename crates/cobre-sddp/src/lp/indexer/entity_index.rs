@@ -18,6 +18,48 @@
 //! `fill_load_balance_entries`, and every bus row read `grid.flat(...)`
 //! directly), so a system-index type for them would have no call site and
 //! ship as a dead type.
+//!
+//! ## Cross-family assignment pins
+//!
+//! None of the eight types coerces into another — a copy-paste swap between
+//! two entity families (e.g. handing an `FphaLocal` where a `HydroSys` is
+//! required) is a compile error, not a silently wrong LP column:
+//!
+//! ```compile_fail
+//! use cobre_sddp::indexer::{FphaLocal, HydroSys};
+//!
+//! let _wrong: HydroSys = FphaLocal::new(0); // FphaLocal substituted for HydroSys
+//! ```
+//!
+//! ```compile_fail
+//! use cobre_sddp::indexer::{EvapLocal, HydroSys};
+//!
+//! let _wrong: HydroSys = EvapLocal::new(0); // EvapLocal substituted for HydroSys
+//! ```
+//!
+//! ```compile_fail
+//! use cobre_sddp::indexer::{HydroSys, ThermalSys};
+//!
+//! let _wrong: HydroSys = ThermalSys::new(0); // ThermalSys substituted for HydroSys
+//! ```
+//!
+//! ```compile_fail
+//! use cobre_sddp::indexer::{AnticipatedLocal, ThermalSys};
+//!
+//! let _wrong: ThermalSys = AnticipatedLocal::new(0); // AnticipatedLocal substituted for ThermalSys
+//! ```
+//!
+//! ```compile_fail
+//! use cobre_sddp::indexer::{EvapLocal, FphaLocal};
+//!
+//! let _wrong: FphaLocal = EvapLocal::new(0); // EvapLocal substituted for FphaLocal
+//! ```
+//!
+//! ```compile_fail
+//! use cobre_sddp::indexer::{HydroSys, LineSys};
+//!
+//! let _wrong: HydroSys = LineSys::new(0); // LineSys substituted for HydroSys
+//! ```
 
 /// A hydro's canonical system position (its slot in `System::hydros`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

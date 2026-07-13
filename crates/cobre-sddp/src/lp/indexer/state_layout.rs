@@ -15,7 +15,7 @@
 
 use std::ops::Range;
 
-use super::{InCol, OutCol, RangeCursor, StateDim};
+use super::{AnticipatedLocal, InCol, OutCol, RangeCursor, StateDim};
 use crate::lead_time::AnticipatedResolution;
 
 /// Stage-invariant state-vector layout for one SDDP stage subproblem.
@@ -511,7 +511,7 @@ impl StateLayout {
         );
         let delivery_stage = stage_idx.saturating_add(self.anticipated_lead_stages[local_idx]);
         self.is_anticipated_decision_active_for_delivery(
-            local_idx,
+            AnticipatedLocal::new(local_idx),
             delivery_stage,
             n_stages,
             anticipated_windows,
@@ -528,12 +528,13 @@ impl StateLayout {
     #[must_use]
     pub fn is_anticipated_decision_active_for_delivery(
         &self,
-        local_idx: usize,
+        local_idx: AnticipatedLocal,
         delivery_stage: usize,
         n_stages: usize,
         anticipated_windows: &[(Option<i32>, Option<i32>)],
         study_stage_ids: &[i32],
     ) -> bool {
+        let local_idx = local_idx.get();
         debug_assert!(
             local_idx < anticipated_windows.len(),
             "local_idx {local_idx} out of bounds (anticipated_windows.len() = {})",
@@ -565,9 +566,10 @@ impl StateLayout {
     #[must_use]
     pub(crate) fn anticipated_resolution_for(
         &self,
-        local_idx: usize,
+        local_idx: AnticipatedLocal,
         n_stages: usize,
     ) -> std::borrow::Cow<'_, crate::lead_time::PointResolution> {
+        let local_idx = local_idx.get();
         if !self.anticipated_resolution.per_plant.is_empty() {
             return std::borrow::Cow::Borrowed(&self.anticipated_resolution.per_plant[local_idx]);
         }

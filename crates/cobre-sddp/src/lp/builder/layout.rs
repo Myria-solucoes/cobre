@@ -15,8 +15,8 @@ use crate::hydro_models::{
     EvaporationModel, EvaporationModelSet, ProductionModelSet, ResolvedProductionModel,
 };
 use crate::indexer::{
-    BlockGrid, EvapLocal, EvaporationIndices, FphaLocal, HydroSys, RangeCursor, StateLayout,
-    StorageBoundaryGrid,
+    AnticipatedLocal, BlockGrid, EvapLocal, EvaporationIndices, FphaLocal, HydroSys, LineSys,
+    RangeCursor, StateLayout, StorageBoundaryGrid, ThermalSys,
 };
 use crate::lead_time::{AnticipatedResolution, SpreadResolution};
 
@@ -112,7 +112,7 @@ pub(crate) struct TemplateBuildCtx<'a> {
     /// Per-plant `lead_stages` (`K_i`), length `n_anticipated`, anticipated-local order.
     pub(crate) anticipated_lead_stages: Vec<usize>,
     /// Anticipated-local position → global thermal index, length `n_anticipated`.
-    pub(crate) anticipated_thermal_indices: Vec<usize>,
+    pub(crate) anticipated_thermal_indices: Vec<ThermalSys>,
     /// Per-plant commissioning window `(entry_stage_id, exit_stage_id)`, length
     /// `n_anticipated`, anticipated-local order. The decision gate keys on the
     /// DELIVERY stage's operation window
@@ -634,7 +634,7 @@ fn build_anticipated_slot_row_pos(
         return (Vec::new(), 0);
     }
     let points: Vec<_> = (0..n_anticipated)
-        .map(|plant| state.anticipated_resolution_for(plant, n_stages))
+        .map(|plant| state.anticipated_resolution_for(AnticipatedLocal::new(plant), n_stages))
         .collect();
 
     let mut row_pos = vec![None; n_anticipated * k_max];
@@ -673,6 +673,7 @@ fn build_anticipated_decision_row_pos(
     let mut row_pos = vec![None; n_anticipated];
     let mut n_active = 0_usize;
     for (plant, pos) in row_pos.iter_mut().enumerate() {
+        let plant = AnticipatedLocal::new(plant);
         let point = state.anticipated_resolution_for(plant, n_stages);
         let Some(m) = point.genuine_decisions_at(stage_idx).next() else {
             continue;
@@ -716,7 +717,7 @@ fn build_anticipated_fishing_row_pos(
     let mut n_active = 0_usize;
     for (plant, pos) in row_pos.iter_mut().enumerate() {
         if state
-            .anticipated_resolution_for(plant, n_stages)
+            .anticipated_resolution_for(AnticipatedLocal::new(plant), n_stages)
             .is_anticipated_at(stage_idx)
         {
             *pos = Some(n_active);
@@ -1263,7 +1264,7 @@ impl<'a> StageLayout<'a> {
             .anticipated_thermal_indices
             .iter()
             .enumerate()
-            .map(|(local, &sys_pos)| (sys_pos, local))
+            .map(|(local, &sys_pos)| (sys_pos.get(), local))
             .collect();
 
         let equipment = EquipmentColumns {
@@ -1389,54 +1390,54 @@ impl<'a> StageLayout<'a> {
         self.block_col(self.equipment.generation_col_start, local_idx.get(), blk)
     }
 
-    /// Forward line-flow column for line `l_idx`, block `blk`.
+    /// Forward line-flow column for line `l`, block `blk`.
     #[inline]
-    pub(crate) fn line_fwd_col(&self, l_idx: usize, blk: usize) -> usize {
-        self.block_col(self.equipment.line_fwd.start, l_idx, blk)
+    pub(crate) fn line_fwd_col(&self, l: LineSys, blk: usize) -> usize {
+        self.block_col(self.equipment.line_fwd.start, l.get(), blk)
     }
 
-    /// Reverse line-flow column for line `l_idx`, block `blk`.
+    /// Reverse line-flow column for line `l`, block `blk`.
     #[inline]
-    pub(crate) fn line_rev_col(&self, l_idx: usize, blk: usize) -> usize {
-        self.block_col(self.equipment.line_rev.start, l_idx, blk)
+    pub(crate) fn line_rev_col(&self, l: LineSys, blk: usize) -> usize {
+        self.block_col(self.equipment.line_rev.start, l.get(), blk)
     }
 
-    /// Outflow-below-minimum slack column for hydro `h_idx`, block `blk`.
+    /// Outflow-below-minimum slack column for hydro `h`, block `blk`.
     #[inline]
-    pub(crate) fn outflow_below_col(&self, h_idx: usize, blk: usize) -> usize {
+    pub(crate) fn outflow_below_col(&self, h: HydroSys, blk: usize) -> usize {
         self.block_col(
             self.slack.oper_violation.outflow_below_slack.start,
-            h_idx,
+            h.get(),
             blk,
         )
     }
 
-    /// Outflow-above-maximum slack column for hydro `h_idx`, block `blk`.
+    /// Outflow-above-maximum slack column for hydro `h`, block `blk`.
     #[inline]
-    pub(crate) fn outflow_above_col(&self, h_idx: usize, blk: usize) -> usize {
+    pub(crate) fn outflow_above_col(&self, h: HydroSys, blk: usize) -> usize {
         self.block_col(
             self.slack.oper_violation.outflow_above_slack.start,
-            h_idx,
+            h.get(),
             blk,
         )
     }
 
-    /// Turbine-below-minimum slack column for hydro `h_idx`, block `blk`.
+    /// Turbine-below-minimum slack column for hydro `h`, block `blk`.
     #[inline]
-    pub(crate) fn turbine_below_col(&self, h_idx: usize, blk: usize) -> usize {
+    pub(crate) fn turbine_below_col(&self, h: HydroSys, blk: usize) -> usize {
         self.block_col(
             self.slack.oper_violation.turbine_below_slack.start,
-            h_idx,
+            h.get(),
             blk,
         )
     }
 
-    /// Generation-below-minimum slack column for hydro `h_idx`, block `blk`.
+    /// Generation-below-minimum slack column for hydro `h`, block `blk`.
     #[inline]
-    pub(crate) fn generation_below_col(&self, h_idx: usize, blk: usize) -> usize {
+    pub(crate) fn generation_below_col(&self, h: HydroSys, blk: usize) -> usize {
         self.block_col(
             self.slack.oper_violation.generation_below_slack.start,
-            h_idx,
+            h.get(),
             blk,
         )
     }

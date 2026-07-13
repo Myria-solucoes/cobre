@@ -25,8 +25,8 @@ use cobre_core::EntityId;
 
 use crate::energy_conversion::EnergyConversionSet;
 use crate::indexer::{
-    BlockGrid, EvapLocal, FillingTargetLocal, FloorLocal, FphaLocal, HydroSys, StateLayout,
-    StudyDimensions,
+    AnticipatedLocal, BlockGrid, EvapLocal, FillingTargetLocal, FloorLocal, FphaLocal, HydroSys,
+    StateLayout, StudyDimensions,
 };
 use crate::lp_builder::{COST_SCALE_FACTOR, GenericConstraintRowEntry};
 use crate::simulation::types::{
@@ -129,7 +129,7 @@ fn read_floor_slack_primal(
     let col = col_range.start + local.get();
     debug_assert!(
         col < col_range.end && col < primal.len(),
-        "filling-slack col {col} out of range {col_range:?} / primal len {}",
+        "floor-slack col {col} out of range {col_range:?} / primal len {}",
         primal.len(),
     );
     primal.get(col).copied().unwrap_or(0.0)
@@ -143,7 +143,7 @@ fn read_floor_slack_primal(
 /// columns — when thermal `t` is anticipated, `None` otherwise.
 pub(crate) struct ThermalReverseLookup {
     /// Anticipated-local slot per thermal, `None` if not anticipated.
-    pub(crate) thermal_is_anticipated: Vec<Option<usize>>,
+    pub(crate) thermal_is_anticipated: Vec<Option<AnticipatedLocal>>,
 }
 
 impl ThermalReverseLookup {
@@ -155,7 +155,7 @@ impl ThermalReverseLookup {
                 sys < n_thermals,
                 "anticipated_thermal_indices entry {sys} >= n_thermals {n_thermals}"
             );
-            thermal_is_anticipated[sys] = Some(local);
+            thermal_is_anticipated[sys] = Some(AnticipatedLocal::new(local));
         }
         Self {
             thermal_is_anticipated,
@@ -212,7 +212,7 @@ fn compute_anticipated_decision_mw(
     }
     // Base is the per-stage `thermal.end` (n_blks-dependent), so use `spec.geometry`,
     // never the global stage-0 indexer — that addresses the wrong column off stage 0.
-    let col = spec.geometry.anticipated_decision.start + local_idx;
+    let col = spec.geometry.anticipated_decision.start + local_idx.get();
     debug_assert!(
         col < view.primal.len(),
         "anticipated_decision col {col} out of primal bounds {}",
@@ -238,7 +238,7 @@ fn compute_anticipated_committed_mw(
     let local_idx = lookup.thermal_is_anticipated[thermal_local]?;
     // Ring buffer lives in the stage-invariant state region, so the base is the
     // role-(a) `StateLayout`, not the geometry indexer. Slot 0 = start + local_idx.
-    let col = spec.state.anticipated_state.start + local_idx;
+    let col = spec.state.anticipated_state.start + local_idx.get();
     debug_assert!(
         col < view.primal.len(),
         "anticipated_state slot-0 col {col} out of primal bounds {}",

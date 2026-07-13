@@ -1,7 +1,9 @@
 use cobre_core::{ContractType, Stage};
 
 use crate::hydro_models::{EvaporationModel, ResolvedProductionModel};
-use crate::indexer::{EvapLocal, FillingTargetLocal, FloorLocal, FphaLocal, HydroSys};
+use crate::indexer::{
+    AnticipatedLocal, EvapLocal, FillingTargetLocal, FloorLocal, FphaLocal, HydroSys, LineSys,
+};
 
 use super::EVAPORATION_FLOW_SAFETY_MARGIN;
 use super::layout::{StageLayout, TemplateBuildCtx};
@@ -397,7 +399,9 @@ pub(super) fn fill_anticipated_columns(
 
     let mut active_count = 0_usize;
     for local_idx in 0..n_ant {
-        let point = layout.state.anticipated_resolution_for(local_idx, n_stages);
+        let point = layout
+            .state
+            .anticipated_resolution_for(AnticipatedLocal::new(local_idx), n_stages);
         let Some(delivery_stage) = point.genuine_decisions_at(stage_idx).next() else {
             continue;
         };
@@ -416,7 +420,7 @@ pub(super) fn fill_anticipated_columns(
         let state_out_col = ring.out_col(slot, local_idx);
 
         if layout.state.is_anticipated_decision_active_for_delivery(
-            local_idx,
+            AnticipatedLocal::new(local_idx),
             delivery_stage,
             n_stages,
             &ctx.anticipated_windows,
@@ -427,7 +431,7 @@ pub(super) fn fill_anticipated_columns(
             let tb = ctx
                 .resolved
                 .bounds
-                .thermal_bounds(thermal_idx, delivery_stage);
+                .thermal_bounds(thermal_idx.get(), delivery_stage);
 
             bufs.col_lower[state_out_col] = f64::NEG_INFINITY;
             bufs.col_upper[state_out_col] = f64::INFINITY;
@@ -471,8 +475,8 @@ fn fill_line_columns(
                 .resolved
                 .resolved_exchange_factors
                 .factors(l_idx, stage_idx, blk);
-            let col_fwd = layout.line_fwd_col(l_idx, blk);
-            let col_rev = layout.line_rev_col(l_idx, blk);
+            let col_fwd = layout.line_fwd_col(LineSys::new(l_idx), blk);
+            let col_rev = layout.line_rev_col(LineSys::new(l_idx), blk);
             if active {
                 bufs.col_upper[col_fwd] = lb.direct_mw * df;
                 bufs.col_upper[col_rev] = lb.reverse_mw * rf;
@@ -729,10 +733,18 @@ fn fill_block_family(
         };
         for blk in 0..layout.n_blks {
             let col = match family {
-                BlockSlackFamily::OutflowBelow => layout.outflow_below_col(h_idx, blk),
-                BlockSlackFamily::OutflowAbove => layout.outflow_above_col(h_idx, blk),
-                BlockSlackFamily::TurbineBelow => layout.turbine_below_col(h_idx, blk),
-                BlockSlackFamily::GenerationBelow => layout.generation_below_col(h_idx, blk),
+                BlockSlackFamily::OutflowBelow => {
+                    layout.outflow_below_col(HydroSys::new(h_idx), blk)
+                }
+                BlockSlackFamily::OutflowAbove => {
+                    layout.outflow_above_col(HydroSys::new(h_idx), blk)
+                }
+                BlockSlackFamily::TurbineBelow => {
+                    layout.turbine_below_col(HydroSys::new(h_idx), blk)
+                }
+                BlockSlackFamily::GenerationBelow => {
+                    layout.generation_below_col(HydroSys::new(h_idx), blk)
+                }
             };
             bufs.col_upper[col] = if active { f64::INFINITY } else { 0.0 };
             bufs.objective[col] = cost * stage.blocks[blk].duration_hours;
@@ -2812,6 +2824,7 @@ mod anticipated_objective_tests {
     use super::super::layout::ResolvedTables;
     use super::super::test_support::{state_layout_for, two_block_stage};
     use super::{StageLayout, TemplateBuildCtx, fill_stage_columns};
+    use crate::indexer::ThermalSys;
 
     const N_STAGES: usize = 6;
     const K_MAX: usize = 1;
@@ -2948,7 +2961,7 @@ mod anticipated_objective_tests {
                 n_anticipated: 1,
                 k_max: K_MAX,
                 anticipated_lead_stages: vec![K_MAX],
-                anticipated_thermal_indices: vec![0],
+                anticipated_thermal_indices: vec![ThermalSys::new(0)],
                 // Windowless single plant: the decision gate reduces to the
                 // strict horizon clause. `study_stage_ids` lists the N_STAGES
                 // study-stage ids so the in-range delivery lookup is safe.
@@ -3239,7 +3252,7 @@ mod anticipated_objective_tests {
                 n_anticipated: 1,
                 k_max: self.k_max,
                 anticipated_lead_stages: vec![self.k_max],
-                anticipated_thermal_indices: vec![0],
+                anticipated_thermal_indices: vec![ThermalSys::new(0)],
                 anticipated_windows: vec![(None, None)],
                 anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
                 study_stage_ids: (0..self.n_stages as i32).collect(),
@@ -3347,6 +3360,7 @@ mod block_family_slack_tests {
     use crate::hydro_models::{
         EvaporationModel, EvaporationModelSet, ProductionModelSet, ResolvedProductionModel,
     };
+    use crate::indexer::HydroSys;
     use crate::resolved_parameters::ResolvedParameters;
 
     use super::super::layout::ResolvedTables;
@@ -3706,7 +3720,7 @@ mod block_family_slack_tests {
     struct FamilyCheck<'b> {
         name: &'static str,
         predicate: fn(&HydroSpec) -> bool,
-        accessor: fn(&StageLayout<'b>, usize, usize) -> usize,
+        accessor: fn(&StageLayout<'b>, HydroSys, usize) -> usize,
         cost_of: fn(&HydroSpec) -> f64,
     }
 
@@ -3771,7 +3785,7 @@ mod block_family_slack_tests {
                 let active = (family.predicate)(spec);
                 let cost = (family.cost_of)(spec);
                 for (blk, &hours) in BLOCK_HOURS.iter().enumerate() {
-                    let col = (family.accessor)(&layout, h_idx, blk);
+                    let col = (family.accessor)(&layout, HydroSys::new(h_idx), blk);
                     let expected_upper = if active { f64::INFINITY } else { 0.0 };
                     assert_eq!(
                         col_upper[col], expected_upper,

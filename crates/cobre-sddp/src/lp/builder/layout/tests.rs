@@ -20,7 +20,7 @@ use cobre_core::{
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
 use crate::hydro_models::{EvaporationModelSet, ProductionModelSet};
-use crate::indexer::{EvapLocal, FphaLocal, HydroSys};
+use crate::indexer::{EvapLocal, FphaLocal, HydroSys, LineSys};
 use crate::resolved_parameters::ResolvedParameters;
 
 use super::super::test_support::{state_layout_for, zero_hydro_penalties};
@@ -163,7 +163,10 @@ impl ZeroEntityFixtures {
             anticipated_windows: vec![(None, None); n_anticipated],
             anticipated_resolution: crate::lead_time::AnticipatedResolution::default(),
             study_stage_ids: (0..i32::try_from(self.bounds.n_stages()).unwrap_or(0)).collect(),
-            anticipated_thermal_indices,
+            anticipated_thermal_indices: anticipated_thermal_indices
+                .into_iter()
+                .map(crate::indexer::ThermalSys::new)
+                .collect(),
             has_penalty: false,
             // Tests that use ZeroEntityFixtures don't exercise discount
             // factors; provide n_stages = 1 element vecs that won't panic.
@@ -1391,9 +1394,7 @@ fn stage_layout_operational_violation_rows_are_contiguous_blocks() {
 fn anticipated_decision_columns_placed_between_thermal_and_line_fwd() {
     let fixtures = ZeroEntityFixtures::new();
     // ZeroEntityFixtures builds n_thermals=0, so the thermal per-block block is
-    // empty and col_anticipated_decision_start == col_thermal_start. The two
-    // stage-level anticipated blocks then separate col_thermal_start from
-    // col_line_fwd_start by exactly 2 * n_anticipated columns.
+    // empty and col_anticipated_decision_start == col_thermal_start.
     let n_anticipated = 2_usize;
     let k_max = 1_usize;
     let ctx = fixtures.make_ctx(n_anticipated, k_max, vec![1, 1], vec![0, 0]);
@@ -1777,7 +1778,10 @@ impl AntFixturesWithNStages {
             n_anticipated,
             k_max,
             anticipated_lead_stages,
-            anticipated_thermal_indices,
+            anticipated_thermal_indices: anticipated_thermal_indices
+                .into_iter()
+                .map(crate::indexer::ThermalSys::new)
+                .collect(),
             // Windowless: one `(None, None)` per plant, so the decision gate
             // reduces to the strict horizon clause. `study_stage_ids` covers
             // the study-stage count so the in-range delivery lookup is safe.
@@ -2334,32 +2338,32 @@ fn column_accessors_match_open_coded_formulas() {
                 "generation_col"
             );
             assert_eq!(
-                layout.line_fwd_col(entity, blk),
+                layout.line_fwd_col(LineSys::new(entity), blk),
                 layout.equipment.line_fwd.start + entity * n_blks + blk,
                 "line_fwd_col"
             );
             assert_eq!(
-                layout.line_rev_col(entity, blk),
+                layout.line_rev_col(LineSys::new(entity), blk),
                 layout.equipment.line_rev.start + entity * n_blks + blk,
                 "line_rev_col"
             );
             assert_eq!(
-                layout.outflow_below_col(entity, blk),
+                layout.outflow_below_col(HydroSys::new(entity), blk),
                 layout.slack.oper_violation.outflow_below_slack.start + entity * n_blks + blk,
                 "outflow_below_col"
             );
             assert_eq!(
-                layout.outflow_above_col(entity, blk),
+                layout.outflow_above_col(HydroSys::new(entity), blk),
                 layout.slack.oper_violation.outflow_above_slack.start + entity * n_blks + blk,
                 "outflow_above_col"
             );
             assert_eq!(
-                layout.turbine_below_col(entity, blk),
+                layout.turbine_below_col(HydroSys::new(entity), blk),
                 layout.slack.oper_violation.turbine_below_slack.start + entity * n_blks + blk,
                 "turbine_below_col"
             );
             assert_eq!(
-                layout.generation_below_col(entity, blk),
+                layout.generation_below_col(HydroSys::new(entity), blk),
                 layout.slack.oper_violation.generation_below_slack.start + entity * n_blks + blk,
                 "generation_below_col"
             );

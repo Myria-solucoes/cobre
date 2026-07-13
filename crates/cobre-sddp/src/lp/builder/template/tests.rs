@@ -25,7 +25,7 @@ use cobre_core::{
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
 use crate::hydro_models::PrepareHydroModelsResult;
-use crate::indexer::HydroSys;
+use crate::indexer::{AnticipatedLocal, HydroSys, ThermalSys};
 use crate::inflow_method::InflowNonNegativityMethod;
 use crate::resolved_parameters::ResolvedParameters;
 
@@ -1120,7 +1120,7 @@ fn build_template_build_ctx_populates_anticipated_metadata() {
     );
     assert_eq!(
         ctx.anticipated_thermal_indices,
-        vec![0, 2],
+        vec![ThermalSys::new(0), ThermalSys::new(2)],
         "anticipated_thermal_indices"
     );
 }
@@ -1564,10 +1564,7 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
 
     let hydro_result = PrepareHydroModelsResult::default_from_system(&system);
     let par_lp = PrecomputedPar::default();
-    let resolved_params = ResolvedParameters {
-        per_param: vec![],
-        id_to_slot: vec![],
-    };
+    let resolved_params = empty_resolved_params();
 
     let (
         anticipated_resolution,
@@ -1596,7 +1593,10 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
 
     assert_eq!(ctx_a.n_anticipated, 2);
     assert_eq!(ctx_a.k_max, 3);
-    assert_eq!(ctx_a.anticipated_thermal_indices, vec![0, 1]);
+    assert_eq!(
+        ctx_a.anticipated_thermal_indices,
+        vec![ThermalSys::new(0), ThermalSys::new(1)]
+    );
     assert_eq!(ctx_a.anticipated_lead_stages, vec![2, 3]);
 
     // Both anticipated arrays must be permuted in lockstep to preserve the
@@ -1670,7 +1670,10 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
         per_stage_mask: ctx_a.per_stage_mask.clone(),
     };
 
-    assert_eq!(ctx_b.anticipated_thermal_indices, vec![1, 0]);
+    assert_eq!(
+        ctx_b.anticipated_thermal_indices,
+        vec![ThermalSys::new(1), ThermalSys::new(0)]
+    );
     assert_eq!(ctx_b.anticipated_lead_stages, vec![3, 2]);
 
     let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
@@ -2996,10 +2999,7 @@ fn block_template(block_mode: BlockMode, n_blks: usize) -> StageTemplate {
         1,
     );
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
-    let resolved_params = ResolvedParameters {
-        per_param: vec![],
-        id_to_slot: vec![],
-    };
+    let resolved_params = empty_resolved_params();
 
     let (
         anticipated_resolution,
@@ -4481,7 +4481,9 @@ fn template_anticipated_resolution_matches_setup_lead_time() {
     );
     let expected_decider = vec![None, Some(0), Some(1)];
     assert_eq!(
-        template_state.anticipated_resolution_for(0, 3).decider,
+        template_state
+            .anticipated_resolution_for(AnticipatedLocal::new(0), 3)
+            .decider,
         expected_decider,
         "template's threaded resolution must resolve the calendar-derived decider"
     );
@@ -4512,7 +4514,7 @@ fn template_anticipated_resolution_matches_setup_lead_time() {
 fn pre_fix_template_state_layout_yields_differing_all_self_delivered_decider() {
     let pre_fix_state = crate::indexer::StateLayout::new(0, 0, 0, Vec::new(), 1, 0, vec![0], &[]);
     let pre_fix_decider = pre_fix_state
-        .anticipated_resolution_for(0, 3)
+        .anticipated_resolution_for(AnticipatedLocal::new(0), 3)
         .decider
         .clone();
     assert_eq!(
@@ -4565,7 +4567,7 @@ fn template_leadstages_byte_identical_to_setup_and_fallback() {
     assert_eq!(ctx.anticipated_lead_stages, vec![1]);
 
     let template_decider = super::super::test_support::state_layout_with_resolution(&ctx)
-        .anticipated_resolution_for(0, 3)
+        .anticipated_resolution_for(AnticipatedLocal::new(0), 3)
         .decider
         .clone();
 
@@ -4575,7 +4577,7 @@ fn template_leadstages_byte_identical_to_setup_and_fallback() {
     assert_eq!(setup_resolution.per_plant[0].decider, template_decider);
 
     let fallback_decider = super::super::test_support::state_layout_for(&ctx)
-        .anticipated_resolution_for(0, 3)
+        .anticipated_resolution_for(AnticipatedLocal::new(0), 3)
         .decider
         .clone();
     assert_eq!(
