@@ -69,7 +69,6 @@ pub(super) fn check_season_id_consistency(data: &ParsedData, ctx: &mut Validatio
         if members.len() < 2 {
             continue;
         }
-        debug_assert!(!members.is_empty(), "guarded by len() >= 2 above");
         let min_d = members.iter().map(|&(_, d)| d).min().unwrap_or(0);
         let max_d = members.iter().map(|&(_, d)| d).max().unwrap_or(0);
         if max_d - min_d > SUB_PERIOD_TOLERANCE_DAYS {

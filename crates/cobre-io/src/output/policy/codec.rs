@@ -144,7 +144,6 @@ pub fn serialize_stage_cuts(
     populated_count: u32,
     entity_manifest: &[EntitySlot],
 ) -> Vec<u8> {
-    // Pre-size the builder to avoid reallocation.
     let estimated = 64
         + cuts.len() * (96usize + state_dimension as usize * std::mem::size_of::<f64>())
         + std::mem::size_of_val(active_cut_indices)

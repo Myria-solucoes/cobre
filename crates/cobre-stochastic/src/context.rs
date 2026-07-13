@@ -873,7 +873,6 @@ mod tests {
 
         assert_eq!(view.n_stages(), ctx.opening_tree().n_stages());
         assert_eq!(view.dim(), ctx.opening_tree().dim());
-        // Spot-check: first opening of first stage must match.
         assert_eq!(view.opening(0, 0), ctx.opening_tree().opening(0, 0));
     }
 
@@ -1071,7 +1070,6 @@ mod tests {
         )
         .unwrap();
 
-        // The opening tree must contain only the 2 study stages.
         assert_eq!(
             ctx.n_stages(),
             2,
@@ -1288,7 +1286,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(ctx.dim(), 3, "expanded dim must be 2 hydros + 1 load bus");
-        // Each opening noise vector must have length = dim.
         let view = ctx.tree_view();
         let noise = view.opening(0, 0);
         assert_eq!(

@@ -47,7 +47,6 @@ use crate::topology::ExecutionTopology;
 #[cfg(feature = "mpi")]
 pub trait CommData: Send + Sync + Copy + Default + 'static + ferrompi::MpiDatatype {}
 
-/// Blanket implementation (mpi): any type satisfying the bounds is `CommData`.
 #[cfg(feature = "mpi")]
 impl<T: Send + Sync + Copy + Default + 'static + ferrompi::MpiDatatype> CommData for T {}
 
@@ -58,7 +57,6 @@ impl<T: Send + Sync + Copy + Default + 'static + ferrompi::MpiDatatype> CommData
 #[cfg(not(feature = "mpi"))]
 pub trait CommData: Send + Sync + Copy + Default + 'static {}
 
-/// Blanket implementation (no mpi): any type satisfying the bounds is `CommData`.
 #[cfg(not(feature = "mpi"))]
 impl<T: Send + Sync + Copy + Default + 'static> CommData for T {}
 

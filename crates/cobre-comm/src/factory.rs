@@ -21,10 +21,10 @@ use crate::FerrompiBackend;
 #[cfg(all(feature = "mpi", feature = "shared-memory"))]
 use crate::HeapRegion;
 use crate::LocalBackend;
+#[cfg(all(feature = "mpi", feature = "shared-memory"))]
+use crate::LocalCommKind;
 #[cfg(feature = "mpi")]
 use crate::ReduceOp;
-#[cfg(all(feature = "mpi", feature = "shared-memory"))]
-use crate::traits::LocalCommKind;
 /// Backend selector passed by the caller to [`create_communicator`].
 ///
 /// [`BackendKind::Mpi`] and [`BackendKind::Local`] force a backend;
@@ -87,7 +87,6 @@ impl crate::Communicator for CommBackend {
         displs: &[usize],
     ) -> Result<(), CommError> {
         match self {
-            #[cfg(feature = "mpi")]
             Self::Mpi(backend) => backend.allgatherv(send, recv, counts, displs),
             Self::Local(backend) => backend.allgatherv(send, recv, counts, displs),
         }
@@ -100,7 +99,6 @@ impl crate::Communicator for CommBackend {
         op: ReduceOp,
     ) -> Result<(), CommError> {
         match self {
-            #[cfg(feature = "mpi")]
             Self::Mpi(backend) => backend.allreduce(send, recv, op),
             Self::Local(backend) => backend.allreduce(send, recv, op),
         }
@@ -108,7 +106,6 @@ impl crate::Communicator for CommBackend {
 
     fn broadcast<T: CommData>(&self, buf: &mut [T], root: usize) -> Result<(), CommError> {
         match self {
-            #[cfg(feature = "mpi")]
             Self::Mpi(backend) => backend.broadcast(buf, root),
             Self::Local(backend) => backend.broadcast(buf, root),
         }
@@ -116,7 +113,6 @@ impl crate::Communicator for CommBackend {
 
     fn barrier(&self) -> Result<(), CommError> {
         match self {
-            #[cfg(feature = "mpi")]
             Self::Mpi(backend) => backend.barrier(),
             Self::Local(backend) => backend.barrier(),
         }
@@ -124,7 +120,6 @@ impl crate::Communicator for CommBackend {
 
     fn rank(&self) -> usize {
         match self {
-            #[cfg(feature = "mpi")]
             Self::Mpi(backend) => backend.rank(),
             Self::Local(backend) => backend.rank(),
         }
@@ -132,7 +127,6 @@ impl crate::Communicator for CommBackend {
 
     fn size(&self) -> usize {
         match self {
-            #[cfg(feature = "mpi")]
             Self::Mpi(backend) => backend.size(),
             Self::Local(backend) => backend.size(),
         }
@@ -140,7 +134,6 @@ impl crate::Communicator for CommBackend {
 
     fn abort(&self, error_code: i32) -> ! {
         match self {
-            #[cfg(feature = "mpi")]
             Self::Mpi(backend) => backend.abort(error_code),
             Self::Local(backend) => backend.abort(error_code),
         }
@@ -182,7 +175,6 @@ impl crate::SharedMemoryProvider for CommBackend {
 impl crate::TopologyProvider for CommBackend {
     fn topology(&self) -> &ExecutionTopology {
         match self {
-            #[cfg(feature = "mpi")]
             Self::Mpi(backend) => backend.topology(),
             Self::Local(backend) => backend.topology(),
         }

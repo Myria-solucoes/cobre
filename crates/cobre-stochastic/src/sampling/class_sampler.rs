@@ -326,7 +326,7 @@ mod tests {
             assert!(v.is_finite(), "output value {v} is not finite");
         }
 
-        let (opening_idx, full_slice) = crate::sampling::insample::sample_forward(
+        let (_opening_idx, full_slice) = crate::sampling::insample::sample_forward(
             &tree.view(),
             42,
             req.iteration,
@@ -334,7 +334,6 @@ mod tests {
             req.stage,
             req.stage_idx,
         );
-        let _ = opening_idx;
         assert_eq!(&output, &full_slice[2..5]);
     }
 

@@ -108,8 +108,6 @@ impl BroadcastConfig {
             StoppingMode::Any => BroadcastStoppingMode::Any,
         };
 
-        let cut_selection = params.cut_selection.clone();
-
         Ok(Self {
             seed: params.seed,
             forward_passes: params.forward_passes,
@@ -119,7 +117,7 @@ impl BroadcastConfig {
             io_channel_capacity: u32::try_from(params.io_channel_capacity).unwrap_or(64),
             policy_path: params.policy_path,
             inflow_method: params.inflow_method,
-            cut_selection,
+            cut_selection: params.cut_selection.clone(),
             cut_activity_tolerance: params.cut_activity_tolerance,
             training_enabled: config.training.enabled,
             policy_mode: config.policy.mode,

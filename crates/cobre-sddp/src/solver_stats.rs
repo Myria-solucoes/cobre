@@ -497,7 +497,6 @@ pub fn pack_worker_opening_stats(
 /// `buf` must be `n_workers * n_slots * WORKER_STATS_ENTRY_STRIDE` floats.
 /// `out` must be a slice of length `n_workers * n_slots` (row-major order; contents overwritten).
 /// The prefix `[worker_id, slot_idx]` per entry is informational (not asserted on unpack for ranks > 0).
-/// Panics in debug if buffer sizes don't match.
 ///
 /// # Panics
 ///

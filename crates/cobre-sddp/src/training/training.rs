@@ -338,7 +338,7 @@ where
         solver_factory,
     )?;
     // Must seed the basis store before `prime_frozen_templates` freezes the loaded
-    // cuts into the templates. No-op for a fresh start (`None`).
+    // cuts into the templates.
     if let Some(cache) = warm_start_basis_cache {
         session.seed_basis_store(&cache);
     }

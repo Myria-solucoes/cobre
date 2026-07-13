@@ -11,7 +11,7 @@ use cobre_io::OwnedPolicyBasisRecord;
 use cobre_io::OwnedPolicyCutRecord;
 use cobre_io::PolicyCheckpointMetadata;
 use cobre_io::StageCutsReadResult;
-use cobre_io::output::policy::read_policy_checkpoint;
+use cobre_io::read_policy_checkpoint;
 use cobre_solver::{Basis, BasisStatus};
 
 use crate::SddpError;

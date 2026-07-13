@@ -195,7 +195,6 @@ mod tests {
                 matches!(sddp_err, SddpError::Simulation(_)),
                 "expected SddpError::Simulation, got {sddp_err:?}"
             );
-            // The wrapped message must contain the original error description.
             let sddp_msg = sddp_err.to_string();
             assert!(
                 sddp_msg.contains(original_msg.as_str()) || sddp_msg.contains("simulation"),

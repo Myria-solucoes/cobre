@@ -14,14 +14,14 @@ use pyo3::types::PyDict;
 use cobre_core::Bus;
 use cobre_core::EnergyContract;
 use cobre_core::Hydro;
+use cobre_core::HydroGenerationModel::ConstantProductivity;
+use cobre_core::HydroGenerationModel::Fpha;
+use cobre_core::HydroGenerationModel::LinearizedHead;
 use cobre_core::Line;
 use cobre_core::NonControllableSource;
 use cobre_core::PumpingStation;
 use cobre_core::System;
 use cobre_core::Thermal;
-use cobre_core::HydroGenerationModel::ConstantProductivity;
-use cobre_core::HydroGenerationModel::Fpha;
-use cobre_core::HydroGenerationModel::LinearizedHead;
 
 // ─── Bus ─────────────────────────────────────────────────────────────────────
 
@@ -278,9 +278,7 @@ impl PyHydro {
     #[getter]
     fn productivity_mw_per_m3s(&self) -> Option<f64> {
         match self.inner.generation_model {
-            ConstantProductivity
-            | LinearizedHead
-            | Fpha => None,
+            ConstantProductivity | LinearizedHead | Fpha => None,
         }
     }
 

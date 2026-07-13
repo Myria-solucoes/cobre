@@ -218,15 +218,13 @@ fn resolve_evaporation_core(
 
         // Midpoint-path values, read only when there are no per-season volumes.
         let midpoint_v = f64::midpoint(hydro.min_storage_hm3, hydro.max_storage_hm3);
-        let midpoint_area = if hydro.evaporation_reference_volumes_hm3.is_none() {
-            interpolate_area(geo_rows, midpoint_v)
+        let (midpoint_area, midpoint_slope) = if hydro.evaporation_reference_volumes_hm3.is_none() {
+            (
+                interpolate_area(geo_rows, midpoint_v),
+                area_derivative(geo_rows, midpoint_v),
+            )
         } else {
-            0.0 // unused; per-season path computes per stage
-        };
-        let midpoint_slope = if hydro.evaporation_reference_volumes_hm3.is_none() {
-            area_derivative(geo_rows, midpoint_v)
-        } else {
-            0.0 // unused; per-season path computes per stage
+            (0.0, 0.0)
         };
 
         let mut stage_coefficients: Vec<LinearizedEvaporation> = Vec::with_capacity(n_stages);

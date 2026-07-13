@@ -85,9 +85,7 @@ pub fn py_to_json_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
 ///
 /// Returns [`PyValueError`] when a key is not a `str`, or when any value fails
 /// [`py_to_json_value`] conversion.
-pub fn pydict_to_json_map(
-    dict: &Bound<'_, PyDict>,
-) -> PyResult<Map<String, Value>> {
+pub fn pydict_to_json_map(dict: &Bound<'_, PyDict>) -> PyResult<Map<String, Value>> {
     let mut map = serde_json::Map::with_capacity(dict.len());
     for (key, value) in dict.iter() {
         let key_str = key.cast::<PyString>().map_err(|_| {

@@ -24,11 +24,11 @@ use cobre_core::System;
 use cobre_io::CaseArtifacts;
 use cobre_io::HydroGeometryRow;
 use cobre_io::ValidationContext;
-use cobre_io::extensions::load_fpha_hyperplanes;
-use cobre_io::extensions::load_hydro_geometry;
-use cobre_io::extensions::load_production_models;
 use cobre_io::extensions::load_tailrace_curves;
+use cobre_io::load_fpha_hyperplanes;
 use cobre_io::load_hydro_energy_productivity;
+use cobre_io::load_hydro_geometry;
+use cobre_io::load_production_models;
 use cobre_io::validate_structure;
 
 use crate::SddpError;
@@ -240,21 +240,17 @@ mod tests {
         let system =
             cobre_io::load_case(&case_dir).expect("d07-fpha-computed must load successfully");
 
-        // Simulated rank 0: call prepare_hydro_models and capture rows.
         let result_rank0 = super::prepare_hydro_models(&system, &case_dir, false)
             .expect("prepare_hydro_models must succeed for rank 0");
 
-        // Simulated rank 1: independent call with the same inputs.
         let result_rank1 = super::prepare_hydro_models(&system, &case_dir, false)
             .expect("prepare_hydro_models must succeed for rank 1");
 
-        // Post-condition: computed-FPHA rows must be present.
         assert!(
             !result_rank0.fpha_export_rows.is_empty(),
             "rank 0: fpha_export_rows must be non-empty for a computed-FPHA case"
         );
 
-        // Parity: both ranks must produce bit-identical rows.
         assert_eq!(
             result_rank0.fpha_export_rows, result_rank1.fpha_export_rows,
             "fpha_export_rows must be bit-identical across ranks (deterministic preprocessing)"

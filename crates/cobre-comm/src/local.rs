@@ -241,7 +241,7 @@ impl crate::TopologyProvider for LocalBackend {
         use std::sync::OnceLock;
 
         use crate::BackendKind;
-        use crate::topology::{ExecutionTopology, HostInfo};
+        use crate::topology::HostInfo;
 
         static TOPOLOGY: OnceLock<ExecutionTopology> = OnceLock::new();
         TOPOLOGY.get_or_init(|| {

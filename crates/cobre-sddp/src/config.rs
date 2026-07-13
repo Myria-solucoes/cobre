@@ -330,7 +330,6 @@ mod tests {
 
         assert!(config.events.event_sender.is_some());
 
-        // Verify the sender in the config can actually send events.
         if let Some(sender) = &config.events.event_sender {
             sender
                 .send(TrainingEvent::TrainingFinished {

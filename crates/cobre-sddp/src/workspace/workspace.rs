@@ -1180,7 +1180,6 @@ mod tests {
     #[test]
     fn basis_store_get_mut_set_and_retrieve() {
         let mut store = BasisStore::new(2, 3);
-        // test shim: zero metadata is acceptable for tests exercising the length path
         *store.get_mut(1, 2) = Some(CapturedBasis::new(4, 2, 0, 0, 0));
         assert!(store.get(1, 2).is_some());
         assert!(store.get(0, 0).is_none());
@@ -1209,10 +1208,8 @@ mod tests {
         let mut slices = store.split_workers_mut(2);
 
         // Worker 0 writes to scenario 0 stage 1.
-        // test shim: zero metadata is acceptable for tests exercising the length path
         *slices[0].get_mut(0, 1) = Some(CapturedBasis::new(2, 1, 0, 0, 0));
         // Worker 1 writes to scenario 3 stage 2.
-        // test shim: zero metadata is acceptable for tests exercising the length path
         *slices[1].get_mut(3, 2) = Some(CapturedBasis::new(2, 1, 0, 0, 0));
 
         // Drop slices to release the borrow on store.
@@ -1234,7 +1231,6 @@ mod tests {
     fn basis_store_split_single_worker() {
         let mut store = BasisStore::new(3, 2);
         let mut slices = store.split_workers_mut(1);
-        // test shim: zero metadata is acceptable for tests exercising the length path
         *slices[0].get_mut(2, 1) = Some(CapturedBasis::new(1, 0, 0, 0, 0));
         drop(slices);
         assert!(store.get(2, 1).is_some());
@@ -1260,9 +1256,7 @@ mod tests {
         let mut slices = store.split_workers_mut(3);
 
         // Worker 1 covers absolute scenarios 2..4.
-        // test shim: zero metadata is acceptable for tests exercising the length path
         *slices[1].get_mut(2, 0) = Some(CapturedBasis::new(1, 0, 0, 0, 0));
-        // test shim: zero metadata is acceptable for tests exercising the length path
         *slices[1].get_mut(3, 1) = Some(CapturedBasis::new(1, 0, 0, 0, 0));
         drop(slices);
 

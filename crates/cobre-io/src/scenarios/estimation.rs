@@ -54,7 +54,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use chrono::{Months, NaiveDate};
-use cobre_core::{EntityId, System};
+use cobre_core::{EntityId, Stage, System};
 use cobre_stochastic::{
     StochasticError,
     par::aggregate::aggregate_observations_to_season,
@@ -78,7 +78,6 @@ use crate::{
 
 // `EstimationReport` lives in `cobre_stochastic::par::fitting`; re-exported here
 // so callers resolve it alongside `EstimationPath`/`estimate_from_history`.
-use cobre_core::temporal::Stage;
 pub use cobre_stochastic::par::fitting::EstimationReport;
 
 /// Classification of the estimation path taken for a given input file manifest.

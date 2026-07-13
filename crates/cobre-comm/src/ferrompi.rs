@@ -17,6 +17,10 @@ use crate::ExecutionTopology;
 #[cfg(feature = "shared-memory")]
 use crate::HeapRegion;
 use crate::HostInfo;
+#[cfg(feature = "shared-memory")]
+use crate::LocalCommKind;
+#[cfg(feature = "shared-memory")]
+use crate::LocalCommKind::Ferrompi;
 use crate::MpiRuntimeInfo;
 use crate::ReduceOp;
 use crate::ReduceOp::BitwiseOr;
@@ -24,10 +28,6 @@ use crate::ReduceOp::Max;
 use crate::ReduceOp::Min;
 use crate::ReduceOp::Sum;
 use crate::SlurmJobInfo;
-#[cfg(feature = "shared-memory")]
-use crate::traits::LocalCommKind;
-#[cfg(feature = "shared-memory")]
-use crate::traits::LocalCommKind::Ferrompi;
 
 /// MPI communication backend wrapping ferrompi.
 ///
@@ -160,9 +160,8 @@ impl FerrompiBackend {
 
 /// Extract a concise library identifier from `MPI_Get_library_version`.
 ///
-/// MPI implementations return widely different formats. This function normalizes
-/// them to a single-line display string: for MPICH, parses `"MPICH Version: X.Y.Z"`;
-/// for others, takes the first line trimmed.
+/// MPI implementations return widely different formats, normalized here to a
+/// single-line display string.
 fn sanitize_library_version(raw: &str) -> String {
     let first_line = raw.lines().next().unwrap_or(raw).trim();
 

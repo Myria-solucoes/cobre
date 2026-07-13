@@ -162,7 +162,6 @@ pub fn generate_schemas() -> Result<Vec<(String, Value)>, Error> {
 mod tests {
     use super::*;
 
-    /// `generate_schemas()` returns at least 17 entries (one per input file).
     #[test]
     fn test_generate_schemas_returns_expected_count() {
         let schemas = generate_schemas().unwrap();
@@ -173,7 +172,6 @@ mod tests {
         );
     }
 
-    /// Every returned schema has a non-empty filename and a non-null JSON value.
     #[test]
     fn test_all_schema_filenames_and_values_non_empty() {
         let schemas = generate_schemas().unwrap();
@@ -183,7 +181,6 @@ mod tests {
         }
     }
 
-    /// Every schema is a JSON object (not an array or scalar).
     #[test]
     fn test_all_schemas_are_objects() {
         let schemas = generate_schemas().unwrap();
@@ -195,8 +192,6 @@ mod tests {
         }
     }
 
-    /// Every schema contains either a `"properties"` key (for object schemas)
-    /// or a `"oneOf"` / `"anyOf"` key (for enum schemas).
     #[test]
     fn test_all_schemas_have_structure_keys() {
         let schemas = generate_schemas().unwrap();
@@ -217,7 +212,6 @@ mod tests {
         }
     }
 
-    /// The `config.schema.json` entry contains expected top-level field names.
     #[test]
     fn test_config_schema_contains_expected_fields() {
         let schemas = generate_schemas().unwrap();
@@ -242,7 +236,6 @@ mod tests {
         }
     }
 
-    /// The `buses.schema.json` entry contains a `buses` array property.
     #[test]
     fn test_buses_schema_contains_buses_array() {
         let schemas = generate_schemas().unwrap();
@@ -265,7 +258,6 @@ mod tests {
         );
     }
 
-    /// All 14 expected schema filenames are present in the output.
     #[test]
     fn test_all_expected_schema_filenames_present() {
         let schemas = generate_schemas().unwrap();

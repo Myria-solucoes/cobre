@@ -1,7 +1,6 @@
 //! Time series estimation configuration types for `config.json → estimation`.
 
-use serde::Deserializer;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Order selection criterion for autoregressive model fitting.
 ///

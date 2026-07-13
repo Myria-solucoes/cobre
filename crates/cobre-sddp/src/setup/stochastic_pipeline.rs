@@ -103,8 +103,6 @@ fn load_user_opening_tree_inner(
 /// for `PrecomputedNormal::build`.
 #[must_use]
 pub fn build_ncs_factor_entries(system: &System) -> Vec<(EntityId, i32, Vec<BlockFactorPair>)> {
-    use cobre_stochastic::normal::precompute::BlockFactorPair;
-
     let stochastic_ncs: BTreeSet<EntityId> = system.ncs_models().iter().map(|m| m.ncs_id).collect();
 
     if stochastic_ncs.is_empty() {
@@ -209,16 +207,11 @@ fn build_opening_tree_library(
     // `max_order` width covers all AR lags.
     let season_map_ref = system.policy_graph().season_map.as_ref();
     // `precompute_stage_lag_transitions` requires a non-optional &SeasonMap.
-    let noop_season_map;
-    let effective_season_map: &SeasonMap = if let Some(sm) = season_map_ref {
-        sm
-    } else {
-        noop_season_map = SeasonMap {
-            cycle_type: Monthly,
-            seasons: Vec::new(),
-        };
-        &noop_season_map
+    let noop_season_map = SeasonMap {
+        cycle_type: Monthly,
+        seasons: Vec::new(),
     };
+    let effective_season_map: &SeasonMap = season_map_ref.unwrap_or(&noop_season_map);
     let downstream_par_order = derive_downstream_par_order(&study_stages, max_order);
     let stage_lag_transitions =
         precompute_stage_lag_transitions(&study_stages, effective_season_map, downstream_par_order);

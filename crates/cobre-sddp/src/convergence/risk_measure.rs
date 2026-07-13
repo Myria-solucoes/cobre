@@ -533,7 +533,6 @@ mod tests {
 
     #[test]
     fn cvar_aggregate_cut_alpha_one_equals_expectation() {
-        // CVaR with alpha=1, lambda=1 should give same result as Expectation
         let outcomes = vec![
             outcome(10.0, 10.0),
             outcome(20.0, 20.0),
@@ -577,8 +576,6 @@ mod tests {
 
     #[test]
     fn cvar_aggregate_cut_weights_sum_to_one() {
-        // Verify that the computed risk weights always sum to 1.0
-        // (This is an invariant of the greedy allocation.)
         let outcomes = [
             outcome(10.0, 15.0),
             outcome(20.0, 5.0),
@@ -662,8 +659,6 @@ mod tests {
 
     #[test]
     fn aggregate_weighted_into_matches_aggregate_weighted() {
-        // Verify that aggregate_weighted_into produces bit-identical results
-        // to aggregate_weighted for both uniform and non-uniform weights.
         use super::aggregate_weighted_into;
 
         let outcomes = vec![
@@ -699,8 +694,6 @@ mod tests {
 
     #[test]
     fn aggregate_cut_into_matches_aggregate_cut_expectation() {
-        // Verify that aggregate_cut_into produces bit-identical results to
-        // aggregate_cut for RiskMeasure::Expectation.
         use super::RiskMeasureScratch;
 
         let outcomes = vec![
@@ -728,8 +721,6 @@ mod tests {
 
     #[test]
     fn aggregate_cut_into_matches_aggregate_cut_cvar() {
-        // Verify that aggregate_cut_into produces bit-identical results to
-        // aggregate_cut for RiskMeasure::CVaR.
         use super::RiskMeasureScratch;
 
         let outcomes = vec![
@@ -765,8 +756,6 @@ mod tests {
 
     #[test]
     fn compute_cvar_weights_into_matches_allocating_variant() {
-        // Verify the _into variant produces identical mu output to the
-        // allocating compute_cvar_weights for the same inputs.
         use super::{RiskMeasureScratch, compute_cvar_weights_into};
 
         let outcomes = vec![

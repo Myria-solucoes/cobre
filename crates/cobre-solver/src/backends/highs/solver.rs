@@ -2,9 +2,7 @@
 //! `highs_version` free function. The warm-start `solve_inner` orchestration is
 //! determinism-sensitive.
 
-use crate::ffi::cobre_highs_version_major;
-use crate::ffi::cobre_highs_version_minor;
-use crate::ffi::cobre_highs_version_patch;
+use crate::ffi::{cobre_highs_version_major, cobre_highs_version_minor, cobre_highs_version_patch};
 #[cfg(feature = "test-support")]
 use std::ffi::CStr;
 use std::os::raw::c_void;

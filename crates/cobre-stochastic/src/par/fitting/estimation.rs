@@ -395,7 +395,6 @@ fn estimate_ar_with_pacf_annual(
     let mut estimates: Vec<ArCoefficientEstimate> = Vec::new();
 
     for &hydro_id in hydro_ids {
-        // Collect Z and A observations + stats indexed by season.
         let mut obs_by_season: Vec<Vec<f64>> = vec![Vec::new(); n_seasons];
         let mut annual_obs_by_season: Vec<Vec<f64>> = vec![Vec::new(); n_seasons];
         let mut stats_by_season: Vec<(f64, f64)> = vec![(0.0, 0.0); n_seasons];

@@ -18,11 +18,11 @@
 //! initialized here. For distributed runs, launch `mpiexec cobre` as a
 //! subprocess.
 
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
-use std::path::Path;
 
 use pyo3::exceptions::PyOSError;
 use pyo3::prelude::*;
@@ -32,26 +32,13 @@ use serde_json::Value;
 
 use cobre_core::TrainingEvent;
 
-use crate::errors::{ErrorSource, convert_error};
 use crate::convert::pydict_to_json_map;
+use crate::errors::{ErrorSource, convert_error};
 
 use cobre_comm::LocalBackend;
-use cobre_io::output::simulation_writer::{ScenarioWritePayload, SimulationParquetWriter};
-use cobre_io::{ParquetWriterConfig, SolverStatsRow};
-use cobre_sddp::{
-    ArOrderSummary, DEFAULT_SEED, HydroModelSummary, ModelProvenanceReport, SolverStatsDelta,
-    StochasticSource, StochasticSummary, StudyParams, StudySetup, build_hydro_model_summary,
-    build_provenance_report, build_stochastic_summary, prepare_stochastic,
-};
-use cobre_solver::ActiveSolver;
 use cobre_core::System;
-use cobre_io::Config;
-use cobre_io::ReportEntry;
-use cobre_io::TrainingOutput;
-use cobre_sddp::FutureCostFunction;
-use cobre_sddp::SddpError;
-use cobre_sddp::TrainingResult;
 use cobre_core::TrainingEvent::IterationSummary;
+use cobre_io::Config;
 use cobre_io::DistributionInfo;
 use cobre_io::EntitySlot;
 use cobre_io::LoadedCase;
@@ -61,9 +48,12 @@ use cobre_io::MetadataTrainingSolveStats;
 use cobre_io::OutputContext;
 use cobre_io::PolicyMode::Resume;
 use cobre_io::PolicyMode::WarmStart;
+use cobre_io::ReportEntry;
+use cobre_io::TrainingOutput;
 use cobre_io::get_hostname;
 use cobre_io::now_iso8601;
 use cobre_io::output::policy::read_policy_checkpoint;
+use cobre_io::output::simulation_writer::{ScenarioWritePayload, SimulationParquetWriter};
 use cobre_io::output::write_evaporation_models;
 use cobre_io::output::write_fpha_deviation_points;
 use cobre_io::output::write_fpha_hyperplanes;
@@ -77,8 +67,12 @@ use cobre_io::write_simulation_results;
 use cobre_io::write_simulation_solver_stats;
 use cobre_io::write_solver_stats;
 use cobre_io::write_training_results;
+use cobre_io::{ParquetWriterConfig, SolverStatsRow};
+use cobre_sddp::FutureCostFunction;
 use cobre_sddp::PolicyLoadKind::FullFcf;
 use cobre_sddp::PolicyStageManifest;
+use cobre_sddp::SddpError;
+use cobre_sddp::TrainingResult;
 use cobre_sddp::aggregate_simulation;
 use cobre_sddp::build_basis_cache_from_checkpoint;
 use cobre_sddp::build_deviation_summary;
@@ -93,6 +87,12 @@ use cobre_sddp::orchestration::export_stochastic_artifacts;
 use cobre_sddp::orchestration::write_checkpoint;
 use cobre_sddp::solver_stats_log_to_rows;
 use cobre_sddp::validate_policy_load;
+use cobre_sddp::{
+    ArOrderSummary, DEFAULT_SEED, HydroModelSummary, ModelProvenanceReport, SolverStatsDelta,
+    StochasticSource, StochasticSummary, StudyParams, StudySetup, build_hydro_model_summary,
+    build_provenance_report, build_stochastic_summary, prepare_stochastic,
+};
+use cobre_solver::ActiveSolver;
 use cobre_solver::active_solver_metadata_id;
 use cobre_solver::active_solver_version;
 use cobre_stochastic::sampling::historical::HistoricalScenarioLibrary;
@@ -533,9 +533,7 @@ pub(crate) fn write_training_artifacts(
         setup: None,
         // Mirrors the CLI write site so Python and CLI emit the same
         // `production_fit_deviation` section.
-        production_fit_deviation: build_deviation_summary(
-            &setup.hydro_models.fpha_fit_deviations,
-        ),
+        production_fit_deviation: build_deviation_summary(&setup.hydro_models.fpha_fit_deviations),
     };
     write_training_results(output_dir, &training.output, system, config, &training_ctx)
         .map_err(|e| format!("output write error: training results output: {e}"))?;
@@ -603,9 +601,9 @@ pub(crate) fn write_fpha_deviation_points_if_any(
         let deviation_points_path = output_dir
             .join("hydro_models")
             .join("fpha_deviation_points.parquet");
-        write_fpha_deviation_points(&deviation_points_path, rows).map_err(
-            |e| format!("output write error: failed to write fpha_deviation_points: {e}"),
-        )?;
+        write_fpha_deviation_points(&deviation_points_path, rows).map_err(|e| {
+            format!("output write error: failed to write fpha_deviation_points: {e}")
+        })?;
     }
     Ok(())
 }
@@ -714,15 +712,7 @@ pub(crate) fn run_simulation_phase_py(
             .solver_stats
             .iter()
             .map(|(scenario_id, _opening, delta)| {
-                delta_to_stats_row(
-                    *scenario_id,
-                    "simulation",
-                    -1,
-                    None,
-                    None,
-                    None,
-                    delta,
-                )
+                delta_to_stats_row(*scenario_id, "simulation", -1, None, None, None, delta)
             })
             .collect();
         write_simulation_solver_stats(output_dir, &rows)
@@ -781,8 +771,7 @@ fn load_effective_config(
                 .map_err(|e| format!("config read error: {e}"))?;
             let base: Value =
                 serde_json::from_str(&raw).map_err(|e| format!("config parse error: {e}"))?;
-            Config::with_overrides(&base, map)
-                .map_err(|e| format!("config override error: {e}"))
+            Config::with_overrides(&base, map).map_err(|e| format!("config override error: {e}"))
         }
         _ => parse_config(config_path).map_err(|e| format!("config parse error: {e}")),
     }
@@ -841,8 +830,7 @@ pub(crate) fn build_study_setup(
 ) -> Result<LoadedStudy, String> {
     // The `validate_*` variant (rather than `load_case_with_artifacts`) captures
     // the warnings so `Study::validate` can replay them without re-reading disk.
-    let (loaded, report) =
-        validate_case_with_artifacts(case_dir).map_err(|e| e.to_string())?;
+    let (loaded, report) = validate_case_with_artifacts(case_dir).map_err(|e| e.to_string())?;
     let LoadedCase { system, artifacts } = loaded;
     let warnings = report.warnings;
 
@@ -899,10 +887,12 @@ pub(crate) fn build_study_setup(
     // detection can compare against a fresh digest on later runs.
     provenance_report
         .inflow
-        .historical_library_past_inflows_digest =
-        setup.scenario_libraries.training.historical.as_ref().map(
-            HistoricalScenarioLibrary::past_inflows_digest,
-        );
+        .historical_library_past_inflows_digest = setup
+        .scenario_libraries
+        .training
+        .historical
+        .as_ref()
+        .map(HistoricalScenarioLibrary::past_inflows_digest);
 
     if config.exports.stochastic {
         let mut on_warning = |msg: &str| {
@@ -986,9 +976,8 @@ fn validate_loaded_policy(
         num_stages: n_stages,
         slots: &current_manifest,
     };
-    let report =
-        validate_policy_load(&source, &current, FullFcf)
-            .map_err(|e| format!("policy validation error: {e}"))?;
+    let report = validate_policy_load(&source, &current, FullFcf)
+        .map_err(|e| format!("policy validation error: {e}"))?;
 
     for msg in &report.warnings {
         eprintln!("cobre-python: policy validation warning: {msg}");

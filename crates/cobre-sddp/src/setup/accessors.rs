@@ -180,7 +180,7 @@ impl StudySetup {
                 .cut_management
                 .cut_selection
                 .as_ref()
-                .and_then(crate::dcs::DcsParams::from_strategy),
+                .and_then(DcsParams::from_strategy),
         }
     }
 

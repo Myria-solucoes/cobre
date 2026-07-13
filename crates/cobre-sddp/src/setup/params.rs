@@ -1,4 +1,4 @@
-//! `StudyParams`, `ConstructionConfig`, and associated constants extracted from `setup/mod.rs`.
+//! `StudyParams`, `ConstructionConfig`, and associated constants.
 
 use cobre_core::ScalarParameter;
 use cobre_io::Config;
@@ -138,15 +138,14 @@ impl StudyParams {
 
         let budget = config.training.cut_selection.max_active_per_stage;
 
-        if let Some(b) = budget {
-            // warn when the budget cannot hold even one cut per forward pass
-            if u64::from(b) < u64::from(forward_passes) {
-                tracing::warn!(
-                    "max_active_per_stage ({b}) is less than forward_passes \
-                     ({forward_passes}); budget enforcement will evict all \
-                     non-current-iteration cuts every iteration"
-                );
-            }
+        if let Some(b) = budget
+            && u64::from(b) < u64::from(forward_passes)
+        {
+            tracing::warn!(
+                "max_active_per_stage ({b}) is less than forward_passes \
+                 ({forward_passes}); budget enforcement will evict all \
+                 non-current-iteration cuts every iteration"
+            );
         }
 
         Ok(Self {

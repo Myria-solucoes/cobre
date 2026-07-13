@@ -128,8 +128,6 @@ impl IterationScratch {
 
         let mut freeze_scratch = FreezeScratch::new();
 
-        // Pre-freeze with an empty cut batch (a structural copy of the base
-        // template) so iteration 1's passes can use the frozen load path.
         for t in 0..num_stages {
             freeze_rows_into_template(
                 &stage_ctx.templates[t],

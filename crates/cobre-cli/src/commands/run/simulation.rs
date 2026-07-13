@@ -336,7 +336,6 @@ fn merge_simulation_metadata<C: Communicator>(
         failed: merged_counts[2],
         total_time_ms: merged_time[0],
         partitions_written: all_partitions,
-        // Filled later by the summary wiring; defaulted here.
         cost: None,
         solve_stats: MetadataSimulationSolveStats::default(),
     })

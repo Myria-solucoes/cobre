@@ -32,7 +32,6 @@ pub fn write_scaling_report(path: &Path, report: &impl Serialize) -> Result<(), 
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
-    use serde::Serialize;
     use tempfile::TempDir;
 
     #[derive(Serialize)]
