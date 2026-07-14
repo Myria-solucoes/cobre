@@ -7,6 +7,7 @@
 //! [`contribution`].
 
 pub mod aggregate;
+pub mod closure;
 pub mod contribution;
 pub mod evaluate;
 pub mod fitting;
@@ -16,6 +17,10 @@ pub mod precompute;
 pub mod validation;
 
 pub use aggregate::aggregate_observations_to_season;
+pub use closure::{
+    AnnualParams, ClosureRejection, check_stationarity, check_stationarity_annual,
+    derive_residual_std_ratios, derive_residual_std_ratios_annual, implied_periodic_acf,
+};
 pub use contribution::{
     check_negative_contributions, compute_contributions, find_max_valid_order, has_negative_phi1,
 };
