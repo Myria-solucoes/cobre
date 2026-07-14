@@ -71,8 +71,9 @@ pub enum ParWarning {
         hydro_id: i32,
         /// Stage index at which the low residual variance was detected.
         stage_id: i32,
-        /// The squared ratio `residual_std_ratio^2` that triggered this warning.
-        ratio: f64,
+        /// Explained variance `R² = 1 − residual_std_ratio²`: the AR fit's
+        /// coefficient of determination for this `(hydro, season)`.
+        explained_variance: f64,
     },
 }
 
@@ -84,8 +85,9 @@ pub enum ParWarning {
 ///
 /// 1. **Positive sample std** (fatal): a model with `ar_order() > 0` must have
 ///    `std_m3s > 0` — zero std cannot normalize the AR coefficients.
-/// 2. **Low residual variance** (warning): `residual_std_ratio^2 < 0.01` (AR fit
-///    explains > 99% of variance) appends a [`ParWarning::LowResidualVariance`].
+/// 2. **Low residual variance** (warning): explained variance `R² = 1 −
+///    residual_std_ratio² > 0.99` (the AR fit explains more than 99% of the
+///    seasonal variance) appends a [`ParWarning::LowResidualVariance`].
 ///
 /// # Errors
 ///
@@ -142,12 +144,13 @@ pub fn validate_par_parameters(
             });
         }
 
-        let ratio_sq = model.residual_std_ratio * model.residual_std_ratio;
-        if ratio_sq < 0.01 {
+        // explained_variance > 0.99 <=> residual_std_ratio^2 < 0.01: same trigger, inverted scale.
+        let explained_variance = 1.0 - model.residual_std_ratio * model.residual_std_ratio;
+        if explained_variance > 0.99 {
             warnings.push(ParWarning::LowResidualVariance {
                 hydro_id: model.hydro_id.0,
                 stage_id: model.stage_id,
-                ratio: ratio_sq,
+                explained_variance,
             });
         }
     }
@@ -255,7 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn low_residual_variance_ratio_triggers_warning() {
+    fn low_residual_variance_reports_explained_variance() {
         let model = make_model(7, 12, 30.0, vec![0.4], 0.05);
         let report = validate_par_parameters(&[model]).unwrap();
 
@@ -265,13 +268,13 @@ mod tests {
             ParWarning::LowResidualVariance {
                 hydro_id,
                 stage_id,
-                ratio,
+                explained_variance,
             } => {
                 assert_eq!(*hydro_id, 7);
                 assert_eq!(*stage_id, 12);
                 assert!(
-                    (ratio - 0.05_f64 * 0.05_f64).abs() < f64::EPSILON,
-                    "ratio must be residual_std_ratio^2"
+                    (explained_variance - (1.0 - 0.05_f64 * 0.05_f64)).abs() < f64::EPSILON,
+                    "explained_variance must be 1 - residual_std_ratio^2"
                 );
             }
             other @ ParWarning::NearUnitCircleRoot { .. } => {
@@ -281,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn residual_variance_ratio_at_boundary_no_warning() {
+    fn explained_variance_at_boundary_no_warning() {
         let model = make_model(2, 3, 30.0, vec![0.3], 0.1);
         let report = validate_par_parameters(&[model]).unwrap();
         assert!(report.warnings.is_empty());
@@ -353,13 +356,13 @@ mod tests {
             ParWarning::LowResidualVariance {
                 hydro_id,
                 stage_id,
-                ratio,
+                explained_variance,
             } => {
                 assert_eq!(*hydro_id, 2);
                 assert_eq!(*stage_id, 3);
                 assert!(
-                    (ratio - 0.05_f64 * 0.05_f64).abs() < f64::EPSILON,
-                    "ratio must be residual_std_ratio^2"
+                    (explained_variance - (1.0 - 0.05_f64 * 0.05_f64)).abs() < f64::EPSILON,
+                    "explained_variance must be 1 - residual_std_ratio^2"
                 );
             }
             other @ ParWarning::NearUnitCircleRoot { .. } => {
