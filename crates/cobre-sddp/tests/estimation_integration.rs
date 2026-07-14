@@ -1118,7 +1118,6 @@ fn write_user_inflow_ar_coefficients(case_dir: &Path, n_stages: i32, max_order: 
                 stage_id,
                 lag,
                 coefficient: 0.1 * f64::from(lag),
-                residual_std_ratio: 0.9,
             });
         }
     }

@@ -1579,7 +1579,6 @@ mod tests {
             stage_id: 0,
             lag: 1,
             coefficient: 0.5,
-            residual_std_ratio: 0.9,
         }];
 
         let mut ctx = ValidationContext::new();

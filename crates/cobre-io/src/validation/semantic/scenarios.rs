@@ -1,8 +1,11 @@
 //! Layer 5b — scenario, penalty, and probability-data validation.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use cobre_core::Hydro;
+use cobre_stochastic::par::{
+    AnnualParams, ClosureRejection, check_stationarity, check_stationarity_annual,
+};
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 
@@ -221,9 +224,16 @@ pub(super) fn check_fpha_penalty_rule(data: &ParsedData, ctx: &mut ValidationCon
     }
 }
 
-// ── Rules 12-13: Scenario model rules ─────────────────────────────────────────
+// ── Rule 12: Scenario model rules ───────────────────────────────────────────
+//
+// Rule 13 (V-AR-4, cross-lag residual_std_ratio consistency) was retired along
+// with the `residual_std_ratio` parquet column it validated — the value is now
+// derived at load, so the check is moot. The rule number is left retired
+// rather than renumbered to avoid perturbing rules 14-35, which are referenced
+// by number elsewhere in this module and in the crate-level rule catalogue
+// (`validation/semantic/mod.rs`).
 
-/// Validates inflow model standard deviation and AR coefficient count consistency.
+/// Validates inflow model standard deviation.
 pub(super) fn check_scenario_models(data: &ParsedData, ctx: &mut ValidationContext) {
     // Rule 12: the parser rejects std_m3s < 0; this layer only warns on == 0.0
     // (valid but unusual deterministic inflow).
@@ -241,38 +251,164 @@ pub(super) fn check_scenario_models(data: &ParsedData, ctx: &mut ValidationConte
             );
         }
     }
+}
 
-    // Rule 13 (V-AR-4): all lag rows of a (hydro_id, stage_id) group must share
-    // one residual_std_ratio. The parser does range validation; this checks only
-    // cross-row consistency within a group.
-    {
-        let mut ratio_by_group: HashMap<(i32, i32), f64> = HashMap::new();
-        for row in &data.inflow_ar_coefficients {
-            let key = (row.hydro_id.0, row.stage_id);
-            match ratio_by_group.entry(key) {
-                std::collections::hash_map::Entry::Vacant(e) => {
-                    e.insert(row.residual_std_ratio);
-                }
-                std::collections::hash_map::Entry::Occupied(e) => {
-                    if (*e.get() - row.residual_std_ratio).abs() > f64::EPSILON {
-                        ctx.add_error(
-                            ErrorKind::InvalidValue,
-                            "scenarios/inflow_ar_coefficients.parquet",
-                            Some(format!("Hydro {}", row.hydro_id.0)),
-                            format!(
-                                "Hydro {} stage {}: inconsistent residual_std_ratio across \
-                                 lag rows (first={}, current={}); all lags must share the \
-                                 same ratio",
-                                row.hydro_id.0,
-                                row.stage_id,
-                                e.get(),
-                                row.residual_std_ratio,
-                            ),
-                        );
-                    }
-                }
-            }
+// ── Rule 35: Hard stationarity gate on user-supplied AR coefficients ─────────
+
+/// Gates user-supplied `inflow_ar_coefficients.parquet` rows for stationarity
+/// via the periodic-ACF closure (`cobre_stochastic::par::closure`).
+///
+/// Runs only when `data.inflow_ar_coefficients` is non-empty -- the
+/// external-input path. The internal fitting/estimation path (triggered from
+/// `inflow_history.parquet` when no coefficient rows are supplied) keeps its
+/// own fallbacks and is not gated here.
+///
+/// For each hydro present in `inflow_ar_coefficients` (ascending `hydro_id`),
+/// resolves seasons via [`crate::scenarios::resolve_stage_seasons`] --
+/// including its no-`season_map` fallback (dense-ranked distinct per-stage
+/// `season_id`s) -- then groups lag rows by season: one representative stage
+/// per season, mirroring
+/// [`crate::scenarios::populate_derived_residual_ratios`]'s grouping, since
+/// stages sharing a season carry identical `ψ*`. Calls
+/// [`check_stationarity_annual`] when any season carries an annual component
+/// (`inflow_annual_components.parquet`), else [`check_stationarity`]. Every
+/// [`ClosureRejection`] becomes an `InvalidValue` error naming the offending
+/// season/lag and the failing quantity.
+///
+/// A hydro whose order-bearing coefficients reference a stage with no
+/// resolvable season (no `season_map` AND no usable per-stage `season_id` --
+/// the same condition under which
+/// [`crate::scenarios::populate_derived_residual_ratios`] itself errors) gets
+/// a `BusinessRuleViolation` naming the unresolved stage(s), and is skipped
+/// for the stationarity check (other hydros still run). Bare per-stage
+/// `season_id`s with no `season_map` (the fallback) resolve cleanly and ARE
+/// gated. Never silently skipped.
+pub(super) fn check_par_stationarity(data: &ParsedData, ctx: &mut ValidationContext) {
+    if data.inflow_ar_coefficients.is_empty() {
+        return;
+    }
+
+    let (stage_to_season, n_seasons) = crate::scenarios::resolve_stage_seasons(
+        &data.stages.stages,
+        data.stages.policy_graph.season_map.as_ref(),
+    );
+
+    let seasonal_std_by_key: HashMap<(i32, i32), f64> = data
+        .inflow_seasonal_stats
+        .iter()
+        .map(|row| ((row.hydro_id.0, row.stage_id), row.std_m3s))
+        .collect();
+    let annual_by_key: HashMap<(i32, i32), AnnualParams> = data
+        .inflow_annual_components
+        .iter()
+        .map(|row| {
+            (
+                (row.hydro_id.0, row.stage_id),
+                AnnualParams {
+                    coefficient: row.annual_coefficient,
+                    sigma_a: row.annual_std_m3s,
+                },
+            )
+        })
+        .collect();
+
+    let mut psi_by_hydro_stage: BTreeMap<i32, BTreeMap<i32, Vec<f64>>> = BTreeMap::new();
+    for row in &data.inflow_ar_coefficients {
+        psi_by_hydro_stage
+            .entry(row.hydro_id.0)
+            .or_default()
+            .entry(row.stage_id)
+            .or_default()
+            .push(row.coefficient);
+    }
+
+    for (hydro_id, stage_psi) in psi_by_hydro_stage {
+        let unresolved: Vec<i32> = stage_psi
+            .keys()
+            .filter(|stage_id| !stage_to_season.contains_key(stage_id))
+            .copied()
+            .collect();
+        if !unresolved.is_empty() {
+            ctx.add_error(
+                ErrorKind::BusinessRuleViolation,
+                "scenarios/inflow_ar_coefficients.parquet",
+                Some(format!("Hydro {hydro_id}")),
+                format!(
+                    "Hydro {hydro_id}: PAR stationarity gate cannot resolve a season \
+                     for stage(s) {unresolved:?} with order-bearing AR coefficients \
+                     (no season_definitions and no per-stage season_id); add \
+                     season_definitions to stages.json or a season_id on the \
+                     affected stage(s)"
+                ),
+            );
+            continue;
         }
+
+        let mut orders = vec![0_usize; n_seasons];
+        let mut psi_by_season = vec![Vec::new(); n_seasons];
+        let mut seasonal_std = vec![0.0_f64; n_seasons];
+        let mut annual: Vec<Option<AnnualParams>> = vec![None; n_seasons];
+        let mut season_seen = vec![false; n_seasons];
+
+        for (stage_id, psi) in stage_psi {
+            let Some(&season) = stage_to_season.get(&stage_id) else {
+                continue;
+            };
+            if season_seen[season] {
+                continue;
+            }
+            season_seen[season] = true;
+            orders[season] = psi.len();
+            seasonal_std[season] = seasonal_std_by_key
+                .get(&(hydro_id, stage_id))
+                .copied()
+                .unwrap_or(0.0);
+            annual[season] = annual_by_key.get(&(hydro_id, stage_id)).copied();
+            psi_by_season[season] = psi;
+        }
+
+        let has_annual = annual.iter().any(Option::is_some);
+        let result = if has_annual {
+            check_stationarity_annual(&psi_by_season, &orders, &annual, &seasonal_std, n_seasons)
+        } else {
+            check_stationarity(&psi_by_season, &orders, n_seasons)
+        };
+
+        if let Err(rejection) = result {
+            let entity_str = format!("Hydro {hydro_id}");
+            ctx.add_error(
+                ErrorKind::InvalidValue,
+                "scenarios/inflow_ar_coefficients.parquet",
+                Some(&entity_str),
+                describe_par_rejection(hydro_id, &rejection),
+            );
+        }
+    }
+}
+
+/// Formats a [`ClosureRejection`] into a message naming the offending
+/// season/lag and the failing quantity, for [`check_par_stationarity`].
+fn describe_par_rejection(hydro_id: i32, rejection: &ClosureRejection) -> String {
+    match rejection {
+        ClosureRejection::SingularClosure => format!(
+            "Hydro {hydro_id}: PAR stationarity gate found the periodic-ACF closure \
+             singular for the AR coefficients in inflow_ar_coefficients.parquet"
+        ),
+        ClosureRejection::AutocorrelationOutOfRange { season, lag, rho } => format!(
+            "Hydro {hydro_id} season {season}: PAR stationarity gate rejected \
+             inflow_ar_coefficients.parquet -- implied autocorrelation ρ(lag {lag}) \
+             = {rho} is outside [-1, 1]"
+        ),
+        ClosureRejection::NonPositiveResidualVariance { season, r_squared } => format!(
+            "Hydro {hydro_id} season {season}: PAR stationarity gate rejected \
+             inflow_ar_coefficients.parquet -- implied residual variance r² \
+             = {r_squared} is at or below the numerical floor"
+        ),
+        ClosureRejection::NonStationaryMonodromy { spectral_radius } => format!(
+            "Hydro {hydro_id}: PAR stationarity gate rejected \
+             inflow_ar_coefficients.parquet -- periodic monodromy spectral radius \
+             = {spectral_radius} is at or above 1"
+        ),
     }
 }
 
@@ -486,7 +622,7 @@ pub(super) fn check_estimation_prerequisites(data: &ParsedData, ctx: &mut Valida
 
     // Skipped when season_map is None: Rule 19 already errored, and running here
     // would cascade a confusing second diagnostic.
-    if let Some(_season_map) = &data.stages.policy_graph.season_map {
+    if data.stages.policy_graph.season_map.is_some() {
         let min_obs = data.config.estimation.min_observations_per_season as usize;
 
         // Stages are sorted by id, which matches date order — partition_point relies on it.
@@ -815,8 +951,8 @@ mod tests {
     use super::*;
     use crate::{
         scenarios::{
-            BlockFactor, InflowArCoefficientRow, InflowHistoryRow, InflowSeasonalStatsRow,
-            LoadFactorEntry, LoadSeasonalStatsRow,
+            BlockFactor, InflowAnnualComponentRow, InflowArCoefficientRow, InflowHistoryRow,
+            InflowSeasonalStatsRow, LoadFactorEntry, LoadSeasonalStatsRow,
         },
         stages::StagesData,
         validation::{ErrorKind, ValidationContext},
@@ -824,7 +960,9 @@ mod tests {
     use cobre_core::{
         EntityId, Hydro,
         entities::HydroGenerationModel,
-        temporal::{Block, PolicyGraph, PolicyGraphType},
+        temporal::{
+            Block, PolicyGraph, PolicyGraphType, SeasonCycleType, SeasonDefinition, SeasonMap,
+        },
     };
 
     // ── Local helpers ─────────────────────────────────────────────────────────
@@ -1145,31 +1283,65 @@ mod tests {
         );
     }
 
-    // ── Rule 13: residual_std_ratio consistency ───────────────────────────────
+    // Rule 13 (V-AR-4, cross-lag residual_std_ratio consistency) was retired
+    // along with the check itself — see the retirement note above
+    // check_scenario_models.
 
-    /// Two AR coefficient rows for the same `(hydro, stage)` with identical
-    /// `residual_std_ratio` values produce no `InvalidValue` error.
+    // ── Rule 35: PAR stationarity gate ────────────────────────────────────────
+
+    /// Build a `SeasonMap` with exactly `n` seasons, ids `0..n`.
+    fn season_map_n(n: usize) -> SeasonMap {
+        SeasonMap {
+            cycle_type: SeasonCycleType::Monthly,
+            seasons: (0..n)
+                .map(|i| SeasonDefinition {
+                    id: i,
+                    label: format!("Season{i}"),
+                    month_start: (i % 12 + 1) as u32,
+                    day_start: None,
+                    month_end: None,
+                    day_end: None,
+                })
+                .collect(),
+        }
+    }
+
+    /// Build a `StagesData` with `n` stages (ids `0..n`), each pinned 1:1 to
+    /// its own season (`stage.id == season_id`), and a matching `n`-season
+    /// `SeasonMap`.
+    fn stages_one_stage_per_season(n: usize) -> StagesData {
+        let stages = (0..n as i32)
+            .map(|id| {
+                let mut stage = make_stage(id);
+                stage.season_id = Some(id as usize);
+                stage
+            })
+            .collect();
+        StagesData {
+            stages,
+            policy_graph: PolicyGraph {
+                graph_type: PolicyGraphType::FiniteHorizon,
+                annual_discount_rate: 0.06,
+                transitions: vec![],
+                season_map: Some(season_map_n(n)),
+            },
+        }
+    }
+
+    /// An explosive AR(1) (`ψ* = 1.2`) on a single-season hydro produces an
+    /// `InvalidValue` error naming the hydro, season 0, and the offending
+    /// autocorrelation.
     #[test]
-    fn test_5b_residual_std_ratio_consistent_no_error() {
-        let ar_rows = vec![
-            InflowArCoefficientRow {
-                hydro_id: EntityId::from(1),
-                stage_id: 0,
-                lag: 1,
-                coefficient: 0.5,
-                residual_std_ratio: 0.85,
-            },
-            InflowArCoefficientRow {
-                hydro_id: EntityId::from(1),
-                stage_id: 0,
-                lag: 2,
-                coefficient: 0.3,
-                residual_std_ratio: 0.85, // same ratio as lag 1
-            },
-        ];
+    fn par_gate_rejects_explosive() {
+        let ar_rows = vec![InflowArCoefficientRow {
+            hydro_id: EntityId::from(1),
+            stage_id: 0,
+            lag: 1,
+            coefficient: 1.2,
+        }];
         let data = make_data_5b(
             vec![make_hydro_ordered_penalties(1)],
-            make_stages_5b(vec![0]),
+            stages_one_stage_per_season(1),
             vec![make_bus_with_deficit(1, 10.0)],
             vec![],
             ar_rows,
@@ -1177,44 +1349,53 @@ mod tests {
         );
         let mut ctx = ValidationContext::new();
         validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
-        let errors = ctx.errors();
-        let invalid_value_errors: Vec<_> = errors
-            .iter()
-            .filter(|e| {
-                e.kind == ErrorKind::InvalidValue && e.message.contains("residual_std_ratio")
-            })
+        let rejections: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidValue && e.message.contains("stationarity"))
             .collect();
+        assert_eq!(
+            rejections.len(),
+            1,
+            "expected exactly 1 stationarity rejection, got: {:?}",
+            ctx.errors()
+        );
         assert!(
-            invalid_value_errors.is_empty(),
-            "consistent residual_std_ratio should produce no InvalidValue errors, \
-             got: {invalid_value_errors:?}"
+            rejections[0].message.contains("Hydro 1") && rejections[0].message.contains("season 0"),
+            "message should name the hydro and season, got: {}",
+            rejections[0].message
         );
     }
 
-    /// Two AR coefficient rows for the same `(hydro, stage)` with different
-    /// `residual_std_ratio` values produce an `InvalidValue` error whose message
-    /// contains "residual_std_ratio" and "inconsistent".
+    /// A stationary mixed-order (`orders = [3, 1, 2, 1]`) hydro -- the same
+    /// fixture Epic 01's `t2_mixed_orders_gate_passes` verified stationary --
+    /// produces no stationarity rejection.
     #[test]
-    fn test_5b_residual_std_ratio_inconsistent_error() {
-        let ar_rows = vec![
-            InflowArCoefficientRow {
-                hydro_id: EntityId::from(1),
-                stage_id: 0,
-                lag: 1,
-                coefficient: 0.5,
-                residual_std_ratio: 0.85,
-            },
-            InflowArCoefficientRow {
-                hydro_id: EntityId::from(1),
-                stage_id: 0,
-                lag: 2,
-                coefficient: 0.3,
-                residual_std_ratio: 0.90, // different ratio — triggers V-AR-4
-            },
+    fn par_gate_accepts_stationary() {
+        let psi: [Vec<f64>; 4] = [
+            vec![
+                0.398_915_659_532_620_8,
+                0.062_802_463_704_355_48,
+                -0.014_634_714_422_504_587,
+            ],
+            vec![0.35],
+            vec![0.294_017_094_017_094, 0.017_094_017_094_017_092],
+            vec![0.38],
         ];
+        let mut ar_rows = Vec::new();
+        for (season, coeffs) in psi.iter().enumerate() {
+            for (i, &coefficient) in coeffs.iter().enumerate() {
+                ar_rows.push(InflowArCoefficientRow {
+                    hydro_id: EntityId::from(1),
+                    stage_id: season as i32,
+                    lag: (i + 1) as i32,
+                    coefficient,
+                });
+            }
+        }
         let data = make_data_5b(
             vec![make_hydro_ordered_penalties(1)],
-            make_stages_5b(vec![0]),
+            stages_one_stage_per_season(4),
             vec![make_bus_with_deficit(1, 10.0)],
             vec![],
             ar_rows,
@@ -1222,22 +1403,191 @@ mod tests {
         );
         let mut ctx = ValidationContext::new();
         validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
-        let errors = ctx.errors();
-        let invalid_value_errors: Vec<_> = errors
-            .iter()
-            .filter(|e| e.kind == ErrorKind::InvalidValue)
+        let rejections: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.message.contains("stationarity"))
             .collect();
         assert!(
-            !invalid_value_errors.is_empty(),
-            "inconsistent residual_std_ratio should produce at least one InvalidValue error"
+            rejections.is_empty(),
+            "stationary mixed-order coefficients should produce no stationarity \
+             rejection, got: {rejections:?}"
         );
-        let ratio_error = invalid_value_errors.iter().find(|e| {
-            e.message.contains("residual_std_ratio") && e.message.contains("inconsistent")
-        });
+    }
+
+    /// Empty `inflow_ar_coefficients` (history-only / estimation path) skips
+    /// the gate even when unrelated history data is present.
+    #[test]
+    fn par_gate_skips_when_no_coefficients() {
+        let data = make_data_5b(
+            vec![make_hydro_ordered_penalties(1)],
+            stages_one_stage_per_season(1),
+            vec![make_bus_with_deficit(1, 10.0)],
+            vec![],
+            vec![], // no AR coefficients -- estimation/history path
+            None,
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
+        let rejections: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.message.contains("stationarity"))
+            .collect();
         assert!(
-            ratio_error.is_some(),
-            "InvalidValue error message should contain 'residual_std_ratio' and \
-             'inconsistent', got: {invalid_value_errors:?}"
+            rejections.is_empty(),
+            "empty inflow_ar_coefficients should skip the gate entirely, \
+             got: {rejections:?}"
+        );
+    }
+
+    /// Order-bearing AR coefficients whose stage carries NO resolvable season
+    /// context (no `season_map` AND no per-stage `season_id` -- genuinely
+    /// unresolvable, the same condition under which
+    /// `populate_derived_residual_ratios` itself errors) produce a
+    /// `BusinessRuleViolation` naming the unresolved stage, instead of
+    /// silently skipping the gate.
+    #[test]
+    fn par_gate_requires_season_map() {
+        let ar_rows = vec![InflowArCoefficientRow {
+            hydro_id: EntityId::from(1),
+            stage_id: 0,
+            lag: 1,
+            coefficient: 0.5,
+        }];
+        let data = make_data_5b(
+            vec![make_hydro_ordered_penalties(1)],
+            make_stages_5b(vec![0]), // stage.season_id: None, no season_map
+            vec![make_bus_with_deficit(1, 10.0)],
+            vec![],
+            ar_rows,
+            None,
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
+        let matching: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| {
+                e.kind == ErrorKind::BusinessRuleViolation
+                    && e.message.contains("stationarity")
+                    && e.message.contains("season_definitions")
+            })
+            .collect();
+        assert!(
+            !matching.is_empty(),
+            "genuinely unresolvable season context with order-bearing \
+             coefficients should error, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Bare per-stage `season_id`s with no `season_map` resolve via
+    /// `resolve_stage_seasons`'s fallback (amended 2026-07-14): no
+    /// missing-season-context error is added, and the stationarity check
+    /// actually runs -- proven here by an explosive AR(1) still being
+    /// rejected on this path, not merely "no error".
+    #[test]
+    fn par_gate_uses_season_id_fallback() {
+        let mut stages = make_stages_5b(vec![0]);
+        stages.stages[0].season_id = Some(0); // bare season_id, no season_map
+        let ar_rows = vec![InflowArCoefficientRow {
+            hydro_id: EntityId::from(1),
+            stage_id: 0,
+            lag: 1,
+            coefficient: 1.2, // explosive -- proves the check actually ran
+        }];
+        let data = make_data_5b(
+            vec![make_hydro_ordered_penalties(1)],
+            stages,
+            vec![make_bus_with_deficit(1, 10.0)],
+            vec![],
+            ar_rows,
+            None,
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
+
+        let missing_context: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| {
+                e.kind == ErrorKind::BusinessRuleViolation && e.message.contains("stationarity")
+            })
+            .collect();
+        assert!(
+            missing_context.is_empty(),
+            "a bare per-stage season_id should resolve via the fallback, \
+             got: {missing_context:?}"
+        );
+
+        let rejections: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidValue && e.message.contains("stationarity"))
+            .collect();
+        assert_eq!(
+            rejections.len(),
+            1,
+            "expected the fallback-resolved gate to run and reject the \
+             explosive AR(1), got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// A PAR-A hydro whose classical part is stationary but whose effective
+    /// 12-lag system (widened by the annual term) is explosive -- the same
+    /// parameterization as Epic 01's `par_a_explosive_effective_rejected` --
+    /// produces a stationarity rejection (the annual gate fired, not merely
+    /// a singular closure).
+    #[test]
+    fn par_gate_rejects_explosive_annual() {
+        let ar_rows = vec![InflowArCoefficientRow {
+            hydro_id: EntityId::from(1),
+            stage_id: 0,
+            lag: 1,
+            coefficient: 0.3,
+        }];
+        let stats = vec![InflowSeasonalStatsRow {
+            hydro_id: EntityId::from(1),
+            stage_id: 0,
+            mean_m3s: 100.0,
+            std_m3s: 20.0,
+        }];
+        let mut data = make_data_5b(
+            vec![make_hydro_ordered_penalties(1)],
+            stages_one_stage_per_season(1),
+            vec![make_bus_with_deficit(1, 10.0)],
+            stats,
+            ar_rows,
+            None,
+        );
+        data.inflow_annual_components = vec![InflowAnnualComponentRow {
+            hydro_id: EntityId::from(1),
+            stage_id: 0,
+            annual_coefficient: 5.0,
+            annual_mean_m3s: 100.0,
+            annual_std_m3s: 1.0,
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
+        let rejections: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidValue && e.message.contains("stationarity"))
+            .collect();
+        assert_eq!(
+            rejections.len(),
+            1,
+            "expected exactly 1 stationarity rejection from the annual gate, got: {:?}",
+            ctx.errors()
+        );
+        assert!(
+            !rejections[0].message.contains("singular"),
+            "the explosive effective annual system should be a typed rejection, \
+             not a singular closure, got: {}",
+            rejections[0].message
         );
     }
 

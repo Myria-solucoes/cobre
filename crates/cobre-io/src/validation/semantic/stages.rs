@@ -173,7 +173,10 @@ mod tests {
     use super::super::test_support::*;
     use super::super::validate_semantic_stages_penalties_scenarios;
     use cobre_core::EntityId;
-    use cobre_core::temporal::{Block, PolicyGraphType, StageRiskConfig, Transition};
+    use cobre_core::temporal::{
+        Block, PolicyGraphType, SeasonCycleType, SeasonDefinition, SeasonMap, StageRiskConfig,
+        Transition,
+    };
 
     use crate::scenarios::InflowArCoefficientRow;
     use crate::validation::{ErrorKind, ValidationContext};
@@ -186,7 +189,6 @@ mod tests {
             stage_id: 0,
             lag,
             coefficient: 0.5,
-            residual_std_ratio: 0.85,
         }
     }
 
@@ -505,7 +507,25 @@ mod tests {
     /// one `ModelQuality` warning and no error.
     #[test]
     fn test_5b_all_stages_inflow_lags_disabled_under_par_warns_once() {
-        let stages = make_stages_5b(vec![0, 1, 2]); // make_stage defaults inflow_lags false
+        let mut stages = make_stages_5b(vec![0, 1, 2]); // make_stage defaults inflow_lags false
+        // Order-bearing inflow_ar_coefficients now trigger the ticket-005 PAR
+        // stationarity gate, which hard-errors without a resolvable season map.
+        for (i, stage) in stages.stages.iter_mut().enumerate() {
+            stage.season_id = Some(i);
+        }
+        stages.policy_graph.season_map = Some(SeasonMap {
+            cycle_type: SeasonCycleType::Monthly,
+            seasons: (0..3)
+                .map(|i| SeasonDefinition {
+                    id: i,
+                    label: format!("Season{i}"),
+                    month_start: (i % 12 + 1) as u32,
+                    day_start: None,
+                    month_end: None,
+                    day_end: None,
+                })
+                .collect(),
+        });
         let data = make_data_5b(
             vec![make_hydro_ordered_penalties(1)],
             stages,

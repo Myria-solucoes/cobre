@@ -205,6 +205,24 @@ fn write_baseline(baseline_subdir: &str, case: &str, hash: &str) -> Result<(), S
 /// The simpler `d01..d05` single-feature cases are covered at the behavioral
 /// tier (`deterministic.rs`); promoting a case into this golden set needs
 /// justification.
+///
+/// ## `D30` re-bless provenance (residual-std-ratio closure derivation)
+///
+/// `D30`'s golden hash (both backends) was re-blessed when `residual_std_ratio`
+/// became closure-derived (unit-variance-exact, from the AR coefficients alone)
+/// instead of read from `inflow_ar_coefficients.parquet`. This is NOT the
+/// generic mixed-per-season-order shift (~1e-4, see
+/// `derive_residual_std_ratios`'s doc): `D30` supplies its AR coefficients
+/// directly (the `out_of_sample` scheme never runs the YW fit) with a uniform
+/// order of 1 at every season it uses, so the closure is exact there —
+/// `r = sqrt(1 - psi^2) = 0.866025403784439` for `psi = 0.5`. The fixture's
+/// stored ratio, `0.85`, was simply an arbitrary literal never fit against
+/// `psi`, so the ~1.6e-2 gap between it and the derived value reflects the
+/// stored-value inconsistency this migration retires, not a closure defect —
+/// `D06`/`D15`/`D34`/`D41`'s unchanged hashes confirm the closure is exact
+/// wherever a case's per-season orders are uniform. The determinism property
+/// (same input -> same output; declaration-order / rank invariance) is
+/// untouched; only this one blessed value moved.
 pub fn case_dir(label: &str) -> PathBuf {
     let suffix = match label {
         "D06" => "d06-fpha-variable-head",

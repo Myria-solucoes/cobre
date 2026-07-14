@@ -557,6 +557,62 @@ fn test_partial_estimation_preserves_user_stats() {
     }
 }
 
+/// The `PartialEstimation` path's internally-fitted AR (periodic YW from
+/// history) must have its `residual_std_ratio` superseded by the
+/// periodic-ACF closure (`populate_derived_residual_ratios`), not the raw YW
+/// estimate — asserted against an independent closure call over the same
+/// final coefficients, per hydro/season.
+#[test]
+fn test_partial_estimation_populates_closure_derived_ratio() {
+    use cobre_stochastic::par::derive_residual_std_ratios;
+    use tempfile::TempDir;
+
+    const N_YEARS: usize = 30;
+    let dir = TempDir::new().unwrap();
+    let case_dir = dir.path();
+
+    setup_partial_estimation_case(case_dir, N_YEARS);
+    let system = build_system_with_user_stats(N_YEARS);
+    let config = default_config();
+
+    let (updated, _report, path) =
+        estimate_from_history(system, case_dir, &config).expect("partial estimation must succeed");
+    assert_eq!(
+        path,
+        EstimationPath::PartialEstimation,
+        "expected PartialEstimation path"
+    );
+
+    let models = updated.inflow_models();
+    let season0 = models
+        .iter()
+        .find(|m| m.stage_id == 0)
+        .expect("stage 0 (season 0) model present");
+    let season1 = models
+        .iter()
+        .find(|m| m.stage_id == 1)
+        .expect("stage 1 (season 1) model present");
+
+    let psi_by_season = vec![
+        season0.ar_coefficients.clone(),
+        season1.ar_coefficients.clone(),
+    ];
+    let orders = vec![season0.ar_order(), season1.ar_order()];
+    let expected = derive_residual_std_ratios(&psi_by_season, &orders, 2)
+        .expect("closure solves for the internally-fitted coefficients");
+
+    for (m, expected_r) in [(season0, expected[0]), (season1, expected[1])] {
+        assert!(
+            (m.residual_std_ratio - expected_r).abs() < 1e-12,
+            "stage {}: residual_std_ratio must equal the closure-derived value \
+             {expected_r}, got {} — the raw YW-fitted value must no longer reach \
+             the returned System",
+            m.stage_id,
+            m.residual_std_ratio
+        );
+    }
+}
+
 #[test]
 fn test_partial_estimation_returns_report() {
     use tempfile::TempDir;
@@ -844,12 +900,10 @@ fn ar_estimates_to_rows_includes_prestudy_stages() {
     // stage_id = -2 is season 1, coefficient = 0.4.
     let neg2 = rows.iter().find(|r| r.stage_id == -2).expect("row for -2");
     assert!((neg2.coefficient - 0.4).abs() < f64::EPSILON);
-    assert!((neg2.residual_std_ratio - 0.85).abs() < f64::EPSILON);
 
     // stage_id = -1 is season 2, coefficient = 0.5.
     let neg1 = rows.iter().find(|r| r.stage_id == -1).expect("row for -1");
     assert!((neg1.coefficient - 0.5).abs() < f64::EPSILON);
-    assert!((neg1.residual_std_ratio - 0.8).abs() < f64::EPSILON);
 }
 
 #[test]
@@ -1066,42 +1120,36 @@ fn test_ar_rows_to_estimates_groups_by_season() {
             stage_id: 0,
             lag: 1,
             coefficient: 0.50,
-            residual_std_ratio: 0.85,
         },
         InflowArCoefficientRow {
             hydro_id: EntityId(1),
             stage_id: 1,
             lag: 1,
             coefficient: 0.50,
-            residual_std_ratio: 0.85,
         },
         InflowArCoefficientRow {
             hydro_id: EntityId(1),
             stage_id: 2,
             lag: 1,
             coefficient: 0.60,
-            residual_std_ratio: 0.80,
         },
         InflowArCoefficientRow {
             hydro_id: EntityId(2),
             stage_id: 0,
             lag: 1,
             coefficient: 0.40,
-            residual_std_ratio: 0.90,
         },
         InflowArCoefficientRow {
             hydro_id: EntityId(2),
             stage_id: 1,
             lag: 1,
             coefficient: 0.40,
-            residual_std_ratio: 0.90,
         },
         InflowArCoefficientRow {
             hydro_id: EntityId(2),
             stage_id: 2,
             lag: 1,
             coefficient: 0.35,
-            residual_std_ratio: 0.88,
         },
     ];
 
@@ -1125,9 +1173,12 @@ fn test_ar_rows_to_estimates_groups_by_season() {
         "coeff must be 0.50, got {}",
         e.coefficients[0]
     );
+    // residual_std_ratio is a placeholder here (the file no longer carries the
+    // column): populate_derived_residual_ratios overwrites it downstream on the
+    // assembled InflowModel, not on this intermediate estimate.
     assert!(
-        (e.residual_std_ratio - 0.85).abs() < f64::EPSILON,
-        "residual_std_ratio must be 0.85"
+        (e.residual_std_ratio - 1.0).abs() < f64::EPSILON,
+        "residual_std_ratio must be the placeholder 1.0"
     );
 
     // season 1 coeff comes from stage 2 (the season's first stage).
@@ -1137,7 +1188,6 @@ fn test_ar_rows_to_estimates_groups_by_season() {
         .expect("hydro 1, season 1 estimate must exist");
     assert_eq!(e.coefficients.len(), 1);
     assert!((e.coefficients[0] - 0.60).abs() < f64::EPSILON);
-    assert!((e.residual_std_ratio - 0.80).abs() < f64::EPSILON);
 
     let e = estimates
         .iter()
@@ -1332,6 +1382,13 @@ fn setup_user_ar_case(
     );
 }
 
+/// The user AR file's `coefficient` column is preserved bitwise (Role 2 is
+/// user-owned), but its `residual_std_ratio` column is now superseded by the
+/// periodic-ACF closure (`populate_derived_residual_ratios`) — for this
+/// uniform-AR(1) two-season fixture the closure decouples exactly to
+/// `r = sqrt(1 - coefficient^2)` (Epic 01 T1), a value deliberately different
+/// from `KNOWN_RATIO` here, so the assertion below also proves the stale
+/// user-column value no longer reaches the returned `System`.
 #[test]
 fn test_user_ar_estimation_preserves_ar_coefficients() {
     use tempfile::TempDir;
@@ -1366,6 +1423,14 @@ fn test_user_ar_estimation_preserves_ar_coefficients() {
         "estimation must produce at least one inflow model"
     );
 
+    let expected_ratio = (1.0 - KNOWN_COEFF * KNOWN_COEFF).sqrt();
+    assert!(
+        (expected_ratio - KNOWN_RATIO).abs() > 1e-3,
+        "fixture sanity: KNOWN_RATIO must differ from the closure value to prove \
+         the user-column value is superseded, got expected={expected_ratio} \
+         known={KNOWN_RATIO}"
+    );
+
     for m in models {
         assert_eq!(
             m.ar_coefficients.len(),
@@ -1379,10 +1444,12 @@ fn test_user_ar_estimation_preserves_ar_coefficients() {
             "ar_coefficients[0] must be bitwise identical to {KNOWN_COEFF} for stage {}",
             m.stage_id
         );
-        assert_eq!(
-            m.residual_std_ratio.to_bits(),
-            KNOWN_RATIO.to_bits(),
-            "residual_std_ratio must be bitwise identical to {KNOWN_RATIO} for stage {}",
+        assert!(
+            (m.residual_std_ratio - expected_ratio).abs() < 1e-12,
+            "residual_std_ratio must equal the closure-derived value {expected_ratio} \
+             (order-1 decouples exactly), got {} for stage {} — the raw user-column \
+             value {KNOWN_RATIO} must no longer reach the returned System",
+            m.residual_std_ratio,
             m.stage_id
         );
     }

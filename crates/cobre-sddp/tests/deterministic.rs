@@ -2082,7 +2082,20 @@ fn d19_multi_hydro_par_truncation() {
 ///
 /// A lag-major/hydro-major indexing regression reads the wrong lag for each
 /// hydro in PAR evaluation, producing a different cost.
-pub const D19_EXPECTED_COST: f64 = 1_334_655.175_543_562_7;
+///
+/// Re-blessed when `residual_std_ratio` became closure-derived: D19 supplies
+/// its AR(2) coefficients directly (both hydros share the single `season_id=0`
+/// used by every stage, so there is no per-season order heterogeneity —
+/// structurally uniform, not mixed), with a stored `residual_std_ratio` of
+/// `1.0` for both hydros that was never fit against ψ = `[0.5, 0.3]` (hydro 0)
+/// / `[0.4, 0.2]` (hydro 1). The closure-derived values (`0.667618...` /
+/// `0.848528...`) differ from that stored literal far outside the mixed-order
+/// `~1e-4` band — the same stored-value-inconsistency class as `D30` (see
+/// `common::parity_hash::case_dir`'s doc), not a closure defect. The resulting
+/// cost shift here is small only because `std_m3s = 0.001` keeps the absolute
+/// noise scale (`σ = s·r`) tiny regardless of `r`. Determinism (same input ->
+/// same output; declaration-order / rank invariance) is unaffected.
+pub const D19_EXPECTED_COST: f64 = 1_334_681.498_530_595;
 
 /// Operational violation slacks: 1 hydro with active min_outflow, max_outflow,
 /// min_turbined, and min_generation bounds.

@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`residual_std_ratio` is now derived, not trusted, whenever
+  `inflow_ar_coefficients.parquet` supplies AR coefficients.** The residual
+  std ratio (`σₘ/sₘ` per season) is computed at load from the standardized
+  AR coefficients via the periodic-ACF closure under the unit-marginal-
+  variance contract, instead of being read from a stored or previously
+  fitted value. For a season whose per-season AR order is uniform across the
+  cycle, the derived value matches a Yule-Walker fit to numerical precision
+  (unchanged solved outputs); for heterogeneous per-season orders, it
+  differs from a Yule-Walker fit by roughly `1e-4`. A study that supplies AR
+  coefficients directly (bypassing estimation) now has any stored
+  `residual_std_ratio` in the coefficients file ignored outright and
+  replaced by the closure-derived value — if that stored value was not
+  itself consistent with the supplied coefficients, solved outputs can
+  shift by more than the `1e-4` mixed-order band. Declaration-order
+  invariance and run-to-run reproducibility are unaffected.
+- `historical`-scheme inflow sampling's residual standardization (`σ = s·r`,
+  `sampling/historical.rs` reading the model's `sigma()`) is unchanged in
+  code but now reads the closure-derived `r` above it, so a `historical`
+  study with heterogeneous per-season AR order sees its sampled residuals
+  standardized by a correspondingly shifted `σ` (~`1e-4`).
+
 ## [0.10.0] - 2026-07-10
 
 ### Added

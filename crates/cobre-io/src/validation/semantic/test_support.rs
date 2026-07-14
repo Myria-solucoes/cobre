@@ -664,7 +664,6 @@ pub(super) fn make_ar_row(hydro_id: i32, stage_id: i32, lag: i32) -> InflowArCoe
         stage_id,
         lag,
         coefficient: 0.5,
-        residual_std_ratio: 0.9,
     }
 }
 

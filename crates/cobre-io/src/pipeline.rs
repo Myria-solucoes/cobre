@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use cobre_core::{SystemBuilder, scenario::CorrelationModel};
+use cobre_core::SystemBuilder;
 
 use crate::{
     LoadError,
@@ -18,6 +18,7 @@ use crate::{
         resolve_load_factors, resolve_ncs_bounds, resolve_ncs_factors, resolve_penalties,
     },
     scenarios::assembly::{assemble_inflow_models, assemble_load_models},
+    scenarios::residual_derivation::{populate_derived_residual_ratios, resolve_stage_seasons},
     validation::{
         ValidationContext,
         dimensional::validate_dimensional_consistency,
@@ -190,11 +191,16 @@ pub(crate) fn run_pipeline_with_artifacts(
         &data.stages.stages,
     );
 
-    let inflow_models = assemble_inflow_models(
+    let mut inflow_models = assemble_inflow_models(
         data.inflow_seasonal_stats,
         data.inflow_ar_coefficients,
         data.inflow_annual_components,
     )?;
+    let (stage_to_season, n_seasons) = resolve_stage_seasons(
+        &data.stages.stages,
+        data.stages.policy_graph.season_map.as_ref(),
+    );
+    populate_derived_residual_ratios(&mut inflow_models, &stage_to_season, n_seasons)?;
     let load_models = assemble_load_models(data.load_seasonal_stats);
 
     // Load tailrace curves only when the manifest detected the file: without
@@ -238,7 +244,7 @@ pub(crate) fn run_pipeline_with_artifacts(
         .inflow_models(inflow_models)
         .load_models(load_models)
         .ncs_models(data.ncs_models)
-        .correlation(data.correlation.unwrap_or_else(CorrelationModel::default))
+        .correlation(data.correlation.unwrap_or_default())
         .initial_conditions(data.initial_conditions)
         .generic_constraints(data.generic_constraints)
         .inflow_history(data.inflow_history)

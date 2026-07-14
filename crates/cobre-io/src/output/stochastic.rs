@@ -26,7 +26,7 @@
 //! | `std_m3s`  | DOUBLE | Seasonal standard deviation (m³/s)  |
 //!
 //! [`write_inflow_ar_coefficients`] exports fitted AR lag coefficients to
-//! `output/stochastic/inflow_ar_coefficients.parquet` using the 5-column
+//! `output/stochastic/inflow_ar_coefficients.parquet` using the 4-column
 //! schema matching the corresponding input file:
 //!
 //! | Column               | Type   | Description                                  |
@@ -35,7 +35,6 @@
 //! | `stage_id`           | INT32  | Stage ID                                     |
 //! | `lag`                | INT32  | Lag index (1-based)                          |
 //! | `coefficient`        | DOUBLE | AR coefficient (standardized, dimensionless) |
-//! | `residual_std_ratio` | DOUBLE | Residual std ratio in (0, 1]                 |
 //!
 //! [`write_correlation_json`] exports a [`CorrelationModel`] to
 //! `output/stochastic/correlation.json` using the same format as the input
@@ -204,7 +203,6 @@ pub fn write_inflow_seasonal_stats(
 ///         stage_id: 0,
 ///         lag: 1,
 ///         coefficient: 0.45,
-///         residual_std_ratio: 0.85,
 ///     },
 /// ];
 /// write_inflow_ar_coefficients(
@@ -550,7 +548,6 @@ fn inflow_ar_coefficients_schema() -> Schema {
         Field::new("stage_id", DataType::Int32, false),
         Field::new("lag", DataType::Int32, false),
         Field::new("coefficient", DataType::Float64, false),
-        Field::new("residual_std_ratio", DataType::Float64, false),
     ])
 }
 
@@ -563,14 +560,12 @@ fn build_inflow_ar_coefficients_batch(
     let mut stage_id_col = Int32Builder::with_capacity(n);
     let mut lag_col = Int32Builder::with_capacity(n);
     let mut coefficient_col = Float64Builder::with_capacity(n);
-    let mut residual_std_ratio_col = Float64Builder::with_capacity(n);
 
     for row in rows {
         hydro_id_col.append_value(row.hydro_id.0);
         stage_id_col.append_value(row.stage_id);
         lag_col.append_value(row.lag);
         coefficient_col.append_value(row.coefficient);
-        residual_std_ratio_col.append_value(row.residual_std_ratio);
     }
 
     RecordBatch::try_new(
@@ -580,7 +575,6 @@ fn build_inflow_ar_coefficients_batch(
             Arc::new(stage_id_col.finish()),
             Arc::new(lag_col.finish()),
             Arc::new(coefficient_col.finish()),
-            Arc::new(residual_std_ratio_col.finish()),
         ],
     )
     .map_err(|e| OutputError::serialization("inflow_ar_coefficients", e.to_string()))
@@ -1191,42 +1185,36 @@ mod tests {
                 stage_id: 0,
                 lag: 1,
                 coefficient: 0.45,
-                residual_std_ratio: 0.85,
             },
             InflowArCoefficientRow {
                 hydro_id: EntityId::from(1),
                 stage_id: 0,
                 lag: 2,
                 coefficient: 0.20,
-                residual_std_ratio: 0.85,
             },
             InflowArCoefficientRow {
                 hydro_id: EntityId::from(1),
                 stage_id: 0,
                 lag: 3,
                 coefficient: 0.10,
-                residual_std_ratio: 0.85,
             },
             InflowArCoefficientRow {
                 hydro_id: EntityId::from(2),
                 stage_id: 0,
                 lag: 1,
                 coefficient: 0.30,
-                residual_std_ratio: 0.75,
             },
             InflowArCoefficientRow {
                 hydro_id: EntityId::from(2),
                 stage_id: 0,
                 lag: 2,
                 coefficient: 0.15,
-                residual_std_ratio: 0.75,
             },
             InflowArCoefficientRow {
                 hydro_id: EntityId::from(2),
                 stage_id: 0,
                 lag: 3,
                 coefficient: 0.05,
-                residual_std_ratio: 0.75,
             },
         ]
     }
@@ -1257,10 +1245,6 @@ mod tests {
             assert!(
                 (parsed.coefficient - original.coefficient).abs() < 1e-10,
                 "coefficient must be bit-for-bit identical"
-            );
-            assert!(
-                (parsed.residual_std_ratio - original.residual_std_ratio).abs() < 1e-10,
-                "residual_std_ratio must be bit-for-bit identical"
             );
         }
     }
@@ -1315,8 +1299,8 @@ mod tests {
         assert_eq!(total_rows, 0, "empty rows must produce 0-row file");
         assert_eq!(
             schema.fields().len(),
-            5,
-            "schema must have exactly 5 columns"
+            4,
+            "schema must have exactly 4 columns"
         );
 
         let fields: Vec<(&str, &DataType)> = schema
@@ -1324,11 +1308,16 @@ mod tests {
             .iter()
             .map(|f| (f.name().as_str(), f.data_type()))
             .collect();
-        assert_eq!(fields[0], ("hydro_id", &DataType::Int32));
-        assert_eq!(fields[1], ("stage_id", &DataType::Int32));
-        assert_eq!(fields[2], ("lag", &DataType::Int32));
-        assert_eq!(fields[3], ("coefficient", &DataType::Float64));
-        assert_eq!(fields[4], ("residual_std_ratio", &DataType::Float64));
+        assert_eq!(
+            fields,
+            vec![
+                ("hydro_id", &DataType::Int32),
+                ("stage_id", &DataType::Int32),
+                ("lag", &DataType::Int32),
+                ("coefficient", &DataType::Float64),
+            ],
+            "written schema fields must be exactly [hydro_id, stage_id, lag, coefficient]"
+        );
     }
 
     // -------------------------------------------------------------------------

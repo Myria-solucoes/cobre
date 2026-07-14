@@ -173,8 +173,11 @@ fn test_referential_integrity_violation() {
 
 // ── test_inflow_history_wired_into_system ─────────────────────────────────────
 
-/// The seasonal-stats + AR-coefficient parquets bypass the estimation path, so
-/// no `season_definitions` are required in `stages.json`.
+/// The seasonal-stats + AR-coefficient parquets bypass the estimation path, but
+/// `stages.json` still needs `season_definitions`: the loading pipeline derives
+/// every order-bearing model's `residual_std_ratio` from the periodic-ACF
+/// closure (`populate_derived_residual_ratios`), which requires a resolvable
+/// season for any AR order > 0, regardless of whether estimation ran.
 #[test]
 fn test_inflow_history_wired_into_system() {
     use arrow::array::{Date32Array, Float64Array, Int32Array};
@@ -186,6 +189,56 @@ fn test_inflow_history_wired_into_system() {
 
     let dir = TempDir::new().unwrap();
     helpers::make_multi_entity_case(&dir);
+
+    // `make_multi_entity_case`'s default `stages.json` carries no
+    // `season_definitions`; this case's `inflow_ar_coefficients.parquet` below
+    // has real AR order > 0, so it needs a resolvable season per stage.
+    std::fs::write(
+        dir.path().join("stages.json"),
+        r#"{
+    "season_definitions": {
+        "cycle_type": "monthly",
+        "seasons": [
+            { "id": 0, "month_start": 1, "label": "January" },
+            { "id": 1, "month_start": 2, "label": "February" },
+            { "id": 2, "month_start": 3, "label": "March" },
+            { "id": 3, "month_start": 4, "label": "April" },
+            { "id": 4, "month_start": 5, "label": "May" },
+            { "id": 5, "month_start": 6, "label": "June" },
+            { "id": 6, "month_start": 7, "label": "July" },
+            { "id": 7, "month_start": 8, "label": "August" },
+            { "id": 8, "month_start": 9, "label": "September" },
+            { "id": 9, "month_start": 10, "label": "October" },
+            { "id": 10, "month_start": 11, "label": "November" },
+            { "id": 11, "month_start": 12, "label": "December" }
+        ]
+    },
+    "policy_graph": {
+        "type": "finite_horizon",
+        "annual_discount_rate": 0.06,
+        "transitions": [
+            { "source_id": 0, "target_id": 1, "probability": 1.0 }
+        ]
+    },
+    "stages": [
+        {
+            "id": 0,
+            "start_date": "2024-01-01",
+            "end_date": "2024-02-01",
+            "blocks": [{ "id": 0, "name": "FLAT", "hours": 744.0 }],
+            "num_scenarios": 10
+        },
+        {
+            "id": 1,
+            "start_date": "2024-02-01",
+            "end_date": "2024-03-01",
+            "blocks": [{ "id": 0, "name": "FLAT", "hours": 672.0 }],
+            "num_scenarios": 10
+        }
+    ]
+}"#,
+    )
+    .unwrap();
 
     std::fs::write(
         dir.path().join("system/hydro_production_models.json"),

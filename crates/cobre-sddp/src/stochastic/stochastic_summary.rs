@@ -351,7 +351,6 @@ pub fn inflow_models_to_ar_rows(models: &[InflowModel]) -> Vec<InflowArCoefficie
                         stage_id: m.stage_id,
                         lag,
                         coefficient,
-                        residual_std_ratio: m.residual_std_ratio,
                     }
                 })
         })
@@ -666,7 +665,6 @@ mod tests {
         assert_eq!(rows[0].hydro_id, EntityId(1));
         assert_eq!(rows[0].lag, 1, "first lag must be 1 (1-based)");
         assert_eq!(rows[0].coefficient, 0.4);
-        assert_eq!(rows[0].residual_std_ratio, 0.92);
 
         assert_eq!(rows[1].lag, 2);
         assert_eq!(rows[1].coefficient, -0.1);

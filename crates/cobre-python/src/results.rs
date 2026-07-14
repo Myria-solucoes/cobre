@@ -432,12 +432,12 @@ pub fn load_convergence_arrow(py: Python<'_>, output_dir: PathBuf) -> PyResult<P
 // ── Stochastic-model introspection (`cobre.results.load_stochastic`) ───────────
 
 /// Number of columns in the flat `par_coefficients()` table:
-/// `[hydro_id, stage_id, lag, coefficient, residual_std_ratio]`.
-const PAR_COEFFICIENT_COLUMNS: usize = 5;
+/// `[hydro_id, stage_id, lag, coefficient]`.
+const PAR_COEFFICIENT_COLUMNS: usize = 4;
 
 /// Parsed rows of `stochastic/inflow_ar_coefficients.parquet`.
 ///
-/// Stored as five parallel owned vectors (one per column), in the file's
+/// Stored as four parallel owned vectors (one per column), in the file's
 /// on-disk row order (`(hydro_id, stage_id, lag)` ascending). All vectors share
 /// the same length (`n_rows`).
 struct ParRows {
@@ -445,7 +445,6 @@ struct ParRows {
     stage_id: Vec<i32>,
     lag: Vec<i32>,
     coefficient: Vec<f64>,
-    residual_std_ratio: Vec<f64>,
 }
 
 /// Parsed rows of `stochastic/noise_openings.parquet`.
@@ -536,23 +535,18 @@ fn read_par_rows(path: &Path) -> PyResult<ParRows> {
             stage_id: Vec::new(),
             lag: Vec::new(),
             coefficient: Vec::new(),
-            residual_std_ratio: Vec::new(),
         },
         |batch, rows| {
             let hydro_id = stochastic_column::<Int32Array>(batch, file, "hydro_id")?;
             let stage_id = stochastic_column::<Int32Array>(batch, file, "stage_id")?;
             let lag = stochastic_column::<Int32Array>(batch, file, "lag")?;
             let coefficient = stochastic_column::<Float64Array>(batch, file, "coefficient")?;
-            let residual_std_ratio =
-                stochastic_column::<Float64Array>(batch, file, "residual_std_ratio")?;
 
             rows.hydro_id.extend(hydro_id.values().iter().copied());
             rows.stage_id.extend(stage_id.values().iter().copied());
             rows.lag.extend(lag.values().iter().copied());
             rows.coefficient
                 .extend(coefficient.values().iter().copied());
-            rows.residual_std_ratio
-                .extend(residual_std_ratio.values().iter().copied());
             Ok(())
         },
     )
@@ -627,13 +621,13 @@ pub struct Stochastic {
 
 #[pymethods]
 impl Stochastic {
-    /// Return the fitted PAR(p) coefficients as a `(n_rows, 5)` `float64` array.
+    /// Return the fitted PAR(p) coefficients as a `(n_rows, 4)` `float64` array.
     ///
     /// Columns, in fixed order, are
-    /// `[hydro_id, stage_id, lag, coefficient, residual_std_ratio]` — a lossless
-    /// projection of `stochastic/inflow_ar_coefficients.parquet` in its on-disk
-    /// row order (`(hydro_id, stage_id, lag)` ascending). The three integer
-    /// columns are cast to `float64`. `lag` is 1-based (ψ₁ = lag 1).
+    /// `[hydro_id, stage_id, lag, coefficient]` — a lossless projection of
+    /// `stochastic/inflow_ar_coefficients.parquet` in its on-disk row order
+    /// (`(hydro_id, stage_id, lag)` ascending). The three integer columns are
+    /// cast to `float64`. `lag` is 1-based (ψ₁ = lag 1).
     ///
     /// Lazily imports `numpy`; an `ImportError` propagates if it is absent.
     fn par_coefficients(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -644,7 +638,6 @@ impl Stochastic {
             flat.push(f64::from(self.par_rows.stage_id[i]));
             flat.push(f64::from(self.par_rows.lag[i]));
             flat.push(self.par_rows.coefficient[i]);
-            flat.push(self.par_rows.residual_std_ratio[i]);
         }
 
         reshape_f64(py, flat, (n_rows, PAR_COEFFICIENT_COLUMNS))
@@ -760,7 +753,7 @@ fn stage_range_message(rows: &OpeningRows) -> String {
 /// import cobre.results
 ///
 /// stoch = cobre.results.load_stochastic("output/")
-/// par = stoch.par_coefficients()        # (n_rows, 5) float64
+/// par = stoch.par_coefficients()        # (n_rows, 4) float64
 /// tree = stoch.opening_tree(0)          # (n_openings, dim) float64 at stage 0
 /// ```
 #[pyfunction]

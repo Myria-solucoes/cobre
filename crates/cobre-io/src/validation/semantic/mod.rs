@@ -56,7 +56,7 @@
 //! |10  | `min(resource_costs) > 0`                                               | `penalties.json`                               | `ModelQuality` (warning) |
 //! |11  | FPHA hydros: `turbined_cost >= 0`                                  | `penalties.json`                               | `BusinessRuleViolation`  |
 //! |12  | `std_m3s >= 0.0`; warn when `== 0.0` (deterministic inflow)            | `scenarios/inflow_seasonal_stats.parquet`      | `ModelQuality` (warning) |
-//! |13  | `residual_std_ratio` consistent across all lag rows of same group       | `scenarios/inflow_ar_coefficients.parquet`     | `InvalidValue`           |
+//! |13  | *(retired — the `residual_std_ratio` column was removed from the file contract; the check was moot)* | — | — |
 //! |14  | Correlation matrix symmetry (`matrix[i][j] == matrix[j][i]` ±1e-9)     | `scenarios/correlation.json`                   | `BusinessRuleViolation`  |
 //! |15  | Correlation matrix diagonal entries equal 1.0 (±1e-9)                  | `scenarios/correlation.json`                   | `BusinessRuleViolation`  |
 //! |16  | Correlation off-diagonal entries in [-1.0, 1.0]                        | `scenarios/correlation.json`                   | `BusinessRuleViolation`  |
@@ -78,6 +78,7 @@
 //! |32  | Each `season_id` in `past_inflows[i].season_ids` must exist in `SeasonMap` | `initial_conditions.json`                    | `BusinessRuleViolation`  |
 //! |33  | Filling schedule reaches the dead volume: `Σ ζ_s·rate_s >= min_storage − seed` | `system/hydros.json`               | `BusinessRuleViolation`  |
 //! |34  | PAR order > 0 but every study stage has `inflow_lags == false` (inflow-lag state omitted) | `stages.json`        | `ModelQuality` (warning) |
+//! |35  | User-supplied `inflow_ar_coefficients.parquet` must pass the periodic-ACF closure stationarity gate (external-input path only; annual-aware; season resolved via `resolve_stage_seasons`'s `season_map`-or-fallback) | `scenarios/inflow_ar_coefficients.parquet` | `InvalidValue` (or `BusinessRuleViolation` when a stage's season is genuinely unresolvable) |
 
 use super::{ValidationContext, schema::ParsedData};
 
@@ -126,7 +127,7 @@ pub(crate) fn validate_semantic_hydro_thermal(data: &ParsedData, ctx: &mut Valid
 ///
 /// # Conditional checks
 ///
-/// Rules 12-13 are only checked when `data.inflow_seasonal_stats` is non-empty.
+/// Rule 12 is only checked when `data.inflow_seasonal_stats` is non-empty.
 /// Rules 14-16 are only checked when `data.correlation` is `Some`.
 /// Rules 17-18 are only checked when `data.load_factors` is non-empty.
 pub(crate) fn validate_semantic_stages_penalties_scenarios(
@@ -140,6 +141,7 @@ pub(crate) fn validate_semantic_stages_penalties_scenarios(
     scenarios::check_filling_sufficiency(data, ctx);
     scenarios::check_fpha_penalty_rule(data, ctx);
     scenarios::check_scenario_models(data, ctx);
+    scenarios::check_par_stationarity(data, ctx);
     correlation::check_correlation_matrices(data, ctx);
     correlation::check_correlation_same_type(data, ctx);
     scenarios::check_external_scheme_has_files(data, ctx);
