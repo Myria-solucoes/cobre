@@ -17,7 +17,6 @@ fn apply_contribution_validation(
     estimates: &mut [ArCoefficientEstimate],
     n_seasons: usize,
     stats_map: &HashMap<(EntityId, usize), &SeasonalStats>,
-    sigma2_map: &HashMap<(EntityId, usize), Vec<f64>>,
     max_coeff_magnitude: Option<f64>,
 ) -> HashMap<EntityId, Vec<ContributionReduction>> {
     let mut all_reductions: HashMap<EntityId, Vec<ContributionReduction>> = HashMap::new();
@@ -38,7 +37,6 @@ fn apply_contribution_validation(
                         reason: ReductionReason::MagnitudeBound,
                     });
                 est.coefficients.clear();
-                est.residual_std_ratio = 1.0;
             }
         }
     }
@@ -57,7 +55,6 @@ fn apply_contribution_validation(
                     reason: ReductionReason::Phi1Negative,
                 });
             est.coefficients.clear();
-            est.residual_std_ratio = 1.0;
         }
     }
 
@@ -111,16 +108,6 @@ fn apply_contribution_validation(
                     });
 
                 estimates[idx].coefficients.truncate(reduced_order);
-
-                if reduced_order == 0 {
-                    estimates[idx].residual_std_ratio = 1.0;
-                } else if let Some(sigma2_vec) = sigma2_map.get(&(hydro_id, season_id))
-                    && reduced_order <= sigma2_vec.len()
-                {
-                    let sigma2 = sigma2_vec[reduced_order - 1];
-                    estimates[idx].residual_std_ratio =
-                        if sigma2 <= 0.0 { 1.0 } else { sigma2.sqrt() };
-                }
 
                 all_coeffs[season_id].clone_from(&estimates[idx].coefficients);
                 current_order = reduced_order;
@@ -392,7 +379,6 @@ fn test_apply_contribution_validation_reduces_explosive() {
         hydro_id,
         season_id: 0,
         coefficients: vec![0.3, -0.8],
-        residual_std_ratio: 0.9,
         annual: None,
     }];
 
@@ -404,16 +390,12 @@ fn test_apply_contribution_validation_reduces_explosive() {
     }];
     let stats_map: HashMap<(EntityId, usize), &SeasonalStats> =
         stats.iter().map(|s| ((s.entity_id, 0_usize), s)).collect();
-    // sigma2_per_order: [sigma2_order1, sigma2_order2]
     // At order 1, residual is sqrt(0.81) ~= 0.9
-    let mut sigma2_map: HashMap<(EntityId, usize), Vec<f64>> = HashMap::new();
-    sigma2_map.insert((hydro_id, 0), vec![0.81, 0.75]);
 
     let reductions = apply_contribution_validation(
         &mut estimates,
         n_seasons,
         &stats_map,
-        &sigma2_map,
         None, // max_coeff_magnitude
     );
 
@@ -423,11 +405,6 @@ fn test_apply_contribution_validation_reduces_explosive() {
         "explosive AR(2) should be reduced to AR(1)"
     );
     assert!((estimates[0].coefficients[0] - 0.3).abs() < 1e-10);
-
-    assert!(
-        (estimates[0].residual_std_ratio - 0.81_f64.sqrt()).abs() < 1e-10,
-        "residual_std_ratio should be recomputed from sigma2_per_order[0]"
-    );
 
     let entity_reductions = reductions.get(&hydro_id).expect("should have reductions");
     assert_eq!(entity_reductions.len(), 1);
@@ -449,7 +426,6 @@ fn test_pimental_like_multi_season_reduction() {
             hydro_id,
             season_id: s,
             coefficients: if s == 7 { vec![0.5, 48.9] } else { vec![0.1] },
-            residual_std_ratio: 0.95,
             annual: None,
         })
         .collect();
@@ -473,13 +449,10 @@ fn test_pimental_like_multi_season_reduction() {
         .map(|(s, st)| ((hydro_id, s), st))
         .collect();
 
-    let sigma2_map: HashMap<(EntityId, usize), Vec<f64>> = HashMap::new();
-
     let reductions = apply_contribution_validation(
         &mut estimates,
         n_seasons,
         &stats_map,
-        &sigma2_map,
         None, // max_coeff_magnitude
     );
 
@@ -509,7 +482,7 @@ fn test_pimental_like_multi_season_reduction() {
 /// All contributions negative forces white-noise fallback.
 ///
 /// AR(1) with phi = -2.0 for all seasons -- every contribution is negative,
-/// so order drops to 0 and residual_std_ratio becomes 1.0.
+/// so order drops to 0.
 #[test]
 fn test_all_negative_fallback_to_white_noise() {
     let hydro_id = EntityId(1);
@@ -519,7 +492,6 @@ fn test_all_negative_fallback_to_white_noise() {
         hydro_id,
         season_id: 0,
         coefficients: vec![-2.0],
-        residual_std_ratio: 0.8,
         annual: None,
     }];
 
@@ -531,23 +503,17 @@ fn test_all_negative_fallback_to_white_noise() {
     }];
     let stats_map: HashMap<(EntityId, usize), &SeasonalStats> =
         stats.iter().map(|s| ((s.entity_id, 0_usize), s)).collect();
-    let sigma2_map: HashMap<(EntityId, usize), Vec<f64>> = HashMap::new();
 
     let _reductions = apply_contribution_validation(
         &mut estimates,
         n_seasons,
         &stats_map,
-        &sigma2_map,
         None, // max_coeff_magnitude
     );
 
     assert!(
         estimates[0].coefficients.is_empty(),
         "should fall back to order 0"
-    );
-    assert!(
-        (estimates[0].residual_std_ratio - 1.0).abs() < 1e-10,
-        "white-noise residual ratio should be 1.0"
     );
 }
 
@@ -563,14 +529,12 @@ fn phi1_rejection_sets_order_to_zero() {
             hydro_id,
             season_id: 0,
             coefficients: vec![-0.3, 0.5],
-            residual_std_ratio: 0.8,
             annual: None,
         },
         ArCoefficientEstimate {
             hydro_id,
             season_id: 1,
             coefficients: vec![0.4, 0.2],
-            residual_std_ratio: 0.7,
             annual: None,
         },
     ];
@@ -594,18 +558,12 @@ fn phi1_rejection_sets_order_to_zero() {
         .enumerate()
         .map(|(i, s)| ((s.entity_id, i), s))
         .collect();
-    let sigma2_map: HashMap<(EntityId, usize), Vec<f64>> = HashMap::new();
 
-    let reductions =
-        apply_contribution_validation(&mut estimates, n_seasons, &stats_map, &sigma2_map, None);
+    let reductions = apply_contribution_validation(&mut estimates, n_seasons, &stats_map, None);
 
     assert!(
         estimates[0].coefficients.is_empty(),
         "season 0 should be cleared to order 0"
-    );
-    assert!(
-        (estimates[0].residual_std_ratio - 1.0).abs() < 1e-10,
-        "season 0 residual_std_ratio should be 1.0"
     );
 
     assert_eq!(
@@ -636,7 +594,6 @@ fn phi1_rejection_before_contribution_analysis() {
         hydro_id,
         season_id: 0,
         coefficients: vec![-0.01, 0.5],
-        residual_std_ratio: 0.8,
         annual: None,
     }];
 
@@ -648,10 +605,8 @@ fn phi1_rejection_before_contribution_analysis() {
     }];
     let stats_map: HashMap<(EntityId, usize), &SeasonalStats> =
         stats.iter().map(|s| ((s.entity_id, 0_usize), s)).collect();
-    let sigma2_map: HashMap<(EntityId, usize), Vec<f64>> = HashMap::new();
 
-    let reductions =
-        apply_contribution_validation(&mut estimates, n_seasons, &stats_map, &sigma2_map, None);
+    let reductions = apply_contribution_validation(&mut estimates, n_seasons, &stats_map, None);
 
     assert!(
         estimates[0].coefficients.is_empty(),
@@ -672,7 +627,6 @@ fn phi1_zero_is_not_rejected() {
         hydro_id,
         season_id: 0,
         coefficients: vec![0.0, 0.3],
-        residual_std_ratio: 0.8,
         annual: None,
     }];
 
@@ -684,10 +638,8 @@ fn phi1_zero_is_not_rejected() {
     }];
     let stats_map: HashMap<(EntityId, usize), &SeasonalStats> =
         stats.iter().map(|s| ((s.entity_id, 0_usize), s)).collect();
-    let sigma2_map: HashMap<(EntityId, usize), Vec<f64>> = HashMap::new();
 
-    let _reductions =
-        apply_contribution_validation(&mut estimates, n_seasons, &stats_map, &sigma2_map, None);
+    let _reductions = apply_contribution_validation(&mut estimates, n_seasons, &stats_map, None);
 
     assert_eq!(
         estimates[0].coefficients.len(),
@@ -708,7 +660,6 @@ fn phi1_rejection_interacts_with_magnitude_bound() {
         hydro_id,
         season_id: 0,
         coefficients: vec![-50.0, 0.3],
-        residual_std_ratio: 0.8,
         annual: None,
     }];
 
@@ -720,13 +671,11 @@ fn phi1_rejection_interacts_with_magnitude_bound() {
     }];
     let stats_map: HashMap<(EntityId, usize), &SeasonalStats> =
         stats.iter().map(|s| ((s.entity_id, 0_usize), s)).collect();
-    let sigma2_map: HashMap<(EntityId, usize), Vec<f64>> = HashMap::new();
 
     let reductions = apply_contribution_validation(
         &mut estimates,
         n_seasons,
         &stats_map,
-        &sigma2_map,
         Some(10.0), // magnitude bound that catches -50.0
     );
 
@@ -758,7 +707,6 @@ fn iterative_reduction_terminates_at_zero() {
         hydro_id,
         season_id: 0,
         coefficients: vec![0.3, -0.8],
-        residual_std_ratio: 0.8,
         annual: None,
     }];
 
@@ -770,10 +718,8 @@ fn iterative_reduction_terminates_at_zero() {
     }];
     let stats_map: HashMap<(EntityId, usize), &SeasonalStats> =
         stats.iter().map(|s| ((s.entity_id, 0_usize), s)).collect();
-    let sigma2_map: HashMap<(EntityId, usize), Vec<f64>> = HashMap::new();
 
-    let reductions =
-        apply_contribution_validation(&mut estimates, n_seasons, &stats_map, &sigma2_map, None);
+    let reductions = apply_contribution_validation(&mut estimates, n_seasons, &stats_map, None);
 
     // The loop should terminate (possibly at a reduced order or order 0).
     // The key assertion is that it terminates and doesn't infinite-loop.
@@ -800,7 +746,6 @@ fn iterative_reduction_only_affects_failing_seasons() {
             season_id: 0,
             // phi = [0.3, -0.8]: contribution at lag 2 is negative.
             coefficients: vec![0.3, -0.8],
-            residual_std_ratio: 0.8,
             annual: None,
         },
         ArCoefficientEstimate {
@@ -808,7 +753,6 @@ fn iterative_reduction_only_affects_failing_seasons() {
             season_id: 1,
             // phi = [0.4, 0.2]: all contributions positive.
             coefficients: vec![0.4, 0.2],
-            residual_std_ratio: 0.7,
             annual: None,
         },
     ];
@@ -832,10 +776,8 @@ fn iterative_reduction_only_affects_failing_seasons() {
         .enumerate()
         .map(|(i, s)| ((s.entity_id, i), s))
         .collect();
-    let sigma2_map: HashMap<(EntityId, usize), Vec<f64>> = HashMap::new();
 
-    let _reductions =
-        apply_contribution_validation(&mut estimates, n_seasons, &stats_map, &sigma2_map, None);
+    let _reductions = apply_contribution_validation(&mut estimates, n_seasons, &stats_map, None);
 
     assert!(
         estimates[0].coefficients.len() < 2,
@@ -875,7 +817,6 @@ fn iterative_pacf_reduction_with_synthetic_observations() {
         hydro_id,
         season_id: 0,
         coefficients: vec![0.5, 0.2, -5.0], // order 3, lag 3 will fail
-        residual_std_ratio: 0.8,
         annual: None,
     }];
 
@@ -920,7 +861,6 @@ fn fixed_path_uses_truncation_not_reselection() {
         hydro_id,
         season_id: 0,
         coefficients: vec![0.5, 0.2, -0.8],
-        residual_std_ratio: 0.8,
         annual: None,
     }];
 
@@ -932,10 +872,8 @@ fn fixed_path_uses_truncation_not_reselection() {
     }];
     let stats_map: HashMap<(EntityId, usize), &SeasonalStats> =
         stats.iter().map(|s| ((s.entity_id, 0_usize), s)).collect();
-    let sigma2_map: HashMap<(EntityId, usize), Vec<f64>> = HashMap::new();
 
-    let reductions =
-        apply_contribution_validation(&mut estimates, n_seasons, &stats_map, &sigma2_map, None);
+    let reductions = apply_contribution_validation(&mut estimates, n_seasons, &stats_map, None);
 
     // With truncation, the Fixed path truncates coefficients at the
     // first negative contribution position, which is at lag 3 (index 2).
@@ -969,7 +907,6 @@ fn combined_strategies_produce_correct_reduction_reasons() {
             hydro_id: h1,
             season_id: 0,
             coefficients: vec![-0.3, 0.5],
-            residual_std_ratio: 0.8,
             annual: None,
         },
         // H1 S1: negative contribution at lag 3 -> NegativeContribution
@@ -977,7 +914,6 @@ fn combined_strategies_produce_correct_reduction_reasons() {
             hydro_id: h1,
             season_id: 1,
             coefficients: vec![0.5, 0.2, -0.8],
-            residual_std_ratio: 0.7,
             annual: None,
         },
         // H2 S0: magnitude bound -> MagnitudeBound
@@ -985,7 +921,6 @@ fn combined_strategies_produce_correct_reduction_reasons() {
             hydro_id: h2,
             season_id: 0,
             coefficients: vec![50.0],
-            residual_std_ratio: 0.9,
             annual: None,
         },
         // H2 S1: passes -> no reduction
@@ -993,7 +928,6 @@ fn combined_strategies_produce_correct_reduction_reasons() {
             hydro_id: h2,
             season_id: 1,
             coefficients: vec![0.4, 0.2],
-            residual_std_ratio: 0.7,
             annual: None,
         },
     ];
@@ -1029,15 +963,9 @@ fn combined_strategies_produce_correct_reduction_reasons() {
         .enumerate()
         .map(|(i, s)| ((s.entity_id, i % 2), s))
         .collect();
-    let sigma2_map: HashMap<(EntityId, usize), Vec<f64>> = HashMap::new();
 
-    let reductions = apply_contribution_validation(
-        &mut estimates,
-        n_seasons,
-        &stats_map,
-        &sigma2_map,
-        Some(10.0),
-    );
+    let reductions =
+        apply_contribution_validation(&mut estimates, n_seasons, &stats_map, Some(10.0));
 
     // H1 S0: phi_1 negative -> Phi1Negative, order 0
     let h1_reductions = &reductions[&h1];
@@ -1163,7 +1091,6 @@ fn iterative_pacf_reduction_stable_par2_not_spuriously_reduced() {
             hydro_id,
             season_id: season,
             coefficients: yw.coefficients,
-            residual_std_ratio: yw.residual_std_ratio,
             annual: None,
         });
     }
@@ -1341,12 +1268,6 @@ fn roundtrip_estimation_two_season_par2_recovers_coefficients() {
             est.season_id,
             est.coefficients[1]
         );
-        assert!(
-            est.residual_std_ratio.is_finite() && est.residual_std_ratio > 0.0,
-            "season {} residual_std_ratio={} should be positive finite",
-            est.season_id,
-            est.residual_std_ratio
-        );
     }
 }
 
@@ -1481,8 +1402,8 @@ fn estimate_ar_with_pacf_annual_insufficient_observations_errors() {
 /// (`use_annual_component: false`, `max_order >= 2`) over a multi-hydro,
 /// multi-season fixture under pools of 1, 2, and 4 threads and asserts the
 /// returned `Vec<ArCoefficientEstimate>` is `to_bits`-identical across all three
-/// — the `(hydro_id, season_id)` ordering and every `coefficients[k]` and
-/// `residual_std_ratio` must match bit-for-bit regardless of thread scheduling.
+/// — the `(hydro_id, season_id)` ordering and every `coefficients[k]`
+/// must match bit-for-bit regardless of thread scheduling.
 /// A regression that collected into a shared `Mutex<Vec>` or pushed estimates
 /// from worker threads would reorder the stream and fail here.
 #[test]
@@ -1566,11 +1487,6 @@ fn ar_fit_is_thread_count_invariant() {
                     "coefficient must be bit-identical across pool sizes"
                 );
             }
-            assert_eq!(
-                ea.residual_std_ratio.to_bits(),
-                eb.residual_std_ratio.to_bits(),
-                "residual_std_ratio must be bit-identical across pool sizes"
-            );
         }
     };
 

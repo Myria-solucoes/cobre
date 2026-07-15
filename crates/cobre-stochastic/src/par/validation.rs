@@ -37,7 +37,7 @@ use crate::StochasticError;
 /// ```
 #[derive(Debug)]
 pub struct ParValidationReport {
-    /// Non-fatal warnings (e.g., near-unit-circle roots, low residual variance).
+    /// Non-fatal warnings (e.g., low residual variance).
     pub warnings: Vec<ParWarning>,
 }
 
@@ -52,18 +52,6 @@ pub struct ParValidationReport {
 /// apply additional checks.
 #[derive(Debug, Clone)]
 pub enum ParWarning {
-    /// AR polynomial has roots near the unit circle (potential instability).
-    ///
-    /// Reserved for a future stationarity check; not emitted yet.
-    NearUnitCircleRoot {
-        /// Identifier of the hydro plant whose AR polynomial has near-unit roots.
-        hydro_id: i32,
-        /// Stage index at which the near-unit root was detected.
-        stage_id: i32,
-        /// Magnitude of the smallest root of the AR characteristic polynomial.
-        min_root_magnitude: f64,
-    },
-
     /// Residual variance very small relative to sample variance, suggesting the
     /// AR fit may be overfitted (see [`validate_par_parameters`] for the threshold).
     LowResidualVariance {
@@ -277,9 +265,6 @@ mod tests {
                     "explained_variance must be 1 - residual_std_ratio^2"
                 );
             }
-            other @ ParWarning::NearUnitCircleRoot { .. } => {
-                panic!("expected LowResidualVariance, got {other:?}")
-            }
         }
     }
 
@@ -323,9 +308,6 @@ mod tests {
             ParWarning::LowResidualVariance { hydro_id, .. } => {
                 assert_eq!(*hydro_id, 2);
             }
-            other @ ParWarning::NearUnitCircleRoot { .. } => {
-                panic!("expected LowResidualVariance, got {other:?}")
-            }
         }
     }
 
@@ -364,9 +346,6 @@ mod tests {
                     (explained_variance - (1.0 - 0.05_f64 * 0.05_f64)).abs() < f64::EPSILON,
                     "explained_variance must be 1 - residual_std_ratio^2"
                 );
-            }
-            other @ ParWarning::NearUnitCircleRoot { .. } => {
-                panic!("expected LowResidualVariance, got {other:?}")
             }
         }
     }

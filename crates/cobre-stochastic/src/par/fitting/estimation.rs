@@ -92,7 +92,7 @@ pub struct EstimationReport {
     /// Order selection method (e.g., `"AIC"`, `"PACF"`, `"fixed"`).
     pub method: String,
     /// Hydros with user-provided stats but no estimated AR coefficients
-    /// (white-noise fallback: empty AR, ratio=1.0).
+    /// (white-noise fallback: empty AR).
     pub white_noise_fallbacks: Vec<EntityId>,
     /// Hydros whose consecutive-season std ratios diverge between the
     /// user-provided and history-estimated profiles.
@@ -440,7 +440,6 @@ fn estimate_ar_with_pacf_annual(
                     hydro_id,
                     season_id: season,
                     coefficients: Vec::new(),
-                    residual_std_ratio: 1.0,
                     annual: annual_stats_map.get(&(hydro_id, prev_season)).map(|s| {
                         AnnualComponent {
                             coefficient: 0.0,
@@ -483,7 +482,6 @@ fn estimate_ar_with_pacf_annual(
                 hydro_id,
                 season_id: season,
                 coefficients: yw_result.coefficients,
-                residual_std_ratio: yw_result.residual_std_ratio,
                 annual: Some(AnnualComponent {
                     coefficient: yw_result.annual_coefficient,
                     mean_m3s: ann_mean,
@@ -555,7 +553,6 @@ fn apply_annual_prepass_reductions(
                         reason: ReductionReason::MagnitudeBound,
                     });
                 est.coefficients.clear();
-                est.residual_std_ratio = 1.0;
             }
         }
     }
@@ -574,7 +571,6 @@ fn apply_annual_prepass_reductions(
                     reason: ReductionReason::Phi1Negative,
                 });
             est.coefficients.clear();
-            est.residual_std_ratio = 1.0;
         }
     }
 
@@ -763,7 +759,6 @@ fn reduce_entity_orders_annual(
                 for &idx in indices {
                     if estimates[idx].season_id == season_id {
                         estimates[idx].coefficients.clear();
-                        estimates[idx].residual_std_ratio = 1.0;
                         all_coeffs[season_id].clear();
                         frozen[season_id] = true;
                     }
@@ -808,7 +803,6 @@ fn reduce_entity_orders_annual(
                     estimates[idx]
                         .coefficients
                         .clone_from(&yw_result.coefficients);
-                    estimates[idx].residual_std_ratio = yw_result.residual_std_ratio;
                     estimates[idx].annual = Some(AnnualComponent {
                         coefficient: yw_result.annual_coefficient,
                         mean_m3s: ann_mean,
@@ -851,7 +845,6 @@ fn reduce_entity_orders_annual(
                 for &idx in indices {
                     if estimates[idx].season_id == season_id {
                         estimates[idx].coefficients.clear();
-                        estimates[idx].residual_std_ratio = yw0.residual_std_ratio;
                         estimates[idx].annual = Some(AnnualComponent {
                             coefficient: yw0.annual_coefficient,
                             mean_m3s: ann_mean,
@@ -978,7 +971,6 @@ fn estimate_all_hydro_ar_coefficients(
                         hydro_id,
                         season_id: season,
                         coefficients: Vec::new(),
-                        residual_std_ratio: 1.0,
                         annual: None,
                     });
                     continue;
@@ -998,7 +990,6 @@ fn estimate_all_hydro_ar_coefficients(
                     hydro_id,
                     season_id: season,
                     coefficients: yw_result.coefficients,
-                    residual_std_ratio: yw_result.residual_std_ratio,
                     annual: None,
                 });
             }
@@ -1036,7 +1027,6 @@ fn apply_prepass_reductions(
                         reason: ReductionReason::MagnitudeBound,
                     });
                 est.coefficients.clear();
-                est.residual_std_ratio = 1.0;
             }
         }
     }
@@ -1054,7 +1044,6 @@ fn apply_prepass_reductions(
                     reason: ReductionReason::Phi1Negative,
                 });
             est.coefficients.clear();
-            est.residual_std_ratio = 1.0;
         }
     }
 }
@@ -1122,7 +1111,6 @@ fn reduce_entity_orders(
                 for &idx in indices {
                     if estimates[idx].season_id == season_id {
                         estimates[idx].coefficients.clear();
-                        estimates[idx].residual_std_ratio = 1.0;
                         all_coeffs[season_id].clear();
                         frozen[season_id] = true;
                     }
@@ -1155,7 +1143,6 @@ fn reduce_entity_orders(
                     estimates[idx]
                         .coefficients
                         .clone_from(&yw_result.coefficients);
-                    estimates[idx].residual_std_ratio = yw_result.residual_std_ratio;
                     all_coeffs[season_id].clone_from(&yw_result.coefficients);
                 }
             }
@@ -1174,7 +1161,6 @@ fn reduce_entity_orders(
                 for &idx in indices {
                     if estimates[idx].season_id == season_id {
                         estimates[idx].coefficients.clear();
-                        estimates[idx].residual_std_ratio = 1.0;
                         all_coeffs[season_id].clear();
                         frozen[season_id] = true;
                     }

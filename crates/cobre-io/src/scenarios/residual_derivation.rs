@@ -8,8 +8,7 @@
 //! residual std ratio `r_m` (see `cobre_stochastic::par::closure` module docs); this
 //! function overwrites each [`InflowModel::residual_std_ratio`] with that
 //! closure-derived value, making the closure authoritative for both file-loaded and
-//! internally-fitted models. The parsed `residual_std_ratio` column value is still
-//! read into the `InflowModel` by assembly — this function only overwrites it.
+//! internally-fitted models (assembly writes only a placeholder into the field).
 //!
 //! [`resolve_stage_seasons`] builds the `(stage_to_season, n_seasons)` pair every
 //! call site needs, shared so this crate's several season-indexed consumers (this
@@ -64,7 +63,7 @@ use crate::LoadError;
 ///     mean_m3s: 100.0,
 ///     std_m3s: 20.0,
 ///     ar_coefficients: vec![0.5],
-///     residual_std_ratio: 0.42, // stale value from the (now-ignored) column
+///     residual_std_ratio: 0.42, // placeholder; overwritten by the derivation
 ///     annual: None,
 /// }];
 /// let stage_to_season: HashMap<i32, usize> = [(0, 0)].into_iter().collect();

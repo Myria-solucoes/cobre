@@ -41,7 +41,7 @@ use crate::scenarios::{
 /// Every resulting [`InflowModel`] gets `residual_std_ratio = 1.0` — a
 /// placeholder immediately overwritten by
 /// [`crate::scenarios::populate_derived_residual_ratios`] (the periodic-ACF
-/// closure is the sole authority for this field; the file no longer carries it).
+/// closure is the sole authority for this field; the file does not carry it).
 ///
 /// When an [`InflowAnnualComponentRow`] exists for a (hydro, stage) pair, the
 /// resulting [`InflowModel`] carries `annual: Some(AnnualComponent { ... })`;

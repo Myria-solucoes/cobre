@@ -703,7 +703,6 @@ fn test_estimation_report_structure() {
                 hydro_id,
                 season_id,
                 coefficients: vec![0.5, 0.3],
-                residual_std_ratio: 0.9,
                 annual: None,
             });
         }
@@ -867,21 +866,18 @@ fn ar_estimates_to_rows_includes_prestudy_stages() {
             hydro_id: h1,
             season_id: 0,
             coefficients: vec![0.3],
-            residual_std_ratio: 0.9,
             annual: None,
         },
         ArCoefficientEstimate {
             hydro_id: h1,
             season_id: 1,
             coefficients: vec![0.4],
-            residual_std_ratio: 0.85,
             annual: None,
         },
         ArCoefficientEstimate {
             hydro_id: h1,
             season_id: 2,
             coefficients: vec![0.5],
-            residual_std_ratio: 0.8,
             annual: None,
         },
     ];
@@ -947,21 +943,18 @@ fn full_estimation_produces_prestudy_inflow_models() {
             hydro_id: h1,
             season_id: 0,
             coefficients: vec![0.3],
-            residual_std_ratio: 0.9,
             annual: None,
         },
         ArCoefficientEstimate {
             hydro_id: h1,
             season_id: 1,
             coefficients: vec![0.4],
-            residual_std_ratio: 0.85,
             annual: None,
         },
         ArCoefficientEstimate {
             hydro_id: h1,
             season_id: 2,
             coefficients: vec![0.5],
-            residual_std_ratio: 0.8,
             annual: None,
         },
     ];
@@ -1173,14 +1166,6 @@ fn test_ar_rows_to_estimates_groups_by_season() {
         "coeff must be 0.50, got {}",
         e.coefficients[0]
     );
-    // residual_std_ratio is a placeholder here (the file no longer carries the
-    // column): populate_derived_residual_ratios overwrites it downstream on the
-    // assembled InflowModel, not on this intermediate estimate.
-    assert!(
-        (e.residual_std_ratio - 1.0).abs() < f64::EPSILON,
-        "residual_std_ratio must be the placeholder 1.0"
-    );
-
     // season 1 coeff comes from stage 2 (the season's first stage).
     let e = estimates
         .iter()

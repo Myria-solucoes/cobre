@@ -226,10 +226,7 @@ pub(super) fn check_fpha_penalty_rule(data: &ParsedData, ctx: &mut ValidationCon
 
 // ── Rule 12: Scenario model rules ───────────────────────────────────────────
 //
-// Rule 13 (V-AR-4, cross-lag residual_std_ratio consistency) was retired along
-// with the `residual_std_ratio` parquet column it validated — the value is now
-// derived at load, so the check is moot. The rule number is left retired
-// rather than renumbered to avoid perturbing rules 14-35, which are referenced
+// Rule 13 is retired; the number is never reused — rules 14-35 are referenced
 // by number elsewhere in this module and in the crate-level rule catalogue
 // (`validation/semantic/mod.rs`).
 
@@ -1282,10 +1279,6 @@ mod tests {
             "should have ModelQuality warning"
         );
     }
-
-    // Rule 13 (V-AR-4, cross-lag residual_std_ratio consistency) was retired
-    // along with the check itself — see the retirement note above
-    // check_scenario_models.
 
     // ── Rule 35: PAR stationarity gate ────────────────────────────────────────
 

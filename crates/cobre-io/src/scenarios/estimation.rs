@@ -576,12 +576,9 @@ fn run_user_ar_estimation(
 /// rows in the `InflowArCoefficientRow` format (all lags repeated for every stage
 /// in the season). This function deduplicates by processing only the first stage
 /// encountered for each season per hydro. Coefficient order is preserved (lag 1,
-/// lag 2, …). `residual_std_ratio` is a placeholder `1.0`: the file no longer
-/// carries the column, and the only consumer of this estimate's own ratio,
-/// `estimate_correlation_with_season_map`'s residual formula, never reads it —
-/// the authoritative value is derived downstream by
+/// lag 2, …). The innovation scale is derived downstream by
 /// [`crate::scenarios::populate_derived_residual_ratios`] on the assembled
-/// `InflowModel`s.
+/// `InflowModel`s — it is not part of the estimate.
 ///
 /// The result is sorted by `(hydro_id, season_id)` ascending, matching the
 /// canonical ordering expected by `estimate_correlation_with_season_map`.
@@ -624,7 +621,6 @@ fn ar_rows_to_estimates(
                 hydro_id,
                 season_id,
                 coefficients,
-                residual_std_ratio: 1.0,
                 annual: None,
             },
         )

@@ -339,7 +339,7 @@ fn effective_psi_by_season(
 /// Derives the residual std ratio `r_m` for each season of a PAR(p)-A model
 /// from the standardized coefficients alone, extending
 /// [`derive_residual_std_ratios`] with the annual component's effective
-/// contribution to the closure (see [`effective_psi_by_season`]).
+/// contribution to the closure (see `effective_psi_by_season`).
 ///
 /// Delegates to [`derive_residual_std_ratios`] outright when no season's
 /// annual term is engaged (see [`AnnualParams`]) — for such a model this
@@ -381,7 +381,7 @@ pub fn derive_residual_std_ratios_annual(
 
 /// Gates a PAR(p)-A standardized coefficient set for stationarity, extending
 /// [`check_stationarity`] with the annual component's effective contribution
-/// to the closure (see [`effective_psi_by_season`]).
+/// to the closure (see `effective_psi_by_season`).
 ///
 /// Delegates to [`check_stationarity`] outright when no season's annual term
 /// is engaged (see [`AnnualParams`]) — for such a model this returns exactly

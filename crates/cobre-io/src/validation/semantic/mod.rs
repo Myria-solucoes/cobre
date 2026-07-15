@@ -56,7 +56,7 @@
 //! |10  | `min(resource_costs) > 0`                                               | `penalties.json`                               | `ModelQuality` (warning) |
 //! |11  | FPHA hydros: `turbined_cost >= 0`                                  | `penalties.json`                               | `BusinessRuleViolation`  |
 //! |12  | `std_m3s >= 0.0`; warn when `== 0.0` (deterministic inflow)            | `scenarios/inflow_seasonal_stats.parquet`      | `ModelQuality` (warning) |
-//! |13  | *(retired — the `residual_std_ratio` column was removed from the file contract; the check was moot)* | — | — |
+//! |13  | *(retired — number never reused)* | — | — |
 //! |14  | Correlation matrix symmetry (`matrix[i][j] == matrix[j][i]` ±1e-9)     | `scenarios/correlation.json`                   | `BusinessRuleViolation`  |
 //! |15  | Correlation matrix diagonal entries equal 1.0 (±1e-9)                  | `scenarios/correlation.json`                   | `BusinessRuleViolation`  |
 //! |16  | Correlation off-diagonal entries in [-1.0, 1.0]                        | `scenarios/correlation.json`                   | `BusinessRuleViolation`  |

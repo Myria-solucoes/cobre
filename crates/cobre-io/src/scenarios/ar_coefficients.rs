@@ -13,11 +13,10 @@
 //! | `lag`                | INT32  | Yes      | Lag index (1-based)                          |
 //! | `coefficient`        | DOUBLE | Yes      | AR coeff ψ*, standardized by the seasonal std sₘ (dimensionless) |
 //!
-//! A legacy `residual_std_ratio` column is tolerated for backward compatibility:
-//! if present, this parser emits one deprecation notice per file and discards
-//! it. The residual std ratio is derived at load from the AR coefficients (see
-//! [`crate::scenarios::populate_derived_residual_ratios`]) rather than read from
-//! the file.
+//! The model's innovation scale is not part of the schema: it is derived at
+//! load from the AR coefficients (see
+//! [`crate::scenarios::populate_derived_residual_ratios`]). Columns beyond the
+//! schema are ignored.
 //!
 //! ## Standardization basis (external fits)
 //!
@@ -52,9 +51,7 @@ use std::fs::File;
 use std::path::Path;
 
 use crate::LoadError;
-use crate::parquet_helpers::{
-    extract_optional_float64, extract_required_float64, extract_required_int32,
-};
+use crate::parquet_helpers::{extract_required_float64, extract_required_int32};
 
 /// A single row from `scenarios/inflow_ar_coefficients.parquet`.
 ///
@@ -125,7 +122,6 @@ pub fn parse_inflow_ar_coefficients(path: &Path) -> Result<Vec<InflowArCoefficie
         .map_err(|e| LoadError::parse(path, e.to_string()))?;
 
     let mut rows: Vec<InflowArCoefficientRow> = Vec::new();
-    let mut legacy_ratio_column_present = false;
 
     for batch_result in reader {
         let batch = batch_result.map_err(|e| LoadError::parse(path, e.to_string()))?;
@@ -134,10 +130,6 @@ pub fn parse_inflow_ar_coefficients(path: &Path) -> Result<Vec<InflowArCoefficie
         let stage_id_col = extract_required_int32(&batch, "stage_id", path)?;
         let lag_col = extract_required_int32(&batch, "lag", path)?;
         let coefficient_col = extract_required_float64(&batch, "coefficient", path)?;
-
-        if extract_optional_float64(&batch, "residual_std_ratio", path)?.is_some() {
-            legacy_ratio_column_present = true;
-        }
 
         let n = batch.num_rows();
         let base_idx = rows.len();
@@ -166,14 +158,6 @@ pub fn parse_inflow_ar_coefficients(path: &Path) -> Result<Vec<InflowArCoefficie
                 coefficient,
             });
         }
-    }
-
-    if legacy_ratio_column_present {
-        tracing::warn!(
-            "residual_std_ratio in {} is no longer read; the residual std ratio is now \
-             derived at load from the AR coefficients",
-            path.display()
-        );
     }
 
     rows.sort_by(|a, b| {
@@ -213,13 +197,13 @@ mod tests {
         ]))
     }
 
-    fn schema_with_legacy_ratio() -> Arc<Schema> {
+    fn schema_with_extra_column() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
             Field::new("hydro_id", DataType::Int32, false),
             Field::new("stage_id", DataType::Int32, false),
             Field::new("lag", DataType::Int32, false),
             Field::new("coefficient", DataType::Float64, false),
-            Field::new("residual_std_ratio", DataType::Float64, false),
+            Field::new("extra", DataType::Float64, false),
         ]))
     }
 
@@ -250,59 +234,24 @@ mod tests {
         .expect("valid batch")
     }
 
-    fn make_legacy_batch(
+    fn make_batch_with_extra(
         hydro_ids: &[i32],
         stage_ids: &[i32],
         lags: &[i32],
         coefficients: &[f64],
-        residual_std_ratios: &[f64],
+        extras: &[f64],
     ) -> RecordBatch {
         RecordBatch::try_new(
-            schema_with_legacy_ratio(),
+            schema_with_extra_column(),
             vec![
                 Arc::new(Int32Array::from(hydro_ids.to_vec())),
                 Arc::new(Int32Array::from(stage_ids.to_vec())),
                 Arc::new(Int32Array::from(lags.to_vec())),
                 Arc::new(Float64Array::from(coefficients.to_vec())),
-                Arc::new(Float64Array::from(residual_std_ratios.to_vec())),
+                Arc::new(Float64Array::from(extras.to_vec())),
             ],
         )
-        .expect("valid legacy batch")
-    }
-
-    /// A `tracing::Subscriber` that counts every `event!` (e.g. `tracing::warn!`)
-    /// emitted while it is the default, used to assert the parser's one-notice-
-    /// per-file deprecation warning without depending on a process-global
-    /// subscriber (which would leak state across tests).
-    struct EventCounter {
-        count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    }
-
-    impl tracing::Subscriber for EventCounter {
-        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-        fn event(&self, _event: &tracing::Event<'_>) {
-            self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }
-        fn enter(&self, _span: &tracing::span::Id) {}
-        fn exit(&self, _span: &tracing::span::Id) {}
-    }
-
-    /// Runs `f` under a scoped [`EventCounter`] subscriber, returning `f`'s
-    /// result alongside the number of tracing events emitted during the call.
-    fn count_tracing_events<T>(f: impl FnOnce() -> T) -> (T, usize) {
-        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let subscriber = EventCounter {
-            count: Arc::clone(&count),
-        };
-        let result = tracing::subscriber::with_default(subscriber, f);
-        (result, count.load(std::sync::atomic::Ordering::SeqCst))
+        .expect("valid batch with extra column")
     }
 
     #[test]
@@ -408,12 +357,11 @@ mod tests {
         assert!((row.coefficient - 0.12345).abs() < 1e-10);
     }
 
-    /// A parquet still carrying the legacy `residual_std_ratio` column parses
-    /// without error and produces exactly one deprecation notice for the file,
-    /// regardless of how many lag rows repeat the (now-ignored) column.
+    /// Columns beyond the four-column schema are ignored: the file parses and
+    /// the extra values never reach the row table.
     #[test]
-    fn legacy_column_warns_once() {
-        let batch = make_legacy_batch(
+    fn extra_columns_are_ignored() {
+        let batch = make_batch_with_extra(
             &[1, 1, 2],
             &[0, 0, 0],
             &[1, 2, 1],
@@ -422,32 +370,8 @@ mod tests {
         );
         let tmp = write_parquet(&batch);
 
-        let (result, warn_count) =
-            count_tracing_events(|| parse_inflow_ar_coefficients(tmp.path()));
-        let rows = result.expect("a legacy residual_std_ratio column must not error");
-
+        let rows =
+            parse_inflow_ar_coefficients(tmp.path()).expect("a file with extra columns must parse");
         assert_eq!(rows.len(), 3, "all rows must still parse");
-        assert_eq!(
-            warn_count, 1,
-            "exactly one deprecation notice must be emitted for the file, got {warn_count}"
-        );
-    }
-
-    /// A parquet with only the canonical 4-column schema parses without error
-    /// and produces no deprecation notice.
-    #[test]
-    fn no_ratio_column_ok() {
-        let batch = make_batch(&[1, 1], &[0, 0], &[1, 2], &[0.5, 0.2]);
-        let tmp = write_parquet(&batch);
-
-        let (result, warn_count) =
-            count_tracing_events(|| parse_inflow_ar_coefficients(tmp.path()));
-        let rows = result.expect("a 4-column file must parse without error");
-
-        assert_eq!(rows.len(), 2);
-        assert_eq!(
-            warn_count, 0,
-            "a 4-column file must not emit a deprecation notice"
-        );
     }
 }
