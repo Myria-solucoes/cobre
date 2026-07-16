@@ -48,6 +48,11 @@ use crate::LoadError;
 ///   annual component but its stage has no entry in `stage_to_season`.
 /// - [`LoadError::ConstraintError`] — the closure system is singular for a hydro
 ///   (`derive_residual_std_ratios`/`_annual` returned `None`).
+/// - [`LoadError::ConstraintError`] — a derived ratio is non-finite: the
+///   (effective) coefficients imply a non-stationary process. User-supplied
+///   coefficients are rejected earlier by the semantic stationarity gate; this
+///   guard is what covers the internally-estimated paths, which reach the
+///   closure without that gate.
 ///
 /// # Examples
 ///
@@ -136,6 +141,16 @@ pub fn populate_derived_residual_ratios(
             description: format!("residual_std_ratio closure is singular for hydro_id={hydro_id}"),
         })?;
 
+        if let Some(season) = derived.iter().position(|r| !r.is_finite()) {
+            return Err(LoadError::ConstraintError {
+                description: format!(
+                    "derived residual_std_ratio is non-finite for hydro_id={hydro_id} \
+                     season={season}: the coefficients imply a non-stationary process \
+                     (implied residual variance 1 - sum(psi*rho) is negative)"
+                ),
+            });
+        }
+
         for &idx in &indices {
             let model = &mut models[idx];
             model.residual_std_ratio = match stage_to_season.get(&model.stage_id) {
@@ -159,7 +174,7 @@ pub fn populate_derived_residual_ratios(
 /// `n_seasons` by season; a season-definitions cycle with sparse or
 /// non-contiguous ids (e.g. `Weekly` season ids `21`/`26` for a 2-season cycle)
 /// would otherwise produce an out-of-bounds raw id used as an array index. This
-/// mirrors `precompute.rs:501–513`'s `stage_to_season` *shape* (a
+/// mirrors `PrecomputedPar::build`'s `stage_to_season` *shape* (a
 /// `HashMap<i32, usize>` keyed by `stage.id`), but not its raw values —
 /// `precompute.rs`'s own arrays are indexed by stage position, not by season, so
 /// it never needed densification; every caller of this shared helper does.
@@ -453,6 +468,34 @@ mod tests {
                 models[season].residual_std_ratio
             );
         }
+    }
+
+    /// A non-stationary coefficient set (uniform AR(1) with `|psi| > 1`, so the
+    /// closure yields `1 - psi^2 < 0` and a NaN sqrt) must hard-error, never
+    /// silently write NaN into `residual_std_ratio`. This is the guard for the
+    /// internally-estimated paths, which reach the derivation without the
+    /// semantic stationarity gate (that gate only sees user-supplied
+    /// coefficient files).
+    #[test]
+    fn derived_ratio_non_stationary_errors_not_nan() {
+        let mut models = vec![model(9, 0, vec![1.2], 0.9, 20.0, None)];
+        let stage_to_season: HashMap<i32, usize> = [(0, 0)].into_iter().collect();
+
+        let err = populate_derived_residual_ratios(&mut models, &stage_to_season, 1).unwrap_err();
+        match err {
+            LoadError::ConstraintError { description } => {
+                assert!(
+                    description.contains("non-finite") && description.contains("hydro_id=9"),
+                    "error should name the failure class and the hydro, got: {description}"
+                );
+            }
+            other => panic!("expected ConstraintError, got: {other:?}"),
+        }
+        assert!(
+            (models[0].residual_std_ratio - 0.9).abs() < 1e-15,
+            "the placeholder must be left untouched on error, got {}",
+            models[0].residual_std_ratio
+        );
     }
 
     /// An order-bearing model whose stage is absent from `stage_to_season`
