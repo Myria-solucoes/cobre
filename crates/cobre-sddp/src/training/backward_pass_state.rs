@@ -66,16 +66,15 @@ pub struct BackwardPassInputs<'a, S: SolverInterface + Send, C: Communicator> {
     pub comm: &'a C,
 
     /// Exchange buffers for gathering trial-point states via `allgatherv`.
-    ///
-    /// When non-empty records are provided, the exchange is populated per
-    /// stage. When `records` is empty the caller has pre-populated the
-    /// exchange buffers (test path).
     pub exchange: &'a mut ExchangeBuffers,
 
     /// Forward-pass trajectory records used to populate `exchange` per stage.
     ///
-    /// Length must be `local_work * num_stages` when non-empty; pass `&[]` in
-    /// tests that pre-populate `exchange` directly.
+    /// Length is `max_local_fwd * num_stages` — rank-uniform, NOT this rank's
+    /// `local_work`; a rank drawing zero trial points still passes full-length
+    /// padding, which `real_total_scenarios` discards after the gather. Re-slicing
+    /// to `local_work * num_stages` (as `ForwardPassInputs` correctly does) empties
+    /// it on exactly those ranks and desynchronises the per-stage `allgatherv`.
     pub records: &'a [TrajectoryRecord],
 
     /// Pre-allocated cut synchronisation buffers for per-stage `allgatherv`.
@@ -675,17 +674,12 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
 
     // State exchange runs here, once per stage inside the backward sweep — not in a
     // separate pre-pass before the loop (sddp.md "Per-stage exchange").
-    let mut state_exchange_ms: u64 = 0;
-    if !inputs.records.is_empty() {
-        let exch_start = Instant::now();
-        inputs
-            .exchange
-            .exchange(inputs.records, t, num_stages, inputs.comm)?;
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            state_exchange_ms = exch_start.elapsed().as_millis() as u64;
-        }
-    }
+    let exch_start = Instant::now();
+    inputs
+        .exchange
+        .exchange(inputs.records, t, num_stages, inputs.comm)?;
+    #[allow(clippy::cast_possible_truncation)]
+    let state_exchange_ms = exch_start.elapsed().as_millis() as u64;
 
     if let Some(ref mut archive) = inputs.visited_archive {
         let total_fwd = inputs.exchange.real_total_scenarios();
@@ -1029,8 +1023,9 @@ mod tests {
         risk_measure::RiskMeasure,
         solver_stats::WORKER_STATS_ENTRY_STRIDE,
         state_exchange::ExchangeBuffers,
-        test_support::{all_enabled_cut_state_layouts, state_layout, study_dims},
-        trajectory::TrajectoryRecord,
+        test_support::{
+            all_enabled_cut_state_layouts, state_layout, study_dims, trial_point_records,
+        },
         workspace::{BackwardAccumulators, BasisStore, ScratchBuffers, SolverWorkspace},
     };
 
@@ -1231,24 +1226,6 @@ mod tests {
 
     fn empty_basis_store(num_scenarios: usize, num_stages: usize) -> BasisStore {
         BasisStore::new(num_scenarios, num_stages)
-    }
-
-    fn exchange_with_states(n_state: usize, states: Vec<Vec<f64>>) -> ExchangeBuffers {
-        use cobre_comm::LocalBackend;
-        let local_count = states.len();
-        let mut bufs = ExchangeBuffers::new(n_state, local_count, 1);
-        let records: Vec<TrajectoryRecord> = states
-            .into_iter()
-            .map(|state| TrajectoryRecord {
-                primal: vec![],
-                dual: vec![],
-                stage_cost: 0.0,
-                state,
-            })
-            .collect();
-        let comm = LocalBackend;
-        bufs.exchange(&records, 0, 1, &comm).unwrap();
-        bufs
     }
 
     fn empty_cut_batches(n_stages: usize) -> Vec<RowBatch> {
@@ -1487,7 +1464,9 @@ mod tests {
 
         let mut fcf =
             FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
-        let mut exchange = exchange_with_states(n_state, vec![vec![10.0], vec![20.0]]);
+        let trial_states = vec![vec![10.0], vec![20.0]];
+        let records = trial_point_records(&trial_states, n_stages);
+        let mut exchange = ExchangeBuffers::new(n_state, trial_states.len(), 1);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
@@ -1560,7 +1539,7 @@ mod tests {
             training_ctx: &training_ctx,
             comm: &comm,
             exchange: &mut exchange,
-            records: &[],
+            records: &records,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             event_sender: None,
@@ -1621,7 +1600,9 @@ mod tests {
 
         let mut fcf =
             FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
-        let mut exchange = exchange_with_states(n_state, vec![vec![10.0], vec![20.0]]);
+        let trial_states = vec![vec![10.0], vec![20.0]];
+        let records = trial_point_records(&trial_states, n_stages);
+        let mut exchange = ExchangeBuffers::new(n_state, trial_states.len(), 1);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
@@ -1693,7 +1674,7 @@ mod tests {
             training_ctx: &training_ctx,
             comm: &comm,
             exchange: &mut exchange,
-            records: &[],
+            records: &records,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             event_sender: None,

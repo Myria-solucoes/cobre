@@ -726,4 +726,99 @@ mod tests {
         bufs.pack_real_states_into(&mut out);
         assert_eq!(out.len(), 10); // still 10 after second call (clear + refill)
     }
+
+    // ── zero-work rank ────────────────────────────────────────────────────────
+
+    /// Rank 1 of a 2-rank world whose `allgatherv` honours `displs`, so a test
+    /// can tell whether this rank contributed its own slot rather than reading
+    /// a peer's.
+    struct Rank1Of2;
+
+    impl Communicator for Rank1Of2 {
+        fn allgatherv<T: CommData>(
+            &self,
+            send: &[T],
+            recv: &mut [T],
+            _counts: &[usize],
+            displs: &[usize],
+        ) -> Result<(), CommError> {
+            let start = displs[1];
+            recv[start..start + send.len()].clone_from_slice(send);
+            Ok(())
+        }
+        fn allreduce<T: CommData>(
+            &self,
+            _send: &[T],
+            _recv: &mut [T],
+            _op: ReduceOp,
+        ) -> Result<(), CommError> {
+            unreachable!("exchange only calls allgatherv")
+        }
+        fn broadcast<T: CommData>(&self, _buf: &mut [T], _root: usize) -> Result<(), CommError> {
+            unreachable!("exchange only calls allgatherv")
+        }
+        fn barrier(&self) -> Result<(), CommError> {
+            unreachable!("exchange only calls allgatherv")
+        }
+        fn rank(&self) -> usize {
+            1
+        }
+        fn size(&self) -> usize {
+            2
+        }
+        fn abort(&self, error_code: i32) -> ! {
+            std::process::exit(error_code)
+        }
+    }
+
+    /// Deadlock-freedom for the per-stage exchange: `total_forward_passes=1`
+    /// across 2 ranks leaves rank 1 with zero real trial points, yet it must
+    /// still pack and contribute a full-length slot. Every rank's send is
+    /// `local_count` (the rank-uniform maximum) states wide, so no rank can have
+    /// a reason to sit the `allgatherv` out — a rank that skipped it would
+    /// strand its peers.
+    #[test]
+    fn rank_with_zero_actual_forward_passes_still_contributes_its_gather_slot() {
+        let n_state = 1;
+        let max_local_fwd = 1;
+        let mut bufs = ExchangeBuffers::with_actual_counts(n_state, max_local_fwd, 2, &[1, 0]);
+
+        // Sized by `max_local_fwd`, as the backward pass receives it: rank 1's
+        // slot is padding the forward pass never wrote.
+        let records = vec![make_record(vec![10.0]), make_record(vec![20.0])];
+
+        bufs.exchange(&records, 0, 2, &Rank1Of2).unwrap();
+
+        assert_eq!(
+            bufs.gathered_states()[max_local_fwd * n_state],
+            10.0,
+            "the zero-work rank must contribute its own padded slot"
+        );
+    }
+
+    /// The zero-work rank's padding must never reach the archive that drives cut
+    /// selection: `real_total_scenarios` and `pack_real_states_into` are keyed on
+    /// `actual_counts`, which is rank-uniform, so every rank archives the same
+    /// states regardless of which rank drew them.
+    #[test]
+    fn zero_work_rank_padding_is_excluded_from_the_packed_states() {
+        let n_state = 1;
+        let mut bufs = ExchangeBuffers::with_actual_counts(n_state, 1, 2, &[1, 0]);
+        let records = vec![make_record(vec![10.0]), make_record(vec![20.0])];
+        bufs.exchange(&records, 0, 2, &Rank1Of2).unwrap();
+
+        assert_eq!(
+            bufs.real_total_scenarios(),
+            1,
+            "only rank 0 drew a trial point"
+        );
+
+        let mut packed = Vec::new();
+        bufs.pack_real_states_into(&mut packed);
+        assert_eq!(
+            packed.len(),
+            1,
+            "rank 1's padding slot must not reach the archive"
+        );
+    }
 }

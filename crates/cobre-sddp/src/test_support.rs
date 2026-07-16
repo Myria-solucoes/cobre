@@ -30,7 +30,8 @@ use crate::policy::policy_load::{
     FullFcf, PolicyLoadProof, PolicyStageManifest, validate_policy_load,
 };
 use crate::resolved_parameters::ResolvedParameters;
-use cobre_solver::StageTemplate;
+use crate::trajectory::TrajectoryRecord;
+use cobre_solver::{Basis, BasisStatus, StageTemplate};
 
 /// Equipment dimensions for the [`geometry`] / [`study_dims_for`] test builders.
 ///
@@ -78,6 +79,25 @@ impl Default for GeometryDims {
             anticipated_thermal_indices: Vec::new(),
         }
     }
+}
+
+/// Overwrite `out` with a basis satisfying `col_basic + row_basic ==
+/// row_status.len()` — the consistency invariant every real solver's `get_basis`
+/// returns and [`enforce_basic_count_invariant`] requires of a stored basis.
+///
+/// A mock `get_basis` that leaves `out` untouched keeps the all-`Lower` zero-fill
+/// from `Basis::new`, i.e. `total_basic == 0`. No solver produces that, and
+/// offering it back as a warm start is a basic-count deficit, which
+/// [`enforce_basic_count_invariant`] rejects as a shape mismatch.
+///
+/// [`enforce_basic_count_invariant`]: crate::basis_reconstruct::enforce_basic_count_invariant
+pub fn fill_consistent_basis(out: &mut Basis) {
+    let num_row = out.row_status.len();
+    out.col_status.fill(BasisStatus::Lower);
+    out.row_status.fill(BasisStatus::Lower);
+    let basic_cols = num_row.min(out.col_status.len());
+    out.col_status[..basic_cols].fill(BasisStatus::Basic);
+    out.row_status[..num_row - basic_cols].fill(BasisStatus::Basic);
 }
 
 /// Build [`GeometryDims`] with the seven scalar entity counts set and no
@@ -608,4 +628,24 @@ pub fn trivial_full_fcf_proof(state_dimension: u32, num_stages: u32) -> PolicyLo
     };
     validate_policy_load::<FullFcf>(&manifest, &manifest)
         .expect("trivial matching manifest cannot fail validate_policy_load")
+}
+
+/// Trial-point states in the flat shape the passes index, `records[m * n_stages + stage]`.
+///
+/// Each scenario's state is replicated across every stage, so the backward pass's
+/// per-stage repack of the gather buffers reproduces exactly `states` at whichever
+/// stage it runs — letting a test pin cut arithmetic against a known trial point.
+#[must_use]
+pub fn trial_point_records(states: &[Vec<f64>], n_stages: usize) -> Vec<TrajectoryRecord> {
+    states
+        .iter()
+        .flat_map(|state| {
+            (0..n_stages).map(move |_| TrajectoryRecord {
+                primal: Vec::new(),
+                dual: Vec::new(),
+                stage_cost: 0.0,
+                state: state.clone(),
+            })
+        })
+        .collect()
 }

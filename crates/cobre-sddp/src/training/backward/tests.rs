@@ -231,7 +231,9 @@ impl SolverInterface for MockSolver {
         })
     }
 
-    fn get_basis(&mut self, _out: &mut Basis) {}
+    fn get_basis(&mut self, out: &mut Basis) {
+        crate::test_support::fill_consistent_basis(out);
+    }
 
     fn statistics(&self) -> SolverStatistics {
         SolverStatistics::default()
@@ -423,6 +425,28 @@ fn basis_store_with_one(
         state_at_capture: Vec::new(),
     });
     store
+}
+
+/// Gather buffers holding `states` as trial points, plus the records the backward
+/// pass repacks them from.
+///
+/// The pass repacks `exchange` from `records` once per stage, so the two must
+/// agree: both are derived here from the same [`test_support::trial_point_records`]
+/// (which replicates each scenario's state across every stage), and the buffers are
+/// pre-populated by driving the real `exchange` those records feed. A caller that
+/// instead crafted the buffers independently of `records` would have its trial
+/// points silently overwritten by the pass's own repack.
+fn exchange_and_records(
+    n_state: usize,
+    states: &[Vec<f64>],
+    n_stages: usize,
+) -> (ExchangeBuffers, Vec<TrajectoryRecord>) {
+    use cobre_comm::LocalBackend;
+
+    let records = test_support::trial_point_records(states, n_stages);
+    let mut bufs = ExchangeBuffers::new(n_state, states.len(), 1);
+    bufs.exchange(&records, 0, n_stages, &LocalBackend).unwrap();
+    (bufs, records)
 }
 
 fn exchange_with_states(n_state: usize, states: Vec<Vec<f64>>) -> ExchangeBuffers {
@@ -696,7 +720,8 @@ fn single_stage_system_produces_no_cuts() {
     let forward_passes = 2_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
-    let mut exchange = exchange_with_states(n_state, vec![vec![10.0], vec![20.0]]);
+    let (mut exchange, records) =
+        exchange_and_records(n_state, &[vec![10.0], vec![20.0]], n_stages);
 
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -761,7 +786,7 @@ fn single_stage_system_produces_no_cuts() {
             dcs: None,
         },
         comm: &comm,
-        records: &[],
+        records: &records,
         iteration: 0,
         local_work: exchange.local_count(),
         fwd_offset: 0,
@@ -793,7 +818,8 @@ fn two_stage_system_two_trial_points_generates_two_cuts_at_stage_0() {
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
 
     // Two trial points with states [10.0] and [20.0] at stage 0.
-    let mut exchange = exchange_with_states(n_state, vec![vec![10.0], vec![20.0]]);
+    let (mut exchange, records) =
+        exchange_and_records(n_state, &[vec![10.0], vec![20.0]], n_stages);
 
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -861,7 +887,7 @@ fn two_stage_system_two_trial_points_generates_two_cuts_at_stage_0() {
             dcs: None,
         },
         comm: &comm,
-        records: &[],
+        records: &records,
         iteration: 0,
         local_work: exchange.local_count(),
         fwd_offset: 0,
@@ -899,7 +925,8 @@ fn cut_inserted_with_correct_stage_iteration_and_forward_pass_index() {
         FutureCostFunction::new(n_stages, n_state, forward_passes, 20, &vec![0; n_stages]);
 
     // 3 trial points (forward_passes=3 on a single rank).
-    let mut exchange = exchange_with_states(n_state, vec![vec![5.0], vec![10.0], vec![15.0]]);
+    let (mut exchange, records) =
+        exchange_and_records(n_state, &[vec![5.0], vec![10.0], vec![15.0]], n_stages);
 
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -964,7 +991,7 @@ fn cut_inserted_with_correct_stage_iteration_and_forward_pass_index() {
             dcs: None,
         },
         comm: &comm,
-        records: &[],
+        records: &records,
         iteration: 2,
         local_work: exchange.local_count(),
         fwd_offset: 0,
@@ -997,7 +1024,7 @@ fn no_cuts_generated_at_last_stage() {
     let forward_passes = 1_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
-    let mut exchange = exchange_with_states(n_state, vec![vec![10.0]]);
+    let (mut exchange, records) = exchange_and_records(n_state, &[vec![10.0]], n_stages);
 
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -1062,7 +1089,7 @@ fn no_cuts_generated_at_last_stage() {
             dcs: None,
         },
         comm: &comm,
-        records: &[],
+        records: &records,
         iteration: 0,
         local_work: exchange.local_count(),
         fwd_offset: 0,
@@ -1096,7 +1123,7 @@ fn elapsed_ms_is_non_negative() {
     let forward_passes = 1_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
-    let mut exchange = exchange_with_states(n_state, vec![vec![5.0]]);
+    let (mut exchange, records) = exchange_and_records(n_state, &[vec![5.0]], n_stages);
 
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -1161,7 +1188,7 @@ fn elapsed_ms_is_non_negative() {
             dcs: None,
         },
         comm: &comm,
-        records: &[],
+        records: &records,
         iteration: 0,
         local_work: exchange.local_count(),
         fwd_offset: 0,
@@ -1190,7 +1217,7 @@ fn infeasible_solver_returns_sddp_infeasible_error() {
     let forward_passes = 1_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
-    let mut exchange = exchange_with_states(n_state, vec![vec![10.0]]);
+    let (mut exchange, records) = exchange_and_records(n_state, &[vec![10.0]], n_stages);
 
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -1255,7 +1282,7 @@ fn infeasible_solver_returns_sddp_infeasible_error() {
             dcs: None,
         },
         comm: &comm,
-        records: &[],
+        records: &records,
         iteration: 0,
         local_work: exchange.local_count(),
         fwd_offset: 0,
@@ -1331,7 +1358,7 @@ fn cut_coefficients_and_intercept_match_dual_extraction_formula() {
     let forward_passes = 1_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
-    let mut exchange = exchange_with_states(n_state, vec![vec![10.0]]);
+    let (mut exchange, records) = exchange_and_records(n_state, &[vec![10.0]], n_stages);
 
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -1397,7 +1424,7 @@ fn cut_coefficients_and_intercept_match_dual_extraction_formula() {
             dcs: None,
         },
         comm: &comm,
-        records: &[],
+        records: &records,
         iteration: 0,
         local_work: exchange.local_count(),
         fwd_offset: 0,
@@ -1450,7 +1477,7 @@ fn cut_gradient_sign_physically_correct() {
     let forward_passes = 1_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
-    let mut exchange = exchange_with_states(n_state, vec![vec![50.0]]);
+    let (mut exchange, records) = exchange_and_records(n_state, &[vec![50.0]], n_stages);
 
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -1517,7 +1544,7 @@ fn cut_gradient_sign_physically_correct() {
             dcs: None,
         },
         comm: &comm,
-        records: &[],
+        records: &records,
         iteration: 0,
         local_work: exchange.local_count(),
         fwd_offset: 0,
@@ -1575,7 +1602,7 @@ fn cut_is_tight_at_trial_point() {
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
     let x_hat = 30.0_f64;
-    let mut exchange = exchange_with_states(n_state, vec![vec![x_hat]]);
+    let (mut exchange, records) = exchange_and_records(n_state, &[vec![x_hat]], n_stages);
 
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -1642,7 +1669,7 @@ fn cut_is_tight_at_trial_point() {
             dcs: None,
         },
         comm: &comm,
-        records: &[],
+        records: &records,
         iteration: 0,
         local_work: exchange.local_count(),
         fwd_offset: 0,
@@ -1687,7 +1714,8 @@ fn single_rank_backward_pass_with_local_backend_produces_correct_fcf() {
     let forward_passes = 2_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
-    let mut exchange = exchange_with_states(n_state, vec![vec![10.0], vec![20.0]]);
+    let (mut exchange, records) =
+        exchange_and_records(n_state, &[vec![10.0], vec![20.0]], n_stages);
 
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -1752,7 +1780,7 @@ fn single_rank_backward_pass_with_local_backend_produces_correct_fcf() {
             dcs: None,
         },
         comm: &comm,
-        records: &[],
+        records: &records,
         iteration: 0,
         local_work: exchange.local_count(),
         fwd_offset: 0,
@@ -1798,9 +1826,9 @@ fn forward_pass_index_matches_global_scenario_index() {
         FutureCostFunction::new(n_stages, n_state, forward_passes, 20, &vec![0; n_stages]);
 
     // 6 trial points (m = 0..5). ExchangeBuffers: local_count=6, num_ranks=1.
-    let mut exchange = exchange_with_states(
+    let (mut exchange, records) = exchange_and_records(
         n_state,
-        vec![
+        &[
             vec![1.0],
             vec![2.0],
             vec![3.0],
@@ -1808,6 +1836,7 @@ fn forward_pass_index_matches_global_scenario_index() {
             vec![5.0],
             vec![6.0],
         ],
+        n_stages,
     );
 
     let horizon = HorizonMode::Finite {
@@ -1873,7 +1902,7 @@ fn forward_pass_index_matches_global_scenario_index() {
             dcs: None,
         },
         comm: &comm,
-        records: &[],
+        records: &records,
         iteration: 2,
         local_work: exchange.local_count(),
         fwd_offset: 0,
@@ -1911,7 +1940,7 @@ fn warm_start_uses_prepopulated_forward_basis() {
     let forward_passes = 1_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
-    let mut exchange = exchange_with_states(n_state, vec![vec![10.0]]);
+    let (mut exchange, records) = exchange_and_records(n_state, &[vec![10.0]], n_stages);
 
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -1924,7 +1953,8 @@ fn warm_start_uses_prepopulated_forward_basis() {
 
     // Pre-populate the basis store at (scenario=0, stage=1).
     // This simulates a forward pass having already solved stage 1 and cached its basis.
-    let pre_basis = Basis::new(templates[1].num_cols, templates[1].num_rows);
+    let mut pre_basis = Basis::new(templates[1].num_cols, templates[1].num_rows);
+    test_support::fill_consistent_basis(&mut pre_basis);
     let mut workspaces = single_workspace(solver, n_state);
     let mut basis_store = basis_store_with_one(exchange.local_count(), n_stages, 0, 1, pre_basis);
 
@@ -1980,7 +2010,7 @@ fn warm_start_uses_prepopulated_forward_basis() {
             dcs: None,
         },
         comm: &comm,
-        records: &[],
+        records: &records,
         iteration: 0,
         local_work: exchange.local_count(),
         fwd_offset: 0,
@@ -2014,7 +2044,7 @@ fn multi_opening_subsequent_openings_use_internal_hotstart() {
     let forward_passes = 1_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
-    let mut exchange = exchange_with_states(n_state, vec![vec![10.0]]);
+    let (mut exchange, records) = exchange_and_records(n_state, &[vec![10.0]], n_stages);
 
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -2081,7 +2111,7 @@ fn multi_opening_subsequent_openings_use_internal_hotstart() {
             dcs: None,
         },
         comm: &comm,
-        records: &[],
+        records: &records,
         iteration: 0,
         local_work: exchange.local_count(),
         fwd_offset: 0,
@@ -2118,7 +2148,7 @@ fn backward_solver_error_propagates() {
     let forward_passes = 1_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
-    let mut exchange = exchange_with_states(n_state, vec![vec![10.0]]);
+    let (mut exchange, records) = exchange_and_records(n_state, &[vec![10.0]], n_stages);
 
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -2131,7 +2161,8 @@ fn backward_solver_error_propagates() {
     let comm = StubComm;
 
     // Pre-populate the store — error should propagate regardless.
-    let pre_basis = Basis::new(templates[1].num_cols, templates[1].num_rows);
+    let mut pre_basis = Basis::new(templates[1].num_cols, templates[1].num_rows);
+    test_support::fill_consistent_basis(&mut pre_basis);
     let mut workspaces = single_workspace(solver, n_state);
     let mut basis_store = basis_store_with_one(exchange.local_count(), n_stages, 0, 1, pre_basis);
 
@@ -2187,7 +2218,7 @@ fn backward_solver_error_propagates() {
             dcs: None,
         },
         comm: &comm,
-        records: &[],
+        records: &records,
         iteration: 0,
         local_work: exchange.local_count(),
         fwd_offset: 0,
@@ -2239,7 +2270,7 @@ fn test_backward_pass_parallel_cut_determinism() {
 
     // Build 8 distinct trial-point states.
     let states: Vec<Vec<f64>> = (0..n_trial_points).map(|i| vec![i as f64 + 1.0]).collect();
-    let mut exchange = exchange_with_states(n_state, states);
+    let (mut exchange, records) = exchange_and_records(n_state, &states, n_stages);
 
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -2347,7 +2378,7 @@ fn test_backward_pass_parallel_cut_determinism() {
             dcs: None,
         },
         comm: &comm,
-        records: &[],
+        records: &records,
         iteration: 0,
         local_work: exchange.local_count(),
         fwd_offset: 0,
@@ -2436,7 +2467,7 @@ fn test_backward_pass_parallel_cut_determinism() {
             dcs: None,
         },
         comm: &comm,
-        records: &[],
+        records: &records,
         iteration: 0,
         local_work: exchange.local_count(),
         fwd_offset: 0,
@@ -2715,7 +2746,7 @@ fn backward_pass_load_patches_applied() {
     let forward_passes = 1_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
-    let mut exchange = exchange_with_states(n_state, vec![vec![10.0]]);
+    let (mut exchange, records) = exchange_and_records(n_state, &[vec![10.0]], n_stages);
 
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -2828,7 +2859,7 @@ fn backward_pass_load_patches_applied() {
             dcs: None,
         },
         comm: &comm,
-        records: &[],
+        records: &records,
         iteration: 0,
         local_work: exchange.local_count(),
         fwd_offset: 0,
@@ -2898,7 +2929,7 @@ fn backward_pass_no_load_buses_unchanged() {
     let forward_passes = 1_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
-    let mut exchange = exchange_with_states(n_state, vec![vec![10.0]]);
+    let (mut exchange, records) = exchange_and_records(n_state, &[vec![10.0]], n_stages);
 
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -3003,7 +3034,7 @@ fn backward_pass_no_load_buses_unchanged() {
             dcs: None,
         },
         comm: &comm,
-        records: &[],
+        records: &records,
         iteration: 0,
         local_work: exchange.local_count(),
         fwd_offset: 0,
@@ -3074,7 +3105,7 @@ fn backward_pass_cut_coefficients_unaffected() {
     let forward_passes = 1_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
-    let mut exchange = exchange_with_states(n_state, vec![vec![10.0]]);
+    let (mut exchange, records) = exchange_and_records(n_state, &[vec![10.0]], n_stages);
 
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -3183,7 +3214,7 @@ fn backward_pass_cut_coefficients_unaffected() {
             dcs: None,
         },
         comm: &comm,
-        records: &[],
+        records: &records,
         iteration: 0,
         local_work: exchange.local_count(),
         fwd_offset: 0,
@@ -3245,7 +3276,8 @@ fn per_stage_cut_sync_invariant_after_bug1_fix() {
     let forward_passes = 3_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 20, &vec![0; n_stages]);
-    let mut exchange = exchange_with_states(n_state, vec![vec![10.0], vec![20.0], vec![30.0]]);
+    let (mut exchange, records) =
+        exchange_and_records(n_state, &[vec![10.0], vec![20.0], vec![30.0]], n_stages);
 
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -3310,7 +3342,7 @@ fn per_stage_cut_sync_invariant_after_bug1_fix() {
             dcs: None,
         },
         comm: &comm,
-        records: &[],
+        records: &records,
         iteration: 1,
         local_work: exchange.local_count(),
         fwd_offset: 0,
@@ -3377,7 +3409,8 @@ fn metadata_sync_updates_active_count_and_last_active_iter() {
     let forward_passes = 3_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 20, &vec![0; n_stages]);
-    let mut exchange = exchange_with_states(n_state, vec![vec![10.0], vec![20.0], vec![30.0]]);
+    let (mut exchange, records) =
+        exchange_and_records(n_state, &[vec![10.0], vec![20.0], vec![30.0]], n_stages);
 
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -3446,7 +3479,7 @@ fn metadata_sync_updates_active_count_and_last_active_iter() {
             dcs: None,
         },
         comm: &comm,
-        records: &[],
+        records: &records,
         iteration: 1,
         local_work: exchange.local_count(),
         fwd_offset: 0,
@@ -3527,7 +3560,7 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
     let states: Vec<Vec<f64>> = (0..local_work)
         .map(|i| vec![(i + 1) as f64 * 10.0])
         .collect();
-    let mut exchange = exchange_with_states(n_state, states);
+    let (mut exchange, records) = exchange_and_records(n_state, &states, n_stages);
 
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -3637,7 +3670,7 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
             dcs: None,
         },
         comm: &comm,
-        records: &[],
+        records: &records,
         iteration: 0,
         local_work: exchange.local_count(),
         fwd_offset: 0,
@@ -3897,7 +3930,7 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
 
     let solution = solution_1_0(100.0, -5.0);
     let states: Vec<Vec<f64>> = (0..local_work).map(|i| vec![(i + 1) as f64]).collect();
-    let mut exchange = exchange_with_states(n_state, states);
+    let (mut exchange, records) = exchange_and_records(n_state, &states, n_stages);
 
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -4004,7 +4037,7 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
             dcs: None,
         },
         comm: &StubComm,
-        records: &[],
+        records: &records,
         iteration: 0,
         local_work: exchange.local_count(),
         fwd_offset: 0,
@@ -4124,7 +4157,7 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
 
     let solution = solution_1_0(100.0, -5.0);
     let states: Vec<Vec<f64>> = (0..local_work).map(|i| vec![(i + 1) as f64]).collect();
-    let mut exchange = exchange_with_states(n_state, states);
+    let (mut exchange, records) = exchange_and_records(n_state, &states, n_stages);
 
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -4231,7 +4264,7 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
             dcs: None,
         },
         comm: &DualRankStubComm,
-        records: &[],
+        records: &records,
         iteration: 0,
         local_work: exchange.local_count(),
         fwd_offset: 0,
@@ -4656,7 +4689,7 @@ fn handshake_passes_with_local_backend() {
     let forward_passes = 1_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
-    let mut exchange = exchange_with_states(n_state, vec![vec![10.0]]);
+    let (mut exchange, records) = exchange_and_records(n_state, &[vec![10.0]], n_stages);
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
     };
@@ -4763,7 +4796,7 @@ fn handshake_passes_with_local_backend() {
             dcs: None,
         },
         comm: &comm,
-        records: &[],
+        records: &records,
         iteration: 0,
         local_work: exchange.local_count(),
         fwd_offset: 0,
@@ -4862,7 +4895,7 @@ fn handshake_rejects_nonuniform_workers() {
     let forward_passes = 1_u32;
     let mut fcf =
         FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
-    let mut exchange = exchange_with_states(n_state, vec![vec![10.0]]);
+    let (mut exchange, records) = exchange_and_records(n_state, &[vec![10.0]], n_stages);
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
     };
@@ -4926,7 +4959,7 @@ fn handshake_rejects_nonuniform_workers() {
             dcs: None,
         },
         comm: &comm,
-        records: &[],
+        records: &records,
         iteration: 0,
         local_work: exchange.local_count(),
         fwd_offset: 0,
