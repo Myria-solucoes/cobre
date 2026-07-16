@@ -552,7 +552,7 @@ mod proptests {
     use proptest::test_runner::RngSeed;
 
     use super::{CutSlot, CutStateProjection, OutCol, StageStateConfig, StateDim};
-    use crate::indexer::{REGION_ORDER, StateSpace};
+    use crate::indexer::StateSpace;
 
     const ALL_ENABLED: StageStateConfig = StageStateConfig {
         storage: true,
@@ -684,33 +684,55 @@ mod proptests {
         }
 
         /// Generalizes `bucket_render_pairs_sit_between_lag_and_anticipated` over
-        /// every gate combination: walking `REGION_ORDER` and skipping
-        /// `cut_enabled == false` regions reproduces, in order, the projection's
-        /// slot-to-column mapping for every surviving global dimension.
+        /// every gate combination. The expected mapping is built from the
+        /// concrete per-region block formulas (the raw range fields, with the
+        /// storage → lag → buckets → anticipated order written out literally) —
+        /// never from `REGION_ORDER` or the resolvers the constructor itself
+        /// walks, which would shift both sides of the assertion in lockstep
+        /// and turn a walk-order or resolver bug green.
         #[test]
         fn gated_projection_agreement(
             (global, state_config) in state_layout_and_config_strategy()
         ) {
             let cut = CutStateProjection::new(&global, state_config);
 
-            let mut slot = 0usize;
-            for region in REGION_ORDER {
-                if !region.cut_enabled(state_config) {
-                    continue;
-                }
-                for g in global.state_dim_range(region) {
-                    prop_assert_eq!(
-                        cut.incoming_column(CutSlot::new(slot)),
-                        global.state_to_lp_incoming_column(StateDim::new(g))
-                    );
-                    prop_assert_eq!(
-                        cut.outgoing_column(CutSlot::new(slot)),
-                        global.lp_column_for_state(StateDim::new(g))
-                    );
-                    slot += 1;
+            let n = global.hydro_count;
+            let mut expected: Vec<(usize, usize)> = Vec::new();
+            if state_config.storage {
+                for h in 0..n {
+                    expected.push((global.storage_in.start + h, global.storage.start + h));
                 }
             }
-            prop_assert_eq!(slot, cut.n_slots());
+            if state_config.inflow_lags {
+                for lag in 0..global.max_par_order {
+                    for h in 0..n {
+                        let outgoing = if lag == 0 {
+                            global.z_inflow.start + h
+                        } else {
+                            global.inflow_lags.start + (lag - 1) * n + h
+                        };
+                        expected.push((global.inflow_lags.start + lag * n + h, outgoing));
+                    }
+                }
+            }
+            for b in 0..global.n_buckets {
+                expected.push((
+                    global.transit_buckets_in.start + b,
+                    global.transit_buckets_out.start + b,
+                ));
+            }
+            for o in 0..global.n_anticipated * global.k_max {
+                expected.push((
+                    global.anticipated_state.start + o,
+                    global.anticipated_slots_out.start + o,
+                ));
+            }
+
+            prop_assert_eq!(expected.len(), cut.n_slots());
+            for (slot, &(incoming, outgoing)) in expected.iter().enumerate() {
+                prop_assert_eq!(cut.incoming_column(CutSlot::new(slot)).get(), incoming);
+                prop_assert_eq!(cut.outgoing_column(CutSlot::new(slot)).get(), outgoing);
+            }
         }
     }
 }

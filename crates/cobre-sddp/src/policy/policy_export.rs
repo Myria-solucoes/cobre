@@ -16,7 +16,7 @@ use cobre_io::output::policy::{
 };
 
 use crate::cut::FutureCostFunction;
-use crate::indexer::{CutSlot, CutStateProjection, StateSpace};
+use crate::indexer::{CutSlot, CutStateProjection, StateRegion, StateSpace};
 use crate::lp_builder::delivery_ring::DeliveryRing;
 use crate::training::TrainingResult;
 
@@ -93,112 +93,107 @@ pub fn build_stage_entity_manifest(
             })
     };
 
+    let anticipated_slot = |offset: usize| -> EntitySlot {
+        let (slot_idx, plant_pos) = anticipated_ring.slot_lane_at(offset);
+        let plant = anticipated_thermals[plant_pos];
+        // The ring shifts one stage per transition, so slot `slot_idx` observed
+        // at stage `t` matures at delivery stage `t + slot_idx` regardless of
+        // lead mode (constant `LeadStages` or calendar-derived `LeadTime`).
+        // Reachability uses the SAME per-plant bound the LP masking itself
+        // uses (`anticipated_lead_stages[plant_pos]`, populated from
+        // `AnticipatedResolution` for both lead modes by
+        // `resolve_anticipated_commitments`): a slot beyond it is structural
+        // padding (frozen `[0, 0]`), not a real commitment, even when
+        // `t + slot_idx` itself still lands inside the horizon — the
+        // multi-plant heterogeneous-lead case.
+        let k_i = global_layout.anticipated_lead_stages[plant_pos];
+        let delivery_anchor = if slot_idx < k_i {
+            current_stage_idx.map_or(ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL, |t| {
+                let m = t + slot_idx;
+                // Defensive cross-check against the resolver (the single owner
+                // of c(m), from `resolve_point`): a within-study decider must
+                // have already fired by `t`; a pre-study (IC-seeded) delivery
+                // has no decider entry and is exempt.
+                debug_assert!(
+                    global_layout
+                        .anticipated_resolution
+                        .per_plant
+                        .get(plant_pos)
+                        .and_then(|resolution| resolution.decider.get(m))
+                        .copied()
+                        .flatten()
+                        .is_none_or(|decided_at| decided_at <= t),
+                    "anticipated delivery {m} observed at stage {t} was not yet decided"
+                );
+                anchor_at(slot_idx)
+            })
+        } else {
+            ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL
+        };
+        EntitySlot {
+            entity_type: ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
+            entity_id: plant.id.0,
+            subindex: slot_idx as u32,
+            was_active: commissioning_active(plant.entry_stage_id, plant.exit_stage_id, stage_id),
+            delivery_anchor,
+        }
+    };
+
     let mut manifest = Vec::with_capacity(projection.n_slots());
     for j in 0..projection.n_slots() {
-        let col = projection.incoming_column(CutSlot::new(j)).get();
-        let slot = if global_layout.storage_in.contains(&col) {
-            let h = col - global_layout.storage_in.start;
-            let hydro = &hydros[h];
-            EntitySlot {
-                entity_type: ENTITY_TYPE_HYDRO_STORAGE,
-                entity_id: hydro.id.0,
-                subindex: 0,
-                was_active: hydro_operating_active(
-                    hydro.filling.as_ref(),
-                    hydro.entry_stage_id,
-                    hydro.exit_stage_id,
-                    stage_id,
-                ),
-                delivery_anchor: ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
+        let (region, offset) =
+            global_layout.classify_incoming_column(projection.incoming_column(CutSlot::new(j)));
+        let slot = match region {
+            StateRegion::Storage => {
+                let hydro = &hydros[offset];
+                EntitySlot {
+                    entity_type: ENTITY_TYPE_HYDRO_STORAGE,
+                    entity_id: hydro.id.0,
+                    subindex: 0,
+                    was_active: hydro_operating_active(
+                        hydro.filling.as_ref(),
+                        hydro.entry_stage_id,
+                        hydro.exit_stage_id,
+                        stage_id,
+                    ),
+                    delivery_anchor: ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
+                }
             }
-        } else if global_layout.inflow_lags.contains(&col) {
-            let offset = col - global_layout.inflow_lags.start;
-            let lag = offset / n;
-            let h = offset % n;
-            let hydro = &hydros[h];
-            EntitySlot {
-                entity_type: ENTITY_TYPE_HYDRO_INFLOW_LAG,
-                entity_id: hydro.id.0,
-                subindex: (lag + 1) as u32,
-                was_active: hydro_operating_active(
-                    hydro.filling.as_ref(),
-                    hydro.entry_stage_id,
-                    hydro.exit_stage_id,
-                    stage_id,
-                ),
-                delivery_anchor: ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
+            StateRegion::Lag => {
+                let lag = offset / n;
+                let h = offset % n;
+                let hydro = &hydros[h];
+                EntitySlot {
+                    entity_type: ENTITY_TYPE_HYDRO_INFLOW_LAG,
+                    entity_id: hydro.id.0,
+                    subindex: (lag + 1) as u32,
+                    was_active: hydro_operating_active(
+                        hydro.filling.as_ref(),
+                        hydro.entry_stage_id,
+                        hydro.exit_stage_id,
+                        stage_id,
+                    ),
+                    delivery_anchor: ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
+                }
             }
-        } else if global_layout.transit_buckets_in.contains(&col) {
-            let b = col - global_layout.transit_buckets_in.start;
-            let (plant_idx, lag) = global_layout.transit_bucket_column_order[b];
-            let hydro = &hydros[plant_idx];
-            EntitySlot {
-                entity_type: ENTITY_TYPE_HYDRO_TRANSIT_BUCKET,
-                entity_id: hydro.id.0,
-                subindex: lag as u32,
-                was_active: hydro_operating_active(
-                    hydro.filling.as_ref(),
-                    hydro.entry_stage_id,
-                    hydro.exit_stage_id,
-                    stage_id,
-                ),
-                // Water in this bucket arrives `lag` stages after this one.
-                delivery_anchor: anchor_at(lag),
+            StateRegion::Buckets => {
+                let (plant_idx, lag) = global_layout.transit_bucket_column_order[offset];
+                let hydro = &hydros[plant_idx];
+                EntitySlot {
+                    entity_type: ENTITY_TYPE_HYDRO_TRANSIT_BUCKET,
+                    entity_id: hydro.id.0,
+                    subindex: lag as u32,
+                    was_active: hydro_operating_active(
+                        hydro.filling.as_ref(),
+                        hydro.entry_stage_id,
+                        hydro.exit_stage_id,
+                        stage_id,
+                    ),
+                    // Water in this bucket arrives `lag` stages after this one.
+                    delivery_anchor: anchor_at(lag),
+                }
             }
-        } else {
-            debug_assert!(
-                global_layout.anticipated_state.contains(&col),
-                "incoming column {col} must lie in storage_in, inflow_lags, transit_buckets_in, or \
-                 anticipated_state"
-            );
-            let offset = col - global_layout.anticipated_state.start;
-            let (slot_idx, plant_pos) = anticipated_ring.slot_lane_at(offset);
-            let plant = anticipated_thermals[plant_pos];
-            // The ring shifts one stage per transition, so slot `slot_idx` observed
-            // at stage `t` matures at delivery stage `t + slot_idx` regardless of
-            // lead mode (constant `LeadStages` or calendar-derived `LeadTime`).
-            // Reachability uses the SAME per-plant bound the LP masking itself
-            // uses (`anticipated_lead_stages[plant_pos]`, populated from
-            // `AnticipatedResolution` for both lead modes by
-            // `resolve_anticipated_commitments`): a slot beyond it is structural
-            // padding (frozen `[0, 0]`), not a real commitment, even when
-            // `t + slot_idx` itself still lands inside the horizon — the
-            // multi-plant heterogeneous-lead case.
-            let k_i = global_layout.anticipated_lead_stages[plant_pos];
-            let delivery_anchor = if slot_idx < k_i {
-                current_stage_idx.map_or(ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL, |t| {
-                    let m = t + slot_idx;
-                    // Defensive cross-check against the resolver (the single owner
-                    // of c(m), from `resolve_point`): a within-study decider must
-                    // have already fired by `t`; a pre-study (IC-seeded) delivery
-                    // has no decider entry and is exempt.
-                    debug_assert!(
-                        global_layout
-                            .anticipated_resolution
-                            .per_plant
-                            .get(plant_pos)
-                            .and_then(|resolution| resolution.decider.get(m))
-                            .copied()
-                            .flatten()
-                            .is_none_or(|decided_at| decided_at <= t),
-                        "anticipated delivery {m} observed at stage {t} was not yet decided"
-                    );
-                    anchor_at(slot_idx)
-                })
-            } else {
-                ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL
-            };
-            EntitySlot {
-                entity_type: ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
-                entity_id: plant.id.0,
-                subindex: slot_idx as u32,
-                was_active: commissioning_active(
-                    plant.entry_stage_id,
-                    plant.exit_stage_id,
-                    stage_id,
-                ),
-                delivery_anchor,
-            }
+            StateRegion::Anticipated => anticipated_slot(offset),
         };
         manifest.push(slot);
     }

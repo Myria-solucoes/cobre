@@ -7,7 +7,11 @@
 //! [`Row`], and [`StateDim`] make each concern its own type; [`InCol`]/[`OutCol`]
 //! further split the column role the state-path resolvers return, so a render
 //! call site handed an incoming column (or vice versa) is a compile error, not
-//! a silently wrong cut coefficient; [`CutSlot`] indexes the enabled cut-state
+//! a silently wrong cut coefficient — on the paths that consume the typed
+//! resolvers (the cut pin/extract/render hot path, simulation extraction, and
+//! the policy manifest); a consumer indexing a raw buffer through
+//! `StateSpace`'s public ranges sits outside that guarantee until the ranges
+//! are sealed; [`CutSlot`] indexes the enabled cut-state
 //! subset a projection reindexes into, distinct from [`StateDim`]; [`BlockIdx`]
 //! makes the block operand of
 //! every [`BlockGrid`](super::BlockGrid) shape method its own type. None of these

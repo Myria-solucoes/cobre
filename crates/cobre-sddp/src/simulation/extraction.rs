@@ -282,9 +282,9 @@ fn extract_transit_buckets(
             spec.entity_counts.hydro_ids.len(),
         );
         let hydro_id = spec.entity_counts.hydro_ids[plant_idx];
-        let in_transit_volume_hm3 = view.primal[state.transit_buckets_out.start + b];
+        let in_transit_volume_hm3 = view.primal[state.bucket_outgoing_col(b).get()];
         let delayed_arrival_hm3 = if lag == 1 {
-            view.primal[state.transit_buckets_in.start + b]
+            view.primal[state.bucket_incoming_col(b).get()]
         } else {
             0.0
         };
@@ -523,7 +523,7 @@ fn extract_hydro_no_turbine(
     let incremental_inflow = if h < spec.inflow_m3s_per_hydro.len() {
         spec.inflow_m3s_per_hydro[h]
     } else if state.max_par_order > 0 {
-        view.primal[state.inflow_lags.start + h]
+        view.primal[state.lag_incoming_col(0, h).get()]
     } else {
         0.0
     };
@@ -605,8 +605,8 @@ fn extract_hydro_no_turbine(
         .energy_conversion
         .accumulated_productivity(h, spec.stage_index);
     let v_min = spec.hydro_min_storage_hm3.get(h).copied().unwrap_or(0.0);
-    let storage_initial = view.primal[state.storage_in.start + h];
-    let storage_final = view.primal[state.storage.start + h];
+    let storage_initial = view.primal[state.storage_incoming_col(h).get()];
+    let storage_final = view.primal[state.storage_outgoing_col(h).get()];
 
     let filling_target_violation = read_filling_target_slack_primal(
         view.primal,
@@ -703,12 +703,12 @@ impl HydroStageContext {
     ) -> Self {
         let study_dims = spec.study_dims;
         let state = spec.state;
-        let storage_final = view.primal[state.storage.start + h];
-        let storage_initial = view.primal[state.storage_in.start + h];
+        let storage_final = view.primal[state.storage_outgoing_col(h).get()];
+        let storage_initial = view.primal[state.storage_incoming_col(h).get()];
         let incremental_inflow = if h < spec.inflow_m3s_per_hydro.len() {
             spec.inflow_m3s_per_hydro[h]
         } else if state.max_par_order > 0 {
-            view.primal[state.inflow_lags.start + h]
+            view.primal[state.lag_incoming_col(0, h).get()]
         } else {
             0.0
         };
@@ -1781,7 +1781,7 @@ fn extract_stub_collections(
                     stage_id,
                     hydro_id,
                     lag_index: l as u32,
-                    inflow_m3s: view.primal[state.inflow_lags.start + l * state.hydro_count + h],
+                    inflow_m3s: view.primal[state.lag_incoming_col(l, h).get()],
                 }
             })
         })
