@@ -219,17 +219,15 @@ fn load_artifacts_for_hydro_models(case_dir: &Path) -> Result<CaseArtifacts, Sdd
     clippy::panic
 )]
 mod tests {
-    // ── 2-rank parity test ────────────────────────────────────────────────────
+    // ── cross-path parity test ────────────────────────────────────────────────
 
-    /// Simulates two independent MPI ranks both calling `prepare_hydro_models` on
-    /// a computed-FPHA case (d07-fpha-computed). Asserts that `fpha_export_rows` is
-    /// non-empty and bit-identical between the two calls, confirming that the
-    /// preprocessing is deterministic and rank-independent.
-    ///
-    /// No real MPI is used. The test simply calls `prepare_hydro_models` twice from
-    /// the same source data and compares the results.
+    /// `cobre-cli` builds hydro models two ways: rank 0 from the already-parsed
+    /// artifacts (`prepare_hydro_models_from_artifacts`), non-root ranks by
+    /// re-reading the case directory (`prepare_hydro_models`). This pins that the
+    /// two agree on a computed-FPHA case, where geometry-derived hyperplane fitting
+    /// — not a precomputed passthrough — gives the loaders the most room to diverge.
     #[test]
-    fn prepare_hydro_models_fpha_export_rows_are_identical_across_ranks() {
+    fn prepare_hydro_models_from_artifacts_matches_prepare_hydro_models_for_computed_fpha() {
         let case_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("cobre-sddp parent dir must exist")
@@ -237,23 +235,31 @@ mod tests {
             .expect("crates parent dir must exist")
             .join("examples/deterministic/d07-fpha-computed");
 
-        let system =
-            cobre_io::load_case(&case_dir).expect("d07-fpha-computed must load successfully");
+        let cobre_io::LoadedCase { system, artifacts } =
+            cobre_io::load_case_with_artifacts(&case_dir)
+                .expect("d07-fpha-computed must load successfully");
 
-        let result_rank0 = super::prepare_hydro_models(&system, &case_dir, false)
-            .expect("prepare_hydro_models must succeed for rank 0");
-
-        let result_rank1 = super::prepare_hydro_models(&system, &case_dir, false)
-            .expect("prepare_hydro_models must succeed for rank 1");
+        let from_artifacts =
+            super::prepare_hydro_models_from_artifacts(&system, &artifacts, false, None)
+                .expect("prepare_hydro_models_from_artifacts must succeed");
+        let from_disk = super::prepare_hydro_models(&system, &case_dir, false)
+            .expect("prepare_hydro_models must succeed");
 
         assert!(
-            !result_rank0.fpha_export_rows.is_empty(),
-            "rank 0: fpha_export_rows must be non-empty for a computed-FPHA case"
+            !from_artifacts.fpha_export_rows.is_empty(),
+            "rank 0 path: fpha_export_rows must be non-empty for a computed-FPHA case"
+        );
+        assert_eq!(
+            from_artifacts.fpha_export_rows, from_disk.fpha_export_rows,
+            "fpha_export_rows must be bit-identical between prepare_hydro_models_from_artifacts \
+             (rank 0's artifact-reuse path) and prepare_hydro_models (the non-root disk-reread path)"
         );
 
+        let summary_from_artifacts = super::build_hydro_model_summary(&from_artifacts, &system);
+        let summary_from_disk = super::build_hydro_model_summary(&from_disk, &system);
         assert_eq!(
-            result_rank0.fpha_export_rows, result_rank1.fpha_export_rows,
-            "fpha_export_rows must be bit-identical across ranks (deterministic preprocessing)"
+            summary_from_artifacts.total_planes, summary_from_disk.total_planes,
+            "total FPHA plane count must match between the two hydro-model construction paths"
         );
     }
 
