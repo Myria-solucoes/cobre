@@ -1371,7 +1371,7 @@ fn setup_user_ar_case(
 /// user-owned), but its `residual_std_ratio` column is now superseded by the
 /// periodic-ACF closure (`populate_derived_residual_ratios`) — for this
 /// uniform-AR(1) two-season fixture the closure decouples exactly to
-/// `r = sqrt(1 - coefficient^2)` (Epic 01 T1), a value deliberately different
+/// `r = sqrt(1 - coefficient^2)`, a value deliberately different
 /// from `KNOWN_RATIO` here, so the assertion below also proves the stale
 /// user-column value no longer reaches the returned `System`.
 #[test]

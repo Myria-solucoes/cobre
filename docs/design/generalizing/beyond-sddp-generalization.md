@@ -148,6 +148,11 @@ graph TD
     comm --> cli
     stoch --> cli
     sddp --> cli
+    core --> py
+    io --> py
+    solver --> py
+    comm --> py
+    stoch --> py
     sddp --> py
 
     uc[cobre-uc<br/>stub]

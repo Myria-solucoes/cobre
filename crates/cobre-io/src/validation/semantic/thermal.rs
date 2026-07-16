@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use cobre_core::commissioning::commissioning_active;
 use cobre_core::{AnticipatedCommitmentHistory, AnticipatedConfig, EntityId, Thermal, VariableRef};
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
@@ -339,10 +340,10 @@ fn check_committed_value_bounds(
 /// equality reads `0 == seed` — an infeasible LP. A zero seed is consistent at
 /// any stage and allowed.
 ///
-/// The half-open `entry <= id < exit` predicate mirrors the LP builder's
-/// `commissioning_active` (the solver crate cannot be a dependency here); a drift
-/// would let an infeasible seed past validation. `study_stage_ids[k]` is the
-/// `k`-th pre-study-committed delivery stage for either lead mode (see
+/// The window predicate is the LP builder's own
+/// `cobre_core::commissioning::commissioning_active`, so validation and the
+/// builder cannot drift on what an infeasible seed is. `study_stage_ids[k]` is
+/// the `k`-th pre-study-committed delivery stage for either lead mode (see
 /// `required_anticipated_commitment_count`), so no per-mode branch is needed here.
 fn check_seed_within_window(
     thermal: &Thermal,
@@ -366,8 +367,7 @@ fn check_seed_within_window(
             // indexes a study stage; defence in depth, never fires for valid input.
             continue;
         };
-        let in_window = entry.is_none_or(|e| e <= stage_id) && exit.is_none_or(|e| stage_id < e);
-        if !in_window {
+        if !commissioning_active(entry, exit, stage_id) {
             ctx.add_error(
                 ErrorKind::BusinessRuleViolation,
                 "initial_conditions.json",

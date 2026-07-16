@@ -503,6 +503,65 @@ impl StateSpace {
         InCol::new(self.incoming_block_start(region) + offset)
     }
 
+    /// `region`'s incoming pinned-block column range.
+    fn incoming_block_range(&self, region: StateRegion) -> Range<usize> {
+        let start = self.incoming_block_start(region);
+        start..start + self.state_dim_range(region).len()
+    }
+
+    /// Inverse of [`Self::state_to_lp_incoming_column`]: the region and
+    /// in-region offset owning pinned column `c`. Total for the same reason
+    /// as [`Self::classify`].
+    #[must_use]
+    pub(crate) fn classify_incoming_column(&self, c: InCol) -> (StateRegion, usize) {
+        let c = c.get();
+        let region = REGION_ORDER
+            .into_iter()
+            .find(|&region| self.incoming_block_range(region).contains(&c))
+            .unwrap_or(StateRegion::Anticipated);
+        (region, c - self.incoming_block_start(region))
+    }
+
+    fn storage_state_dim(&self, h: usize) -> StateDim {
+        debug_assert!(h < self.hydro_count);
+        StateDim::new(self.state_dim_storage_range().start + h)
+    }
+
+    /// Incoming (stage-initial) storage column of hydro `h`.
+    #[must_use]
+    pub(crate) fn storage_incoming_col(&self, h: usize) -> InCol {
+        self.state_to_lp_incoming_column(self.storage_state_dim(h))
+    }
+
+    /// Outgoing (stage-final) storage column of hydro `h`.
+    #[must_use]
+    pub(crate) fn storage_outgoing_col(&self, h: usize) -> OutCol {
+        self.state_to_lp_column(self.storage_state_dim(h))
+    }
+
+    /// Incoming pinned lag column of hydro `h` at `lag` (lag-major block).
+    #[must_use]
+    pub(crate) fn lag_incoming_col(&self, lag: usize, h: usize) -> InCol {
+        debug_assert!(lag < self.max_par_order && h < self.hydro_count);
+        let start = self.state_dim_lag_range().start;
+        self.state_to_lp_incoming_column(StateDim::new(start + lag * self.hydro_count + h))
+    }
+
+    /// Incoming pinned bucket column of bucket `b`
+    /// ([`Self::transit_bucket_column_order`] order).
+    #[must_use]
+    pub(crate) fn bucket_incoming_col(&self, b: usize) -> InCol {
+        debug_assert!(b < self.n_buckets);
+        self.state_to_lp_incoming_column(StateDim::new(self.state_dim_bucket_range().start + b))
+    }
+
+    /// Outgoing bucket column of bucket `b`.
+    #[must_use]
+    pub(crate) fn bucket_outgoing_col(&self, b: usize) -> OutCol {
+        debug_assert!(b < self.n_buckets);
+        self.state_to_lp_column(StateDim::new(self.state_dim_bucket_range().start + b))
+    }
+
     /// Compute and store [`Self::nonzero_state_indices`] from per-hydro
     /// lag-slot counts and per-plant anticipated lead-stage counts.
     ///
@@ -1449,5 +1508,51 @@ mod tests {
             anticipated.end, idx.n_state,
             "anticipated region must end exactly at n_state (no trailing gap)"
         );
+    }
+
+    /// [`StateSpace::classify_incoming_column`] must invert
+    /// [`StateSpace::state_to_lp_incoming_column`] for every state dimension,
+    /// with every region non-empty.
+    #[test]
+    fn classify_incoming_column_inverts_incoming_resolver() {
+        let idx = finalized_with_transit_buckets(3, 2, 2, vec![(0, 1), (0, 2)], 2, 2, vec![1, 2]);
+        for j in 0..idx.n_state {
+            let dim = StateDim::new(j);
+            let (region, offset) =
+                idx.classify_incoming_column(idx.state_to_lp_incoming_column(dim));
+            assert_eq!(
+                idx.state_dim_range(region).start + offset,
+                j,
+                "incoming classification must round-trip state dim {j}"
+            );
+        }
+    }
+
+    /// The purpose-named column accessors resolve to the same columns as the
+    /// raw range arithmetic they replaced at the extraction and manifest
+    /// seams — the byte-neutrality pin for that migration.
+    #[test]
+    fn typed_state_col_accessors_match_block_layout() {
+        let idx = finalized_with_transit_buckets(3, 2, 2, vec![(0, 1), (0, 2)], 2, 2, vec![1, 2]);
+        for h in 0..idx.hydro_count {
+            assert_eq!(idx.storage_incoming_col(h).get(), idx.storage_in.start + h);
+            assert_eq!(idx.storage_outgoing_col(h).get(), idx.storage.start + h);
+            for lag in 0..idx.max_par_order {
+                assert_eq!(
+                    idx.lag_incoming_col(lag, h).get(),
+                    idx.inflow_lags.start + lag * idx.hydro_count + h
+                );
+            }
+        }
+        for b in 0..idx.n_buckets {
+            assert_eq!(
+                idx.bucket_incoming_col(b).get(),
+                idx.transit_buckets_in.start + b
+            );
+            assert_eq!(
+                idx.bucket_outgoing_col(b).get(),
+                idx.transit_buckets_out.start + b
+            );
+        }
     }
 }

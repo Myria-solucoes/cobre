@@ -32,6 +32,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   study with heterogeneous per-season AR order sees its sampled residuals
   standardized by a correspondingly shifted `σ` (~`1e-4`).
 
+### Fixed
+
+- **A non-stationary fitted inflow model now fails the load with a named
+  error instead of silently corrupting scenarios.** When history estimation
+  produces AR coefficients whose implied residual variance is negative (a
+  degenerate near-unit-root fit), the closure-derived `residual_std_ratio`
+  is non-finite; loading previously wrote that `NaN` into the model — user-
+  supplied coefficient files were already rejected by the stationarity
+  validation rule, but internally-estimated coefficients bypassed it. The
+  derivation now hard-errors, naming the hydro and season.
+
 ## [0.10.0] - 2026-07-10
 
 ### Added

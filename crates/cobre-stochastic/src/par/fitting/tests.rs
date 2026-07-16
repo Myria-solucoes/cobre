@@ -2891,6 +2891,51 @@ fn conditional_facp_partitioned_empty_for_zero_max_order() {
     );
 }
 
+/// A conditional-FACP lag deeper than the season cycle (`k >= n_seasons + 2`,
+/// here a 2-season cycle probed at the default `max_order = 6`) must produce
+/// finite values, not underflow the season index of `Z_{t-1-j}` — the lag
+/// season wraps around the cycle exactly like the guarded conditioning-set
+/// walk above it.
+#[test]
+fn conditional_facp_partitioned_deep_lag_wraps_season_index() {
+    let n_years = 20_usize;
+    let z0: Vec<f64> = (0..n_years)
+        .map(|i| (i as f64).sin() * 3.0 + 0.1 * i as f64)
+        .collect();
+    let z1: Vec<f64> = (0..n_years)
+        .map(|i| (i as f64).cos() * 2.5 - 0.05 * i as f64)
+        .collect();
+    let a0: Vec<f64> = (0..n_years).map(|i| 5.0 + 0.2 * (i as f64).sin()).collect();
+    let a1: Vec<f64> = (0..n_years).map(|i| 3.0 - 0.1 * (i as f64).cos()).collect();
+
+    let obs: &[&[f64]] = &[&z0, &z1];
+    let stats = [pop_mean_std_ann(&z0), pop_mean_std_ann(&z1)];
+    let ann_obs: &[&[f64]] = &[&a0, &a1];
+    let ann_stats = [pop_mean_std_ann(&a0), pop_mean_std_ann(&a1)];
+
+    for season in 0..2_usize {
+        let cond = conditional_facp_partitioned(
+            season,
+            6,
+            2,
+            obs,
+            &stats,
+            &[0_i32; 32],
+            ann_obs,
+            &ann_stats,
+            &[0_i32; 32],
+        );
+        assert_eq!(cond.len(), 6, "season {season}: FACP must cover every lag");
+        for (k, v) in cond.iter().enumerate() {
+            assert!(
+                v.is_finite(),
+                "season {season} lag {}: FACP must be finite, got {v}",
+                k + 1
+            );
+        }
+    }
+}
+
 /// When A is a constant series (std = 0), all cross-correlations
 /// involving A are 0.0. At k=1 the conditioning set is just {A_{t-1}} and
 /// Σ_22 = [[1.0]], Σ_12[:,0] = [0, 0]. The Schur complement reduces to
