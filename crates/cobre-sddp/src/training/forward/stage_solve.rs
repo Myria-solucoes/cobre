@@ -87,7 +87,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         training_ctx,
         t,
         &prep_params,
-    );
+    )?;
     // Zero theta at the terminal stage (no successor to penalise), but NOT when
     // boundary cuts are loaded — those constrain theta from below and must stay
     // visible in the objective.

@@ -581,3 +581,52 @@ training and simulating both `LeadTime` and `LeadStages` configurations of
 the same calendar to bit-identical solutions), and
 `a1c_lead_stages_is_pure_index_shift` (pins the delivery-anchored decider
 `c(m) = m - lead` those bounds are read against).
+
+### Delivered commitments reconcile against solver drift; exactness is unreachable
+
+Delivery-anchoring keeps the committed value inside the delivery stage's
+generation bounds **in exact arithmetic only**. The value that actually reaches
+the delivery stage is the solver's computed value for a **basic** ring-slot
+column: `slot_out` is defined by an equality row (`slot_out − decision = 0`, or
+the interior shift), so the simplex produces it through the basis factorization,
+and it is accurate only to the backend's `primal_feasibility_tolerance` (`1e-9`
+on HiGHS and CLP) — never to 1 ULP. A commitment at its cap therefore arrives a
+hair outside it, and the fishing equality's no-slack pin turns that hair into
+`SddpError::Infeasible`: a false infeasibility over a physically meaningless
+quantity that aborts training outright.
+
+`StageSolvePrep::run` therefore reconciles every pinned commitment against the
+delivery generation column's **enforced** bound (`col_upper * col_scale`, the
+round-tripped value the solver applies — not the template's raw `max_gen`),
+relaxing the column just far enough to admit drift within `drift_margin`. Drift
+beyond that margin is `SddpError::AnticipatedCommitmentOutOfBounds`, never
+absorbed: the margin is the discrimination line between solver noise and a
+modelling error, and a guard that relaxes for ANY overshoot silently admits a
+plant generating past its cap.
+
+Two forbidden alternatives, both of which have shipped:
+
+- **Deleting the reconciliation on the premise that unscaling makes it
+  redundant.** `apply_anticipated_col_scale_unscale` (`col_scale = 1.0` on
+  `anticipated_slots_out ∪ anticipated_state`) removes the ring _carry_ drift and
+  is retained — the carry is bit-exact and the decision column's own value is
+  bit-exact at its bound. It cannot remove the drift the basis factorization
+  introduces at the deposit row, because exactness there is the solver's to give
+  and it does not give it. No amount of unscaling closes this.
+- **Making the reconciliation an opt-in hook.** It is not a variation point and
+  takes no parameter: `run` derives its own gate, so all four solve sites (forward,
+  backward, lower bound, simulation) get it and none can opt out. An
+  `Option<..Ctx>` hook threaded per call site is what let all four silently lose it
+  in one commit.
+
+Read: `lp/builder/commitment_reconcile.rs` (`reconcile_commitment`,
+`fill_bound_relaxations`, `drift_margin`), `training/stage_solve_prep.rs`
+(`StageSolvePrep::reconcile_commitments`), `lp/builder/scaling.rs`
+(`apply_anticipated_col_scale_unscale`). Pinned by
+`anticipated_commitment_drifted_over_cap_is_absorbed` (a seed a hair past the cap
+trains; it returns `Infeasible` the moment the reconciliation is disabled) and
+`anticipated_commitment_over_cap_seed_is_refused` (a genuine over-commitment is
+named, not absorbed). `anticipated_commitment_at_cap_survives_ring_carry` does
+NOT pin this contract and must never be mistaken for it: a seed exactly at the cap
+carries zero drift, never reaches the reconciliation, and stays green with the
+guard deleted — an at-cap-only suite is what let this regression ship.

@@ -2487,15 +2487,22 @@ mod d37_anticipated_commissioning_simulation {
 
 mod anticipated_commitment_at_cap {
     //! Regression: the must-generate fishing equality (`Σ_b h_b·gen_b =
-    //! H·commitment`) pins a delivery-stage anticipated generation column to
-    //! the ring-carried commitment with no slack, so relatively-complete
-    //! recourse requires the commitment lie within the delivery stage's own
-    //! `[min_gen, max_gen]`. A pre-study commitment seeded exactly at the
-    //! delivery cap and carried through a K=2 in-LP ring trains feasible: the
-    //! ring's incoming-state columns are unscaled, so the pin-then-fish
-    //! round-trip reproduces the seed bit-exact. A commitment genuinely above
-    //! the cap is an invalid pre-study seed with no in-LP recourse and trains
-    //! infeasible at its delivery stage.
+    //! H·commitment`) pins a delivery-stage anticipated generation column to the
+    //! ring-carried commitment with no slack, so feasibility requires the
+    //! commitment lie within the delivery stage's own `[min_gen, max_gen]`.
+    //!
+    //! Three seeds carried through a `K = 2` in-LP ring pin the whole contract:
+    //! at the cap (feasible unrelaxed — no patch, so parity holds); a hair over it
+    //! by less than the solver's own primal feasibility tolerance (feasible only
+    //! because `commitment_reconcile` relaxes the delivery bound — this is the
+    //! drift a carried commitment genuinely carries, since the ring slot is a
+    //! solver-computed BASIC variable, and it is what makes the reconciliation
+    //! permanent); and genuinely over the cap (a modelling error, refused as
+    //! `AnticipatedCommitmentOutOfBounds` rather than absorbed).
+    //!
+    //! Seeding exactly at the cap alone is NOT sufficient coverage: zero drift
+    //! never reaches the reconciliation, so an at-cap-only suite stays green while
+    //! studies whose commitments drift abort on a false infeasibility.
 
     use cobre_core::entities::{
         bus::DeficitSegment,
@@ -2531,8 +2538,12 @@ mod anticipated_commitment_at_cap {
 
     const CAP_MW: f64 = 100.0;
     const AT_CAP_SEED_MW: f64 = CAP_MW;
-    /// `1e-6` (relative) over the cap — comfortably above any pin/fish round-trip
-    /// noise, so the infeasibility is deterministic.
+    /// `1e-12` (relative) over the cap: above the ring's own round-trip noise
+    /// (`~1e-16`) so the fail-without/pass-with split is deterministic, and below the
+    /// reconciliation's headroom so it is absorbed rather than refused.
+    const DRIFTED_SEED_MW: f64 = CAP_MW * (1.0 + 1e-12);
+    /// `1e-6` (relative) over the cap — orders of magnitude past any solver drift, so
+    /// it is a modelling error, not noise.
     const OVER_CAP_SEED_MW: f64 = CAP_MW * (1.0 + 1e-6);
 
     fn build_system(seed_mw: f64) -> cobre_core::System {
@@ -2846,8 +2857,31 @@ mod anticipated_commitment_at_cap {
         );
     }
 
+    /// Fails without `commitment_reconcile`: the delivery LP reports `Infeasible` over
+    /// a drift the solver itself would report as feasible.
     #[test]
-    fn anticipated_commitment_over_cap_seed_is_infeasible() {
+    fn anticipated_commitment_drifted_over_cap_is_absorbed() {
+        let system = build_system(DRIFTED_SEED_MW);
+        let config = build_config();
+        let mut setup = build_setup_in_code(system, &config);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+
+        let outcome = setup
+            .train(&mut solver, &comm, 4, ActiveSolver::new, None, None)
+            .expect("train must not return Err");
+
+        assert!(
+            outcome.error.is_none(),
+            "a commitment carried a sub-tolerance hair past its delivery cap must \
+             train: the overshoot is numerical drift, not an over-commitment, and \
+             refusing it aborts training on a physically meaningless quantity. Got: {:?}",
+            outcome.error
+        );
+    }
+
+    #[test]
+    fn anticipated_commitment_over_cap_seed_is_refused() {
         let system = build_system(OVER_CAP_SEED_MW);
         let config = build_config();
         let mut setup = build_setup_in_code(system, &config);
@@ -2859,9 +2893,12 @@ mod anticipated_commitment_at_cap {
             .expect("train must not return Err");
 
         assert!(
-            matches!(outcome.error, Some(SddpError::Infeasible { stage: 0, .. })),
-            "a pre-study commitment above its delivery cap must be infeasible at \
-             its stage-0 delivery, got: {:?}",
+            matches!(
+                outcome.error,
+                Some(SddpError::AnticipatedCommitmentOutOfBounds { stage: 0, .. })
+            ),
+            "a commitment genuinely above its delivery cap must be refused by name, \
+             never absorbed as drift and never reported as a bare Infeasible, got: {:?}",
             outcome.error
         );
     }

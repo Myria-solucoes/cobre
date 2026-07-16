@@ -175,7 +175,7 @@ impl StageOpeningSolver {
         omega: usize,
         is_first: bool,
     ) -> Result<(), SddpError> {
-        patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s);
+        patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s)?;
 
         // Moved out before the solve to avoid a borrow conflict with `view`'s
         // lifetime; pre-warmed capacity is reused across openings.
@@ -288,7 +288,7 @@ impl StageOpeningSolver {
         let core = &ctx.templates[s];
         let col_scale = &ctx.templates[s].col_scale;
 
-        patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s);
+        patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s)?;
 
         let mut stats_before_omega = std::mem::take(&mut ws.backward_accum.stats_before_buf);
         ws.solver.statistics_into(&mut stats_before_omega);

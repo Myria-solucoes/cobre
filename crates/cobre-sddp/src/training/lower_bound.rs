@@ -255,7 +255,7 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
             training_ctx,
             0,
             &prep_params,
-        );
+        )?;
 
         let view = solver.solve(None).map_err(|e| match e {
             SolverError::Infeasible => SddpError::Infeasible {

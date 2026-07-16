@@ -6,6 +6,7 @@ use cobre_solver::SolverInterface;
 
 use crate::{
     context::{StageContext, TrainingContext},
+    error::SddpError,
     training::stage_solve_prep::{
         InflowNoise, LoadNoise, OpeningMode, StageSolvePrep, StageSolvePrepParams, StateSource,
     },
@@ -34,6 +35,11 @@ pub(crate) fn load_backward_lp<S: SolverInterface + Send>(
 ///
 /// The LP structure is already loaded by [`load_backward_lp`]; this delegates to
 /// [`StageSolvePrep::run`], pinning `x_hat` as the incoming state.
+///
+/// # Errors
+///
+/// Propagates [`SddpError::AnticipatedCommitmentOutOfBounds`] when `x_hat` carries a
+/// commitment outside its delivery generation bound by more than solver drift.
 pub(crate) fn patch_opening_bounds<S: SolverInterface + Send>(
     ws: &mut SolverWorkspace<S>,
     ctx: &StageContext<'_>,
@@ -41,7 +47,7 @@ pub(crate) fn patch_opening_bounds<S: SolverInterface + Send>(
     raw_noise: &[f64],
     x_hat: &[f64],
     s: usize,
-) {
+) -> Result<(), SddpError> {
     let prep_params = StageSolvePrepParams {
         state_source: StateSource(x_hat),
         opening_mode: OpeningMode::PerOpening,
@@ -57,7 +63,7 @@ pub(crate) fn patch_opening_bounds<S: SolverInterface + Send>(
         training_ctx,
         s,
         &prep_params,
-    );
+    )
 }
 
 /// Resolve the ω=0 warm-start basis from the worker's `BasisStoreSliceMut`.

@@ -1,3 +1,4 @@
+use super::commitment_reconcile::BoundRelaxations;
 use crate::indexer::{BlockGrid, BlockIdx, StateDim, StateSpace};
 
 /// Pre-allocated row-bound and column-bound patch arrays for one SDDP stage LP solve.
@@ -36,6 +37,14 @@ pub struct PatchBuffer {
 
     /// New upper bounds for each patched column in the column-bound region.
     pub col_upper: Vec<f64>,
+
+    /// Delivery generation-column bound relaxations absorbing solver-tolerance
+    /// commitment drift; empty (no `set_col_bounds`) whenever every commitment is
+    /// in bounds, so parity is preserved. Filled by
+    /// [`commitment_reconcile::fill_bound_relaxations`].
+    ///
+    /// [`commitment_reconcile::fill_bound_relaxations`]: super::commitment_reconcile::fill_bound_relaxations
+    pub commitment_relax: BoundRelaxations,
 
     /// Number of operating hydro plants (N).
     hydro_count: usize,
@@ -148,6 +157,7 @@ impl PatchBuffer {
             col_indices: vec![0; col_capacity],
             col_lower: vec![0.0; col_capacity],
             col_upper: vec![0.0; col_capacity],
+            commitment_relax: BoundRelaxations::default(),
             hydro_count,
             max_par_order,
             load_bus_count: n_load_buses,

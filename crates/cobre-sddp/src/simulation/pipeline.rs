@@ -374,7 +374,8 @@ fn solve_simulation_stage<S: SolverInterface>(
         training_ctx,
         t,
         &prep_params,
-    );
+    )
+    .map_err(|e| SimulationError::SolvePrep(e.to_string()))?;
     // stage_id (the commissioning key the dormancy predicate compares NCS windows
     // against), NOT the stage index `t`: they differ when negative-id placeholder
     // stages are filtered out.
