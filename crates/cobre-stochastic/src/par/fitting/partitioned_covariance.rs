@@ -117,8 +117,10 @@ pub(crate) fn assemble_partitioned_covariance(
 
     // Row 1, position j = Corr(Z_{t−k}, Z_{t−1−j}): Z_{t−1−j} is the newer of the
     // two, so ρ_periodic is anchored at its season with lag = (k−1) − j.
+    // `(1 + j) % n_seasons` prevents underflow when a lag exceeds the season
+    // cycle (k ≥ n_seasons + 2), matching the conditioning-set walk above.
     for (j, entry) in sigma_12[k..k + k.saturating_sub(1)].iter_mut().enumerate() {
-        let ref_season = (season + n_seasons - 1 - j) % n_seasons;
+        let ref_season = (season + n_seasons - (1 + j) % n_seasons) % n_seasons;
         let lag = k.saturating_sub(1).saturating_sub(j);
         let rho = periodic_autocorrelation(ref_season, lag, n_seasons, obs_z, stats_z);
         *entry = rho;
