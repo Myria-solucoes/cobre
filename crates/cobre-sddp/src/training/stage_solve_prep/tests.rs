@@ -388,7 +388,8 @@ fn run_matches_open_coded_forward_block_for_minimal_fixture() {
         &training_ctx,
         0,
         &params,
-    );
+    )
+    .expect("fixture commitments are in bounds; reconciliation must not reject");
 
     assert_eq!(
         owner_solver.col_bounds_calls, reference_solver.col_bounds_calls,
@@ -676,7 +677,8 @@ fn run_wires_ncs_patch_matching_pre_collapse_inline_pattern() {
         &training_ctx,
         0,
         &params,
-    );
+    )
+    .expect("fixture commitments are in bounds; reconciliation must not reject");
 
     assert_eq!(
         owner_solver.col_bounds_calls.last(),
@@ -780,7 +782,8 @@ fn run_skips_load_and_inflow_transform_under_absent_and_prebuilt() {
         &training_ctx,
         0,
         &params,
-    );
+    )
+    .expect("fixture commitments are in bounds; reconciliation must not reject");
 
     assert_eq!(
         scratch.noise_buf,

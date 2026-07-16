@@ -43,6 +43,7 @@
 use cobre_core::ConstraintSense;
 
 mod columns;
+pub(crate) mod commitment_reconcile;
 pub(crate) mod delivery_ring;
 mod entries;
 mod fpha_cursor;
@@ -56,6 +57,7 @@ mod template;
 mod test_support;
 
 // --- Public re-exports (stable API) ---
+pub use commitment_reconcile::BoundRelaxations;
 pub use patch::PatchBuffer;
 #[cfg(any(test, feature = "test-support"))]
 pub use template::build_stage_templates_resolving_layout;

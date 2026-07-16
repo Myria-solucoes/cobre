@@ -4542,7 +4542,8 @@ fn patch_opening_bounds_pins_transit_bucket_incoming_columns_per_stage_visit() {
     let raw_noise: Vec<f64> = Vec::new();
     let mut ws = transit_bucket_only_workspace(MockSolver::always_ok(solution_1_0(0.0, 0.0)), 2);
 
-    super::patch_opening_bounds(&mut ws, &ctx, &training_ctx, &raw_noise, &x_hat, 0);
+    super::patch_opening_bounds(&mut ws, &ctx, &training_ctx, &raw_noise, &x_hat, 0)
+        .expect("fixture commitments are in bounds; reconciliation must not reject");
 
     let cp = ws.patch_buf.state_col_patch_count();
     assert_eq!(

@@ -34,6 +34,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A study whose anticipated thermal commitment reaches its delivery
+  generation cap now trains instead of aborting as infeasible.** The
+  commitment a delivery stage receives is the solver's computed value for a
+  ring state column, so it is accurate only to the backend's primal
+  feasibility tolerance rather than exact. It can therefore arrive a hair
+  outside the generation bound the must-generate coupling pins it to, and the
+  stage LP was reported infeasible over a physically meaningless quantity,
+  ending the run. The delivery generation bound is now reconciled against that
+  drift on every solve. A commitment genuinely beyond its cap is unaffected:
+  it is refused as a named error identifying the thermal, stage, and
+  overshoot, never absorbed and never reported as a bare infeasibility.
+
 - **A non-stationary fitted inflow model now fails the load with a named
   error instead of silently corrupting scenarios.** When history estimation
   produces AR coefficients whose implied residual variance is negative (a

@@ -65,6 +65,12 @@ pub enum SimulationError {
     /// does not match `num_stages`.
     #[error("invalid simulation configuration: {0}")]
     InvalidConfiguration(String),
+
+    /// Stage-LP solve preparation rejected the pinned state, e.g. a policy
+    /// commitment outside its delivery generation bound. The detailed type is
+    /// [`SddpError`], stringified here — the mirror of [`SddpError::Simulation`].
+    #[error("stage solve preparation error: {0}")]
+    SolvePrep(String),
 }
 
 impl From<SimulationError> for SddpError {
