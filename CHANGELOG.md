@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-07-16
+
 ### Changed
 
 - **`residual_std_ratio` is now derived, not trusted, whenever
@@ -31,6 +33,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code but now reads the closure-derived `r` above it, so a `historical`
   study with heterogeneous per-season AR order sees its sampled residuals
   standardized by a correspondingly shifted `σ` (~`1e-4`).
+- The spectral-clipping diagnostic emitted while estimating correlation
+  matrices is logged at debug level instead of warn: a finite-sample
+  correlation estimate is routinely indefinite and clipping to the nearest
+  positive-semidefinite factor is the expected remedy, so healthy studies no
+  longer warn on every run. The largest negative eigenvalue magnitude stays
+  on the debug record.
 
 ### Fixed
 
@@ -54,6 +62,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   supplied coefficient files were already rejected by the stationarity
   validation rule, but internally-estimated coefficients bypassed it. The
   derivation now hard-errors, naming the hydro and season.
+- **Multi-rank training with an auto-generated opening tree now derives the
+  same tree on every rank.** The tree is regenerated locally per rank, but
+  only rank 0 passed the noise-group ids that make consecutive stages
+  sharing a `(season, year)` group reuse one noise draw — its peers drew
+  independently, solved against different openings, and exchanged cuts for
+  models that disagreed. Uniform monthly studies were unaffected (every
+  group is unique there); a weekly study placing several stages in one
+  season triggered it. Both sides now derive the ids from the broadcast
+  system through one owner.
+- **Multi-rank runs no longer overstate the lower bound through empty
+  entity lookups on non-root ranks.** `System`'s lookup indices are derived
+  data skipped by serialization, and the broadcast path left them empty on
+  every rank but 0 — downstream, a missing downstream-hydro lookup fell
+  back to a different tailrace, so non-root ranks fitted different FPHA
+  planes, built structurally different LPs, and rejected rank 0's
+  warm-start basis; lower bounds came out roughly 3% above the true value.
+  The indices are now rebuilt as part of deserialization itself.
+- **A stored policy basis with too few basic entries is rejected with a
+  named error instead of being handed to the solver.** A deficit proves the
+  basis was captured against a differently-shaped LP; previously HiGHS
+  aborted on it while CLP silently accepted it — the same defect was a hard
+  abort on one backend and a silent wrong answer on the other. Both now
+  reject it identically, reporting the basic-count arithmetic.
+- **A rank failing under MPI now prints its own error before aborting.**
+  The abort path bypassed error rendering, so a failed run reported only
+  the launcher's bare abort code — and, since ranks abort in lockstep,
+  often from a peer echoing the failure rather than the rank that caused
+  it. The failing rank's rendered error now reaches stderr first.
+- **PAR history estimation no longer panics when the fitting lag depth
+  exceeds the season cycle.** Evaluating a candidate lag `k ≥ n_seasons + 2`
+  (reachable at the default `max_order = 6` with a short season cycle, e.g.
+  two seasons) underflowed a season index in the conditional-FACP
+  covariance and aborted the fit in debug builds. The lag season now wraps
+  around the cycle; in-range lags are computed identically.
 
 ## [0.10.0] - 2026-07-10
 
@@ -2539,7 +2581,8 @@ disappears from `cobre.results.load_policy` per-cut dicts.
 
 <!-- next-url -->
 
-[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/cobre-rs/cobre/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/cobre-rs/cobre/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/cobre-rs/cobre/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/cobre-rs/cobre/compare/v0.8.2...v0.9.0
