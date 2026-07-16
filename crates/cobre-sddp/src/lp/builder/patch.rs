@@ -41,9 +41,7 @@ pub struct PatchBuffer {
     /// Delivery generation-column bound relaxations absorbing solver-tolerance
     /// commitment drift; empty (no `set_col_bounds`) whenever every commitment is
     /// in bounds, so parity is preserved. Filled by
-    /// [`commitment_reconcile::fill_bound_relaxations`].
-    ///
-    /// [`commitment_reconcile::fill_bound_relaxations`]: super::commitment_reconcile::fill_bound_relaxations
+    /// `commitment_reconcile::fill_bound_relaxations`.
     pub commitment_relax: BoundRelaxations,
 
     /// Number of operating hydro plants (N).

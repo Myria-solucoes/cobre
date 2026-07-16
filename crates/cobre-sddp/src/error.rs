@@ -67,8 +67,8 @@ pub enum SddpError {
 
     /// A pinned anticipated commitment lies outside the delivery stage's
     /// generation bounds by more than solver-tolerance drift, so it is a
-    /// modelling error rather than a numerical artifact. See
-    /// [`commitment_reconcile`](crate::lp_builder::commitment_reconcile).
+    /// modelling error rather than a numerical artifact. See the
+    /// `commitment_reconcile` module in the LP builder.
     #[error(
         "anticipated commitment {commitment} MW for thermal {thermal_index} at stage {stage} \
          block {block} lies {drift} MW outside its delivery generation bound {bound} — beyond \
