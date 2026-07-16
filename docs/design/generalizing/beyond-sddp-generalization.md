@@ -76,8 +76,9 @@ irreversible break:
 0. **Seam + second consumer** — add the engine-selection seam and ship deterministic
    **economic dispatch** on the _existing_ case format; carve the `cobre-model`
    formulation kernel from the engine-neutral parts of `cobre-sddp`'s LP machinery —
-   priced as new construction informed by existing code (IV.2), with its timing an
-   explicit fork (VI, D12). Proves the abstraction with two real consumers before
+   priced as new construction informed by existing code (IV.2), with its timing
+   resolved as the 0a/0b split (VI, D12). Proves the abstraction with two real
+   consumers before
    freezing it.
 1. **Purify the data model** — the greenfield case-format break, now justified;
    stochastic state moves to a cross-vertical uncertainty store; the temporal model
@@ -103,7 +104,11 @@ real second consumer (economic dispatch), not **pushed** by refactoring the core
 the abstract. The genuinely irreversible or contract-touching forks — the
 case-format break's timing, the MILP determinism policy, universal-model vs a shared
 physical cadastre, and whether AC-OPF is ever in scope — are surfaced for explicit
-sign-off in **Part VI**, not resolved in passing.
+sign-off in **Part VI**, not resolved in passing. _(Status 2026-07-16: the
+owner has since resolved D1, D2, D9, D12, and D14 — each Part VI entry records
+the decision, its grounds, and the trigger that would reopen it; D3 is scoped
+to determinism tiers with UC's tier signed off at Phase 3; D4–D8, D11, and D13
+remain open recommendations.)_
 
 ---
 
@@ -777,7 +782,8 @@ per engine — while the worst-credible type-level matrix costs 3.2× compile /
 restricting to the built tuples verifiably collapses it back to baseline. So
 **legalize only the tuples actually built** stands as the verified mitigation,
 and the constructive design is fundable-to-build from the compile-cost axis
-(D9 still decides how much of the enforcement is compile-time). Budgeted, not
+(D9 — resolved — fixes the split: inner legality compile-enforced, outer
+selection a runtime gate). Budgeted, not
 measured: the per-formulation touch list — the per-axis enum, a `BuildProblem`
 impl, the admission-gate legal-tuple set plus a rejection test and error
 message, the committed schemas, the Python stubs, and the determinism-harness
@@ -1116,7 +1122,8 @@ new derived-matrices crate (`cobre-network`), two new engine-layer crates
 reserved), and the CLI turned into a
 dispatcher. The layering below preserves Cobre's existing virtues — acyclic
 dependencies, foundations consumed through generic bounds, no `dyn` — and adds the
-seams the verticals need. It assumes the **universal-model** default; IV.6 notes
+seams the verticals need. It reflects the **universal-model** choice (D1 —
+resolved, with IV.6 as the documented escape hatch); IV.6 notes
 where the shared-cadastre alternative (VI) would change the picture.
 
 ### IV.1 The target layering
@@ -1232,13 +1239,15 @@ engine-neutral emission logic (entity indexing, block/cursor primitives, plain
 equipment columns/rows, generic-constraint lowering, FPHA planes) — and even that
 must be re-parameterized off the θ-anchored layout; the majority is the SDDP
 decomposition itself and stays put. "Extraction" therefore means _carving a new
-kernel that reuses this logic_, priced as a rewrite, not a move (D12 owns the
-timing). The crate's claim to be engine-neutral rests on n=1 until the second
+kernel that reuses this logic_, priced as a rewrite, not a move (D12 — resolved:
+carved in Phase 0b, pulled by two live engines). The crate's claim to be
+engine-neutral rests on n=1 until the second
 consumer (economic dispatch, Phase 0) actually exercises the shared surface. Of
 the two conditions that made this fundable-to-spike rather than
 fundable-to-build, the monomorphization spike has since been executed and
-passed (D10, verification addendum); what remains is the real one — the shared
-surface being validated by a real second consumer, plus the D9 fork.
+passed (D10, verification addendum) and D9 is resolved; what remains is the
+real one — the shared
+surface being validated by a real second consumer (Phase 0b).
 
 ### IV.3 New and repurposed crates
 
@@ -1312,9 +1321,10 @@ engine. Each `run` returns a result implementing a shared `results` trait from
 `cobre-io`, so the CLI and Python bindings serialize outputs through one boundary
 (closing the Python-parity gap). Engine selection is **data** — defaulted by the study
 preset, overridable in config, and validated against the problem's structure (III.3's
-gate) — not a subcommand per algorithm. Whether the engine is runtime-config-selected
-or compile-fixed per binary is an open fork (Part VI, D9): it sets how much of III.3's
-compile-time enforcement is real versus a runtime admission gate. One scope-honesty
+gate) — not a subcommand per algorithm. Engine selection is
+runtime-config-driven in one binary (Part VI, D9 — resolved): the _inner_
+(device, formulation) and (method, capability) legality stays compile-enforced,
+and the outer selection is the one runtime admission gate. One scope-honesty
 note: today the entire `run` pipeline — case load, the MPI broadcast that
 reconstructs state on every rank, and both phases — is typed on
 `cobre_sddp::StudySetup` end-to-end, so introducing `Engine::Direct` is a refactor
@@ -1322,9 +1332,10 @@ of that pipeline into engine-generic (or engine-tagged) stages, not the addition
 one match arm. Two consequences the dispatch sketch hides (verification
 addendum): the setup stage is **rank-collective** (config broadcast, non-root
 stochastic reconstruction, barriers) while `cobre_direct::run` above takes no
-communicator — so `Engine::Direct` under `mpirun -n > 1` has no defined
-semantics yet (idle non-roots? redundant deterministic solve? reject?) — a
-Phase-0 decision, not a detail (Part VI, D14); and the engine-tagged setup must
+communicator — so `Engine::Direct` under `mpirun -n > 1` needed defined
+semantics: **resolved (Part VI, D14) as rank-0-executes** — non-root ranks skip
+the case broadcast and all setup, join only the final barrier, and the run
+summary's `ranks_participated` records 1; and the engine-tagged setup must
 **skip the stochastic reconstruction** for engines that do not consume it, or
 the "cheap second consumer" silently drags the SDDP setup machinery on every
 rank. The six-line dispatch above is the destination; the existing
@@ -1377,7 +1388,7 @@ they are frozen. Concretely, the roadmap obeys three rules:
    non-breaking, high-value moves immediately (per-kind IDs, `VarDomain` vocabulary,
    the `ElectricalBranch`/transport split). The `cobre-model` kernel is **not** on
    that list — it is the roadmap's largest single construction (IV.2), and its
-   timing is an explicit fork (D12). Defer the
+   timing is resolved as the Phase-0a/0b split (D12). Defer the
    case-format break, the `ValueFunctionArtifact` promotion, and the composition DAG
    until a second consumer demands them.
 3. **Escalate the true forks.** The MILP determinism policy, the greenfield-break
@@ -1407,15 +1418,18 @@ concrete pull that should shape the general model, rather than a guess.
 **Deliverables.** Introduce the `Engine` enum + dispatch in `cobre-cli`/`cobre-python`
 (a refactor of the `StudySetup`-typed run pipeline — IV.4); implement deterministic
 ED in `cobre-direct` at copper-plate/transport fidelity, reading the current v1 case
-unchanged (demand = `LoadModel.mean_mw`; no new field); resolve **D14** and
-implement its chosen `Engine::Direct` MPI semantics, with the engine-tagged
+unchanged (demand = `LoadModel.mean_mw`; no new field); implement the resolved
+**D14** MPI semantics — rank 0 executes the Direct study serially, non-roots
+skip setup and idle to a final barrier, `ranks_participated` records 1 — with
+the engine-tagged
 setup stages skipping stochastic reconstruction for engines that do not consume
 it (IV.4); add the **shared output-orchestration entry point** in `cobre-io`
 (the re-specified results seam, III.7) and wire ED outputs in _both_ CLI and
 Python through it (Python-parity
-from day one); carve the `cobre-model` kernel (`BuildProblem`, `ProblemTemplate`,
-`VarDomain` — continuous only, for now) per the D12 resolution — bundled here,
-split, or deferred past purification (option c) — priced as new construction
+from day one). That is **Phase 0a**. **Phase 0b** (per the resolved D12 split)
+then carves the `cobre-model` kernel (`BuildProblem`, `ProblemTemplate`,
+`VarDomain` — continuous only, for now), pulled by the two live engines and
+priced as new construction
 (IV.2); add per-kind newtype IDs (ergonomics, non-gating). The
 **monomorphization spike** (III.3) was already executed on a synthetic matrix
 (verification addendum — D10 satisfied); re-run `cargo-bloat`/`cargo-llvm-lines`
@@ -1628,9 +1642,11 @@ train + simulate) or "economic-dispatch" — which expands to a `ProblemTemplate
   (study × engine × backend) combinations into a structured error naming the
   offending tuple — e.g. an integer formulation on a `clp`-feature binary — where
   today the failure would surface as a deep solver error; and under MPI,
-  `mpirun` on a Direct study behaves per the D14 decision (an explicit
-  "single-rank engine" rejection, or rank-0-solves — either way documented, never
-  silent). `cobre init` ships an ED template beside the hydrothermal one.
+  `mpirun` on a Direct study runs rank-0-only (D14 — resolved): the same
+  submission script works for every study preset, non-root ranks idle to the
+  final barrier, the run summary records `ranks_participated = 1`, and a
+  warning notes the idle allocation — documented, never
+  silent. `cobre init` ships an ED template beside the hydrothermal one.
 
 **Phase 1 — the one breaking event, shaped for migration.** Case format v2
 relocates fields; it does not change results. The user-visible shape: a
@@ -1681,20 +1697,20 @@ infeasible at the desk).
 
 ### V.10 Risk register
 
-| Risk                                                                                                                                        | Severity         | Mitigation (roadmap location)                                                                                                                                              |
-| ------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Speculative generality** — generalizing from n=1 to four unbuilt verticals                                                                | High             | Second consumer (ED) before the break; pull-not-push; kernel timing fork (V.0/V.1, D12)                                                                                    |
-| **Phase-0 concentration** — the de-risking phase carries the kernel carve (a rewrite, not a move)                                           | Med–High         | D12 split option; kernel priced as new construction (IV.2, V.1)                                                                                                            |
-| **Case-format break cost** under a bit-for-bit contract (doubles I/O + schema surface; shim maintained for years)                           | High             | Defer to Phase 1; v1→v2 proven bit-for-bit; shim gated (V.2)                                                                                                               |
-| **MILP determinism** — parallel B&B non-reproducible; open-source deterministic parallel is single-paper-thin                               | Med (was High)   | Determinism tiers (owner decision, III.6/V.7); `threads=1` Tier-1 default now spike-evidenced (`spikes/mipdet/`); `warm≠cold` documented; UC tier sign-off at Phase 3 (D3) |
-| **Vendored-solver upgrades** — HiGHS releases are determinism- AND correctness-sensitive (1.14 MIP regression; 1.15 parallel-MIP prototype) | Medium           | Pin the vendored version; re-run determinism + correctness harness on every upgrade (V.7, III.6)                                                                           |
-| **Engine::Direct under MPI undefined** — comm-less direct engine dispatched after rank-collective setup                                     | Med–High         | Resolve D14 in Phase 0; Phase-0 gate includes an MPI run; engine-tagged setup skips stochastic reconstruction (IV.4, V.1)                                                  |
-| **Monomorphization / binary-size blow-up** from `vertical × formulation × fidelity × domain`                                                | Low (was Medium) | D10 spike executed — cost bounded, linear in legalized tuples; legalize only built tuples (III.3, V.1)                                                                     |
-| **AC-solver gap** — no NLP/conic backend; AC breaks the solver contract                                                                     | Medium           | Split AC out; climb the LP/conic ladder only (III.6, V.6)                                                                                                                  |
-| **Purifying the wrong cut** — regressing the only paying customer for hypothetical ones                                                     | Medium           | Distinguish formulation-config (move) from uncertainty (generalize, not dump) (III.7)                                                                                      |
-| **Obsolescing references** — NEWAVE moving to individual-plant / "Híbrido"; some CEPEL claims unverified                                    | Low–Med          | Treat CEPEL as contrast not target; verify `hidr`-sharing before leaning on it (II.2)                                                                                      |
-| **Composition over-fit** — a general DAG/artifact for a boundary only SDDP uses today                                                       | Medium           | Specify the edge rule now, build the DAG/artifact only at Phase 4 (III.4, V.5)                                                                                             |
-| **Corpus errors propagating** — a miscited paper, an inter/intra-node state error                                                           | Low              | Corrected in-text (III.4, III.5); unverified claims flagged, not asserted                                                                                                  |
+| Risk                                                                                                                                        | Severity           | Mitigation (roadmap location)                                                                                                                                              |
+| ------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Speculative generality** — generalizing from n=1 to four unbuilt verticals                                                                | High               | Second consumer (ED) before the break; pull-not-push; kernel timed per the resolved 0a/0b split (V.0/V.1, D12)                                                             |
+| **Phase-0 concentration** — the de-risking phase carries the kernel carve (a rewrite, not a move)                                           | Med–High           | D12 resolved: split 0a/0b; kernel priced as new construction (IV.2, V.1)                                                                                                   |
+| **Case-format break cost** under a bit-for-bit contract (doubles I/O + schema surface; shim maintained for years)                           | High               | Defer to Phase 1; v1→v2 proven bit-for-bit; shim gated (V.2)                                                                                                               |
+| **MILP determinism** — parallel B&B non-reproducible; open-source deterministic parallel is single-paper-thin                               | Med (was High)     | Determinism tiers (owner decision, III.6/V.7); `threads=1` Tier-1 default now spike-evidenced (`spikes/mipdet/`); `warm≠cold` documented; UC tier sign-off at Phase 3 (D3) |
+| **Vendored-solver upgrades** — HiGHS releases are determinism- AND correctness-sensitive (1.14 MIP regression; 1.15 parallel-MIP prototype) | Medium             | Pin the vendored version; re-run determinism + correctness harness on every upgrade (V.7, III.6)                                                                           |
+| **Engine::Direct under MPI** — comm-less direct engine dispatched after rank-collective setup                                               | Low (was Med–High) | D14 resolved: rank-0-executes; Phase-0 gate includes an MPI run exercising it; engine-tagged setup skips stochastic reconstruction (IV.4, V.1)                             |
+| **Monomorphization / binary-size blow-up** from `vertical × formulation × fidelity × domain`                                                | Low (was Medium)   | D10 spike executed — cost bounded, linear in legalized tuples; legalize only built tuples (III.3, V.1)                                                                     |
+| **AC-solver gap** — no NLP/conic backend; AC breaks the solver contract                                                                     | Medium             | Split AC out; climb the LP/conic ladder only (III.6, V.6)                                                                                                                  |
+| **Purifying the wrong cut** — regressing the only paying customer for hypothetical ones                                                     | Medium             | Distinguish formulation-config (move) from uncertainty (generalize, not dump) (III.7)                                                                                      |
+| **Obsolescing references** — NEWAVE moving to individual-plant / "Híbrido"; some CEPEL claims unverified                                    | Low–Med            | Treat CEPEL as contrast not target; verify `hidr`-sharing before leaning on it (II.2)                                                                                      |
+| **Composition over-fit** — a general DAG/artifact for a boundary only SDDP uses today                                                       | Medium             | Specify the edge rule now, build the DAG/artifact only at Phase 4 (III.4, V.5)                                                                                             |
+| **Corpus errors propagating** — a miscited paper, an inter/intra-node state error                                                           | Low                | Corrected in-text (III.4, III.5); unverified claims flagged, not asserted                                                                                                  |
 
 ---
 
@@ -1703,23 +1719,41 @@ infeasible at the desk).
 Each of these is a genuine fork where the wrong silent choice is expensive and
 hard to reverse. Recommendations are given, but per Cobre's anti-simplification
 discipline they are surfaced for an explicit decision, not resolved in passing.
+Where an entry is marked **Resolved**, the owner made the call (dated); the
+entry keeps the option set and adds the decision, its grounds, and the
+**reopen trigger** — the concrete observation that would legitimately put the
+fork back on the table. A resolved fork is not a deleted fork.
 
-**D1 — Data-model home: one universal `System` vs a shared physical cadastre.**
-Options: (a) one general `System` struct serving all verticals (the default
+**D1 — Data-model home: one universal `System` vs a shared physical cadastre.
+_Resolved (owner, 2026-07-16): (a) — one universal `System`._**
+Options were: (a) one general `System` struct serving all verticals (the default
 throughout Parts III–V); (b) a `cobre-cadastre` authoritative physical registry with
-per-vertical projections (III.1, IV.6). _Recommendation:_ start on (a) but keep the
-`cobre-model` seam agnostic enough that (b) remains reachable; commit only after the
-second consumer (Phase 0) reveals how divergent the verticals' data really is.
-_Stakes:_ this is the single highest-variance bet in the roadmap — it decides whether
-the core is one struct or a registry, and it is very expensive to switch after four
-verticals depend on it.
+per-vertical projections (III.1, IV.6). _Grounds:_ every reference framework that
+serves multiple problem classes from one codebase does so with **one** data
+model (Sienna, PyPSA, PowerModels, PSR — II); the cadastre shape exists in the
+wild only as CEPEL's `hidr`, i.e. as the survival mechanism of a
+**three-codebase** split this roadmap explicitly rejects; and the per-vertical
+data deltas catalogued in Appendix C are **additive** (units, electrical
+branches, investment axes) rather than conflicting representations of the same
+physics — the case the degenerate-aggregate principle (III.2) is built for.
+The `cobre-model` seam stays cadastre-agnostic (IV.6 remains the documented
+escape hatch). _Reopen trigger:_ a vertical requiring a **conflicting**
+representation of the same physical asset — not merely additional fields —
+during Phase 1 or 2. _Stakes (unchanged):_ highest-variance bet in the
+roadmap; the reopen trigger is deliberately checked at the phases where
+switching is still cheap.
 
-**D2 — Greenfield-break timing.** Options: (a) defer the case-format break to Phase 1,
-after economic dispatch proves the seam (recommended, V.0); (b) break first, then
-build verticals on v2. _Recommendation:_ (a) — the break is the highest-cost
-irreversible step and should be pulled by two real consumers, not four hypotheses.
-_Stakes:_ breaking first risks freezing a confidently-wrong model; deferring costs one
-extra vertical living briefly on v1.
+**D2 — Greenfield-break timing. _Resolved (owner, 2026-07-16): (a) — defer the
+break to Phase 1._** Options were: (a) defer the case-format break to Phase 1,
+after economic dispatch proves the seam (V.0); (b) break first, then
+build verticals on v2. _Grounds:_ the break is the highest-cost
+irreversible step and is pulled by two real consumers rather than four
+hypotheses; the verification pass removed the last argument for (b) — ED
+needs **no new input field** on v1 (`LoadModel.mean_mw`, V.1), so nothing
+forces an early break — and established that v2 is numerically frozen either
+way (V.2), so waiting costs no numerical opportunity. _Reopen trigger:_ none
+realistic; (b) would resurface only if Phase-0 ED proved impossible on the v1
+format, which the code evidence refutes.
 
 **D3 — MILP determinism policy.** _Partially resolved._ Two inputs landed on
 2026-07-16 (verification addendum). **Evidence:** the required empirical input
@@ -1779,15 +1813,25 @@ model is a _deliberate_ simplification of a known ontology rather than an ad-hoc
 and round-tripping MATPOWER/PSS®E for free validation corpora. _Stakes:_ (b) imports
 CIM's asset/business baggage without closing Cobre's actual modeling gaps.
 
-**D9 — Engine selection: runtime-config-driven vs compile-fixed per binary.**
-Options: (a) the study config names the engine at run time (IV.4), so the _outer_
+**D9 — Engine selection: runtime-config-driven vs compile-fixed per binary.
+_Resolved (owner, 2026-07-16): (a) — runtime-config-driven, one binary._**
+Options were: (a) the study config names the engine at run time (IV.4), so the _outer_
 (engine, formulation) / (engine, backend) admissibility is necessarily a runtime
 typed gate; (b) each binary is compiled for one vertical, letting more of the legal
-set be enforced at compile time (the `diesel`/`embedded-hal` idiom). _Recommendation:_
-(a) for CLI ergonomics, accepting a runtime admission gate for the outer selection
-while keeping the _inner_ (device, formulation) and (method, capability) legality
-compile-enforced. _Stakes:_ this sets how much of III.3's compile-time-enforcement
-result is real versus a runtime gate; it must be decided before the seam is built.
+set be enforced at compile time (the `diesel`/`embedded-hal` idiom). _Grounds:_
+(b) buys almost nothing it appears to — formulations are config data under
+**either** option, so the admission gate exists regardless and (b) would
+compile-fix only the engine axis; the D10 spike showed the compile/binary cost
+of carrying every engine in one binary is trivial (~×2 builder codegen per
+engine); and (b) multiplies the CI/build/ship matrix and breaks the single
+`cobre run` entry point that the user contract (V.9) and HPC launch scripts
+depend on. The _inner_ (device, formulation) and (method, capability) legality
+stays compile-enforced; the outer selection is the one runtime gate, and the
+gate's structured rejection is itself part of the user contract (V.9).
+_Reopen trigger:_ a genuinely size-constrained deployment target needing a
+minimal single-engine binary — addable later as a Cargo-feature subset without
+breaking (a), since the traits are sealed (D11). This closes the last gate on
+the constructive track (D10's condition (ii)).
 
 **D10 — The monomorphization spike. _Resolved: executed, gate satisfied_**
 (2026-07-16, verification addendum; harness `spikes/monospike/`). Result over a
@@ -1818,28 +1862,33 @@ concrete out-of-tree extension need appears. _Stakes:_ open→sealed later is a 
 change; sealed→open is not — so sealing is the reversible default.
 
 **D12 — Phase-0 scope: bundle the kernel carve, split the phase, or carve after
-purification.** The
+purification. _Resolved (owner, 2026-07-16): (b) — split into 0a/0b._** The
 `cobre-model` kernel is the roadmap's largest single construction (IV.2: a new
 kernel reusing roughly a fifth to a quarter of today's `lp/` logic, re-parameterized
-off the θ-anchored layout), yet Phase 0 is the phase meant to be cheap. Options:
+off the θ-anchored layout), yet Phase 0 is the phase meant to be cheap. Options were:
 (a) bundle the carve into Phase 0; (b) split — Phase 0a ships the `Engine` seam plus
 a bespoke ED build directly on `cobre-solver` (genuinely cheap; proves the seam, the
 output-orchestration boundary, and Python parity), then Phase 0b carves the kernel
 pulled by two
 _live_ engines; (c) — added by the verification pass — Phase 0a as in (b), but
 **defer the carve until after Phase-1 purification**, so the kernel is carved
-once against the clean v2 core with two live consumers, eliminating the refit
-that (a) and (b) both incur when Phase 1 relocates the data homes the kernel
-was carved against. _Recommendation:_ (b) when Phase-1 scope is confined to
-the planned relocations (the refit is then the demand-access re-pointing V.2
-already schedules), (c) if v2 reshapes builder-facing access patterns more
-broadly; under (a) or (b), the kernel's engine-neutrality is **re-gated after
-purification** (the V.2 bit-for-bit gate doubles as that re-proof — name it as
-such). _Stakes:_ (a) concentrates the riskiest
-construction in the phase meant to de-risk; (b) costs a temporary bespoke ED builder
-that the kernel later replaces and accepts a bounded post-purification refit;
-(c) stretches the bespoke builder's life through Phase 1 and delays the kernel
-that Phase 2 wants.
+once against the clean v2 core, eliminating the refit
+that (a) and (b) incur when Phase 1 relocates the data homes the kernel
+was carved against. _Grounds for (b) over (c):_ the kernel is precisely the
+abstraction v2 must serve, so it should **exist before the break** — under (b)
+the greenfield model is pulled by the kernel's real consumer surface, while
+under (c) v2 is designed against two builders both scheduled for replacement
+and the kernel must then adapt to a v2 it never informed. The refit (b)
+accepts is bounded to the scheduled relocations (demand access re-pointing,
+V.2) and is re-proved by the V.2 bit-for-bit gate, which doubles as the
+kernel's post-purification **engine-neutrality re-gate** — that re-gate is
+part of this resolution, not optional. (c) also stretches the bespoke
+builder's life through Phase 1 and stacks the carve directly against Phase 2's
+DC-OPF construction. _Reopen trigger → (c):_ if, when the v2 design starts,
+the planned relocations grow into builder-facing access-pattern changes beyond
+the demand/uncertainty homes. _Stakes (unchanged):_ (a) concentrates the
+riskiest construction in the phase meant to de-risk; (b) costs a temporary
+bespoke ED builder that the kernel later replaces.
 
 **D13 — SDDiP: fund as its own effort, or defer indefinitely.** SDDiP is
 architecturally an intra-SDDP duality sub-strategy (III.3) and a new algorithm stack
@@ -1864,12 +1913,24 @@ discipline; wastes allocated ranks); (c) **redundant deterministic solve** on
 every rank (bit-for-bit makes it safe and collective-free, N× wasteful);
 (d) **a real parallel axis** for multi-period/multi-scenario direct studies —
 which is the Phase-4 "which axis owns parallelism" question (III.4) arriving
-early. _Recommendation:_ (a) or (b) for Phase 0 — pick one explicitly and test
-it in the Phase-0 MPI gate run (V.1); defer (d) to the composition layer.
-Either way the engine-tagged setup must skip the stochastic reconstruction for
-engines that do not consume it (IV.4). _Stakes:_ the Phase-0 seam is the
-roadmap's de-risking vehicle; leaving its multi-rank semantics undefined bakes
-the ambiguity into the first public API of the multi-engine era.
+early. **_Resolved (owner, 2026-07-16): (b) — rank 0 executes, non-roots
+idle._** _Grounds:_ (b) is the only option that keeps one submission script
+valid for every study preset — the V.9 user contract — where (a) would make a
+config edit (SDDP study → ED study) break an unchanged `mpirun` launch line;
+and (b) is operationally minimal: for a Direct study, non-root ranks skip the
+case broadcast and all setup, participate in **no** collective except the
+final barrier, and rank 0 runs exactly the serial path. The waste of idle
+ranks is the submitter's choice and is made visible: the run summary's
+`ranks_participated` records 1, and a warning is logged when `n > 1` ranks are
+allocated to a Direct study. (c) buys nothing over (b) — output is rank-0-only
+regardless — and (d) is deferred to the composition layer, where a study DAG
+gives Direct solves a genuine parallel axis. The Phase-0 MPI gate run (V.1)
+tests exactly these semantics. The engine-tagged setup skipping stochastic
+reconstruction for engines that do not consume it (IV.4) is part of this
+resolution. _Reopen trigger → (d):_ a single-engine multi-period/
+multi-scenario Direct workload that materially needs rank parallelism before
+the composition layer exists. _Stakes (now bounded):_ the semantics are
+defined, tested at the gate, and recorded in output metadata.
 
 ---
 
@@ -2061,8 +2122,9 @@ them immediately. Of the two conditions that gated the constructive track (the
 `cobre-model` kernel, `ProblemTemplate`,
 the capability traits, the SDDiP transform), **(1) is now satisfied** — the
 monomorphization spike was executed 2026-07-16 and the closed-enum cost is
-bounded and mitigable (D10) — leaving only (2), the
-config-driven-vs-compile-fixed fork (D9). Two items remain hypotheses, not
+bounded and mitigable (D10) — **and (2) is now also resolved** (D9:
+runtime-config-driven, one binary). The constructive track is open; what
+validates it from here is the Phase-0b second consumer itself. Two items remain hypotheses, not
 funded: the SDDiP transform as a single named type that is both the math object and
 owns a nested subproblem (its only prior art, SMS++'s `LagBFunction`, uses a mechanism
 Cobre forbids); and whether a second value-function participant will ever exist.
