@@ -38,7 +38,7 @@
 //! `stored.base_row_count == target.base_row_count`; and `stored` satisfied
 //! `col_basic + row_basic == num_row` for its own LP. A deficit therefore proves
 //! `stored` was captured against a differently-shaped LP — it is rejected with
-//! [`SddpError::BasisShapeMismatch`](crate::SddpError::BasisShapeMismatch), never
+//! [`SddpError::BasisShapeMismatch`], never
 //! repaired: demotion cannot create the missing basics, and promotion would
 //! fabricate a basis `stored` never described.
 //!
