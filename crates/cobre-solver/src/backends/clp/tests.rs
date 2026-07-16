@@ -1,7 +1,7 @@
 use crate::backends::clp::{ClpAlgorithm, ClpProfile, ClpSolver, LADDER_RUNGS, clp_version};
 use crate::profile::DEFAULT_PROFILE_HEURISTIC_SENTINEL;
 use crate::types::{Basis, RowBatch, SolutionView, SolverError, SolverStatistics, StageTemplate};
-use crate::{ProfiledSolver, SolverInterface};
+use crate::{BasisStatus, ProfiledSolver, SolverInterface};
 
 fn assert_profile_bounds<P: Copy + PartialEq + Default + Send>() {}
 
@@ -523,7 +523,7 @@ fn test_clp_get_basis_dimensions_and_codes() {
     assert_eq!(out.row_status.len(), 2);
     for &s in out.col_status.iter().chain(out.row_status.iter()) {
         assert!(
-            !matches!(s, crate::BasisStatus::Nonbasic),
+            !matches!(s, BasisStatus::Nonbasic),
             "status {s:?} is not CLP-representable (from_clp_code never yields Nonbasic)"
         );
     }

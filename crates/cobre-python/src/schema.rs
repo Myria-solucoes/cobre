@@ -6,6 +6,7 @@
 
 use std::path::PathBuf;
 
+use cobre_io::schema::generate_schemas;
 use pyo3::exceptions::{PyOSError, PyValueError};
 use pyo3::prelude::*;
 
@@ -39,7 +40,7 @@ pub fn export(output_dir: PathBuf) -> PyResult<usize> {
         ))
     })?;
 
-    let schemas = cobre_io::schema::generate_schemas()
+    let schemas = generate_schemas()
         .map_err(|e| PyValueError::new_err(format!("schema generation failed: {e}")))?;
 
     let count = schemas.len();

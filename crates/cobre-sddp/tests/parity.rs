@@ -25,20 +25,69 @@
 
 mod common;
 
+/// Fixed base seed for the declaration-order-shuffle axis. Permutation `i`'s
+/// seed is `SHUFFLE_BASE_SEED.wrapping_add(i as u64)`; the single permutation
+/// folded into each `parity_hash_<case>` test uses `i = 0`. See
+/// [`common::permute`]'s module doc for the classification map and coverage
+/// bound the permutations exercise.
+const SHUFFLE_BASE_SEED: u64 = 0x5EED_C0BE_5EED_C0BE;
+
+/// Permutation count for the `shuffle_matrix_<case>` tests, dispatched only via
+/// `.github/workflows/invariance-shuffle.yml` (`--run-ignored ignored-only`).
+const FULL_SHUFFLE_PERMUTATIONS: usize = 8;
+
 #[cfg(feature = "highs")]
 mod parity_hash_highs {
     //! HiGHS golden parity-hash regression. Each case's train + simulate output
     //! is digested over the whitelist owned by
     //! [`compute_parity_hash`](super::common::parity_hash::compute_parity_hash);
     //! the hash pins bit-for-bit determinism and declaration-order invariance, so a
-    //! changed hash means a real output change. `COBRE_PARITY_REGEN=1` writes the
-    //! baseline instead of verifying it. The selection rationale for the five golden
-    //! cases lives on [`case_dir`](super::common::parity_hash::case_dir).
+    //! changed hash means a real output change. The `parity_regen_*` tests below
+    //! write the baseline instead of asserting it; they are unconditionally
+    //! `#[ignore]`d and must be run explicitly. The selection rationale for the
+    //! five golden cases lives on [`case_dir`](super::common::parity_hash::case_dir).
+    //!
+    //! Each `parity_hash_<case>` folds in ONE seeded declaration-order
+    //! permutation (asserted against the in-memory base hash, not a committed
+    //! baseline); the sibling `shuffle_matrix_<case>` tests run the full
+    //! `FULL_SHUFFLE_PERMUTATIONS`-permutation matrix and are unconditionally
+    //! `#[ignore]`d — see [`super::SHUFFLE_BASE_SEED`]/[`super::FULL_SHUFFLE_PERMUTATIONS`].
 
     use cobre_solver::highs::HighsSolver;
 
-    fn run_case(label: &str) {
-        super::common::parity_hash::run_golden_case("parity_baselines", label, HighsSolver::new);
+    fn run_case(label: &str) -> String {
+        super::common::parity_hash::run_golden_case("parity_baselines", label, HighsSolver::new)
+    }
+
+    fn regen_case(label: &str) {
+        super::common::parity_hash::regen_golden_case("parity_baselines", label, HighsSolver::new);
+    }
+
+    /// The base case plus one seeded permutation, asserted against the
+    /// in-memory base hash — the default-CI fold-in of the shuffle axis.
+    fn run_case_with_permutation(label: &str) {
+        let base_hash = run_case(label);
+        super::common::parity_hash::assert_permutation_hash(
+            label,
+            super::SHUFFLE_BASE_SEED,
+            &base_hash,
+            HighsSolver::new,
+        );
+    }
+
+    /// The base case plus [`super::FULL_SHUFFLE_PERMUTATIONS`] seeded
+    /// permutations, each asserted against the in-memory base hash.
+    fn run_shuffle_matrix(label: &str) {
+        let base_hash = run_case(label);
+        for i in 0..super::FULL_SHUFFLE_PERMUTATIONS {
+            let seed = super::SHUFFLE_BASE_SEED.wrapping_add(i as u64);
+            super::common::parity_hash::assert_permutation_hash(
+                label,
+                seed,
+                &base_hash,
+                HighsSolver::new,
+            );
+        }
     }
 
     #[test]
@@ -47,7 +96,7 @@ mod parity_hash_highs {
         ignore = "slow: run with --features slow-tests"
     )]
     fn parity_hash_d06() {
-        run_case("D06");
+        run_case_with_permutation("D06");
     }
 
     #[test]
@@ -56,7 +105,7 @@ mod parity_hash_highs {
         ignore = "slow: run with --features slow-tests"
     )]
     fn parity_hash_d15() {
-        run_case("D15");
+        run_case_with_permutation("D15");
     }
 
     #[test]
@@ -65,7 +114,7 @@ mod parity_hash_highs {
         ignore = "slow: run with --features slow-tests"
     )]
     fn parity_hash_d30() {
-        run_case("D30");
+        run_case_with_permutation("D30");
     }
 
     #[test]
@@ -74,7 +123,7 @@ mod parity_hash_highs {
         ignore = "slow: run with --features slow-tests"
     )]
     fn parity_hash_d34() {
-        run_case("D34");
+        run_case_with_permutation("D34");
     }
 
     #[test]
@@ -83,7 +132,67 @@ mod parity_hash_highs {
         ignore = "slow: run with --features slow-tests"
     )]
     fn parity_hash_d41() {
-        run_case("D41");
+        run_case_with_permutation("D41");
+    }
+
+    #[test]
+    #[ignore = "full shuffle matrix — dispatched via invariance-shuffle.yml"]
+    fn shuffle_matrix_d06() {
+        run_shuffle_matrix("D06");
+    }
+
+    #[test]
+    #[ignore = "full shuffle matrix — dispatched via invariance-shuffle.yml"]
+    fn shuffle_matrix_d15() {
+        run_shuffle_matrix("D15");
+    }
+
+    #[test]
+    #[ignore = "full shuffle matrix — dispatched via invariance-shuffle.yml"]
+    fn shuffle_matrix_d30() {
+        run_shuffle_matrix("D30");
+    }
+
+    #[test]
+    #[ignore = "full shuffle matrix — dispatched via invariance-shuffle.yml"]
+    fn shuffle_matrix_d34() {
+        run_shuffle_matrix("D34");
+    }
+
+    #[test]
+    #[ignore = "full shuffle matrix — dispatched via invariance-shuffle.yml"]
+    fn shuffle_matrix_d41() {
+        run_shuffle_matrix("D41");
+    }
+
+    #[test]
+    #[ignore = "rewrites committed parity baselines — run explicitly on the canonical machine"]
+    fn parity_regen_d06() {
+        regen_case("D06");
+    }
+
+    #[test]
+    #[ignore = "rewrites committed parity baselines — run explicitly on the canonical machine"]
+    fn parity_regen_d15() {
+        regen_case("D15");
+    }
+
+    #[test]
+    #[ignore = "rewrites committed parity baselines — run explicitly on the canonical machine"]
+    fn parity_regen_d30() {
+        regen_case("D30");
+    }
+
+    #[test]
+    #[ignore = "rewrites committed parity baselines — run explicitly on the canonical machine"]
+    fn parity_regen_d34() {
+        regen_case("D34");
+    }
+
+    #[test]
+    #[ignore = "rewrites committed parity baselines — run explicitly on the canonical machine"]
+    fn parity_regen_d41() {
+        regen_case("D41");
     }
 }
 
@@ -101,8 +210,43 @@ mod parity_hash_clp {
 
     use cobre_solver::clp::ClpSolver;
 
-    fn run_case(label: &str) {
-        super::common::parity_hash::run_golden_case("parity_baselines_clp", label, ClpSolver::new);
+    fn run_case(label: &str) -> String {
+        super::common::parity_hash::run_golden_case("parity_baselines_clp", label, ClpSolver::new)
+    }
+
+    fn regen_case(label: &str) {
+        super::common::parity_hash::regen_golden_case(
+            "parity_baselines_clp",
+            label,
+            ClpSolver::new,
+        );
+    }
+
+    /// The base case plus one seeded permutation, asserted against the
+    /// in-memory base hash — the default-CI fold-in of the shuffle axis.
+    fn run_case_with_permutation(label: &str) {
+        let base_hash = run_case(label);
+        super::common::parity_hash::assert_permutation_hash(
+            label,
+            super::SHUFFLE_BASE_SEED,
+            &base_hash,
+            ClpSolver::new,
+        );
+    }
+
+    /// The base case plus [`super::FULL_SHUFFLE_PERMUTATIONS`] seeded
+    /// permutations, each asserted against the in-memory base hash.
+    fn run_shuffle_matrix(label: &str) {
+        let base_hash = run_case(label);
+        for i in 0..super::FULL_SHUFFLE_PERMUTATIONS {
+            let seed = super::SHUFFLE_BASE_SEED.wrapping_add(i as u64);
+            super::common::parity_hash::assert_permutation_hash(
+                label,
+                seed,
+                &base_hash,
+                ClpSolver::new,
+            );
+        }
     }
 
     #[test]
@@ -111,7 +255,7 @@ mod parity_hash_clp {
         ignore = "slow: run with --features slow-tests"
     )]
     fn parity_hash_d06() {
-        run_case("D06");
+        run_case_with_permutation("D06");
     }
 
     #[test]
@@ -120,7 +264,7 @@ mod parity_hash_clp {
         ignore = "slow: run with --features slow-tests"
     )]
     fn parity_hash_d15() {
-        run_case("D15");
+        run_case_with_permutation("D15");
     }
 
     #[test]
@@ -129,7 +273,7 @@ mod parity_hash_clp {
         ignore = "slow: run with --features slow-tests"
     )]
     fn parity_hash_d30() {
-        run_case("D30");
+        run_case_with_permutation("D30");
     }
 
     #[test]
@@ -138,7 +282,7 @@ mod parity_hash_clp {
         ignore = "slow: run with --features slow-tests"
     )]
     fn parity_hash_d34() {
-        run_case("D34");
+        run_case_with_permutation("D34");
     }
 
     #[test]
@@ -147,7 +291,67 @@ mod parity_hash_clp {
         ignore = "slow: run with --features slow-tests"
     )]
     fn parity_hash_d41() {
-        run_case("D41");
+        run_case_with_permutation("D41");
+    }
+
+    #[test]
+    #[ignore = "full shuffle matrix — dispatched via invariance-shuffle.yml"]
+    fn shuffle_matrix_d06() {
+        run_shuffle_matrix("D06");
+    }
+
+    #[test]
+    #[ignore = "full shuffle matrix — dispatched via invariance-shuffle.yml"]
+    fn shuffle_matrix_d15() {
+        run_shuffle_matrix("D15");
+    }
+
+    #[test]
+    #[ignore = "full shuffle matrix — dispatched via invariance-shuffle.yml"]
+    fn shuffle_matrix_d30() {
+        run_shuffle_matrix("D30");
+    }
+
+    #[test]
+    #[ignore = "full shuffle matrix — dispatched via invariance-shuffle.yml"]
+    fn shuffle_matrix_d34() {
+        run_shuffle_matrix("D34");
+    }
+
+    #[test]
+    #[ignore = "full shuffle matrix — dispatched via invariance-shuffle.yml"]
+    fn shuffle_matrix_d41() {
+        run_shuffle_matrix("D41");
+    }
+
+    #[test]
+    #[ignore = "rewrites committed parity baselines — run explicitly on the canonical machine"]
+    fn parity_regen_d06() {
+        regen_case("D06");
+    }
+
+    #[test]
+    #[ignore = "rewrites committed parity baselines — run explicitly on the canonical machine"]
+    fn parity_regen_d15() {
+        regen_case("D15");
+    }
+
+    #[test]
+    #[ignore = "rewrites committed parity baselines — run explicitly on the canonical machine"]
+    fn parity_regen_d30() {
+        regen_case("D30");
+    }
+
+    #[test]
+    #[ignore = "rewrites committed parity baselines — run explicitly on the canonical machine"]
+    fn parity_regen_d34() {
+        regen_case("D34");
+    }
+
+    #[test]
+    #[ignore = "rewrites committed parity baselines — run explicitly on the canonical machine"]
+    fn parity_regen_d41() {
+        regen_case("D41");
     }
 }
 
@@ -207,7 +411,7 @@ mod self_reproducibility_regression {
         let hydro_models =
             prepare_hydro_models(&system, &dir, false).expect("prepare_hydro_models must succeed");
 
-        let mut config_with_sim = config.clone();
+        let mut config_with_sim = config;
         config_with_sim.simulation.enabled = true;
         config_with_sim.simulation.num_scenarios = 1;
 
@@ -345,7 +549,7 @@ mod b6a_hydro_inflow_parity {
     use std::sync::mpsc;
 
     use cobre_core::scenario::ScenarioSource;
-    use cobre_core::{ConstraintSense, EntityId, VariableRef};
+    use cobre_core::{CoefficientRef, ConstraintSense, EntityId, VariableRef};
     use cobre_sddp::{
         aggregate_simulation, hydro_models::prepare_hydro_models, setup::prepare_stochastic,
     };
@@ -398,7 +602,7 @@ mod b6a_hydro_inflow_parity {
         );
         assert_eq!(
             term.coefficient,
-            cobre_core::CoefficientRef::Literal(1.0),
+            CoefficientRef::Literal(1.0),
             "the hydro_inflow term coefficient must be the literal +1.0"
         );
         assert!(
@@ -438,7 +642,7 @@ mod b6a_hydro_inflow_parity {
 
         // Enable simulation so the cascade `hydro_inflow` row is exercised on the
         // simulation LP as well as the training LP, mirroring the D-case harness.
-        let mut config_with_sim = config.clone();
+        let mut config_with_sim = config;
         config_with_sim.simulation.enabled = true;
         config_with_sim.simulation.num_scenarios = 1;
 
@@ -499,7 +703,8 @@ mod b6a_hydro_inflow_parity {
         ignore = "slow: run with --features slow-tests"
     )]
     fn b6a_hydro_inflow_cascade_solves_highs() {
-        run_cascade_inflow_case(cobre_solver::highs::HighsSolver::new);
+        use cobre_solver::highs::HighsSolver;
+        run_cascade_inflow_case(HighsSolver::new);
     }
 
     /// The same cascade `hydro_inflow(1) >= 12.0` constraint solves end-to-end
@@ -511,7 +716,8 @@ mod b6a_hydro_inflow_parity {
         ignore = "slow: run with --features slow-tests"
     )]
     fn b6a_hydro_inflow_cascade_solves_clp() {
-        run_cascade_inflow_case(cobre_solver::clp::ClpSolver::new);
+        use cobre_solver::clp::ClpSolver;
+        run_cascade_inflow_case(ClpSolver::new);
     }
 }
 
@@ -554,7 +760,7 @@ mod determinism {
         energy_conversion::{EnergyConversion, EnergyConversionSet},
         forward::{ForwardResult, sync_forward},
         horizon_mode::HorizonMode,
-        indexer::StateLayout,
+        indexer::{CutStateProjection, StateSpace, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
         lp_builder::PatchBuffer,
         risk_measure::RiskMeasure,
@@ -576,11 +782,11 @@ mod determinism {
     // ===========================================================================
 
     /// Mirrors the gated `test_support::state_layout_for` via the public
-    /// [`StateLayout::new`] constructor: this external test crate cannot see the
+    /// [`StateSpace::new`] constructor: this external test crate cannot see the
     /// parent crate's `#[cfg(test)]` surface, so it rebuilds byte-identical patch
     /// columns on the default feature set.
-    fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
-        StateLayout::new(
+    fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateSpace {
+        StateSpace::new(
             hydro_count,
             max_par_order,
             0,
@@ -592,8 +798,8 @@ mod determinism {
         )
     }
 
-    fn study_dims() -> cobre_sddp::indexer::StudyDimensions {
-        cobre_sddp::indexer::StudyDimensions::default()
+    fn study_dims() -> StudyDimensions {
+        StudyDimensions::default()
     }
 
     // ===========================================================================
@@ -656,7 +862,9 @@ mod determinism {
             })
         }
 
-        fn get_basis(&mut self, _out: &mut Basis) {}
+        fn get_basis(&mut self, out: &mut Basis) {
+            cobre_sddp::test_support::fill_consistent_basis(out);
+        }
 
         fn statistics(&self) -> SolverStatistics {
             SolverStatistics::default()
@@ -938,7 +1146,7 @@ mod determinism {
         n_stages: usize,
         templates: Vec<StageTemplate>,
         base_rows: Vec<usize>,
-        state: StateLayout,
+        state: StateSpace,
         initial_state: Vec<f64>,
         stochastic: StochasticContext,
         horizon: HorizonMode,
@@ -1155,13 +1363,7 @@ mod determinism {
         let (result_tx, result_rx) = mpsc::sync_channel(64);
 
         // Drain the channel in a background thread to avoid blocking simulate().
-        let drain_thread = std::thread::spawn(move || {
-            let mut results = Vec::new();
-            while let Ok(r) = result_rx.recv() {
-                results.push(r);
-            }
-            results
-        });
+        let drain_thread = std::thread::spawn(move || result_rx.into_iter().collect::<Vec<_>>());
 
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(n_workspaces)
@@ -1660,22 +1862,22 @@ mod determinism {
     /// per-pool projection. Every pool projects the full global state, keeping the
     /// extracted subgradient bit-identical to the global-loop result.
     fn all_enabled_cut_state_layouts(
-        global: &StateLayout,
+        global: &StateSpace,
         n_stages: usize,
-    ) -> Vec<cobre_sddp::indexer::CutStateProjection> {
+    ) -> Vec<CutStateProjection> {
         let full = StageStateConfig {
             storage: true,
             inflow_lags: true,
         };
         (0..n_stages)
-            .map(|_| cobre_sddp::indexer::CutStateProjection::new(global, full))
+            .map(|_| CutStateProjection::new(global, full))
             .collect()
     }
 }
 
 mod water_travel_time_no_arc_byte_identity {
     //! With the water travel-time feature compiled in but no arc declared on any
-    //! hydro, `n_buckets == 0` and the `StateLayout`/LP/cuts/outputs must collapse
+    //! hydro, `n_buckets == 0` and the `StateSpace`/LP/cuts/outputs must collapse
     //! to the pre-bucket baseline byte-for-byte (the `n_buckets` == 0
     //! byte-identity anchor). This module makes that guarantee an explicit
     //! regression at two scales:
@@ -1683,12 +1885,12 @@ mod water_travel_time_no_arc_byte_identity {
     //! - [`synthetic_no_arc_state_layout_matches_pre_transit_bucket_formula`] and
     //!   [`k1_chronological_byte_identical_to_parallel_with_no_arc_declared`]
     //!   build a tiny in-code system (no solver, no baseline) and check the
-    //!   `StateLayout` dimensions and the `K = 1` chronological/parallel
+    //!   `StateSpace` dimensions and the `K = 1` chronological/parallel
     //!   templates directly.
     //! - [`d06_state_layout_matches_pre_transit_bucket_formula`] and
     //!   `d06_parity_hash_matches_existing_baseline_{highs,clp}` exercise a real
     //!   golden deterministic case (D06, which declares no arc): its
-    //!   `StateLayout` and its full train+simulate parity hash, reusing
+    //!   `StateSpace` and its full train+simulate parity hash, reusing
     //!   [`common::parity_hash::run_golden_case`](super::common::parity_hash::run_golden_case)
     //!   against the EXISTING committed baseline — no new baseline is written.
 
@@ -1698,15 +1900,15 @@ mod water_travel_time_no_arc_byte_identity {
     use cobre_core::temporal::{BlockMode, Stage};
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, DeficitSegment,
-        EntityId, HydroGenerationModel, HydroStageBounds, HydroStagePenalties, HydroStorage,
-        InitialConditions, LineStageBounds, LineStagePenalties, NcsStagePenalties,
+        EntityId, HydroGenerationModel, HydroPenalties, HydroStageBounds, HydroStagePenalties,
+        HydroStorage, InitialConditions, LineStageBounds, LineStagePenalties, NcsStagePenalties,
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
         ResolvedPenalties, SystemBuilder, ThermalStageBounds,
     };
     use cobre_sddp::{
         StudySetup,
         hydro_models::prepare_hydro_models,
-        indexer::StateLayout,
+        indexer::StateSpace,
         setup::{StudyParams, prepare_stochastic},
     };
     use cobre_solver::StageTemplate;
@@ -1719,8 +1921,8 @@ mod water_travel_time_no_arc_byte_identity {
     const N_STAGES: usize = 3;
     const HYDRO_ID: i32 = 1;
 
-    fn zero_hydro_penalties() -> cobre_core::entities::hydro::HydroPenalties {
-        cobre_core::entities::hydro::HydroPenalties {
+    fn zero_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -2058,7 +2260,7 @@ mod water_travel_time_no_arc_byte_identity {
     /// pre-bucket `N*(1+L) + A*k_max` — computed from the layout's OWN public
     /// dimensions (`hydro_count`, `max_par_order`, `n_anticipated`, `k_max`), not
     /// a hand-picked literal, so the check holds for any no-arc case.
-    fn assert_no_arc_state_layout(state: &StateLayout) {
+    fn assert_no_arc_state_layout(state: &StateSpace) {
         assert_eq!(state.n_buckets, 0, "no arc declared: n_buckets must be 0");
         assert!(
             state.transit_buckets_out.is_empty(),
@@ -2081,7 +2283,7 @@ mod water_travel_time_no_arc_byte_identity {
         );
     }
 
-    /// Synthetic no-arc system: `StateLayout` collapses to the pre-bucket
+    /// Synthetic no-arc system: `StateSpace` collapses to the pre-bucket
     /// formula with no `.sha256` baseline involved.
     #[test]
     fn synthetic_no_arc_state_layout_matches_pre_transit_bucket_formula() {
@@ -2121,7 +2323,7 @@ mod water_travel_time_no_arc_byte_identity {
 
     /// Build D06's `StudySetup` (mirrors `common::parity_hash::run_golden_case`'s
     /// construction) without training/simulating, so the caller can inspect the
-    /// built `StateLayout` directly.
+    /// built `StateSpace` directly.
     fn build_d06_setup() -> StudySetup {
         let dir = d06_case_dir();
         let config_path = dir.join("config.json");
@@ -2184,11 +2386,8 @@ mod water_travel_time_no_arc_byte_identity {
         ignore = "slow: run with --features slow-tests"
     )]
     fn d06_parity_hash_matches_existing_baseline_highs() {
-        super::common::parity_hash::run_golden_case(
-            "parity_baselines",
-            "D06",
-            cobre_solver::highs::HighsSolver::new,
-        );
+        use cobre_solver::highs::HighsSolver;
+        super::common::parity_hash::run_golden_case("parity_baselines", "D06", HighsSolver::new);
     }
 
     /// CLP counterpart of
@@ -2201,10 +2400,7 @@ mod water_travel_time_no_arc_byte_identity {
         ignore = "slow: run with --features slow-tests"
     )]
     fn d06_parity_hash_matches_existing_baseline_clp() {
-        super::common::parity_hash::run_golden_case(
-            "parity_baselines_clp",
-            "D06",
-            cobre_solver::clp::ClpSolver::new,
-        );
+        use cobre_solver::clp::ClpSolver;
+        super::common::parity_hash::run_golden_case("parity_baselines_clp", "D06", ClpSolver::new);
     }
 }

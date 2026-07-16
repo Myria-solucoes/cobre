@@ -18,7 +18,7 @@ categories = ["science", "simulation", "mathematics"]
 slow-tests = []
 
 [dependencies]
-cobre-core = { version = "0.10.0", path = "../cobre-core" }
+cobre-core = { version = "0.11.0", path = "../cobre-core" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 siphasher = "1"
 rand = "0.10"

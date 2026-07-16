@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 
+use cobre_core::commissioning::{Phase, filling_phase};
 use cobre_core::{
     BlockMode, Bus, CascadeTopology, ConstraintSense, EnergyContract, EntityId, GenericConstraint,
     Hydro, Line, LoadModel, NonControllableSource, PumpingStation, ResolvedBounds,
@@ -9,16 +10,24 @@ use cobre_core::{
 };
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
+use crate::generic_constraints::GenericResolverGeom;
 use crate::hydro_models::{
     EvaporationModel, EvaporationModelSet, ProductionModelSet, ResolvedProductionModel,
 };
-use crate::indexer::{BlockGrid, EvaporationIndices, StateLayout};
+use crate::indexer::{
+    AnticipatedLocal, BlockGrid, BlockIdx, Boundary, EvapLocal, EvaporationIndices, FphaLocal,
+    HydroSys, LineSys, RangeCursor, StateSpace, StorageBoundaryGrid, ThermalSys,
+    anticipated_resolution_for, is_anticipated_decision_active_for_delivery,
+};
 use crate::lead_time::{AnticipatedResolution, SpreadResolution};
 
+use super::template::StageGeometry;
 use super::{
     EVAP_COLS_PER_HYDRO, EVAP_F_MINUS_OFFSET, EVAP_F_PLUS_OFFSET, EVAP_FLOW_OFFSET,
-    GenericConstraintRowEntry, M3S_TO_HM3, Phase, filling_phase,
+    GenericConstraintRowEntry, M3S_TO_HM3,
 };
+use crate::generic_constraints::expression_is_block_independent;
+use crate::resolved_parameters::ResolvedParameters;
 
 /// Pre-resolved bound, penalty, and factor tables shared across all stages.
 pub(crate) struct ResolvedTables<'a> {
@@ -38,7 +47,7 @@ pub(crate) struct ResolvedTables<'a> {
     pub(crate) resolved_ncs_factors: &'a ResolvedNcsFactors,
     /// `(parameter_id, stage_idx)` → resolved `f64`, queried for a
     /// [`cobre_core::CoefficientRef::Parameter`] term.
-    pub(crate) resolved_parameters: &'a crate::resolved_parameters::ResolvedParameters,
+    pub(crate) resolved_parameters: &'a ResolvedParameters,
 }
 
 /// System-level context shared across all stages during template construction.
@@ -106,15 +115,15 @@ pub(crate) struct TemplateBuildCtx<'a> {
     /// Per-plant `lead_stages` (`K_i`), length `n_anticipated`, anticipated-local order.
     pub(crate) anticipated_lead_stages: Vec<usize>,
     /// Anticipated-local position → global thermal index, length `n_anticipated`.
-    pub(crate) anticipated_thermal_indices: Vec<usize>,
+    pub(crate) anticipated_thermal_indices: Vec<ThermalSys>,
     /// Per-plant commissioning window `(entry_stage_id, exit_stage_id)`, length
     /// `n_anticipated`, anticipated-local order. The decision gate keys on the
     /// DELIVERY stage's operation window
-    /// ([`StateLayout::is_anticipated_decision_active_for_delivery`]).
+    /// (`is_anticipated_decision_active_for_delivery`).
     pub(crate) anticipated_windows: Vec<(Option<i32>, Option<i32>)>,
     /// Delivery-anchored resolution, threaded from setup's single owner
     /// (`crate::setup::resolve_state_layout`) — the same resolution the role-(a)
-    /// `StateLayout` this build receives already carries.
+    /// `StateSpace` this build receives already carries.
     pub(crate) anticipated_resolution: AnticipatedResolution,
     /// `study_stage_ids[t] = stage.id`, length `n_study_stages`. The decision gate
     /// keys its window clause on the delivery stage's `stage.id`, NOT the stage
@@ -175,7 +184,7 @@ pub(crate) struct AnticipatedLayout {
     pub(crate) col_anticipated_decision_start: usize,
     /// Start of the `anticipated_slots_out` column block (`A * k_max` columns,
     /// slot-major, plant-minor). Sourced from
-    /// `StateLayout::anticipated_slots_out.start`, so the offset is
+    /// `StateSpace::anticipated_slots_out.start`, so the offset is
     /// stage-invariant — keeping the global stage-0 cut map on the correct
     /// column at every stage regardless of this stage's block count.
     pub(crate) col_anticipated_slots_out_start: usize,
@@ -224,7 +233,7 @@ pub(crate) struct AnticipatedLayout {
     /// (`anticipated_slot_row_pos`'s `Some` count).
     pub(crate) n_anticipated_slot_definition_rows: usize,
     /// For each GLOBAL anticipated-ring slot (`slot * n_anticipated + plant`,
-    /// slot-major, matching [`crate::indexer::StateLayout::anticipated_slots_out`]'s
+    /// slot-major, matching [`crate::indexer::StateSpace::anticipated_slots_out`]'s
     /// own layout), this stage's compact row position within the interior-slot
     /// definition-row family, or `None` when the slot's delivery target is a
     /// genuine fresh decision this stage (`PointResolution::genuine_decisions_at`,
@@ -234,98 +243,11 @@ pub(crate) struct AnticipatedLayout {
     pub(crate) anticipated_slot_row_pos: Vec<Option<usize>>,
 }
 
-/// Pre-computed column and row layout offsets for a single stage LP.
-///
-/// Owns the role-(b) geometry (per-stage equipment / slack / row ranges and the
-/// entity counts that stride them) as its own fields, computed in
-/// [`StageLayout::new`] anchored at the handle's
-/// [`StateLayout::control_region_start`]. The stage-invariant role-(a) state
-/// region is NOT duplicated here — it is read through the borrowed [`Self::state`]
-/// handle. The control region begins at `state.control_region_start()`
-/// (`theta + 1`), so the two regions meet there with no overlap.
-pub(crate) struct StageLayout<'a> {
-    /// Borrowed handle to the stage-invariant role-(a) state layout; the role-(a)
-    /// accessors read through it rather than re-deriving offsets per stage. The
-    /// dependency is one-directional (geometry → `StateLayout`), never the reverse.
-    pub(crate) state: &'a StateLayout,
-    /// Block count for this stage.
-    pub(crate) n_blks: usize,
-    /// Hydro count.
-    pub(crate) n_h: usize,
-    /// PAR lag order.
-    pub(crate) lag_order: usize,
-    /// Number of anticipated thermals (mirrors `TemplateBuildCtx.n_anticipated`).
-    pub(crate) n_anticipated: usize,
-    /// Maximum `lead_stages` across the anticipated thermals (`K_max`).
-    pub(crate) k_max: usize,
-    /// Anticipated-state ring-buffer width: `n_anticipated * k_max`.
-    // Rationale: asserted only in layout unit tests; production helpers derive
-    // `n_anticipated * k_max` inline, so dead_code fires on the production side.
-    #[allow(dead_code)]
-    pub(crate) n_ant_state: usize,
-    /// Anticipated-thermal column/row offsets (see [`AnticipatedLayout`]).
-    pub(crate) anticipated: AnticipatedLayout,
-    /// Start of NCS generation columns (one per NCS per block, dense and
-    /// system-indexed): `col_ncs_start + ncs_sys_idx * n_blks + blk`. A
-    /// commissioning-dormant NCS keeps its column zeroed to `[0, 0]`, so the
-    /// position is the entity's system index, not an active-local index.
-    pub(crate) col_ncs_start: usize,
-    /// Full NCS count (identical at every stage).
-    pub(crate) n_ncs: usize,
-    /// Start of pumping-flow columns (one per station per block, dense and
-    /// system-indexed, block-major): `col_pumping_start + p_sys * n_blks + blk`. A
-    /// dormant station keeps its column zeroed to `[0, 0]`; with `n_pumping == 0`
-    /// the block is empty and `col_pumping_start == col_ncs_end`.
-    pub(crate) col_pumping_start: usize,
-    /// Full station count (identical at every stage); contributes `n_blks` columns
-    /// each. Read into the scalar `StageTemplates::n_pumping` that bounds the
-    /// per-(station, block) simulation primal read.
-    pub(crate) n_pumping: usize,
-    /// Start of import-contract columns (one per import contract per block,
-    /// block-major): `col_contract_import_start + import_idx * n_blks + blk`. The
-    /// import block follows pumping; with `n_contract_import == 0` it is empty and
-    /// `col_contract_import_start == col_pumping_end`.
-    pub(crate) col_contract_import_start: usize,
-    /// Full import-contract count (identical at every stage).
-    pub(crate) n_contract_import: usize,
-    /// Start of export-contract columns (one per export contract per block,
-    /// block-major): `col_contract_export_start + export_idx * n_blks + blk`. The
-    /// export block follows the import block; with `n_contract_export == 0` it is
-    /// empty and `col_contract_export_start == col_contract_import_end`.
-    pub(crate) col_contract_export_start: usize,
-    /// Full export-contract count (identical at every stage).
-    pub(crate) n_contract_export: usize,
-    /// Total column count.
-    pub(crate) num_cols: usize,
-    /// Start of generic constraint rows (one per active `(constraint, block)` pair),
-    /// after operational-violation rows.
-    pub(crate) row_generic_start: usize,
-    /// Total row count.
-    pub(crate) num_rows: usize,
-    /// Generic constraint row count.
-    pub(crate) n_generic_rows: usize,
-    /// Structural dual-relevant row prefix; `0` (state pinning uses column bounds).
-    pub(crate) n_dual_relevant: usize,
-    /// `total_stage_hours * M3S_TO_HM3`; the water-balance noise/inflow scale.
-    pub(crate) zeta: f64,
-    /// Indices (into `ctx.hydros`) of hydros using FPHA at this stage.
-    pub(crate) fpha_hydro_indices: Vec<usize>,
-    /// Inverse of `fpha_hydro_indices`: system hydro index → FPHA-local index,
-    /// length `n_h` (`None` at non-FPHA hydros). Single owner of the reverse map,
-    /// read by the matrix-fill helpers in place of rebuilding it per call.
-    pub(crate) fpha_local_index: Vec<Option<usize>>,
-    /// Hyperplane count per FPHA hydro at this stage.
-    pub(crate) fpha_planes_per_hydro: Vec<usize>,
-    /// Indices (into `ctx.hydros`) of hydros with linearized evaporation at this stage.
-    pub(crate) evap_hydro_indices: Vec<usize>,
-    /// Per-row metadata for active generic constraint rows, one per active
-    /// `(constraint, block)` pair in constraint-index-major order.
-    pub(crate) generic_constraint_rows: Vec<GenericConstraintRowEntry>,
-
-    // ── Role-(b) equipment column ranges (own fields) ────────────────────────
-    // Empty families normalise to `0..0`; the empty-block-cursor accessors
-    // therefore read a dedicated cursor field, not the `0` a bare `range.start`
-    // would return for a collapsed range.
+/// Equipment column ranges and their block-start cursors: every dispatchable
+/// piece of equipment (storage/turbine/spillage/diversion/thermal/lines/
+/// deficit/excess/generation/evaporation/NCS/pumping/contracts), anchored at
+/// the handle's [`StateSpace::control_region_start`].
+pub(crate) struct EquipmentColumns {
     /// Column range for the interior storage boundaries `S¹ … Sᴷ⁻¹` (one column
     /// per `(hydro, interior boundary)`, block-minor); empty `0..0` in parallel
     /// mode and when `K = 1`.
@@ -358,34 +280,69 @@ pub(crate) struct StageLayout<'a> {
     pub(crate) max_deficit_segments: usize,
     /// Column range for bus excess variables (one per bus per block).
     pub(crate) excess: Range<usize>,
-    /// Column range for import-contract variables (one per import contract per
-    /// block); empty `start..start` at `col_pumping_end` with no import contracts.
-    pub(crate) contract_import: Range<usize>,
-    /// Column range for export-contract variables (one per export contract per
-    /// block); empty `start..start` at the import-block end with no export contracts.
-    pub(crate) contract_export: Range<usize>,
-    /// Column range for inflow non-negativity slack (one per hydro, stage-level);
-    /// `0..0` without the penalty or hydros. Stored first-class so the per-stage
-    /// simulation geometry reads the stage-correct range — a single global stage-0
-    /// range would shift under a non-uniform block schedule.
-    pub(crate) inflow_slack: Range<usize>,
     /// Column-block cursor at which the FPHA generation block begins, even when
-    /// that block is empty (`inflow_slack.end` with penalty, else `excess.end`).
+    /// that block is empty. Always `inflow_slack.end` — `RangeCursor::alloc(0)`
+    /// leaves the cursor at `excess.end` when the penalty is inactive, which is
+    /// also what `inflow_slack.end` reads there.
     pub(crate) generation_col_start: usize,
     /// Column range for FPHA generation (one per FPHA hydro per block).
     pub(crate) generation: Range<usize>,
     /// Column-block cursor at which the evaporation block begins, even when empty
     /// (`generation_col_start + n_fpha_hydros * n_blks`).
     pub(crate) evap_col_start: usize,
-    /// Per-`(evaporation hydro, block)` column/row indices, block-major
-    /// (`local * n_blks + blk`). At `n_blks == 1` the slot for evap hydro `i` is
-    /// `i`, parallel to `evap_hydro_indices`.
-    pub(crate) evap_indices: Vec<EvaporationIndices>,
-    /// Column range for under-withdrawal slack (one per hydro). `0..0` with no
-    /// hydros.
-    pub(crate) withdrawal_slack_neg: Range<usize>,
-    /// Column range for over-withdrawal slack (one per hydro).
-    pub(crate) withdrawal_slack_pos: Range<usize>,
+    /// Shared post-equipment column cursor for empty-hydro fallbacks
+    /// (`evap_col_start`). The eight withdrawal/operational column families and
+    /// the NCS region collapse onto this single cursor when `n_h == 0`.
+    // Rationale: read only by the layout unit tests pinning the RangeCursor
+    // collapse invariant (no production accessor branches on `n_h` anymore, so a
+    // non-test build sees it as unread).
+    #[allow(dead_code)]
+    pub(crate) post_equipment_col_start: usize,
+    /// Start of NCS generation columns (one per NCS per block, dense and
+    /// system-indexed): `col_ncs_start + ncs_sys_idx * n_blks + blk`. A
+    /// commissioning-dormant NCS keeps its column zeroed to `[0, 0]`, so the
+    /// position is the entity's system index, not an active-local index.
+    pub(crate) col_ncs_start: usize,
+    /// Full NCS count (identical at every stage).
+    pub(crate) n_ncs: usize,
+    /// Start of pumping-flow columns (one per station per block, dense and
+    /// system-indexed, block-major): `col_pumping_start + p_sys * n_blks + blk`. A
+    /// dormant station keeps its column zeroed to `[0, 0]`; with `n_pumping == 0`
+    /// the block is empty and `col_pumping_start == col_ncs_end`.
+    pub(crate) col_pumping_start: usize,
+    /// Full station count (identical at every stage); contributes `n_blks` columns
+    /// each. Read into the scalar `StageTemplates::n_pumping` that bounds the
+    /// per-(station, block) simulation primal read.
+    pub(crate) n_pumping: usize,
+    /// Start of import-contract columns (one per import contract per block,
+    /// block-major): `col_contract_import_start + import_idx * n_blks + blk`. The
+    /// import block follows pumping; with `n_contract_import == 0` it is empty and
+    /// `col_contract_import_start == col_pumping_end`.
+    pub(crate) col_contract_import_start: usize,
+    /// Full import-contract count (identical at every stage).
+    pub(crate) n_contract_import: usize,
+    /// Start of export-contract columns (one per export contract per block,
+    /// block-major): `col_contract_export_start + export_idx * n_blks + blk`. The
+    /// export block follows the import block; with `n_contract_export == 0` it is
+    /// empty and `col_contract_export_start == col_contract_import_end`.
+    pub(crate) col_contract_export_start: usize,
+    /// Full export-contract count (identical at every stage).
+    pub(crate) n_contract_export: usize,
+    /// Column range for import-contract variables (one per import contract per
+    /// block); empty `start..start` at `col_pumping_end` with no import contracts.
+    pub(crate) contract_import: Range<usize>,
+    /// Column range for export-contract variables (one per export contract per
+    /// block); empty `start..start` at the import-block end with no export contracts.
+    pub(crate) contract_export: Range<usize>,
+}
+
+/// Column and row ranges for the four operational-violation slack families
+/// (below-min-outflow, above-max-outflow, below-min-turbine,
+/// below-min-generation), non-empty only when `n_h > 0`. Slack columns follow
+/// the withdrawal slacks; constraint rows follow the evaporation rows. Kept as
+/// one nested struct (not destructured) because the column and row halves are
+/// allocated as two back-to-back `RangeCursor` runs — see [`Self::new`].
+pub(crate) struct OperViolationRanges {
     /// Column range for outflow-below-minimum slack (one per hydro per block).
     pub(crate) outflow_below_slack: Range<usize>,
     /// Column range for outflow-above-maximum slack (one per hydro per block).
@@ -394,12 +351,60 @@ pub(crate) struct StageLayout<'a> {
     pub(crate) turbine_below_slack: Range<usize>,
     /// Column range for generation-below-minimum slack (one per hydro per block).
     pub(crate) generation_below_slack: Range<usize>,
-    /// Shared post-equipment column cursor for empty-hydro fallbacks
-    /// (`evap_col_start`). The eight withdrawal/operational column families and
-    /// the NCS region collapse onto this single cursor when `n_h == 0`.
-    pub(crate) post_equipment_col_start: usize,
+    /// Row range for min-outflow constraints (one per hydro per block).
+    pub(crate) min_outflow_rows: Range<usize>,
+    /// Row range for max-outflow constraints (one per hydro per block).
+    pub(crate) max_outflow_rows: Range<usize>,
+    /// Row range for min-turbine constraints (one per hydro per block).
+    pub(crate) min_turbine_rows: Range<usize>,
+    /// Row range for min-generation constraints (one per hydro per block).
+    pub(crate) min_generation_rows: Range<usize>,
+}
 
-    // ── Role-(b) constraint row ranges (own fields) ──────────────────────────
+impl OperViolationRanges {
+    /// Allocate the four column families then the four row families,
+    /// contiguously in that order — the exact sequence `StageLayout::new` ran
+    /// inline before this extraction; reordering these eight `alloc` calls
+    /// would shift every downstream column/row, so `col`/`row` are threaded
+    /// through unchanged and consumed in the same order.
+    fn new(col: &mut RangeCursor, row: &mut RangeCursor, n_op: usize) -> Self {
+        Self {
+            outflow_below_slack: col.alloc(n_op),
+            outflow_above_slack: col.alloc(n_op),
+            turbine_below_slack: col.alloc(n_op),
+            generation_below_slack: col.alloc(n_op),
+            min_outflow_rows: row.alloc(n_op),
+            max_outflow_rows: row.alloc(n_op),
+            min_turbine_rows: row.alloc(n_op),
+            min_generation_rows: row.alloc(n_op),
+        }
+    }
+}
+
+/// Slack columns: inflow non-negativity, under/over-withdrawal, and the four
+/// operational-violation slacks (nested via [`OperViolationRanges`], which also
+/// carries their paired constraint rows — see that type's doc for why the
+/// pairing is not split across this struct and [`ConstraintRows`]).
+pub(crate) struct SlackColumns {
+    /// Column range for inflow non-negativity slack (one per hydro, stage-level);
+    /// empty `start..start` without the penalty or hydros. Stored first-class so
+    /// the per-stage simulation geometry reads the stage-correct range — a single
+    /// global stage-0 range would shift under a non-uniform block schedule.
+    pub(crate) inflow_slack: Range<usize>,
+    /// Column range for under-withdrawal slack (one per hydro); empty
+    /// `start..start` with no hydros.
+    pub(crate) withdrawal_slack_neg: Range<usize>,
+    /// Column range for over-withdrawal slack (one per hydro).
+    pub(crate) withdrawal_slack_pos: Range<usize>,
+    /// The four operational-violation slack column ranges and their paired
+    /// constraint-row ranges.
+    pub(crate) oper_violation: OperViolationRanges,
+}
+
+/// Constraint row ranges shared by every stage's LP: z-inflow, water balance,
+/// travel-time buckets, load balance, the FPHA/evaporation row cursor, and the
+/// structural row-count scalars.
+pub(crate) struct ConstraintRows {
     /// Row index of the first z-inflow definition constraint. Row 0; state pinning
     /// uses column bounds, so no state-fixing rows precede the z-inflow block.
     pub(crate) z_inflow_row_start: usize,
@@ -435,18 +440,29 @@ pub(crate) struct StageLayout<'a> {
     /// Row cursor at which the evaporation row block begins (`fpha_rows_end`),
     /// even when the FPHA block is empty.
     pub(crate) fpha_rows_end: usize,
-    /// Row range for min-outflow constraints (one per hydro per block).
-    pub(crate) min_outflow_rows: Range<usize>,
-    /// Row range for max-outflow constraints (one per hydro per block).
-    pub(crate) max_outflow_rows: Range<usize>,
-    /// Row range for min-turbine constraints (one per hydro per block).
-    pub(crate) min_turbine_rows: Range<usize>,
-    /// Row range for min-generation constraints (one per hydro per block).
-    pub(crate) min_generation_rows: Range<usize>,
     /// Shared post-equipment row cursor for empty-hydro fallbacks
     /// (`fpha_rows_end + n_evap_hydros`). The four operational-violation row
     /// families collapse onto this single cursor when `n_h == 0`.
+    // Rationale: read only by the layout unit tests pinning the RangeCursor
+    // collapse invariant (no production accessor branches on `n_h` anymore, so a
+    // non-test build sees it as unread).
+    #[allow(dead_code)]
     pub(crate) post_equipment_row_start: usize,
+    /// Start of generic constraint rows (one per active `(constraint, block)` pair),
+    /// after operational-violation rows.
+    pub(crate) row_generic_start: usize,
+    /// Total row count.
+    pub(crate) num_rows: usize,
+    /// Generic constraint row count.
+    pub(crate) n_generic_rows: usize,
+    /// Structural dual-relevant row prefix; `0` (state pinning uses column bounds).
+    pub(crate) n_dual_relevant: usize,
+}
+
+/// Per-stage filling-phase row/column families: the `σ_fill` target (Filling
+/// phase) and the soft `σ^{v-}` operating floor (Operating phase), each with
+/// its paired hydro-index satellite vector.
+pub(crate) struct FillingLayout {
     /// First per-stage `σ_fill`-target row (one per Filling-phase filling hydro);
     /// after the operational-violation rows, in the pre-cut region. Empty at every
     /// non-Filling stage. MUST stay strictly below `num_rows`: a row at index
@@ -462,7 +478,7 @@ pub(crate) struct StageLayout<'a> {
     /// Parallel to both the `filling_target` row and `σ_fill` column blocks: local
     /// index `i` → row `row_filling_target_start + i`, column
     /// `col_filling_target_start + i`.
-    pub(crate) filling_target_hydro_indices: Vec<usize>,
+    pub(crate) filling_target_hydro_indices: Vec<HydroSys>,
     /// First soft `σ^{v-}` operating-floor row (one per Operating-phase filling
     /// hydro); sibling to `filling_target` in the pre-cut region. Same
     /// `row >= num_rows` aliasing invariant as `row_filling_target_start`.
@@ -476,7 +492,70 @@ pub(crate) struct StageLayout<'a> {
     /// Parallel to both the `filled_min_storage_floor` row and column blocks. DISTINCT
     /// from `filling_target_hydro_indices` (`σ_fill`, Filling phase); the two
     /// never overlap (Operating vs Filling).
-    pub(crate) filled_min_storage_floor_hydro_indices: Vec<usize>,
+    pub(crate) filled_min_storage_floor_hydro_indices: Vec<HydroSys>,
+}
+
+/// Pre-computed column and row layout offsets for a single stage LP.
+///
+/// Owns the role-(b) geometry (per-stage equipment / slack / row ranges and the
+/// entity counts that stride them) as its own fields, computed in
+/// [`StageLayout::new`] anchored at the handle's
+/// [`StateSpace::control_region_start`]. The stage-invariant role-(a) state
+/// region is NOT duplicated here — it is read through the borrowed [`Self::state`]
+/// handle. The control region begins at `state.control_region_start()`
+/// (`theta + 1`), so the two regions meet there with no overlap.
+pub(crate) struct StageLayout<'a> {
+    /// Borrowed handle to the stage-invariant role-(a) state layout; the role-(a)
+    /// accessors read through it rather than re-deriving offsets per stage. The
+    /// dependency is one-directional (geometry → `StateSpace`), never the reverse.
+    pub(crate) state: &'a StateSpace,
+    /// Block count for this stage.
+    pub(crate) n_blks: usize,
+    /// Hydro count.
+    pub(crate) n_h: usize,
+    /// PAR lag order.
+    pub(crate) lag_order: usize,
+    /// Number of anticipated thermals (mirrors `TemplateBuildCtx.n_anticipated`).
+    pub(crate) n_anticipated: usize,
+    /// Maximum `lead_stages` across the anticipated thermals (`K_max`).
+    pub(crate) k_max: usize,
+    /// Anticipated-state ring-buffer width: `n_anticipated * k_max`.
+    // Rationale: asserted only in layout unit tests; production helpers derive
+    // `n_anticipated * k_max` inline, so dead_code fires on the production side.
+    #[allow(dead_code)]
+    pub(crate) n_ant_state: usize,
+    /// Anticipated-thermal column/row offsets (see [`AnticipatedLayout`]).
+    pub(crate) anticipated: AnticipatedLayout,
+    /// Equipment column ranges (see [`EquipmentColumns`]).
+    pub(crate) equipment: EquipmentColumns,
+    /// Slack columns, including the paired operational-violation rows (see
+    /// [`SlackColumns`]).
+    pub(crate) slack: SlackColumns,
+    /// Constraint row ranges (see [`ConstraintRows`]).
+    pub(crate) rows: ConstraintRows,
+    /// Filling-phase row/column families (see [`FillingLayout`]).
+    pub(crate) filling: FillingLayout,
+    /// Total column count.
+    pub(crate) num_cols: usize,
+    /// `total_stage_hours * M3S_TO_HM3`; the water-balance noise/inflow scale.
+    pub(crate) zeta: f64,
+    /// Indices (into `ctx.hydros`) of hydros using FPHA at this stage.
+    pub(crate) fpha_hydro_indices: Vec<HydroSys>,
+    /// Inverse of `fpha_hydro_indices`: system hydro index → FPHA-local index,
+    /// length `n_h` (`None` at non-FPHA hydros). Single owner of the reverse map,
+    /// read by the matrix-fill helpers in place of rebuilding it per call.
+    pub(crate) fpha_local_index: Vec<Option<FphaLocal>>,
+    /// Hyperplane count per FPHA hydro at this stage.
+    pub(crate) fpha_planes_per_hydro: Vec<usize>,
+    /// Indices (into `ctx.hydros`) of hydros with linearized evaporation at this stage.
+    pub(crate) evap_hydro_indices: Vec<HydroSys>,
+    /// Per-`(evaporation hydro, block)` column/row indices, block-major
+    /// (`local * n_blks + blk`). At `n_blks == 1` the slot for evap hydro `i` is
+    /// `i`, parallel to `evap_hydro_indices`.
+    pub(crate) evap_indices: Vec<EvaporationIndices>,
+    /// Per-row metadata for active generic constraint rows, one per active
+    /// `(constraint, block)` pair in constraint-index-major order.
+    pub(crate) generic_constraint_rows: Vec<GenericConstraintRowEntry>,
 
     // ── Role-(b) anticipated identity maps (own fields) ──────────────────────
     /// Reverse map: global thermal position → anticipated-local index. Built once
@@ -491,45 +570,6 @@ struct GenericConstraintLayout {
     n_generic_rows: usize,
     n_generic_slack_cols: usize,
     generic_constraint_rows: Vec<GenericConstraintRowEntry>,
-}
-
-/// Column and row ranges for the four operational-violation slack families,
-/// non-empty only when `n_h > 0`. Slack columns follow the withdrawal slacks;
-/// constraint rows follow the evaporation rows.
-struct OperViolationRanges {
-    outflow_below_slack: Range<usize>,
-    outflow_above_slack: Range<usize>,
-    turbine_below_slack: Range<usize>,
-    generation_below_slack: Range<usize>,
-    min_outflow_rows: Range<usize>,
-    max_outflow_rows: Range<usize>,
-    min_turbine_rows: Range<usize>,
-    min_generation_rows: Range<usize>,
-}
-
-impl OperViolationRanges {
-    /// The all-empty (`0..0`) variant used when `n_h == 0`.
-    fn empty() -> Self {
-        Self {
-            outflow_below_slack: 0..0,
-            outflow_above_slack: 0..0,
-            turbine_below_slack: 0..0,
-            generation_below_slack: 0..0,
-            min_outflow_rows: 0..0,
-            max_outflow_rows: 0..0,
-            min_turbine_rows: 0..0,
-            min_generation_rows: 0..0,
-        }
-    }
-}
-
-/// Row cursor where the evaporation rows begin (after the FPHA rows):
-/// `start_row + n_blks * Σ planes`. The per-hydro
-/// [`FphaRowRange`](crate::indexer::FphaRowRange) entries live on
-/// `StageData.indexer`, not here.
-fn build_fpha_rows(planes_per_hydro: &[usize], n_blks: usize, start_row: usize) -> usize {
-    let total_planes: usize = planes_per_hydro.iter().sum();
-    start_row + n_blks * total_planes
 }
 
 /// For each entry of `column_order` (global bucket index `slot`, `(plant, lag)`),
@@ -587,7 +627,7 @@ fn build_transit_bucket_row_pos(
 /// fold-blindness class this per-slot check rules out). Returns the mapping
 /// and the reachable count.
 fn build_anticipated_slot_row_pos(
-    state: &StateLayout,
+    state: &StateSpace,
     n_stages: usize,
     stage_idx: usize,
 ) -> (Vec<Option<usize>>, usize) {
@@ -597,7 +637,7 @@ fn build_anticipated_slot_row_pos(
         return (Vec::new(), 0);
     }
     let points: Vec<_> = (0..n_anticipated)
-        .map(|plant| state.anticipated_resolution_for(plant, n_stages))
+        .map(|plant| anticipated_resolution_for(state, AnticipatedLocal::new(plant), n_stages))
         .collect();
 
     let mut row_pos = vec![None; n_anticipated * k_max];
@@ -620,10 +660,10 @@ fn build_anticipated_slot_row_pos(
 /// the deposit-row family, or `None` when the plant has no genuine decision
 /// this stage (`PointResolution::genuine_decisions_at(stage_idx).next()`) or
 /// the delivery is commissioning-inactive
-/// (`StateLayout::is_anticipated_decision_active_for_delivery`). Returns the
+/// (`is_anticipated_decision_active_for_delivery`). Returns the
 /// mapping and the active count.
 fn build_anticipated_decision_row_pos(
-    state: &StateLayout,
+    state: &StateSpace,
     n_stages: usize,
     stage_idx: usize,
     anticipated_windows: &[(Option<i32>, Option<i32>)],
@@ -636,7 +676,8 @@ fn build_anticipated_decision_row_pos(
     let mut row_pos = vec![None; n_anticipated];
     let mut n_active = 0_usize;
     for (plant, pos) in row_pos.iter_mut().enumerate() {
-        let point = state.anticipated_resolution_for(plant, n_stages);
+        let plant = AnticipatedLocal::new(plant);
+        let point = anticipated_resolution_for(state, plant, n_stages);
         let Some(m) = point.genuine_decisions_at(stage_idx).next() else {
             continue;
         };
@@ -645,7 +686,8 @@ fn build_anticipated_decision_row_pos(
             "a K=0 self-delivery (decider[m] == m) must never reach the anticipated \
              ring's deposit-row fill"
         );
-        if state.is_anticipated_decision_active_for_delivery(
+        if is_anticipated_decision_active_for_delivery(
+            state,
             plant,
             m,
             n_stages,
@@ -667,7 +709,7 @@ fn build_anticipated_decision_row_pos(
 /// unconstrained by any fishing coupling. Returns the mapping and the active
 /// count.
 fn build_anticipated_fishing_row_pos(
-    state: &StateLayout,
+    state: &StateSpace,
     n_stages: usize,
     stage_idx: usize,
 ) -> (Vec<Option<usize>>, usize) {
@@ -678,8 +720,7 @@ fn build_anticipated_fishing_row_pos(
     let mut row_pos = vec![None; n_anticipated];
     let mut n_active = 0_usize;
     for (plant, pos) in row_pos.iter_mut().enumerate() {
-        if state
-            .anticipated_resolution_for(plant, n_stages)
+        if anticipated_resolution_for(state, AnticipatedLocal::new(plant), n_stages)
             .is_anticipated_at(stage_idx)
         {
             *pos = Some(n_active);
@@ -734,8 +775,8 @@ fn identify_fpha_hydros(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
     stage_id: i32,
-) -> (Vec<usize>, Vec<usize>) {
-    let mut fpha_hydro_indices: Vec<usize> = Vec::new();
+) -> (Vec<HydroSys>, Vec<usize>) {
+    let mut fpha_hydro_indices: Vec<HydroSys> = Vec::new();
     let mut fpha_planes_per_hydro: Vec<usize> = Vec::new();
     for h_idx in 0..ctx.n_hydros {
         let hydro = &ctx.hydros[h_idx];
@@ -753,7 +794,7 @@ fn identify_fpha_hydros(
         if let ResolvedProductionModel::Fpha { planes, .. } =
             ctx.production_models.model(h_idx, stage_idx)
         {
-            fpha_hydro_indices.push(h_idx);
+            fpha_hydro_indices.push(HydroSys::new(h_idx));
             fpha_planes_per_hydro.push(planes.len());
         }
     }
@@ -768,7 +809,7 @@ fn identify_fpha_hydros(
 /// `Filling` — the opposite of the FPHA rule (excluded in `PreFilling` *and*
 /// `Filling`); the two must not be unified. A non-filling hydro with no window is
 /// `Operating` at every stage (parity-neutral).
-fn identify_evap_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> Vec<usize> {
+fn identify_evap_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> Vec<HydroSys> {
     (0..ctx.n_hydros)
         .filter(|&h_idx| {
             let hydro = &ctx.hydros[h_idx];
@@ -788,6 +829,7 @@ fn identify_evap_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> Vec<usize>
                 EvaporationModel::Linearized { .. }
             )
         })
+        .map(HydroSys::new)
         .collect()
 }
 
@@ -801,7 +843,7 @@ fn identify_evap_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> Vec<usize>
 /// drops every intermediate floor. `PreFilling`/`Operating` are excluded by
 /// [`filling_phase`] (`filled_min_storage_floor` takes over at/after `entry`). A
 /// non-filling hydro is `Operating` at every stage (parity-neutral).
-fn identify_filling_target_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> Vec<usize> {
+fn identify_filling_target_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> Vec<HydroSys> {
     (0..ctx.n_hydros)
         .filter(|&h_idx| {
             let hydro = &ctx.hydros[h_idx];
@@ -816,6 +858,7 @@ fn identify_filling_target_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> 
                     Phase::Filling
                 )
         })
+        .map(HydroSys::new)
         .collect()
 }
 
@@ -835,7 +878,7 @@ fn identify_filling_target_hydros(ctx: &TemplateBuildCtx<'_>, stage_id: i32) -> 
 fn identify_filled_min_storage_floor_hydros(
     ctx: &TemplateBuildCtx<'_>,
     stage_id: i32,
-) -> Vec<usize> {
+) -> Vec<HydroSys> {
     (0..ctx.n_hydros)
         .filter(|&h_idx| {
             let hydro = &ctx.hydros[h_idx];
@@ -849,6 +892,7 @@ fn identify_filled_min_storage_floor_hydros(
                 Phase::Operating
             ) && hydro.filling.is_some()
         })
+        .map(HydroSys::new)
         .collect()
 }
 
@@ -904,8 +948,7 @@ fn enumerate_generic_constraint_rows(
             .resolved_generic_bounds
             .bounds_for_stage(constraint_idx, stage.id);
 
-        let collapse_stage_level =
-            crate::generic_constraints::expression_is_block_independent(&constraint.expression);
+        let collapse_stage_level = expression_is_block_independent(&constraint.expression);
 
         // Bind the constraint-invariant fields once so the three arms below stay
         // field-for-field identical (only per-row fields vary).
@@ -1005,7 +1048,7 @@ impl<'a> StageLayout<'a> {
     #[allow(clippy::too_many_lines, clippy::similar_names)]
     pub(crate) fn new(
         ctx: &TemplateBuildCtx<'_>,
-        state: &'a StateLayout,
+        state: &'a StateSpace,
         stage: &Stage,
         stage_idx: usize,
     ) -> Self {
@@ -1019,9 +1062,9 @@ impl<'a> StageLayout<'a> {
         let filled_min_storage_floor_hydro_indices =
             identify_filled_min_storage_floor_hydros(ctx, stage.id);
 
-        let mut fpha_local_index: Vec<Option<usize>> = vec![None; n_h];
-        for (local_idx, &h_idx) in fpha_hydro_indices.iter().enumerate() {
-            fpha_local_index[h_idx] = Some(local_idx);
+        let mut fpha_local_index: Vec<Option<FphaLocal>> = vec![None; n_h];
+        for (local_idx, &h) in fpha_hydro_indices.iter().enumerate() {
+            fpha_local_index[h.get()] = Some(FphaLocal::new(local_idx));
         }
 
         let max_deficit_segments = ctx
@@ -1033,164 +1076,110 @@ impl<'a> StageLayout<'a> {
 
         // ── Role-(b) equipment column ranges ─────────────────────────────────
         // Anchored at the handle's `control_region_start()` (the role-(a)/role-(b)
-        // seam); each range starts at the previous range's `.end`, strided by THIS
-        // stage's `n_blks` (the per-stage authority over the stage-0 global stride).
+        // seam); `col` allocates every family through `RangeCursor::alloc`, strided
+        // by THIS stage's `n_blks` (the per-stage authority over the stage-0 global
+        // stride). Adjacency between consecutive families is structural, never a
+        // hand-copied `.end`.
         let n_interior = match stage.block_mode {
             BlockMode::Chronological => n_blks.saturating_sub(1),
             BlockMode::Parallel => 0,
         };
-        let storage_internal_start = state.control_region_start();
-        let storage_internal_end = storage_internal_start + n_h * n_interior;
-        let turbine_start = storage_internal_end;
-        let spillage_start = turbine_start + n_h * n_blks;
-        let diversion_start = spillage_start + n_h * n_blks;
-        let thermal_start = diversion_start + n_h * n_blks;
-        let thermal_end = thermal_start + ctx.n_thermals * n_blks;
-        let anticipated_decision_end = thermal_end + ctx.n_anticipated;
-        let line_fwd_start = anticipated_decision_end;
-        let line_rev_start = line_fwd_start + ctx.n_lines * n_blks;
-        let deficit_start = line_rev_start + ctx.n_lines * n_blks;
-        let excess_start = deficit_start + ctx.n_buses * max_deficit_segments * n_blks;
-        let excess_end = excess_start + ctx.n_buses * n_blks;
+        let mut col = RangeCursor::new(state.control_region_start());
+        let storage_internal = col.alloc(n_h * n_interior);
+        let storage_internal_start = storage_internal.start;
+        let turbine = col.alloc(n_h * n_blks);
+        let spillage = col.alloc(n_h * n_blks);
+        let diversion = col.alloc(n_h * n_blks);
+        let thermal = col.alloc(ctx.n_thermals * n_blks);
+        let thermal_end = thermal.end;
+        col.alloc(ctx.n_anticipated);
+        let line_fwd = col.alloc(ctx.n_lines * n_blks);
+        let line_rev = col.alloc(ctx.n_lines * n_blks);
+        let deficit = col.alloc(ctx.n_buses * max_deficit_segments * n_blks);
+        let excess = col.alloc(ctx.n_buses * n_blks);
 
         let has_inflow_penalty = ctx.has_penalty && n_h > 0;
-        let inflow_slack = if has_inflow_penalty {
-            excess_end..excess_end + n_h
-        } else {
-            0..0
-        };
+        let inflow_slack = col.alloc(if has_inflow_penalty { n_h } else { 0 });
 
         // `generation_col_start` is the empty-block cursor `col_generation_start`
-        // reads, so it never returns a bare-`.start` `0`.
+        // reads; `col.pos()` already carries the correct value whether or not the
+        // inflow-penalty family above was empty.
         let n_fpha_hydros = fpha_hydro_indices.len();
-        let generation_col_start = if has_inflow_penalty {
-            inflow_slack.end
-        } else {
-            excess_end
-        };
-        let generation_end = generation_col_start + n_fpha_hydros * n_blks;
-        let generation = if n_fpha_hydros > 0 {
-            generation_col_start..generation_end
-        } else {
-            0..0
-        };
+        let generation_col_start = col.pos();
+        let generation = col.alloc(n_fpha_hydros * n_blks);
 
         // `evap_col_start` is the empty-block cursor `col_evap_start` reads; one
         // `EVAP_COLS_PER_HYDRO` triple per `(evap hydro, block)`, block-strided by `n_blks`.
         let n_evap_hydros = evap_hydro_indices.len();
-        let evap_col_start = generation_end;
-        let evap_col_end = evap_col_start + n_evap_hydros * n_blks * EVAP_COLS_PER_HYDRO;
+        let evap_col_start = col.pos();
+        col.alloc(n_evap_hydros * n_blks * EVAP_COLS_PER_HYDRO);
         let post_equipment_col_start = evap_col_start;
 
         // ── Role-(b) constraint row ranges ───────────────────────────────────
         // z_inflow rows start at row 0 — state pinning uses column bounds, so no
-        // state-fixing row range precedes them.
-        let z_inflow_row_start = 0_usize;
-        let water_balance_start = z_inflow_row_start + n_h;
+        // state-fixing row range precedes them. `row` allocates every family
+        // through `RangeCursor::alloc`, mirroring `col` above.
+        let mut row = RangeCursor::new(0);
+        let z_inflow_row_start = row.pos();
+        row.alloc(n_h);
         let n_water_blocks = match stage.block_mode {
             BlockMode::Chronological => n_blks,
             BlockMode::Parallel => 1,
         };
-        let n_water_rows = n_h * n_water_blocks;
-        let water_balance = water_balance_start..water_balance_start + n_water_rows;
+        let water_balance = row.alloc(n_h * n_water_blocks);
         // Sized from this stage's reachable count, not the stage-invariant
         // `state.n_buckets`: `build_transit_bucket_row_pos` masks a lag beyond
         // `ctx.per_stage_mask[stage_idx]`'s per-plant cap out of the row range
         // entirely (`horizon_cap_active`'s "dropped by construction").
-        let transit_bucket_definition_start = water_balance.end;
         let (transit_bucket_row_pos, n_transit_bucket_rows) = build_transit_bucket_row_pos(
             &state.transit_bucket_column_order,
             &ctx.per_stage_mask,
             stage_idx,
         );
-        let transit_bucket_definition = transit_bucket_definition_start
-            ..transit_bucket_definition_start + n_transit_bucket_rows;
-        let load_balance_start = transit_bucket_definition.end;
-        let load_balance_end = load_balance_start + ctx.n_buses * n_blks;
-        let load_balance = load_balance_start..load_balance_end;
+        let transit_bucket_definition = row.alloc(n_transit_bucket_rows);
+        let load_balance = row.alloc(ctx.n_buses * n_blks);
 
         // Only the end cursor is kept here (the per-hydro ranges live on
         // `StageData.indexer`); `fpha_rows_end` is the evaporation-row start even
         // when the FPHA block is empty.
-        let fpha_rows_end = build_fpha_rows(&fpha_planes_per_hydro, n_blks, load_balance_end);
+        let total_fpha_planes: usize = fpha_planes_per_hydro.iter().sum();
+        let fpha_rows_end = row.alloc(n_blks * total_fpha_planes).end;
 
-        // `evap_rows_end` is the post-equipment row cursor the empty
-        // operational-violation row families collapse onto. One row per
-        // `(evap hydro, block)`, so the block grows by `n_blks` — the cursor chain
-        // below MUST stay in lockstep or every downstream row shifts.
+        // One row per `(evap hydro, block)`, so the block grows by `n_blks` — the
+        // cursor chain below MUST stay in lockstep or every downstream row shifts.
         let evap_indices = build_evap_indices(n_evap_hydros, n_blks, evap_col_start, fpha_rows_end);
-        let evap_rows_end = fpha_rows_end + n_evap_hydros * n_blks;
-        let post_equipment_row_start = evap_rows_end;
+        row.alloc(n_evap_hydros * n_blks);
+        let post_equipment_row_start = row.pos();
 
         // Withdrawal slacks + the four operational-violation slack families (after
         // the evaporation columns) and their matching rows (after the evaporation
-        // rows). All collapse to `0..0` when `n_h == 0`, with downstream cursors
-        // falling back to the post-equipment cursor so no stale offset survives.
-        let (withdrawal_slack_neg, withdrawal_slack_pos, oper) = if n_h > 0 {
-            let neg = evap_col_end..evap_col_end + n_h;
-            let pos = neg.end..neg.end + n_h;
-            let n_op = n_h * n_blks;
-            let ob = pos.end..pos.end + n_op;
-            let oa = ob.end..ob.end + n_op;
-            let tb = oa.end..oa.end + n_op;
-            let gb = tb.end..tb.end + n_op;
-            let r_min_out = evap_rows_end..evap_rows_end + n_op;
-            let r_max_out = r_min_out.end..r_min_out.end + n_op;
-            let r_min_turb = r_max_out.end..r_max_out.end + n_op;
-            let r_min_gen = r_min_turb.end..r_min_turb.end + n_op;
-            (
-                neg,
-                pos,
-                OperViolationRanges {
-                    outflow_below_slack: ob,
-                    outflow_above_slack: oa,
-                    turbine_below_slack: tb,
-                    generation_below_slack: gb,
-                    min_outflow_rows: r_min_out,
-                    max_outflow_rows: r_max_out,
-                    min_turbine_rows: r_min_turb,
-                    min_generation_rows: r_min_gen,
-                },
-            )
-        } else {
-            (0..0, 0..0, OperViolationRanges::empty())
-        };
+        // rows). `n_op` is `0` when `n_h == 0`, so `alloc(0)` collapses every
+        // family onto the post-equipment cursor with no branch.
+        let withdrawal_slack_neg = col.alloc(n_h);
+        let withdrawal_slack_pos = col.alloc(n_h);
+        let n_op = n_h * n_blks;
+        let oper_violation = OperViolationRanges::new(&mut col, &mut row, n_op);
 
         let n_ant_state = ctx.n_anticipated * ctx.k_max;
 
-        // NCS follows the last operational-violation slack family; when `n_h == 0`
-        // that family is the empty `0..0` sentinel, so fall back to the
-        // post-equipment cursor — a future family inserted before NCS then cannot
-        // leave this `n_h == 0` start on a stale cursor.
+        // NCS follows the last operational-violation slack family; `col.pos()`
+        // already equals the post-equipment cursor when `n_h == 0`, so no fallback
+        // branch is needed.
         let n_ncs = ctx.non_controllable_sources.len();
-        let col_ncs_start = if n_h > 0 {
-            oper.generation_below_slack.end
-        } else {
-            post_equipment_col_start
-        };
-        let col_ncs_end = col_ncs_start + n_ncs * n_blks;
+        let col_ncs_start = col.alloc(n_ncs * n_blks).start;
 
         // n_dual_relevant is 0 — state pinning uses column bounds, so the cut path
         // reads view.reduced_costs, not a structural dual prefix.
         let n_dual_relevant = 0_usize;
-        let n_op_rows = n_h * n_blks;
-        // Anchor the fishing-row chain on the post-equipment cursor when `n_h == 0`
-        // (the operational-violation blocks normalise to `0..0`), so the empty-hydro
-        // row layout cannot drift onto a stale `> 0`-branch offset.
-        let row_min_generation_start = if n_h > 0 {
-            oper.min_generation_rows.start
-        } else {
-            post_equipment_row_start
-        };
 
         // σ_fill then σ^{v-} rows, in the pre-cut region after the
         // operational-violation rows. Both MUST stay strictly below `num_rows`: a
         // row at index `>= num_rows` aliases the append-only cut rows (slot-identity
         // warm-start matches cut rows from `num_rows`) and corrupts every cut.
         let n_filling_target_rows = filling_target_hydro_indices.len();
-        let row_filling_target_start = row_min_generation_start + n_op_rows;
+        let row_filling_target_start = row.alloc(n_filling_target_rows).start;
         let n_filled_min_storage_floor_rows = filled_min_storage_floor_hydro_indices.len();
-        let row_filled_min_storage_floor_start = row_filling_target_start + n_filling_target_rows;
+        let row_filled_min_storage_floor_start = row.alloc(n_filled_min_storage_floor_rows).start;
 
         // Fishing rows: one per GENUINELY anticipated plant this stage
         // (`build_anticipated_fishing_row_pos`) — a `K = 0` self-delivery
@@ -1199,8 +1188,7 @@ impl<'a> StageLayout<'a> {
         let n_stages = ctx.resolved.bounds.n_stages();
         let (anticipated_fishing_row_pos, n_anticipated_fishing_rows) =
             build_anticipated_fishing_row_pos(state, n_stages, stage_idx);
-        let row_anticipated_fishing_start =
-            row_filled_min_storage_floor_start + n_filled_min_storage_floor_rows;
+        let row_anticipated_fishing_start = row.alloc(n_anticipated_fishing_rows).start;
 
         // Anticipated-state-out (deposit) definition rows
         // (`build_anticipated_decision_row_pos`).
@@ -1212,43 +1200,43 @@ impl<'a> StageLayout<'a> {
                 &ctx.anticipated_windows,
                 &ctx.study_stage_ids,
             );
-        let row_anticipated_state_out_def_start =
-            row_anticipated_fishing_start + n_anticipated_fishing_rows;
+        let row_anticipated_state_out_def_start = row.alloc(n_anticipated_state_out_def_rows).start;
 
         // Anticipated-ring interior-slot definition rows
         // (`build_anticipated_slot_row_pos`).
         let (anticipated_slot_row_pos, n_anticipated_slot_definition_rows) =
             build_anticipated_slot_row_pos(state, n_stages, stage_idx);
         let row_anticipated_slot_definition_start =
-            row_anticipated_state_out_def_start + n_anticipated_state_out_def_rows;
-        let row_generic_start =
-            row_anticipated_slot_definition_start + n_anticipated_slot_definition_rows;
+            row.alloc(n_anticipated_slot_definition_rows).start;
+        // Peeked before `generic` below is computed: the generic row block's
+        // length depends on `col_generic_slack_start` (the column axis), but its
+        // own start does not depend on that length.
+        let row_generic_start = row.pos();
 
         let n_pumping = ctx.n_pumping;
-        let col_pumping_start = col_ncs_end;
-        let col_pumping_end = col_pumping_start + n_pumping * n_blks;
+        let col_pumping_start = col.alloc(n_pumping * n_blks).start;
 
         // Import then export contract block; both empty leaves
         // col_generic_slack_start at col_pumping_end (parity-neutral).
         let n_contract_import = ctx.n_contract_import;
         let n_contract_export = ctx.n_contract_export;
-        let col_contract_import_start = col_pumping_end;
-        let col_contract_import_end = col_contract_import_start + n_contract_import * n_blks;
-        let col_contract_export_start = col_contract_import_end;
-        let col_contract_export_end = col_contract_export_start + n_contract_export * n_blks;
+        let contract_import = col.alloc(n_contract_import * n_blks);
+        let contract_export = col.alloc(n_contract_export * n_blks);
 
-        let col_generic_slack_start = col_contract_export_end;
+        let col_generic_slack_start = col.pos();
         let generic =
             enumerate_generic_constraint_rows(ctx, stage, n_blks, col_generic_slack_start);
+        col.alloc(generic.n_generic_slack_cols);
 
         // σ_fill then σ^{v-} are the last two per-stage column families; σ^{v-}
         // last so its presence cannot shift any other family's start.
-        let col_filling_target_start = col_generic_slack_start + generic.n_generic_slack_cols;
-        let col_filled_min_storage_floor_start =
-            col_filling_target_start + filling_target_hydro_indices.len();
-        let num_cols =
-            col_filled_min_storage_floor_start + filled_min_storage_floor_hydro_indices.len();
-        let num_rows = row_generic_start + generic.n_generic_rows;
+        let col_filling_target_start = col.alloc(filling_target_hydro_indices.len()).start;
+        let col_filled_min_storage_floor_start = col
+            .alloc(filled_min_storage_floor_hydro_indices.len())
+            .start;
+        let num_cols = col.pos();
+        row.alloc(generic.n_generic_rows);
+        let num_rows = row.pos();
         let zeta = stage.blocks.iter().map(|b| b.duration_hours).sum::<f64>() * M3S_TO_HM3;
 
         // The ring's outgoing columns are sourced from their stage-invariant
@@ -1278,8 +1266,63 @@ impl<'a> StageLayout<'a> {
             .anticipated_thermal_indices
             .iter()
             .enumerate()
-            .map(|(local, &sys_pos)| (sys_pos, local))
+            .map(|(local, &sys_pos)| (sys_pos.get(), local))
             .collect();
+
+        let equipment = EquipmentColumns {
+            storage_internal,
+            storage_internal_start,
+            turbine,
+            spillage,
+            diversion,
+            thermal,
+            line_fwd,
+            line_rev,
+            deficit,
+            max_deficit_segments,
+            excess,
+            generation_col_start,
+            generation,
+            evap_col_start,
+            post_equipment_col_start,
+            col_ncs_start,
+            n_ncs,
+            col_pumping_start,
+            n_pumping,
+            col_contract_import_start: contract_import.start,
+            n_contract_import,
+            col_contract_export_start: contract_export.start,
+            n_contract_export,
+            contract_import,
+            contract_export,
+        };
+        let slack = SlackColumns {
+            inflow_slack,
+            withdrawal_slack_neg,
+            withdrawal_slack_pos,
+            oper_violation,
+        };
+        let rows = ConstraintRows {
+            z_inflow_row_start,
+            water_balance,
+            transit_bucket_definition,
+            transit_bucket_row_pos,
+            load_balance,
+            fpha_rows_end,
+            post_equipment_row_start,
+            row_generic_start,
+            num_rows,
+            n_generic_rows: generic.n_generic_rows,
+            n_dual_relevant,
+        };
+        let filling = FillingLayout {
+            row_filling_target_start,
+            col_filling_target_start,
+            filling_target_hydro_indices,
+            row_filled_min_storage_floor_start,
+            col_filled_min_storage_floor_start,
+            filled_min_storage_floor_hydro_indices,
+        };
 
         Self {
             state,
@@ -1290,67 +1333,18 @@ impl<'a> StageLayout<'a> {
             k_max: ctx.k_max,
             n_ant_state,
             anticipated,
-            col_ncs_start,
-            n_ncs,
-            col_pumping_start,
-            n_pumping,
-            col_contract_import_start,
-            n_contract_import,
-            col_contract_export_start,
-            n_contract_export,
+            equipment,
+            slack,
+            rows,
+            filling,
             num_cols,
-            row_generic_start,
-            num_rows,
-            n_generic_rows: generic.n_generic_rows,
-            n_dual_relevant,
             zeta,
             fpha_hydro_indices,
             fpha_local_index,
             fpha_planes_per_hydro,
             evap_hydro_indices,
-            generic_constraint_rows: generic.generic_constraint_rows,
-            storage_internal: storage_internal_start..storage_internal_end,
-            storage_internal_start,
-            turbine: turbine_start..spillage_start,
-            spillage: spillage_start..diversion_start,
-            diversion: diversion_start..thermal_start,
-            thermal: thermal_start..thermal_end,
-            line_fwd: line_fwd_start..line_rev_start,
-            line_rev: line_rev_start..deficit_start,
-            deficit: deficit_start..excess_start,
-            max_deficit_segments,
-            excess: excess_start..excess_end,
-            contract_import: col_contract_import_start..col_contract_import_end,
-            contract_export: col_contract_export_start..col_contract_export_end,
-            inflow_slack,
-            generation_col_start,
-            generation,
-            evap_col_start,
             evap_indices,
-            withdrawal_slack_neg,
-            withdrawal_slack_pos,
-            outflow_below_slack: oper.outflow_below_slack,
-            outflow_above_slack: oper.outflow_above_slack,
-            turbine_below_slack: oper.turbine_below_slack,
-            generation_below_slack: oper.generation_below_slack,
-            post_equipment_col_start,
-            z_inflow_row_start,
-            water_balance,
-            transit_bucket_definition,
-            transit_bucket_row_pos,
-            load_balance,
-            fpha_rows_end,
-            min_outflow_rows: oper.min_outflow_rows,
-            max_outflow_rows: oper.max_outflow_rows,
-            min_turbine_rows: oper.min_turbine_rows,
-            min_generation_rows: oper.min_generation_rows,
-            post_equipment_row_start,
-            row_filling_target_start,
-            col_filling_target_start,
-            filling_target_hydro_indices,
-            row_filled_min_storage_floor_start,
-            col_filled_min_storage_floor_start,
-            filled_min_storage_floor_hydro_indices,
+            generic_constraint_rows: generic.generic_constraint_rows,
             anticipated_local_by_sys_pos,
         }
     }
@@ -1362,7 +1356,7 @@ impl<'a> StageLayout<'a> {
     /// LP. Delegates to [`BlockGrid::flat`](crate::indexer::BlockGrid::flat), the
     /// single owner of the stride arithmetic.
     #[inline]
-    pub(crate) fn block_col(&self, start: usize, entity: usize, blk: usize) -> usize {
+    pub(crate) fn block_col(&self, start: usize, entity: usize, blk: BlockIdx) -> usize {
         self.block_grid().flat(start, entity, blk)
     }
 
@@ -1371,67 +1365,83 @@ impl<'a> StageLayout<'a> {
     #[inline]
     #[must_use]
     pub(crate) fn block_grid(&self) -> BlockGrid {
-        BlockGrid::new(self.n_blks, self.max_deficit_segments)
+        BlockGrid::new(self.n_blks, self.equipment.max_deficit_segments)
     }
 
-    /// Turbine-flow column for hydro `h_idx`, block `blk`.
+    /// Turbine-flow column for hydro `h`, block `blk`.
     #[inline]
-    pub(crate) fn turbine_col(&self, h_idx: usize, blk: usize) -> usize {
-        self.block_col(self.col_turbine_start(), h_idx, blk)
+    pub(crate) fn turbine_col(&self, h: HydroSys, blk: BlockIdx) -> usize {
+        self.block_col(self.equipment.turbine.start, h.get(), blk)
     }
 
-    /// Spillage column for hydro `h_idx`, block `blk`.
+    /// Spillage column for hydro `h`, block `blk`.
     #[inline]
-    pub(crate) fn spillage_col(&self, h_idx: usize, blk: usize) -> usize {
-        self.block_col(self.col_spillage_start(), h_idx, blk)
+    pub(crate) fn spillage_col(&self, h: HydroSys, blk: BlockIdx) -> usize {
+        self.block_col(self.equipment.spillage.start, h.get(), blk)
     }
 
-    /// Diversion-flow column for hydro `h_idx`, block `blk`.
+    /// Diversion-flow column for hydro `h`, block `blk`.
     #[inline]
-    pub(crate) fn diversion_col(&self, h_idx: usize, blk: usize) -> usize {
-        self.block_col(self.col_diversion_start(), h_idx, blk)
+    pub(crate) fn diversion_col(&self, h: HydroSys, blk: BlockIdx) -> usize {
+        self.block_col(self.equipment.diversion.start, h.get(), blk)
     }
 
     /// FPHA generation column for FPHA-local index `local_idx`, block `blk`.
     #[inline]
-    pub(crate) fn generation_col(&self, local_idx: usize, blk: usize) -> usize {
-        self.block_col(self.col_generation_start(), local_idx, blk)
+    pub(crate) fn generation_col(&self, local_idx: FphaLocal, blk: BlockIdx) -> usize {
+        self.block_col(self.equipment.generation_col_start, local_idx.get(), blk)
     }
 
-    /// Forward line-flow column for line `l_idx`, block `blk`.
+    /// Forward line-flow column for line `l`, block `blk`.
     #[inline]
-    pub(crate) fn line_fwd_col(&self, l_idx: usize, blk: usize) -> usize {
-        self.block_col(self.col_line_fwd_start(), l_idx, blk)
+    pub(crate) fn line_fwd_col(&self, l: LineSys, blk: BlockIdx) -> usize {
+        self.block_col(self.equipment.line_fwd.start, l.get(), blk)
     }
 
-    /// Reverse line-flow column for line `l_idx`, block `blk`.
+    /// Reverse line-flow column for line `l`, block `blk`.
     #[inline]
-    pub(crate) fn line_rev_col(&self, l_idx: usize, blk: usize) -> usize {
-        self.block_col(self.col_line_rev_start(), l_idx, blk)
+    pub(crate) fn line_rev_col(&self, l: LineSys, blk: BlockIdx) -> usize {
+        self.block_col(self.equipment.line_rev.start, l.get(), blk)
     }
 
-    /// Outflow-below-minimum slack column for hydro `h_idx`, block `blk`.
+    /// Outflow-below-minimum slack column for hydro `h`, block `blk`.
     #[inline]
-    pub(crate) fn outflow_below_col(&self, h_idx: usize, blk: usize) -> usize {
-        self.block_col(self.col_outflow_below_start(), h_idx, blk)
+    pub(crate) fn outflow_below_col(&self, h: HydroSys, blk: BlockIdx) -> usize {
+        self.block_col(
+            self.slack.oper_violation.outflow_below_slack.start,
+            h.get(),
+            blk,
+        )
     }
 
-    /// Outflow-above-maximum slack column for hydro `h_idx`, block `blk`.
+    /// Outflow-above-maximum slack column for hydro `h`, block `blk`.
     #[inline]
-    pub(crate) fn outflow_above_col(&self, h_idx: usize, blk: usize) -> usize {
-        self.block_col(self.col_outflow_above_start(), h_idx, blk)
+    pub(crate) fn outflow_above_col(&self, h: HydroSys, blk: BlockIdx) -> usize {
+        self.block_col(
+            self.slack.oper_violation.outflow_above_slack.start,
+            h.get(),
+            blk,
+        )
     }
 
-    /// Turbine-below-minimum slack column for hydro `h_idx`, block `blk`.
+    /// Turbine-below-minimum slack column for hydro `h`, block `blk`.
     #[inline]
-    pub(crate) fn turbine_below_col(&self, h_idx: usize, blk: usize) -> usize {
-        self.block_col(self.col_turbine_below_start(), h_idx, blk)
+    pub(crate) fn turbine_below_col(&self, h: HydroSys, blk: BlockIdx) -> usize {
+        self.block_col(
+            self.slack.oper_violation.turbine_below_slack.start,
+            h.get(),
+            blk,
+        )
     }
 
-    /// Generation-below-minimum slack column for hydro `h_idx`, block `blk`.
+    /// Generation-below-minimum slack column for hydro `h`, block `blk`.
     #[inline]
-    pub(crate) fn generation_below_col(&self, h_idx: usize, blk: usize) -> usize {
-        self.block_col(self.col_generation_below_start(), h_idx, blk)
+    pub(crate) fn generation_below_col(&self, h: HydroSys, blk: BlockIdx) -> usize {
+        self.block_col(
+            self.slack.oper_violation.generation_below_slack.start,
+            h.get(),
+            blk,
+        )
     }
 
     /// Base column of the `(evap hydro local_idx, block blk)` triple, block-major
@@ -1440,61 +1450,62 @@ impl<'a> StageLayout<'a> {
     /// The transposed `blk * n_evap_hydros + local_idx` stride compiles and silently
     /// aliases one hydro's block onto another's.
     #[inline]
-    fn evap_triple_base(&self, local_idx: usize, blk: usize) -> usize {
-        self.col_evap_start() + (local_idx * self.n_blks + blk) * EVAP_COLS_PER_HYDRO
+    fn evap_triple_base(&self, local_idx: usize, blk: BlockIdx) -> usize {
+        let blk = blk.get();
+        self.equipment.evap_col_start + (local_idx * self.n_blks + blk) * EVAP_COLS_PER_HYDRO
     }
 
     /// Evaporation-outflow column for `(evap hydro local_idx, block blk)` (the
     /// [`EVAP_FLOW_OFFSET`] column of the block's triple).
     #[inline]
-    pub(crate) fn evap_flow_col(&self, local_idx: usize, blk: usize) -> usize {
-        self.evap_triple_base(local_idx, blk) + EVAP_FLOW_OFFSET
+    pub(crate) fn evap_flow_col(&self, local_idx: EvapLocal, blk: BlockIdx) -> usize {
+        self.evap_triple_base(local_idx.get(), blk) + EVAP_FLOW_OFFSET
     }
 
     /// `f_evap_plus` (under-evaporation slack) column for `(evap hydro local_idx,
     /// block blk)` (the [`EVAP_F_PLUS_OFFSET`] column of the block's triple).
     #[inline]
-    pub(crate) fn evap_f_plus_col(&self, local_idx: usize, blk: usize) -> usize {
-        self.evap_triple_base(local_idx, blk) + EVAP_F_PLUS_OFFSET
+    pub(crate) fn evap_f_plus_col(&self, local_idx: EvapLocal, blk: BlockIdx) -> usize {
+        self.evap_triple_base(local_idx.get(), blk) + EVAP_F_PLUS_OFFSET
     }
 
     /// `f_evap_minus` (over-evaporation slack) column for `(evap hydro local_idx,
     /// block blk)` (the [`EVAP_F_MINUS_OFFSET`] column of the block's triple).
     #[inline]
-    pub(crate) fn evap_f_minus_col(&self, local_idx: usize, blk: usize) -> usize {
-        self.evap_triple_base(local_idx, blk) + EVAP_F_MINUS_OFFSET
+    pub(crate) fn evap_f_minus_col(&self, local_idx: EvapLocal, blk: BlockIdx) -> usize {
+        self.evap_triple_base(local_idx.get(), blk) + EVAP_F_MINUS_OFFSET
     }
 
     /// Deficit column for bus `b_idx`, segment `seg_idx`, block `blk`. Three-term
     /// stride owned by [`BlockGrid::deficit`](crate::indexer::BlockGrid::deficit).
     #[inline]
-    pub(crate) fn deficit_col(&self, b_idx: usize, seg_idx: usize, blk: usize) -> usize {
+    pub(crate) fn deficit_col(&self, b_idx: usize, seg_idx: usize, blk: BlockIdx) -> usize {
         self.block_grid()
-            .deficit(self.col_deficit_start(), b_idx, seg_idx, blk)
+            .deficit(self.equipment.deficit.start, b_idx, seg_idx, blk)
     }
 
-    /// Storage column at chronological boundary `k ∈ 0..=K` (`K = self.n_blks`) for
-    /// hydro `h`: the single owner of the endpoints-vs-interior split, the storage
-    /// analogue of [`Self::block_col`] for flows. The two endpoints are STATE
-    /// columns — `k = 0 → S⁰` (incoming state) and `k = K → Sᴷ` (outgoing state) —
-    /// while `k ∈ 1..K` are interior CONTROL columns in the `storage_internal`
-    /// family (stride `n_blks − 1`, not `n_blks`). The `k == self.n_blks` arm MUST
-    /// precede the interior `_` arm, else `_` captures the outgoing endpoint and
-    /// addresses an interior column past the family. Outgoing storage returns `h`
-    /// because `state.storage.start == 0`, the same convention `resolve_hydro_storage`
-    /// uses (`state.storage.start + pos`). Never called in parallel mode (the
-    /// single-row balance path is used instead); at `K = 1` only the two endpoints
-    /// resolve (no interior).
+    /// The [`StorageBoundaryGrid`] address primitive for this stage's LP,
+    /// carrying this stage's state bases and interior anchor.
     #[inline]
-    pub(crate) fn block_storage_col(&self, h: usize, k: usize) -> usize {
-        match k {
-            0 => self.col_storage_in_start() + h,
-            k if k == self.n_blks => h,
-            _ => self.storage_internal_start + h * (self.n_blks - 1) + (k - 1),
-        }
+    #[must_use]
+    pub(crate) fn storage_boundary_grid(&self) -> StorageBoundaryGrid {
+        StorageBoundaryGrid::new(
+            self.state.storage_in.start,
+            self.state.storage.start,
+            self.equipment.storage_internal_start,
+            self.n_blks,
+        )
     }
 
-    // ── Role-(a) accessors (read through the borrowed StateLayout handle) ─────────
+    /// Storage column at chronological `boundary` for hydro `h`; delegates to
+    /// [`StorageBoundaryGrid::col`], the single owner of the endpoints-vs-interior
+    /// split. At `n_blks = 1` only the two endpoints resolve (no interior).
+    #[inline]
+    pub(crate) fn block_storage_col(&self, h: HydroSys, boundary: Boundary) -> usize {
+        self.storage_boundary_grid().col(h.get(), boundary)
+    }
+
+    // ── Role-(a) accessors (read through the borrowed StateSpace handle) ─────────
 
     /// Theta (future-cost) column; reads `self.state.theta`.
     #[inline]
@@ -1540,321 +1551,38 @@ impl<'a> StageLayout<'a> {
 
     // ── Role-(b) accessors (read StageLayout's own fields) ───────────────────────
 
-    /// First turbine-flow column; reads `self.turbine.start`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn col_turbine_start(&self) -> usize {
-        self.turbine.start
-    }
-
-    /// First spillage column; reads `self.spillage.start`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn col_spillage_start(&self) -> usize {
-        self.spillage.start
-    }
-
-    /// First diversion-flow column; reads `self.diversion.start`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn col_diversion_start(&self) -> usize {
-        self.diversion.start
-    }
-
-    /// First thermal column; reads `self.thermal.start`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn col_thermal_start(&self) -> usize {
-        self.thermal.start
-    }
-
-    /// First forward line-flow column; reads `self.line_fwd.start`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn col_line_fwd_start(&self) -> usize {
-        self.line_fwd.start
-    }
-
-    /// First reverse line-flow column; reads `self.line_rev.start`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn col_line_rev_start(&self) -> usize {
-        self.line_rev.start
-    }
-
-    /// First deficit column; reads `self.deficit.start`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn col_deficit_start(&self) -> usize {
-        self.deficit.start
-    }
-
-    /// Maximum deficit segments across buses; reads `self.max_deficit_segments`.
-    ///
-    /// Test-only: production `deficit_col` routes through
-    /// [`BlockGrid::deficit`](crate::indexer::BlockGrid::deficit), which reads
-    /// `max_deficit_segments` internally, so the sole live caller is the
-    /// deficit-stride regression test that reconstructs the open-coded 3-term
-    /// form to prove `deficit_col` still equals it.
-    #[cfg(test)]
-    #[inline]
-    #[must_use]
-    pub(crate) fn max_deficit_segments(&self) -> usize {
-        self.max_deficit_segments
-    }
-
-    /// First excess column; reads `self.excess.start`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn col_excess_start(&self) -> usize {
-        self.excess.start
-    }
-
-    /// First inflow-slack column; the `inflow_slack` block normalises to `0..0`
-    /// without the penalty, so this is the excess-block end cursor — reads
-    /// `self.excess.end`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn col_inflow_slack_start(&self) -> usize {
-        self.excess.end
-    }
-
-    /// First z-inflow definition row; reads `self.z_inflow_row_start`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn row_z_inflow_start(&self) -> usize {
-        self.z_inflow_row_start
-    }
-
-    /// First water-balance row; reads `self.water_balance.start`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn row_water_balance_start(&self) -> usize {
-        self.water_balance.start
-    }
-
-    /// First travel-time bucket-definition row; reads `self.transit_bucket_definition.start`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn row_transit_bucket_definition_start(&self) -> usize {
-        self.transit_bucket_definition.start
-    }
-
-    /// First load-balance row; reads `self.load_balance.start`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn row_load_balance_start(&self) -> usize {
-        self.load_balance.start
-    }
-
     /// First FPHA row; the FPHA block follows the load-balance rows, so this is
-    /// the load-balance end cursor — reads `self.load_balance.end`.
+    /// the load-balance end cursor — reads `self.rows.load_balance.end`.
     #[inline]
     #[must_use]
     pub(crate) fn row_fpha_start(&self) -> usize {
-        self.load_balance.end
-    }
-
-    // ── Empty-block-cursor accessors (own fields) ────────────────────────────────
-    // When a family is empty its range normalises to `0..0`, so each accessor reads
-    // a dedicated cursor field (or branches on `self.n_h > 0` to the shared
-    // post-equipment cursor) rather than a bare `range.start` that would return `0`
-    // and silently misbuild the empty-hydro layout.
-
-    /// Start of FPHA generation columns (one per FPHA hydro per block):
-    /// `col_generation_start() + local_fpha_idx * n_blks + blk`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn col_generation_start(&self) -> usize {
-        self.generation_col_start
-    }
-
-    /// Start of evaporation columns ([`EVAP_COLS_PER_HYDRO`] per `(evap hydro,
-    /// block)`, block-major); address the three via `evap_flow_col` /
-    /// `evap_f_plus_col` / `evap_f_minus_col`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn col_evap_start(&self) -> usize {
-        self.evap_col_start
+        self.rows.load_balance.end
     }
 
     /// Start of evaporation constraint rows (one per `(evap hydro, block)`,
-    /// block-major): `row_evap_start() + local_evap_idx * n_blks + blk`.
+    /// block-major): `row_evap_start() + local_evap_idx * n_blks + blk`. The
+    /// evaporation row block follows the FPHA rows even when empty — reads
+    /// `self.rows.fpha_rows_end`.
     #[inline]
     #[must_use]
     pub(crate) fn row_evap_start(&self) -> usize {
-        self.fpha_rows_end
-    }
-
-    /// Start of under-withdrawal slack columns (one per hydro):
-    /// `col_withdrawal_neg_start() + h`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn col_withdrawal_neg_start(&self) -> usize {
-        if self.n_h > 0 {
-            self.withdrawal_slack_neg.start
-        } else {
-            self.post_equipment_col_start
-        }
-    }
-
-    /// Start of over-withdrawal slack columns (one per hydro):
-    /// `col_withdrawal_pos_start() + h`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn col_withdrawal_pos_start(&self) -> usize {
-        if self.n_h > 0 {
-            self.withdrawal_slack_pos.start
-        } else {
-            self.post_equipment_col_start
-        }
-    }
-
-    /// Start of outflow-below-minimum slack columns (one per hydro per block):
-    /// `col_outflow_below_start() + h_idx * n_blks + blk`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn col_outflow_below_start(&self) -> usize {
-        if self.n_h > 0 {
-            self.outflow_below_slack.start
-        } else {
-            self.post_equipment_col_start
-        }
-    }
-
-    /// Start of outflow-above-maximum slack columns (one per hydro per block):
-    /// `col_outflow_above_start() + h_idx * n_blks + blk`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn col_outflow_above_start(&self) -> usize {
-        if self.n_h > 0 {
-            self.outflow_above_slack.start
-        } else {
-            self.post_equipment_col_start
-        }
-    }
-
-    /// Start of turbine-below-minimum slack columns (one per hydro per block):
-    /// `col_turbine_below_start() + h_idx * n_blks + blk`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn col_turbine_below_start(&self) -> usize {
-        if self.n_h > 0 {
-            self.turbine_below_slack.start
-        } else {
-            self.post_equipment_col_start
-        }
-    }
-
-    /// Start of generation-below-minimum slack columns (one per hydro per block):
-    /// `col_generation_below_start() + h_idx * n_blks + blk`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn col_generation_below_start(&self) -> usize {
-        if self.n_h > 0 {
-            self.generation_below_slack.start
-        } else {
-            self.post_equipment_col_start
-        }
-    }
-
-    /// Start of minimum-outflow constraint rows (one per hydro per block):
-    /// `row_min_outflow_start() + h_idx * n_blks + blk`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn row_min_outflow_start(&self) -> usize {
-        if self.n_h > 0 {
-            self.min_outflow_rows.start
-        } else {
-            self.post_equipment_row_start
-        }
-    }
-
-    /// Start of maximum-outflow constraint rows (one per hydro per block):
-    /// `row_max_outflow_start() + h_idx * n_blks + blk`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn row_max_outflow_start(&self) -> usize {
-        if self.n_h > 0 {
-            self.max_outflow_rows.start
-        } else {
-            self.post_equipment_row_start
-        }
-    }
-
-    /// Start of minimum-turbine constraint rows (one per hydro per block):
-    /// `row_min_turbine_start() + h_idx * n_blks + blk`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn row_min_turbine_start(&self) -> usize {
-        if self.n_h > 0 {
-            self.min_turbine_rows.start
-        } else {
-            self.post_equipment_row_start
-        }
-    }
-
-    /// Start of minimum-generation constraint rows (one per hydro per block):
-    /// `row_min_generation_start() + h_idx * n_blks + blk`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn row_min_generation_start(&self) -> usize {
-        if self.n_h > 0 {
-            self.min_generation_rows.start
-        } else {
-            self.post_equipment_row_start
-        }
-    }
-
-    /// Start of per-stage `σ_fill`-target rows:
-    /// `row_filling_target_start() + local_target_idx` over
-    /// `filling_target_hydro_indices`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn row_filling_target_start(&self) -> usize {
-        self.row_filling_target_start
-    }
-
-    /// Start of per-stage `σ_fill`-target slack columns:
-    /// `col_filling_target_start() + local_target_idx`, parallel to
-    /// `row_filling_target_start()`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn col_filling_target_start(&self) -> usize {
-        self.col_filling_target_start
-    }
-
-    /// Start of soft `σ^{v-}` operating-floor rows:
-    /// `row_filled_min_storage_floor_start() + local_floor_idx` over
-    /// `filled_min_storage_floor_hydro_indices`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn row_filled_min_storage_floor_start(&self) -> usize {
-        self.row_filled_min_storage_floor_start
-    }
-
-    /// Start of soft `σ^{v-}` operating-floor slack columns:
-    /// `col_filled_min_storage_floor_start() + local_floor_idx`, parallel to
-    /// `row_filled_min_storage_floor_start()`.
-    #[inline]
-    #[must_use]
-    pub(crate) fn col_filled_min_storage_floor_start(&self) -> usize {
-        self.col_filled_min_storage_floor_start
+        self.rows.fpha_rows_end
     }
 
     // ── Range accessors mirrored onto `StageGeometry` (own fields) ──────────────
     // `StageLayout::new` only ever needs each family's *length* (to derive the
     // next family's start), never its full range, so these are the sole place the
-    // `start..start + len` arithmetic is expressed; `StageGeometry::from_layout` is
-    // the only consumer.
+    // `start..start + len` arithmetic is expressed; `Self::geometry` is the only
+    // consumer.
 
     /// Per-stage `σ_fill`-target row range: empty `start..start` (not `0..0`) at
     /// every non-Filling stage.
     #[inline]
     #[must_use]
     pub(crate) fn filling_target(&self) -> Range<usize> {
-        self.row_filling_target_start
-            ..self.row_filling_target_start + self.filling_target_hydro_indices.len()
+        self.filling.row_filling_target_start
+            ..self.filling.row_filling_target_start
+                + self.filling.filling_target_hydro_indices.len()
     }
 
     /// Per-stage `σ_fill`-target slack column range, parallel to
@@ -1862,8 +1590,9 @@ impl<'a> StageLayout<'a> {
     #[inline]
     #[must_use]
     pub(crate) fn filling_target_col(&self) -> Range<usize> {
-        self.col_filling_target_start
-            ..self.col_filling_target_start + self.filling_target_hydro_indices.len()
+        self.filling.col_filling_target_start
+            ..self.filling.col_filling_target_start
+                + self.filling.filling_target_hydro_indices.len()
     }
 
     /// Soft `σ^{v-}` operating-floor row range: empty `start..start` (not `0..0`)
@@ -1871,9 +1600,9 @@ impl<'a> StageLayout<'a> {
     #[inline]
     #[must_use]
     pub(crate) fn filled_min_storage_floor(&self) -> Range<usize> {
-        self.row_filled_min_storage_floor_start
-            ..self.row_filled_min_storage_floor_start
-                + self.filled_min_storage_floor_hydro_indices.len()
+        self.filling.row_filled_min_storage_floor_start
+            ..self.filling.row_filled_min_storage_floor_start
+                + self.filling.filled_min_storage_floor_hydro_indices.len()
     }
 
     /// Soft `σ^{v-}` operating-floor slack column range, parallel to
@@ -1881,17 +1610,17 @@ impl<'a> StageLayout<'a> {
     #[inline]
     #[must_use]
     pub(crate) fn filled_min_storage_floor_col(&self) -> Range<usize> {
-        self.col_filled_min_storage_floor_start
-            ..self.col_filled_min_storage_floor_start
-                + self.filled_min_storage_floor_hydro_indices.len()
+        self.filling.col_filled_min_storage_floor_start
+            ..self.filling.col_filled_min_storage_floor_start
+                + self.filling.filled_min_storage_floor_hydro_indices.len()
     }
 
     /// Anticipated-decision column range (one per anticipated thermal,
     /// stage-level): `col_anticipated_decision_start .. + n_anticipated`. `0..0`
     /// (not `col_anticipated_decision_start..col_anticipated_decision_start`) when
-    /// `n_anticipated == 0` — the pre-existing empty-case value `from_layout`
-    /// established and a byte-identity oracle test pins; do not align this to the
-    /// `start..start` convention the sibling filling-family accessors use.
+    /// `n_anticipated == 0` — the empty-case value a byte-identity oracle test
+    /// pins; do not align this to the `start..start` convention the sibling
+    /// filling-family accessors use.
     #[inline]
     #[must_use]
     pub(crate) fn anticipated_decision(&self) -> Range<usize> {
@@ -1900,6 +1629,85 @@ impl<'a> StageLayout<'a> {
             s..s + self.n_anticipated
         } else {
             0..0
+        }
+    }
+
+    /// Owned per-stage equipment-geometry snapshot: every field is a clone or
+    /// range accessor of `self`, so `StageLayout` alone owns each family's
+    /// start/end arithmetic. Must stay OWNED — the result is cloned into
+    /// `StageTemplates.geometry_per_stage`, which outlives this `StageLayout`
+    /// (rebuilt per MPI rank, never serialized).
+    #[must_use]
+    pub(crate) fn geometry(&self, block_mode: BlockMode) -> StageGeometry {
+        StageGeometry {
+            theta_col: self.col_theta(),
+            turbine: self.equipment.turbine.clone(),
+            spillage: self.equipment.spillage.clone(),
+            diversion: self.equipment.diversion.clone(),
+            thermal: self.equipment.thermal.clone(),
+            anticipated_decision: self.anticipated_decision(),
+            line_fwd: self.equipment.line_fwd.clone(),
+            line_rev: self.equipment.line_rev.clone(),
+            deficit: self.equipment.deficit.clone(),
+            excess: self.equipment.excess.clone(),
+            generation: self.equipment.generation.clone(),
+            evap_indices: self.evap_indices.clone(),
+            inflow_slack: self.slack.inflow_slack.clone(),
+            withdrawal_slack_neg: self.slack.withdrawal_slack_neg.clone(),
+            withdrawal_slack_pos: self.slack.withdrawal_slack_pos.clone(),
+            outflow_below_slack: self.slack.oper_violation.outflow_below_slack.clone(),
+            outflow_above_slack: self.slack.oper_violation.outflow_above_slack.clone(),
+            turbine_below_slack: self.slack.oper_violation.turbine_below_slack.clone(),
+            generation_below_slack: self.slack.oper_violation.generation_below_slack.clone(),
+            contract_import: self.equipment.contract_import.clone(),
+            contract_export: self.equipment.contract_export.clone(),
+            water_balance: self.rows.water_balance.clone(),
+            load_balance: self.rows.load_balance.clone(),
+            filling_target: self.filling_target(),
+            filling_target_col: self.filling_target_col(),
+            filled_min_storage_floor: self.filled_min_storage_floor(),
+            filled_min_storage_floor_col: self.filled_min_storage_floor_col(),
+            z_inflow_row_start: self.rows.z_inflow_row_start,
+            n_blks: self.n_blks,
+            storage_boundary_grid: self.storage_boundary_grid(),
+            block_mode,
+            fpha_hydro_indices: self.fpha_hydro_indices.clone(),
+            evap_hydro_indices: self.evap_hydro_indices.clone(),
+            filling_target_hydro_indices: self.filling.filling_target_hydro_indices.clone(),
+            filled_min_storage_floor_hydro_indices: self
+                .filling
+                .filled_min_storage_floor_hydro_indices
+                .clone(),
+        }
+    }
+
+    /// Borrowed view over this stage's ranges for the generic-constraint
+    /// resolver. Must stay BORROWED — `fill_generic_constraint_entries` builds
+    /// one per stage; owning would clone every range family it lists on that
+    /// path.
+    #[must_use]
+    pub(crate) fn resolver_geom(&self) -> GenericResolverGeom<'_> {
+        GenericResolverGeom {
+            state: self.state,
+            storage_boundary_grid: self.storage_boundary_grid(),
+            turbine: &self.equipment.turbine,
+            spillage: &self.equipment.spillage,
+            diversion: &self.equipment.diversion,
+            thermal: &self.equipment.thermal,
+            line_fwd: &self.equipment.line_fwd,
+            line_rev: &self.equipment.line_rev,
+            excess: &self.equipment.excess,
+            contract_import: &self.equipment.contract_import,
+            contract_export: &self.equipment.contract_export,
+            generation: &self.equipment.generation,
+            deficit: &self.equipment.deficit,
+            max_deficit_segments: self.equipment.max_deficit_segments,
+            n_blks: self.n_blks,
+            evap_indices: &self.evap_indices,
+            evap_hydro_indices: &self.evap_hydro_indices,
+            fpha_hydro_indices: &self.fpha_hydro_indices,
+            anticipated_decision_start: self.anticipated.col_anticipated_decision_start,
+            anticipated_local_by_sys_pos: &self.anticipated_local_by_sys_pos,
         }
     }
 }

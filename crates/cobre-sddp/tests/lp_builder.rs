@@ -374,7 +374,7 @@ mod indexer_slim_migration_rejection {
     //!
     //! The role-(b) geometry descriptor `StageIndexer` and its `EquipmentCounts`
     //! constructor input were deleted: the state-vector concern lives on
-    //! `StateLayout`, the non-state study shape on `StudyDimensions`, and the
+    //! `StateSpace`, the non-state study shape on `StudyDimensions`, and the
     //! per-stage equipment geometry on `StageLayout`/`StageGeometry`. This gate scans
     //! the production sources under `src/` and asserts those deleted types do not
     //! reappear — a regression guard that the deletion stays deleted.
@@ -440,7 +440,7 @@ mod indexer_slim_migration_rejection {
             offenders.is_empty(),
             "deletion regression — a deleted indexer type reappeared in production \
              sources (the role-(b) geometry now lives on StageLayout/StageGeometry, \
-             the state vector on StateLayout, the study shape on StudyDimensions):\n{}",
+             the state vector on StateSpace, the study shape on StudyDimensions):\n{}",
             offenders.join("\n")
         );
     }
@@ -576,7 +576,7 @@ mod policy_entity_manifest {
     }
 
     /// Train a case to a policy checkpoint via the shared `write_checkpoint`, then read
-    /// it back. Returns `(checkpoint, per-pool cut_state_layout n_state)`.
+    /// it back. Returns `(checkpoint, per-pool cut_state_layout n_slots)`.
     fn train_and_read_checkpoint(name: &str) -> (cobre_io::PolicyCheckpoint, Vec<usize>) {
         let dir = case_dir(name);
         let config = cobre_io::parse_config(&dir.join("config.json")).expect("config must parse");
@@ -605,7 +605,7 @@ mod policy_entity_manifest {
         let _training_output = setup.build_training_output(&result, &[]);
 
         // Each pool is sized to its stage's cut-state dimension at construction
-        // (`pool_state_dimensions[t] == cut_state_layouts[t].n_state()`), so the pool's
+        // (`pool_state_dimensions[t] == cut_state_layouts[t].n_slots()`), so the pool's
         // own `state_dimension` is the authoritative per-stage manifest length.
         let pool_n_state: Vec<usize> = setup.fcf.pools.iter().map(|p| p.state_dimension).collect();
 
@@ -680,7 +680,7 @@ mod policy_entity_manifest {
             assert_eq!(
                 stage.entity_manifest.len(),
                 pool_n_state[t],
-                "stage {t} manifest length must equal cut_state_layouts[{t}].n_state()"
+                "stage {t} manifest length must equal cut_state_layouts[{t}].n_slots()"
             );
         }
 

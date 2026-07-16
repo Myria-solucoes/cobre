@@ -19,7 +19,17 @@
 
 use std::path::Path;
 
+use cobre_core::EntityId;
 use cobre_core::System;
+use cobre_io::CaseArtifacts;
+use cobre_io::HydroGeometryRow;
+use cobre_io::ValidationContext;
+use cobre_io::extensions::load_tailrace_curves;
+use cobre_io::load_fpha_hyperplanes;
+use cobre_io::load_hydro_energy_productivity;
+use cobre_io::load_hydro_geometry;
+use cobre_io::load_production_models;
+use cobre_io::validate_structure;
 
 use crate::SddpError;
 
@@ -87,7 +97,7 @@ pub fn prepare_hydro_models(
 /// Same conditions as [`prepare_hydro_models`].
 pub fn prepare_hydro_models_from_artifacts(
     system: &System,
-    artifacts: &cobre_io::CaseArtifacts,
+    artifacts: &CaseArtifacts,
     collect_deviation_points: bool,
     timings: Option<&mut HydroFitTimings>,
 ) -> Result<PrepareHydroModelsResult, SddpError> {
@@ -114,10 +124,8 @@ pub fn prepare_hydro_models_from_artifacts(
     }
 
     // Sorted by ascending volume, as `ForebayTable::new` expects.
-    let mut vha_geometry_by_hydro: std::collections::HashMap<
-        cobre_core::EntityId,
-        Vec<cobre_io::HydroGeometryRow>,
-    > = std::collections::HashMap::new();
+    let mut vha_geometry_by_hydro: std::collections::HashMap<EntityId, Vec<HydroGeometryRow>> =
+        std::collections::HashMap::new();
     for row in &artifacts.hydro_geometry {
         vha_geometry_by_hydro
             .entry(row.hydro_id)
@@ -149,9 +157,9 @@ pub fn prepare_hydro_models_from_artifacts(
 /// backing the legacy [`prepare_hydro_models`] signature; production pipelines
 /// should call [`cobre_io::load_case_with_artifacts`] so the full validation runs
 /// once.
-fn load_artifacts_for_hydro_models(case_dir: &Path) -> Result<cobre_io::CaseArtifacts, SddpError> {
-    let mut ctx = cobre_io::ValidationContext::new();
-    let manifest = cobre_io::validate_structure(case_dir, &mut ctx);
+fn load_artifacts_for_hydro_models(case_dir: &Path) -> Result<CaseArtifacts, SddpError> {
+    let mut ctx = ValidationContext::new();
+    let manifest = validate_structure(case_dir, &mut ctx);
     // Fail on a malformed layout here, before any file load, so it does not
     // surface as a confusing downstream parse error or silent default.
     ctx.into_result().map_err(SddpError::from)?;
@@ -185,17 +193,17 @@ fn load_artifacts_for_hydro_models(case_dir: &Path) -> Result<cobre_io::CaseArti
         None
     };
 
-    let production_file = cobre_io::extensions::load_production_models(prod_path.as_deref())?;
+    let production_file = load_production_models(prod_path.as_deref())?;
 
-    Ok(cobre_io::CaseArtifacts {
+    Ok(CaseArtifacts {
         file_manifest: manifest,
-        hydro_geometry: cobre_io::extensions::load_hydro_geometry(geom_path.as_deref())?,
+        hydro_geometry: load_hydro_geometry(geom_path.as_deref())?,
         production_models: production_file.configs,
         plane_reduction: production_file.plane_reduction,
-        hydro_energy_productivity: cobre_io::load_hydro_energy_productivity(prod_eff_path_opt)?,
-        fpha_hyperplanes: cobre_io::extensions::load_fpha_hyperplanes(fpha_path.as_deref())?,
+        hydro_energy_productivity: load_hydro_energy_productivity(prod_eff_path_opt)?,
+        fpha_hyperplanes: load_fpha_hyperplanes(fpha_path.as_deref())?,
         scalar_parameters: Vec::new(),
-        tailrace_curves: cobre_io::extensions::load_tailrace_curves(tailrace_path.as_deref())?,
+        tailrace_curves: load_tailrace_curves(tailrace_path.as_deref())?,
     })
 }
 
@@ -211,17 +219,15 @@ fn load_artifacts_for_hydro_models(case_dir: &Path) -> Result<cobre_io::CaseArti
     clippy::panic
 )]
 mod tests {
-    // ── 2-rank parity test ────────────────────────────────────────────────────
+    // ── cross-path parity test ────────────────────────────────────────────────
 
-    /// Simulates two independent MPI ranks both calling `prepare_hydro_models` on
-    /// a computed-FPHA case (d07-fpha-computed). Asserts that `fpha_export_rows` is
-    /// non-empty and bit-identical between the two calls, confirming that the
-    /// preprocessing is deterministic and rank-independent.
-    ///
-    /// No real MPI is used. The test simply calls `prepare_hydro_models` twice from
-    /// the same source data and compares the results.
+    /// `cobre-cli` builds hydro models two ways: rank 0 from the already-parsed
+    /// artifacts (`prepare_hydro_models_from_artifacts`), non-root ranks by
+    /// re-reading the case directory (`prepare_hydro_models`). This pins that the
+    /// two agree on a computed-FPHA case, where geometry-derived hyperplane fitting
+    /// — not a precomputed passthrough — gives the loaders the most room to diverge.
     #[test]
-    fn prepare_hydro_models_fpha_export_rows_are_identical_across_ranks() {
+    fn prepare_hydro_models_from_artifacts_matches_prepare_hydro_models_for_computed_fpha() {
         let case_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("cobre-sddp parent dir must exist")
@@ -229,27 +235,31 @@ mod tests {
             .expect("crates parent dir must exist")
             .join("examples/deterministic/d07-fpha-computed");
 
-        let system =
-            cobre_io::load_case(&case_dir).expect("d07-fpha-computed must load successfully");
+        let cobre_io::LoadedCase { system, artifacts } =
+            cobre_io::load_case_with_artifacts(&case_dir)
+                .expect("d07-fpha-computed must load successfully");
 
-        // Simulated rank 0: call prepare_hydro_models and capture rows.
-        let result_rank0 = super::prepare_hydro_models(&system, &case_dir, false)
-            .expect("prepare_hydro_models must succeed for rank 0");
+        let from_artifacts =
+            super::prepare_hydro_models_from_artifacts(&system, &artifacts, false, None)
+                .expect("prepare_hydro_models_from_artifacts must succeed");
+        let from_disk = super::prepare_hydro_models(&system, &case_dir, false)
+            .expect("prepare_hydro_models must succeed");
 
-        // Simulated rank 1: independent call with the same inputs.
-        let result_rank1 = super::prepare_hydro_models(&system, &case_dir, false)
-            .expect("prepare_hydro_models must succeed for rank 1");
-
-        // Post-condition: computed-FPHA rows must be present.
         assert!(
-            !result_rank0.fpha_export_rows.is_empty(),
-            "rank 0: fpha_export_rows must be non-empty for a computed-FPHA case"
+            !from_artifacts.fpha_export_rows.is_empty(),
+            "rank 0 path: fpha_export_rows must be non-empty for a computed-FPHA case"
+        );
+        assert_eq!(
+            from_artifacts.fpha_export_rows, from_disk.fpha_export_rows,
+            "fpha_export_rows must be bit-identical between prepare_hydro_models_from_artifacts \
+             (rank 0's artifact-reuse path) and prepare_hydro_models (the non-root disk-reread path)"
         );
 
-        // Parity: both ranks must produce bit-identical rows.
+        let summary_from_artifacts = super::build_hydro_model_summary(&from_artifacts, &system);
+        let summary_from_disk = super::build_hydro_model_summary(&from_disk, &system);
         assert_eq!(
-            result_rank0.fpha_export_rows, result_rank1.fpha_export_rows,
-            "fpha_export_rows must be bit-identical across ranks (deterministic preprocessing)"
+            summary_from_artifacts.total_planes, summary_from_disk.total_planes,
+            "total FPHA plane count must match between the two hydro-model construction paths"
         );
     }
 

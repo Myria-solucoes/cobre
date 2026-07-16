@@ -348,6 +348,7 @@ pub fn write_row_selection_records(
 )]
 mod tests {
     use super::*;
+    use crate::MetadataTrainingSolveStats;
     use crate::output::{RowPoolStatistics, TrainingOutput};
 
     fn make_record(iteration: u32, gap: Option<f64>) -> IterationRecord {
@@ -407,7 +408,7 @@ mod tests {
             },
             cut_selection_records: vec![],
             worker_timing_records: vec![],
-            training_solve_stats: crate::MetadataTrainingSolveStats::default(),
+            training_solve_stats: MetadataTrainingSolveStats::default(),
         }
     }
 

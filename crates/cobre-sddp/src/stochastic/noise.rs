@@ -3,11 +3,13 @@
 //! Single home for the noise→RHS transforms so a fix to one applies to every
 //! call site (forward, backward, lower-bound).
 
+use cobre_core::commissioning::commissioning_active;
 use cobre_core::temporal::StageLagTransition;
 use cobre_solver::SolverInterface;
 use cobre_stochastic::par::lag_kernel::{LagMajor, advance_lag_chain};
 use cobre_stochastic::{StochasticContext, evaluate_par_batch, solve_par_noise_batch};
 
+use crate::indexer::StateSpace;
 use crate::{
     InflowNonNegativityMethod,
     context::{StageContext, TrainingContext},
@@ -175,7 +177,7 @@ pub(crate) fn shift_lag_state(
     state: &mut [f64],
     incoming_lags: &[f64],
     unscaled_primal: &[f64],
-    layout: &crate::indexer::StateLayout,
+    layout: &StateSpace,
 ) {
     let n_h = layout.hydro_count;
     let l_max = layout.max_par_order;
@@ -207,7 +209,7 @@ pub(crate) use cobre_stochastic::par::lag_kernel::PrimaryLagAccum as LagAccumSta
 /// finalize_period=true`) this produces bit-for-bit identical results to
 /// [`shift_lag_state`].
 ///
-/// Thin adapter: resolves the LP-`StateLayout` offsets into plain slices, then
+/// Thin adapter: resolves the LP-`StateSpace` offsets into plain slices, then
 /// delegates the accumulate/finalize/shift/downstream-ring algorithm to
 /// [`advance_lag_chain`].
 ///
@@ -230,7 +232,7 @@ pub(crate) fn accumulate_and_shift_lag_state(
     state: &mut [f64],
     incoming_lags: &[f64],
     unscaled_primal: &[f64],
-    layout: &crate::indexer::StateLayout,
+    layout: &StateSpace,
     stage_lag: &StageLagTransition,
     lag: &mut LagAccumState<'_>,
     ds: &mut DownstreamAccumState<'_>,
@@ -412,7 +414,7 @@ pub(crate) fn gather_dense_ncs_bounds(
         "upper_src too short for windows: every slot strides by block_count",
     );
     for (slot, &(entry, exit)) in windows.iter().enumerate() {
-        if crate::lp_builder::commissioning_active(entry, exit, stage_id) {
+        if commissioning_active(entry, exit, stage_id) {
             let base = slot * block_count;
             lower_out.extend_from_slice(&lower_src[base..base + block_count]);
             upper_out.extend_from_slice(&upper_src[base..base + block_count]);
@@ -512,12 +514,14 @@ mod tests {
     use crate::{
         context::{StageContext, TrainingContext},
         horizon_mode::HorizonMode,
+        indexer::StateSpace,
         inflow_method::InflowNonNegativityMethod,
         noise::{
             NcsNoiseOffsets, apply_ncs_col_bounds, build_dense_ncs_col_indices,
             compute_effective_eta, gather_dense_ncs_bounds, shift_lag_state,
             transform_inflow_noise, transform_load_noise, transform_ncs_noise,
         },
+        test_support,
         workspace::ScratchBuffers,
     };
 
@@ -552,7 +556,9 @@ mod tests {
             unreachable!("solve() is not exercised by the NCS column-bound patch")
         }
 
-        fn get_basis(&mut self, _out: &mut Basis) {}
+        fn get_basis(&mut self, out: &mut Basis) {
+            crate::test_support::fill_consistent_basis(out);
+        }
 
         fn statistics(&self) -> SolverStatistics {
             SolverStatistics::default()
@@ -937,8 +943,8 @@ mod tests {
     fn test_transform_inflow_noise_none_method() {
         let stochastic = make_one_hydro_stochastic(1);
         // State layout: 1 hydro, 0 PAR lags → n_state = 1
-        let layout = crate::test_support::state_layout(1, 0);
-        let state = crate::test_support::state_layout(1, 0);
+        let layout = test_support::state_layout(1, 0);
+        let state = test_support::state_layout(1, 0);
         let current_state = vec![0.0; layout.n_state];
 
         // noise_scale[0] = 1.0, base_rhs = 5.0, eta = -3.0
@@ -975,7 +981,7 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::test_support::study_dims();
+        let study_dims = test_support::study_dims();
         let training_ctx = TrainingContext {
             horizon: &horizon,
             state: &state,
@@ -1021,8 +1027,8 @@ mod tests {
     fn test_transform_inflow_noise_truncation_clamps() {
         let stochastic = make_one_hydro_stochastic(1);
         // 1 hydro, 0 PAR lags
-        let layout = crate::test_support::state_layout(1, 0);
-        let state = crate::test_support::state_layout(1, 0);
+        let layout = test_support::state_layout(1, 0);
+        let state = test_support::state_layout(1, 0);
         let current_state = vec![0.0; layout.n_state];
 
         // Very negative eta guarantees negative inflow (AR(0) with sigma=1).
@@ -1058,7 +1064,7 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::test_support::study_dims();
+        let study_dims = test_support::study_dims();
         let training_ctx = TrainingContext {
             horizon: &horizon,
             state: &state,
@@ -1104,8 +1110,8 @@ mod tests {
     #[test]
     fn test_transform_inflow_noise_truncation_passthrough() {
         let stochastic = make_one_hydro_stochastic(1);
-        let layout = crate::test_support::state_layout(1, 0);
-        let state = crate::test_support::state_layout(1, 0);
+        let layout = test_support::state_layout(1, 0);
+        let state = test_support::state_layout(1, 0);
         let current_state = vec![0.0; layout.n_state];
 
         // eta = 3.0 → inflow = 1.0 * 3.0 = 3.0 > 0 → no clamping.
@@ -1141,7 +1147,7 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::test_support::study_dims();
+        let study_dims = test_support::study_dims();
         let training_ctx = TrainingContext {
             horizon: &horizon,
             state: &state,
@@ -1239,8 +1245,8 @@ mod tests {
 
     #[test]
     fn shift_lag_state_par0_is_noop() {
-        let _indexer = crate::test_support::geom(2, 0);
-        let layout = crate::test_support::state_layout(2, 0);
+        let _indexer = test_support::geom(2, 0);
+        let layout = test_support::state_layout(2, 0);
         let mut state = vec![100.0, 200.0]; // storage only, no lags
         let incoming_lags: Vec<f64> = vec![];
         let primal = vec![0.0; 10];
@@ -1255,8 +1261,8 @@ mod tests {
     #[test]
     fn shift_lag_state_par1_single_hydro() {
         // N=1, L=1: state = [v_out, lag0], inflow_lags.start = 1
-        let _indexer = crate::test_support::geom(1, 1);
-        let layout = crate::test_support::state_layout(1, 1);
+        let _indexer = test_support::geom(1, 1);
+        let layout = test_support::state_layout(1, 1);
         let mut state = vec![500.0, 99.0]; // v_out, stale lag
         let incoming_lags = vec![42.0]; // lag0 (lag-major: lag * n_h + h = 0*1+0 = 0)
         // z_inflow.start = N*(1+L) = 1*(1+1) = 2
@@ -1269,8 +1275,8 @@ mod tests {
     #[test]
     fn shift_lag_state_par3_single_hydro() {
         // N=1, L=3: state = [v_out, lag0, lag1, lag2]
-        let _indexer = crate::test_support::geom(1, 3);
-        let layout = crate::test_support::state_layout(1, 3);
+        let _indexer = test_support::geom(1, 3);
+        let layout = test_support::state_layout(1, 3);
         let mut state = vec![500.0, 0.0, 0.0, 0.0];
         // incoming_lags in lag-major: [lag0, lag1, lag2] = [10.0, 20.0, 30.0]
         let incoming_lags = vec![10.0, 20.0, 30.0];
@@ -1287,8 +1293,8 @@ mod tests {
     fn shift_lag_state_par1_two_hydros() {
         // N=2, L=1: state = [v0, v1, lag0_h0, lag0_h1]
         // inflow_lags.start = 2, lag-major: lag0 * 2 + 0 = 0, lag0 * 2 + 1 = 1
-        let _indexer = crate::test_support::geom(2, 1);
-        let layout = crate::test_support::state_layout(2, 1);
+        let _indexer = test_support::geom(2, 1);
+        let layout = test_support::state_layout(2, 1);
         let mut state = vec![100.0, 200.0, 0.0, 0.0];
         let incoming_lags = vec![10.0, 20.0]; // lag0_h0=10, lag0_h1=20
         let mut primal = vec![0.0; 20];
@@ -1302,8 +1308,8 @@ mod tests {
     #[test]
     fn shift_lag_state_preserves_storage() {
         // Verify storage portion [0..N] is unchanged after shift.
-        let _indexer = crate::test_support::geom(2, 2);
-        let layout = crate::test_support::state_layout(2, 2);
+        let _indexer = test_support::geom(2, 2);
+        let layout = test_support::state_layout(2, 2);
         let mut state = vec![100.0, 200.0, 0.0, 0.0, 0.0, 0.0];
         let incoming_lags = vec![1.0, 2.0, 3.0, 4.0];
         let mut primal = vec![0.0; 20];
@@ -1435,8 +1441,8 @@ mod tests {
     #[test]
     fn test_accumulate_monthly_identity() {
         // N=1 hydro, L=1 lag order.
-        let _indexer = crate::test_support::geom(1, 1);
-        let layout = crate::test_support::state_layout(1, 1);
+        let _indexer = test_support::geom(1, 1);
+        let layout = test_support::state_layout(1, 1);
 
         // Reference: shift_lag_state result.
         let mut state_ref = vec![500.0, 99.0];
@@ -1496,8 +1502,8 @@ mod tests {
     /// average: (500 + 480 + 520 + 510) / 4 = 502.5.
     #[test]
     fn test_accumulate_four_weeks_then_finalize() {
-        let _indexer = crate::test_support::geom(1, 1);
-        let layout = crate::test_support::state_layout(1, 1);
+        let _indexer = test_support::geom(1, 1);
+        let layout = test_support::state_layout(1, 1);
         let mut state = vec![500.0, 0.0]; // storage, lag0
         let incoming_lags = vec![0.0]; // lag-major: lag0 for hydro 0
         let mut lag_accumulator = vec![0.0_f64; 1];
@@ -1557,8 +1563,8 @@ mod tests {
     /// Spillover seeds the next lag period with raw `z_inflow` * `spillover_weight`.
     #[test]
     fn test_accumulate_spillover_seeds_next_period() {
-        let _indexer = crate::test_support::geom(1, 1);
-        let layout = crate::test_support::state_layout(1, 1);
+        let _indexer = test_support::geom(1, 1);
+        let layout = test_support::state_layout(1, 1);
         let mut state = vec![0.0, 0.0];
         let incoming_lags = vec![0.0];
         let mut lag_accumulator = vec![0.0_f64; 1];
@@ -1614,8 +1620,8 @@ mod tests {
     /// `max_par_order == 0`: function must return immediately, nothing modified.
     #[test]
     fn test_accumulate_noop_for_par0() {
-        let _indexer = crate::test_support::geom(2, 0); // no lag order
-        let layout = crate::test_support::state_layout(2, 0);
+        let _indexer = test_support::geom(2, 0); // no lag order
+        let layout = test_support::state_layout(2, 0);
         let mut state = vec![100.0, 200.0];
         let incoming_lags: Vec<f64> = vec![];
         let primal = vec![0.0; 10];
@@ -1664,8 +1670,8 @@ mod tests {
     #[test]
     fn test_accumulate_preserves_storage() {
         // N=2 hydros, L=2 lag order: state = [v0, v1, lag0_h0, lag0_h1, lag1_h0, lag1_h1]
-        let _indexer = crate::test_support::geom(2, 2);
-        let layout = crate::test_support::state_layout(2, 2);
+        let _indexer = test_support::geom(2, 2);
+        let layout = test_support::state_layout(2, 2);
         let mut state = vec![100.0, 200.0, 0.0, 0.0, 0.0, 0.0];
         let incoming_lags = vec![1.0, 2.0, 3.0, 4.0]; // lag-major: lag0 h0,h1; lag1 h0,h1
         let mut primal = vec![0.0; 20];
@@ -1745,7 +1751,7 @@ mod tests {
         state: &mut [f64],
         incoming_lags: &[f64],
         z_inflow: f64,
-        layout: &crate::indexer::StateLayout,
+        layout: &StateSpace,
         stage_lag: &StageLagTransition,
         lag: &mut LagAccumState<'_>,
         ds: &mut DownstreamAccumState<'_>,
@@ -1760,7 +1766,7 @@ mod tests {
         state: &mut [f64],
         incoming_lags: &[f64],
         z_inflows: [f64; 2],
-        layout: &crate::indexer::StateLayout,
+        layout: &StateSpace,
         stage_lag: &StageLagTransition,
         lag: &mut LagAccumState<'_>,
         ds: &mut DownstreamAccumState<'_>,
@@ -1783,8 +1789,8 @@ mod tests {
     #[test]
     fn test_downstream_par1_accumulation_and_rebuild() {
         // N=1 hydro, L=1 lag (primary monthly PAR(1) order).
-        let _indexer = crate::test_support::geom(1, 1);
-        let layout = crate::test_support::state_layout(1, 1);
+        let _indexer = test_support::geom(1, 1);
+        let layout = test_support::state_layout(1, 1);
         let lag_start = layout.inflow_lags.start;
 
         // Primary state: storage=500, lag0=old_value_to_be_replaced.
@@ -1888,8 +1894,8 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn test_downstream_par2_two_quarters() {
-        let _indexer = crate::test_support::geom(1, 2); // L=2 lag order
-        let layout = crate::test_support::state_layout(1, 2);
+        let _indexer = test_support::geom(1, 2); // L=2 lag order
+        let layout = test_support::state_layout(1, 2);
         let lag_start = layout.inflow_lags.start;
 
         let mut state = vec![0.0; 1 + 2]; // storage + lag0 + lag1
@@ -2014,8 +2020,8 @@ mod tests {
     /// with no downstream fields accessed.
     #[test]
     fn test_no_downstream_for_uniform_monthly() {
-        let _indexer = crate::test_support::geom(1, 1);
-        let layout = crate::test_support::state_layout(1, 1);
+        let _indexer = test_support::geom(1, 1);
+        let layout = test_support::state_layout(1, 1);
         let mut state_ds = vec![500.0, 0.0]; // with empty downstream
         let mut state_ref = vec![500.0, 0.0]; // with noop downstream
         let incoming_lags = vec![0.0];
@@ -2099,8 +2105,8 @@ mod tests {
     /// `downstream_weight_accum == 0.0`.
     #[test]
     fn test_rebuild_resets_downstream_state() {
-        let _indexer = crate::test_support::geom(1, 1);
-        let layout = crate::test_support::state_layout(1, 1);
+        let _indexer = test_support::geom(1, 1);
+        let layout = test_support::state_layout(1, 1);
         let mut state = vec![0.0, 0.0];
         let incoming_lags = vec![0.0];
         let mut lag_acc = vec![0.0_f64; 1];
@@ -2162,8 +2168,8 @@ mod tests {
     /// (b) seed the next quarter's accumulator with `z_inflow * 0.1`.
     #[test]
     fn test_downstream_spillover_seeds_next_quarter() {
-        let _indexer = crate::test_support::geom(1, 1);
-        let layout = crate::test_support::state_layout(1, 1);
+        let _indexer = test_support::geom(1, 1);
+        let layout = test_support::state_layout(1, 1);
         let mut state = vec![0.0, 0.0];
         let incoming_lags = vec![0.0];
         let mut lag_acc = vec![0.0_f64; 1];
@@ -2232,8 +2238,8 @@ mod tests {
     #[test]
     fn test_downstream_multi_hydro() {
         // N=2 hydros, L=1 lag order.
-        let _indexer = crate::test_support::geom(2, 1);
-        let layout = crate::test_support::state_layout(2, 1);
+        let _indexer = test_support::geom(2, 1);
+        let layout = test_support::state_layout(2, 1);
         let lag_start = layout.inflow_lags.start;
 
         let mut state = vec![0.0; 2 + 2]; // 2 storage + 2 lag entries (lag0 h0, lag0 h1)

@@ -1,6 +1,6 @@
 //! Automatic PAR(p) parameter estimation from historical inflow observations.
 //!
-//! This module bridges `cobre-io` (case loading) and `cobre-stochastic` (PAR fitting).
+//! This module bridges case loading (this crate) and PAR fitting (`cobre-stochastic`).
 //! It inspects the input file manifest, resolves which of seven input paths applies
 //! (see [`EstimationPath`]), and dispatches to the appropriate estimation function.
 //!
@@ -29,14 +29,18 @@
 //! - **Role 1 (seasonal stats)**: `mean_m3s` and `std_m3s` per hydro per stage.
 //!   These drive the LP assembly (scenario scaling) and can come from either the
 //!   user file (`inflow_seasonal_stats.parquet`) or history estimation.
-//! - **Role 2 (AR coefficients)**: `ar_coefficients` and `residual_std_ratio` per
-//!   hydro per stage. These drive the autoregressive scenario noise and can come
-//!   from either the user file (`inflow_ar_coefficients.parquet`) or history
-//!   estimation.
+//! - **Role 2 (AR coefficients)**: `ar_coefficients` per hydro per stage. These
+//!   drive the autoregressive scenario noise and can come from either the user
+//!   file (`inflow_ar_coefficients.parquet`) or history estimation.
+//!   `residual_std_ratio` is not a Role 2 input: it is always derived at load
+//!   from the (user-provided or estimated) `ar_coefficients` via the
+//!   periodic-ACF closure (`populate_derived_residual_ratios`), never read
+//!   from a file.
 //!
 //! Rows 4-6 are the "active" paths where at least one role is estimated from
 //! history. In rows 4 and 6, Role 2 is estimated via periodic Yule-Walker / PACF.
-//! In row 5, Role 1 is estimated from history while Role 2 is preserved from user.
+//! In row 5, Role 1 is estimated from history while Role 2's `ar_coefficients`
+//! are preserved from user (`residual_std_ratio` is still derived, not preserved).
 //!
 //! `correlation.json` is handled independently: if present, the existing
 //! `system.correlation()` is kept; if absent, the correlation is estimated from
@@ -54,16 +58,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use chrono::{Months, NaiveDate};
-use cobre_core::{EntityId, System};
-use cobre_io::{
-    Config, FileManifest, LoadError, ValidationContext, parse_inflow_ar_coefficients,
-    parse_inflow_history,
-    scenarios::{
-        InflowAnnualComponentRow, InflowArCoefficientRow, InflowSeasonalStatsRow,
-        assemble_inflow_models,
-    },
-    validate_structure,
-};
+use cobre_core::{EntityId, SeasonMap, Stage, System};
 use cobre_stochastic::{
     StochasticError,
     par::aggregate::aggregate_observations_to_season,
@@ -74,8 +69,19 @@ use cobre_stochastic::{
     },
 };
 
-// Re-exported so the public `cobre_sddp::` surface resolves `EstimationReport`
-// through this shell module; also the module's own binding of the type.
+use crate::LoadError::ConstraintError;
+use crate::{
+    Config, FileManifest, LoadError, OrderSelectionMethod, ValidationContext,
+    parse_inflow_ar_coefficients, parse_inflow_history,
+    scenarios::{
+        InflowAnnualComponentRow, InflowArCoefficientRow, InflowSeasonalStatsRow,
+        assemble_inflow_models, populate_derived_residual_ratios, resolve_stage_seasons,
+    },
+    validate_structure,
+};
+
+// `EstimationReport` lives in `cobre_stochastic::par::fitting`; re-exported here
+// so callers resolve it alongside `EstimationPath`/`estimate_from_history`.
 pub use cobre_stochastic::par::fitting::EstimationReport;
 
 /// Classification of the estimation path taken for a given input file manifest.
@@ -108,7 +114,7 @@ impl EstimationPath {
     /// combinations (AR present without history or stats) fall back to
     /// `Deterministic` because AR coefficients alone cannot drive estimation.
     #[must_use]
-    pub fn resolve(manifest: &cobre_io::FileManifest) -> Self {
+    pub fn resolve(manifest: &FileManifest) -> Self {
         match (
             manifest.scenarios_inflow_history_parquet,
             manifest.scenarios_inflow_seasonal_stats_parquet,
@@ -225,7 +231,7 @@ fn run_estimation(
     // Empty for a full-year study, so `stages == study_stages` and the estimation
     // is bit-identical to the no-prestudy path.
     let prestudy = synthesize_prestudy_stages(study_stages, max_order, season_map);
-    let stages: Vec<cobre_core::temporal::Stage> = study_stages
+    let stages: Vec<Stage> = study_stages
         .iter()
         .cloned()
         .chain(prestudy.iter().cloned())
@@ -254,7 +260,7 @@ fn run_estimation(
             season_map,
             use_annual_component: matches!(
                 config.estimation.order_selection,
-                cobre_io::config::OrderSelectionMethod::PacfAnnual
+                OrderSelectionMethod::PacfAnnual
             ),
         },
     )?;
@@ -276,7 +282,12 @@ fn run_estimation(
     let coeff_rows = ar_estimates_to_rows(&ar_estimates, stages);
     let annual_rows = ar_estimates_to_annual_rows(&ar_estimates, stages);
 
-    let inflow_models = assemble_inflow_models(stats_rows, coeff_rows, annual_rows)?;
+    let mut inflow_models = assemble_inflow_models(stats_rows, coeff_rows, annual_rows)?;
+    // `stages` (study + synthesized prestudy) matches `seasonal_stats_to_rows`'s own
+    // stage_to_season construction above: prestudy stage_ids appear in
+    // `inflow_models` too, so `system.stages()` alone would under-resolve them.
+    let (stage_to_season, n_seasons) = resolve_stage_seasons(stages, season_map);
+    populate_derived_residual_ratios(&mut inflow_models, &stage_to_season, n_seasons)?;
 
     Ok((
         system.with_scenario_models(inflow_models, correlation),
@@ -304,7 +315,7 @@ fn run_partial_estimation(
     // Empty for a full-year study, so `stages == study_stages` and the partial
     // estimation is bit-identical to the no-prestudy path.
     let prestudy = synthesize_prestudy_stages(study_stages, max_order, season_map);
-    let stages_owned: Vec<cobre_core::temporal::Stage> = study_stages
+    let stages_owned: Vec<Stage> = study_stages
         .iter()
         .cloned()
         .chain(prestudy.iter().cloned())
@@ -315,14 +326,12 @@ fn run_partial_estimation(
     let observations = load_and_aggregate_observations(case_dir, study_stages, season_map)?;
 
     if system.inflow_models().is_empty() {
-        return Err(EstimationError::Load(
-            cobre_io::LoadError::ConstraintError {
-                description: "manifest indicates inflow_seasonal_stats.parquet is present \
+        return Err(EstimationError::Load(ConstraintError {
+            description: "manifest indicates inflow_seasonal_stats.parquet is present \
                           but system.inflow_models() is empty; \
                           no user stats available for partial estimation"
-                    .to_string(),
-            },
-        ));
+                .to_string(),
+        }));
     }
 
     // Fitting stats: used only for the YW solve below, never for LP assembly.
@@ -340,7 +349,7 @@ fn run_partial_estimation(
             season_map,
             use_annual_component: matches!(
                 config.estimation.order_selection,
-                cobre_io::config::OrderSelectionMethod::PacfAnnual
+                OrderSelectionMethod::PacfAnnual
             ),
         },
     )?;
@@ -371,7 +380,11 @@ fn run_partial_estimation(
     stats_rows.extend(prestudy_seasonal_rows(&fitting_stats, &prestudy));
     let coeff_rows = ar_estimates_to_rows(&ar_estimates, stages);
     let annual_rows = ar_estimates_to_annual_rows(&ar_estimates, stages);
-    let inflow_models = assemble_inflow_models(stats_rows, coeff_rows, annual_rows)?;
+    let mut inflow_models = assemble_inflow_models(stats_rows, coeff_rows, annual_rows)?;
+    // `stages` (study + synthesized prestudy) — see `run_estimation`'s identical
+    // rationale: prestudy stage_ids appear in `inflow_models` too.
+    let (stage_to_season, n_seasons) = resolve_stage_seasons(stages, season_map);
+    populate_derived_residual_ratios(&mut inflow_models, &stage_to_season, n_seasons)?;
 
     estimation_report.white_noise_fallbacks = white_noise_fallbacks;
     estimation_report.std_ratio_warnings = std_ratio_warnings;
@@ -386,8 +399,8 @@ fn run_partial_estimation(
 /// season resolution when a season map is present.
 fn load_and_aggregate_observations(
     case_dir: &Path,
-    stages: &[cobre_core::temporal::Stage],
-    season_map: Option<&cobre_core::temporal::SeasonMap>,
+    stages: &[Stage],
+    season_map: Option<&SeasonMap>,
 ) -> Result<Vec<(EntityId, NaiveDate, f64)>, EstimationError> {
     let history_path = case_dir.join("scenarios/inflow_history.parquet");
     let history = parse_inflow_history(&history_path)?;
@@ -414,7 +427,7 @@ type CoverageCheckResult = (Vec<EntityId>, Vec<StdRatioDivergence>);
 fn validate_partial_estimation_coverage(
     system: &System,
     fitting_stats: &[SeasonalStats],
-    stages: &[cobre_core::temporal::Stage],
+    stages: &[Stage],
 ) -> Result<CoverageCheckResult, EstimationError> {
     let estimated_hydro_ids: HashSet<EntityId> =
         fitting_stats.iter().map(|s| s.entity_id).collect();
@@ -429,16 +442,14 @@ fn validate_partial_estimation_coverage(
     missing_stats.sort();
     if !missing_stats.is_empty() {
         let ids: Vec<String> = missing_stats.iter().map(|id| id.0.to_string()).collect();
-        return Err(EstimationError::Load(
-            cobre_io::LoadError::ConstraintError {
-                description: format!(
-                    "partial estimation: AR coefficients were estimated for hydro(s) \
+        return Err(EstimationError::Load(ConstraintError {
+            description: format!(
+                "partial estimation: AR coefficients were estimated for hydro(s) \
                      [{ids}] but inflow_seasonal_stats.parquet has no entry for them; \
                      all hydros with estimated AR must have user-provided stats",
-                    ids = ids.join(", ")
-                ),
-            },
-        ));
+                ids = ids.join(", ")
+            ),
+        }));
     }
 
     // Direction B: user stats but no AR estimated → white noise fallback.
@@ -495,7 +506,7 @@ fn run_user_ar_estimation(
     // Empty for a full-year study, so `extended == stages` and the estimation
     // is bit-identical to the no-prestudy path.
     let prestudy = synthesize_prestudy_stages(stages, max_order, season_map);
-    let extended: Vec<cobre_core::temporal::Stage> = stages
+    let extended: Vec<Stage> = stages
         .iter()
         .cloned()
         .chain(prestudy.iter().cloned())
@@ -532,10 +543,15 @@ fn run_user_ar_estimation(
         )?
     };
 
-    // History stats drive mean_m3s/std_m3s; user AR rows drive ar_coefficients/residual_std_ratio.
+    // History stats drive mean_m3s/std_m3s; user AR rows drive ar_coefficients
+    // (residual_std_ratio is derived below, not read from the user file).
     let stats_rows = seasonal_stats_to_rows(&seasonal_stats, extended);
 
-    let inflow_models = assemble_inflow_models(stats_rows, user_ar_rows, vec![])?;
+    let mut inflow_models = assemble_inflow_models(stats_rows, user_ar_rows, vec![])?;
+    // `extended` (study + synthesized prestudy) matches `seasonal_stats_to_rows`'s
+    // own coverage above — see `run_estimation`'s identical rationale.
+    let (stage_to_season, n_seasons) = resolve_stage_seasons(extended, season_map);
+    populate_derived_residual_ratios(&mut inflow_models, &stage_to_season, n_seasons)?;
 
     let estimation_report = EstimationReport {
         entries: BTreeMap::new(),
@@ -560,13 +576,15 @@ fn run_user_ar_estimation(
 /// rows in the `InflowArCoefficientRow` format (all lags repeated for every stage
 /// in the season). This function deduplicates by processing only the first stage
 /// encountered for each season per hydro. Coefficient order is preserved (lag 1,
-/// lag 2, …); `residual_std_ratio` is taken from the first row of each group.
+/// lag 2, …). The innovation scale is derived downstream by
+/// [`crate::scenarios::populate_derived_residual_ratios`] on the assembled
+/// `InflowModel`s — it is not part of the estimate.
 ///
 /// The result is sorted by `(hydro_id, season_id)` ascending, matching the
 /// canonical ordering expected by `estimate_correlation_with_season_map`.
 fn ar_rows_to_estimates(
     rows: &[InflowArCoefficientRow],
-    stages: &[cobre_core::temporal::Stage],
+    stages: &[Stage],
 ) -> Vec<ArCoefficientEstimate> {
     let stage_id_to_season: HashMap<i32, usize> = stages
         .iter()
@@ -579,7 +597,7 @@ fn ar_rows_to_estimates(
     let mut first_stage: HashMap<(EntityId, usize), i32> = HashMap::new();
 
     // BTreeMap for deterministic (hydro_id, season_id) output ordering.
-    let mut groups: BTreeMap<(EntityId, usize), (Vec<f64>, f64)> = BTreeMap::new();
+    let mut groups: BTreeMap<(EntityId, usize), Vec<f64>> = BTreeMap::new();
 
     for row in rows {
         let Some(&season_id) = stage_id_to_season.get(&row.stage_id) else {
@@ -593,20 +611,16 @@ fn ar_rows_to_estimates(
             continue;
         }
 
-        let entry = groups
-            .entry(key)
-            .or_insert_with(|| (Vec::new(), row.residual_std_ratio));
-        entry.0.push(row.coefficient);
+        groups.entry(key).or_default().push(row.coefficient);
     }
 
     groups
         .into_iter()
         .map(
-            |((hydro_id, season_id), (coefficients, residual_std_ratio))| ArCoefficientEstimate {
+            |((hydro_id, season_id), coefficients)| ArCoefficientEstimate {
                 hydro_id,
                 season_id,
                 coefficients,
-                residual_std_ratio,
                 annual: None,
             },
         )
@@ -642,7 +656,7 @@ fn user_stats_to_rows(system: &System) -> Vec<InflowSeasonalStatsRow> {
 fn check_std_ratio_divergence(
     system: &System,
     fitting_stats: &[SeasonalStats],
-    stages: &[cobre_core::temporal::Stage],
+    stages: &[Stage],
 ) -> Vec<StdRatioDivergence> {
     let stage_id_to_season: HashMap<i32, usize> = stages
         .iter()
@@ -767,10 +781,10 @@ fn check_std_ratio_divergence(
 /// Returns an empty `Vec` when `season_map` is `None`, `max_order == 0`, or
 /// the study has no stage with a `season_id`.
 fn synthesize_prestudy_stages(
-    stages: &[cobre_core::temporal::Stage],
+    stages: &[Stage],
     max_order: usize,
-    season_map: Option<&cobre_core::temporal::SeasonMap>,
-) -> Vec<cobre_core::temporal::Stage> {
+    season_map: Option<&SeasonMap>,
+) -> Vec<Stage> {
     let Some(sm) = season_map else {
         return Vec::new();
     };
@@ -846,7 +860,7 @@ fn synthesize_prestudy_stages(
 /// Returns an empty `Vec` when `prestudy` is empty (full-year studies).
 fn prestudy_seasonal_rows(
     fitting_stats: &[SeasonalStats],
-    prestudy: &[cobre_core::temporal::Stage],
+    prestudy: &[Stage],
 ) -> Vec<InflowSeasonalStatsRow> {
     if prestudy.is_empty() {
         return Vec::new();
@@ -866,6 +880,17 @@ fn prestudy_seasonal_rows(
     rows
 }
 
+/// Index stage ids by their `season_id`, skipping stages without one.
+fn build_season_to_stages(stages: &[Stage]) -> HashMap<usize, Vec<i32>> {
+    let mut season_to_stages: HashMap<usize, Vec<i32>> = HashMap::new();
+    for stage in stages {
+        if let Some(sid) = stage.season_id {
+            season_to_stages.entry(sid).or_default().push(stage.id);
+        }
+    }
+    season_to_stages
+}
+
 /// Convert [`SeasonalStats`] to [`InflowSeasonalStatsRow`], expanding each
 /// per-season estimate to every stage sharing its `season_id` so that
 /// [`cobre_stochastic::PrecomputedPar`] finds a model at every stage index.
@@ -874,19 +899,14 @@ fn prestudy_seasonal_rows(
 /// at their negative `stage_id` for direct lag-stage hits.
 fn seasonal_stats_to_rows(
     stats: &[SeasonalStats],
-    stages: &[cobre_core::temporal::Stage],
+    stages: &[Stage],
 ) -> Vec<InflowSeasonalStatsRow> {
     let stage_to_season: HashMap<i32, usize> = stages
         .iter()
         .filter_map(|s| s.season_id.map(|sid| (s.id, sid)))
         .collect();
 
-    let mut season_to_stages: HashMap<usize, Vec<i32>> = HashMap::new();
-    for stage in stages {
-        if let Some(sid) = stage.season_id {
-            season_to_stages.entry(sid).or_default().push(stage.id);
-        }
-    }
+    let season_to_stages = build_season_to_stages(stages);
 
     let mut rows = Vec::with_capacity(stats.len() * 10);
     for s in stats {
@@ -924,14 +944,9 @@ fn seasonal_stats_to_rows(
 /// their negative `stage_id` for direct lag lookups.
 fn ar_estimates_to_rows(
     ar_estimates: &[ArCoefficientEstimate],
-    stages: &[cobre_core::temporal::Stage],
+    stages: &[Stage],
 ) -> Vec<InflowArCoefficientRow> {
-    let mut season_to_stages: HashMap<usize, Vec<i32>> = HashMap::new();
-    for stage in stages {
-        if let Some(sid) = stage.season_id {
-            season_to_stages.entry(sid).or_default().push(stage.id);
-        }
-    }
+    let season_to_stages = build_season_to_stages(stages);
 
     let mut rows: Vec<InflowArCoefficientRow> = Vec::new();
 
@@ -949,7 +964,6 @@ fn ar_estimates_to_rows(
                     stage_id,
                     lag,
                     coefficient: coeff,
-                    residual_std_ratio: est.residual_std_ratio,
                 });
             }
         }
@@ -969,14 +983,9 @@ fn ar_estimates_to_rows(
 /// an empty `Vec`).
 fn ar_estimates_to_annual_rows(
     ar_estimates: &[ArCoefficientEstimate],
-    stages: &[cobre_core::temporal::Stage],
+    stages: &[Stage],
 ) -> Vec<InflowAnnualComponentRow> {
-    let mut season_to_stages: HashMap<usize, Vec<i32>> = HashMap::new();
-    for stage in stages {
-        if let Some(sid) = stage.season_id {
-            season_to_stages.entry(sid).or_default().push(stage.id);
-        }
-    }
+    let season_to_stages = build_season_to_stages(stages);
 
     let mut rows: Vec<InflowAnnualComponentRow> = Vec::new();
 

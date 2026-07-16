@@ -11,6 +11,9 @@
 //! use cobre_stochastic::sampling::{ForwardSampler, build_forward_sampler};
 //! ```
 
+use crate::context::ClassSchemes;
+
+use std::fmt;
 pub mod class_sampler;
 pub mod external;
 pub mod historical;
@@ -31,8 +34,8 @@ pub(crate) mod out_of_sample;
 use cobre_core::{EntityId, scenario::SamplingScheme, temporal::NoiseMethod, temporal::Stage};
 
 use crate::{
-    StochasticError, context::StochasticContext, correlation::resolve::DecomposedCorrelation,
-    tree::generate::ClassDimensions,
+    OpeningTreeView, StochasticError, context::StochasticContext,
+    correlation::resolve::DecomposedCorrelation, tree::generate::ClassDimensions,
 };
 
 // ---------------------------------------------------------------------------
@@ -124,7 +127,7 @@ impl<'a> ForwardSampler<'a> {
 }
 
 impl std::fmt::Debug for ForwardSampler<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ForwardSampler")
             .field("dims", &self.dims)
             .finish_non_exhaustive()
@@ -248,7 +251,7 @@ impl ForwardSampler<'_> {
 #[derive(Debug, Clone, Copy)]
 pub struct ForwardSamplerConfig<'a> {
     /// Per-class sampling scheme selections.
-    pub class_schemes: crate::context::ClassSchemes,
+    pub class_schemes: ClassSchemes,
     /// Stochastic context providing tree, seeds, correlation, and entity order.
     pub ctx: &'a StochasticContext,
     /// Study stages in index order; required by `OutOfSample` to read per-stage
@@ -286,7 +289,7 @@ struct ClassSamplerParams<'a, 'b> {
     len: usize,
     forward_seed: Option<u64>,
     noise_methods: &'b [NoiseMethod],
-    tree: Option<crate::tree::opening_tree::OpeningTreeView<'a>>,
+    tree: Option<OpeningTreeView<'a>>,
     base_seed: u64,
     historical_library: Option<&'a HistoricalScenarioLibrary>,
     external_library: Option<&'a ExternalScenarioLibrary>,
@@ -608,8 +611,9 @@ mod tests {
 
     use super::{ClassSampler, ForwardNoise, ForwardSampler, SampleRequest, build_forward_sampler};
     use crate::{
-        StochasticError,
+        StochasticContext, StochasticError,
         context::{ClassSchemes, OpeningTreeInputs, build_stochastic_context},
+        sample_forward,
         tree::generate::ClassDimensions,
         tree::opening_tree::OpeningTree,
     };
@@ -741,9 +745,7 @@ mod tests {
         }
     }
 
-    fn build_test_ctx(
-        forward_seed: Option<u64>,
-    ) -> (crate::context::StochasticContext, Vec<Stage>) {
+    fn build_test_ctx(forward_seed: Option<u64>) -> (StochasticContext, Vec<Stage>) {
         let hydros = vec![make_hydro(1)];
         let stages = vec![make_stage(0, 0, 5), make_stage(1, 1, 5)];
         let inflow_models = vec![make_inflow_model(1, 0), make_inflow_model(1, 1)];
@@ -788,7 +790,7 @@ mod tests {
     /// Build a `ForwardSamplerConfig` with all three classes set to `scheme`.
     fn all_classes_config<'a>(
         scheme: SamplingScheme,
-        ctx: &'a crate::context::StochasticContext,
+        ctx: &'a StochasticContext,
         stages: &'a [Stage],
     ) -> super::ForwardSamplerConfig<'a> {
         let n_hydros = ctx.dim() - ctx.n_load_buses() - ctx.n_stochastic_ncs();
@@ -1147,8 +1149,7 @@ mod tests {
             "total noise length must equal total_dim"
         );
 
-        let (_, full_slice) =
-            crate::sampling::insample::sample_forward(&tree.view(), 42, 0, 0, 0, 0);
+        let (_, full_slice) = sample_forward(&tree.view(), 42, 0, 0, 0, 0);
         assert_eq!(
             noise.as_slice(),
             full_slice,

@@ -169,7 +169,7 @@ fn test_fpha_model_accepted() {
         },
     );
 
-    let system = cobre_core::SystemBuilder::new()
+    let system = SystemBuilder::new()
         .buses(vec![bus])
         .hydros(vec![hydro])
         .stages(stages)

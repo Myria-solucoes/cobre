@@ -26,13 +26,16 @@ use cobre_sddp::{
     TrainingResult,
 };
 
+use crate::convert::pydict_to_json_map;
 use crate::errors::{ErrorSource, convert_error};
+use crate::io::build_warnings_list;
 use crate::model::PySystem;
 use crate::run::{
-    LoadedStudy, PhaseError, SimSummary, apply_training_policy_mode, build_study_setup,
-    reconstruct_policy_from_checkpoint, run_in_scoped_pool, run_simulation_phase_py,
-    run_training_phase_py, run_training_phase_py_streaming, write_evaporation_models_if_any,
-    write_fpha_deviation_points_if_any, write_fpha_hyperplanes_if_any, write_training_artifacts,
+    LoadedStudy, PhaseError, SimSummary, TrainingPhaseResult, apply_training_policy_mode,
+    build_study_setup, reconstruct_policy_from_checkpoint, run_in_scoped_pool,
+    run_simulation_phase_py, run_training_phase_py, run_training_phase_py_streaming,
+    write_evaporation_models_if_any, write_fpha_deviation_points_if_any,
+    write_fpha_hyperplanes_if_any, write_training_artifacts,
 };
 
 /// Map a [`PhaseError`] to a Python exception through the single
@@ -271,7 +274,7 @@ impl Study {
         // Convert UNDER THE GIL, before py.detach releases it; the resulting owned
         // `serde_json::Map` is Send and crosses the py.detach boundary.
         let overrides = config_overrides
-            .map(|dict| crate::convert::pydict_to_json_map(&dict))
+            .map(|dict| pydict_to_json_map(&dict))
             .transpose()?;
 
         // Release the GIL for the slow PAR estimation. No rayon work runs here, so
@@ -333,10 +336,7 @@ impl Study {
         let dict = PyDict::new(py);
         dict.set_item("valid", true)?;
         dict.set_item("errors", PyList::empty(py))?;
-        dict.set_item(
-            "warnings",
-            crate::io::build_warnings_list(py, &self.warnings)?,
-        )?;
+        dict.set_item("warnings", build_warnings_list(py, &self.warnings)?)?;
 
         Ok(dict)
     }
@@ -418,8 +418,8 @@ impl Study {
 
         // `on_iteration` (`Py<PyAny>`), `PyErr`, and the returned tuple are all
         // Send, so crossing the `py.detach` boundary into the drain thread is sound.
-        let phase_result: Result<(crate::run::TrainingPhaseResult, Option<PyErr>), PhaseError> = py
-            .detach(|| {
+        let phase_result: Result<(TrainingPhaseResult, Option<PyErr>), PhaseError> =
+            py.detach(|| {
                 // Outer `?` surfaces pool-construction failure (a `String`);
                 // the inner `Result<_, PhaseError>` is the training/artifact outcome.
                 run_in_scoped_pool(threads, |n| {

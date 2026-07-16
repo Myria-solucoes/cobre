@@ -3,6 +3,18 @@
 //! [`TrainingSession`] owns all scratch buffers for a single [`crate::training::train`] call.
 //! No hot-path allocations; forward and backward passes encapsulated in their own state structs.
 
+use cobre_comm::CommError::CollectiveFailed;
+use cobre_solver::SolverError;
+use cobre_solver::freeze_rows_into_template;
+
+use crate::cut_selection::CutSelectionStrategy::Dominated;
+use crate::cut_selection::CutSelectionStrategy::Dynamic;
+use crate::cut_selection::CutSelectionStrategy::Level1;
+use crate::cut_selection::CutSelectionStrategy::Lml1;
+use crate::visited_states::VisitedStatesArchive;
+use crate::workspace::CapturedBasis;
+
+use std::ops::RangeInclusive;
 pub(crate) mod iteration_scratch;
 pub(crate) mod rank_distribution;
 pub(crate) mod results;
@@ -22,6 +34,7 @@ use cobre_solver::SolverInterface;
 
 use crate::{
     SddpError, TrainingConfig,
+    backward::BackwardResult,
     backward_pass_state::{BackwardPassInputs, BackwardPassState},
     context::{StageContext, TrainingContext},
     convergence::convergence::ConvergenceMonitor,
@@ -29,7 +42,7 @@ use crate::{
     cut::row::build_cut_row_batch_into,
     cut_selection::CutActivityUpdates,
     cut_sync::CutSyncBuffers,
-    forward::sync_forward,
+    forward::{ForwardResult, SyncResult, sync_forward},
     forward_pass_state::{ForwardPassInputs, ForwardPassState},
     lower_bound::LbEvalScratchBundle,
     lower_bound::evaluate_lower_bound,
@@ -103,7 +116,7 @@ pub(crate) struct TrainingSession<'a, S: SolverInterface + Send, C: Communicator
     basis_store: BasisStore,
     exchange_bufs: ExchangeBuffers,
     cut_sync_bufs: CutSyncBuffers,
-    visited_archive: Option<crate::visited_states::VisitedStatesArchive>,
+    visited_archive: Option<VisitedStatesArchive>,
     scratch: IterationScratch,
     convergence_monitor: ConvergenceMonitor,
 
@@ -133,7 +146,7 @@ where
         stage_ctx: &'a StageContext<'a>,
         training_ctx: &'a TrainingContext<'a>,
         comm: &'a C,
-        solver_factory: impl Fn() -> Result<S, cobre_solver::SolverError>,
+        solver_factory: impl Fn() -> Result<S, SolverError>,
     ) -> Result<Self, SddpError> {
         let horizon = training_ctx.horizon;
         let state = training_ctx.state;
@@ -213,7 +226,7 @@ where
         let needs_archive =
             config.cut_management.cut_selection.is_some() || config.events.export_states;
         let visited_archive = if needs_archive {
-            Some(crate::visited_states::VisitedStatesArchive::new(
+            Some(VisitedStatesArchive::new(
                 ranks.num_stages,
                 ranks.n_state,
                 config.loop_config.max_iterations,
@@ -301,7 +314,7 @@ where
     }
 
     /// Returns the range of iteration indices this session should run.
-    pub(crate) fn iteration_range(&self) -> std::ops::RangeInclusive<u64> {
+    pub(crate) fn iteration_range(&self) -> RangeInclusive<u64> {
         (self.config.loop_config.start_iteration + 1)..=self.config.loop_config.max_iterations
     }
 
@@ -405,6 +418,23 @@ where
         #[allow(clippy::cast_possible_truncation)]
         let iteration_time_ms = iter_start.elapsed().as_millis() as u64;
 
+        // Sum across ranks: forward/backward solves partition across ranks and the
+        // lower bound runs only on rank 0, so the per-rank sum scales with rank
+        // count while the global total is rank-count invariant.
+        let lp_solves = {
+            #[allow(clippy::cast_precision_loss)]
+            let local =
+                [(forward_result.lp_solves + backward_result.lp_solves + lb_lp_solves) as f64];
+            let mut global = [0.0_f64; 1];
+            self.comm
+                .allreduce(&local, &mut global, ReduceOp::Sum)
+                .map_err(SddpError::Communication)?;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            {
+                global[0].round() as u64
+            }
+        };
+
         emit(
             self.runtime.event_sender(),
             TrainingEvent::IterationSummary {
@@ -416,7 +446,7 @@ where
                 iteration_time_ms,
                 forward_ms: forward_result.elapsed_ms,
                 backward_ms: backward_result.elapsed_ms,
-                lp_solves: forward_result.lp_solves + backward_result.lp_solves + lb_lp_solves,
+                lp_solves,
                 solve_time_ms: fwd_solve_time_ms + bwd_solve_time_ms + lb_solve_time_ms,
                 lower_bound_eval_ms: lb_wall_ms,
                 fwd_setup_time_ms: forward_result.setup_time_ms,
@@ -521,7 +551,7 @@ where
         let err = reconcile_error_flag(Err(err), self.comm, &mut self.fwd_state.reconcile_scratch)
             .err()
             .unwrap_or_else(|| {
-                SddpError::Communication(cobre_comm::CommError::CollectiveFailed {
+                SddpError::Communication(CollectiveFailed {
                     operation: "reconcile_error_flag",
                     mpi_error_code: 0,
                     message: "reconcile over a local failure unexpectedly reported agreement"
@@ -590,14 +620,7 @@ where
     fn run_forward_phase(
         &mut self,
         iteration: u64,
-    ) -> Result<
-        (
-            crate::forward::ForwardResult,
-            crate::forward::SyncResult,
-            f64,
-        ),
-        SddpError,
-    > {
+    ) -> Result<(ForwardResult, SyncResult, f64), SddpError> {
         let fwd_stats_before = aggregate_solver_statistics(
             self.fwd_pool
                 .workspaces
@@ -728,10 +751,7 @@ where
     // Rationale: the `i32::try_from(*omega).expect(...)` cannot fire — opening
     // indices derive from `branching_factor: u16` and stay well below `i32::MAX`.
     #[allow(clippy::expect_used)]
-    fn run_backward_phase(
-        &mut self,
-        iteration: u64,
-    ) -> Result<(crate::backward::BackwardResult, f64), SddpError> {
+    fn run_backward_phase(&mut self, iteration: u64) -> Result<(BackwardResult, f64), SddpError> {
         // Borrow bwd_state and each disjoint `self.scratch` sub-field separately
         // so they can be co-borrowed mutably without a whole-struct conflict.
         let bwd = &mut self.bwd_state;
@@ -905,17 +925,16 @@ where
             // bound documented on [`VisitedStatesArchive::trim_to_window`].
             if let Some(ref mut archive) = self.visited_archive {
                 let check_freq = match strategy {
-                    crate::cut_selection::CutSelectionStrategy::Level1 {
+                    Level1 {
                         check_frequency, ..
                     }
-                    | crate::cut_selection::CutSelectionStrategy::Lml1 {
+                    | Lml1 {
                         check_frequency, ..
                     }
-                    | crate::cut_selection::CutSelectionStrategy::Dominated {
-                        check_frequency,
-                        ..
+                    | Dominated {
+                        check_frequency, ..
                     } => *check_frequency,
-                    crate::cut_selection::CutSelectionStrategy::Dynamic { .. } => {
+                    Dynamic { .. } => {
                         unreachable!(
                             "DCS never runs as a periodic pool pass; should_run is always false"
                         )
@@ -1032,7 +1051,7 @@ where
             {
                 total_rows_frozen += self.scratch.freeze_row_batches[t].num_rows as u64;
             }
-            cobre_solver::freeze_rows_into_template(
+            freeze_rows_into_template(
                 &self.stage_ctx.templates[t],
                 &self.scratch.freeze_row_batches[t],
                 &mut self.scratch.frozen_templates[t],
@@ -1054,7 +1073,7 @@ where
     /// stored cut rows against the current active set by slot identity, so a
     /// seeded basis stays correct even if cut selection diverges. No-op for a
     /// fresh start (no cache).
-    pub(crate) fn seed_basis_store(&mut self, cache: &[Option<crate::workspace::CapturedBasis>]) {
+    pub(crate) fn seed_basis_store(&mut self, cache: &[Option<CapturedBasis>]) {
         let max_local_fwd = self.ranks.max_local_fwd;
         let num_stages = self.ranks.num_stages;
         for (t, slot) in cache.iter().enumerate().take(num_stages) {
@@ -1148,7 +1167,7 @@ mod tests {
     use cobre_core::{
         Bus, EntityId, SystemBuilder, TrainingEvent, WorkerTimingPhase,
         scenario::{
-            CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile,
+            CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, InflowModel,
             SamplingScheme,
         },
         temporal::{
@@ -1171,9 +1190,11 @@ mod tests {
         cut::fcf::FutureCostFunction,
         error::SddpError,
         horizon_mode::HorizonMode,
-        indexer::{StateLayout, StudyDimensions},
+        indexer::{CutStateProjection, StateSpace, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
         risk_measure::RiskMeasure,
+        solver_stats::WORKER_STATS_ENTRY_STRIDE,
+        test_support,
     };
 
     // ── Shared helpers (mirrors training.rs test helpers) ──────────────────
@@ -1245,7 +1266,9 @@ mod tests {
             })
         }
 
-        fn get_basis(&mut self, _out: &mut Basis) {}
+        fn get_basis(&mut self, out: &mut Basis) {
+            crate::test_support::fill_consistent_basis(out);
+        }
 
         fn statistics(&self) -> SolverStatistics {
             SolverStatistics::default()
@@ -1391,7 +1414,7 @@ mod tests {
         let stages: Vec<Stage> = (0..n_stages).map(make_stage).collect();
 
         let inflow_models: Vec<_> = (0..n_stages)
-            .map(|i| cobre_core::scenario::InflowModel {
+            .map(|i| InflowModel {
                 hydro_id: EntityId(1),
                 stage_id: i as i32,
                 mean_m3s: 100.0,
@@ -1461,11 +1484,11 @@ mod tests {
                     duration_hours: 744.0,
                 }],
                 block_mode: BlockMode::Parallel,
-                state_config: cobre_core::temporal::StageStateConfig {
+                state_config: StageStateConfig {
                     storage: true,
                     inflow_lags: false,
                 },
-                risk_config: cobre_core::temporal::StageRiskConfig::Expectation,
+                risk_config: StageRiskConfig::Expectation,
                 scenario_config: ScenarioSourceConfig {
                     branching_factor: 1,
                     noise_method: NoiseMethod::Saa,
@@ -1561,8 +1584,8 @@ mod tests {
     fn make_training_ctx<'a>(
         horizon: &'a HorizonMode,
         study_dims: &'a StudyDimensions,
-        state: &'a StateLayout,
-        cut_state_layouts: &'a [crate::indexer::CutStateProjection],
+        state: &'a StateSpace,
+        cut_state_layouts: &'a [CutStateProjection],
         stochastic: &'a StochasticContext,
         initial_state: &'a [f64],
         stages: &'a [Stage],
@@ -1596,7 +1619,7 @@ mod tests {
     #[test]
     fn training_session_new_preallocates_all_buffers() {
         let n_stages = 2;
-        let state = crate::test_support::state_layout(1, 0);
+        let state = test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1611,9 +1634,8 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let study_dims = crate::test_support::study_dims();
-        let cut_state_layouts =
-            crate::test_support::all_enabled_cut_state_layouts(&state, n_stages);
+        let study_dims = test_support::study_dims();
+        let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, n_stages);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,
@@ -1654,7 +1676,7 @@ mod tests {
         );
         // send_stride = n_workers_local * max_openings * WORKER_STATS_ENTRY_STRIDE
         // n_fwd_threads=1 → n_workers_local=1; max_openings=1 for this fixture
-        let expected_send_stride = crate::solver_stats::WORKER_STATS_ENTRY_STRIDE;
+        let expected_send_stride = WORKER_STATS_ENTRY_STRIDE;
         assert_eq!(
             session.bwd_state.bwd_stats_send_buf.len(),
             expected_send_stride,
@@ -1668,7 +1690,7 @@ mod tests {
     #[test]
     fn training_session_finalize_emits_training_finished() {
         let n_stages = 2;
-        let state = crate::test_support::state_layout(1, 0);
+        let state = test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1687,9 +1709,8 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let study_dims = crate::test_support::study_dims();
-        let cut_state_layouts =
-            crate::test_support::all_enabled_cut_state_layouts(&state, n_stages);
+        let study_dims = test_support::study_dims();
+        let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, n_stages);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,
@@ -1731,7 +1752,7 @@ mod tests {
     #[test]
     fn training_session_finalize_with_error_emits_training_finished_with_error_reason() {
         let n_stages = 2;
-        let state = crate::test_support::state_layout(1, 0);
+        let state = test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1750,9 +1771,8 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let study_dims = crate::test_support::study_dims();
-        let cut_state_layouts =
-            crate::test_support::all_enabled_cut_state_layouts(&state, n_stages);
+        let study_dims = test_support::study_dims();
+        let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, n_stages);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,
@@ -1797,7 +1817,7 @@ mod tests {
     #[test]
     fn training_session_run_iteration_returns_continue_when_not_converged() {
         let n_stages = 2;
-        let state = crate::test_support::state_layout(1, 0);
+        let state = test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1814,9 +1834,8 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let study_dims = crate::test_support::study_dims();
-        let cut_state_layouts =
-            crate::test_support::all_enabled_cut_state_layouts(&state, n_stages);
+        let study_dims = test_support::study_dims();
+        let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, n_stages);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,
@@ -1852,7 +1871,7 @@ mod tests {
     #[test]
     fn training_session_run_iteration_returns_converged_when_gap_closes() {
         let n_stages = 2;
-        let state = crate::test_support::state_layout(1, 0);
+        let state = test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1869,9 +1888,8 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let study_dims = crate::test_support::study_dims();
-        let cut_state_layouts =
-            crate::test_support::all_enabled_cut_state_layouts(&state, n_stages);
+        let study_dims = test_support::study_dims();
+        let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, n_stages);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,
@@ -1922,7 +1940,7 @@ mod tests {
     #[test]
     fn training_session_run_iteration_emits_correct_event_sequence() {
         let n_stages = 2;
-        let state = crate::test_support::state_layout(1, 0);
+        let state = test_support::state_layout(1, 0);
         let templates = vec![minimal_template(state.n_state); n_stages];
         let base_rows = vec![2usize; n_stages];
         let initial_state = vec![0.0_f64; state.n_state];
@@ -1941,9 +1959,8 @@ mod tests {
         let comm = StubComm;
         let block_counts = vec![1usize; n_stages];
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
-        let study_dims = crate::test_support::study_dims();
-        let cut_state_layouts =
-            crate::test_support::all_enabled_cut_state_layouts(&state, n_stages);
+        let study_dims = test_support::study_dims();
+        let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, n_stages);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,

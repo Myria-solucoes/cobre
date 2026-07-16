@@ -934,7 +934,7 @@ mod anticipated_two_plants_smoke {
 
 mod anticipated_simulation_ring_buffer {
     //! Regression: simulation advances the anticipated ring like the forward pass
-    //! (`StateLayout::state_to_lp_column`). With the anticipated thermal cheaper than
+    //! (`StateSpace::state_to_lp_column`). With the anticipated thermal cheaper than
     //! backup, the matured commitment equals the decision made `K` stages earlier,
     //!
     //! `anticipated_committed_mw(t = K) == anticipated_decision_mw(t = 0)`,
@@ -2256,7 +2256,7 @@ mod d37_anticipated_commissioning_simulation {
     //!
     //! T1 (`K=2`, cheap, `max 150 MW`) carries window `[entry=2, exit=4)` over a
     //! 6-stage horizon (per-stage block schedule 1/3/2/3/1/2). The decision gate
-    //! (`StateLayout::is_anticipated_decision_active`) conjoins the strict horizon
+    //! (`StateSpace::is_anticipated_decision_active`) conjoins the strict horizon
     //! clause (`t + K < n_stages`) with the operation-window clause keyed on the
     //! DELIVERY stage `id(t + K)`:
     //!
@@ -2274,8 +2274,12 @@ mod d37_anticipated_commissioning_simulation {
     use std::sync::mpsc;
 
     use cobre_core::scenario::ScenarioSource;
+    use cobre_io::Config;
+    use cobre_io::config::SimulationConfig;
+    use cobre_sddp::simulation::SimulationThermalResult;
     use cobre_sddp::{
-        SolverStatsDelta, StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic,
+        SimulationScenarioResult, SolverStatsDelta, StudySetup, hydro_models::prepare_hydro_models,
+        setup::prepare_stochastic,
     };
     use cobre_solver::ActiveSolver;
 
@@ -2290,16 +2294,16 @@ mod d37_anticipated_commissioning_simulation {
             .join("examples/deterministic/d37-anticipated-commissioning")
     }
 
-    fn build_setup(case_dir: &Path) -> (StudySetup, cobre_io::config::Config) {
+    fn build_setup(case_dir: &Path) -> (StudySetup, Config) {
         let config_path = case_dir.join("config.json");
         let mut config = cobre_io::parse_config(&config_path).expect("config must parse");
         // The shipped case disables simulation (parity trains only); enable one
         // deterministic scenario so the thermal extraction paths run.
-        config.simulation = cobre_io::config::SimulationConfig {
+        config.simulation = SimulationConfig {
             enabled: true,
             num_scenarios: 1,
             io_channel_capacity: 8,
-            ..cobre_io::config::SimulationConfig::default()
+            ..SimulationConfig::default()
         };
 
         let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
@@ -2324,10 +2328,7 @@ mod d37_anticipated_commissioning_simulation {
     const N_STAGES: usize = 6;
     const TOL: f64 = 1e-6;
 
-    fn t1_at(
-        scenario: &cobre_sddp::simulation::SimulationScenarioResult,
-        stage: usize,
-    ) -> &cobre_sddp::simulation::SimulationThermalResult {
+    fn t1_at(scenario: &SimulationScenarioResult, stage: usize) -> &SimulationThermalResult {
         scenario.stages[stage]
             .thermals
             .iter()
@@ -2486,15 +2487,22 @@ mod d37_anticipated_commissioning_simulation {
 
 mod anticipated_commitment_at_cap {
     //! Regression: the must-generate fishing equality (`Σ_b h_b·gen_b =
-    //! H·commitment`) pins a delivery-stage anticipated generation column to
-    //! the ring-carried commitment with no slack, so relatively-complete
-    //! recourse requires the commitment lie within the delivery stage's own
-    //! `[min_gen, max_gen]`. A pre-study commitment seeded exactly at the
-    //! delivery cap and carried through a K=2 in-LP ring trains feasible: the
-    //! ring's incoming-state columns are unscaled, so the pin-then-fish
-    //! round-trip reproduces the seed bit-exact. A commitment genuinely above
-    //! the cap is an invalid pre-study seed with no in-LP recourse and trains
-    //! infeasible at its delivery stage.
+    //! H·commitment`) pins a delivery-stage anticipated generation column to the
+    //! ring-carried commitment with no slack, so feasibility requires the
+    //! commitment lie within the delivery stage's own `[min_gen, max_gen]`.
+    //!
+    //! Three seeds carried through a `K = 2` in-LP ring pin the whole contract:
+    //! at the cap (feasible unrelaxed — no patch, so parity holds); a hair over it
+    //! by less than the solver's own primal feasibility tolerance (feasible only
+    //! because `commitment_reconcile` relaxes the delivery bound — this is the
+    //! drift a carried commitment genuinely carries, since the ring slot is a
+    //! solver-computed BASIC variable, and it is what makes the reconciliation
+    //! permanent); and genuinely over the cap (a modelling error, refused as
+    //! `AnticipatedCommitmentOutOfBounds` rather than absorbed).
+    //!
+    //! Seeding exactly at the cap alone is NOT sufficient coverage: zero drift
+    //! never reaches the reconciliation, so an at-cap-only suite stays green while
+    //! studies whose commitments drift abort on a false infeasibility.
 
     use cobre_core::entities::{
         bus::DeficitSegment,
@@ -2530,8 +2538,12 @@ mod anticipated_commitment_at_cap {
 
     const CAP_MW: f64 = 100.0;
     const AT_CAP_SEED_MW: f64 = CAP_MW;
-    /// `1e-6` (relative) over the cap — comfortably above any pin/fish round-trip
-    /// noise, so the infeasibility is deterministic.
+    /// `1e-12` (relative) over the cap: above the ring's own round-trip noise
+    /// (`~1e-16`) so the fail-without/pass-with split is deterministic, and below the
+    /// reconciliation's headroom so it is absorbed rather than refused.
+    const DRIFTED_SEED_MW: f64 = CAP_MW * (1.0 + 1e-12);
+    /// `1e-6` (relative) over the cap — orders of magnitude past any solver drift, so
+    /// it is a modelling error, not noise.
     const OVER_CAP_SEED_MW: f64 = CAP_MW * (1.0 + 1e-6);
 
     fn build_system(seed_mw: f64) -> cobre_core::System {
@@ -2845,8 +2857,31 @@ mod anticipated_commitment_at_cap {
         );
     }
 
+    /// Fails without `commitment_reconcile`: the delivery LP reports `Infeasible` over
+    /// a drift the solver itself would report as feasible.
     #[test]
-    fn anticipated_commitment_over_cap_seed_is_infeasible() {
+    fn anticipated_commitment_drifted_over_cap_is_absorbed() {
+        let system = build_system(DRIFTED_SEED_MW);
+        let config = build_config();
+        let mut setup = build_setup_in_code(system, &config);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+
+        let outcome = setup
+            .train(&mut solver, &comm, 4, ActiveSolver::new, None, None)
+            .expect("train must not return Err");
+
+        assert!(
+            outcome.error.is_none(),
+            "a commitment carried a sub-tolerance hair past its delivery cap must \
+             train: the overshoot is numerical drift, not an over-commitment, and \
+             refusing it aborts training on a physically meaningless quantity. Got: {:?}",
+            outcome.error
+        );
+    }
+
+    #[test]
+    fn anticipated_commitment_over_cap_seed_is_refused() {
         let system = build_system(OVER_CAP_SEED_MW);
         let config = build_config();
         let mut setup = build_setup_in_code(system, &config);
@@ -2858,9 +2893,12 @@ mod anticipated_commitment_at_cap {
             .expect("train must not return Err");
 
         assert!(
-            matches!(outcome.error, Some(SddpError::Infeasible { stage: 0, .. })),
-            "a pre-study commitment above its delivery cap must be infeasible at \
-             its stage-0 delivery, got: {:?}",
+            matches!(
+                outcome.error,
+                Some(SddpError::AnticipatedCommitmentOutOfBounds { stage: 0, .. })
+            ),
+            "a commitment genuinely above its delivery cap must be refused by name, \
+             never absorbed as drift and never reported as a bare Infeasible, got: {:?}",
             outcome.error
         );
     }

@@ -1949,7 +1949,6 @@ fn estimate_periodic_ar_order_zero() {
 
     let result = estimate_periodic_ar_coefficients(0, 0, 1, obs, stats_arr);
     assert!(result.coefficients.is_empty());
-    assert!((result.residual_std_ratio - 1.0).abs() < 1e-15);
     assert!(result.sigma2_per_order.is_empty());
 }
 
@@ -1967,8 +1966,6 @@ fn estimate_periodic_ar_order_one_known_rho() {
     let result = estimate_periodic_ar_coefficients(0, 1, 1, obs, stats_arr);
     assert_eq!(result.coefficients.len(), 1);
     assert_eq!(result.sigma2_per_order.len(), 1);
-    // residual_std_ratio should be in (0, 1].
-    assert!(result.residual_std_ratio > 0.0 && result.residual_std_ratio <= 1.0);
     // sigma2 = 1 - phi * rho(1)
     let rho1 = periodic_autocorrelation(0, 1, 1, obs, stats_arr);
     let expected_sigma2 = 1.0 - result.coefficients[0] * rho1;
@@ -1995,7 +1992,6 @@ fn estimate_periodic_ar_two_season() {
     let result = estimate_periodic_ar_coefficients(0, 2, 2, &obs, &stats);
     assert_eq!(result.coefficients.len(), 2);
     assert_eq!(result.sigma2_per_order.len(), 2);
-    assert!(result.residual_std_ratio > 0.0 && result.residual_std_ratio <= 1.0);
 }
 
 #[test]
@@ -2016,28 +2012,6 @@ fn estimate_periodic_ar_sigma2_per_order_length() {
             result.coefficients.len(),
             order,
             "coefficients should have {order} entries"
-        );
-    }
-}
-
-#[test]
-fn estimate_periodic_ar_residual_ratio_bounded() {
-    // For any valid model, residual_std_ratio should be in (0, 1].
-    let s0: Vec<f64> = (0..40)
-        .map(|i| (i as f64 * 0.2).sin() * 3.0 + 5.0)
-        .collect();
-    let s1: Vec<f64> = (0..40)
-        .map(|i| (i as f64 * 0.4).cos() * 2.0 + 7.0)
-        .collect();
-    let stats: Vec<(f64, f64)> = [&s0[..], &s1[..]].iter().map(|s| pop_mean_std(s)).collect();
-    let obs: Vec<&[f64]> = vec![&s0, &s1];
-
-    for order in 1..=4 {
-        let result = estimate_periodic_ar_coefficients(0, order, 2, &obs, &stats);
-        assert!(
-            result.residual_std_ratio > 0.0 && result.residual_std_ratio <= 1.0,
-            "Order {order}: ratio={} out of bounds",
-            result.residual_std_ratio
         );
     }
 }
@@ -2917,6 +2891,51 @@ fn conditional_facp_partitioned_empty_for_zero_max_order() {
     );
 }
 
+/// A conditional-FACP lag deeper than the season cycle (`k >= n_seasons + 2`,
+/// here a 2-season cycle probed at the default `max_order = 6`) must produce
+/// finite values, not underflow the season index of `Z_{t-1-j}` — the lag
+/// season wraps around the cycle exactly like the guarded conditioning-set
+/// walk above it.
+#[test]
+fn conditional_facp_partitioned_deep_lag_wraps_season_index() {
+    let n_years = 20_usize;
+    let z0: Vec<f64> = (0..n_years)
+        .map(|i| (i as f64).sin() * 3.0 + 0.1 * i as f64)
+        .collect();
+    let z1: Vec<f64> = (0..n_years)
+        .map(|i| (i as f64).cos() * 2.5 - 0.05 * i as f64)
+        .collect();
+    let a0: Vec<f64> = (0..n_years).map(|i| 5.0 + 0.2 * (i as f64).sin()).collect();
+    let a1: Vec<f64> = (0..n_years).map(|i| 3.0 - 0.1 * (i as f64).cos()).collect();
+
+    let obs: &[&[f64]] = &[&z0, &z1];
+    let stats = [pop_mean_std_ann(&z0), pop_mean_std_ann(&z1)];
+    let ann_obs: &[&[f64]] = &[&a0, &a1];
+    let ann_stats = [pop_mean_std_ann(&a0), pop_mean_std_ann(&a1)];
+
+    for season in 0..2_usize {
+        let cond = conditional_facp_partitioned(
+            season,
+            6,
+            2,
+            obs,
+            &stats,
+            &[0_i32; 32],
+            ann_obs,
+            &ann_stats,
+            &[0_i32; 32],
+        );
+        assert_eq!(cond.len(), 6, "season {season}: FACP must cover every lag");
+        for (k, v) in cond.iter().enumerate() {
+            assert!(
+                v.is_finite(),
+                "season {season} lag {}: FACP must be finite, got {v}",
+                k + 1
+            );
+        }
+    }
+}
+
 /// When A is a constant series (std = 0), all cross-correlations
 /// involving A are 0.0. At k=1 the conditioning set is just {A_{t-1}} and
 /// Σ_22 = [[1.0]], Σ_12[:,0] = [0, 0]. The Schur complement reduces to
@@ -3761,11 +3780,6 @@ fn estimate_periodic_ar_annual_coefficients_order_zero_returns_one_by_one_soluti
         result.annual_coefficient,
         expected_psi
     );
-    assert!(
-        result.residual_std_ratio > 0.0 && result.residual_std_ratio <= 1.0,
-        "residual_std_ratio must be in (0, 1], got {}",
-        result.residual_std_ratio
-    );
 }
 
 /// `selected_order = 2` with the 3×3 hand-computed fixture.
@@ -3784,8 +3798,6 @@ fn estimate_periodic_ar_annual_coefficients_order_zero_returns_one_by_one_soluti
 /// - φ1 ≈ 0.81267678
 /// - φ2 ≈ -0.98684211
 /// - ψ  ≈ 0.97274947
-/// - sigma2 ≈ 0.55946356
-/// - residual_std_ratio ≈ 0.74797297
 #[test]
 fn estimate_periodic_ar_annual_coefficients_hand_computed_three_season() {
     let z0: &[f64] = &[1.0, 3.0, 2.0, 5.0, 4.0];
@@ -3836,11 +3848,6 @@ fn estimate_periodic_ar_annual_coefficients_hand_computed_three_season() {
         "ψ={} expected≈0.8779371830",
         result.annual_coefficient
     );
-    assert!(
-        (result.residual_std_ratio - 0.782_756_341_321_194_8).abs() < tol,
-        "residual_std_ratio={} expected≈0.7827563413",
-        result.residual_std_ratio
-    );
 }
 
 /// Singular extended YW system returns the zero fallback.
@@ -3890,10 +3897,6 @@ fn estimate_periodic_ar_annual_coefficients_singular_returns_zero_result() {
     assert_eq!(
         result.annual_coefficient, 0.0,
         "singular system must return annual_coefficient=0.0"
-    );
-    assert_eq!(
-        result.residual_std_ratio, 1.0,
-        "singular system must return residual_std_ratio=1.0"
     );
 }
 

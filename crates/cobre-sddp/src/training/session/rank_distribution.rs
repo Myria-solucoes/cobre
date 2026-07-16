@@ -164,6 +164,47 @@ mod tests {
         }
     }
 
+    /// `max_local_fwd * num_stages` stays rank-uniform and non-zero even where
+    /// `my_actual_fwd` is 0 — the premise the backward pass's record slice rests
+    /// on. Pins the arithmetic only; that the pass actually hands `exchange` a
+    /// full-length slice is pinned by `state_exchange`'s zero-work tests.
+    #[test]
+    fn zero_work_ranks_keep_a_rank_uniform_backward_record_length() {
+        let num_stages = 3;
+        let (total_forward_passes, num_ranks) = (1, 4);
+
+        let backward_record_lens: Vec<usize> = (0..num_ranks)
+            .map(|rank| {
+                let comm = StubCommN {
+                    rank,
+                    size: num_ranks,
+                };
+                let rd = RankDistribution::new(&comm, num_stages, total_forward_passes, 2);
+                rd.max_local_fwd * rd.num_stages
+            })
+            .collect();
+
+        assert_eq!(
+            backward_record_lens,
+            vec![num_stages; num_ranks],
+            "every rank's backward record slice must be the same non-zero length"
+        );
+
+        let zero_work_ranks = (0..num_ranks)
+            .filter(|&rank| {
+                let comm = StubCommN {
+                    rank,
+                    size: num_ranks,
+                };
+                RankDistribution::new(&comm, num_stages, total_forward_passes, 2).my_actual_fwd == 0
+            })
+            .count();
+        assert_eq!(
+            zero_work_ranks, 3,
+            "fixture must actually exercise ranks that draw zero forward passes"
+        );
+    }
+
     #[test]
     fn rank_distribution_actual_per_rank_is_consistent_with_my_actual_fwd() {
         for rank in 0..3 {

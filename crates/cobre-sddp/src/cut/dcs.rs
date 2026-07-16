@@ -22,7 +22,7 @@ use crate::cut::{CutPool, CutRowMap};
 use crate::cut_selection::CutSelectionStrategy;
 use crate::error::SddpError;
 use crate::gemm::gemm_block;
-use crate::indexer::{CutStateProjection, StateLayout};
+use crate::indexer::{CutSlot, CutStateProjection, StateSpace};
 use crate::workspace::CapturedBasis;
 
 /// Dynamic Cut Selection hyperparameters.
@@ -181,7 +181,7 @@ impl DcsScoringScratch {
 /// (`x_raw = col_scale[c] · x_scaled`, empty ⇒ factor 1.0) — **mixing scaled
 /// state with raw coefficients is the classic silent bug.** Reduced index → LP
 /// column mapping uses the per-pool
-/// [`CutStateProjection::state_to_lp_outgoing_column`], so scoring spans the same
+/// [`CutStateProjection::outgoing_column`], so scoring spans the same
 /// enabled cut-state dimensions the cut-row builder renders.
 ///
 /// # Batched scoring
@@ -223,7 +223,7 @@ impl DcsScoringScratch {
 #[allow(clippy::too_many_arguments)]
 pub fn score_violated_candidates(
     pool: &CutPool,
-    state: &StateLayout,
+    state: &StateSpace,
     cut_state: &CutStateProjection,
     primal: &[f64],
     col_scale: &[f64],
@@ -233,7 +233,7 @@ pub fn score_violated_candidates(
     scratch: &mut DcsScoringScratch,
     out_selected: &mut Vec<u32>,
 ) -> usize {
-    let n_state = cut_state.n_state();
+    let n_state = cut_state.n_slots();
     let theta = state.theta;
 
     // `> theta` rather than `>= theta + 1` to satisfy clippy::int_plus_one.
@@ -244,11 +244,11 @@ pub fn score_violated_candidates(
     );
     debug_assert_eq!(
         pool.state_dimension, n_state,
-        "score_violated_candidates: pool.state_dimension {} != cut_state.n_state() {}",
+        "score_violated_candidates: pool.state_dimension {} != cut_state.n_slots() {}",
         pool.state_dimension, n_state,
     );
     // col_scale is per-column (sized like primal), so this one check covers both
-    // col_scale[theta] and every col_scale[state_to_lp_outgoing_column(j)] read below.
+    // col_scale[theta] and every col_scale[outgoing_column(j)] read below.
     debug_assert!(
         col_scale.is_empty() || col_scale.len() == primal.len(),
         "score_violated_candidates: col_scale.len() {} != primal.len() {} (non-empty col_scale \
@@ -271,7 +271,7 @@ pub fn score_violated_candidates(
 
     scratch.unscaled_state.clear();
     for j in 0..n_state {
-        let c = cut_state.state_to_lp_outgoing_column(j);
+        let c = cut_state.outgoing_column(CutSlot::new(j)).get();
         let x_raw = if col_scale.is_empty() {
             primal[c]
         } else {
@@ -572,7 +572,7 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
     solver: &mut ProfiledSolver<S>,
     core: &StageTemplate,
     pool: &CutPool,
-    state: &StateLayout,
+    state: &StateSpace,
     cut_state: &CutStateProjection,
     col_scale: &[f64],
     stored_basis: Option<&CapturedBasis>,
@@ -615,7 +615,7 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
                 &mut scratch.recon_basis,
                 core.num_rows + cut_rows,
                 core.num_rows,
-            );
+            )?;
             solver
                 .solve(Some(&scratch.recon_basis))
                 .map_err(|e| map_solver_error(e, ctx))?
@@ -758,16 +758,19 @@ mod tests {
         DcsParams, DcsScoringScratch, DcsSolveContext, DcsSolveScratch, build_initial_resident_set,
         lazy_solve_preloaded, score_violated_candidates,
     };
+    use cobre_core::temporal::StageStateConfig;
+
+    use crate::cut::row::append_slots_to_lp;
     use crate::cut::{CutPool, CutRowMap};
     use crate::cut_selection::{CutMetadata, CutSelectionStrategy};
-    use crate::indexer::{CutStateProjection, StateLayout};
+    use crate::indexer::{CutSlot, CutStateProjection, StateSpace};
 
     /// All-enabled per-pool projection of `idx`: every scoring/append test uses a
     /// full-dimension pool, so this reproduces the global outgoing render.
-    fn cut_state(idx: &StateLayout) -> CutStateProjection {
+    fn cut_state(idx: &StateSpace) -> CutStateProjection {
         CutStateProjection::new(
             idx,
-            cobre_core::temporal::StageStateConfig {
+            StageStateConfig {
                 storage: true,
                 inflow_lags: true,
             },
@@ -870,7 +873,7 @@ mod tests {
     // score_violated_candidates fixtures
     // -----------------------------------------------------------------------
 
-    // All scoring tests use n_state = 2 (StateLayout::new(2, 0, 0, [], 0, 0, …)):
+    // All scoring tests use n_state = 2 (StateSpace::new(2, 0, 0, [], 0, 0, …)):
     //   - state columns 0, 1 (identity state_to_lp_column for j < hydro_count)
     //   - theta column 6 (= n * (3 + l) with n = 2, l = 0)
     // So `primal` must be at least length 7.
@@ -878,8 +881,8 @@ mod tests {
     const THETA_COL: usize = 6;
     const PRIMAL_LEN: usize = THETA_COL + 1;
 
-    fn indexer() -> StateLayout {
-        StateLayout::new(2, 0, 0, Vec::new(), 0, 0, vec![], &[0, 0])
+    fn indexer() -> StateSpace {
+        StateSpace::new(2, 0, 0, Vec::new(), 0, 0, vec![], &[0, 0])
     }
 
     /// A pool with capacity 16, state_dimension 2, forward_passes 16, no
@@ -1259,13 +1262,13 @@ mod tests {
     /// order of `score_violated_candidates`, but scores each surviving candidate
     /// with its own `gemm_block(coef, x*, 1, n_state, 1, ..)` call (the old
     /// per-candidate path). The reduced-index → LP-column mapping uses the per-pool
-    /// `cut_state` projection (`n_state` and `state_to_lp_outgoing_column`), mirroring
+    /// `cut_state` projection (`n_slots` and `outgoing_column`), mirroring
     /// production so the reference is a true oracle for a reduced projection, not
     /// only the all-enabled case. Returns `(alpha_bits_in_gather_order, out_selected)`.
     #[allow(clippy::cast_possible_truncation)]
     fn per_row_reference(
         pool: &CutPool,
-        idx: &StateLayout,
+        idx: &StateSpace,
         cut_state: &CutStateProjection,
         primal: &[f64],
         col_scale: &[f64],
@@ -1273,7 +1276,7 @@ mod tests {
         p: &DcsParams,
         current_iteration: u64,
     ) -> (Vec<u64>, Vec<u32>) {
-        let n_state = cut_state.n_state();
+        let n_state = cut_state.n_slots();
         let theta = idx.theta;
         let theta_raw = if col_scale.is_empty() {
             primal[theta]
@@ -1282,7 +1285,7 @@ mod tests {
         };
         let mut unscaled_state = Vec::with_capacity(n_state);
         for j in 0..n_state {
-            let c = cut_state.state_to_lp_outgoing_column(j);
+            let c = cut_state.outgoing_column(CutSlot::new(j)).get();
             let x_raw = if col_scale.is_empty() {
                 primal[c]
             } else {
@@ -1651,7 +1654,7 @@ mod tests {
     // lazy_solve fixtures
     // -----------------------------------------------------------------------
 
-    // Synthetic LP for StateLayout::new(1, 0, …): n_state = 1, theta = col 3.
+    // Synthetic LP for StateSpace::new(1, 0, …): n_state = 1, theta = col 3.
     //   Columns: 0 = state x0 (pinned to 2.0), 1 and 2 fixed to 0, 3 = theta.
     //   No structural rows (num_rows = 0) — cuts are the only rows.
     //   Objective: minimize theta. So at the optimum theta equals the max cut
@@ -1659,8 +1662,8 @@ mod tests {
     const STATE_X0: f64 = 2.0;
     const LAZY_THETA_COL: usize = 3;
 
-    fn lazy_indexer() -> StateLayout {
-        StateLayout::new(1, 0, 0, Vec::new(), 0, 0, vec![], &[0])
+    fn lazy_indexer() -> StateSpace {
+        StateSpace::new(1, 0, 0, Vec::new(), 0, 0, vec![], &[0])
     }
 
     /// Cut-free core template with x0 pinned to `STATE_X0` and theta free.
@@ -1746,7 +1749,7 @@ mod tests {
     }
 
     /// Reference all-cuts optimum: load core, append every active slot, solve.
-    fn solve_all_cuts(pool: &CutPool, state: &StateLayout) -> (f64, f64) {
+    fn solve_all_cuts(pool: &CutPool, state: &StateSpace) -> (f64, f64) {
         let mut solver = active_profiled();
         let core = core_template();
         solver.load_model(&core);
@@ -1761,7 +1764,7 @@ mod tests {
         };
         let all_slots: Vec<u32> = (0..pool.populated() as u32).collect();
         let cs = cut_state(state);
-        crate::cut::row::append_slots_to_lp(
+        append_slots_to_lp(
             &mut solver,
             pool,
             &all_slots,
@@ -2392,7 +2395,9 @@ mod tests {
                 solve_time_seconds: 0.0,
             })
         }
-        fn get_basis(&mut self, _out: &mut Basis) {}
+        fn get_basis(&mut self, out: &mut Basis) {
+            crate::test_support::fill_consistent_basis(out);
+        }
         fn statistics(&self) -> SolverStatistics {
             SolverStatistics {
                 solve_count: self.call_count as u64,

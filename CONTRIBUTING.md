@@ -442,9 +442,10 @@ Before tagging a new release:
    and update the guard table **in the same change** — otherwise the `Test`
    job goes red on the stale baselines:
    ```bash
-   COBRE_PARITY_REGEN=1 cargo test -p cobre-sddp --features slow-tests --test parity
-   COBRE_PARITY_REGEN=1 cargo test -p cobre-sddp --no-default-features \
-     --features "clp slow-tests" --test parity
+   cargo nextest run -p cobre-sddp --features slow-tests --test parity \
+     -E 'test(parity_regen)' --run-ignored ignored-only
+   cargo nextest run -p cobre-sddp --no-default-features --features "clp slow-tests" \
+     --test parity -E 'test(parity_regen)' --run-ignored ignored-only
    # These rewrite the committed baselines under
    # crates/cobre-sddp/tests/fixtures/parity_baselines/ (HiGHS) and
    # crates/cobre-sddp/tests/fixtures/parity_baselines_clp/ (CLP). The two dirs

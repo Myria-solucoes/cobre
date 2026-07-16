@@ -21,6 +21,7 @@
 use std::path::{Path, PathBuf};
 
 use clap::Args;
+use cobre_io::{LoadError, validate_case_with_artifacts};
 use cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts;
 use cobre_sddp::validate_phases::{PrepPhase, prep_phase_metadata};
 use cobre_sddp::{StudyParams, prepare_stochastic};
@@ -100,15 +101,15 @@ pub fn execute(args: ValidateArgs) -> Result<(), CliError> {
 
     // _with_artifacts returns the pre-parsed CaseArtifacts the hydro-models phase
     // needs, avoiding a second disk read.
-    let (loaded, report) = match cobre_io::validate_case_with_artifacts(&args.case_dir) {
+    let (loaded, report) = match validate_case_with_artifacts(&args.case_dir) {
         Ok(result) => result,
-        Err(cobre_io::LoadError::IoError { path, source }) => {
+        Err(LoadError::IoError { path, source }) => {
             return Err(CliError::Io {
                 source,
                 context: path.display().to_string(),
             });
         }
-        Err(cobre_io::LoadError::ConstraintError { description }) => {
+        Err(LoadError::ConstraintError { description }) => {
             // Warnings are not available when errors abort the pipeline, so report 0.
             format_constraint_description(&stdout, &description, 0, &args.case_dir);
             return Err(CliError::Validation {

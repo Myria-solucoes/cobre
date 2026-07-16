@@ -9,7 +9,7 @@ use cobre_stochastic::par::precompute::PrecomputedPar;
 use crate::error::SddpError;
 use crate::hydro_models::{EvaporationModelSet, ProductionModelSet, ResolvedProductionModel};
 use crate::inflow_method::InflowNonNegativityMethod;
-use crate::lead_time::AnticipatedResolution;
+use crate::lead_time::{AnticipatedResolution, SpreadResolution};
 use crate::resolved_parameters::ResolvedParameters;
 use crate::setup::template_postprocess::{
     compute_cumulative_discount_factors, compute_per_stage_discount_factors,
@@ -19,6 +19,16 @@ use super::layout::{ResolvedTables, StageLayout, TemplateBuildCtx};
 use super::{
     COST_SCALE_FACTOR, GenericConstraintRowEntry, M3S_TO_HM3, columns, entries, rows, scaling,
 };
+use crate::indexer::Boundary;
+use crate::indexer::EvaporationIndices;
+use crate::indexer::HydroSys;
+use crate::indexer::StateSpace;
+use crate::indexer::StorageBoundaryGrid;
+use crate::indexer::ThermalSys;
+#[cfg(any(test, feature = "test-support"))]
+use crate::setup::bucket_topology::build_transit_bucket_topology;
+#[cfg(any(test, feature = "test-support"))]
+use crate::setup::resolve_state_layout;
 
 /// Outcome of [`build_stage_templates`]: one [`StageTemplate`] per study stage
 /// plus the per-stage offsets and counts the forward/backward/simulation passes
@@ -135,10 +145,6 @@ pub struct StageTemplates {
     /// the placeholder window). Read via
     /// [`StageTemplates::cumulative_discount_factors`].
     cumulative_discount_factors: Vec<f64>,
-    /// Role-(a) canonical `StateLayout` (stage-invariant): the same one every
-    /// per-stage `StageLayout` shares, fed to `postprocess_templates`'s
-    /// anticipated-ring `col_scale` override.
-    pub(crate) state_layout: crate::indexer::StateLayout,
 }
 
 impl StageTemplates {
@@ -167,16 +173,6 @@ impl StageTemplates {
             hydro_productivities_per_stage: Vec::new(),
             discount_factors: Vec::new(),
             cumulative_discount_factors: Vec::new(),
-            state_layout: crate::indexer::StateLayout::new(
-                n_hydros,
-                0,
-                0,
-                Vec::new(),
-                0,
-                0,
-                Vec::new(),
-                &vec![0; n_hydros],
-            ),
         }
     }
 
@@ -255,7 +251,7 @@ pub struct StageGeometry {
     /// FPHA-generation-block end, so they shift under a non-uniform schedule —
     /// this per-stage copy carries the stage-correct columns. A reader wanting a
     /// hydro's block 0 indexes `local_evap_idx * n_blks`.
-    pub evap_indices: Vec<crate::indexer::EvaporationIndices>,
+    pub evap_indices: Vec<EvaporationIndices>,
     /// Inflow non-negativity slack column range (one per hydro, stage-level).
     pub inflow_slack: Range<usize>,
     /// Under-withdrawal slack column range (one per hydro, stage-level).
@@ -315,112 +311,43 @@ pub struct StageGeometry {
     /// Number of operating blocks (K) at this stage — the block-major stride for
     /// every equipment family.
     pub n_blks: usize,
-    /// Control-region anchor for the interior storage boundaries `S¹ … Sᴷ⁻¹`,
-    /// mirroring `StageLayout::storage_internal_start` (holds
-    /// `StateLayout::control_region_start()`, not `0`); the within-family address is
-    /// `storage_internal_start + h * (n_blks − 1) + (k − 1)` (stride `n_blks − 1`).
-    /// Dead in parallel mode and when `n_blks ≤ 1`: the interior family is empty, so no
-    /// `k` reaches the `_` arm of [`StageGeometry::block_storage_col`], which this feeds.
-    pub storage_internal_start: usize,
+    /// Storage-boundary address primitive for this stage, carrying both state
+    /// bases plus the interior control-region anchor mirroring
+    /// `StageLayout::storage_boundary_grid`; feeds [`StageGeometry::block_storage_col`].
+    pub storage_boundary_grid: StorageBoundaryGrid,
     /// Block formulation mode at this stage. Selects per-block storage extraction
     /// (`Chronological` reads each block's own `(Sᵇ, Sᵇ⁺¹)` boundary) versus the
     /// stage-level `(S⁰, Sᴷ)` pair (`Parallel`); defaults to `Parallel`.
     pub block_mode: BlockMode,
     /// System hydro indices using FPHA at this stage, in slot order. FPHA
     /// membership is per `(hydro, stage)`, so this is the stage-correct list.
-    pub fpha_hydro_indices: Vec<usize>,
+    pub fpha_hydro_indices: Vec<HydroSys>,
     /// System hydro indices with linearized evaporation at this stage, in slot
     /// order. Parallel to `evap_indices`.
-    pub evap_hydro_indices: Vec<usize>,
+    pub evap_hydro_indices: Vec<HydroSys>,
     /// System hydro indices owning a `σ_fill`-target slack column at this stage (the
     /// Filling-phase hydros), in slot order. Parallel to `filling_target_col` (slot
     /// `i` → `filling_target_col.start + i`). The family is SPARSE — one column per
     /// filling hydro — so extraction resolves a system hydro's column via this
     /// system→slot list, never by the dense system index `h`.
-    pub filling_target_hydro_indices: Vec<usize>,
+    pub filling_target_hydro_indices: Vec<HydroSys>,
     /// System hydro indices owning a `σ^{v-}` operating-floor slack column at this
     /// stage (the Operating-phase filling hydros), in slot order. Parallel to
     /// `filled_min_storage_floor_col`; SPARSE like `filling_target_hydro_indices`,
     /// resolved the same way.
-    pub filled_min_storage_floor_hydro_indices: Vec<usize>,
+    pub filled_min_storage_floor_hydro_indices: Vec<HydroSys>,
 }
 
 impl StageGeometry {
-    /// Build the per-stage equipment geometry from this stage's `StageLayout`.
-    ///
-    /// This is the production source: every range is the stage-correct geometry
-    /// the LP template was frozen with, so the simulation read-path addresses the
-    /// columns the solved primal actually occupies at this stage. The empty-block
-    /// `start` accessors (`col_generation_start`, the `col_*_slack` accessors)
-    /// resolve the dedicated empty-block cursor rather than a bare `0` when the
-    /// family collapses to `0..0`, matching the indexer convention.
-    ///
-    /// Every field is either a direct `StageLayout` field clone or a `StageLayout`
-    /// range accessor (`filling_target`, `filling_target_col`,
-    /// `filled_min_storage_floor`, `filled_min_storage_floor_col`,
-    /// `anticipated_decision`) — no range is hand-derived here, so `StageLayout`
-    /// alone owns each family's start/end arithmetic.
-    fn from_layout(layout: &StageLayout<'_>, block_mode: BlockMode) -> Self {
-        Self {
-            theta_col: layout.col_theta(),
-            turbine: layout.turbine.clone(),
-            spillage: layout.spillage.clone(),
-            diversion: layout.diversion.clone(),
-            thermal: layout.thermal.clone(),
-            anticipated_decision: layout.anticipated_decision(),
-            line_fwd: layout.line_fwd.clone(),
-            line_rev: layout.line_rev.clone(),
-            deficit: layout.deficit.clone(),
-            excess: layout.excess.clone(),
-            generation: layout.generation.clone(),
-            evap_indices: layout.evap_indices.clone(),
-            inflow_slack: layout.inflow_slack.clone(),
-            withdrawal_slack_neg: layout.withdrawal_slack_neg.clone(),
-            withdrawal_slack_pos: layout.withdrawal_slack_pos.clone(),
-            outflow_below_slack: layout.outflow_below_slack.clone(),
-            outflow_above_slack: layout.outflow_above_slack.clone(),
-            turbine_below_slack: layout.turbine_below_slack.clone(),
-            generation_below_slack: layout.generation_below_slack.clone(),
-            contract_import: layout.contract_import.clone(),
-            contract_export: layout.contract_export.clone(),
-            water_balance: layout.water_balance.clone(),
-            load_balance: layout.load_balance.clone(),
-            filling_target: layout.filling_target(),
-            filling_target_col: layout.filling_target_col(),
-            filled_min_storage_floor: layout.filled_min_storage_floor(),
-            filled_min_storage_floor_col: layout.filled_min_storage_floor_col(),
-            z_inflow_row_start: layout.z_inflow_row_start,
-            n_blks: layout.n_blks,
-            storage_internal_start: layout.storage_internal_start,
-            block_mode,
-            fpha_hydro_indices: layout.fpha_hydro_indices.clone(),
-            evap_hydro_indices: layout.evap_hydro_indices.clone(),
-            filling_target_hydro_indices: layout.filling_target_hydro_indices.clone(),
-            filled_min_storage_floor_hydro_indices: layout
-                .filled_min_storage_floor_hydro_indices
-                .clone(),
-        }
-    }
-
-    /// Storage column at chronological boundary `k ∈ 0..=K` (`K = self.n_blks`) for
-    /// hydro `h`, mirroring `StageLayout::block_storage_col`
-    /// so the simulation read-path resolves per-block boundaries without a
-    /// `StageLayout`. `k = 0 → S⁰` (incoming state, base `storage_in_start`);
-    /// `k = K → Sᴷ` (outgoing state, bare `h` because `state.storage.start == 0`);
-    /// `k ∈ 1..K → storage_internal_start + h * (n_blks − 1) + (k − 1)` (interior
-    /// CONTROL columns, stride `n_blks − 1`). The `k == self.n_blks` arm MUST precede
-    /// the interior `_` arm, else `_` captures the outgoing endpoint and addresses an
-    /// interior column past the family. The incoming-state base is passed in because
-    /// the state region is owned by [`StateLayout`](crate::indexer::StateLayout), not
-    /// `StageGeometry`.
+    /// Storage column at chronological `boundary` for hydro `h`, so the
+    /// simulation read-path resolves per-block boundaries without a
+    /// `StageLayout`; delegates to
+    /// [`StorageBoundaryGrid::col`](crate::indexer::StorageBoundaryGrid::col),
+    /// the single owner of the endpoints-vs-interior split.
     #[inline]
     #[must_use]
-    pub fn block_storage_col(&self, h: usize, k: usize, storage_in_start: usize) -> usize {
-        match k {
-            0 => storage_in_start + h,
-            k if k == self.n_blks => h,
-            _ => self.storage_internal_start + h * (self.n_blks - 1) + (k - 1),
-        }
+    pub fn block_storage_col(&self, h: HydroSys, boundary: Boundary) -> usize {
+        self.storage_boundary_grid.col(h.get(), boundary)
     }
 }
 
@@ -461,13 +388,13 @@ pub(super) struct StageBuildOutput {
 #[allow(clippy::similar_names)]
 pub(super) fn build_single_stage_template(
     ctx: &TemplateBuildCtx<'_>,
-    state: &crate::indexer::StateLayout,
+    state: &StateSpace,
     stage: &Stage,
     stage_idx: usize,
 ) -> StageBuildOutput {
     let layout = StageLayout::new(ctx, state, stage, stage_idx);
-    let stage_base_row = layout.row_water_balance_start();
-    let load_balance_row_start = layout.row_load_balance_start();
+    let stage_base_row = layout.rows.water_balance.start;
+    let load_balance_row_start = layout.rows.load_balance.start;
 
     let (col_lower, mut col_upper, mut objective) =
         columns::fill_stage_columns(ctx, stage, stage_idx, &layout);
@@ -511,7 +438,7 @@ pub(super) fn build_single_stage_template(
 
     let template = StageTemplate {
         num_cols: layout.num_cols,
-        num_rows: layout.num_rows,
+        num_rows: layout.rows.num_rows,
         num_nz: col_entries.iter().map(Vec::len).sum(),
         col_starts,
         row_indices,
@@ -523,7 +450,7 @@ pub(super) fn build_single_stage_template(
         row_upper,
         n_state: layout.n_state(),
         n_transfer,
-        n_dual_relevant: layout.n_dual_relevant,
+        n_dual_relevant: layout.rows.n_dual_relevant,
         n_hydro: layout.n_h,
         max_par_order: layout.lag_order,
         col_scale: Vec::new(),
@@ -531,19 +458,19 @@ pub(super) fn build_single_stage_template(
     };
 
     // Snapshot the per-stage equipment geometry BEFORE moving `layout`'s owned
-    // `generic_constraint_rows` Vec into the output: `from_layout` only borrows,
-    // so it must run while `layout` is intact.
-    let equipment_geometry = StageGeometry::from_layout(&layout, stage.block_mode);
+    // `generic_constraint_rows` Vec into the output: `geometry` only borrows
+    // `layout`, so it must run while `layout` is intact.
+    let equipment_geometry = layout.geometry(stage.block_mode);
 
     StageBuildOutput {
         template,
         stage_base_row,
         load_balance_row_start,
         gc_entries: layout.generic_constraint_rows,
-        ncs_col_start: layout.col_ncs_start,
-        ncs_count: layout.n_ncs,
-        pumping_col_start: layout.col_pumping_start,
-        n_pumping: layout.n_pumping,
+        ncs_col_start: layout.equipment.col_ncs_start,
+        ncs_count: layout.equipment.n_ncs,
+        pumping_col_start: layout.equipment.col_pumping_start,
+        n_pumping: layout.equipment.n_pumping,
         equipment_geometry,
     }
 }
@@ -661,7 +588,7 @@ fn collect_load_bus_indices(system: &System, bus_pos: &BTreeMap<EntityId, usize>
 /// use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
 /// use cobre_sddp::InflowNonNegativityMethod;
 /// use cobre_sddp::hydro_models::PrepareHydroModelsResult;
-/// use cobre_sddp::indexer::StateLayout;
+/// use cobre_sddp::indexer::StateSpace;
 /// use cobre_sddp::lp_builder::build_stage_templates;
 /// use cobre_sddp::resolved_parameters::ResolvedParameters;
 /// use cobre_stochastic::par::precompute::PrecomputedPar;
@@ -680,13 +607,23 @@ fn collect_load_bus_indices(system: &System, bus_pos: &BTreeMap<EntityId, usize>
 /// let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
 /// let resolved_parameters = ResolvedParameters::default();
 /// // No stages, so the state layout is empty too.
-/// let state_layout = StateLayout::new(0, 0, 0, Vec::new(), 0, 0, Vec::new(), &[]);
+/// let state_layout = StateSpace::new(0, 0, 0, Vec::new(), 0, 0, Vec::new(), &[]);
 /// let result = build_stage_templates(&system, method, &par_lp, &normal_lp,
 ///                                    &hydro_models.production, &hydro_models.evaporation,
-///                                    &resolved_parameters, &state_layout, &[])
+///                                    &resolved_parameters, &state_layout, &[],
+///                                    &std::collections::HashMap::new(),
+///                                    &std::collections::HashMap::new(),
+///                                    &std::collections::HashMap::new())
 ///     .expect("empty system ok");
 /// assert!(result.templates.is_empty());
 /// ```
+// Rationale (too_many_arguments): each of the three arc-table parameters threads
+// the single setup-owned derivation (`build_transit_bucket_topology`) through, the
+// same coupling `per_stage_mask` already threads; a wrapper struct used at this one
+// signature would rename the coupling, not remove it.
+// implicit_hasher: callers pass a concrete `HashMap`; a `BuildHasher` generic buys
+// nothing.
+#[allow(clippy::too_many_arguments, clippy::implicit_hasher)]
 pub fn build_stage_templates(
     system: &System,
     inflow_method: InflowNonNegativityMethod,
@@ -695,8 +632,11 @@ pub fn build_stage_templates(
     production_models: &ProductionModelSet,
     evaporation_models: &EvaporationModelSet,
     resolved_parameters: &ResolvedParameters,
-    state_layout: &crate::indexer::StateLayout,
+    state_layout: &StateSpace,
     per_stage_mask: &[Vec<usize>],
+    arc_stage_weights: &HashMap<usize, Vec<Vec<f64>>>,
+    arc_spread_chrono: &HashMap<usize, Vec<Option<SpreadResolution>>>,
+    arc_arrival_density: &HashMap<usize, Vec<Option<Vec<f64>>>>,
 ) -> Result<StageTemplates, SddpError> {
     let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
     let n_hydros = system.hydros().len();
@@ -715,6 +655,10 @@ pub fn build_stage_templates(
         state_layout.anticipated_resolution.clone(),
         state_layout.anticipated_lead_stages.clone(),
         per_stage_mask.to_vec(),
+        arc_stage_weights.clone(),
+        arc_spread_chrono.clone(),
+        arc_arrival_density.clone(),
+        state_layout.max_par_order,
     );
     let n_load_buses = load_bus_indices.len();
     debug_assert!(
@@ -731,6 +675,18 @@ pub fn build_stage_templates(
         ctx.anticipated_lead_stages, state_layout.anticipated_lead_stages,
         "ctx's threaded anticipated_lead_stages must match the state_layout it was built from"
     );
+    debug_assert_eq!(
+        ctx.max_par_order,
+        system
+            .inflow_models()
+            .iter()
+            .filter(|m| m.stage_id >= 0)
+            .map(|m| m.ar_coefficients.len())
+            .max()
+            .unwrap_or(0)
+            .max(par_lp.max_order()),
+        "ctx's threaded max_par_order must match the state_layout it was built from"
+    );
 
     let n_study = study_stages.len();
     let mut stage_outputs = Vec::with_capacity(n_study);
@@ -743,7 +699,7 @@ pub fn build_stage_templates(
         ));
     }
 
-    let mut output = assemble_stage_templates_output(
+    let output = assemble_stage_templates_output(
         stage_outputs,
         load_bus_indices,
         diversion_upstream_output,
@@ -754,7 +710,6 @@ pub fn build_stage_templates(
         n_load_buses,
         n_study,
     );
-    output.state_layout = state_layout.clone();
     Ok(output)
 }
 
@@ -763,7 +718,7 @@ pub fn build_stage_templates(
 /// through the same setup entry point production uses
 /// (`crate::setup::resolve_state_layout`), then delegates. Production
 /// (`StudySetup`) always threads its own already-resolved
-/// `StateLayout`/`per_stage_mask` directly through [`build_stage_templates`]
+/// `StateSpace`/`per_stage_mask` directly through [`build_stage_templates`]
 /// instead — this wrapper exists so test call sites that build templates from
 /// a bare system do not each need to resolve the layout themselves.
 ///
@@ -781,8 +736,8 @@ pub fn build_stage_templates_resolving_layout(
     evaporation_models: &EvaporationModelSet,
     resolved_parameters: &ResolvedParameters,
 ) -> Result<StageTemplates, SddpError> {
-    let topology = crate::setup::bucket_topology::build_transit_bucket_topology(system);
-    let (state_layout, _, _) = crate::setup::resolve_state_layout(system, par_lp, &topology)?;
+    let topology = build_transit_bucket_topology(system);
+    let (state_layout, _, _) = resolve_state_layout(system, par_lp, &topology)?;
     build_stage_templates(
         system,
         inflow_method,
@@ -793,6 +748,9 @@ pub fn build_stage_templates_resolving_layout(
         resolved_parameters,
         &state_layout,
         &topology.per_stage_mask,
+        &topology.arc_stage_weights,
+        &topology.arc_spread_chrono,
+        &topology.arc_arrival_density,
     )
 }
 
@@ -877,7 +835,11 @@ pub(super) fn build_filling_v_target(
 // maps, anticipated metadata, contracts, discount factors) feeding a single
 // `TemplateBuildCtx` literal; splitting it would scatter the construction the
 // literal reads back, without removing any branching.
-#[allow(clippy::too_many_lines)]
+// Rationale: too_many_arguments — each parameter threads a single-owner value
+// from `StateSpace` into the shared `TemplateBuildCtx` (mirroring the existing
+// `anticipated_resolution`/`anticipated_lead_stages` threads); a wrapper struct
+// used nowhere else would rename the coupling, not remove it.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn build_template_build_ctx<'a>(
     system: &'a System,
     inflow_method: InflowNonNegativityMethod,
@@ -888,6 +850,10 @@ fn build_template_build_ctx<'a>(
     anticipated_resolution: AnticipatedResolution,
     anticipated_lead_stages: Vec<usize>,
     per_stage_mask: Vec<Vec<usize>>,
+    arc_stage_weights: HashMap<usize, Vec<Vec<f64>>>,
+    arc_spread_chrono: HashMap<usize, Vec<Option<SpreadResolution>>>,
+    arc_arrival_density: HashMap<usize, Vec<Option<Vec<f64>>>>,
+    max_par_order: usize,
 ) -> (
     TemplateBuildCtx<'a>,
     Vec<usize>,
@@ -963,23 +929,14 @@ fn build_template_build_ctx<'a>(
 
     let load_bus_indices = collect_load_bus_indices(system, &bus_pos);
 
-    let max_par_order: usize = system
-        .inflow_models()
-        .iter()
-        .filter(|m| m.stage_id >= 0)
-        .map(|m| m.ar_coefficients.len())
-        .max()
-        .unwrap_or(0)
-        .max(par_lp.max_order());
-
     // Per anticipated thermal: global index and commissioning window. The window
     // keys the decision gate's operation-window clause on the delivery stage;
     // `(None, None)` means active every delivery stage in horizon.
-    let mut anticipated_thermal_indices: Vec<usize> = Vec::new();
+    let mut anticipated_thermal_indices: Vec<ThermalSys> = Vec::new();
     let mut anticipated_windows: Vec<(Option<i32>, Option<i32>)> = Vec::new();
     for (t_idx, thermal) in system.thermals().iter().enumerate() {
         if thermal.anticipated_config.is_some() {
-            anticipated_thermal_indices.push(t_idx);
+            anticipated_thermal_indices.push(ThermalSys::new(t_idx));
             anticipated_windows.push((thermal.entry_stage_id, thermal.exit_stage_id));
         }
     }
@@ -1045,13 +1002,6 @@ fn build_template_build_ctx<'a>(
         &total_hours_per_stage,
         &stage_id_to_idx,
     );
-
-    // Resolved once here (SETUP time, never per stage-solve): `resolve_spread`
-    // is O(declared arcs * n_stages), not called again per LP fill.
-    let arc_stage_weights = crate::setup::bucket_topology::build_arc_stage_weights(system);
-    let arc_spread_chrono = crate::setup::bucket_topology::build_arc_spread_chrono(system);
-    let arc_arrival_density =
-        crate::setup::bucket_topology::build_arc_arrival_density(system, &arc_stage_weights);
 
     let ctx = TemplateBuildCtx {
         hydros,
@@ -1202,9 +1152,6 @@ fn assemble_stage_templates_output(
         // 1.0-placeholders until `StageTemplates::set_discount_factors`.
         discount_factors: vec![1.0; n_study],
         cumulative_discount_factors: vec![1.0; n_study],
-        // Placeholder until `build_stage_templates` overwrites it with the role-(a)
-        // `StateLayout` it already built for the per-stage loop above.
-        state_layout: crate::indexer::StateLayout::new(0, 0, 0, Vec::new(), 0, 0, Vec::new(), &[]),
     }
 }
 

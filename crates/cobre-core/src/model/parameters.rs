@@ -20,6 +20,9 @@
 
 use crate::EntityId;
 
+#[cfg(feature = "serde")]
+use serde::Deserializer;
+
 /// Reference to a scalar coefficient in a linear term.
 ///
 /// Allows constraint coefficients to be either a literal `f64` value known at
@@ -330,7 +333,7 @@ impl From<ParameterKind> for ParameterKindJson {
 impl<'de> serde::Deserialize<'de> for ParameterKind {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: serde::Deserializer<'de>,
+        D: Deserializer<'de>,
     {
         let json = ParameterKindJson::deserialize(deserializer)?;
         match json {

@@ -8,8 +8,12 @@
 use std::collections::BTreeMap;
 
 use cobre_core::TrainingEvent;
-use cobre_io::{IterationRecord, RowPoolStatistics, RowSelectionRecord, TrainingOutput};
+use cobre_io::{
+    IterationRecord, MetadataTrainingSolveStats, RowPoolStatistics, RowSelectionRecord,
+    TrainingOutput,
+};
 
+use crate::stopping_rule::{RULE_BOUND_STALLING, RULE_SIMULATION_BASED};
 use crate::{FutureCostFunction, TrainingResult};
 
 /// Per-iteration accumulator filled by [`accumulate_partial_records`] from
@@ -334,8 +338,7 @@ pub fn build_training_output(
         rows_in_lp_max,
     };
 
-    let converged = result.reason == crate::stopping_rule::RULE_BOUND_STALLING
-        || result.reason == crate::stopping_rule::RULE_SIMULATION_BASED;
+    let converged = result.reason == RULE_BOUND_STALLING || result.reason == RULE_SIMULATION_BASED;
 
     // None for non-positive lower bound: the gap percentage is undefined
     // (final_lb == 0) or sign-inverted (final_lb < 0).
@@ -393,7 +396,7 @@ pub fn build_training_output(
         cut_selection_records,
         worker_timing_records,
         // Populated downstream (CLI/Python) from live solver statistics.
-        training_solve_stats: cobre_io::MetadataTrainingSolveStats::default(),
+        training_solve_stats: MetadataTrainingSolveStats::default(),
     }
 }
 

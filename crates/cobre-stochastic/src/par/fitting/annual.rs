@@ -42,7 +42,7 @@ pub struct AnnualSeasonalStats {
 /// `(hydro_id, season_id)`.
 ///
 /// `σ^A_m` uses the population (`1/N`) divisor — required because the runtime
-/// `ψ̂ = ψ · σ_m / σ^A_m` needs `σ^A_m > 0` (enforced by the `cobre-io` output
+/// `ψ̂ = ψ · s_m / σ^A_m` needs `σ^A_m > 0` (enforced by the `cobre-io` output
 /// validator) and self-consistent partitioned-covariance FACPs.
 ///
 /// # Errors

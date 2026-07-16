@@ -5,6 +5,7 @@
 //! The deltas are stored per-iteration and per-phase for later Parquet output and
 //! CLI display.
 
+use cobre_io::SolverStatsRow;
 use cobre_solver::SolverStatistics;
 
 /// Delta of solver counters between two snapshots.
@@ -288,7 +289,7 @@ impl SolverStatsLogEntry {
     }
 }
 
-/// Convert a [`SolverStatsDelta`] into a [`cobre_io::SolverStatsRow`] for Parquet output.
+/// Convert a [`SolverStatsDelta`] into a [`SolverStatsRow`] for Parquet output.
 ///
 /// `id` is the row identifier: iteration number for training phases, scenario ID
 /// for simulation.
@@ -302,8 +303,8 @@ pub fn delta_to_stats_row(
     rank: Option<i32>,
     worker_id: Option<i32>,
     delta: &SolverStatsDelta,
-) -> cobre_io::SolverStatsRow {
-    cobre_io::SolverStatsRow {
+) -> SolverStatsRow {
+    SolverStatsRow {
         iteration: id,
         phase: phase.to_string(),
         stage,
@@ -328,7 +329,7 @@ pub fn delta_to_stats_row(
 
 /// Map a per-iteration solver-stats log into Parquet rows.
 #[must_use]
-pub fn solver_stats_log_to_rows(log: &[SolverStatsLogEntry]) -> Vec<cobre_io::SolverStatsRow> {
+pub fn solver_stats_log_to_rows(log: &[SolverStatsLogEntry]) -> Vec<SolverStatsRow> {
     log.iter()
         .map(|entry| {
             #[allow(clippy::cast_possible_truncation)] // iteration count fits in u32
@@ -496,7 +497,6 @@ pub fn pack_worker_opening_stats(
 /// `buf` must be `n_workers * n_slots * WORKER_STATS_ENTRY_STRIDE` floats.
 /// `out` must be a slice of length `n_workers * n_slots` (row-major order; contents overwritten).
 /// The prefix `[worker_id, slot_idx]` per entry is informational (not asserted on unpack for ranks > 0).
-/// Panics in debug if buffer sizes don't match.
 ///
 /// # Panics
 ///

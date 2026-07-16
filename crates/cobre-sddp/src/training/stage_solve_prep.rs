@@ -12,8 +12,10 @@ use cobre_solver::SolverInterface;
 
 use crate::{
     context::{StageContext, TrainingContext},
+    error::SddpError,
     indexer::BlockGrid,
     lp_builder::PatchBuffer,
+    lp_builder::commitment_reconcile::{DeliveryPins, fill_bound_relaxations},
     noise::{
         NcsNoiseOffsets, apply_ncs_col_bounds, transform_inflow_noise, transform_load_noise,
         transform_ncs_noise,
@@ -84,8 +86,17 @@ pub(crate) struct StageSolvePrepParams<'a> {
 pub(crate) struct StageSolvePrep;
 
 impl StageSolvePrep {
-    /// Executes `pin → row_patches → ncs_patch → commit` over caller-owned
-    /// `&mut` scratch: allocates nothing.
+    /// Executes `pin → row_patches → ncs_patch → commit → reconcile` over
+    /// caller-owned `&mut` scratch: allocates nothing.
+    ///
+    /// Commitment reconciliation is **not** a variation point and takes no hook: it
+    /// runs on every solve this pipeline prepares, gated only on facts `run` derives
+    /// itself. An opt-in hook is what let four call sites silently lose it.
+    ///
+    /// # Errors
+    ///
+    /// [`SddpError::AnticipatedCommitmentOutOfBounds`] when a pinned commitment lies
+    /// further outside its delivery generation bound than solver drift explains.
     pub(crate) fn run<S>(
         solver: &mut S,
         patch_buf: &mut PatchBuffer,
@@ -94,7 +105,8 @@ impl StageSolvePrep {
         training_ctx: &TrainingContext<'_>,
         stage: usize,
         params: &StageSolvePrepParams<'_>,
-    ) where
+    ) -> Result<(), SddpError>
+    where
         S: SolverInterface,
     {
         let pinned_state = params.state_source.0;
@@ -208,6 +220,50 @@ impl StageSolvePrep {
                 );
             }
         }
+
+        Self::reconcile_commitments(solver, patch_buf, ctx, training_ctx, stage, pinned_state)
+    }
+
+    /// Relax the delivery generation bounds this stage's pinned commitments drifted
+    /// outside of. Runs last: the template reload and the bound patches above reset
+    /// the columns it relaxes, so an earlier call would be overwritten.
+    fn reconcile_commitments<S>(
+        solver: &mut S,
+        patch_buf: &mut PatchBuffer,
+        ctx: &StageContext<'_>,
+        training_ctx: &TrainingContext<'_>,
+        stage: usize,
+        pinned_state: &[f64],
+    ) -> Result<(), SddpError>
+    where
+        S: SolverInterface,
+    {
+        if training_ctx.state.n_anticipated == 0 {
+            return Ok(());
+        }
+        let Some(geometry) = ctx.geometry_per_stage.get(stage) else {
+            return Ok(());
+        };
+
+        fill_bound_relaxations(
+            &DeliveryPins {
+                state_layout: training_ctx.state,
+                pinned_state,
+                template: &ctx.templates[stage],
+                geometry,
+                anticipated_thermal_indices: &training_ctx.study_dims.anticipated_thermal_indices,
+                n_blks: ctx.block_counts_per_stage[stage],
+                stage_idx: stage,
+                n_stages: training_ctx.horizon.num_stages(),
+            },
+            &mut patch_buf.commitment_relax,
+        )?;
+
+        let relax = &patch_buf.commitment_relax;
+        if !relax.is_empty() {
+            solver.set_col_bounds(&relax.indices, &relax.lower, &relax.upper);
+        }
+        Ok(())
     }
 }
 

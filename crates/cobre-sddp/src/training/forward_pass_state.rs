@@ -6,7 +6,9 @@
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
+use cobre_core::WorkerPhaseTimings;
 use cobre_core::{TrainingEvent, WorkerTimingPhase};
+use cobre_solver::ActiveProfile;
 use cobre_solver::{SolverInterface, SolverStatistics, StageTemplate};
 use cobre_stochastic::context::ClassSchemes;
 use cobre_stochastic::{
@@ -17,12 +19,16 @@ use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator,
 };
 
+use crate::training_session::iteration_scratch::IterationScratch;
+use crate::training_session::rank_distribution::RankDistribution;
+use crate::training_session::runtime::RuntimeHandles;
+use crate::workspace::WorkspacePool;
 use crate::{
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
     error::SddpError,
     forward::{ForwardResult, StageKey, run_forward_stage},
-    indexer::StateLayout,
+    indexer::StateSpace,
     solve::partition,
     solver_phase::Phase,
     solver_stats::SolverStatsDelta,
@@ -75,14 +81,14 @@ impl<'a, S: SolverInterface + Send> ForwardPassInputs<'a, S> {
     // without adding indirection or invalidating the disjoint-borrow design.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_session_fields(
-        fwd_pool: &'a mut crate::workspace::WorkspacePool<S>,
+        fwd_pool: &'a mut WorkspacePool<S>,
         basis_store: &'a mut BasisStore,
         ctx: &'a StageContext<'a>,
-        scratch: &'a mut crate::training_session::iteration_scratch::IterationScratch,
+        scratch: &'a mut IterationScratch,
         fcf: &'a FutureCostFunction,
         training_ctx: &'a TrainingContext<'a>,
-        ranks: &crate::training_session::rank_distribution::RankDistribution,
-        runtime: &'a crate::training_session::runtime::RuntimeHandles,
+        ranks: &RankDistribution,
+        runtime: &'a RuntimeHandles,
         iteration: u64,
     ) -> Self {
         let fwd_record_len = ranks.my_actual_fwd * training_ctx.horizon.num_stages();
@@ -132,7 +138,7 @@ pub(crate) struct ForwardWorkerParams<'a> {
     pub recent_weight_seed: f64,
     /// Stage-invariant state layout; only `inflow_lags.start` is read (the
     /// initial-state lag base).
-    pub state: &'a StateLayout,
+    pub state: &'a StateSpace,
     /// Stage-level LP context (templates, row counts, noise scales).
     pub ctx: &'a StageContext<'a>,
     /// Frozen LP templates including pre-appended prior-iteration cuts.
@@ -267,7 +273,7 @@ impl ForwardPassState {
         inputs: &mut ForwardPassInputs<'_, S>,
     ) -> Result<ForwardResult, SddpError>
     where
-        S: SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
+        S: SolverInterface<Profile = ActiveProfile> + Send,
     {
         let training_ctx = inputs.training_ctx;
         let TrainingContext {
@@ -369,7 +375,7 @@ impl ForwardPassState {
         }
 
         for ws in inputs.workspaces.iter_mut() {
-            ws.worker_timing_buf = cobre_core::WorkerPhaseTimings::default();
+            ws.worker_timing_buf = WorkerPhaseTimings::default();
         }
 
         let parallel_start = Instant::now();
@@ -755,7 +761,7 @@ mod tests {
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
         StageStateConfig,
     };
-    use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
+    use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder, WorkerPhaseTimings};
     use cobre_solver::{
         Basis, LpSolution, ProfiledSolver, RowBatch, SolverError, SolverInterface,
         SolverStatistics, StageTemplate,
@@ -768,10 +774,12 @@ mod tests {
         context::{StageContext, TrainingContext},
         cut::FutureCostFunction,
         horizon_mode::HorizonMode,
-        indexer::StateLayout,
+        indexer::StateSpace,
         inflow_method::InflowNonNegativityMethod,
+        lp_builder::PatchBuffer,
+        test_support::{state_layout, study_dims},
         trajectory::TrajectoryRecord,
-        workspace::{BackwardAccumulators, BasisStore, SolverWorkspace},
+        workspace::{BackwardAccumulators, BasisStore, ScratchBuffers, SolverWorkspace},
     };
 
     // ── Minimal mock solver ────────────────────────────────────────────────
@@ -826,7 +834,9 @@ mod tests {
                 solve_time_seconds: 0.0,
             })
         }
-        fn get_basis(&mut self, _out: &mut Basis) {}
+        fn get_basis(&mut self, out: &mut Basis) {
+            crate::test_support::fill_consistent_basis(out);
+        }
         fn statistics(&self) -> SolverStatistics {
             self.stats.clone()
         }
@@ -877,25 +887,14 @@ mod tests {
         }
     }
 
-    fn single_workspace(
-        solver: MockSolver,
-        state: &crate::indexer::StateLayout,
-    ) -> SolverWorkspace<MockSolver> {
+    fn single_workspace(solver: MockSolver, state: &StateSpace) -> SolverWorkspace<MockSolver> {
         SolverWorkspace {
             rank: 0,
             worker_id: 0,
             solver: ProfiledSolver::new(solver),
-            patch_buf: crate::lp_builder::PatchBuffer::new(
-                state.hydro_count,
-                state.max_par_order,
-                0,
-                0,
-                0,
-                0,
-                0,
-            ),
+            patch_buf: PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(state.n_state),
-            scratch: crate::workspace::ScratchBuffers {
+            scratch: ScratchBuffers {
                 noise_buf: Vec::with_capacity(state.hydro_count),
                 inflow_m3s_buf: Vec::with_capacity(state.hydro_count),
                 lag_matrix_buf: Vec::with_capacity(state.max_par_order * state.hydro_count),
@@ -928,7 +927,7 @@ mod tests {
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
-            worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+            worker_timing_buf: WorkerPhaseTimings::default(),
         }
     }
 
@@ -1086,7 +1085,7 @@ mod tests {
     struct ForwardFixture {
         n_stages: usize,
         n_scenarios: usize,
-        state: StateLayout,
+        state: StateSpace,
         templates: Vec<StageTemplate>,
         base_rows: Vec<usize>,
         initial_state: Vec<f64>,
@@ -1094,7 +1093,7 @@ mod tests {
         fcf: FutureCostFunction,
         horizon: HorizonMode,
         stochastic: cobre_stochastic::StochasticContext,
-        stages: Vec<cobre_core::temporal::Stage>,
+        stages: Vec<Stage>,
         workspaces: Vec<SolverWorkspace<MockSolver>>,
         basis_store: BasisStore,
         records: Vec<TrajectoryRecord>,
@@ -1104,7 +1103,7 @@ mod tests {
         fn new() -> Self {
             let n_stages = 2_usize;
             let n_scenarios = 2_usize;
-            let state = crate::test_support::state_layout(1, 0);
+            let state = state_layout(1, 0);
             let stochastic = make_stochastic_context_2_stages();
             let stages = make_stages_2();
             let solution = fixed_solution_1_0();
@@ -1192,7 +1191,7 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::test_support::study_dims();
+        let study_dims = study_dims();
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
@@ -1268,7 +1267,7 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::test_support::study_dims();
+        let study_dims = study_dims();
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
@@ -1399,7 +1398,7 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::test_support::study_dims();
+        let study_dims = study_dims();
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,
@@ -1533,7 +1532,7 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::test_support::study_dims();
+        let study_dims = study_dims();
         let training_ctx = TrainingContext {
             horizon: &fx.horizon,
             state: &fx.state,

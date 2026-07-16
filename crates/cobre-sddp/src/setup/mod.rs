@@ -26,6 +26,24 @@
 //! # }
 //! ```
 
+use cobre_core::ContractType::Import;
+use cobre_core::temporal::SeasonCycleType::Monthly;
+use cobre_core::temporal::SeasonMap;
+use cobre_core::temporal::StageLagTransition;
+use cobre_core::temporal::StageStateConfig;
+use cobre_io::Config;
+use cobre_stochastic::par::RecentObservationSeed;
+use cobre_stochastic::par::lag_transition::compute_recent_observation_seed;
+use cobre_stochastic::par::lag_transition::derive_downstream_par_order;
+use cobre_stochastic::par::lag_transition::precompute_noise_groups;
+use cobre_stochastic::par::lag_transition::precompute_stage_lag_transitions;
+
+use crate::StageTemplates;
+use crate::config::LoopParams;
+use crate::resolved_parameters::build_resolved_parameters;
+use crate::scaling_report::ScalingReport;
+use crate::simulation::SimulationConfig;
+use crate::stochastic::noise_key::build_noise_key_table;
 mod accessors;
 pub(crate) mod bucket_seed;
 pub(crate) mod bucket_topology;
@@ -45,14 +63,14 @@ pub use scenario_library_set::{PhaseLibraries, ScenarioLibraries};
 pub use stage_data::StageData;
 pub use stochastic_pipeline::{
     PrepareStochasticResult, build_ncs_factor_entries, load_load_factors_for_stochastic,
-    prepare_stochastic,
+    prepare_stochastic, study_stage_noise_group_ids,
 };
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use cobre_core::{
-    AnticipatedConfig, EntityId, Hydro, Stage, System, Thermal,
+    AnticipatedConfig, EntityId, Hydro, Stage, StageId, System, Thermal,
     scenario::{SamplingScheme, ScenarioSource},
 };
 use cobre_io::build_hydro_reference_volumes_resolved;
@@ -68,12 +86,11 @@ use crate::{
     error::SddpError,
     horizon_mode::HorizonMode,
     hydro_models::PrepareHydroModelsResult,
-    indexer::{CutStateProjection, StateLayout, StudyDimensions},
-    lead_time::{AnticipatedResolution, LeadTime, PointResolution},
+    indexer::{CutStateProjection, StateSpace, StudyDimensions},
+    lead_time::{AnticipatedResolution, LeadTime, PointResolution, SpreadResolution},
     lp_builder::build_stage_templates,
     risk_measure::RiskMeasure,
     simulation::EntityCounts,
-    stage_key::StageId,
     stopping_rule::{StoppingRule, StoppingRuleSet},
     workspace::CapturedBasis,
 };
@@ -141,7 +158,7 @@ pub struct StudySetup {
     /// Threaded into the simulation
     /// [`StageExtractionSpec`](crate::simulation::extraction::StageExtractionSpec)
     /// so the anticipated-decision read gates on the same
-    /// `StateLayout::is_anticipated_decision_active` predicate the LP builder used,
+    /// `is_anticipated_decision_active` predicate the LP builder used,
     /// keying its operation-window clause on the DELIVERY stage's `stage.id`. Empty
     /// when there are no anticipated thermals.
     pub(crate) anticipated_windows: Vec<(Option<i32>, Option<i32>)>,
@@ -157,10 +174,10 @@ pub struct StudySetup {
     ///
     /// `n_fwd_threads` is excluded (derived at runtime) and supplied as a per-call
     /// argument to [`StudySetup::train`].
-    pub loop_params: crate::config::LoopParams,
+    pub loop_params: LoopParams,
 
     /// Simulation pipeline parameters, stored directly as [`crate::simulation::SimulationConfig`].
-    pub simulation_config: crate::simulation::SimulationConfig,
+    pub simulation_config: SimulationConfig,
 
     /// Relative path to the policy output directory (e.g. `"training/policy"`).
     pub policy_path: String,
@@ -182,7 +199,7 @@ pub struct StudySetup {
     /// at every trajectory start in the forward pass and simulation pipeline instead
     /// of zero-filling. All-zero (a plain zero reset) when `recent_observations` is
     /// empty.
-    pub(crate) recent_observation_seed: crate::lag_transition::RecentObservationSeed,
+    pub(crate) recent_observation_seed: RecentObservationSeed,
 
     /// PAR order of the downstream (coarser) resolution model. Non-zero only when
     /// the study includes stages with `season_id >= 12` (a monthly-to-quarterly
@@ -200,11 +217,14 @@ pub struct StudySetup {
     pub(crate) hydro_min_storage_hm3: Vec<f64>,
 
     /// Water travel-time in-transit bucket topology: canonical column order,
-    /// global bucket count, and per-stage reachability mask. Empty
+    /// global bucket count, per-stage reachability mask, and the three
+    /// resolved arc tables (stage-clock weights, chronological spread,
+    /// arrival density) — the single derivation site for all of them. Empty
     /// (`n_buckets == 0`) when the system declares no travel-time arc.
-    // Voice 4: no read site consumes this yet — the state layout reads
-    // `n_buckets`/`column_order` to size and order the bucket block. The
-    // `#[allow(dead_code)]` refires once that reader lands.
+    // Voice 4: every field is consumed via the constructor's threaded LOCAL
+    // (state-layout sizing, the LP builder's arc-table threading, the bucket
+    // IC seed) before this STORED field is set below; no post-construction
+    // reader exists yet. `#[allow(dead_code)]` refires once one lands.
     #[allow(dead_code)]
     pub(crate) transit_bucket_topology: bucket_topology::TransitBucketTopology,
 
@@ -231,7 +251,7 @@ impl StudySetup {
     ///   an invalid config string.
     pub fn new(
         system: &System,
-        config: &cobre_io::Config,
+        config: &Config,
         stochastic: StochasticContext,
         hydro_models: PrepareHydroModelsResult,
     ) -> Result<Self, SddpError> {
@@ -299,8 +319,7 @@ impl StudySetup {
         // Keys are a pure function of the synced tree + fixed σ, so every rank
         // computes the identical permutation and cuts stay bit-identical across
         // thread/rank counts (canonical-ω aggregation is order-independent).
-        let solve_order_keys =
-            crate::stochastic::noise_key::build_noise_key_table(system, &stochastic)?;
+        let solve_order_keys = build_noise_key_table(system, &stochastic)?;
         stochastic
             .set_solve_order(&solve_order_keys, SweepDirection::Descending)
             .map_err(|e| SddpError::Validation(e.to_string()))?;
@@ -311,7 +330,7 @@ impl StudySetup {
         let transit_bucket_topology = bucket_topology::build_transit_bucket_topology(system);
 
         // Resolved before the LP templates: none of the state dimensions depend on
-        // the built LP, and `build_stage_templates` needs the finished `StateLayout`
+        // the built LP, and `build_stage_templates` needs the finished `StateSpace`
         // threaded in as a parameter (the single role-(a) owner — see
         // `resolve_state_layout`).
         let (state_layout, hydro_count, anticipated_thermal_indices) =
@@ -329,6 +348,9 @@ impl StudySetup {
             &scalar_parameters,
             &state_layout,
             &transit_bucket_topology.per_stage_mask,
+            &transit_bucket_topology.arc_stage_weights,
+            &transit_bucket_topology.arc_spread_chrono,
+            &transit_bucket_topology.arc_arrival_density,
         )?;
 
         let study_dims = build_study_dimensions(
@@ -354,7 +376,7 @@ impl StudySetup {
         let cut_state_layouts = build_cut_state_layouts(system, &state_layout, n_stages);
         let pool_state_dimensions: Vec<usize> = cut_state_layouts
             .iter()
-            .map(CutStateProjection::n_state)
+            .map(CutStateProjection::n_slots)
             .collect();
         let fcf = FutureCostFunction::new_per_stage(
             &pool_state_dimensions,
@@ -454,7 +476,7 @@ impl StudySetup {
             anticipated_windows,
             study_stage_ids,
             scenario_libraries,
-            loop_params: crate::config::LoopParams {
+            loop_params: LoopParams {
                 seed,
                 forward_passes,
                 max_iterations,
@@ -462,7 +484,7 @@ impl StudySetup {
                 max_blocks,
                 stopping_rules: stopping_rule_set,
             },
-            simulation_config: crate::simulation::SimulationConfig {
+            simulation_config: SimulationConfig {
                 n_scenarios,
                 io_channel_capacity,
             },
@@ -516,7 +538,7 @@ struct NcsEntityData {
 /// in the system's `non_controllable_sources`.
 fn build_ncs_entity_data(
     system: &System,
-    stage_templates: &crate::lp_builder::StageTemplates,
+    stage_templates: &StageTemplates,
     stochastic: &StochasticContext,
 ) -> Result<NcsEntityData, SddpError> {
     let entity_counts = build_entity_counts(system);
@@ -576,8 +598,8 @@ fn build_ncs_entity_data(
 /// Grouped output of [`build_energy_and_templates`].
 struct EnergyAndTemplates {
     energy_conversion: EnergyConversionSet,
-    stage_templates: crate::lp_builder::StageTemplates,
-    scaling_report: crate::scaling_report::ScalingReport,
+    stage_templates: StageTemplates,
+    scaling_report: ScalingReport,
 }
 
 /// Build the energy-conversion set, the resolved parameter table, and the
@@ -595,14 +617,23 @@ struct EnergyAndTemplates {
 /// - [`SddpError::Validation`] — on energy-conversion / resolved-parameter
 ///   construction failure, or when the post-processed template list is empty.
 /// - [`SddpError::Solver`] — propagated from `build_stage_templates`.
+// Rationale (too_many_arguments): each of the three arc-table parameters threads
+// the single setup-owned derivation (`build_transit_bucket_topology`) into
+// `build_stage_templates`, mirroring the existing `per_stage_mask` thread; a
+// wrapper struct used at this one call site would rename the coupling, not
+// remove it.
+#[allow(clippy::too_many_arguments)]
 fn build_energy_and_templates(
     system: &System,
     inflow_method: crate::InflowNonNegativityMethod,
     stochastic: &StochasticContext,
     hydro_models: &PrepareHydroModelsResult,
     scalar_parameters: &[cobre_core::ScalarParameter],
-    state_layout: &StateLayout,
+    state_layout: &StateSpace,
     per_stage_mask: &[Vec<usize>],
+    arc_stage_weights: &HashMap<usize, Vec<Vec<f64>>>,
+    arc_spread_chrono: &HashMap<usize, Vec<Option<SpreadResolution>>>,
+    arc_arrival_density: &HashMap<usize, Vec<Option<Vec<f64>>>>,
 ) -> Result<EnergyAndTemplates, SddpError> {
     let study_stage_ids: Vec<StageId> = system
         .stages()
@@ -635,7 +666,7 @@ fn build_energy_and_templates(
         Some(&hydro_models.production),
     )
     .map_err(|e| SddpError::Validation(e.to_string()))?;
-    let resolved_parameters = crate::resolved_parameters::build_resolved_parameters(
+    let resolved_parameters = build_resolved_parameters(
         scalar_parameters,
         &energy_conversion,
         &hydro_models.productivity_override,
@@ -656,9 +687,13 @@ fn build_energy_and_templates(
         &resolved_parameters,
         state_layout,
         per_stage_mask,
+        arc_stage_weights,
+        arc_spread_chrono,
+        arc_arrival_density,
     )?;
 
-    let scaling_report = template_postprocess::postprocess_templates(&mut stage_templates, system);
+    let scaling_report =
+        template_postprocess::postprocess_templates(&mut stage_templates, system, state_layout);
 
     if stage_templates.templates.is_empty() {
         return Err(SddpError::Validation(
@@ -674,7 +709,7 @@ fn build_energy_and_templates(
 }
 
 /// Resolve every anticipated thermal's delivery-anchored commitment and
-/// construct the single role-(a) [`StateLayout`] — before stage templates
+/// construct the single role-(a) [`StateSpace`] — before stage templates
 /// exist, since none of the state dimensions depend on the built LP.
 ///
 /// The returned `hydro_count` and `anticipated_thermal_indices` are the exact
@@ -690,13 +725,13 @@ pub(crate) fn resolve_state_layout(
     system: &System,
     par_lp: &PrecomputedPar,
     transit_bucket_topology: &bucket_topology::TransitBucketTopology,
-) -> Result<(StateLayout, usize, Vec<usize>), SddpError> {
-    let mut anticipated_thermal_indices: Vec<usize> = Vec::new();
-    for (t_idx, thermal) in system.thermals().iter().enumerate() {
-        if thermal.anticipated_config.is_some() {
-            anticipated_thermal_indices.push(t_idx);
-        }
-    }
+) -> Result<(StateSpace, usize, Vec<usize>), SddpError> {
+    let anticipated_thermal_indices: Vec<usize> = system
+        .thermals()
+        .iter()
+        .enumerate()
+        .filter_map(|(t_idx, thermal)| thermal.anticipated_config.is_some().then_some(t_idx))
+        .collect();
     let n_anticipated = anticipated_thermal_indices.len();
 
     // Single resolve_point consumer: map each anticipated plant's config to a
@@ -753,7 +788,7 @@ pub(crate) fn resolve_state_layout(
     // par_lp.n_hydros()`) — production's `par_lp` always covers every system
     // hydro, so the fallback is inert there; a hydro-free `PrecomputedPar` test
     // fixture paired with a hydro-bearing system relies on it to satisfy the
-    // `StateLayout::new` length contract.
+    // `StateSpace::new` length contract.
     let effective_lag_counts: Vec<usize> = if max_par_order > 0 {
         (0..hydro_count)
             .map(|h| {
@@ -768,10 +803,10 @@ pub(crate) fn resolve_state_layout(
         vec![0; hydro_count]
     };
 
-    // `StateLayout` is the sole role-(a) owner; its constructor finalizes the
+    // `StateSpace` is the sole role-(a) owner; its constructor finalizes the
     // nonzero mask unconditionally, so every study (storage-only or pure-thermal)
     // has a finalized mask for the single-path mask-driven cut-row loop.
-    let mut state = StateLayout::new(
+    let mut state = StateSpace::new(
         hydro_count,
         max_par_order,
         transit_bucket_topology.n_buckets,
@@ -790,12 +825,12 @@ pub(crate) fn resolve_state_layout(
 /// and the post-processed stage templates.
 ///
 /// `hydro_count` and `anticipated_thermal_indices` are threaded from
-/// [`resolve_state_layout`] — the same values its [`StateLayout`] was built
+/// [`resolve_state_layout`] — the same values its [`StateSpace`] was built
 /// from — so the only per-stage template field this reads is
 /// `ncs_col_starts`, the one dimension genuinely derived from the built LP.
 fn build_study_dimensions(
     system: &System,
-    stage_templates: &crate::lp_builder::StageTemplates,
+    stage_templates: &StageTemplates,
     inflow_method: crate::InflowNonNegativityMethod,
     hydro_count: usize,
     anticipated_thermal_indices: Vec<usize>,
@@ -813,7 +848,7 @@ fn build_study_dimensions(
     // presence; the per-(ncs, block) column base is read per stage from
     // `StageContext::ncs_col_starts`, never a global handle. `n_blks` is deliberately
     // absent — it is per-stage, owned by the per-stage geometry, never study-global.
-    crate::indexer::StudyDimensions {
+    StudyDimensions {
         n_thermals: system.thermals().len(),
         n_lines: system.lines().len(),
         n_buses: system.buses().len(),
@@ -856,7 +891,7 @@ fn first_fanned_plant_id(
 /// The sole `resolve_point` consumer (via [`AnticipatedResolution::resolve`]).
 /// Warn-free: [`resolve_anticipated_commitments`] wraps this with the setup-time
 /// `K = 0` advisory; [`crate::lp_builder::build_stage_templates`] calls this core
-/// directly to attach an identical resolution onto its own `StateLayout` — the
+/// directly to attach an identical resolution onto its own `StateSpace` — the
 /// same accepted redundant-but-deterministic recompute this crate already
 /// applies to the bucket topology, not a second advisory emission. Returns the
 /// per-plant resolution and the anticipated-local constant leads: a
@@ -968,7 +1003,7 @@ fn leadstages_decision_sets_are_singletons(
 }
 
 /// Build the per-pool [`CutStateProjection`], one per stage (pool) `t`, projecting
-/// the global [`StateLayout`] onto the cut-state dimensions each pool carries.
+/// the global [`StateSpace`] onto the cut-state dimensions each pool carries.
 ///
 /// Pool `t` is sized by `stages[t + 1].state_config` — the cost-to-go this
 /// stage's **successor** generates for it (pool `t` is populated by the backward
@@ -988,7 +1023,7 @@ fn leadstages_decision_sets_are_singletons(
 /// here.)
 fn build_cut_state_layouts(
     system: &cobre_core::System,
-    state_layout: &StateLayout,
+    state_layout: &StateSpace,
     n_stages: usize,
 ) -> Vec<CutStateProjection> {
     let study_stages: Vec<&Stage> = system.stages().iter().filter(|s| s.id >= 0).collect();
@@ -1005,17 +1040,16 @@ fn build_cut_state_layouts(
 
 /// The all-dimensions cut-state config, sizing a pool to the full global
 /// `n_state`. Used for the terminal pool (no successor stage to govern it).
-const FULL_STATE_CONFIG: cobre_core::temporal::StageStateConfig =
-    cobre_core::temporal::StageStateConfig {
-        storage: true,
-        inflow_lags: true,
-    };
+const FULL_STATE_CONFIG: StageStateConfig = StageStateConfig {
+    storage: true,
+    inflow_lags: true,
+};
 
 /// Grouped output of [`precompute_lag_data`].
 struct LagData {
-    stage_lag_transitions: Vec<cobre_core::temporal::StageLagTransition>,
+    stage_lag_transitions: Vec<StageLagTransition>,
     noise_group_ids: Vec<u32>,
-    recent_observation_seed: crate::lag_transition::RecentObservationSeed,
+    recent_observation_seed: RecentObservationSeed,
     downstream_par_order: usize,
 }
 
@@ -1031,27 +1065,26 @@ fn precompute_lag_data(
         sm
     } else {
         // No season map: all stages produce zero-weight no-op transitions.
-        noop_season_map = cobre_core::temporal::SeasonMap {
-            cycle_type: cobre_core::temporal::SeasonCycleType::Monthly,
+        noop_season_map = SeasonMap {
+            cycle_type: Monthly,
             seasons: Vec::new(),
         };
         &noop_season_map
     };
     // Proxy: the global `max_par_order` stands in for the quarterly PAR order until a
     // separate quarterly stochastic context exists.
-    let downstream_par_order =
-        crate::lag_transition::derive_downstream_par_order(stages, stochastic.par().max_order());
-    let stage_lag_transitions = crate::lag_transition::precompute_stage_lag_transitions(
-        stages,
-        season_map_ref,
-        downstream_par_order,
-    );
-    let noise_group_ids = crate::lag_transition::precompute_noise_groups(stages);
+    let downstream_par_order = derive_downstream_par_order(stages, stochastic.par().max_order());
+    let stage_lag_transitions =
+        precompute_stage_lag_transitions(stages, season_map_ref, downstream_par_order);
+    // Both outputs derive from `stages`, so they cannot disagree about which
+    // stages are in scope; `study_stage_noise_group_ids` re-derives that scope
+    // from `System` and is for callers that have no filtered slice.
+    let noise_group_ids = precompute_noise_groups(stages);
 
     let recent_observation_seed = if stages.is_empty() {
-        crate::lag_transition::RecentObservationSeed::zero(system.hydros().len())
+        RecentObservationSeed::zero(system.hydros().len())
     } else {
-        crate::lag_transition::compute_recent_observation_seed(
+        compute_recent_observation_seed(
             &system.initial_conditions().recent_observations,
             &stages[0],
             season_map_ref,
@@ -1085,7 +1118,7 @@ fn build_scenario_libraries(
     stages: &[Stage],
     hydro_ids: &[EntityId],
     stochastic: &StochasticContext,
-    stage_lag_transitions: &[cobre_core::temporal::StageLagTransition],
+    stage_lag_transitions: &[StageLagTransition],
     training_source: &ScenarioSource,
     simulation_source: &ScenarioSource,
     forward_passes: u32,
@@ -1328,7 +1361,7 @@ fn build_contract_is_import(system: &System) -> Vec<bool> {
     system
         .contracts()
         .iter()
-        .map(|c| c.contract_type == cobre_core::ContractType::Import)
+        .map(|c| c.contract_type == Import)
         .collect()
 }
 
@@ -1376,7 +1409,7 @@ fn id_to_position<T>(entities: &[T], id_of: impl Fn(&T) -> i32) -> HashMap<i32, 
 fn build_initial_state(
     system: &System,
     study_dims: &StudyDimensions,
-    layout: &StateLayout,
+    layout: &StateSpace,
 ) -> Vec<f64> {
     let mut state = vec![0.0_f64; layout.n_state];
     let hydros = system.hydros();
@@ -1414,7 +1447,7 @@ fn build_initial_state(
 
     // Anticipated ring, slot-major: `state[anticipated_slots_out.start + slot *
     // n_anticipated + local_idx]`. This IS the state-vector numbering
-    // (`StateLayout::state_to_lp_column`'s identity domain), the same
+    // (`StateSpace::state_to_lp_column`'s identity domain), the same
     // `anticipated_slots_out` position every other outgoing-state read uses —
     // never `anticipated_state` (the relocated, incoming-only pinned block).
     // Padding slots `[K_i, k_max)` must stay zero — the in-LP ring's row/column
@@ -1470,12 +1503,12 @@ fn build_initial_state(
 }
 
 /// Write the travel-time bucket seed into `state`'s declared `transit_buckets_out`
-/// slots — the same index space [`StateLayout::state_to_lp_incoming_column`]
+/// slots — the same index space [`StateSpace::state_to_lp_incoming_column`]
 /// remaps to the pinned `transit_buckets_in` LP column, so no separate pin wiring is
 /// needed beyond this splice.
 fn splice_transit_bucket_seed(
     state: &mut [f64],
-    layout: &StateLayout,
+    layout: &StateSpace,
     system: &System,
     topology: &bucket_topology::TransitBucketTopology,
 ) {

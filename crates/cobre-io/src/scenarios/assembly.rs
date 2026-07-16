@@ -38,9 +38,10 @@ use crate::scenarios::{
 /// preserving lag order. The coefficient count determines the AR order; there is
 /// no cross-check against a separate `ar_order` field.
 ///
-/// When no coefficient rows exist for a (hydro, stage) pair, the resulting
-/// [`InflowModel`] has an empty `ar_coefficients` vec and `residual_std_ratio = 1.0`
-/// (white-noise identity).
+/// Every resulting [`InflowModel`] gets `residual_std_ratio = 1.0` — a
+/// placeholder immediately overwritten by
+/// [`crate::scenarios::populate_derived_residual_ratios`] (the periodic-ACF
+/// closure is the sole authority for this field; the file does not carry it).
 ///
 /// When an [`InflowAnnualComponentRow`] exists for a (hydro, stage) pair, the
 /// resulting [`InflowModel`] carries `annual: Some(AnnualComponent { ... })`;
@@ -72,13 +73,13 @@ use crate::scenarios::{
 ///     InflowSeasonalStatsRow { hydro_id: EntityId(1), stage_id: 1, mean_m3s: 80.0, std_m3s: 8.0 },
 /// ];
 /// let coefficients = vec![
-///     InflowArCoefficientRow { hydro_id: EntityId(1), stage_id: 0, lag: 1, coefficient: 0.5, residual_std_ratio: 0.85 },
-///     InflowArCoefficientRow { hydro_id: EntityId(1), stage_id: 0, lag: 2, coefficient: 0.2, residual_std_ratio: 0.85 },
+///     InflowArCoefficientRow { hydro_id: EntityId(1), stage_id: 0, lag: 1, coefficient: 0.5 },
+///     InflowArCoefficientRow { hydro_id: EntityId(1), stage_id: 0, lag: 2, coefficient: 0.2 },
 /// ];
 /// let models = assemble_inflow_models(stats, coefficients, vec![]).expect("valid join");
 /// assert_eq!(models.len(), 2);
 /// assert_eq!(models[0].ar_order(), 2);
-/// assert!((models[0].residual_std_ratio - 0.85).abs() < f64::EPSILON);
+/// assert!((models[0].residual_std_ratio - 1.0).abs() < f64::EPSILON);
 /// assert!(models[1].ar_coefficients.is_empty());
 /// assert!((models[1].residual_std_ratio - 1.0).abs() < f64::EPSILON);
 /// ```
@@ -91,19 +92,14 @@ pub fn assemble_inflow_models(
         return Ok(Vec::new());
     }
 
-    // residual_std_ratio is taken from the first row of each group; cross-lag
-    // consistency is validated in Layer 5, not here.
-    let mut coeff_map: HashMap<(EntityId, i32), (Vec<f64>, f64)> =
+    let mut coeff_map: HashMap<(EntityId, i32), Vec<f64>> =
         HashMap::with_capacity(coefficients.len());
     for row in coefficients {
-        let entry = coeff_map
+        coeff_map
             .entry((row.hydro_id, row.stage_id))
-            .or_insert_with(|| (Vec::new(), row.residual_std_ratio));
-        entry.0.push(row.coefficient);
+            .or_default()
+            .push(row.coefficient);
     }
-
-    let total_coeff_keys = coeff_map.len();
-    let mut consumed_keys: usize = 0;
 
     let mut annual_map: HashMap<(EntityId, i32), AnnualComponent> =
         HashMap::with_capacity(annual_components.len());
@@ -131,14 +127,7 @@ pub fn assemble_inflow_models(
     for row in stats {
         let key = (row.hydro_id, row.stage_id);
 
-        let (ar_coefficients, residual_std_ratio) =
-            if let Some((coeffs, ratio)) = coeff_map.remove(&key) {
-                consumed_keys += 1;
-                (coeffs, ratio)
-            } else {
-                // No coefficients: white-noise identity (residual_std_ratio = 1.0).
-                (Vec::new(), 1.0_f64)
-            };
+        let ar_coefficients = coeff_map.remove(&key).unwrap_or_default();
 
         let annual = annual_map.remove(&key);
 
@@ -148,12 +137,12 @@ pub fn assemble_inflow_models(
             mean_m3s: row.mean_m3s,
             std_m3s: row.std_m3s,
             ar_coefficients,
-            residual_std_ratio,
+            residual_std_ratio: 1.0,
             annual,
         });
     }
 
-    if consumed_keys < total_coeff_keys {
+    if !coeff_map.is_empty() {
         return report_orphaned_keys(
             coeff_map.keys(),
             Path::new("scenarios/inflow_ar_coefficients.parquet"),
@@ -276,21 +265,18 @@ mod tests {
                 stage_id: 0,
                 lag: 1,
                 coefficient: 0.45,
-                residual_std_ratio: 0.85,
             },
             InflowArCoefficientRow {
                 hydro_id: EntityId(1),
                 stage_id: 0,
                 lag: 2,
                 coefficient: 0.22,
-                residual_std_ratio: 0.85,
             },
             InflowArCoefficientRow {
                 hydro_id: EntityId(2),
                 stage_id: 0,
                 lag: 1,
                 coefficient: 0.60,
-                residual_std_ratio: 0.72,
             },
         ];
 
@@ -304,7 +290,7 @@ mod tests {
         assert_eq!(m0.ar_coefficients.len(), 2);
         assert!((m0.ar_coefficients[0] - 0.45).abs() < f64::EPSILON);
         assert!((m0.ar_coefficients[1] - 0.22).abs() < f64::EPSILON);
-        assert!((m0.residual_std_ratio - 0.85).abs() < f64::EPSILON);
+        assert!((m0.residual_std_ratio - 1.0).abs() < f64::EPSILON);
 
         let m1 = &models[1];
         assert_eq!(m1.hydro_id, EntityId(1));
@@ -319,7 +305,7 @@ mod tests {
         assert_eq!(m2.ar_order(), 1);
         assert_eq!(m2.ar_coefficients.len(), 1);
         assert!((m2.ar_coefficients[0] - 0.60).abs() < f64::EPSILON);
-        assert!((m2.residual_std_ratio - 0.72).abs() < f64::EPSILON);
+        assert!((m2.residual_std_ratio - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -350,7 +336,6 @@ mod tests {
             stage_id: 0,
             lag: 1,
             coefficient: 0.3,
-            residual_std_ratio: 0.85,
         }];
 
         let err = assemble_inflow_models(stats, coefficients, vec![]).unwrap_err();
@@ -384,7 +369,6 @@ mod tests {
             stage_id: 0,
             lag: 1,
             coefficient: 0.5,
-            residual_std_ratio: 0.85,
         }];
 
         let result = assemble_inflow_models(vec![], coefficients, vec![]);

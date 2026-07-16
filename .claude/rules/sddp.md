@@ -29,8 +29,8 @@ Incoming state is pinned with `set_col_bounds` on the incoming-state LP column.
 There is no state-fixing row range in the LP; incoming state is pinned entirely
 via column bounds. Always resolve the LP
 column — for both pinning and dual extraction — via
-`StateLayout::state_to_lp_incoming_column`; never assume a fixing-row index.
-Read: `lp/indexer/state_layout.rs`.
+`StateSpace::state_to_lp_incoming_column`; never assume a fixing-row index.
+Read: `lp/indexer/state_space.rs`.
 
 ## FPHA uses average storage
 
@@ -134,7 +134,8 @@ the canonical order, but every write still iterates the IC record list (not
 the map) — a map iteration order is unspecified and would violate
 declaration-order invariance if used to drive writes.
 Read: `setup/mod.rs` (`id_to_position`, `build_initial_state`),
-`stochastic/lag_transition.rs` (`compute_recent_observation_seed`). Pinned by
+`crates/cobre-stochastic/src/par/lag_transition.rs`
+(`compute_recent_observation_seed`). Pinned by
 `test_initial_state_seeds_correctly_under_staggered_commissioning_dates`,
 `build_initial_state_anticipated_seed_correct_under_staggered_commissioning_dates`,
 and `test_seed_correct_under_staggered_commissioning_dates`, each using a
@@ -199,12 +200,12 @@ carries `k_0` onto the balance row — never a separate once-per-stage family
 (the deposit share itself is emitted at the call site, never through
 `DeliveryRing::emit_deposit`, which only the anticipated ring calls). Incoming
 buckets are pinned via column bounds, resolved through
-`StateLayout::state_to_lp_incoming_column`'s explicit bucket arm, never the
+`StateSpace::state_to_lp_incoming_column`'s explicit bucket arm, never the
 `anticipated_state` catch-all. Subgradient extraction
 divides the incoming bucket column's reduced cost by `col_scale`
 (`extract_duals_from_view`, the same rc/col_scale contract as storage); the
 cut row renders the **outgoing** bucket column through
-`StateLayout::lp_column_for_state`'s identity arm and multiplies `col_scale`
+`StateSpace::lp_column_for_state`'s identity arm and multiplies `col_scale`
 back on via `push_scaled_coefficient` — divided on extract, multiplied on
 render, identical to storage. Swapping which column is pinned/read, or
 dividing on render instead of extract, prices the in-transit water in the
@@ -213,8 +214,8 @@ wrong direction — a wrong bound that still compiles. A fold implementation
 cost as the correct one, so total cost alone cannot discriminate — only the
 dual's sign/magnitude and the per-stage delivery split do.
 Read: `lp/builder/entries.rs` (`fill_transit_bucket_definition_entries`,
-`fill_arc_release_block_entries`, `transit_bucket_ring`), `lp/indexer/state_layout.rs`
-(`StateLayout::state_to_lp_incoming_column`, `StateLayout::lp_column_for_state`),
+`fill_arc_release_block_entries`, `transit_bucket_ring`), `lp/indexer/state_space.rs`
+(`StateSpace::state_to_lp_incoming_column`, `StateSpace::lp_column_for_state`),
 `training/backward/duals_extraction.rs` (`extract_duals_from_view`), `cut/row.rs`
 (`push_scaled_coefficient`, `push_cut_row`). Pinned by the bucket-arm
 column-resolution tests (outgoing resolves by identity, incoming resolves to the
@@ -382,9 +383,9 @@ Pinned by `test_anticipated_lead_time_coverage_pmo_calendar` and
 ### In-LP anticipated ring: definition-row sign & two-sided masking
 
 The anticipated ring is `DeliveryRing`'s other instantiation (the shared
-skeleton above): an outgoing block (`StateLayout::anticipated_slots_out`,
+skeleton above): an outgoing block (`StateSpace::anticipated_slots_out`,
 identity-resolved by `state_to_lp_column`, contributing to `n_state`) and a
-separate incoming block (`StateLayout::anticipated_state`, pinned via
+separate incoming block (`StateSpace::anticipated_state`, pinned via
 `state_to_lp_incoming_column`) — never one dual-purpose range shifted
 out-of-LP. There is no Rust-side shift step: the ring transition is resolved
 entirely by the definition rows below, and `current_state`/`state_at_capture`
@@ -410,7 +411,7 @@ definition row (the row-cap side) AND a frozen `[0, 0]` outgoing column
 (`fill_anticipated_slot_columns`, the column-freeze side — the same
 commissioning-dormant-column convention as NCS/thermal/line/station/contract).
 
-A slot beyond a plant's OWN `StateLayout::anticipated_lead_stages[plant]`
+A slot beyond a plant's OWN `StateSpace::anticipated_lead_stages[plant]`
 bound is structural padding even when `t + slot_idx` itself still lands
 inside the horizon — the multi-plant heterogeneous-lead case, where two
 plants sharing one `k_max`-wide ring have different per-plant reachable
@@ -423,7 +424,7 @@ manifest resolves a ring column back to `(slot, plant)` via
 `DeliveryRing::slot_lane_at` — the exact inverse of `out_col`/`in_col` — never
 a re-derived `offset % n_anticipated`/`offset / n_anticipated` pair.
 
-Read: `lp/indexer/state_layout.rs` (`StateLayout::state_to_lp_column`,
+Read: `lp/indexer/state_space.rs` (`StateSpace::state_to_lp_column`,
 `state_to_lp_incoming_column`), `lp/builder/layout.rs`
 (`build_anticipated_slot_row_pos`), `lp/builder/entries.rs`
 (`fill_anticipated_slot_definition_entries`,
@@ -458,7 +459,7 @@ admitted target-stage imprecision — while the anticipated gate prevents the
 decision from ever existing, so nothing of value is lost. Crediting a masked
 slot as if it held a dropped commitment would introduce value the model
 never computed, for a delivery stage that does not exist.
-Read: `lp/indexer/state_layout.rs` (`is_anticipated_decision_active`,
+Read: `lp/indexer/anticipated_gate.rs` (`is_anticipated_decision_active`,
 `is_anticipated_decision_active_for_delivery`), `lead_time/mod.rs`
 (`PointResolution::decider`), `lp/builder/layout.rs`
 (`build_anticipated_slot_row_pos`), `lp/builder/columns.rs`
@@ -506,8 +507,8 @@ per-trajectory.
 
 Read: `lead_time/mod.rs` (`PointResolution::genuine_decisions_at`,
 `self_delivered_stages`, `is_anticipated_at`, `is_ready_at`),
-`lp/indexer/state_layout.rs`
-(`StateLayout::is_anticipated_decision_active_for_delivery`,
+`lp/indexer/anticipated_gate.rs`
+(`is_anticipated_decision_active_for_delivery`,
 `anticipated_resolution_for`), `lp/builder/layout.rs`
 (`build_anticipated_slot_row_pos`, `build_anticipated_decision_row_pos`,
 `build_anticipated_fishing_row_pos`), `lp/builder/columns.rs`
@@ -567,7 +568,7 @@ surfaced by `warn_thermal_generation_on_anticipated_thermal` and is the general
 hole.
 
 Read: `lp/builder/columns.rs` (`fill_anticipated_columns`),
-`lp/indexer/state_layout.rs` (`is_anticipated_decision_active_for_delivery`),
+`lp/indexer/anticipated_gate.rs` (`is_anticipated_decision_active_for_delivery`),
 `lp/generic_constraints.rs` (`resolve_anticipated_decision`),
 `cobre-io` `validation/semantic/thermal.rs`
 (`warn_thermal_generation_on_anticipated_thermal`). Pinned by
@@ -580,3 +581,52 @@ training and simulating both `LeadTime` and `LeadStages` configurations of
 the same calendar to bit-identical solutions), and
 `a1c_lead_stages_is_pure_index_shift` (pins the delivery-anchored decider
 `c(m) = m - lead` those bounds are read against).
+
+### Delivered commitments reconcile against solver drift; exactness is unreachable
+
+Delivery-anchoring keeps the committed value inside the delivery stage's
+generation bounds **in exact arithmetic only**. The value that actually reaches
+the delivery stage is the solver's computed value for a **basic** ring-slot
+column: `slot_out` is defined by an equality row (`slot_out − decision = 0`, or
+the interior shift), so the simplex produces it through the basis factorization,
+and it is accurate only to the backend's `primal_feasibility_tolerance` (`1e-9`
+on HiGHS and CLP) — never to 1 ULP. A commitment at its cap therefore arrives a
+hair outside it, and the fishing equality's no-slack pin turns that hair into
+`SddpError::Infeasible`: a false infeasibility over a physically meaningless
+quantity that aborts training outright.
+
+`StageSolvePrep::run` therefore reconciles every pinned commitment against the
+delivery generation column's **enforced** bound (`col_upper * col_scale`, the
+round-tripped value the solver applies — not the template's raw `max_gen`),
+relaxing the column just far enough to admit drift within `drift_margin`. Drift
+beyond that margin is `SddpError::AnticipatedCommitmentOutOfBounds`, never
+absorbed: the margin is the discrimination line between solver noise and a
+modelling error, and a guard that relaxes for ANY overshoot silently admits a
+plant generating past its cap.
+
+Two forbidden alternatives, both of which have shipped:
+
+- **Deleting the reconciliation on the premise that unscaling makes it
+  redundant.** `apply_anticipated_col_scale_unscale` (`col_scale = 1.0` on
+  `anticipated_slots_out ∪ anticipated_state`) removes the ring _carry_ drift and
+  is retained — the carry is bit-exact and the decision column's own value is
+  bit-exact at its bound. It cannot remove the drift the basis factorization
+  introduces at the deposit row, because exactness there is the solver's to give
+  and it does not give it. No amount of unscaling closes this.
+- **Making the reconciliation an opt-in hook.** It is not a variation point and
+  takes no parameter: `run` derives its own gate, so all four solve sites (forward,
+  backward, lower bound, simulation) get it and none can opt out. An
+  `Option<..Ctx>` hook threaded per call site is what let all four silently lose it
+  in one commit.
+
+Read: `lp/builder/commitment_reconcile.rs` (`reconcile_commitment`,
+`fill_bound_relaxations`, `drift_margin`), `training/stage_solve_prep.rs`
+(`StageSolvePrep::reconcile_commitments`), `lp/builder/scaling.rs`
+(`apply_anticipated_col_scale_unscale`). Pinned by
+`anticipated_commitment_drifted_over_cap_is_absorbed` (a seed a hair past the cap
+trains; it returns `Infeasible` the moment the reconciliation is disabled) and
+`anticipated_commitment_over_cap_seed_is_refused` (a genuine over-commitment is
+named, not absorbed). `anticipated_commitment_at_cap_survives_ring_carry` does
+NOT pin this contract and must never be mistaken for it: a seed exactly at the cap
+carries zero drift, never reaches the reconciliation, and stays green with the
+guard deleted — an at-cap-only suite is what let this regression ship.

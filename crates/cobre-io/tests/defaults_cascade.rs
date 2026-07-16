@@ -1,6 +1,7 @@
 //! Integration tests for config/stages defaults cascade.
 #![allow(clippy::unwrap_used, clippy::panic, clippy::doc_markdown)]
 
+use cobre_io::PolicyMode;
 use cobre_io::config::{InflowNonNegativityMethod, parse_config};
 use std::io::Write;
 use tempfile::NamedTempFile;
@@ -53,7 +54,7 @@ fn test_minimal_config_all_defaults() {
 
     assert_eq!(
         cfg.policy.mode,
-        cobre_io::PolicyMode::Fresh,
+        PolicyMode::Fresh,
         "policy.mode should default to 'fresh'"
     );
     assert_eq!(
@@ -158,7 +159,7 @@ fn test_config_all_sections_explicit_no_defaults_applied() {
     assert_eq!(cfg.simulation.num_scenarios, 500);
 
     assert_eq!(cfg.policy.path, "./my_policy");
-    assert_eq!(cfg.policy.mode, cobre_io::PolicyMode::WarmStart);
+    assert_eq!(cfg.policy.mode, PolicyMode::WarmStart);
 
     assert!(cfg.exports.states);
     assert!(cfg.exports.stochastic);

@@ -3,6 +3,9 @@
 use std::collections::{HashMap, HashSet};
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
+use crate::stages::SUB_PERIOD_TOLERANCE_DAYS;
+
+use cobre_core::SeasonMap;
 
 // ── Rules 27+29: Season ID range coverage and resolution consistency ──────────
 
@@ -66,10 +69,9 @@ pub(super) fn check_season_id_consistency(data: &ParsedData, ctx: &mut Validatio
         if members.len() < 2 {
             continue;
         }
-        debug_assert!(!members.is_empty(), "guarded by len() >= 2 above");
         let min_d = members.iter().map(|&(_, d)| d).min().unwrap_or(0);
         let max_d = members.iter().map(|&(_, d)| d).max().unwrap_or(0);
-        if max_d - min_d > crate::stages::SUB_PERIOD_TOLERANCE_DAYS {
+        if max_d - min_d > SUB_PERIOD_TOLERANCE_DAYS {
             let mut details_parts: Vec<String> = members
                 .iter()
                 .map(|&(id, d)| format!("stage {id} ({d}d)"))
@@ -231,7 +233,7 @@ pub(super) fn check_observation_season_alignment(data: &ParsedData, ctx: &mut Va
 /// coefficients pre-computed).
 pub(super) fn check_season_observation_coverage(
     data: &ParsedData,
-    season_map: &cobre_core::temporal::SeasonMap,
+    season_map: &SeasonMap,
     ctx: &mut ValidationContext,
 ) {
     use cobre_core::scenario::SamplingScheme;
@@ -301,7 +303,7 @@ pub(super) fn check_season_observation_coverage(
 /// any stage, helping users detect accidental gaps.
 pub(super) fn check_season_contiguity(
     data: &ParsedData,
-    season_map: &cobre_core::temporal::SeasonMap,
+    season_map: &SeasonMap,
     ctx: &mut ValidationContext,
 ) {
     let referenced_ids: HashSet<usize> = data
@@ -341,7 +343,7 @@ mod tests {
     use super::super::validate_semantic_stages_penalties_scenarios;
     use super::*;
     use crate::{
-        scenarios::InflowHistoryRow,
+        scenarios::{InflowArCoefficientRow, InflowHistoryRow, InflowSeasonalStatsRow},
         stages::StagesData,
         validation::{ErrorKind, ValidationContext},
     };
@@ -1566,18 +1568,17 @@ mod tests {
         let history = make_history_rows(1, 12);
         let mut data = make_data_estimation(vec![make_hydro(1, None)], stages, history);
         // Supply both stats and AR coefficients to deactivate estimation.
-        data.inflow_seasonal_stats = vec![crate::scenarios::InflowSeasonalStatsRow {
+        data.inflow_seasonal_stats = vec![InflowSeasonalStatsRow {
             hydro_id: EntityId::from(1),
             stage_id: 0,
             mean_m3s: 100.0,
             std_m3s: 10.0,
         }];
-        data.inflow_ar_coefficients = vec![crate::scenarios::InflowArCoefficientRow {
+        data.inflow_ar_coefficients = vec![InflowArCoefficientRow {
             hydro_id: EntityId::from(1),
             stage_id: 0,
             lag: 1,
             coefficient: 0.5,
-            residual_std_ratio: 0.9,
         }];
 
         let mut ctx = ValidationContext::new();

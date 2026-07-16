@@ -6,11 +6,14 @@
 //! These types live in `cobre-sddp` (not `cobre-cli`) so Python bindings and
 //! other callers reuse them without the CLI's `console::style` display deps.
 
+use cobre_core::EntityId;
+use cobre_core::InflowModel;
 use cobre_core::{System, scenario::SamplingScheme};
 use cobre_io::output::{FittingReductionEntry, FittingReport, HydroFittingEntry};
 use cobre_io::scenarios::{
     InflowAnnualComponentRow, InflowArCoefficientRow, InflowSeasonalStatsRow,
 };
+use cobre_stochastic::par::fitting::HydroEstimationEntry;
 use cobre_stochastic::{ComponentProvenance, StochasticContext};
 
 use crate::EstimationReport;
@@ -288,40 +291,33 @@ pub fn estimation_report_to_fitting_report(report: &EstimationReport) -> Fitting
     let hydros = report
         .entries
         .iter()
-        .map(
-            |(id, entry): (
-                &cobre_core::EntityId,
-                &cobre_stochastic::par::fitting::HydroEstimationEntry,
-            )| {
-                (
-                    id.0.to_string(),
-                    HydroFittingEntry {
-                        selected_order: entry.selected_order,
-                        coefficients: entry.coefficients.clone(),
-                        contribution_reductions: entry
-                            .contribution_reductions
-                            .iter()
-                            .map(|r| FittingReductionEntry {
-                                season_id: r.season_id,
-                                original_order: r.original_order,
-                                reduced_order: r.reduced_order,
-                                contributions: r.contributions.clone(),
-                                reason: r.reason.as_str().to_string(),
-                            })
-                            .collect(),
-                    },
-                )
-            },
-        )
+        .map(|(id, entry): (&EntityId, &HydroEstimationEntry)| {
+            (
+                id.0.to_string(),
+                HydroFittingEntry {
+                    selected_order: entry.selected_order,
+                    coefficients: entry.coefficients.clone(),
+                    contribution_reductions: entry
+                        .contribution_reductions
+                        .iter()
+                        .map(|r| FittingReductionEntry {
+                            season_id: r.season_id,
+                            original_order: r.original_order,
+                            reduced_order: r.reduced_order,
+                            contributions: r.contributions.clone(),
+                            reason: r.reason.as_str().to_string(),
+                        })
+                        .collect(),
+                },
+            )
+        })
         .collect();
     FittingReport { hydros }
 }
 
 /// Convert inflow models to seasonal stats rows (one row per model).
 #[must_use]
-pub fn inflow_models_to_stats_rows(
-    models: &[cobre_core::scenario::InflowModel],
-) -> Vec<InflowSeasonalStatsRow> {
+pub fn inflow_models_to_stats_rows(models: &[InflowModel]) -> Vec<InflowSeasonalStatsRow> {
     models
         .iter()
         .map(|m| InflowSeasonalStatsRow {
@@ -338,9 +334,7 @@ pub fn inflow_models_to_stats_rows(
 /// Each model's `ar_coefficients` expands into rows with 1-based lag indices.
 /// White-noise models (AR order 0) produce no rows.
 #[must_use]
-pub fn inflow_models_to_ar_rows(
-    models: &[cobre_core::scenario::InflowModel],
-) -> Vec<InflowArCoefficientRow> {
+pub fn inflow_models_to_ar_rows(models: &[InflowModel]) -> Vec<InflowArCoefficientRow> {
     models
         .iter()
         .flat_map(|m| {
@@ -357,7 +351,6 @@ pub fn inflow_models_to_ar_rows(
                         stage_id: m.stage_id,
                         lag,
                         coefficient,
-                        residual_std_ratio: m.residual_std_ratio,
                     }
                 })
         })
@@ -372,7 +365,7 @@ pub fn inflow_models_to_ar_rows(
 /// canonical ordering is required before writing.
 #[must_use]
 pub fn inflow_models_to_annual_component_rows(
-    models: &[cobre_core::scenario::InflowModel],
+    models: &[InflowModel],
 ) -> Vec<InflowAnnualComponentRow> {
     models
         .iter()
@@ -398,13 +391,15 @@ mod tests {
     use cobre_core::{
         Bus, DeficitSegment, EntityId, SystemBuilder,
         entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties},
-        scenario::{CorrelationModel, InflowModel, SamplingScheme},
+        scenario::{AnnualComponent, CorrelationModel, InflowModel, SamplingScheme},
         temporal::{
             Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
             StageStateConfig,
         },
     };
-    use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
+    use cobre_stochastic::{
+        ArCoefficientEstimate, ClassSchemes, OpeningTreeInputs, build_stochastic_context,
+    };
 
     use super::{
         StochasticSource, build_stochastic_summary, estimation_report_to_fitting_report,
@@ -513,7 +508,7 @@ mod tests {
         }
     }
 
-    fn identity_correlation(entity_ids: &[i32]) -> cobre_core::scenario::CorrelationModel {
+    fn identity_correlation(entity_ids: &[i32]) -> CorrelationModel {
         use cobre_core::scenario::{CorrelationEntity, CorrelationGroup, CorrelationProfile};
         let n = entity_ids.len();
         let matrix: Vec<Vec<f64>> = (0..n)
@@ -536,7 +531,7 @@ mod tests {
                 }],
             },
         );
-        cobre_core::scenario::CorrelationModel {
+        CorrelationModel {
             method: "spectral".to_string(),
             profiles,
             schedule: vec![],
@@ -670,7 +665,6 @@ mod tests {
         assert_eq!(rows[0].hydro_id, EntityId(1));
         assert_eq!(rows[0].lag, 1, "first lag must be 1 (1-based)");
         assert_eq!(rows[0].coefficient, 0.4);
-        assert_eq!(rows[0].residual_std_ratio, 0.92);
 
         assert_eq!(rows[1].lag, 2);
         assert_eq!(rows[1].coefficient, -0.1);
@@ -1197,18 +1191,16 @@ mod tests {
         use std::collections::HashMap;
 
         let estimates = vec![
-            cobre_stochastic::par::fitting::ArCoefficientEstimate {
+            ArCoefficientEstimate {
                 hydro_id: EntityId(1),
                 season_id: 0,
                 coefficients: Vec::new(),
-                residual_std_ratio: 1.0,
                 annual: None,
             },
-            cobre_stochastic::par::fitting::ArCoefficientEstimate {
+            ArCoefficientEstimate {
                 hydro_id: EntityId(1),
                 season_id: 1,
                 coefficients: vec![0.4],
-                residual_std_ratio: 0.9,
                 annual: None,
             },
         ];
@@ -1253,7 +1245,7 @@ mod tests {
     fn make_annual_model(
         hydro_id: i32,
         stage_id: i32,
-        annual: Option<cobre_core::scenario::AnnualComponent>,
+        annual: Option<AnnualComponent>,
     ) -> InflowModel {
         InflowModel {
             hydro_id: EntityId(hydro_id),

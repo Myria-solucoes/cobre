@@ -25,18 +25,22 @@
 //! for the initial solve of each (stage, solve). It takes no `slot_lookup` and
 //! reads none of [`CapturedBasis::cut_row_slots`]: DCS adds its cut rows fresh
 //! each solve and does not guess which will bind, so slot alignment is
-//! unnecessary and every resident cut row is seeded BASIC. As on the forward
-//! path, the seeding can leave an excess of basics; the caller pairs it with
-//! [`enforce_basic_count_invariant`].
+//! unnecessary and every resident cut row is seeded BASIC.
 //!
-//! ## Forward-path basic-count invariant
+//! ## Basic-count invariant
 //!
-//! Cut selection may drop cuts whose stored status was BASIC, while
-//! [`reconstruct_basis`] still seeds new cuts BASIC, leaving
-//! `excess = col_basic + row_basic - num_row >= 0`.
 //! [`enforce_basic_count_invariant`] runs unconditionally after every
-//! reconstruction at its single call site, demoting trailing BASIC cut rows to
-//! `LOWER` until the invariant holds (no-op when `excess == 0`).
+//! reconstruction, demoting trailing BASIC cut rows until
+//! `excess = col_basic + row_basic - num_row` reaches zero.
+//!
+//! `excess >= 0` holds only under three premises the reconstruction assumes and
+//! never verifies: `stored.basis.col_status.len() == target.num_cols`;
+//! `stored.base_row_count == target.base_row_count`; and `stored` satisfied
+//! `col_basic + row_basic == num_row` for its own LP. A deficit therefore proves
+//! `stored` was captured against a differently-shaped LP — it is rejected with
+//! [`SddpError::BasisShapeMismatch`], never
+//! repaired: demotion cannot create the missing basics, and promotion would
+//! fabricate a basis `stored` never described.
 //!
 //! ## Usage
 //!
@@ -64,6 +68,7 @@
 
 use cobre_solver::{Basis, BasisStatus};
 
+use crate::error::SddpError;
 use crate::workspace::CapturedBasis;
 
 // ---------------------------------------------------------------------------
@@ -162,18 +167,14 @@ where
 // reconstruct_basis_uniform_basic (DCS path)
 // ---------------------------------------------------------------------------
 
-/// Reconstruct a [`Basis`] for the **Dynamic Cut Selection (DCS)** initial
-/// solve, seeding every cut row uniform [`BasisStatus::Basic`].
-///
-/// **Slot-identity-free**: takes no `slot_lookup`, reads none of
-/// [`CapturedBasis::cut_row_slots`] — DCS adds cut rows fresh each solve and does
-/// not guess which bind, so each is seeded BASIC rather than slot-aligned. The
-/// column block and first `target.base_row_count` template rows are copied from
-/// `stored`.
+/// Reconstruct a [`Basis`] for the **Dynamic Cut Selection (DCS)** initial solve,
+/// seeding every cut row uniform [`BasisStatus::Basic`] — slot-identity-free, see
+/// the module docs.
 ///
 /// Does **not** repair the basic count: the caller must pair this with
 /// [`enforce_basic_count_invariant`]`(out, target.base_row_count + cut_row_count,
-/// target.base_row_count)` to restore `col_basic + row_basic == num_row`.
+/// target.base_row_count)` to restore `col_basic + row_basic == num_row` and to
+/// reject a shape-mismatched `stored`.
 pub fn reconstruct_basis_uniform_basic(
     stored: &CapturedBasis,
     target: ReconstructionTarget,
@@ -259,19 +260,21 @@ fn build_slot_lookup(reconcilable_slots: &[u32], slot_lookup: &mut Vec<Option<u3
 // enforce_basic_count_invariant
 // ---------------------------------------------------------------------------
 
-/// Restore `col_basic + row_basic == num_row` after [`reconstruct_basis`] on the
-/// forward path. Returns the number of demotions applied.
+/// Restore `col_basic + row_basic == num_row` after a reconstruction. Returns the
+/// number of demotions applied.
 ///
-/// `excess = col_basic + row_basic - num_row` is always `>= 0` — dropping BASIC
-/// cuts while reconstruction seeds new cuts BASIC can only over-count, never
-/// under-count, so there is no deficit path. When `excess > 0`, scans
-/// `out.row_status` from the end and demotes BASIC to `LOWER` **only for cut rows
-/// (indices `>= base_row_count`)** until `excess` demotions are applied.
+/// Demotes **only cut rows** (indices `>= base_row_count`), never a template row.
+///
+/// # Errors
+///
+/// Returns [`SddpError::BasisShapeMismatch`] when `excess` is negative — a deficit
+/// is unreachable under the module docs' three premises, so it is a shape mismatch
+/// to surface, never a condition to repair.
 pub fn enforce_basic_count_invariant(
     out: &mut Basis,
     num_row: usize,
     base_row_count: usize,
-) -> u32 {
+) -> Result<u32, SddpError> {
     debug_assert_eq!(
         num_row,
         out.row_status.len(),
@@ -295,8 +298,13 @@ pub fn enforce_basic_count_invariant(
         .count();
 
     let total_basic = col_basic + row_basic;
-    if total_basic <= num_row {
-        return 0;
+    if total_basic < num_row {
+        return Err(SddpError::BasisShapeMismatch {
+            num_row,
+            total_basic,
+            col_basic,
+            row_basic,
+        });
     }
 
     let mut excess = total_basic - num_row;
@@ -313,7 +321,7 @@ pub fn enforce_basic_count_invariant(
         }
     }
 
-    demotions
+    Ok(demotions)
 }
 
 // ---------------------------------------------------------------------------
@@ -330,6 +338,7 @@ mod tests {
         ReconstructionStats, ReconstructionTarget, enforce_basic_count_invariant,
         reconstruct_basis, reconstruct_basis_uniform_basic,
     };
+    use crate::error::SddpError;
     use crate::workspace::CapturedBasis;
 
     /// Build a `CapturedBasis` populated with the requested slot list and
@@ -527,9 +536,8 @@ mod tests {
     // reconstruct_basis_uniform_basic (DCS path) — unit tests
     // -----------------------------------------------------------------------
 
-    /// AC1: `base_row_count = 2`, column block `[B, B, L]`, 2 template rows
-    /// `[L, L]`, 4 cut rows. All 4 cut rows are seeded BASIC; the column block
-    /// and template rows are copied verbatim.
+    /// All 4 cut rows are seeded BASIC; the column block and template rows are
+    /// copied verbatim.
     #[test]
     fn uniform_basic_appends_all_basic_cut_rows() {
         // Template rows must be LOWER here, so build the CapturedBasis directly
@@ -554,12 +562,8 @@ mod tests {
         assert_eq!(&out.row_status[2..6], &[B, B, B, B]);
     }
 
-    /// AC2 (corrected): chaining the helper with `enforce_basic_count_invariant`
-    /// balances the basic-count invariant. Start from the AC1 fill but with an
-    /// all-BASIC column block (`col_basic = 3`) and template rows `[L, L]`
-    /// (`row_basic` from cut rows = 4) → `total_basic = 7 > num_row = 6`. The
-    /// repair demotes exactly one trailing BASIC cut row to LOWER (returns 1),
-    /// and `col_basic + row_basic == 6` afterward.
+    /// `col_basic = 3` plus 4 BASIC cut rows against `num_row = 6` is an excess of
+    /// one, so the repair demotes exactly one trailing BASIC cut row.
     #[test]
     fn uniform_basic_then_invariant_repair_balances() {
         let mut stored = CapturedBasis::new(3, 2, 2, 0, 0);
@@ -579,7 +583,8 @@ mod tests {
         assert_eq!(out.row_status, vec![L, L, B, B, B, B]);
 
         let num_row = target.base_row_count + 4; // 6
-        let demotions = enforce_basic_count_invariant(&mut out, num_row, target.base_row_count);
+        let demotions = enforce_basic_count_invariant(&mut out, num_row, target.base_row_count)
+            .expect("excess is repairable, never a deficit");
         assert_eq!(demotions, 1, "exactly one excess BASIC cut row demoted");
 
         let col_basic = out.col_status.iter().filter(|&&s| s == B).count();
@@ -591,9 +596,8 @@ mod tests {
         );
     }
 
-    /// AC3: the helper consults none of `stored.cut_row_slots`. The result with
-    /// a non-empty slot list must be identical to the same call with the slots
-    /// cleared.
+    /// The helper consults none of `stored.cut_row_slots`: a non-empty slot list
+    /// must give the same result as one that is cleared.
     #[test]
     fn uniform_basic_ignores_cut_row_slots() {
         let target = ReconstructionTarget {
@@ -620,8 +624,7 @@ mod tests {
         assert_eq!(out_with.row_status, out_without.row_status);
     }
 
-    /// AC4: `cut_row_count = 0` appends no cut rows; only the template rows
-    /// remain.
+    /// `cut_row_count = 0` appends no cut rows; only the template rows remain.
     #[test]
     fn uniform_basic_zero_cut_rows() {
         let stored = make_stored_basis(3, 2, &[10, 20], &[B, L], &[1.0]);
@@ -635,5 +638,112 @@ mod tests {
 
         assert_eq!(out.row_status.len(), 3);
         assert_eq!(out.col_status.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // enforce_basic_count_invariant — deficit detection
+    // -----------------------------------------------------------------------
+
+    /// A basis whose basic count falls short of `num_row` is rejected with
+    /// `BasisShapeMismatch` carrying all four counters — never silently accepted,
+    /// never "repaired" by promotion.
+    #[test]
+    fn deficit_is_rejected_as_shape_mismatch() {
+        let mut out = Basis::new(0, 0);
+        out.col_status.extend_from_slice(&[B, L, L]);
+        out.row_status.extend_from_slice(&[L, L, L, B]);
+
+        let err = enforce_basic_count_invariant(&mut out, 4, 2)
+            .expect_err("total_basic = 2 against num_row = 4 is a deficit");
+
+        match err {
+            SddpError::BasisShapeMismatch {
+                num_row,
+                total_basic,
+                col_basic,
+                row_basic,
+            } => {
+                assert_eq!(num_row, 4);
+                assert_eq!(col_basic, 1);
+                assert_eq!(row_basic, 1);
+                assert_eq!(total_basic, 2);
+            }
+            other => panic!("expected SddpError::BasisShapeMismatch, got {other:?}"),
+        }
+        assert_eq!(
+            out.row_status,
+            vec![L, L, L, B],
+            "a rejected basis must not be mutated"
+        );
+    }
+
+    /// `stored` is a *valid* basis for its own 6-row LP (`col_basic(4) +
+    /// row_basic(2) == 6`), but the target LP carries two extra template rows, so
+    /// the template copy swallows two of stored's slack cut rows and the
+    /// reconstruction lands two basics short of the target's 8 rows.
+    #[test]
+    fn reconstruct_from_grown_base_row_count_yields_deficit() {
+        let mut stored = CapturedBasis::new(5, 6, 2, 4, 0);
+        stored.basis.col_status.clear();
+        stored.basis.col_status.extend_from_slice(&[B, B, B, B, L]);
+        stored.basis.row_status.clear();
+        stored
+            .basis
+            .row_status
+            .extend_from_slice(&[B, B, L, L, L, L]);
+        stored.cut_row_slots.extend_from_slice(&[10, 20, 30, 40]);
+
+        let target = ReconstructionTarget {
+            base_row_count: 4,
+            num_cols: 5,
+        };
+        let cuts: Vec<(usize, f64, Vec<f64>)> = vec![
+            (10, 0.0, vec![0.0; 5]),
+            (20, 0.0, vec![0.0; 5]),
+            (30, 0.0, vec![0.0; 5]),
+            (40, 0.0, vec![0.0; 5]),
+        ];
+        let mut out = Basis::new(0, 0);
+        let mut lookup: Vec<Option<u32>> = vec![None; 64];
+
+        reconstruct_basis(
+            &stored,
+            target,
+            cuts.iter().map(|(s, i, c)| (*s, *i, c.as_slice())),
+            &mut out,
+            &mut lookup,
+        );
+
+        let num_row = out.row_status.len();
+        assert_eq!(num_row, 8, "4 template rows + 4 cut rows");
+
+        let err = enforce_basic_count_invariant(&mut out, num_row, target.base_row_count)
+            .expect_err("a base_row_count divergence must surface as a shape mismatch");
+        match err {
+            SddpError::BasisShapeMismatch {
+                num_row,
+                total_basic,
+                ..
+            } => {
+                assert_eq!(num_row, 8);
+                assert_eq!(total_basic, 6, "stored's own LP row count, two short");
+            }
+            other => panic!("expected SddpError::BasisShapeMismatch, got {other:?}"),
+        }
+    }
+
+    /// `total_basic == num_row` is the balanced case: no demotions, no error, and
+    /// the basis is returned untouched.
+    #[test]
+    fn balanced_basic_count_is_a_no_op() {
+        let mut out = Basis::new(0, 0);
+        out.col_status.extend_from_slice(&[B, B]);
+        out.row_status.extend_from_slice(&[L, B, L]);
+
+        let demotions = enforce_basic_count_invariant(&mut out, 3, 1)
+            .expect("total_basic == num_row is balanced, not a deficit");
+
+        assert_eq!(demotions, 0);
+        assert_eq!(out.row_status, vec![L, B, L]);
     }
 }

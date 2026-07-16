@@ -14,18 +14,6 @@ use crate::StochasticError;
 
 const SYMMETRY_TOL: f64 = 1e-10;
 
-/// Threshold separating round-off-scale negative eigenvalues from genuinely
-/// indefinite ones.
-///
-/// A correlation matrix that is mathematically positive-semidefinite but
-/// rank-deficient (e.g. estimated from a sample with collinear or constant
-/// series) yields eigenvalues that straddle zero by a few multiples of machine
-/// epsilon (~2.2e-16). Clipping those to 0.0 is exact PSD projection at no cost.
-/// A magnitude above this threshold instead signals an input that is meaningfully
-/// indefinite (e.g. inconsistent user-specified correlations), which is worth a
-/// warning. `1e-9` sits comfortably between the two regimes.
-pub(crate) const NEGLIGIBLE_NEGATIVE_EIGENVALUE: f64 = 1e-9;
-
 /// Negative-eigenvalue clipping (PSD projection) applied by one decomposition,
 /// returned so a caller decomposing many matrices aggregates into one report
 /// instead of logging per matrix.

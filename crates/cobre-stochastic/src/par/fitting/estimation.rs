@@ -10,6 +10,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{Datelike, NaiveDate};
 use cobre_core::EntityId;
+use cobre_core::SeasonMap;
+use cobre_core::Stage;
 use cobre_core::scenario::AnnualComponent;
 use rayon::prelude::*;
 
@@ -17,6 +19,7 @@ use crate::StochasticError;
 use crate::par::contribution::{
     check_negative_contributions, compute_contributions, find_max_valid_order, has_negative_phi1,
 };
+use crate::par::fitting::estimate_ar_coefficients_with_season_map;
 use crate::par::fitting::{
     AnnualSeasonalStats, ArCoefficientEstimate, SeasonalStats, conditional_facp_partitioned,
     estimate_annual_seasonal_stats, estimate_periodic_ar_annual_coefficients,
@@ -89,7 +92,7 @@ pub struct EstimationReport {
     /// Order selection method (e.g., `"AIC"`, `"PACF"`, `"fixed"`).
     pub method: String,
     /// Hydros with user-provided stats but no estimated AR coefficients
-    /// (white-noise fallback: empty AR, ratio=1.0).
+    /// (white-noise fallback: empty AR).
     pub white_noise_fallbacks: Vec<EntityId>,
     /// Hydros whose consecutive-season std ratios diverge between the
     /// user-provided and history-estimated profiles.
@@ -179,7 +182,7 @@ pub struct ArEstimationConfig<'a> {
     /// Optional per-coefficient magnitude safety bound.
     pub max_coeff_magnitude: Option<f64>,
     /// Season map for calendar-based date-to-season fallback.
-    pub season_map: Option<&'a cobre_core::temporal::SeasonMap>,
+    pub season_map: Option<&'a SeasonMap>,
     /// `true` selects the PAR-A path (conditional FACP + extended YW); `false`
     /// (default) the classical PACF path.
     pub use_annual_component: bool,
@@ -194,7 +197,7 @@ pub struct ArEstimationConfig<'a> {
 pub fn estimate_ar_coefficients_with_selection(
     observations: &[(EntityId, NaiveDate, f64)],
     seasonal_stats: &[SeasonalStats],
-    stages: &[cobre_core::temporal::Stage],
+    stages: &[Stage],
     hydro_ids: &[EntityId],
     cfg: &ArEstimationConfig<'_>,
 ) -> Result<(Vec<ArCoefficientEstimate>, EstimationReport), StochasticError> {
@@ -227,14 +230,14 @@ pub fn estimate_ar_coefficients_with_selection(
 fn estimate_ar_with_pacf(
     observations: &[(EntityId, NaiveDate, f64)],
     seasonal_stats: &[SeasonalStats],
-    stages: &[cobre_core::temporal::Stage],
+    stages: &[Stage],
     hydro_ids: &[EntityId],
     max_order: usize,
-    season_map: Option<&cobre_core::temporal::SeasonMap>,
+    season_map: Option<&SeasonMap>,
     max_coeff_magnitude: Option<f64>,
 ) -> Result<(Vec<ArCoefficientEstimate>, EstimationReport), StochasticError> {
     if max_order == 0 {
-        let estimates = crate::par::fitting::estimate_ar_coefficients_with_season_map(
+        let estimates = estimate_ar_coefficients_with_season_map(
             observations,
             seasonal_stats,
             stages,
@@ -298,10 +301,10 @@ fn estimate_ar_with_pacf(
 fn estimate_ar_with_pacf_annual(
     observations: &[(EntityId, NaiveDate, f64)],
     seasonal_stats: &[SeasonalStats],
-    stages: &[cobre_core::temporal::Stage],
+    stages: &[Stage],
     hydro_ids: &[EntityId],
     max_order: usize,
-    season_map: Option<&cobre_core::temporal::SeasonMap>,
+    season_map: Option<&SeasonMap>,
     max_coeff_magnitude: Option<f64>,
 ) -> Result<(Vec<ArCoefficientEstimate>, EstimationReport), StochasticError> {
     let annual_stats: Vec<AnnualSeasonalStats> =
@@ -392,7 +395,6 @@ fn estimate_ar_with_pacf_annual(
     let mut estimates: Vec<ArCoefficientEstimate> = Vec::new();
 
     for &hydro_id in hydro_ids {
-        // Collect Z and A observations + stats indexed by season.
         let mut obs_by_season: Vec<Vec<f64>> = vec![Vec::new(); n_seasons];
         let mut annual_obs_by_season: Vec<Vec<f64>> = vec![Vec::new(); n_seasons];
         let mut stats_by_season: Vec<(f64, f64)> = vec![(0.0, 0.0); n_seasons];
@@ -438,7 +440,6 @@ fn estimate_ar_with_pacf_annual(
                     hydro_id,
                     season_id: season,
                     coefficients: Vec::new(),
-                    residual_std_ratio: 1.0,
                     annual: annual_stats_map.get(&(hydro_id, prev_season)).map(|s| {
                         AnnualComponent {
                             coefficient: 0.0,
@@ -474,14 +475,13 @@ fn estimate_ar_with_pacf_annual(
                 &a_year_starts,
             );
 
-            // σ_a in the runtime `psi_hat = ψ · σ_m / σ_a` must be the std of
-            // A_{t-1} — the entry at `prev_season`, not `season`.
+            // The annual std σ^A in the runtime `psi_hat = ψ · s_m / σ^A` must be
+            // the std of A_{t-1} — the entry at `prev_season`, not `season`.
             let (ann_mean, ann_std) = annual_stats_by_season[prev_season];
             estimates.push(ArCoefficientEstimate {
                 hydro_id,
                 season_id: season,
                 coefficients: yw_result.coefficients,
-                residual_std_ratio: yw_result.residual_std_ratio,
                 annual: Some(AnnualComponent {
                     coefficient: yw_result.annual_coefficient,
                     mean_m3s: ann_mean,
@@ -553,7 +553,6 @@ fn apply_annual_prepass_reductions(
                         reason: ReductionReason::MagnitudeBound,
                     });
                 est.coefficients.clear();
-                est.residual_std_ratio = 1.0;
             }
         }
     }
@@ -572,7 +571,6 @@ fn apply_annual_prepass_reductions(
                     reason: ReductionReason::Phi1Negative,
                 });
             est.coefficients.clear();
-            est.residual_std_ratio = 1.0;
         }
     }
 
@@ -761,7 +759,6 @@ fn reduce_entity_orders_annual(
                 for &idx in indices {
                     if estimates[idx].season_id == season_id {
                         estimates[idx].coefficients.clear();
-                        estimates[idx].residual_std_ratio = 1.0;
                         all_coeffs[season_id].clear();
                         frozen[season_id] = true;
                     }
@@ -806,8 +803,7 @@ fn reduce_entity_orders_annual(
                     estimates[idx]
                         .coefficients
                         .clone_from(&yw_result.coefficients);
-                    estimates[idx].residual_std_ratio = yw_result.residual_std_ratio;
-                    estimates[idx].annual = Some(cobre_core::scenario::AnnualComponent {
+                    estimates[idx].annual = Some(AnnualComponent {
                         coefficient: yw_result.annual_coefficient,
                         mean_m3s: ann_mean,
                         std_m3s: ann_std,
@@ -849,8 +845,7 @@ fn reduce_entity_orders_annual(
                 for &idx in indices {
                     if estimates[idx].season_id == season_id {
                         estimates[idx].coefficients.clear();
-                        estimates[idx].residual_std_ratio = yw0.residual_std_ratio;
-                        estimates[idx].annual = Some(cobre_core::scenario::AnnualComponent {
+                        estimates[idx].annual = Some(AnnualComponent {
                             coefficient: yw0.annual_coefficient,
                             mean_m3s: ann_mean,
                             std_m3s: ann_std,
@@ -883,7 +878,7 @@ type PacfStageLookups<'a> = (
 /// Build the PACF stage-season lookups: `stage_index` sorted by start date,
 /// `stats_map` keyed by `(EntityId, season_id)`, and the season count.
 fn build_pacf_stage_lookups<'a>(
-    stages: &[cobre_core::temporal::Stage],
+    stages: &[Stage],
     seasonal_stats: &'a [SeasonalStats],
 ) -> PacfStageLookups<'a> {
     let mut stage_index = stages
@@ -919,7 +914,7 @@ fn group_observations_by_season(
     observations: &[(EntityId, NaiveDate, f64)],
     hydro_ids: &[EntityId],
     stage_index: &[(chrono::NaiveDate, chrono::NaiveDate, i32, usize)],
-    season_map: Option<&cobre_core::temporal::SeasonMap>,
+    season_map: Option<&SeasonMap>,
 ) -> HashMap<(EntityId, usize), Vec<f64>> {
     let entity_set: HashSet<EntityId> = hydro_ids.iter().copied().collect();
     let mut group_obs: HashMap<(EntityId, usize), Vec<f64>> = HashMap::new();
@@ -976,7 +971,6 @@ fn estimate_all_hydro_ar_coefficients(
                         hydro_id,
                         season_id: season,
                         coefficients: Vec::new(),
-                        residual_std_ratio: 1.0,
                         annual: None,
                     });
                     continue;
@@ -996,7 +990,6 @@ fn estimate_all_hydro_ar_coefficients(
                     hydro_id,
                     season_id: season,
                     coefficients: yw_result.coefficients,
-                    residual_std_ratio: yw_result.residual_std_ratio,
                     annual: None,
                 });
             }
@@ -1034,7 +1027,6 @@ fn apply_prepass_reductions(
                         reason: ReductionReason::MagnitudeBound,
                     });
                 est.coefficients.clear();
-                est.residual_std_ratio = 1.0;
             }
         }
     }
@@ -1052,7 +1044,6 @@ fn apply_prepass_reductions(
                     reason: ReductionReason::Phi1Negative,
                 });
             est.coefficients.clear();
-            est.residual_std_ratio = 1.0;
         }
     }
 }
@@ -1120,7 +1111,6 @@ fn reduce_entity_orders(
                 for &idx in indices {
                     if estimates[idx].season_id == season_id {
                         estimates[idx].coefficients.clear();
-                        estimates[idx].residual_std_ratio = 1.0;
                         all_coeffs[season_id].clear();
                         frozen[season_id] = true;
                     }
@@ -1153,7 +1143,6 @@ fn reduce_entity_orders(
                     estimates[idx]
                         .coefficients
                         .clone_from(&yw_result.coefficients);
-                    estimates[idx].residual_std_ratio = yw_result.residual_std_ratio;
                     all_coeffs[season_id].clone_from(&yw_result.coefficients);
                 }
             }
@@ -1172,7 +1161,6 @@ fn reduce_entity_orders(
                 for &idx in indices {
                     if estimates[idx].season_id == season_id {
                         estimates[idx].coefficients.clear();
-                        estimates[idx].residual_std_ratio = 1.0;
                         all_coeffs[season_id].clear();
                         frozen[season_id] = true;
                     }

@@ -1,0 +1,28 @@
+=== variant base ===
+model+engine source lines: 372
+cold release build: .542520363s
+binary size: 424072 bytes
+incremental (touch model): .467770957s
+total LLVM IR lines: 14230
+llvm-lines spike-cli total: -----
+
+=== variant a ===
+model+engine source lines: 1810
+cold release build: 1.475978596s
+binary size: 554344 bytes
+incremental (touch model): 1.351007282s
+total LLVM IR lines: 64144
+llvm-lines spike-cli total: -----
+llvm-lines spike-direct total: -----
+llvm-lines spike-sddp total: -----
+
+=== variant b ===
+model+engine source lines: 1790
+cold release build: 4.776414488s
+binary size: 898056 bytes
+incremental (touch model): 4.741095510s
+total LLVM IR lines: 205768
+llvm-lines spike-cli total: -----
+llvm-lines spike-direct total: -----
+llvm-lines spike-sddp total: -----
+

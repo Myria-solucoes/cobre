@@ -6,16 +6,18 @@
 
 #![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
+use crate::visited_states::VisitedStatesArchive;
 use cobre_core::System;
+use cobre_core::Thermal;
+use cobre_core::commissioning::{commissioning_active, hydro_operating_active};
 use cobre_io::output::policy::{
     ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL, EntitySlot, PolicyBasisRecord, PolicyCutRecord,
     StageCutsPayload, StageStatesPayload,
 };
 
 use crate::cut::FutureCostFunction;
-use crate::indexer::{CutStateProjection, StateLayout};
+use crate::indexer::{CutSlot, CutStateProjection, StateRegion, StateSpace};
 use crate::lp_builder::delivery_ring::DeliveryRing;
-use crate::lp_builder::{commissioning_active, hydro_operating_active};
 use crate::training::TrainingResult;
 
 /// `EntityType::HydroStorage` discriminant from `schemas/policy.fbs`.
@@ -43,24 +45,26 @@ fn year_month_anchor(date: chrono::NaiveDate) -> i32 {
 /// Slots are emitted in `projection`'s storage → lag → buckets → anticipated order, so slot
 /// `j` describes the entity owning positional coefficient `j` — the order a
 /// consumer matches the manifest against the cut coefficients. Each slot is
-/// classified by the global [`StateLayout`] region containing its incoming-state
-/// column ([`CutStateProjection::state_to_lp_incoming_column`]), never by
+/// classified by the global [`StateSpace`] region containing its incoming-state
+/// column ([`CutStateProjection::incoming_column`]), never by
 /// re-deriving column arithmetic.
+///
+/// Each hydro-region slot's `was_active` comes from [`hydro_operating_active`].
 ///
 /// # Panics (debug builds only)
 ///
-/// Panics if the built manifest length differs from `projection.n_state()`.
+/// Panics if the built manifest length differs from `projection.n_slots()`.
 #[must_use]
 pub fn build_stage_entity_manifest(
     system: &System,
-    global_layout: &StateLayout,
+    global_layout: &StateSpace,
     projection: &CutStateProjection,
     stage_id: i32,
 ) -> Vec<EntitySlot> {
     let n = global_layout.hydro_count;
     let n_anticipated = global_layout.n_anticipated;
     let hydros = system.hydros();
-    let anticipated_thermals: Vec<&cobre_core::Thermal> = system
+    let anticipated_thermals: Vec<&Thermal> = system
         .thermals()
         .iter()
         .filter(|t| t.anticipated_config.is_some())
@@ -89,120 +93,115 @@ pub fn build_stage_entity_manifest(
             })
     };
 
-    let mut manifest = Vec::with_capacity(projection.n_state());
-    for j in 0..projection.n_state() {
-        let col = projection.state_to_lp_incoming_column(j);
-        let slot = if global_layout.storage_in.contains(&col) {
-            let h = col - global_layout.storage_in.start;
-            let hydro = &hydros[h];
-            EntitySlot {
-                entity_type: ENTITY_TYPE_HYDRO_STORAGE,
-                entity_id: hydro.id.0,
-                subindex: 0,
-                was_active: hydro_operating_active(
-                    hydro.filling.as_ref(),
-                    hydro.entry_stage_id,
-                    hydro.exit_stage_id,
-                    stage_id,
-                ),
-                delivery_anchor: ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
-            }
-        } else if global_layout.inflow_lags.contains(&col) {
-            let offset = col - global_layout.inflow_lags.start;
-            let lag = offset / n;
-            let h = offset % n;
-            let hydro = &hydros[h];
-            EntitySlot {
-                entity_type: ENTITY_TYPE_HYDRO_INFLOW_LAG,
-                entity_id: hydro.id.0,
-                subindex: (lag + 1) as u32,
-                was_active: hydro_operating_active(
-                    hydro.filling.as_ref(),
-                    hydro.entry_stage_id,
-                    hydro.exit_stage_id,
-                    stage_id,
-                ),
-                delivery_anchor: ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
-            }
-        } else if global_layout.transit_buckets_in.contains(&col) {
-            let b = col - global_layout.transit_buckets_in.start;
-            let (plant_idx, lag) = global_layout.transit_bucket_column_order[b];
-            let hydro = &hydros[plant_idx];
-            EntitySlot {
-                entity_type: ENTITY_TYPE_HYDRO_TRANSIT_BUCKET,
-                entity_id: hydro.id.0,
-                subindex: lag as u32,
-                was_active: hydro_operating_active(
-                    hydro.filling.as_ref(),
-                    hydro.entry_stage_id,
-                    hydro.exit_stage_id,
-                    stage_id,
-                ),
-                // Water in this bucket arrives `lag` stages after this one.
-                delivery_anchor: anchor_at(lag),
-            }
+    let anticipated_slot = |offset: usize| -> EntitySlot {
+        let (slot_idx, plant_pos) = anticipated_ring.slot_lane_at(offset);
+        let plant = anticipated_thermals[plant_pos];
+        // The ring shifts one stage per transition, so slot `slot_idx` observed
+        // at stage `t` matures at delivery stage `t + slot_idx` regardless of
+        // lead mode (constant `LeadStages` or calendar-derived `LeadTime`).
+        // Reachability uses the SAME per-plant bound the LP masking itself
+        // uses (`anticipated_lead_stages[plant_pos]`, populated from
+        // `AnticipatedResolution` for both lead modes by
+        // `resolve_anticipated_commitments`): a slot beyond it is structural
+        // padding (frozen `[0, 0]`), not a real commitment, even when
+        // `t + slot_idx` itself still lands inside the horizon — the
+        // multi-plant heterogeneous-lead case.
+        let k_i = global_layout.anticipated_lead_stages[plant_pos];
+        let delivery_anchor = if slot_idx < k_i {
+            current_stage_idx.map_or(ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL, |t| {
+                let m = t + slot_idx;
+                // Defensive cross-check against the resolver (the single owner
+                // of c(m), from `resolve_point`): a within-study decider must
+                // have already fired by `t`; a pre-study (IC-seeded) delivery
+                // has no decider entry and is exempt.
+                debug_assert!(
+                    global_layout
+                        .anticipated_resolution
+                        .per_plant
+                        .get(plant_pos)
+                        .and_then(|resolution| resolution.decider.get(m))
+                        .copied()
+                        .flatten()
+                        .is_none_or(|decided_at| decided_at <= t),
+                    "anticipated delivery {m} observed at stage {t} was not yet decided"
+                );
+                anchor_at(slot_idx)
+            })
         } else {
-            debug_assert!(
-                global_layout.anticipated_state.contains(&col),
-                "incoming column {col} must lie in storage_in, inflow_lags, transit_buckets_in, or \
-                 anticipated_state"
-            );
-            let offset = col - global_layout.anticipated_state.start;
-            let (slot_idx, plant_pos) = anticipated_ring.slot_lane_at(offset);
-            let plant = anticipated_thermals[plant_pos];
-            // The ring shifts one stage per transition, so slot `slot_idx` observed
-            // at stage `t` matures at delivery stage `t + slot_idx` regardless of
-            // lead mode (constant `LeadStages` or calendar-derived `LeadTime`).
-            // Reachability uses the SAME per-plant bound the LP masking itself
-            // uses (`anticipated_lead_stages[plant_pos]`, populated from
-            // `AnticipatedResolution` for both lead modes by
-            // `resolve_anticipated_commitments`): a slot beyond it is structural
-            // padding (frozen `[0, 0]`), not a real commitment, even when
-            // `t + slot_idx` itself still lands inside the horizon — the
-            // multi-plant heterogeneous-lead case.
-            let k_i = global_layout.anticipated_lead_stages[plant_pos];
-            let delivery_anchor = if slot_idx < k_i {
-                current_stage_idx.map_or(ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL, |t| {
-                    let m = t + slot_idx;
-                    // Defensive cross-check against the resolver (the single owner
-                    // of c(m), from `resolve_point`): a within-study decider must
-                    // have already fired by `t`; a pre-study (IC-seeded) delivery
-                    // has no decider entry and is exempt.
-                    debug_assert!(
-                        global_layout
-                            .anticipated_resolution
-                            .per_plant
-                            .get(plant_pos)
-                            .and_then(|resolution| resolution.decider.get(m))
-                            .copied()
-                            .flatten()
-                            .is_none_or(|decided_at| decided_at <= t),
-                        "anticipated delivery {m} observed at stage {t} was not yet decided"
-                    );
-                    anchor_at(slot_idx)
-                })
-            } else {
-                ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL
-            };
-            EntitySlot {
-                entity_type: ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
-                entity_id: plant.id.0,
-                subindex: slot_idx as u32,
-                was_active: commissioning_active(
-                    plant.entry_stage_id,
-                    plant.exit_stage_id,
-                    stage_id,
-                ),
-                delivery_anchor,
+            ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL
+        };
+        EntitySlot {
+            entity_type: ENTITY_TYPE_ANTICIPATED_THERMAL_STATE,
+            entity_id: plant.id.0,
+            subindex: slot_idx as u32,
+            was_active: commissioning_active(plant.entry_stage_id, plant.exit_stage_id, stage_id),
+            delivery_anchor,
+        }
+    };
+
+    let mut manifest = Vec::with_capacity(projection.n_slots());
+    for j in 0..projection.n_slots() {
+        let (region, offset) =
+            global_layout.classify_incoming_column(projection.incoming_column(CutSlot::new(j)));
+        let slot = match region {
+            StateRegion::Storage => {
+                let hydro = &hydros[offset];
+                EntitySlot {
+                    entity_type: ENTITY_TYPE_HYDRO_STORAGE,
+                    entity_id: hydro.id.0,
+                    subindex: 0,
+                    was_active: hydro_operating_active(
+                        hydro.filling.as_ref(),
+                        hydro.entry_stage_id,
+                        hydro.exit_stage_id,
+                        stage_id,
+                    ),
+                    delivery_anchor: ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
+                }
             }
+            StateRegion::Lag => {
+                let lag = offset / n;
+                let h = offset % n;
+                let hydro = &hydros[h];
+                EntitySlot {
+                    entity_type: ENTITY_TYPE_HYDRO_INFLOW_LAG,
+                    entity_id: hydro.id.0,
+                    subindex: (lag + 1) as u32,
+                    was_active: hydro_operating_active(
+                        hydro.filling.as_ref(),
+                        hydro.entry_stage_id,
+                        hydro.exit_stage_id,
+                        stage_id,
+                    ),
+                    delivery_anchor: ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
+                }
+            }
+            StateRegion::Buckets => {
+                let (plant_idx, lag) = global_layout.transit_bucket_column_order[offset];
+                let hydro = &hydros[plant_idx];
+                EntitySlot {
+                    entity_type: ENTITY_TYPE_HYDRO_TRANSIT_BUCKET,
+                    entity_id: hydro.id.0,
+                    subindex: lag as u32,
+                    was_active: hydro_operating_active(
+                        hydro.filling.as_ref(),
+                        hydro.entry_stage_id,
+                        hydro.exit_stage_id,
+                        stage_id,
+                    ),
+                    // Water in this bucket arrives `lag` stages after this one.
+                    delivery_anchor: anchor_at(lag),
+                }
+            }
+            StateRegion::Anticipated => anticipated_slot(offset),
         };
         manifest.push(slot);
     }
 
     debug_assert_eq!(
         manifest.len(),
-        projection.n_state(),
-        "manifest length must equal projection.n_state()"
+        projection.n_slots(),
+        "manifest length must equal projection.n_slots()"
     );
     manifest
 }
@@ -362,7 +361,7 @@ pub fn build_stage_basis_records<'a>(
 /// carry, attached to stage `t`'s states payload.
 #[must_use]
 pub fn build_stage_states_payloads<'a>(
-    archive: Option<&'a crate::visited_states::VisitedStatesArchive>,
+    archive: Option<&'a VisitedStatesArchive>,
     stage_manifests: &'a [Vec<EntitySlot>],
 ) -> Vec<StageStatesPayload<'a>> {
     let Some(archive) = archive else {
@@ -395,10 +394,10 @@ mod tests {
         ENTITY_TYPE_ANTICIPATED_THERMAL_STATE, ENTITY_TYPE_HYDRO_INFLOW_LAG,
         ENTITY_TYPE_HYDRO_STORAGE, ENTITY_TYPE_HYDRO_TRANSIT_BUCKET, build_stage_entity_manifest,
     };
-    use crate::indexer::{CutStateProjection, StateLayout};
+    use crate::indexer::{CutStateProjection, StateSpace};
     use crate::lead_time::{AnticipatedResolution, LeadTime};
-    use crate::lp_builder::hydro_operating_active;
     use crate::test_support;
+    use cobre_core::commissioning::hydro_operating_active;
     use cobre_core::temporal::StageStateConfig;
     use cobre_core::{
         AnticipatedConfig, Block, BlockMode, Bus, DeficitSegment, EntityId, Hydro,
@@ -438,6 +437,42 @@ mod tests {
             evaporation_violation_pos_cost: 0.0,
             evaporation_violation_neg_cost: 0.0,
             inflow_nonnegativity_cost: 1000.0,
+        }
+    }
+
+    fn bounds_defaults() -> BoundsDefaults {
+        BoundsDefaults {
+            hydro: HydroStageBounds {
+                min_storage_hm3: 0.0,
+                max_storage_hm3: 100.0,
+                min_turbined_m3s: 0.0,
+                max_turbined_m3s: 50.0,
+                min_outflow_m3s: 0.0,
+                max_outflow_m3s: None,
+                min_generation_mw: 0.0,
+                max_generation_mw: 45.0,
+                max_diversion_m3s: None,
+                filling_min_rate_m3s: 0.0,
+                water_withdrawal_m3s: 0.0,
+            },
+            thermal: ThermalStageBounds {
+                min_generation_mw: 0.0,
+                max_generation_mw: 100.0,
+                cost_per_mwh: 0.0,
+            },
+            line: LineStageBounds {
+                direct_mw: 500.0,
+                reverse_mw: 500.0,
+            },
+            pumping: PumpingStageBounds {
+                min_flow_m3s: 0.0,
+                max_flow_m3s: 0.0,
+            },
+            contract: ContractStageBounds {
+                min_mw: 0.0,
+                max_mw: 0.0,
+                price_per_mwh: 0.0,
+            },
         }
     }
 
@@ -543,39 +578,7 @@ mod tests {
                 n_stages: 1,
                 k_max: 2,
             },
-            &BoundsDefaults {
-                hydro: HydroStageBounds {
-                    min_storage_hm3: 0.0,
-                    max_storage_hm3: 100.0,
-                    min_turbined_m3s: 0.0,
-                    max_turbined_m3s: 50.0,
-                    min_outflow_m3s: 0.0,
-                    max_outflow_m3s: None,
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 45.0,
-                    max_diversion_m3s: None,
-                    filling_min_rate_m3s: 0.0,
-                    water_withdrawal_m3s: 0.0,
-                },
-                thermal: ThermalStageBounds {
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 100.0,
-                    cost_per_mwh: 0.0,
-                },
-                line: LineStageBounds {
-                    direct_mw: 500.0,
-                    reverse_mw: 500.0,
-                },
-                pumping: PumpingStageBounds {
-                    min_flow_m3s: 0.0,
-                    max_flow_m3s: 0.0,
-                },
-                contract: ContractStageBounds {
-                    min_mw: 0.0,
-                    max_mw: 0.0,
-                    price_per_mwh: 0.0,
-                },
-            },
+            &bounds_defaults(),
         );
         SystemBuilder::new()
             .buses(vec![make_bus()])
@@ -591,7 +594,7 @@ mod tests {
     }
 
     /// The `N=2, L=2, A=1, k_max=2` global layout the fixture system maps onto.
-    fn layout_2h_1ant() -> StateLayout {
+    fn layout_2h_1ant() -> StateSpace {
         test_support::state_layout_full(2, 2, 1, 2, vec![2])
     }
 
@@ -607,7 +610,7 @@ mod tests {
 
         let manifest = build_stage_entity_manifest(&system, &global, &projection, 0);
 
-        assert_eq!(manifest.len(), projection.n_state());
+        assert_eq!(manifest.len(), projection.n_slots());
         assert_eq!(manifest.len(), 8);
 
         assert_eq!(manifest[0].entity_type, ENTITY_TYPE_HYDRO_STORAGE);
@@ -671,7 +674,7 @@ mod tests {
 
         let manifest = build_stage_entity_manifest(&system, &global, &projection, 0);
 
-        assert_eq!(manifest.len(), projection.n_state());
+        assert_eq!(manifest.len(), projection.n_slots());
         assert_eq!(
             manifest.len(),
             10,
@@ -714,7 +717,7 @@ mod tests {
 
         let manifest = build_stage_entity_manifest(&system, &global, &projection, 0);
 
-        assert_eq!(manifest.len(), projection.n_state());
+        assert_eq!(manifest.len(), projection.n_slots());
         assert_eq!(manifest.len(), 4);
         assert!(
             manifest
@@ -810,39 +813,7 @@ mod tests {
                 n_stages: 3,
                 k_max: 2,
             },
-            &BoundsDefaults {
-                hydro: HydroStageBounds {
-                    min_storage_hm3: 0.0,
-                    max_storage_hm3: 100.0,
-                    min_turbined_m3s: 0.0,
-                    max_turbined_m3s: 50.0,
-                    min_outflow_m3s: 0.0,
-                    max_outflow_m3s: None,
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 45.0,
-                    max_diversion_m3s: None,
-                    filling_min_rate_m3s: 0.0,
-                    water_withdrawal_m3s: 0.0,
-                },
-                thermal: ThermalStageBounds {
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 100.0,
-                    cost_per_mwh: 0.0,
-                },
-                line: LineStageBounds {
-                    direct_mw: 500.0,
-                    reverse_mw: 500.0,
-                },
-                pumping: PumpingStageBounds {
-                    min_flow_m3s: 0.0,
-                    max_flow_m3s: 0.0,
-                },
-                contract: ContractStageBounds {
-                    min_mw: 0.0,
-                    max_mw: 0.0,
-                    price_per_mwh: 0.0,
-                },
-            },
+            &bounds_defaults(),
         );
         SystemBuilder::new()
             .buses(vec![make_bus()])
@@ -872,39 +843,7 @@ mod tests {
                 n_stages: 3,
                 k_max: 2,
             },
-            &BoundsDefaults {
-                hydro: HydroStageBounds {
-                    min_storage_hm3: 0.0,
-                    max_storage_hm3: 100.0,
-                    min_turbined_m3s: 0.0,
-                    max_turbined_m3s: 50.0,
-                    min_outflow_m3s: 0.0,
-                    max_outflow_m3s: None,
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 45.0,
-                    max_diversion_m3s: None,
-                    filling_min_rate_m3s: 0.0,
-                    water_withdrawal_m3s: 0.0,
-                },
-                thermal: ThermalStageBounds {
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 100.0,
-                    cost_per_mwh: 0.0,
-                },
-                line: LineStageBounds {
-                    direct_mw: 500.0,
-                    reverse_mw: 500.0,
-                },
-                pumping: PumpingStageBounds {
-                    min_flow_m3s: 0.0,
-                    max_flow_m3s: 0.0,
-                },
-                contract: ContractStageBounds {
-                    min_mw: 0.0,
-                    max_mw: 0.0,
-                    price_per_mwh: 0.0,
-                },
-            },
+            &bounds_defaults(),
         );
         SystemBuilder::new()
             .buses(vec![make_bus()])

@@ -3,6 +3,7 @@
 //! All scratch is owned by the workspace and reused across scenarios; no
 //! allocation occurs on this hot path.
 
+use cobre_core::temporal::StageLagTransition;
 use cobre_solver::SolverInterface;
 
 use crate::{
@@ -10,6 +11,10 @@ use crate::{
     dcs::{DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
     error::SddpError,
     lp_builder::COST_SCALE_FACTOR,
+    noise::{DownstreamAccumState, LagAccumState, accumulate_and_shift_lag_state},
+    stage_solve::{
+        StageInputs, debug_assert_bucket_copy_gap_intact, fill_unscaled, run_stage_solve,
+    },
     training::stage_solve_prep::{
         InflowNoise, LoadNoise, OpeningMode, StageSolvePrep, StageSolvePrepParams, StateSource,
     },
@@ -82,7 +87,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         training_ctx,
         t,
         &prep_params,
-    );
+    )?;
     // Zero theta at the terminal stage (no successor to penalise), but NOT when
     // boundary cuts are loaded — those constrain theta from below and must stay
     // visible in the objective.
@@ -131,11 +136,11 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         )?;
         let view = ws.backward_accum.dcs_solve.result_view();
         let objective = view.objective;
-        crate::stage_solve::fill_unscaled(&mut unscaled_primal, view.primal, col_scale);
+        fill_unscaled(&mut unscaled_primal, view.primal, col_scale);
         let _ = view;
         objective
     } else {
-        let inputs = crate::stage_solve::StageInputs {
+        let inputs = StageInputs {
             stage_context: ctx,
             pool,
             stored_basis: basis_slice.get_mut(m, t).as_ref(),
@@ -144,7 +149,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
             iteration: Some(iteration),
         };
 
-        let view = crate::stage_solve::run_stage_solve(ws, &inputs).map_err(|e| {
+        let view = run_stage_solve(ws, &inputs).map_err(|e| {
             // Invalidate the stored basis on Infeasible so the next warm-start
             // attempt cold-solves.
             if matches!(e, SddpError::Infeasible { .. }) {
@@ -154,7 +159,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         })?;
 
         let objective = view.objective;
-        crate::stage_solve::fill_unscaled(&mut unscaled_primal, view.primal, col_scale);
+        fill_unscaled(&mut unscaled_primal, view.primal, col_scale);
         let _ = view;
         objective
     };
@@ -179,8 +184,11 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     ws.current_state.clear();
     ws.current_state
         .extend_from_slice(&unscaled_primal[..state.n_state]);
-    let stage_lag = ctx.stage_lag_transitions.get(t).copied().unwrap_or(
-        cobre_core::temporal::StageLagTransition {
+    let stage_lag = ctx
+        .stage_lag_transitions
+        .get(t)
+        .copied()
+        .unwrap_or(StageLagTransition {
             accumulate_weight: 1.0,
             spillover_weight: 0.0,
             finalize_period: true,
@@ -189,25 +197,24 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
             downstream_spillover_weight: 0.0,
             downstream_finalize: false,
             rebuild_from_downstream: false,
-        },
-    );
+        });
     let downstream_par_order = ws
         .scratch
         .downstream_completed_lags
         .len()
         .checked_div(ws.scratch.lag_accumulator.len())
         .unwrap_or(0);
-    crate::noise::accumulate_and_shift_lag_state(
+    accumulate_and_shift_lag_state(
         &mut ws.current_state,
         &ws.scratch.lag_matrix_buf,
         &unscaled_primal,
         state,
         &stage_lag,
-        &mut crate::noise::LagAccumState {
+        &mut LagAccumState {
             accumulator: &mut ws.scratch.lag_accumulator,
             weight_accum: &mut ws.scratch.lag_weight_accum,
         },
-        &mut crate::noise::DownstreamAccumState {
+        &mut DownstreamAccumState {
             accumulator: &mut ws.scratch.downstream_accumulator,
             weight_accum: &mut ws.scratch.downstream_weight_accum,
             completed_lags: &mut ws.scratch.downstream_completed_lags,
@@ -215,11 +222,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
             par_order: downstream_par_order,
         },
     );
-    crate::stage_solve::debug_assert_bucket_copy_gap_intact(
-        &ws.current_state,
-        &unscaled_primal,
-        state,
-    );
+    debug_assert_bucket_copy_gap_intact(&ws.current_state, &unscaled_primal, state);
     // Last read of `unscaled_primal`; restore it so the next stage reuses the
     // warmed allocation.
     ws.scratch.unscaled_primal = unscaled_primal;

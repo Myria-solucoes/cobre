@@ -28,7 +28,7 @@ use cobre_core::{
     BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, DeficitSegment,
     EntityId, HydroStageBounds, HydroStagePenalties, LineStageBounds, LineStagePenalties,
     NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
-    ResolvedPenalties, ThermalStageBounds,
+    ResolvedPenalties, SystemBuilder, ThermalStageBounds,
     scenario::{
         CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, SamplingScheme,
     },
@@ -38,16 +38,16 @@ use cobre_core::{
     },
 };
 use cobre_sddp::{
-    StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
+    ResolvedParameters, StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
     config::{CutManagementConfig, EventConfig, LoopConfig},
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
     energy_conversion::{EnergyConversion, EnergyConversionSet},
     horizon_mode::HorizonMode,
     hydro_models::PrepareHydroModelsResult,
-    indexer::StateLayout,
+    indexer::{CutStateProjection, StateSpace, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::{PatchBuffer, build_stage_templates_resolving_layout},
+    lp_builder::{PatchBuffer, StageGeometry, build_stage_templates_resolving_layout},
     risk_measure::RiskMeasure,
     simulate,
     simulation::{EntityCounts, SimulationConfig, SimulationOutputSpec},
@@ -56,7 +56,8 @@ use cobre_sddp::{
 };
 use cobre_solver::ActiveSolver;
 use cobre_stochastic::{
-    ClassSchemes, OpeningTreeInputs, PrecomputedPar, StochasticContext, build_stochastic_context,
+    ClassSchemes, OpeningTreeInputs, PrecomputedNormal, PrecomputedPar, StochasticContext,
+    build_stochastic_context,
 };
 
 mod common;
@@ -67,12 +68,12 @@ use common::builders::{BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make
 // Communicator stub
 // ===========================================================================
 
-/// Build the role-(a) [`StateLayout`] via the public [`StateLayout::new`] (full
+/// Build the role-(a) [`StateSpace`] via the public [`StateSpace::new`] (full
 /// `max_par_order` lag stride per hydro). This external test crate cannot see the
 /// parent's `#[cfg(test)]`/`test-support` surface, so it constructs from explicit
 /// dimensions rather than a test helper.
-fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
-    StateLayout::new(
+fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateSpace {
+    StateSpace::new(
         hydro_count,
         max_par_order,
         0,
@@ -94,8 +95,8 @@ fn study_dims_for(
     n_buses: usize,
     hydro_count: usize,
     has_inflow_penalty: bool,
-) -> cobre_sddp::indexer::StudyDimensions {
-    cobre_sddp::indexer::StudyDimensions {
+) -> StudyDimensions {
+    StudyDimensions {
         n_thermals,
         n_lines,
         n_buses,
@@ -345,7 +346,7 @@ fn build_system() -> cobre_core::System {
         },
     );
 
-    cobre_core::SystemBuilder::new()
+    SystemBuilder::new()
         .buses(vec![bus])
         .hydros(hydros)
         .stages(stages)
@@ -386,9 +387,9 @@ struct Fixture {
     stochastic: StochasticContext,
     /// Production stage-0 geometry (the role-(b) equipment/slack column ranges),
     /// cloned from `stage_templates.geometry_per_stage[0]`.
-    geometry: cobre_sddp::lp_builder::StageGeometry,
-    study_dims: cobre_sddp::indexer::StudyDimensions,
-    state: StateLayout,
+    geometry: StageGeometry,
+    study_dims: StudyDimensions,
+    state: StateSpace,
     initial_state: Vec<f64>,
     horizon: HorizonMode,
     risk_measures: Vec<RiskMeasure>,
@@ -421,10 +422,10 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
         &system,
         inflow_method,
         &par_lp,
-        &cobre_stochastic::normal::precompute::PrecomputedNormal::default(),
+        &PrecomputedNormal::default(),
         &hydro_models.production,
         &hydro_models.evaporation,
-        &cobre_sddp::ResolvedParameters::default(),
+        &ResolvedParameters::default(),
     )
     .expect("no FPHA plants in integration test fixture");
     let stochastic = build_stochastic();
@@ -881,7 +882,7 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
     }
 
     let base_system = build_system();
-    let system = cobre_core::SystemBuilder::new()
+    let system = SystemBuilder::new()
         .buses(base_system.buses().to_vec())
         .hydros(base_system.hydros().to_vec())
         .stages(base_system.stages().to_vec())
@@ -910,10 +911,10 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
         &system,
         inflow_method,
         &par_lp,
-        &cobre_stochastic::normal::precompute::PrecomputedNormal::default(),
+        &PrecomputedNormal::default(),
         &hydro_models.production,
         &hydro_models.evaporation,
-        &cobre_sddp::ResolvedParameters::default(),
+        &ResolvedParameters::default(),
     )
     .expect("build_stage_templates_resolving_layout must succeed");
 
@@ -954,15 +955,12 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
 /// see the parent crate's `#[cfg(test)]` surface) builds the default all-enabled
 /// per-pool projection. Every pool projects the full global state, keeping the
 /// extracted subgradient bit-identical to the global-loop result.
-fn all_enabled_cut_state_layouts(
-    global: &StateLayout,
-    n_stages: usize,
-) -> Vec<cobre_sddp::indexer::CutStateProjection> {
+fn all_enabled_cut_state_layouts(global: &StateSpace, n_stages: usize) -> Vec<CutStateProjection> {
     let full = StageStateConfig {
         storage: true,
         inflow_lags: true,
     };
     (0..n_stages)
-        .map(|_| cobre_sddp::indexer::CutStateProjection::new(global, full))
+        .map(|_| CutStateProjection::new(global, full))
         .collect()
 }

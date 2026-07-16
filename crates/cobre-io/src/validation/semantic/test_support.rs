@@ -14,7 +14,7 @@
 
 use chrono::NaiveDate;
 use cobre_core::{
-    EntityId,
+    CorrelationGroup, CorrelationModel, EntityId, SeasonMap,
     entities::{Bus, Hydro, HydroGenerationModel, HydroPenalties, Line, Thermal},
     initial_conditions::InitialConditions,
     penalty::GlobalPenaltyDefaults,
@@ -25,8 +25,10 @@ use cobre_core::{
 };
 
 use crate::{
+    InflowArCoefficientRow, InflowHistoryRow, InflowSeasonalStatsRow,
     config::Config,
     extensions::{FphaHyperplaneRow, HydroGeometryRow},
+    parse_config,
     stages::StagesData,
     validation::{ValidationContext, schema::ParsedData},
 };
@@ -252,9 +254,9 @@ pub(super) fn make_data_5b(
     hydros: Vec<Hydro>,
     stages: StagesData,
     buses: Vec<Bus>,
-    inflow_stats: Vec<crate::scenarios::InflowSeasonalStatsRow>,
-    inflow_ar: Vec<crate::scenarios::InflowArCoefficientRow>,
-    correlation: Option<cobre_core::scenario::CorrelationModel>,
+    inflow_stats: Vec<InflowSeasonalStatsRow>,
+    inflow_ar: Vec<InflowArCoefficientRow>,
+    correlation: Option<CorrelationModel>,
 ) -> ParsedData {
     ParsedData {
         config: minimal_config(),
@@ -404,12 +406,9 @@ pub(super) fn make_geom_row(
 // ── Correlation helpers ───────────────────────────────────────────────────────
 
 /// Build a valid 2x2 symmetric correlation group.
-pub(super) fn make_corr_group(
-    name: &str,
-    matrix: Vec<Vec<f64>>,
-) -> cobre_core::scenario::CorrelationGroup {
+pub(super) fn make_corr_group(name: &str, matrix: Vec<Vec<f64>>) -> CorrelationGroup {
     use cobre_core::scenario::CorrelationEntity;
-    cobre_core::scenario::CorrelationGroup {
+    CorrelationGroup {
         name: name.to_string(),
         entities: vec![
             CorrelationEntity {
@@ -427,9 +426,7 @@ pub(super) fn make_corr_group(
 
 /// Build a `CorrelationModel` with a single "default" profile containing the
 /// given group.
-pub(super) fn make_correlation(
-    group: cobre_core::scenario::CorrelationGroup,
-) -> cobre_core::scenario::CorrelationModel {
+pub(super) fn make_correlation(group: CorrelationGroup) -> CorrelationModel {
     use cobre_core::scenario::CorrelationProfile;
     use std::collections::BTreeMap;
     let mut profiles = BTreeMap::new();
@@ -439,7 +436,7 @@ pub(super) fn make_correlation(
             groups: vec![group],
         },
     );
-    cobre_core::scenario::CorrelationModel {
+    CorrelationModel {
         method: "spectral".to_string(),
         profiles,
         schedule: vec![],
@@ -460,7 +457,7 @@ pub(super) fn minimal_config() -> Config {
     }"#;
     let tmp = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(tmp.path(), json).unwrap();
-    crate::config::parse_config(tmp.path()).unwrap()
+    parse_config(tmp.path()).unwrap()
 }
 
 /// Build a `Config` with `training.scenario_source.inflow.scheme = "external"`.
@@ -479,7 +476,7 @@ pub(super) fn config_with_training_external_inflow() -> Config {
     }"#;
     let tmp = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(tmp.path(), json).unwrap();
-    crate::config::parse_config(tmp.path()).unwrap()
+    parse_config(tmp.path()).unwrap()
 }
 
 /// Build a `Config` with `simulation.scenario_source.load.scheme = "external"`.
@@ -500,13 +497,13 @@ pub(super) fn config_with_simulation_external_load() -> Config {
     }"#;
     let tmp = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(tmp.path(), json).unwrap();
-    crate::config::parse_config(tmp.path()).unwrap()
+    parse_config(tmp.path()).unwrap()
 }
 
 // ── Season / estimation data builders ────────────────────────────────────────
 
 /// Build a monthly `SeasonMap` with 12 seasons (January=0 .. December=11).
-pub(super) fn make_monthly_season_map() -> cobre_core::temporal::SeasonMap {
+pub(super) fn make_monthly_season_map() -> SeasonMap {
     use cobre_core::temporal::{SeasonCycleType, SeasonDefinition, SeasonMap};
     let seasons = (0..12u32)
         .map(|m| SeasonDefinition {
@@ -526,16 +523,13 @@ pub(super) fn make_monthly_season_map() -> cobre_core::temporal::SeasonMap {
 
 /// Build `n_obs` `InflowHistoryRow` records for `hydro_id`, one per calendar
 /// month starting from January 2000.
-pub(super) fn make_history_rows(
-    hydro_id: i32,
-    n_obs: usize,
-) -> Vec<crate::scenarios::InflowHistoryRow> {
+pub(super) fn make_history_rows(hydro_id: i32, n_obs: usize) -> Vec<InflowHistoryRow> {
     let mut rows = Vec::with_capacity(n_obs);
     for i in 0..n_obs {
         let year = 2000 + (i / 12) as i32;
         let month = (i % 12) as u32 + 1;
         let date = chrono::NaiveDate::from_ymd_opt(year, month, 15).unwrap();
-        rows.push(crate::scenarios::InflowHistoryRow {
+        rows.push(InflowHistoryRow {
             hydro_id: EntityId::from(hydro_id),
             date,
             value_m3s: 100.0,
@@ -602,13 +596,13 @@ pub(super) fn make_stages_with_seasons(n_months: usize, with_season_map: bool) -
 pub(super) fn make_data_estimation(
     hydros: Vec<Hydro>,
     stages: StagesData,
-    inflow_history: Vec<crate::scenarios::InflowHistoryRow>,
+    inflow_history: Vec<InflowHistoryRow>,
 ) -> ParsedData {
     ParsedData {
         config: minimal_config(),
         penalties: minimal_global_penalties(),
         stages,
-        initial_conditions: cobre_core::initial_conditions::InitialConditions {
+        initial_conditions: InitialConditions {
             storage: vec![],
             filling_storage: vec![],
             past_inflows: vec![],
@@ -664,17 +658,12 @@ pub(super) fn make_data_estimation(
 }
 
 /// Build an `InflowArCoefficientRow` with the given hydro_id, stage_id, and lag.
-pub(super) fn make_ar_row(
-    hydro_id: i32,
-    stage_id: i32,
-    lag: i32,
-) -> crate::scenarios::InflowArCoefficientRow {
-    crate::scenarios::InflowArCoefficientRow {
+pub(super) fn make_ar_row(hydro_id: i32, stage_id: i32, lag: i32) -> InflowArCoefficientRow {
+    InflowArCoefficientRow {
         hydro_id: EntityId::from(hydro_id),
         stage_id,
         lag,
         coefficient: 0.5,
-        residual_std_ratio: 0.9,
     }
 }
 
@@ -686,7 +675,7 @@ pub(super) fn make_data_past_inflows(
     hydros: Vec<Hydro>,
     inflow_lags_enabled: bool,
     past_inflows: Vec<cobre_core::HydroPastInflows>,
-    inflow_ar_coefficients: Vec<crate::scenarios::InflowArCoefficientRow>,
+    inflow_ar_coefficients: Vec<InflowArCoefficientRow>,
 ) -> ParsedData {
     use cobre_core::EntityId as EId;
     let stage_0_start = chrono::NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
@@ -751,7 +740,7 @@ pub(super) fn make_data_past_inflows(
         inflow_history: vec![],
         // Populate a sentinel entry so the estimation path (rules 19-21) is
         // inactive. Rules 22-24 are independent of the estimation path.
-        inflow_seasonal_stats: vec![crate::scenarios::InflowSeasonalStatsRow {
+        inflow_seasonal_stats: vec![InflowSeasonalStatsRow {
             hydro_id: EId::from(1),
             stage_id: 0,
             mean_m3s: 500.0,
@@ -789,7 +778,7 @@ pub(super) fn make_data_past_inflows(
 pub(super) fn make_data_past_inflows_with_season_map(
     hydros: Vec<Hydro>,
     past_inflows: Vec<cobre_core::HydroPastInflows>,
-    inflow_ar_coefficients: Vec<crate::scenarios::InflowArCoefficientRow>,
+    inflow_ar_coefficients: Vec<InflowArCoefficientRow>,
     num_seasons: usize,
 ) -> ParsedData {
     use cobre_core::temporal::{SeasonCycleType, SeasonDefinition, SeasonMap};

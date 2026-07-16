@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use super::config::HighsProfile;
 use super::solver::{HighsSolver, highs_version};
+use crate::types::Basis;
 use crate::{
     BasisStatus, SolverInterface, ffi,
     types::{RowBatch, SolutionView, SolverError, SolverStatistics, StageTemplate},
@@ -363,10 +364,7 @@ impl SolverInterface for HighsSolver {
     /// when the offered basis has fewer row entries than the LP has rows, and
     /// `Err(SolverError::BasisInconsistent { .. })` when `HiGHS` rejects the
     /// offered basis via `isBasisConsistent`.
-    fn solve(
-        &mut self,
-        basis: Option<&crate::types::Basis>,
-    ) -> Result<SolutionView<'_>, SolverError> {
+    fn solve(&mut self, basis: Option<&Basis>) -> Result<SolutionView<'_>, SolverError> {
         assert!(
             self.has_model,
             "solve called without a loaded model — call load_model first"
@@ -460,7 +458,7 @@ impl SolverInterface for HighsSolver {
         self.solve_inner()
     }
 
-    fn get_basis(&mut self, out: &mut crate::types::Basis) {
+    fn get_basis(&mut self, out: &mut Basis) {
         assert!(
             self.has_model,
             "get_basis called without a loaded model — call load_model first"

@@ -8,7 +8,7 @@ use crate::{
     context::StageContext,
     cut::pool::CutPool,
     error::SddpError,
-    indexer::StateLayout,
+    indexer::StateSpace,
     workspace::{CapturedBasis, SolverWorkspace},
 };
 
@@ -72,13 +72,11 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
             &mut ws.scratch_basis,
             &mut ws.scratch.recon_slot_lookup,
         );
-        // Safety net: when cut selection drops a cut whose stored row was BASIC,
-        // the reconstructed basis carries excess BASIC entries; the post-pass
-        // demotes them until `col_basic + row_basic == num_row`.
-        //
-        // `num_row_for_invariant` uses the reconstructed length, not
-        // frozen.num_rows, because delta cuts (added during the current backward
-        // pass) extend past the frozen template row count.
+        // `num_row_for_invariant` is the reconstructed length — `target.base_row_count`
+        // plus one row per active cut, which is this LP's row count on every frozen
+        // path (forward and simulation load `frozen[t]`; backward loads `frozen[t]`
+        // then adds the delta cuts the pool has meanwhile gained). `frozen.num_rows`
+        // is the wrong-but-plausible alternative: it omits those delta cuts.
         //
         // `base_row_for_invariant = 0` is safe: the loop demotes only currently-
         // BASIC rows, and equality rows are never BASIC by LP duality.
@@ -89,7 +87,7 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
             &mut ws.scratch_basis,
             num_row_for_invariant,
             base_row_for_invariant,
-        );
+        )?;
 
         ws.solver.record_reconstruction_stats();
 
@@ -195,7 +193,7 @@ pub(crate) fn fill_unscaled_dual(out: &mut Vec<f64>, scaled: &[f64], row_scale: 
 pub(crate) fn debug_assert_bucket_copy_gap_intact(
     assembled_state: &[f64],
     unscaled_primal: &[f64],
-    layout: &StateLayout,
+    layout: &StateSpace,
 ) {
     debug_assert!(
         layout
@@ -216,11 +214,7 @@ pub(crate) fn debug_assert_bucket_copy_gap_intact(
 #[cfg(test)]
 mod tests {
     use cobre_solver::BasisStatus::{Basic as B, Lower as L};
-    use cobre_solver::{ActiveSolver, SolverInterface, StageTemplate};
-    // `SolverError` is only referenced by the `highs`-gated
-    // `basis_inconsistent_propagates_as_sddp_solver_error` test below.
-    #[cfg(feature = "highs")]
-    use cobre_solver::SolverError;
+    use cobre_solver::{ActiveSolver, SolverError, SolverInterface, StageTemplate};
 
     use super::{StageInputs, run_stage_solve};
     use crate::{
@@ -228,6 +222,7 @@ mod tests {
         context::StageContext,
         cut::pool::CutPool,
         lp_builder::PatchBuffer,
+        test_support::state_layout_with_transit_buckets,
         workspace::{CapturedBasis, SolverWorkspace, WorkspaceSizing},
     };
 
@@ -468,22 +463,17 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 6: BasisInconsistent propagates as SddpError::Solver
+    // Test 6: a basic-count deficit is rejected before the solver sees it
     // -----------------------------------------------------------------------
 
-    /// A basis with zero basic variables (all LOWER) against `num_row = 2`
-    /// causes `cobre_highs_set_basis_non_alien` to fail `isBasisConsistent`
-    /// and return `HIGHS_STATUS_ERROR`.  The solver converts this to
-    /// `SolverError::BasisInconsistent`, which `map_solver_error` must route
-    /// to `SddpError::Solver(...)` — not `SddpError::Infeasible`.
-    ///
-    /// HiGHS-specific: relies on `cobre_highs_set_basis_non_alien`'s
-    /// `isBasisConsistent` rejection of a zero-basic basis. CLP accepts such a
-    /// basis and solves normally, so this assertion is gated to the `highs`
-    /// backend; a CLP-equivalent lands with CLP's own basis-rejection coverage.
-    #[cfg(feature = "highs")]
+    /// A stored basis with zero basic variables (all LOWER) against `num_row = 2`
+    /// is a deficit, which only a shape mismatch can produce. `run_stage_solve`
+    /// must reject it with `SddpError::BasisShapeMismatch` naming the counters —
+    /// never pass it to the solver, whose own `isBasisConsistent` rejection
+    /// (`SolverError::BasisInconsistent` under `HiGHS`; accepted outright under CLP)
+    /// cannot say which LP the basis came from.
     #[test]
-    fn basis_inconsistent_propagates_as_sddp_solver_error() {
+    fn basis_deficit_rejected_before_solver_sees_it() {
         let template = make_template();
         let templates = std::slice::from_ref(&template);
         let ctx = make_context(templates);
@@ -491,13 +481,9 @@ mod tests {
         let mut ws = make_workspace(&template);
         ws.scratch.recon_slot_lookup = vec![None; 16];
 
-        // Build a CapturedBasis where all col_status and row_status are LOWER
-        // (= 0, the zero-fill default from Basis::new).  After reconstruct_basis
-        // copies these values into scratch_basis and enforce_basic_count_invariant
-        // runs (it only demotes excess basics, never promotes), the delivered
-        // basis has col_basic = 0, row_basic = 0, total_basic = 0 against
-        // num_row = 2.  cobre_highs_set_basis_non_alien rejects this because
-        // isBasisConsistent requires total_basic == num_row.
+        // All col_status and row_status LOWER (the zero-fill default from
+        // Basis::new) → col_basic = 0, row_basic = 0, total_basic = 0 against
+        // num_row = 2.
         let all_lower = CapturedBasis::new(
             template.num_cols,
             template.num_rows,
@@ -505,8 +491,6 @@ mod tests {
             0,
             1,
         );
-        // state_at_capture is empty (capacity only), which satisfies the
-        // reconstruct_basis debug_assert (stored.state_at_capture.is_empty()).
 
         let inputs = StageInputs {
             stage_context: &ctx,
@@ -517,20 +501,45 @@ mod tests {
             iteration: Some(5),
         };
 
-        let result = run_stage_solve(&mut ws, &inputs);
-        match result {
-            Err(SddpError::Solver(SolverError::BasisInconsistent { .. })) => {
-                // Correct: BasisInconsistent routes to SddpError::Solver, not
-                // SddpError::Infeasible.
+        match run_stage_solve(&mut ws, &inputs) {
+            Err(SddpError::BasisShapeMismatch {
+                num_row,
+                total_basic,
+                col_basic,
+                row_basic,
+            }) => {
+                assert_eq!(num_row, template.num_rows);
+                assert_eq!(total_basic, 0);
+                assert_eq!(col_basic, 0);
+                assert_eq!(row_basic, 0);
             }
-            Err(SddpError::Infeasible { .. }) => {
-                panic!("BasisInconsistent must not map to SddpError::Infeasible")
-            }
-            other => panic!(
-                "expected Err(SddpError::Solver(SolverError::BasisInconsistent {{ .. }})), \
-                 got {other:?}"
-            ),
+            other => panic!("expected Err(SddpError::BasisShapeMismatch {{ .. }}), got {other:?}"),
         }
+    }
+
+    /// `SolverError::BasisInconsistent` must route to `SddpError::Solver`, not
+    /// `SddpError::Infeasible`: it is a basis defect, not a proof of
+    /// infeasibility, and conflating them would abort a recoverable run.
+    #[test]
+    fn basis_inconsistent_maps_to_sddp_solver_error() {
+        let mapped = super::map_solver_error(
+            SolverError::BasisInconsistent {
+                num_row: 4385,
+                total_basic: 4383,
+                col_basic: 4000,
+                row_basic: 383,
+            },
+            0,
+            3,
+            Some(5),
+        );
+        assert!(
+            matches!(
+                mapped,
+                SddpError::Solver(SolverError::BasisInconsistent { .. })
+            ),
+            "expected SddpError::Solver(BasisInconsistent), got {mapped:?}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -539,15 +548,7 @@ mod tests {
 
     #[test]
     fn debug_assert_bucket_copy_gap_intact_passes_when_bucket_matches_primal() {
-        let layout = crate::test_support::state_layout_with_transit_buckets(
-            0,
-            0,
-            2,
-            vec![(0, 0), (0, 1)],
-            0,
-            0,
-            vec![],
-        );
+        let layout = state_layout_with_transit_buckets(0, 0, 2, vec![(0, 0), (0, 1)], 0, 0, vec![]);
         let primal = vec![7.0, 11.0];
         let assembled = primal.clone();
         super::debug_assert_bucket_copy_gap_intact(&assembled, &primal, &layout);
@@ -556,15 +557,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "bucket/anticipated-ring state must equal the LP primal's identity")]
     fn debug_assert_bucket_copy_gap_intact_panics_when_bucket_diverges() {
-        let layout = crate::test_support::state_layout_with_transit_buckets(
-            0,
-            0,
-            2,
-            vec![(0, 0), (0, 1)],
-            0,
-            0,
-            vec![],
-        );
+        let layout = state_layout_with_transit_buckets(0, 0, 2, vec![(0, 0), (0, 1)], 0, 0, vec![]);
         let primal = vec![7.0, 11.0];
         let mut assembled = primal.clone();
         assembled[1] = 999.0; // simulate an accidental overwrite of the bucket block
@@ -573,15 +566,7 @@ mod tests {
 
     #[test]
     fn debug_assert_bucket_copy_gap_intact_passes_when_anticipated_ring_matches_primal() {
-        let layout = crate::test_support::state_layout_with_transit_buckets(
-            0,
-            0,
-            0,
-            vec![],
-            2,
-            1,
-            vec![1, 1],
-        );
+        let layout = state_layout_with_transit_buckets(0, 0, 0, vec![], 2, 1, vec![1, 1]);
         let primal = vec![3.0, 5.0];
         let assembled = primal.clone();
         super::debug_assert_bucket_copy_gap_intact(&assembled, &primal, &layout);
@@ -590,15 +575,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "bucket/anticipated-ring state must equal the LP primal's identity")]
     fn debug_assert_bucket_copy_gap_intact_panics_when_anticipated_ring_diverges() {
-        let layout = crate::test_support::state_layout_with_transit_buckets(
-            0,
-            0,
-            0,
-            vec![],
-            2,
-            1,
-            vec![1, 1],
-        );
+        let layout = state_layout_with_transit_buckets(0, 0, 0, vec![], 2, 1, vec![1, 1]);
         let primal = vec![3.0, 5.0];
         let mut assembled = primal.clone();
         assembled[0] = 999.0; // simulate an accidental overwrite of the anticipated-ring slot

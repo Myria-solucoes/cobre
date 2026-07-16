@@ -6,9 +6,34 @@
 
 use cobre_solver::SolutionView;
 
-use crate::indexer::CutStateProjection;
+use crate::indexer::{CutSlot, CutStateProjection};
 
 use super::SuccessorSpec;
+
+fn fill_state_duals(
+    view: &SolutionView<'_>,
+    cut_state: &CutStateProjection,
+    col_scale: &[f64],
+    state_duals: &mut Vec<f64>,
+) {
+    // Divided, not multiplied (module-level contract). Empty col_scale ⇒ raw rc.
+    state_duals.clear();
+    for j in 0..cut_state.n_slots() {
+        let col = cut_state.incoming_column(CutSlot::new(j)).get();
+        let rc = view.reduced_costs[col];
+        let unscaled = if col_scale.is_empty() {
+            rc
+        } else {
+            rc / col_scale[col]
+        };
+        state_duals.push(unscaled);
+    }
+    debug_assert_eq!(
+        state_duals.len(),
+        cut_state.n_slots(),
+        "state_duals must contain exactly cut_state.n_slots() entries after fill"
+    );
+}
 
 /// Extract state and cut duals from the live solver view into pre-warmed scratch
 /// buffers, returning the LP objective. `state_duals` holds the unscaled
@@ -27,23 +52,7 @@ pub(crate) fn extract_duals_from_view(
 ) -> f64 {
     let objective = view.objective;
 
-    // Divided, not multiplied (module-level contract). Empty col_scale ⇒ raw rc.
-    state_duals.clear();
-    for j in 0..cut_state.n_state() {
-        let col = cut_state.state_to_lp_incoming_column(j);
-        let rc = view.reduced_costs[col];
-        let unscaled = if col_scale.is_empty() {
-            rc
-        } else {
-            rc / col_scale[col]
-        };
-        state_duals.push(unscaled);
-    }
-    debug_assert_eq!(
-        state_duals.len(),
-        cut_state.n_state(),
-        "state_duals must contain exactly cut_state.n_state() entries after fill"
-    );
+    fill_state_duals(view, cut_state, col_scale, state_duals);
 
     cut_duals.clear();
     if succ.num_cuts_at_successor > 0 {
@@ -70,22 +79,7 @@ pub(crate) fn extract_state_duals_only(
 ) -> f64 {
     let objective = view.objective;
 
-    state_duals.clear();
-    for j in 0..cut_state.n_state() {
-        let col = cut_state.state_to_lp_incoming_column(j);
-        let rc = view.reduced_costs[col];
-        let unscaled = if col_scale.is_empty() {
-            rc
-        } else {
-            rc / col_scale[col]
-        };
-        state_duals.push(unscaled);
-    }
-    debug_assert_eq!(
-        state_duals.len(),
-        cut_state.n_state(),
-        "state_duals must contain exactly cut_state.n_state() entries after fill"
-    );
+    fill_state_duals(view, cut_state, col_scale, state_duals);
 
     objective
 }
@@ -96,7 +90,7 @@ mod tests {
     use cobre_solver::SolutionView;
 
     use super::extract_state_duals_only;
-    use crate::indexer::{CutStateProjection, StateLayout};
+    use crate::indexer::{CutStateProjection, StateDim, StateSpace};
     use cobre_core::temporal::StageStateConfig;
 
     const ALL_ENABLED: StageStateConfig = StageStateConfig {
@@ -108,9 +102,9 @@ mod tests {
         inflow_lags: false,
     };
 
-    fn state_layout(hydro_count: usize, max_par_order: usize) -> StateLayout {
+    fn state_layout(hydro_count: usize, max_par_order: usize) -> StateSpace {
         let lag_counts = vec![max_par_order; hydro_count];
-        StateLayout::new(
+        StateSpace::new(
             hydro_count,
             max_par_order,
             0,
@@ -142,7 +136,7 @@ mod tests {
     fn storage_only_yields_n_length_subgradient_with_storage_columns() {
         let global = state_layout(3, 2);
         let cut_state = CutStateProjection::new(&global, STORAGE_ONLY);
-        assert_eq!(cut_state.n_state(), 3);
+        assert_eq!(cut_state.n_slots(), 3);
 
         let rc: Vec<f64> = (0..=global.theta).map(|c| c as f64).collect();
         let view = indexed_view(&rc);
@@ -154,20 +148,20 @@ mod tests {
         for (j, &dual) in state_duals.iter().enumerate() {
             assert_eq!(
                 dual,
-                global.state_to_lp_incoming_column(j) as f64,
+                global.state_to_lp_incoming_column(StateDim::new(j)).get() as f64,
                 "storage slot {j} reads its storage_in column reduced cost"
             );
         }
     }
 
     /// All-enabled `CutStateProjection` reproduces the pre-change global-loop result:
-    /// `n_state()` equals the global `n_state` and every slot reads the same LP
-    /// column the global `StateLayout` resolver would.
+    /// `n_slots()` equals the global `n_state` and every slot reads the same LP
+    /// column the global `StateSpace` resolver would.
     #[test]
     fn all_enabled_reproduces_global_loop_result() {
         let global = state_layout(3, 2);
         let cut_state = CutStateProjection::new(&global, ALL_ENABLED);
-        assert_eq!(cut_state.n_state(), global.n_state);
+        assert_eq!(cut_state.n_slots(), global.n_state);
 
         let rc: Vec<f64> = (0..=global.theta).map(|c| c as f64).collect();
         let view = indexed_view(&rc);
@@ -176,7 +170,7 @@ mod tests {
         let _ = extract_state_duals_only(&view, &cut_state, &[], &mut via_cut_state);
 
         let global_loop: Vec<f64> = (0..global.n_state)
-            .map(|j| rc[global.state_to_lp_incoming_column(j)])
+            .map(|j| rc[global.state_to_lp_incoming_column(StateDim::new(j)).get()])
             .collect();
 
         assert_eq!(via_cut_state, global_loop);

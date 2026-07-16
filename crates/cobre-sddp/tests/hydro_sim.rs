@@ -138,7 +138,11 @@ mod simulation_only {
             "stage_cuts count must match"
         );
 
-        let loaded_fcf = FutureCostFunction::from_deserialized(&checkpoint.stage_cuts)
+        let proof = cobre_sddp::test_support::trivial_full_fcf_proof(
+            checkpoint.metadata.state_dimension,
+            checkpoint.metadata.num_stages,
+        );
+        let loaded_fcf = FutureCostFunction::from_deserialized(&proof, &checkpoint.stage_cuts)
             .expect("from_deserialized");
 
         assert_eq!(
@@ -147,7 +151,7 @@ mod simulation_only {
             "active cut count must match after round-trip"
         );
 
-        for (stage, &expected_eval) in original_evals.iter().enumerate().take(n_stages) {
+        for (stage, &expected_eval) in original_evals.iter().enumerate() {
             let loaded_eval = loaded_fcf.evaluate_at_state(stage, &test_state);
             assert_eq!(
                 loaded_eval, expected_eval,
@@ -345,6 +349,7 @@ mod d41_energy_contracts_simulation {
     use std::sync::mpsc;
 
     use cobre_core::scenario::ScenarioSource;
+    use cobre_io::config::SimulationConfig;
     use cobre_sddp::simulation::accumulate_category_costs;
     use cobre_sddp::simulation::types::ScenarioCategoryCosts;
     use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
@@ -381,11 +386,11 @@ mod d41_energy_contracts_simulation {
         let config_path = case_dir.join("config.json");
         let mut config = cobre_io::parse_config(&config_path).expect("config must parse");
         // The shipped parity case trains only; enable one sim scenario so the contract extraction path runs.
-        config.simulation = cobre_io::config::SimulationConfig {
+        config.simulation = SimulationConfig {
             enabled: true,
             num_scenarios: 1,
             io_channel_capacity: 8,
-            ..cobre_io::config::SimulationConfig::default()
+            ..SimulationConfig::default()
         };
 
         let system = cobre_io::load_case(&case_dir).expect("load_case must succeed");
@@ -827,7 +832,8 @@ mod sparse_dense {
 
     use cobre_sddp::FutureCostFunction;
     use cobre_sddp::build_cut_row_batch_into;
-    use cobre_sddp::indexer::StateLayout;
+    use cobre_sddp::indexer::StateSpace;
+    use cobre_sddp::test_support::cut_state_projection;
     use cobre_solver::RowBatch;
 
     #[test]
@@ -837,8 +843,8 @@ mod sparse_dense {
         let n_state = n_hydro * (1 + max_par_order);
 
         // The [0, 1, 2] arg is per-hydro effective_lag_count; mixed orders zero out
-        // some lag slots. StateLayout::new finalizes the mask as production setup does.
-        let state = StateLayout::new(
+        // some lag slots. StateSpace::new finalizes the mask as production setup does.
+        let state = StateSpace::new(
             n_hydro,
             max_par_order,
             0,
@@ -870,14 +876,14 @@ mod sparse_dense {
             row_lower: Vec::new(),
             row_upper: Vec::new(),
         };
-        let cut_state = cobre_sddp::test_support::cut_state_projection(&state);
+        let cut_state = cut_state_projection(&state);
         build_cut_row_batch_into(&mut batch, &fcf, 0, &state, &cut_state, &col_scale);
 
         assert_eq!(batch.num_rows, 1);
         let theta_col = state.theta;
         let expected_cols: Vec<i32> = mask
             .iter()
-            .map(|&j| state.state_to_lp_column(j) as i32)
+            .map(|&j| state.state_to_lp_column(j).get() as i32)
             .chain(std::iter::once(theta_col as i32))
             .collect();
         assert_eq!(
@@ -887,7 +893,7 @@ mod sparse_dense {
 
         let expected_values: Vec<f64> = mask
             .iter()
-            .map(|&j| -coeffs[j])
+            .map(|&j| -coeffs[j.get()])
             .chain(std::iter::once(1.0))
             .collect();
         for (i, (actual, expected)) in batch.values.iter().zip(expected_values.iter()).enumerate() {

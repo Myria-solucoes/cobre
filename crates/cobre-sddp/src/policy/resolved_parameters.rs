@@ -11,11 +11,13 @@
 
 use std::collections::HashMap;
 
-use cobre_core::{ComputedParameter, EntityId, Hydro, ParameterKind, ScalarParameter};
+use cobre_core::{ComputedParameter, EntityId, Hydro, ParameterKind, ScalarParameter, StageId};
 use thiserror::Error;
 
 use crate::energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride};
-use crate::stage_key::StageId;
+use crate::error::SddpError;
+use crate::error::SddpError::Validation;
+use crate::error::SddpError::WireVersionMismatch;
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -142,11 +144,10 @@ impl ResolvedParameters {
 /// # Examples
 ///
 /// ```
-/// use cobre_core::{EntityId, ParameterKind, ScalarParameter};
+/// use cobre_core::{EntityId, ParameterKind, ScalarParameter, StageId};
 /// use cobre_sddp::energy_conversion::{
 ///     EnergyConversionSet, HydroEnergyProductivityOverride,
 /// };
-/// use cobre_sddp::stage_key::StageId;
 /// use cobre_sddp::resolved_parameters::build_resolved_parameters;
 ///
 /// let params = vec![ScalarParameter {
@@ -424,9 +425,8 @@ struct ResolvedParametersWireEnvelope {
 ///     build_resolved_parameters, deserialize_resolved_parameters,
 ///     serialize_resolved_parameters,
 /// };
-/// use cobre_core::{EntityId, ParameterKind, ScalarParameter};
+/// use cobre_core::{EntityId, ParameterKind, ScalarParameter, StageId};
 /// use cobre_sddp::energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride};
-/// use cobre_sddp::stage_key::StageId;
 ///
 /// let params = vec![ScalarParameter {
 ///     id: EntityId(1),
@@ -446,16 +446,13 @@ struct ResolvedParametersWireEnvelope {
 ///     restored.get(EntityId(1), 0).to_bits()
 /// );
 /// ```
-pub fn serialize_resolved_parameters(
-    table: &ResolvedParameters,
-) -> Result<Vec<u8>, crate::error::SddpError> {
+pub fn serialize_resolved_parameters(table: &ResolvedParameters) -> Result<Vec<u8>, SddpError> {
     let envelope = ResolvedParametersWireEnvelope {
         version: RESOLVED_PARAMETERS_WIRE_VERSION,
         payload: table.clone(),
     };
-    postcard::to_allocvec(&envelope).map_err(|e| {
-        crate::error::SddpError::Validation(format!("postcard resolved_parameters: {e}"))
-    })
+    postcard::to_allocvec(&envelope)
+        .map_err(|e| Validation(format!("postcard resolved_parameters: {e}")))
 }
 
 /// Deserialize a [`ResolvedParameters`] table from a postcard byte buffer
@@ -477,9 +474,8 @@ pub fn serialize_resolved_parameters(
 /// use cobre_sddp::resolved_parameters::{
 ///     deserialize_resolved_parameters, serialize_resolved_parameters,
 /// };
-/// use cobre_core::{EntityId, ParameterKind, ScalarParameter};
+/// use cobre_core::{EntityId, ParameterKind, ScalarParameter, StageId};
 /// use cobre_sddp::energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride};
-/// use cobre_sddp::stage_key::StageId;
 /// use cobre_sddp::resolved_parameters::build_resolved_parameters;
 ///
 /// let params = vec![ScalarParameter {
@@ -500,14 +496,11 @@ pub fn serialize_resolved_parameters(
 ///     restored.get(EntityId(1), 2).to_bits()
 /// );
 /// ```
-pub fn deserialize_resolved_parameters(
-    bytes: &[u8],
-) -> Result<ResolvedParameters, crate::error::SddpError> {
-    let envelope: ResolvedParametersWireEnvelope = postcard::from_bytes(bytes).map_err(|e| {
-        crate::error::SddpError::Validation(format!("postcard resolved_parameters: {e}"))
-    })?;
+pub fn deserialize_resolved_parameters(bytes: &[u8]) -> Result<ResolvedParameters, SddpError> {
+    let envelope: ResolvedParametersWireEnvelope = postcard::from_bytes(bytes)
+        .map_err(|e| Validation(format!("postcard resolved_parameters: {e}")))?;
     if envelope.version != RESOLVED_PARAMETERS_WIRE_VERSION {
-        return Err(crate::error::SddpError::WireVersionMismatch {
+        return Err(WireVersionMismatch {
             encoded: envelope.version,
             expected: RESOLVED_PARAMETERS_WIRE_VERSION,
         });

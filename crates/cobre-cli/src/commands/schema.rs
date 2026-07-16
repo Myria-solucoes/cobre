@@ -6,6 +6,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
+use cobre_io::schema::generate_schemas;
 use console::Term;
 
 use crate::error::CliError;
@@ -60,7 +61,7 @@ fn execute_export(args: &ExportArgs) -> Result<(), CliError> {
         context: format!("creating output directory '{}'", output_dir.display()),
     })?;
 
-    let schemas = cobre_io::schema::generate_schemas().map_err(|e| CliError::Internal {
+    let schemas = generate_schemas().map_err(|e| CliError::Internal {
         message: format!("schema generation failed: {e}"),
     })?;
 

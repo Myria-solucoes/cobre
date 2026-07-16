@@ -12,6 +12,7 @@ pub mod annual_component;
 pub mod ar_coefficients;
 pub mod assembly;
 pub mod correlation;
+pub mod estimation;
 pub mod external;
 pub mod inflow_history;
 pub mod inflow_stats;
@@ -20,11 +21,13 @@ pub mod load_stats;
 pub mod noise_openings;
 pub mod non_controllable_factors;
 pub mod non_controllable_stats;
+pub mod residual_derivation;
 
 pub use annual_component::{InflowAnnualComponentRow, parse_inflow_annual_component};
 pub use ar_coefficients::{InflowArCoefficientRow, parse_inflow_ar_coefficients};
 pub use assembly::{assemble_inflow_models, assemble_load_models};
 pub use correlation::parse_correlation;
+pub use estimation::{EstimationError, EstimationPath, estimate_from_history};
 pub use external::{
     ExternalLoadRow, ExternalNcsRow, ExternalScenarioRow, parse_external_inflow_scenarios,
     parse_external_load_scenarios, parse_external_ncs_scenarios,
@@ -38,10 +41,12 @@ pub use noise_openings::{
 };
 pub use non_controllable_factors::{NcsFactorEntry, parse_non_controllable_factors};
 pub use non_controllable_stats::parse_ncs_stats;
+pub use residual_derivation::{populate_derived_residual_ratios, resolve_stage_seasons};
 
 use cobre_core::scenario::{CorrelationModel, InflowModel, LoadModel, NcsModel};
 
 use crate::LoadError;
+use crate::stages::parse_stages;
 use crate::validation::structural::FileManifest;
 use std::path::Path;
 
@@ -283,13 +288,27 @@ pub struct ScenarioData {
 ///
 /// File paths are constructed as `case_root.join("scenarios/<filename>")`.
 ///
+/// `inflow_models[].residual_std_ratio` is closure-derived, never read from a
+/// file (see [`populate_derived_residual_ratios`]). When `manifest.stages_json`
+/// is set, this function parses `case_root.join("stages.json")` for stage/season
+/// context and runs the derivation over the assembled models, mirroring the
+/// four production call sites (`pipeline.rs`, `scenarios::estimation`). When
+/// `manifest.stages_json` is unset — this function has no other source of
+/// stage/season context — derivation is skipped and every model keeps
+/// [`assemble_inflow_models`]'s placeholder `residual_std_ratio = 1.0`
+/// unresolved; a caller relying on the derived value in that case must call
+/// [`populate_derived_residual_ratios`] itself once stage data is available.
+///
 /// # Errors
 ///
-/// | Condition                                              | Error variant              |
-/// |--------------------------------------------------------|----------------------------|
-/// | Any file read or parse failure                         | Propagated from parser     |
-/// | AR coefficient rows without matching stats row         | [`LoadError::SchemaError`] |
-/// | AR coefficient rows exist for unknown (hydro, stage)   | [`LoadError::SchemaError`] |
+/// | Condition                                                | Error variant              |
+/// |-----------------------------------------------------------|----------------------------|
+/// | Any file read or parse failure                           | Propagated from parser     |
+/// | AR coefficient rows without matching stats row           | [`LoadError::SchemaError`] |
+/// | AR coefficient rows exist for unknown (hydro, stage)     | [`LoadError::SchemaError`] |
+/// | `stages.json` present but malformed                      | Propagated from `parse_stages` |
+/// | An order-bearing model's stage has no resolvable season (`stages.json` present) | [`LoadError::ConstraintError`] |
+/// | The `residual_std_ratio` closure is singular for a hydro (`stages.json` present) | [`LoadError::ConstraintError`] |
 ///
 /// # Examples
 ///
@@ -383,7 +402,16 @@ pub fn load_scenarios(
             .as_deref(),
     )?;
 
-    let inflow_models = assemble_inflow_models(raw_stats, raw_coefficients, raw_annual_components)?;
+    let mut inflow_models =
+        assemble_inflow_models(raw_stats, raw_coefficients, raw_annual_components)?;
+    if manifest.stages_json {
+        let stages_data = parse_stages(&case_root.join("stages.json"))?;
+        let (stage_to_season, n_seasons) = resolve_stage_seasons(
+            &stages_data.stages,
+            stages_data.policy_graph.season_map.as_ref(),
+        );
+        populate_derived_residual_ratios(&mut inflow_models, &stage_to_season, n_seasons)?;
+    }
     let load_models = assemble_load_models(raw_load_stats);
 
     Ok(ScenarioData {
@@ -548,6 +576,85 @@ mod tests {
         assert!(
             data.inflow_models.iter().all(|m| m.annual.is_none()),
             "every inflow model should have annual == None when annual component file is absent"
+        );
+    }
+
+    /// With `stages.json` present (`manifest.stages_json = true`), an
+    /// order-bearing model's `residual_std_ratio` must come out closure-derived
+    /// (`sqrt(1 - psi^2)` for this uniform-AR(1) fixture, per the closure's
+    /// exact order-1 decoupling), not the [`assemble_inflow_models`] placeholder
+    /// `1.0` — proving the derivation pass is actually wired into
+    /// `load_scenarios`, not merely reachable.
+    #[test]
+    fn test_load_scenarios_derives_residual_std_ratio_when_stages_present() {
+        use crate::output::stochastic::{
+            write_inflow_ar_coefficients, write_inflow_seasonal_stats,
+        };
+
+        let dir = TempDir::new().unwrap();
+        let scenarios_dir = dir.path().join("scenarios");
+        std::fs::create_dir_all(&scenarios_dir).unwrap();
+
+        std::fs::write(
+            dir.path().join("stages.json"),
+            r#"{
+                "season_definitions": {
+                    "cycle_type": "monthly",
+                    "seasons": [{ "id": 0, "month_start": 1, "label": "January" }]
+                },
+                "policy_graph": {
+                    "type": "finite_horizon",
+                    "annual_discount_rate": 0.0,
+                    "transitions": []
+                },
+                "stages": [{
+                    "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
+                    "season_id": 0,
+                    "blocks": [{ "id": 0, "name": "FLAT", "hours": 744.0 }],
+                    "num_scenarios": 10
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let psi = 0.5_f64;
+        write_inflow_seasonal_stats(
+            &scenarios_dir.join("inflow_seasonal_stats.parquet"),
+            &[InflowSeasonalStatsRow {
+                hydro_id: cobre_core::EntityId::from(1),
+                stage_id: 0,
+                mean_m3s: 100.0,
+                std_m3s: 20.0,
+            }],
+        )
+        .unwrap();
+        write_inflow_ar_coefficients(
+            &scenarios_dir.join("inflow_ar_coefficients.parquet"),
+            &[InflowArCoefficientRow {
+                hydro_id: cobre_core::EntityId::from(1),
+                stage_id: 0,
+                lag: 1,
+                coefficient: psi,
+            }],
+        )
+        .unwrap();
+
+        let manifest = FileManifest {
+            stages_json: true,
+            scenarios_inflow_seasonal_stats_parquet: true,
+            scenarios_inflow_ar_coefficients_parquet: true,
+            ..FileManifest::default()
+        };
+
+        let data = load_scenarios(dir.path(), &manifest).expect("load_scenarios must succeed");
+
+        assert_eq!(data.inflow_models.len(), 1);
+        let expected = (1.0 - psi * psi).sqrt();
+        let got = data.inflow_models[0].residual_std_ratio;
+        assert!(
+            (got - expected).abs() < 1e-9,
+            "residual_std_ratio must be the closure-derived value {expected}, not the \
+             assembly placeholder 1.0; got {got}"
         );
     }
 }

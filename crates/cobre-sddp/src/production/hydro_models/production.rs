@@ -12,8 +12,14 @@ use std::path::Path;
 
 use rayon::prelude::*;
 
-use cobre_core::{EntityId, System, entities::hydro::HydroGenerationModel};
+use cobre_core::temporal::Stage;
+use cobre_core::{
+    EntityId, Hydro, StageId, StudyPos, System, entities::hydro::HydroGenerationModel,
+};
+use cobre_io::CaseArtifacts;
+use cobre_io::FphaDeviationPointRow;
 use cobre_io::HydroReferenceVolumeFractions;
+use cobre_io::extensions::PlaneReductionConfig;
 use cobre_io::extensions::{
     FphaColumnLayout, FphaHyperplaneRow, HydroGeometryRow, ProductionModelConfig, ReferenceVolume,
     SeasonConfig, SelectionMode, StageRange, build_hydro_reference_volumes_resolved,
@@ -25,23 +31,25 @@ use super::types::{
     ResolvedProductionModel,
 };
 use crate::SddpError;
+use crate::energy_conversion::{
+    HydroEnergyProductivityOverride, build_hydro_energy_productivity_override,
+};
 use crate::fpha_fitting::{
     ForebayTable, FphaDeviationPoint, FphaFitDeviation, FphaFitResult, TailraceFamilies,
     TailraceSource, build_tailrace_families_map, fit_fpha_planes,
 };
-use crate::stage_key::StageId;
 // ── FPHA production model resolution ─────────────────────────────────────────
 
 /// Return type for [`resolve_production_models`]. Export rows are non-empty only
 /// when at least one hydro uses `source: "computed"`; this function never does I/O.
 type ResolveProductionResult = (
     ProductionModelSet,
-    crate::energy_conversion::HydroEnergyProductivityOverride,
+    HydroEnergyProductivityOverride,
     Vec<(EntityId, ProductionModelSource)>,
-    Vec<cobre_io::FphaHyperplaneRow>,
-    Vec<(EntityId, usize, f64)>,
+    Vec<FphaHyperplaneRow>,
+    Vec<(EntityId, StudyPos, f64)>,
     Vec<FphaFitDeviationEntry>,
-    Vec<cobre_io::FphaDeviationPointRow>,
+    Vec<FphaDeviationPointRow>,
 );
 
 /// Resolve per-hydro per-stage production models from the case directory.
@@ -87,19 +95,17 @@ pub fn resolve_production_models(
 /// Same conditions as [`resolve_production_models`].
 pub fn resolve_production_models_from_artifacts(
     system: &System,
-    artifacts: &cobre_io::CaseArtifacts,
+    artifacts: &CaseArtifacts,
     collect_deviation_points: bool,
 ) -> Result<ResolveProductionResult, SddpError> {
-    let override_table = crate::energy_conversion::build_hydro_energy_productivity_override(
-        &artifacts.hydro_energy_productivity,
-    )
-    .map_err(|e| SddpError::Validation(e.to_string()))?;
+    let override_table =
+        build_hydro_energy_productivity_override(&artifacts.hydro_energy_productivity)
+            .map_err(|e| SddpError::Validation(e.to_string()))?;
 
     let prod_configs: &[ProductionModelConfig] = &artifacts.production_models;
 
     // `None` skips the merge pass entirely.
-    let plane_reduction: Option<&cobre_io::extensions::PlaneReductionConfig> =
-        artifacts.plane_reduction.as_ref();
+    let plane_reduction: Option<&PlaneReductionConfig> = artifacts.plane_reduction.as_ref();
 
     let config_map: HashMap<EntityId, &ProductionModelConfig> =
         prod_configs.iter().map(|c| (c.hydro_id, c)).collect();
@@ -131,15 +137,14 @@ pub fn resolve_production_models_from_artifacts(
             HashMap::new()
         };
 
-    let study_stages: Vec<&cobre_core::temporal::Stage> =
-        system.stages().iter().filter(|s| s.id >= 0).collect();
+    let study_stages: Vec<&Stage> = system.stages().iter().filter(|s| s.id >= 0).collect();
     let n_stages = study_stages.len();
     let n_hydros = system.hydros().len();
 
     // The same resolved table feeds the energy-conversion reference in
     // `setup::build_energy_and_templates`, so the backwater level and the
     // productivity reference share one source of truth.
-    let reference_volumes_hm3: Vec<(EntityId, usize, f64)> = system
+    let reference_volumes_hm3: Vec<(EntityId, StudyPos, f64)> = system
         .hydros()
         .iter()
         .flat_map(|hydro| {
@@ -153,7 +158,7 @@ pub fn resolve_production_models_from_artifacts(
                 // both consumers (`resolve_downstream_level`,
                 // `build_energy_conversion_set`) query by study position;
                 // `stage.index` shifts every key by the pre-study-stage count.
-                (hydro.id, stage_pos, resolved)
+                (hydro.id, StudyPos(stage_pos), resolved)
             })
         })
         .collect();
@@ -162,11 +167,11 @@ pub fn resolve_production_models_from_artifacts(
 
     let mut all_models: Vec<Vec<ResolvedProductionModel>> = Vec::with_capacity(n_hydros);
     let mut provenance: Vec<(EntityId, ProductionModelSource)> = Vec::with_capacity(n_hydros);
-    let mut export_rows: Vec<cobre_io::FphaHyperplaneRow> = Vec::new();
+    let mut export_rows: Vec<FphaHyperplaneRow> = Vec::new();
     let mut fpha_fit_deviations: Vec<FphaFitDeviationEntry> = Vec::new();
     // Per-sampled-point deviation rows, concatenated below in the same sequential
     // canonical-order flatten as `export_rows`. Empty unless the opt-in is on.
-    let mut fpha_deviation_point_rows: Vec<cobre_io::FphaDeviationPointRow> = Vec::new();
+    let mut fpha_deviation_point_rows: Vec<FphaDeviationPointRow> = Vec::new();
 
     // Determinism (D5): `par_iter().collect()` reassembles the fits in canonical
     // hydro order regardless of thread scheduling, then the SEQUENTIAL flatten
@@ -257,10 +262,10 @@ struct FphaDeviationDiagnostic {
 struct PerHydroFit {
     stage_models: Vec<ResolvedProductionModel>,
     provenance: (EntityId, ProductionModelSource),
-    export_rows: Vec<cobre_io::FphaHyperplaneRow>,
+    export_rows: Vec<FphaHyperplaneRow>,
     fpha_deviations: Vec<FphaDeviationDiagnostic>,
     /// Per-sampled-point rows; empty unless `collect_deviation_points` is on.
-    deviation_point_rows: Vec<cobre_io::FphaDeviationPointRow>,
+    deviation_point_rows: Vec<FphaDeviationPointRow>,
 }
 
 /// Resolve every study-stage production model for ONE hydro, returning the
@@ -274,15 +279,15 @@ struct PerHydroFit {
 // context struct would only relocate the same fields.
 #[allow(clippy::too_many_arguments)]
 fn fit_one_hydro(
-    hydro: &cobre_core::entities::hydro::Hydro,
+    hydro: &Hydro,
     config_map: &HashMap<EntityId, &ProductionModelConfig>,
     geometry_map: &HashMap<EntityId, Vec<&HydroGeometryRow>>,
     families_map: &HashMap<EntityId, TailraceFamilies>,
     reference_volume_fractions: &HydroReferenceVolumeFractions,
     hyperplane_map: &HashMap<(EntityId, Option<i32>), Vec<&FphaHyperplaneRow>>,
-    override_table: &crate::energy_conversion::HydroEnergyProductivityOverride,
-    study_stages: &[&cobre_core::temporal::Stage],
-    plane_reduction: Option<&cobre_io::extensions::PlaneReductionConfig>,
+    override_table: &HydroEnergyProductivityOverride,
+    study_stages: &[&Stage],
+    plane_reduction: Option<&PlaneReductionConfig>,
     system: &System,
     n_stages: usize,
     collect_deviation_points: bool,
@@ -291,9 +296,9 @@ fn fit_one_hydro(
 
     let source = determine_source(hydro, config_entry)?;
 
-    let mut export_rows: Vec<cobre_io::FphaHyperplaneRow> = Vec::new();
+    let mut export_rows: Vec<FphaHyperplaneRow> = Vec::new();
     let mut fpha_deviations: Vec<FphaDeviationDiagnostic> = Vec::new();
-    let mut deviation_point_rows: Vec<cobre_io::FphaDeviationPointRow> = Vec::new();
+    let mut deviation_point_rows: Vec<FphaDeviationPointRow> = Vec::new();
 
     // Fit once per distinct `SelectionMode` entry (via the dedup in
     // `fit_computed_planes_per_stage`); each study stage carries the plane set of
@@ -368,13 +373,13 @@ fn build_geometry_map(
 /// reference volume. `None` when there is no downstream plant, or the downstream
 /// plant is absent / has no geometry.
 ///
-/// `stage_pos` is the 0-based study-horizon position (NOT `stage.index`), keyed to
-/// match the reference-volume resolver and `build_energy_conversion_set`. The
-/// resolver already holds `v_ref` resolved to absolute hm³, so it is consumed
-/// verbatim — do NOT re-apply the `v_min + fraction·(..)` span formula here.
+/// `stage_pos` is keyed to match the reference-volume resolver and
+/// `build_energy_conversion_set`. The resolver already holds `v_ref` resolved to
+/// absolute hm³, so it is consumed verbatim — do NOT re-apply the
+/// `v_min + fraction·(..)` span formula here.
 fn resolve_downstream_level(
-    hydro: &cobre_core::entities::hydro::Hydro,
-    stage_pos: usize,
+    hydro: &Hydro,
+    stage_pos: StudyPos,
     system: &System,
     geometry_map: &HashMap<EntityId, Vec<&HydroGeometryRow>>,
     reference_volume_fractions: &HydroReferenceVolumeFractions,
@@ -428,12 +433,12 @@ fn long_term_mean_inflow(system: &System, hydro_id: EntityId) -> f64 {
 /// the hull/α/secant procedure. `plane_reduction` `None` skips the merge pass.
 /// `entry_level_bits` seeds the `Distance` reduction arm (with `hydro.id.0`).
 fn fit_planes_for_hydro(
-    hydro: &cobre_core::entities::hydro::Hydro,
+    hydro: &Hydro,
     config: &FphaColumnLayout,
     geometry_map: &HashMap<EntityId, Vec<&HydroGeometryRow>>,
     long_term_mean_inflow_m3s: f64,
     tailrace_source: TailraceSource,
-    plane_reduction: Option<&cobre_io::extensions::PlaneReductionConfig>,
+    plane_reduction: Option<&PlaneReductionConfig>,
     entry_level_bits: u64,
     collect_deviation_points: bool,
 ) -> Result<FphaFitResult, SddpError> {
@@ -463,8 +468,8 @@ fn fit_planes_for_hydro(
 /// families coupled to the resolved downstream level when the plant is in
 /// `families_map`, else the entity [`cobre_core::TailraceModel`] fallback.
 fn resolve_tailrace_source(
-    hydro: &cobre_core::entities::hydro::Hydro,
-    stage_pos: usize,
+    hydro: &Hydro,
+    stage_pos: StudyPos,
     families_map: &HashMap<EntityId, TailraceFamilies>,
     geometry_map: &HashMap<EntityId, Vec<&HydroGeometryRow>>,
     reference_volume_fractions: &HydroReferenceVolumeFractions,
@@ -522,19 +527,19 @@ type FittedCacheEntry<'a> = (
 // would only relocate the same fields.
 #[allow(clippy::too_many_arguments)]
 fn fit_computed_planes_per_stage(
-    hydro: &cobre_core::entities::hydro::Hydro,
+    hydro: &Hydro,
     config_entry: Option<&ProductionModelConfig>,
     geometry_map: &HashMap<EntityId, Vec<&HydroGeometryRow>>,
     families_map: &HashMap<EntityId, TailraceFamilies>,
     reference_volume_fractions: &HydroReferenceVolumeFractions,
     system: &System,
-    study_stages: &[&cobre_core::temporal::Stage],
+    study_stages: &[&Stage],
     long_term_mean_inflow_m3s: f64,
-    plane_reduction: Option<&cobre_io::extensions::PlaneReductionConfig>,
+    plane_reduction: Option<&PlaneReductionConfig>,
     collect_deviation_points: bool,
-    export_rows: &mut Vec<cobre_io::FphaHyperplaneRow>,
+    export_rows: &mut Vec<FphaHyperplaneRow>,
     diagnostics: &mut Vec<FphaDeviationDiagnostic>,
-    deviation_point_rows: &mut Vec<cobre_io::FphaDeviationPointRow>,
+    deviation_point_rows: &mut Vec<FphaDeviationPointRow>,
 ) -> Result<Vec<Vec<FphaPlane>>, SddpError> {
     // Linear scan over `PartialEq` rather than a hash map: `FphaColumnLayout` holds
     // f64 fields (no `Eq`/`Hash`) and the per-hydro entry count is small.
@@ -554,7 +559,7 @@ fn fit_computed_planes_per_stage(
 
         let tailrace_source = resolve_tailrace_source(
             hydro,
-            stage_pos,
+            StudyPos(stage_pos),
             families_map,
             geometry_map,
             reference_volume_fractions,
@@ -598,7 +603,7 @@ fn fit_computed_planes_per_stage(
             };
 
         for point in &deviation_points {
-            deviation_point_rows.push(cobre_io::FphaDeviationPointRow {
+            deviation_point_rows.push(FphaDeviationPointRow {
                 hydro_id: hydro.id,
                 stage_id: Some(stage.id),
                 v: point.v,
@@ -666,7 +671,7 @@ fn config_uses_computed_fpha(config: &ProductionModelConfig) -> bool {
 /// the matched entry has no `fpha_config` field.
 fn find_fpha_config_for_stage<'a>(
     config: &'a ProductionModelConfig,
-    stage: &cobre_core::temporal::Stage,
+    stage: &Stage,
 ) -> Option<&'a FphaColumnLayout> {
     resolve_stage(config, stage).fpha_config
 }
@@ -685,7 +690,7 @@ pub(crate) const DEFAULT_REFERENCE_VOLUME_FRACTION: f64 = 0.65;
 /// entry has no `reference_volume`.
 fn find_reference_volume_for_stage<'a>(
     config: &'a ProductionModelConfig,
-    stage: &cobre_core::temporal::Stage,
+    stage: &Stage,
 ) -> Option<&'a ReferenceVolume> {
     resolve_stage(config, stage).reference_volume
 }
@@ -721,7 +726,7 @@ pub(crate) fn resolve_reference_volume_hm3(
 ///
 /// Returns `SddpError::Validation` naming the first missing prerequisite and the hydro.
 fn validate_computed_prerequisites(
-    hydro: &cobre_core::entities::hydro::Hydro,
+    hydro: &Hydro,
     geometry_map: &HashMap<EntityId, Vec<&HydroGeometryRow>>,
 ) -> Result<(), SddpError> {
     let missing = if hydro.tailrace.is_none() {
@@ -751,7 +756,7 @@ fn validate_computed_prerequisites(
 /// Determine the [`ProductionModelSource`] for one hydro (the high-level
 /// classification only), rejecting unsupported cases before any Parquet load.
 fn determine_source(
-    hydro: &cobre_core::entities::hydro::Hydro,
+    hydro: &Hydro,
     config_entry: Option<&ProductionModelConfig>,
 ) -> Result<ProductionModelSource, SddpError> {
     if let Some(config) = config_entry {
@@ -787,13 +792,13 @@ fn determine_source(
 /// loop (when `source == ComputedFromGeometry`), so the fitting pipeline does not
 /// re-run per stage.
 fn resolve_stage_model(
-    hydro: &cobre_core::entities::hydro::Hydro,
-    stage: &cobre_core::temporal::Stage,
+    hydro: &Hydro,
+    stage: &Stage,
     config_entry: Option<&ProductionModelConfig>,
     source: ProductionModelSource,
     hyperplane_map: &HashMap<(EntityId, Option<i32>), Vec<&FphaHyperplaneRow>>,
     cached_computed_planes: Option<&[FphaPlane]>,
-    productivity_override: Option<&crate::energy_conversion::HydroEnergyProductivityOverride>,
+    productivity_override: Option<&HydroEnergyProductivityOverride>,
 ) -> Result<ResolvedProductionModel, SddpError> {
     // `cobre_io::validation::productivity_resolution` rejects both-JSON-and-parquet
     // at load time, so this override lookup never silently masks a JSON value.
@@ -858,7 +863,7 @@ fn resolve_stage_model(
 /// For `Seasonal`, the match is by `season_id == stage.season_id`.
 fn find_model_for_stage(
     config: &ProductionModelConfig,
-    stage: &cobre_core::temporal::Stage,
+    stage: &Stage,
 ) -> Option<(String, Option<f64>)> {
     let resolution = resolve_stage(config, stage);
     resolution
@@ -960,7 +965,7 @@ struct StageProductionResolution<'a> {
 /// not.
 fn resolve_stage<'a>(
     config: &'a ProductionModelConfig,
-    stage: &cobre_core::temporal::Stage,
+    stage: &Stage,
 ) -> StageProductionResolution<'a> {
     match &config.selection_mode {
         SelectionMode::StageRanges { ranges } => {
@@ -1015,8 +1020,8 @@ fn resolve_stage<'a>(
 /// `(hydro_id, None)` all-stage rows. Each `FphaPlane` intercept is the pre-scaled
 /// `gamma_0 * kappa`.
 fn build_fpha_model(
-    hydro: &cobre_core::entities::hydro::Hydro,
-    stage: &cobre_core::temporal::Stage,
+    hydro: &Hydro,
+    stage: &Stage,
     _source: ProductionModelSource,
     hyperplane_map: &HashMap<(EntityId, Option<i32>), Vec<&FphaHyperplaneRow>>,
 ) -> Result<ResolvedProductionModel, SddpError> {
@@ -1064,8 +1069,8 @@ fn build_fpha_model(
 /// - `gamma_q > 0` — more turbined flow → more generation
 /// - `kappa ∈ (0, 1]` — correction factor range
 fn validate_hyperplane_row(
-    hydro: &cobre_core::entities::hydro::Hydro,
-    stage: &cobre_core::temporal::Stage,
+    hydro: &Hydro,
+    stage: &Stage,
     row: &FphaHyperplaneRow,
 ) -> Result<(), SddpError> {
     let ctx = format!(

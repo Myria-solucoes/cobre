@@ -4,6 +4,10 @@
 //! negative PAR(p) inflow realisations, dispatched via `match` when constructing
 //! LP templates and extracting simulation results.
 
+use cobre_io::config::InflowNonNegativityConfig;
+use cobre_io::config::InflowNonNegativityMethod::Penalty;
+use cobre_io::config::InflowNonNegativityMethod::Truncation;
+use cobre_io::config::InflowNonNegativityMethod::TruncationWithPenalty;
 /// Inflow non-negativity treatment method.
 ///
 /// The variant must be the same across all stages (set once at solver
@@ -62,21 +66,15 @@ impl InflowNonNegativityMethod {
     }
 }
 
-impl From<&cobre_io::config::InflowNonNegativityConfig> for InflowNonNegativityMethod {
+impl From<&InflowNonNegativityConfig> for InflowNonNegativityMethod {
     /// The config method is a typed enum, so typos are rejected at parse time
     /// before this total conversion runs.
-    fn from(cfg: &cobre_io::config::InflowNonNegativityConfig) -> Self {
+    fn from(cfg: &InflowNonNegativityConfig) -> Self {
         match cfg.method {
             cobre_io::config::InflowNonNegativityMethod::None => InflowNonNegativityMethod::None,
-            cobre_io::config::InflowNonNegativityMethod::Truncation => {
-                InflowNonNegativityMethod::Truncation
-            }
-            cobre_io::config::InflowNonNegativityMethod::Penalty => {
-                InflowNonNegativityMethod::Penalty
-            }
-            cobre_io::config::InflowNonNegativityMethod::TruncationWithPenalty => {
-                InflowNonNegativityMethod::TruncationWithPenalty
-            }
+            Truncation => InflowNonNegativityMethod::Truncation,
+            Penalty => InflowNonNegativityMethod::Penalty,
+            TruncationWithPenalty => InflowNonNegativityMethod::TruncationWithPenalty,
         }
     }
 }

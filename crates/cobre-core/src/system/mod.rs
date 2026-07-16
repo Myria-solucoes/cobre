@@ -20,6 +20,7 @@ mod validate;
 
 pub use builder::SystemBuilder;
 
+#[cfg(feature = "serde")]
 use validate::{build_index, build_stage_index};
 
 /// Top-level system representation: immutable and thread-safe after construction.
@@ -50,6 +51,7 @@ use validate::{build_index, build_stage_index};
 /// ```
 #[derive(Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(from = "SystemRepr"))]
 pub struct System {
     buses: Vec<Bus>,
     lines: Vec<Line>,
@@ -59,8 +61,11 @@ pub struct System {
     contracts: Vec<EnergyContract>,
     non_controllable_sources: Vec<NonControllableSource>,
 
-    // Lookup indices are not serialized; the caller must invoke `rebuild_indices()`
-    // after deserialization to restore them (spec SS6.2).
+    // Not serialized: `HashMap` iteration order is unstable, so serializing an
+    // index would make the wire payload non-reproducible for identical content.
+    // `serde(from = "SystemRepr")` above is `Deserialize`'s sole entry point and
+    // rebuilds them unconditionally — without it every lookup on a deserialized
+    // `System` silently returns `None`.
     #[cfg_attr(feature = "serde", serde(skip))]
     bus_index: HashMap<EntityId, usize>,
     #[cfg_attr(feature = "serde", serde(skip))]
@@ -135,6 +140,88 @@ const _: () = {
     }
     let _ = check;
 };
+
+/// Deserialize-only mirror of [`System`] without the derived indices. Field
+/// order must match `System`'s non-skipped fields exactly — postcard is
+/// non-self-describing, so a reorder silently decodes into the wrong fields.
+#[cfg(feature = "serde")]
+#[derive(serde::Deserialize)]
+struct SystemRepr {
+    buses: Vec<Bus>,
+    lines: Vec<Line>,
+    hydros: Vec<Hydro>,
+    thermals: Vec<Thermal>,
+    pumping_stations: Vec<PumpingStation>,
+    contracts: Vec<EnergyContract>,
+    non_controllable_sources: Vec<NonControllableSource>,
+    cascade: CascadeTopology,
+    network: NetworkTopology,
+    stages: Vec<Stage>,
+    policy_graph: PolicyGraph,
+    penalties: ResolvedPenalties,
+    bounds: ResolvedBounds,
+    resolved_generic_bounds: ResolvedGenericConstraintBounds,
+    resolved_load_factors: ResolvedLoadFactors,
+    resolved_exchange_factors: ResolvedExchangeFactors,
+    resolved_ncs_bounds: ResolvedNcsBounds,
+    resolved_ncs_factors: ResolvedNcsFactors,
+    inflow_models: Vec<InflowModel>,
+    load_models: Vec<LoadModel>,
+    ncs_models: Vec<NcsModel>,
+    correlation: CorrelationModel,
+    initial_conditions: InitialConditions,
+    generic_constraints: Vec<GenericConstraint>,
+    inflow_history: Vec<InflowHistoryRow>,
+    external_scenarios: Vec<ExternalScenarioRow>,
+    external_load_scenarios: Vec<ExternalLoadRow>,
+    external_ncs_scenarios: Vec<ExternalNcsRow>,
+}
+
+#[cfg(feature = "serde")]
+impl From<SystemRepr> for System {
+    fn from(repr: SystemRepr) -> Self {
+        let mut system = System {
+            buses: repr.buses,
+            lines: repr.lines,
+            hydros: repr.hydros,
+            thermals: repr.thermals,
+            pumping_stations: repr.pumping_stations,
+            contracts: repr.contracts,
+            non_controllable_sources: repr.non_controllable_sources,
+            bus_index: HashMap::new(),
+            line_index: HashMap::new(),
+            hydro_index: HashMap::new(),
+            thermal_index: HashMap::new(),
+            pumping_station_index: HashMap::new(),
+            contract_index: HashMap::new(),
+            non_controllable_source_index: HashMap::new(),
+            cascade: repr.cascade,
+            network: repr.network,
+            stages: repr.stages,
+            policy_graph: repr.policy_graph,
+            stage_index: HashMap::new(),
+            penalties: repr.penalties,
+            bounds: repr.bounds,
+            resolved_generic_bounds: repr.resolved_generic_bounds,
+            resolved_load_factors: repr.resolved_load_factors,
+            resolved_exchange_factors: repr.resolved_exchange_factors,
+            resolved_ncs_bounds: repr.resolved_ncs_bounds,
+            resolved_ncs_factors: repr.resolved_ncs_factors,
+            inflow_models: repr.inflow_models,
+            load_models: repr.load_models,
+            ncs_models: repr.ncs_models,
+            correlation: repr.correlation,
+            initial_conditions: repr.initial_conditions,
+            generic_constraints: repr.generic_constraints,
+            inflow_history: repr.inflow_history,
+            external_scenarios: repr.external_scenarios,
+            external_load_scenarios: repr.external_load_scenarios,
+            external_ncs_scenarios: repr.external_ncs_scenarios,
+        };
+        system.rebuild_indices();
+        system
+    }
+}
 
 impl System {
     /// Returns all buses in canonical ID order.
@@ -453,38 +540,11 @@ impl System {
 
     /// Rebuild all lookup indices from the entity collections.
     ///
-    /// Required after deserialization: the indices are `serde(skip)`, so call this
-    /// once to restore lookup via [`bus`](Self::bus), [`hydro`](Self::hydro), etc.
-    /// (spec SS6.2).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # #[cfg(feature = "serde")]
-    /// # {
-    /// use chrono::NaiveDate;
-    /// use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
-    ///
-    /// let system = SystemBuilder::new()
-    ///     .buses(vec![Bus {
-    ///         id: EntityId(1),
-    ///         name: "A".to_string(),
-    ///         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-    ///         deficit_segments: vec![],
-    ///         excess_cost: 0.0,
-    ///     }])
-    ///     .build()
-    ///     .expect("valid system");
-    ///
-    /// let json = serde_json::to_string(&system).unwrap();
-    /// let mut deserialized: cobre_core::System = serde_json::from_str(&json).unwrap();
-    /// deserialized.rebuild_indices();
-    ///
-    /// // O(1) lookup now works after index rebuild.
-    /// assert!(deserialized.bus(EntityId(1)).is_some());
-    /// # }
-    /// ```
-    pub fn rebuild_indices(&mut self) {
+    /// Sole caller: `From<SystemRepr>` (`Deserialize`'s entry point).
+    /// `SystemBuilder::build` needs the same maps earlier, for cross-reference
+    /// validation, so it builds them inline instead of calling this.
+    #[cfg(feature = "serde")]
+    pub(crate) fn rebuild_indices(&mut self) {
         self.bus_index = build_index(&self.buses);
         self.line_index = build_index(&self.lines);
         self.hydro_index = build_index(&self.hydros);
@@ -1387,8 +1447,7 @@ mod tests {
 
         let json = serde_json::to_string(&system).unwrap();
 
-        let mut deserialized: System = serde_json::from_str(&json).unwrap();
-        deserialized.rebuild_indices();
+        let deserialized: System = serde_json::from_str(&json).unwrap();
 
         assert_eq!(system.buses(), deserialized.buses());
         assert_eq!(system.hydros(), deserialized.hydros());
@@ -1567,8 +1626,7 @@ mod tests {
             .expect("valid system");
 
         let json = serde_json::to_string(&system).unwrap();
-        let mut deserialized: System = serde_json::from_str(&json).unwrap();
-        deserialized.rebuild_indices();
+        let deserialized: System = serde_json::from_str(&json).unwrap();
 
         assert_eq!(system.n_stages(), deserialized.n_stages());
         assert_eq!(system.stages()[0].id, deserialized.stages()[0].id);
@@ -1582,6 +1640,406 @@ mod tests {
             deserialized.policy_graph().graph_type,
             system.policy_graph().graph_type
         );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn deserialized_system_lookups_work_without_manual_rebuild() {
+        let bus = make_bus(1);
+        let hydro = make_hydro_on_bus(10, 1);
+        let thermal = make_thermal_on_bus(20, 1);
+
+        let system = SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(vec![hydro])
+            .thermals(vec![thermal])
+            .build()
+            .expect("valid system");
+
+        let bytes = postcard::to_allocvec(&system).unwrap();
+        let deserialized: System = postcard::from_bytes(&bytes).unwrap();
+
+        assert_eq!(
+            deserialized.bus(EntityId(1)).map(|b| b.id),
+            Some(EntityId(1))
+        );
+        assert_eq!(
+            deserialized.hydro(EntityId(10)).map(|h| h.id),
+            Some(EntityId(10))
+        );
+        assert_eq!(
+            deserialized.thermal(EntityId(20)).map(|t| t.id),
+            Some(EntityId(20))
+        );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn fully_populated_system_survives_postcard_roundtrip_intact() {
+        use crate::{
+            AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
+            ConstraintExpression, ConstraintSense, ContractStageBounds, CorrelationEntity,
+            CorrelationGroup, CorrelationProfile, CorrelationScheduleEntry, DeficitSegment,
+            HydroPastDefluence, HydroPastInflows, HydroStageBounds, HydroStagePenalties,
+            HydroStorage, LineStageBounds, LineStagePenalties, LinearTerm, NcsStagePenalties,
+            PenaltiesCountsSpec, PenaltiesDefaults, PolicyGraphType, PumpingStageBounds,
+            RecentObservation, SlackConfig, ThermalStageBounds, Transition, VariableRef,
+        };
+
+        let bus1 = {
+            let mut b = make_bus(1);
+            b.deficit_segments = vec![DeficitSegment {
+                depth_mw: Some(50.0),
+                cost_per_mwh: 3000.0,
+            }];
+            b.excess_cost = 12.5;
+            b
+        };
+        let bus2 = {
+            let mut b = make_bus(2);
+            b.deficit_segments = vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 5000.0,
+            }];
+            b.excess_cost = 7.25;
+            b
+        };
+
+        let mut hydro1 = make_hydro_on_bus(1, 1);
+        hydro1.downstream_id = Some(EntityId(2));
+        hydro1.travel_time_hours = Some(6.0);
+        hydro1.entry_stage_id = Some(0);
+        let hydro2 = make_hydro_on_bus(2, 2);
+
+        let thermal1 = make_thermal_on_bus(1, 1);
+        let line1 = make_line(1, 1, 2);
+        let pump1 = make_pumping_station_full(1, 1, 1, 2);
+        let contract1 = make_contract_on_bus(1, 2);
+        let ncs1 = make_ncs_on_bus(1, 2);
+
+        let stage0 = make_stage(0);
+        let stage1 = make_stage(1);
+
+        let policy_graph = PolicyGraph {
+            graph_type: PolicyGraphType::Cyclic,
+            annual_discount_rate: 0.08,
+            transitions: vec![
+                Transition {
+                    source_id: 0,
+                    target_id: 1,
+                    probability: 1.0,
+                    annual_discount_rate_override: None,
+                },
+                Transition {
+                    source_id: 1,
+                    target_id: 0,
+                    probability: 1.0,
+                    annual_discount_rate_override: Some(0.05),
+                },
+            ],
+            season_map: None,
+        };
+
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 2,
+                n_buses: 2,
+                n_lines: 1,
+                n_ncs: 1,
+                n_stages: 2,
+            },
+            &PenaltiesDefaults {
+                hydro: HydroStagePenalties {
+                    spillage_cost: 0.01,
+                    diversion_cost: 0.02,
+                    turbined_cost: 0.03,
+                    storage_violation_below_cost: 1000.0,
+                    filling_target_violation_cost: 5000.0,
+                    turbined_violation_below_cost: 500.0,
+                    outflow_violation_below_cost: 400.0,
+                    outflow_violation_above_cost: 300.0,
+                    generation_violation_below_cost: 200.0,
+                    evaporation_violation_cost: 150.0,
+                    water_withdrawal_violation_cost: 100.0,
+                    water_withdrawal_violation_pos_cost: 100.0,
+                    water_withdrawal_violation_neg_cost: 100.0,
+                    evaporation_violation_pos_cost: 150.0,
+                    evaporation_violation_neg_cost: 150.0,
+                    inflow_nonnegativity_cost: 1000.0,
+                },
+                bus: BusStagePenalties { excess_cost: 250.0 },
+                line: LineStagePenalties {
+                    exchange_cost: 12.5,
+                },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 33.0,
+                },
+            },
+        );
+
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 2,
+                n_thermals: 1,
+                n_lines: 1,
+                n_pumping: 1,
+                n_contracts: 1,
+                n_stages: 2,
+                k_max: 1,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 10.0,
+                    max_storage_hm3: 500.0,
+                    min_turbined_m3s: 1.0,
+                    max_turbined_m3s: 300.0,
+                    min_outflow_m3s: 2.0,
+                    max_outflow_m3s: Some(600.0),
+                    min_generation_mw: 5.0,
+                    max_generation_mw: 200.0,
+                    max_diversion_m3s: Some(20.0),
+                    filling_min_rate_m3s: 3.0,
+                    water_withdrawal_m3s: 1.5,
+                },
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 10.0,
+                    max_generation_mw: 150.0,
+                    cost_per_mwh: 85.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 300.0,
+                    reverse_mw: 250.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.5,
+                    max_flow_m3s: 40.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 90.0,
+                    price_per_mwh: 95.0,
+                },
+            },
+        );
+
+        let resolved_generic_bounds = ResolvedGenericConstraintBounds::new(
+            &std::collections::HashMap::from([(1i32, 0usize)]),
+            vec![(1i32, 0i32, None::<i32>, 777.0f64)].into_iter(),
+        );
+
+        let mut resolved_load_factors = ResolvedLoadFactors::new(2, 2, 1);
+        resolved_load_factors.set(0, 0, 0, 0.92);
+        resolved_load_factors.set(1, 1, 0, 1.08);
+
+        let mut resolved_exchange_factors = ResolvedExchangeFactors::new(1, 2, 1);
+        resolved_exchange_factors.set(0, 0, 0, 0.95, 0.9);
+
+        let resolved_ncs_bounds = ResolvedNcsBounds::new(1, 2, &[45.0]);
+
+        let mut resolved_ncs_factors = ResolvedNcsFactors::new(1, 2, 1);
+        resolved_ncs_factors.set(0, 0, 0, 0.77);
+
+        let inflow_models = vec![
+            InflowModel {
+                hydro_id: EntityId(1),
+                stage_id: 0,
+                mean_m3s: 150.0,
+                std_m3s: 30.0,
+                ar_coefficients: vec![0.45, 0.22],
+                residual_std_ratio: 0.85,
+                annual: None,
+            },
+            InflowModel {
+                hydro_id: EntityId(2),
+                stage_id: 1,
+                mean_m3s: 90.0,
+                std_m3s: 15.0,
+                ar_coefficients: vec![0.3],
+                residual_std_ratio: 0.7,
+                annual: None,
+            },
+        ];
+
+        let load_models = vec![
+            LoadModel {
+                bus_id: EntityId(1),
+                stage_id: 0,
+                mean_mw: 320.5,
+                std_mw: 45.0,
+            },
+            LoadModel {
+                bus_id: EntityId(2),
+                stage_id: 1,
+                mean_mw: 210.0,
+                std_mw: 30.0,
+            },
+        ];
+
+        let ncs_models = vec![NcsModel {
+            ncs_id: EntityId(1),
+            stage_id: 0,
+            mean: 0.5,
+            std: 0.1,
+        }];
+
+        let correlation = {
+            let mut profiles = std::collections::BTreeMap::new();
+            profiles.insert(
+                "default".to_string(),
+                CorrelationProfile {
+                    groups: vec![CorrelationGroup {
+                        name: "All".to_string(),
+                        entities: vec![
+                            CorrelationEntity {
+                                entity_type: "inflow".to_string(),
+                                id: EntityId(1),
+                            },
+                            CorrelationEntity {
+                                entity_type: "inflow".to_string(),
+                                id: EntityId(2),
+                            },
+                        ],
+                        matrix: vec![vec![1.0, 0.3], vec![0.3, 1.0]],
+                    }],
+                },
+            );
+            CorrelationModel {
+                method: "spectral".to_string(),
+                profiles,
+                schedule: vec![CorrelationScheduleEntry {
+                    stage_id: 0,
+                    profile_name: "default".to_string(),
+                }],
+            }
+        };
+
+        let initial_conditions = InitialConditions {
+            storage: vec![
+                HydroStorage {
+                    hydro_id: EntityId(1),
+                    value_hm3: 12_000.0,
+                },
+                HydroStorage {
+                    hydro_id: EntityId(2),
+                    value_hm3: 8_500.0,
+                },
+            ],
+            filling_storage: vec![HydroStorage {
+                hydro_id: EntityId(1),
+                value_hm3: 50.0,
+            }],
+            past_inflows: vec![HydroPastInflows {
+                hydro_id: EntityId(1),
+                values_m3s: vec![600.0, 500.0],
+                season_ids: None,
+            }],
+            past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
+                thermal_id: EntityId(1),
+                values_mw: vec![100.0, 200.0],
+            }],
+            recent_observations: vec![RecentObservation {
+                hydro_id: EntityId(1),
+                start_date: NaiveDate::from_ymd_opt(2023, 12, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2023, 12, 15).unwrap(),
+                value_m3s: 480.0,
+            }],
+            past_defluences: vec![HydroPastDefluence {
+                hydro_id: EntityId(1),
+                start_date: NaiveDate::from_ymd_opt(2023, 11, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2023, 12, 1).unwrap(),
+                value_m3s: 320.0,
+            }],
+        };
+
+        let generic_constraints = vec![GenericConstraint {
+            id: EntityId(1),
+            name: "gc-full".to_string(),
+            description: Some("full population coverage".to_string()),
+            expression: ConstraintExpression {
+                terms: vec![LinearTerm::literal(
+                    1.0,
+                    VariableRef::HydroGeneration {
+                        hydro_id: EntityId(1),
+                        block_id: None,
+                    },
+                )],
+            },
+            sense: ConstraintSense::GreaterEqual,
+            slack: SlackConfig {
+                enabled: true,
+                penalty: Some(2500.0),
+            },
+        }];
+
+        let inflow_history = vec![
+            InflowHistoryRow {
+                hydro_id: EntityId(1),
+                date: NaiveDate::from_ymd_opt(2000, 1, 1).unwrap(),
+                value_m3s: 500.0,
+            },
+            InflowHistoryRow {
+                hydro_id: EntityId(2),
+                date: NaiveDate::from_ymd_opt(2000, 2, 1).unwrap(),
+                value_m3s: 420.0,
+            },
+        ];
+
+        let external_scenarios = vec![ExternalScenarioRow {
+            stage_id: 0,
+            scenario_id: 2,
+            hydro_id: EntityId(1),
+            value_m3s: 320.5,
+        }];
+
+        let external_load_scenarios = vec![ExternalLoadRow {
+            stage_id: 0,
+            scenario_id: 2,
+            bus_id: EntityId(1),
+            value_mw: 150.0,
+        }];
+
+        let external_ncs_scenarios = vec![ExternalNcsRow {
+            stage_id: 1,
+            scenario_id: 0,
+            ncs_id: EntityId(1),
+            value: 0.85,
+        }];
+
+        let system = SystemBuilder::new()
+            .buses(vec![bus1, bus2])
+            .lines(vec![line1])
+            .hydros(vec![hydro1, hydro2])
+            .thermals(vec![thermal1])
+            .pumping_stations(vec![pump1])
+            .contracts(vec![contract1])
+            .non_controllable_sources(vec![ncs1])
+            .stages(vec![stage0, stage1])
+            .policy_graph(policy_graph)
+            .penalties(penalties)
+            .bounds(bounds)
+            .resolved_generic_bounds(resolved_generic_bounds)
+            .resolved_load_factors(resolved_load_factors)
+            .resolved_exchange_factors(resolved_exchange_factors)
+            .resolved_ncs_bounds(resolved_ncs_bounds)
+            .resolved_ncs_factors(resolved_ncs_factors)
+            .inflow_models(inflow_models)
+            .load_models(load_models)
+            .ncs_models(ncs_models)
+            .correlation(correlation)
+            .initial_conditions(initial_conditions)
+            .generic_constraints(generic_constraints)
+            .inflow_history(inflow_history)
+            .external_scenarios(external_scenarios)
+            .external_load_scenarios(external_load_scenarios)
+            .external_ncs_scenarios(external_ncs_scenarios)
+            .build()
+            .expect("fully populated, cross-reference-consistent system must be valid");
+
+        let bytes = postcard::to_allocvec(&system).unwrap();
+        let deserialized: System = postcard::from_bytes(&bytes).unwrap();
+
+        // Failure means SystemRepr drifted from System: field order or field set.
+        assert_eq!(system, deserialized);
     }
 
     // ---- inflow_history and external_scenarios field tests ------------------

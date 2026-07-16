@@ -8,7 +8,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use cobre_core::{EntityId, System};
+use cobre_core::temporal::Stage;
+use cobre_core::{EntityId, Hydro, System, month_of};
+use cobre_io::CaseArtifacts;
 use cobre_io::extensions::HydroGeometryRow;
 
 use super::load_artifacts_for_hydro_models;
@@ -17,7 +19,6 @@ use super::types::{
     LinearizedEvaporation,
 };
 use crate::SddpError;
-use crate::stage_key::month_of;
 // ── Evaporation model resolution ──────────────────────────────────────────────
 
 /// Resolve per-hydro linearized evaporation models from reservoir geometry.
@@ -41,7 +42,7 @@ use crate::stage_key::month_of;
 ///
 /// `reference_volume = (v_min + v_max) / 2` is the linearization reference volume.
 /// `stage_hours` is the sum of all block durations in the stage.
-/// `month` is the 0-based calendar month [`month_of`](crate::stage_key::month_of)
+/// `month` is the 0-based calendar month [`month_of`](cobre_core::month_of)
 /// derives from `stage.start_date` — not `stage.season_id`, whose meaning is
 /// cycle-dependent (`Monthly`, `Weekly`, `Custom`) and only equals the calendar
 /// month under the `Monthly` convention.
@@ -86,7 +87,7 @@ pub fn resolve_evaporation_models(
 #[allow(clippy::type_complexity)]
 pub fn resolve_evaporation_models_from_artifacts(
     system: &System,
-    artifacts: &cobre_io::CaseArtifacts,
+    artifacts: &CaseArtifacts,
 ) -> Result<
     (
         EvaporationModelSet,
@@ -125,8 +126,7 @@ pub fn resolve_evaporation_models_from_artifacts(
 
     let geometry_rows: &[HydroGeometryRow] = &artifacts.hydro_geometry;
 
-    let mut geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
-        HashMap::new();
+    let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
     for row in geometry_rows {
         geometry_map.entry(row.hydro_id).or_default().push(row);
     }
@@ -135,8 +135,7 @@ pub fn resolve_evaporation_models_from_artifacts(
         rows.sort_by(|a, b| a.volume_hm3.total_cmp(&b.volume_hm3));
     }
 
-    let study_stages: Vec<&cobre_core::temporal::Stage> =
-        system.stages().iter().filter(|s| s.id >= 0).collect();
+    let study_stages: Vec<&Stage> = system.stages().iter().filter(|s| s.id >= 0).collect();
 
     resolve_evaporation_core(system.hydros(), &geometry_map, &study_stages)
 }
@@ -152,9 +151,9 @@ pub fn resolve_evaporation_models_from_artifacts(
 // boundaries.
 #[allow(clippy::type_complexity, clippy::too_many_lines)]
 fn resolve_evaporation_core(
-    hydros: &[cobre_core::entities::hydro::Hydro],
-    geometry_map: &HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>>,
-    study_stages: &[&cobre_core::temporal::Stage],
+    hydros: &[Hydro],
+    geometry_map: &HashMap<EntityId, Vec<&HydroGeometryRow>>,
+    study_stages: &[&Stage],
 ) -> Result<
     (
         EvaporationModelSet,
@@ -177,8 +176,7 @@ fn resolve_evaporation_core(
             continue;
         };
 
-        let geo_rows: &[&cobre_io::extensions::HydroGeometryRow] =
-            geometry_map.get(&hydro.id).map_or(&[], Vec::as_slice);
+        let geo_rows: &[&HydroGeometryRow] = geometry_map.get(&hydro.id).map_or(&[], Vec::as_slice);
 
         // Evaporation needs a usable area-volume curve. A new or being-filled
         // reservoir legitimately may have none (no geometry rows, or a single
@@ -220,15 +218,13 @@ fn resolve_evaporation_core(
 
         // Midpoint-path values, read only when there are no per-season volumes.
         let midpoint_v = f64::midpoint(hydro.min_storage_hm3, hydro.max_storage_hm3);
-        let midpoint_area = if hydro.evaporation_reference_volumes_hm3.is_none() {
-            interpolate_area(geo_rows, midpoint_v)
+        let (midpoint_area, midpoint_slope) = if hydro.evaporation_reference_volumes_hm3.is_none() {
+            (
+                interpolate_area(geo_rows, midpoint_v),
+                area_derivative(geo_rows, midpoint_v),
+            )
         } else {
-            0.0 // unused; per-season path computes per stage
-        };
-        let midpoint_slope = if hydro.evaporation_reference_volumes_hm3.is_none() {
-            area_derivative(geo_rows, midpoint_v)
-        } else {
-            0.0 // unused; per-season path computes per stage
+            (0.0, 0.0)
         };
 
         let mut stage_coefficients: Vec<LinearizedEvaporation> = Vec::with_capacity(n_stages);
@@ -304,7 +300,7 @@ fn resolve_evaporation_core(
 /// geometry table. Out-of-range `v` clamps to the first/last point's area (no
 /// extrapolation). Assumes `geometry` is ascending by `volume_hm3`; returns `0.0`
 /// for an empty slice.
-fn interpolate_area(geometry: &[&cobre_io::extensions::HydroGeometryRow], v: f64) -> f64 {
+fn interpolate_area(geometry: &[&HydroGeometryRow], v: f64) -> f64 {
     if geometry.is_empty() {
         return 0.0;
     }
@@ -348,7 +344,7 @@ fn interpolate_area(geometry: &[&cobre_io::extensions::HydroGeometryRow], v: f64
 /// table, using the enclosing interval's slope (the edge interval when `v` is
 /// out of range). Returns `0.0` for a single-point geometry. Assumes `geometry`
 /// is ascending by `volume_hm3`.
-fn area_derivative(geometry: &[&cobre_io::extensions::HydroGeometryRow], v: f64) -> f64 {
+fn area_derivative(geometry: &[&HydroGeometryRow], v: f64) -> f64 {
     let n = geometry.len();
 
     if n < 2 {
@@ -408,6 +404,8 @@ mod tests {
         },
     };
 
+    use crate::SddpError;
+
     use super::*;
 
     // ── Test helpers ──────────────────────────────────────────────────────────
@@ -434,10 +432,10 @@ mod tests {
     }
 
     /// Helper: build a slice of HydroGeometryRow references for interpolation tests.
-    fn make_geo_rows(volume_area: &[(f64, f64)]) -> Vec<cobre_io::extensions::HydroGeometryRow> {
+    fn make_geo_rows(volume_area: &[(f64, f64)]) -> Vec<HydroGeometryRow> {
         volume_area
             .iter()
-            .map(|&(v, a)| cobre_io::extensions::HydroGeometryRow {
+            .map(|&(v, a)| HydroGeometryRow {
                 hydro_id: EntityId::from(1),
                 volume_hm3: v,
                 height_m: 0.0,
@@ -497,8 +495,8 @@ mod tests {
         min_storage: f64,
         max_storage: f64,
         evap_mm: Option<[f64; 12]>,
-    ) -> cobre_core::entities::hydro::Hydro {
-        cobre_core::entities::hydro::Hydro {
+    ) -> Hydro {
+        Hydro {
             id: EntityId::from(id),
             name: format!("Hydro{id}"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -528,7 +526,6 @@ mod tests {
         }
     }
 
-    /// interpolate_area: exact match on the first geometry point returns that area.
     #[test]
     fn interpolate_area_exact_first_point() {
         let rows = make_geo_rows(&[(100.0, 1.0), (200.0, 1.5), (300.0, 2.0)]);
@@ -540,7 +537,6 @@ mod tests {
         );
     }
 
-    /// interpolate_area: exact match on the last geometry point returns that area.
     #[test]
     fn interpolate_area_exact_last_point() {
         let rows = make_geo_rows(&[(100.0, 1.0), (200.0, 1.5), (300.0, 2.0)]);
@@ -552,7 +548,6 @@ mod tests {
         );
     }
 
-    /// interpolate_area: exact match on a middle geometry point returns that area.
     #[test]
     fn interpolate_area_exact_middle_point() {
         let rows = make_geo_rows(&[(100.0, 1.0), (200.0, 1.5), (300.0, 2.0)]);
@@ -586,7 +581,6 @@ mod tests {
         );
     }
 
-    /// interpolate_area: volume below first point clamps to first area.
     #[test]
     fn interpolate_area_clamps_below_first_point() {
         let rows = make_geo_rows(&[(100.0, 1.0), (200.0, 1.5), (300.0, 2.0)]);
@@ -598,7 +592,6 @@ mod tests {
         );
     }
 
-    /// interpolate_area: volume above last point clamps to last area.
     #[test]
     fn interpolate_area_clamps_above_last_point() {
         let rows = make_geo_rows(&[(100.0, 1.0), (200.0, 1.5), (300.0, 2.0)]);
@@ -634,7 +627,6 @@ mod tests {
         );
     }
 
-    /// area_derivative: single-point geometry returns 0.0.
     #[test]
     fn area_derivative_single_point_returns_zero() {
         let rows = make_geo_rows(&[(200.0, 1.5)]);
@@ -646,7 +638,6 @@ mod tests {
         );
     }
 
-    /// area_derivative: at or below the first point uses the first interval.
     #[test]
     fn area_derivative_at_or_below_first_point_uses_first_interval() {
         let rows = make_geo_rows(&[(100.0, 1.0), (200.0, 1.5), (300.0, 2.0)]);
@@ -659,7 +650,6 @@ mod tests {
         );
     }
 
-    /// area_derivative: at or above the last point uses the last interval.
     #[test]
     fn area_derivative_at_or_above_last_point_uses_last_interval() {
         let rows = make_geo_rows(&[(100.0, 1.0), (200.0, 1.5), (300.0, 2.0)]);
@@ -685,8 +675,7 @@ mod tests {
         ];
 
         // Build the geometry map (empty, since no hydro needs it).
-        let geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
-            HashMap::new();
+        let geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
         let study_stages = [make_stage_with_month(0, 0)];
         let stage_refs: Vec<_> = study_stages.iter().collect();
 
@@ -738,8 +727,7 @@ mod tests {
             (500.0, 3.0),
         ]);
         let geo_refs: Vec<_> = geo_rows.iter().collect();
-        let mut geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
-            HashMap::new();
+        let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
         geometry_map.insert(EntityId::from(0), geo_refs);
 
         let study_stages = [make_stage_with_month(0, 0)]; // January
@@ -809,8 +797,7 @@ mod tests {
 
         let geo_rows = make_geo_rows(&[(100.0, 1.0), (200.0, 1.5), (300.0, 2.0)]);
         let geo_refs: Vec<_> = geo_rows.iter().collect();
-        let mut geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
-            HashMap::new();
+        let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
         geometry_map.insert(EntityId::from(0), geo_refs);
 
         let study_stages = [make_stage_with_month(0, 0)]; // January
@@ -851,8 +838,7 @@ mod tests {
         let hydro = make_hydro_with_evaporation(0, 100.0, 500.0, Some(evap_mm));
 
         // Geometry map has no entry for hydro 0.
-        let geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
-            HashMap::new();
+        let geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
 
         let study_stages = [make_stage_with_month(0, 0)];
         let stage_refs: Vec<_> = study_stages.iter().collect();
@@ -884,8 +870,7 @@ mod tests {
         // Single dead-volume point with zero surface area (no area-volume curve).
         let geo_rows = make_geo_rows(&[(2.93, 0.0)]);
         let refs: Vec<_> = geo_rows.iter().collect();
-        let mut geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
-            HashMap::new();
+        let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
         geometry_map.insert(EntityId::from(0), refs);
 
         let study_stages = [make_stage_with_month(0, 0)];
@@ -925,8 +910,7 @@ mod tests {
         let refs_h0: Vec<_> = geo_rows_h0.iter().collect();
         let refs_h2: Vec<_> = geo_rows_h2.iter().collect();
 
-        let mut geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
-            HashMap::new();
+        let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
         geometry_map.insert(EntityId::from(0), refs_h0);
         geometry_map.insert(EntityId::from(2), refs_h2);
 
@@ -989,8 +973,7 @@ mod tests {
 
         let geo_rows = make_geo_rows(&[(100.0, 1.0), (200.0, 1.5), (300.0, 2.0)]);
         let geo_refs: Vec<_> = geo_rows.iter().collect();
-        let mut geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
-            HashMap::new();
+        let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
         geometry_map.insert(EntityId::from(0), geo_refs);
 
         let stage_refs = vec![&stage_zero_duration];
@@ -999,7 +982,7 @@ mod tests {
             .expect_err("degenerate geometry (zero duration) must return an error");
 
         assert!(
-            matches!(err, crate::SddpError::Validation(_)),
+            matches!(err, SddpError::Validation(_)),
             "expected Validation error for non-finite coefficients, got {err:?}"
         );
     }
@@ -1033,8 +1016,7 @@ mod tests {
             (500.0, 3.0),
         ]);
         let geo_refs: Vec<_> = geo_rows.iter().collect();
-        let mut geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
-            HashMap::new();
+        let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
         geometry_map.insert(EntityId::from(0), geo_refs);
 
         // Two stages: January (744h) and February (672h).
@@ -1142,8 +1124,7 @@ mod tests {
             (500.0, 3.0),
         ]);
         let geo_refs: Vec<_> = geo_rows.iter().collect();
-        let mut geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
-            HashMap::new();
+        let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
         geometry_map.insert(EntityId::from(0), geo_refs);
 
         // Two stages with different months (January = 0, June = 5).
@@ -1203,8 +1184,7 @@ mod tests {
 
         let geo_rows = make_geo_rows(&[(100.0, 1.0), (300.0, 2.0), (500.0, 3.0)]);
         let refs: Vec<_> = geo_rows.iter().collect();
-        let mut geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
-            HashMap::new();
+        let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
         geometry_map.insert(EntityId::from(0), refs.clone());
         geometry_map.insert(EntityId::from(1), refs);
 
@@ -1251,8 +1231,7 @@ mod tests {
             (500.0, 3.0),
         ]);
         let geo_refs: Vec<_> = geo_rows.iter().collect();
-        let mut geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
-            HashMap::new();
+        let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
         geometry_map.insert(EntityId::from(0), geo_refs);
 
         // Custom cycle: season_id=3 (April, a non-monthly bucket) but start_date is in June.
@@ -1299,8 +1278,7 @@ mod tests {
 
         let geo_rows = make_geo_rows(&[(100.0, 1.0), (300.0, 2.0), (500.0, 3.0)]);
         let geo_refs: Vec<_> = geo_rows.iter().collect();
-        let mut geometry_map: HashMap<EntityId, Vec<&cobre_io::extensions::HydroGeometryRow>> =
-            HashMap::new();
+        let mut geometry_map: HashMap<EntityId, Vec<&HydroGeometryRow>> = HashMap::new();
         geometry_map.insert(EntityId::from(0), geo_refs);
 
         // Weekly cycle: season_id=48 (>= 12), a week in late December.

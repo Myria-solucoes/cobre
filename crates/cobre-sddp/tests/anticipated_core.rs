@@ -640,7 +640,7 @@ mod anticipated_backward_cut {
     /// - slot 2: stage-3 fishing dual via two successive ring-shift definition rows
     ///   (stage-2 then stage-1 FCF cuts), reaching slot 2 at stage 0.
     ///
-    /// See `StateLayout::state_to_lp_column` for the full algebraic chain.
+    /// See `StateSpace::state_to_lp_column` for the full algebraic chain.
     #[test]
     fn four_stage_k3_anticipated_cut_coefficient_propagates_correctly() {
         const K_MAX: usize = FIXTURE_K3.k_max;
@@ -2368,7 +2368,7 @@ mod anticipated_forward_pass {
     //! slot's outgoing column is pinned to the fresh decision
     //! (`slot[K-1]_out = decision_col`) — so slot 0 at stage `t+1` equals slot 1
     //! at stage `t`. The forward pass reads these outgoing columns by identity
-    //! (`StateLayout::state_to_lp_column`), with no Rust-side shift step.
+    //! (`StateSpace::state_to_lp_column`), with no Rust-side shift step.
 
     use cobre_core::entities::{
         bus::DeficitSegment,
@@ -3357,7 +3357,7 @@ mod anticipated_closed_form_lb_k1_single_thermal {
 mod lead_time_single_decider_end_to_end {
     //! The first true `LeadTime` parse→validate→setup→train load-path exercise:
     //! a single-decider `LeadTime` thermal (`|C(t)| <= 1` everywhere) must solve
-    //! end-to-end with no panic, validating both `template.rs`'s `StateLayout`
+    //! end-to-end with no panic, validating both `template.rs`'s `StateSpace`
     //! threading and the in-LP ring for `LeadTime`.
     //!
     //! ## Fixture

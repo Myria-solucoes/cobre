@@ -1,5 +1,7 @@
 //! Captured-basis metadata population after a forward stage solve.
 
+use cobre_solver::BasisStatus;
+
 use crate::cut::pool::CutPool;
 use crate::workspace::CapturedBasis;
 
@@ -32,6 +34,6 @@ pub(crate) fn write_capture_metadata(
         captured
             .basis
             .row_status
-            .resize(expected_len, cobre_solver::BasisStatus::Basic);
+            .resize(expected_len, BasisStatus::Basic);
     }
 }

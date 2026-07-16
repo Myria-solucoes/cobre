@@ -8,9 +8,14 @@
 //! All workspace buffers are allocated once before the loop and reused: no heap
 //! allocation occurs on the hot path.
 
+use cobre_comm::CommError::InvalidBufferSize;
 use cobre_comm::Communicator;
+use cobre_solver::ActiveProfile;
+use cobre_solver::SolverError;
 use cobre_solver::{SolverInterface, StageTemplate};
 
+use crate::visited_states::VisitedStatesArchive;
+use crate::workspace::BasisStore;
 use crate::{
     SddpError, TrainingConfig,
     context::{StageContext, TrainingContext},
@@ -77,7 +82,7 @@ pub struct TrainingResult {
 
     /// Visited-states archive of all forward-pass trial points; the caller
     /// decides whether to persist it based on `exports.states`.
-    pub visited_archive: Option<crate::visited_states::VisitedStatesArchive>,
+    pub visited_archive: Option<VisitedStatesArchive>,
 
     /// Final-iteration frozen templates, one per stage. Always `Some`: freeze
     /// runs unconditionally before the first iteration and is never reverted.
@@ -104,7 +109,7 @@ impl TrainingResult {
         total_time_ms: u64,
         basis_cache: Vec<Option<CapturedBasis>>,
         solver_stats_log: Vec<SolverStatsLogEntry>,
-        visited_archive: Option<crate::visited_states::VisitedStatesArchive>,
+        visited_archive: Option<VisitedStatesArchive>,
         frozen_templates: Option<Vec<StageTemplate>>,
     ) -> Self {
         Self {
@@ -135,7 +140,7 @@ impl TrainingResult {
 /// when `len > i32::MAX` (the MPI count limit).
 fn checked_broadcast_len(len: usize, operation: &'static str) -> Result<i32, SddpError> {
     i32::try_from(len).map_err(|_| {
-        SddpError::Communication(cobre_comm::CommError::InvalidBufferSize {
+        SddpError::Communication(InvalidBufferSize {
             operation,
             expected: i32::MAX as usize,
             actual: len,
@@ -166,7 +171,7 @@ fn checked_broadcast_len(len: usize, operation: &'static str) -> Result<i32, Sdd
 /// `comm.broadcast` fails, or `SddpError::Validation` when a length prefix is
 /// inconsistent with the received buffer (naming the offending stage).
 pub(crate) fn broadcast_basis_cache<C: Communicator>(
-    basis_store: &crate::workspace::BasisStore,
+    basis_store: &BasisStore,
     num_stages: usize,
     comm: &C,
 ) -> Result<Vec<Option<CapturedBasis>>, SddpError> {
@@ -317,11 +322,11 @@ pub fn train<S, C: Communicator>(
     stage_ctx: &StageContext<'_>,
     training_ctx: &TrainingContext<'_>,
     comm: &C,
-    solver_factory: impl Fn() -> Result<S, cobre_solver::SolverError>,
-    warm_start_basis_cache: Option<Vec<Option<crate::workspace::CapturedBasis>>>,
+    solver_factory: impl Fn() -> Result<S, SolverError>,
+    warm_start_basis_cache: Option<Vec<Option<CapturedBasis>>>,
 ) -> Result<TrainingOutcome, SddpError>
 where
-    S: SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
+    S: SolverInterface<Profile = ActiveProfile> + Send,
 {
     let mut session = TrainingSession::new(
         solver,
@@ -333,7 +338,7 @@ where
         solver_factory,
     )?;
     // Must seed the basis store before `prime_frozen_templates` freezes the loaded
-    // cuts into the templates. No-op for a fresh start (`None`).
+    // cuts into the templates.
     if let Some(cache) = warm_start_basis_cache {
         session.seed_basis_store(&cache);
     }

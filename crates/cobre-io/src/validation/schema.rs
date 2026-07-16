@@ -47,7 +47,7 @@ use crate::{
         load_inflow_ar_coefficients, load_inflow_history, load_inflow_seasonal_stats,
         load_load_factors, load_load_seasonal_stats, load_ncs_stats, load_non_controllable_factors,
     },
-    stages::StagesData,
+    stages::{StagesData, parse_stages},
     system::{
         load_energy_contracts, load_non_controllable_sources, load_pumping_stations, parse_buses,
         parse_hydros, parse_lines, parse_thermals,
@@ -251,7 +251,7 @@ pub(crate) fn validate_schema(
     );
 
     let stages = parse_or_error(
-        crate::stages::parse_stages(&case_root.join("stages.json")),
+        parse_stages(&case_root.join("stages.json")),
         "stages.json",
         ctx,
     );

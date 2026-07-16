@@ -7,7 +7,7 @@ use cobre_stochastic::{ExternalScenarioLibrary, HistoricalScenarioLibrary, Stoch
 use crate::{
     dcs::DcsParams,
     horizon_mode::HorizonMode,
-    indexer::{CutStateProjection, StateLayout, StudyDimensions},
+    indexer::{CutStateProjection, StateSpace, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
     lp_builder::StageGeometry,
 };
@@ -128,7 +128,7 @@ pub struct TrainingContext<'a> {
     /// Single owner of the state-vector layout: the state column ranges,
     /// `n_state`, the resolvers, and the mask. Every hot-path state-column read
     /// resolves through this handle.
-    pub state: &'a StateLayout,
+    pub state: &'a StateSpace,
     /// Per-pool cut-state projection, indexed by pool `t` (paired 1:1 with
     /// `FutureCostFunction::pools`). The backward pass reads
     /// `cut_state_layouts[t]` when solving stage `t+1` to size pool `t`'s

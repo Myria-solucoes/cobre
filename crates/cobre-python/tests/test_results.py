@@ -403,14 +403,14 @@ def stochastic_output(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
 def test_load_stochastic_par_coefficients_shape(
     stochastic_output: pathlib.Path,
 ) -> None:
-    """par_coefficients() returns a 2-D (n_rows, 5) float64 array."""
+    """par_coefficients() returns a 2-D (n_rows, 4) float64 array."""
     numpy = pytest.importorskip("numpy")
     import cobre.results  # noqa: PLC0415
 
     arr = cobre.results.load_stochastic(str(stochastic_output)).par_coefficients()
 
     assert arr.ndim == 2, "par_coefficients must be 2-D"
-    assert arr.shape[1] == 5, "par_coefficients must have 5 columns"
+    assert arr.shape[1] == 4, "par_coefficients must have 4 columns"
     assert arr.dtype == numpy.float64, "par_coefficients must be float64"
 
 

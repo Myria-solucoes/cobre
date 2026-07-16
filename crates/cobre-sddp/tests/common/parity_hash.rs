@@ -39,6 +39,7 @@ use cobre_sddp::{
 use sha2::{Digest, Sha256};
 
 use super::StubComm;
+use super::permute::permute_case;
 
 /// Compute the SHA-256 parity hash over the module-doc whitelist.
 pub fn compute_parity_hash(
@@ -131,29 +132,20 @@ fn baseline_path(baseline_subdir: &str, case: &str) -> PathBuf {
         .join(format!("{case}.sha256"))
 }
 
-/// Read the baseline for `case` and compare to `hash`, or write it when
-/// `COBRE_PARITY_REGEN=1`.
+/// Read the baseline for `case` and assert it matches `hash`.
 ///
-/// Returns `Ok(())` on match or successful write; `Err(msg)` on mismatch or a
-/// missing/malformed baseline.
-fn read_or_regen_baseline(baseline_subdir: &str, case: &str, hash: &str) -> Result<(), String> {
+/// Returns `Ok(())` on match; `Err(msg)` on mismatch or a missing/malformed
+/// baseline. The missing-baseline error names the ignored `parity_regen_*`
+/// test as the remedy — see [`write_baseline`].
+fn assert_baseline(baseline_subdir: &str, case: &str, hash: &str) -> Result<(), String> {
     let path = baseline_path(baseline_subdir, case);
 
-    if std::env::var("COBRE_PARITY_REGEN").as_deref() == Ok("1") {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("cannot create baseline dir: {e}"))?;
-        }
-        std::fs::write(&path, format!("{hash}\n"))
-            .map_err(|e| format!("cannot write baseline for {case}: {e}"))?;
-        eprintln!("REGEN: wrote baseline for {case}: {hash}");
-        return Ok(());
-    }
-
     if !path.exists() {
+        let case_lower = case.to_lowercase();
         return Err(format!(
             "baseline file for {case} is missing at {}; \
-             run with COBRE_PARITY_REGEN=1 to generate it",
+             run the ignored `parity_regen_{case_lower}` test \
+             (--run-ignored ignored-only) to generate it",
             path.display()
         ));
     }
@@ -174,6 +166,22 @@ fn read_or_regen_baseline(baseline_subdir: &str, case: &str, hash: &str) -> Resu
             "parity hash mismatch for {case}:\n  expected (baseline): {expected}\n  actual:              {hash}"
         ))
     }
+}
+
+/// Write `hash` as the baseline for `case`, creating the baseline directory
+/// when needed. Only the ignored `parity_regen_*` tests call this.
+///
+/// Returns `Ok(())` on success; `Err(msg)` on a write failure.
+fn write_baseline(baseline_subdir: &str, case: &str, hash: &str) -> Result<(), String> {
+    let path = baseline_path(baseline_subdir, case);
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("cannot create baseline dir: {e}"))?;
+    }
+    std::fs::write(&path, format!("{hash}\n"))
+        .map_err(|e| format!("cannot write baseline for {case}: {e}"))?;
+    eprintln!("REGEN: wrote baseline for {case}: {hash}");
+    Ok(())
 }
 
 /// Map a golden-case label (e.g. `"D06"`) to its deterministic fixture directory.
@@ -197,7 +205,25 @@ fn read_or_regen_baseline(baseline_subdir: &str, case: &str, hash: &str) -> Resu
 /// The simpler `d01..d05` single-feature cases are covered at the behavioral
 /// tier (`deterministic.rs`); promoting a case into this golden set needs
 /// justification.
-fn case_dir(label: &str) -> PathBuf {
+///
+/// ## `D30` re-bless provenance (residual-std-ratio closure derivation)
+///
+/// `D30`'s golden hash (both backends) was re-blessed when `residual_std_ratio`
+/// became closure-derived (unit-variance-exact, from the AR coefficients alone)
+/// instead of read from `inflow_ar_coefficients.parquet`. This is NOT the
+/// generic mixed-per-season-order shift (~1e-4, see
+/// `derive_residual_std_ratios`'s doc): `D30` supplies its AR coefficients
+/// directly (the `out_of_sample` scheme never runs the YW fit) with a uniform
+/// order of 1 at every season it uses, so the closure is exact there —
+/// `r = sqrt(1 - psi^2) = 0.866025403784439` for `psi = 0.5`. The fixture's
+/// stored ratio, `0.85`, was simply an arbitrary literal never fit against
+/// `psi`, so the ~1.6e-2 gap between it and the derived value reflects the
+/// stored-value inconsistency this migration retires, not a closure defect —
+/// `D06`/`D15`/`D34`/`D41`'s unchanged hashes confirm the closure is exact
+/// wherever a case's per-season orders are uniform. The determinism property
+/// (same input -> same output; declaration-order / rank invariance) is
+/// untouched; only this one blessed value moved.
+pub fn case_dir(label: &str) -> PathBuf {
     let suffix = match label {
         "D06" => "d06-fpha-variable-head",
         "D15" => "d15-non-controllable-source",
@@ -211,35 +237,34 @@ fn case_dir(label: &str) -> PathBuf {
         .join(suffix)
 }
 
-/// Run the full train + simulate pipeline for a golden case under the given LP
-/// solver and assert its parity hash against the committed baseline (or write the
-/// baseline when `COBRE_PARITY_REGEN=1`).
+/// Run the full train + simulate pipeline for the case at `dir` under the
+/// given LP solver and return its parity hash.
 ///
-/// Generic over the solver so both backend `parity_hash_*` modules share one
-/// body; `make_solver` supplies fresh worker solvers exactly as the production
-/// training/simulation paths do. `baseline_subdir` selects the per-backend
-/// baseline directory under `tests/fixtures/`.
-pub fn run_golden_case<S, F>(baseline_subdir: &str, label: &str, make_solver: F)
+/// Generic over the solver so [`compute_golden_case_hash`],
+/// [`compute_permuted_case_hash`], and every backend `parity_hash_*`/
+/// `parity_regen_*`/`shuffle_matrix_*` test share one body; `make_solver`
+/// supplies fresh worker solvers exactly as the production
+/// training/simulation paths do.
+fn compute_case_hash_at_dir<S, F>(dir: &Path, make_solver: F) -> String
 where
     S: cobre_solver::SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
     F: Fn() -> Result<S, cobre_solver::SolverError> + Copy,
 {
-    let dir = case_dir(label);
     let config_path = dir.join("config.json");
 
     let config = cobre_io::parse_config(&config_path).expect("config must parse");
-    let system = cobre_io::load_case(&dir).expect("load_case must succeed");
+    let system = cobre_io::load_case(dir).expect("load_case must succeed");
 
     let prep_source = config
         .training_scenario_source(&config_path)
         .expect("training_scenario_source must parse");
-    let pr = prepare_stochastic(system, &dir, &config, 42, &prep_source)
+    let pr = prepare_stochastic(system, dir, &config, 42, &prep_source)
         .expect("prepare_stochastic must succeed");
     let system = pr.system;
     let stochastic = pr.stochastic;
 
     let hydro_models =
-        prepare_hydro_models(&system, &dir, false).expect("prepare_hydro_models must succeed");
+        prepare_hydro_models(&system, dir, false).expect("prepare_hydro_models must succeed");
 
     let mut config_with_sim = config.clone();
     config_with_sim.simulation.enabled = true;
@@ -277,7 +302,8 @@ where
         .expect("train must return Ok");
     assert!(
         outcome.error.is_none(),
-        "{label}: expected no training error"
+        "{}: expected no training error",
+        dir.display()
     );
     let result = outcome.result;
 
@@ -307,7 +333,76 @@ where
     let _summary = aggregate_simulation(&local_costs.costs, sim_config, &comm)
         .expect("aggregate_simulation must succeed");
 
-    let hash = compute_parity_hash(&setup, scenario_results);
+    compute_parity_hash(&setup, scenario_results)
+}
 
-    read_or_regen_baseline(baseline_subdir, label, &hash).unwrap_or_else(|msg| panic!("{msg}"));
+/// Run [`compute_case_hash_at_dir`] for a golden case's own directory.
+fn compute_golden_case_hash<S, F>(label: &str, make_solver: F) -> String
+where
+    S: cobre_solver::SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
+    F: Fn() -> Result<S, cobre_solver::SolverError> + Copy,
+{
+    compute_case_hash_at_dir::<S, F>(&case_dir(label), make_solver)
+}
+
+/// Run [`compute_case_hash_at_dir`] on one [`permute_case`] copy of `label`'s
+/// golden case directory, seeded from `seed` — the declaration-order-shuffle
+/// axis's per-permutation hash. See [`super::permute`]'s module doc for the
+/// classification map and coverage bound.
+fn compute_permuted_case_hash<S, F>(label: &str, seed: u64, make_solver: F) -> String
+where
+    S: cobre_solver::SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
+    F: Fn() -> Result<S, cobre_solver::SolverError> + Copy,
+{
+    let permuted = permute_case(&case_dir(label), seed);
+    compute_case_hash_at_dir::<S, F>(permuted.path(), make_solver)
+}
+
+/// Run [`compute_golden_case_hash`] for a golden case and assert the result
+/// against the committed baseline, returning the computed hash.
+///
+/// `baseline_subdir` selects the per-backend baseline directory under
+/// `tests/fixtures/`.
+pub fn run_golden_case<S, F>(baseline_subdir: &str, label: &str, make_solver: F) -> String
+where
+    S: cobre_solver::SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
+    F: Fn() -> Result<S, cobre_solver::SolverError> + Copy,
+{
+    let hash = compute_golden_case_hash::<S, F>(label, make_solver);
+    assert_baseline(baseline_subdir, label, &hash).unwrap_or_else(|msg| panic!("{msg}"));
+    hash
+}
+
+/// Run [`compute_golden_case_hash`] for a golden case and write the result as
+/// the committed baseline, overwriting whatever is there.
+///
+/// Only the ignored `parity_regen_<case>` tests call this. `baseline_subdir`
+/// selects the per-backend baseline directory under `tests/fixtures/`.
+pub fn regen_golden_case<S, F>(baseline_subdir: &str, label: &str, make_solver: F)
+where
+    S: cobre_solver::SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
+    F: Fn() -> Result<S, cobre_solver::SolverError> + Copy,
+{
+    let hash = compute_golden_case_hash::<S, F>(label, make_solver);
+    write_baseline(baseline_subdir, label, &hash).unwrap_or_else(|msg| panic!("{msg}"));
+}
+
+/// Assert [`compute_permuted_case_hash`] (`label`, `seed`) equals `base_hash` —
+/// the declaration-order-shuffle axis's core assertion, folded into every
+/// `parity_hash_<case>`/`shuffle_matrix_<case>` test in `tests/parity.rs`. The
+/// comparison target is the caller's in-memory base hash, not the committed
+/// baseline: it holds even on a machine where the baseline itself does not
+/// reproduce (parity hashes are environment-dependent; base-vs-permuted
+/// equality is not).
+pub fn assert_permutation_hash<S, F>(label: &str, seed: u64, base_hash: &str, make_solver: F)
+where
+    S: cobre_solver::SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
+    F: Fn() -> Result<S, cobre_solver::SolverError> + Copy,
+{
+    let permuted_hash = compute_permuted_case_hash::<S, F>(label, seed, make_solver);
+    assert_eq!(
+        base_hash, permuted_hash,
+        "declaration-order invariance violated for {label} at seed {seed}:\n  \
+         base hash:     {base_hash}\n  permuted hash: {permuted_hash}"
+    );
 }

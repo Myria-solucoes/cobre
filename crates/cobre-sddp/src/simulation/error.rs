@@ -5,6 +5,8 @@
 
 use crate::SddpError;
 
+use cobre_stochastic::StochasticError;
+
 /// Errors that can occur during simulation execution.
 #[derive(Debug, thiserror::Error)]
 pub enum SimulationError {
@@ -57,12 +59,18 @@ pub enum SimulationError {
 
     /// Forward sampler construction or sampling failure.
     #[error("stochastic error: {0}")]
-    Stochastic(#[from] cobre_stochastic::StochasticError),
+    Stochastic(#[from] StochasticError),
 
     /// Invalid configuration passed to `simulate`, e.g. frozen-template slice length
     /// does not match `num_stages`.
     #[error("invalid simulation configuration: {0}")]
     InvalidConfiguration(String),
+
+    /// Stage-LP solve preparation rejected the pinned state, e.g. a policy
+    /// commitment outside its delivery generation bound. The detailed type is
+    /// [`SddpError`], stringified here — the mirror of [`SddpError::Simulation`].
+    #[error("stage solve preparation error: {0}")]
+    SolvePrep(String),
 }
 
 impl From<SimulationError> for SddpError {
@@ -193,7 +201,6 @@ mod tests {
                 matches!(sddp_err, SddpError::Simulation(_)),
                 "expected SddpError::Simulation, got {sddp_err:?}"
             );
-            // The wrapped message must contain the original error description.
             let sddp_msg = sddp_err.to_string();
             assert!(
                 sddp_msg.contains(original_msg.as_str()) || sddp_msg.contains("simulation"),

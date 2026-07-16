@@ -1,6 +1,7 @@
 use super::StudySetup;
 use crate::hydro_models::{PrepareHydroModelsResult, ProductionModelSet, ResolvedProductionModel};
-use crate::indexer::StateLayout;
+use crate::indexer::StateSpace;
+use crate::test_support;
 
 use cobre_core::{
     BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, HydroStageBounds,
@@ -862,12 +863,15 @@ fn training_ctx_fields_match_study_setup() {
 
 #[test]
 fn simulation_ctx_propagates_dynamic_dcs_from_setup() {
+    use crate::dcs::DcsParams;
+    use cobre_io::config::SelectionMethod;
+
     let n_stages = 3;
     let system = minimal_system(n_stages);
     let mut config = minimal_config(2, 10);
     // A Dynamic strategy here is what makes `simulation_ctx()` populate `dcs`.
     config.training.cut_selection = RowSelectionConfig {
-        selection: Some(cobre_io::config::SelectionMethod::Dynamic {
+        selection: Some(SelectionMethod::Dynamic {
             start_iteration: 2,
             seed_window: 5,
             candidate_recency: None,
@@ -902,13 +906,13 @@ fn simulation_ctx_propagates_dynamic_dcs_from_setup() {
 
     // The dynamic method with default fields maps to the spec defaults
     // (k1 = None, k2 = 5, nadic = 10, epsilon_viol = 1e-10, start_iteration = 2).
-    let expected = crate::dcs::DcsParams {
+    let expected = DcsParams {
         k1: None,
         k2: 5,
         nadic: 10,
         epsilon_viol: 1e-10,
         start_iteration: 2,
-        max_inner_iterations: crate::dcs::DcsParams::default().max_inner_iterations,
+        max_inner_iterations: DcsParams::default().max_inner_iterations,
     };
     assert_eq!(
         ctx.dcs,
@@ -1146,14 +1150,15 @@ fn build_training_output_non_empty() {
 #[test]
 fn simulate_after_train_returns_nonempty_costs() {
     use cobre_comm::LocalBackend;
+    use cobre_io::config::SimulationConfig as IoSimulationConfig;
     use cobre_solver::ActiveSolver;
 
     let mut config = minimal_config(1, 3);
-    config.simulation = cobre_io::config::SimulationConfig {
+    config.simulation = IoSimulationConfig {
         enabled: true,
         num_scenarios: 3,
         io_channel_capacity: 8,
-        ..cobre_io::config::SimulationConfig::default()
+        ..IoSimulationConfig::default()
     };
 
     let system = minimal_system(2);
@@ -1216,7 +1221,7 @@ fn simulate_after_train_returns_nonempty_costs() {
 #[test]
 fn study_params_from_config_defaults() {
     use super::{DEFAULT_FORWARD_PASSES, DEFAULT_SEED, StudyParams};
-    use crate::stopping_rule::StoppingMode;
+    use crate::stopping_rule::{StoppingMode, StoppingRule};
     use cobre_io::config::{
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
         InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
@@ -1266,7 +1271,7 @@ fn study_params_from_config_defaults() {
     assert!(
         matches!(
             params.stopping_rule_set.rules[0],
-            crate::stopping_rule::StoppingRule::IterationLimit { .. }
+            StoppingRule::IterationLimit { .. }
         ),
         "default rule should be IterationLimit"
     );
@@ -1949,15 +1954,15 @@ fn study_setup_propagates_fpha_missing_equivalent_productivity() {
     );
 }
 
-fn layout_for_lag_test(hydro_count: usize, max_par_order: usize) -> StateLayout {
-    crate::test_support::state_layout(hydro_count, max_par_order)
+fn layout_for_lag_test(hydro_count: usize, max_par_order: usize) -> StateSpace {
+    test_support::state_layout(hydro_count, max_par_order)
 }
 
 /// Must match [`counts_with_anticipated`]: 1 hydro, 0 lags, `n_anticipated`
 /// plants with the given per-plant K.
-fn layout_with_anticipated(n_anticipated: usize, k_values: &[usize]) -> StateLayout {
+fn layout_with_anticipated(n_anticipated: usize, k_values: &[usize]) -> StateSpace {
     let k_max = k_values.iter().copied().max().unwrap_or(0);
-    crate::test_support::state_layout_full(1, 0, n_anticipated, k_max, k_values.to_vec())
+    test_support::state_layout_full(1, 0, n_anticipated, k_max, k_values.to_vec())
 }
 
 /// 2-hydro PAR(2) system with `inflow_lags` and the given `past_inflows` for
@@ -2218,7 +2223,7 @@ fn build_initial_state_populates_lags_from_past_inflows() {
         minimal_system_2_hydros_with_past_inflows(1, vec![600.0, 500.0], vec![200.0, 100.0]);
     let layout = layout_for_lag_test(2, 2);
 
-    let state = build_initial_state(&system, &crate::test_support::study_dims(), &layout);
+    let state = build_initial_state(&system, &test_support::study_dims(), &layout);
 
     // State layout: storage(0..2), lags(2..6) in lag-major order.
     // Lag-major: slot = s + lag * N + h, where N = 2.
@@ -2259,7 +2264,7 @@ fn build_initial_state_empty_past_inflows_leaves_zero_lags() {
     let system = minimal_system(2);
     let layout = layout_for_lag_test(1, 3);
 
-    let state = build_initial_state(&system, &crate::test_support::study_dims(), &layout);
+    let state = build_initial_state(&system, &test_support::study_dims(), &layout);
 
     let s = layout.inflow_lags.start;
     for l in 0..3 {
@@ -2280,7 +2285,7 @@ fn build_initial_state_unknown_hydro_in_past_inflows_stays_zero() {
     let system = minimal_system(2);
     let layout = layout_for_lag_test(1, 2);
 
-    let state = build_initial_state(&system, &crate::test_support::study_dims(), &layout);
+    let state = build_initial_state(&system, &test_support::study_dims(), &layout);
 
     let s = layout.inflow_lags.start;
     assert!(
@@ -2587,7 +2592,7 @@ fn test_initial_state_seeds_correctly_under_staggered_commissioning_dates() {
     let system = staggered_dates_system_2_hydros(1, ic);
     let layout = layout_for_lag_test(2, 2);
 
-    let state = build_initial_state(&system, &crate::test_support::study_dims(), &layout);
+    let state = build_initial_state(&system, &test_support::study_dims(), &layout);
 
     // Storage: state[0] is hydro id=2's own coordinate (canonical position 0),
     // state[1] is hydro id=1's own coordinate (canonical position 1).
@@ -2889,7 +2894,7 @@ fn build_initial_state_seeds_filling_storage() {
     let system = filling_system_2_hydros(1, 0, ic);
     let layout = layout_for_lag_test(2, 2);
 
-    let state = build_initial_state(&system, &crate::test_support::study_dims(), &layout);
+    let state = build_initial_state(&system, &test_support::study_dims(), &layout);
 
     // Hydro id=2 is at system index 1; its storage coordinate is state[1].
     assert!(
@@ -2923,7 +2928,7 @@ fn build_initial_state_filling_empty_pit_is_zero() {
     let system = filling_system_2_hydros(1, 1, ic);
     let layout = layout_for_lag_test(2, 2);
 
-    let state = build_initial_state(&system, &crate::test_support::study_dims(), &layout);
+    let state = build_initial_state(&system, &test_support::study_dims(), &layout);
 
     assert!(
         state[1].abs() < 1e-10,
@@ -2937,7 +2942,7 @@ fn build_initial_state_unknown_filling_hydro_skipped() {
     use super::build_initial_state;
 
     let layout = layout_for_lag_test(2, 2);
-    let study_dims = crate::test_support::study_dims();
+    let study_dims = test_support::study_dims();
 
     let baseline_ic = cobre_core::InitialConditions {
         storage: vec![],
@@ -3006,7 +3011,7 @@ fn build_initial_state_mixed_operating_and_filling_seeds() {
     let system = filling_system_2_hydros(1, 0, ic);
     let layout = layout_for_lag_test(2, 2);
 
-    let state = build_initial_state(&system, &crate::test_support::study_dims(), &layout);
+    let state = build_initial_state(&system, &test_support::study_dims(), &layout);
 
     assert!(
         (state[0] - operating_seed).abs() < 1e-10,
@@ -3116,7 +3121,7 @@ fn build_initial_state_no_lags_state_is_storage_only() {
         "inflow_lags range should be empty for L=0"
     );
 
-    let state = build_initial_state(&system, &crate::test_support::study_dims(), &layout);
+    let state = build_initial_state(&system, &test_support::study_dims(), &layout);
 
     assert_eq!(state.len(), 1, "state length must equal n_state=1");
 }
@@ -3132,9 +3137,9 @@ fn counts_with_anticipated(
     n_anticipated: usize,
     k_values: &[usize],
     thermal_indices: &[usize],
-) -> crate::test_support::GeometryDims {
+) -> test_support::GeometryDims {
     let k_max = k_values.iter().copied().max().unwrap_or(0);
-    crate::test_support::GeometryDims {
+    test_support::GeometryDims {
         hydro_count: 1,
         n_thermals: n_anticipated, // at least cover the anticipated plants
         n_buses: 1,
@@ -3694,7 +3699,7 @@ fn build_initial_state_anticipated_seed_correct_under_staggered_commissioning_da
 
     let state = build_initial_state(
         &system,
-        &crate::test_support::study_dims_for(&counts_with_anticipated(2, &[3, 2], &[0, 1])),
+        &test_support::study_dims_for(&counts_with_anticipated(2, &[3, 2], &[0, 1])),
         &layout,
     );
 
@@ -3743,7 +3748,7 @@ fn build_initial_state_no_anticipated_state_unchanged() {
     assert_eq!(layout.n_anticipated, 0);
     assert!(layout.anticipated_slots_out.is_empty());
 
-    let state = build_initial_state(&system, &crate::test_support::study_dims(), &layout);
+    let state = build_initial_state(&system, &test_support::study_dims(), &layout);
 
     assert_eq!(
         state.len(),
@@ -3777,7 +3782,7 @@ fn build_initial_state_single_anticipated_thermal_k2() {
 
     let state = build_initial_state(
         &system,
-        &crate::test_support::study_dims_for(&counts_with_anticipated(1, &[2], &[0])),
+        &test_support::study_dims_for(&counts_with_anticipated(1, &[2], &[0])),
         &layout,
     );
 
@@ -3829,7 +3834,7 @@ fn build_initial_state_two_anticipated_thermals_mixed_k() {
 
     let state = build_initial_state(
         &system,
-        &crate::test_support::study_dims_for(&counts_with_anticipated(2, &[2, 3], &[0, 1])),
+        &test_support::study_dims_for(&counts_with_anticipated(2, &[2, 3], &[0, 1])),
         &layout,
     );
 
@@ -3883,7 +3888,7 @@ fn build_initial_state_empty_past_commitments_leaves_zeros() {
 
     let state = build_initial_state(
         &system,
-        &crate::test_support::study_dims_for(&counts_with_anticipated(1, &[2], &[0])),
+        &test_support::study_dims_for(&counts_with_anticipated(1, &[2], &[0])),
         &layout,
     );
 
@@ -3917,7 +3922,7 @@ fn build_initial_state_unknown_thermal_id_silently_skipped() {
 
     let state = build_initial_state(
         &system,
-        &crate::test_support::study_dims_for(&counts_with_anticipated(1, &[2], &[0])),
+        &test_support::study_dims_for(&counts_with_anticipated(1, &[2], &[0])),
         &layout,
     );
 
@@ -3968,7 +3973,7 @@ fn build_initial_state_anticipated_seed_padding_slot_stays_zero() {
 
     let state = build_initial_state(
         &system,
-        &crate::test_support::study_dims_for(&counts_with_anticipated(2, &[1, 2], &[0, 1])),
+        &test_support::study_dims_for(&counts_with_anticipated(2, &[1, 2], &[0, 1])),
         &layout,
     );
 
@@ -5926,16 +5931,16 @@ fn test_anticipated_resolve_point_fanout_calendar() {
 }
 
 /// Assert `state` is finalized and byte-for-byte reproduces a fresh
-/// `StateLayout::new` over the same `(N, L, A, k_max, leads)` — the single-owner
+/// `StateSpace::new` over the same `(N, L, A, k_max, leads)` — the single-owner
 /// property `resolve_state_layout` guarantees. Role-(b) equipment geometry lives
 /// on `StageGeometry`, so there is no state half to compare here.
-fn assert_state_layout_finalized(state: &StateLayout) {
+fn assert_state_layout_finalized(state: &StateSpace) {
     assert_eq!(
         state.state_to_lp_column_map.len(),
         state.n_state,
         "state_to_lp_column_map must be finalized to n_state length"
     );
-    let reference = StateLayout::new(
+    let reference = StateSpace::new(
         state.hydro_count,
         state.max_par_order,
         state.n_buckets,
@@ -5947,7 +5952,7 @@ fn assert_state_layout_finalized(state: &StateLayout) {
     );
     assert_eq!(
         state.state_to_lp_column_map, reference.state_to_lp_column_map,
-        "state_to_lp_column_map must match a fresh StateLayout::new"
+        "state_to_lp_column_map must match a fresh StateSpace::new"
     );
     assert_eq!(state.n_state, reference.n_state, "n_state must match");
     assert_eq!(state.theta, reference.theta, "theta column must match");
@@ -6273,89 +6278,6 @@ fn setup_state_and_stage_template_agree_on_n_state_with_declared_arc() {
     );
 }
 
-/// Single-owner invariant: `stage_templates.state_layout` and the authoritative
-/// `stage_data.state` agree field-for-field — comparing the two production
-/// handles directly, unlike [`assert_state_layout_finalized`]'s reference build.
-#[test]
-fn stage_templates_state_layout_matches_authoritative_state_layout() {
-    let system = minimal_system(3);
-    let config = minimal_config(2, 10);
-    let stochastic = build_stochastic_context(
-        &system,
-        42,
-        None,
-        &[],
-        &[],
-        OpeningTreeInputs::default(),
-        ClassSchemes {
-            inflow: Some(SamplingScheme::InSample),
-            load: Some(SamplingScheme::InSample),
-            ncs: Some(SamplingScheme::InSample),
-        },
-    )
-    .expect("stochastic context");
-
-    let setup = StudySetup::new(
-        &system,
-        &config,
-        stochastic,
-        PrepareHydroModelsResult::default_from_system(&system),
-    )
-    .expect("setup");
-
-    let threaded = &setup.stage_data.stage_templates.state_layout;
-    let authoritative = &setup.stage_data.state;
-
-    assert_eq!(
-        threaded.n_state, authoritative.n_state,
-        "n_state must match"
-    );
-    assert_eq!(
-        threaded.theta, authoritative.theta,
-        "theta column must match"
-    );
-    assert_eq!(
-        threaded.storage, authoritative.storage,
-        "storage range must match"
-    );
-    assert_eq!(
-        threaded.inflow_lags, authoritative.inflow_lags,
-        "inflow_lags range must match"
-    );
-    assert_eq!(
-        threaded.transit_buckets_out, authoritative.transit_buckets_out,
-        "transit_buckets_out range must match"
-    );
-    assert_eq!(
-        threaded.anticipated_state, authoritative.anticipated_state,
-        "anticipated_state range must match"
-    );
-    assert_eq!(
-        threaded.anticipated_slots_out, authoritative.anticipated_slots_out,
-        "anticipated_slots_out range must match"
-    );
-    assert_eq!(
-        threaded.z_inflow, authoritative.z_inflow,
-        "z_inflow range must match"
-    );
-    assert_eq!(
-        threaded.storage_in, authoritative.storage_in,
-        "storage_in range must match"
-    );
-    assert_eq!(
-        threaded.transit_buckets_in, authoritative.transit_buckets_in,
-        "transit_buckets_in range must match"
-    );
-    assert_eq!(
-        threaded.state_to_lp_column_map, authoritative.state_to_lp_column_map,
-        "state_to_lp_column_map must match"
-    );
-    assert_eq!(
-        threaded.nonzero_state_indices, authoritative.nonzero_state_indices,
-        "nonzero_state_indices must match"
-    );
-}
-
 /// Geometry byte-identity (the role-(b) analogue of
 /// `assert_state_layout_finalized`): the production stage-0 `StageGeometry` is
 /// byte-identical to an independent `test_support::geometry` build; a divergence
@@ -6389,7 +6311,7 @@ fn stage_data_geometry_role_b_matches_reference_build() {
 
     let geometry = &setup.stage_data.stage_templates.geometry_per_stage[0];
     let study_dims = &setup.stage_data.study_dims;
-    let dims = crate::test_support::GeometryDims {
+    let dims = test_support::GeometryDims {
         hydro_count: geometry.water_balance.len(),
         max_par_order: 0, // role-(b) ranges do not depend on L
         n_thermals: study_dims.n_thermals,
@@ -6402,13 +6324,21 @@ fn stage_data_geometry_role_b_matches_reference_build() {
         k_max: 0,
         anticipated_thermal_indices: study_dims.anticipated_thermal_indices.clone(),
     };
-    let reference = crate::test_support::geometry(
+    let reference = test_support::geometry(
         &dims,
-        geometry.fpha_hydro_indices.clone(),
+        geometry
+            .fpha_hydro_indices
+            .iter()
+            .map(|h| h.get())
+            .collect(),
         // minimal_system has no FPHA planes; mirror the built geometry's
         // FPHA-hydro count with a placeholder plane count per hydro.
         &vec![1usize; geometry.fpha_hydro_indices.len()],
-        geometry.evap_hydro_indices.clone(),
+        geometry
+            .evap_hydro_indices
+            .iter()
+            .map(|h| h.get())
+            .collect(),
     );
 
     assert_eq!(reference.turbine, geometry.turbine, "turbine range");
@@ -6481,7 +6411,7 @@ fn stage_data_state_matches_indexer_role_a_anticipated() {
 
 /// Cut-row byte-identity: the production `build_cut_row_batch` reading role-(a)
 /// from `StageData.state` matches an independent reference loop over the same
-/// `StateLayout` (mask, `theta`, `lp_column_for_state`) — the substitutability
+/// `StateSpace` (mask, `theta`, `lp_column_for_state`) — the substitutability
 /// guarantee the cut-path repoint relies on (same LP columns, same
 /// negated-scaled coefficients).
 #[test]
@@ -6530,7 +6460,7 @@ fn cut_row_from_state_matches_reference_loop() {
         &fcf,
         0,
         state,
-        &crate::test_support::cut_state_projection(state),
+        &test_support::cut_state_projection(state),
         &[],
     );
 
@@ -6549,11 +6479,11 @@ fn cut_row_from_state_matches_reference_loop() {
     for (_slot, intercept, coeffs) in fcf.active_cuts(0) {
         from_state.row_starts.push(0);
         for &j in mask {
-            let lp_col = state.lp_column_for_state(j);
+            let lp_col = state.lp_column_for_state(j).get();
             from_state
                 .col_indices
                 .push(i32::try_from(lp_col).expect("col fits i32"));
-            from_state.values.push(-coeffs[j]);
+            from_state.values.push(-coeffs[j.get()]);
         }
         from_state
             .col_indices
@@ -6597,7 +6527,7 @@ fn cut_row_from_state_matches_reference_loop() {
 
 /// PAR(2) study (one stage per `state_configs` entry): AR(2) coefficients plus
 /// pre-study inflow models at stage ids -1/-2 give the PAR builder its lag
-/// statistics, so the global `StateLayout` has `n_state = N*(1 + 2)`.
+/// statistics, so the global `StateSpace` has `n_state = N*(1 + 2)`.
 #[allow(clippy::too_many_lines, clippy::cast_possible_wrap)]
 fn par2_system_with_state_configs(state_configs: &[StageStateConfig]) -> cobre_core::System {
     use chrono::NaiveDate;
@@ -6900,7 +6830,7 @@ fn cut_pool_sizing_t_plus_1_reduces_pool_zero_for_lagless_successor() {
 
 /// Result-neutrality: when every stage enables all dimensions (the default
 /// for every shipped case), every pool's `state_dimension` equals the global
-/// `StateLayout::n_state`. This is the bit-identical-to-today guarantee.
+/// `StateSpace::n_state`. This is the bit-identical-to-today guarantee.
 #[test]
 fn cut_pool_sizing_all_enabled_matches_global_n_state() {
     let lags = StageStateConfig {
@@ -6922,7 +6852,7 @@ fn cut_pool_sizing_all_enabled_matches_global_n_state() {
     assert_eq!(setup.fcf.state_dimension, global_n_state);
 }
 
-/// Each pool's `CutStateProjection` has `n_state()` equal to the pool's
+/// Each pool's `CutStateProjection` has `n_slots()` equal to the pool's
 /// `state_dimension` — the pairing the backward pass relies on to extract duals
 /// at the right dimension.
 #[test]
@@ -6945,9 +6875,9 @@ fn cut_state_layouts_stored_one_per_pool_and_reachable() {
     );
     for (t, layout) in setup.stage_data.cut_state_layouts.iter().enumerate() {
         assert_eq!(
-            layout.n_state(),
+            layout.n_slots(),
             setup.fcf.pools[t].state_dimension,
-            "cut_state_layouts[{t}].n_state() must match pool {t} dimension",
+            "cut_state_layouts[{t}].n_slots() must match pool {t} dimension",
         );
     }
 

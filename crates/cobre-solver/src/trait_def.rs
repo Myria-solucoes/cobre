@@ -226,6 +226,9 @@ pub trait SolverInterface: Send {
 mod tests {
     use super::SolverInterface;
     use crate::profile::MockProfile;
+    use crate::types::{
+        Basis, RowBatch, SolutionView, SolverError, SolverStatistics, StageTemplate,
+    };
 
     fn accepts_solver<S: SolverInterface>(_: &S) {}
 
@@ -236,32 +239,29 @@ mod tests {
 
         fn apply_profile(&mut self, _profile: &MockProfile) {}
 
-        fn load_model(&mut self, _template: &crate::types::StageTemplate) {}
+        fn load_model(&mut self, _template: &StageTemplate) {}
 
-        fn add_rows(&mut self, _rows: &crate::types::RowBatch) {}
+        fn add_rows(&mut self, _rows: &RowBatch) {}
 
         fn set_row_bounds(&mut self, _indices: &[usize], _lower: &[f64], _upper: &[f64]) {}
 
         fn set_col_bounds(&mut self, _indices: &[usize], _lower: &[f64], _upper: &[f64]) {}
 
-        fn solve(
-            &mut self,
-            _basis: Option<&crate::types::Basis>,
-        ) -> Result<crate::types::SolutionView<'_>, crate::types::SolverError> {
-            Err(crate::types::SolverError::InternalError {
+        fn solve(&mut self, _basis: Option<&Basis>) -> Result<SolutionView<'_>, SolverError> {
+            Err(SolverError::InternalError {
                 message: "noop".to_string(),
                 error_code: None,
             })
         }
 
-        fn get_basis(&mut self, _out: &mut crate::types::Basis) {}
+        fn get_basis(&mut self, _out: &mut Basis) {}
 
-        fn statistics(&self) -> crate::types::SolverStatistics {
-            crate::types::SolverStatistics::default()
+        fn statistics(&self) -> SolverStatistics {
+            SolverStatistics::default()
         }
 
-        fn statistics_into(&self, out: &mut crate::types::SolverStatistics) {
-            out.copy_from(&crate::types::SolverStatistics::default());
+        fn statistics_into(&self, out: &mut SolverStatistics) {
+            out.copy_from(&SolverStatistics::default());
         }
 
         fn name(&self) -> &'static str {

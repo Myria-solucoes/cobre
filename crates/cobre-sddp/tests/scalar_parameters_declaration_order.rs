@@ -1,10 +1,7 @@
-//! Declaration-order invariance regression test for [`ResolvedParameters`].
-//!
-//! Asserts that calling [`build_resolved_parameters`] with the same set of
-//! [`ScalarParameter`] entries in two different orderings produces bit-for-bit
-//! identical resolved values for every `(EntityId, stage_idx)` pair and that
-//! the sorted `id_to_slot` key sequence is canonicalized to `[10, 20, 30]`
-//! regardless of authored order.
+//! Declaration-order invariance regression test for [`ResolvedParameters`]:
+//! permuting the input [`ScalarParameter`] set leaves the values and the
+//! canonical `id_to_slot` key order that [`build_resolved_parameters`] produces
+//! unchanged.
 
 #![allow(
     clippy::unwrap_used,
@@ -13,10 +10,9 @@
     clippy::float_cmp
 )]
 
-use cobre_core::{EntityId, ParameterKind, ScalarParameter};
+use cobre_core::{EntityId, ParameterKind, ScalarParameter, StageId};
 use cobre_sddp::build_resolved_parameters;
 use cobre_sddp::energy_conversion::{EnergyConversionSet, HydroEnergyProductivityOverride};
-use cobre_sddp::stage_key::StageId;
 
 /// Return the three fixed [`ScalarParameter`] entries permuted by `order`.
 fn make_params(order: &[usize]) -> Vec<ScalarParameter> {

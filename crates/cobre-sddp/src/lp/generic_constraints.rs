@@ -4,7 +4,7 @@
 //! `(column_index, coefficient_multiplier)` pairs; the LP builder calls it for each
 //! [`cobre_core::LinearTerm`] of a generic-constraint expression to produce CSC
 //! entries. Column offsets come from the [`GenericResolverGeom`] view (role-(a)
-//! state region through its [`StateLayout`] handle, role-(b) equipment ranges
+//! state region through its [`StateSpace`] handle, role-(b) equipment ranges
 //! directly), with all block-stride arithmetic routed through the single-owner
 //! [`BlockGrid`] primitive.
 //!
@@ -27,14 +27,16 @@ use cobre_core::{
 };
 
 use crate::hydro_models::{ProductionModelSet, ResolvedProductionModel};
-use crate::indexer::{BlockGrid, EvaporationIndices, StateLayout};
+use crate::indexer::{
+    BlockGrid, BlockIdx, Boundary, EvaporationIndices, HydroSys, StateSpace, StorageBoundaryGrid,
+};
 
 /// Borrowed LP-column geometry the generic-constraint resolver reads — the
 /// resolver's window onto a `StageLayout` (private to `builder`) without exposing it.
 ///
 /// ## Role split (the load-bearing distinction for the cut path)
 ///
-/// - **Role (a)** — `state`: storage and z-inflow columns, owned by [`StateLayout`].
+/// - **Role (a)** — `state`: storage and z-inflow columns, owned by [`StateSpace`].
 ///   Resolving a `HydroStorage`/`HydroInflow` term through the handle is what keeps a
 ///   generic constraint's storage/inflow column landing on the same column the cut
 ///   path reads.
@@ -43,10 +45,10 @@ use crate::indexer::{BlockGrid, EvaporationIndices, StateLayout};
 ///   anticipated-decision base + reverse map, riding this stage's own block count.
 pub(crate) struct GenericResolverGeom<'a> {
     /// Role-(a) state-region handle (storage + z-inflow column owner).
-    pub state: &'a StateLayout,
-    /// Role-(a)-adjacent: control-region anchor for the interior storage
-    /// boundaries `S¹ … Sᴷ⁻¹`, feeding [`Self::block_storage_col`]'s `_` arm.
-    pub storage_internal_start: usize,
+    pub state: &'a StateSpace,
+    /// Role-(a)-adjacent: storage-boundary address primitive, feeding
+    /// [`Self::block_storage_col`].
+    pub storage_boundary_grid: StorageBoundaryGrid,
     /// Turbine column range (one per hydro per block).
     pub turbine: &'a Range<usize>,
     /// Spillage column range.
@@ -77,9 +79,9 @@ pub(crate) struct GenericResolverGeom<'a> {
     /// [`Self::evap_hydro_indices`].
     pub evap_indices: &'a [EvaporationIndices],
     /// System hydro indices of the evaporation hydros at this stage.
-    pub evap_hydro_indices: &'a [usize],
+    pub evap_hydro_indices: &'a [HydroSys],
     /// System hydro indices of the FPHA hydros at this stage.
-    pub fpha_hydro_indices: &'a [usize],
+    pub fpha_hydro_indices: &'a [HydroSys],
     /// First anticipated-decision column (`anticipated_decision.start`).
     pub anticipated_decision_start: usize,
     /// Reverse map: global thermal position → anticipated-local index.
@@ -93,21 +95,14 @@ impl GenericResolverGeom<'_> {
         BlockGrid::new(self.n_blks, self.max_deficit_segments)
     }
 
-    /// Storage column at chronological boundary `k ∈ 0..=K` (`K = self.n_blks`) for
-    /// hydro `h`, mirroring `StageLayout::block_storage_col` so the resolver reaches
-    /// per-block boundaries without a `StageLayout`. The two endpoints are STATE
-    /// columns — `k = 0 → S⁰` (`storage_in.start + h`), `k = K → Sᴷ`
-    /// (`storage.start + h`) — while `k ∈ 1..K` are interior CONTROL columns
-    /// (stride `n_blks − 1`). The `k == self.n_blks` arm MUST precede the interior
-    /// `_` arm, else `_` captures the outgoing endpoint and addresses an interior
-    /// column past the family.
+    /// Storage column at chronological `boundary` for hydro `h`, so the
+    /// resolver reaches per-block boundaries without a `StageLayout`;
+    /// delegates to
+    /// [`StorageBoundaryGrid::col`](crate::indexer::StorageBoundaryGrid::col),
+    /// the single owner of the endpoints-vs-interior split.
     #[inline]
-    fn block_storage_col(&self, h: usize, k: usize) -> usize {
-        match k {
-            0 => self.state.storage_in.start + h,
-            k if k == self.n_blks => self.state.storage.start + h,
-            _ => self.storage_internal_start + h * (self.n_blks - 1) + (k - 1),
-        }
+    fn block_storage_col(&self, h: usize, boundary: Boundary) -> usize {
+        self.storage_boundary_grid.col(h, boundary)
     }
 }
 
@@ -481,10 +476,11 @@ fn resolve_hydro_storage_boundary(
     hydro_pos: &BTreeMap<EntityId, usize>,
 ) -> Vec<(usize, f64)> {
     if let Some(&pos) = hydro_pos.get(&hydro_id) {
-        let boundary = match block_id {
+        let k = match block_id {
             Some(k) => k + boundary_offset,
             None => boundary_offset * geom.n_blks,
         };
+        let boundary = Boundary::from_index(k, geom.n_blks);
         vec![(geom.block_storage_col(pos, boundary), 1.0)]
     } else {
         vec![]
@@ -543,8 +539,14 @@ fn resolve_hydro_inflow(
     if !turbine.is_empty() && !spillage.is_empty() {
         for &up_id in upstream {
             if let Some(&pos_up) = hydro_pos.get(&up_id) {
-                result.push((grid.flat(turbine.start, pos_up, eff_blk), 1.0));
-                result.push((grid.flat(spillage.start, pos_up, eff_blk), 1.0));
+                result.push((
+                    grid.flat(turbine.start, pos_up, BlockIdx::new(eff_blk)),
+                    1.0,
+                ));
+                result.push((
+                    grid.flat(spillage.start, pos_up, BlockIdx::new(eff_blk)),
+                    1.0,
+                ));
             }
         }
     }
@@ -554,7 +556,10 @@ fn resolve_hydro_inflow(
     let diversion = block_col_range(geom, ElementKind::Diversion);
     if !diversion.is_empty() {
         for &d_idx in diversion_into {
-            result.push((grid.flat(diversion.start, d_idx, eff_blk), 1.0));
+            result.push((
+                grid.flat(diversion.start, d_idx, BlockIdx::new(eff_blk)),
+                1.0,
+            ));
         }
     }
 
@@ -579,7 +584,11 @@ fn resolve_hydro_evaporation(
     };
     // Linear scan: cold template-build path over a handful of evap hydros, so an
     // O(1) reverse map is not warranted (unlike `resolve_anticipated_decision`).
-    let Some(local_idx) = geom.evap_hydro_indices.iter().position(|&p| p == sys_pos) else {
+    let Some(local_idx) = geom
+        .evap_hydro_indices
+        .iter()
+        .position(|&p| p.get() == sys_pos)
+    else {
         return vec![];
     };
     // `evap_indices` is block-major (`local * n_blks + blk`); `None` maps to block 0.
@@ -609,12 +618,12 @@ fn resolve_hydro_outflow(
     let turbine_col = grid.flat(
         block_col_range(geom, ElementKind::Turbine).start,
         pos,
-        effective_blk,
+        BlockIdx::new(effective_blk),
     );
     let spillage_col = grid.flat(
         block_col_range(geom, ElementKind::Spillage).start,
         pos,
-        effective_blk,
+        BlockIdx::new(effective_blk),
     );
     vec![(turbine_col, 1.0), (spillage_col, 1.0)]
 }
@@ -641,10 +650,17 @@ fn resolve_hydro_generation(
         ResolvedProductionModel::Fpha { .. } => {
             // Linear scan: cold template-build path over a handful of FPHA hydros, so
             // an O(1) reverse map is not warranted (see `resolve_hydro_evaporation`).
-            if let Some(fpha_local_idx) = geom.fpha_hydro_indices.iter().position(|&p| p == sys_pos)
+            if let Some(fpha_local_idx) = geom
+                .fpha_hydro_indices
+                .iter()
+                .position(|&p| p.get() == sys_pos)
             {
                 let effective_blk = block_id.unwrap_or(block_idx);
-                let col = grid.flat(geom.generation.start, fpha_local_idx, effective_blk);
+                let col = grid.flat(
+                    geom.generation.start,
+                    fpha_local_idx,
+                    BlockIdx::new(effective_blk),
+                );
                 vec![(col, 1.0)]
             } else {
                 vec![]
@@ -679,12 +695,12 @@ fn resolve_line_exchange(
         let fwd_col = grid.flat(
             block_col_range(geom, ElementKind::LineFwd).start,
             pos,
-            effective_blk,
+            BlockIdx::new(effective_blk),
         );
         let rev_col = grid.flat(
             block_col_range(geom, ElementKind::LineRev).start,
             pos,
-            effective_blk,
+            BlockIdx::new(effective_blk),
         );
         vec![(fwd_col, 1.0), (rev_col, -1.0)]
     } else {
@@ -709,7 +725,7 @@ fn resolve_bus_deficit(
         (0..s)
             .map(|seg| {
                 (
-                    grid.deficit(geom.deficit.start, b_pos, seg, effective_blk),
+                    grid.deficit(geom.deficit.start, b_pos, seg, BlockIdx::new(effective_blk)),
                     1.0,
                 )
             })
@@ -772,7 +788,11 @@ fn resolve_pumping_column(
         return vec![];
     };
     let eff_blk = block_id.unwrap_or(block_idx);
-    let col = grid.flat(pumping_refs.col_pumping_start, p_idx, eff_blk);
+    let col = grid.flat(
+        pumping_refs.col_pumping_start,
+        p_idx,
+        BlockIdx::new(eff_blk),
+    );
     vec![(col, coeff_fn(station))]
 }
 
@@ -831,7 +851,7 @@ fn resolve_contract_column(
     }
     let (_, family_slot) = contract_family_slot(contract_refs.contracts, c_sys);
     let eff_blk = block_id.unwrap_or(block_idx);
-    let col = grid.flat(base, family_slot, eff_blk);
+    let col = grid.flat(base, family_slot, BlockIdx::new(eff_blk));
     vec![(col, 1.0)]
 }
 
@@ -849,7 +869,10 @@ fn resolve_block_variable(
 ) -> Vec<(usize, f64)> {
     if let Some(&pos) = pos_map.get(&entity_id) {
         let effective_blk = ref_block_id.unwrap_or(current_block_idx);
-        vec![(grid.flat(col_start, pos, effective_blk), multiplier)]
+        vec![(
+            grid.flat(col_start, pos, BlockIdx::new(effective_blk)),
+            multiplier,
+        )]
     } else {
         vec![]
     }

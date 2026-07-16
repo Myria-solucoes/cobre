@@ -20,6 +20,8 @@ use super::records::{
     StageStatesReadResult,
 };
 
+use std::path::Path;
+
 // ── FlatBuffers vtable slot offsets ──────────────────────────────────────────
 //
 // The slot 12 gap on `Cut` is the deprecated `domination_count` field; it MUST
@@ -142,7 +144,6 @@ pub fn serialize_stage_cuts(
     populated_count: u32,
     entity_manifest: &[EntitySlot],
 ) -> Vec<u8> {
-    // Pre-size the builder to avoid reallocation.
     let estimated = 64
         + cuts.len() * (96usize + state_dimension as usize * std::mem::size_of::<f64>())
         + std::mem::size_of_val(active_cut_indices)
@@ -804,7 +805,7 @@ pub fn deserialize_stage_states(buf: &[u8]) -> Result<StageStatesReadResult, Out
 /// The returned `Vec` is unsorted — callers must sort by `stage_id` after this call
 /// (`read_dir` order is not guaranteed; sorting upholds declaration-order invariance).
 pub(super) fn read_sorted_bin_files<T, F>(
-    dir: &std::path::Path,
+    dir: &Path,
     ctx: &str,
     deser_fn: F,
 ) -> Result<Vec<T>, OutputError>

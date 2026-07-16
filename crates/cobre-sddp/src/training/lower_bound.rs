@@ -12,6 +12,8 @@ use cobre_comm::Communicator;
 use cobre_solver::{RowBatch, SolverError, SolverInterface};
 use cobre_stochastic::{evaluate_par_batch, solve_par_noise_batch};
 
+use crate::cut::CutRowMap;
+use crate::cut::row::append_new_cuts_to_lp;
 use crate::{
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
@@ -65,7 +67,7 @@ pub struct LbEvalScratchBundle<'a> {
     /// Stage-0 cut row batch for the lower-bound LP.
     pub lb_cut_batch: &'a mut RowBatch,
     /// Cut row map for append-only lower-bound LP management.
-    pub lb_cut_row_map: Option<&'a mut crate::cut::CutRowMap>,
+    pub lb_cut_row_map: Option<&'a mut CutRowMap>,
     /// Noise/NCS-transform scratch, shared in shape with every other solve site.
     pub noise_scratch: &'a mut ScratchBuffers,
     /// Rank-0 risk-measure aggregation scratch.
@@ -79,7 +81,7 @@ impl<'a> LbEvalScratchBundle<'a> {
     pub fn from_scratch_fields(
         patch_buf: &'a mut PatchBuffer,
         lb_cut_batch: &'a mut RowBatch,
-        lb_cut_row_map: Option<&'a mut crate::cut::CutRowMap>,
+        lb_cut_row_map: Option<&'a mut CutRowMap>,
         noise_scratch: &'a mut ScratchBuffers,
         lb_scratch: &'a mut LbEvalScratch,
     ) -> Self {
@@ -100,7 +102,7 @@ fn lb_init_rank0<S: SolverInterface>(
     ctx: &StageContext<'_>,
     training_ctx: &TrainingContext<'_>,
     lb_cut_batch: &mut RowBatch,
-    lb_cut_row_map: Option<&mut crate::cut::CutRowMap>,
+    lb_cut_row_map: Option<&mut CutRowMap>,
 ) {
     let state_layout = training_ctx.state;
     let cut_state = &training_ctx.cut_state_layouts[0];
@@ -112,7 +114,7 @@ fn lb_init_rank0<S: SolverInterface>(
         if row_map.total_cut_rows() == 0 {
             solver.load_model(template);
         }
-        crate::cut::row::append_new_cuts_to_lp(
+        append_new_cuts_to_lp(
             solver,
             fcf,
             0,
@@ -253,7 +255,7 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
             training_ctx,
             0,
             &prep_params,
-        );
+        )?;
 
         let view = solver.solve(None).map_err(|e| match e {
             SolverError::Infeasible => SddpError::Infeasible {
@@ -375,22 +377,31 @@ pub fn evaluate_lower_bound<S: SolverInterface, C: Communicator>(
 mod tests {
     use super::{LbEvalScratch, LbEvalScratchBundle, evaluate_lower_bound, lb_evaluate_stage_0};
     use crate::{
+        PrepareHydroModelsResult, ResolvedParameters, StageTemplates,
+        build_stage_templates_resolving_layout,
         context::{StageContext, TrainingContext},
         cut::FutureCostFunction,
         error::SddpError,
         horizon_mode::HorizonMode,
-        indexer::{CutStateProjection, StateLayout, StudyDimensions},
+        indexer::{CutStateProjection, StateSpace, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
         lp_builder::PatchBuffer,
         risk_measure::RiskMeasure,
+        test_support,
         workspace::{ScratchBuffers, WorkspaceSizing},
     };
     use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
+    use cobre_core::SystemBuilder;
     use cobre_core::scenario::SamplingScheme;
+    use cobre_solver::ActiveSolver;
     use cobre_solver::{
         Basis, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
     };
-    use cobre_stochastic::{OpeningTree, StochasticContext};
+    use cobre_stochastic::tree::generate::OpeningTreeGenerationInputs;
+    use cobre_stochastic::{
+        ClassSchemes, OpeningTree, OpeningTreeInputs, PrecomputedNormal, StochasticContext,
+        build_stochastic_context, generate_opening_tree,
+    };
 
     fn empty_row_batch() -> RowBatch {
         RowBatch {
@@ -503,7 +514,7 @@ mod tests {
         let decomposed = DecomposedCorrelation::build(&corr_model).unwrap();
         let entity_order = vec![entity_id];
 
-        cobre_stochastic::tree::generate::generate_opening_tree(
+        generate_opening_tree(
             42,
             &[stage],
             1, // dim = 1 hydro
@@ -514,7 +525,7 @@ mod tests {
                 n_load_buses: 0,
                 n_ncs: 0,
             },
-            &cobre_stochastic::tree::generate::OpeningTreeGenerationInputs::default(),
+            &OpeningTreeGenerationInputs::default(),
         )
         .unwrap()
     }
@@ -525,20 +536,18 @@ mod tests {
     /// `stochastic: None` field. `user_tree` bypasses generation entirely, so the
     /// injected tree's shape is preserved verbatim.
     fn wrap_opening_tree(tree: OpeningTree) -> StochasticContext {
-        let system = cobre_core::SystemBuilder::new()
-            .build()
-            .expect("empty system is valid");
-        cobre_stochastic::context::build_stochastic_context(
+        let system = SystemBuilder::new().build().expect("empty system is valid");
+        build_stochastic_context(
             &system,
             42,
             None,
             &[],
             &[],
-            cobre_stochastic::context::OpeningTreeInputs {
+            OpeningTreeInputs {
                 user_tree: Some(tree),
                 ..Default::default()
             },
-            cobre_stochastic::context::ClassSchemes {
+            ClassSchemes {
                 inflow: None,
                 load: None,
                 ncs: None,
@@ -775,7 +784,9 @@ mod tests {
             })
         }
 
-        fn get_basis(&mut self, _out: &mut Basis) {}
+        fn get_basis(&mut self, out: &mut Basis) {
+            crate::test_support::fill_consistent_basis(out);
+        }
 
         fn statistics(&self) -> SolverStatistics {
             SolverStatistics::default()
@@ -808,7 +819,7 @@ mod tests {
         base_rows: Vec<usize>,
         noise_scale: Vec<f64>,
         n_hydros: usize,
-        state: StateLayout,
+        state: StateSpace,
         cut_state_layouts: Vec<CutStateProjection>,
         study_dims: StudyDimensions,
         horizon: HorizonMode,
@@ -828,15 +839,15 @@ mod tests {
             inflow_method: InflowNonNegativityMethod,
             initial_state: Vec<f64>,
         ) -> Self {
-            let state = crate::test_support::state_layout(hydro_count, 0);
-            let cut_state_layouts = crate::test_support::all_enabled_cut_state_layouts(&state, 2);
+            let state = test_support::state_layout(hydro_count, 0);
+            let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, 2);
             Self {
                 templates: vec![template],
                 base_rows: vec![base_row],
                 noise_scale,
                 n_hydros,
                 cut_state_layouts,
-                study_dims: crate::test_support::study_dims(),
+                study_dims: test_support::study_dims(),
                 horizon: HorizonMode::Finite { num_stages: 2 },
                 stochastic: wrap_opening_tree(opening_tree),
                 inflow_method,
@@ -1818,7 +1829,7 @@ mod tests {
         let templates = vec![template];
         let base_rows = vec![0_usize];
 
-        let state = crate::test_support::state_layout(0, 0);
+        let state = test_support::state_layout(0, 0);
         let ncs_max_gen = vec![100.0_f64; n_ncs];
         let ncs_allow_curtailment = vec![true; n_ncs];
         // Dense: every stochastic slot maps to its own NCS column (slot order ==
@@ -1861,7 +1872,7 @@ mod tests {
             ..StudyDimensions::default()
         };
         let stages = vec![stage];
-        let cut_state_layouts = crate::test_support::all_enabled_cut_state_layouts(&state, 1);
+        let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, 1);
         let initial_state: Vec<f64> = Vec::new();
         let training_ctx = TrainingContext {
             horizon: &horizon,
@@ -2049,7 +2060,7 @@ mod tests {
         clippy::cast_possible_truncation,
         clippy::cast_possible_wrap
     )]
-    fn filling_study_templates() -> (crate::lp_builder::StageTemplates, usize, usize) {
+    fn filling_study_templates() -> (StageTemplates, usize, usize) {
         use chrono::NaiveDate;
         use cobre_core::scenario::InflowModel;
         use cobre_core::{
@@ -2286,15 +2297,14 @@ mod tests {
             None,
         )
         .expect("white-noise PrecomputedPar build");
-        let normal_lp = cobre_stochastic::normal::precompute::PrecomputedNormal::default();
-        let hydro_models =
-            crate::hydro_models::PrepareHydroModelsResult::default_from_system(&system);
-        let resolved_params = crate::resolved_parameters::ResolvedParameters {
+        let normal_lp = PrecomputedNormal::default();
+        let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
+        let resolved_params = ResolvedParameters {
             per_param: vec![],
             id_to_slot: vec![],
         };
 
-        let templates = crate::lp_builder::build_stage_templates_resolving_layout(
+        let templates = build_stage_templates_resolving_layout(
             &system,
             InflowNonNegativityMethod::None,
             &par_lp,
@@ -2381,7 +2391,7 @@ mod tests {
         };
         let decomposed = DecomposedCorrelation::build(&corr_model).unwrap();
 
-        cobre_stochastic::tree::generate::generate_opening_tree(
+        generate_opening_tree(
             42,
             &[stage],
             2, // dim = 2 hydros
@@ -2392,7 +2402,7 @@ mod tests {
                 n_load_buses: 0,
                 n_ncs: 0,
             },
-            &cobre_stochastic::tree::generate::OpeningTreeGenerationInputs::default(),
+            &OpeningTreeGenerationInputs::default(),
         )
         .unwrap()
     }
@@ -2602,11 +2612,11 @@ mod tests {
         // The per-opening water-balance noise patch reads `noise_scale` — including
         // H_B's PreFilling-zeroed stage-0 entry — exactly as the forward/backward
         // passes do, so the bound sees the same stage-0 constraints.
-        let mut solver = cobre_solver::ActiveSolver::new().expect("ActiveSolver::new");
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
         let comm = LocalComm;
 
         // 2 storage states (one per hydro), white noise ⇒ max_par_order = 0.
-        let state = crate::test_support::state_layout(2, 0);
+        let state = test_support::state_layout(2, 0);
         let fcf = make_fcf(templates.templates.len(), state.n_state);
         let initial_state = vec![0.0_f64; state.n_state];
         let mut patch_buf = PatchBuffer::new(state.hydro_count, state.max_par_order, 0, 0, 0, 0, 0);
@@ -2641,9 +2651,9 @@ mod tests {
         let horizon = HorizonMode::Finite {
             num_stages: templates.templates.len(),
         };
-        let study_dims = crate::test_support::study_dims();
+        let study_dims = test_support::study_dims();
         let cut_state_layouts =
-            crate::test_support::all_enabled_cut_state_layouts(&state, templates.templates.len());
+            test_support::all_enabled_cut_state_layouts(&state, templates.templates.len());
         let training_ctx = TrainingContext {
             horizon: &horizon,
             state: &state,
@@ -2699,7 +2709,7 @@ mod tests {
     /// pinning contract.
     #[test]
     fn evaluate_lower_bound_pins_transit_bucket_incoming_columns() {
-        let state = crate::test_support::state_layout_with_transit_buckets(
+        let state = test_support::state_layout_with_transit_buckets(
             0,
             0,
             2,
@@ -2710,8 +2720,7 @@ mod tests {
         );
         assert_eq!(state.n_state, 2);
 
-        let template =
-            crate::test_support::transit_bucket_only_template(state.theta + 1, state.n_state);
+        let template = test_support::transit_bucket_only_template(state.theta + 1, state.n_state);
         let templates = vec![template];
         let base_rows = vec![0_usize];
         let fcf = make_fcf(1, state.n_state);
@@ -2748,8 +2757,8 @@ mod tests {
             downstream_par_order: 0,
         };
         let horizon = HorizonMode::Finite { num_stages: 1 };
-        let study_dims = crate::test_support::study_dims();
-        let cut_state_layouts = crate::test_support::all_enabled_cut_state_layouts(&state, 1);
+        let study_dims = test_support::study_dims();
+        let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, 1);
         let training_ctx = TrainingContext {
             horizon: &horizon,
             state: &state,

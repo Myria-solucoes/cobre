@@ -31,16 +31,13 @@ pub struct ArCoefficientEstimate {
     pub season_id: usize,
     /// Standardized AR coefficients ψ*₁..ψ*ₚ (Yule-Walker output); empty at order 0.
     pub coefficients: Vec<f64>,
-    /// Residual std ratio `σ_m / s_m`, always in (0, 1].
-    pub residual_std_ratio: f64,
     /// PAR(p)-A annual-component triple; `None` for classical PAR(p). All three
     /// sub-fields are present together by construction, never split.
     pub annual: Option<AnnualComponent>,
 }
 
-/// Produce white-noise (order-0) AR estimates (empty coefficients,
-/// `residual_std_ratio = 1.0`) for every `(entity, season)` pair in
-/// `seasonal_stats` that belongs to `hydro_ids`.
+/// Produce white-noise (order-0) AR estimates (empty coefficients) for every
+/// `(entity, season)` pair in `seasonal_stats` that belongs to `hydro_ids`.
 ///
 /// # Errors
 ///
@@ -189,9 +186,8 @@ pub(super) fn build_season_lookups<'a>(
     }
 }
 
-/// Produce white-noise (order-0) AR estimates (empty coefficients,
-/// `residual_std_ratio = 1.0`) for every `(entity, season)` pair in
-/// `seasonal_stats` that belongs to `hydro_ids`.
+/// Produce white-noise (order-0) AR estimates (empty coefficients) for every
+/// `(entity, season)` pair in `seasonal_stats` that belongs to `hydro_ids`.
 ///
 /// `observations`, `stages`, and `season_map` are accepted for signature parity
 /// with the order-selecting path but unused here.
@@ -237,7 +233,6 @@ pub fn estimate_ar_coefficients_with_season_map(
                 hydro_id: s.entity_id,
                 season_id,
                 coefficients: Vec::new(),
-                residual_std_ratio: 1.0,
                 annual: None,
             })
         })

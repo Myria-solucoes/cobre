@@ -2,11 +2,12 @@
 //! stage templates for numerical conditioning (`D_r * A * D_c` form), plus the
 //! noise pre-scaling helper. Invoked from `setup/template_postprocess::postprocess_templates`.
 
+use cobre_core::commissioning::{Phase, filling_phase};
 use cobre_core::{Hydro, Stage};
 use cobre_solver::StageTemplate;
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
-use crate::indexer::StateLayout;
+use crate::indexer::StateSpace;
 
 use super::M3S_TO_HM3;
 
@@ -90,7 +91,7 @@ pub(crate) fn apply_col_scale(template: &mut StageTemplate, col_scale: &[f64]) {
 // activates it once the travel-time bucket LP fill gives bucket columns real
 // row/column entries. The `#[allow(dead_code)]` refires once that reader lands.
 #[allow(dead_code)]
-pub(crate) fn apply_bucket_col_scale(col_scale: &mut [f64], state_layout: &StateLayout) {
+pub(crate) fn apply_bucket_col_scale(col_scale: &mut [f64], state_layout: &StateSpace) {
     debug_assert!(
         col_scale.len() > state_layout.theta,
         "col_scale must cover every state column including theta ({}); got len {}",
@@ -119,7 +120,7 @@ pub(crate) fn apply_bucket_col_scale(col_scale: &mut [f64], state_layout: &State
 /// relies on.
 pub(crate) fn apply_anticipated_col_scale_unscale(
     col_scale: &mut [f64],
-    state_layout: &StateLayout,
+    state_layout: &StateSpace,
 ) {
     debug_assert!(
         col_scale.len() > state_layout.theta,
@@ -237,13 +238,13 @@ pub(super) fn compute_noise_scale(
             // defaults missing entries to `Operating` via `.get()`, never a panic.
             let is_prefilling = hydros.get(h_idx).is_some_and(|hydro| {
                 matches!(
-                    crate::lp_builder::filling_phase(
+                    filling_phase(
                         hydro.filling.as_ref(),
                         hydro.entry_stage_id,
                         hydro.exit_stage_id,
                         stage.id,
                     ),
-                    crate::lp_builder::Phase::PreFilling
+                    Phase::PreFilling
                 )
             });
             let sigma = if !is_prefilling && par_lp.n_stages() > 0 && par_lp.n_hydros() == n_hydros
@@ -462,7 +463,7 @@ mod tests {
     // Bucket column scale tests
     // =========================================================================
 
-    use crate::indexer::StateLayout;
+    use crate::indexer::StateSpace;
 
     /// `N=2` hydros, `L=0` (no lags), `B=3` buckets: hydro 0 feeds two lags
     /// (depth 2), hydro 1 feeds one lag (depth 1). Each bucket's in/out scale
@@ -471,7 +472,7 @@ mod tests {
     #[test]
     fn apply_bucket_col_scale_reuses_storage_scale_per_plant() {
         let state_layout =
-            StateLayout::new(2, 0, 3, vec![(0, 1), (0, 2), (1, 1)], 0, 0, vec![], &[0, 0]);
+            StateSpace::new(2, 0, 3, vec![(0, 1), (0, 2), (1, 1)], 0, 0, vec![], &[0, 0]);
 
         assert_eq!(state_layout.storage, 0..2);
         assert_eq!(state_layout.transit_buckets_out, 2..5);
@@ -504,7 +505,7 @@ mod tests {
     /// produced it.
     #[test]
     fn apply_bucket_col_scale_is_noop_when_b_zero() {
-        let state_layout = StateLayout::new(2, 0, 0, vec![], 0, 0, vec![], &[0, 0]);
+        let state_layout = StateSpace::new(2, 0, 0, vec![], 0, 0, vec![], &[0, 0]);
         let mut col_scale = vec![1.0_f64; state_layout.theta + 1];
         col_scale[0] = 3.0;
 
@@ -527,7 +528,7 @@ mod tests {
     /// to `1.0` while leaving every other index byte-identical to its seed.
     #[test]
     fn apply_anticipated_col_scale_unscale_forces_ring_to_one() {
-        let state_layout = StateLayout::new(2, 0, 0, vec![], 1, 2, vec![2], &[0, 0]);
+        let state_layout = StateSpace::new(2, 0, 0, vec![], 1, 2, vec![2], &[0, 0]);
 
         assert_eq!(state_layout.anticipated_slots_out, 2..4);
         assert_eq!(state_layout.anticipated_state, 8..10);
@@ -561,7 +562,7 @@ mod tests {
     /// computation produced it.
     #[test]
     fn apply_anticipated_col_scale_unscale_is_noop_when_a_zero() {
-        let state_layout = StateLayout::new(2, 0, 0, vec![], 0, 0, vec![], &[0, 0]);
+        let state_layout = StateSpace::new(2, 0, 0, vec![], 0, 0, vec![], &[0, 0]);
         let mut col_scale = vec![1.0_f64; state_layout.theta + 1];
         col_scale[0] = 3.0;
 

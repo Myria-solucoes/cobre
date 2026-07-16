@@ -7,9 +7,9 @@
 
 use std::collections::HashMap;
 
+use cobre_core::Stage;
 use cobre_core::entities::NonControllableSource;
 use cobre_core::resolved::ResolvedNcsFactors;
-use cobre_core::temporal::Stage;
 
 use crate::scenarios::NcsFactorEntry;
 
@@ -60,7 +60,7 @@ pub fn resolve_ncs_factors(
             continue;
         };
         for bf in &entry.block_factors {
-            let Some(block_idx) = usize::try_from(bf.block_id).ok() else {
+            let Ok(block_idx) = usize::try_from(bf.block_id) else {
                 continue;
             };
             if block_idx < max_blocks {

@@ -31,22 +31,32 @@
 //! ```
 
 use super::pool::CutPool;
+use crate::FullFcf;
+use crate::PolicyLoadProof;
+use crate::SddpError;
+use crate::SddpError::Validation;
+
+use cobre_io::StageCutsReadResult;
 
 /// All-stages container for the Future Cost Function (FCF): one [`CutPool`] per
 /// stage. Per-cut logic is delegated to [`CutPool`].
 ///
-/// Each pool carries its own [`CutPool::state_dimension`]; a stage whose cuts
-/// span fewer state dimensions (a successor with `inflow_lags: false`) sizes a
-/// smaller pool. [`Self::state_dimension`] remains the global state-vector
-/// length used by the cross-cutting checkpoint and boundary paths, equal to
-/// every pool's dimension when all stages enable all dimensions (the default).
+/// Each pool carries its own [`CutPool::state_dimension`] — its cut-slot-space
+/// dimension, the length each stored cut's `coefficients` slice spans
+/// ([`CutStateProjection::n_slots`](crate::indexer::CutStateProjection::n_slots));
+/// a stage whose cuts span fewer state dimensions (a successor with
+/// `inflow_lags: false`) sizes a smaller pool. [`Self::state_dimension`] remains
+/// the global state-vector length (`StateSpace::n_state`) the checkpoint and
+/// boundary paths validate on — the space `validate_policy_load`'s
+/// `state_dimension` check operates in — equal to every pool's dimension when
+/// all stages enable all dimensions (the default).
 #[derive(Debug, Clone)]
 pub struct FutureCostFunction {
     /// One cut pool per stage, indexed 0-based.
     pub pools: Vec<CutPool>,
 
-    /// Global state-vector length (`StateLayout::n_state`); a pool's own
-    /// `state_dimension` may be smaller.
+    /// Global state-vector length (`StateSpace::n_state`); a pool's own
+    /// cut-slot-space [`CutPool::state_dimension`] may be smaller.
     pub state_dimension: usize,
 
     /// Forward passes per training iteration. Immutable after construction.
@@ -98,7 +108,7 @@ impl FutureCostFunction {
     /// `pool_state_dimensions[t]` is the dimension of pool `t` (the count from
     /// `CutStateProjection(stages[t+1].state_config)` for non-terminal pools; the
     /// global `n_state` for the terminal pool). `global_state_dimension` is
-    /// `StateLayout::n_state` — the value stored in [`Self::state_dimension`] and
+    /// `StateSpace::n_state` — the value stored in [`Self::state_dimension`] and
     /// used by the checkpoint/boundary paths, independent of any reduced pool.
     ///
     /// # Parameters
@@ -148,6 +158,11 @@ impl FutureCostFunction {
     /// Reconstruct a `FutureCostFunction` from deserialized policy checkpoint data
     /// via [`CutPool::from_deserialized`] (tightly sized, no training capacity).
     ///
+    /// `_proof` is compile-time evidence from
+    /// [`validate_policy_load`](crate::validate_policy_load) that
+    /// `stage_results` already passed the [`FullFcf`] compatibility check; it is
+    /// never read at runtime.
+    ///
     /// # Errors
     ///
     /// [`SddpError::Validation`] if `stage_results` is empty or `state_dimension`
@@ -155,8 +170,9 @@ impl FutureCostFunction {
     ///
     /// [`SddpError::Validation`]: crate::SddpError::Validation
     pub fn from_deserialized(
-        stage_results: &[cobre_io::StageCutsReadResult],
-    ) -> Result<Self, crate::SddpError> {
+        _proof: &PolicyLoadProof<FullFcf>,
+        stage_results: &[StageCutsReadResult],
+    ) -> Result<Self, SddpError> {
         let state_dimension =
             validate_consistent_state_dimension("from_deserialized", stage_results)?;
 
@@ -175,6 +191,32 @@ impl FutureCostFunction {
     /// Build an FCF with warm-start cuts plus training capacity via
     /// [`CutPool::new_with_warm_start`].
     ///
+    /// `_proof` is compile-time evidence from
+    /// [`validate_policy_load`](crate::validate_policy_load) that
+    /// `stage_results` already passed the [`FullFcf`] compatibility check; it is
+    /// never read at runtime. Omitting it, or handing a
+    /// [`BoundaryInjection`](crate::BoundaryInjection)-typed proof instead,
+    /// fails to compile.
+    ///
+    /// ```compile_fail
+    /// use cobre_sddp::FutureCostFunction;
+    ///
+    /// fn call_without_proof(stage_results: &[cobre_io::StageCutsReadResult]) {
+    ///     let _ = FutureCostFunction::new_with_warm_start(stage_results, 4, 10);
+    /// }
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use cobre_sddp::{BoundaryInjection, FutureCostFunction, PolicyLoadProof};
+    ///
+    /// fn call_with_wrong_kind(
+    ///     proof: &PolicyLoadProof<BoundaryInjection>,
+    ///     stage_results: &[cobre_io::StageCutsReadResult],
+    /// ) {
+    ///     let _ = FutureCostFunction::new_with_warm_start(proof, stage_results, 4, 10);
+    /// }
+    /// ```
+    ///
     /// # Errors
     ///
     /// [`SddpError::Validation`] if `stage_results` is empty or `state_dimension`
@@ -182,10 +224,11 @@ impl FutureCostFunction {
     ///
     /// [`SddpError::Validation`]: crate::SddpError::Validation
     pub fn new_with_warm_start(
-        stage_results: &[cobre_io::StageCutsReadResult],
+        _proof: &PolicyLoadProof<FullFcf>,
+        stage_results: &[StageCutsReadResult],
         forward_passes: u32,
         max_iterations: u64,
-    ) -> Result<Self, crate::SddpError> {
+    ) -> Result<Self, SddpError> {
         let state_dimension =
             validate_consistent_state_dimension("new_with_warm_start", stage_results)?;
 
@@ -346,18 +389,16 @@ impl FutureCostFunction {
 
 fn validate_consistent_state_dimension(
     context: &str,
-    stage_results: &[cobre_io::StageCutsReadResult],
-) -> Result<usize, crate::SddpError> {
+    stage_results: &[StageCutsReadResult],
+) -> Result<usize, SddpError> {
     if stage_results.is_empty() {
-        return Err(crate::SddpError::Validation(format!(
-            "{context}: stage_results is empty"
-        )));
+        return Err(Validation(format!("{context}: stage_results is empty")));
     }
 
     let state_dimension = stage_results[0].state_dimension as usize;
     for sr in &stage_results[1..] {
         if sr.state_dimension as usize != state_dimension {
-            return Err(crate::SddpError::Validation(format!(
+            return Err(Validation(format!(
                 "{context}: inconsistent state_dimension: stage {} has {}, \
                  expected {} (from stage {})",
                 sr.stage_id, sr.state_dimension, state_dimension, stage_results[0].stage_id
@@ -637,7 +678,8 @@ mod tests {
 
     #[test]
     fn from_deserialized_empty_input_returns_err() {
-        let result = FutureCostFunction::from_deserialized(&[]);
+        let proof = crate::test_support::trivial_full_fcf_proof(0, 0);
+        let result = FutureCostFunction::from_deserialized(&proof, &[]);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("empty"), "{msg}");
@@ -649,7 +691,8 @@ mod tests {
             make_stage(0, 2, vec![make_record(1.0, vec![1.0, 0.0], true)]),
             make_stage(1, 3, vec![make_record(2.0, vec![1.0, 0.0, 0.0], true)]),
         ];
-        let result = FutureCostFunction::from_deserialized(&stages);
+        let proof = crate::test_support::trivial_full_fcf_proof(2, 2);
+        let result = FutureCostFunction::from_deserialized(&proof, &stages);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("inconsistent"), "{msg}");
@@ -667,7 +710,8 @@ mod tests {
             ],
         )];
 
-        let fcf = FutureCostFunction::from_deserialized(&stages).unwrap();
+        let proof = crate::test_support::trivial_full_fcf_proof(2, 1);
+        let fcf = FutureCostFunction::from_deserialized(&proof, &stages).unwrap();
         assert_eq!(fcf.pools.len(), 1);
         assert_eq!(fcf.total_active_cuts(), 2);
         assert_eq!(fcf.pools[0].populated(), 3);
@@ -698,7 +742,8 @@ mod tests {
             make_stage(1, 2, vec![make_record(3.0, vec![1.0, 1.0], true)]),
         ];
 
-        let reconstructed = FutureCostFunction::from_deserialized(&stages).unwrap();
+        let proof = crate::test_support::trivial_full_fcf_proof(2, 2);
+        let reconstructed = FutureCostFunction::from_deserialized(&proof, &stages).unwrap();
         assert_eq!(reconstructed.evaluate_at_state(0, &state), orig_val_s0);
         assert_eq!(reconstructed.evaluate_at_state(1, &state), orig_val_s1);
     }
@@ -710,7 +755,8 @@ mod tests {
             make_stage(1, 2, vec![]), // empty stage
         ];
 
-        let fcf = FutureCostFunction::from_deserialized(&stages).unwrap();
+        let proof = crate::test_support::trivial_full_fcf_proof(2, 2);
+        let fcf = FutureCostFunction::from_deserialized(&proof, &stages).unwrap();
         assert_eq!(fcf.pools.len(), 2);
         assert_eq!(fcf.pools[1].capacity, 0);
         assert_eq!(fcf.pools[1].active_count(), 0);
@@ -725,7 +771,8 @@ mod tests {
             vec![make_record(7.0, vec![1.0, 2.0, 3.0], true)],
         )];
 
-        let fcf = FutureCostFunction::from_deserialized(&stages).unwrap();
+        let proof = crate::test_support::trivial_full_fcf_proof(3, 1);
+        let fcf = FutureCostFunction::from_deserialized(&proof, &stages).unwrap();
         assert_eq!(fcf.state_dimension, 3);
         assert_eq!(fcf.total_active_cuts(), 1);
         // 7 + 1*1 + 2*2 + 3*3 = 7 + 1 + 4 + 9 = 21
@@ -745,7 +792,8 @@ mod tests {
             ],
         )];
 
-        let fcf = FutureCostFunction::new_with_warm_start(&stages, 4, 10).unwrap();
+        let proof = crate::test_support::trivial_full_fcf_proof(2, 1);
+        let fcf = FutureCostFunction::new_with_warm_start(&proof, &stages, 4, 10).unwrap();
         assert_eq!(fcf.pools.len(), 1);
         // capacity = 2 warm-start + 10*4 training = 42
         assert_eq!(fcf.pools[0].capacity, 42);
@@ -759,7 +807,8 @@ mod tests {
     fn warm_start_training_cuts_at_correct_offset() {
         let stages = vec![make_stage(0, 1, vec![make_record(10.0, vec![1.0], true)])];
 
-        let mut fcf = FutureCostFunction::new_with_warm_start(&stages, 2, 5).unwrap();
+        let proof = crate::test_support::trivial_full_fcf_proof(1, 1);
+        let mut fcf = FutureCostFunction::new_with_warm_start(&proof, &stages, 2, 5).unwrap();
         // warm_start_count = 1, forward_passes = 2
         // Training cut at iteration=0, fwd_idx=0: slot = 1 + 0*2 + 0 = 1
         fcf.add_cut(0, 0, 0, 20.0, &[2.0]);
@@ -782,7 +831,8 @@ mod tests {
             make_stage(1, 2, vec![]),
         ];
 
-        let fcf = FutureCostFunction::new_with_warm_start(&stages, 3, 5).unwrap();
+        let proof = crate::test_support::trivial_full_fcf_proof(2, 2);
+        let fcf = FutureCostFunction::new_with_warm_start(&proof, &stages, 3, 5).unwrap();
         // Stage 0: warm_start=1, capacity=1+15=16
         assert_eq!(fcf.pools[0].capacity, 16);
         assert_eq!(fcf.pools[0].warm_start_count, 1);
@@ -802,7 +852,8 @@ mod tests {
             ],
         )];
 
-        let fcf = FutureCostFunction::new_with_warm_start(&stages, 1, 5).unwrap();
+        let proof = crate::test_support::trivial_full_fcf_proof(2, 1);
+        let fcf = FutureCostFunction::new_with_warm_start(&proof, &stages, 1, 5).unwrap();
         assert_eq!(fcf.pools[0].warm_start_count, 2);
         assert_eq!(fcf.total_active_cuts(), 1); // only the active one
     }

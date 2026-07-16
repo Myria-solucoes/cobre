@@ -1,21 +1,22 @@
 use cobre_core::{BlockMode, Stage};
 
 use crate::hydro_models::EvaporationModel;
+use crate::indexer::BlockIdx;
 
 use super::fpha_cursor::for_each_fpha_plane;
 use super::layout::{StageLayout, TemplateBuildCtx};
 
 /// Fill row lower/upper bounds for one stage.
 ///
-/// Returns `(row_lower, row_upper)` vectors of length `layout.num_rows`.
+/// Returns `(row_lower, row_upper)` vectors of length `layout.rows.num_rows`.
 pub(super) fn fill_stage_rows(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
     stage_idx: usize,
     layout: &StageLayout,
 ) -> (Vec<f64>, Vec<f64>) {
-    let mut row_lower = vec![0.0_f64; layout.num_rows];
-    let mut row_upper = vec![0.0_f64; layout.num_rows];
+    let mut row_lower = vec![0.0_f64; layout.rows.num_rows];
+    let mut row_upper = vec![0.0_f64; layout.rows.num_rows];
 
     fill_water_balance_rows(
         ctx,
@@ -89,7 +90,7 @@ fn fill_parallel_water_rows(
 ) {
     let has_par = ctx.par_lp.n_stages() > 0 && ctx.par_lp.n_hydros() == layout.n_h;
     for h_idx in 0..layout.n_h {
-        let row = layout.row_water_balance_start() + h_idx;
+        let row = layout.rows.water_balance.start + h_idx;
         if super::entries::is_prefilling(ctx, stage, h_idx) {
             // Frozen identity: RHS 0 (the base inflow rides the routed `z_h` column).
             row_lower[row] = 0.0;
@@ -131,7 +132,7 @@ fn fill_parallel_water_rows(
             .hydro_bounds(h_idx, stage_idx)
             .water_withdrawal_m3s;
         let delta = layout.zeta * withdrawal_h;
-        let row_d = layout.row_water_balance_start() + d_idx;
+        let row_d = layout.rows.water_balance.start + d_idx;
         row_lower[row_d] -= delta;
         row_upper[row_d] -= delta;
     }
@@ -156,7 +157,7 @@ fn fill_chronological_water_rows(
     for h_idx in 0..layout.n_h {
         if super::entries::is_prefilling(ctx, stage, h_idx) {
             for k in 1..=n_blks {
-                let row = layout.row_water_balance_start() + h_idx * n_blks + (k - 1);
+                let row = layout.rows.water_balance.start + h_idx * n_blks + (k - 1);
                 row_lower[row] = 0.0;
                 row_upper[row] = 0.0;
             }
@@ -174,7 +175,7 @@ fn fill_chronological_water_rows(
             .water_withdrawal_m3s;
         for k in 1..=n_blks {
             let blk = k - 1;
-            let row = layout.row_water_balance_start() + h_idx * n_blks + blk;
+            let row = layout.rows.water_balance.start + h_idx * n_blks + blk;
             let tau_k = stage.blocks[blk].duration_hours * super::M3S_TO_HM3;
             let rhs = tau_k * (base - withdrawal);
             row_lower[row] = rhs;
@@ -197,7 +198,7 @@ fn fill_chronological_water_rows(
         for k in 1..=n_blks {
             let blk = k - 1;
             let tau_k = stage.blocks[blk].duration_hours * super::M3S_TO_HM3;
-            let row_d = layout.row_water_balance_start() + d_idx * n_blks + blk;
+            let row_d = layout.rows.water_balance.start + d_idx * n_blks + blk;
             row_lower[row_d] -= tau_k * withdrawal_h;
             row_upper[row_d] -= tau_k * withdrawal_h;
         }
@@ -206,7 +207,7 @@ fn fill_chronological_water_rows(
 
 /// Fill the travel-time bucket-definition equality row bounds (`0 == 0`), one
 /// row per (plant, lag) bucket REACHABLE at this stage
-/// (`layout.transit_bucket_row_pos`, sparse like
+/// (`layout.rows.transit_bucket_row_pos`, sparse like
 /// [`fill_anticipated_state_out_def_rows`]'s `active_pos` offset, not
 /// [`fill_anticipated_fishing_rows`]'s always-active dense one) — a lag beyond
 /// this stage's horizon-reachable cap gets no row. Empty when
@@ -216,8 +217,8 @@ fn fill_transit_bucket_definition_rows(
     row_lower: &mut [f64],
     row_upper: &mut [f64],
 ) {
-    let row_start = layout.row_transit_bucket_definition_start();
-    for pos in layout.transit_bucket_row_pos.iter().flatten() {
+    let row_start = layout.rows.transit_bucket_definition.start;
+    for pos in layout.rows.transit_bucket_row_pos.iter().flatten() {
         let row = row_start + pos;
         row_lower[row] = 0.0;
         row_upper[row] = 0.0;
@@ -247,16 +248,22 @@ fn fill_filling_target_rows(
     row_lower: &mut [f64],
     row_upper: &mut [f64],
 ) {
-    let row_start = layout.row_filling_target_start();
-    for (local_idx, &h_idx) in layout.filling_target_hydro_indices.iter().enumerate() {
+    let row_start = layout.filling.row_filling_target_start;
+    for (local_idx, &h) in layout
+        .filling
+        .filling_target_hydro_indices
+        .iter()
+        .enumerate()
+    {
         // Fail loud on a lookup miss rather than writing a `0.0` floor, which would
         // make `v + σ_fill ≥ 0` trivially true and silently neutralize the
         // constraint. Membership and the `build_filling_v_target` precompute share
         // the Filling-phase predicate, so a miss is a construction bug between them.
-        let Some(v_target) = ctx.filling_v_target.get(&(h_idx, stage_id)).copied() else {
+        let Some(v_target) = ctx.filling_v_target.get(&(h.get(), stage_id)).copied() else {
             unreachable!(
-                "no V_target for filling hydro {h_idx} at stage id {stage_id}: \
-                 filling_target membership and the V_target precompute disagree"
+                "no V_target for filling hydro {} at stage id {stage_id}: \
+                 filling_target membership and the V_target precompute disagree",
+                h.get()
             );
         };
         let row = row_start + local_idx;
@@ -288,8 +295,9 @@ fn fill_filled_min_storage_floor_rows(
     row_lower: &mut [f64],
     row_upper: &mut [f64],
 ) {
-    let row_start = layout.row_filled_min_storage_floor_start();
-    for (local_idx, &h_idx) in layout
+    let row_start = layout.filling.row_filled_min_storage_floor_start;
+    for (local_idx, &h) in layout
+        .filling
         .filled_min_storage_floor_hydro_indices
         .iter()
         .enumerate()
@@ -297,7 +305,7 @@ fn fill_filled_min_storage_floor_rows(
         let min_storage = ctx
             .resolved
             .bounds
-            .hydro_bounds(h_idx, stage_idx)
+            .hydro_bounds(h.get(), stage_idx)
             .min_storage_hm3;
         let row = row_start + local_idx;
         row_lower[row] = min_storage;
@@ -327,7 +335,7 @@ fn fill_load_balance_rows(
                 .resolved
                 .resolved_load_factors
                 .factor(b_idx, stage_idx, blk);
-            let row = grid.flat(layout.row_load_balance_start(), b_idx, blk);
+            let row = grid.flat(layout.rows.load_balance.start, b_idx, BlockIdx::new(blk));
             let rhs = mean_mw * factor;
             row_lower[row] = rhs;
             row_upper[row] = rhs;
@@ -371,8 +379,8 @@ fn fill_evaporation_rows(
     row_upper: &mut [f64],
 ) {
     let n_blks = layout.n_blks;
-    for (local_idx, &h_idx) in layout.evap_hydro_indices.iter().enumerate() {
-        match ctx.evaporation_models.model(h_idx) {
+    for (local_idx, &h) in layout.evap_hydro_indices.iter().enumerate() {
+        match ctx.evaporation_models.model(h.get()) {
             EvaporationModel::Linearized { coefficients, .. } => {
                 debug_assert!(
                     stage_idx < coefficients.len(),
@@ -389,7 +397,8 @@ fn fill_evaporation_rows(
             EvaporationModel::None => {
                 debug_assert!(
                     false,
-                    "evap_hydro_indices contains hydro {h_idx} but model is None"
+                    "evap_hydro_indices contains hydro {} but model is None",
+                    h.get()
                 );
             }
         }
@@ -409,7 +418,7 @@ fn fill_z_inflow_rows(
     row_upper: &mut [f64],
 ) {
     for h_idx in 0..layout.n_h {
-        let row = layout.row_z_inflow_start() + h_idx;
+        let row = layout.rows.z_inflow_row_start + h_idx;
         let base = if ctx.par_lp.n_stages() > 0 && ctx.par_lp.n_hydros() == layout.n_h {
             ctx.par_lp.deterministic_base(stage_idx, h_idx)
         } else {
@@ -446,29 +455,29 @@ fn fill_operational_violation_rows(
         let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
         let families = [
             (
-                layout.row_min_outflow_start(),
+                layout.slack.oper_violation.min_outflow_rows.start,
                 hb.min_outflow_m3s,
                 f64::INFINITY,
             ),
             (
-                layout.row_max_outflow_start(),
+                layout.slack.oper_violation.max_outflow_rows.start,
                 f64::NEG_INFINITY,
                 hb.max_outflow_m3s.unwrap_or(f64::INFINITY),
             ),
             (
-                layout.row_min_turbine_start(),
+                layout.slack.oper_violation.min_turbine_rows.start,
                 hb.min_turbined_m3s,
                 f64::INFINITY,
             ),
             (
-                layout.row_min_generation_start(),
+                layout.slack.oper_violation.min_generation_rows.start,
                 hb.min_generation_mw,
                 f64::INFINITY,
             ),
         ];
         for (row_start, lower, upper) in families {
             for blk in 0..layout.n_blks {
-                let row = grid.flat(row_start, h_idx, blk);
+                let row = grid.flat(row_start, h_idx, BlockIdx::new(blk));
                 row_lower[row] = lower;
                 row_upper[row] = upper;
             }

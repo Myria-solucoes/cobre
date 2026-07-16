@@ -50,15 +50,14 @@ use cobre_core::{
 };
 use cobre_sddp::{
     InflowNonNegativityMethod, StoppingMode, StoppingRule, StoppingRuleSet, StudySetup,
-    hydro_models::PrepareHydroModelsResult,
-    lag_transition::{derive_downstream_par_order, precompute_stage_lag_transitions},
-    setup::ConstructionConfig,
+    hydro_models::PrepareHydroModelsResult, setup::ConstructionConfig,
 };
 use cobre_solver::ActiveSolver;
 use cobre_stochastic::{
     ClassSchemes, ExternalScenarioLibrary, HistoricalScenarioLibrary, OpeningTreeInputs,
     PrecomputedPar, build_stochastic_context,
     par::lag_kernel::{DownstreamLagAccum, LagMajor, PrimaryLagAccum, advance_lag_chain},
+    par::lag_transition::{derive_downstream_par_order, precompute_stage_lag_transitions},
     solve_par_noise, standardize_external_inflow, standardize_historical_windows,
 };
 

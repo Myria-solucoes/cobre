@@ -13,6 +13,7 @@ use crate::{
     context::{StageContext, TrainingContext},
     dcs::{DcsParams, DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
     risk_measure::RiskMeasure,
+    stage_solve::{StageInputs, run_stage_solve},
     state_exchange::ExchangeBuffers,
     workspace::{BasisStoreSliceMut, SolverWorkspace},
 };
@@ -174,7 +175,7 @@ impl StageOpeningSolver {
         omega: usize,
         is_first: bool,
     ) -> Result<(), SddpError> {
-        patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s);
+        patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s)?;
 
         // Moved out before the solve to avoid a borrow conflict with `view`'s
         // lifetime; pre-warmed capacity is reused across openings.
@@ -189,7 +190,7 @@ impl StageOpeningSolver {
         } else {
             None
         };
-        let inputs = crate::stage_solve::StageInputs {
+        let inputs = StageInputs {
             stage_context: ctx,
             pool: succ.successor_pool,
             stored_basis,
@@ -198,7 +199,7 @@ impl StageOpeningSolver {
             iteration: Some(iteration),
         };
 
-        let view = crate::stage_solve::run_stage_solve(ws, &inputs)?;
+        let view = run_stage_solve(ws, &inputs)?;
 
         // Statistics must be captured after `view` is dropped (the `let _ = view`
         // below).
@@ -287,7 +288,7 @@ impl StageOpeningSolver {
         let core = &ctx.templates[s];
         let col_scale = &ctx.templates[s].col_scale;
 
-        patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s);
+        patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s)?;
 
         let mut stats_before_omega = std::mem::take(&mut ws.backward_accum.stats_before_buf);
         ws.solver.statistics_into(&mut stats_before_omega);

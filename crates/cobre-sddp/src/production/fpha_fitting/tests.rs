@@ -2,7 +2,8 @@ use cobre_core::{
     EfficiencyModel, EntityId, HydraulicLossesModel, Hydro, HydroGenerationModel, HydroPenalties,
     TailraceModel, TailracePoint,
 };
-use cobre_io::extensions::{FittingWindow, FphaColumnLayout, HydroGeometryRow};
+use cobre_io::PlaneReductionConfig;
+use cobre_io::extensions::{FittingWindow, FphaColumnLayout, HydroGeometryRow, TailraceCurveRow};
 
 use super::alpha::compute_alpha_fpha;
 use super::error::FphaFittingError;
@@ -1328,7 +1329,7 @@ fn make_sobradinho_hydro() -> Hydro {
         tailrace: Some(TailraceModel::Polynomial {
             coefficients: vec![0.0, 0.001_f64],
         }),
-        hydraulic_losses: Some(cobre_core::HydraulicLossesModel::Constant { value_m: 2.0 }),
+        hydraulic_losses: Some(HydraulicLossesModel::Constant { value_m: 2.0 }),
         efficiency: Some(EfficiencyModel::Constant { value: 0.92 }),
         evaporation_coefficients_mm: None,
         evaporation_reference_volumes_hm3: None,
@@ -2107,7 +2108,7 @@ fn entity_source_net_head_equals_evaluate_tailrace() {
 /// `coefficients[i]` share the `Q^i` Horner convention, so the two evaluators
 /// agree pointwise inside the segment domain.
 fn single_family_matching_polynomial(coeffs: [f64; 5], outflow_max: f64) -> TailraceFamilies {
-    let curve_row = cobre_io::extensions::TailraceCurveRow {
+    let curve_row = TailraceCurveRow {
         hydro_id: EntityId::from(1),
         family_id: 1,
         downstream_reference_level_m: None,
@@ -2389,9 +2390,7 @@ fn assert_fit_planes_bit_identical(left: &[FphaPlane], right: &[FphaPlane], cont
 
 /// A reduction-enabled fit, run on the Sobradinho fixture with `tolerance` chosen
 /// so the merge pass is exercised. Returns the emitted `FphaPlane` Vec.
-fn reduced_sobradinho_planes(
-    reduction: &cobre_io::extensions::PlaneReductionConfig,
-) -> Vec<FphaPlane> {
+fn reduced_sobradinho_planes(reduction: &PlaneReductionConfig) -> Vec<FphaPlane> {
     let rows = sobradinho_rows();
     let hydro = make_sobradinho_hydro();
     let config = FphaColumnLayout {

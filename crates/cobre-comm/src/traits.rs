@@ -15,6 +15,13 @@
 //! require `Send + Sync` — needs a single-threaded-access wrapper or a ferrompi
 //! API change. Deferred until a downstream consumer exists.
 
+use crate::CommError;
+use crate::ReduceOp;
+#[cfg(all(feature = "mpi", feature = "shared-memory"))]
+use crate::ferrompi::FerrompiLocalComm;
+#[cfg(feature = "shared-memory")]
+use crate::local::LocalBackend;
+use crate::topology::ExecutionTopology;
 /// Marker trait for types that can be transmitted through collective operations.
 ///
 /// Requires `Send + Sync`, `Copy`, `Default` (zero-fill regions in
@@ -40,7 +47,6 @@
 #[cfg(feature = "mpi")]
 pub trait CommData: Send + Sync + Copy + Default + 'static + ferrompi::MpiDatatype {}
 
-/// Blanket implementation (mpi): any type satisfying the bounds is `CommData`.
 #[cfg(feature = "mpi")]
 impl<T: Send + Sync + Copy + Default + 'static + ferrompi::MpiDatatype> CommData for T {}
 
@@ -51,7 +57,6 @@ impl<T: Send + Sync + Copy + Default + 'static + ferrompi::MpiDatatype> CommData
 #[cfg(not(feature = "mpi"))]
 pub trait CommData: Send + Sync + Copy + Default + 'static {}
 
-/// Blanket implementation (no mpi): any type satisfying the bounds is `CommData`.
 #[cfg(not(feature = "mpi"))]
 impl<T: Send + Sync + Copy + Default + 'static> CommData for T {}
 
@@ -108,8 +113,8 @@ pub trait Communicator: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::CommError::InvalidBufferSize`] if any buffer-size precondition
-    /// is violated. Returns [`crate::CommError::CollectiveFailed`] if the underlying
+    /// Returns [`CommError::InvalidBufferSize`] if any buffer-size precondition
+    /// is violated. Returns [`CommError::CollectiveFailed`] if the underlying
     /// MPI operation fails. On error, the contents of `recv` are unspecified.
     fn allgatherv<T: CommData>(
         &self,
@@ -117,7 +122,7 @@ pub trait Communicator: Send + Sync {
         recv: &mut [T],
         counts: &[usize],
         displs: &[usize],
-    ) -> Result<(), crate::CommError>;
+    ) -> Result<(), CommError>;
 
     /// Reduce data from all ranks element-wise (`recv[i] = op(send_0[i], ...,
     /// send_{R-1}[i])`), with the result available identically on all ranks.
@@ -138,24 +143,24 @@ pub trait Communicator: Send + Sync {
     ///
     /// # Floating-point note
     ///
-    /// [`crate::ReduceOp::Sum`] may produce results that vary across runs with different
+    /// [`ReduceOp::Sum`] may produce results that vary across runs with different
     /// rank counts or MPI implementations, because floating-point addition is
     /// non-associative and the reduction tree shape is implementation-defined.
     /// This is acceptable: the upper bound is a statistical estimate and small
-    /// variations do not affect convergence. [`crate::ReduceOp::Min`] is exact
+    /// variations do not affect convergence. [`ReduceOp::Min`] is exact
     /// (comparison-based, no arithmetic).
     ///
     /// # Errors
     ///
-    /// Returns [`crate::CommError::InvalidBufferSize`] if `send.len() != recv.len()`.
-    /// Returns [`crate::CommError::CollectiveFailed`] if the underlying MPI operation
+    /// Returns [`CommError::InvalidBufferSize`] if `send.len() != recv.len()`.
+    /// Returns [`CommError::CollectiveFailed`] if the underlying MPI operation
     /// fails. On error, the contents of `recv` are unspecified.
     fn allreduce<T: CommData>(
         &self,
         send: &[T],
         recv: &mut [T],
-        op: crate::ReduceOp,
-    ) -> Result<(), crate::CommError>;
+        op: ReduceOp,
+    ) -> Result<(), CommError>;
 
     /// Broadcast `buf` from `root` to all other ranks, which overwrite their
     /// `buf` with it; afterwards all ranks hold identical contents, uniquely
@@ -177,11 +182,11 @@ pub trait Communicator: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::CommError::InvalidRoot`] if `root >= self.size()`. Returns
-    /// [`crate::CommError::CollectiveFailed`] if the underlying MPI operation fails.
+    /// Returns [`CommError::InvalidRoot`] if `root >= self.size()`. Returns
+    /// [`CommError::CollectiveFailed`] if the underlying MPI operation fails.
     /// On error, `buf` on non-root ranks may be partially overwritten; the root
     /// rank's `buf` is unchanged.
-    fn broadcast<T: CommData>(&self, buf: &mut [T], root: usize) -> Result<(), crate::CommError>;
+    fn broadcast<T: CommData>(&self, buf: &mut [T], root: usize) -> Result<(), CommError>;
 
     /// Block until all ranks have called barrier. Exchanges no user data.
     ///
@@ -202,10 +207,10 @@ pub trait Communicator: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::CommError::CollectiveFailed`] if the underlying MPI barrier
+    /// Returns [`CommError::CollectiveFailed`] if the underlying MPI barrier
     /// fails. In practice the only failure mode is a process crash, detected
     /// as a communication timeout by the MPI runtime.
-    fn barrier(&self) -> Result<(), crate::CommError>;
+    fn barrier(&self) -> Result<(), CommError>;
 
     /// Return the rank index of the calling process, in `0..size()`.
     ///
@@ -260,9 +265,9 @@ pub trait LocalCommunicator: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::CommError::CollectiveFailed`] if the underlying
+    /// Returns [`CommError::CollectiveFailed`] if the underlying
     /// barrier operation fails.
-    fn barrier(&self) -> Result<(), crate::CommError>;
+    fn barrier(&self) -> Result<(), CommError>;
 }
 
 /// Enum dispatch over the closed set of intra-node communicator backends,
@@ -273,10 +278,10 @@ pub trait LocalCommunicator: Send + Sync {
 #[cfg(feature = "shared-memory")]
 pub enum LocalCommKind {
     /// Single-process local backend (always available).
-    Local(crate::local::LocalBackend),
+    Local(LocalBackend),
     /// Ferrompi intra-node communicator wrapping `MPI_Comm_split_type SHARED`.
     #[cfg(feature = "mpi")]
-    Ferrompi(crate::ferrompi::FerrompiLocalComm),
+    Ferrompi(FerrompiLocalComm),
 }
 
 #[cfg(feature = "shared-memory")]
@@ -297,7 +302,7 @@ impl LocalCommunicator for LocalCommKind {
         }
     }
 
-    fn barrier(&self) -> Result<(), crate::CommError> {
+    fn barrier(&self) -> Result<(), CommError> {
         match self {
             Self::Local(b) => LocalCommunicator::barrier(b),
             #[cfg(feature = "mpi")]
@@ -347,10 +352,10 @@ pub trait SharedRegion<T: CommData>: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::CommError::CollectiveFailed`] if a rank has crashed or
+    /// Returns [`CommError::CollectiveFailed`] if a rank has crashed or
     /// the underlying fence operation fails. On error, the visibility of prior
     /// writes is unspecified.
-    fn fence(&self) -> Result<(), crate::CommError>;
+    fn fence(&self) -> Result<(), CommError>;
 }
 
 /// Backend abstraction for intra-node shared memory region management.
@@ -380,15 +385,13 @@ pub trait SharedMemoryProvider: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::CommError::AllocationFailed`] if the OS rejects the
+    /// Returns [`CommError::AllocationFailed`] if the OS rejects the
     /// shared memory allocation (size too large, insufficient permissions, or
     /// system shared memory limits exceeded). For `HeapFallback`, returns
     /// `AllocationFailed` only on heap exhaustion (which on most platforms causes
     /// process abort before returning `Err`).
-    fn create_shared_region<T: CommData>(
-        &self,
-        count: usize,
-    ) -> Result<Self::Region<T>, crate::CommError>;
+    fn create_shared_region<T: CommData>(&self, count: usize)
+    -> Result<Self::Region<T>, CommError>;
 
     /// Create an intra-node communicator of the ranks sharing the calling rank's
     /// node, at startup only (ferrompi `comm.split_shared()`; spec
@@ -397,9 +400,9 @@ pub trait SharedMemoryProvider: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::CommError::CollectiveFailed`] if the underlying
+    /// Returns [`CommError::CollectiveFailed`] if the underlying
     /// communicator split operation fails (e.g., MPI communicator split failure).
-    fn split_local(&self) -> Result<LocalCommKind, crate::CommError>;
+    fn split_local(&self) -> Result<LocalCommKind, CommError>;
 
     /// Return whether the calling rank is its node's shared memory leader (local
     /// rank 0 from `split_local()`); only the leader may write via
@@ -410,12 +413,12 @@ pub trait SharedMemoryProvider: Send + Sync {
 /// Trait for backends that can report their execution topology, separate from
 /// [`Communicator`] because not all backends expose one.
 ///
-/// The [`ExecutionTopology`](crate::topology::ExecutionTopology) is gathered at
+/// The [`ExecutionTopology`](ExecutionTopology) is gathered at
 /// initialization and queried non-collectively, allocation-free.
 pub trait TopologyProvider: Send + Sync {
     /// Return the cached execution topology (non-collective, any thread).
     #[must_use]
-    fn topology(&self) -> &crate::topology::ExecutionTopology;
+    fn topology(&self) -> &ExecutionTopology;
 }
 
 #[cfg(test)]
@@ -425,6 +428,8 @@ mod tests {
 
     #[cfg(feature = "shared-memory")]
     use super::{LocalCommunicator, SharedMemoryProvider, SharedRegion};
+    #[cfg(feature = "shared-memory")]
+    use crate::LocalBackend;
 
     /// Compile-time assertion that a type satisfies `CommData`.
     ///
@@ -645,7 +650,7 @@ mod tests {
             }
 
             fn split_local(&self) -> Result<super::LocalCommKind, CommError> {
-                Ok(super::LocalCommKind::Local(crate::local::LocalBackend))
+                Ok(super::LocalCommKind::Local(LocalBackend))
             }
 
             fn is_leader(&self) -> bool {
@@ -698,7 +703,7 @@ mod tests {
             }
 
             fn split_local(&self) -> Result<super::LocalCommKind, CommError> {
-                Ok(super::LocalCommKind::Local(crate::local::LocalBackend))
+                Ok(super::LocalCommKind::Local(LocalBackend))
             }
 
             fn is_leader(&self) -> bool {

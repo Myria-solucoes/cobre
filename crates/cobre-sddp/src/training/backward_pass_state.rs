@@ -8,11 +8,13 @@ use std::time::Instant;
 
 use cobre_comm::{Communicator, ReduceOp};
 use cobre_core::{TrainingEvent, WorkerPhaseTimings, WorkerTimingPhase};
+use cobre_solver::ActiveProfile;
 use cobre_solver::{RowBatch, SolverInterface, SolverStatistics, StageTemplate};
 use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator,
 };
 
+use crate::risk_measure::BackwardOutcome;
 use crate::{
     backward::{
         BackwardResult, StageOpeningSolver, StageWorkerOpeningDelta, StagedCut, SuccessorSpec,
@@ -64,16 +66,15 @@ pub struct BackwardPassInputs<'a, S: SolverInterface + Send, C: Communicator> {
     pub comm: &'a C,
 
     /// Exchange buffers for gathering trial-point states via `allgatherv`.
-    ///
-    /// When non-empty records are provided, the exchange is populated per
-    /// stage. When `records` is empty the caller has pre-populated the
-    /// exchange buffers (test path).
     pub exchange: &'a mut ExchangeBuffers,
 
     /// Forward-pass trajectory records used to populate `exchange` per stage.
     ///
-    /// Length must be `local_work * num_stages` when non-empty; pass `&[]` in
-    /// tests that pre-populate `exchange` directly.
+    /// Length is `max_local_fwd * num_stages` — rank-uniform, NOT this rank's
+    /// `local_work`; a rank drawing zero trial points still passes full-length
+    /// padding, which `real_total_scenarios` discards after the gather. Re-slicing
+    /// to `local_work * num_stages` (as `ForwardPassInputs` correctly does) empties
+    /// it on exactly those ranks and desynchronises the per-stage `allgatherv`.
     pub records: &'a [TrajectoryRecord],
 
     /// Pre-allocated cut synchronisation buffers for per-stage `allgatherv`.
@@ -293,7 +294,7 @@ impl BackwardPassState {
         inputs: &mut BackwardPassInputs<'_, S, C>,
     ) -> Result<BackwardResult, SddpError>
     where
-        S: SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
+        S: SolverInterface<Profile = ActiveProfile> + Send,
     {
         let training_ctx = inputs.training_ctx;
         let num_stages = training_ctx.horizon.num_stages();
@@ -323,9 +324,6 @@ impl BackwardPassState {
                 ws.solver.current_profile() == &backward_profile,
                 "solver profile must equal the profile passed to set_profile"
             );
-        }
-
-        for ws in inputs.workspaces.iter_mut() {
             ws.worker_timing_buf = WorkerPhaseTimings::default();
         }
 
@@ -630,7 +628,8 @@ struct StageDerivedParams {
 
 /// Per-stage output produced by `run_one_backward_stage`.
 struct StageOutput {
-    /// Number of cuts generated at this stage (always equals `local_work`).
+    /// Global cuts generated at this stage across all ranks (rank-count invariant);
+    /// this rank's `local_work` plus every peer's share gathered by the cut sync.
     cuts_generated: usize,
     /// Per-`(rank, worker_id, opening)` solver delta entries for this stage.
     stage_entries: Vec<StageWorkerOpeningDelta>,
@@ -675,17 +674,12 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
 
     // State exchange runs here, once per stage inside the backward sweep — not in a
     // separate pre-pass before the loop (sddp.md "Per-stage exchange").
-    let mut state_exchange_ms: u64 = 0;
-    if !inputs.records.is_empty() {
-        let exch_start = Instant::now();
-        inputs
-            .exchange
-            .exchange(inputs.records, t, num_stages, inputs.comm)?;
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            state_exchange_ms = exch_start.elapsed().as_millis() as u64;
-        }
-    }
+    let exch_start = Instant::now();
+    inputs
+        .exchange
+        .exchange(inputs.records, t, num_stages, inputs.comm)?;
+    #[allow(clippy::cast_possible_truncation)]
+    let state_exchange_ms = exch_start.elapsed().as_millis() as u64;
 
     if let Some(ref mut archive) = inputs.visited_archive {
         let total_fwd = inputs.exchange.real_total_scenarios();
@@ -795,7 +789,7 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
             let range = cut.coefficients_range.clone();
             let arena = &inputs.workspaces[*w].backward_accum.agg_arena;
             debug_assert!(
-                range.len() == cut_state_projection.n_state() && range.end <= arena.len(),
+                range.len() == cut_state_projection.n_slots() && range.end <= arena.len(),
                 "coefficients_range must span exactly the pool's cut n_state and lie within the worker arena"
             );
             inputs.fcf.add_cut(
@@ -814,17 +808,23 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
     // points, so a failure on a strict subset makes every rank return Err here
     // rather than let a healthy rank block in `sync_packed_records` /
     // `sync_stage_metadata` / `gather_stage_solver_stats` while a peer skipped them.
-    let cuts_generated = reconcile_result(local_solve, inputs.comm, &mut state.reconcile_scratch)?;
+    reconcile_result(local_solve, inputs.comm, &mut state.reconcile_scratch)?;
 
     let sync_start = Instant::now();
     let n_local = inputs
         .cut_sync_bufs
         .pack_local_records(inputs.fcf, t, inputs.iteration);
-    inputs
-        .cut_sync_bufs
-        .sync_packed_records(t, n_local, inputs.fcf, inputs.comm)?;
+    let remote_cuts =
+        inputs
+            .cut_sync_bufs
+            .sync_packed_records(t, n_local, inputs.fcf, inputs.comm)?;
     #[allow(clippy::cast_possible_truncation)]
     let cut_sync_ms = sync_start.elapsed().as_millis() as u64;
+
+    // Global cuts added to the replicated pool this stage: this rank's share plus
+    // every peer's, NOT `n_local` alone — the local count scales with rank count
+    // while the global total is rank-count invariant.
+    let cuts_generated = n_local + remote_cuts;
 
     state.sync_stage_metadata(
         successor,
@@ -880,7 +880,7 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
     // across stages are resized to EXACTLY this each stage, never grown to a
     // per-worker max: a reduced stage after a full one must shrink, or
     // `write_opening_outcome`'s `copy_from_slice` reads stale full-length data.
-    let cut_n_state = succ.cut_state.n_state();
+    let cut_n_state = succ.cut_state.n_slots();
     let pop = succ.successor_populated_count;
     let n_workers = workspaces.len().max(1);
 
@@ -901,13 +901,11 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
             // never `ws.solver`: the LP load is issued per trial point via
             // `opening_solver.prepare`, not here.
             while ws.backward_accum.outcomes.len() < n_openings {
-                ws.backward_accum
-                    .outcomes
-                    .push(crate::risk_measure::BackwardOutcome {
-                        intercept: 0.0,
-                        coefficients: vec![0.0_f64; cut_n_state],
-                        objective_value: 0.0,
-                    });
+                ws.backward_accum.outcomes.push(BackwardOutcome {
+                    intercept: 0.0,
+                    coefficients: vec![0.0_f64; cut_n_state],
+                    objective_value: 0.0,
+                });
             }
             for outcome in &mut ws.backward_accum.outcomes[..n_openings] {
                 outcome.coefficients.resize(cut_n_state, 0.0_f64);
@@ -1010,7 +1008,7 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
 mod tests {
     use super::*;
     use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
-    use cobre_core::scenario::SamplingScheme;
+    use cobre_core::scenario::{InflowModel, SamplingScheme};
     use cobre_solver::{
         Basis, LpSolution, ProfiledSolver, RowBatch, SolverError, SolverInterface,
         SolverStatistics, StageTemplate,
@@ -1025,8 +1023,10 @@ mod tests {
         risk_measure::RiskMeasure,
         solver_stats::WORKER_STATS_ENTRY_STRIDE,
         state_exchange::ExchangeBuffers,
-        trajectory::TrajectoryRecord,
-        workspace::{BackwardAccumulators, BasisStore, SolverWorkspace},
+        test_support::{
+            all_enabled_cut_state_layouts, state_layout, study_dims, trial_point_records,
+        },
+        workspace::{BackwardAccumulators, BasisStore, ScratchBuffers, SolverWorkspace},
     };
 
     // ── test stubs ──────────────────────────────────────────────────────────
@@ -1187,7 +1187,7 @@ mod tests {
             solver: ProfiledSolver::new(solver),
             patch_buf: PatchBuffer::new(1, 0, 0, 0, 0, 0, 0),
             current_state: Vec::with_capacity(n_state),
-            scratch: crate::workspace::ScratchBuffers {
+            scratch: ScratchBuffers {
                 noise_buf: Vec::new(),
                 inflow_m3s_buf: Vec::new(),
                 lag_matrix_buf: Vec::new(),
@@ -1226,24 +1226,6 @@ mod tests {
 
     fn empty_basis_store(num_scenarios: usize, num_stages: usize) -> BasisStore {
         BasisStore::new(num_scenarios, num_stages)
-    }
-
-    fn exchange_with_states(n_state: usize, states: Vec<Vec<f64>>) -> ExchangeBuffers {
-        use cobre_comm::LocalBackend;
-        let local_count = states.len();
-        let mut bufs = ExchangeBuffers::new(n_state, local_count, 1);
-        let records: Vec<TrajectoryRecord> = states
-            .into_iter()
-            .map(|state| TrajectoryRecord {
-                primal: vec![],
-                dual: vec![],
-                stage_cost: 0.0,
-                state,
-            })
-            .collect();
-        let comm = LocalBackend;
-        bufs.exchange(&records, 0, 1, &comm).unwrap();
-        bufs
     }
 
     fn empty_cut_batches(n_stages: usize) -> Vec<RowBatch> {
@@ -1359,7 +1341,7 @@ mod tests {
 
         let stages: Vec<Stage> = (0..n_stages).map(make_stage).collect();
         let inflow_models: Vec<_> = (0..n_stages)
-            .map(|idx| cobre_core::scenario::InflowModel {
+            .map(|idx| InflowModel {
                 hydro_id: EntityId(1),
                 stage_id: idx as i32,
                 mean_m3s: 100.0,
@@ -1470,7 +1452,7 @@ mod tests {
         let n_stages = 2_usize;
         let n_openings = 2_usize;
         let stochastic = make_stochastic_context(n_stages, n_openings);
-        let state = crate::test_support::state_layout(1, 0);
+        let state = state_layout(1, 0);
         let templates = vec![minimal_template_1_0(); n_stages];
         // Production carries a separate frozen-template buffer alongside
         // `ctx.templates`; mirror that here so `frozen` does not alias the
@@ -1482,7 +1464,9 @@ mod tests {
 
         let mut fcf =
             FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
-        let mut exchange = exchange_with_states(n_state, vec![vec![10.0], vec![20.0]]);
+        let trial_states = vec![vec![10.0], vec![20.0]];
+        let records = trial_point_records(&trial_states, n_stages);
+        let mut exchange = ExchangeBuffers::new(n_state, trial_states.len(), 1);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
@@ -1518,13 +1502,11 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::test_support::study_dims();
+        let study_dims = study_dims();
         let training_ctx = TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
             study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1557,7 +1539,7 @@ mod tests {
             training_ctx: &training_ctx,
             comm: &comm,
             exchange: &mut exchange,
-            records: &[],
+            records: &records,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             event_sender: None,
@@ -1609,7 +1591,7 @@ mod tests {
         let n_stages = 2_usize;
         let n_openings = 2_usize;
         let stochastic = make_stochastic_context(n_stages, n_openings);
-        let state = crate::test_support::state_layout(1, 0);
+        let state = state_layout(1, 0);
         let templates = vec![minimal_template_1_0(); n_stages];
         let frozen_templates = templates.clone();
         let base_rows = vec![1_usize; n_stages];
@@ -1618,7 +1600,9 @@ mod tests {
 
         let mut fcf =
             FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
-        let mut exchange = exchange_with_states(n_state, vec![vec![10.0], vec![20.0]]);
+        let trial_states = vec![vec![10.0], vec![20.0]];
+        let records = trial_point_records(&trial_states, n_stages);
+        let mut exchange = ExchangeBuffers::new(n_state, trial_states.len(), 1);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
         };
@@ -1654,13 +1638,11 @@ mod tests {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::test_support::study_dims();
+        let study_dims = study_dims();
         let training_ctx = TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
             study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
@@ -1692,7 +1674,7 @@ mod tests {
             training_ctx: &training_ctx,
             comm: &comm,
             exchange: &mut exchange,
-            records: &[],
+            records: &records,
             cut_sync_bufs: &mut csb,
             visited_archive: None,
             event_sender: None,

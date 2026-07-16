@@ -3,6 +3,7 @@
 //! Writes `training/solver/iterations.parquet` (scalar metrics) and
 //! `training/solver/retry_histogram.parquet` (normalized per-level retry counts).
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -156,22 +157,39 @@ fn build_iterations_columns(rows: &[SolverStatsRow]) -> Vec<Arc<dyn arrow::array
     ]
 }
 
-/// Build a `RecordBatch` for `retry_histogram.parquet` from the histogram data
-/// embedded in each `SolverStatsRow`. Only rows with `count > 0` are emitted.
+/// Build a `RecordBatch` for `retry_histogram.parquet`: one row per
+/// (iteration, phase, stage, `retry_level`) tuple whose summed `count > 0`.
 fn build_retry_histogram_batch(rows: &[SolverStatsRow]) -> Result<RecordBatch, OutputError> {
+    // Sum per-level counts across every row sharing an (iteration, phase, stage)
+    // key. BTreeMap (never HashMap) emits canonical (iteration, phase, stage,
+    // level) order, making the file a pure function of the aggregate retry data
+    // regardless of rank/worker/opening partitioning — the declaration-order rule.
+    let mut aggregated: BTreeMap<(u32, &str, i32), Vec<u64>> = BTreeMap::new();
+    for r in rows {
+        let entry = aggregated
+            .entry((r.iteration, r.phase.as_str(), r.stage))
+            .or_default();
+        if entry.len() < r.retry_level_histogram.len() {
+            entry.resize(r.retry_level_histogram.len(), 0);
+        }
+        for (acc, &count) in entry.iter_mut().zip(r.retry_level_histogram.iter()) {
+            *acc += count;
+        }
+    }
+
     let mut iterations = Vec::new();
     let mut phases = Vec::new();
     let mut stages = Vec::new();
     let mut levels = Vec::new();
     let mut counts = Vec::new();
 
-    for r in rows {
+    for (&(iteration, phase, stage), histogram) in &aggregated {
         #[allow(clippy::cast_possible_truncation)]
-        for (level, &count) in r.retry_level_histogram.iter().enumerate() {
+        for (level, &count) in histogram.iter().enumerate() {
             if count > 0 {
-                iterations.push(r.iteration);
-                phases.push(r.phase.as_str());
-                stages.push(r.stage);
+                iterations.push(iteration);
+                phases.push(phase);
+                stages.push(stage);
                 levels.push(level as u32);
                 counts.push(count);
             }
@@ -287,7 +305,6 @@ mod tests {
 
         write_solver_stats(dir.path(), &rows).unwrap();
 
-        // iterations.parquet — 19 scalar columns (opening + rank + worker_id: Int32, nullable)
         let iter_path = dir.path().join("training/solver/iterations.parquet");
         assert!(iter_path.exists());
         let batch = read_parquet(&iter_path);
@@ -409,8 +426,17 @@ mod tests {
         let hist_path = dir.path().join("training/solver/retry_histogram.parquet");
         let batch = read_parquet(&hist_path);
 
-        // Only 2 nonzero entries: (forward, level 0, 5) and (forward, level 2, 1)
+        // Only 2 nonzero entries: (forward, level 0, 5) and (forward, level 2, 1);
+        // the all-zero backward row contributes nothing.
         assert_eq!(batch.num_rows(), 2);
+
+        let phase_col = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
+        assert_eq!(phase_col.value(0), "forward");
+        assert_eq!(phase_col.value(1), "forward");
 
         let level_col = batch
             .column(3)
@@ -427,6 +453,141 @@ mod tests {
             .unwrap();
         assert_eq!(count_col.value(0), 5);
         assert_eq!(count_col.value(1), 1);
+    }
+
+    #[test]
+    fn retry_histogram_aggregates_shared_keys_in_canonical_order() {
+        // Rows sharing (iteration, phase, stage) but differing by opening/rank,
+        // fed SHUFFLED, must aggregate to exactly one row per
+        // (iteration, phase, stage, retry_level) with summed counts, emitted in
+        // canonical order — proving the file is a pure function of the aggregate
+        // retry data, independent of input partitioning/order.
+        fn make(
+            iteration: u32,
+            phase: &str,
+            stage: i32,
+            opening: Option<i32>,
+            rank: Option<i32>,
+            hist: Vec<u64>,
+        ) -> SolverStatsRow {
+            SolverStatsRow {
+                iteration,
+                phase: phase.to_string(),
+                stage,
+                opening,
+                rank,
+                worker_id: None,
+                lp_solves: 0,
+                lp_successes: 0,
+                lp_retries: 0,
+                lp_failures: 0,
+                retry_attempts: 0,
+                basis_offered: 0,
+                basis_consistency_failures: 0,
+                simplex_iterations: 0,
+                solve_time_ms: 0.0,
+                load_model_time_ms: 0.0,
+                set_bounds_time_ms: 0.0,
+                basis_set_time_ms: 0.0,
+                retry_level_histogram: hist,
+            }
+        }
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let rows = vec![
+            make(
+                1,
+                "backward",
+                0,
+                Some(2),
+                Some(1),
+                vec![0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            ),
+            make(
+                1,
+                "forward",
+                0,
+                None,
+                Some(0),
+                vec![7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            ),
+            make(
+                1,
+                "backward",
+                1,
+                Some(0),
+                Some(0),
+                vec![0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            ),
+            make(
+                1,
+                "backward",
+                0,
+                Some(0),
+                Some(0),
+                vec![2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            ),
+            make(
+                1,
+                "backward",
+                0,
+                Some(1),
+                Some(1),
+                vec![1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            ),
+        ];
+
+        write_solver_stats(dir.path(), &rows).unwrap();
+
+        let hist_path = dir.path().join("training/solver/retry_histogram.parquet");
+        let batch = read_parquet(&hist_path);
+
+        // Aggregated unique tuples, canonical order (phase sorts "backward" < "forward"):
+        //   (1, backward, 0, level 0) = 2 + 1 = 3
+        //   (1, backward, 0, level 1) = 3 + 1 = 4
+        //   (1, backward, 1, level 2) = 4
+        //   (1, forward,  0, level 0) = 7
+        assert_eq!(batch.num_rows(), 4);
+
+        let iter_col = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        let phase_col = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
+        let stage_col = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        let level_col = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        let count_col = batch
+            .column(4)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+
+        let expected = [
+            (1u32, "backward", 0i32, 0u32, 3u64),
+            (1, "backward", 0, 1, 4),
+            (1, "backward", 1, 2, 4),
+            (1, "forward", 0, 0, 7),
+        ];
+        for (i, (it, ph, st, lv, ct)) in expected.iter().enumerate() {
+            assert_eq!(iter_col.value(i), *it, "iteration row {i}");
+            assert_eq!(phase_col.value(i), *ph, "phase row {i}");
+            assert_eq!(stage_col.value(i), *st, "stage row {i}");
+            assert_eq!(level_col.value(i), *lv, "retry_level row {i}");
+            assert_eq!(count_col.value(i), *ct, "count row {i}");
+        }
     }
 
     #[test]

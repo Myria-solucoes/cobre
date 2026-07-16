@@ -8,6 +8,7 @@
 
 use std::path::Path;
 
+use cobre_io::EntitySlot;
 use cobre_io::output::policy::{PolicyCheckpointMetadata, write_policy_checkpoint};
 use cobre_io::output::{
     OutputError, write_correlation_json, write_fitting_report, write_inflow_annual_component,
@@ -15,10 +16,10 @@ use cobre_io::output::{
     write_noise_openings,
 };
 use cobre_io::scenarios::LoadSeasonalStatsRow;
+use cobre_io::scenarios::estimation::EstimationReport;
 use cobre_stochastic::StochasticContext;
 
 use crate::TrainingResult;
-use crate::estimation::EstimationReport;
 use crate::policy_export::{
     build_active_indices, build_stage_basis_records, build_stage_cut_records,
     build_stage_cuts_payloads, build_stage_entity_manifest, build_stage_states_payloads,
@@ -101,7 +102,7 @@ pub fn write_checkpoint(
     let state_dimension = fcf.state_dimension;
 
     let global_layout = setup.stage_state();
-    let stage_manifests: Vec<Vec<cobre_io::output::policy::EntitySlot>> = (0..n_stages)
+    let stage_manifests: Vec<Vec<EntitySlot>> = (0..n_stages)
         .map(|t| {
             build_stage_entity_manifest(
                 system,

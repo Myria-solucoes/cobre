@@ -12,7 +12,8 @@
 
 use super::*;
 use cobre_core::scenario::{CorrelationModel, InflowModel};
-use cobre_core::{EntityId, SystemBuilder};
+use cobre_core::{EntityId, Hydro, HydroPenalties, SeasonMap, Stage, SystemBuilder};
+use cobre_stochastic::PrecomputedPar;
 
 // ── Helper to build a minimal System ─────────────────────────────────────
 
@@ -195,7 +196,7 @@ fn test_estimate_no_history_returns_unchanged() {
 
 #[test]
 fn test_estimation_path_resolve_all_8_combinations() {
-    use cobre_io::FileManifest;
+    use crate::FileManifest;
 
     let make = |history: bool, stats: bool, ar: bool| FileManifest {
         scenarios_inflow_history_parquet: history,
@@ -389,7 +390,7 @@ fn write_unit_test_inflow_history(path: &std::path::Path, hydro_id: i32, n_years
 /// `inflow_ar_coefficients.parquet` (the `PartialEstimation` precondition).
 #[allow(clippy::cast_possible_wrap)]
 fn build_system_with_user_stats(n_years: usize) -> System {
-    use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
+    use cobre_core::entities::hydro::HydroGenerationModel;
     use cobre_core::scenario::InflowModel;
     use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
 
@@ -556,6 +557,62 @@ fn test_partial_estimation_preserves_user_stats() {
     }
 }
 
+/// The `PartialEstimation` path's internally-fitted AR (periodic YW from
+/// history) must have its `residual_std_ratio` superseded by the
+/// periodic-ACF closure (`populate_derived_residual_ratios`), not the raw YW
+/// estimate — asserted against an independent closure call over the same
+/// final coefficients, per hydro/season.
+#[test]
+fn test_partial_estimation_populates_closure_derived_ratio() {
+    use cobre_stochastic::par::derive_residual_std_ratios;
+    use tempfile::TempDir;
+
+    const N_YEARS: usize = 30;
+    let dir = TempDir::new().unwrap();
+    let case_dir = dir.path();
+
+    setup_partial_estimation_case(case_dir, N_YEARS);
+    let system = build_system_with_user_stats(N_YEARS);
+    let config = default_config();
+
+    let (updated, _report, path) =
+        estimate_from_history(system, case_dir, &config).expect("partial estimation must succeed");
+    assert_eq!(
+        path,
+        EstimationPath::PartialEstimation,
+        "expected PartialEstimation path"
+    );
+
+    let models = updated.inflow_models();
+    let season0 = models
+        .iter()
+        .find(|m| m.stage_id == 0)
+        .expect("stage 0 (season 0) model present");
+    let season1 = models
+        .iter()
+        .find(|m| m.stage_id == 1)
+        .expect("stage 1 (season 1) model present");
+
+    let psi_by_season = vec![
+        season0.ar_coefficients.clone(),
+        season1.ar_coefficients.clone(),
+    ];
+    let orders = vec![season0.ar_order(), season1.ar_order()];
+    let expected = derive_residual_std_ratios(&psi_by_season, &orders, 2)
+        .expect("closure solves for the internally-fitted coefficients");
+
+    for (m, expected_r) in [(season0, expected[0]), (season1, expected[1])] {
+        assert!(
+            (m.residual_std_ratio - expected_r).abs() < 1e-12,
+            "stage {}: residual_std_ratio must equal the closure-derived value \
+             {expected_r}, got {} — the raw YW-fitted value must no longer reach \
+             the returned System",
+            m.stage_id,
+            m.residual_std_ratio
+        );
+    }
+}
+
 #[test]
 fn test_partial_estimation_returns_report() {
     use tempfile::TempDir;
@@ -593,7 +650,7 @@ fn test_partial_estimation_returns_report() {
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 fn default_config() -> Config {
-    use cobre_io::config::{EstimationConfig, OrderSelectionMethod};
+    use crate::config::{EstimationConfig, OrderSelectionMethod};
     let mut cfg: Config = serde_json::from_str(MINIMAL_CONFIG_JSON).unwrap();
     cfg.estimation = EstimationConfig {
         max_order: 2,
@@ -646,7 +703,6 @@ fn test_estimation_report_structure() {
                 hydro_id,
                 season_id,
                 coefficients: vec![0.5, 0.3],
-                residual_std_ratio: 0.9,
                 annual: None,
             });
         }
@@ -670,8 +726,6 @@ fn test_estimation_report_structure() {
 
 #[test]
 fn test_estimation_report_empty_for_pacf() {
-    use cobre_core::temporal::Stage;
-
     let observations: Vec<(EntityId, chrono::NaiveDate, f64)> = vec![];
     let seasonal_stats: Vec<SeasonalStats> = vec![];
     let stages: Vec<Stage> = vec![];
@@ -700,17 +754,13 @@ fn test_estimation_report_empty_for_pacf() {
 
 // ── Pre-study stage expansion tests ─────────────────────────────────────
 
-fn make_expansion_stage(
-    index: usize,
-    id: i32,
-    season_id: Option<usize>,
-) -> cobre_core::temporal::Stage {
+fn make_expansion_stage(index: usize, id: i32, season_id: Option<usize>) -> Stage {
     use chrono::NaiveDate;
     use cobre_core::temporal::{
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
     };
 
-    cobre_core::temporal::Stage {
+    Stage {
         index,
         id,
         start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -816,21 +866,18 @@ fn ar_estimates_to_rows_includes_prestudy_stages() {
             hydro_id: h1,
             season_id: 0,
             coefficients: vec![0.3],
-            residual_std_ratio: 0.9,
             annual: None,
         },
         ArCoefficientEstimate {
             hydro_id: h1,
             season_id: 1,
             coefficients: vec![0.4],
-            residual_std_ratio: 0.85,
             annual: None,
         },
         ArCoefficientEstimate {
             hydro_id: h1,
             season_id: 2,
             coefficients: vec![0.5],
-            residual_std_ratio: 0.8,
             annual: None,
         },
     ];
@@ -849,17 +896,15 @@ fn ar_estimates_to_rows_includes_prestudy_stages() {
     // stage_id = -2 is season 1, coefficient = 0.4.
     let neg2 = rows.iter().find(|r| r.stage_id == -2).expect("row for -2");
     assert!((neg2.coefficient - 0.4).abs() < f64::EPSILON);
-    assert!((neg2.residual_std_ratio - 0.85).abs() < f64::EPSILON);
 
     // stage_id = -1 is season 2, coefficient = 0.5.
     let neg1 = rows.iter().find(|r| r.stage_id == -1).expect("row for -1");
     assert!((neg1.coefficient - 0.5).abs() < f64::EPSILON);
-    assert!((neg1.residual_std_ratio - 0.8).abs() < f64::EPSILON);
 }
 
 #[test]
 fn full_estimation_produces_prestudy_inflow_models() {
-    use cobre_io::scenarios::assemble_inflow_models;
+    use crate::scenarios::assemble_inflow_models;
 
     let stages = vec![
         make_expansion_stage(0, -2, Some(1)),
@@ -898,21 +943,18 @@ fn full_estimation_produces_prestudy_inflow_models() {
             hydro_id: h1,
             season_id: 0,
             coefficients: vec![0.3],
-            residual_std_ratio: 0.9,
             annual: None,
         },
         ArCoefficientEstimate {
             hydro_id: h1,
             season_id: 1,
             coefficients: vec![0.4],
-            residual_std_ratio: 0.85,
             annual: None,
         },
         ArCoefficientEstimate {
             hydro_id: h1,
             season_id: 2,
             coefficients: vec![0.5],
-            residual_std_ratio: 0.8,
             annual: None,
         },
     ];
@@ -985,7 +1027,7 @@ fn make_two_season_stage(
     season_id: usize,
     year: i32,
     first_half: bool,
-) -> cobre_core::temporal::Stage {
+) -> Stage {
     use chrono::NaiveDate;
     use cobre_core::temporal::{
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
@@ -1003,7 +1045,7 @@ fn make_two_season_stage(
         )
     };
 
-    cobre_core::temporal::Stage {
+    Stage {
         index,
         id,
         start_date,
@@ -1039,7 +1081,7 @@ fn test_ar_rows_to_estimates_groups_by_season() {
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
     };
 
-    let make_stage = |id: i32, season_id: usize| cobre_core::temporal::Stage {
+    let make_stage = |id: i32, season_id: usize| Stage {
         index: id as usize,
         id,
         start_date: chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
@@ -1071,42 +1113,36 @@ fn test_ar_rows_to_estimates_groups_by_season() {
             stage_id: 0,
             lag: 1,
             coefficient: 0.50,
-            residual_std_ratio: 0.85,
         },
         InflowArCoefficientRow {
             hydro_id: EntityId(1),
             stage_id: 1,
             lag: 1,
             coefficient: 0.50,
-            residual_std_ratio: 0.85,
         },
         InflowArCoefficientRow {
             hydro_id: EntityId(1),
             stage_id: 2,
             lag: 1,
             coefficient: 0.60,
-            residual_std_ratio: 0.80,
         },
         InflowArCoefficientRow {
             hydro_id: EntityId(2),
             stage_id: 0,
             lag: 1,
             coefficient: 0.40,
-            residual_std_ratio: 0.90,
         },
         InflowArCoefficientRow {
             hydro_id: EntityId(2),
             stage_id: 1,
             lag: 1,
             coefficient: 0.40,
-            residual_std_ratio: 0.90,
         },
         InflowArCoefficientRow {
             hydro_id: EntityId(2),
             stage_id: 2,
             lag: 1,
             coefficient: 0.35,
-            residual_std_ratio: 0.88,
         },
     ];
 
@@ -1130,11 +1166,6 @@ fn test_ar_rows_to_estimates_groups_by_season() {
         "coeff must be 0.50, got {}",
         e.coefficients[0]
     );
-    assert!(
-        (e.residual_std_ratio - 0.85).abs() < f64::EPSILON,
-        "residual_std_ratio must be 0.85"
-    );
-
     // season 1 coeff comes from stage 2 (the season's first stage).
     let e = estimates
         .iter()
@@ -1142,7 +1173,6 @@ fn test_ar_rows_to_estimates_groups_by_season() {
         .expect("hydro 1, season 1 estimate must exist");
     assert_eq!(e.coefficients.len(), 1);
     assert!((e.coefficients[0] - 0.60).abs() < f64::EPSILON);
-    assert!((e.residual_std_ratio - 0.80).abs() < f64::EPSILON);
 
     let e = estimates
         .iter()
@@ -1167,7 +1197,7 @@ fn test_ar_rows_to_estimates_groups_by_season() {
 fn write_unit_test_ar_coefficients(
     path: &std::path::Path,
     hydro_id: i32,
-    stages: &[cobre_core::temporal::Stage],
+    stages: &[Stage],
     coefficient: f64,
     residual_std_ratio: f64,
 ) {
@@ -1215,7 +1245,7 @@ fn write_unit_test_ar_coefficients(
 /// `UserArHistoryStats` case), where `assemble_inflow_models` returns empty.
 #[allow(clippy::cast_possible_wrap)]
 fn build_system_empty_models(n_years: usize) -> System {
-    use cobre_core::entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties};
+    use cobre_core::entities::hydro::HydroGenerationModel;
     use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
 
     let hydro_id = EntityId(1);
@@ -1337,6 +1367,13 @@ fn setup_user_ar_case(
     );
 }
 
+/// The user AR file's `coefficient` column is preserved bitwise (Role 2 is
+/// user-owned), but its `residual_std_ratio` column is now superseded by the
+/// periodic-ACF closure (`populate_derived_residual_ratios`) — for this
+/// uniform-AR(1) two-season fixture the closure decouples exactly to
+/// `r = sqrt(1 - coefficient^2)`, a value deliberately different
+/// from `KNOWN_RATIO` here, so the assertion below also proves the stale
+/// user-column value no longer reaches the returned `System`.
 #[test]
 fn test_user_ar_estimation_preserves_ar_coefficients() {
     use tempfile::TempDir;
@@ -1371,6 +1408,14 @@ fn test_user_ar_estimation_preserves_ar_coefficients() {
         "estimation must produce at least one inflow model"
     );
 
+    let expected_ratio = (1.0 - KNOWN_COEFF * KNOWN_COEFF).sqrt();
+    assert!(
+        (expected_ratio - KNOWN_RATIO).abs() > 1e-3,
+        "fixture sanity: KNOWN_RATIO must differ from the closure value to prove \
+         the user-column value is superseded, got expected={expected_ratio} \
+         known={KNOWN_RATIO}"
+    );
+
     for m in models {
         assert_eq!(
             m.ar_coefficients.len(),
@@ -1384,10 +1429,12 @@ fn test_user_ar_estimation_preserves_ar_coefficients() {
             "ar_coefficients[0] must be bitwise identical to {KNOWN_COEFF} for stage {}",
             m.stage_id
         );
-        assert_eq!(
-            m.residual_std_ratio.to_bits(),
-            KNOWN_RATIO.to_bits(),
-            "residual_std_ratio must be bitwise identical to {KNOWN_RATIO} for stage {}",
+        assert!(
+            (m.residual_std_ratio - expected_ratio).abs() < 1e-12,
+            "residual_std_ratio must equal the closure-derived value {expected_ratio} \
+             (order-1 decouples exactly), got {} for stage {} — the raw user-column \
+             value {KNOWN_RATIO} must no longer reach the returned System",
+            m.residual_std_ratio,
             m.stage_id
         );
     }
@@ -1463,8 +1510,8 @@ fn test_user_ar_estimation_returns_user_provided_report() {
 
 // ── Bidirectional coverage validation tests ─────────────────
 
-fn make_hydro(hydro_id: EntityId, bus_id: EntityId) -> cobre_core::entities::hydro::Hydro {
-    use cobre_core::entities::hydro::{Hydro, HydroGenerationModel};
+fn make_hydro(hydro_id: EntityId, bus_id: EntityId) -> Hydro {
+    use cobre_core::entities::hydro::HydroGenerationModel;
     Hydro {
         id: hydro_id,
         name: format!("H{}", hydro_id.0),
@@ -1491,7 +1538,7 @@ fn make_hydro(hydro_id: EntityId, bus_id: EntityId) -> cobre_core::entities::hyd
         evaporation_reference_volumes_hm3: None,
         diversion: None,
         filling: None,
-        penalties: cobre_core::entities::hydro::HydroPenalties {
+        penalties: HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -1819,7 +1866,7 @@ fn collect_std_ratio_warnings(
     );
     let n = user_stds.len();
 
-    let stages: Vec<cobre_core::temporal::Stage> = (0..n)
+    let stages: Vec<Stage> = (0..n)
         .map(|i| {
             let year = 1970_i32;
             let first_half = i % 2 == 0;
@@ -1933,7 +1980,7 @@ use cobre_core::temporal::{
 };
 
 /// 12-season monthly stages over `n_years` from year 2000; season_id cycles 0..12.
-fn make_monthly_stages_for_annual(n_years: usize) -> Vec<cobre_core::temporal::Stage> {
+fn make_monthly_stages_for_annual(n_years: usize) -> Vec<Stage> {
     let mut stages = Vec::new();
     let mut idx = 0usize;
     for year in 0..n_years {
@@ -1941,7 +1988,7 @@ fn make_monthly_stages_for_annual(n_years: usize) -> Vec<cobre_core::temporal::S
             let y = 2000 + year as i32;
             let m = month as u32 + 1;
             let (ey, em) = if m == 12 { (y + 1, 1u32) } else { (y, m + 1) };
-            stages.push(cobre_core::temporal::Stage {
+            stages.push(Stage {
                 index: idx,
                 id: idx as i32,
                 start_date: NaiveDate::from_ymd_opt(y, m, 1).unwrap(),
@@ -2072,7 +2119,7 @@ fn write_monthly_inflow_history_two_hydros(path: &std::path::Path, n_years: usiz
 
 #[test]
 fn estimate_from_history_pacf_annual_populates_annual_field() {
-    use cobre_io::config::{EstimationConfig, OrderSelectionMethod};
+    use crate::config::{EstimationConfig, OrderSelectionMethod};
     use tempfile::TempDir;
 
     const N_YEARS: usize = 5;
@@ -2117,7 +2164,7 @@ fn estimate_from_history_pacf_annual_populates_annual_field() {
 
 #[test]
 fn estimate_from_history_pacf_classical_keeps_annual_none() {
-    use cobre_io::config::{EstimationConfig, OrderSelectionMethod};
+    use crate::config::{EstimationConfig, OrderSelectionMethod};
     use tempfile::TempDir;
 
     const N_YEARS: usize = 5;
@@ -2205,8 +2252,8 @@ fn estimate_ar_coefficients_with_selection_classical_path_unchanged() {
 }
 
 /// Build a 12-season monthly `SeasonMap` (season id m → calendar month m+1).
-fn monthly_season_map() -> cobre_core::temporal::SeasonMap {
-    use cobre_core::temporal::{SeasonCycleType, SeasonDefinition, SeasonMap};
+fn monthly_season_map() -> SeasonMap {
+    use cobre_core::temporal::{SeasonCycleType, SeasonDefinition};
     let seasons = (0..12usize)
         .map(|m| SeasonDefinition {
             id: m,
@@ -2225,11 +2272,7 @@ fn monthly_season_map() -> cobre_core::temporal::SeasonMap {
 
 /// Build study stages for a partial-year monthly study spanning seasons
 /// `[first_season, first_season + n)` starting in calendar year `start_year`.
-fn partial_year_stages(
-    first_season: usize,
-    n: usize,
-    start_year: i32,
-) -> Vec<cobre_core::temporal::Stage> {
+fn partial_year_stages(first_season: usize, n: usize, start_year: i32) -> Vec<Stage> {
     (0..n)
         .map(|k| {
             let season = first_season + k;
@@ -2239,7 +2282,7 @@ fn partial_year_stages(
             } else {
                 (start_year, m + 1)
             };
-            cobre_core::temporal::Stage {
+            Stage {
                 index: k,
                 id: i32::try_from(k).unwrap(),
                 start_date: NaiveDate::from_ymd_opt(start_year, m, 1).unwrap(),
@@ -2306,7 +2349,7 @@ fn partial_year_par2_synthesizes_prestudy_lag_models() {
         "stage -2 must map to season 6 (Jul)"
     );
 
-    let stages: Vec<cobre_core::temporal::Stage> = study_stages
+    let stages: Vec<Stage> = study_stages
         .iter()
         .cloned()
         .chain(prestudy.iter().cloned())
@@ -2338,15 +2381,14 @@ fn partial_year_par2_synthesizes_prestudy_lag_models() {
     let inflow_models = assemble_inflow_models(stats_rows, coeff_rows, annual_rows)
         .expect("assembly must succeed with pre-study rows present");
 
-    let neg_models: Vec<&cobre_core::scenario::InflowModel> =
-        inflow_models.iter().filter(|m| m.stage_id < 0).collect();
+    let neg_models: Vec<&InflowModel> = inflow_models.iter().filter(|m| m.stage_id < 0).collect();
     assert!(
         neg_models.iter().any(|m| m.stage_id == -1) && neg_models.iter().any(|m| m.stage_id == -2),
         "expected InflowModel entries at stage_id -1 and -2, got {:?}",
         neg_models.iter().map(|m| m.stage_id).collect::<Vec<_>>()
     );
 
-    let par = cobre_stochastic::PrecomputedPar::build(
+    let par = PrecomputedPar::build(
         &inflow_models,
         &study_stages,
         &[h1],

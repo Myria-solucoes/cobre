@@ -46,7 +46,7 @@ use cobre_sddp::{
     context::{StageContext, TrainingContext},
     cut::fcf::FutureCostFunction,
     horizon_mode::HorizonMode,
-    indexer::StateLayout,
+    indexer::{CutStateProjection, StateSpace, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
     risk_measure::RiskMeasure,
     train,
@@ -61,10 +61,10 @@ use common::builders::{BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make
 // ===========================================================================
 
 /// Mirrors the gated `test_support::state_layout_for` via the public
-/// [`StateLayout::new`], so this external test crate (which cannot see the parent
+/// [`StateSpace::new`], so this external test crate (which cannot see the parent
 /// crate's `#[cfg(test)]` surface) resolves byte-identical patch columns.
-fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
-    StateLayout::new(
+fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateSpace {
+    StateSpace::new(
         hydro_count,
         max_par_order,
         0,
@@ -76,8 +76,8 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateLayout {
     )
 }
 
-fn study_dims() -> cobre_sddp::indexer::StudyDimensions {
-    cobre_sddp::indexer::StudyDimensions::default()
+fn study_dims() -> StudyDimensions {
+    StudyDimensions::default()
 }
 
 /// Communicator wrapper that sets `flag` to `true` on the first `allgatherv`
@@ -205,7 +205,9 @@ impl SolverInterface for MockSolver {
         })
     }
 
-    fn get_basis(&mut self, _out: &mut Basis) {}
+    fn get_basis(&mut self, out: &mut Basis) {
+        cobre_sddp::test_support::fill_consistent_basis(out);
+    }
 
     fn statistics(&self) -> SolverStatistics {
         SolverStatistics::default()
@@ -287,7 +289,9 @@ impl SolverInterface for ExpandingMockSolver {
         })
     }
 
-    fn get_basis(&mut self, _out: &mut Basis) {}
+    fn get_basis(&mut self, out: &mut Basis) {
+        cobre_sddp::test_support::fill_consistent_basis(out);
+    }
 
     fn statistics(&self) -> SolverStatistics {
         SolverStatistics::default()
@@ -498,7 +502,7 @@ struct Fixture {
     n_stages: usize,
     templates: Vec<StageTemplate>,
     base_rows: Vec<usize>,
-    state: StateLayout,
+    state: StateSpace,
     initial_state: Vec<f64>,
     stochastic: StochasticContext,
     horizon: HorizonMode,
@@ -1849,15 +1853,12 @@ fn frozen_backward_pass_smoke_test() {
 /// see the parent crate's `#[cfg(test)]` surface) builds the default all-enabled
 /// per-pool projection. Every pool projects the full global state, keeping the
 /// extracted subgradient bit-identical to the global-loop result.
-fn all_enabled_cut_state_layouts(
-    global: &StateLayout,
-    n_stages: usize,
-) -> Vec<cobre_sddp::indexer::CutStateProjection> {
+fn all_enabled_cut_state_layouts(global: &StateSpace, n_stages: usize) -> Vec<CutStateProjection> {
     let full = StageStateConfig {
         storage: true,
         inflow_lags: true,
     };
     (0..n_stages)
-        .map(|_| cobre_sddp::indexer::CutStateProjection::new(global, full))
+        .map(|_| CutStateProjection::new(global, full))
         .collect()
 }

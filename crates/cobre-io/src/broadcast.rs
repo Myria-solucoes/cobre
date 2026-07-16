@@ -214,8 +214,9 @@ pub fn serialize_system(system: &System) -> Result<Vec<u8>, LoadError> {
 
 /// Deserialize a [`System`] from a postcard byte buffer received via MPI broadcast.
 ///
-/// Calls [`System::rebuild_indices`] after deserialization so that O(1) entity
-/// lookups (e.g., `system.bus(id)`) work immediately on the returned value.
+/// `System`'s `Deserialize` impl rebuilds lookup indices unconditionally, so
+/// O(1) entity lookups (e.g., `system.bus(id)`) work immediately on the
+/// returned value.
 ///
 /// # Errors
 ///
@@ -243,10 +244,8 @@ pub fn serialize_system(system: &System) -> Result<Vec<u8>, LoadError> {
 /// assert!(restored.bus(EntityId(1)).is_some());
 /// ```
 pub fn deserialize_system(bytes: &[u8]) -> Result<System, LoadError> {
-    let mut system: System = postcard::from_bytes(bytes)
-        .map_err(|e| LoadError::parse("<broadcast>", format!("postcard deserialization: {e}")))?;
-    system.rebuild_indices();
-    Ok(system)
+    postcard::from_bytes(bytes)
+        .map_err(|e| LoadError::parse("<broadcast>", format!("postcard deserialization: {e}")))
 }
 
 /// Serialize a list of [`ScalarParameter`] to a postcard byte buffer for MPI

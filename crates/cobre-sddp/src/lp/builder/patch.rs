@@ -1,4 +1,5 @@
-use crate::indexer::{BlockGrid, StateLayout};
+use super::commitment_reconcile::BoundRelaxations;
+use crate::indexer::{BlockGrid, BlockIdx, StateDim, StateSpace};
 
 /// Pre-allocated row-bound and column-bound patch arrays for one SDDP stage LP solve.
 ///
@@ -14,7 +15,7 @@ use crate::indexer::{BlockGrid, StateLayout};
 ///
 /// [`fill_col_state_patches`](Self::fill_col_state_patches) is the single owner
 /// of the column-bound region: it iterates
-/// [`StateLayout::state_to_lp_incoming_column`] over every state-vector index,
+/// [`StateSpace::state_to_lp_incoming_column`] over every state-vector index,
 /// so storage, AR lags, buckets, and anticipated state all resolve through one
 /// call site rather than parallel hardcoded offsets.
 #[derive(Debug, Clone)]
@@ -36,6 +37,12 @@ pub struct PatchBuffer {
 
     /// New upper bounds for each patched column in the column-bound region.
     pub col_upper: Vec<f64>,
+
+    /// Delivery generation-column bound relaxations absorbing solver-tolerance
+    /// commitment drift; empty (no `set_col_bounds`) whenever every commitment is
+    /// in bounds, so parity is preserved. Filled by
+    /// `commitment_reconcile::fill_bound_relaxations`.
+    pub commitment_relax: BoundRelaxations,
 
     /// Number of operating hydro plants (N).
     hydro_count: usize,
@@ -148,6 +155,7 @@ impl PatchBuffer {
             col_indices: vec![0; col_capacity],
             col_lower: vec![0.0; col_capacity],
             col_upper: vec![0.0; col_capacity],
+            commitment_relax: BoundRelaxations::default(),
             hydro_count,
             max_par_order,
             load_bus_count: n_load_buses,
@@ -174,7 +182,7 @@ impl PatchBuffer {
     /// `noise.len() != layout.hydro_count`.
     pub fn fill_forward_patches(
         &mut self,
-        layout: &StateLayout,
+        layout: &StateSpace,
         state: &[f64],
         noise: &[f64],
         base_row: usize,
@@ -208,7 +216,7 @@ impl PatchBuffer {
     /// state.
     ///
     /// The single owner of the column-bound region: iterates
-    /// [`StateLayout::state_to_lp_incoming_column`] over every state-vector index
+    /// [`StateSpace::state_to_lp_incoming_column`] over every state-vector index
     /// `j ∈ [0, n_state)`, writing one patch per `j` at buffer slot `j` — storage,
     /// AR lags, buckets, and anticipated state all resolve through this one
     /// resolver call rather than parallel hardcoded offsets. A hardcoded
@@ -228,7 +236,7 @@ impl PatchBuffer {
     /// storage and AR lags (contrast with NCS availability, which patches per
     /// opening).
     ///
-    /// [`state_to_lp_incoming_column`]: StateLayout::state_to_lp_incoming_column
+    /// [`state_to_lp_incoming_column`]: StateSpace::state_to_lp_incoming_column
     ///
     /// # Panics
     ///
@@ -238,7 +246,7 @@ impl PatchBuffer {
     /// `state_layout.transit_buckets_in`.
     pub fn fill_col_state_patches(
         &mut self,
-        state_layout: &StateLayout,
+        state_layout: &StateSpace,
         state: &[f64],
         col_scale: &[f64],
     ) {
@@ -251,7 +259,9 @@ impl PatchBuffer {
         );
 
         for (j, &sv) in state.iter().enumerate() {
-            let col = state_layout.state_to_lp_incoming_column(j);
+            let col = state_layout
+                .state_to_lp_incoming_column(StateDim::new(j))
+                .get();
             let scaled = if col_scale.is_empty() {
                 sv
             } else {
@@ -330,10 +340,10 @@ impl PatchBuffer {
 
         for (i, &bus_pos) in bus_positions.iter().enumerate() {
             for blk in 0..n_blocks {
-                let row = grid.flat(load_row_start, bus_pos, blk);
+                let row = grid.flat(load_row_start, bus_pos, BlockIdx::new(blk));
                 // Host-array index `i * n_blks + blk` routed through the same
                 // `grid.flat` (start = 0) to keep one owner of the stride.
-                let rhs = load_rhs[grid.flat(0, i, blk)];
+                let rhs = load_rhs[grid.flat(0, i, BlockIdx::new(blk))];
                 let scaled = if row_scale.is_empty() {
                     rhs
                 } else {
@@ -414,11 +424,11 @@ impl PatchBuffer {
 )]
 mod tests {
     use super::PatchBuffer;
-    use crate::indexer::{BlockGrid, StateLayout};
+    use crate::indexer::{BlockGrid, StateSpace};
     use crate::test_support::{state_layout, state_layout_full, state_layout_with_transit_buckets};
 
     /// Convenience: make a role-(a) state layout without repeating N/L everywhere.
-    fn idx(n: usize, l: usize) -> StateLayout {
+    fn idx(n: usize, l: usize) -> StateSpace {
         state_layout(n, l)
     }
 
@@ -1146,7 +1156,7 @@ mod tests {
     }
 
     /// A `PatchBuffer` constructed with `n_buckets = 0` panics (index out of
-    /// bounds) when filled against a bucket-aware `StateLayout` — the sizing
+    /// bounds) when filled against a bucket-aware `StateSpace` — the sizing
     /// contract between `PatchBuffer::new`'s `n_buckets` and the layout it
     /// patches must match, or the column-bound region has no room for the
     /// bucket slots.

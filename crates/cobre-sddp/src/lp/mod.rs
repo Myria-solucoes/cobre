@@ -5,10 +5,10 @@
 //! This directory module groups the three pieces that own the LP's structure,
 //! kept together because each depends on the column layout the next encodes:
 //!
-//! - [`indexer`] — [`StateLayout`](indexer::StateLayout) owns the state-vector
+//! - [`indexer`] — [`StateSpace`](indexer::StateSpace) owns the state-vector
 //!   column layout and [`StudyDimensions`](indexer::StudyDimensions) the
 //!   non-state study shape. The LP has no state-fixing row range: state is
-//!   pinned via [`crate::indexer::StateLayout::state_to_lp_incoming_column`]
+//!   pinned via [`crate::indexer::StateSpace::state_to_lp_incoming_column`]
 //!   column bounds, never a fixing row. The per-stage equipment geometry lives
 //!   on [`StageGeometry`].
 //! - `generic_constraints` — lowers user-declared generic constraints onto the

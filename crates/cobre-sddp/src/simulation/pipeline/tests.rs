@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 
 use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
+use cobre_core::WorkerPhaseTimings;
 use cobre_core::scenario::SamplingScheme;
 use cobre_solver::{
     Basis, LpSolution, ProfiledSolver, RowBatch, SolverError, SolverInterface, SolverStatistics,
@@ -15,6 +16,7 @@ use super::SimulationOutputSpec;
 use crate::{
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
+    energy_conversion::EnergyConversionSet,
     horizon_mode::HorizonMode,
     inflow_method::InflowNonNegativityMethod,
     lp_builder::PatchBuffer,
@@ -24,6 +26,7 @@ use crate::{
         extraction::EntityCounts,
         state::{SimulationInputs, SimulationState},
     },
+    test_support,
     workspace::{BackwardAccumulators, CapturedBasis, ScratchBuffers, SolverWorkspace},
 };
 
@@ -32,7 +35,7 @@ use crate::{
 fn run_simulate<S, C: cobre_comm::Communicator>(
     workspaces: &mut [SolverWorkspace<S>],
     ctx: &StageContext<'_>,
-    fcf: &crate::FutureCostFunction,
+    fcf: &FutureCostFunction,
     training_ctx: &TrainingContext<'_>,
     config: &SimulationConfig,
     output: SimulationOutputSpec<'_>,
@@ -197,7 +200,9 @@ impl SolverInterface for MockSolver {
         }
         self.do_solve()
     }
-    fn get_basis(&mut self, _out: &mut Basis) {}
+    fn get_basis(&mut self, out: &mut Basis) {
+        crate::test_support::fill_consistent_basis(out);
+    }
     fn record_reconstruction_stats(&mut self) {
         self.reconstruction_counter += 1;
     }
@@ -437,12 +442,9 @@ fn hydro_productivities_1hydro(n_stages: usize) -> Vec<Vec<f64>> {
     vec![vec![1.0]; n_stages]
 }
 
-/// Build a zero-valued [`crate::energy_conversion::EnergyConversionSet`] for tests
+/// Build a zero-valued [`EnergyConversionSet`] for tests
 /// that do not assert on energy fields.
-fn zero_energy_conversion(
-    n_hydros: usize,
-    n_stages: usize,
-) -> crate::energy_conversion::EnergyConversionSet {
+fn zero_energy_conversion(n_hydros: usize, n_stages: usize) -> EnergyConversionSet {
     use crate::energy_conversion::{EnergyConversion, EnergyConversionSet};
     let zero_ec = EnergyConversion {
         equivalent_productivity_mw_per_m3s: 0.0,
@@ -501,7 +503,7 @@ fn single_workspace(solver: MockSolver) -> Vec<SolverWorkspace<MockSolver>> {
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
-        worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+        worker_timing_buf: WorkerPhaseTimings::default(),
     }]
 }
 
@@ -693,7 +695,7 @@ fn simulation_load_patches_applied() {
         n_scenarios: 1,
         io_channel_capacity: 4,
     };
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
     };
@@ -745,7 +747,7 @@ fn simulation_load_patches_applied() {
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
-        worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+        worker_timing_buf: WorkerPhaseTimings::default(),
     }];
 
     // load_balance_row_starts[0]=2 (load balance row is row 2 in the template).
@@ -787,10 +789,8 @@ fn simulation_load_patches_applied() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -900,7 +900,7 @@ fn simulation_no_load_buses_unchanged() {
     let base_rows = vec![0usize];
 
     let stochastic = make_stochastic_context(n_stages);
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let config = SimulationConfig {
         n_scenarios: 1,
@@ -952,10 +952,8 @@ fn simulation_no_load_buses_unchanged() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1046,7 +1044,7 @@ fn simulation_inflow_extraction_unaffected() {
 
     let n_load_buses = 1usize;
     let stochastic = make_stochastic_context_1_hydro_1_load_bus_sim(300.0, 30.0);
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
     let config = SimulationConfig {
         n_scenarios: 1,
@@ -1103,7 +1101,7 @@ fn simulation_inflow_extraction_unaffected() {
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
-        worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+        worker_timing_buf: WorkerPhaseTimings::default(),
     }];
 
     let load_balance_row_starts = vec![2usize];
@@ -1143,10 +1141,8 @@ fn simulation_inflow_extraction_unaffected() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1435,7 +1431,7 @@ fn single_workspace_with_hydros(
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
-        worker_timing_buf: cobre_core::WorkerPhaseTimings::default(),
+        worker_timing_buf: WorkerPhaseTimings::default(),
     }]
 }
 
@@ -1466,7 +1462,7 @@ fn simulation_truncation_clamps_negative_inflow_noise() {
     let base_rows = vec![0_usize];
     let noise_scale = vec![noise_scale_val];
 
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     let fcf = FutureCostFunction::new(n_stages, state.n_state, 1, 10, &vec![0; n_stages]);
     let config = SimulationConfig {
         n_scenarios: 4,
@@ -1517,10 +1513,8 @@ fn simulation_truncation_clamps_negative_inflow_noise() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::Truncation,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1598,7 +1592,7 @@ fn simulation_none_method_produces_raw_negative_noise() {
     let base_rows = vec![0_usize];
     let noise_scale = vec![noise_scale_val];
 
-    let state = crate::test_support::state_layout(1, 0);
+    let state = test_support::state_layout(1, 0);
     let fcf = FutureCostFunction::new(n_stages, state.n_state, 1, 10, &vec![0; n_stages]);
     let config = SimulationConfig {
         n_scenarios: 4,
@@ -1649,10 +1643,8 @@ fn simulation_none_method_produces_raw_negative_noise() {
         &TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(
-                &state, n_stages,
-            ),
-            study_dims: &crate::test_support::study_dims(),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &initial_state,
@@ -1726,6 +1718,7 @@ mod dcs_simulation {
     use std::collections::HashMap;
     use std::sync::mpsc;
 
+    use cobre_core::scenario::SamplingScheme;
     use cobre_solver::{ActiveSolver, StageTemplate};
 
     use super::super::{
@@ -1741,7 +1734,8 @@ mod dcs_simulation {
     use crate::inflow_method::InflowNonNegativityMethod;
     use crate::lp_builder::{PatchBuffer, StageGeometry};
     use crate::simulation::extraction::EntityCounts;
-    use crate::simulation::types::SimulationStageResult;
+    use crate::simulation::types::{SimulationCostResult, SimulationStageResult};
+    use crate::test_support;
     use crate::workspace::{SolverWorkspace, WorkspaceSizing};
 
     const X_HAT: f64 = 2.0;
@@ -1893,7 +1887,7 @@ mod dcs_simulation {
         dcs: Option<DcsParams>,
         frozen: &StageTemplate,
     ) -> (f64, SimulationStageResult) {
-        let state = crate::test_support::state_layout(1, 0);
+        let state = test_support::state_layout(1, 0);
         let core = sim_core_template();
         // The DCS branch always loads `core`; the frozen branch loads `frozen` —
         // each carries its own trailing z-inflow definition row as its last row.
@@ -1963,18 +1957,18 @@ mod dcs_simulation {
             noise_group_ids: &[],
             downstream_par_order: 0,
         };
-        let study_dims = crate::test_support::study_dims();
+        let study_dims = test_support::study_dims();
         let training_ctx = TrainingContext {
             horizon: &horizon,
             state: &state,
-            cut_state_layouts: &crate::test_support::all_enabled_cut_state_layouts(&state, 1),
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, 1),
             study_dims: &study_dims,
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
-            inflow_scheme: cobre_core::scenario::SamplingScheme::InSample,
-            load_scheme: cobre_core::scenario::SamplingScheme::InSample,
-            ncs_scheme: cobre_core::scenario::SamplingScheme::InSample,
+            inflow_scheme: SamplingScheme::InSample,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
             stages: &[],
             historical_library: None,
             external_inflow_library: None,
@@ -2017,7 +2011,7 @@ mod dcs_simulation {
             frozen_template: frozen,
             warm_basis: None,
         };
-        let lookups = SimLookups::build(&crate::test_support::study_dims(), &[], 0, 1);
+        let lookups = SimLookups::build(&test_support::study_dims(), &[], 0, 1);
 
         let (immediate, result) = solve_simulation_stage(
             &mut ws,
@@ -2035,9 +2029,7 @@ mod dcs_simulation {
     }
 
     /// The stage-level cost record (block 0) carrying total/immediate/future.
-    fn stage_cost(
-        result: &SimulationStageResult,
-    ) -> &crate::simulation::types::SimulationCostResult {
+    fn stage_cost(result: &SimulationStageResult) -> &SimulationCostResult {
         result
             .costs
             .first()
@@ -2152,6 +2144,7 @@ mod anticipated_ring_matches_forward_propagation {
     use std::collections::HashMap;
     use std::sync::mpsc;
 
+    use cobre_core::scenario::SamplingScheme;
     use cobre_solver::{
         Basis, LpSolution, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
     };
@@ -2163,9 +2156,11 @@ mod anticipated_ring_matches_forward_propagation {
     use crate::cut::FutureCostFunction;
     use crate::energy_conversion::EnergyConversionSet;
     use crate::horizon_mode::HorizonMode;
+    use crate::indexer::StateSpace;
     use crate::inflow_method::InflowNonNegativityMethod;
     use crate::lp_builder::PatchBuffer;
     use crate::simulation::extraction::EntityCounts;
+    use crate::test_support;
     use crate::training::forward::{StageKey, run_forward_stage};
     use crate::trajectory::TrajectoryRecord;
     use crate::workspace::{BasisStore, SolverWorkspace, WorkspaceSizing};
@@ -2224,7 +2219,9 @@ mod anticipated_ring_matches_forward_propagation {
                 solve_time_seconds: sol.solve_time_seconds,
             })
         }
-        fn get_basis(&mut self, _out: &mut Basis) {}
+        fn get_basis(&mut self, out: &mut Basis) {
+            crate::test_support::fill_consistent_basis(out);
+        }
         fn record_reconstruction_stats(&mut self) {}
         fn statistics(&self) -> SolverStatistics {
             SolverStatistics::default()
@@ -2311,7 +2308,7 @@ mod anticipated_ring_matches_forward_propagation {
     /// Drive `run_forward_stage` over `N_STAGES` stages, returning the captured
     /// `current_state` after each stage.
     fn run_forward_trajectory(
-        state: &crate::indexer::StateLayout,
+        state: &StateSpace,
         templates: &[StageTemplate],
         training_ctx: &TrainingContext<'_>,
         ctx: &StageContext<'_>,
@@ -2372,7 +2369,7 @@ mod anticipated_ring_matches_forward_propagation {
     /// Drive `solve_simulation_stage` over `N_STAGES` stages, returning the
     /// captured `current_state` after each stage.
     fn run_simulation_trajectory(
-        state: &crate::indexer::StateLayout,
+        state: &StateSpace,
         templates: &[StageTemplate],
         training_ctx: &TrainingContext<'_>,
         ctx: &StageContext<'_>,
@@ -2466,7 +2463,7 @@ mod anticipated_ring_matches_forward_propagation {
     /// copy-outgoing convention, not a residual shift.
     #[test]
     fn simulation_ring_matches_forward_pass_for_identical_solves() {
-        let state = crate::test_support::state_layout_full(0, 0, 1, 2, vec![2]);
+        let state = test_support::state_layout_full(0, 0, 1, 2, vec![2]);
         let num_cols = state.theta + 1;
         let template = ring_template(num_cols, state.n_state);
         let templates = vec![template.clone(), template.clone(), template];
@@ -2475,10 +2472,9 @@ mod anticipated_ring_matches_forward_propagation {
         let horizon = HorizonMode::Finite {
             num_stages: N_STAGES,
         };
-        let study_dims = crate::test_support::study_dims();
+        let study_dims = test_support::study_dims();
         let fcf = FutureCostFunction::new(N_STAGES, state.n_state, 1, 1, &[0, 0, 0]);
-        let cut_state_layouts =
-            crate::test_support::all_enabled_cut_state_layouts(&state, N_STAGES);
+        let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, N_STAGES);
 
         let ctx = StageContext {
             geometry_per_stage: &[],
@@ -2512,9 +2508,9 @@ mod anticipated_ring_matches_forward_propagation {
             inflow_method: &InflowNonNegativityMethod::None,
             stochastic: &stochastic,
             initial_state: &[],
-            inflow_scheme: cobre_core::scenario::SamplingScheme::InSample,
-            load_scheme: cobre_core::scenario::SamplingScheme::InSample,
-            ncs_scheme: cobre_core::scenario::SamplingScheme::InSample,
+            inflow_scheme: SamplingScheme::InSample,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
             stages: &[],
             historical_library: None,
             external_inflow_library: None,

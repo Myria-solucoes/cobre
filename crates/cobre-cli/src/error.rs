@@ -13,6 +13,26 @@
 
 use console::Term;
 
+use cobre_comm::BackendError;
+use cobre_io::LoadError;
+use cobre_io::OutputError;
+use cobre_sddp::SddpError;
+use cobre_sddp::SddpError::AnticipatedCommitmentOutOfBounds;
+use cobre_sddp::SddpError::BasisShapeMismatch;
+use cobre_sddp::SddpError::Communication;
+use cobre_sddp::SddpError::Infeasible;
+use cobre_sddp::SddpError::Io;
+use cobre_sddp::SddpError::Simulation;
+use cobre_sddp::SddpError::Solver;
+use cobre_sddp::SddpError::Stochastic;
+use cobre_sddp::SddpError::Validation;
+use cobre_sddp::SddpError::WireVersionMismatch;
+use cobre_sddp::SimulationError;
+use cobre_sddp::SimulationError::LpInfeasible;
+use cobre_sddp::SimulationError::SolverError;
+
+use std::io::Error;
+
 /// Errors that can occur during CLI command execution.
 ///
 /// Each variant maps to a specific exit code (see the module-level table).
@@ -48,7 +68,7 @@ pub enum CliError {
     #[error("I/O error in {context}: {source}")]
     Io {
         /// Underlying I/O error.
-        source: std::io::Error,
+        source: Error,
         /// Path or operation description that provides context for the failure.
         context: String,
     },
@@ -163,9 +183,9 @@ impl CliError {
 }
 
 impl From<cobre_io::LoadError> for CliError {
-    fn from(err: cobre_io::LoadError) -> Self {
+    fn from(err: LoadError) -> Self {
         match err {
-            cobre_io::LoadError::IoError { path, source } => Self::Io {
+            LoadError::IoError { path, source } => Self::Io {
                 source,
                 context: path.display().to_string(),
             },
@@ -178,9 +198,9 @@ impl From<cobre_io::LoadError> for CliError {
 }
 
 impl From<cobre_io::OutputError> for CliError {
-    fn from(err: cobre_io::OutputError) -> Self {
+    fn from(err: OutputError) -> Self {
         match err {
-            cobre_io::OutputError::IoError { path, source } => Self::Io {
+            OutputError::IoError { path, source } => Self::Io {
                 source,
                 context: path.display().to_string(),
             },
@@ -192,7 +212,7 @@ impl From<cobre_io::OutputError> for CliError {
 }
 
 impl From<cobre_comm::BackendError> for CliError {
-    fn from(err: cobre_comm::BackendError) -> Self {
+    fn from(err: BackendError) -> Self {
         Self::Internal {
             message: format!("communication backend error: {err}"),
         }
@@ -200,9 +220,9 @@ impl From<cobre_comm::BackendError> for CliError {
 }
 
 impl From<cobre_sddp::SddpError> for CliError {
-    fn from(err: cobre_sddp::SddpError) -> Self {
+    fn from(err: SddpError) -> Self {
         match err {
-            cobre_sddp::SddpError::Infeasible {
+            Infeasible {
                 stage,
                 iteration,
                 scenario,
@@ -211,35 +231,41 @@ impl From<cobre_sddp::SddpError> for CliError {
                     "LP infeasible at stage {stage}, iteration {iteration}, scenario {scenario}"
                 ),
             },
-            cobre_sddp::SddpError::Solver(solver_err) => Self::Solver {
+            Solver(solver_err) => Self::Solver {
                 message: solver_err.to_string(),
             },
-            cobre_sddp::SddpError::Io(load_err) => Self::from(load_err),
-            cobre_sddp::SddpError::Validation(msg) => Self::Validation {
+            Io(load_err) => Self::from(load_err),
+            Validation(msg) => Self::Validation {
                 report: msg,
                 already_rendered: false,
             },
-            cobre_sddp::SddpError::Communication(comm_err) => Self::Internal {
+            Communication(comm_err) => Self::Internal {
                 message: comm_err.to_string(),
             },
-            cobre_sddp::SddpError::Simulation(msg) => Self::Internal { message: msg },
-            cobre_sddp::SddpError::Stochastic(stoch_err) => Self::Internal {
+            Simulation(msg) => Self::Internal { message: msg },
+            Stochastic(stoch_err) => Self::Internal {
                 message: stoch_err.to_string(),
             },
-            cobre_sddp::SddpError::WireVersionMismatch { encoded, expected } => Self::Internal {
+            WireVersionMismatch { encoded, expected } => Self::Internal {
                 message: format!(
                     "wire format version mismatch: encoded={encoded}, expected={expected}; \
                      restart all ranks with the same binary"
                 ),
+            },
+            ref shape_mismatch @ BasisShapeMismatch { .. } => Self::Internal {
+                message: shape_mismatch.to_string(),
+            },
+            ref over_commitment @ AnticipatedCommitmentOutOfBounds { .. } => Self::Internal {
+                message: over_commitment.to_string(),
             },
         }
     }
 }
 
 impl From<cobre_sddp::SimulationError> for CliError {
-    fn from(err: cobre_sddp::SimulationError) -> Self {
+    fn from(err: SimulationError) -> Self {
         match err {
-            cobre_sddp::SimulationError::LpInfeasible {
+            LpInfeasible {
                 scenario_id,
                 stage_id,
                 solver_message,
@@ -248,7 +274,7 @@ impl From<cobre_sddp::SimulationError> for CliError {
                     "LP infeasible at scenario {scenario_id}, stage {stage_id}: {solver_message}"
                 ),
             },
-            cobre_sddp::SimulationError::SolverError {
+            SolverError {
                 scenario_id,
                 stage_id,
                 solver_message,
@@ -268,6 +294,8 @@ impl From<cobre_sddp::SimulationError> for CliError {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use cobre_comm::CommError;
+    use cobre_stochastic::StochasticError;
 
     #[test]
     fn validation_exit_code_is_1() {
@@ -383,7 +411,7 @@ mod tests {
     fn from_load_error_io_maps_to_cli_io() {
         use std::path::PathBuf;
 
-        let load_err = cobre_io::LoadError::IoError {
+        let load_err = LoadError::IoError {
             path: PathBuf::from("system/hydros.json"),
             source: std::io::Error::new(std::io::ErrorKind::NotFound, "no such file"),
         };
@@ -397,7 +425,7 @@ mod tests {
 
     #[test]
     fn from_load_error_constraint_maps_to_validation() {
-        let load_err = cobre_io::LoadError::ConstraintError {
+        let load_err = LoadError::ConstraintError {
             description: "hydro cascade contains a cycle".to_string(),
         };
         let cli_err = CliError::from(load_err);
@@ -412,7 +440,7 @@ mod tests {
     fn from_load_error_schema_maps_to_validation() {
         use std::path::PathBuf;
 
-        let load_err = cobre_io::LoadError::SchemaError {
+        let load_err = LoadError::SchemaError {
             path: PathBuf::from("system/buses.json"),
             field: "voltage".to_string(),
             message: "must be positive".to_string(),
@@ -429,7 +457,7 @@ mod tests {
     fn from_load_error_cross_reference_maps_to_validation() {
         use std::path::PathBuf;
 
-        let load_err = cobre_io::LoadError::CrossReferenceError {
+        let load_err = LoadError::CrossReferenceError {
             source_file: PathBuf::from("system/hydros.json"),
             source_entity: "Hydro 'H1'".to_string(),
             target_collection: "bus registry".to_string(),
@@ -445,7 +473,7 @@ mod tests {
 
     #[test]
     fn from_sddp_error_infeasible_maps_to_solver() {
-        let sddp_err = cobre_sddp::SddpError::Infeasible {
+        let sddp_err = Infeasible {
             stage: 5,
             iteration: 42,
             scenario: 3,
@@ -460,7 +488,7 @@ mod tests {
 
     #[test]
     fn from_sddp_error_solver_maps_to_solver() {
-        let sddp_err = cobre_sddp::SddpError::Solver(cobre_solver::SolverError::Infeasible);
+        let sddp_err = Solver(cobre_solver::SolverError::Infeasible);
         let cli_err = CliError::from(sddp_err);
         assert!(
             matches!(cli_err, CliError::Solver { .. }),
@@ -473,11 +501,11 @@ mod tests {
     fn from_sddp_error_io_maps_to_cli_io_or_validation() {
         use std::path::PathBuf;
 
-        let load_io = cobre_io::LoadError::IoError {
+        let load_io = LoadError::IoError {
             path: PathBuf::from("system/hydros.json"),
             source: std::io::Error::new(std::io::ErrorKind::NotFound, "not found"),
         };
-        let sddp_err = cobre_sddp::SddpError::Io(load_io);
+        let sddp_err = Io(load_io);
         let cli_err = CliError::from(sddp_err);
         assert!(
             matches!(cli_err, CliError::Io { .. }),
@@ -488,7 +516,7 @@ mod tests {
 
     #[test]
     fn from_sddp_error_validation_maps_to_validation() {
-        let sddp_err = cobre_sddp::SddpError::Validation("forward_passes must be > 0".to_string());
+        let sddp_err = Validation("forward_passes must be > 0".to_string());
         let cli_err = CliError::from(sddp_err);
         assert!(
             matches!(cli_err, CliError::Validation { .. }),
@@ -499,12 +527,11 @@ mod tests {
 
     #[test]
     fn from_sddp_error_communication_maps_to_internal() {
-        let sddp_err =
-            cobre_sddp::SddpError::Communication(cobre_comm::CommError::CollectiveFailed {
-                operation: "allgatherv",
-                mpi_error_code: 1,
-                message: "timed out".to_string(),
-            });
+        let sddp_err = Communication(CommError::CollectiveFailed {
+            operation: "allgatherv",
+            mpi_error_code: 1,
+            message: "timed out".to_string(),
+        });
         let cli_err = CliError::from(sddp_err);
         assert!(
             matches!(cli_err, CliError::Internal { .. }),
@@ -515,10 +542,10 @@ mod tests {
 
     #[test]
     fn from_sddp_error_stochastic_maps_to_internal() {
-        let stoch_err = cobre_stochastic::StochasticError::InsufficientData {
+        let stoch_err = StochasticError::InsufficientData {
             context: "hydro 7 has only 2 observations".to_string(),
         };
-        let sddp_err = cobre_sddp::SddpError::Stochastic(stoch_err);
+        let sddp_err = Stochastic(stoch_err);
         let cli_err = CliError::from(sddp_err);
         assert!(
             matches!(cli_err, CliError::Internal { .. }),
@@ -529,7 +556,7 @@ mod tests {
 
     #[test]
     fn from_sddp_error_simulation_maps_to_internal() {
-        let sddp_err = cobre_sddp::SddpError::Simulation("output channel closed".to_string());
+        let sddp_err = Simulation("output channel closed".to_string());
         let cli_err = CliError::from(sddp_err);
         assert!(
             matches!(cli_err, CliError::Internal { .. }),
@@ -540,7 +567,7 @@ mod tests {
 
     #[test]
     fn from_simulation_error_lp_infeasible_maps_to_solver() {
-        let sim_err = cobre_sddp::SimulationError::LpInfeasible {
+        let sim_err = LpInfeasible {
             scenario_id: 5,
             stage_id: 3,
             solver_message: "primal infeasible".to_string(),
@@ -555,7 +582,7 @@ mod tests {
 
     #[test]
     fn from_simulation_error_solver_error_maps_to_solver() {
-        let sim_err = cobre_sddp::SimulationError::SolverError {
+        let sim_err = SolverError {
             scenario_id: 10,
             stage_id: 7,
             solver_message: "numerical difficulties".to_string(),
@@ -570,7 +597,7 @@ mod tests {
 
     #[test]
     fn from_simulation_error_io_maps_to_internal() {
-        let sim_err = cobre_sddp::SimulationError::IoError {
+        let sim_err = SimulationError::IoError {
             message: "disk full".to_string(),
         };
         let cli_err = CliError::from(sim_err);
@@ -583,7 +610,7 @@ mod tests {
 
     #[test]
     fn from_simulation_error_policy_incompatible_maps_to_internal() {
-        let sim_err = cobre_sddp::SimulationError::PolicyIncompatible {
+        let sim_err = SimulationError::PolicyIncompatible {
             message: "hydro count mismatch".to_string(),
         };
         let cli_err = CliError::from(sim_err);
@@ -596,7 +623,7 @@ mod tests {
 
     #[test]
     fn from_simulation_error_channel_closed_maps_to_internal() {
-        let sim_err = cobre_sddp::SimulationError::ChannelClosed;
+        let sim_err = SimulationError::ChannelClosed;
         let cli_err = CliError::from(sim_err);
         assert!(
             matches!(cli_err, CliError::Internal { .. }),
@@ -607,7 +634,7 @@ mod tests {
 
     #[test]
     fn from_backend_error_maps_to_internal() {
-        let err = cobre_comm::BackendError::InvalidBackend {
+        let err = BackendError::InvalidBackend {
             requested: "foobar".to_string(),
             available: vec!["local".to_string()],
         };

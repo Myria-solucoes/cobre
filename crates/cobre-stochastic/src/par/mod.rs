@@ -7,14 +7,20 @@
 //! [`contribution`].
 
 pub mod aggregate;
+pub mod closure;
 pub mod contribution;
 pub mod evaluate;
 pub mod fitting;
 pub mod lag_kernel;
+pub mod lag_transition;
 pub mod precompute;
 pub mod validation;
 
 pub use aggregate::aggregate_observations_to_season;
+pub use closure::{
+    AnnualParams, ClosureRejection, check_stationarity, check_stationarity_annual,
+    derive_residual_std_ratios, derive_residual_std_ratios_annual, implied_periodic_acf,
+};
 pub use contribution::{
     check_negative_contributions, compute_contributions, find_max_valid_order, has_negative_phi1,
 };
@@ -37,6 +43,10 @@ pub use fitting::{
 };
 pub use lag_kernel::{
     DownstreamLagAccum, EntityMajor, LagIndex, LagMajor, PrimaryLagAccum, advance_lag_chain,
+};
+pub use lag_transition::{
+    RecentObservationSeed, compute_recent_observation_seed, derive_downstream_par_order,
+    precompute_noise_groups, precompute_stage_lag_transitions,
 };
 pub use precompute::PrecomputedPar;
 pub use validation::{ParValidationReport, ParWarning, validate_par_parameters};

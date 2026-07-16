@@ -1,10 +1,11 @@
 //! Error types for the `cobre-sddp` crate.
 
+use cobre_comm::CommError;
 use cobre_io::LoadError;
+use cobre_io::scenarios::estimation::EstimationError;
 use cobre_solver::SolverError;
 use cobre_stochastic::StochasticError;
 
-use crate::estimation::EstimationError;
 use crate::fpha_fitting::FphaFittingError;
 
 /// Unified error type for SDDP algorithm operations.
@@ -32,7 +33,7 @@ pub enum SddpError {
 
     /// A distributed communication operation failed.
     #[error("communication error: {0}")]
-    Communication(#[from] cobre_comm::CommError),
+    Communication(#[from] CommError),
 
     /// Stochastic model construction or scenario generation failed.
     #[error("stochastic error: {0}")]
@@ -63,6 +64,51 @@ pub enum SddpError {
     /// [`SimulationError`](crate::SimulationError), stringified here.
     #[error("simulation error: {0}")]
     Simulation(String),
+
+    /// A pinned anticipated commitment lies outside the delivery stage's
+    /// generation bounds by more than solver-tolerance drift, so it is a
+    /// modelling error rather than a numerical artifact. See the
+    /// `commitment_reconcile` module in the LP builder.
+    #[error(
+        "anticipated commitment {commitment} MW for thermal {thermal_index} at stage {stage} \
+         block {block} lies {drift} MW outside its delivery generation bound {bound} — beyond \
+         the solver-drift margin, so this is a genuine over-commitment, not numerical drift"
+    )]
+    AnticipatedCommitmentOutOfBounds {
+        /// Delivery stage index (0-based).
+        stage: usize,
+        /// Position in `system.thermals[]`.
+        thermal_index: usize,
+        /// Block whose generation column the commitment crossed.
+        block: usize,
+        /// The pinned commitment, in MW.
+        commitment: f64,
+        /// The enforced generation bound it crossed, in MW.
+        bound: f64,
+        /// Distance past `bound`, in MW.
+        drift: f64,
+    },
+
+    /// A reconstructed warm-start basis has fewer basic variables than the LP
+    /// has rows, proving the stored basis was captured against a different LP
+    /// shape. See
+    /// [`enforce_basic_count_invariant`](crate::basis_reconstruct::enforce_basic_count_invariant).
+    #[error(
+        "stored basis was captured against a different LP shape: num_row={num_row} but \
+         total_basic={total_basic} (col_basic={col_basic}, row_basic={row_basic}); a basic-count \
+         deficit is unreachable for a stored basis matching this LP's column count and \
+         base row count"
+    )]
+    BasisShapeMismatch {
+        /// Row count of the LP the basis is being applied to.
+        num_row: usize,
+        /// `col_basic + row_basic` in the reconstructed basis.
+        total_basic: usize,
+        /// Basic columns in the reconstructed basis.
+        col_basic: usize,
+        /// Basic rows in the reconstructed basis.
+        row_basic: usize,
+    },
 
     /// A postcard-encoded payload's wire `version` does not match the current binary.
     #[error(

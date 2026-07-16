@@ -4,20 +4,27 @@ use std::sync::mpsc;
 
 use cobre_comm::{Communicator, ReduceOp};
 use cobre_core::TrainingEvent;
+use cobre_io::MetadataTrainingSolveStats;
+use cobre_io::TrainingOutput;
+use cobre_sddp::SddpError;
+use cobre_sddp::SolverStatsDelta;
 use cobre_sddp::StudySetup;
+use cobre_sddp::TrainingResult;
 use cobre_solver::ActiveSolver;
 
 use crate::error::CliError;
 use crate::summary::TrainingSummary;
 
 use super::{RunContext, check_stats_overflow};
+use crate::progress::run_progress_thread;
+use crate::summary::print_training_summary;
 
 /// Output of [`run_training_phase`]: result, training output, and optional error.
 pub(super) struct TrainingPhaseResult {
-    pub(super) result: cobre_sddp::TrainingResult,
-    pub(super) output: cobre_io::TrainingOutput,
+    pub(super) result: TrainingResult,
+    pub(super) output: TrainingOutput,
     /// Mid-iteration training error, if any. Partial results are still valid.
-    pub(super) error: Option<cobre_sddp::SddpError>,
+    pub(super) error: Option<SddpError>,
 }
 
 /// Single owner of the globally-reduced training solve-stats: the printed
@@ -57,7 +64,7 @@ pub(super) fn run_training_phase(
         None
     } else {
         quiet_rx = None;
-        Some(crate::progress::run_progress_thread(
+        Some(run_progress_thread(
             event_rx,
             ctx.render_mode,
             setup.loop_params.max_iterations,
@@ -119,11 +126,11 @@ pub(super) fn run_training_phase(
         local_backward_solve_s,
     ) = aggregate_solver_stats(&training_result.solver_stats_log, my_rank);
 
-    let training_guard_delta = cobre_sddp::SolverStatsDelta {
+    let training_guard_delta = SolverStatsDelta {
         lp_successes: local_first_try.saturating_add(local_retried),
         first_try_successes: local_first_try,
         lp_failures: local_failed,
-        ..cobre_sddp::SolverStatsDelta::default()
+        ..SolverStatsDelta::default()
     };
     check_stats_overflow(&training_guard_delta)?;
 
@@ -190,12 +197,12 @@ pub(super) fn run_training_phase(
         initial_gap_percent,
     };
     if !ctx.quiet && ctx.is_root {
-        crate::summary::print_training_summary(&ctx.stderr, &training_summary);
+        print_training_summary(&ctx.stderr, &training_summary);
     }
 
     // Assign only this field; `final_upper_bound_std` is populated upstream and
     // must stay untouched.
-    training_output.training_solve_stats = cobre_io::MetadataTrainingSolveStats {
+    training_output.training_solve_stats = MetadataTrainingSolveStats {
         total_lp_solves: Some(global_lp_solves),
         first_try: Some(global_stats.first_try),
         retried: Some(global_stats.retried),

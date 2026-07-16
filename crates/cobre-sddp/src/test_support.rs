@@ -1,19 +1,37 @@
-//! Crate-internal test-support builders: role-(a) [`StateLayout`], role-(b)
+//! Crate-internal test-support builders: role-(a) [`StateSpace`], role-(b)
 //! [`StageGeometry`], and [`StudyDimensions`] fixtures shared across the crate's
 //! unit tests and `tests/` integration suites.
 //!
-//! They reproduce production stage-0 layout arithmetic from explicit equipment
-//! dimensions, so a test builds the exact types a study of those dimensions would
-//! without a full `StudySetup`. They construct crate-internal types, so they live
-//! in `src/` under `#[cfg(any(test, feature = "test-support"))]` — reachable by
-//! plain `cargo test` and by downstream integration tests via the `test-support`
-//! feature.
+//! [`geometry`] drives the production `StageLayout::new`/`StageLayout::geometry`
+//! constructors from explicit equipment dimensions, so a test exercises the exact
+//! construction path a study of those dimensions would, without a full
+//! `StudySetup`. They construct crate-internal types, so they live in `src/` under
+//! `#[cfg(any(test, feature = "test-support"))]` — reachable by plain `cargo test`
+//! and by downstream integration tests via the `test-support` feature.
 
-use crate::indexer::{CutStateProjection, EvaporationIndices, StateLayout, StudyDimensions};
-use crate::lp_builder::{
-    EVAP_COLS_PER_HYDRO, EVAP_F_MINUS_OFFSET, EVAP_F_PLUS_OFFSET, EVAP_FLOW_OFFSET, StageGeometry,
+use std::collections::{BTreeMap, HashMap};
+
+use chrono::NaiveDate;
+use cobre_core::{
+    Block, BlockMode, Bus, CascadeTopology, DeficitSegment, EntityId, Hydro, HydroGenerationModel,
+    HydroPenalties, NoiseMethod, ResolvedBounds, ResolvedExchangeFactors,
+    ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
+    ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig,
 };
-use cobre_solver::StageTemplate;
+use cobre_stochastic::par::precompute::PrecomputedPar;
+
+use crate::hydro_models::{
+    EvaporationModel, EvaporationModelSet, FphaPlane, ProductionModelSet, ResolvedProductionModel,
+};
+use crate::indexer::{CutStateProjection, StateSpace, StudyDimensions, ThermalSys};
+use crate::lead_time::AnticipatedResolution;
+use crate::lp_builder::{ResolvedTables, StageGeometry, StageLayout, TemplateBuildCtx};
+use crate::policy::policy_load::{
+    FullFcf, PolicyLoadProof, PolicyStageManifest, validate_policy_load,
+};
+use crate::resolved_parameters::ResolvedParameters;
+use crate::trajectory::TrajectoryRecord;
+use cobre_solver::{Basis, BasisStatus, StageTemplate};
 
 /// Equipment dimensions for the [`geometry`] / [`study_dims_for`] test builders.
 ///
@@ -61,6 +79,25 @@ impl Default for GeometryDims {
             anticipated_thermal_indices: Vec::new(),
         }
     }
+}
+
+/// Overwrite `out` with a basis satisfying `col_basic + row_basic ==
+/// row_status.len()` — the consistency invariant every real solver's `get_basis`
+/// returns and [`enforce_basic_count_invariant`] requires of a stored basis.
+///
+/// A mock `get_basis` that leaves `out` untouched keeps the all-`Lower` zero-fill
+/// from `Basis::new`, i.e. `total_basic == 0`. No solver produces that, and
+/// offering it back as a warm start is a basic-count deficit, which
+/// [`enforce_basic_count_invariant`] rejects as a shape mismatch.
+///
+/// [`enforce_basic_count_invariant`]: crate::basis_reconstruct::enforce_basic_count_invariant
+pub fn fill_consistent_basis(out: &mut Basis) {
+    let num_row = out.row_status.len();
+    out.col_status.fill(BasisStatus::Lower);
+    out.row_status.fill(BasisStatus::Lower);
+    let basic_cols = num_row.min(out.col_status.len());
+    out.col_status[..basic_cols].fill(BasisStatus::Basic);
+    out.row_status[..num_row - basic_cols].fill(BasisStatus::Basic);
 }
 
 /// Build [`GeometryDims`] with the seven scalar entity counts set and no
@@ -117,161 +154,297 @@ pub fn eq_with_anticipated(
     }
 }
 
+/// All-zero [`HydroPenalties`] for [`geometry_hydro`] — no fixture-side penalty
+/// cost reaches the column/objective arithmetic `StageLayout::new` computes.
+fn geometry_zero_penalties() -> HydroPenalties {
+    HydroPenalties {
+        spillage_cost: 0.0,
+        diversion_cost: 0.0,
+        turbined_cost: 0.0,
+        storage_violation_below_cost: 0.0,
+        filling_target_violation_cost: 0.0,
+        turbined_violation_below_cost: 0.0,
+        outflow_violation_below_cost: 0.0,
+        outflow_violation_above_cost: 0.0,
+        generation_violation_below_cost: 0.0,
+        evaporation_violation_cost: 0.0,
+        water_withdrawal_violation_cost: 0.0,
+        water_withdrawal_violation_pos_cost: 0.0,
+        water_withdrawal_violation_neg_cost: 0.0,
+        evaporation_violation_pos_cost: 0.0,
+        evaporation_violation_neg_cost: 0.0,
+        inflow_nonnegativity_cost: 0.0,
+    }
+}
+
+/// Fixture hydro at system position `idx`: always `Operating` (`filling`,
+/// `entry_stage_id`, `exit_stage_id` all `None`), so `StageLayout::new`'s FPHA/
+/// evaporation membership filters never drop a caller-requested index regardless
+/// of `stage.id`.
+fn geometry_hydro(idx: usize) -> Hydro {
+    let id = EntityId(i32::try_from(idx).unwrap_or(i32::MAX));
+    Hydro {
+        id,
+        name: String::new(),
+        operational_start_date: NaiveDate::default(),
+        bus_id: id,
+        downstream_id: None,
+        travel_time_hours: None,
+        entry_stage_id: None,
+        exit_stage_id: None,
+        min_storage_hm3: 0.0,
+        max_storage_hm3: 1.0,
+        min_outflow_m3s: 0.0,
+        max_outflow_m3s: None,
+        generation_model: HydroGenerationModel::ConstantProductivity,
+        min_turbined_m3s: 0.0,
+        max_turbined_m3s: 1.0,
+        specific_productivity_mw_per_m3s_per_m: None,
+        min_generation_mw: 0.0,
+        max_generation_mw: 1.0,
+        tailrace: None,
+        hydraulic_losses: None,
+        efficiency: None,
+        evaporation_coefficients_mm: None,
+        evaporation_reference_volumes_hm3: None,
+        diversion: None,
+        filling: None,
+        penalties: geometry_zero_penalties(),
+    }
+}
+
+/// Fixture bus at system position `idx` carrying exactly `max_deficit_segments`
+/// deficit segments — `StageLayout::new` derives its own `max_deficit_segments` as
+/// `ctx.buses.iter().map(|b| b.deficit_segments.len()).max()`, so every bus must
+/// carry the caller's count for that derivation to reproduce it.
+fn geometry_bus(idx: usize, max_deficit_segments: usize) -> Bus {
+    Bus {
+        id: EntityId(i32::try_from(idx).unwrap_or(i32::MAX)),
+        name: String::new(),
+        operational_start_date: NaiveDate::default(),
+        deficit_segments: vec![
+            DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 0.0,
+            };
+            max_deficit_segments
+        ],
+        excess_cost: 0.0,
+    }
+}
+
+/// Single-stage [`ProductionModelSet`]: `Fpha` with `fpha_planes[local]` planes at
+/// each `fpha_hydro_indices[local]`, `ConstantProductivity` elsewhere — the exact
+/// classification `StageLayout::new`'s FPHA-membership filter reconstructs from
+/// `(hydro, stage)`.
+fn geometry_production_models(
+    hydro_count: usize,
+    fpha_hydro_indices: &[usize],
+    fpha_planes: &[usize],
+) -> ProductionModelSet {
+    let mut plane_count: Vec<Option<usize>> = vec![None; hydro_count];
+    for (&h, &planes) in fpha_hydro_indices.iter().zip(fpha_planes) {
+        if let Some(slot) = plane_count.get_mut(h) {
+            *slot = Some(planes);
+        }
+    }
+    let models = plane_count
+        .into_iter()
+        .map(|planes| {
+            vec![planes.map_or(
+                ResolvedProductionModel::ConstantProductivity { productivity: 0.0 },
+                |n| ResolvedProductionModel::Fpha {
+                    planes: vec![
+                        FphaPlane {
+                            intercept: 0.0,
+                            gamma_v: 0.0,
+                            gamma_q: 0.0,
+                            gamma_s: 0.0,
+                        };
+                        n
+                    ],
+                },
+            )]
+        })
+        .collect();
+    ProductionModelSet::new(models, hydro_count, 1)
+}
+
+/// Single-hydro [`EvaporationModelSet`]: `Linearized` (membership only — no field
+/// beyond variant identity reaches `StageLayout::new`) at each `evap_hydro_indices`
+/// position, `None` elsewhere.
+fn geometry_evaporation_models(
+    hydro_count: usize,
+    evap_hydro_indices: &[usize],
+) -> EvaporationModelSet {
+    let mut is_evap = vec![false; hydro_count];
+    for &h in evap_hydro_indices {
+        if let Some(slot) = is_evap.get_mut(h) {
+            *slot = true;
+        }
+    }
+    let models = is_evap
+        .into_iter()
+        .map(|evap| {
+            if evap {
+                EvaporationModel::Linearized {
+                    coefficients: Vec::new(),
+                    reference_volumes_hm3: Vec::new(),
+                }
+            } else {
+                EvaporationModel::None
+            }
+        })
+        .collect();
+    EvaporationModelSet::new(models)
+}
+
+/// Single-stage [`Stage`] fixture: `n_blks` uniform blocks, [`BlockMode::Parallel`].
+fn geometry_stage(n_blks: usize) -> Stage {
+    Stage {
+        index: 0,
+        id: 0,
+        start_date: NaiveDate::default(),
+        end_date: NaiveDate::default(),
+        season_id: Some(0),
+        blocks: (0..n_blks)
+            .map(|i| Block {
+                index: i,
+                name: String::new(),
+                duration_hours: 744.0,
+            })
+            .collect(),
+        block_mode: BlockMode::Parallel,
+        state_config: StageStateConfig {
+            storage: false,
+            inflow_lags: false,
+        },
+        risk_config: StageRiskConfig::Expectation,
+        scenario_config: ScenarioSourceConfig {
+            branching_factor: 1,
+            noise_method: NoiseMethod::Saa,
+        },
+    }
+}
+
 /// Build the role-(b) [`StageGeometry`] for a single stage from explicit
 /// equipment dimensions, FPHA plane counts, and evaporation hydro indices.
 ///
-/// `fpha_hydro_indices` / `fpha_planes` are parallel (equal length).
+/// `fpha_hydro_indices` / `fpha_planes` are parallel (equal length). Builds the
+/// production `TemplateBuildCtx`/[`StateSpace`]/[`Stage`] the dimensions
+/// describe and delegates to `StageLayout::new`/`StageLayout::geometry` — the
+/// single owner of the offset arithmetic.
 #[must_use]
-// Rationale: each offset derives from the previous, so splitting into sub-helpers
-// would scatter the sequential layout derivation.
-#[allow(clippy::too_many_lines)]
+// Rationale: `fpha_hydro_indices`/`evap_hydro_indices` stay owned `Vec<usize>` —
+// the signature is a stability contract its ~30 call sites depend on — even
+// though the body only borrows them (`StageLayout::new` re-derives the
+// authoritative membership from `ctx.hydros`/`production_models`/
+// `evaporation_models`, not from the caller's raw list).
+#[allow(clippy::needless_pass_by_value)]
+// Rationale: clippy::similar_names flags `state` next to `stage`; both names
+// are established (the `StageLayout`/`StageData` field is `state`, the
+// per-stage input is `stage`), so renaming either would obscure intent rather
+// than clarify it — mirrors `build_single_stage_template`.
+#[allow(clippy::similar_names)]
 pub fn geometry(
     dims: &GeometryDims,
     fpha_hydro_indices: Vec<usize>,
     fpha_planes: &[usize],
     evap_hydro_indices: Vec<usize>,
 ) -> StageGeometry {
-    let GeometryDims {
-        hydro_count,
-        max_par_order,
-        n_thermals,
-        n_lines,
-        n_buses,
-        n_blks,
-        has_inflow_penalty,
-        max_deficit_segments,
-        n_anticipated,
-        k_max,
-        ..
-    } = *dims;
-    let n_ant_state = n_anticipated * k_max;
+    let hydros: Vec<Hydro> = (0..dims.hydro_count).map(geometry_hydro).collect();
+    let buses: Vec<Bus> = (0..dims.n_buses)
+        .map(|idx| geometry_bus(idx, dims.max_deficit_segments))
+        .collect();
+    let production_models =
+        geometry_production_models(dims.hydro_count, &fpha_hydro_indices, fpha_planes);
+    let evaporation_models = geometry_evaporation_models(dims.hydro_count, &evap_hydro_indices);
 
-    // `2 * n_ant_state`: the anticipated ring's outgoing + incoming blocks.
-    let theta = hydro_count * (3 + max_par_order) + 2 * n_ant_state;
-    let decision_start = theta + 1;
-
-    let z_inflow_row_start = 0_usize;
-
-    let turbine_start = decision_start;
-    let spillage_start = turbine_start + hydro_count * n_blks;
-    let diversion_start = spillage_start + hydro_count * n_blks;
-    let thermal_start = diversion_start + hydro_count * n_blks;
-    let thermal_end = thermal_start + n_thermals * n_blks;
-    let anticipated_decision = if n_anticipated > 0 {
-        thermal_end..thermal_end + n_anticipated
-    } else {
-        0..0
+    let bounds = ResolvedBounds::empty();
+    let penalties = ResolvedPenalties::empty();
+    let resolved_generic_bounds = ResolvedGenericConstraintBounds::empty();
+    let resolved_load_factors = ResolvedLoadFactors::empty();
+    let resolved_exchange_factors = ResolvedExchangeFactors::empty();
+    let resolved_ncs_bounds = ResolvedNcsBounds::empty();
+    let resolved_ncs_factors = ResolvedNcsFactors::empty();
+    let resolved_parameters = ResolvedParameters {
+        per_param: vec![],
+        id_to_slot: vec![],
     };
-    let line_fwd_start = thermal_end + n_anticipated;
-    let line_rev_start = line_fwd_start + n_lines * n_blks;
-    let deficit_start = line_rev_start + n_lines * n_blks;
-    let excess_start = deficit_start + n_buses * max_deficit_segments * n_blks;
-    let excess_end = excess_start + n_buses * n_blks;
+    let cascade = CascadeTopology::build(&[]);
+    let par_lp = PrecomputedPar::default();
+    let anticipated_lead_stages = vec![dims.k_max; dims.n_anticipated];
 
-    let (inflow_slack, active_penalty) = if has_inflow_penalty && hydro_count > 0 {
-        (excess_end..excess_end + hydro_count, true)
-    } else {
-        (0..0, false)
-    };
-
-    let n_fpha_hydros = fpha_hydro_indices.len();
-    let generation_start = if active_penalty {
-        inflow_slack.end
-    } else {
-        excess_end
-    };
-    let generation_end = generation_start + n_fpha_hydros * n_blks;
-    let generation = if n_fpha_hydros > 0 {
-        generation_start..generation_end
-    } else {
-        0..0
-    };
-
-    let n_evap_hydros = evap_hydro_indices.len();
-    let evap_col_start = generation_end;
-
-    let water_balance_start = z_inflow_row_start + hydro_count;
-    let load_balance_start = water_balance_start + hydro_count;
-    let load_balance_end = load_balance_start + n_buses * n_blks;
-
-    let mut fpha_row_cursor = load_balance_end;
-    for &planes in fpha_planes {
-        fpha_row_cursor += planes * n_blks;
-    }
-
-    let mut evap_indices: Vec<EvaporationIndices> = Vec::with_capacity(n_evap_hydros * n_blks);
-    for i in 0..n_evap_hydros {
-        for blk in 0..n_blks {
-            let slot = i * n_blks + blk;
-            let triple_base = evap_col_start + slot * EVAP_COLS_PER_HYDRO;
-            evap_indices.push(EvaporationIndices {
-                evaporation_flow_col: triple_base + EVAP_FLOW_OFFSET,
-                f_evap_plus_col: triple_base + EVAP_F_PLUS_OFFSET,
-                f_evap_minus_col: triple_base + EVAP_F_MINUS_OFFSET,
-                evap_row: fpha_row_cursor + slot,
-            });
-        }
-    }
-    let evap_col_end = evap_col_start + n_evap_hydros * n_blks * EVAP_COLS_PER_HYDRO;
-
-    let (withdrawal_slack_neg, withdrawal_slack_pos) = if hydro_count > 0 {
-        let neg = evap_col_end..evap_col_end + hydro_count;
-        let pos = neg.end..neg.end + hydro_count;
-        (neg, pos)
-    } else {
-        (0..0, 0..0)
+    let ctx = TemplateBuildCtx {
+        hydros: &hydros,
+        thermals: &[],
+        lines: &[],
+        buses: &buses,
+        load_models: &[],
+        cascade: &cascade,
+        resolved: ResolvedTables {
+            bounds: &bounds,
+            penalties: &penalties,
+            resolved_generic_bounds: &resolved_generic_bounds,
+            resolved_load_factors: &resolved_load_factors,
+            resolved_exchange_factors: &resolved_exchange_factors,
+            resolved_ncs_bounds: &resolved_ncs_bounds,
+            resolved_ncs_factors: &resolved_ncs_factors,
+            resolved_parameters: &resolved_parameters,
+        },
+        hydro_pos: BTreeMap::new(),
+        thermal_pos: BTreeMap::new(),
+        line_pos: BTreeMap::new(),
+        bus_pos: BTreeMap::new(),
+        par_lp: &par_lp,
+        production_models: &production_models,
+        evaporation_models: &evaporation_models,
+        generic_constraints: &[],
+        non_controllable_sources: &[],
+        pumping_stations: &[],
+        pumping_pos: BTreeMap::new(),
+        n_pumping: 0,
+        contracts: &[],
+        contract_pos: BTreeMap::new(),
+        n_contract_import: 0,
+        n_contract_export: 0,
+        diversion_upstream: HashMap::new(),
+        n_hydros: dims.hydro_count,
+        n_thermals: dims.n_thermals,
+        n_lines: dims.n_lines,
+        n_buses: dims.n_buses,
+        max_par_order: dims.max_par_order,
+        n_anticipated: dims.n_anticipated,
+        k_max: dims.k_max,
+        anticipated_lead_stages: anticipated_lead_stages.clone(),
+        anticipated_thermal_indices: dims
+            .anticipated_thermal_indices
+            .iter()
+            .map(|&t| ThermalSys::new(t))
+            .collect(),
+        anticipated_windows: vec![(None, None); dims.n_anticipated],
+        anticipated_resolution: AnticipatedResolution::default(),
+        study_stage_ids: Vec::new(),
+        has_penalty: dims.has_inflow_penalty,
+        cumulative_discount_factors: vec![1.0],
+        total_hours_per_stage: vec![744.0],
+        filling_v_target: BTreeMap::new(),
+        arc_stage_weights: HashMap::new(),
+        arc_spread_chrono: HashMap::new(),
+        arc_arrival_density: HashMap::new(),
+        per_stage_mask: Vec::new(),
     };
 
-    let ws_end = withdrawal_slack_pos.end;
-    let (outflow_below_slack, outflow_above_slack, turbine_below_slack, generation_below_slack) =
-        if hydro_count == 0 {
-            (0..0, 0..0, 0..0, 0..0)
-        } else {
-            let n_op = hydro_count * n_blks;
-            let ob = ws_end..ws_end + n_op;
-            let oa = ob.end..ob.end + n_op;
-            let tb = oa.end..oa.end + n_op;
-            let gb = tb.end..tb.end + n_op;
-            (ob, oa, tb, gb)
-        };
+    let state = state_layout_full(
+        dims.hydro_count,
+        dims.max_par_order,
+        dims.n_anticipated,
+        dims.k_max,
+        anticipated_lead_stages,
+    );
+    let stage = geometry_stage(dims.n_blks);
 
-    StageGeometry {
-        theta_col: turbine_start - 1,
-        turbine: turbine_start..spillage_start,
-        spillage: spillage_start..diversion_start,
-        diversion: diversion_start..thermal_start,
-        thermal: thermal_start..thermal_end,
-        anticipated_decision,
-        line_fwd: line_fwd_start..line_rev_start,
-        line_rev: line_rev_start..deficit_start,
-        deficit: deficit_start..excess_start,
-        excess: excess_start..excess_end,
-        generation,
-        evap_indices,
-        inflow_slack,
-        withdrawal_slack_neg,
-        withdrawal_slack_pos,
-        outflow_below_slack,
-        outflow_above_slack,
-        turbine_below_slack,
-        generation_below_slack,
-        contract_import: 0..0,
-        contract_export: 0..0,
-        water_balance: water_balance_start..water_balance_start + hydro_count,
-        load_balance: load_balance_start..load_balance_end,
-        filling_target: 0..0,
-        filling_target_col: 0..0,
-        filled_min_storage_floor: 0..0,
-        filled_min_storage_floor_col: 0..0,
-        z_inflow_row_start,
-        n_blks,
-        storage_internal_start: 0,
-        block_mode: cobre_core::BlockMode::Parallel,
-        fpha_hydro_indices,
-        evap_hydro_indices,
-        filling_target_hydro_indices: vec![],
-        filled_min_storage_floor_hydro_indices: vec![],
-    }
+    StageLayout::new(&ctx, &state, &stage, 0).geometry(BlockMode::Parallel)
 }
 
 /// Build the empty-equipment role-(b) [`StageGeometry`] (every range `0..0`).
@@ -283,13 +456,13 @@ pub fn geom(_hydro_count: usize, _max_par_order: usize) -> StageGeometry {
     StageGeometry::default()
 }
 
-/// Build a finalized storage+lag [`StateLayout`] (no anticipated thermals) with the
+/// Build a finalized storage+lag [`StateSpace`] (no anticipated thermals) with the
 /// full `max_par_order` lag stride for every hydro — the dense coverage
 /// `crate::setup::resolve_state_layout` finalizes with no per-hydro AR truncation.
 #[must_use]
-pub fn state_layout(hydro_count: usize, max_par_order: usize) -> StateLayout {
+pub fn state_layout(hydro_count: usize, max_par_order: usize) -> StateSpace {
     let effective_lag_count = vec![max_par_order; hydro_count];
-    StateLayout::new(
+    StateSpace::new(
         hydro_count,
         max_par_order,
         0,
@@ -301,7 +474,7 @@ pub fn state_layout(hydro_count: usize, max_par_order: usize) -> StateLayout {
     )
 }
 
-/// Build a finalized [`StateLayout`] from explicit state-vector dimensions,
+/// Build a finalized [`StateSpace`] from explicit state-vector dimensions,
 /// including anticipated thermals. Lag coverage is dense (full `max_par_order`).
 ///
 /// `anticipated_lead_stages` must have length `n_anticipated` and its max (when
@@ -313,9 +486,9 @@ pub fn state_layout_full(
     n_anticipated: usize,
     k_max: usize,
     anticipated_lead_stages: Vec<usize>,
-) -> StateLayout {
+) -> StateSpace {
     let effective_lag_count = vec![max_par_order; hydro_count];
-    StateLayout::new(
+    StateSpace::new(
         hydro_count,
         max_par_order,
         0,
@@ -327,7 +500,7 @@ pub fn state_layout_full(
     )
 }
 
-/// Build a finalized [`StateLayout`] with a declared travel-time bucket block
+/// Build a finalized [`StateSpace`] with a declared travel-time bucket block
 /// (`transit_buckets_out`/`transit_buckets_in`), optionally combined with anticipated
 /// thermals. `effective_lag_count` is dense (full `max_par_order` for every
 /// hydro), matching [`state_layout_full`].
@@ -340,9 +513,9 @@ pub fn state_layout_with_transit_buckets(
     n_anticipated: usize,
     k_max: usize,
     anticipated_lead_stages: Vec<usize>,
-) -> StateLayout {
+) -> StateSpace {
     let effective_lag_count = vec![max_par_order; hydro_count];
-    StateLayout::new(
+    StateSpace::new(
         hydro_count,
         max_par_order,
         n_buckets,
@@ -385,24 +558,20 @@ pub fn transit_bucket_only_template(num_cols: usize, n_state: usize) -> StageTem
 /// keeping the extracted subgradient bit-identical to the unprojected global loop.
 #[must_use]
 pub fn all_enabled_cut_state_layouts(
-    global: &StateLayout,
+    global: &StateSpace,
     n_stages: usize,
 ) -> Vec<CutStateProjection> {
-    let full = cobre_core::temporal::StageStateConfig {
-        storage: true,
-        inflow_lags: true,
-    };
     (0..n_stages)
-        .map(|_| CutStateProjection::new(global, full))
+        .map(|_| cut_state_projection(global))
         .collect()
 }
 
 /// Build a single all-enabled [`CutStateProjection`] projecting the full global state.
 #[must_use]
-pub fn cut_state_projection(global: &StateLayout) -> CutStateProjection {
+pub fn cut_state_projection(global: &StateSpace) -> CutStateProjection {
     CutStateProjection::new(
         global,
-        cobre_core::temporal::StageStateConfig {
+        StageStateConfig {
             storage: true,
             inflow_lags: true,
         },
@@ -433,4 +602,50 @@ pub fn study_dims_for(dims: &GeometryDims) -> StudyDimensions {
         anticipated_thermal_indices: dims.anticipated_thermal_indices.clone(),
         n_pumping: 0,
     }
+}
+
+/// Trivial matching [`PolicyLoadProof`] typed to [`FullFcf`] for tests
+/// exercising FCF reconstruction rather than cross-study compatibility: identical
+/// `state_dimension`/`num_stages` on both sides with an empty manifest (the
+/// "identity could not be verified" warning path). [`validate_policy_load`] is
+/// the only constructor of [`PolicyLoadProof`], so tests route through it here
+/// rather than a forged literal.
+///
+/// # Panics
+///
+/// Never in practice — see the rationale below.
+#[allow(clippy::expect_used)]
+// Rationale: matching state_dimension/num_stages with an empty manifest on
+// both sides cannot hit validate_policy_load's error paths (state_dimension
+// and num_stages equality hold trivially; an empty manifest short-circuits
+// identity comparison with a warning, never an error).
+#[must_use]
+pub fn trivial_full_fcf_proof(state_dimension: u32, num_stages: u32) -> PolicyLoadProof<FullFcf> {
+    let manifest = PolicyStageManifest {
+        state_dimension,
+        num_stages,
+        slots: &[],
+    };
+    validate_policy_load::<FullFcf>(&manifest, &manifest)
+        .expect("trivial matching manifest cannot fail validate_policy_load")
+}
+
+/// Trial-point states in the flat shape the passes index, `records[m * n_stages + stage]`.
+///
+/// Each scenario's state is replicated across every stage, so the backward pass's
+/// per-stage repack of the gather buffers reproduces exactly `states` at whichever
+/// stage it runs — letting a test pin cut arithmetic against a known trial point.
+#[must_use]
+pub fn trial_point_records(states: &[Vec<f64>], n_stages: usize) -> Vec<TrajectoryRecord> {
+    states
+        .iter()
+        .flat_map(|state| {
+            (0..n_stages).map(move |_| TrajectoryRecord {
+                primal: Vec::new(),
+                dual: Vec::new(),
+                stage_cost: 0.0,
+                state: state.clone(),
+            })
+        })
+        .collect()
 }

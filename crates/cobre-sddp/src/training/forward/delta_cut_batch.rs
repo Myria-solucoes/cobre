@@ -4,7 +4,7 @@ use cobre_solver::RowBatch;
 
 use crate::cut::FutureCostFunction;
 use crate::cut::row::push_scaled_coefficient;
-use crate::indexer::{CutStateProjection, StateLayout};
+use crate::indexer::{CutStateProjection, StateSpace};
 
 /// Fill a pre-allocated [`RowBatch`] with only the Benders cut rows generated
 /// in `current_iteration`, for appending to a frozen template via `add_rows`.
@@ -14,7 +14,7 @@ use crate::indexer::{CutStateProjection, StateLayout};
 /// [`build_cut_row_batch_into`](crate::cut::row::build_cut_row_batch_into); when
 /// the pool holds only `current_iteration` cuts the two produce byte-identical
 /// output. `cut_state` is pool `stage`'s projection; `coefficients` has length
-/// `cut_state.n_state()`.
+/// `cut_state.n_slots()`.
 ///
 /// # Panics
 ///
@@ -26,14 +26,14 @@ pub fn build_delta_cut_row_batch_into(
     batch: &mut RowBatch,
     fcf: &FutureCostFunction,
     stage: usize,
-    state: &StateLayout,
+    state: &StateSpace,
     cut_state: &CutStateProjection,
     col_scale: &[f64],
     current_iteration: u64,
 ) {
     batch.clear();
 
-    let n_cut_state = cut_state.n_state();
+    let n_cut_state = cut_state.n_slots();
     let theta_col = state.theta;
 
     let num_cuts: usize = fcf.pools[stage]
@@ -64,7 +64,7 @@ pub fn build_delta_cut_row_batch_into(
         batch.row_starts.push(nz_offset as i32);
 
         for (j, lp_col) in cut_state.render_pairs() {
-            push_scaled_coefficient(batch, lp_col, coefficients[j], col_scale);
+            push_scaled_coefficient(batch, lp_col, coefficients[j.get()], col_scale);
         }
 
         debug_assert!(

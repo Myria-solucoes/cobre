@@ -1,6 +1,7 @@
-//! `StudyParams`, `ConstructionConfig`, and associated constants extracted from `setup/mod.rs`.
+//! `StudyParams`, `ConstructionConfig`, and associated constants.
 
 use cobre_core::ScalarParameter;
+use cobre_io::Config;
 use cobre_io::config::StoppingRuleConfig;
 
 use crate::{
@@ -22,7 +23,7 @@ pub const DEFAULT_SEED: u64 = 42;
 // StudyParams
 // ---------------------------------------------------------------------------
 
-/// Scalar parameters extracted from a [`cobre_io::Config`].
+/// Scalar parameters extracted from a [`Config`].
 ///
 /// Centralises config-to-domain conversion for both [`StudySetup::new`](super::StudySetup::new)
 /// and `BroadcastConfig::from_config`. The struct owns all
@@ -55,12 +56,12 @@ pub struct StudyParams {
 }
 
 impl StudyParams {
-    /// Extract study parameters from a validated [`cobre_io::Config`].
+    /// Extract study parameters from a validated [`Config`].
     ///
     /// # Errors
     ///
     /// - [`SddpError::Validation`] if cut selection config is invalid.
-    pub fn from_config(config: &cobre_io::Config) -> Result<Self, SddpError> {
+    pub fn from_config(config: &Config) -> Result<Self, SddpError> {
         let seed = config
             .training
             .tree_seed
@@ -137,15 +138,14 @@ impl StudyParams {
 
         let budget = config.training.cut_selection.max_active_per_stage;
 
-        if let Some(b) = budget {
-            // warn when the budget cannot hold even one cut per forward pass
-            if u64::from(b) < u64::from(forward_passes) {
-                tracing::warn!(
-                    "max_active_per_stage ({b}) is less than forward_passes \
-                     ({forward_passes}); budget enforcement will evict all \
-                     non-current-iteration cuts every iteration"
-                );
-            }
+        if let Some(b) = budget
+            && u64::from(b) < u64::from(forward_passes)
+        {
+            tracing::warn!(
+                "max_active_per_stage ({b}) is less than forward_passes \
+                 ({forward_passes}); budget enforcement will evict all \
+                 non-current-iteration cuts every iteration"
+            );
         }
 
         Ok(Self {
@@ -192,7 +192,7 @@ impl StudyParams {
 /// Scalar and config parameters bundled for [`StudySetup::from_broadcast_params`](super::StudySetup::from_broadcast_params).
 ///
 /// Groups parameters to reduce argument count. Construct via
-/// [`StudyParams::into_construction_config`] from a [`cobre_io::Config`],
+/// [`StudyParams::into_construction_config`] from a [`Config`],
 /// or populate fields directly from a broadcast config.
 #[derive(Debug, Clone)]
 pub struct ConstructionConfig {
@@ -313,7 +313,7 @@ mod tests {
         fn exit(&self, _span: &span::Id) {}
     }
 
-    /// Build a minimal `cobre_io::Config` with `max_active_per_stage` and
+    /// Build a minimal `Config` with `max_active_per_stage` and
     /// `forward_passes` set so that the budget-below-forward-passes warning fires.
     fn config_with_budget_below_forward_passes() -> Config {
         Config {
@@ -344,7 +344,7 @@ mod tests {
         }
     }
 
-    /// Build a minimal `cobre_io::Config` whose stopping rules contain a
+    /// Build a minimal `Config` whose stopping rules contain a
     /// `Simulation` entry.
     fn config_with_simulation_stopping_rule() -> Config {
         Config {

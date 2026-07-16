@@ -11,9 +11,6 @@ use super::yw_matrices::{
 pub struct PeriodicYwResult {
     /// Standardised AR coefficients `phi_1..phi_p`.
     pub coefficients: Vec<f64>,
-    /// Residual std ratio `sigma_residual / sigma_sample`, in `(0, 1]`; 1.0 for
-    /// order-0.
-    pub residual_std_ratio: f64,
     /// Prediction error variance per intermediate order; `sigma2_per_order[k-1]`
     /// is the variance for AR(k).
     pub sigma2_per_order: Vec<f64>,
@@ -33,8 +30,8 @@ pub struct PeriodicYwResult {
 ///
 /// # Returns
 ///
-/// Returns the order-0 result (empty coefficients, ratio 1.0) when
-/// `selected_order == 0` or the system is singular.
+/// Returns the order-0 result (empty coefficients) when `selected_order == 0`
+/// or the system is singular.
 pub fn estimate_periodic_ar_coefficients(
     season: usize,
     selected_order: usize,
@@ -44,7 +41,6 @@ pub fn estimate_periodic_ar_coefficients(
 ) -> PeriodicYwResult {
     let zero_result = PeriodicYwResult {
         coefficients: Vec::new(),
-        residual_std_ratio: 1.0,
         sigma2_per_order: Vec::new(),
     };
 
@@ -92,16 +88,8 @@ pub fn estimate_periodic_ar_coefficients(
         }
     }
 
-    let sigma2_final = *sigma2_per_order.last().unwrap_or(&1.0);
-    let residual_std_ratio = if sigma2_final > 0.0 {
-        sigma2_final.sqrt().clamp(f64::EPSILON, 1.0)
-    } else {
-        1.0
-    };
-
     PeriodicYwResult {
         coefficients: final_coefficients,
-        residual_std_ratio,
         sigma2_per_order,
     }
 }
@@ -122,8 +110,6 @@ pub struct PeriodicYwAnnualResult {
     pub coefficients: Vec<f64>,
     /// Standardised annual coefficient `ψ`.
     pub annual_coefficient: f64,
-    /// Residual std ratio `σ_residual / σ_seasonal` in `(0, 1]`.
-    pub residual_std_ratio: f64,
 }
 
 /// Estimate PAR-A coefficients `(φ_1..φ_p, ψ)` by solving the
@@ -131,8 +117,8 @@ pub struct PeriodicYwAnnualResult {
 ///
 /// `selected_order == 0` solves the 1×1 system yielding only `ψ` (empty
 /// `coefficients`). A singular system returns the zero fallback
-/// (`coefficients: vec![]`, `annual_coefficient: 0.0`, `residual_std_ratio: 1.0`),
-/// matching [`estimate_periodic_ar_coefficients`].
+/// (`coefficients: vec![]`, `annual_coefficient: 0.0`), matching
+/// [`estimate_periodic_ar_coefficients`].
 pub fn estimate_periodic_ar_annual_coefficients(
     season: usize,
     selected_order: usize,
@@ -147,7 +133,6 @@ pub fn estimate_periodic_ar_annual_coefficients(
     let zero_result = PeriodicYwAnnualResult {
         coefficients: Vec::new(),
         annual_coefficient: 0.0,
-        residual_std_ratio: 1.0,
     };
 
     let (mut matrix, mut rhs) = build_extended_periodic_yw_matrix(
@@ -163,7 +148,6 @@ pub fn estimate_periodic_ar_annual_coefficients(
     );
 
     let dim = selected_order + 1;
-    let rhs_orig: Vec<f64> = rhs.clone();
 
     let Some(solution) = solve_linear_system(&mut matrix, &mut rhs, dim) else {
         return zero_result;
@@ -173,22 +157,8 @@ pub fn estimate_periodic_ar_annual_coefficients(
     let coefficients: Vec<f64> = solution[..selected_order].to_vec();
     let annual_coefficient: f64 = solution[selected_order];
 
-    let sigma2: f64 = 1.0
-        - solution
-            .iter()
-            .zip(rhs_orig.iter())
-            .map(|(s, r)| s * r)
-            .sum::<f64>();
-
-    let residual_std_ratio = if sigma2 > 0.0 {
-        sigma2.sqrt().clamp(f64::EPSILON, 1.0)
-    } else {
-        1.0
-    };
-
     PeriodicYwAnnualResult {
         coefficients,
         annual_coefficient,
-        residual_std_ratio,
     }
 }

@@ -123,7 +123,7 @@ pub fn build_hydro_model_summary(
 mod tests {
     use chrono::NaiveDate;
     use cobre_core::{
-        Bus, DeficitSegment, EntityId, SystemBuilder,
+        Bus, DeficitSegment, EntityId, Hydro, SystemBuilder,
         entities::hydro::{HydroGenerationModel, HydroPenalties},
         scenario::CorrelationModel,
         temporal::{
@@ -135,6 +135,7 @@ mod tests {
     // The summary tests construct production and evaporation result types owned by
     // sibling submodules; import the full re-exported surface from the directory
     // module rather than only `summary`'s own narrow `use` block.
+    use crate::HydroEnergyProductivityOverride;
     use crate::production::hydro_models::*;
 
     // ── Test helpers ──────────────────────────────────────────────────────────
@@ -160,8 +161,8 @@ mod tests {
         }
     }
 
-    fn make_hydro(id: i32, model: HydroGenerationModel) -> cobre_core::entities::hydro::Hydro {
-        cobre_core::entities::hydro::Hydro {
+    fn make_hydro(id: i32, model: HydroGenerationModel) -> Hydro {
+        Hydro {
             id: EntityId::from(id),
             name: format!("Hydro{id}"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -194,9 +195,7 @@ mod tests {
     /// Build a minimal single-bus `System` with the given hydros and one study stage.
     ///
     /// Uses bus `EntityId(10)` to match the `make_hydro` helper's `bus_id`.
-    fn make_system_for_summary(
-        hydros: Vec<cobre_core::entities::hydro::Hydro>,
-    ) -> cobre_core::System {
+    fn make_system_for_summary(hydros: Vec<Hydro>) -> cobre_core::System {
         let bus = Bus {
             id: EntityId(10),
             name: "B10".to_string(),
@@ -268,8 +267,7 @@ mod tests {
             hydro_ids.iter().map(|_| EvaporationModel::None).collect();
         PrepareHydroModelsResult {
             production,
-            productivity_override:
-                crate::energy_conversion::HydroEnergyProductivityOverride::default(),
+            productivity_override: HydroEnergyProductivityOverride::default(),
             evaporation: EvaporationModelSet::new(evap_models),
             provenance: HydroModelProvenance {
                 production_sources,
@@ -348,8 +346,7 @@ mod tests {
             all_ids.iter().map(|_| EvaporationModel::None).collect();
         PrepareHydroModelsResult {
             production,
-            productivity_override:
-                crate::energy_conversion::HydroEnergyProductivityOverride::default(),
+            productivity_override: HydroEnergyProductivityOverride::default(),
             evaporation: EvaporationModelSet::new(evap_models),
             provenance: HydroModelProvenance {
                 production_sources,
@@ -419,8 +416,7 @@ mod tests {
             .collect();
         PrepareHydroModelsResult {
             production,
-            productivity_override:
-                crate::energy_conversion::HydroEnergyProductivityOverride::default(),
+            productivity_override: HydroEnergyProductivityOverride::default(),
             evaporation: EvaporationModelSet::new(evap_models),
             provenance: HydroModelProvenance {
                 production_sources,
@@ -489,8 +485,7 @@ mod tests {
 
         let result = PrepareHydroModelsResult {
             production,
-            productivity_override:
-                crate::energy_conversion::HydroEnergyProductivityOverride::default(),
+            productivity_override: HydroEnergyProductivityOverride::default(),
             evaporation: EvaporationModelSet::new(evap_models),
             provenance: HydroModelProvenance {
                 production_sources,
@@ -685,8 +680,7 @@ mod tests {
             .collect();
         let result = PrepareHydroModelsResult {
             production,
-            productivity_override:
-                crate::energy_conversion::HydroEnergyProductivityOverride::default(),
+            productivity_override: HydroEnergyProductivityOverride::default(),
             evaporation: EvaporationModelSet::new(evap_models),
             provenance: HydroModelProvenance {
                 production_sources,
@@ -759,8 +753,7 @@ mod tests {
 
         let result = PrepareHydroModelsResult {
             production,
-            productivity_override:
-                crate::energy_conversion::HydroEnergyProductivityOverride::default(),
+            productivity_override: HydroEnergyProductivityOverride::default(),
             evaporation: EvaporationModelSet::new(vec![EvaporationModel::None]),
             provenance: HydroModelProvenance {
                 production_sources: vec![(

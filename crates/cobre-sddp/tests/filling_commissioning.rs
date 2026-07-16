@@ -75,6 +75,7 @@ mod d38_dead_volume_filling_simulation {
 
     use cobre_core::TrainingEvent;
     use cobre_core::scenario::ScenarioSource;
+    use cobre_io::config::SimulationConfig;
     use cobre_sddp::{
         SolverStatsDelta, StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic,
     };
@@ -191,11 +192,11 @@ mod d38_dead_volume_filling_simulation {
         );
 
         // The shipped parity case trains only; enable one sim scenario so the extraction path runs.
-        config.simulation = cobre_io::config::SimulationConfig {
+        config.simulation = SimulationConfig {
             enabled: true,
             num_scenarios: 1,
             io_channel_capacity: 8,
-            ..cobre_io::config::SimulationConfig::default()
+            ..SimulationConfig::default()
         };
 
         let system = cobre_io::load_case(&case_dir).expect("load_case must succeed");
@@ -610,6 +611,7 @@ mod d40_filling_cascade_simulation {
 
     use cobre_core::TrainingEvent;
     use cobre_core::scenario::ScenarioSource;
+    use cobre_io::config::SimulationConfig;
     use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
     use cobre_solver::ActiveSolver;
 
@@ -760,11 +762,11 @@ mod d40_filling_cascade_simulation {
         }
 
         // The shipped parity case trains only; enable one sim scenario so the extraction path runs.
-        config.simulation = cobre_io::config::SimulationConfig {
+        config.simulation = SimulationConfig {
             enabled: true,
             num_scenarios: 1,
             io_channel_capacity: 8,
-            ..cobre_io::config::SimulationConfig::default()
+            ..SimulationConfig::default()
         };
 
         let system = cobre_io::load_case(&case_dir).expect("load_case must succeed");
@@ -1069,6 +1071,7 @@ mod prefilling_spillage_frozen {
 
     use cobre_core::TrainingEvent;
     use cobre_core::scenario::ScenarioSource;
+    use cobre_io::config::SimulationConfig;
     use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
     use cobre_solver::ActiveSolver;
 
@@ -1149,11 +1152,11 @@ mod prefilling_spillage_frozen {
 
         let mut config =
             cobre_io::parse_config(&case_dir.join("config.json")).expect("config must parse");
-        config.simulation = cobre_io::config::SimulationConfig {
+        config.simulation = SimulationConfig {
             enabled: true,
             num_scenarios: 1,
             io_channel_capacity: 8,
-            ..cobre_io::config::SimulationConfig::default()
+            ..SimulationConfig::default()
         };
 
         let system = cobre_io::load_case(&case_dir).expect("load_case must succeed");
@@ -1827,7 +1830,7 @@ mod filling_cut_validity {
         // incoming-state pin via the SAME pin chain every other stage uses (no
         // entry-boundary reset / RHS-fold / `initial_operating_volume`); the no-reset
         // contract is owned by `builder_setup_never_references_entry_boundary_reset`.
-        // Column identity is structural — one study-level `StateLayout` maps each
+        // Column identity is structural — one study-level `StateSpace` maps each
         // storage coordinate to a stage-invariant dense column, so a same-vs-same
         // assertion would be tautological; this block adds the value-continuity check.
         let entry = ENTRY_STAGE_ID as usize;
@@ -1955,6 +1958,7 @@ mod d35_pumping_commissioning_simulation {
     use std::sync::mpsc;
 
     use cobre_core::scenario::ScenarioSource;
+    use cobre_io::config::SimulationConfig;
     use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
     use cobre_solver::ActiveSolver;
 
@@ -1972,11 +1976,11 @@ mod d35_pumping_commissioning_simulation {
         let config_path = case_dir.join("config.json");
         let mut config = cobre_io::parse_config(&config_path).expect("config must parse");
         // The shipped parity case trains only; enable one sim scenario so the pumping extraction path runs.
-        config.simulation = cobre_io::config::SimulationConfig {
+        config.simulation = SimulationConfig {
             enabled: true,
             num_scenarios: 1,
             io_channel_capacity: 8,
-            ..cobre_io::config::SimulationConfig::default()
+            ..SimulationConfig::default()
         };
 
         let system = cobre_io::load_case(&case_dir).expect("load_case must succeed");
@@ -2112,6 +2116,7 @@ mod d36_thermal_line_commissioning_simulation {
     use std::sync::mpsc;
 
     use cobre_core::scenario::ScenarioSource;
+    use cobre_io::config::SimulationConfig;
     use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
     use cobre_solver::ActiveSolver;
 
@@ -2130,11 +2135,11 @@ mod d36_thermal_line_commissioning_simulation {
         let mut config = cobre_io::parse_config(&config_path).expect("config must parse");
         // The shipped parity case trains only; enable one sim scenario so the thermal/line
         // extraction paths run (`StudySetup::new` reads `n_scenarios` from this).
-        config.simulation = cobre_io::config::SimulationConfig {
+        config.simulation = SimulationConfig {
             enabled: true,
             num_scenarios: 1,
             io_channel_capacity: 8,
-            ..cobre_io::config::SimulationConfig::default()
+            ..SimulationConfig::default()
         };
 
         let system = cobre_io::load_case(&case_dir).expect("load_case must succeed");
@@ -2321,6 +2326,7 @@ mod d42_nonfilling_hydro_commissioning {
 
     use cobre_core::TrainingEvent;
     use cobre_core::scenario::ScenarioSource;
+    use cobre_io::config::SimulationConfig;
     use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
     use cobre_solver::ActiveSolver;
 
@@ -2434,11 +2440,11 @@ mod d42_nonfilling_hydro_commissioning {
 
         let mut config =
             cobre_io::parse_config(&case_dir.join("config.json")).expect("config must parse");
-        config.simulation = cobre_io::config::SimulationConfig {
+        config.simulation = SimulationConfig {
             enabled: true,
             num_scenarios: 1,
             io_channel_capacity: 8,
-            ..cobre_io::config::SimulationConfig::default()
+            ..SimulationConfig::default()
         };
 
         let system = cobre_io::load_case(&case_dir).expect("load_case must succeed");
@@ -2651,8 +2657,9 @@ mod backwater_reference_volume {
 
     use std::path::Path;
 
+    use cobre_core::EntityId;
     use cobre_io::FphaHyperplaneRow;
-    use cobre_io::extensions::SelectionMode;
+    use cobre_io::extensions::{SelectionMode, load_tailrace_curves};
     use cobre_sddp::hydro_models::prepare_hydro_models_from_artifacts;
 
     fn case_dir() -> std::path::PathBuf {
@@ -2671,8 +2678,7 @@ mod backwater_reference_volume {
         let mut artifacts = loaded.artifacts;
         let tailrace_path = dir.join("system").join("tailrace_curves.parquet");
         artifacts.tailrace_curves =
-            cobre_io::extensions::load_tailrace_curves(Some(&tailrace_path))
-                .expect("tailrace curves must load");
+            load_tailrace_curves(Some(&tailrace_path)).expect("tailrace curves must load");
         (loaded.system, artifacts)
     }
 
@@ -2687,7 +2693,7 @@ mod backwater_reference_volume {
         let mut rows: Vec<FphaHyperplaneRow> = prepared
             .fpha_export_rows
             .into_iter()
-            .filter(|r| r.hydro_id == cobre_core::EntityId::from(0))
+            .filter(|r| r.hydro_id == EntityId::from(0))
             .collect();
         rows.sort_by(|a, b| {
             (a.stage_id, a.plane_id)
@@ -2702,7 +2708,7 @@ mod backwater_reference_volume {
     /// that may change.
     fn clear_downstream_reference_volume(artifacts: &mut cobre_io::CaseArtifacts) {
         for config in &mut artifacts.production_models {
-            if config.hydro_id != cobre_core::EntityId::from(1) {
+            if config.hydro_id != EntityId::from(1) {
                 continue;
             }
             match &mut config.selection_mode {

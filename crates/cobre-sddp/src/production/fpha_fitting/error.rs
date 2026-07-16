@@ -1,5 +1,6 @@
 //! FPHA fitting error type.
 
+use std::fmt;
 /// Errors that arise during FPHA fitting geometry validation or evaluation.
 #[derive(Debug)]
 pub(crate) enum FphaFittingError {
@@ -168,7 +169,7 @@ pub(crate) enum FphaFittingError {
 }
 
 impl std::fmt::Display for FphaFittingError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InsufficientPoints { hydro_name, count } => write!(
                 f,

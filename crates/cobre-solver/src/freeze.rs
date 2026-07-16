@@ -244,7 +244,11 @@ pub fn freeze_rows_into_template(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{RowBatch, SolverStatistics, StageTemplate};
+    use crate::SolverInterface;
+    use crate::profile::MockProfile;
+    use crate::types::{
+        Basis, RowBatch, SolutionView, SolverError, SolverStatistics, StageTemplate,
+    };
 
     /// Builds the canonical 3-col, 2-row fixture from `types.rs::make_fixture_stage_template`.
     ///
@@ -618,10 +622,10 @@ mod tests {
         }
     }
 
-    impl crate::SolverInterface for MockSolver {
-        type Profile = crate::profile::MockProfile;
+    impl SolverInterface for MockSolver {
+        type Profile = MockProfile;
 
-        fn apply_profile(&mut self, _profile: &crate::profile::MockProfile) {}
+        fn apply_profile(&mut self, _profile: &MockProfile) {}
 
         fn load_model(&mut self, template: &StageTemplate) {
             self.last_loaded_num_rows = template.num_rows;
@@ -634,17 +638,14 @@ mod tests {
 
         fn set_col_bounds(&mut self, _indices: &[usize], _lower: &[f64], _upper: &[f64]) {}
 
-        fn solve(
-            &mut self,
-            _basis: Option<&crate::types::Basis>,
-        ) -> Result<crate::types::SolutionView<'_>, crate::types::SolverError> {
-            Err(crate::types::SolverError::InternalError {
+        fn solve(&mut self, _basis: Option<&Basis>) -> Result<SolutionView<'_>, SolverError> {
+            Err(SolverError::InternalError {
                 message: "mock".to_string(),
                 error_code: None,
             })
         }
 
-        fn get_basis(&mut self, _out: &mut crate::types::Basis) {}
+        fn get_basis(&mut self, _out: &mut Basis) {}
 
         fn statistics(&self) -> SolverStatistics {
             self.stats.clone()
@@ -665,8 +666,6 @@ mod tests {
 
     #[test]
     fn test_freeze_load_model_row_count() {
-        use crate::SolverInterface;
-
         let base = make_fixture_stage_template();
         let rows = RowBatch {
             num_rows: 3,

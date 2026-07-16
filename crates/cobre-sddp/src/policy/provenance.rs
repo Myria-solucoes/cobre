@@ -8,9 +8,9 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use cobre_io::scenarios::estimation::{EstimationPath, EstimationReport};
 use cobre_stochastic::{ComponentProvenance, StochasticProvenance};
 
-use crate::estimation::{EstimationPath, EstimationReport};
 use crate::hydro_models::{
     EvaporationReferenceSource, EvaporationSource, HydroModelProvenance, ProductionModelSource,
 };
@@ -267,9 +267,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use cobre_core::EntityId;
+    use cobre_io::scenarios::estimation::{EstimationPath, EstimationReport};
     use cobre_stochastic::{ComponentProvenance, StochasticProvenance};
 
-    use crate::estimation::{EstimationPath, EstimationReport};
     use crate::hydro_models::{
         EvaporationReferenceSource, EvaporationSource, HydroModelProvenance, ProductionModelSource,
     };

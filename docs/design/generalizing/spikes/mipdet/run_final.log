@@ -1,0 +1,16 @@
+=== cross-process A (threads=1, case0, cap3000, 1 run)
+case=0 G=24 T=48 run=0 threads=1 status=0 obj_bits=4142f8cd27f34215 sol_hash=525d22482fb3c9f4 nodes=2466
+case=0 VERDICT threads=1: BIT-IDENTICAL across runs
+permutation probe: obj_canonical=495485.96355478792 obj_permuted=495485.96355479932 objbits_equal=0 nodes 11 vs 3
+OVERALL threads=1: DETERMINISTIC (run-to-run, fixed order)
+=== cross-process B (same)
+case=0 G=24 T=48 run=0 threads=1 status=0 obj_bits=4142f8cd27f34215 sol_hash=525d22482fb3c9f4 nodes=2466
+case=0 VERDICT threads=1: BIT-IDENTICAL across runs
+permutation probe: obj_canonical=495485.96355478792 obj_permuted=495485.96355479932 objbits_equal=0 nodes 11 vs 3
+OVERALL threads=1: DETERMINISTIC (run-to-run, fixed order)
+=== threads=8 (case0, cap3000, 2 runs)
+case=0 G=24 T=48 run=0 threads=8 status=0 obj_bits=4142f8cd27f34215 sol_hash=525d22482fb3c9f4 nodes=2466
+case=0 G=24 T=48 run=1 threads=8 status=0 obj_bits=4142f8cd27f34215 sol_hash=525d22482fb3c9f4 nodes=2466
+case=0 VERDICT threads=8: BIT-IDENTICAL across runs
+OVERALL threads=8: DETERMINISTIC (run-to-run, fixed order)
+EXIT=0

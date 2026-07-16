@@ -37,6 +37,8 @@ use std::collections::BTreeMap;
 
 use crate::EntityId;
 
+use chrono::NaiveDate;
+
 /// Forward-pass noise source for multi-stage optimization solvers.
 ///
 /// Determines where the forward-pass scenario realisations come from.
@@ -193,13 +195,20 @@ impl HistoricalYears {
 
 /// Annual component of a PAR(p)-A inflow model for one (hydro, stage) pair.
 ///
-/// Augments the classical PAR(p) with an annual term capturing long-range persistence.
-/// All three sub-fields are required together for the runtime unit conversion
-/// `ψ̂ = ψ · σ_m / σ^A_m`:
+/// Augments the classical PAR(p) with an annual term capturing long-range
+/// persistence. The three sub-fields are:
 ///
 /// - the standardized annual coefficient `ψ` (Yule-Walker output)
 /// - the sample mean `μ^A_m` of the rolling 12-month average
 /// - the sample std `σ^A_m` of the rolling 12-month average
+///
+/// The runtime unit conversion `ψ̂ = ψ · s_m / σ^A_m` (at `PrecomputedPar::build`)
+/// uses only `coefficient` and `std_m3s`, where `s_m` is the seasonal (marginal)
+/// std `InflowModel::std_m3s` — not the innovation std. `mean_m3s` (`μ^A_m`) is
+/// **not** consumed by the LP math: the deterministic base centers the annual
+/// term on the 12 seasonal means `μ_{m-τ}` (whose average equals `μ^A` by
+/// construction), so the field is retained for round-trip fidelity and output
+/// summaries only.
 ///
 /// When `InflowModel::annual` is `None`, the classical PAR(p) model is in effect.
 ///
@@ -222,6 +231,23 @@ pub struct AnnualComponent {
 ///
 /// Raw input-facing values loaded from `inflow_seasonal_stats.parquet` and
 /// `inflow_ar_coefficients.parquet`; see each field for units and standardization.
+///
+/// ## Two planes
+///
+/// The fields split into two planes. The **conditioning plane** — `mean_m3s`
+/// (`μ_m`) and `std_m3s` (`s_m`), both m³/s — carries the level and magnitude of
+/// the series and may be re-conditioned per study (e.g. a climate scenario
+/// shifting both mean and variability). The **dynamics plane** —
+/// `ar_coefficients` (`ψ*`, standardized) and `residual_std_ratio`
+/// (`r_m = σ_m / s_m`), both dimensionless — is the shape of the temporal
+/// dependence, fixed per fit. Runtime re-couples them: `ψ = ψ* · s_m / s_{m-ℓ}`
+/// and `σ_m = s_m · r_m`.
+///
+/// The coefficients are standardized by the **seasonal std** `s_m`, not the
+/// innovation std `σ_m` (the two differ whenever `r_m` varies across seasons). An
+/// externally-fitted model must therefore store `ar_coefficients = ψ · s_{m-ℓ} / s_m`
+/// and `residual_std_ratio = σ_m / s_m` against the same `s_m` it reports in
+/// `std_m3s`.
 ///
 /// ## Declaration-order invariance
 ///
@@ -422,7 +448,7 @@ pub struct InflowHistoryRow {
     /// Hydro plant this observation belongs to.
     pub hydro_id: EntityId,
     /// Date of the observation (timezone-free calendar date).
-    pub date: chrono::NaiveDate,
+    pub date: NaiveDate,
     /// Mean inflow for this observation period in m³/s. Must be finite.
     pub value_m3s: f64,
 }

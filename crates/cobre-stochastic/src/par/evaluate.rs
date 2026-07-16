@@ -927,9 +927,7 @@ mod tests {
             residual_std_ratio: 1.0,
             annual: None,
         };
-        let par_lp =
-            crate::par::precompute::PrecomputedPar::build(&[model], &[stage], &[EntityId(1)], None)
-                .unwrap();
+        let par_lp = PrecomputedPar::build(&[model], &[stage], &[EntityId(1)], None).unwrap();
 
         let lag_matrix: Vec<f64> = vec![];
         // Matching target: deterministic_value = 125.0

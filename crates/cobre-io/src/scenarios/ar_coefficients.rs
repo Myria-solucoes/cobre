@@ -11,8 +11,22 @@
 //! | `hydro_id`           | INT32  | Yes      | Hydro plant ID                               |
 //! | `stage_id`           | INT32  | Yes      | Stage ID                                     |
 //! | `lag`                | INT32  | Yes      | Lag index (1-based)                          |
-//! | `coefficient`        | DOUBLE | Yes      | AR coefficient (standardized, dimensionless) |
-//! | `residual_std_ratio` | DOUBLE | Yes      | Residual std ratio in (0, 1]                 |
+//! | `coefficient`        | DOUBLE | Yes      | AR coeff ψ*, standardized by the seasonal std sₘ (dimensionless) |
+//!
+//! The model's innovation scale is not part of the schema: it is derived at
+//! load from the AR coefficients (see
+//! [`crate::scenarios::populate_derived_residual_ratios`]). Columns beyond the
+//! schema are ignored.
+//!
+//! ## Standardization basis (external fits)
+//!
+//! `coefficient` is the AR coefficient of the process normalized by the seasonal
+//! **sample std** sₘ (the `std_m3s` column of `inflow_seasonal_stats.parquet`),
+//! not by the innovation std σₘ. A model fitted outside Cobre must store
+//! `coefficient = ψ · s_{m-ℓ}/s_m` against the same sₘ it reports in `std_m3s`;
+//! runtime reconstructs original-unit ψ and σ from the stored sₘ
+//! (`cobre-stochastic::par::precompute`), so an inconsistent sₘ silently
+//! rescales the model. See the PAR(p) methodology, "Two planes".
 //!
 //! ## Output ordering
 //!
@@ -22,16 +36,14 @@
 //!
 //! Per-row constraints enforced by this parser:
 //!
-//! - All five columns must be present with the correct types.
+//! - All four columns must be present with the correct types.
 //! - `lag` must be ≥ 1 (lags are 1-based per spec).
-//! - `residual_std_ratio` must be finite and in (0, 1].
 //!
 //! Deferred validations (not performed here):
 //!
 //! - `hydro_id` existence in the hydro registry — Layer 3.
 //! - `stage_id` existence in the stages registry — Layer 3.
 //! - Lag contiguity (1, 2, …, p for each (hydro, stage)) — Layer 3/5.
-//! - `residual_std_ratio` consistency across lag rows of the same (hydro, stage) — Layer 2/5.
 
 use cobre_core::EntityId;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -59,11 +71,9 @@ use crate::parquet_helpers::{extract_required_float64, extract_required_int32};
 ///     stage_id: 0,
 ///     lag: 1,
 ///     coefficient: 0.45,
-///     residual_std_ratio: 0.85,
 /// };
 /// assert_eq!(row.lag, 1);
 /// assert!((row.coefficient - 0.45).abs() < 1e-10);
-/// assert!((row.residual_std_ratio - 0.85).abs() < 1e-10);
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct InflowArCoefficientRow {
@@ -75,9 +85,6 @@ pub struct InflowArCoefficientRow {
     pub lag: i32,
     /// AR coefficient `ψ*_lag`, standardized by seasonal std (dimensionless).
     pub coefficient: f64,
-    /// Residual std ratio (`sigma_m` / `s_m`) for this (hydro, stage). Dimensionless, in (0, 1].
-    /// Repeated across all lag rows of the same (`hydro_id`, `stage_id`) group.
-    pub residual_std_ratio: f64,
 }
 
 /// Parse `scenarios/inflow_ar_coefficients.parquet` and return a sorted row table.
@@ -93,7 +100,6 @@ pub struct InflowArCoefficientRow {
 /// | Malformed Parquet (corrupt header, etc.)      | [`LoadError::ParseError`]  |
 /// | Required column missing or wrong type         | [`LoadError::SchemaError`] |
 /// | `lag` < 1                                     | [`LoadError::SchemaError`] |
-/// | `residual_std_ratio` not finite or not in (0, 1] | [`LoadError::SchemaError`] |
 ///
 /// # Examples
 ///
@@ -124,7 +130,6 @@ pub fn parse_inflow_ar_coefficients(path: &Path) -> Result<Vec<InflowArCoefficie
         let stage_id_col = extract_required_int32(&batch, "stage_id", path)?;
         let lag_col = extract_required_int32(&batch, "lag", path)?;
         let coefficient_col = extract_required_float64(&batch, "coefficient", path)?;
-        let residual_std_ratio_col = extract_required_float64(&batch, "residual_std_ratio", path)?;
 
         let n = batch.num_rows();
         let base_idx = rows.len();
@@ -137,7 +142,6 @@ pub fn parse_inflow_ar_coefficients(path: &Path) -> Result<Vec<InflowArCoefficie
             let stage_id = stage_id_col.value(i);
             let lag = lag_col.value(i);
             let coefficient = coefficient_col.value(i);
-            let residual_std_ratio = residual_std_ratio_col.value(i);
 
             if lag < 1 {
                 return Err(LoadError::SchemaError {
@@ -147,23 +151,11 @@ pub fn parse_inflow_ar_coefficients(path: &Path) -> Result<Vec<InflowArCoefficie
                 });
             }
 
-            if !residual_std_ratio.is_finite()
-                || residual_std_ratio <= 0.0
-                || residual_std_ratio > 1.0
-            {
-                return Err(LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: format!("inflow_ar_coefficients[{row_idx}].residual_std_ratio"),
-                    message: format!("value must be in (0, 1], got {residual_std_ratio}"),
-                });
-            }
-
             rows.push(InflowArCoefficientRow {
                 hydro_id,
                 stage_id,
                 lag,
                 coefficient,
-                residual_std_ratio,
             });
         }
     }
@@ -202,7 +194,16 @@ mod tests {
             Field::new("stage_id", DataType::Int32, false),
             Field::new("lag", DataType::Int32, false),
             Field::new("coefficient", DataType::Float64, false),
-            Field::new("residual_std_ratio", DataType::Float64, false),
+        ]))
+    }
+
+    fn schema_with_extra_column() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
+            Field::new("hydro_id", DataType::Int32, false),
+            Field::new("stage_id", DataType::Int32, false),
+            Field::new("lag", DataType::Int32, false),
+            Field::new("coefficient", DataType::Float64, false),
+            Field::new("extra", DataType::Float64, false),
         ]))
     }
 
@@ -220,7 +221,6 @@ mod tests {
         stage_ids: &[i32],
         lags: &[i32],
         coefficients: &[f64],
-        residual_std_ratios: &[f64],
     ) -> RecordBatch {
         RecordBatch::try_new(
             schema(),
@@ -229,10 +229,29 @@ mod tests {
                 Arc::new(Int32Array::from(stage_ids.to_vec())),
                 Arc::new(Int32Array::from(lags.to_vec())),
                 Arc::new(Float64Array::from(coefficients.to_vec())),
-                Arc::new(Float64Array::from(residual_std_ratios.to_vec())),
             ],
         )
         .expect("valid batch")
+    }
+
+    fn make_batch_with_extra(
+        hydro_ids: &[i32],
+        stage_ids: &[i32],
+        lags: &[i32],
+        coefficients: &[f64],
+        extras: &[f64],
+    ) -> RecordBatch {
+        RecordBatch::try_new(
+            schema_with_extra_column(),
+            vec![
+                Arc::new(Int32Array::from(hydro_ids.to_vec())),
+                Arc::new(Int32Array::from(stage_ids.to_vec())),
+                Arc::new(Int32Array::from(lags.to_vec())),
+                Arc::new(Float64Array::from(coefficients.to_vec())),
+                Arc::new(Float64Array::from(extras.to_vec())),
+            ],
+        )
+        .expect("valid batch with extra column")
     }
 
     #[test]
@@ -242,7 +261,6 @@ mod tests {
             &[0, 0, 0, 0, 0, 0],
             &[3, 2, 1, 2, 3, 1],
             &[0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
-            &[0.85, 0.85, 0.85, 0.85, 0.85, 0.85],
         );
         let tmp = write_parquet(&batch);
         let rows = parse_inflow_ar_coefficients(tmp.path()).unwrap();
@@ -264,7 +282,7 @@ mod tests {
 
     #[test]
     fn test_lag_zero_is_schema_error() {
-        let batch = make_batch(&[1], &[0], &[0], &[0.45], &[0.85]);
+        let batch = make_batch(&[1], &[0], &[0], &[0.45]);
         let tmp = write_parquet(&batch);
         let err = parse_inflow_ar_coefficients(tmp.path()).unwrap_err();
 
@@ -319,7 +337,7 @@ mod tests {
 
     #[test]
     fn test_empty_parquet_returns_empty_vec() {
-        let batch = make_batch(&[], &[], &[], &[], &[]);
+        let batch = make_batch(&[], &[], &[], &[]);
         let tmp = write_parquet(&batch);
         let rows = parse_inflow_ar_coefficients(tmp.path()).unwrap();
         assert!(rows.is_empty());
@@ -327,7 +345,7 @@ mod tests {
 
     #[test]
     fn test_coefficient_values_preserved() {
-        let batch = make_batch(&[42], &[3], &[1], &[0.12345], &[0.75]);
+        let batch = make_batch(&[42], &[3], &[1], &[0.12345]);
         let tmp = write_parquet(&batch);
         let rows = parse_inflow_ar_coefficients(tmp.path()).unwrap();
 
@@ -337,123 +355,23 @@ mod tests {
         assert_eq!(row.stage_id, 3);
         assert_eq!(row.lag, 1);
         assert!((row.coefficient - 0.12345).abs() < 1e-10);
-        assert!((row.residual_std_ratio - 0.75).abs() < 1e-10);
     }
 
+    /// Columns beyond the four-column schema are ignored: the file parses and
+    /// the extra values never reach the row table.
     #[test]
-    fn test_valid_residual_std_ratio_preserved() {
-        let batch = make_batch(
-            &[1, 1, 1, 2, 2, 2],
-            &[0, 0, 0, 0, 0, 0],
-            &[1, 2, 3, 1, 2, 3],
-            &[0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
-            &[0.85, 0.85, 0.85, 0.85, 0.85, 0.85],
+    fn extra_columns_are_ignored() {
+        let batch = make_batch_with_extra(
+            &[1, 1, 2],
+            &[0, 0, 0],
+            &[1, 2, 1],
+            &[0.5, 0.2, 0.3],
+            &[0.85, 0.85, 0.9],
         );
         let tmp = write_parquet(&batch);
-        let rows = parse_inflow_ar_coefficients(tmp.path()).unwrap();
 
-        assert_eq!(rows.len(), 6);
-        for row in &rows {
-            assert!(
-                (row.residual_std_ratio - 0.85).abs() < 1e-10,
-                "expected 0.85, got {}",
-                row.residual_std_ratio
-            );
-        }
-    }
-
-    #[test]
-    fn test_residual_std_ratio_zero_is_schema_error() {
-        let batch = make_batch(&[1], &[0], &[1], &[0.45], &[0.0]);
-        let tmp = write_parquet(&batch);
-        let err = parse_inflow_ar_coefficients(tmp.path()).unwrap_err();
-
-        match &err {
-            LoadError::SchemaError { field, message, .. } => {
-                assert!(
-                    field.contains("residual_std_ratio"),
-                    "field should contain 'residual_std_ratio', got: {field}"
-                );
-                assert!(
-                    message.contains("(0, 1]"),
-                    "message should mention '(0, 1]', got: {message}"
-                );
-            }
-            other => panic!("expected SchemaError, got: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_residual_std_ratio_above_one_is_schema_error() {
-        let batch = make_batch(&[1], &[0], &[1], &[0.45], &[1.5]);
-        let tmp = write_parquet(&batch);
-        let err = parse_inflow_ar_coefficients(tmp.path()).unwrap_err();
-
-        match &err {
-            LoadError::SchemaError { field, message, .. } => {
-                assert!(
-                    field.contains("residual_std_ratio"),
-                    "field should contain 'residual_std_ratio', got: {field}"
-                );
-                assert!(
-                    message.contains("(0, 1]"),
-                    "message should mention '(0, 1]', got: {message}"
-                );
-            }
-            other => panic!("expected SchemaError, got: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_residual_std_ratio_nan_is_schema_error() {
-        let batch = make_batch(&[1], &[0], &[1], &[0.45], &[f64::NAN]);
-        let tmp = write_parquet(&batch);
-        let err = parse_inflow_ar_coefficients(tmp.path()).unwrap_err();
-
-        match &err {
-            LoadError::SchemaError { field, .. } => {
-                assert!(
-                    field.contains("residual_std_ratio"),
-                    "field should contain 'residual_std_ratio', got: {field}"
-                );
-            }
-            other => panic!("expected SchemaError, got: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_missing_residual_std_ratio_column() {
-        let schema_no_ratio = Arc::new(Schema::new(vec![
-            Field::new("hydro_id", DataType::Int32, false),
-            Field::new("stage_id", DataType::Int32, false),
-            Field::new("lag", DataType::Int32, false),
-            Field::new("coefficient", DataType::Float64, false),
-        ]));
-        let batch = RecordBatch::try_new(
-            schema_no_ratio,
-            vec![
-                Arc::new(Int32Array::from(vec![1_i32])),
-                Arc::new(Int32Array::from(vec![0_i32])),
-                Arc::new(Int32Array::from(vec![1_i32])),
-                Arc::new(Float64Array::from(vec![0.45_f64])),
-            ],
-        )
-        .unwrap();
-        let tmp = write_parquet(&batch);
-        let err = parse_inflow_ar_coefficients(tmp.path()).unwrap_err();
-
-        match &err {
-            LoadError::SchemaError { field, message, .. } => {
-                assert!(
-                    field.contains("residual_std_ratio"),
-                    "field should contain 'residual_std_ratio', got: {field}"
-                );
-                assert!(
-                    message.contains("missing required column"),
-                    "message should mention missing column, got: {message}"
-                );
-            }
-            other => panic!("expected SchemaError, got: {other:?}"),
-        }
+        let rows =
+            parse_inflow_ar_coefficients(tmp.path()).expect("a file with extra columns must parse");
+        assert_eq!(rows.len(), 3, "all rows must still parse");
     }
 }

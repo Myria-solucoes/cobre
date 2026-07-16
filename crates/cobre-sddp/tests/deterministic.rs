@@ -19,14 +19,15 @@ use std::path::Path;
 use std::sync::mpsc;
 
 use cobre_core::scenario::ScenarioSource;
+use cobre_core::{BlockMode, EntityId};
 use cobre_io::{
     PolicyCheckpointMetadata, PolicyCutRecord, StageCutsPayload, write_policy_checkpoint,
 };
 use cobre_sddp::{
-    StudySetup, aggregate_simulation, hydro_models::prepare_hydro_models, setup::prepare_stochastic,
+    StudySetup, aggregate_simulation, hydro_models::prepare_hydro_models,
+    lead_time::resolve_spread, setup::prepare_stochastic,
 };
-use cobre_solver::ActiveSolver;
-use cobre_solver::SolverInterface;
+use cobre_solver::{ActiveSolver, SolverInterface};
 
 mod common;
 use common::StubComm;
@@ -1940,8 +1941,6 @@ fn d16_par1_lag_shift() {
 /// this test additionally checks the call count invariant.
 #[test]
 fn model_persistence_regression_d01() {
-    use cobre_solver::SolverInterface;
-
     let case_dir = Path::new("../../examples/deterministic/d01-thermal-dispatch");
     let (result, solver) = run_deterministic_with_solver(case_dir);
 
@@ -1989,8 +1988,6 @@ fn model_persistence_regression_d01() {
 /// We verify that load_model_count is strictly less than the non-incremental total.
 #[test]
 fn incremental_lb_reduces_load_model_count() {
-    use cobre_solver::SolverInterface;
-
     let case_dir = Path::new("../../examples/deterministic/d03-two-hydro-cascade");
     let (result, solver) = run_deterministic_with_solver(case_dir);
 
@@ -2085,7 +2082,20 @@ fn d19_multi_hydro_par_truncation() {
 ///
 /// A lag-major/hydro-major indexing regression reads the wrong lag for each
 /// hydro in PAR evaluation, producing a different cost.
-pub const D19_EXPECTED_COST: f64 = 1_334_655.175_543_562_7;
+///
+/// Re-blessed when `residual_std_ratio` became closure-derived: D19 supplies
+/// its AR(2) coefficients directly (both hydros share the single `season_id=0`
+/// used by every stage, so there is no per-season order heterogeneity —
+/// structurally uniform, not mixed), with a stored `residual_std_ratio` of
+/// `1.0` for both hydros that was never fit against ψ = `[0.5, 0.3]` (hydro 0)
+/// / `[0.4, 0.2]` (hydro 1). The closure-derived values (`0.667618...` /
+/// `0.848528...`) differ from that stored literal far outside the mixed-order
+/// `~1e-4` band — the same stored-value-inconsistency class as `D30` (see
+/// `common::parity_hash::case_dir`'s doc), not a closure defect. The resulting
+/// cost shift here is small only because `std_m3s = 0.001` keeps the absolute
+/// noise scale (`σ = s·r`) tiny regardless of `r`. Determinism (same input ->
+/// same output; declaration-order / rank invariance) is unaffected.
+pub const D19_EXPECTED_COST: f64 = 1_334_681.498_530_595;
 
 /// Operational violation slacks: 1 hydro with active min_outflow, max_outflow,
 /// min_turbined, and min_generation bounds.
@@ -3002,8 +3012,6 @@ fn d26_estimated_par2() {
 )]
 #[test]
 fn d26_estimated_par2_order_selection() {
-    use cobre_sddp::prepare_stochastic;
-
     let case_dir = Path::new("../../examples/deterministic/d26-estimated-par2");
     let config_path = case_dir.join("config.json");
     let config = cobre_io::parse_config(&config_path).expect("config must parse");
@@ -3318,14 +3326,8 @@ fn frozen_vs_fallback_simulation_costs_are_identical() {
 
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
 
-    let pr = prepare_stochastic(
-        system,
-        case_dir,
-        &config,
-        42,
-        &cobre_core::scenario::ScenarioSource::default(),
-    )
-    .expect("prepare_stochastic must succeed");
+    let pr = prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
+        .expect("prepare_stochastic must succeed");
     let system = pr.system;
     let stochastic = pr.stochastic;
 
@@ -3592,7 +3594,7 @@ fn d44_travel_time_substage_transit_bucket_dual() {
 
     // Bucket subgradient: rc/col_scale on the incoming bucket column, stored
     // (undivided by COST_SCALE_FACTOR) as pool-0's cut coefficient
-    // (StateLayout::state_to_lp_incoming_column's explicit bucket arm resolves
+    // (StateSpace::state_to_lp_incoming_column's explicit bucket arm resolves
     // the pin; the cut coefficient index is the STATE index, identity to the
     // outgoing column per `transit_buckets_out`).
     //
@@ -3611,7 +3613,7 @@ fn d44_travel_time_substage_transit_bucket_dual() {
     let j_canonical_idx = system
         .hydros()
         .iter()
-        .position(|h| h.id == cobre_core::EntityId::from(1))
+        .position(|h| h.id == EntityId::from(1))
         .expect("D44: J (hydro id 1) must exist in the canonical hydro order");
     let storage_j_idx = state.storage.start + j_canonical_idx;
 
@@ -3769,7 +3771,7 @@ fn d45_travel_time_mixed_calendar_conservation() {
 
     let stage_hours = [720.0, 168.0, 168.0, 168.0];
 
-    let monthly = cobre_sddp::lead_time::resolve_spread(TRAVEL_TIME_HOURS, 0, &stage_hours, None);
+    let monthly = resolve_spread(TRAVEL_TIME_HOURS, 0, &stage_hours, None);
     assert_eq!(
         monthly.stage_reach, 3,
         "D45: the monthly anchor must resolve to depth 3, not the closed-form \
@@ -3808,10 +3810,7 @@ fn d45_travel_time_mixed_calendar_conservation() {
     );
     let padded = pad_calendar_for_resolution(&stage_hours, TRAVEL_TIME_HOURS);
     let own_depths: Vec<usize> = (0..N_STAGES)
-        .map(|stage| {
-            cobre_sddp::lead_time::resolve_spread(TRAVEL_TIME_HOURS, stage, &padded, None)
-                .stage_reach
-        })
+        .map(|stage| resolve_spread(TRAVEL_TIME_HOURS, stage, &padded, None).stage_reach)
         .collect();
     let capped: Vec<usize> = own_depths
         .iter()
@@ -3951,7 +3950,7 @@ fn d47_travel_time_confluence_aggregation() {
 
     let stage_hours = [720.0, 720.0, 720.0];
 
-    let u1 = cobre_sddp::lead_time::resolve_spread(360.0, 0, &stage_hours, None);
+    let u1 = resolve_spread(360.0, 0, &stage_hours, None);
     assert_eq!(u1.stage_reach, 1, "U1: depth must be 1");
     for (lag, (&actual, &expected)) in u1.stage_weights.iter().zip([0.5, 0.5].iter()).enumerate() {
         assert!(
@@ -3960,7 +3959,7 @@ fn d47_travel_time_confluence_aggregation() {
         );
     }
 
-    let u2 = cobre_sddp::lead_time::resolve_spread(1080.0, 0, &stage_hours, None);
+    let u2 = resolve_spread(1080.0, 0, &stage_hours, None);
     assert_eq!(
         u2.stage_reach, 2,
         "U2: depth must be 2 (arrives at lags 1 and 2)"
@@ -3994,7 +3993,7 @@ fn d47_travel_time_confluence_aggregation() {
     let j_canonical_idx = system
         .hydros()
         .iter()
-        .position(|h| h.id == cobre_core::EntityId::from(2))
+        .position(|h| h.id == EntityId::from(2))
         .expect("D47: J (hydro id 2) must exist in the canonical hydro order");
     assert_eq!(
         state.transit_bucket_column_order,
@@ -4217,7 +4216,7 @@ fn d48_travel_time_ic_seed_windowed_defluence_cost() {
     let j_canonical_idx = system
         .hydros()
         .iter()
-        .position(|h| h.id == cobre_core::EntityId::from(1))
+        .position(|h| h.id == EntityId::from(1))
         .expect("D48: J (hydro id 1) must exist in the canonical hydro order");
     assert_eq!(
         state.transit_bucket_column_order,
@@ -4397,10 +4396,8 @@ fn d49_travel_time_chronological_arrival_density() {
     // Two source stages reach the chronological arrival stage: stage 1 at lag 1
     // and stage 0 at lag 2 — a multi-lag blend.
     let padded = pad_calendar_for_resolution(&stage_hours, T_V);
-    let stage_weights_0 =
-        cobre_sddp::lead_time::resolve_spread(T_V, 0, &padded, None).stage_weights;
-    let stage_weights_1 =
-        cobre_sddp::lead_time::resolve_spread(T_V, 1, &padded, None).stage_weights;
+    let stage_weights_0 = resolve_spread(T_V, 0, &padded, None).stage_weights;
+    let stage_weights_1 = resolve_spread(T_V, 1, &padded, None).stage_weights;
     let source_weight_lag1 = stage_weights_1[1];
     let source_weight_lag2 = stage_weights_0[2];
     assert!(
@@ -4483,17 +4480,17 @@ fn d49_travel_time_chronological_arrival_density() {
     // uniform first-stage fallback.
     assert_eq!(
         study_stages[ARRIVAL_STAGE_IDX].block_mode,
-        cobre_core::BlockMode::Chronological,
+        BlockMode::Chronological,
         "D49: the arrival stage must be chronological to drive the arrival-frame branch"
     );
     assert_eq!(
         study_stages[0].block_mode,
-        cobre_core::BlockMode::Parallel,
+        BlockMode::Parallel,
         "D49: source stage 0 must be parallel"
     );
     assert_eq!(
         study_stages[1].block_mode,
-        cobre_core::BlockMode::Parallel,
+        BlockMode::Parallel,
         "D49: source stage 1 must be parallel"
     );
 
@@ -4661,10 +4658,8 @@ fn d50_travel_time_plain_tributary_confluence_arrival_density() {
     // same calendar), recomputed from the public resolvers so nothing is read
     // from the solver.
     let padded = pad_calendar_for_resolution(&stage_hours, T_V);
-    let stage_weights_0 =
-        cobre_sddp::lead_time::resolve_spread(T_V, 0, &padded, None).stage_weights;
-    let stage_weights_1 =
-        cobre_sddp::lead_time::resolve_spread(T_V, 1, &padded, None).stage_weights;
+    let stage_weights_0 = resolve_spread(T_V, 0, &padded, None).stage_weights;
+    let stage_weights_1 = resolve_spread(T_V, 1, &padded, None).stage_weights;
     let source_weight_lag1 = stage_weights_1[1];
     let source_weight_lag2 = stage_weights_0[2];
     assert!(
@@ -4764,17 +4759,17 @@ fn d50_travel_time_plain_tributary_confluence_arrival_density() {
     );
     assert_eq!(
         study_stages[ARRIVAL_STAGE_IDX].block_mode,
-        cobre_core::BlockMode::Chronological,
+        BlockMode::Chronological,
         "D50: the arrival stage must be chronological to drive the arrival-frame branch"
     );
     assert_eq!(
         study_stages[0].block_mode,
-        cobre_core::BlockMode::Parallel,
+        BlockMode::Parallel,
         "D50: source stage 0 must be parallel"
     );
     assert_eq!(
         study_stages[1].block_mode,
-        cobre_core::BlockMode::Parallel,
+        BlockMode::Parallel,
         "D50: source stage 1 must be parallel"
     );
 
@@ -5065,8 +5060,8 @@ mod chronological_telescoping {
     };
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, DeficitSegment,
-        EntityId, HydroGenerationModel, HydroStageBounds, HydroStagePenalties, HydroStorage,
-        InitialConditions, LineStageBounds, LineStagePenalties, NcsStagePenalties,
+        EntityId, HydroGenerationModel, HydroPenalties, HydroStageBounds, HydroStagePenalties,
+        HydroStorage, InitialConditions, LineStageBounds, LineStagePenalties, NcsStagePenalties,
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
         ResolvedPenalties, SystemBuilder, ThermalStageBounds,
     };
@@ -5078,7 +5073,9 @@ mod chronological_telescoping {
     };
     use cobre_solver::ActiveSolver;
 
+    use cobre_io::PolicyCheckpoint;
     use cobre_io::output::policy::read_policy_checkpoint;
+    use cobre_sddp::FutureCostFunction;
     use cobre_sddp::orchestration::{CheckpointParams, write_checkpoint};
     use cobre_sddp::policy_export::build_stage_cut_records;
     use tempfile::TempDir;
@@ -5316,8 +5313,8 @@ mod chronological_telescoping {
             .expect("build_system: valid constant-productivity study")
     }
 
-    fn zero_hydro_penalties() -> cobre_core::entities::hydro::HydroPenalties {
-        cobre_core::entities::hydro::HydroPenalties {
+    fn zero_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -5407,7 +5404,7 @@ mod chronological_telescoping {
     /// deletes the on-disk policy — kept alive by returning it.
     fn train_and_checkpoint(
         train_mode: BlockMode,
-    ) -> (cobre_sddp::StudySetup, cobre_io::PolicyCheckpoint, TempDir) {
+    ) -> (cobre_sddp::StudySetup, PolicyCheckpoint, TempDir) {
         let config = build_config();
         let mut setup = build_setup_in_code(build_system(train_mode), &config);
         let comm = StubComm;
@@ -5442,10 +5439,7 @@ mod chronological_telescoping {
 
     /// Assert every checkpoint cut's coefficients and intercept are bit-for-bit
     /// identical (`f64::to_bits`, never `==`) to the records written from `fcf`.
-    fn assert_cuts_bit_identical(
-        fcf: &cobre_sddp::FutureCostFunction,
-        checkpoint: &cobre_io::PolicyCheckpoint,
-    ) {
+    fn assert_cuts_bit_identical(fcf: &FutureCostFunction, checkpoint: &PolicyCheckpoint) {
         let written = build_stage_cut_records(fcf);
         assert_eq!(
             written.len(),
@@ -5500,7 +5494,12 @@ mod chronological_telescoping {
         let config = build_config();
         let mut setup2 = build_setup_in_code(build_system(load_mode), &config);
 
-        let warm_fcf = cobre_sddp::FutureCostFunction::new_with_warm_start(
+        let proof = cobre_sddp::test_support::trivial_full_fcf_proof(
+            checkpoint.metadata.state_dimension,
+            checkpoint.metadata.num_stages,
+        );
+        let warm_fcf = FutureCostFunction::new_with_warm_start(
+            &proof,
             &checkpoint.stage_cuts,
             setup2.loop_params.forward_passes,
             setup2.loop_params.max_iterations.saturating_add(1),
@@ -5563,8 +5562,8 @@ mod chronological_attribution {
     use cobre_core::temporal::{Block, BlockMode, Stage};
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, DeficitSegment,
-        EntityId, HydroGenerationModel, HydroStageBounds, HydroStagePenalties, HydroStorage,
-        InitialConditions, LineStageBounds, LineStagePenalties, NcsStagePenalties,
+        EntityId, HydroGenerationModel, HydroPenalties, HydroStageBounds, HydroStagePenalties,
+        HydroStorage, InitialConditions, LineStageBounds, LineStagePenalties, NcsStagePenalties,
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
         ResolvedPenalties, SystemBuilder, ThermalStageBounds,
     };
@@ -5574,6 +5573,7 @@ mod chronological_attribution {
         RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
         TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
     };
+    use cobre_sddp::lead_time::resolve_spread;
     use cobre_solver::StageTemplate;
 
     use super::common::build_setup_in_code;
@@ -5603,8 +5603,8 @@ mod chronological_attribution {
         }
     }
 
-    fn zero_hydro_penalties() -> cobre_core::entities::hydro::HydroPenalties {
-        cobre_core::entities::hydro::HydroPenalties {
+    fn zero_hydro_penalties() -> HydroPenalties {
+        HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
             turbined_cost: 0.0,
@@ -5935,7 +5935,7 @@ mod chronological_attribution {
     fn resolve_spread_matches_reference_block_tables() {
         let stage_lengths_hours = [720.0, 720.0];
         let block_lengths_hours = [240.0, 240.0, 240.0];
-        let resolution = cobre_sddp::lead_time::resolve_spread(
+        let resolution = resolve_spread(
             TRAVEL_TIME_HOURS,
             0,
             &stage_lengths_hours,
@@ -6136,17 +6136,22 @@ mod chronological_attribution {
 mod nonzero_stage_fpha_override_regression {
     use std::path::{Path, PathBuf};
 
-    use cobre_core::EntityId;
     use cobre_core::scenario::ScenarioSource;
+    use cobre_core::{EntityId, StageId};
     use cobre_io::HydroEnergyProductivityRow;
     use cobre_sddp::energy_conversion::build_hydro_energy_productivity_override;
     use cobre_sddp::hydro_models::prepare_hydro_models;
     use cobre_sddp::setup::prepare_stochastic;
-    use cobre_sddp::stage_key::StageId;
     use cobre_sddp::{SimulationHydroResult, SimulationScenarioResult, StudySetup};
 
     use super::common::parity_hash::compute_parity_hash;
+    use super::common::permute::permute_case;
     use super::common::{build_setup_for_case, run_simulation};
+
+    /// Fixed seed for this fixture's fast, non-golden default-CI declaration-
+    /// order-invariance probe; the full seeded-shuffle matrix lives in
+    /// `tests/parity.rs`'s `shuffle_matrix_<case>` tests.
+    const PERMUTATION_SEED: u64 = 20_260_711;
 
     /// Domain stage id (`Stage::id`) carrying the override row, and the corresponding
     /// 0-based study position — see `stages.json` / `hydro_energy_productivity.parquet`
@@ -6262,14 +6267,17 @@ mod nonzero_stage_fpha_override_regression {
         );
     }
 
-    /// Declaration-order invariance: reversing the array order of `hydros.json`'s hydro
-    /// list, `hydro_production_models.json`'s per-hydro entries, and `stages.json`'s
-    /// stage list must not change the parity hash — the override fix must not depend on
-    /// how the study's entities were declared.
+    /// Declaration-order invariance: a seeded permutation of every
+    /// [`permute_case`]-classified registry (hydros, production models,
+    /// stages, storage/filling entries) must not change the parity hash — the
+    /// override fix must not depend on how the study's entities were
+    /// declared. The full seeded-shuffle matrix (more registries, more
+    /// permutations) lives in `tests/parity.rs`'s `shuffle_matrix_<case>`
+    /// tests; this is the fast, non-golden default-CI probe for this fixture.
     #[test]
     fn declaration_order_permutation_parity_hash_is_identical() {
         let base_dir = case_dir();
-        let permuted_dir = build_declaration_order_permuted_case(&base_dir);
+        let permuted_dir = permute_case(&base_dir, PERMUTATION_SEED);
 
         let (setup_a, results_a) = train_and_simulate_setup(&base_dir);
         let (setup_b, results_b) = train_and_simulate_setup(permuted_dir.path());
@@ -6308,72 +6316,6 @@ mod nonzero_stage_fpha_override_regression {
         let scenario_results = run_simulation(&mut setup, 1);
         (setup, scenario_results)
     }
-
-    /// Copy `base_dir` into a fresh `TempDir`, reversing the declared array order of
-    /// `stages.json`'s `stages`, `system/hydros.json`'s `hydros`, and
-    /// `system/hydro_production_models.json`'s `production_models`. Every other file is
-    /// copied byte-for-byte, so the two case directories are identical except for the
-    /// declaration order of hydro and stage entities.
-    fn build_declaration_order_permuted_case(base_dir: &Path) -> tempfile::TempDir {
-        let tmp = tempfile::tempdir().expect("tempdir must succeed");
-        let dst = tmp.path();
-
-        std::fs::create_dir_all(dst.join("scenarios")).expect("create scenarios dir");
-        std::fs::create_dir_all(dst.join("system")).expect("create system dir");
-
-        for rel in [
-            "config.json",
-            "initial_conditions.json",
-            "penalties.json",
-            "scenarios/inflow_seasonal_stats.parquet",
-            "scenarios/load_seasonal_stats.parquet",
-            "system/buses.json",
-            "system/hydro_energy_productivity.parquet",
-            "system/hydro_geometry.parquet",
-            "system/lines.json",
-            "system/thermals.json",
-        ] {
-            std::fs::copy(base_dir.join(rel), dst.join(rel))
-                .unwrap_or_else(|e| panic!("copy {rel}: {e}"));
-        }
-
-        reverse_json_array(
-            &base_dir.join("stages.json"),
-            &dst.join("stages.json"),
-            "stages",
-        );
-        reverse_json_array(
-            &base_dir.join("system/hydros.json"),
-            &dst.join("system/hydros.json"),
-            "hydros",
-        );
-        reverse_json_array(
-            &base_dir.join("system/hydro_production_models.json"),
-            &dst.join("system/hydro_production_models.json"),
-            "production_models",
-        );
-
-        tmp
-    }
-
-    /// Parse `src` as JSON, reverse the top-level array at `array_key`, and write the
-    /// result to `dst` — the declaration-order-permutation primitive every JSON file in
-    /// [`build_declaration_order_permuted_case`] shares.
-    fn reverse_json_array(src: &Path, dst: &Path, array_key: &str) {
-        let text =
-            std::fs::read_to_string(src).unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
-        let mut value: serde_json::Value =
-            serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}", src.display()));
-        value[array_key]
-            .as_array_mut()
-            .unwrap_or_else(|| panic!("{array_key} must be a JSON array in {}", src.display()))
-            .reverse();
-        std::fs::write(
-            dst,
-            serde_json::to_string_pretty(&value).expect("serialize"),
-        )
-        .unwrap_or_else(|e| panic!("write {}: {e}", dst.display()));
-    }
 }
 
 /// End-to-end regression for the `CalendarMonth` evaporation-month fix: a
@@ -6383,7 +6325,7 @@ mod nonzero_stage_fpha_override_regression {
 /// not hard-error at setup. Both fixtures route through the full
 /// `cobre_io::load_case` -> `prepare_stochastic` -> `prepare_hydro_models`
 /// pipeline every other deterministic case uses — the season-parsing path the
-/// fix's own unit tests (`production/stage_key.rs`,
+/// fix's own unit tests (`model/temporal/stage_key.rs` in `cobre-core`,
 /// `hydro_models/evaporation.rs`) construct `Stage` values directly and never
 /// exercise.
 mod custom_weekly_evaporation_regression {

@@ -8,14 +8,32 @@ use std::collections::HashMap;
 use std::sync::mpsc::{Sender, SyncSender};
 
 use cobre_comm::Communicator;
+use cobre_core::commissioning::commissioning_active;
+use cobre_core::temporal::StageLagTransition;
 use cobre_core::{EntityId, TrainingEvent};
+use cobre_solver::ActiveProfile;
 use cobre_solver::{SolverInterface, StageTemplate};
 use cobre_stochastic::{ClassSampleRequest, ForwardSampler, SampleRequest};
 
+use crate::energy_conversion::EnergyConversionSet;
+use crate::error::SddpError::Infeasible;
+use crate::error::SddpError::Solver;
+use crate::indexer::StudyDimensions;
+use crate::lp_builder::GenericConstraintRowEntry;
+use crate::lp_builder::StageGeometry;
+use crate::noise::DownstreamAccumState;
+use crate::noise::LagAccumState;
+use crate::noise::accumulate_and_shift_lag_state;
+use crate::stage_solve::StageInputs;
+use crate::stage_solve::debug_assert_bucket_copy_gap_intact;
+use crate::stage_solve::fill_unscaled;
+use crate::stage_solve::fill_unscaled_dual;
+use crate::stage_solve::run_stage_solve;
 use crate::{
-    FutureCostFunction,
+    FutureCostFunction, SddpError,
     context::{StageContext, TrainingContext},
     dcs::{DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
+    indexer::StateSpace,
     lp_builder::COST_SCALE_FACTOR,
     simulation::{
         config::SimulationConfig,
@@ -77,7 +95,7 @@ pub struct SimulationOutputSpec<'a> {
     pub entity_counts: &'a EntityCounts,
 
     /// Per-stage active generic-constraint row metadata for extraction.
-    pub generic_constraint_row_entries: &'a [Vec<crate::lp_builder::GenericConstraintRowEntry>],
+    pub generic_constraint_row_entries: &'a [Vec<GenericConstraintRowEntry>],
 
     /// Per-stage column index of the first NCS generation variable.
     pub ncs_col_starts: &'a [usize],
@@ -97,7 +115,7 @@ pub struct SimulationOutputSpec<'a> {
     /// Per-stage equipment geometry for extraction, from the per-stage
     /// `StageLayout`. A single global stage-0 geometry carries `n_blks`-striped
     /// bases that misread any stage with a differing block count.
-    pub geometry_per_stage: &'a [crate::lp_builder::StageGeometry],
+    pub geometry_per_stage: &'a [StageGeometry],
 
     /// Per-station pumping power-consumption rate \[MW/(m³/s)\], ID-sorted
     /// parallel to `entity_counts.pumping_station_ids` and indexed by the SYSTEM
@@ -126,7 +144,7 @@ pub struct SimulationOutputSpec<'a> {
     pub hydro_productivities_per_stage: &'a [Vec<f64>],
 
     /// Pre-computed energy-conversion scalars for every `(hydro, stage)` pair.
-    pub energy_conversion: &'a crate::energy_conversion::EnergyConversionSet,
+    pub energy_conversion: &'a EnergyConversionSet,
 
     /// Minimum storage volume `V_min` per hydro plant (hm³), ID-sorted.
     pub hydro_min_storage_hm3: &'a [f64],
@@ -260,8 +278,8 @@ impl SimLookups {
     /// Build the reverse-lookup tables from study dimensions, the per-stage
     /// geometry table, and entity counts.
     pub(crate) fn build(
-        study_dims: &crate::indexer::StudyDimensions,
-        geometry_per_stage: &[crate::lp_builder::StageGeometry],
+        study_dims: &StudyDimensions,
+        geometry_per_stage: &[StageGeometry],
         n_thermals: usize,
         n_hydros: usize,
     ) -> Self {
@@ -276,9 +294,9 @@ impl SimLookups {
 /// [`SimulationError`], carrying the scenario/stage ids. Shared by the frozen
 /// `run_stage_solve` path and the DCS `lazy_solve_preloaded` path so both report
 /// failures identically.
-fn map_sim_solver_error(e: crate::error::SddpError, ids: &SimStageIds) -> SimulationError {
+fn map_sim_solver_error(e: SddpError, ids: &SimStageIds) -> SimulationError {
     match e {
-        crate::error::SddpError::Infeasible {
+        Infeasible {
             stage, scenario, ..
         } => {
             #[allow(clippy::cast_possible_truncation)]
@@ -291,7 +309,7 @@ fn map_sim_solver_error(e: crate::error::SddpError, ids: &SimStageIds) -> Simula
                 solver_message: "LP infeasible".to_string(),
             }
         }
-        crate::error::SddpError::Solver(other) => SimulationError::SolverError {
+        Solver(other) => SimulationError::SolverError {
             scenario_id: ids.scenario_id,
             stage_id: ids.stage_id_u32,
             solver_message: other.to_string(),
@@ -315,7 +333,7 @@ fn map_sim_solver_error(e: crate::error::SddpError, ids: &SimStageIds) -> Simula
 // per-stage invariant tracking.
 #[allow(clippy::too_many_lines)]
 fn solve_simulation_stage<S: SolverInterface>(
-    ws: &mut crate::workspace::SolverWorkspace<S>,
+    ws: &mut SolverWorkspace<S>,
     ctx: &StageContext<'_>,
     fcf: &FutureCostFunction,
     training_ctx: &TrainingContext<'_>,
@@ -356,7 +374,8 @@ fn solve_simulation_stage<S: SolverInterface>(
         training_ctx,
         t,
         &prep_params,
-    );
+    )
+    .map_err(|e| SimulationError::SolvePrep(e.to_string()))?;
     // stage_id (the commissioning key the dormancy predicate compares NCS windows
     // against), NOT the stage index `t`: they differ when negative-id placeholder
     // stages are filtered out.
@@ -410,18 +429,18 @@ fn solve_simulation_stage<S: SolverInterface>(
         .map_err(|e| map_sim_solver_error(e, ids))?;
         let view = ws.backward_accum.dcs_solve.result_view();
         let objective = view.objective;
-        crate::stage_solve::fill_unscaled(&mut unscaled_primal, view.primal, col_scale);
+        fill_unscaled(&mut unscaled_primal, view.primal, col_scale);
         // INVARIANT: on the DCS path `view.dual` is LONGER than the structural
         // template (the lazy loop appends resident cut rows), carrying cut-row
         // duals at indices `>= template_num_rows`. Harmless: the reader only reads
         // structural-row indices. Do NOT truncate or add a `dual.len() ==
         // template_num_rows` check — that holds on the frozen path but NOT here, and
         // would drop the structural duals the reader needs.
-        crate::stage_solve::fill_unscaled_dual(&mut unscaled_dual, view.dual, row_scale);
+        fill_unscaled_dual(&mut unscaled_dual, view.dual, row_scale);
         let _ = view;
         objective
     } else {
-        let inputs = crate::stage_solve::StageInputs {
+        let inputs = StageInputs {
             stage_context: ctx,
             pool: &fcf.pools[t],
             stored_basis: load_spec.warm_basis,
@@ -430,12 +449,11 @@ fn solve_simulation_stage<S: SolverInterface>(
             iteration: None, // simulation has no iteration counter
         };
 
-        let view = crate::stage_solve::run_stage_solve(ws, &inputs)
-            .map_err(|e| map_sim_solver_error(e, ids))?;
+        let view = run_stage_solve(ws, &inputs).map_err(|e| map_sim_solver_error(e, ids))?;
 
         let objective = view.objective;
-        crate::stage_solve::fill_unscaled(&mut unscaled_primal, view.primal, col_scale);
-        crate::stage_solve::fill_unscaled_dual(&mut unscaled_dual, view.dual, row_scale);
+        fill_unscaled(&mut unscaled_primal, view.primal, col_scale);
+        fill_unscaled_dual(&mut unscaled_dual, view.dual, row_scale);
         let _ = view;
         objective
     };
@@ -473,8 +491,11 @@ fn solve_simulation_stage<S: SolverInterface>(
     ws.current_state
         .extend_from_slice(&ws.scratch.unscaled_primal[..state.n_state]);
 
-    let stage_lag = ctx.stage_lag_transitions.get(ids.t).copied().unwrap_or(
-        cobre_core::temporal::StageLagTransition {
+    let stage_lag = ctx
+        .stage_lag_transitions
+        .get(ids.t)
+        .copied()
+        .unwrap_or(StageLagTransition {
             accumulate_weight: 1.0,
             spillover_weight: 0.0,
             finalize_period: true,
@@ -483,8 +504,7 @@ fn solve_simulation_stage<S: SolverInterface>(
             downstream_spillover_weight: 0.0,
             downstream_finalize: false,
             rebuild_from_downstream: false,
-        },
-    );
+        });
     let downstream_par_order = ws
         .scratch
         .downstream_completed_lags
@@ -494,17 +514,17 @@ fn solve_simulation_stage<S: SolverInterface>(
     // Pass unscaled_primal as a separate borrow so the borrow checker sees it is
     // disjoint from the &mut ws.scratch.lag_* fields passed alongside it.
     let unscaled_primal_ref: &[f64] = &ws.scratch.unscaled_primal;
-    crate::noise::accumulate_and_shift_lag_state(
+    accumulate_and_shift_lag_state(
         &mut ws.current_state,
         &ws.scratch.lag_matrix_buf,
         unscaled_primal_ref,
         state,
         &stage_lag,
-        &mut crate::noise::LagAccumState {
+        &mut LagAccumState {
             accumulator: &mut ws.scratch.lag_accumulator,
             weight_accum: &mut ws.scratch.lag_weight_accum,
         },
-        &mut crate::noise::DownstreamAccumState {
+        &mut DownstreamAccumState {
             accumulator: &mut ws.scratch.downstream_accumulator,
             weight_accum: &mut ws.scratch.downstream_weight_accum,
             completed_lags: &mut ws.scratch.downstream_completed_lags,
@@ -512,11 +532,7 @@ fn solve_simulation_stage<S: SolverInterface>(
             par_order: downstream_par_order,
         },
     );
-    crate::stage_solve::debug_assert_bucket_copy_gap_intact(
-        &ws.current_state,
-        unscaled_primal_ref,
-        state,
-    );
+    debug_assert_bucket_copy_gap_intact(&ws.current_state, unscaled_primal_ref, state);
 
     Ok((immediate_cost, result))
 }
@@ -542,8 +558,8 @@ fn extract_sim_stage_result(
     view_objective: f64,
     ctx: &StageContext<'_>,
     output: &SimulationOutputSpec<'_>,
-    state: &crate::indexer::StateLayout,
-    study_dims: &crate::indexer::StudyDimensions,
+    state: &StateSpace,
+    study_dims: &StudyDimensions,
     ids: &SimStageIds,
     stage_id: i32,
     n_stochastic_ncs: usize,
@@ -600,7 +616,7 @@ fn extract_sim_stage_result(
             || output.geometry_per_stage.len() == ctx.templates.len(),
         "geometry_per_stage must carry one entry per study stage when populated",
     );
-    let geometry_default = crate::lp_builder::StageGeometry::default();
+    let geometry_default = StageGeometry::default();
     let geometry = output
         .geometry_per_stage
         .get(t)
@@ -623,7 +639,7 @@ fn extract_sim_stage_result(
             let windows = ctx.ncs_stochastic_windows;
             for (slot, &col) in dense_col.iter().enumerate() {
                 let (entry, exit) = windows[slot];
-                if !crate::lp_builder::commissioning_active(entry, exit, stage_id) {
+                if !commissioning_active(entry, exit, stage_id) {
                     continue;
                 }
                 let dst = col * stage_n_blks;
@@ -651,8 +667,8 @@ fn extract_sim_stage_result(
     let hydro_lookup = if let Some(l) = lookups.hydro_per_stage.get(t) {
         l
     } else {
-        hydro_lookup_default = crate::simulation::extraction::HydroReverseLookup::build(
-            &crate::lp_builder::StageGeometry::default(),
+        hydro_lookup_default = HydroReverseLookup::build(
+            &StageGeometry::default(),
             output.entity_counts.hydro_ids.len(),
         );
         &hydro_lookup_default
@@ -720,7 +736,7 @@ fn extract_sim_stage_result(
 
 /// Reset workspace state to the initial conditions for a new scenario.
 fn reset_scenario_state<S: SolverInterface>(
-    ws: &mut crate::workspace::SolverWorkspace<S>,
+    ws: &mut SolverWorkspace<S>,
     sampler: &ForwardSampler<'_>,
     global_scenario: u32,
     total_scenarios: u32,
@@ -769,7 +785,7 @@ fn reset_scenario_state<S: SolverInterface>(
 }
 
 pub(crate) fn process_scenario_stages<S: SolverInterface>(
-    ws: &mut crate::workspace::SolverWorkspace<S>,
+    ws: &mut SolverWorkspace<S>,
     ctx: &StageContext<'_>,
     fcf: &FutureCostFunction,
     training_ctx: &TrainingContext<'_>,
@@ -912,7 +928,7 @@ pub fn simulate<S, C: Communicator>(
     comm: &C,
 ) -> Result<SimulationRunResult, SimulationError>
 where
-    S: SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
+    S: SolverInterface<Profile = ActiveProfile> + Send,
 {
     use crate::simulation::state::{SimulationInputs, SimulationState};
     let mut state = SimulationState::new(training_ctx.horizon.num_stages());

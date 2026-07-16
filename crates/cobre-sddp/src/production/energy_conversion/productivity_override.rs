@@ -1,14 +1,11 @@
 //! User-supplied productivity override table: the
 //! [`HydroEnergyProductivityOverride`] lookup struct and its
-//! [`build_hydro_energy_productivity_override`] constructor (which the struct's
-//! private fields keep colocated here).
+//! [`build_hydro_energy_productivity_override`] constructor.
 
 use std::collections::{HashMap, HashSet};
 
-use cobre_core::EntityId;
+use cobre_core::{EntityId, StageId};
 use cobre_io::{HydroEnergyProductivityRow, LoadError};
-
-use crate::stage_key::StageId;
 
 /// Per-`(hydro, stage)` override table loaded from
 /// `system/hydro_energy_productivity.parquet`.
@@ -202,7 +199,7 @@ mod tests {
         ];
         let err = build_hydro_energy_productivity_override(&rows).unwrap_err();
         match err {
-            cobre_io::LoadError::SchemaError { field, .. } => {
+            LoadError::SchemaError { field, .. } => {
                 assert_eq!(field, "hydro_energy_productivity.duplicate_entry");
             }
             other => panic!("expected SchemaError, got: {other:?}"),

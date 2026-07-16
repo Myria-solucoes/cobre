@@ -17,22 +17,23 @@ use super::{
     contract_family_slot, resolve_variable_ref, variable_ref_is_block_independent,
 };
 use crate::hydro_models::{FphaPlane, ProductionModelSet, ResolvedProductionModel};
-use crate::indexer::StateLayout;
+use crate::indexer::{Boundary, StateSpace, StorageBoundaryGrid};
 use crate::lp_builder::StageGeometry;
+use crate::test_support::{GeometryDims, geometry};
 
 // ── Test helpers ──────────────────────────────────────────────────────────
 
-/// Build the [`StateLayout`] matching [`make_indexer`]'s state dimensions
+/// Build the [`StateSpace`] matching [`make_indexer`]'s state dimensions
 /// (N=4 hydros, L=0 lags, no anticipated thermals), so the role-(a) storage /
 /// z-inflow columns the resolver reads through the handle equal the indexer's.
-fn make_state() -> StateLayout {
-    StateLayout::new(4, 0, 0, Vec::new(), 0, 0, vec![], &[0, 0, 0, 0])
+fn make_state() -> StateSpace {
+    StateSpace::new(4, 0, 0, Vec::new(), 0, 0, vec![], &[0, 0, 0, 0])
 }
 
-/// Build the [`StateLayout`] matching [`make_indexer_with_anticipated`]'s state
+/// Build the [`StateSpace`] matching [`make_indexer_with_anticipated`]'s state
 /// dimensions (N=0 hydros, L=0, A=1 anticipated plant, k_max=2, K=[2]).
-fn make_state_anticipated() -> StateLayout {
-    StateLayout::new(0, 0, 0, Vec::new(), 1, 2, vec![2], &[])
+fn make_state_anticipated() -> StateSpace {
+    StateSpace::new(0, 0, 0, Vec::new(), 1, 2, vec![2], &[])
 }
 
 /// Mirrors the production `GenericResolverGeom` built in `entries.rs`, sourcing
@@ -40,7 +41,7 @@ fn make_state_anticipated() -> StateLayout {
 /// tests exercise the same offsets production does.
 fn make_geom<'a>(
     indexer: &'a StageGeometry,
-    state: &'a StateLayout,
+    state: &'a StateSpace,
     max_deficit_segments: usize,
     anticipated_thermal_indices: &[usize],
 ) -> GenericResolverGeom<'a> {
@@ -54,12 +55,13 @@ fn make_geom<'a>(
     )
 }
 
-/// Like [`make_geom`], but with explicit contract column ranges. The
-/// `geometry` fixture hardcodes both contract ranges to `0..0`, so the contract
-/// resolution / `block_col_range` tests inject their own non-empty ranges here.
+/// Like [`make_geom`], but with explicit contract column ranges. `GeometryDims`
+/// has no contract fields, so `geometry`'s contract ranges are always empty; the
+/// contract resolution / `block_col_range` tests inject their own non-empty
+/// ranges here.
 fn make_geom_with_contracts<'a>(
     indexer: &'a StageGeometry,
-    state: &'a StateLayout,
+    state: &'a StateSpace,
     max_deficit_segments: usize,
     anticipated_thermal_indices: &[usize],
     contract_import: &'a std::ops::Range<usize>,
@@ -76,7 +78,7 @@ fn make_geom_with_contracts<'a>(
     let reverse: &'a std::collections::HashMap<usize, usize> = Box::leak(Box::new(reverse));
     GenericResolverGeom {
         state,
-        storage_internal_start: indexer.storage_internal_start,
+        storage_boundary_grid: indexer.storage_boundary_grid,
         turbine: &indexer.turbine,
         spillage: &indexer.spillage,
         diversion: &indexer.diversion,
@@ -177,8 +179,8 @@ fn empty_cascade() -> CascadeTopology {
 ///   evap: none
 ///   withdrawal_slack_neg: [85, 89)  withdrawal_slack_pos: [89, 93) (4 hydros)
 fn make_indexer() -> StageGeometry {
-    crate::test_support::geometry(
-        &crate::test_support::GeometryDims {
+    geometry(
+        &GeometryDims {
             hydro_count: 4,
             n_thermals: 2,
             n_lines: 1,
@@ -320,9 +322,6 @@ fn call_with_cascade(
 /// Threads real pumping data the way the production `fill_pumping_water_entries`
 /// caller does, so the pumping arms exercise their real column arithmetic and
 /// consumption-rate coefficient instead of the empty fixture used by [`call`].
-// Mirrors the production resolver's argument surface it exercises; bundling
-// into a struct would diverge the test from the real call shape.
-#[allow(clippy::too_many_arguments)]
 fn call_pumping(
     var_ref: VariableRef,
     block_idx: usize,
@@ -723,8 +722,8 @@ fn hydro_generation_fpha_second_hydro_block_2() {
 /// evap cols: [15, 18)  → evaporation_flow=15, f_evap_plus=16, f_evap_minus=17
 #[test]
 fn hydro_evaporation_maps_to_evaporation_flow_col() {
-    let evap_indexer = crate::test_support::geometry(
-        &crate::test_support::GeometryDims {
+    let evap_indexer = geometry(
+        &GeometryDims {
             hydro_count: 2,
             n_buses: 1,
             n_blks: 1,
@@ -750,46 +749,20 @@ fn hydro_evaporation_maps_to_evaporation_flow_col() {
     let bpos: BTreeMap<EntityId, usize> = [(EntityId(100), 0)].into_iter().collect();
     let lpos: BTreeMap<EntityId, usize> = BTreeMap::new();
 
-    let positions = super::EntityPositionMaps {
-        hydro: &hpos,
-        thermal: &tpos,
-        bus: &bpos,
-        line: &lpos,
-    };
-    let cascade = empty_cascade();
-    let diversion_upstream: HashMap<EntityId, Vec<usize>> = HashMap::new();
-    let cascade_refs = CascadeRefs {
-        cascade: &cascade,
-        diversion_upstream: &diversion_upstream,
-    };
-    let no_stations: Vec<PumpingStation> = Vec::new();
-    let empty_pumping_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
-    let pumping_refs = PumpingRefs {
-        col_pumping_start: 0,
-        pumping_stations: &no_stations,
-        pumping_pos: &empty_pumping_pos,
-    };
-    let state = StateLayout::new(2, 0, 0, Vec::new(), 0, 0, vec![], &[0, 0]);
+    let state = StateSpace::new(2, 0, 0, Vec::new(), 0, 0, vec![], &[0, 0]);
     let geom = make_geom(&evap_indexer, &state, 1, &[]);
-    let no_contracts: Vec<EnergyContract> = Vec::new();
-    let empty_contract_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
-    let contract_refs = ContractRefs {
-        contracts: &no_contracts,
-        contract_pos: &empty_contract_pos,
-    };
-    let result = resolve_variable_ref(
-        &VariableRef::HydroEvaporation {
+    let result = call(
+        VariableRef::HydroEvaporation {
             hydro_id: EntityId(10),
             block_id: None,
         },
         0,
-        0, // stage_idx
         &geom,
         &prod_models,
-        &positions,
-        &cascade_refs,
-        &pumping_refs,
-        &contract_refs,
+        &hpos,
+        &tpos,
+        &bpos,
+        &lpos,
     );
 
     assert_eq!(result, vec![(15, 1.0)]);
@@ -797,8 +770,8 @@ fn hydro_evaporation_maps_to_evaporation_flow_col() {
 
 #[test]
 fn hydro_evaporation_no_evap_model_returns_empty() {
-    let evap_indexer = crate::test_support::geometry(
-        &crate::test_support::GeometryDims {
+    let evap_indexer = geometry(
+        &GeometryDims {
             hydro_count: 2,
             n_buses: 1,
             n_blks: 1,
@@ -825,46 +798,20 @@ fn hydro_evaporation_no_evap_model_returns_empty() {
     let lpos: BTreeMap<EntityId, usize> = BTreeMap::new();
 
     // Hydro 20 (pos=1) has no evaporation in evap_hydro_indices=[0]
-    let positions = super::EntityPositionMaps {
-        hydro: &hpos,
-        thermal: &tpos,
-        bus: &bpos,
-        line: &lpos,
-    };
-    let cascade = empty_cascade();
-    let diversion_upstream: HashMap<EntityId, Vec<usize>> = HashMap::new();
-    let cascade_refs = CascadeRefs {
-        cascade: &cascade,
-        diversion_upstream: &diversion_upstream,
-    };
-    let no_stations: Vec<PumpingStation> = Vec::new();
-    let empty_pumping_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
-    let pumping_refs = PumpingRefs {
-        col_pumping_start: 0,
-        pumping_stations: &no_stations,
-        pumping_pos: &empty_pumping_pos,
-    };
-    let state = StateLayout::new(2, 0, 0, Vec::new(), 0, 0, vec![], &[0, 0]);
+    let state = StateSpace::new(2, 0, 0, Vec::new(), 0, 0, vec![], &[0, 0]);
     let geom = make_geom(&evap_indexer, &state, 1, &[]);
-    let no_contracts: Vec<EnergyContract> = Vec::new();
-    let empty_contract_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
-    let contract_refs = ContractRefs {
-        contracts: &no_contracts,
-        contract_pos: &empty_contract_pos,
-    };
-    let result = resolve_variable_ref(
-        &VariableRef::HydroEvaporation {
+    let result = call(
+        VariableRef::HydroEvaporation {
             hydro_id: EntityId(20),
             block_id: None,
         },
         0,
-        0,
         &geom,
         &prod_models,
-        &positions,
-        &cascade_refs,
-        &pumping_refs,
-        &contract_refs,
+        &hpos,
+        &tpos,
+        &bpos,
+        &lpos,
     );
 
     assert!(result.is_empty());
@@ -875,8 +822,8 @@ fn hydro_evaporation_no_evap_model_returns_empty() {
 /// an out-of-range block resolves to empty.
 #[test]
 fn hydro_evaporation_none_resolves_block_zero_not_sum() {
-    let evap_indexer = crate::test_support::geometry(
-        &crate::test_support::GeometryDims {
+    let evap_indexer = geometry(
+        &GeometryDims {
             hydro_count: 2,
             n_buses: 1,
             n_blks: 3,
@@ -902,48 +849,22 @@ fn hydro_evaporation_none_resolves_block_zero_not_sum() {
     let bpos: BTreeMap<EntityId, usize> = [(EntityId(100), 0)].into_iter().collect();
     let lpos: BTreeMap<EntityId, usize> = BTreeMap::new();
 
-    let positions = super::EntityPositionMaps {
-        hydro: &hpos,
-        thermal: &tpos,
-        bus: &bpos,
-        line: &lpos,
-    };
-    let cascade = empty_cascade();
-    let diversion_upstream: HashMap<EntityId, Vec<usize>> = HashMap::new();
-    let cascade_refs = CascadeRefs {
-        cascade: &cascade,
-        diversion_upstream: &diversion_upstream,
-    };
-    let no_stations: Vec<PumpingStation> = Vec::new();
-    let empty_pumping_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
-    let pumping_refs = PumpingRefs {
-        col_pumping_start: 0,
-        pumping_stations: &no_stations,
-        pumping_pos: &empty_pumping_pos,
-    };
-    let state = StateLayout::new(2, 0, 0, Vec::new(), 0, 0, vec![], &[0, 0]);
+    let state = StateSpace::new(2, 0, 0, Vec::new(), 0, 0, vec![], &[0, 0]);
     let geom = make_geom(&evap_indexer, &state, 3, &[]);
-    let no_contracts: Vec<EnergyContract> = Vec::new();
-    let empty_contract_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
-    let contract_refs = ContractRefs {
-        contracts: &no_contracts,
-        contract_pos: &empty_contract_pos,
-    };
 
     let resolve = |block_id: Option<usize>| {
-        resolve_variable_ref(
-            &VariableRef::HydroEvaporation {
+        call(
+            VariableRef::HydroEvaporation {
                 hydro_id: EntityId(10),
                 block_id,
             },
             0,
-            0,
             &geom,
             &prod_models,
-            &positions,
-            &cascade_refs,
-            &pumping_refs,
-            &contract_refs,
+            &hpos,
+            &tpos,
+            &bpos,
+            &lpos,
         )
     };
 
@@ -1806,8 +1727,8 @@ fn line_exchange_unknown_id_returns_empty() {
 ///   deficit: [10, 10+1*1*2) = [10, 12)  (B=1, S=1, K=2)
 ///   excess:  [12, 12+1*2) = [12, 14)
 fn make_indexer_with_anticipated() -> StageGeometry {
-    crate::test_support::geometry(
-        &crate::test_support::GeometryDims {
+    geometry(
+        &GeometryDims {
             n_thermals: 2,
             n_buses: 1,
             n_blks: 2,
@@ -2379,24 +2300,39 @@ fn hydro_inflow_is_block_dependent() {
 //
 // A K=3 chronological geom: `make_indexer` (n_blks=3) + `make_state` (N=4,
 // storage=[0,4), storage_in.start=8), overriding `storage_internal_start` to a
-// non-zero interior anchor so the interior-boundary formula is exercised (the
-// `test_support::geometry` fixture hardcodes it to 0). Interior stride is
-// `n_blks - 1 = 2`; for hydro pos 0 the boundaries are S⁰=8, S¹=12, S²=13, S³=0.
+// non-zero interior anchor so the interior-boundary formula is exercised (`geometry`
+// always builds `BlockMode::Parallel`, which has no interior columns, so its
+// `storage_internal_start` must be overridden regardless of its own value).
+// Interior stride is `n_blks - 1 = 2`; for hydro pos 0 the boundaries are S⁰=8,
+// S¹=12, S²=13, S³=0.
 
 const STORAGE_INTERNAL_START: usize = 12;
 
 /// Build the K=3 chronological geom with a non-zero `storage_internal_start`.
 fn make_chronological_geom<'a>(
     indexer: &'a StageGeometry,
-    state: &'a StateLayout,
+    state: &'a StateSpace,
 ) -> GenericResolverGeom<'a> {
     let mut geom = make_geom(indexer, state, 2, &[]);
-    geom.storage_internal_start = STORAGE_INTERNAL_START;
+    geom.storage_boundary_grid = StorageBoundaryGrid::new(
+        state.storage_in.start,
+        state.storage.start,
+        STORAGE_INTERNAL_START,
+        indexer.n_blks,
+    );
     geom
 }
 
-/// Resolve every boundary (`k = 0`, interior, `k = K`) of both variants on a K=3
-/// chronological geom against the mirrored `block_storage_col`.
+/// `VariableRef::HydroStorageInitial`/`HydroStorageFinal` resolve to the hand-
+/// computed S⁰/interior/Sᴷ boundary columns for this K=3,
+/// `STORAGE_INTERNAL_START = 12` fixture — literals computed independently of
+/// `StorageBoundaryGrid::col` itself, so a regression in its match arms fails
+/// this test, not just an identity of the owner with itself.
+///
+/// Seam B of the geometry cross-check guard — pairs with
+/// `stage_geometry_block_storage_col_matches_layout` (Seam A, in
+/// `super::super::builder::template::tests`), each independently anchored
+/// against its own hand-computed oracle rather than compared to each other.
 #[test]
 fn hydro_storage_boundary_resolves_each_boundary() {
     let indexer = make_indexer();
@@ -2409,7 +2345,6 @@ fn hydro_storage_boundary_resolves_each_boundary() {
     let lpos = make_line_pos();
 
     // Hydro EntityId(10) at pos 0; K = 3.
-    // Initial{0} = S⁰ = storage_in.start + 0 = 8.
     let initial_0 = call(
         VariableRef::HydroStorageInitial {
             hydro_id: EntityId(10),
@@ -2423,10 +2358,8 @@ fn hydro_storage_boundary_resolves_each_boundary() {
         &bpos,
         &lpos,
     );
-    assert_eq!(initial_0, vec![(geom.block_storage_col(0, 0), 1.0)]);
-    assert_eq!(initial_0, vec![(state.storage_in.start + 0, 1.0)]);
+    assert_eq!(initial_0, vec![(8, 1.0)], "S⁰ = storage_in.start + 0");
 
-    // Initial{1} = S¹ = storage_internal_start + 0 = 12 (interior boundary).
     let initial_1 = call(
         VariableRef::HydroStorageInitial {
             hydro_id: EntityId(10),
@@ -2440,10 +2373,12 @@ fn hydro_storage_boundary_resolves_each_boundary() {
         &bpos,
         &lpos,
     );
-    assert_eq!(initial_1, vec![(geom.block_storage_col(0, 1), 1.0)]);
-    assert_eq!(initial_1, vec![(STORAGE_INTERNAL_START, 1.0)]);
+    assert_eq!(
+        initial_1,
+        vec![(12, 1.0)],
+        "S¹ = STORAGE_INTERNAL_START + 0 (interior boundary)"
+    );
 
-    // Final{2} = S³ = Sᴷ = storage.start + 0 = 0 (K=3, last block).
     let final_2 = call(
         VariableRef::HydroStorageFinal {
             hydro_id: EntityId(10),
@@ -2457,8 +2392,11 @@ fn hydro_storage_boundary_resolves_each_boundary() {
         &bpos,
         &lpos,
     );
-    assert_eq!(final_2, vec![(geom.block_storage_col(0, 3), 1.0)]);
-    assert_eq!(final_2, vec![(state.storage.start + 0, 1.0)]);
+    assert_eq!(
+        final_2,
+        vec![(0, 1.0)],
+        "S³ = Sᴷ = storage.start + 0 (K=3, last block)"
+    );
 }
 
 /// `HydroStorageFinal{K-1}` resolves to the SAME column as `HydroStorage` (Sᴷ).
@@ -2572,7 +2510,10 @@ fn hydro_storage_boundary_none_resolves_stage_endpoint() {
             &bpos,
             &lpos,
         );
-        assert_eq!(initial, vec![(geom.block_storage_col(0, 0), 1.0)]);
+        assert_eq!(
+            initial,
+            vec![(geom.block_storage_col(0, Boundary::Incoming), 1.0)]
+        );
 
         let final_ = call(
             VariableRef::HydroStorageFinal {
@@ -2587,7 +2528,10 @@ fn hydro_storage_boundary_none_resolves_stage_endpoint() {
             &bpos,
             &lpos,
         );
-        assert_eq!(final_, vec![(geom.block_storage_col(0, 3), 1.0)]);
+        assert_eq!(
+            final_,
+            vec![(geom.block_storage_col(0, Boundary::Outgoing), 1.0)]
+        );
     }
 }
 
