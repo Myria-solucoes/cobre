@@ -124,6 +124,10 @@ pub fn execute(args: &RunArgs) -> Result<(), CliError> {
     if let Err(ref e) = result
         && ctx.comm.size() > 1
     {
+        // `abort` diverges, so `main` never reaches its own `format_error`:
+        // render here or the failing rank's diagnostic is lost to the launcher.
+        let _ = ctx.stderr.write_line(&format!("rank {}:", ctx.comm.rank()));
+        e.format_error(&ctx.stderr);
         ctx.comm.abort(e.exit_code());
     }
     result
