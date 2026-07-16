@@ -11,10 +11,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use cobre_core::{CorrelationModel, EntityId};
 
-use crate::{
-    StochasticError,
-    correlation::spectral::{NEGLIGIBLE_NEGATIVE_EIGENVALUE, SpectralFactor},
-};
+use crate::{StochasticError, correlation::spectral::SpectralFactor};
 
 /// Group dimension at or below which `apply_correlation` buffers are stack-allocated;
 /// larger groups fall back to heap allocation.
@@ -215,30 +212,19 @@ impl DecomposedCorrelation {
             factors.insert(profile_name.clone(), group_factors);
         }
 
-        // Clipping above NEGLIGIBLE_NEGATIVE_EIGENVALUE signals a genuinely indefinite
-        // input (warn); round-off-scale clipping is harmless PSD projection (debug).
+        // Estimated correlation matrices are routinely indefinite, and clipping to the
+        // nearest PSD factor is the standard remedy — a diagnostic, not a warning.
+        // `largest_negative_magnitude` is what distinguishes round-off from a
+        // meaningfully indefinite input.
         if clip_matrices_affected > 0 {
-            if clip_largest_magnitude > NEGLIGIBLE_NEGATIVE_EIGENVALUE {
-                tracing::warn!(
-                    matrices_affected = clip_matrices_affected,
-                    matrices_total = clip_matrices_total,
-                    clipped_eigenvalues = clip_eigenvalues_total,
-                    largest_negative_magnitude = clip_largest_magnitude,
-                    "spectral decomposition clipped significant negative eigenvalues; \
-                     one or more correlation matrices may be indefinite rather than \
-                     merely rank-deficient — verify the correlation inputs"
-                );
-            } else {
-                tracing::debug!(
-                    matrices_affected = clip_matrices_affected,
-                    matrices_total = clip_matrices_total,
-                    clipped_eigenvalues = clip_eigenvalues_total,
-                    largest_negative_magnitude = clip_largest_magnitude,
-                    "spectral decomposition clipped near-zero negative eigenvalues to 0.0 \
-                     (nearest PSD approximation); correlation matrices are rank-deficient \
-                     but the projection is numerically negligible"
-                );
-            }
+            tracing::debug!(
+                matrices_affected = clip_matrices_affected,
+                matrices_total = clip_matrices_total,
+                clipped_eigenvalues = clip_eigenvalues_total,
+                largest_negative_magnitude = clip_largest_magnitude,
+                "spectral decomposition clipped negative eigenvalues to 0.0 \
+                 (nearest PSD projection)"
+            );
         }
 
         let schedule: HashMap<i32, String> = model
