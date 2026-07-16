@@ -784,7 +784,9 @@ mod tests {
             })
         }
 
-        fn get_basis(&mut self, _out: &mut Basis) {}
+        fn get_basis(&mut self, out: &mut Basis) {
+            crate::test_support::fill_consistent_basis(out);
+        }
 
         fn statistics(&self) -> SolverStatistics {
             SolverStatistics::default()

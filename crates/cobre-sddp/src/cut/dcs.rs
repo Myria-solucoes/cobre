@@ -615,7 +615,7 @@ pub fn lazy_solve_preloaded<S: SolverInterface>(
                 &mut scratch.recon_basis,
                 core.num_rows + cut_rows,
                 core.num_rows,
-            );
+            )?;
             solver
                 .solve(Some(&scratch.recon_basis))
                 .map_err(|e| map_solver_error(e, ctx))?
@@ -2395,7 +2395,9 @@ mod tests {
                 solve_time_seconds: 0.0,
             })
         }
-        fn get_basis(&mut self, _out: &mut Basis) {}
+        fn get_basis(&mut self, out: &mut Basis) {
+            crate::test_support::fill_consistent_basis(out);
+        }
         fn statistics(&self) -> SolverStatistics {
             SolverStatistics {
                 solve_count: self.call_count as u64,

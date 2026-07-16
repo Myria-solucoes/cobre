@@ -205,7 +205,9 @@ impl SolverInterface for MockSolver {
         })
     }
 
-    fn get_basis(&mut self, _out: &mut Basis) {}
+    fn get_basis(&mut self, out: &mut Basis) {
+        cobre_sddp::test_support::fill_consistent_basis(out);
+    }
 
     fn statistics(&self) -> SolverStatistics {
         SolverStatistics::default()
@@ -287,7 +289,9 @@ impl SolverInterface for ExpandingMockSolver {
         })
     }
 
-    fn get_basis(&mut self, _out: &mut Basis) {}
+    fn get_basis(&mut self, out: &mut Basis) {
+        cobre_sddp::test_support::fill_consistent_basis(out);
+    }
 
     fn statistics(&self) -> SolverStatistics {
         SolverStatistics::default()

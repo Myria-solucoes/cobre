@@ -65,6 +65,27 @@ pub enum SddpError {
     #[error("simulation error: {0}")]
     Simulation(String),
 
+    /// A reconstructed warm-start basis has fewer basic variables than the LP
+    /// has rows, proving the stored basis was captured against a different LP
+    /// shape. See
+    /// [`enforce_basic_count_invariant`](crate::basis_reconstruct::enforce_basic_count_invariant).
+    #[error(
+        "stored basis was captured against a different LP shape: num_row={num_row} but \
+         total_basic={total_basic} (col_basic={col_basic}, row_basic={row_basic}); a basic-count \
+         deficit is unreachable for a stored basis matching this LP's column count and \
+         base row count"
+    )]
+    BasisShapeMismatch {
+        /// Row count of the LP the basis is being applied to.
+        num_row: usize,
+        /// `col_basic + row_basic` in the reconstructed basis.
+        total_basic: usize,
+        /// Basic columns in the reconstructed basis.
+        col_basic: usize,
+        /// Basic rows in the reconstructed basis.
+        row_basic: usize,
+    },
+
     /// A postcard-encoded payload's wire `version` does not match the current binary.
     #[error(
         "wire format version mismatch: encoded={encoded}, expected={expected}; \

@@ -17,6 +17,7 @@ use cobre_comm::BackendError;
 use cobre_io::LoadError;
 use cobre_io::OutputError;
 use cobre_sddp::SddpError;
+use cobre_sddp::SddpError::BasisShapeMismatch;
 use cobre_sddp::SddpError::Communication;
 use cobre_sddp::SddpError::Infeasible;
 use cobre_sddp::SddpError::Io;
@@ -249,6 +250,9 @@ impl From<cobre_sddp::SddpError> for CliError {
                     "wire format version mismatch: encoded={encoded}, expected={expected}; \
                      restart all ranks with the same binary"
                 ),
+            },
+            ref shape_mismatch @ BasisShapeMismatch { .. } => Self::Internal {
+                message: shape_mismatch.to_string(),
             },
         }
     }

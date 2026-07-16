@@ -200,7 +200,9 @@ impl SolverInterface for MockSolver {
         }
         self.do_solve()
     }
-    fn get_basis(&mut self, _out: &mut Basis) {}
+    fn get_basis(&mut self, out: &mut Basis) {
+        crate::test_support::fill_consistent_basis(out);
+    }
     fn record_reconstruction_stats(&mut self) {
         self.reconstruction_counter += 1;
     }
@@ -2217,7 +2219,9 @@ mod anticipated_ring_matches_forward_propagation {
                 solve_time_seconds: sol.solve_time_seconds,
             })
         }
-        fn get_basis(&mut self, _out: &mut Basis) {}
+        fn get_basis(&mut self, out: &mut Basis) {
+            crate::test_support::fill_consistent_basis(out);
+        }
         fn record_reconstruction_stats(&mut self) {}
         fn statistics(&self) -> SolverStatistics {
             SolverStatistics::default()
