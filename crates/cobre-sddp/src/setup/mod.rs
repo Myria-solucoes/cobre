@@ -63,7 +63,7 @@ pub use scenario_library_set::{PhaseLibraries, ScenarioLibraries};
 pub use stage_data::StageData;
 pub use stochastic_pipeline::{
     PrepareStochasticResult, build_ncs_factor_entries, load_load_factors_for_stochastic,
-    prepare_stochastic,
+    prepare_stochastic, study_stage_noise_group_ids,
 };
 
 use std::collections::HashMap;
@@ -1076,6 +1076,9 @@ fn precompute_lag_data(
     let downstream_par_order = derive_downstream_par_order(stages, stochastic.par().max_order());
     let stage_lag_transitions =
         precompute_stage_lag_transitions(stages, season_map_ref, downstream_par_order);
+    // Both outputs derive from `stages`, so they cannot disagree about which
+    // stages are in scope; `study_stage_noise_group_ids` re-derives that scope
+    // from `System` and is for callers that have no filtered slice.
     let noise_group_ids = precompute_noise_groups(stages);
 
     let recent_observation_seed = if stages.is_empty() {

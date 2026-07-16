@@ -97,6 +97,23 @@ fn load_user_opening_tree_inner(
     Ok(Some(tree))
 }
 
+/// Noise-group ids for the study stages, delegating to [`precompute_noise_groups`].
+///
+/// Single owner: every site needing per-stage noise-group ids calls this rather
+/// than inlining the filter — an inlined copy diverges whenever two consecutive
+/// stages share a `(season_id, year)` group, changing which openings a rank solves
+/// against.
+#[must_use]
+pub fn study_stage_noise_group_ids(system: &System) -> Vec<u32> {
+    let study_stages: Vec<_> = system
+        .stages()
+        .iter()
+        .filter(|s| s.id >= 0)
+        .cloned()
+        .collect();
+    precompute_noise_groups(&study_stages)
+}
+
 /// Build NCS entity factor entries from `System::resolved_ncs_factors()`.
 ///
 /// Converts the dense 3D table into `(entity_id, stage_id, block_pairs)` tuples
@@ -384,15 +401,7 @@ pub fn prepare_stochastic(
     let opening_tree_library = build_opening_tree_library(&system, training_source)?;
     let external_scenario_counts = compute_external_scenario_counts(&system, training_source);
 
-    let opening_tree_noise_group_ids: Vec<u32> = {
-        let study_stages: Vec<_> = system
-            .stages()
-            .iter()
-            .filter(|s| s.id >= 0)
-            .cloned()
-            .collect();
-        precompute_noise_groups(&study_stages)
-    };
+    let opening_tree_noise_group_ids = study_stage_noise_group_ids(&system);
 
     let forward_seed = training_source.seed.map(i64::unsigned_abs);
     let stochastic = build_stochastic_context(

@@ -1,7 +1,11 @@
 //! Case-load, communicator setup, broadcast, and pre-training phases for `cobre run`.
 //!
-//! Rank 0 loads from disk; system and config are broadcast to all ranks, which
-//! then build `StudySetup` from the shared data.
+//! Rank 0 loads from disk; `System` and config are broadcast to all ranks, which
+//! then build `StudySetup` from the shared data. Hydro model preprocessing is the
+//! exception: it is not broadcast. Rank 0 reuses the artifacts
+//! `load_case_with_artifacts` already parsed (`prepare_hydro_models_from_artifacts`);
+//! non-root ranks independently re-read the case directory from disk
+//! (`prepare_hydro_models`), relying on a shared filesystem instead.
 
 use std::path::{Path, PathBuf};
 
@@ -32,7 +36,10 @@ use cobre_sddp::reconcile_global_ok;
 use cobre_sddp::{
     EstimationReport, PrepareHydroModelsResult, PrepareStochasticResult, StudySetup,
     build_hydro_model_summary, prepare_hydro_models, prepare_stochastic,
-    setup::{ConstructionConfig, build_ncs_factor_entries, load_load_factors_for_stochastic},
+    setup::{
+        ConstructionConfig, build_ncs_factor_entries, load_load_factors_for_stochastic,
+        study_stage_noise_group_ids,
+    },
 };
 use cobre_solver::active_solver_name;
 use cobre_solver::active_solver_version;
@@ -440,10 +447,7 @@ fn reconstruct_stochastic_context_non_root(
             user_tree,
             historical_library: opening_tree_library.as_ref(),
             external_scenario_counts: None,
-            // None is safe: the auto-generated tree is broadcast from rank 0, so
-            // independent per-stage noise here never reaches the result.
-            // TODO(noise-group-non-root-saa-tree): wire noise_group_ids for non-root SAA tree generation
-            noise_group_ids: None,
+            noise_group_ids: Some(study_stage_noise_group_ids(system)),
         },
         ClassSchemes {
             inflow: Some(training_src.inflow_scheme),
@@ -709,4 +713,73 @@ fn run_root_exports(
     })?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use console::Term;
+
+    use super::{
+        load_case_and_config, reconstruct_stochastic_context_non_root, study_stage_noise_group_ids,
+    };
+    use crate::commands::run::{CommBackendArg, RunArgs};
+
+    fn d19_case_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/deterministic/d19-multi-hydro-par")
+    }
+
+    /// D19's study stages share one `season_id`, so `study_stage_noise_group_ids`
+    /// groups them into a single shared noise group — the sharing case a monthly
+    /// (all-unique-groups) fixture cannot exercise.
+    #[test]
+    fn non_root_opening_tree_matches_rank_0_under_shared_noise_groups() {
+        let case_dir = d19_case_dir();
+        let args = RunArgs {
+            case_dir: case_dir.clone(),
+            output: None,
+            quiet: true,
+            threads: None,
+            comm_backend: CommBackendArg::Local,
+        };
+        let (prepared, _hydro_models, bcast, _config, _scalars, _timings) =
+            load_case_and_config(&args, true, &Term::stderr())
+                .expect("D19 must load and prepare stochastic context on rank 0");
+
+        let ids = study_stage_noise_group_ids(&prepared.system);
+        assert!(
+            ids.windows(2).any(|w| w[0] == w[1]),
+            "D19 fixture must exercise shared noise groups; got {ids:?}",
+        );
+
+        let rank0_tree = prepared.stochastic.opening_tree();
+
+        let non_root = reconstruct_stochastic_context_non_root(
+            &prepared.system,
+            &bcast,
+            None,
+            bcast.seed,
+            &case_dir,
+        )
+        .expect("non-root reconstruction must succeed for D19");
+        let non_root_tree = non_root.opening_tree();
+
+        assert_eq!(
+            non_root_tree.data(),
+            rank0_tree.data(),
+            "non-root opening tree data must match rank 0's under shared noise groups"
+        );
+        assert_eq!(
+            non_root_tree.openings_per_stage_slice(),
+            rank0_tree.openings_per_stage_slice(),
+            "non-root opening tree shape must match rank 0's under shared noise groups"
+        );
+        assert_eq!(
+            non_root_tree.dim(),
+            rank0_tree.dim(),
+            "non-root opening tree dim must match rank 0's under shared noise groups"
+        );
+    }
 }
