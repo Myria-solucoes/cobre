@@ -16,8 +16,8 @@
 //! carries the standardized annual coefficient and `σ^A` per season;
 //! [`derive_residual_std_ratios_annual`] and [`check_stationarity_annual`]
 //! extend the classical closure to the effective system with `K = 12` (see
-//! `precompute.rs:534–586` for the ground-truth original-unit construction
-//! these reproduce in standardized terms).
+//! `fill_stage_arrays` in `par::precompute` for the ground-truth
+//! original-unit construction these reproduce in standardized terms).
 
 use std::cmp::Ordering;
 
@@ -49,7 +49,7 @@ pub fn implied_periodic_acf(
             for j in 1..=orders[m] {
                 let coeff = psi[j - 1];
                 // `j % n_seasons` / `kp % n_seasons` prevent underflow when an
-                // order exceeds n_seasons (matches yw_matrices.rs:128).
+                // order exceeds n_seasons (matches `build_periodic_yw_matrix`'s guard).
                 match j.cmp(&kp) {
                     Ordering::Equal => b[row] += coeff,
                     Ordering::Less => {
@@ -252,12 +252,12 @@ pub struct AnnualParams {
 
     /// Sample std `σ^A` of the rolling 12-month average, in the same units as
     /// `seasonal_std`. `0.0` degenerates the season's annual term to
-    /// classical (no divide-by-zero), matching `precompute.rs:544`.
+    /// classical (no divide-by-zero), matching `fill_stage_arrays`.
     pub sigma_a: f64,
 }
 
 /// Whether any season's annual term actually contributes (`σ^A ≠ 0`) — the
-/// "engaged" state `precompute.rs:539,544` gates on. `false` means the
+/// "engaged" state `fill_stage_arrays` gates on. `false` means the
 /// annual term is inert (absent, or every present `σ^A == 0`) everywhere, so
 /// the PAR(p)-A closure degenerates to the classical one bit-for-bit.
 fn annual_engaged(annual: &[Option<AnnualParams>]) -> bool {
@@ -267,7 +267,7 @@ fn annual_engaged(annual: &[Option<AnnualParams>]) -> bool {
 }
 
 /// Builds the per-season effective standardized coefficient vectors for the
-/// PAR(p)-A model, reproducing `precompute.rs:534–586`'s annual spread in
+/// PAR(p)-A model, reproducing `fill_stage_arrays`'s annual spread in
 /// standardized terms.
 ///
 /// The stride `k` widens to 12 whenever any season carries `annual:
@@ -280,7 +280,7 @@ fn annual_engaged(annual: &[Option<AnnualParams>]) -> bool {
 /// The effective coefficient at lag `τ` for season `m` is
 /// `ψ*ᵉᶠᶠ_{m,τ} = (ψ*_{m,τ} if τ ≤ orders[m] else 0) + c_τ · ψ`, where
 /// `c_τ = s_{m−τ} / (12 σ^A)` reproduces the original-unit `ψ̂/12` spread
-/// (`precompute.rs:580`) after the standardized↔original rescale
+/// (`fill_stage_arrays`) after the standardized↔original rescale
 /// `ψ = ψ*ᵉᶠᶠ · s_m / s_{m−τ}`.
 fn effective_psi_by_season(
     psi_by_season: &[Vec<f64>],
@@ -490,8 +490,8 @@ mod tests {
 
     /// Test-local port of the prototype's classical periodic YW solve
     /// (`par-noise-closure-check.py::yw_solve`): predicts season `m` from a
-    /// `rho` table directly, mirroring `build_periodic_yw_matrix`
-    /// (`yw_matrices.rs:106`) but reading `rho` instead of raw observations.
+    /// `rho` table directly, mirroring `build_periodic_yw_matrix` but
+    /// reading `rho` instead of raw observations.
     fn yw_solve_from_rho(m: usize, p: usize, rho: &[Vec<f64>]) -> (Vec<f64>, f64) {
         if p == 0 {
             return (Vec::new(), 1.0);
@@ -784,12 +784,11 @@ mod tests {
         }
     }
 
-    /// 12-month PAR(p)-A fixture matching `precompute.rs`'s own
-    /// `par_a_on_12_seasons_with_season_fallback` pattern: only month 0
-    /// carries an AR(1) coefficient and an annual component; the other
-    /// months are AR(0), no annual. `mean = 100 + 10*stage_id`,
-    /// `std = 20 + 2*stage_id` for every month — all strictly positive (the
-    /// bit-parity requirement needs every `s_{m-τ} > 0`).
+    /// 12-month PAR(p)-A fixture over one stage per season:
+    /// `mean = 100 + 10*stage_id`, `std = 20 + 2*stage_id` for every month —
+    /// all strictly positive (the bit-parity requirement needs every
+    /// `s_{m-τ} > 0`). Per-month classical order and annual component come
+    /// from a [`MonthSpec`] pattern.
     struct ParAPrecomputeFixture {
         psi_by_season: Vec<Vec<f64>>,
         orders: Vec<usize>,
@@ -799,7 +798,17 @@ mod tests {
         stages: Vec<Stage>,
     }
 
-    fn par_a_precompute_fixture() -> ParAPrecomputeFixture {
+    /// Per-month fixture spec: classical AR order (coefficients generated
+    /// from [`PSI_BASE`], month-scaled) + optional annual
+    /// `(coefficient, sigma_a)`.
+    type MonthSpec = (usize, Option<(f64, f64)>);
+
+    const PSI_BASE: [f64; 16] = [
+        0.30, -0.15, 0.10, -0.05, 0.08, -0.04, 0.06, -0.03, 0.05, -0.02, 0.04, -0.02, 0.03, -0.01,
+        0.02, -0.01,
+    ];
+
+    fn par_a_precompute_fixture_with(pattern: &[MonthSpec; 12]) -> ParAPrecomputeFixture {
         let mut stages = Vec::with_capacity(12);
         let mut seasonal_std = Vec::with_capacity(12);
         let mut psi_by_season = vec![Vec::new(); 12];
@@ -812,41 +821,35 @@ mod tests {
             let fi = f64::from(stage_id);
             let mean = 100.0 + fi * 10.0;
             let std = 20.0 + fi * 2.0;
+            let (order, month_annual) = pattern[m];
 
             stages.push(par_a_stage(m, stage_id, m));
             seasonal_std.push(std);
 
-            if stage_id == 0 {
-                psi_by_season[m] = vec![0.5];
-                orders[m] = 1;
-                annual[m] = Some(AnnualParams {
-                    coefficient: 0.4,
-                    sigma_a: 18.0,
-                });
-                models.push(InflowModel {
-                    hydro_id: EntityId(1),
-                    stage_id,
+            let coeffs: Vec<f64> = PSI_BASE[..order]
+                .iter()
+                .map(|&base| base * fi.mul_add(0.02, 1.0))
+                .collect();
+            psi_by_season[m].clone_from(&coeffs);
+            orders[m] = order;
+            annual[m] = month_annual.map(|(coefficient, sigma_a)| AnnualParams {
+                coefficient,
+                sigma_a,
+            });
+
+            models.push(InflowModel {
+                hydro_id: EntityId(1),
+                stage_id,
+                mean_m3s: mean,
+                std_m3s: std,
+                ar_coefficients: coeffs,
+                residual_std_ratio: 0.9,
+                annual: month_annual.map(|(coefficient, sigma_a)| AnnualComponent {
+                    coefficient,
                     mean_m3s: mean,
-                    std_m3s: std,
-                    ar_coefficients: vec![0.5],
-                    residual_std_ratio: 0.9,
-                    annual: Some(AnnualComponent {
-                        coefficient: 0.4,
-                        mean_m3s: mean,
-                        std_m3s: 18.0,
-                    }),
-                });
-            } else {
-                models.push(InflowModel {
-                    hydro_id: EntityId(1),
-                    stage_id,
-                    mean_m3s: mean,
-                    std_m3s: std,
-                    ar_coefficients: vec![],
-                    residual_std_ratio: 1.0,
-                    annual: None,
-                });
-            }
+                    std_m3s: sigma_a,
+                }),
+            });
         }
 
         ParAPrecomputeFixture {
@@ -859,22 +862,33 @@ mod tests {
         }
     }
 
-    /// Pins [`effective_psi_by_season`]'s reconstruction against the actual
-    /// `PrecomputedPar` build (the real `precompute.rs:534-586` code, not a
-    /// hand-transcribed port) — the closure's effective coefficients,
-    /// rescaled to original units, must equal `precompute.rs`'s psi buffer
-    /// for every `(season, lag)`.
-    #[test]
-    fn par_a_effective_coeffs_match_precompute() {
-        let fixture = par_a_precompute_fixture();
+    /// `precompute.rs`'s own `par_a_on_12_seasons_with_season_fallback`
+    /// pattern: only month 0 carries an AR(1) coefficient and an annual
+    /// component; the other months are AR(0), no annual.
+    fn par_a_precompute_fixture() -> ParAPrecomputeFixture {
+        let mut pattern: [MonthSpec; 12] = [(0, None); 12];
+        pattern[0] = (1, Some((0.4, 18.0)));
+        par_a_precompute_fixture_with(&pattern)
+    }
+
+    /// The cross-module agreement pin: [`effective_psi_by_season`]'s
+    /// standardized coefficients, rescaled to original units, must equal the
+    /// actual `PrecomputedPar` psi buffer for every `(season, lag)` — the
+    /// closure derives the innovation scale for exactly the coefficients
+    /// precompute generates scenarios with, and nothing but this agreement
+    /// binds the two formulas.
+    fn assert_effective_matches_precompute(fixture: &ParAPrecomputeFixture) {
+        let expected_stride = fixture.orders.iter().copied().max().unwrap_or(0).max(
+            if fixture.annual.iter().any(Option::is_some) {
+                12
+            } else {
+                0
+            },
+        );
 
         let lp = PrecomputedPar::build(&fixture.models, &fixture.stages, &[EntityId(1)], None)
             .expect("precompute build succeeds");
-        assert_eq!(
-            lp.max_order(),
-            12,
-            "annual component must widen max_order to 12"
-        );
+        assert_eq!(lp.max_order(), expected_stride, "precompute stride");
 
         let (effective_psi, k) = effective_psi_by_season(
             &fixture.psi_by_season,
@@ -883,17 +897,15 @@ mod tests {
             &fixture.seasonal_std,
             12,
         );
-        assert_eq!(k, 12);
+        assert_eq!(k, expected_stride, "closure stride");
 
-        let mut max_gap = 0.0_f64;
         for (m, effective_psi_m) in effective_psi.iter().enumerate() {
             let psi_slice = lp.psi_slice(m, 0);
-            for tau in 1..=12_usize {
+            for tau in 1..=k {
                 let lag_season = (m + 12 - tau % 12) % 12;
                 let reconstructed = effective_psi_m[tau - 1] * fixture.seasonal_std[m]
                     / fixture.seasonal_std[lag_season];
                 let gap = (reconstructed - psi_slice[tau - 1]).abs();
-                max_gap = max_gap.max(gap);
                 assert!(
                     gap < 1e-12,
                     "season {m} lag {tau}: reconstructed={reconstructed}, \
@@ -902,7 +914,90 @@ mod tests {
                 );
             }
         }
-        assert!(max_gap < 1e-12, "max reconstruction gap = {max_gap:e}");
+    }
+
+    /// Pins [`effective_psi_by_season`]'s reconstruction against the actual
+    /// `PrecomputedPar` build (the real precompute code, not a
+    /// hand-transcribed port) on the single-annual-month pattern.
+    #[test]
+    fn par_a_effective_coeffs_match_precompute() {
+        assert_effective_matches_precompute(&par_a_precompute_fixture());
+    }
+
+    /// The same agreement pinned across a deliberately diverse pattern
+    /// matrix — annual on every month with mixed signs and orders,
+    /// present-but-inert (`σ^A == 0`) months beside engaged ones, a
+    /// classical order exceeding 12 (stride widened past the annual
+    /// window), and annual-only (order 0 everywhere) — the shapes the
+    /// single-pattern pin above cannot catch a formula desync on.
+    #[test]
+    fn par_a_effective_coeffs_match_precompute_pattern_sweep() {
+        let all_annual_mixed_orders: [MonthSpec; 12] = [
+            (1, Some((0.35, 12.0))),
+            (0, Some((-0.22, 15.0))),
+            (2, Some((0.31, 9.0))),
+            (3, Some((-0.18, 20.0))),
+            (0, Some((0.27, 11.0))),
+            (1, Some((-0.33, 14.0))),
+            (2, Some((0.15, 17.0))),
+            (1, Some((-0.29, 8.0))),
+            (3, Some((0.24, 13.0))),
+            (0, Some((-0.12, 19.0))),
+            (2, Some((0.38, 10.0))),
+            (1, Some((-0.21, 16.0))),
+        ];
+        let inert_mix: [MonthSpec; 12] = [
+            (3, Some((0.40, 18.0))),
+            (1, None),
+            (2, Some((-0.25, 12.0))),
+            (1, None),
+            (0, Some((0.55, 0.0))),
+            (2, None),
+            (1, Some((0.19, 21.0))),
+            (3, None),
+            (0, Some((-0.31, 15.0))),
+            (1, None),
+            (2, Some((0.62, 0.0))),
+            (1, None),
+        ];
+        let wide_stride: [MonthSpec; 12] = [
+            (0, None),
+            (1, None),
+            (0, None),
+            (13, Some((0.28, 14.0))),
+            (0, None),
+            (2, None),
+            (0, None),
+            (1, Some((-0.17, 11.0))),
+            (0, None),
+            (0, None),
+            (1, None),
+            (0, None),
+        ];
+        let annual_only: [MonthSpec; 12] = [
+            (0, Some((0.30, 10.0))),
+            (0, Some((-0.20, 12.0))),
+            (0, Some((0.25, 14.0))),
+            (0, Some((-0.15, 16.0))),
+            (0, Some((0.35, 18.0))),
+            (0, Some((-0.10, 20.0))),
+            (0, Some((0.28, 9.0))),
+            (0, Some((-0.24, 11.0))),
+            (0, Some((0.18, 13.0))),
+            (0, Some((-0.32, 15.0))),
+            (0, Some((0.22, 17.0))),
+            (0, Some((-0.26, 19.0))),
+        ];
+
+        for (name, pattern) in [
+            ("all_annual_mixed_orders", &all_annual_mixed_orders),
+            ("inert_mix", &inert_mix),
+            ("wide_stride", &wide_stride),
+            ("annual_only", &annual_only),
+        ] {
+            println!("pattern: {name}");
+            assert_effective_matches_precompute(&par_a_precompute_fixture_with(pattern));
+        }
     }
 
     #[test]
@@ -939,7 +1034,7 @@ mod tests {
         let seasonal_std = vec![25.0, 22.0, 28.0, 24.0];
         // Every present annual entry has σ^A == 0 — the whole model is
         // inert, so the closure must degenerate to classical exactly (no
-        // divide-by-zero), matching `precompute.rs:544`.
+        // divide-by-zero), matching `fill_stage_arrays`.
         let annual: Vec<Option<AnnualParams>> = vec![
             Some(AnnualParams {
                 coefficient: 0.7,
