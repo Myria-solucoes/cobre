@@ -3,8 +3,10 @@
 artifact (engineering-monograph identity: copper accent on graphite neutrals)."""
 import re, html
 
-SRC = "/home/rogerio/git/cobre/docs/design/beyond-sddp-generalization.md"
-OUT = "/home/rogerio/git/cobre/docs/design/beyond-sddp-generalization.html"
+import os
+_HERE = os.path.dirname(os.path.abspath(__file__))
+SRC = os.path.join(_HERE, "beyond-sddp-generalization.md")
+OUT = os.path.join(_HERE, "beyond-sddp-generalization.html")
 
 # Private-use-area sentinels delimit code-span placeholders so the restore step
 # can never collide with real digits in the prose.
@@ -323,17 +325,52 @@ JS = r"""
 </script>
 """
 
-# Mermaid renders client-side from a module CDN. A LOCAL file has no CSP (unlike the
-# hosted artifact), so this works when online; offline / CDN-blocked, the raw graph
-# text stays visible and the Markdown remains the diagram-complete source.
-MERMAID = r"""
-<script type="module">
-  try {
-    const mermaid = (await import("https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs")).default;
-    mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose", flowchart: { htmlLabels: true } });
-  } catch (e) { /* offline or CDN blocked: leave the mermaid source visible */ }
-</script>
+# Mermaid renders client-side. Preferred path: mermaid.min.js beside this
+# script is INLINED, so the HTML is fully self-contained and the diagrams
+# render offline (file://, no CDN). The file is deliberately NOT tracked in git
+# (see .gitignore) — when missing, it is auto-downloaded once from the pinned
+# URL below; if that fails (offline build), the HTML falls back to a CDN ESM
+# import. Every path calls mermaid.run() explicitly — startOnLoad:true races an
+# async import and silently skips rendering when the page's load event fires
+# before the module arrives, which is exactly the bug the CDN-only version had.
+_MERMAID_PINNED_URL = "https://cdn.jsdelivr.net/npm/mermaid@11.16.0/dist/mermaid.min.js"
+_MERMAID_RUN_JS = r"""
+  const _mermaidGo = async () => {
+    try {
+      mermaid.initialize({ startOnLoad: false, theme: "neutral", securityLevel: "loose", flowchart: { htmlLabels: true } });
+      await mermaid.run({ querySelector: ".mermaid" });
+    } catch (e) { console.error("mermaid render failed:", e); /* source stays visible */ }
+  };
+  if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", _mermaidGo); }
+  else { _mermaidGo(); }
 """
+_MERMAID_LOCAL = os.path.join(_HERE, "mermaid.min.js")
+if not os.path.exists(_MERMAID_LOCAL):
+    try:
+        import sys
+        import urllib.request
+
+        print(f"mermaid.min.js missing — downloading {_MERMAID_PINNED_URL}", file=sys.stderr)
+        urllib.request.urlretrieve(_MERMAID_PINNED_URL, _MERMAID_LOCAL)
+    except Exception as exc:  # offline build: HTML falls back to the CDN loader
+        print(f"mermaid download failed ({exc}); emitting CDN-loader HTML", file=sys.stderr)
+if os.path.exists(_MERMAID_LOCAL):
+    MERMAID = (
+        "<script>"
+        + open(_MERMAID_LOCAL, encoding="utf-8").read()
+        + "</script>\n<script>"
+        + _MERMAID_RUN_JS
+        + "</script>"
+    )
+else:
+    MERMAID = (
+        '<script type="module">\n'
+        "try {\n"
+        '  const mermaid = (await import("https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs")).default;\n'
+        + _MERMAID_RUN_JS
+        + "\n} catch (e) { /* offline or CDN blocked: leave the mermaid source visible */ }\n"
+        "</script>"
+    )
 
 body_html = (
     '<div class="shell">'

@@ -2,6 +2,12 @@
 
 **Date:** 2026-07-14
 **Status:** Research proposal / architectural roadmap (no implementation this cycle)
+**Verification addendum (2026-07-16):** an independent feasibility pass executed
+the two spikes this roadmap gates on (D10 monomorphization, D3 HiGHS MIP
+determinism) and ran precedent research the original streams did not cover —
+results, harnesses, and raw logs in `feasibility-verification-2026-07.md` and
+`spikes/` (this directory). Sections and forks below have been amended in place
+where that evidence landed; each amendment cites the addendum.
 **Scope:** How to evolve Cobre from a single-vertical SDDP hydrothermal-dispatch
 tool into a genuine multi-vertical power-system optimization ecosystem — the data
 model, the crate/module borders, the solver and orchestration seams, and a
@@ -22,8 +28,9 @@ and can be read at three depths:
 - **The analysis (Parts I–III)** — where Cobre is today (I), how the field solves
   the generalization problem (II), and the specific design axes and the choices
   each forces (III).
-- **The plan (Parts IV–VI)** — the target crate/module architecture (IV), the
-  phased roadmap with decision gates and a risk register (V), and the open
+- **The plan (Parts IV–VI)** — the target crate/module architecture (IV); the
+  phased roadmap with decision gates, the user-visible surface phase by phase
+  (V.9), and a risk register (V); and the open
   decisions that need an owner's call (VI).
 
 Appendices carry the cited source corpus, a glossary, and per-vertical data-field
@@ -79,7 +86,9 @@ irreversible break:
    DC-OPF over one topology; a `cobre-network` crate for derived matrices.
 3. **Integer domain + unit commitment** — `VarDomain`, the `SupportsIntegers`
    capability trait (III.6 — deliberately not a `MilpSolver` kind), and a
-   `Unit`-under-`Plant` model, behind an escalated MILP-determinism policy.
+   `Unit`-under-`Plant` model, under the per-problem-class determinism-tier
+   policy (III.6; owner-scoped 2026-07-16, `threads=1` Tier-1 default
+   spike-evidenced).
 4. **Capacity expansion + composition** — and only now promote the cut pool to a
    first-class value-function artifact, once a second value-function participant
    exists. Full AC-OPF is deliberately deferred (it breaks the _solver_ contract).
@@ -386,6 +395,12 @@ _mechanism_ (Julia runtime multiple dispatch, mutable structs, an untyped
 `ext::Dict` escape hatch, insertion-ordered lazy iteration, auto-deleted HDF5-temp
 time-series) is hostile to Cobre's no-`dyn`, immutable-after-build, bit-for-bit
 world. **Copy the separation, not the mechanism** — a theme Part III returns to.
+A third caveat is institutional: in late 2025 the Sienna GitHub organization
+migrated (NREL-Sienna → Sienna-Platform) amid its host lab's renaming and
+priority shift — the design lessons stand (the packages are permissively
+licensed and the `DeviceModel`/`ProblemTemplate` core is unchanged through
+PowerSystems.jl v5), but Sienna's _roadmap_ should be treated as a precedent,
+not a stable multi-year anchor.
 
 **PyPSA — the pragmatic single-package model, and the decisive precedent.** PyPSA's
 `Network` holds one DataFrame per component type (`Bus`, `Generator`,
@@ -404,8 +419,15 @@ _deprecated open custom components_ in v0.33 — both `override_components` and
 as only a possible future re-addition "in an improved way" — retreating to a
 **fixed component set** whose richness lives in the standard per-component
 attributes. A framework built on runtime extensibility deliberately adopted exactly
-the closed-set posture Cobre's constraints impose. _(Sources: docs.pypsa.org UC +
-components; PyPSA v0.33 release notes and PRs #1130/#1131; Brown et al.,
+the closed-set posture Cobre's constraints impose. PyPSA v1.0 (2025) settled the
+direction: the replacement is a curated, first-class `Components` API — there is
+still **no plugin mechanism for user-defined component types** — and v1.0 also
+added native two-stage stochastic programming with CVaR (two-stage only, no
+multistage/SDDP overlap). One stale claim to retire: current PyPSA co-optimizes
+unit commitment with capacity expansion — do not cite the old restriction.
+_(Sources: docs.pypsa.org UC +
+components; PyPSA v0.33 release notes and PRs #1130/#1131; PyPSA v1.0 user
+guide; Brown et al.,
 arXiv:1707.09913; cycle-flow formulation, arXiv:1704.01881.)_
 
 **PowerModels.jl — the multi-fidelity network answer.** PowerModels selects among
@@ -453,8 +475,13 @@ fixed-column Fortran text — untyped, versionless — forcing the community to
 reverse-engineer typed readers (`inewave`/`idecomp`/`idessem`). Two load-bearing
 claims here are _reported but not primary-verified_ and should be treated with
 care: that "DESSEM is openly non-deterministic," and that "only `hidr` is shared."
-And the aggregate-REE characterization is **going obsolete** — the Brazilian sector
-is migrating toward individual-plant representation ("NEWAVE Híbrido"). CEPEL is
+And the aggregate-REE characterization is **already obsolete in production** — the
+"NEWAVE Híbrido" individual-plant representation has been official for PMO/PLD
+since January 2025 (individualized plants in the first twelve months; the 2025
+CVaR recalibration is α = 15 %, λ = 40 %), and DESSEM v22 was authorized in
+January 2026. No CEPEL model has been open-sourced — the 2025–26 movement is a
+transparency/governance process (ANEEL-mandated consultation and a technical
+portal), not open code. CEPEL is
 therefore an instructive _contrast_, not a fixed target.
 
 **PSR: SDDP / OptGen / NCP — the unified counter-model.** PSR's commercial stack
@@ -639,6 +666,20 @@ continuous LP is untouched. The same principle covers the network (single-arc
 cascade, zero-reactance transport) and the variable domain (`Continuous` is the
 degenerate case of `{Continuous, Integer, Binary}`).
 
+Two verification-pass amendments (2026-07-16) sharpen this. First, the
+granularity precedent is split: the open-source formulation libraries
+(UnitCommitment.jl, Egret, Sienna, PyPSA) all **flatten** to one generator = one
+unit, while `Unit`-under-`Plant` is the shape of the **production dispatch
+tools** — DESSEM's unidades geradoras under usinas (the daily tool of Cobre's
+audience) and PLEXOS's unit clustering — and the per-unit data that advanced UC
+needs (multi-temperature startup stages, hydro forbidden operating zones) is
+affirmative evidence for the hierarchy. Frame the choice as production-dispatch
+alignment, not academic convention. Second, commitment is assigned **per entity
+class**, not as one global switch (Sienna's `DeviceModel` map is the precedent):
+a study commits thermal units while hydro and renewables stay continuous, so
+`CommitmentConfig` is a per-class (ultimately per-unit-class) field of the
+template, with `None` remaining the zero-binary degenerate default everywhere.
+
 One caveat keeps this from being a dogma: **a parallel variant is warranted when
 attributes genuinely cannot express the difference.** Sienna keeps _two_ thermal
 types (`ThermalStandard` + `ThermalMultiStart`) because multi-temperature startup data
@@ -647,8 +688,10 @@ only when attributes cannot capture the physics" — a per-entity judgment. Eith
 the individual/detailed model stays authoritative and aggregates (REE-style) are
 derived as compile-time projections.
 
-**Decision:** `Unit`-under-`Plant`, aggregates as derived projections,
-`Option`-gated features, `CommitmentConfig::None` emitting zero binaries; permit a
+**Decision:** `Unit`-under-`Plant` (production-dispatch precedent: DESSEM,
+PLEXOS), aggregates as derived projections,
+`Option`-gated features, commitment assigned per entity class with
+`CommitmentConfig::None` emitting zero binaries; permit a
 parallel entity type only where attributes provably cannot capture the physics.
 
 ### III.3 Data / formulation / algorithm separation — the central seam
@@ -681,6 +724,13 @@ Two properties carry the design:
 - **The problem is a composed `ProblemTemplate` _value_, never a top-level enum.**
   Problem identity is _emergent_ from which per-axis formulations the template holds
   — as in Sienna's `DeviceModel`/`ProblemTemplate` and Coluna's typed `Annotation`.
+  The UC libraries confirm the same shape independently (verification addendum):
+  UnitCommitment.jl fills abstract per-axis formulation slots with paper-named
+  marker structs, and Egret composes a nine-slot `UCFormulation` template — i.e.
+  **one closed enum per formulation axis** (ramping, piecewise costs, startup
+  costs, generation limits, min-up/down), composed into the template. Egret's
+  stringly-typed `getattr` selection is the anti-pattern contrast; Cobre's enums
+  provide the compile-time closed set it lacks.
 - **Dispatch is two-level, keyed on the engine — never on a `problem × method`
   bundle.** _Outer_ (cold, once per run): a closed `Engine` enum + `match` living
   **only at L4** (`cobre-cli`/`cobre-python`, the sole layer that sees every engine),
@@ -718,19 +768,30 @@ classes, i.e. exactly the `Box<dyn Trait>`/registry shape Cobre forbids. Its
 _mechanism_ does not transplant; Cobre must reach the same separation with closed
 enums + trait bounds.
 
-The maintenance cost is real: every new formulation edits central
-enums, and `vertical × formulation × fidelity × domain` monomorphization is unmeasured.
-So **legalize only the tuples actually built**, and **gate the whole constructive
-design on the monomorphization spike** (`cargo-bloat`/`cargo-llvm-lines` over a
-synthetic matrix) before it is load-bearing — the design is fundable-to-spike, not
-fundable-to-build, until that runs (see the readiness note in Appendix D).
+The maintenance cost is real, and it splits into a measured half and a budgeted
+half. Measured: **the monomorphization spike (D10) was executed** (2026-07-16,
+verification addendum). The recommended value-based template shows **no
+formulation-matrix multiplier at all** — codegen scales with source size, ~×2
+per engine — while the worst-credible type-level matrix costs 3.2× compile /
+1.6× binary at 15 legalized tuples × 2 engines, **linear in legalized tuples**;
+restricting to the built tuples verifiably collapses it back to baseline. So
+**legalize only the tuples actually built** stands as the verified mitigation,
+and the constructive design is fundable-to-build from the compile-cost axis
+(D9 still decides how much of the enforcement is compile-time). Budgeted, not
+measured: the per-formulation touch list — the per-axis enum, a `BuildProblem`
+impl, the admission-gate legal-tuple set plus a rejection test and error
+message, the committed schemas, the Python stubs, and the determinism-harness
+case — and the CI wall-time trajectory as the feature matrix grows. Neither is
+covered by the spike; both belong in the Phase-0 review checklist.
 
 **Decision:** a composed `ProblemTemplate` _value_ (per-axis closed enums, problem
 identity emergent); outer `Engine`-enum dispatch to named entry-point functions at
 L4; inner engine as a monomorphized trait (not a discriminant enum), SDDiP a
 sub-strategy of SDDP; structure gates, method is chosen; the legal set compile-enforced
 (`diesel`/`embedded-hal` idiom) while the config-selected instance is a runtime
-admission gate; legalize only built tuples; gate on the monomorphization spike.
+admission gate; legalize only built tuples (mitigation verified — the D10 spike
+was executed and the compile-cost gate is satisfied; see the verification
+addendum and D10).
 
 ### III.4 The temporal model and a problem-composition layer
 
@@ -767,7 +828,17 @@ producers/consumers), fixed-decision feedforward (the only currency that crosses
 convex→nonconvex boundary, e.g. into UC/AC), and budget-to-bound. A general
 composition DAG + a promoted `ValueFunctionArtifact` would generalize from n=1,
 though — only SDDP produces a value function today, and for the nonconvex problems
-(UC and AC-OPF) the value-function currency is unavailable. So: **design the boundary rules now** (a typed composition edge whose
+(UC and AC-OPF) the value-function currency is unavailable. The verification
+pass hardened the defer: **no open, typed value-function/FCF schema exists
+anywhere in the field** — StochOptFormat deliberately excludes the cost-to-go
+(and has been frozen at v1.0.0, single-implementation, since 2023), SDDP.jl's
+cut files are an undocumented Julia-coupled single-tool round-trip, and the
+production FCF artifacts (CEPEL `cortes.dat`, PSR's terminal cost function) are
+proprietary binaries decoded by community readers. When the artifact is
+eventually built, Cobre will be **defining** the first open schema, not
+adopting one — and because FCF files move markets and are corrected under
+regulatory deadlines, provenance, versioning, and auditability are first-class
+requirements of that schema, not afterthought metadata. So: **design the boundary rules now** (a typed composition edge whose
 type enforces "value-function edges are convex-producer-only; any edge into a
 MILP/nonconvex vertical is fixed-decision feedforward") and **defer building** the
 general DAG and the artifact promotion until a _second_ value-function producer or
@@ -802,6 +873,24 @@ dedicated **`cobre-network`** crate (sibling to `cobre-stochastic`) with a _pinn
 deterministic factorization order_, a canonical slack bus (lowest id), and a
 `θ_ref = 0` pin to preserve bit-for-bit reproducibility.
 
+The verification pass (2026-07-16) filled the two blanks that recommendation
+left. **Backend:** `faer` on its single-threaded path (`Par::Seq`, or built
+without its `rayon` feature) — the only pure-Rust library carrying the sparse
+LU + Cholesky + QR this ladder needs (AMD ordering; MIT/Apache-2.0; pin the
+version and golden-test the still-young sparse module against a dense
+reference) — with vendored KLU FFI as the fallback (the PowerNetworkMatrices.jl
+choice; LGPL-2.1 relink obligation noted; UMFPACK-based routes are a GPL trap
+for an Apache-2.0 distribution). **Contract:** the canonical slack bus is
+necessary but not sufficient — **canonical bus/branch ordering before matrix
+assembly** joins the determinism contract, because AMD's elimination order is a
+function of input order and order variance surfaces at the last ULP (the D3
+permutation probe demonstrates the same physics on the MIP side). The lazy
+`VirtualPTDF` row cache is exactly what PowerNetworkMatrices.jl ships (stored
+KLU factors + on-demand rows + LRU eviction); dense PTDF at Brazilian scale
+(~10k buses × ~15k branches ≈ a gigabyte of f64) is feasible on a workstation
+but wasteful — lazy is the right default, with eager materialization as an
+opt-in for small grids.
+
 A further axis must be pinned before any impedance-based
 vertical lands: **a units / per-unit policy** (base MVA, per-unit vs SI, angle
 units, sign conventions). Under a bit-for-bit contract, unit ambiguity is a silent
@@ -819,7 +908,9 @@ transport-vs-DC fidelity question.
 
 **Decision:** add a passive `ElectricalBranch` beside the transport edge; a
 `NetworkFormulation` enum orthogonal to `Engine`; a `cobre-network` crate owning
-derived matrices with pinned deterministic ordering; a documented per-unit policy;
+derived matrices with pinned deterministic ordering — `faer` single-threaded as
+the factorization backend (KLU-FFI fallback) and canonical bus/branch
+pre-ordering added to the contract; a documented per-unit policy;
 spatial aggregation as its own axis.
 
 ### III.6 Solver-paradigm expansion (LP/MILP → NLP/conic) and determinism under MILP
@@ -859,7 +950,13 @@ about the _current_ bindings keep the MILP leg honest: the in-tree HiGHS FFI exp
 **no MIP surface today** (no integrality marking, no MIP solve/solution path), so
 `SupportsIntegers` is new binding + solve-path work, not a trait split; and the CLP
 backend can never provide it (Cbc is not vendored), so the admission gate must
-**reject any integer formulation on a `clp`-feature binary**. SOC/QC
+**reject any integer formulation on a `clp`-feature binary**. A third MIP option
+now exists and deserves a named place: **SCIP is fully Apache-2.0** (since
+v8.0.3, reaffirmed through v10) and `russcip` ships a bundled build — the same
+thin-FFI-to-vendored-C philosophy as Cobre's own backends, and SCIP documents
+seed-fixed reproducibility where HiGHS documents nothing. It is the designated
+fallback if HiGHS MIP proves weak on performance or correctness, not a third
+simultaneous backend. SOC/QC
 relaxations need a conic backend (the pure-Rust `Clarabel.rs` is a candidate); full
 **AC-OPF is nonconvex NLP** (Ipopt-class via FFI).
 
@@ -888,20 +985,45 @@ AC-NLP behind a distinct, later effort with its _own_ determinism policy that op
 acknowledges AC solutions are at best tolerance-reproducible, not bit-for-bit — or
 the decision not to ship AC at all. Do not let AC's data needs enter core now.
 
-**MILP determinism is the item the anti-simplification rule says to escalate, not
-resolve silently.** Three nuances matter here: deterministic _parallel_
-branch-and-bound has long been available in commercial solvers (Gurobi/CPLEX/COPT)
-but is **new and single-paper-thin for open-source HiGHS** (arXiv:2604.09556,
-Apr 2026, billed as the first open-source such implementation); HiGHS's own
-documentation makes **no run-to-run determinism statement at all — even for
-single-threaded MIP** — so `threads=1` reproducibility is an assumption to retire
-empirically (extend the `clp_determinism.rs`-style harness to MIP as a D3 input),
-not a documented guarantee; and the "DESSEM is
-openly non-deterministic" precedent is reported, not primary-verified. So the
-conservative policy is **`threads=1` deterministic solve, or a pinned-version +
-pinned-thread-count carve-out**, with the explicit acknowledgment that for MILP
+**MILP determinism was the item the anti-simplification rule said to escalate;
+the escalation has since produced evidence and an owner decision.** The factual
+ground first, updated by the verification pass (2026-07-16): deterministic
+_parallel_ branch-and-bound has long been available in commercial solvers
+(Gurobi/CPLEX ship it by default via deterministic work clocks; CBC has an
+opt-in mode) but remains **absent from HiGHS** — the single open-source result
+(arXiv:2604.09556, Apr 2026) is an unmerged academic prototype, and the HiGHS
+maintainer describes the concurrent path as "(theoretically) non-deterministic"
+with deterministic pseudo-clocks as future work. HiGHS documentation still makes
+no determinism statement even for single-threaded MIP — but the D3 spike
+**retired that assumption empirically on the vendored HiGHS 1.13.1**: seeded
+symmetric UC MIPs were bit-identical run-to-run and across processes on a
+2,466-node proven-optimal search, a node-limit-truncated search was bit-identical
+too (node/gap limits are determinism-safe; **wall-clock limits are not** and are
+forbidden on any deterministic path), and a column-permutation probe diverged at
+the last ULP — canonical entity ordering before the solver is load-bearing for
+MIP exactly as it is for LP (`spikes/mipdet/`, verification addendum). Three
+operational facts follow: HiGHS **defaults** are `threads=0` + `parallel="choose"`,
+so the deterministic configuration must be explicitly pinned (`threads=1`,
+`parallel="off"`, pinned `random_seed`); HiGHS **version upgrades are both
+determinism- and correctness-sensitive** (a 1.14 MIP correctness regression and
+a 1.15 prototype multithreaded MIP solver are upstream facts) — every vendored
+upgrade re-runs the determinism and correctness harness; and the "DESSEM is
+openly non-deterministic" precedent remains reported, not primary-verified.
+
+**Scope of the contract (owner decision, 2026-07-16):** the hard bit-for-bit
+reproducibility requirement is anchored to the **current applications of the
+SDDP vertical** — it is a property demanded by those applications, not an
+intrinsic property every problem class must inherit. Determinism is therefore a
+**per-problem-class tier declared by the study**: Tier 1, bit-for-bit (SDDP
+operation-planning today, and any vertical whose application demands it —
+`threads=1` MILP under this tier, now evidence-backed); Tier 2, deterministic
+under a pinned environment (pinned solver version + thread count — where the
+deterministic-parallel tooling matures); Tier 3, documented non-reproducible
+(AC-NLP interior point, V.6, already framed this way). For MILP under any tier,
 **warm ≠ cold must be accepted** (multiple equally-optimal integer solutions),
-extending Cobre's existing "cross-algorithm equivalence is not contracted" caveat.
+extending Cobre's existing "cross-algorithm equivalence is not contracted"
+caveat. The tier a given vertical ships under is part of its Phase gate
+(UC's assignment is signed off at Phase 3 — D3).
 This also decides _where UC lives_: full MILP UC fits the deterministic-dispatch and
 expansion settings far better than inside the SDDP training LP, where it would
 collide with the slot-identity basis warm-start machinery (`basis_reconstruct.rs`
@@ -912,9 +1034,11 @@ cuts.
 traits (`SupportsIntegers`, `ProducesDuals`, …) + a typed admission gate — **not** a
 4-kind solver taxonomy; a generic `VarDomain`; a small closed named reformulation set
 for UC/SDDiP; climb transport→DC→LPAC→(SOC) on the LP/conic path; defer AC-NLP to its
-own effort with a separate determinism carve-out; adopt a `threads=1`-class MILP
-determinism policy and **escalate it to an owner** with the warm≠cold caveat
-documented.
+own effort (Tier-3 determinism); determinism is a per-problem-class **tier**
+declared by the study (owner decision 2026-07-16), with bit-for-bit anchored to
+the SDDP vertical's applications, `threads=1` MILP as the Tier-1 default
+(evidence: D3 spike), the warm≠cold caveat documented, and SCIP/russcip as the
+named MIP fallback.
 
 ### III.7 Extracting the stochastic layer out of `cobre-core` (and generalizing it)
 
@@ -949,17 +1073,36 @@ reference" idiom is a genuine design choice rather than a universal convention
 (PyPSA's `_t` is a parallel collection keyed by name); it earns its place here on
 determinism and generality grounds.
 
-One more missing axis to fold in here: a **general results/output model**. Every
-claim above concerns _inputs_; none addresses a general results contract (primals,
-duals, statuses, per-vertical artifacts). Since Cobre's Python-parity hard rule is
-about _outputs_, without a shared results-serialization boundary every new vertical
-re-wires outputs twice (CLI + Python) — the axis most likely to silently break parity
-as verticals multiply.
+One more missing axis to fold in here: the **output boundary that makes
+Python-parity scale** — re-specified by the verification pass (2026-07-16),
+which found the original "shared results trait" framing misdiagnosed the
+mechanism. Today parity is achieved because CLI and Python both call the same
+`cobre-io` writers; what is duplicated is the **hand-mirrored call-site list**,
+and the write orchestration is conditional on config/system state, not on a
+result value — so a trait returning primals/duals would not collapse the
+duplication. The correct seam is **one shared output-orchestration entry point
+in `cobre-io`** — a single call-site list consumed by both the CLI and the
+Python bindings — taking a per-engine results value plus the config/system
+context it needs. Per-engine results stay typed and engine-shaped (SDDP
+training telemetry is not a single-solve primal/dual report); the generalized
+results _schema_ is deferred until the second engine exists — the
+pull-don't-push rule applies to outputs exactly as it does to the data model.
+
+One sub-decision inside the store deserves an explicit trade-off rather than a
+silent default: the **bulk time-series binary layer**. Cobre's rules point to
+postcard/FlatBuffers; the domain-dominant choice is netCDF/HDF5 (Sienna ships
+JSON + HDF5; PyPSA argues netCDF explicitly for cross-language access, float
+-precision control, and lazy loading). FlatBuffers keeps the in-house toolchain
+and zero-copy reads; netCDF buys third-party analyzability of large series.
+Decide it as a named choice during the v2 design, with the interoperability
+cost stated either way.
 
 **Decision:** relocate SDDP formulation config off the data; generalize the
 uncertainty representation into a cross-vertical time-series/uncertainty store
 (`Switchable<T>`, by-reference, content-addressed) rather than an SDDP-private one;
-and add a general results model so Python-parity scales.
+one shared output-orchestration entry point in `cobre-io` (per-engine results
+values; results-schema generalization deferred to the second engine) so
+Python-parity scales; bulk-series binary layer decided as a named trade-off.
 
 ---
 
@@ -991,7 +1134,7 @@ graph TD
         net["cobre-network (NEW)<br/>derived matrices (PTDF/LODF/Ybus)<br/>+ NetworkFormulation"]
     end
     subgraph L2["L2 · Case I/O"]
-        io["cobre-io<br/>multi-vertical case v2 +<br/>import adapters + results model"]
+        io["cobre-io<br/>multi-vertical case v2 + import adapters<br/>+ shared output orchestration"]
     end
     subgraph L3["L3 · Engines + composition"]
         sddp["cobre-sddp<br/>SDDP + SDDiP engine<br/>(policy: train + simulate)"]
@@ -1091,26 +1234,28 @@ must be re-parameterized off the θ-anchored layout; the majority is the SDDP
 decomposition itself and stays put. "Extraction" therefore means _carving a new
 kernel that reuses this logic_, priced as a rewrite, not a move (D12 owns the
 timing). The crate's claim to be engine-neutral rests on n=1 until the second
-consumer (economic dispatch, Phase 0) actually exercises the shared surface — so this
-work is fundable-to-spike, not fundable-to-build, until the monomorphization
-spike runs and the shared surface is validated by a real second consumer.
+consumer (economic dispatch, Phase 0) actually exercises the shared surface. Of
+the two conditions that made this fundable-to-spike rather than
+fundable-to-build, the monomorphization spike has since been executed and
+passed (D10, verification addendum); what remains is the real one — the shared
+surface being validated by a real second consumer, plus the D9 fork.
 
 ### IV.3 New and repurposed crates
 
-| Crate                                 | Status                      | Role in the target architecture                                                                                                                                                                                                                                                                                                                                                                                        |
-| ------------------------------------- | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cobre-core`                          | **purified**                | Paradigm-neutral data only: components (`Plant`→`Unit`), topology (`WaterArc` multigraph, `ElectricalBranch`), `HorizonGraph`, `TemporalStructure`, `InvestmentPeriod`, per-unit policy. Loses PAR(p)/CVaR/branching/`training_event` and the `GenericConstraint` vocabulary.                                                                                                                                          |
-| `cobre-solver`                        | **purified + capabilities** | Sheds the multistage-state fields its "generic" `StageTemplate` carries today (`n_state`/`n_transfer`/`n_dual_relevant`/`n_hydro`/`max_par_order` — I.3); gains the per-feature capability traits (III.6). `SupportsIntegers` is net-new HiGHS MIP FFI work, and the CLP backend never provides it — the admission gate rejects integer formulations there.                                                            |
-| `cobre-model`                         | **new (L1)**                | The formulation kernel (IV.2): indexer, builder, `VarDomain`, `BuildProblem`, `ProblemTemplate`. Carved from the engine-neutral parts of `cobre-sddp`'s `lp/` (new construction — IV.2, D12); consumed by every engine.                                                                                                                                                                                                |
-| `cobre-network`                       | **new (L1)**                | Derived matrices (PTDF/LODF/Ybus, lazy `VirtualPTDF`) with pinned deterministic factorization; the `NetworkFormulation` enum + builders. Consumed by any network-constrained engine (e.g. `cobre-direct` for OPF).                                                                                                                                                                                                     |
-| `cobre-stochastic`                    | **generalized**             | The cross-vertical uncertainty / time-series store (`Switchable<T>`, by-reference, content-addressed) + scenario generation. (The `ValueFunctionArtifact` promotion — a lower, algorithm-agnostic home for the cut pool — is **deferred**: SDDP.jl keeps its `ValueFunction` inside the method, so the pool stays in `cobre-sddp` until proven a bare convex-PWL form and a second value-function participant exists.) |
-| `cobre-io`                            | **generalized**             | Multi-vertical case format v2 (struct-first + schemars; descriptor codegen only if the III.1 spike lands) + v1 compat shim; import adapters (MATPOWER → PSS®E → ONS/CEPEL deck); the generic **results model** so Python-parity scales. Checkpoint format generalized from SDDP cut-records to an engine-neutral policy artifact (the lower `ValueFunctionArtifact` home is deferred — see `cobre-stochastic`).        |
-| `cobre-sddp`                          | **slimmed → engine**        | The **SDDP + SDDiP engine** (policy iteration: train + simulate), generic over the problem via the template; consumes `cobre-model` + `cobre-stochastic`. SDDiP is a duality/cut sub-strategy, not a peer — and a separately-funded effort (D13, V.6).                                                                                                                                                                 |
-| `cobre-direct`                        | **new (L3 engine)**         | The **single-solve engine**: build the extensive form once, solve via HiGHS/CLP, extract. Serves economic dispatch, OPF (over `cobre-network`), and deterministic unit commitment (the `commitment` feature), plus monolithic capacity expansion. The **cheap second consumer** (Part V) enters here.                                                                                                                  |
-| `cobre-study`                         | **new (L3 · Phase 4)**      | The **composition orchestrator**: runs a study that is a DAG of base-engine solves wired by typed value-function / fixed-decision edges (Part III.4). Capacity expansion is its first Composed study (investment master ↔ operation sub); the investment _formulation_ lives in `cobre-model`. There is no `cobre-expansion` crate.                                                                                    |
-| `cobre-flow`                          | **reserved**                | The AC/DC **power-flow engine** (Newton-Raphson / fast-decoupled) — a non-optimization nonlinear solve. Out of this roadmap's near-term scope; OPF is `cobre-direct` over `cobre-network`, not here.                                                                                                                                                                                                                   |
-| `cobre-uc`                            | **dissolved**               | Unit commitment is a formulation _feature_ (`commitment` + `VarDomain::Binary` + constraints in `cobre-model`), not an engine. Deterministic UC → `cobre-direct` (MILP); multistage-stochastic UC → the SDDiP sub-strategy in `cobre-sddp` (once funded — D13). The reserved `cobre-uc` stub is retired (see the dissolution sweep below).                                                                             |
-| `cobre-emt`, `cobre-tui`, `cobre-mcp` | unchanged                   | Out of scope for this roadmap.                                                                                                                                                                                                                                                                                                                                                                                         |
+| Crate                                 | Status                      | Role in the target architecture                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------------- | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cobre-core`                          | **purified**                | Paradigm-neutral data only: components (`Plant`→`Unit`), topology (`WaterArc` multigraph, `ElectricalBranch`), `HorizonGraph`, `TemporalStructure`, `InvestmentPeriod`, per-unit policy. Loses PAR(p)/CVaR/branching/`training_event` and the `GenericConstraint` vocabulary.                                                                                                                                                                                        |
+| `cobre-solver`                        | **purified + capabilities** | Sheds the multistage-state fields its "generic" `StageTemplate` carries today (`n_state`/`n_transfer`/`n_dual_relevant`/`n_hydro`/`max_par_order` — I.3); gains the per-feature capability traits (III.6). `SupportsIntegers` is net-new HiGHS MIP FFI work, and the CLP backend never provides it — the admission gate rejects integer formulations there.                                                                                                          |
+| `cobre-model`                         | **new (L1)**                | The formulation kernel (IV.2): indexer, builder, `VarDomain`, `BuildProblem`, `ProblemTemplate`. Carved from the engine-neutral parts of `cobre-sddp`'s `lp/` (new construction — IV.2, D12); consumed by every engine.                                                                                                                                                                                                                                              |
+| `cobre-network`                       | **new (L1)**                | Derived matrices (PTDF/LODF/Ybus, lazy `VirtualPTDF`) with pinned deterministic factorization — backend `faer` single-threaded, KLU-FFI fallback, canonical bus/branch pre-ordering in the contract (III.5); the `NetworkFormulation` enum + builders. Consumed by any network-constrained engine (e.g. `cobre-direct` for OPF).                                                                                                                                     |
+| `cobre-stochastic`                    | **generalized**             | The cross-vertical uncertainty / time-series store (`Switchable<T>`, by-reference, content-addressed) + scenario generation. (The `ValueFunctionArtifact` promotion — a lower, algorithm-agnostic home for the cut pool — is **deferred**: SDDP.jl keeps its `ValueFunction` inside the method, so the pool stays in `cobre-sddp` until proven a bare convex-PWL form and a second value-function participant exists.)                                               |
+| `cobre-io`                            | **generalized**             | Multi-vertical case format v2 (struct-first + schemars; descriptor codegen only if the III.1 spike lands) + v1 compat shim; import adapters (MATPOWER → PSS®E → ONS/CEPEL deck); the **shared output-orchestration entry point** (per-engine results values; III.7) so Python-parity scales. Checkpoint format generalized from SDDP cut-records to an engine-neutral policy artifact (the lower `ValueFunctionArtifact` home is deferred — see `cobre-stochastic`). |
+| `cobre-sddp`                          | **slimmed → engine**        | The **SDDP + SDDiP engine** (policy iteration: train + simulate), generic over the problem via the template; consumes `cobre-model` + `cobre-stochastic`. SDDiP is a duality/cut sub-strategy, not a peer — and a separately-funded effort (D13, V.6).                                                                                                                                                                                                               |
+| `cobre-direct`                        | **new (L3 engine)**         | The **single-solve engine**: build the extensive form once, solve via HiGHS/CLP, extract. Serves economic dispatch, OPF (over `cobre-network`), and deterministic unit commitment (the `commitment` feature), plus monolithic capacity expansion. The **cheap second consumer** (Part V) enters here.                                                                                                                                                                |
+| `cobre-study`                         | **new (L3 · Phase 4)**      | The **composition orchestrator**: runs a study that is a DAG of base-engine solves wired by typed value-function / fixed-decision edges (Part III.4). Capacity expansion is its first Composed study (investment master ↔ operation sub); the investment _formulation_ lives in `cobre-model`. There is no `cobre-expansion` crate.                                                                                                                                  |
+| `cobre-flow`                          | **reserved**                | The AC/DC **power-flow engine** (Newton-Raphson / fast-decoupled) — a non-optimization nonlinear solve. Out of this roadmap's near-term scope; OPF is `cobre-direct` over `cobre-network`, not here.                                                                                                                                                                                                                                                                 |
+| `cobre-uc`                            | **dissolved**               | Unit commitment is a formulation _feature_ (`commitment` + `VarDomain::Binary` + constraints in `cobre-model`), not an engine. Deterministic UC → `cobre-direct` (MILP); multistage-stochastic UC → the SDDiP sub-strategy in `cobre-sddp` (once funded — D13). The reserved `cobre-uc` stub is retired (see the dissolution sweep below).                                                                                                                           |
+| `cobre-emt`, `cobre-tui`, `cobre-mcp` | unchanged                   | Out of scope for this roadmap.                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
 Retiring `cobre-uc` is not a one-line deletion. The sweep touches the workspace
 member list (`Cargo.toml`), the member-count and reserved-crate prose and the
@@ -1174,7 +1319,15 @@ note: today the entire `run` pipeline — case load, the MPI broadcast that
 reconstructs state on every rank, and both phases — is typed on
 `cobre_sddp::StudySetup` end-to-end, so introducing `Engine::Direct` is a refactor
 of that pipeline into engine-generic (or engine-tagged) stages, not the addition of
-one match arm. The six-line dispatch above is the destination; the existing
+one match arm. Two consequences the dispatch sketch hides (verification
+addendum): the setup stage is **rank-collective** (config broadcast, non-root
+stochastic reconstruction, barriers) while `cobre_direct::run` above takes no
+communicator — so `Engine::Direct` under `mpirun -n > 1` has no defined
+semantics yet (idle non-roots? redundant deterministic solve? reject?) — a
+Phase-0 decision, not a detail (Part VI, D14); and the engine-tagged setup must
+**skip the stochastic reconstruction** for engines that do not consume it, or
+the "cheap second consumer" silently drags the SDDP setup machinery on every
+rank. The six-line dispatch above is the destination; the existing
 `cobre run <case>` UX and v1 config remain valid throughout (engine defaults to
 `Sddp`).
 
@@ -1254,17 +1407,26 @@ concrete pull that should shape the general model, rather than a guess.
 **Deliverables.** Introduce the `Engine` enum + dispatch in `cobre-cli`/`cobre-python`
 (a refactor of the `StudySetup`-typed run pipeline — IV.4); implement deterministic
 ED in `cobre-direct` at copper-plate/transport fidelity, reading the current v1 case
-unchanged (demand = `LoadModel.mean_mw`; no new field); add the generic **results
-model** in `cobre-io` and wire ED outputs in _both_ CLI and Python (Python-parity
+unchanged (demand = `LoadModel.mean_mw`; no new field); resolve **D14** and
+implement its chosen `Engine::Direct` MPI semantics, with the engine-tagged
+setup stages skipping stochastic reconstruction for engines that do not consume
+it (IV.4); add the **shared output-orchestration entry point** in `cobre-io`
+(the re-specified results seam, III.7) and wire ED outputs in _both_ CLI and
+Python through it (Python-parity
 from day one); carve the `cobre-model` kernel (`BuildProblem`, `ProblemTemplate`,
-`VarDomain` — continuous only, for now) per the D12 resolution — bundled here, or
-pulled immediately after by the two live engines — priced as new construction
-(IV.2); add per-kind newtype IDs (ergonomics, non-gating). Run the
-**monomorphization spike** (III.3) here, before the enum design is load-bearing.
+`VarDomain` — continuous only, for now) per the D12 resolution — bundled here,
+split, or deferred past purification (option c) — priced as new construction
+(IV.2); add per-kind newtype IDs (ergonomics, non-gating). The
+**monomorphization spike** (III.3) was already executed on a synthetic matrix
+(verification addendum — D10 satisfied); re-run `cargo-bloat`/`cargo-llvm-lines`
+on the real kernel once it exists as a regression check, not as a gate.
 
 **Gate.** One `cobre run` binary dispatches SDDP _and_ ED end-to-end over the same
-loaded system; SDDP results are bit-for-bit unchanged from today; ED output is mirrored
-in Python; `cargo-bloat`/compile-time from the spike are within budget. Under the
+loaded system — **including under MPI (`mpirun -n > 1`), exercising the D14
+semantics**, not only single-rank; SDDP results are bit-for-bit unchanged from
+today; ED output is mirrored
+in Python through the shared orchestration entry point; kernel
+`cargo-bloat`/compile-time regression check within budget. Under the
 D12 split, the kernel carve that follows re-proves the same bit-for-bit condition
 before Phase 1 opens.
 
@@ -1289,6 +1451,18 @@ format v2 with a v1 compat shim**.
 equals SDDP on the native v2 case equals today's output; ED continues to pass. This is
 the determinism-critical gate — the translation itself is subject to the hard rule.
 
+**The general constraint this gate implies — stated once so it is not
+rediscovered per quantity:** v2 is structurally greenfield but **numerically
+frozen**. The gate forbids changing how any existing quantity is computed —
+reduction order, scaling, access path — for the life of the shim; the per-unit
+carve-out above is one instance of this rule, not the whole of it. Every
+relocated quantity carries an exact-arithmetic equivalence obligation (the
+`Switchable::Scalar` arm must reproduce the current stats-path arithmetic
+bit-for-bit — which holds for demand only because `std = 0` annihilates the
+noise term, a property to verify per quantity, not assume). And the v1 schema
+with its CI drift gate does not retire at v2 — it runs beside v2's for the
+shim's whole lifetime, as do the dual Python stubs.
+
 ### V.3 Phase 2 — The network-fidelity ladder
 
 **Goal.** Climb from transport to DC-OPF over one topology.
@@ -1312,21 +1486,29 @@ is explicitly _out_ of this phase (V.6).
 
 **Deliverables.** Plumb `VarDomain::{Integer, Binary}` through the kernel; add the
 `SupportsIntegers` capability trait over the HiGHS MILP backend (not a `MilpSolver`
-kind — III.6); add the `Unit`-under-`Plant` sub-entity with `Option`-gated
-ramp/min-up-down/startup (with `CommitmentConfig::None` emitting zero binaries so SDDP
-is untouched); implement network-constrained **deterministic** UC as the
+kind — III.6; SCIP/russcip is the named fallback if HiGHS MIP disappoints); add
+the `Unit`-under-`Plant` sub-entity with `Option`-gated
+ramp/min-up-down/startup, commitment assigned per entity class (III.2), with
+`CommitmentConfig::None` emitting zero binaries so SDDP
+is untouched; implement network-constrained **deterministic** UC as the
 `commitment` feature — direct MILP in `cobre-direct` over `cobre-network`; adopt a
-tight-and-compact formulation family as the target (not necessarily the first cut).
+tight-and-compact formulation family as the target (not necessarily the first
+cut — the field's default set is Knueven-Ostrowski-Watson piecewise costs +
+Morales-España ramping + Rajan-Takriti min-up/down).
 Multistage-stochastic UC (the SDDiP sub-strategy in `cobre-sddp`) is **not** in this
 phase — it is a new algorithm stack (III.6) behind its own decision gate (D13, V.6).
 
-**Gate.** UC MILP is reproducible under the **agreed determinism policy** (V.7),
+**Gate.** UC MILP is reproducible under its **signed-off determinism tier**
+(III.6, V.7, D3),
 verified by extending the determinism reference harness to MIP — upstream HiGHS
 documents no determinism guarantee, even single-threaded, so the harness is the
-evidence, not the docs; the
+evidence, not the docs (the `spikes/mipdet/` probe is that harness's prototype
+and already evidences the `threads=1` tier on the vendored 1.13.1); the harness
+re-runs on every vendored HiGHS upgrade as a determinism **and correctness**
+gate (III.6); the
 `warm ≠ cold` caveat for MILP is documented as an extension of the existing
-cross-algorithm caveat. This gate cannot open until the determinism policy is signed
-off (VI).
+cross-algorithm caveat. This gate cannot open until UC's tier is signed
+off (VI, D3).
 
 ### V.5 Phase 4 — Capacity expansion and composition
 
@@ -1369,18 +1551,32 @@ re-scope from IV.1.
 
 ### V.7 Determinism preservation (cross-cutting)
 
-Determinism is the binding constraint that filters every borrowed idea. The
-`clp_determinism.rs`-style reference harness is extended per phase (order-invariance +
-run-to-run for each new vertical). The standing mitigations: canonical sort / `IndexMap`
-iteration (never `HashMap` order); pinned matrix-factorization order in `cobre-network`;
-`Option<f64>` never NaN sentinels; and, for MILP, the **escalated policy** —
-`threads = 1` deterministic solve, _or_ a pinned-solver-version + pinned-thread-count
-carve-out (open-source deterministic-parallel B&B on HiGHS rests on a single Apr-2026
-result, arXiv:2604.09556, and is not yet a safe default), with `warm ≠ cold` accepted
-for integer programs. One assumption to retire empirically before Phase 3: upstream
-HiGHS documentation makes **no** run-to-run determinism statement even for
-single-threaded MIP — the MIP harness extension is the evidence D3 needs, not the
-docs. The convexity-boundary edge rule (V.5) is itself a determinism guard: it
+Determinism filters every borrowed idea — but as a **per-problem-class tier**,
+not a single global absolute (owner decision, 2026-07-16): the bit-for-bit hard
+rule is anchored to the current applications of the SDDP vertical; each new
+vertical declares its tier (bit-for-bit / pinned-environment / documented
+non-reproducible — III.6) as part of its phase gate. The
+`clp_determinism.rs`-style reference harness is extended per phase
+(order-invariance + run-to-run for each vertical shipping Tier 1). The standing
+mitigations: canonical sort / `IndexMap`
+iteration (never `HashMap` order); pinned matrix-factorization order in
+`cobre-network` (single-threaded `faer`, canonical bus/branch pre-ordering —
+III.5);
+`Option<f64>` never NaN sentinels; deterministic termination via node/gap
+limits only, never wall-clock (empirically shown determinism-safe vs unsafe —
+verification addendum); and, for Tier-1 MILP, **`threads = 1` +
+`parallel="off"` + pinned `random_seed`, explicitly set** (HiGHS defaults are
+auto-parallel), _or_ a pinned-solver-version + pinned-thread-count
+carve-out once deterministic-parallel tooling matures (on HiGHS it rests on a
+single unmerged Apr-2026
+result, arXiv:2604.09556), with `warm ≠ cold` accepted
+for integer programs. The D3 spike retired the single-threaded assumption
+empirically on the vendored HiGHS 1.13.1 (bit-identical across runs and
+processes on a 2,466-node search — `spikes/mipdet/`); what remains for Phase 3
+is extending the _production_ harness and re-running it **on every vendored
+HiGHS upgrade**, which is also a _correctness_ gate (upstream 1.14 shipped a
+MIP correctness regression; 1.15 ships a prototype multithreaded MIP solver).
+The convexity-boundary edge rule (V.5) is itself a determinism guard: it
 prevents a nonconvex vertical from silently corrupting a value-function hand-off.
 
 ### V.8 Migration and compatibility
@@ -1392,20 +1588,113 @@ import-adapter order (MATPOWER → PSS®E → ONS/CEPEL deck, III / Appendix) gi
 network verticals free validation corpora and serves the NEWAVE-user audience. The
 schema-export CI gate extends to cover the multi-vertical v2 schema.
 
-### V.9 Risk register
+### V.9 The user's view — what changes at the desk
 
-| Risk                                                                                                              | Severity | Mitigation (roadmap location)                                                                                                   |
-| ----------------------------------------------------------------------------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| **Speculative generality** — generalizing from n=1 to four unbuilt verticals                                      | High     | Second consumer (ED) before the break; pull-not-push; kernel timing fork (V.0/V.1, D12)                                         |
-| **Phase-0 concentration** — the de-risking phase carries the kernel carve (a rewrite, not a move)                 | Med–High | D12 split option; kernel priced as new construction (IV.2, V.1)                                                                 |
-| **Case-format break cost** under a bit-for-bit contract (doubles I/O + schema surface; shim maintained for years) | High     | Defer to Phase 1; v1→v2 proven bit-for-bit; shim gated (V.2)                                                                    |
-| **MILP determinism** — parallel B&B non-reproducible; open-source deterministic parallel is single-paper-thin     | High     | `threads=1`/pinned carve-out; MIP harness evidence (upstream docs silent); `warm≠cold` documented; **owner sign-off** (V.7, VI) |
-| **Monomorphization / binary-size blow-up** from `vertical × formulation × fidelity × domain`                      | Medium   | Spike before load-bearing; legalize only built tuples (III.3, V.1)                                                              |
-| **AC-solver gap** — no NLP/conic backend; AC breaks the solver contract                                           | Medium   | Split AC out; climb the LP/conic ladder only (III.6, V.6)                                                                       |
-| **Purifying the wrong cut** — regressing the only paying customer for hypothetical ones                           | Medium   | Distinguish formulation-config (move) from uncertainty (generalize, not dump) (III.7)                                           |
-| **Obsolescing references** — NEWAVE moving to individual-plant / "Híbrido"; some CEPEL claims unverified          | Low–Med  | Treat CEPEL as contrast not target; verify `hidr`-sharing before leaning on it (II.2)                                           |
-| **Composition over-fit** — a general DAG/artifact for a boundary only SDDP uses today                             | Medium   | Specify the edge rule now, build the DAG/artifact only at Phase 4 (III.4, V.5)                                                  |
-| **Corpus errors propagating** — a miscited paper, an inter/intra-node state error                                 | Low      | Corrected in-text (III.4, III.5); unverified claims flagged, not asserted                                                       |
+Everything above is architecture; this section states the same roadmap as the
+**user-visible contract** — what a person running studies sees change in the
+CLI, the case data, the config, and the outputs, phase by phase. The governing
+principle: **from an existing SDDP user's desk, the generalization must read as
+"nothing broke; new studies became possible."** Selection is data, additions are
+opt-in, and the one genuinely breaking event (the case format) arrives with a
+shim and a converter.
+
+**The stable spine (every phase).** The invocation remains `cobre run
+<case-dir>` — a study/engine is **config data** (IV.4), never a new subcommand
+per algorithm; `cobre schema`, `cobre version`, and `cobre init` remain. An
+existing v1 SDDP case keeps producing bit-for-bit identical outputs through
+Phase 0 (its gate) and, after the Phase-1 break, through the compat shim (its
+gate). SDDP outputs keep the `training/` + `simulation/` tree; every output a
+CLI run writes, the Python bindings write identically (the shared
+output-orchestration entry point, III.7, is what makes that a mechanism rather
+than a promise).
+
+| Phase | New at the desk                                                                                                                                                                                 | Untouched                                                                                        |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| 0     | `study` block in config (preset name; defaults to today's SDDP train+simulate); ED study preset; dispatch-results output family; typed admission-gate errors; `cobre init` gains an ED template | CLI verbs; v1 case format; every existing config file (valid unedited); SDDP outputs bit-for-bit |
+| 1     | Case format v2 + one-shot converter; v1→v2 field-relocation map; dual v1/v2 schema export                                                                                                       | The numbers (v2 is numerically frozen — V.2); unconverted v1 cases (shim, bit-for-bit)           |
+| 2     | Optional electrical sections in the case; network-fidelity choice in the study config; OPF preset; MATPOWER/PSS®E importers                                                                     | Transport-only studies (degenerate default: absent sections change nothing)                      |
+| 3     | Optional `units` under plants; per-class commitment in the study config; UC preset (MILP); visible determinism-tier declaration                                                                 | Cases without units; every continuous study (zero binaries emitted)                              |
+| 4     | Composed-study config (investment ↔ operation wiring); expansion outputs; the value-function artifact as a file                                                                                 | Single-engine studies                                                                            |
+
+**Phase 0 — selection appears; nothing moves.** The run config gains a `study`
+section naming a preset — "operation-planning" (the default, ≡ today's SDDP
+train + simulate) or "economic-dispatch" — which expands to a `ProblemTemplate`
+
+- `Engine` (IV.4). A config that does not name a study behaves exactly as
+  today. An ED run reads the **same v1 case** (demand = `LoadModel.mean_mw`,
+  V.1), writes a new dispatch-results family (per-stage/per-block dispatch,
+  marginal costs, no `training/` tree), mirrored in Python from day one. Two new
+  user-facing surfaces: the **typed admission gate** turns unsupported
+  (study × engine × backend) combinations into a structured error naming the
+  offending tuple — e.g. an integer formulation on a `clp`-feature binary — where
+  today the failure would surface as a deep solver error; and under MPI,
+  `mpirun` on a Direct study behaves per the D14 decision (an explicit
+  "single-rank engine" rejection, or rank-0-solves — either way documented, never
+  silent). `cobre init` ships an ED template beside the hydrothermal one.
+
+**Phase 1 — the one breaking event, shaped for migration.** Case format v2
+relocates fields; it does not change results. The user-visible shape: a
+**one-shot converter** (`cobre` gains a case-upgrade command; the
+NEWAVE-adapter path `cobre-bridge convert newave` follows separately — V.8)
+plus the **shim**, so an unconverted v1 case keeps running bit-for-bit for the
+shim's lifetime. The relocations the user will notice in the case files:
+stochastic inflow/load/renewable models leave the system file for the
+uncertainty store; CVaR/branching/lag settings leave stage definitions for the
+SDDP engine's config section; a v1→v2 **field-relocation map** ships with the
+converter. `cobre schema export` emits both schema generations while the shim
+lives. What the user must _not_ expect from v2: different numbers — the
+translation is gated bit-for-bit (V.2), so migration is a file-layout event,
+not a results event.
+
+**Phase 2 — the network becomes opt-in data.** New, optional case sections
+(passive electrical branches with `r`/`x`/`b`/ratings; AC bus attributes; a
+first-class load entity) and a `network` fidelity choice in the study config
+(copper-plate → transport → DC-Bθ → DC-PTDF → LPAC). A case without electrical
+sections runs exactly as before — fidelity above transport is simply not
+admissible for it, and the gate says so. OPF arrives as a preset over the same
+case; `cobre import matpower` / `psse` adapters (V.8) let users pull public
+grids in for validation.
+
+**Phase 3 — units and integer studies, still opt-in.** Plants may declare
+`units` sub-entities (min-stable generation, min-up/down, startup costs, ramps
+— Appendix C); commitment is enabled **per entity class** in the study config
+(III.2), and a case or study without commitment emits zero binaries — the SDDP
+user sees no change. New UC preset = direct MILP; its run summary **declares
+its determinism tier** (III.6) and the pinned solver settings
+(`threads = 1`, seed) so reproducibility expectations are explicit in the
+output metadata, including the documented `warm ≠ cold` caveat for integer
+solutions.
+
+**Phase 4 — studies compose.** The config can describe a composed study — an
+investment master wired to an operation subproblem (V.5) — producing expansion
+outputs (build/retire decisions, NPV accounting) beside the operation results,
+and the value-function artifact becomes a **file a user can hand from one study
+to another** (the FCF hand-off CEPEL/PSR users already practice, III.4 — now
+typed, versioned, and auditable).
+
+Two cross-cutting user-facing improvements ride the whole roadmap:
+**error quality** (the admission gate converts "solver returned status -1" into
+"this study requires X, which this build/backend does not provide") and
+**diagnosability** (infeasibility diagnostics are a named future axis —
+Appendix C — precisely because more verticals mean more ways for a study to be
+infeasible at the desk).
+
+### V.10 Risk register
+
+| Risk                                                                                                                                        | Severity         | Mitigation (roadmap location)                                                                                                                                              |
+| ------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Speculative generality** — generalizing from n=1 to four unbuilt verticals                                                                | High             | Second consumer (ED) before the break; pull-not-push; kernel timing fork (V.0/V.1, D12)                                                                                    |
+| **Phase-0 concentration** — the de-risking phase carries the kernel carve (a rewrite, not a move)                                           | Med–High         | D12 split option; kernel priced as new construction (IV.2, V.1)                                                                                                            |
+| **Case-format break cost** under a bit-for-bit contract (doubles I/O + schema surface; shim maintained for years)                           | High             | Defer to Phase 1; v1→v2 proven bit-for-bit; shim gated (V.2)                                                                                                               |
+| **MILP determinism** — parallel B&B non-reproducible; open-source deterministic parallel is single-paper-thin                               | Med (was High)   | Determinism tiers (owner decision, III.6/V.7); `threads=1` Tier-1 default now spike-evidenced (`spikes/mipdet/`); `warm≠cold` documented; UC tier sign-off at Phase 3 (D3) |
+| **Vendored-solver upgrades** — HiGHS releases are determinism- AND correctness-sensitive (1.14 MIP regression; 1.15 parallel-MIP prototype) | Medium           | Pin the vendored version; re-run determinism + correctness harness on every upgrade (V.7, III.6)                                                                           |
+| **Engine::Direct under MPI undefined** — comm-less direct engine dispatched after rank-collective setup                                     | Med–High         | Resolve D14 in Phase 0; Phase-0 gate includes an MPI run; engine-tagged setup skips stochastic reconstruction (IV.4, V.1)                                                  |
+| **Monomorphization / binary-size blow-up** from `vertical × formulation × fidelity × domain`                                                | Low (was Medium) | D10 spike executed — cost bounded, linear in legalized tuples; legalize only built tuples (III.3, V.1)                                                                     |
+| **AC-solver gap** — no NLP/conic backend; AC breaks the solver contract                                                                     | Medium           | Split AC out; climb the LP/conic ladder only (III.6, V.6)                                                                                                                  |
+| **Purifying the wrong cut** — regressing the only paying customer for hypothetical ones                                                     | Medium           | Distinguish formulation-config (move) from uncertainty (generalize, not dump) (III.7)                                                                                      |
+| **Obsolescing references** — NEWAVE moving to individual-plant / "Híbrido"; some CEPEL claims unverified                                    | Low–Med          | Treat CEPEL as contrast not target; verify `hidr`-sharing before leaning on it (II.2)                                                                                      |
+| **Composition over-fit** — a general DAG/artifact for a boundary only SDDP uses today                                                       | Medium           | Specify the edge rule now, build the DAG/artifact only at Phase 4 (III.4, V.5)                                                                                             |
+| **Corpus errors propagating** — a miscited paper, an inter/intra-node state error                                                           | Low              | Corrected in-text (III.4, III.5); unverified claims flagged, not asserted                                                                                                  |
 
 ---
 
@@ -1432,18 +1721,28 @@ irreversible step and should be pulled by two real consumers, not four hypothese
 _Stakes:_ breaking first risks freezing a confidently-wrong model; deferring costs one
 extra vertical living briefly on v1.
 
-**D3 — MILP determinism policy.** Options: (a) `threads = 1` deterministic solve;
-(b) pinned-solver-version + pinned-thread-count deterministic-parallel carve-out;
-(c) a documented non-deterministic carve-out for MILP verticals. _Required input,
-whichever option:_ an empirical MIP extension of the determinism reference harness —
-upstream HiGHS documentation asserts no run-to-run determinism even single-threaded,
-so option (a) is itself an assumption until the harness proves it.
+**D3 — MILP determinism policy.** _Partially resolved._ Two inputs landed on
+2026-07-16 (verification addendum). **Evidence:** the required empirical input
+was delivered — a MIP determinism harness against the vendored HiGHS 1.13.1
+(`spikes/mipdet/`) showed bit-identical results across runs and processes on a
+2,466-node proven-optimal search and on a node-limit-truncated search, with a
+column-permutation probe diverging at the last ULP (canonical ordering is
+load-bearing for MIP). **Owner scoping decision:** the hard bit-for-bit
+requirement is anchored to the current applications of the SDDP vertical, not
+inherited by every problem class — determinism is a per-problem-class tier
+declared by the study (III.6). Options for the UC vertical's tier remain:
+(a) Tier 1, `threads = 1` deterministic solve (now evidence-backed);
+(b) Tier 2, pinned-solver-version + pinned-thread-count deterministic-parallel
+carve-out;
+(c) Tier 3, a documented non-reproducible carve-out.
 _Recommendation:_ (a)
-as the safe default, revisiting (b) only if UC solve-time demands it and the
+as the default, revisiting (b) only if UC solve-time demands it and the
 open-source deterministic-parallel tooling matures past its current single-result
-state. _Stakes:_ this touches a hard workspace rule (bit-for-bit); the
-anti-simplification rule requires sign-off before Phase 3 opens. `warm ≠ cold` for
-integer programs must be accepted either way.
+state. _What remains for Phase 3:_ extend the production harness (the spike is
+its prototype), re-run it on every vendored HiGHS upgrade (also a correctness
+gate — III.6), and sign off UC's tier before the Phase-3 gate opens.
+`warm ≠ cold` for
+integer programs must be accepted under every tier.
 
 **D4 — AC-OPF: defer vs commit.** Options: (a) defer AC-NLP indefinitely, ship the
 LP/conic ladder (transport → DC → LPAC → SOC), and keep AC data out of core
@@ -1490,18 +1789,23 @@ while keeping the _inner_ (device, formulation) and (method, capability) legalit
 compile-enforced. _Stakes:_ this sets how much of III.3's compile-time-enforcement
 result is real versus a runtime gate; it must be decided before the seam is built.
 
-**D10 — The monomorphization spike is a build gate, not optional.** The constructive
+**D10 — The monomorphization spike. _Resolved: executed, gate satisfied_**
+(2026-07-16, verification addendum; harness `spikes/monospike/`). Result over a
+synthetic vertical × formulation × fidelity × domain matrix: the recommended
+value-based `ProblemTemplate` has **no formulation-matrix multiplier** (codegen
+scales with source size, ~×2 per engine); the worst-credible type-level matrix
+costs 3.2× compile / 1.6× binary at 15 legalized tuples × 2 engines, **linear
+in legalized tuples**; restricting to built tuples verifiably collapses the
+cost to baseline. The constructive
 track (the `cobre-model` kernel, `ProblemTemplate`, capability traits, the SDDiP
-transform) is **fundable-to-spike, not fundable-to-build**, until (i) the spike
-(`cargo-bloat` / `cargo-llvm-lines` over a synthetic vertical × formulation × fidelity
-× domain matrix) shows the closed-enum monomorphization cost is acceptable, and
-(ii) D9 is resolved. Single-axis solver-trait monomorphization already has in-repo
+transform) is therefore **fundable-to-build from the compile-cost axis**; its
+remaining gate is (ii) alone — D9. Residual caveat: the spike is synthetic —
+re-run `cargo-bloat`/`cargo-llvm-lines` on the real kernel as a regression
+check once it exists (V.1). Single-axis solver-trait monomorphization already
+had in-repo
 precedent (`train<S: SolverInterface>` and the simulation pipeline are generic over
-the compile-selected backend), so the spike's open question is the multi-axis
-formulation matrix, not solver generics. _Recommendation:_ run the spike before
-committing the seam; treat
-a negative result as the trigger to narrow the legalized tuple set. _Stakes:_ this is
-the one unmeasured assumption under the entire dispatch design (Appendix D readiness).
+the compile-selected backend); the spike answered the multi-axis
+formulation matrix.
 
 **D11 — Sealing the extension axes.** Options: (a) seal `SolverInterface` + the
 capability traits and the `Formulation`/vertical enums (closed to out-of-tree
@@ -1513,18 +1817,29 @@ no-`dyn`, closed-world discipline and the determinism contract); revisit only if
 concrete out-of-tree extension need appears. _Stakes:_ open→sealed later is a breaking
 change; sealed→open is not — so sealing is the reversible default.
 
-**D12 — Phase-0 scope: bundle the kernel carve, or split the phase.** The
+**D12 — Phase-0 scope: bundle the kernel carve, split the phase, or carve after
+purification.** The
 `cobre-model` kernel is the roadmap's largest single construction (IV.2: a new
 kernel reusing roughly a fifth to a quarter of today's `lp/` logic, re-parameterized
 off the θ-anchored layout), yet Phase 0 is the phase meant to be cheap. Options:
 (a) bundle the carve into Phase 0; (b) split — Phase 0a ships the `Engine` seam plus
 a bespoke ED build directly on `cobre-solver` (genuinely cheap; proves the seam, the
-results model, and Python parity), then Phase 0b carves the kernel pulled by two
-_live_ engines. _Recommendation:_ (b) — the more faithful reading of "pull, don't
-push": the kernel is then derived from two working consumers rather than one working
-consumer plus one being built against it. _Stakes:_ (a) concentrates the riskiest
+output-orchestration boundary, and Python parity), then Phase 0b carves the kernel
+pulled by two
+_live_ engines; (c) — added by the verification pass — Phase 0a as in (b), but
+**defer the carve until after Phase-1 purification**, so the kernel is carved
+once against the clean v2 core with two live consumers, eliminating the refit
+that (a) and (b) both incur when Phase 1 relocates the data homes the kernel
+was carved against. _Recommendation:_ (b) when Phase-1 scope is confined to
+the planned relocations (the refit is then the demand-access re-pointing V.2
+already schedules), (c) if v2 reshapes builder-facing access patterns more
+broadly; under (a) or (b), the kernel's engine-neutrality is **re-gated after
+purification** (the V.2 bit-for-bit gate doubles as that re-proof — name it as
+such). _Stakes:_ (a) concentrates the riskiest
 construction in the phase meant to de-risk; (b) costs a temporary bespoke ED builder
-that the kernel later replaces.
+that the kernel later replaces and accepts a bounded post-purification refit;
+(c) stretches the bespoke builder's life through Phase 1 and delays the kernel
+that Phase 2 wants.
 
 **D13 — SDDiP: fund as its own effort, or defer indefinitely.** SDDiP is
 architecturally an intra-SDDP duality sub-strategy (III.3) and a new algorithm stack
@@ -1536,6 +1851,26 @@ may cover the practical need). _Recommendation:_ decide only after Phase 3 lands
 not schedule it inside Phase 3. _Stakes:_ treating it as a Phase-3 line item hides
 an effort comparable to a new engine.
 
+**D14 — `Engine::Direct` execution semantics under MPI** _(added 2026-07-16,
+verification addendum)_. The run pipeline is rank-collective before the engine
+dispatch (config broadcast, non-root reconstruction, barriers; only rank 0
+writes), SDDP's parallel axes are forward scenarios and backward openings — and
+a direct solve has neither, so `cobre_direct::run` takes no communicator in
+IV.4's sketch and `mpirun -n > 1` on `Engine::Direct` currently has no defined
+meaning. Options: (a) **reject** — the admission gate errors on a
+multi-rank direct study (simplest honest Phase-0 answer); (b) **rank-0 solves,
+non-roots idle** at a final barrier (matches the existing rank-0-writes
+discipline; wastes allocated ranks); (c) **redundant deterministic solve** on
+every rank (bit-for-bit makes it safe and collective-free, N× wasteful);
+(d) **a real parallel axis** for multi-period/multi-scenario direct studies —
+which is the Phase-4 "which axis owns parallelism" question (III.4) arriving
+early. _Recommendation:_ (a) or (b) for Phase 0 — pick one explicitly and test
+it in the Phase-0 MPI gate run (V.1); defer (d) to the composition layer.
+Either way the engine-tagged setup must skip the stochastic reconstruction for
+engines that do not consume it (IV.4). _Stakes:_ the Phase-0 seam is the
+roadmap's de-risking vehicle; leaving its multi-rank semantics undefined bakes
+the ambiguity into the first public API of the multi-engine era.
+
 ---
 
 ## Appendices
@@ -1544,6 +1879,12 @@ an effort comparable to a new engine.
 
 Grouped by theme; these are the primary sources actually consulted during the research
 streams (framework source, official documentation, peer-reviewed papers).
+The 2026-07-16 verification pass consulted an additional sourced corpus — HiGHS
+determinism primary quotes (maintainer statements, solver-vendor determinism
+docs), the UC formulation libraries (UnitCommitment.jl, Egret), policy-artifact
+formats (StochOptFormat, MSPFormat, OMMX), Rust sparse linear algebra (faer,
+SuiteSparse licensing), and 2025–26 ecosystem deltas — cited in
+`feasibility-verification-2026-07.md` rather than duplicated here.
 
 **Sienna (NREL).**
 
@@ -1668,8 +2009,11 @@ retire decision variables; a representative-period temporal regime distinct from
 chronology.
 
 **Further axes named but scoped out of this roadmap** (surfaced by the completeness
-critic; recorded so they are chosen, not forgotten): a general **results/output
-model** (Part III.7 — required for Python-parity at scale, recommended _in_ Phase 0);
+critic; recorded so they are chosen, not forgotten): the **shared
+output-orchestration boundary** (Part III.7, as re-specified — one `cobre-io`
+entry point with per-engine results values, required for Python-parity at
+scale, in Phase 0; the generalized results _schema_ waits for the second
+engine);
 **reserves / ancillary-services co-optimization** (a cross-vertical axis, à la
 Sienna `ServiceModel`); **security / contingency** (N-1, SCUC/SCOPF via LODF);
 **spatial aggregation** (nodal/zonal/copper-plate/REE) as an axis distinct from
@@ -1710,17 +2054,21 @@ solver, never at the framework layer); and a **four-kind solver taxonomy**
 `{Lp,Milp,Conic,Nlp}` (the shape MOI abandoned and OR-Tools migrated off — kinds do
 not compose, so mixed-integer-conic has no home).
 
-**Readiness — freeze the guardrails now; do not yet freeze the build.** The declined
+**Readiness — the guardrails are frozen; the build is one fork from open.** The
+declined
 shapes above are the best-verified conclusions and _protect_ the architecture — adopt
-them immediately. The constructive track (the `cobre-model` kernel, `ProblemTemplate`,
-the capability traits, the SDDiP transform) is **buildable only after** (1) the
-monomorphization spike (D10) confirms the closed-enum cost is acceptable and (2) the
-config-driven-vs-compile-fixed fork (D9) is resolved. Three items remain hypotheses, not
+them immediately. Of the two conditions that gated the constructive track (the
+`cobre-model` kernel, `ProblemTemplate`,
+the capability traits, the SDDiP transform), **(1) is now satisfied** — the
+monomorphization spike was executed 2026-07-16 and the closed-enum cost is
+bounded and mitigable (D10) — leaving only (2), the
+config-driven-vs-compile-fixed fork (D9). Two items remain hypotheses, not
 funded: the SDDiP transform as a single named type that is both the math object and
 owns a nested subproblem (its only prior art, SMS++'s `LagBFunction`, uses a mechanism
-Cobre forbids); whether a second value-function participant will ever exist; and
-single-threaded run-to-run determinism of HiGHS MIP (undocumented upstream — retired
-only by the harness extension, D3). Worth
+Cobre forbids); and whether a second value-function participant will ever exist.
+A third graduated from hypothesis to evidence: single-threaded run-to-run
+determinism of HiGHS MIP, undocumented upstream, was shown empirically on the
+vendored 1.13.1 (`spikes/mipdet/`; production-harness extension remains, D3). Worth
 studying before building: `diesel` and `embedded-hal` (Rust compile-time capability
 enforcement), SciML `DifferentialEquations.jl` (framework-level auto method-selection —
 the sharpest test of the structure-gates-not-routes boundary), and COIN-OR OSI and
