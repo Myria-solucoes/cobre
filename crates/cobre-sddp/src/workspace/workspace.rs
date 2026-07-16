@@ -959,9 +959,10 @@ impl BasisStoreSliceMut<'_> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "highs")]
+    use super::PatchBuffer;
     use super::{
-        BasisStore, CapturedBasis, PatchBuffer, ScratchBuffers, SolverWorkspace, WorkspacePool,
-        WorkspaceSizing,
+        BasisStore, CapturedBasis, ScratchBuffers, SolverWorkspace, WorkspacePool, WorkspaceSizing,
     };
     use cobre_solver::{
         Basis, BasisStatus, SolutionView, SolverError, SolverInterface, SolverStatistics,
