@@ -104,6 +104,27 @@ fn margin_is_the_discrimination_line() {
     );
 }
 
+/// A basic-variable value drifts past the RESIDUAL tolerance by the basis
+/// conditioning: this production-observed commitment landed `3.77e-6` MW over
+/// a `1593.04` MW enforced cap (`2.4e-9` relative — noise, not a modelling
+/// error) and must be absorbed, not refused. Pins the margin's headroom above
+/// the raw solver tolerance.
+#[test]
+fn factorization_drift_severalfold_past_tolerance_is_absorbed() {
+    let commitment = 1_593.040_683_768_330_6;
+    let enforced_cap = 1_593.040_679_999_999_8;
+
+    match reconcile_commitment(commitment, 0.0, enforced_cap, 1.0) {
+        Reconciliation::Relaxed { upper_scaled, .. } => assert!(
+            upper_scaled >= commitment,
+            "the relaxed bound must admit the drifted commitment"
+        ),
+        other => {
+            panic!("severalfold-tolerance factorization drift must be absorbed, got {other:?}")
+        }
+    }
+}
+
 /// The margin must cover what the backend may actually emit, or the reconciliation
 /// rejects the very drift it exists to absorb.
 #[test]

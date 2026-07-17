@@ -32,13 +32,18 @@ use crate::indexer::{AnticipatedLocal, StateSpace, anticipated_resolution_for};
 
 use super::template::StageGeometry;
 
-/// Relative headroom admitted around a drifted commitment.
-const COMMITMENT_DRIFT_REL: f64 = 1e-9;
+/// Relative headroom admitted around a drifted commitment. Deliberately two
+/// orders above the backends' `primal_feasibility_tolerance` (`1e-9`): that
+/// tolerance bounds the scaled residuals, while the carried value is a basic
+/// variable whose error is the residual amplified by the basis conditioning —
+/// severalfold past `1e-9` on production-scale LPs. Tightening this back to
+/// the raw tolerance re-aborts real studies over sub-watt drift.
+const COMMITMENT_DRIFT_REL: f64 = 1e-7;
 
 /// Absolute headroom floor, in MW. Keeps the margin above the solver's own
 /// feasibility tolerance once the generation column's `col_scale` divides it, which
 /// a purely relative term fails to do for a commitment near zero.
-const COMMITMENT_DRIFT_ABS: f64 = 1e-6;
+const COMMITMENT_DRIFT_ABS: f64 = 1e-5;
 
 /// Headroom bounding solver-tolerance drift on `commitment`.
 #[must_use]

@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The anticipated-commitment drift margin no longer refuses genuine solver
+  noise.** The margin introduced in 0.11.0 was anchored to the backends'
+  raw `primal_feasibility_tolerance`, but that tolerance bounds the scaled
+  residuals — the carried commitment is a basic-variable value whose error is
+  amplified by the basis conditioning, and production-scale studies produce
+  drift severalfold past it (observed: `3.8e-6` MW over a `1593` MW cap,
+  refused as a training error). The relative headroom is now two orders above
+  the raw tolerance with a matching absolute floor — still sub-watt at any
+  realistic capacity, so a genuine over-commitment (kilowatts and up) is
+  refused exactly as before.
+
 ## [0.11.0] - 2026-07-16
 
 ### Changed
