@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-07-17
+
+### Fixed
+
+- **The anticipated-commitment drift margin no longer refuses genuine solver
+  noise.** The margin introduced in 0.11.0 was anchored to the backends'
+  raw `primal_feasibility_tolerance`, but that tolerance bounds the scaled
+  residuals — the carried commitment is a basic-variable value whose error is
+  amplified by the basis conditioning, and production-scale studies produce
+  drift severalfold past it (observed: `3.8e-6` MW over a `1593` MW cap,
+  refused as a training error). The relative headroom is now two orders above
+  the raw tolerance with a matching absolute floor — still sub-watt at any
+  realistic capacity, so a genuine over-commitment (kilowatts and up) is
+  refused exactly as before.
+
 ## [0.11.0] - 2026-07-16
 
 ### Changed
@@ -2581,7 +2596,8 @@ disappears from `cobre.results.load_policy` per-cut dicts.
 
 <!-- next-url -->
 
-[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/cobre-rs/cobre/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/cobre-rs/cobre/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/cobre-rs/cobre/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/cobre-rs/cobre/compare/v0.9.0...v0.9.1
