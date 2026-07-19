@@ -42,23 +42,15 @@ pub fn read_convergence_summary(path: &Path) -> Result<ConvergenceSummary, Outpu
     let file = std::fs::File::open(path).map_err(|e| OutputError::io(path, e))?;
 
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| OutputError::SerializationError {
-            entity: "convergence".to_string(),
-            message: e.to_string(),
-        })?
+        .map_err(|e| OutputError::serialization("convergence", e.to_string()))?
         .build()
-        .map_err(|e| OutputError::SerializationError {
-            entity: "convergence".to_string(),
-            message: e.to_string(),
-        })?;
+        .map_err(|e| OutputError::serialization("convergence", e.to_string()))?;
 
     let mut totals = BatchTotals::default();
 
     for batch_result in reader {
-        let batch = batch_result.map_err(|e| OutputError::SerializationError {
-            entity: "convergence".to_string(),
-            message: e.to_string(),
-        })?;
+        let batch =
+            batch_result.map_err(|e| OutputError::serialization("convergence", e.to_string()))?;
         if batch.num_rows() > 0 {
             accumulate_batch(&batch, &mut totals)?;
         }

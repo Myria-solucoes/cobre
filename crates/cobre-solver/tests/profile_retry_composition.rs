@@ -81,7 +81,6 @@ mod tests {
             .get_int_option(c"simplex_iteration_limit")
             .expect("simplex_iteration_limit must be readable");
 
-        // num_cols = 2  →  heuristic = max(100_000, 2 * 50) = 100_000
         assert_eq!(
             cap, 100_000,
             "sentinel should produce heuristic cap 100_000; got {cap}"
@@ -436,6 +435,79 @@ mod tests {
         );
     }
 
+    // ── Full-field profile-seam readback ─────────────────────────────────────
+    //
+    // Power statement: catches a `HighsProfile` field that `reapply_profile`
+    // forgets to re-install after `restore_default_settings` — the seam the two
+    // `Fix 1` tests above only sample via the tolerances. It does NOT catch a
+    // HiGHS-internal option the profile never carries (only the fields
+    // `reapply_profile` owns are read back below).
+
+    /// Every field `reapply_profile` is responsible for — both feasibility
+    /// tolerances and all three simplex strategy ints — survives
+    /// `restore_default_settings` followed by `reapply_profile`, with every one
+    /// of those fields installed at a non-default value simultaneously.
+    #[test]
+    fn full_profile_survives_retry_finalization_seam() {
+        let mut solver = make_solver();
+        let profile = HighsProfile {
+            primal_feasibility_tolerance: 1e-7,
+            dual_feasibility_tolerance: 1e-7,
+            simplex_iteration_limit: 50_000,
+            ipm_iteration_limit: 5_000,
+            simplex_dual_edge_weight_strategy: 0, // Dantzig
+            simplex_scale_strategy: 2,            // Curtis-Reid
+            simplex_price_strategy: 2,            // RowHyperSparse
+        };
+        assert_ne!(
+            profile,
+            HighsProfile::default(),
+            "fixture profile must differ from every HighsProfile::default() field"
+        );
+        solver.apply_profile(&profile);
+
+        solver.restore_defaults_then_reapply_profile_for_test();
+
+        let primal = solver
+            .get_double_option(c"primal_feasibility_tolerance")
+            .expect("primal_feasibility_tolerance must be readable");
+        let dual = solver
+            .get_double_option(c"dual_feasibility_tolerance")
+            .expect("dual_feasibility_tolerance must be readable");
+        let dual_edge_weight = solver
+            .get_int_option(c"simplex_dual_edge_weight_strategy")
+            .expect("simplex_dual_edge_weight_strategy must be readable");
+        let scale = solver
+            .get_int_option(c"simplex_scale_strategy")
+            .expect("simplex_scale_strategy must be readable");
+        let price = solver
+            .get_int_option(c"simplex_price_strategy")
+            .expect("simplex_price_strategy must be readable");
+
+        assert!(
+            (primal - profile.primal_feasibility_tolerance).abs() < 1e-20,
+            "primal tolerance must survive the finalization seam; expected {}, got {primal}",
+            profile.primal_feasibility_tolerance
+        );
+        assert!(
+            (dual - profile.dual_feasibility_tolerance).abs() < 1e-20,
+            "dual tolerance must survive the finalization seam; expected {}, got {dual}",
+            profile.dual_feasibility_tolerance
+        );
+        assert_eq!(
+            dual_edge_weight, profile.simplex_dual_edge_weight_strategy,
+            "simplex_dual_edge_weight_strategy must survive the finalization seam"
+        );
+        assert_eq!(
+            scale, profile.simplex_scale_strategy,
+            "simplex_scale_strategy must survive the finalization seam"
+        );
+        assert_eq!(
+            price, profile.simplex_price_strategy,
+            "simplex_price_strategy must survive the finalization seam"
+        );
+    }
+
     // ── Fix 2: IPM iteration_limit sentinel for "unbounded" ──────────────────
     //
     // When `ipm_iteration_limit == 0` (DEFAULT_PROFILE_IPM_UNBOUNDED_SENTINEL),
@@ -450,7 +522,6 @@ mod tests {
     #[test]
     fn ipm_sentinel_zero_maps_to_i32_max() {
         let mut solver = make_solver();
-        // 0 is DEFAULT_PROFILE_IPM_UNBOUNDED_SENTINEL — "unbounded".
         solver.apply_profile(&HighsProfile {
             ipm_iteration_limit: 0,
             ..Default::default()

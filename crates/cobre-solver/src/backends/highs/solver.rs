@@ -192,10 +192,11 @@ impl HighsSolver {
         }
     }
 
-    /// Every option `current_profile` carries — the two feasibility tolerances
-    /// and the three simplex strategy ints — is re-applied here; an option
-    /// restored anywhere else after `restore_default_settings` runs is a
-    /// determinism bug.
+    /// The two feasibility tolerances and the three simplex strategy ints from
+    /// `current_profile` are re-applied here; restoring any of these five
+    /// anywhere else after `restore_default_settings` runs is a determinism
+    /// bug. The profile's iteration limits are the one sanctioned exception —
+    /// `restore_iteration_limits` re-installs them immediately after this call.
     pub(super) fn reapply_profile(&mut self) {
         // SAFETY: `self.handle` is a valid, non-null HiGHS pointer obtained from
         // `cobre_highs_create()`. Option names are static C string literals with no

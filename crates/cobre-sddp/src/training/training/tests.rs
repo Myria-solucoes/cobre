@@ -27,8 +27,7 @@ use cobre_core::{
     },
 };
 use cobre_solver::{
-    Basis, BasisStatus, LpSolution, RowBatch, SolverError, SolverInterface, SolverStatistics,
-    StageTemplate,
+    Basis, BasisStatus, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
 };
 use cobre_stochastic::{
     ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context,
@@ -88,17 +87,6 @@ fn minimal_template(n_state: usize) -> StageTemplate {
     }
 }
 
-fn fixed_solution(objective: f64) -> LpSolution {
-    LpSolution {
-        objective,
-        primal: vec![0.0; 4],
-        dual: vec![0.0; 2],
-        reduced_costs: vec![0.0; 4],
-        iterations: 0,
-        solve_time_seconds: 0.0,
-    }
-}
-
 /// Mock solver that returns fixed objective values in sequence.
 ///
 /// Each call to `solve()` returns the next value from `objectives`,
@@ -153,12 +141,7 @@ impl SolverInterface for MockSolver {
         let obj = self.objectives[call % self.objectives.len()];
         // Return a view with primal[3] = 0.0 (theta = 0, N=1 L=0 → theta at col 3)
         // so that the forward pass computes stage_cost = objective - primal[theta]
-        // = obj - 0 = obj.  The fixed_solution helper provides compatible arrays.
-        let sol = fixed_solution(obj);
-        // We cannot borrow from a temporary, so we use static empty slices.
-        // training.rs mock only needs to satisfy the SolverInterface bound;
-        // the actual slice contents are not checked by the training loop.
-        let _ = sol;
+        // = obj - 0 = obj.
         Ok(cobre_solver::SolutionView {
             objective: obj,
             primal: &[0.0, 0.0, 0.0, 0.0],
@@ -748,7 +731,6 @@ fn ac_train_emits_correct_event_sequence() {
     )
     .unwrap();
 
-    drop(fcf); // not needed; just for clarity
     let events: Vec<TrainingEvent> = rx.try_iter().collect();
 
     // 1 TrainingStarted + 2*(9 per-iteration) + 1 TrainingFinished = 20

@@ -5,6 +5,8 @@ use cobre_core::commissioning::commissioning_active;
 use cobre_core::scenario::SamplingScheme;
 use cobre_io::EntitySlot;
 
+#[cfg(any(test, feature = "test-support"))]
+use crate::convergence::risk_measure::RiskMeasure;
 use crate::{
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
@@ -47,6 +49,14 @@ impl StudySetup {
     /// Set the active-cut budget cap per stage.
     pub fn set_budget(&mut self, budget: Option<u32>) {
         self.cut_management.budget = budget;
+    }
+
+    /// Test-support hook: override the per-stage backward-pass risk measures
+    /// (`length` must equal `num_stages`), e.g. to swap `Expectation` for
+    /// `CVaR { alpha, lambda }` without a config file exposing it per case.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_risk_measures(&mut self, risk_measures: Vec<RiskMeasure>) {
+        self.cut_management.risk_measures = risk_measures;
     }
 
     /// Return the pre-computed [`EnergyConversionSet`] for this study.

@@ -44,7 +44,7 @@ use crate::config::LoopParams;
 use crate::resolved_parameters::build_resolved_parameters;
 use crate::scaling_report::ScalingReport;
 use crate::simulation::SimulationConfig;
-use crate::solve::solver_phase::Phase;
+use crate::solve::solver_phase::{Phase, validate_phase_solver_config};
 use crate::stochastic::noise_key::build_noise_key_table;
 mod accessors;
 pub(crate) mod bucket_seed;
@@ -296,6 +296,9 @@ impl StudySetup {
     ///
     /// # Errors
     ///
+    /// - [`SddpError::Validation`] — a per-phase solver profile config names an
+    ///   unknown preset, or sets a preset/field the compiled backend does not
+    ///   support (see `validate_phase_solver_config`).
     /// - [`SddpError::Validation`] — if `build_stage_templates` succeeds but
     ///   the template list is empty ("system has no study stages").
     /// - [`SddpError::Solver`] — propagated from `build_stage_templates` on LP
@@ -329,6 +332,13 @@ impl StudySetup {
             training_solver_forward,
             simulation_solver,
         } = config;
+
+        // Fail fast on a backend-unsupported preset/field before any template
+        // exists; validation runs on every rank (`from_broadcast_params` is the
+        // shared setup path), so it is deterministic across the run.
+        validate_phase_solver_config(training_solver_backward.as_ref(), Phase::Backward)?;
+        validate_phase_solver_config(training_solver_forward.as_ref(), Phase::Forward)?;
+        validate_phase_solver_config(simulation_solver.as_ref(), Phase::Simulation)?;
 
         // `resolve_profile` is a pure function of the (identically broadcast)
         // config, so every rank resolving independently is sufficient — the

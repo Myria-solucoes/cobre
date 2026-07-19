@@ -47,7 +47,6 @@ mod tests {
     use super::SimulationConfig;
     use crate::config::training::{PriceStrategy, ScaleStrategy};
 
-    /// A `simulation.solver` block round-trips into `Some(PhaseSolverProfileConfig)`.
     #[test]
     fn simulation_solver_profile_block_round_trips() {
         let json = r#"{
@@ -66,7 +65,6 @@ mod tests {
         assert_eq!(solver.price, Some(PriceStrategy::Row));
     }
 
-    /// `SimulationConfig::default()` carries no solver profile.
     #[test]
     fn simulation_solver_profile_absent_is_none() {
         assert!(SimulationConfig::default().solver.is_none());

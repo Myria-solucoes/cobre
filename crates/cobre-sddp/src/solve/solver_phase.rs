@@ -28,6 +28,8 @@ use cobre_solver::{ActiveProfile, DEFAULT_PROFILE_HEURISTIC_SENTINEL};
 #[cfg(feature = "clp")]
 use cobre_solver::{ClpAlgorithm, ClpProfile};
 
+use crate::SddpError;
+
 /// The three algorithmic phases of the SDDP algorithm.
 ///
 /// The solver is configured per phase via
@@ -223,12 +225,104 @@ impl Phase {
     /// ([`Self::profile`]) + named preset + per-field overrides (a later layer
     /// wins). `config` absent returns [`Self::profile`] unchanged — the
     /// byte-neutral default. An unrecognized preset name falls back to the
-    /// base constant; backend-support/unknown-preset validation is a separate
-    /// step, not performed here.
+    /// base constant; call [`validate_phase_solver_config`] on the same
+    /// `config` to reject it instead.
     #[must_use]
     pub fn resolve_profile(self, config: Option<&PhaseSolverProfileConfig>) -> ActiveProfile {
         resolve_active_profile(self.profile(), config)
     }
+}
+
+fn phase_config_key(phase: Phase) -> &'static str {
+    match phase {
+        Phase::Forward => "forward",
+        Phase::Backward => "backward",
+        Phase::Simulation => "simulation",
+    }
+}
+
+/// Validates a resolved per-phase solver config against the compiled
+/// backend's support matrix (decision D11: everything HiGHS-scoped for v1).
+///
+/// `config` absent is always `Ok(())` — the byte-neutral path
+/// ([`Phase::resolve_profile`]) is untouched by this validator.
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] naming the offending preset or field,
+/// its value, and the compiled backend when `config` sets something the
+/// compiled backend does not support.
+pub(crate) fn validate_phase_solver_config(
+    config: Option<&PhaseSolverProfileConfig>,
+    phase: Phase,
+) -> Result<(), SddpError> {
+    match config {
+        Some(config) => validate_backend_support(config, phase),
+        None => Ok(()),
+    }
+}
+
+/// Under `highs`, every [`DualEdgeWeight`]/[`ScaleStrategy`]/[`PriceStrategy`]
+/// variant is supported (the enums are already closed to the supported set),
+/// so only the preset name and the tolerance's finiteness need checking.
+#[cfg(feature = "highs")]
+fn validate_backend_support(
+    config: &PhaseSolverProfileConfig,
+    phase: Phase,
+) -> Result<(), SddpError> {
+    let phase_key = phase_config_key(phase);
+    if let Some(preset) = config.preset.as_deref()
+        && preset != "backward_tuned_v1"
+    {
+        return Err(SddpError::Validation(format!(
+            "unknown solver profile preset {preset:?} for phase \"{phase_key}\"; known presets: \"backward_tuned_v1\""
+        )));
+    }
+    if let Some(tolerance) = config.primal_feasibility_tolerance
+        && !tolerance.is_finite()
+    {
+        return Err(SddpError::Validation(format!(
+            "unsupported primal_feasibility_tolerance {tolerance} for backend \"highs\" in phase \"{phase_key}\": value must be finite"
+        )));
+    }
+    Ok(())
+}
+
+// CLP support is minimal for v1 (decision D11): reject every preset/override
+// instead of silently applying a HiGHS-flavored value to CLP's own option
+// surface.
+#[cfg(feature = "clp")]
+fn validate_backend_support(
+    config: &PhaseSolverProfileConfig,
+    phase: Phase,
+) -> Result<(), SddpError> {
+    let phase_key = phase_config_key(phase);
+    if let Some(preset) = config.preset.as_deref() {
+        return Err(clp_unsupported(format!("preset {preset:?}"), phase_key));
+    }
+    if config.dual_edge_weight.is_some() {
+        return Err(clp_unsupported("field \"dual_edge_weight\"", phase_key));
+    }
+    if config.scale.is_some() {
+        return Err(clp_unsupported("field \"scale\"", phase_key));
+    }
+    if config.price.is_some() {
+        return Err(clp_unsupported("field \"price\"", phase_key));
+    }
+    if let Some(tolerance) = config.primal_feasibility_tolerance {
+        return Err(clp_unsupported(
+            format!("field \"primal_feasibility_tolerance\" ({tolerance})"),
+            phase_key,
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "clp")]
+fn clp_unsupported(item: impl std::fmt::Display, phase_key: &str) -> SddpError {
+    SddpError::Validation(format!(
+        "solver profile {item} for phase \"{phase_key}\" is unsupported on backend \"clp\": rejected until CLP is re-measured"
+    ))
 }
 
 /// The `backward_tuned_v1` config preset — the measured tuned bundle (dual
@@ -366,6 +460,20 @@ const _: () = {
     assert!(BACKWARD_TUNED_V1_PRESET.simplex_price_strategy == 1);
 };
 
+#[cfg(test)]
+mod validate_phase_solver_config_tests {
+    use super::{Phase, validate_phase_solver_config};
+
+    /// A fully-absent config is always accepted, regardless of the compiled
+    /// backend — the byte-neutral resolution path stays untouched.
+    #[test]
+    fn absent_config_is_accepted() {
+        assert!(validate_phase_solver_config(None, Phase::Forward).is_ok());
+        assert!(validate_phase_solver_config(None, Phase::Backward).is_ok());
+        assert!(validate_phase_solver_config(None, Phase::Simulation).is_ok());
+    }
+}
+
 #[cfg(all(test, feature = "highs"))]
 mod highs_tests {
     use cobre_io::config::{DualEdgeWeight, PhaseSolverProfileConfig, PriceStrategy};
@@ -373,7 +481,7 @@ mod highs_tests {
 
     use super::{
         BACKWARD_PROFILE, BACKWARD_TUNED_V1_PRESET, FORWARD_PROFILE, Phase, PhaseProfiles,
-        SIMULATION_PROFILE,
+        SIMULATION_PROFILE, validate_phase_solver_config,
     };
 
     /// `Phase::profile()` returns the matching named constant for each variant.
@@ -444,7 +552,6 @@ mod highs_tests {
         let forward = <HighsProfile as PhaseProfiles>::FORWARD;
         let simulation = <HighsProfile as PhaseProfiles>::SIMULATION;
         let backward = <HighsProfile as PhaseProfiles>::BACKWARD;
-        // All three per-phase profiles are now identical (the tuned profile).
         assert_eq!(forward, backward);
         assert_eq!(simulation, backward);
         // They differ from the default only in the tuned price strategy.
@@ -546,8 +653,9 @@ mod highs_tests {
         assert_eq!(resolved.primal_feasibility_tolerance, 1e-7);
     }
 
-    /// An unrecognized preset name falls back to the base constant (ticket-007
-    /// owns rejecting it); it must not panic or silently corrupt other fields.
+    /// An unrecognized preset name falls back to the base constant
+    /// (`validate_phase_solver_config` rejects it before resolution); it must
+    /// not panic or silently corrupt other fields.
     #[test]
     fn resolve_profile_unknown_preset_falls_back_to_base_constant() {
         let config = PhaseSolverProfileConfig {
@@ -589,14 +697,74 @@ mod highs_tests {
             FORWARD_PROFILE.primal_feasibility_tolerance
         );
     }
+
+    // ── `validate_phase_solver_config` (HiGHS) ──────────────────────────────
+
+    /// An unrecognized preset name is rejected, naming the preset and the phase.
+    #[test]
+    fn validate_phase_solver_config_rejects_unknown_preset() {
+        let config = PhaseSolverProfileConfig {
+            preset: Some("turbo".to_string()),
+            dual_edge_weight: None,
+            scale: None,
+            price: None,
+            primal_feasibility_tolerance: None,
+        };
+        let err = validate_phase_solver_config(Some(&config), Phase::Backward)
+            .expect_err("unknown preset must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("turbo"), "message must name the preset: {msg}");
+        assert!(
+            msg.contains("backward"),
+            "message must name the phase: {msg}"
+        );
+    }
+
+    /// A non-finite `primal_feasibility_tolerance` is rejected, naming the
+    /// field, its value, and the backend.
+    #[test]
+    fn validate_phase_solver_config_rejects_non_finite_tolerance() {
+        let config = PhaseSolverProfileConfig {
+            preset: None,
+            dual_edge_weight: None,
+            scale: None,
+            price: None,
+            primal_feasibility_tolerance: Some(f64::NAN),
+        };
+        let err = validate_phase_solver_config(Some(&config), Phase::Forward)
+            .expect_err("non-finite tolerance must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("primal_feasibility_tolerance"),
+            "message must name the field: {msg}"
+        );
+        assert!(
+            msg.contains("highs"),
+            "message must name the backend: {msg}"
+        );
+    }
+
+    /// The known preset plus a per-field override the closed enums allow are
+    /// accepted without error.
+    #[test]
+    fn validate_phase_solver_config_accepts_known_preset_and_overrides() {
+        let config = PhaseSolverProfileConfig {
+            preset: Some("backward_tuned_v1".to_string()),
+            dual_edge_weight: Some(DualEdgeWeight::Dantzig),
+            scale: None,
+            price: Some(PriceStrategy::RowHyperSparse),
+            primal_feasibility_tolerance: Some(1e-8),
+        };
+        assert!(validate_phase_solver_config(Some(&config), Phase::Backward).is_ok());
+    }
 }
 
 #[cfg(all(test, feature = "clp"))]
 mod clp_tests {
-    use cobre_io::config::PhaseSolverProfileConfig;
+    use cobre_io::config::{DualEdgeWeight, PhaseSolverProfileConfig};
     use cobre_solver::{ClpAlgorithm, ClpProfile};
 
-    use super::{Phase, PhaseProfiles};
+    use super::{Phase, PhaseProfiles, validate_phase_solver_config};
 
     /// The CLP `FORWARD` and `BACKWARD` profiles are the identical tuned
     /// deep-cut-pool profile (dual simplex, `dual_pricing_mode = 1`,
@@ -703,5 +871,43 @@ mod clp_tests {
             Phase::Backward.resolve_profile(Some(&config)),
             Phase::Backward.profile()
         );
+    }
+
+    // ── `validate_phase_solver_config` (CLP, D11 hard-reject) ───────────────
+
+    /// The tuned preset is hard-rejected on CLP, naming CLP and the preset.
+    #[test]
+    fn validate_phase_solver_config_rejects_clp_preset() {
+        let config = PhaseSolverProfileConfig {
+            preset: Some("backward_tuned_v1".to_string()),
+            dual_edge_weight: None,
+            scale: None,
+            price: None,
+            primal_feasibility_tolerance: None,
+        };
+        let err = validate_phase_solver_config(Some(&config), Phase::Backward)
+            .expect_err("CLP must hard-reject the tuned preset");
+        let msg = err.to_string();
+        assert!(msg.contains("clp"), "message must name the backend: {msg}");
+        assert!(
+            msg.contains("backward_tuned_v1"),
+            "message must name the preset: {msg}"
+        );
+    }
+
+    /// A per-field override with no preset is also hard-rejected on CLP — D11
+    /// rejects every HiGHS-only override, not only the preset.
+    #[test]
+    fn validate_phase_solver_config_rejects_clp_override_without_preset() {
+        let config = PhaseSolverProfileConfig {
+            preset: None,
+            dual_edge_weight: Some(DualEdgeWeight::Dantzig),
+            scale: None,
+            price: None,
+            primal_feasibility_tolerance: None,
+        };
+        let err = validate_phase_solver_config(Some(&config), Phase::Forward)
+            .expect_err("CLP must hard-reject an unsupported override");
+        assert!(err.to_string().contains("clp"));
     }
 }

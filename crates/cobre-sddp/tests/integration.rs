@@ -1671,11 +1671,9 @@ fn d18_lml1_cut_selection_convergence() {
 fn test_forward_basis_reconstruct_bit_identical_d01() {
     use std::path::Path;
 
-    use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
     use cobre_core::scenario::ScenarioSource;
     use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
     use cobre_solver::ActiveSolver;
-    use cobre_solver::SolverInterface;
 
     struct LocalStubComm;
 

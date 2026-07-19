@@ -1,14 +1,4 @@
 //! Integration tests for `ForwardSampler` dispatch.
-//!
-//! Covers three scenarios:
-//! 1. `InSample` bitwise equivalence: the `InSample` path matches the D01
-//!    deterministic lower bound and iteration count.
-//! 2. `OutOfSample` convergence: training with fresh noise converges to a lower
-//!    bound within 5% of the `InSample` lower bound.
-//! 3. Declaration-order invariance for `OutOfSample`: entity ordering does not
-//!    affect the lower bound (bitwise identical results for both orderings).
-//!
-//! All tests use `StubComm` (single-rank) and `ActiveSolver`.
 
 #![allow(
     clippy::unwrap_used,
@@ -143,24 +133,7 @@ fn build_resolved_bounds(n_hydros: usize, n_stages: usize) -> ResolvedBounds {
 }
 
 fn build_resolved_penalties(n_hydros: usize, n_buses: usize, n_stages: usize) -> ResolvedPenalties {
-    let n_st = n_stages.max(1);
-    ResolvedPenalties::new(
-        &PenaltiesCountsSpec {
-            n_hydros,
-            n_buses,
-            n_lines: 0,
-            n_ncs: 0,
-            n_stages: n_st,
-        },
-        &PenaltiesDefaults {
-            hydro: hydro_stage_penalties(),
-            bus: BusStagePenalties { excess_cost: 0.0 },
-            line: LineStagePenalties { exchange_cost: 0.0 },
-            ncs: NcsStagePenalties {
-                curtailment_cost: 0.0,
-            },
-        },
-    )
+    build_resolved_penalties_with_ncs(n_hydros, n_buses, 0, n_stages)
 }
 
 fn make_correlation(entity_ids: &[EntityId]) -> CorrelationModel {

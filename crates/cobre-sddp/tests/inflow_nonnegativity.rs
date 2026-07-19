@@ -433,9 +433,7 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
 
     let n_stages = stage_templates.templates.len();
     let first_tmpl = stage_templates.templates.first().expect("at least 1 stage");
-    let n_blks = system.stages().first().map_or(1, |s| s.blocks.len().max(1));
     let has_inflow_penalty = inflow_method.has_slack_columns() && first_tmpl.n_hydro > 0;
-    let _ = n_blks;
     let study_dims = study_dims_for(
         system.thermals().len(),
         system.lines().len(),
@@ -494,7 +492,6 @@ fn train_fixture(
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
     let comm = StubComm;
 
-    let _n_stages = fx.stage_templates.templates.len();
     let block_counts: Vec<usize> = fx
         .stage_templates
         .block_hours_per_stage

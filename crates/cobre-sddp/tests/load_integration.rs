@@ -379,7 +379,6 @@ fn test_stochastic_load_training_completes() {
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
     };
-    let state = state_layout_for(1, 0);
     let risk_measures = vec![RiskMeasure::Expectation; n_stages];
     let mut fcf = make_fcf(n_stages);
     let mut solver = MockSolver::with_fixed(100.0);

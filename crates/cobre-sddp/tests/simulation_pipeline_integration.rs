@@ -2767,7 +2767,6 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
     const CUT_STATUS_0: BasisStatus = BasisStatus::Superbasic;
     const CUT_STATUS_1: BasisStatus = BasisStatus::Zero;
     const CUT_STATUS_2: BasisStatus = BasisStatus::Fixed;
-    // Base rows use BasisStatus::Basic.
     const BASE_STATUS: BasisStatus = BasisStatus::Basic;
 
     let n_stages = 1;

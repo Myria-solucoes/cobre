@@ -16,6 +16,8 @@
     clippy::cast_precision_loss
 )]
 
+mod common;
+
 mod test_mpi_hydro_models_output_path {
     //! Integration test: for `source: "computed"` hydros, `prepare_hydro_models`
     //! populates `fpha_export_rows` in memory and writes no file to disk.
@@ -52,12 +54,6 @@ mod test_mpi_hydro_models_output_path {
              got {} rows",
             result.fpha_export_rows.len()
         );
-
-        let output_dir = case_dir.join("output").join("hydro_models");
-        if output_dir.exists() {
-            // No-op: prepare_hydro_models never writes files (the write site is the
-            // CLI/Python entry point), so a pre-existing output dir is left untouched.
-        }
     }
 }
 
@@ -422,5 +418,257 @@ mod test_mpi_4rank_basis_broadcast_round_trip {
 
         let stage2_unpacked = results[0][2].as_ref().expect("rank 0 stage 2 must be Some");
         assert_captured_basis_eq(&stage2_basis, stage2_unpacked, "pack/unpack parity stage 2");
+    }
+}
+
+#[cfg(all(feature = "highs", feature = "test-support"))]
+mod retry_armed_determinism {
+    //! Retry-armed determinism gate: the `backward_tuned_v1` preset with a
+    //! deliberately low `simplex_iteration_limit` forces the `HiGHS` retry
+    //! escalation ladder (`crates/cobre-solver/src/backends/highs/retry.rs`)
+    //! to fire, then asserts the final training lower bound is bitwise
+    //! identical across four execution shapes of the SAME config: threads=k,
+    //! threads=1, a same-shape repeat, and a faithful 2-rank leg. Runs on both
+    //! an expectation and a `CVaR` risk configuration of the same fixture.
+    //!
+    //! Power statement: this gate catches a profile option dropped at the
+    //! retry-finalization seam (`reapply_profile` after
+    //! `restore_default_settings`) that manifests only once a solve genuinely
+    //! retries; it has no power on a case/length that produces zero retries.
+    //! `total_retries > 0` is asserted per shape as the gate's own
+    //! self-check, not an incidental fact.
+
+    use std::path::Path;
+
+    use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
+    use cobre_core::scenario::ScenarioSource;
+    use cobre_io::config::PhaseSolverProfileConfig;
+    use cobre_sddp::{
+        Phase, RiskMeasure, SolverProfiles, StudySetup, hydro_models::prepare_hydro_models,
+        setup::prepare_stochastic,
+    };
+    use cobre_solver::ActiveSolver;
+
+    use crate::common::{StubComm, build_setup_for_case};
+
+    /// Low enough that the tuned `backward_tuned_v1` profile's first attempt
+    /// cannot finish within the cap on every stage solve of the d03 fixture,
+    /// arming the retry-escalation ladder on every solve rather than
+    /// occasionally; tuned empirically against this fixture, not derived
+    /// from a closed form.
+    const FORCED_SIMPLEX_ITERATION_LIMIT: u32 = 1;
+
+    /// `backward_tuned_v1` (`SteepestEdge` / Curtis-Reid / Row / ptol `1e-7`)
+    /// forced to [`FORCED_SIMPLEX_ITERATION_LIMIT`]. `forward` stays
+    /// byte-neutral (`Phase::Forward.resolve_profile(None)`): only the
+    /// backward-pass retry-finalization seam is under test.
+    fn forced_retry_profiles() -> SolverProfiles {
+        let tuned = PhaseSolverProfileConfig {
+            preset: Some("backward_tuned_v1".to_string()),
+            dual_edge_weight: None,
+            scale: None,
+            price: None,
+            primal_feasibility_tolerance: None,
+        };
+        let mut backward = Phase::Backward.resolve_profile(Some(&tuned));
+        backward.simplex_iteration_limit = FORCED_SIMPLEX_ITERATION_LIMIT;
+        SolverProfiles {
+            forward: Phase::Forward.resolve_profile(None),
+            backward,
+        }
+    }
+
+    fn d03_case_dir() -> &'static Path {
+        Path::new("../../examples/deterministic/d03-two-hydro-cascade")
+    }
+
+    /// Build a fresh [`StudySetup`], mirroring `deterministic.rs`'s
+    /// `run_deterministic_with_solver` construction pipeline. Each shape
+    /// trains from an independently-built setup, never a warm-started reuse,
+    /// so the four shapes compare cold-to-cold.
+    fn fresh_setup(case_dir: &Path) -> StudySetup {
+        let config_path = case_dir.join("config.json");
+        let config = cobre_io::parse_config(&config_path).expect("config must parse");
+        let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
+
+        let prepare_result =
+            prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
+                .expect("prepare_stochastic must succeed");
+        let system = prepare_result.system;
+        let stochastic = prepare_result.stochastic;
+
+        let hydro_models = prepare_hydro_models(&system, case_dir, false)
+            .expect("prepare_hydro_models must succeed");
+
+        build_setup_for_case(case_dir, &config, &system, stochastic, hydro_models)
+    }
+
+    /// `size() == 2` sibling of [`StubComm`]: every collective writes only
+    /// this rank's own slot (`recv[displs[0]..displs[0] + send.len()]`),
+    /// mirroring `state_exchange.rs`'s own `Rank1Of2` test pattern rather than
+    /// echoing rank 0's data into rank 1's slot. Faithful — not a dishonest
+    /// tautology — only because every fixture below trains with
+    /// `forward_passes == 1`: `RankDistribution` (`base_fwd=0, remainder=1`
+    /// for `num_ranks=2`) assigns rank 0 the sole real forward pass and rank 1
+    /// exactly zero, so the zero contribution this stub leaves unwritten IS
+    /// what a genuine rank 1 would also send.
+    struct Rank0Of2;
+
+    impl Communicator for Rank0Of2 {
+        fn allgatherv<T: CommData>(
+            &self,
+            send: &[T],
+            recv: &mut [T],
+            _counts: &[usize],
+            displs: &[usize],
+        ) -> Result<(), CommError> {
+            let start = displs[0];
+            recv[start..start + send.len()].clone_from_slice(send);
+            Ok(())
+        }
+
+        fn allreduce<T: CommData>(
+            &self,
+            send: &[T],
+            recv: &mut [T],
+            _op: ReduceOp,
+        ) -> Result<(), CommError> {
+            recv.clone_from_slice(send);
+            Ok(())
+        }
+
+        fn broadcast<T: CommData>(&self, _buf: &mut [T], _root: usize) -> Result<(), CommError> {
+            Ok(())
+        }
+
+        fn barrier(&self) -> Result<(), CommError> {
+            Ok(())
+        }
+
+        fn rank(&self) -> usize {
+            0
+        }
+
+        fn size(&self) -> usize {
+            2
+        }
+
+        fn abort(&self, error_code: i32) -> ! {
+            std::process::exit(error_code)
+        }
+    }
+
+    /// Train one shape on a fresh [`StudySetup`], returning
+    /// `(final_lb, total_retries)`. `total_retries` sums
+    /// `solver_stats_log`'s per-iteration, per-phase deltas — the run's
+    /// reduced `SolverStatistics.retry_count`, already aggregated across every
+    /// workspace/rank the phase distributed work to.
+    fn run_shape(
+        case_dir: &Path,
+        n_threads: usize,
+        comm: &impl Communicator,
+        risk_measures: Option<Vec<RiskMeasure>>,
+    ) -> (f64, u64) {
+        let mut setup = fresh_setup(case_dir);
+        if let Some(risk_measures) = risk_measures {
+            setup.set_risk_measures(risk_measures);
+        }
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+
+        let outcome = setup
+            .train_with_solver_profiles(
+                &mut solver,
+                comm,
+                n_threads,
+                ActiveSolver::new,
+                forced_retry_profiles(),
+            )
+            .expect("train_with_solver_profiles must return Ok");
+        assert!(
+            outcome.error.is_none(),
+            "expected no training error, got: {:?}",
+            outcome.error
+        );
+
+        let total_retries: u64 = outcome
+            .result
+            .solver_stats_log
+            .iter()
+            .map(|entry| entry.delta.retry_attempts)
+            .sum();
+
+        (outcome.result.final_lb, total_retries)
+    }
+
+    /// Assert bitwise-identical `final_lb` across the four shapes of one
+    /// config, and that every shape's reduced retry count is `> 0` — a
+    /// zero-retry shape is a powerless gate, not a pass.
+    fn assert_shapes_agree(case_dir: &Path, risk_measures: Option<Vec<RiskMeasure>>) {
+        let stub1 = StubComm;
+        let rank0_of_2 = Rank0Of2;
+
+        let (lb_threads_k, retries_k) = run_shape(case_dir, 4, &stub1, risk_measures.clone());
+        let (lb_threads_1, retries_1) = run_shape(case_dir, 1, &stub1, risk_measures.clone());
+        let (lb_repeat, retries_repeat) = run_shape(case_dir, 1, &stub1, risk_measures.clone());
+        let (lb_2rank, retries_2rank) = run_shape(case_dir, 1, &rank0_of_2, risk_measures);
+
+        for (label, retries) in [
+            ("threads=4", retries_k),
+            ("threads=1", retries_1),
+            ("same-shape repeat", retries_repeat),
+            ("2-rank", retries_2rank),
+        ] {
+            assert!(
+                retries > 0,
+                "{label}: forced-retry profile produced 0 retries on this fixture — the gate \
+                 is powerless here; tighten FORCED_SIMPLEX_ITERATION_LIMIT"
+            );
+        }
+
+        assert_eq!(
+            lb_threads_k.to_bits(),
+            lb_threads_1.to_bits(),
+            "threads=4 vs threads=1 final lower bound must be bitwise identical"
+        );
+        assert_eq!(
+            lb_threads_1.to_bits(),
+            lb_repeat.to_bits(),
+            "same-shape repeat final lower bound must be bitwise identical"
+        );
+        assert_eq!(
+            lb_threads_1.to_bits(),
+            lb_2rank.to_bits(),
+            "2-rank final lower bound must be bitwise identical"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow: run with --features slow-tests"
+    )]
+    fn retry_armed_determinism_expectation() {
+        assert_shapes_agree(d03_case_dir(), None);
+    }
+
+    /// `alpha=0.5, lambda=1.0` mirror `conformance.rs`'s
+    /// `cvar_alpha_half_concentrates_on_worst` fixture — first `CVaR`
+    /// determinism coverage in the suite.
+    #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow: run with --features slow-tests"
+    )]
+    fn retry_armed_determinism_cvar() {
+        let case_dir = d03_case_dir();
+        let num_stages = fresh_setup(case_dir).num_stages();
+        let risk_measures = vec![
+            RiskMeasure::CVaR {
+                alpha: 0.5,
+                lambda: 1.0
+            };
+            num_stages
+        ];
+        assert_shapes_agree(case_dir, Some(risk_measures));
     }
 }
