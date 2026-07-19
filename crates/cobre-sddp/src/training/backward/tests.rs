@@ -24,6 +24,8 @@ where
         n_ranks,
         bwd_max_openings,
         real_states_capacity,
+        inputs.local_work,
+        inputs.training_ctx.state.n_state,
     );
     bwd_state.run(inputs)
 }

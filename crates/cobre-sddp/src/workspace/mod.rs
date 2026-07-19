@@ -24,9 +24,9 @@ pub mod workspace;
 // modules, so the re-export reads as unused in the non-test build; scoping the
 // allow to `cfg(not(test))` keeps the warning live should a non-test caller land.
 pub use context::{StageContext, TrainingContext};
-#[cfg_attr(not(test), allow(unused_imports))]
-pub(crate) use workspace::BackwardAccumulators;
 pub use workspace::{
     BASIS_BROADCAST_WIRE_VERSION, BasisStore, BasisStoreSliceMut, CapturedBasis, ScratchBuffers,
     SolverWorkspace, WorkspacePool, WorkspaceSizing,
 };
+#[cfg_attr(not(test), allow(unused_imports))]
+pub(crate) use workspace::{BackwardAccumulators, BackwardPnScratch};

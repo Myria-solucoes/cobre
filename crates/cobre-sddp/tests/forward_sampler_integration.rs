@@ -546,6 +546,8 @@ fn run_programmatic(
         training_solver_forward: None,
         simulation_solver: None,
         backward_opening_order: cobre_io::config::BackwardOpeningOrder::default(),
+        backward_scheduler: cobre_io::config::BackwardScheduler::default(),
+        opening_block_size: None,
     };
     let mut setup =
         StudySetup::from_broadcast_params(system, stochastic, config, hydro_models, source, source)
@@ -885,6 +887,8 @@ fn run_with_setup(
         training_solver_forward: None,
         simulation_solver: None,
         backward_opening_order: cobre_io::config::BackwardOpeningOrder::default(),
+        backward_scheduler: cobre_io::config::BackwardScheduler::default(),
+        opening_block_size: None,
     };
     let mut setup =
         StudySetup::from_broadcast_params(system, stochastic, config, hydro_models, source, source)

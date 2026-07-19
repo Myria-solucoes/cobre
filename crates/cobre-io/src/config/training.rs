@@ -1,5 +1,7 @@
 //! Training-phase configuration types for `config.json → training`.
 
+use std::num::NonZeroUsize;
+
 use serde::{Deserialize, Serialize};
 
 use super::scenario_source::RawScenarioSourceConfig;
@@ -49,6 +51,16 @@ pub struct TrainingConfig {
     /// Backward opening solve order.
     #[serde(default)]
     pub backward_opening_order: BackwardOpeningOrder,
+
+    /// Backward-pass scheduler: per-trial-point or opening-block claim loop.
+    #[serde(default)]
+    pub backward_scheduler: BackwardScheduler,
+
+    /// Opening-block size for `backward_scheduler = "opening_block"`. Absent
+    /// resolves per stage to `⌈|Ω_s|/2⌉` (half the openings, rounded up); a set
+    /// value is clamped to `min(|Ω_s|, size)`.
+    #[serde(default)]
+    pub opening_block_size: Option<NonZeroUsize>,
 
     /// Scenario source configuration for the training forward pass.
     /// When absent, all classes default to `in_sample`.
@@ -261,6 +273,18 @@ pub enum BackwardOpeningOrder {
     SigmaKey,
 }
 
+/// Backward-pass scheduler selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum BackwardScheduler {
+    /// Per-trial-point backward scheduling (the default).
+    #[default]
+    TrialPoint,
+    /// Opening-block backward scheduling.
+    OpeningBlock,
+}
+
 /// Dual simplex edge-weight (pricing) strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -394,8 +418,8 @@ pub struct LipschitzConfig {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{
-        BackwardOpeningOrder, DualEdgeWeight, PriceStrategy, ScaleStrategy, SelectionMethod,
-        TrainingConfig,
+        BackwardOpeningOrder, BackwardScheduler, DualEdgeWeight, NonZeroUsize, PriceStrategy,
+        ScaleStrategy, SelectionMethod, TrainingConfig,
     };
 
     /// A `dynamic` selection block round-trips through the tagged enum, with
@@ -649,6 +673,48 @@ mod tests {
         assert!(
             result.is_err(),
             "an unknown backward_opening_order value must be rejected"
+        );
+    }
+
+    /// An absent `backward_scheduler` deserializes to the `TrialPoint` default.
+    #[test]
+    fn backward_scheduler_defaults_to_trial_point_when_absent() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }]
+        }"#;
+        let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.backward_scheduler, BackwardScheduler::TrialPoint);
+        assert_eq!(cfg.opening_block_size, None);
+    }
+
+    /// `"opening_block"` with `opening_block_size: 4` round-trips into the
+    /// `OpeningBlock` variant and `Some(4)`.
+    #[test]
+    fn backward_scheduler_and_block_size_round_trip() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "backward_scheduler": "opening_block",
+            "opening_block_size": 4
+        }"#;
+        let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.backward_scheduler, BackwardScheduler::OpeningBlock);
+        assert_eq!(cfg.opening_block_size, NonZeroUsize::new(4));
+    }
+
+    /// `opening_block_size: 0` is an out-of-range deserialize error (`NonZeroUsize`).
+    #[test]
+    fn opening_block_size_zero_is_deserialize_error() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "opening_block_size": 0
+        }"#;
+        let result = serde_json::from_str::<TrainingConfig>(json);
+        assert!(
+            result.is_err(),
+            "opening_block_size = 0 must be rejected by NonZeroUsize"
         );
     }
 }

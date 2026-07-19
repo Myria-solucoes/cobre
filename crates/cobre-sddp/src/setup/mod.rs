@@ -32,6 +32,7 @@ use cobre_core::temporal::SeasonMap;
 use cobre_core::temporal::StageLagTransition;
 use cobre_core::temporal::StageStateConfig;
 use cobre_io::Config;
+use cobre_io::config::BackwardScheduler;
 use cobre_solver::ActiveProfile;
 use cobre_stochastic::par::RecentObservationSeed;
 use cobre_stochastic::par::lag_transition::compute_recent_observation_seed;
@@ -69,6 +70,7 @@ pub use stochastic_pipeline::{
 };
 
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::path::Path;
 
 use cobre_core::{
@@ -203,6 +205,14 @@ pub struct StudySetup {
     /// Resolved forward-pass solver profile (`training.solver.forward`).
     pub(crate) forward_profile: ActiveProfile,
 
+    /// Backward-pass scheduler (`training.backward_scheduler`), threaded into
+    /// [`StudySetup::train`] alongside [`Self::backward_profile`].
+    pub(crate) backward_scheduler: BackwardScheduler,
+
+    /// Opening-block size override for `backward_scheduler = opening_block`
+    /// (`training.opening_block_size`).
+    pub(crate) opening_block_size: Option<NonZeroUsize>,
+
     /// Stochastic numerical methodology parameters (`horizon`, `inflow_method`).
     pub(crate) methodology: methodology_config::MethodologyConfig,
 
@@ -332,6 +342,8 @@ impl StudySetup {
             training_solver_forward,
             simulation_solver,
             backward_opening_order,
+            backward_scheduler,
+            opening_block_size,
         } = config;
 
         // Fail fast on a backend-unsupported preset/field before any template
@@ -532,6 +544,8 @@ impl StudySetup {
             events: EventParams { export_states },
             backward_profile,
             forward_profile,
+            backward_scheduler,
+            opening_block_size,
             methodology: methodology_config::MethodologyConfig {
                 horizon,
                 inflow_method,

@@ -412,6 +412,8 @@ fn make_config() -> Config {
             cut_selection: RowSelectionConfig::default(),
             solver: TrainingSolverConfig::default(),
             backward_opening_order: cobre_io::config::BackwardOpeningOrder::default(),
+            backward_scheduler: cobre_io::config::BackwardScheduler::default(),
+            opening_block_size: None,
             scenario_source: None,
         },
         upper_bound_evaluation: UpperBoundEvaluationConfig::default(),

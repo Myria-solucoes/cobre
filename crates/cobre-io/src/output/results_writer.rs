@@ -268,8 +268,8 @@ mod tests {
 
     fn make_config() -> crate::Config {
         use crate::config::{
-            BackwardOpeningOrder, CheckpointingConfig, EstimationConfig, ExportsConfig,
-            InflowNonNegativityConfig, ModelingConfig, PolicyConfig, PolicyMode,
+            BackwardOpeningOrder, BackwardScheduler, CheckpointingConfig, EstimationConfig,
+            ExportsConfig, InflowNonNegativityConfig, ModelingConfig, PolicyConfig, PolicyMode,
             RowSelectionConfig, SimulationConfig, StoppingRuleConfig, TrainingConfig,
             TrainingSolverConfig, UpperBoundEvaluationConfig,
         };
@@ -287,6 +287,8 @@ mod tests {
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 backward_opening_order: BackwardOpeningOrder::default(),
+                backward_scheduler: BackwardScheduler::default(),
+                opening_block_size: None,
                 scenario_source: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),

@@ -97,6 +97,32 @@ Read: `stochastic/noise_key.rs` (`build_noise_key_table`),
 stub, bitwise `final_lb`) and the MPI SLURM Integration job's rank-invariance
 comparison on `examples/4ree`.
 
+## PN opening-block scheduler is warm-start-only
+
+The opt-in PN scheduler (`training.backward_scheduler = opening_block`)
+reassigns the backward pass's work unit from a whole trial point to an
+opening-block: workers claim `(trial point, block)` units in any order from a
+shared atomic counter, warm-chaining each block's openings from a fresh
+frozen-LP load. Units are SOLVED in claim order — dependent on worker count and
+scheduling timing — but each opening's outcome is WRITTEN into a per-`(m, ω)`
+arena and AGGREGATED per trial point over CANONICAL ω, in ASCENDING m. The
+generated cut set is therefore independent of claim order and worker count:
+reordering claims changes only which worker warms which block, never which cut
+is produced. Aggregating the arena in claim/solve-position order, or keying it
+on the claim index instead of `(m, ω)`, is the wrong-but-compiling
+alternative — CVaR's tail weighting is order-sensitive, so it silently breaks
+CVaR reproducibility and declaration-order invariance the same way a
+solve-order-keyed aggregation would break the trial-point path above. An
+active Dynamic Cut Selection iteration always falls back to the trial-point
+path: PN's frozen-LP load is incompatible with DCS's cut-free lazy core.
+Read: `training/backward/pn.rs` (`process_stage_backward_pn`'s claim loop,
+`pn_finish`'s per-`(m, ω)` arena and ascending-m aggregation),
+`training/backward_pass_state.rs` (`run_one_backward_stage`'s `use_pn`
+dispatch). Pinned by `pn_scheduler_reproducible_across_thread_counts` in
+`tests/mpi_wire.rs` (threads=4 / threads=1 bitwise `final_lb`); a fuller
+multi-shape/CVaR/2-rank matrix mirroring `opening_order_determinism`'s gate is
+a planned follow-up.
+
 ## No EWMA upper bound
 
 `ConvergenceMonitor::upper_bound()` returns the raw per-iteration upper bound —

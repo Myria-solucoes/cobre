@@ -19,7 +19,9 @@
 //! trait is local and the implemented profile types are foreign, which the
 //! orphan rule permits.
 
-use cobre_io::config::PhaseSolverProfileConfig;
+use std::num::NonZeroUsize;
+
+use cobre_io::config::{BackwardScheduler, PhaseSolverProfileConfig};
 #[cfg(feature = "highs")]
 use cobre_io::config::{DualEdgeWeight, PriceStrategy, ScaleStrategy};
 #[cfg(feature = "highs")]
@@ -45,17 +47,26 @@ pub enum Phase {
     Simulation,
 }
 
-/// Resolved forward/backward solver profiles, threaded from [`crate::setup::StudySetup`]
-/// into `TrainingSession::new` once per training run.
+/// Resolved per-run backward/forward tuning, threaded from [`crate::setup::StudySetup`]
+/// into `TrainingSession::new` once per training run: the solver profiles plus
+/// the backward-pass scheduler (`training.backward_scheduler`/
+/// `training.opening_block_size`), which has no forward-pass analogue but
+/// travels the same seam.
 ///
-/// `Default` reproduces [`Phase::profile`]'s byte-neutral constants, so a caller
-/// that has no config override can pass `SolverProfiles::default()`.
+/// `Default` reproduces [`Phase::profile`]'s byte-neutral constants and the
+/// byte-neutral trial-point scheduler, so a caller with no config override can
+/// pass `SolverProfiles::default()`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SolverProfiles {
     /// Resolved forward-pass profile.
     pub forward: ActiveProfile,
     /// Resolved backward-pass profile.
     pub backward: ActiveProfile,
+    /// Backward-pass scheduler (`training.backward_scheduler`).
+    pub backward_scheduler: BackwardScheduler,
+    /// Opening-block size override for `backward_scheduler = opening_block`
+    /// (`training.opening_block_size`).
+    pub opening_block_size: Option<NonZeroUsize>,
 }
 
 impl Default for SolverProfiles {
@@ -63,6 +74,8 @@ impl Default for SolverProfiles {
         Self {
             forward: Phase::Forward.profile(),
             backward: Phase::Backward.profile(),
+            backward_scheduler: BackwardScheduler::default(),
+            opening_block_size: None,
         }
     }
 }

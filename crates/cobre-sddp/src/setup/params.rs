@@ -1,8 +1,12 @@
 //! `StudyParams`, `ConstructionConfig`, and associated constants.
 
+use std::num::NonZeroUsize;
+
 use cobre_core::ScalarParameter;
 use cobre_io::Config;
-use cobre_io::config::{BackwardOpeningOrder, PhaseSolverProfileConfig, StoppingRuleConfig};
+use cobre_io::config::{
+    BackwardOpeningOrder, BackwardScheduler, PhaseSolverProfileConfig, StoppingRuleConfig,
+};
 
 use crate::{
     InflowNonNegativityMethod, SddpError,
@@ -61,6 +65,11 @@ pub struct StudyParams {
     pub simulation_solver: Option<PhaseSolverProfileConfig>,
     /// Backward opening solve order (`training.backward_opening_order`).
     pub backward_opening_order: BackwardOpeningOrder,
+    /// Backward-pass scheduler (`training.backward_scheduler`).
+    pub backward_scheduler: BackwardScheduler,
+    /// Opening-block size override for `backward_scheduler = opening_block`
+    /// (`training.opening_block_size`).
+    pub opening_block_size: Option<NonZeroUsize>,
 }
 
 impl StudyParams {
@@ -150,6 +159,8 @@ impl StudyParams {
         let training_solver_forward = config.training.solver.forward.clone();
         let simulation_solver = config.simulation.solver.clone();
         let backward_opening_order = config.training.backward_opening_order;
+        let backward_scheduler = config.training.backward_scheduler;
+        let opening_block_size = config.training.opening_block_size;
 
         if let Some(b) = budget
             && u64::from(b) < u64::from(forward_passes)
@@ -176,6 +187,8 @@ impl StudyParams {
             training_solver_forward,
             simulation_solver,
             backward_opening_order,
+            backward_scheduler,
+            opening_block_size,
         })
     }
 
@@ -202,6 +215,8 @@ impl StudyParams {
             training_solver_forward: self.training_solver_forward,
             simulation_solver: self.simulation_solver,
             backward_opening_order: self.backward_opening_order,
+            backward_scheduler: self.backward_scheduler,
+            opening_block_size: self.opening_block_size,
         }
     }
 }
@@ -259,6 +274,11 @@ pub struct ConstructionConfig {
     pub simulation_solver: Option<PhaseSolverProfileConfig>,
     /// Backward opening solve order (`training.backward_opening_order`).
     pub backward_opening_order: BackwardOpeningOrder,
+    /// Backward-pass scheduler (`training.backward_scheduler`).
+    pub backward_scheduler: BackwardScheduler,
+    /// Opening-block size override for `backward_scheduler = opening_block`
+    /// (`training.opening_block_size`).
+    pub opening_block_size: Option<NonZeroUsize>,
 }
 
 #[cfg(test)]
@@ -268,10 +288,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use cobre_io::config::{
-        BackwardOpeningOrder, Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
-        InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
-        RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
-        TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+        BackwardOpeningOrder, BackwardScheduler, Config, EstimationConfig, ExportsConfig,
+        InflowNonNegativityConfig, InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig,
+        PolicyConfig, RowSelectionConfig, SimulationConfig as IoSimulationConfig,
+        StoppingRuleConfig, TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
     };
     use tracing::{Event, Level, Metadata, Subscriber, span};
 
@@ -364,6 +384,8 @@ mod tests {
                 },
                 solver: TrainingSolverConfig::default(),
                 backward_opening_order: BackwardOpeningOrder::default(),
+                backward_scheduler: BackwardScheduler::default(),
+                opening_block_size: None,
                 scenario_source: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
@@ -399,6 +421,8 @@ mod tests {
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 backward_opening_order: BackwardOpeningOrder::default(),
+                backward_scheduler: BackwardScheduler::default(),
+                opening_block_size: None,
                 scenario_source: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),

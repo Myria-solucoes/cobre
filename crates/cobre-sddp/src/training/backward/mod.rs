@@ -60,11 +60,13 @@ use std::ops::Range;
 mod duals_extraction;
 mod lp_setup;
 mod outcome_aggregation;
+mod pn;
 mod trial_point;
 
 #[cfg(test)]
 mod tests;
 
+pub(crate) use pn::{PnOutcome, pn_finish, process_stage_backward_pn, resolve_block_size};
 pub(crate) use trial_point::{StageOpeningSolver, process_trial_point_backward};
 
 #[cfg(test)]

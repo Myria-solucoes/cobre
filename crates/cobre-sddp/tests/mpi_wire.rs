@@ -442,7 +442,7 @@ mod retry_armed_determinism {
 
     use cobre_comm::Communicator;
     use cobre_core::scenario::ScenarioSource;
-    use cobre_io::config::PhaseSolverProfileConfig;
+    use cobre_io::config::{BackwardScheduler, PhaseSolverProfileConfig};
     use cobre_sddp::{
         Phase, RiskMeasure, SolverProfiles, StudySetup, hydro_models::prepare_hydro_models,
         setup::prepare_stochastic,
@@ -475,6 +475,8 @@ mod retry_armed_determinism {
         SolverProfiles {
             forward: Phase::Forward.resolve_profile(None),
             backward,
+            backward_scheduler: BackwardScheduler::default(),
+            opening_block_size: None,
         }
     }
 
@@ -732,5 +734,651 @@ mod opening_order_determinism {
             lb_2rank.to_bits(),
             "2-rank final lower bound must be bitwise identical"
         );
+    }
+}
+
+mod pn_scheduler_determinism {
+    //! PN opening-block scheduler gate: trains `examples/1dtoy` under
+    //! `training.backward_scheduler = opening_block` via the public `train`
+    //! entry point. Three properties are pinned: (1) the final lower bound is
+    //! bitwise identical across thread counts, (2) an active Dynamic Cut
+    //! Selection iteration forces the PN path to degenerate to the
+    //! trial-point path bit-for-bit, and (3) both schedulers generate the
+    //! same number of cuts. A fuller multi-shape/CVaR/2-rank matrix mirroring
+    //! `opening_order_determinism`'s gate is a planned follow-up (sddp.md "PN
+    //! opening-block scheduler is warm-start-only").
+
+    use std::path::Path;
+    use std::sync::mpsc;
+
+    use cobre_comm::Communicator;
+    use cobre_core::TrainingEvent;
+    use cobre_core::scenario::ScenarioSource;
+    use cobre_io::Config;
+    use cobre_io::config::{BackwardScheduler, SelectionMethod, StoppingRuleConfig};
+    use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
+    use cobre_solver::ActiveSolver;
+
+    use crate::common::{StubComm, build_setup_for_case};
+
+    fn fixture_case_dir() -> &'static Path {
+        Path::new("../../examples/1dtoy")
+    }
+
+    /// Build a fresh [`StudySetup`] from `case_dir`'s config, applying `mutate`
+    /// to the freshly-parsed [`Config`] before [`build_setup_for_case`] —
+    /// mirrors `opening_order_determinism`'s `fresh_setup` shape, parameterized
+    /// over the config mutation each caller needs.
+    fn fresh_setup_with(case_dir: &Path, mutate: impl FnOnce(&mut Config)) -> StudySetup {
+        let config_path = case_dir.join("config.json");
+        let mut config = cobre_io::parse_config(&config_path).expect("config must parse");
+        mutate(&mut config);
+        let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
+
+        let prepare_result =
+            prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
+                .expect("prepare_stochastic must succeed");
+        let system = prepare_result.system;
+        let stochastic = prepare_result.stochastic;
+
+        let hydro_models = prepare_hydro_models(&system, case_dir, false)
+            .expect("prepare_hydro_models must succeed");
+
+        build_setup_for_case(case_dir, &config, &system, stochastic, hydro_models)
+    }
+
+    /// Build a fresh [`StudySetup`] with `training.backward_scheduler` forced
+    /// to `scheduler`.
+    fn fresh_setup(case_dir: &Path, scheduler: BackwardScheduler) -> StudySetup {
+        fresh_setup_with(case_dir, |config| {
+            config.training.backward_scheduler = scheduler;
+        })
+    }
+
+    /// Like [`fresh_setup`], additionally forcing `cut_selection` to `Dynamic`
+    /// active from iteration 1 — DCS is active on every solved iteration.
+    fn fresh_setup_with_active_dcs(case_dir: &Path, scheduler: BackwardScheduler) -> StudySetup {
+        fresh_setup_with(case_dir, |config| {
+            config.training.backward_scheduler = scheduler;
+            config.training.cut_selection.selection = Some(SelectionMethod::Dynamic {
+                start_iteration: 1,
+                seed_window: 5,
+                candidate_recency: None,
+                max_added_per_round: 10,
+                violation_tolerance: 1e-10,
+            });
+        })
+    }
+
+    /// Like [`fresh_setup`], additionally forcing exactly one training
+    /// iteration (`training.stopping_rules = iteration_limit(1)`).
+    fn fresh_setup_one_iteration(case_dir: &Path, scheduler: BackwardScheduler) -> StudySetup {
+        fresh_setup_with(case_dir, |config| {
+            config.training.backward_scheduler = scheduler;
+            config.training.stopping_rules =
+                Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]);
+        })
+    }
+
+    /// Train `setup` via the public `train` entry point, returning `final_lb`.
+    fn train_final_lb(mut setup: StudySetup, n_threads: usize, comm: &impl Communicator) -> f64 {
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = setup
+            .train(&mut solver, comm, n_threads, ActiveSolver::new, None, None)
+            .expect("train must return Ok");
+        assert!(
+            outcome.error.is_none(),
+            "expected no training error, got: {:?}",
+            outcome.error
+        );
+        outcome.result.final_lb
+    }
+
+    /// Train `setup` (one iteration) via the public `train` entry point,
+    /// returning the single `BackwardPassComplete` event's `rows_generated` —
+    /// `BackwardResult::cuts_generated` summed across all stages for that
+    /// iteration.
+    fn train_rows_generated(mut setup: StudySetup, comm: &impl Communicator) -> u32 {
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let (event_tx, event_rx) = mpsc::channel::<TrainingEvent>();
+        let outcome = setup
+            .train(
+                &mut solver,
+                comm,
+                1,
+                ActiveSolver::new,
+                Some(event_tx),
+                None,
+            )
+            .expect("train must return Ok");
+        assert!(
+            outcome.error.is_none(),
+            "expected no training error, got: {:?}",
+            outcome.error
+        );
+
+        let rows_generated: Vec<u32> = event_rx
+            .try_iter()
+            .filter_map(|e| {
+                if let TrainingEvent::BackwardPassComplete { rows_generated, .. } = e {
+                    Some(rows_generated)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            rows_generated.len(),
+            1,
+            "one-iteration training must emit exactly one BackwardPassComplete event, got {}",
+            rows_generated.len()
+        );
+        rows_generated[0]
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow: run with --features slow-tests"
+    )]
+    fn pn_scheduler_reproducible_across_thread_counts() {
+        let case_dir = fixture_case_dir();
+        let stub = StubComm;
+
+        let lb_threads_4 = train_final_lb(
+            fresh_setup(case_dir, BackwardScheduler::OpeningBlock),
+            4,
+            &stub,
+        );
+        let lb_threads_1 = train_final_lb(
+            fresh_setup(case_dir, BackwardScheduler::OpeningBlock),
+            1,
+            &stub,
+        );
+
+        assert_eq!(
+            lb_threads_4.to_bits(),
+            lb_threads_1.to_bits(),
+            "opening_block threads=4 vs threads=1 final lower bound must be bitwise identical"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow: run with --features slow-tests"
+    )]
+    fn pn_falls_back_to_trial_point_under_active_dcs() {
+        let case_dir = fixture_case_dir();
+        let stub = StubComm;
+
+        let lb_opening_block = train_final_lb(
+            fresh_setup_with_active_dcs(case_dir, BackwardScheduler::OpeningBlock),
+            1,
+            &stub,
+        );
+        let lb_trial_point = train_final_lb(
+            fresh_setup_with_active_dcs(case_dir, BackwardScheduler::TrialPoint),
+            1,
+            &stub,
+        );
+
+        assert_eq!(
+            lb_opening_block.to_bits(),
+            lb_trial_point.to_bits(),
+            "opening_block must degenerate to trial_point bit-for-bit under active DCS"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow: run with --features slow-tests"
+    )]
+    fn pn_generates_one_cut_per_trial_point() {
+        let case_dir = fixture_case_dir();
+        let stub = StubComm;
+
+        let rows_opening_block = train_rows_generated(
+            fresh_setup_one_iteration(case_dir, BackwardScheduler::OpeningBlock),
+            &stub,
+        );
+        let rows_trial_point = train_rows_generated(
+            fresh_setup_one_iteration(case_dir, BackwardScheduler::TrialPoint),
+            &stub,
+        );
+
+        assert_eq!(
+            rows_opening_block, rows_trial_point,
+            "opening_block and trial_point must generate the same number of cuts"
+        );
+    }
+}
+
+mod pn_scratch {
+    //! `BackwardPnScratch` sizing/gating/no-alloc gate. Unlike
+    //! `pn_scheduler_determinism`'s `examples/1dtoy`-based tests, these drive
+    //! `BackwardPassState` directly against a small synthetic 2-stage, 2-opening
+    //! fixture: `set_scheduler` and the PN scratch it sizes are internal to the
+    //! backward pass and have no observable surface through the public
+    //! `StudySetup::train` entry point.
+
+    use std::num::NonZeroUsize;
+
+    use cobre_core::scenario::{
+        CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, InflowModel,
+        SamplingScheme,
+    };
+    use cobre_core::temporal::{NoiseMethod, ScenarioSourceConfig};
+    use cobre_core::{EntityId, HydroGenerationModel, SystemBuilder};
+    use cobre_io::config::BackwardScheduler;
+    use cobre_sddp::{
+        BackwardPassInputs, BackwardPassState, ExchangeBuffers,
+        context::{StageContext, TrainingContext},
+        cut::FutureCostFunction,
+        cut_sync::CutSyncBuffers,
+        horizon_mode::HorizonMode,
+        inflow_method::InflowNonNegativityMethod,
+        risk_measure::RiskMeasure,
+        test_support::{
+            all_enabled_cut_state_layouts, state_layout, study_dims, trial_point_records,
+        },
+        workspace::{BasisStore, WorkspacePool, WorkspaceSizing},
+    };
+    use cobre_solver::{
+        Basis, LpSolution, RowBatch, SolutionView, SolverError, SolverInterface, SolverStatistics,
+        StageTemplate,
+    };
+    use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
+
+    use crate::common::StubComm;
+    use crate::common::builders::{BusSpec, HydroSpec, make_bus, make_hydro, make_stage};
+
+    /// Minimal `SolverInterface` mock returning a fixed feasible solution for
+    /// every solve; mirrors `backward_pass_state.rs`'s own unit-test mock, not
+    /// reachable from this external test crate.
+    struct MockSolver {
+        solution: LpSolution,
+        current_num_rows: usize,
+        buf_primal: Vec<f64>,
+        buf_dual: Vec<f64>,
+        buf_reduced_costs: Vec<f64>,
+    }
+
+    impl MockSolver {
+        fn always_ok(solution: LpSolution) -> Self {
+            let base_rows = solution.dual.len();
+            let buf_primal = solution.primal.clone();
+            let buf_dual = solution.dual.clone();
+            let buf_reduced_costs = solution.reduced_costs.clone();
+            Self {
+                solution,
+                current_num_rows: base_rows,
+                buf_primal,
+                buf_dual,
+                buf_reduced_costs,
+            }
+        }
+    }
+
+    impl SolverInterface for MockSolver {
+        type Profile = cobre_solver::ActiveProfile;
+
+        fn apply_profile(&mut self, _profile: &cobre_solver::ActiveProfile) {}
+
+        fn name(&self) -> &'static str {
+            "mock"
+        }
+        fn solver_name_version(&self) -> String {
+            "MockSolver 0.0.0".to_string()
+        }
+        fn load_model(&mut self, template: &StageTemplate) {
+            self.current_num_rows = template.num_rows;
+            self.buf_primal = self.solution.primal.clone();
+            self.buf_dual = self.solution.dual.clone();
+            self.buf_reduced_costs = self.solution.reduced_costs.clone();
+            self.buf_dual.resize(self.current_num_rows, 0.0);
+        }
+        fn add_rows(&mut self, cuts: &RowBatch) {
+            self.current_num_rows += cuts.num_rows;
+            self.buf_dual.resize(self.current_num_rows, 0.0);
+        }
+        fn set_col_bounds(&mut self, _indices: &[usize], _lower: &[f64], _upper: &[f64]) {}
+        fn set_row_bounds(&mut self, _indices: &[usize], _lower: &[f64], _upper: &[f64]) {}
+        fn solve(&mut self, _basis: Option<&Basis>) -> Result<SolutionView<'_>, SolverError> {
+            Ok(SolutionView {
+                objective: self.solution.objective,
+                primal: &self.buf_primal,
+                dual: &self.buf_dual,
+                reduced_costs: &self.buf_reduced_costs,
+                iterations: 0,
+                solve_time_seconds: 0.0,
+            })
+        }
+        fn get_basis(&mut self, out: &mut Basis) {
+            *out = Basis::new(0, 0);
+        }
+        fn statistics(&self) -> SolverStatistics {
+            SolverStatistics::default()
+        }
+        fn statistics_into(&self, out: &mut SolverStatistics) {
+            out.copy_from(&SolverStatistics::default());
+        }
+    }
+
+    /// Single-state-column template: one storage-like state column, one aux
+    /// column pinned `[0, 0]` by an equality row, one zero-cost objective column
+    /// — a trivially solvable LP any `SolverInterface` accepts unconditionally.
+    fn minimal_template_1_0() -> StageTemplate {
+        StageTemplate {
+            num_cols: 3,
+            num_rows: 1,
+            num_nz: 1,
+            col_starts: vec![0_i32, 0, 1, 1],
+            row_indices: vec![0_i32],
+            values: vec![1.0],
+            col_lower: vec![0.0, 0.0, 0.0],
+            col_upper: vec![f64::INFINITY; 3],
+            objective: vec![0.0, 0.0, 1.0],
+            row_lower: vec![0.0],
+            row_upper: vec![0.0],
+            n_state: 1,
+            n_transfer: 0,
+            n_dual_relevant: 1,
+            n_hydro: 1,
+            max_par_order: 0,
+            col_scale: Vec::new(),
+            row_scale: Vec::new(),
+        }
+    }
+
+    fn solution_1_0(objective: f64, dual_storage: f64) -> LpSolution {
+        LpSolution {
+            objective,
+            primal: vec![0.0, 0.0, 0.0],
+            dual: vec![dual_storage],
+            reduced_costs: vec![0.0; 3],
+            iterations: 0,
+            solve_time_seconds: 0.0,
+        }
+    }
+
+    fn empty_cut_batches(n_stages: usize) -> Vec<RowBatch> {
+        (0..n_stages)
+            .map(|_| RowBatch {
+                num_rows: 0,
+                row_starts: Vec::new(),
+                col_indices: Vec::new(),
+                values: Vec::new(),
+                row_lower: Vec::new(),
+                row_upper: Vec::new(),
+            })
+            .collect()
+    }
+
+    /// Single-hydro, single-bus `StochasticContext` with `n_stages` monthly
+    /// stages and `branching_factor` openings at every successor stage.
+    fn make_stochastic_context(
+        n_stages: usize,
+        branching_factor: usize,
+    ) -> cobre_stochastic::StochasticContext {
+        use std::collections::BTreeMap;
+
+        let bus = make_bus(EntityId(0), BusSpec::default());
+        let hydro = make_hydro(
+            EntityId(1),
+            HydroSpec {
+                bus_id: EntityId(0),
+                max_storage_hm3: 100.0,
+                max_turbined_m3s: 100.0,
+                max_generation_mw: 100.0,
+                generation_model: HydroGenerationModel::ConstantProductivity,
+                ..HydroSpec::default()
+            },
+        );
+
+        let stages: Vec<_> = (0..n_stages)
+            .map(|idx| {
+                make_stage(
+                    idx,
+                    crate::common::builders::StageSpec {
+                        scenario_config: ScenarioSourceConfig {
+                            branching_factor,
+                            noise_method: NoiseMethod::Saa,
+                        },
+                        ..crate::common::builders::StageSpec::default()
+                    },
+                )
+            })
+            .collect();
+
+        let inflow_models: Vec<_> = (0..n_stages)
+            .map(|idx| InflowModel {
+                hydro_id: EntityId(1),
+                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                stage_id: idx as i32,
+                mean_m3s: 100.0,
+                std_m3s: 30.0,
+                ar_coefficients: vec![],
+                residual_std_ratio: 1.0,
+                annual: None,
+            })
+            .collect();
+
+        let mut profiles = BTreeMap::new();
+        profiles.insert(
+            "default".to_string(),
+            CorrelationProfile {
+                groups: vec![CorrelationGroup {
+                    name: "g1".to_string(),
+                    entities: vec![CorrelationEntity {
+                        entity_type: "inflow".to_string(),
+                        id: EntityId(1),
+                    }],
+                    matrix: vec![vec![1.0]],
+                }],
+            },
+        );
+        let correlation = CorrelationModel {
+            method: "spectral".to_string(),
+            profiles,
+            schedule: vec![],
+        };
+
+        let system = SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(vec![hydro])
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .correlation(correlation)
+            .build()
+            .expect("system must build");
+
+        build_stochastic_context(
+            &system,
+            42,
+            None,
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::InSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .expect("stochastic context must build")
+    }
+
+    #[test]
+    fn pn_scratch_empty_on_trial_point_default() {
+        let mut state = BackwardPassState::new(1, 1, 4, 0, 3, 5);
+        state.set_scheduler(BackwardScheduler::TrialPoint, None);
+        assert_eq!(
+            state.pn_scratch_arena_capacity(),
+            0,
+            "the default trial_point scheduler must keep the PN scratch arena empty"
+        );
+        assert!(state.pn_scratch_arena().is_empty());
+    }
+
+    #[test]
+    fn pn_scratch_sized_from_study_dims() {
+        let max_local_fwd = 3_usize;
+        let bwd_max_openings = 4_usize;
+        let n_state = 5_usize;
+        let mut state = BackwardPassState::new(1, 1, bwd_max_openings, 0, max_local_fwd, n_state);
+
+        state.set_scheduler(BackwardScheduler::OpeningBlock, None);
+
+        let arena = state.pn_scratch_arena();
+        assert_eq!(
+            arena.len(),
+            max_local_fwd * bwd_max_openings,
+            "arena must hold max_local_fwd * bwd_max_openings outcomes"
+        );
+        assert!(
+            arena
+                .iter()
+                .all(|outcome| outcome.coefficients.len() == n_state),
+            "every outcome's coefficients must be pre-sized to n_state"
+        );
+    }
+
+    /// Drives `BackwardPassState` directly across several repeated backward-pass
+    /// runs under `OpeningBlock`: the arena's `.capacity()` right after
+    /// `set_scheduler` must equal its capacity after every run — no hot-path
+    /// reallocation.
+    #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow: run with --features slow-tests"
+    )]
+    fn pn_scratch_capacity_stable_across_training() {
+        let n_stages = 2_usize;
+        let n_openings = 2_usize;
+        let stochastic = make_stochastic_context(n_stages, n_openings);
+        let state_layout_fixture = state_layout(1, 0);
+        let templates = vec![minimal_template_1_0(); n_stages];
+        let frozen_templates = templates.clone();
+        let base_rows = vec![1_usize; n_stages];
+        let n_state = state_layout_fixture.n_state;
+        let forward_passes = 2_u32;
+
+        let mut fcf =
+            FutureCostFunction::new(n_stages, n_state, forward_passes, 20, &vec![0; n_stages]);
+        let trial_states = vec![vec![10.0], vec![20.0]];
+        let records = trial_point_records(&trial_states, n_stages);
+        let mut exchange = ExchangeBuffers::new(n_state, trial_states.len(), 1);
+        let horizon = HorizonMode::Finite {
+            num_stages: n_stages,
+        };
+        let risk_measures = vec![RiskMeasure::Expectation; n_stages];
+
+        let comm = StubComm;
+        let mut workspace_pool = WorkspacePool::new(
+            0,
+            1,
+            n_state,
+            WorkspaceSizing {
+                hydro_count: 1,
+                max_openings: n_openings,
+                initial_pool_capacity: 20,
+                n_state,
+                ..WorkspaceSizing::default()
+            },
+            || MockSolver::always_ok(solution_1_0(100.0, -5.0)),
+        );
+        let mut basis_store = BasisStore::new(exchange.local_count(), n_stages);
+        let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
+        let mut cut_batches = empty_cut_batches(n_stages);
+        let ctx = StageContext {
+            geometry_per_stage: &[],
+            templates: &templates,
+            base_rows: &base_rows,
+            noise_scale: &[],
+            n_hydros: 0,
+            n_load_buses: 0,
+            load_balance_row_starts: &[],
+            load_bus_indices: &[],
+            block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+            ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
+            discount_factors: &[],
+            cumulative_discount_factors: &[],
+            stage_lag_transitions: &[],
+            noise_group_ids: &[],
+            downstream_par_order: 0,
+        };
+        let study_dims_fixture = study_dims();
+        let training_ctx = TrainingContext {
+            horizon: &horizon,
+            state: &state_layout_fixture,
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state_layout_fixture, n_stages),
+            study_dims: &study_dims_fixture,
+            inflow_method: &InflowNonNegativityMethod::None,
+            stochastic: &stochastic,
+            initial_state: &[],
+            inflow_scheme: SamplingScheme::InSample,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            stages: &[],
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+            recent_accum_seed: &[],
+            recent_weight_seed: 0.0,
+            dcs: None,
+        };
+
+        let local_count = exchange.local_count();
+        let mut state = BackwardPassState::new(1, 1, n_openings, n_state, local_count, n_state);
+        state.set_scheduler(BackwardScheduler::OpeningBlock, NonZeroUsize::new(1));
+        let capacity_after_set_scheduler = state.pn_scratch_arena_capacity();
+        assert!(
+            capacity_after_set_scheduler > 0,
+            "OpeningBlock must size the PN scratch arena at set_scheduler time"
+        );
+
+        let mut inputs = BackwardPassInputs {
+            workspaces: &mut workspace_pool.workspaces,
+            basis_store: &mut basis_store,
+            ctx: &ctx,
+            frozen: &frozen_templates,
+            fcf: &mut fcf,
+            cut_batches: &mut cut_batches,
+            training_ctx: &training_ctx,
+            comm: &comm,
+            exchange: &mut exchange,
+            records: &records,
+            cut_sync_bufs: &mut csb,
+            visited_archive: None,
+            event_sender: None,
+            risk_measures: &risk_measures,
+            cut_activity_tolerance: 0.0,
+            iteration: 1,
+            local_work: local_count,
+            fwd_offset: 0,
+        };
+
+        for iteration in 1..=3_u64 {
+            inputs.iteration = iteration;
+            let _ = state
+                .run(&mut inputs)
+                .expect("backward pass must not error");
+            assert_eq!(
+                state.pn_scratch_arena_capacity(),
+                capacity_after_set_scheduler,
+                "PN scratch arena must not reallocate across repeated backward-pass runs \
+                 (iteration {iteration})"
+            );
+        }
     }
 }

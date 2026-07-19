@@ -291,8 +291,14 @@ where
             ranks.num_ranks,
             max_openings,
             real_states_capacity,
+            ranks.max_local_fwd,
+            ranks.n_state,
         );
         bwd_state.set_profile(solver_profiles.backward);
+        bwd_state.set_scheduler(
+            solver_profiles.backward_scheduler,
+            solver_profiles.opening_block_size,
+        );
 
         Ok(Self {
             solver,

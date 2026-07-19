@@ -52,6 +52,8 @@ impl StudySetup {
         let solver_profiles = SolverProfiles {
             forward: self.forward_profile,
             backward: self.backward_profile,
+            backward_scheduler: self.backward_scheduler,
+            opening_block_size: self.opening_block_size,
         };
         self.train_inner(
             solver,

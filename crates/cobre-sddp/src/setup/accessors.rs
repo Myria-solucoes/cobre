@@ -6,6 +6,12 @@ use cobre_core::scenario::SamplingScheme;
 use cobre_io::EntitySlot;
 
 #[cfg(any(test, feature = "test-support"))]
+use std::num::NonZeroUsize;
+
+#[cfg(any(test, feature = "test-support"))]
+use cobre_io::config::BackwardScheduler;
+
+#[cfg(any(test, feature = "test-support"))]
 use crate::convergence::risk_measure::RiskMeasure;
 use crate::{
     context::{StageContext, TrainingContext},
@@ -57,6 +63,19 @@ impl StudySetup {
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_risk_measures(&mut self, risk_measures: Vec<RiskMeasure>) {
         self.cut_management.risk_measures = risk_measures;
+    }
+
+    /// Test-support hook: override the backward-pass scheduler
+    /// (`training.backward_scheduler`/`training.opening_block_size`) to force
+    /// `opening_block` without a config file edit.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_scheduler(
+        &mut self,
+        scheduler: BackwardScheduler,
+        opening_block_size: Option<NonZeroUsize>,
+    ) {
+        self.backward_scheduler = scheduler;
+        self.opening_block_size = opening_block_size;
     }
 
     /// Return the pre-computed [`EnergyConversionSet`] for this study.

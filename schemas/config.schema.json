@@ -15,6 +15,21 @@
         }
       ]
     },
+    "BackwardScheduler": {
+      "description": "Backward-pass scheduler selection.",
+      "oneOf": [
+        {
+          "const": "trial_point",
+          "description": "Per-trial-point backward scheduling (the default).",
+          "type": "string"
+        },
+        {
+          "const": "opening_block",
+          "description": "Opening-block backward scheduling.",
+          "type": "string"
+        }
+      ]
+    },
     "BoundaryPolicy": {
       "additionalProperties": false,
       "description": "Boundary-row configuration for terminal-stage FCF coupling.\n\nWhen present, the solver loads rows from a source Cobre policy\ncheckpoint and injects them as fixed boundary conditions at the\nterminal stage of the current study.",
@@ -874,6 +889,11 @@
           "default": "tsp",
           "description": "Backward opening solve order."
         },
+        "backward_scheduler": {
+          "$ref": "#/$defs/BackwardScheduler",
+          "default": "trial_point",
+          "description": "Backward-pass scheduler: per-trial-point or opening-block claim loop."
+        },
         "cut_selection": {
           "$ref": "#/$defs/RowSelectionConfig",
           "default": {
@@ -892,6 +912,16 @@
           "description": "Number of forward-pass scenario trajectories $M$ per iteration.\n\n**Mandatory** — no default. The loader rejects any config that omits this field.",
           "format": "uint32",
           "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "opening_block_size": {
+          "default": null,
+          "description": "Opening-block size for `backward_scheduler = \"opening_block\"`. Absent\nresolves per stage to `⌈|Ω_s|/2⌉` (half the openings, rounded up); a set\nvalue is clamped to `min(|Ω_s|, size)`.",
+          "format": "uint",
+          "minimum": 1,
           "type": [
             "integer",
             "null"

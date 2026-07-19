@@ -179,9 +179,9 @@ mod tests {
     use super::{find_productivity_for_stage, validate_productivity_resolution};
     use crate::{
         config::{
-            BackwardOpeningOrder, Config, EstimationConfig, ExportsConfig, ModelingConfig,
-            PolicyConfig, RowSelectionConfig, SimulationConfig, StoppingRuleConfig, TrainingConfig,
-            TrainingSolverConfig, UpperBoundEvaluationConfig,
+            BackwardOpeningOrder, BackwardScheduler, Config, EstimationConfig, ExportsConfig,
+            ModelingConfig, PolicyConfig, RowSelectionConfig, SimulationConfig, StoppingRuleConfig,
+            TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
         },
         extensions::{
             HydroEnergyProductivityRow, ProductionModelConfig, SeasonConfig, SelectionMode,
@@ -314,6 +314,8 @@ mod tests {
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 backward_opening_order: BackwardOpeningOrder::default(),
+                backward_scheduler: BackwardScheduler::default(),
+                opening_block_size: None,
                 scenario_source: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
