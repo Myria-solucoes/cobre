@@ -121,6 +121,48 @@ fn run_then_summary_and_report_preserve_the_deterministic_end_block() {
         );
     }
 
+    // Time split (training): reworked three-line Forward/Backward/Serial
+    // format. Asserted against `run_stderr` only — `cobre summary`
+    // reconstructs `TrainingSummary` from `metadata.json`, which does not
+    // persist per-iteration phase-wall timing, so this block never appears
+    // in `summary_stderr` (see `build_training_summary` in
+    // `commands/summary.rs`).
+    let forward_line = run_stderr
+        .lines()
+        .find(|l| l.contains("Forward"))
+        .unwrap_or_else(|| panic!("expected a Forward Time-split line in run stderr"));
+    let backward_line = run_stderr
+        .lines()
+        .find(|l| l.contains("Backward"))
+        .unwrap_or_else(|| panic!("expected a Backward Time-split line in run stderr"));
+    let serial_line = run_stderr
+        .lines()
+        .find(|l| l.contains("Serial"))
+        .unwrap_or_else(|| panic!("expected a Serial Time-split line in run stderr"));
+
+    for (label, line) in [
+        ("Forward", forward_line),
+        ("Backward", backward_line),
+        ("Serial", serial_line),
+    ] {
+        assert!(
+            line.contains('%'),
+            "{label} Time-split line must carry a wall value with a percentage, got: {line:?}"
+        );
+    }
+    assert!(
+        forward_line.contains("solve") && forward_line.contains("wait"),
+        "Forward line must show the solve/wait decomposition for a local, \
+         per-worker-data-present run, got: {forward_line:?}"
+    );
+    assert!(
+        backward_line.contains("solve") && backward_line.contains("wait"),
+        "Backward line must show the solve/wait decomposition for a local, \
+         per-worker-data-present run, got: {backward_line:?}"
+    );
+    assert_ordered(&run_stderr, "Forward", "Backward");
+    assert_ordered(&run_stderr, "Backward", "Serial");
+
     let (report_stdout, _) = run_ok(&["report", out_path.to_str().unwrap()]);
     let value: serde_json::Value = serde_json::from_str(&report_stdout).unwrap();
 

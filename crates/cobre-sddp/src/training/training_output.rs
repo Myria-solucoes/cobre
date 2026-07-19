@@ -400,6 +400,59 @@ pub fn build_training_output(
     }
 }
 
+/// Run-level sums (milliseconds) of the phase-wall, wait, and serial-bucket
+/// timing components carried per iteration in [`IterationRecord`]. Feeds
+/// `cobre-cli`'s post-run summary (`TrainingSummary::forward_phase_wall_seconds`
+/// and its siblings), which divides each field by 1000 once to seconds.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PhaseTimingTotals {
+    /// Σ `forward_wall_ms` — coordinator-measured forward-phase wall.
+    pub forward_wall_ms: u64,
+    /// Σ `backward_wall_ms` — coordinator-measured backward-phase wall.
+    pub backward_wall_ms: u64,
+    /// Σ `fwd_load_imbalance_ms` — forward-phase worker wait.
+    pub forward_wait_ms: u64,
+    /// Σ `bwd_load_imbalance_ms` — backward-phase worker wait.
+    pub backward_wait_ms: u64,
+    /// Σ `lower_bound_ms`.
+    pub lower_bound_ms: u64,
+    /// Σ `cut_selection_ms`.
+    pub cut_selection_ms: u64,
+    /// Σ `cut_sync_ms`.
+    pub cut_sync_ms: u64,
+    /// Σ `mpi_allreduce_ms`.
+    pub allreduce_ms: u64,
+    /// Σ (`fwd_scheduling_overhead_ms` + `bwd_scheduling_overhead_ms`).
+    pub scheduling_ms: u64,
+}
+
+/// Sum the phase-wall/wait/serial timing components across every iteration in
+/// `records`. Integer-ms accumulation only — the caller converts to seconds once
+/// (declaration-order invariance; D5).
+#[must_use]
+pub fn sum_phase_timing_ms(records: &[IterationRecord]) -> PhaseTimingTotals {
+    records
+        .iter()
+        .fold(PhaseTimingTotals::default(), |acc, r| PhaseTimingTotals {
+            forward_wall_ms: acc.forward_wall_ms.saturating_add(r.time_forward_wall_ms),
+            backward_wall_ms: acc.backward_wall_ms.saturating_add(r.time_backward_wall_ms),
+            forward_wait_ms: acc
+                .forward_wait_ms
+                .saturating_add(r.time_fwd_load_imbalance_ms),
+            backward_wait_ms: acc
+                .backward_wait_ms
+                .saturating_add(r.time_bwd_load_imbalance_ms),
+            lower_bound_ms: acc.lower_bound_ms.saturating_add(r.time_lower_bound_ms),
+            cut_selection_ms: acc.cut_selection_ms.saturating_add(r.time_cut_selection_ms),
+            cut_sync_ms: acc.cut_sync_ms.saturating_add(r.time_cut_sync_ms),
+            allreduce_ms: acc.allreduce_ms.saturating_add(r.time_mpi_allreduce_ms),
+            scheduling_ms: acc
+                .scheduling_ms
+                .saturating_add(r.time_fwd_scheduling_overhead_ms)
+                .saturating_add(r.time_bwd_scheduling_overhead_ms),
+        })
+}
+
 /// Build the `(iteration, rank, worker_id)` timing rows for
 /// `training/timing/iterations.parquet`. Each iteration emits one rank-aggregated
 /// row (`worker_id=None`, rank-only columns) plus one per-worker row per
@@ -486,8 +539,9 @@ fn build_worker_timing_records(
 #[allow(clippy::unwrap_used, clippy::panic, clippy::doc_markdown)]
 mod tests {
     use cobre_core::TrainingEvent;
+    use cobre_io::IterationRecord;
 
-    use super::build_training_output;
+    use super::{PhaseTimingTotals, build_training_output, sum_phase_timing_ms};
     use crate::{FutureCostFunction, TrainingResult};
 
     fn make_result(reason: &str, lb: f64, ub: f64, gap: f64, iterations: u64) -> TrainingResult {
@@ -1064,5 +1118,97 @@ mod tests {
         let output = build_training_output(&result, &events, &fcf);
 
         assert!(output.cut_selection_records.is_empty());
+    }
+
+    fn zero_iteration_record() -> IterationRecord {
+        IterationRecord {
+            iteration: 1,
+            lower_bound: 0.0,
+            upper_bound_mean: 0.0,
+            upper_bound_std: 0.0,
+            gap_percent: None,
+            cuts_added: 0,
+            cuts_removed: 0,
+            cuts_active: 0,
+            time_forward_ms: 0,
+            time_backward_ms: 0,
+            time_total_ms: 0,
+            time_forward_wall_ms: 0,
+            time_backward_wall_ms: 0,
+            time_cut_selection_ms: 0,
+            time_mpi_allreduce_ms: 0,
+            time_cut_sync_ms: 0,
+            time_lower_bound_ms: 0,
+            time_state_exchange_ms: 0,
+            time_cut_batch_build_ms: 0,
+            time_bwd_setup_ms: 0,
+            time_bwd_load_imbalance_ms: 0,
+            time_bwd_scheduling_overhead_ms: 0,
+            time_fwd_setup_ms: 0,
+            time_fwd_load_imbalance_ms: 0,
+            time_fwd_scheduling_overhead_ms: 0,
+            time_overhead_ms: 0,
+            forward_passes: 0,
+            lp_solves: 0,
+            solve_time_ms: 0.0,
+            mean_rows_in_lp: 0.0,
+        }
+    }
+
+    #[test]
+    fn sum_phase_timing_ms_sums_all_components_across_iterations() {
+        let record_1 = IterationRecord {
+            time_forward_wall_ms: 40,
+            time_backward_wall_ms: 50,
+            time_fwd_load_imbalance_ms: 5,
+            time_bwd_load_imbalance_ms: 15,
+            time_lower_bound_ms: 3,
+            time_cut_selection_ms: 8,
+            time_cut_sync_ms: 4,
+            time_mpi_allreduce_ms: 7,
+            time_fwd_scheduling_overhead_ms: 2,
+            time_bwd_scheduling_overhead_ms: 6,
+            ..zero_iteration_record()
+        };
+        let record_2 = IterationRecord {
+            time_forward_wall_ms: 60,
+            time_backward_wall_ms: 70,
+            time_fwd_load_imbalance_ms: 9,
+            time_bwd_load_imbalance_ms: 25,
+            time_lower_bound_ms: 1,
+            time_cut_selection_ms: 2,
+            time_cut_sync_ms: 3,
+            time_mpi_allreduce_ms: 4,
+            time_fwd_scheduling_overhead_ms: 5,
+            time_bwd_scheduling_overhead_ms: 6,
+            ..zero_iteration_record()
+        };
+
+        let totals = sum_phase_timing_ms(&[record_1, record_2]);
+
+        assert_eq!(totals.forward_wall_ms, 100, "Σ forward_wall_ms");
+        assert_eq!(
+            totals.backward_wall_ms, 120,
+            "backward_phase_wall_seconds source: Σ backward_wall_ms"
+        );
+        assert_eq!(totals.forward_wait_ms, 14, "Σ fwd_load_imbalance_ms");
+        assert_eq!(
+            totals.backward_wait_ms, 40,
+            "backward_wait_seconds source: Σ bwd_load_imbalance_ms"
+        );
+        assert_eq!(totals.lower_bound_ms, 4, "Σ lower_bound_ms");
+        assert_eq!(totals.cut_selection_ms, 10, "Σ cut_selection_ms");
+        assert_eq!(totals.cut_sync_ms, 7, "Σ cut_sync_ms");
+        assert_eq!(totals.allreduce_ms, 11, "Σ mpi_allreduce_ms");
+        assert_eq!(
+            totals.scheduling_ms, 19,
+            "Σ (fwd_scheduling_overhead_ms + bwd_scheduling_overhead_ms)"
+        );
+    }
+
+    #[test]
+    fn sum_phase_timing_ms_empty_slice_returns_zero() {
+        let totals = sum_phase_timing_ms(&[]);
+        assert_eq!(totals, PhaseTimingTotals::default());
     }
 }

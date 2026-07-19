@@ -179,7 +179,9 @@ pub use convergence::stopping_rule::{MonitorState, StoppingMode, StoppingRule, S
 // ── training ──────────────────────────────────────────────────────────────────
 pub use training::training::{TrainingOutcome, TrainingResult, train};
 // ── training_output ───────────────────────────────────────────────────────────
-pub use training::training_output::build_training_output;
+pub use training::training_output::{
+    PhaseTimingTotals, build_training_output, sum_phase_timing_ms,
+};
 // ── resolved_parameters ───────────────────────────────────────────────────────
 pub use policy::resolved_parameters::{
     ResolvedParameters, ResolvedParametersError, build_resolved_parameters,

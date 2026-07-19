@@ -182,6 +182,17 @@ fn build_training_summary(
         total_backward_solve_seconds: metadata.solve_stats.backward_solve_seconds,
         parallelism: metadata.solve_stats.parallelism,
         initial_gap_percent,
+        // Per-iteration timing is not persisted to metadata.json; unavailable
+        // when a summary is reconstructed from a completed output directory.
+        forward_phase_wall_seconds: None,
+        backward_phase_wall_seconds: None,
+        forward_wait_seconds: None,
+        backward_wait_seconds: None,
+        serial_lower_bound_seconds: None,
+        serial_cut_selection_seconds: None,
+        serial_cut_sync_seconds: None,
+        serial_allreduce_seconds: None,
+        serial_scheduling_seconds: None,
     }
 }
 
@@ -456,6 +467,16 @@ mod tests {
         assert_eq!(summary.total_forward_solve_seconds, Some(123.5));
         assert_eq!(summary.total_backward_solve_seconds, Some(456.75));
         assert_eq!(summary.parallelism, Some(8));
+        // Per-iteration timing is not persisted to metadata.json.
+        assert_eq!(summary.forward_phase_wall_seconds, None);
+        assert_eq!(summary.backward_phase_wall_seconds, None);
+        assert_eq!(summary.forward_wait_seconds, None);
+        assert_eq!(summary.backward_wait_seconds, None);
+        assert_eq!(summary.serial_lower_bound_seconds, None);
+        assert_eq!(summary.serial_cut_selection_seconds, None);
+        assert_eq!(summary.serial_cut_sync_seconds, None);
+        assert_eq!(summary.serial_allreduce_seconds, None);
+        assert_eq!(summary.serial_scheduling_seconds, None);
     }
 
     #[test]
