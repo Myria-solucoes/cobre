@@ -397,6 +397,14 @@ pub(crate) struct BackwardAccumulators {
     /// `n_openings`). Re-initialised once per stage; merged into the per-stage
     /// `Vec<SolverStatsDelta>` in `BackwardResult::stage_stats`.
     pub(crate) per_opening_stats: Vec<SolverStatsDelta>,
+    /// Per-block `simplex_iterations` sum for the PN opening-block
+    /// scheduler's pivot accumulator (D6), index `b` in `[0, n_blocks)` for
+    /// the current stage. Re-initialised once per stage (never per trial
+    /// point); merged into `BackwardPnScratch::block_pivots` after the
+    /// parallel region.
+    pub(crate) block_pivot_sum: Vec<u64>,
+    /// Per-block solved-opening count, parallel to `block_pivot_sum`.
+    pub(crate) block_pivot_count: Vec<u64>,
     /// Per-opening scratch for state-fixing-row duals; grows to `indexer.n_state`.
     pub(crate) state_duals_buf: Vec<f64>,
     /// Per-opening scratch for cut-row duals; grows to
@@ -406,10 +414,13 @@ pub(crate) struct BackwardAccumulators {
     /// the rayon closure boundary so ownership can cross the closure return.
     pub(crate) staged_cuts_buf: Vec<StagedCut>,
     /// Per-worker PN opening-block scheduler out-buffer (`process_stage_backward_pn`'s
-    /// claim loop). Grown once to whatever count a worker's claimed units ever
-    /// produce in one stage; reused every stage via `copy_from_slice` writes into
-    /// existing slots (indexed by a per-stage count, never `clear`ed/`drain`ed) so
-    /// the per-opening coefficient vector allocates at most once.
+    /// claim loop). Starts empty — zero footprint under the default `TrialPoint`
+    /// scheduler, which never touches it. The outer `Vec` grows once, per worker,
+    /// to a stage's claimed-unit high-water mark (indexed by a per-stage count,
+    /// never `clear`ed/`drain`ed); each slot's `coefficients` resizes to the
+    /// CURRENT stage's `cut_n_state` before every write, so capacity — not
+    /// length — is the no-reallocation invariant once every `cut_n_state` value
+    /// in the run has been visited (trivially within iteration 1).
     pub(crate) pn_outcomes_buf: Vec<PnOutcome>,
     /// Scratch for `CVaR` weight computation; the internal `Vec`s grow to
     /// `n_openings` on the first `CVaR` call. Never accessed under
@@ -440,17 +451,6 @@ impl BackwardAccumulators {
                 objective_value: 0.0,
             })
             .collect();
-        let pn_outcomes_buf = (0..max_openings)
-            .map(|_| PnOutcome {
-                m: 0,
-                omega: 0,
-                outcome: BackwardOutcome {
-                    intercept: 0.0,
-                    coefficients: vec![0.0_f64; n_state],
-                    objective_value: 0.0,
-                },
-            })
-            .collect();
         let mut dcs_solve = DcsSolveScratch::default();
         dcs_solve.reserve(n_state, initial_pool_capacity);
         Self {
@@ -460,10 +460,12 @@ impl BackwardAccumulators {
             agg_arena: Vec::new(),
             metadata_sync_contribution: vec![0u64; initial_pool_capacity],
             per_opening_stats: Vec::new(),
+            block_pivot_sum: Vec::new(),
+            block_pivot_count: Vec::new(),
             state_duals_buf: Vec::new(),
             cut_duals_buf: Vec::new(),
             staged_cuts_buf: Vec::new(),
-            pn_outcomes_buf,
+            pn_outcomes_buf: Vec::new(),
             risk_scratch: RiskMeasureScratch::new(),
             dcs_solve,
             dcs_initial_resident: Vec::with_capacity(initial_pool_capacity),
@@ -494,22 +496,45 @@ pub(crate) struct BackwardPnScratch {
     /// `BackwardAccumulators::agg_arena`'s grow-once/overwrite-before-read
     /// discipline: every `(m, ω)` in the active region is written by
     /// `pn_finish`'s scatter before the aggregation loop reads it, so no clear
-    /// pass is required between stages.
+    /// pass is required between stages. Each entry's `coefficients` starts at
+    /// `n_state` length but is resized (never reallocated — capacity is the
+    /// invariant) to the CURRENT stage's `cut_n_state` during that scatter, a
+    /// stage whose successor disables a state group projecting to fewer slots.
     pub(crate) arena: Vec<BackwardOutcome>,
     /// `CVaR` weight-computation scratch for `pn_finish`'s per-trial-point
     /// aggregation loop.
     pub(crate) risk_scratch: RiskMeasureScratch,
-    /// Aggregated cut coefficients buffer (`n_state` entries) for `pn_finish`'s
-    /// per-trial-point aggregation loop.
+    /// Aggregated cut coefficients buffer for `pn_finish`'s per-trial-point
+    /// aggregation loop; starts at `n_state` length, resized (within reserved
+    /// capacity) to each stage's `cut_n_state` — see [`Self::arena`].
     pub(crate) coeffs_buf: Vec<f64>,
+    /// Per-`(stage, block-index)` `(simplex_iterations sum, solved-opening
+    /// count)` pivot accumulator (D6), addressed `block_pivots[stage *
+    /// n_blocks_max + block_index]`. `stage` is the backward pass's successor
+    /// index (`t + 1`); aggregated over every trial point `m` claimed for that
+    /// block, never keyed per-`m` (D6 — the wrong-but-plausible variant, since
+    /// resampled trial points make per-`m` hardness noise where the
+    /// opening-block component is iteration-stable). Reset to `(0, 0)` at the
+    /// start of every `BackwardPassState::run` call, never per stage.
+    pub(crate) block_pivots: Vec<(u64, u64)>,
+    /// Row width of `block_pivots` (block slots per stage) — the run's max
+    /// opening count, an upper bound on any stage's actual block count (block
+    /// size >= 1 implies `n_blocks <= n_openings <= n_blocks_max`).
+    pub(crate) n_blocks_max: usize,
 }
 
 impl BackwardPnScratch {
     /// Allocate the arena and aggregation scratch for `OpeningBlock`: `arena`
     /// holds `max_local_fwd * bwd_max_openings` outcomes, each with an
-    /// `n_state`-length coefficient vector.
+    /// `n_state`-length coefficient vector; `block_pivots` holds `num_stages *
+    /// bwd_max_openings` accumulator cells (see [`Self::block_pivots`]).
     #[must_use]
-    pub(crate) fn sized(max_local_fwd: usize, bwd_max_openings: usize, n_state: usize) -> Self {
+    pub(crate) fn sized(
+        max_local_fwd: usize,
+        bwd_max_openings: usize,
+        n_state: usize,
+        num_stages: usize,
+    ) -> Self {
         let arena = (0..max_local_fwd * bwd_max_openings)
             .map(|_| BackwardOutcome {
                 intercept: 0.0,
@@ -521,6 +546,8 @@ impl BackwardPnScratch {
             arena,
             risk_scratch: RiskMeasureScratch::new(),
             coeffs_buf: vec![0.0_f64; n_state],
+            block_pivots: vec![(0u64, 0u64); num_stages * bwd_max_openings],
+            n_blocks_max: bwd_max_openings,
         }
     }
 }
@@ -1139,6 +1166,28 @@ mod tests {
     }
 
     #[test]
+    fn test_backward_accumulators_pn_outcomes_buf_starts_empty() {
+        // AC: a nonzero max_openings must not eagerly build pn_outcomes_buf —
+        // the default TrialPoint scheduler never touches it (zero PN footprint).
+        let pool = WorkspacePool::new(
+            0,
+            2,
+            9,
+            WorkspaceSizing {
+                max_openings: 5,
+                ..sizing(3, 2, 0)
+            },
+            || MockSolver,
+        );
+        for ws in &pool.workspaces {
+            assert!(
+                ws.backward_accum.pn_outcomes_buf.is_empty(),
+                "pn_outcomes_buf must start empty regardless of max_openings"
+            );
+        }
+    }
+
+    #[test]
     fn test_scratch_buffers_zero_downstream_par_order_empty_buffers() {
         // AC: downstream_par_order=0 → all downstream fields are zero/empty.
         let scratch = ScratchBuffers::new(WorkspaceSizing {
@@ -1243,6 +1292,8 @@ mod tests {
         assert_eq!(scratch.arena.capacity(), 0, "arena must start capacity 0");
         assert!(scratch.arena.is_empty());
         assert!(scratch.coeffs_buf.is_empty());
+        assert!(scratch.block_pivots.is_empty());
+        assert_eq!(scratch.n_blocks_max, 0);
     }
 
     #[test]
@@ -1250,8 +1301,10 @@ mod tests {
         let max_local_fwd = 3_usize;
         let bwd_max_openings = 4_usize;
         let n_state = 5_usize;
+        let num_stages = 6_usize;
 
-        let scratch = BackwardPnScratch::sized(max_local_fwd, bwd_max_openings, n_state);
+        let scratch =
+            BackwardPnScratch::sized(max_local_fwd, bwd_max_openings, n_state, num_stages);
 
         assert_eq!(
             scratch.arena.len(),
@@ -1266,13 +1319,27 @@ mod tests {
             "every outcome's coefficients must be pre-sized to n_state"
         );
         assert_eq!(scratch.coeffs_buf.len(), n_state);
+        assert_eq!(
+            scratch.block_pivots.len(),
+            num_stages * bwd_max_openings,
+            "block_pivots must hold num_stages * bwd_max_openings accumulator cells"
+        );
+        assert!(
+            scratch
+                .block_pivots
+                .iter()
+                .all(|&(sum, count)| sum == 0 && count == 0),
+            "a freshly sized accumulator must start zeroed"
+        );
+        assert_eq!(scratch.n_blocks_max, bwd_max_openings);
     }
 
     #[test]
     fn backward_pn_scratch_sized_zero_dims_yields_empty_arena() {
-        let scratch = BackwardPnScratch::sized(0, 0, 0);
+        let scratch = BackwardPnScratch::sized(0, 0, 0, 0);
         assert!(scratch.arena.is_empty());
         assert!(scratch.coeffs_buf.is_empty());
+        assert!(scratch.block_pivots.is_empty());
     }
 
     // ---------------------------------------------------------------------------

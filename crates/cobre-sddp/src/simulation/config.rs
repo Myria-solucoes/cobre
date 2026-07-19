@@ -40,7 +40,7 @@ pub struct SimulationConfig {
     /// Resolved simulation solver profile (`simulation.solver`, layered over
     /// the current per-phase constant — see
     /// [`crate::solve::solver_phase::Phase::resolve_profile`]), applied at
-    /// [`crate::simulation::state::SimulationState::run`] entry.
+    /// `SimulationState::run` entry.
     pub profile: ActiveProfile,
 }
 

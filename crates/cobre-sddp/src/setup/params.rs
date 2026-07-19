@@ -172,6 +172,13 @@ impl StudyParams {
             );
         }
 
+        if opening_block_size.is_some() && backward_scheduler == BackwardScheduler::TrialPoint {
+            tracing::warn!(
+                "opening_block_size is set but backward_scheduler is trial_point; \
+                 opening_block_size has no effect and is ignored"
+            );
+        }
+
         Ok(Self {
             seed,
             forward_passes,
@@ -285,6 +292,7 @@ pub struct ConstructionConfig {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+    use std::num::NonZeroUsize;
     use std::sync::{Arc, Mutex};
 
     use cobre_io::config::{
@@ -396,6 +404,38 @@ mod tests {
         }
     }
 
+    /// Build a minimal `Config` with `opening_block_size` set while
+    /// `backward_scheduler` stays `trial_point` (the default), so the
+    /// ignored-key advisory fires.
+    fn config_with_opening_block_size_ignored_under_trial_point() -> Config {
+        Config {
+            schema: None,
+            modeling: ModelingConfig {
+                inflow_non_negativity: InflowNonNegativityConfig {
+                    method: CfgInflowMethod::Penalty,
+                },
+            },
+            training: TrainingConfig {
+                enabled: true,
+                tree_seed: Some(42),
+                forward_passes: Some(1),
+                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
+                stopping_mode: "any".to_string(),
+                cut_selection: RowSelectionConfig::default(),
+                solver: TrainingSolverConfig::default(),
+                backward_opening_order: BackwardOpeningOrder::default(),
+                backward_scheduler: BackwardScheduler::TrialPoint,
+                opening_block_size: NonZeroUsize::new(4),
+                scenario_source: None,
+            },
+            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
+            policy: PolicyConfig::default(),
+            simulation: IoSimulationConfig::default(),
+            exports: ExportsConfig::default(),
+            estimation: EstimationConfig::default(),
+        }
+    }
+
     /// Build a minimal `Config` whose stopping rules contain a
     /// `Simulation` entry.
     fn config_with_simulation_stopping_rule() -> Config {
@@ -476,6 +516,30 @@ mod tests {
         assert!(
             !relevant.is_empty(),
             "expected at least one WARN event containing 'max_active_per_stage', got: {recorded:?}"
+        );
+    }
+
+    /// AC: when `opening_block_size` is set but `backward_scheduler` is
+    /// `trial_point`, `StudyParams::from_config` emits a WARN-level tracing
+    /// event whose message contains `opening_block_size`.
+    #[test]
+    fn study_params_warns_when_opening_block_size_ignored_under_trial_point() {
+        let (subscriber, messages) = WarnRecorder::new();
+        tracing::subscriber::with_default(subscriber, || {
+            let _params = StudyParams::from_config(
+                &config_with_opening_block_size_ignored_under_trial_point(),
+            )
+            .expect("config is valid; warning must not prevent construction");
+        });
+        let recorded = messages.lock().unwrap();
+        let relevant: Vec<&str> = recorded
+            .iter()
+            .map(std::string::String::as_str)
+            .filter(|msg| msg.contains("opening_block_size"))
+            .collect();
+        assert!(
+            !relevant.is_empty(),
+            "expected at least one WARN event containing 'opening_block_size', got: {recorded:?}"
         );
     }
 }

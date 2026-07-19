@@ -238,7 +238,7 @@ impl Phase {
     /// ([`Self::profile`]) + named preset + per-field overrides (a later layer
     /// wins). `config` absent returns [`Self::profile`] unchanged — the
     /// byte-neutral default. An unrecognized preset name falls back to the
-    /// base constant; call [`validate_phase_solver_config`] on the same
+    /// base constant; call `validate_phase_solver_config` on the same
     /// `config` to reject it instead.
     #[must_use]
     pub fn resolve_profile(self, config: Option<&PhaseSolverProfileConfig>) -> ActiveProfile {

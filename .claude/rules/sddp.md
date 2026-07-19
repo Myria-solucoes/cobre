@@ -118,10 +118,14 @@ path: PN's frozen-LP load is incompatible with DCS's cut-free lazy core.
 Read: `training/backward/pn.rs` (`process_stage_backward_pn`'s claim loop,
 `pn_finish`'s per-`(m, ω)` arena and ascending-m aggregation),
 `training/backward_pass_state.rs` (`run_one_backward_stage`'s `use_pn`
-dispatch). Pinned by `pn_scheduler_reproducible_across_thread_counts` in
-`tests/mpi_wire.rs` (threads=4 / threads=1 bitwise `final_lb`); a fuller
-multi-shape/CVaR/2-rank matrix mirroring `opening_order_determinism`'s gate is
-a planned follow-up.
+dispatch). Pinned by `pn_scheduler_determinism_expectation` and
+`pn_scheduler_determinism_cvar` in `tests/mpi_wire.rs` (threads=4 / a
+same-shape threads=4 repeat / threads=2 / threads=1 / a `Rank0Of2` 2-rank
+stub, bitwise `final_lb`, on both an expectation and a `CVaR` configuration),
+`pn_opening_block_degenerates_on_single_opening` (PN-vs-PS equality on a
+single-opening case whose resolved block count is `1`), and
+`pn_handles_non_uniform_cut_projection` (PN-vs-PS equality on a case whose
+per-stage cut-state projection dimension varies across stages).
 
 ## No EWMA upper bound
 

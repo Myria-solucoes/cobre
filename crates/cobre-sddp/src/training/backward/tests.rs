@@ -26,6 +26,7 @@ where
         real_states_capacity,
         inputs.local_work,
         inputs.training_ctx.state.n_state,
+        num_stages,
     );
     bwd_state.run(inputs)
 }

@@ -293,6 +293,7 @@ where
             real_states_capacity,
             ranks.max_local_fwd,
             ranks.n_state,
+            ranks.num_stages,
         );
         bwd_state.set_profile(solver_profiles.backward);
         bwd_state.set_scheduler(

@@ -20,7 +20,8 @@ use crate::risk_measure::BackwardOutcome;
 use crate::{
     backward::{
         BackwardResult, StageOpeningSolver, StageWorkerOpeningDelta, StagedCut, SuccessorSpec,
-        pn_finish, process_stage_backward_pn, process_trial_point_backward, resolve_block_size,
+        pn_block_count, pn_finish, pn_merge_block_pivots, process_stage_backward_pn,
+        process_trial_point_backward, resolve_block_size,
     },
     config::CutManagementConfig,
     context::{StageContext, TrainingContext},
@@ -261,6 +262,11 @@ pub struct BackwardPassState {
     /// State dimension; see [`Self::max_local_fwd`].
     n_state: usize,
 
+    /// Number of stages in the study; with `bwd_max_openings`, sizes
+    /// [`Self::pn_scratch`]'s per-`(stage, block-index)` pivot accumulator
+    /// when [`Self::set_scheduler`] resolves `OpeningBlock`.
+    num_stages: usize,
+
     /// Pre-allocated PN opening-block scheduler scratch (per-`(m, ω)` outcome
     /// arena + aggregation buffers). Empty until [`Self::set_scheduler`] sizes
     /// it for `BackwardScheduler::OpeningBlock` (sddp.md "PN opening-block
@@ -280,11 +286,12 @@ impl BackwardPassState {
     ///   (`real_total_scenarios * n_state`).
     /// - `max_local_fwd`: maximum local forward-pass count across the run.
     /// - `n_state`: state dimension.
+    /// - `num_stages`: number of stages in the study.
     ///
-    /// `max_local_fwd` and `n_state`, together with `bwd_max_openings`, size
-    /// [`Self::pn_scratch`] when [`Self::set_scheduler`] later resolves
-    /// `OpeningBlock`; `pn_scratch` starts empty regardless of the resolved
-    /// scheduler.
+    /// `max_local_fwd`, `n_state`, and `num_stages`, together with
+    /// `bwd_max_openings`, size `Self::pn_scratch` when
+    /// [`Self::set_scheduler`] later resolves `OpeningBlock`; `pn_scratch`
+    /// starts empty regardless of the resolved scheduler.
     #[must_use]
     pub fn new(
         n_workers_local: usize,
@@ -293,6 +300,7 @@ impl BackwardPassState {
         real_states_capacity: usize,
         max_local_fwd: usize,
         n_state: usize,
+        num_stages: usize,
     ) -> Self {
         let send_stride = n_workers_local * bwd_max_openings * WORKER_STATS_ENTRY_STRIDE;
         Self {
@@ -322,6 +330,7 @@ impl BackwardPassState {
             max_local_fwd,
             bwd_max_openings,
             n_state,
+            num_stages,
             pn_scratch: BackwardPnScratch::default(),
         }
     }
@@ -336,7 +345,7 @@ impl BackwardPassState {
     /// [`Self::run`] entry (default: [`BackwardScheduler::TrialPoint`], `None`).
     /// Call before `run()`.
     ///
-    /// Sizes [`Self::pn_scratch`] once, here, from the dimensions passed to
+    /// Sizes `Self::pn_scratch` once, here, from the dimensions passed to
     /// [`Self::new`]: the full `max_local_fwd * bwd_max_openings` shape for
     /// `OpeningBlock`, empty (zero PN footprint) for `TrialPoint` — never on the
     /// hot path.
@@ -348,9 +357,12 @@ impl BackwardPassState {
         self.scheduler = scheduler;
         self.opening_block_size = opening_block_size;
         self.pn_scratch = match scheduler {
-            BackwardScheduler::OpeningBlock => {
-                BackwardPnScratch::sized(self.max_local_fwd, self.bwd_max_openings, self.n_state)
-            }
+            BackwardScheduler::OpeningBlock => BackwardPnScratch::sized(
+                self.max_local_fwd,
+                self.bwd_max_openings,
+                self.n_state,
+                self.num_stages,
+            ),
             BackwardScheduler::TrialPoint => BackwardPnScratch::default(),
         };
     }
@@ -408,6 +420,10 @@ impl BackwardPassState {
             );
             ws.worker_timing_buf = WorkerPhaseTimings::default();
         }
+        // PN's per-(stage, block-index) pivot accumulator is iteration-local:
+        // reset here (once per `run()` call), never per stage — a stage's
+        // block hardness this iteration must not mix with a prior iteration's.
+        self.pn_scratch.block_pivots.fill((0, 0));
 
         #[allow(clippy::cast_precision_loss)]
         let params = StageDerivedParams {
@@ -691,12 +707,12 @@ impl BackwardPassState {
     }
 }
 
-/// Test/tooling accessors for [`BackwardPassState::pn_scratch`] — never called
+/// Test/tooling accessors for `BackwardPassState::pn_scratch` — never called
 /// from production hot-path code.
 #[cfg(any(test, feature = "test-support"))]
 impl BackwardPassState {
     /// `.capacity()` of the PN scratch arena — `0` under `TrialPoint`, else the
-    /// `max_local_fwd * bwd_max_openings` shape [`BackwardPnScratch::sized`]
+    /// `max_local_fwd * bwd_max_openings` shape `BackwardPnScratch::sized`
     /// allocated at [`Self::set_scheduler`].
     #[must_use]
     pub fn pn_scratch_arena_capacity(&self) -> usize {
@@ -708,6 +724,32 @@ impl BackwardPassState {
     #[must_use]
     pub fn pn_scratch_arena(&self) -> &[BackwardOutcome] {
         &self.pn_scratch.arena
+    }
+
+    /// Per-`(stage, block-index)` mean `simplex_iterations` pivot from the PN
+    /// opening-block scheduler's rank-local accumulator (D6). Outer index is
+    /// the backward pass's successor stage (`t + 1`); inner index is the
+    /// block index. `None` where no opening was solved this iteration
+    /// (count == 0); empty under `BackwardScheduler::TrialPoint`.
+    #[must_use]
+    pub fn pn_block_pivot_means(&self) -> Vec<Vec<Option<f64>>> {
+        let stride = self.pn_scratch.n_blocks_max;
+        if stride == 0 {
+            return Vec::new();
+        }
+        self.pn_scratch
+            .block_pivots
+            .chunks(stride)
+            .map(|stage_row| {
+                stage_row
+                    .iter()
+                    .map(|&(sum, count)| {
+                        #[allow(clippy::cast_precision_loss)]
+                        (count > 0).then(|| sum as f64 / count as f64)
+                    })
+                    .collect()
+            })
+            .collect()
     }
 }
 
@@ -870,6 +912,21 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
         );
         #[allow(clippy::cast_possible_truncation)]
         let elapsed_ms = process_start.elapsed().as_millis() as u64;
+        // Telemetry-only merge (sddp.md "PN opening-block scheduler is
+        // warm-start-only" — disjoint from the per-`(m, ω)` arena scatter and
+        // ascending-m aggregation `pn_finish` performs below).
+        let n_blocks = pn_block_count(n_openings, block_size);
+        pn_merge_block_pivots(
+            inputs.workspaces.iter().map(|ws| {
+                (
+                    ws.backward_accum.block_pivot_sum.as_slice(),
+                    ws.backward_accum.block_pivot_count.as_slice(),
+                )
+            }),
+            n_blocks,
+            successor,
+            &mut state.pn_scratch,
+        );
         let result = pn_finish(
             worker_out,
             &*inputs.workspaces,
@@ -1558,6 +1615,7 @@ mod tests {
             real_states_capacity,
             7,
             4,
+            3,
         );
 
         let send_stride = n_workers_local * bwd_max_openings * WORKER_STATS_ENTRY_STRIDE;
@@ -1674,8 +1732,15 @@ mod tests {
         let bwd_max_openings = n_openings;
         // Capture local_count before mutably borrowing exchange inside the struct literal.
         let local_count = exchange.local_count();
-        let mut state =
-            BackwardPassState::new(1, 1, bwd_max_openings, n_state, local_count, n_state);
+        let mut state = BackwardPassState::new(
+            1,
+            1,
+            bwd_max_openings,
+            n_state,
+            local_count,
+            n_state,
+            n_stages,
+        );
 
         let mut inputs = BackwardPassInputs {
             workspaces: &mut workspaces,
@@ -1803,8 +1868,15 @@ mod tests {
 
         let bwd_max_openings = n_openings;
         let local_count = exchange.local_count();
-        let mut bwd_state =
-            BackwardPassState::new(1, 1, bwd_max_openings, n_state, local_count, n_state);
+        let mut bwd_state = BackwardPassState::new(
+            1,
+            1,
+            bwd_max_openings,
+            n_state,
+            local_count,
+            n_state,
+            n_stages,
+        );
         let resolved =
             Phase::Backward.resolve_profile(Some(&cobre_io::config::PhaseSolverProfileConfig {
                 preset: Some("backward_tuned_v1".to_string()),
@@ -1934,8 +2006,15 @@ mod tests {
 
         let bwd_max_openings = n_openings;
         let local_count = exchange.local_count();
-        let mut state =
-            BackwardPassState::new(1, 1, bwd_max_openings, n_state, local_count, n_state);
+        let mut state = BackwardPassState::new(
+            1,
+            1,
+            bwd_max_openings,
+            n_state,
+            local_count,
+            n_state,
+            n_stages,
+        );
 
         let mut inputs = BackwardPassInputs {
             workspaces: &mut workspaces,
@@ -2026,7 +2105,7 @@ mod tests {
         contrib[1] = 1;
 
         let comm = StubComm;
-        let mut state = BackwardPassState::new(1, 1, n_openings, n_state, 1, n_state);
+        let mut state = BackwardPassState::new(1, 1, n_openings, n_state, 1, n_state, n_stages);
 
         state
             .sync_stage_metadata(successor, i, &workspaces, &mut fcf, &comm)

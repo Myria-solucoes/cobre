@@ -12,6 +12,7 @@
 
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 use cobre_solver::SolverInterface;
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
@@ -52,6 +53,14 @@ pub(crate) fn resolve_block_size(
     requested.min(n_openings)
 }
 
+/// Resolve the number of opening-blocks `n_blocks` a stage's `n_openings`
+/// split into under `block_size` — the single owner of this formula, shared
+/// by [`process_stage_backward_pn`] (the claim-loop unit count) and its
+/// caller (the block-pivot merge's per-stage block count).
+pub(crate) fn pn_block_count(n_openings: usize, block_size: usize) -> usize {
+    n_openings.div_ceil(block_size.max(1))
+}
+
 /// Solve one backward stage PN-style; returns, per worker, either the error
 /// that aborted its claim loop or `(worker_index, outcome_count)` — the count
 /// of entries this worker recorded into its own
@@ -74,7 +83,7 @@ pub(crate) fn process_stage_backward_pn<S: SolverInterface + Send>(
     let n_openings = succ.probabilities.len();
     let cut_n_state = succ.cut_state.n_slots();
     let pop = succ.successor_populated_count;
-    let n_blocks = n_openings.div_ceil(block_size.max(1));
+    let n_blocks = pn_block_count(n_openings, block_size);
     let total_units = local_work * n_blocks;
     let tree_view = training_ctx.stochastic.tree_view();
     let solve_order = tree_view.solve_order_data(succ.successor);
@@ -110,7 +119,14 @@ pub(crate) fn process_stage_backward_pn<S: SolverInterface + Send>(
             for slot in &mut ws.backward_accum.per_opening_stats[..n_openings] {
                 *slot = SolverStatsDelta::default();
             }
+            if ws.backward_accum.block_pivot_sum.len() < n_blocks {
+                ws.backward_accum.block_pivot_sum.resize(n_blocks, 0u64);
+                ws.backward_accum.block_pivot_count.resize(n_blocks, 0u64);
+            }
+            ws.backward_accum.block_pivot_sum[..n_blocks].fill(0);
+            ws.backward_accum.block_pivot_count[..n_blocks].fill(0);
 
+            let worker_stage_wall_start = Instant::now();
             let s = succ.successor;
             let mut count = 0usize;
 
@@ -171,6 +187,15 @@ pub(crate) fn process_stage_backward_pn<S: SolverInterface + Send>(
 
                     let mut stats_after = std::mem::take(&mut ws.backward_accum.stats_after_buf);
                     ws.solver.statistics_into(&mut stats_after);
+                    // Counters are monotonically increasing (mirrors
+                    // `SolverStatsDelta::from_snapshots`); the running sum below
+                    // saturates against overflow across many iterations.
+                    let opening_simplex_iters =
+                        stats_after.total_iterations - stats_before.total_iterations;
+                    ws.backward_accum.block_pivot_sum[b] =
+                        ws.backward_accum.block_pivot_sum[b].saturating_add(opening_simplex_iters);
+                    ws.backward_accum.block_pivot_count[b] =
+                        ws.backward_accum.block_pivot_count[b].saturating_add(1);
                     accumulate_opening_outcome(
                         ws,
                         succ,
@@ -185,9 +210,13 @@ pub(crate) fn process_stage_backward_pn<S: SolverInterface + Send>(
 
                     // Grow-once record into the pre-allocated per-worker
                     // out-buffer: a fresh slot is pushed only the first time
-                    // `count` exceeds every prior stage's high-water mark; every
-                    // subsequent stage's writes land on an already-allocated
-                    // slot via `copy_from_slice`, never a clone.
+                    // `count` exceeds every prior stage's high-water mark. A
+                    // reused slot's `coefficients` may still carry a DIFFERENT
+                    // prior stage's `cut_n_state` (a successor disabling a
+                    // state group shrinks it, a later stage regrows it), so it
+                    // is resized to THIS stage's `cut_n_state` before every
+                    // write — otherwise `copy_from_slice` panics on a length
+                    // mismatch.
                     if ws.backward_accum.pn_outcomes_buf.len() <= count {
                         ws.backward_accum.pn_outcomes_buf.push(PnOutcome {
                             m: 0,
@@ -200,6 +229,7 @@ pub(crate) fn process_stage_backward_pn<S: SolverInterface + Send>(
                         });
                     }
                     let recorded = &mut ws.backward_accum.pn_outcomes_buf[count];
+                    recorded.outcome.coefficients.resize(cut_n_state, 0.0_f64);
                     recorded.m = m;
                     recorded.omega = omega;
                     recorded
@@ -220,6 +250,9 @@ pub(crate) fn process_stage_backward_pn<S: SolverInterface + Send>(
                 }
             }
 
+            ws.worker_timing_buf.backward_wall_ms +=
+                worker_stage_wall_start.elapsed().as_secs_f64() * 1_000.0;
+
             Ok((w, count))
         })
         .collect()
@@ -232,7 +265,11 @@ pub(crate) fn process_stage_backward_pn<S: SolverInterface + Send>(
 ///
 /// `scratch` is `BackwardPassState::pn_scratch`, sized once by `set_scheduler`;
 /// the scatter overwrites `arena[0..local_work * n_openings]` in full before the
-/// aggregation loop reads it, so no clear pass is required between stages.
+/// aggregation loop reads it, so no clear pass is required between stages. Each
+/// touched slot's `coefficients` (and `coeffs_buf`) resize to THIS stage's
+/// `cut_n_state`, which may differ from a prior stage's — always within the
+/// capacity `BackwardPnScratch::sized` reserved at the run's global `n_state`, so
+/// this never reallocates on the hot path.
 // Rationale: mirrors the staged-cut merge's disjoint-borrow argument list.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pn_finish<S: SolverInterface>(
@@ -251,17 +288,29 @@ pub(crate) fn pn_finish<S: SolverInterface>(
 ) -> Result<usize, SddpError> {
     let arena_len = local_work * n_openings;
     debug_assert!(
-        scratch.arena.len() >= arena_len && scratch.coeffs_buf.len() == cut_n_state,
-        "BackwardPnScratch must already cover local_work * n_openings ({arena_len}) with \
-         n_state = {cut_n_state} coefficients before the PN scatter (arena len = {}, coeffs_buf \
-         len = {})",
+        scratch.arena.len() >= arena_len,
+        "BackwardPnScratch arena must already cover local_work * n_openings ({arena_len}); got \
+         arena len = {}",
         scratch.arena.len(),
-        scratch.coeffs_buf.len(),
     );
+    debug_assert!(
+        cut_n_state <= scratch.coeffs_buf.capacity(),
+        "cut_n_state ({cut_n_state}) exceeds BackwardPnScratch::coeffs_buf's reserved capacity \
+         ({}) — resizing must never reallocate on the PN hot path",
+        scratch.coeffs_buf.capacity()
+    );
+    scratch.coeffs_buf.resize(cut_n_state, 0.0_f64);
     for res in worker_out {
         let (w, count) = res?;
         for recorded in &workspaces[w].backward_accum.pn_outcomes_buf[..count] {
             let slot = &mut scratch.arena[recorded.m * n_openings + recorded.omega];
+            debug_assert!(
+                cut_n_state <= slot.coefficients.capacity(),
+                "cut_n_state ({cut_n_state}) exceeds this arena slot's reserved capacity ({}) — \
+                 resizing must never reallocate on the PN hot path",
+                slot.coefficients.capacity()
+            );
+            slot.coefficients.resize(cut_n_state, 0.0_f64);
             slot.coefficients
                 .copy_from_slice(&recorded.outcome.coefficients);
             slot.intercept = recorded.outcome.intercept;
@@ -299,11 +348,44 @@ pub(crate) fn pn_finish<S: SolverInterface>(
     Ok(cuts_added)
 }
 
+/// Merge each worker's per-block `(simplex_iterations sum, count)` — filled
+/// during [`process_stage_backward_pn`]'s claim loop, aggregated over every
+/// trial point `m` a worker claimed for a block by construction — into
+/// [`BackwardPnScratch::block_pivots`] at `stage_key`'s row. Telemetry-only:
+/// touches no cut-generation state, so it is cut-neutral by construction
+/// (disjoint from `pn_finish`'s per-`(m, ω)` arena and FCF insertion).
+///
+/// `per_worker` yields each worker's `(sums, counts)` slices, both indexed
+/// `[0, n_blocks)`; `n_blocks <= scratch.n_blocks_max` is the caller's
+/// contract (checked in debug builds).
+pub(crate) fn pn_merge_block_pivots<'a>(
+    per_worker: impl Iterator<Item = (&'a [u64], &'a [u64])>,
+    n_blocks: usize,
+    stage_key: usize,
+    scratch: &mut BackwardPnScratch,
+) {
+    debug_assert!(
+        n_blocks <= scratch.n_blocks_max,
+        "n_blocks ({n_blocks}) must not exceed scratch.n_blocks_max ({})",
+        scratch.n_blocks_max
+    );
+    for (sums, counts) in per_worker {
+        debug_assert!(sums.len() >= n_blocks && counts.len() >= n_blocks);
+        for b in 0..n_blocks {
+            let idx = stage_key * scratch.n_blocks_max + b;
+            let (sum, count) = scratch.block_pivots[idx];
+            scratch.block_pivots[idx] =
+                (sum.saturating_add(sums[b]), count.saturating_add(counts[b]));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroUsize;
 
-    use super::resolve_block_size;
+    use super::{pn_block_count, pn_merge_block_pivots, resolve_block_size};
+    use crate::workspace::BackwardPnScratch;
 
     #[test]
     fn resolve_block_size_defaults_to_half_openings_rounded_up() {
@@ -316,5 +398,54 @@ mod tests {
     fn resolve_block_size_clamps_configured_size_to_n_openings() {
         assert_eq!(resolve_block_size(7, NonZeroUsize::new(3)), 3);
         assert_eq!(resolve_block_size(7, NonZeroUsize::new(100)), 7);
+    }
+
+    #[test]
+    fn pn_block_count_matches_div_ceil() {
+        assert_eq!(pn_block_count(7, 4), 2);
+        assert_eq!(pn_block_count(8, 4), 2);
+        assert_eq!(pn_block_count(1, 1), 1);
+    }
+
+    /// Two workers' per-block `simplex_iterations` sums/counts merged into the
+    /// same `(stage, block)` bucket yield the expected combined sum, count,
+    /// and mean — the D6 aggregate-over-`m` contract at its smallest scale.
+    #[test]
+    fn pn_merge_block_pivots_sums_two_workers_into_one_bucket() {
+        let n_blocks = 2_usize;
+        let bwd_max_openings = 4_usize;
+        let num_stages = 3_usize;
+        let mut scratch = BackwardPnScratch::sized(1, bwd_max_openings, 1, num_stages);
+        let stage_key = 1_usize;
+
+        let worker0_sum = [10_u64, 0];
+        let worker0_count = [2_u64, 0];
+        let worker1_sum = [5_u64, 0];
+        let worker1_count = [1_u64, 0];
+        let per_worker = [
+            (worker0_sum.as_slice(), worker0_count.as_slice()),
+            (worker1_sum.as_slice(), worker1_count.as_slice()),
+        ];
+
+        pn_merge_block_pivots(per_worker.into_iter(), n_blocks, stage_key, &mut scratch);
+
+        let idx = stage_key * bwd_max_openings;
+        assert_eq!(
+            scratch.block_pivots[idx],
+            (15, 3),
+            "block 0 must hold the summed (sum, count) across both workers"
+        );
+        #[allow(clippy::float_cmp, clippy::cast_precision_loss)]
+        {
+            assert_eq!(
+                scratch.block_pivots[idx].0 as f64 / scratch.block_pivots[idx].1 as f64,
+                5.0
+            );
+        }
+        assert_eq!(
+            scratch.block_pivots[idx + 1],
+            (0, 0),
+            "block 1 (untouched by either worker) must stay zeroed"
+        );
     }
 }
