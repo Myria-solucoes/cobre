@@ -1,5 +1,20 @@
 {
   "$defs": {
+    "BackwardOpeningOrder": {
+      "description": "Backward opening solve order.",
+      "oneOf": [
+        {
+          "const": "tsp",
+          "description": "Traveling-salesman-path ordering of openings.",
+          "type": "string"
+        },
+        {
+          "const": "sigma_key",
+          "description": "Sigma-key ordering of openings.",
+          "type": "string"
+        }
+      ]
+    },
     "BoundaryPolicy": {
       "additionalProperties": false,
       "description": "Boundary-row configuration for terminal-stage FCF coupling.\n\nWhen present, the solver loads rows from a source Cobre policy\ncheckpoint and injects them as fixed boundary conditions at the\nterminal stage of the current study.",
@@ -854,6 +869,11 @@
       "additionalProperties": false,
       "description": "Training parameters (`config.json → training`).\n\n`forward_passes` and `stopping_rules` are mandatory — the loader returns\n[`crate::LoadError::SchemaError`] if either is absent.",
       "properties": {
+        "backward_opening_order": {
+          "$ref": "#/$defs/BackwardOpeningOrder",
+          "default": "tsp",
+          "description": "Backward opening solve order."
+        },
         "cut_selection": {
           "$ref": "#/$defs/RowSelectionConfig",
           "default": {

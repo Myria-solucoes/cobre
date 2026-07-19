@@ -76,6 +76,27 @@ Read: `training/lower_bound.rs`, `training/stage_solve_prep.rs`.
 separate pre-pass before the loop.
 Read: `training/backward_pass_state.rs`.
 
+## Backward opening order is warm-start-only
+
+A trial point's backward openings are SOLVED in the installed `solve_order`
+permutation (`OpeningTree::set_solve_order`, keyed by
+`noise_key::build_noise_key_table` — `BackwardOpeningOrder::Tsp` by default,
+`SigmaKey` on override) but each opening's outcome is WRITTEN and AGGREGATED by
+**canonical ω**. The generated cut is therefore bit-identical across solve
+orders: reordering changes only the warm-start chain the backward pass walks,
+never which cut is produced. Aggregating the outcome slice indexed by solve
+position — or handing solve-order-permuted probabilities to
+`RiskMeasure::aggregate_cut_into` — is the wrong-but-compiling alternative: it
+makes the cut depend on solve order, silently breaking declaration-order
+invariance and run-to-run reproducibility.
+Read: `stochastic/noise_key.rs` (`build_noise_key_table`),
+`training/backward/trial_point.rs` (`process_trial_point_backward` — solves by
+`solve_order`, aggregates by canonical ω), `training/backward/outcome_aggregation.rs`
+(`write_opening_outcome`). Pinned by the `opening_order_determinism` gate in
+`tests/mpi_wire.rs` (threads=k / threads=1 / a same-shape repeat / a 2-rank
+stub, bitwise `final_lb`) and the MPI SLURM Integration job's rank-invariance
+comparison on `examples/4ree`.
+
 ## No EWMA upper bound
 
 `ConvergenceMonitor::upper_bound()` returns the raw per-iteration upper bound —

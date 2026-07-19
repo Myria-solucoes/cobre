@@ -23,8 +23,7 @@
 //! println!("forward_passes = {:?}", cfg.training.forward_passes);
 //! ```
 
-use serde_json::Map;
-use serde_json::Value;
+use serde_json::{Map, Value};
 pub mod estimation;
 pub mod exports;
 pub mod modeling;
@@ -40,9 +39,9 @@ pub use policy::{BoundaryPolicy, CheckpointingConfig, PolicyConfig, PolicyMode};
 pub use scenario_source::{RawClassConfigEntry, RawHistoricalYearsConfig, RawScenarioSourceConfig};
 pub use simulation::SimulationConfig;
 pub use training::{
-    DualEdgeWeight, LipschitzConfig, PhaseSolverProfileConfig, PriceStrategy, RowSelectionConfig,
-    ScaleStrategy, SelectionMethod, StoppingRuleConfig, TrainingConfig, TrainingSolverConfig,
-    UpperBoundEvaluationConfig,
+    BackwardOpeningOrder, DualEdgeWeight, LipschitzConfig, PhaseSolverProfileConfig, PriceStrategy,
+    RowSelectionConfig, ScaleStrategy, SelectionMethod, StoppingRuleConfig, TrainingConfig,
+    TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
 
 use cobre_core::scenario::{HistoricalYears, SamplingScheme, ScenarioSource};

@@ -1520,14 +1520,11 @@ mod determinism {
 
         // Keys are arbitrary: the determinism property needs the order to be
         // run-constant, not noise-derived.
-        let n_openings_per_stage: Vec<usize> = (0..fx.n_stages)
-            .map(|s| fx.stochastic.tree_view().n_openings(s))
-            .collect();
-        let keys: Vec<Vec<f64>> = n_openings_per_stage
-            .iter()
-            .map(|&n| {
+        let keys: Vec<Vec<f64>> = (0..fx.n_stages)
+            .map(|s| {
                 assert_eq!(
-                    n, BRANCHING,
+                    fx.stochastic.tree_view().n_openings(s),
+                    BRANCHING,
                     "fixture must have BRANCHING openings per stage"
                 );
                 vec![3.0, 1.0, 4.0, 2.0]
@@ -2165,6 +2162,7 @@ mod water_travel_time_no_arc_byte_identity {
                 stopping_mode: "any".to_string(),
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
+                backward_opening_order: cobre_io::config::BackwardOpeningOrder::default(),
                 scenario_source: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),

@@ -65,6 +65,7 @@ where
 
 /// Identical to [`run_simulate`], but installs `profile` via `set_profile`
 /// before `run()` — exercises the resolved-profile threading mechanism.
+// A params struct would churn every call site; the wide arity is deliberate.
 #[allow(clippy::too_many_arguments)]
 fn run_simulate_with_profile<S, C: cobre_comm::Communicator>(
     workspaces: &mut [SolverWorkspace<S>],
@@ -295,7 +296,7 @@ fn minimal_template_1_0() -> StageTemplate {
 fn fixed_solution(objective: f64, theta_val: f64) -> LpSolution {
     let num_cols = 4;
     let mut primal = vec![0.0_f64; num_cols];
-    primal[3] = theta_val; // theta at col 3 (N=1, L=0 → theta = N*(3+L) = 3)
+    primal[3] = theta_val;
     LpSolution {
         objective,
         primal,
@@ -1899,7 +1900,6 @@ mod dcs_simulation {
 
     use crate::inflow_method::InflowNonNegativityMethod;
     use crate::lp_builder::{PatchBuffer, StageGeometry};
-    use crate::simulation::extraction::EntityCounts;
     use crate::simulation::types::{SimulationCostResult, SimulationStageResult};
     use crate::test_support;
     use crate::workspace::{SolverWorkspace, WorkspaceSizing};
@@ -2071,16 +2071,7 @@ mod dcs_simulation {
         let stochastic = super::make_stochastic_context(1);
         let horizon = HorizonMode::Finite { num_stages: 1 };
         let fcf = sim_pool();
-        let entity_counts = EntityCounts {
-            hydro_ids: vec![1],
-            hydro_productivities: vec![1.0],
-            thermal_ids: vec![],
-            line_ids: vec![],
-            bus_ids: vec![],
-            pumping_station_ids: vec![],
-            contract_ids: vec![],
-            non_controllable_ids: vec![],
-        };
+        let entity_counts = super::entity_counts_1_hydro();
         let hprod = vec![vec![1.0]];
         let zero_ec = EnergyConversion {
             equivalent_productivity_mw_per_m3s: 0.0,

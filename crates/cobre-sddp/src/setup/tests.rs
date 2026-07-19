@@ -500,6 +500,7 @@ fn minimal_config(forward_passes: u32, max_iterations: u32) -> Config {
             stopping_mode: "any".to_string(),
             cut_selection: RowSelectionConfig::default(),
             solver: TrainingSolverConfig::default(),
+            backward_opening_order: cobre_io::config::BackwardOpeningOrder::default(),
             scenario_source: None,
         },
         upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
@@ -905,7 +906,6 @@ fn simulation_ctx_propagates_dynamic_dcs_from_setup() {
     let ctx = setup.simulation_ctx();
 
     // The dynamic method with default fields maps to the spec defaults
-    // (k1 = None, k2 = 5, nadic = 10, epsilon_viol = 1e-10, start_iteration = 2).
     let expected = DcsParams {
         k1: None,
         k2: 5,
@@ -1244,6 +1244,7 @@ fn study_params_from_config_defaults() {
             stopping_mode: "any".to_string(),
             cut_selection: RowSelectionConfig::default(),
             solver: TrainingSolverConfig::default(),
+            backward_opening_order: cobre_io::config::BackwardOpeningOrder::default(),
             scenario_source: None,
         },
         upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
@@ -1318,6 +1319,7 @@ fn study_params_from_config_explicit() {
             stopping_mode: "all".to_string(),
             cut_selection: RowSelectionConfig::default(),
             solver: TrainingSolverConfig::default(),
+            backward_opening_order: cobre_io::config::BackwardOpeningOrder::default(),
             scenario_source: None,
         },
         upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
@@ -1405,6 +1407,7 @@ fn minimal_prepare_config() -> cobre_io::Config {
             stopping_mode: "any".to_string(),
             cut_selection: RowSelectionConfig::default(),
             solver: TrainingSolverConfig::default(),
+            backward_opening_order: cobre_io::config::BackwardOpeningOrder::default(),
             scenario_source: None,
         },
         upper_bound_evaluation: UpperBoundEvaluationConfig::default(),

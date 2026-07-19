@@ -584,6 +584,7 @@ fn build_study_setup(
         training_solver_backward,
         training_solver_forward,
         simulation_solver,
+        backward_opening_order: bcast_config.backward_opening_order,
     };
     StudySetup::from_broadcast_params(
         system,

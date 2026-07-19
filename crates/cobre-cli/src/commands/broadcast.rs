@@ -4,7 +4,7 @@ use cobre_comm::Communicator;
 use cobre_core::scenario::ScenarioSource;
 use cobre_io::Config;
 use cobre_io::PolicyMode;
-use cobre_io::config::PhaseSolverProfileConfig;
+use cobre_io::config::{BackwardOpeningOrder, PhaseSolverProfileConfig};
 use cobre_sddp::{
     CutSelectionStrategy, DEFAULT_MAX_ITERATIONS, InflowNonNegativityMethod, StoppingMode,
     StoppingRule, StoppingRuleSet, StudyParams,
@@ -65,6 +65,8 @@ pub(crate) struct BroadcastConfig {
     pub(crate) training_solver_forward: Option<PhaseSolverProfileConfig>,
     /// Simulation solver profile override (`simulation.solver`).
     pub(crate) simulation_solver: Option<PhaseSolverProfileConfig>,
+    /// Backward opening solve order (`training.backward_opening_order`).
+    pub(crate) backward_opening_order: BackwardOpeningOrder,
 }
 
 impl BroadcastConfig {
@@ -137,6 +139,7 @@ impl BroadcastConfig {
             training_solver_backward: params.training_solver_backward,
             training_solver_forward: params.training_solver_forward,
             simulation_solver: params.simulation_solver,
+            backward_opening_order: params.backward_opening_order,
         })
     }
 }

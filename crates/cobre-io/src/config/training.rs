@@ -46,6 +46,10 @@ pub struct TrainingConfig {
     #[serde(default)]
     pub solver: TrainingSolverConfig,
 
+    /// Backward opening solve order.
+    #[serde(default)]
+    pub backward_opening_order: BackwardOpeningOrder,
+
     /// Scenario source configuration for the training forward pass.
     /// When absent, all classes default to `in_sample`.
     #[serde(default)]
@@ -245,6 +249,18 @@ pub struct PhaseSolverProfileConfig {
     pub primal_feasibility_tolerance: Option<f64>,
 }
 
+/// Backward opening solve order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum BackwardOpeningOrder {
+    /// Traveling-salesman-path ordering of openings.
+    #[default]
+    Tsp,
+    /// Sigma-key ordering of openings.
+    SigmaKey,
+}
+
 /// Dual simplex edge-weight (pricing) strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -377,7 +393,10 @@ pub struct LipschitzConfig {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::{DualEdgeWeight, PriceStrategy, ScaleStrategy, SelectionMethod, TrainingConfig};
+    use super::{
+        BackwardOpeningOrder, DualEdgeWeight, PriceStrategy, ScaleStrategy, SelectionMethod,
+        TrainingConfig,
+    };
 
     /// A `dynamic` selection block round-trips through the tagged enum, with
     /// every method-specific field landing in the `Dynamic` variant.
@@ -585,5 +604,51 @@ mod tests {
         }"#;
         let result = serde_json::from_str::<TrainingConfig>(json);
         assert!(result.is_err(), "an unknown scale value must be rejected");
+    }
+
+    /// An absent `backward_opening_order` deserializes to the `Tsp` default.
+    #[test]
+    fn backward_opening_order_defaults_to_tsp_when_absent() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }]
+        }"#;
+        let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.backward_opening_order, BackwardOpeningOrder::Tsp);
+    }
+
+    /// `"tsp"` and `"sigma_key"` round-trip into their respective variants.
+    #[test]
+    fn backward_opening_order_variants_round_trip() {
+        let sigma_json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "backward_opening_order": "sigma_key"
+        }"#;
+        let sigma: TrainingConfig = serde_json::from_str(sigma_json).unwrap();
+        assert_eq!(sigma.backward_opening_order, BackwardOpeningOrder::SigmaKey);
+
+        let tsp_json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "backward_opening_order": "tsp"
+        }"#;
+        let tsp: TrainingConfig = serde_json::from_str(tsp_json).unwrap();
+        assert_eq!(tsp.backward_opening_order, BackwardOpeningOrder::Tsp);
+    }
+
+    /// An unknown `backward_opening_order` value is a deserialize error.
+    #[test]
+    fn backward_opening_order_bad_value_is_deserialize_error() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "backward_opening_order": "tsp_2opt"
+        }"#;
+        let result = serde_json::from_str::<TrainingConfig>(json);
+        assert!(
+            result.is_err(),
+            "an unknown backward_opening_order value must be rejected"
+        );
     }
 }

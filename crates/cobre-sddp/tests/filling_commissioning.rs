@@ -1671,6 +1671,7 @@ mod filling_cut_validity {
                 stopping_mode: "any".to_string(),
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
+                backward_opening_order: cobre_io::config::BackwardOpeningOrder::default(),
                 scenario_source: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),

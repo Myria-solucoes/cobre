@@ -69,6 +69,61 @@ impl Communicator for StubComm {
     }
 }
 
+/// `size() == 2` sibling of [`StubComm`]: every collective writes only this
+/// rank's own slot (`recv[displs[0]..displs[0] + send.len()]`), mirroring
+/// `state_exchange.rs`'s own `Rank1Of2` test pattern rather than echoing rank
+/// 0's data into rank 1's slot. Faithful — not a dishonest tautology — only
+/// when the caller trains with `forward_passes == 1`: `RankDistribution`
+/// (`base_fwd=0, remainder=1` for `num_ranks=2`) assigns rank 0 the sole real
+/// forward pass and rank 1 exactly zero, so the zero contribution this stub
+/// leaves unwritten IS what a genuine rank 1 would also send. Every caller
+/// must keep its own fixture at `forward_passes == 1`.
+pub struct Rank0Of2;
+
+impl Communicator for Rank0Of2 {
+    fn allgatherv<T: CommData>(
+        &self,
+        send: &[T],
+        recv: &mut [T],
+        _counts: &[usize],
+        displs: &[usize],
+    ) -> Result<(), CommError> {
+        let start = displs[0];
+        recv[start..start + send.len()].clone_from_slice(send);
+        Ok(())
+    }
+
+    fn allreduce<T: CommData>(
+        &self,
+        send: &[T],
+        recv: &mut [T],
+        _op: ReduceOp,
+    ) -> Result<(), CommError> {
+        recv.clone_from_slice(send);
+        Ok(())
+    }
+
+    fn broadcast<T: CommData>(&self, _buf: &mut [T], _root: usize) -> Result<(), CommError> {
+        Ok(())
+    }
+
+    fn barrier(&self) -> Result<(), CommError> {
+        Ok(())
+    }
+
+    fn rank(&self) -> usize {
+        0
+    }
+
+    fn size(&self) -> usize {
+        2
+    }
+
+    fn abort(&self, error_code: i32) -> ! {
+        std::process::exit(error_code)
+    }
+}
+
 /// Build a [`StudySetup`] for a case directory.
 ///
 /// The caller's `prepare_hydro_models` has already folded the productivity

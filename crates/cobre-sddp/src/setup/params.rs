@@ -2,7 +2,7 @@
 
 use cobre_core::ScalarParameter;
 use cobre_io::Config;
-use cobre_io::config::{PhaseSolverProfileConfig, StoppingRuleConfig};
+use cobre_io::config::{BackwardOpeningOrder, PhaseSolverProfileConfig, StoppingRuleConfig};
 
 use crate::{
     InflowNonNegativityMethod, SddpError,
@@ -59,6 +59,8 @@ pub struct StudyParams {
     pub training_solver_forward: Option<PhaseSolverProfileConfig>,
     /// Simulation solver profile override (`simulation.solver`).
     pub simulation_solver: Option<PhaseSolverProfileConfig>,
+    /// Backward opening solve order (`training.backward_opening_order`).
+    pub backward_opening_order: BackwardOpeningOrder,
 }
 
 impl StudyParams {
@@ -147,6 +149,7 @@ impl StudyParams {
         let training_solver_backward = config.training.solver.backward.clone();
         let training_solver_forward = config.training.solver.forward.clone();
         let simulation_solver = config.simulation.solver.clone();
+        let backward_opening_order = config.training.backward_opening_order;
 
         if let Some(b) = budget
             && u64::from(b) < u64::from(forward_passes)
@@ -172,6 +175,7 @@ impl StudyParams {
             training_solver_backward,
             training_solver_forward,
             simulation_solver,
+            backward_opening_order,
         })
     }
 
@@ -197,6 +201,7 @@ impl StudyParams {
             training_solver_backward: self.training_solver_backward,
             training_solver_forward: self.training_solver_forward,
             simulation_solver: self.simulation_solver,
+            backward_opening_order: self.backward_opening_order,
         }
     }
 }
@@ -252,6 +257,8 @@ pub struct ConstructionConfig {
     pub training_solver_forward: Option<PhaseSolverProfileConfig>,
     /// Simulation solver profile override (`simulation.solver`).
     pub simulation_solver: Option<PhaseSolverProfileConfig>,
+    /// Backward opening solve order (`training.backward_opening_order`).
+    pub backward_opening_order: BackwardOpeningOrder,
 }
 
 #[cfg(test)]
@@ -261,7 +268,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use cobre_io::config::{
-        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+        BackwardOpeningOrder, Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
         InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
         RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
         TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
@@ -356,6 +363,7 @@ mod tests {
                     ..RowSelectionConfig::default()
                 },
                 solver: TrainingSolverConfig::default(),
+                backward_opening_order: BackwardOpeningOrder::default(),
                 scenario_source: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
@@ -390,6 +398,7 @@ mod tests {
                 stopping_mode: "any".to_string(),
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
+                backward_opening_order: BackwardOpeningOrder::default(),
                 scenario_source: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),

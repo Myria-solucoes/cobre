@@ -331,6 +331,7 @@ impl StudySetup {
             training_solver_backward,
             training_solver_forward,
             simulation_solver,
+            backward_opening_order,
         } = config;
 
         // Fail fast on a backend-unsupported preset/field before any template
@@ -350,7 +351,7 @@ impl StudySetup {
         // Keys are a pure function of the synced tree + fixed σ, so every rank
         // computes the identical permutation and cuts stay bit-identical across
         // thread/rank counts (canonical-ω aggregation is order-independent).
-        let solve_order_keys = build_noise_key_table(system, &stochastic)?;
+        let solve_order_keys = build_noise_key_table(system, &stochastic, backward_opening_order)?;
         stochastic
             .set_solve_order(&solve_order_keys, SweepDirection::Descending)
             .map_err(|e| SddpError::Validation(e.to_string()))?;

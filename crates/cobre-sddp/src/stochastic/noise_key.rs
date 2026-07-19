@@ -1,4 +1,4 @@
-//! Per-(stage, canonical-ω) σ-weighted noise keys for the backward solve order.
+//! Per-(stage, canonical-ω) backward solve-order keys.
 //!
 //! `noise_key[stage][ω]` is a pure function of setup-constant data (the synced
 //! tree's `raw_noise` and the fixed per-(hydro, stage) `std_m3s`), precomputed
@@ -17,14 +17,29 @@
 //! as the PAR precompute does, indexed `[stage * n_hydros + h]`; a `(hydro,
 //! stage)` pair with no inflow model contributes σ = 0 (the PAR's
 //! deterministic-zero-inflow fallback).
+//!
+//! ## Opening order
+//!
+//! [`BackwardOpeningOrder::SigmaKey`] sorts by the σ-weighted key above.
+//! [`BackwardOpeningOrder::Tsp`] instead sorts each stage with 3 or more
+//! openings by a nearest-neighbor + 2-opt tour over unweighted L2 distance
+//! between openings' hydro-prefix noise vectors, shortening the warm-start
+//! chain the backward pass walks; a stage with fewer than 3 openings keeps its
+//! σ-key (there is no tour to improve).
 
 use cobre_core::{EntityId, System};
-use cobre_stochastic::StochasticContext;
+use cobre_io::config::BackwardOpeningOrder;
+use cobre_stochastic::{OpeningTreeView, StochasticContext};
 
 use crate::error::SddpError;
 
-/// Build the per-(stage, canonical-ω) σ-weighted noise key table from
-/// setup-constant data — the key the backward solve order sorts by.
+/// Build the per-(stage, canonical-ω) backward solve-order key table from
+/// setup-constant data.
+///
+/// Always computes the σ-weighted key first (also performs the noise-dimension
+/// validation every path relies on), then, under
+/// [`BackwardOpeningOrder::Tsp`], overwrites each stage's keys with its winning
+/// TSP tour's reversed path positions (see the module docs).
 ///
 /// # Errors
 ///
@@ -34,6 +49,7 @@ use crate::error::SddpError;
 pub(crate) fn build_noise_key_table(
     system: &System,
     stochastic: &StochasticContext,
+    order: BackwardOpeningOrder,
 ) -> Result<Vec<Vec<f64>>, SddpError> {
     let n_hydros = stochastic.n_hydros();
     let hydro_ids: Vec<EntityId> = system.hydros().iter().map(|h| h.id).collect();
@@ -58,6 +74,10 @@ pub(crate) fn build_noise_key_table(
             stage_keys.push(noise_key(sigma_stage, raw_noise)?);
         }
         keys.push(stage_keys);
+    }
+
+    if matches!(order, BackwardOpeningOrder::Tsp) {
+        apply_tsp_order(&mut keys, &tree, n_hydros);
     }
 
     Ok(keys)
@@ -113,9 +133,154 @@ fn build_sigma_table(
     sigma
 }
 
+/// Total pairwise-distance cost of visiting `tour` in order.
+fn tour_cost(tour: &[usize], distances: &[f64], n_o: usize) -> f64 {
+    tour.windows(2).map(|w| distances[w[0] * n_o + w[1]]).sum()
+}
+
+/// Nearest-neighbor tour from `start` over the row-major `n_o x n_o` distance
+/// matrix, breaking ties by keeping the lowest already-found candidate index
+/// (`total_cmp`, never `partial_cmp`/`<`, to stay a deterministic function of
+/// `distances` alone).
+fn nearest_neighbor_tour(distances: &[f64], n_o: usize, start: usize) -> Vec<usize> {
+    let mut tour = Vec::with_capacity(n_o);
+    let mut visited = vec![false; n_o];
+    tour.push(start);
+    visited[start] = true;
+
+    for _ in 1..n_o {
+        let last = tour[tour.len() - 1];
+        let mut nearest: Option<usize> = None;
+        for candidate in 0..n_o {
+            if visited[candidate] {
+                continue;
+            }
+            let better = match nearest {
+                None => true,
+                Some(best) => distances[last * n_o + candidate]
+                    .total_cmp(&distances[last * n_o + best])
+                    .is_lt(),
+            };
+            if better {
+                nearest = Some(candidate);
+            }
+        }
+        if let Some(next) = nearest {
+            tour.push(next);
+            visited[next] = true;
+        }
+    }
+
+    tour
+}
+
+/// Improve `tour` in place with full 2-opt (every segment reversal), keeping a
+/// reversal only when it strictly lowers `*cost` (`total_cmp`).
+fn two_opt_improve(tour: &mut [usize], cost: &mut f64, distances: &[f64], n_o: usize) {
+    let mut improved = true;
+    while improved {
+        improved = false;
+        for i in 1..n_o.saturating_sub(1) {
+            for j in (i + 1)..n_o {
+                tour[i..=j].reverse();
+                let candidate_cost = tour_cost(tour, distances, n_o);
+                if candidate_cost.total_cmp(cost).is_lt() {
+                    *cost = candidate_cost;
+                    improved = true;
+                } else {
+                    tour[i..=j].reverse();
+                }
+            }
+        }
+    }
+}
+
+/// Lowest-cost Hamiltonian path over the row-major `n_o x n_o` distance
+/// matrix: a nearest-neighbor tour from every start index, each improved by
+/// full 2-opt, keeping the winning tour. All comparisons use `total_cmp` — a
+/// `partial_cmp`/`<`/`min_by` reintroduces a NaN/`-0.0`-dependent order that
+/// breaks run-to-run reproducibility.
+fn tsp_path(distances: &[f64], n_o: usize) -> Vec<usize> {
+    debug_assert_eq!(
+        distances.len(),
+        n_o * n_o,
+        "tsp_path: distance matrix must be n_o x n_o"
+    );
+
+    let mut best: Vec<usize> = (0..n_o).collect();
+    let mut best_cost = tour_cost(&best, distances, n_o);
+
+    for start in 0..n_o {
+        let mut tour = nearest_neighbor_tour(distances, n_o, start);
+        let mut cost = tour_cost(&tour, distances, n_o);
+        two_opt_improve(&mut tour, &mut cost, distances, n_o);
+        if cost.total_cmp(&best_cost).is_lt() {
+            best_cost = cost;
+            best = tour;
+        }
+    }
+
+    best
+}
+
+/// Row-major pairwise unweighted-L2 distance matrix over the canonical
+/// `[..n_hydros]` noise prefix of stage `stage`'s `n_o` openings.
+fn l2_distance_matrix(
+    tree: &OpeningTreeView<'_>,
+    stage: usize,
+    n_o: usize,
+    n_hydros: usize,
+) -> Vec<f64> {
+    let mut distances = vec![0.0_f64; n_o * n_o];
+    for i in 0..n_o {
+        let opening_i = &tree.opening(stage, i)[..n_hydros];
+        for j in 0..n_o {
+            let opening_j = &tree.opening(stage, j)[..n_hydros];
+            distances[i * n_o + j] = opening_i
+                .iter()
+                .zip(opening_j)
+                .map(|(a, b)| (a - b) * (a - b))
+                .sum::<f64>()
+                .sqrt();
+        }
+    }
+    distances
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn tsp_key(n_o: usize, pos: usize) -> f64 {
+    (n_o - pos) as f64
+}
+
+/// Overwrite each stage's keys with its TSP tour's reversed path positions
+/// (`keys[stage][ω] = n_o - pos`, where `pos` is ω's index in the winning
+/// tour); a stage below 3 openings keeps its σ-key — there is no tour to
+/// improve.
+fn apply_tsp_order(keys: &mut [Vec<f64>], tree: &OpeningTreeView<'_>, n_hydros: usize) {
+    for (stage, stage_keys) in keys.iter_mut().enumerate() {
+        let n_o = stage_keys.len();
+        if n_o < 3 {
+            continue;
+        }
+        let distances = l2_distance_matrix(tree, stage, n_o, n_hydros);
+        let path = tsp_path(&distances, n_o);
+        for (pos, &omega) in path.iter().enumerate() {
+            stage_keys[omega] = tsp_key(n_o, pos);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::noise_key;
+    use chrono::NaiveDate;
+    use cobre_core::{
+        Block, BlockMode, Bus, DeficitSegment, EntityId, Hydro, HydroGenerationModel,
+        HydroPenalties, InflowModel, NoiseMethod, SamplingScheme, ScenarioSourceConfig, Stage,
+        StageRiskConfig, StageStateConfig, System, SystemBuilder,
+    };
+    use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
+
+    use super::{BackwardOpeningOrder, StochasticContext, build_noise_key_table, noise_key};
 
     #[test]
     fn test_noise_key_sums_sigma_weighted_components() {
@@ -143,5 +308,268 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains('3'), "message must name σ length 3: {msg}");
         assert!(msg.contains('2'), "message must name noise dim 2: {msg}");
+    }
+
+    // ------------------------------------------------------------------
+    // tsp_path: pure-kernel tests over hand-built distance matrices.
+    // ------------------------------------------------------------------
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn tsp_path_orders_collinear_points() {
+        use super::tsp_path;
+
+        let n_o = 4;
+        let mut distances = vec![0.0_f64; n_o * n_o];
+        for i in 0..n_o {
+            for j in 0..n_o {
+                distances[i * n_o + j] = (i as f64 - j as f64).abs();
+            }
+        }
+
+        let path = tsp_path(&distances, n_o);
+        assert_eq!(path.len(), n_o);
+        let ascending = path.windows(2).all(|w| w[1] == w[0] + 1);
+        let descending = path.windows(2).all(|w| w[0] == w[1] + 1);
+        assert!(
+            ascending || descending,
+            "expected a monotone tour over collinear points, got {path:?}"
+        );
+    }
+
+    mod tsp_path_proptests {
+        use proptest::prelude::*;
+        use proptest::test_runner::RngSeed;
+
+        use super::super::tsp_path;
+
+        /// Fixed seed so a failing shrink is reproducible run-to-run.
+        fn fixed_config() -> ProptestConfig {
+            ProptestConfig {
+                cases: 64,
+                rng_seed: RngSeed::Fixed(7),
+                ..ProptestConfig::default()
+            }
+        }
+
+        fn size_and_matrix() -> impl Strategy<Value = (usize, Vec<f64>)> {
+            (3usize..=8).prop_flat_map(|n_o| {
+                prop::collection::vec(0.0..1000.0_f64, n_o * n_o).prop_map(move |d| (n_o, d))
+            })
+        }
+
+        proptest! {
+            #![proptest_config(fixed_config())]
+
+            #[test]
+            fn tsp_path_is_always_a_permutation((n_o, distances) in size_and_matrix()) {
+                let path = tsp_path(&distances, n_o);
+                let mut sorted = path.clone();
+                sorted.sort_unstable();
+                prop_assert_eq!(sorted, (0..n_o).collect::<Vec<_>>());
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // build_noise_key_table + BackwardOpeningOrder fixture tests.
+    // ------------------------------------------------------------------
+
+    fn bus_fixture(id: i32) -> Bus {
+        Bus {
+            id: EntityId(id),
+            name: format!("Bus{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 1000.0,
+            }],
+            excess_cost: 0.0,
+        }
+    }
+
+    fn hydro_fixture(id: i32, bus_id: i32) -> Hydro {
+        Hydro {
+            id: EntityId(id),
+            name: format!("H{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            bus_id: EntityId(bus_id),
+            downstream_id: None,
+            travel_time_hours: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 100.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 100.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: HydroPenalties {
+                spillage_cost: 0.0,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 0.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+        }
+    }
+
+    fn stage_fixture(index: usize, id: i32, branching_factor: usize) -> Stage {
+        Stage {
+            index,
+            id,
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).expect("valid date"),
+            season_id: Some(0),
+            blocks: vec![Block {
+                index: 0,
+                name: "SINGLE".to_string(),
+                duration_hours: 744.0,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: true,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor,
+                noise_method: NoiseMethod::Saa,
+            },
+        }
+    }
+
+    fn inflow_model_fixture(hydro_id: i32, stage_id: i32, std_m3s: f64) -> InflowModel {
+        InflowModel {
+            hydro_id: EntityId(hydro_id),
+            stage_id,
+            mean_m3s: 100.0,
+            std_m3s,
+            ar_coefficients: vec![],
+            residual_std_ratio: 1.0,
+            annual: None,
+        }
+    }
+
+    /// Build a `System` with one hydro per id in `hydro_order` (declared to
+    /// `SystemBuilder` in that Vec order; `System::hydros()` re-sorts
+    /// canonically regardless), `n_stages` stages each with `branching_factor`
+    /// openings.
+    fn build_system(hydro_order: &[i32], n_stages: usize, branching_factor: usize) -> System {
+        let bus = bus_fixture(1);
+        let hydros: Vec<Hydro> = hydro_order.iter().map(|&id| hydro_fixture(id, 1)).collect();
+        let stages: Vec<Stage> = (0..n_stages)
+            .map(|s| {
+                stage_fixture(
+                    s,
+                    i32::try_from(s).expect("small stage count"),
+                    branching_factor,
+                )
+            })
+            .collect();
+        let inflow_models: Vec<InflowModel> = hydro_order
+            .iter()
+            .flat_map(|&hydro_id| {
+                stages.iter().map(move |stage| {
+                    inflow_model_fixture(hydro_id, stage.id, 10.0 + f64::from(hydro_id))
+                })
+            })
+            .collect();
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(hydros)
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .build()
+            .expect("fixture system must build")
+    }
+
+    fn build_ctx(system: &System, seed: u64) -> StochasticContext {
+        build_stochastic_context(
+            system,
+            seed,
+            None,
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::InSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .expect("fixture stochastic context must build")
+    }
+
+    #[test]
+    fn tsp_order_is_declaration_order_invariant() {
+        let system_a = build_system(&[10, 20, 30], 2, 4);
+        let system_b = build_system(&[30, 10, 20], 2, 4);
+
+        let ctx_a = build_ctx(&system_a, 99);
+        let ctx_b = build_ctx(&system_b, 99);
+
+        let table_a = build_noise_key_table(&system_a, &ctx_a, BackwardOpeningOrder::Tsp)
+            .expect("table must build");
+        let table_b = build_noise_key_table(&system_b, &ctx_b, BackwardOpeningOrder::Tsp)
+            .expect("table must build");
+
+        assert_eq!(table_a.len(), table_b.len());
+        for (stage_a, stage_b) in table_a.iter().zip(&table_b) {
+            assert_eq!(stage_a.len(), stage_b.len());
+            for (&ka, &kb) in stage_a.iter().zip(stage_b) {
+                assert_eq!(
+                    ka.to_bits(),
+                    kb.to_bits(),
+                    "TSP key tables must be bit-identical across hydro declaration order"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tsp_is_noop_below_three_openings() {
+        let system = build_system(&[10], 2, 2);
+        let ctx = build_ctx(&system, 7);
+
+        let sigma_table = build_noise_key_table(&system, &ctx, BackwardOpeningOrder::SigmaKey)
+            .expect("sigma table must build");
+        let tsp_table = build_noise_key_table(&system, &ctx, BackwardOpeningOrder::Tsp)
+            .expect("tsp table must build");
+
+        assert_eq!(sigma_table.len(), tsp_table.len());
+        for (sigma_stage, tsp_stage) in sigma_table.iter().zip(&tsp_table) {
+            assert_eq!(sigma_stage.len(), tsp_stage.len());
+            for (&s, &t) in sigma_stage.iter().zip(tsp_stage) {
+                assert_eq!(
+                    s.to_bits(),
+                    t.to_bits(),
+                    "Tsp must be a no-op for stages with fewer than 3 openings"
+                );
+            }
+        }
     }
 }

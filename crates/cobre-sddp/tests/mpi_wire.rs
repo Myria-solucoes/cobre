@@ -440,7 +440,7 @@ mod retry_armed_determinism {
 
     use std::path::Path;
 
-    use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
+    use cobre_comm::Communicator;
     use cobre_core::scenario::ScenarioSource;
     use cobre_io::config::PhaseSolverProfileConfig;
     use cobre_sddp::{
@@ -449,7 +449,7 @@ mod retry_armed_determinism {
     };
     use cobre_solver::ActiveSolver;
 
-    use crate::common::{StubComm, build_setup_for_case};
+    use crate::common::{Rank0Of2, StubComm, build_setup_for_case};
 
     /// Low enough that the tuned `backward_tuned_v1` profile's first attempt
     /// cannot finish within the cap on every stage solve of the d03 fixture,
@@ -501,61 +501,6 @@ mod retry_armed_determinism {
             .expect("prepare_hydro_models must succeed");
 
         build_setup_for_case(case_dir, &config, &system, stochastic, hydro_models)
-    }
-
-    /// `size() == 2` sibling of [`StubComm`]: every collective writes only
-    /// this rank's own slot (`recv[displs[0]..displs[0] + send.len()]`),
-    /// mirroring `state_exchange.rs`'s own `Rank1Of2` test pattern rather than
-    /// echoing rank 0's data into rank 1's slot. Faithful — not a dishonest
-    /// tautology — only because every fixture below trains with
-    /// `forward_passes == 1`: `RankDistribution` (`base_fwd=0, remainder=1`
-    /// for `num_ranks=2`) assigns rank 0 the sole real forward pass and rank 1
-    /// exactly zero, so the zero contribution this stub leaves unwritten IS
-    /// what a genuine rank 1 would also send.
-    struct Rank0Of2;
-
-    impl Communicator for Rank0Of2 {
-        fn allgatherv<T: CommData>(
-            &self,
-            send: &[T],
-            recv: &mut [T],
-            _counts: &[usize],
-            displs: &[usize],
-        ) -> Result<(), CommError> {
-            let start = displs[0];
-            recv[start..start + send.len()].clone_from_slice(send);
-            Ok(())
-        }
-
-        fn allreduce<T: CommData>(
-            &self,
-            send: &[T],
-            recv: &mut [T],
-            _op: ReduceOp,
-        ) -> Result<(), CommError> {
-            recv.clone_from_slice(send);
-            Ok(())
-        }
-
-        fn broadcast<T: CommData>(&self, _buf: &mut [T], _root: usize) -> Result<(), CommError> {
-            Ok(())
-        }
-
-        fn barrier(&self) -> Result<(), CommError> {
-            Ok(())
-        }
-
-        fn rank(&self) -> usize {
-            0
-        }
-
-        fn size(&self) -> usize {
-            2
-        }
-
-        fn abort(&self, error_code: i32) -> ! {
-            std::process::exit(error_code)
-        }
     }
 
     /// Train one shape on a fresh [`StudySetup`], returning
@@ -670,5 +615,122 @@ mod retry_armed_determinism {
             num_stages
         ];
         assert_shapes_agree(case_dir, Some(risk_measures));
+    }
+}
+
+#[cfg(all(feature = "highs", feature = "test-support"))]
+mod opening_order_determinism {
+    //! TSP opening-order determinism gate: trains `examples/1dtoy` (a
+    //! stochastic, multi-opening fixture; `BackwardOpeningOrder::Tsp` is the
+    //! config default) via the public `train` entry point — config-resolved
+    //! (TSP-default) solver profiles, no forced retry — and asserts the final
+    //! training lower bound is bitwise identical across four execution shapes
+    //! of the SAME config: threads=k, threads=1, a same-shape repeat, and a
+    //! faithful 2-rank leg.
+    //!
+    //! Power statement: this gate has no power on a fixture whose TSP tour has
+    //! nothing to reorder (`BackwardOpeningOrder::Tsp` no-ops below 3 openings
+    //! per stage, see `noise_key::apply_tsp_order`); `n_openings >= 3` on at
+    //! least one stage is asserted as the gate's own self-check, not an
+    //! incidental fact.
+    //!
+    //! The real multi-rank leg is the existing MPI SLURM Integration job
+    //! (`.github/workflows/mpi-slurm.yml`, `tests/slurm/run-tests.sh`), which
+    //! compares `mpiexec -n 1` against `-n 2` on `examples/4ree` bit-for-bit;
+    //! this in-process gate does not reproduce that leg.
+
+    use std::path::Path;
+
+    use cobre_comm::Communicator;
+    use cobre_core::scenario::ScenarioSource;
+    use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
+    use cobre_solver::ActiveSolver;
+
+    use crate::common::{Rank0Of2, StubComm, build_setup_for_case};
+
+    fn fixture_case_dir() -> &'static Path {
+        Path::new("../../examples/1dtoy")
+    }
+
+    /// Build a fresh [`StudySetup`], mirroring `retry_armed_determinism`'s
+    /// `fresh_setup`. Each shape trains from an independently-built setup,
+    /// never a warm-started reuse, so the four shapes compare cold-to-cold.
+    fn fresh_setup(case_dir: &Path) -> StudySetup {
+        let config_path = case_dir.join("config.json");
+        let config = cobre_io::parse_config(&config_path).expect("config must parse");
+        let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
+
+        let prepare_result =
+            prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
+                .expect("prepare_stochastic must succeed");
+        let system = prepare_result.system;
+        let stochastic = prepare_result.stochastic;
+
+        let hydro_models = prepare_hydro_models(&system, case_dir, false)
+            .expect("prepare_hydro_models must succeed");
+
+        build_setup_for_case(case_dir, &config, &system, stochastic, hydro_models)
+    }
+
+    /// Train one shape on a fresh [`StudySetup`] via the public `train` entry
+    /// point (config-resolved, TSP-default profiles), returning `final_lb`.
+    fn run_shape(case_dir: &Path, n_threads: usize, comm: &impl Communicator) -> f64 {
+        let mut setup = fresh_setup(case_dir);
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+
+        let outcome = setup
+            .train(&mut solver, comm, n_threads, ActiveSolver::new, None, None)
+            .expect("train must return Ok");
+        assert!(
+            outcome.error.is_none(),
+            "expected no training error, got: {:?}",
+            outcome.error
+        );
+
+        outcome.result.final_lb
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow: run with --features slow-tests"
+    )]
+    fn opening_order_determinism() {
+        let case_dir = fixture_case_dir();
+
+        let probe = fresh_setup(case_dir);
+        let tree_view = probe.stochastic.tree_view();
+        let has_multi_opening_stage =
+            (0..probe.num_stages()).any(|stage| tree_view.n_openings(stage) >= 3);
+        assert!(
+            has_multi_opening_stage,
+            "opening_order_determinism: fixture {case_dir:?} has no stage with \
+             n_openings >= 3 — the gate is powerless here (the TSP tour is a no-op \
+             below 3 openings); point it at a genuinely multi-opening case"
+        );
+
+        let stub = StubComm;
+        let rank0_of_2 = Rank0Of2;
+
+        let lb_threads_k = run_shape(case_dir, 4, &stub);
+        let lb_threads_1 = run_shape(case_dir, 1, &stub);
+        let lb_repeat = run_shape(case_dir, 1, &stub);
+        let lb_2rank = run_shape(case_dir, 1, &rank0_of_2);
+
+        assert_eq!(
+            lb_threads_k.to_bits(),
+            lb_threads_1.to_bits(),
+            "threads=4 vs threads=1 final lower bound must be bitwise identical"
+        );
+        assert_eq!(
+            lb_threads_1.to_bits(),
+            lb_repeat.to_bits(),
+            "same-shape repeat final lower bound must be bitwise identical"
+        );
+        assert_eq!(
+            lb_threads_1.to_bits(),
+            lb_2rank.to_bits(),
+            "2-rank final lower bound must be bitwise identical"
+        );
     }
 }
