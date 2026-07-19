@@ -55,6 +55,35 @@ rule; the rules below are the Cobre-specific ones.
   bit-exact for the golden HiGHS path only.
 - **Test output goes to `TempDir`.** No test writes into
   `examples/deterministic/*/output/`; generated artifacts self-delete.
+- **A determinism gate must have power on the fixture it runs — a bitwise
+  comparison proves nothing on a fixture that never exercises the condition
+  the gate is meant to guard.** Three invariants apply across
+  `crates/cobre-sddp/tests/mpi_wire.rs`'s determinism gates:
+  - A gate whose power depends on a runtime-resolved fixture threshold
+    self-checks that threshold and fails loudly instead of passing
+    vacuously — a forced-retry gate asserts `retry_attempts > 0` per shape,
+    an opening-order gate asserts `n_openings >= 3` on some stage, and an
+    opening-block-scheduler gate asserts a resolved block count `>= 2`. The
+    authoritative set of preconditions is the gates themselves, not a list
+    frozen here.
+  - A backward-path gate is exercised on both the uniform and the
+    non-uniform cut-state-projection fixture axis — a stage whose projected
+    cut-state dimension differs from its neighbours' (`d43-storage-only-cut`
+    is the non-uniform reference case), not only a fixture where every
+    stage projects the same dimension. Uniform-only coverage on this axis
+    previously let a per-stage cut-state-projection crash class through
+    undetected; a new backward-path gate is incomplete until it covers
+    both, or the omission is justified.
+  - A scheduler-determinism gate asserts PN-vs-PN reproducibility and
+    thread/rank-shape invariance for the same scheduler; it never asserts
+    PN-vs-PS bitwise equality beyond the single-opening case where PN's
+    chain IS PS's chain. PN warm-chains a block from a fresh frozen-LP load
+    while PS warm-chains the whole trial point, so at a degenerate optimum
+    a multi-opening comparison may settle on a different-but-equally-valid
+    dual vertex — the hot≠cold divergence the Cobre determinism contract
+    explicitly permits (CLAUDE.md: "never hot == cold") — so a
+    multi-opening PN-vs-PS bit-identity gate is not a gateable contract,
+    even where a fixture happens to pass it today.
 
 ## Re-baselining parity hashes
 

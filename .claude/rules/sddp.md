@@ -82,13 +82,19 @@ A trial point's backward openings are SOLVED in the installed `solve_order`
 permutation (`OpeningTree::set_solve_order`, keyed by
 `noise_key::build_noise_key_table` — `BackwardOpeningOrder::Tsp` by default,
 `SigmaKey` on override) but each opening's outcome is WRITTEN and AGGREGATED by
-**canonical ω**. The generated cut is therefore bit-identical across solve
-orders: reordering changes only the warm-start chain the backward pass walks,
-never which cut is produced. Aggregating the outcome slice indexed by solve
-position — or handing solve-order-permuted probabilities to
+**canonical ω**. The aggregation therefore carries no solve-order dependence:
+under a FIXED configured order, results are declaration-order-invariant and
+run-to-run reproducible across thread and rank shapes (the pinned gates).
+CHANGING the configured order (`Tsp` ↔ `SigmaKey`) changes the warm-start
+chain each opening's solve starts from, and at a degenerate optimum a
+differently-warmed solve may settle on a different-but-equally-valid vertex
+with different duals — the hot≠cold divergence the Cobre determinism contract
+permits — so an order change re-checks the golden parity baselines instead of
+assuming byte-identical outputs. Aggregating the outcome slice indexed by
+solve position — or handing solve-order-permuted probabilities to
 `RiskMeasure::aggregate_cut_into` — is the wrong-but-compiling alternative: it
-makes the cut depend on solve order, silently breaking declaration-order
-invariance and run-to-run reproducibility.
+makes the cut depend on solve order even at a fixed configuration, silently
+breaking declaration-order invariance and run-to-run reproducibility.
 Read: `stochastic/noise_key.rs` (`build_noise_key_table`),
 `training/backward/trial_point.rs` (`process_trial_point_backward` — solves by
 `solve_order`, aggregates by canonical ω), `training/backward/outcome_aggregation.rs`

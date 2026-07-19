@@ -9,6 +9,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Per-phase LP solver settings are now configurable.**
+  `training.solver.backward`, `training.solver.forward`, and
+  `simulation.solver` each accept an optional solver-profile block — a named
+  `preset` plus per-field overrides (`dual_edge_weight`, `scale`, `price`,
+  `primal_feasibility_tolerance`) — resolved once at setup and broadcast
+  identically to every MPI rank. A recognized `preset` replaces the phase's
+  built-in profile before the per-field overrides layer on top of it; the
+  `backward_tuned_v1` preset selects the measured tuned bundle for the
+  backward pass (dual `SteepestEdge`, Curtis–Reid scaling, `Row` pricing, a
+  loosened primal feasibility tolerance). Every field is optional, and a
+  study with no solver-profile config resolves byte-identically to the
+  prior, unconfigurable per-phase defaults. On the CLP backend, any
+  solver-profile config — the preset or any override field — is rejected at
+  setup with a named error identifying the phase and the unsupported
+  setting, instead of silently applying a HiGHS-tuned option to CLP's own
+  option surface; CLP solver-profile support is deferred until it is
+  separately measured.
+
+- **An opt-in opening-block backward scheduler distributes backward-pass
+  work at finer granularity than a whole trial point.** Setting
+  `training.backward_scheduler = "opening_block"` (the default remains
+  `"trial_point"`) reassigns each backward work unit from a whole trial
+  point to a `(trial point, opening block)` pair, claimed off a shared
+  counter and warm-chained from a fresh frozen-LP load;
+  `training.opening_block_size` controls the block size (default: half of
+  each stage's opening count, rounded up; an explicit value is clamped to
+  the stage's own opening count). Claims within a stage are ordered
+  hardest-first by each `(stage, block)`'s mean simplex-iteration cost
+  measured on the previous iteration, load-balancing workers without
+  changing which cuts are generated or how they are aggregated — the
+  produced cut set and the training lower bound are identical to claiming
+  blocks in their canonical order. An active Dynamic Cut Selection
+  iteration always falls back to the `trial_point` scheduler: the
+  opening-block path's frozen-LP load is incompatible with Dynamic Cut
+  Selection's cut-free lazy core.
+
+### Changed
+
+- **The training `Time split` report now reflects coordinator-measured
+  phase time instead of a per-worker average.** The `Forward`/`Backward`
+  lines report the coordinator's own measured phase wall (previously a
+  per-worker mean), each decomposed into `solve` (mean worker busy time)
+  and `wait` (load imbalance across workers); a new `Serial` line replaces
+  the previous opaque `Other` bucket, breaking the non-parallel portion of
+  training down into lower-bound evaluation, row (cut) selection,
+  cross-rank cut synchronization, MPI allreduce, and scheduling overhead.
+  The three lines' durations sum to the training wall and match the
+  per-iteration progress line. A summary reconstructed from a completed
+  output directory (`cobre summary`) omits the `Time split` block entirely,
+  since per-iteration phase timing is not persisted to `metadata.json`.
+
+- **The backward pass now solves each stage's openings in a shorter
+  warm-start tour by default.** `training.backward_opening_order` (default
+  `"tsp"`) orders each stage's openings along a nearest-neighbor-plus-2-opt
+  tour over their inflow-noise vectors before solving, replacing the
+  previous fixed sigma-weighted-key order (still available via
+  `backward_opening_order = "sigma_key"`). The chosen order only changes
+  which warm-start chain the backward pass walks: each opening's cut is
+  still written and aggregated by its own canonical opening identity,
+  independent of solve order, so declaration-order invariance and
+  run-to-run reproducibility are unaffected. The default warm-start chain
+  itself changes, not only training time: at a degenerate optimum a
+  multi-opening stage can settle on a different — but equally optimal —
+  vertex than the prior order, so training and simulation outputs on such a
+  stage can shift; set `backward_opening_order = "sigma_key"` to restore
+  the previous solve order.
+
 ## [0.11.1] - 2026-07-17
 
 ### Fixed
