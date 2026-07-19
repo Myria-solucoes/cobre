@@ -477,6 +477,7 @@ mod retry_armed_determinism {
             backward,
             backward_scheduler: BackwardScheduler::default(),
             opening_block_size: None,
+            lpt_claim_order: true,
         }
     }
 
@@ -740,12 +741,16 @@ mod opening_order_determinism {
 mod pn_scheduler_determinism {
     //! PN opening-block scheduler determinism gates: train `examples/1dtoy`
     //! under `training.backward_scheduler = opening_block` via the public
-    //! `train` entry point. `pn_scheduler_determinism_expectation` and
-    //! `pn_scheduler_determinism_cvar` assert `final_lb` is bitwise identical
-    //! across five execution shapes of the SAME config — threads=4, a
-    //! same-shape threads=4 repeat (the claim loop's run-to-run assignment
-    //! randomization), threads=2, threads=1, and a `Rank0Of2` 2-rank stub at
-    //! threads=4 — on both an expectation and a `CVaR` risk configuration.
+    //! `train` entry point. LPT claim ordering is always-on under
+    //! `opening_block` (no config field gates it), so
+    //! `pn_scheduler_determinism_expectation` and `pn_scheduler_determinism_cvar`
+    //! exercise LPT-on from iteration 2 onward (`CVaR` coverage rides `_cvar`);
+    //! both still assert `final_lb` is bitwise identical across five execution
+    //! shapes of the SAME config — threads=4, a same-shape threads=4 repeat
+    //! (the claim loop's run-to-run assignment randomization), threads=2,
+    //! threads=1, and a `Rank0Of2` 2-rank stub at threads=4 — on both an
+    //! expectation and a `CVaR` risk configuration.
+    //! `lpt_claim_order_is_result_neutral` is the direct LPT-on-vs-LPT-off gate.
     //! `pn_opening_block_degenerates_on_single_opening` and
     //! `pn_handles_non_uniform_cut_projection` are the two places a genuinely
     //! executed PN run (`process_stage_backward_pn`'s own claim loop, not the
@@ -1022,6 +1027,37 @@ mod pn_scheduler_determinism {
             num_stages
         ];
         assert_pn_shapes_agree(case_dir, Some(risk_measures));
+    }
+
+    /// LPT claim-order byte-neutrality gate (sddp.md "PN opening-block
+    /// scheduler is warm-start-only" — LPT result-neutrality): training the
+    /// SAME `opening_block`-forced fixture with LPT on (the production
+    /// default) and again with `set_lpt_claim_order(false)` (the canonical
+    /// ascending block order) must produce a bit-identical `final_lb` at the
+    /// same thread count — LPT reorders only which worker claims which
+    /// block, never the generated cut set.
+    #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow: run with --features slow-tests"
+    )]
+    fn lpt_claim_order_is_result_neutral() {
+        let case_dir = fixture_case_dir();
+        assert_has_multi_block_stage(case_dir);
+        let stub = StubComm;
+
+        let lb_lpt_on = run_shape(case_dir, 4, &stub, None);
+
+        let mut setup_lpt_off = fresh_setup(case_dir, BackwardScheduler::OpeningBlock);
+        setup_lpt_off.set_lpt_claim_order(false);
+        let lb_lpt_off = train_final_lb(setup_lpt_off, 4, &stub);
+
+        assert_eq!(
+            lb_lpt_on.to_bits(),
+            lb_lpt_off.to_bits(),
+            "LPT-on and LPT-off (canonical claim order) must produce a bit-identical final \
+             lower bound"
+        );
     }
 
     fn single_opening_case_dir() -> &'static Path {

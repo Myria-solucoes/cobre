@@ -78,6 +78,15 @@ impl StudySetup {
         self.opening_block_size = opening_block_size;
     }
 
+    /// Test-support hook: override the PN opening-block scheduler's claim
+    /// order (`BackwardPassState::set_lpt_claim_order`) — `false` forces the
+    /// canonical ascending block order for the byte-neutrality gate.
+    /// Production always resolves `true`; no config field surfaces this.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_lpt_claim_order(&mut self, enabled: bool) {
+        self.lpt_claim_order = enabled;
+    }
+
     /// Return the pre-computed [`EnergyConversionSet`] for this study.
     #[must_use]
     pub fn energy_conversion(&self) -> &EnergyConversionSet {

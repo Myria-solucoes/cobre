@@ -67,6 +67,13 @@ pub struct SolverProfiles {
     /// Opening-block size override for `backward_scheduler = opening_block`
     /// (`training.opening_block_size`).
     pub opening_block_size: Option<NonZeroUsize>,
+    /// PN opening-block-scheduler claim order
+    /// (`BackwardPassState::set_lpt_claim_order`): `true` claims hardest-
+    /// `(stage, block)`-first by the previous iteration's mean pivots (LPT);
+    /// `false` forces the canonical ascending block order. No `training.*`
+    /// config field resolves this yet — a reserved test-support seam for the
+    /// byte-neutrality gate; production always resolves `true`.
+    pub lpt_claim_order: bool,
 }
 
 impl Default for SolverProfiles {
@@ -76,6 +83,7 @@ impl Default for SolverProfiles {
             backward: Phase::Backward.profile(),
             backward_scheduler: BackwardScheduler::default(),
             opening_block_size: None,
+            lpt_claim_order: true,
         }
     }
 }

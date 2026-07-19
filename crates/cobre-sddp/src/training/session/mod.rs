@@ -300,6 +300,7 @@ where
             solver_profiles.backward_scheduler,
             solver_profiles.opening_block_size,
         );
+        bwd_state.set_lpt_claim_order(solver_profiles.lpt_claim_order);
 
         Ok(Self {
             solver,

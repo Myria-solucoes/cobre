@@ -54,6 +54,7 @@ impl StudySetup {
             backward: self.backward_profile,
             backward_scheduler: self.backward_scheduler,
             opening_block_size: self.opening_block_size,
+            lpt_claim_order: self.lpt_claim_order,
         };
         self.train_inner(
             solver,

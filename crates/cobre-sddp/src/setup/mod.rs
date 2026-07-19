@@ -213,6 +213,13 @@ pub struct StudySetup {
     /// (`training.opening_block_size`).
     pub(crate) opening_block_size: Option<NonZeroUsize>,
 
+    /// PN opening-block-scheduler claim-order override, threaded into
+    /// [`StudySetup::train`] alongside [`Self::backward_scheduler`]. No
+    /// `training.*` config field resolves this yet — a reserved test-support
+    /// seam; production always resolves `true` (see
+    /// [`crate::solve::solver_phase::SolverProfiles::lpt_claim_order`]).
+    pub(crate) lpt_claim_order: bool,
+
     /// Stochastic numerical methodology parameters (`horizon`, `inflow_method`).
     pub(crate) methodology: methodology_config::MethodologyConfig,
 
@@ -546,6 +553,7 @@ impl StudySetup {
             forward_profile,
             backward_scheduler,
             opening_block_size,
+            lpt_claim_order: true,
             methodology: methodology_config::MethodologyConfig {
                 horizon,
                 inflow_method,

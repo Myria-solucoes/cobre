@@ -67,8 +67,8 @@ mod trial_point;
 mod tests;
 
 pub(crate) use pn::{
-    PnOutcome, pn_block_count, pn_finish, pn_merge_block_pivots, process_stage_backward_pn,
-    resolve_block_size,
+    PnOutcome, identity_block_order, lpt_block_order, pn_block_count, pn_finish,
+    pn_merge_block_pivots, process_stage_backward_pn, resolve_block_size,
 };
 pub(crate) use trial_point::{StageOpeningSolver, process_trial_point_backward};
 

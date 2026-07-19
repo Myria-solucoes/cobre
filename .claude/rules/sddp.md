@@ -127,6 +127,29 @@ single-opening case whose resolved block count is `1`), and
 `pn_handles_non_uniform_cut_projection` (PN-vs-PS equality on a case whose
 per-stage cut-state projection dimension varies across stages).
 
+**LPT claim order is result-neutral.** Under `OpeningBlock`, claims are
+further ordered hardest-`(stage, block)`-first (LPT) by the PREVIOUS
+iteration's per-`(stage, block)` mean `simplex_iterations` pivot — never
+per-`(m, block)`, since resampled trial points make per-m hardness noise
+where the opening-block component is iteration-stable. LPT touches only the
+claim decode: the per-`(m, ω)` write and the ascending-m aggregation above
+are unchanged, so LPT-on and canonical (identity-order) PN produce a
+bit-identical cut set and `final_lb`. Keying the order on per-`(m, block)`
+pivots, reordering the arena or the aggregation instead of only the claim
+decode, and a tie-break that leaves equal-mean blocks unordered (not a total
+order) are each wrong-but-compiling: the first two reintroduce a
+claim-order dependence the invariant above forbids; the third makes the
+claim order itself nondeterministic across otherwise-identical runs.
+`block_pivots_prev` is the previous iteration's fully-merged row —
+`BackwardPassState::run` swaps it in from `block_pivots` once per call, never
+per stage; reading `block_pivots` instead during the sweep is stale
+(reset-then-partially-filled).
+Read: `training/backward/pn.rs` (`process_stage_backward_pn`'s
+`block_order`-indexed decode, `lpt_block_order`, `identity_block_order`),
+`training/backward_pass_state.rs` (`run_one_backward_stage`'s block-order
+computation, the `run` swap). Pinned by `lpt_claim_order_is_result_neutral`
+in `tests/mpi_wire.rs` (LPT-on vs LPT-off, bitwise `final_lb`).
+
 ## No EWMA upper bound
 
 `ConvergenceMonitor::upper_bound()` returns the raw per-iteration upper bound —

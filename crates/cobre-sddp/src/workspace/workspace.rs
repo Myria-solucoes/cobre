@@ -517,17 +517,34 @@ pub(crate) struct BackwardPnScratch {
     /// opening-block component is iteration-stable). Reset to `(0, 0)` at the
     /// start of every `BackwardPassState::run` call, never per stage.
     pub(crate) block_pivots: Vec<(u64, u64)>,
+    /// Double-buffer companion to [`Self::block_pivots`]: holds the
+    /// PREVIOUS iteration's fully-merged row, swapped in at the top of
+    /// `BackwardPassState::run` (never per stage) so LPT's claim-order
+    /// computation reads a row the current sweep has not yet started
+    /// overwriting. Reading `block_pivots` directly during the sweep is the
+    /// wrong-but-compiling alternative it rules out — that buffer is
+    /// reset-then-partially-filled mid-run, yielding zeros or a half-filled
+    /// row. Same shape as `block_pivots`.
+    pub(crate) block_pivots_prev: Vec<(u64, u64)>,
     /// Row width of `block_pivots` (block slots per stage) — the run's max
     /// opening count, an upper bound on any stage's actual block count (block
     /// size >= 1 implies `n_blocks <= n_openings <= n_blocks_max`).
     pub(crate) n_blocks_max: usize,
+    /// LPT claim-order scratch: the successor stage's sorted (or identity)
+    /// `0..n_blocks` block-index permutation, recomputed into this buffer
+    /// once per stage from [`Self::block_pivots_prev`] — never a fresh `Vec`
+    /// per stage. Length `n_blocks_max`, an upper bound on any stage's
+    /// `n_blocks` (see [`Self::n_blocks_max`]).
+    pub(crate) block_order: Vec<u32>,
 }
 
 impl BackwardPnScratch {
     /// Allocate the arena and aggregation scratch for `OpeningBlock`: `arena`
     /// holds `max_local_fwd * bwd_max_openings` outcomes, each with an
-    /// `n_state`-length coefficient vector; `block_pivots` holds `num_stages *
-    /// bwd_max_openings` accumulator cells (see [`Self::block_pivots`]).
+    /// `n_state`-length coefficient vector; `block_pivots` and
+    /// `block_pivots_prev` each hold `num_stages * bwd_max_openings`
+    /// accumulator cells (see [`Self::block_pivots`]); `block_order` holds
+    /// `bwd_max_openings` claim-order scratch slots.
     #[must_use]
     pub(crate) fn sized(
         max_local_fwd: usize,
@@ -547,7 +564,9 @@ impl BackwardPnScratch {
             risk_scratch: RiskMeasureScratch::new(),
             coeffs_buf: vec![0.0_f64; n_state],
             block_pivots: vec![(0u64, 0u64); num_stages * bwd_max_openings],
+            block_pivots_prev: vec![(0u64, 0u64); num_stages * bwd_max_openings],
             n_blocks_max: bwd_max_openings,
+            block_order: vec![0u32; bwd_max_openings],
         }
     }
 }
@@ -1293,7 +1312,9 @@ mod tests {
         assert!(scratch.arena.is_empty());
         assert!(scratch.coeffs_buf.is_empty());
         assert!(scratch.block_pivots.is_empty());
+        assert!(scratch.block_pivots_prev.is_empty());
         assert_eq!(scratch.n_blocks_max, 0);
+        assert!(scratch.block_order.is_empty());
     }
 
     #[test]
@@ -1331,7 +1352,24 @@ mod tests {
                 .all(|&(sum, count)| sum == 0 && count == 0),
             "a freshly sized accumulator must start zeroed"
         );
+        assert_eq!(
+            scratch.block_pivots_prev.len(),
+            num_stages * bwd_max_openings,
+            "block_pivots_prev must mirror block_pivots' shape"
+        );
+        assert!(
+            scratch
+                .block_pivots_prev
+                .iter()
+                .all(|&(sum, count)| sum == 0 && count == 0),
+            "a freshly sized double-buffer companion must start zeroed"
+        );
         assert_eq!(scratch.n_blocks_max, bwd_max_openings);
+        assert_eq!(
+            scratch.block_order.len(),
+            bwd_max_openings,
+            "block_order must hold n_blocks_max claim-order scratch slots"
+        );
     }
 
     #[test]
@@ -1340,6 +1378,8 @@ mod tests {
         assert!(scratch.arena.is_empty());
         assert!(scratch.coeffs_buf.is_empty());
         assert!(scratch.block_pivots.is_empty());
+        assert!(scratch.block_pivots_prev.is_empty());
+        assert!(scratch.block_order.is_empty());
     }
 
     // ---------------------------------------------------------------------------

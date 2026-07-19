@@ -1,15 +1,18 @@
 //! Parallel-by-node (PN) backward stage scheduler: the work unit is an
 //! opening-block of one trial point (`B_s` consecutive `solve_order` positions),
-//! not a whole trial point. Units are enumerated in canonical (m-major,
-//! block-minor) order and claimed dynamically by workers from a shared atomic
-//! counter (work-stealing dispatch); each unit's chain is self-contained (head
-//! anchored on the forward capture at `(m, s)`, warm-continue inside the block),
-//! so results are independent of the worker count and of which worker claims
-//! which unit, by construction. Outcomes are accumulated worker-locally and
-//! scattered into a per-`(m, ω)` arena after the parallel region; cut
-//! aggregation runs canonically over ω per trial point, in ascending m
-//! (sddp.md "PN opening-block scheduler is warm-start-only").
+//! not a whole trial point. Units are claimed dynamically by workers from a
+//! shared atomic counter (work-stealing dispatch) in block-major order — every
+//! `m` of one block is claimed before the next block, in the `block_order`
+//! permutation ([`lpt_block_order`]: hardest-first by the previous iteration's
+//! mean pivot, or [`identity_block_order`] when LPT is disabled). Each unit's
+//! chain is self-contained (head anchored on the forward capture at `(m, s)`,
+//! warm-continue inside the block), so results are independent of the worker
+//! count and of the claim/block order, by construction. Outcomes are
+//! accumulated worker-locally and scattered into a per-`(m, ω)` arena after the
+//! parallel region; cut aggregation runs canonically over ω per trial point, in
+//! ascending m (sddp.md "PN opening-block scheduler is warm-start-only").
 
+use std::cmp;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
@@ -61,13 +64,60 @@ pub(crate) fn pn_block_count(n_openings: usize, block_size: usize) -> usize {
     n_openings.div_ceil(block_size.max(1))
 }
 
+/// Fill `out[..n_blocks]` with the identity permutation `0..n_blocks` — the
+/// canonical PN claim order (LPT disabled) and [`lpt_block_order`]'s pre-sort
+/// seed. `out` is pre-allocated (`BackwardPnScratch::block_order`, reserved
+/// capacity `n_blocks_max`); cleared and refilled in place, never reallocated
+/// on the hot path.
+pub(crate) fn identity_block_order(n_blocks: usize, out: &mut Vec<u32>) {
+    debug_assert!(
+        n_blocks <= out.capacity(),
+        "n_blocks ({n_blocks}) exceeds the block_order scratch's reserved capacity ({}) — \
+         resizing must never reallocate on the PN hot path",
+        out.capacity()
+    );
+    out.clear();
+    #[allow(clippy::cast_possible_truncation)]
+    out.extend((0..n_blocks).map(|b| b as u32));
+}
+
+/// Compute the LPT hardest-block-first claim order for one stage's `n_blocks`
+/// opening-blocks from the previous iteration's per-block mean
+/// `(simplex_iterations sum, count)` pivot row: block indices sorted by
+/// descending mean, ties — including an all-zero row (iteration 1, or any
+/// block with no prior data) — broken by ascending index, a total order.
+/// Compares means by cross-multiplying `sum`/`count` in `u128` rather than
+/// dividing `f64`, avoiding both the `count == 0` divide-by-zero and a
+/// float-compare edge case.
+pub(crate) fn lpt_block_order(prev_row: &[(u64, u64)], n_blocks: usize, out: &mut Vec<u32>) {
+    debug_assert!(prev_row.len() >= n_blocks);
+    identity_block_order(n_blocks, out);
+    out.sort_by(|&a, &b| {
+        let (sum_a, count_a) = prev_row[a as usize];
+        let (sum_b, count_b) = prev_row[b as usize];
+        match (count_a == 0, count_b == 0) {
+            (true, true) => a.cmp(&b),
+            (true, false) => cmp::Ordering::Greater,
+            (false, true) => cmp::Ordering::Less,
+            (false, false) => {
+                let cross_a = u128::from(sum_a) * u128::from(count_b);
+                let cross_b = u128::from(sum_b) * u128::from(count_a);
+                cross_b.cmp(&cross_a).then_with(|| a.cmp(&b))
+            }
+        }
+    });
+}
+
 /// Solve one backward stage PN-style; returns, per worker, either the error
 /// that aborted its claim loop or `(worker_index, outcome_count)` — the count
 /// of entries this worker recorded into its own
 /// `ws.backward_accum.pn_outcomes_buf[..outcome_count]`, which
 /// [`pn_finish`] resolves back through `workspaces[worker_index]`.
-// Rationale: mirrors `process_stage_backward`'s disjoint-borrow argument list.
-#[allow(clippy::too_many_arguments)]
+// Rationale: mirrors `process_stage_backward`'s disjoint-borrow argument list;
+// too_many_lines is the claim loop's single sequential region (LP load, warm-chain
+// solve, dual extraction, pivot accumulation, outcome recording) — splitting it
+// would scatter state the next step in the same loop iteration reads.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn process_stage_backward_pn<S: SolverInterface + Send>(
     workspaces: &mut [SolverWorkspace<S>],
     ctx: &StageContext<'_>,
@@ -79,11 +129,17 @@ pub(crate) fn process_stage_backward_pn<S: SolverInterface + Send>(
     succ: &SuccessorSpec<'_>,
     basis_store: &BasisStore,
     block_size: usize,
+    block_order: &[u32],
 ) -> Vec<Result<(usize, usize), SddpError>> {
     let n_openings = succ.probabilities.len();
     let cut_n_state = succ.cut_state.n_slots();
     let pop = succ.successor_populated_count;
     let n_blocks = pn_block_count(n_openings, block_size);
+    debug_assert_eq!(
+        block_order.len(),
+        n_blocks,
+        "block_order must hold exactly n_blocks entries"
+    );
     let total_units = local_work * n_blocks;
     let tree_view = training_ctx.stochastic.tree_view();
     let solve_order = tree_view.solve_order_data(succ.successor);
@@ -135,8 +191,8 @@ pub(crate) fn process_stage_backward_pn<S: SolverInterface + Send>(
                 if u >= total_units {
                     break;
                 }
-                let m = u / n_blocks;
-                let b = u % n_blocks;
+                let b = block_order[u / local_work] as usize;
+                let m = u % local_work;
                 let x_hat = exchange.state_at(succ.my_rank, m);
                 let scenario = fwd_offset + m;
 
@@ -384,7 +440,10 @@ pub(crate) fn pn_merge_block_pivots<'a>(
 mod tests {
     use std::num::NonZeroUsize;
 
-    use super::{pn_block_count, pn_merge_block_pivots, resolve_block_size};
+    use super::{
+        identity_block_order, lpt_block_order, pn_block_count, pn_merge_block_pivots,
+        resolve_block_size,
+    };
     use crate::workspace::BackwardPnScratch;
 
     #[test]
@@ -446,6 +505,53 @@ mod tests {
             scratch.block_pivots[idx + 1],
             (0, 0),
             "block 1 (untouched by either worker) must stay zeroed"
+        );
+    }
+
+    #[test]
+    fn identity_block_order_fills_ascending_prefix() {
+        let mut out = vec![9_u32; 5];
+        identity_block_order(3, &mut out);
+        assert_eq!(out, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn lpt_block_order_sorts_descending_mean_ties_by_index() {
+        // Means: block 0 = 5.0, block 1 = 10.0, block 2 = 4.0, block 3 = 5.0 (ties block 0).
+        let prev_row = [(10_u64, 2_u64), (30, 3), (8, 2), (10, 2)];
+        let mut out = vec![0_u32; 4];
+        lpt_block_order(&prev_row, 4, &mut out);
+        assert_eq!(
+            out,
+            vec![1, 0, 3, 2],
+            "blocks sort by descending mean; the (block 0, block 3) tie at mean 5.0 breaks by \
+             ascending index"
+        );
+    }
+
+    #[test]
+    fn lpt_block_order_falls_back_to_identity_when_no_prior_data() {
+        let prev_row = [(0_u64, 0_u64); 3];
+        let mut out = vec![0_u32; 3];
+        lpt_block_order(&prev_row, 3, &mut out);
+        assert_eq!(
+            out,
+            vec![0, 1, 2],
+            "an all-zero previous-iteration row (iteration 1) must yield the identity order"
+        );
+    }
+
+    #[test]
+    fn lpt_block_order_sorts_zero_count_block_as_least_hard() {
+        // Block 1 has no prior data (undefined mean); blocks 0 and 2 have real means
+        // 5.0 and 10.0. Block 1 must sort last, never panic on the count == 0 divide.
+        let prev_row = [(10_u64, 2_u64), (0, 0), (30, 3)];
+        let mut out = vec![0_u32; 3];
+        lpt_block_order(&prev_row, 3, &mut out);
+        assert_eq!(
+            out,
+            vec![2, 0, 1],
+            "a zero-count block sorts least-hard, after every block with real prior data"
         );
     }
 }
