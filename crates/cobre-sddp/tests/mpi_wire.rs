@@ -441,15 +441,11 @@ mod retry_armed_determinism {
     use std::path::Path;
 
     use cobre_comm::Communicator;
-    use cobre_core::scenario::ScenarioSource;
     use cobre_io::config::{BackwardScheduler, PhaseSolverProfileConfig};
-    use cobre_sddp::{
-        Phase, RiskMeasure, SolverProfiles, StudySetup, hydro_models::prepare_hydro_models,
-        setup::prepare_stochastic,
-    };
+    use cobre_sddp::{Phase, RiskMeasure, SolverProfiles, StudySetup};
     use cobre_solver::ActiveSolver;
 
-    use crate::common::{Rank0Of2, StubComm, build_setup_for_case};
+    use crate::common::{Rank0Of2, StubComm};
 
     /// Low enough that the tuned `backward_tuned_v1` profile's first attempt
     /// cannot finish within the cap on every stage solve of the d03 fixture,
@@ -485,25 +481,12 @@ mod retry_armed_determinism {
         Path::new("../../examples/deterministic/d03-two-hydro-cascade")
     }
 
-    /// Build a fresh [`StudySetup`], mirroring `deterministic.rs`'s
-    /// `run_deterministic_with_solver` construction pipeline. Each shape
+    /// Thin wrapper over [`crate::common::fresh_setup_with`] (no config
+    /// mutation) — see its doc for the construction pipeline. Each shape
     /// trains from an independently-built setup, never a warm-started reuse,
     /// so the four shapes compare cold-to-cold.
     fn fresh_setup(case_dir: &Path) -> StudySetup {
-        let config_path = case_dir.join("config.json");
-        let config = cobre_io::parse_config(&config_path).expect("config must parse");
-        let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
-
-        let prepare_result =
-            prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-                .expect("prepare_stochastic must succeed");
-        let system = prepare_result.system;
-        let stochastic = prepare_result.stochastic;
-
-        let hydro_models = prepare_hydro_models(&system, case_dir, false)
-            .expect("prepare_hydro_models must succeed");
-
-        build_setup_for_case(case_dir, &config, &system, stochastic, hydro_models)
+        crate::common::fresh_setup_with(case_dir, |_| {})
     }
 
     /// Train one shape on a fresh [`StudySetup`], returning
@@ -645,34 +628,21 @@ mod opening_order_determinism {
     use std::path::Path;
 
     use cobre_comm::Communicator;
-    use cobre_core::scenario::ScenarioSource;
-    use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
+    use cobre_sddp::StudySetup;
     use cobre_solver::ActiveSolver;
 
-    use crate::common::{Rank0Of2, StubComm, build_setup_for_case};
+    use crate::common::{Rank0Of2, StubComm};
 
     fn fixture_case_dir() -> &'static Path {
         Path::new("../../examples/1dtoy")
     }
 
-    /// Build a fresh [`StudySetup`], mirroring `retry_armed_determinism`'s
-    /// `fresh_setup`. Each shape trains from an independently-built setup,
-    /// never a warm-started reuse, so the four shapes compare cold-to-cold.
+    /// Thin wrapper over [`crate::common::fresh_setup_with`] (no config
+    /// mutation) — see its doc for the construction pipeline. Each shape
+    /// trains from an independently-built setup, never a warm-started reuse,
+    /// so the four shapes compare cold-to-cold.
     fn fresh_setup(case_dir: &Path) -> StudySetup {
-        let config_path = case_dir.join("config.json");
-        let config = cobre_io::parse_config(&config_path).expect("config must parse");
-        let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
-
-        let prepare_result =
-            prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-                .expect("prepare_stochastic must succeed");
-        let system = prepare_result.system;
-        let stochastic = prepare_result.stochastic;
-
-        let hydro_models = prepare_hydro_models(&system, case_dir, false)
-            .expect("prepare_hydro_models must succeed");
-
-        build_setup_for_case(case_dir, &config, &system, stochastic, hydro_models)
+        crate::common::fresh_setup_with(case_dir, |_| {})
     }
 
     /// Train one shape on a fresh [`StudySetup`] via the public `train` entry
@@ -783,42 +753,23 @@ mod pn_scheduler_determinism {
     use std::sync::mpsc;
 
     use cobre_comm::Communicator;
-    use cobre_core::scenario::ScenarioSource;
     use cobre_core::{TrainingEvent, WorkerTimingPhase};
     use cobre_io::Config;
     use cobre_io::config::{BackwardScheduler, SelectionMethod, StoppingRuleConfig};
-    use cobre_sddp::{
-        RiskMeasure, StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic,
-    };
+    use cobre_sddp::{RiskMeasure, StudySetup};
     use cobre_solver::ActiveSolver;
 
-    use crate::common::{Rank0Of2, StubComm, build_setup_for_case};
+    use crate::common::{Rank0Of2, StubComm};
     use crate::pn_scratch::run_pn_one_iteration;
 
     fn fixture_case_dir() -> &'static Path {
         Path::new("../../examples/1dtoy")
     }
 
-    /// Build a fresh [`StudySetup`] from `case_dir`'s config, applying `mutate`
-    /// to the freshly-parsed [`Config`] before [`build_setup_for_case`] —
-    /// mirrors `opening_order_determinism`'s `fresh_setup` shape, parameterized
-    /// over the config mutation each caller needs.
+    /// Delegates to [`crate::common::fresh_setup_with`] — see its doc for the
+    /// construction pipeline.
     fn fresh_setup_with(case_dir: &Path, mutate: impl FnOnce(&mut Config)) -> StudySetup {
-        let config_path = case_dir.join("config.json");
-        let mut config = cobre_io::parse_config(&config_path).expect("config must parse");
-        mutate(&mut config);
-        let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
-
-        let prepare_result =
-            prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-                .expect("prepare_stochastic must succeed");
-        let system = prepare_result.system;
-        let stochastic = prepare_result.stochastic;
-
-        let hydro_models = prepare_hydro_models(&system, case_dir, false)
-            .expect("prepare_hydro_models must succeed");
-
-        build_setup_for_case(case_dir, &config, &system, stochastic, hydro_models)
+        crate::common::fresh_setup_with(case_dir, mutate)
     }
 
     /// Build a fresh [`StudySetup`] with `training.backward_scheduler` forced

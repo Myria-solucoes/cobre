@@ -425,6 +425,11 @@ pub(crate) fn pn_merge_block_pivots<'a>(
         "n_blocks ({n_blocks}) must not exceed scratch.n_blocks_max ({})",
         scratch.n_blocks_max
     );
+    debug_assert!(
+        stage_key * scratch.n_blocks_max + n_blocks <= scratch.block_pivots.len(),
+        "stage_key ({stage_key}) row must fit scratch.block_pivots (len {})",
+        scratch.block_pivots.len()
+    );
     for (sums, counts) in per_worker {
         debug_assert!(sums.len() >= n_blocks && counts.len() >= n_blocks);
         for b in 0..n_blocks {

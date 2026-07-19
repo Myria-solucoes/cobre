@@ -427,6 +427,46 @@ mod tests {
         );
     }
 
+    /// Postcard round-trip for the scheduler/opening-order fields at their
+    /// non-default values — `broadcast_config_roundtrips_via_postcard` above
+    /// only exercises the `TrialPoint`/`Tsp`/`None` defaults.
+    #[test]
+    fn broadcast_config_roundtrips_via_postcard_with_opening_block_scheduler() {
+        use std::num::NonZeroUsize;
+
+        use cobre_io::config::{BackwardOpeningOrder, BackwardScheduler};
+
+        use super::BroadcastConfig;
+
+        let json = r#"{
+            "training": {
+                "backward_scheduler": "opening_block",
+                "backward_opening_order": "sigma_key",
+                "opening_block_size": 4
+            }
+        }"#;
+        let config: cobre_io::Config = serde_json::from_str(json).unwrap();
+        let original = BroadcastConfig::from_config(&config).unwrap();
+
+        let bytes = postcard::to_allocvec(&original)
+            .expect("postcard serialization of BroadcastConfig must succeed");
+        let decoded: BroadcastConfig = postcard::from_bytes(&bytes)
+            .expect("postcard deserialization of BroadcastConfig must succeed");
+
+        assert_eq!(decoded.backward_scheduler, original.backward_scheduler);
+        assert_eq!(decoded.backward_scheduler, BackwardScheduler::OpeningBlock);
+        assert_eq!(
+            decoded.backward_opening_order,
+            original.backward_opening_order
+        );
+        assert_eq!(
+            decoded.backward_opening_order,
+            BackwardOpeningOrder::SigmaKey
+        );
+        assert_eq!(decoded.opening_block_size, original.opening_block_size);
+        assert_eq!(decoded.opening_block_size, NonZeroUsize::new(4));
+    }
+
     /// Postcard round-trip for a populated `training.solver.backward` /
     /// `.forward` / `simulation.solver` block: every field, not just presence,
     /// must survive the wire hop identically.
