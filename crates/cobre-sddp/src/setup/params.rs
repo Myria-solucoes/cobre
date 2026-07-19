@@ -2,7 +2,7 @@
 
 use cobre_core::ScalarParameter;
 use cobre_io::Config;
-use cobre_io::config::StoppingRuleConfig;
+use cobre_io::config::{PhaseSolverProfileConfig, StoppingRuleConfig};
 
 use crate::{
     InflowNonNegativityMethod, SddpError,
@@ -53,6 +53,12 @@ pub struct StudyParams {
     /// `None` means no cap is enforced. Derived from
     /// `config.training.cut_selection.max_active_per_stage`.
     pub budget: Option<u32>,
+    /// Backward-pass solver profile override (`training.solver.backward`).
+    pub training_solver_backward: Option<PhaseSolverProfileConfig>,
+    /// Forward-pass solver profile override (`training.solver.forward`).
+    pub training_solver_forward: Option<PhaseSolverProfileConfig>,
+    /// Simulation solver profile override (`simulation.solver`).
+    pub simulation_solver: Option<PhaseSolverProfileConfig>,
 }
 
 impl StudyParams {
@@ -138,6 +144,10 @@ impl StudyParams {
 
         let budget = config.training.cut_selection.max_active_per_stage;
 
+        let training_solver_backward = config.training.solver.backward.clone();
+        let training_solver_forward = config.training.solver.forward.clone();
+        let simulation_solver = config.simulation.solver.clone();
+
         if let Some(b) = budget
             && u64::from(b) < u64::from(forward_passes)
         {
@@ -159,6 +169,9 @@ impl StudyParams {
             cut_selection,
             cut_activity_tolerance,
             budget,
+            training_solver_backward,
+            training_solver_forward,
+            simulation_solver,
         })
     }
 
@@ -181,6 +194,9 @@ impl StudyParams {
             budget: self.budget,
             export_states: false,
             scalar_parameters: Vec::new(),
+            training_solver_backward: self.training_solver_backward,
+            training_solver_forward: self.training_solver_forward,
+            simulation_solver: self.simulation_solver,
         }
     }
 }
@@ -230,6 +246,12 @@ pub struct ConstructionConfig {
     /// Consumed by `build_resolved_parameters` to populate the per-`(parameter_id,
     /// stage_idx)` lookup table used by the LP builder.
     pub scalar_parameters: Vec<ScalarParameter>,
+    /// Backward-pass solver profile override (`training.solver.backward`).
+    pub training_solver_backward: Option<PhaseSolverProfileConfig>,
+    /// Forward-pass solver profile override (`training.solver.forward`).
+    pub training_solver_forward: Option<PhaseSolverProfileConfig>,
+    /// Simulation solver profile override (`simulation.solver`).
+    pub simulation_solver: Option<PhaseSolverProfileConfig>,
 }
 
 #[cfg(test)]

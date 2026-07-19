@@ -565,6 +565,9 @@ fn build_study_setup(
 ) -> Result<StudySetup, CliError> {
     let stopping_rule_set = stopping_rules_from_broadcast(bcast_config);
     let cut_selection = bcast_config.cut_selection.take();
+    let training_solver_backward = bcast_config.training_solver_backward.take();
+    let training_solver_forward = bcast_config.training_solver_forward.take();
+    let simulation_solver = bcast_config.simulation_solver.take();
     let config = ConstructionConfig {
         seed: bcast_config.seed,
         forward_passes: bcast_config.forward_passes,
@@ -578,6 +581,9 @@ fn build_study_setup(
         budget: bcast_config.budget,
         export_states: bcast_config.export_states,
         scalar_parameters,
+        training_solver_backward,
+        training_solver_forward,
+        simulation_solver,
     };
     StudySetup::from_broadcast_params(
         system,

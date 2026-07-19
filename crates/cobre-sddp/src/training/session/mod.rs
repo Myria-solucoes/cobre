@@ -33,7 +33,7 @@ use cobre_core::{StageRowSelectionRecord, TrainingEvent};
 use cobre_solver::SolverInterface;
 
 use crate::{
-    SddpError, TrainingConfig,
+    SddpError, SolverProfiles, TrainingConfig,
     backward::BackwardResult,
     backward_pass_state::{BackwardPassInputs, BackwardPassState},
     context::{StageContext, TrainingContext},
@@ -147,6 +147,7 @@ where
         training_ctx: &'a TrainingContext<'a>,
         comm: &'a C,
         solver_factory: impl Fn() -> Result<S, SolverError>,
+        solver_profiles: SolverProfiles,
     ) -> Result<Self, SddpError> {
         let horizon = training_ctx.horizon;
         let state = training_ctx.state;
@@ -280,16 +281,18 @@ where
         );
 
         let n_workers_local = fwd_pool.workspaces.len();
-        let fwd_state =
+        let mut fwd_state =
             ForwardPassState::new(n_workers_local, ranks.num_stages, ranks.max_local_fwd);
+        fwd_state.set_profile(solver_profiles.forward);
 
         let real_states_capacity = exchange_bufs.real_total_scenarios() * ranks.n_state;
-        let bwd_state = BackwardPassState::new(
+        let mut bwd_state = BackwardPassState::new(
             n_workers_local,
             ranks.num_ranks,
             max_openings,
             real_states_capacity,
         );
+        bwd_state.set_profile(solver_profiles.backward);
 
         Ok(Self {
             solver,
@@ -1184,7 +1187,7 @@ mod tests {
 
     use super::{IterationOutcome, TrainingSession};
     use crate::{
-        StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
+        SolverProfiles, StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
         config::{CutManagementConfig, EventConfig, LoopConfig},
         context::{StageContext, TrainingContext},
         cut::fcf::FutureCostFunction,
@@ -1654,6 +1657,7 @@ mod tests {
             &training_ctx,
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            SolverProfiles::default(),
         )
         .unwrap();
 
@@ -1729,6 +1733,7 @@ mod tests {
             &training_ctx,
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            SolverProfiles::default(),
         )
         .unwrap();
 
@@ -1791,6 +1796,7 @@ mod tests {
             &training_ctx,
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            SolverProfiles::default(),
         )
         .unwrap();
 
@@ -1854,6 +1860,7 @@ mod tests {
             &training_ctx,
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            SolverProfiles::default(),
         )
         .unwrap();
 
@@ -1908,6 +1915,7 @@ mod tests {
             &training_ctx,
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            SolverProfiles::default(),
         )
         .unwrap();
 
@@ -1979,6 +1987,7 @@ mod tests {
             &training_ctx,
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
+            SolverProfiles::default(),
         )
         .unwrap();
 

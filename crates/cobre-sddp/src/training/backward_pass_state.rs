@@ -230,6 +230,11 @@ pub struct BackwardPassState {
     /// Cross-rank error-reconciliation scratch, reused each stage by the
     /// pre-`sync_packed_records` reconcile so that reconciliation never allocates.
     pub(crate) reconcile_scratch: [i32; 1],
+
+    /// Resolved backward-phase solver profile applied at [`Self::run`] entry.
+    /// Defaults to `Phase::Backward.profile()`; override with
+    /// [`Self::set_profile`] before the first `run()` call.
+    profile: ActiveProfile,
 }
 
 impl BackwardPassState {
@@ -270,7 +275,14 @@ impl BackwardPassState {
             worker_deltas: Vec::with_capacity(n_workers_local),
             worker_totals: Vec::with_capacity(n_workers_local),
             reconcile_scratch: [0_i32; 1],
+            profile: Phase::Backward.profile(),
         }
+    }
+
+    /// Overrides the backward-phase solver profile applied at [`Self::run`]
+    /// entry (default: `Phase::Backward.profile()`). Call before `run()`.
+    pub fn set_profile(&mut self, profile: ActiveProfile) {
+        self.profile = profile;
     }
 
     /// Execute the backward pass for one training iteration on this rank.
@@ -317,7 +329,7 @@ impl BackwardPassState {
 
         // `set_profile` is delta-tracked: it issues solver-option calls only for
         // fields that differ from the solver's current state.
-        let backward_profile = Phase::Backward.profile();
+        let backward_profile = self.profile;
         for ws in inputs.workspaces.iter_mut() {
             ws.solver.set_profile(&backward_profile);
             debug_assert!(
@@ -1573,6 +1585,129 @@ mod tests {
         assert!(
             !result.stage_stats.is_empty(),
             "stage_stats must be non-empty after a successful backward pass"
+        );
+    }
+
+    /// A profile installed via `set_profile` before `run()` is the one
+    /// `ProfiledSolver::current_profile()` reports afterwards — the resolved
+    /// profile reaches the solver, not just the stored default.
+    #[test]
+    fn backward_pass_state_set_profile_reaches_current_profile_after_run() {
+        let n_stages = 2_usize;
+        let n_openings = 2_usize;
+        let stochastic = make_stochastic_context(n_stages, n_openings);
+        let state_layout_fixture = state_layout(1, 0);
+        let templates = vec![minimal_template_1_0(); n_stages];
+        let frozen_templates = templates.clone();
+        let base_rows = vec![1_usize; n_stages];
+        let n_state = state_layout_fixture.n_state;
+        let forward_passes = 2_u32;
+
+        let mut fcf =
+            FutureCostFunction::new(n_stages, n_state, forward_passes, 10, &vec![0; n_stages]);
+        let trial_states = vec![vec![10.0], vec![20.0]];
+        let records = trial_point_records(&trial_states, n_stages);
+        let mut exchange = ExchangeBuffers::new(n_state, trial_states.len(), 1);
+        let horizon = HorizonMode::Finite {
+            num_stages: n_stages,
+        };
+        let risk_measures = vec![RiskMeasure::Expectation; n_stages];
+
+        let solution = solution_1_0(100.0, -5.0);
+        let comm = StubComm;
+        let mut workspaces = single_workspace(MockSolver::always_ok(solution), n_state);
+        let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
+        let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
+        let mut cut_batches = empty_cut_batches(n_stages);
+        let ctx = StageContext {
+            geometry_per_stage: &[],
+            templates: &templates,
+            base_rows: &base_rows,
+            noise_scale: &[],
+            n_hydros: 0,
+            n_load_buses: 0,
+            load_balance_row_starts: &[],
+            load_bus_indices: &[],
+            block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+            ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
+            discount_factors: &[],
+            cumulative_discount_factors: &[],
+            stage_lag_transitions: &[],
+            noise_group_ids: &[],
+            downstream_par_order: 0,
+        };
+        let study_dims = study_dims();
+        let training_ctx = TrainingContext {
+            horizon: &horizon,
+            state: &state_layout_fixture,
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state_layout_fixture, n_stages),
+            study_dims: &study_dims,
+            inflow_method: &InflowNonNegativityMethod::None,
+            stochastic: &stochastic,
+            initial_state: &[],
+            inflow_scheme: SamplingScheme::InSample,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            stages: &[],
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+            recent_accum_seed: &[],
+            recent_weight_seed: 0.0,
+            dcs: None,
+        };
+
+        let bwd_max_openings = n_openings;
+        let mut bwd_state = BackwardPassState::new(1, 1, bwd_max_openings, n_state);
+        let resolved =
+            Phase::Backward.resolve_profile(Some(&cobre_io::config::PhaseSolverProfileConfig {
+                preset: Some("backward_tuned_v1".to_string()),
+                dual_edge_weight: None,
+                scale: None,
+                price: None,
+                primal_feasibility_tolerance: None,
+            }));
+        bwd_state.set_profile(resolved);
+        let local_count = exchange.local_count();
+
+        let mut inputs = BackwardPassInputs {
+            workspaces: &mut workspaces,
+            basis_store: &mut basis_store,
+            ctx: &ctx,
+            frozen: &frozen_templates,
+            fcf: &mut fcf,
+            cut_batches: &mut cut_batches,
+            training_ctx: &training_ctx,
+            comm: &comm,
+            exchange: &mut exchange,
+            records: &records,
+            cut_sync_bufs: &mut csb,
+            visited_archive: None,
+            event_sender: None,
+            risk_measures: &risk_measures,
+            cut_activity_tolerance: 0.0,
+            iteration: 1,
+            local_work: local_count,
+            fwd_offset: 0,
+        };
+
+        let _ = bwd_state
+            .run(&mut inputs)
+            .expect("backward pass must not error");
+
+        assert_eq!(
+            inputs.workspaces[0].solver.current_profile(),
+            &resolved,
+            "the profile installed via set_profile must be the one stored on \
+             current_profile after run()"
         );
     }
 

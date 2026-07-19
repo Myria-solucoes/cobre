@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::scenario_source::RawScenarioSourceConfig;
+use super::training::PhaseSolverProfileConfig;
 
 /// Post-training simulation settings (`config.json → simulation`).
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -22,6 +23,10 @@ pub struct SimulationConfig {
     /// When absent, falls back to the training scenario source.
     #[serde(default)]
     pub scenario_source: Option<RawScenarioSourceConfig>,
+
+    /// Simulation solver profile. Absent leaves the backend defaults.
+    #[serde(default)]
+    pub solver: Option<PhaseSolverProfileConfig>,
 }
 
 impl Default for SimulationConfig {
@@ -31,6 +36,39 @@ impl Default for SimulationConfig {
             num_scenarios: 2000,
             io_channel_capacity: 64,
             scenario_source: None,
+            solver: None,
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::SimulationConfig;
+    use crate::config::training::{PriceStrategy, ScaleStrategy};
+
+    /// A `simulation.solver` block round-trips into `Some(PhaseSolverProfileConfig)`.
+    #[test]
+    fn simulation_solver_profile_block_round_trips() {
+        let json = r#"{
+            "enabled": true,
+            "num_scenarios": 500,
+            "solver": {
+                "preset": "sim_v1",
+                "scale": "off",
+                "price": "row"
+            }
+        }"#;
+        let cfg: SimulationConfig = serde_json::from_str(json).unwrap();
+        let solver = cfg.solver.as_ref().expect("solver present");
+        assert_eq!(solver.preset.as_deref(), Some("sim_v1"));
+        assert_eq!(solver.scale, Some(ScaleStrategy::Off));
+        assert_eq!(solver.price, Some(PriceStrategy::Row));
+    }
+
+    /// `SimulationConfig::default()` carries no solver profile.
+    #[test]
+    fn simulation_solver_profile_absent_is_none() {
+        assert!(SimulationConfig::default().solver.is_none());
     }
 }

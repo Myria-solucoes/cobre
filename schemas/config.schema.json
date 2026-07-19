@@ -72,6 +72,26 @@
       },
       "type": "object"
     },
+    "DualEdgeWeight": {
+      "description": "Dual simplex edge-weight (pricing) strategy.",
+      "oneOf": [
+        {
+          "const": "devex",
+          "description": "Devex approximate edge weights.",
+          "type": "string"
+        },
+        {
+          "const": "steepest_edge",
+          "description": "Exact steepest-edge weights.",
+          "type": "string"
+        },
+        {
+          "const": "dantzig",
+          "description": "Dantzig most-negative-reduced-cost rule.",
+          "type": "string"
+        }
+      ]
+    },
     "EstimationConfig": {
       "additionalProperties": false,
       "description": "Time series estimation settings (`config.json → estimation`).\n\nControls automatic parameter estimation when historical inflow data is\nprovided without explicit model statistics or coefficients.",
@@ -228,6 +248,66 @@
         }
       ]
     },
+    "PhaseSolverProfileConfig": {
+      "additionalProperties": false,
+      "description": "Per-phase LP solver profile (`config.json → training.solver.backward` /\n`.forward`, and `simulation.solver`).\n\nBackend-agnostic. Every field is optional: an absent field leaves the\ncorresponding solver option at its backend default. `preset` names a\nbuilt-in profile applied first; the remaining fields override it.",
+      "properties": {
+        "dual_edge_weight": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DualEdgeWeight"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Dual simplex edge-weight strategy override."
+        },
+        "preset": {
+          "default": null,
+          "description": "Named built-in profile to start from before applying the overrides below.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "price": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PriceStrategy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Simplex pricing strategy override."
+        },
+        "primal_feasibility_tolerance": {
+          "default": null,
+          "description": "Primal feasibility tolerance override.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "scale": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScaleStrategy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Constraint-matrix scaling strategy override."
+        }
+      },
+      "type": "object"
+    },
     "PolicyConfig": {
       "additionalProperties": false,
       "description": "Policy directory settings (`config.json → policy`).",
@@ -284,6 +364,21 @@
         {
           "const": "resume",
           "description": "Resume a previously interrupted training run from its checkpoint.",
+          "type": "string"
+        }
+      ]
+    },
+    "PriceStrategy": {
+      "description": "Simplex pricing (column-selection) strategy.",
+      "oneOf": [
+        {
+          "const": "row",
+          "description": "Row-wise pricing.",
+          "type": "string"
+        },
+        {
+          "const": "row_hyper_sparse",
+          "description": "Row-wise pricing with hyper-sparse updates.",
           "type": "string"
         }
       ]
@@ -436,6 +531,21 @@
         }
       },
       "type": "object"
+    },
+    "ScaleStrategy": {
+      "description": "LP constraint-matrix scaling strategy.",
+      "oneOf": [
+        {
+          "const": "off",
+          "description": "No scaling.",
+          "type": "string"
+        },
+        {
+          "const": "solver_scaling",
+          "description": "Solver-managed scaling.",
+          "type": "string"
+        }
+      ]
     },
     "SelectionMethod": {
       "description": "Row-selection method and its method-specific parameters.\n\nInternally tagged on `method`; each variant carries only the fields it uses,\nso supplying a parameter that does not belong to the chosen method is a\nload-time error under `deny_unknown_fields`, and a misspelled `method` is an\n`unknown variant` error at parse time.",
@@ -608,6 +718,18 @@
           ],
           "default": null,
           "description": "Scenario source configuration for the post-training simulation forward pass.\nWhen absent, falls back to the training scenario source."
+        },
+        "solver": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PhaseSolverProfileConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Simulation solver profile. Absent leaves the backend defaults."
         }
       },
       "type": "object"
@@ -770,6 +892,8 @@
         "solver": {
           "$ref": "#/$defs/TrainingSolverConfig",
           "default": {
+            "backward": null,
+            "forward": null,
             "retry_max_attempts": 5,
             "retry_time_budget_seconds": 30.0
           },
@@ -804,8 +928,32 @@
     },
     "TrainingSolverConfig": {
       "additionalProperties": false,
-      "description": "LP solver retry settings (`config.json → training.solver`).",
+      "description": "LP solver settings (`config.json → training.solver`): retry policy plus\noptional per-phase solver profiles.",
       "properties": {
+        "backward": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PhaseSolverProfileConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Backward-pass solver profile. Absent leaves the backend defaults."
+        },
+        "forward": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PhaseSolverProfileConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Forward-pass solver profile. Absent leaves the backend defaults."
+        },
         "retry_max_attempts": {
           "default": 5,
           "description": "Maximum solver retry attempts before propagating a hard error.",
@@ -928,7 +1076,8 @@
         "enabled": false,
         "io_channel_capacity": 64,
         "num_scenarios": 2000,
-        "scenario_source": null
+        "scenario_source": null,
+        "solver": null
       },
       "description": "Post-training simulation settings."
     },

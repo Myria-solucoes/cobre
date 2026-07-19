@@ -5236,6 +5236,9 @@ mod anticipated_convergence_slow {
             budget: None,
             export_states: false,
             scalar_parameters: Vec::new(),
+            training_solver_backward: None,
+            training_solver_forward: None,
+            simulation_solver: None,
         };
 
         let source = ScenarioSource {

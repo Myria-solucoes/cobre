@@ -38,7 +38,8 @@ use cobre_core::{
     },
 };
 use cobre_sddp::{
-    ResolvedParameters, StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
+    Phase, ResolvedParameters, SolverProfiles, StoppingMode, StoppingRule, StoppingRuleSet,
+    TrainingConfig,
     config::{CutManagementConfig, EventConfig, LoopConfig},
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
@@ -579,6 +580,7 @@ fn train_fixture(
         &comm,
         ActiveSolver::new,
         None,
+        SolverProfiles::default(),
     )
 }
 
@@ -685,6 +687,7 @@ fn simulate_fixture(
         &SimulationConfig {
             n_scenarios: 20,
             io_channel_capacity: 32,
+            profile: Phase::Simulation.profile(),
         },
         SimulationOutputSpec {
             result_tx: &result_tx,

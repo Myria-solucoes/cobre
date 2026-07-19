@@ -299,6 +299,7 @@ mod tests {
                 num_scenarios: 0,
                 io_channel_capacity: 64,
                 scenario_source: None,
+                solver: None,
             },
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),

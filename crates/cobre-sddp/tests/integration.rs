@@ -41,7 +41,7 @@ use cobre_stochastic::{
 };
 
 use cobre_sddp::{
-    SddpError, StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
+    SddpError, SolverProfiles, StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
     config::{CutManagementConfig, EventConfig, LoopConfig},
     context::{StageContext, TrainingContext},
     cut::fcf::FutureCostFunction,
@@ -619,6 +619,7 @@ fn run_one_deterministic_pass(
         &StubComm,
         || Ok(MockSolver::with_fixed(50.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap()
 }
@@ -706,6 +707,7 @@ fn train_converges_with_mock_solver() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -822,6 +824,7 @@ fn train_lb_monotonically_nondecreasing() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -927,6 +930,7 @@ fn train_emits_correct_event_sequence() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -1038,6 +1042,7 @@ fn train_stops_at_iteration_limit() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -1136,6 +1141,7 @@ fn train_stops_on_graceful_shutdown() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -1224,6 +1230,7 @@ fn train_propagates_infeasible_error() {
         &comm,
         || Ok(MockSolver::infeasible_on_first()),
         None,
+        SolverProfiles::default(),
     );
 
     let outcome = result.expect("train must return Ok(TrainingOutcome) with captured error");
@@ -1333,6 +1340,7 @@ fn d17_level1_cut_selection_convergence() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -1489,6 +1497,7 @@ fn d17_level1_cut_selection_reconstruction() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -1599,6 +1608,7 @@ fn d18_lml1_cut_selection_convergence() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -1832,6 +1842,7 @@ fn frozen_backward_pass_smoke_test() {
         &StubComm,
         || Ok(ExpandingMockSolver::with_objectives(vec![50.0])),
         None,
+        SolverProfiles::default(),
     )
     .expect("frozen backward pass smoke: train must not error");
 

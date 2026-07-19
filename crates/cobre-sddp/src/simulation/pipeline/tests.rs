@@ -26,6 +26,7 @@ use crate::{
         extraction::EntityCounts,
         state::{SimulationInputs, SimulationState},
     },
+    solve::solver_phase::Phase,
     test_support,
     workspace::{BackwardAccumulators, CapturedBasis, ScratchBuffers, SolverWorkspace},
 };
@@ -48,6 +49,41 @@ where
 {
     let num_stages = training_ctx.horizon.num_stages();
     let mut state = SimulationState::new(num_stages);
+    let mut inputs = SimulationInputs {
+        workspaces,
+        ctx,
+        fcf,
+        training_ctx,
+        config,
+        output,
+        frozen_templates,
+        stage_bases,
+        comm,
+    };
+    state.run(&mut inputs)
+}
+
+/// Identical to [`run_simulate`], but installs `profile` via `set_profile`
+/// before `run()` — exercises the resolved-profile threading mechanism.
+#[allow(clippy::too_many_arguments)]
+fn run_simulate_with_profile<S, C: cobre_comm::Communicator>(
+    workspaces: &mut [SolverWorkspace<S>],
+    ctx: &StageContext<'_>,
+    fcf: &FutureCostFunction,
+    training_ctx: &TrainingContext<'_>,
+    config: &SimulationConfig,
+    output: SimulationOutputSpec<'_>,
+    frozen_templates: Option<&[cobre_solver::StageTemplate]>,
+    stage_bases: &[Option<CapturedBasis>],
+    comm: &C,
+    profile: cobre_solver::ActiveProfile,
+) -> Result<super::SimulationRunResult, SimulationError>
+where
+    S: cobre_solver::SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
+{
+    let num_stages = training_ctx.horizon.num_stages();
+    let mut state = SimulationState::new(num_stages);
+    state.set_profile(profile);
     let mut inputs = SimulationInputs {
         workspaces,
         ctx,
@@ -694,6 +730,7 @@ fn simulation_load_patches_applied() {
     let config = SimulationConfig {
         n_scenarios: 1,
         io_channel_capacity: 4,
+        profile: Phase::Simulation.profile(),
     };
     let state = test_support::state_layout(1, 0);
     let horizon = HorizonMode::Finite {
@@ -905,6 +942,7 @@ fn simulation_no_load_buses_unchanged() {
     let config = SimulationConfig {
         n_scenarios: 1,
         io_channel_capacity: 4,
+        profile: Phase::Simulation.profile(),
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -1009,6 +1047,131 @@ fn simulation_no_load_buses_unchanged() {
     );
 }
 
+/// A profile installed via `set_profile` before `run()` is the one
+/// `ProfiledSolver::current_profile()` reports afterwards.
+#[test]
+fn simulation_state_set_profile_reaches_current_profile_after_run() {
+    let n_stages = 1;
+    let templates = vec![minimal_template_1_0()];
+    let base_rows = vec![0usize];
+
+    let stochastic = make_stochastic_context(n_stages);
+    let state = test_support::state_layout(1, 0);
+    let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
+    let config = SimulationConfig {
+        n_scenarios: 1,
+        io_channel_capacity: 4,
+        profile: Phase::Simulation.profile(),
+    };
+    let horizon = HorizonMode::Finite {
+        num_stages: n_stages,
+    };
+    let initial_state = vec![50.0_f64];
+
+    let solution = fixed_solution(100.0, 30.0);
+    let solver = MockSolver::always_ok(solution);
+    let comm = StubComm { rank: 0, size: 1 };
+    let entity_counts = entity_counts_1_hydro();
+
+    let (tx, _rx) = mpsc::sync_channel(4);
+
+    let hprod = hydro_productivities_1hydro(n_stages);
+    let ec = zero_energy_conversion(1, n_stages);
+    let mut workspaces = single_workspace(solver);
+
+    let resolved =
+        Phase::Simulation.resolve_profile(Some(&cobre_io::config::PhaseSolverProfileConfig {
+            preset: None,
+            dual_edge_weight: None,
+            scale: Some(cobre_io::config::ScaleStrategy::SolverScaling),
+            price: None,
+            primal_feasibility_tolerance: None,
+        }));
+
+    run_simulate_with_profile(
+        &mut workspaces,
+        &StageContext {
+            geometry_per_stage: &[],
+            templates: &templates,
+            base_rows: &base_rows,
+            noise_scale: &[],
+            n_hydros: 0,
+            n_load_buses: 0,
+            load_balance_row_starts: &[],
+            load_bus_indices: &[],
+            block_counts_per_stage: &[1],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+            ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
+            discount_factors: &[],
+            cumulative_discount_factors: &[],
+            stage_lag_transitions: &[],
+            noise_group_ids: &[],
+            downstream_par_order: 0,
+        },
+        &fcf,
+        &TrainingContext {
+            horizon: &horizon,
+            state: &state,
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
+            inflow_method: &InflowNonNegativityMethod::None,
+            stochastic: &stochastic,
+            initial_state: &initial_state,
+            inflow_scheme: SamplingScheme::InSample,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            stages: &[],
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+            recent_accum_seed: &[],
+            recent_weight_seed: 0.0,
+            dcs: None,
+        },
+        &config,
+        SimulationOutputSpec {
+            result_tx: &tx,
+            zeta_per_stage: &[],
+            block_hours_per_stage: &[],
+            entity_counts: &entity_counts,
+            generic_constraint_row_entries: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            pumping_col_starts: &[],
+            n_pumping: 0,
+            geometry_per_stage: &[],
+            pumping_consumption_mw_per_m3s: &[],
+            contract_prices_per_stage: &[],
+            contract_is_import: &[],
+            ncs_entity_ids_per_stage: &[],
+            diversion_upstream: &HashMap::new(),
+            hydro_productivities_per_stage: &hprod,
+            energy_conversion: &ec,
+            hydro_min_storage_hm3: &[0.0],
+            event_sender: None,
+        },
+        None,
+        &[],
+        &comm,
+        resolved,
+    )
+    .unwrap();
+
+    assert_eq!(
+        workspaces[0].solver.current_profile(),
+        &resolved,
+        "the profile installed via set_profile must be the one stored on \
+         current_profile after run()"
+    );
+}
+
 /// When load noise is present,
 /// `noise_buf` still contains only inflow values (not contaminated by load noise).
 ///
@@ -1049,6 +1212,7 @@ fn simulation_inflow_extraction_unaffected() {
     let config = SimulationConfig {
         n_scenarios: 1,
         io_channel_capacity: 4,
+        profile: Phase::Simulation.profile(),
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -1467,6 +1631,7 @@ fn simulation_truncation_clamps_negative_inflow_noise() {
     let config = SimulationConfig {
         n_scenarios: 4,
         io_channel_capacity: 16,
+        profile: Phase::Simulation.profile(),
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -1597,6 +1762,7 @@ fn simulation_none_method_produces_raw_negative_noise() {
     let config = SimulationConfig {
         n_scenarios: 4,
         io_channel_capacity: 16,
+        profile: Phase::Simulation.profile(),
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,

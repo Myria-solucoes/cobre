@@ -17,7 +17,7 @@ use cobre_solver::{SolverInterface, StageTemplate};
 use crate::visited_states::VisitedStatesArchive;
 use crate::workspace::BasisStore;
 use crate::{
-    SddpError, TrainingConfig,
+    SddpError, SolverProfiles, TrainingConfig,
     context::{StageContext, TrainingContext},
     cut::fcf::FutureCostFunction,
     solver_stats::SolverStatsLogEntry,
@@ -285,7 +285,7 @@ pub(crate) fn broadcast_basis_cache<C: Communicator>(
 /// # Examples
 ///
 /// ```rust,ignore
-/// use cobre_sddp::{train, TrainingConfig, LoopConfig, CutManagementConfig, EventConfig};
+/// use cobre_sddp::{train, TrainingConfig, LoopConfig, CutManagementConfig, EventConfig, SolverProfiles};
 /// use cobre_sddp::{StoppingRuleSet, StoppingRule, RiskMeasure, HorizonMode};
 ///
 /// let mut solver = HiggsBackend::new();
@@ -301,7 +301,7 @@ pub(crate) fn broadcast_basis_cache<C: Communicator>(
 ///
 /// let result = train(
 ///     &mut solver, config, &mut fcf, &stage_ctx, &training_ctx, &comm,
-///     || HiggsBackend::new(),
+///     || HiggsBackend::new(), None, SolverProfiles::default(),
 /// )?;
 ///
 /// println!("converged in {} iterations, gap={:.4}", result.result.iterations, result.result.final_gap);
@@ -324,6 +324,7 @@ pub fn train<S, C: Communicator>(
     comm: &C,
     solver_factory: impl Fn() -> Result<S, SolverError>,
     warm_start_basis_cache: Option<Vec<Option<CapturedBasis>>>,
+    solver_profiles: SolverProfiles,
 ) -> Result<TrainingOutcome, SddpError>
 where
     S: SolverInterface<Profile = ActiveProfile> + Send,
@@ -336,6 +337,7 @@ where
         training_ctx,
         comm,
         solver_factory,
+        solver_profiles,
     )?;
     // Must seed the basis store before `prime_frozen_templates` freezes the loaded
     // cuts into the templates.

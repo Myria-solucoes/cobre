@@ -182,7 +182,8 @@ fn default_violation_tolerance() -> f64 {
     1e-10
 }
 
-/// LP solver retry settings (`config.json → training.solver`).
+/// LP solver settings (`config.json → training.solver`): retry policy plus
+/// optional per-phase solver profiles.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -192,6 +193,14 @@ pub struct TrainingSolverConfig {
 
     /// Total time budget in seconds across all retry attempts for one solve.
     pub retry_time_budget_seconds: f64,
+
+    /// Backward-pass solver profile. Absent leaves the backend defaults.
+    #[serde(default)]
+    pub backward: Option<PhaseSolverProfileConfig>,
+
+    /// Forward-pass solver profile. Absent leaves the backend defaults.
+    #[serde(default)]
+    pub forward: Option<PhaseSolverProfileConfig>,
 }
 
 impl Default for TrainingSolverConfig {
@@ -199,8 +208,76 @@ impl Default for TrainingSolverConfig {
         Self {
             retry_max_attempts: 5,
             retry_time_budget_seconds: 30.0,
+            backward: None,
+            forward: None,
         }
     }
+}
+
+/// Per-phase LP solver profile (`config.json → training.solver.backward` /
+/// `.forward`, and `simulation.solver`).
+///
+/// Backend-agnostic. Every field is optional: an absent field leaves the
+/// corresponding solver option at its backend default. `preset` names a
+/// built-in profile applied first; the remaining fields override it.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct PhaseSolverProfileConfig {
+    /// Named built-in profile to start from before applying the overrides below.
+    #[serde(default)]
+    pub preset: Option<String>,
+
+    /// Dual simplex edge-weight strategy override.
+    #[serde(default)]
+    pub dual_edge_weight: Option<DualEdgeWeight>,
+
+    /// Constraint-matrix scaling strategy override.
+    #[serde(default)]
+    pub scale: Option<ScaleStrategy>,
+
+    /// Simplex pricing strategy override.
+    #[serde(default)]
+    pub price: Option<PriceStrategy>,
+
+    /// Primal feasibility tolerance override.
+    #[serde(default)]
+    pub primal_feasibility_tolerance: Option<f64>,
+}
+
+/// Dual simplex edge-weight (pricing) strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum DualEdgeWeight {
+    /// Devex approximate edge weights.
+    Devex,
+    /// Exact steepest-edge weights.
+    SteepestEdge,
+    /// Dantzig most-negative-reduced-cost rule.
+    Dantzig,
+}
+
+/// LP constraint-matrix scaling strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum ScaleStrategy {
+    /// No scaling.
+    Off,
+    /// Solver-managed scaling.
+    SolverScaling,
+}
+
+/// Simplex pricing (column-selection) strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum PriceStrategy {
+    /// Row-wise pricing.
+    Row,
+    /// Row-wise pricing with hyper-sparse updates.
+    RowHyperSparse,
 }
 
 /// Deserialized configuration for one entry in `training.stopping_rules[]`.
@@ -300,7 +377,7 @@ pub struct LipschitzConfig {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::{SelectionMethod, TrainingConfig};
+    use super::{DualEdgeWeight, PriceStrategy, ScaleStrategy, SelectionMethod, TrainingConfig};
 
     /// A `dynamic` selection block round-trips through the tagged enum, with
     /// every method-specific field landing in the `Dynamic` variant.
@@ -427,5 +504,86 @@ mod tests {
             result.is_err(),
             "domination requires domination_tolerance; absence must be rejected"
         );
+    }
+
+    /// A full `training.solver.backward` block round-trips: `preset` plus every
+    /// per-field override lands in `PhaseSolverProfileConfig`, and the sibling
+    /// `forward` phase stays absent.
+    #[test]
+    fn backward_solver_profile_block_round_trips() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "solver": {
+                "backward": {
+                    "preset": "backward_tuned_v1",
+                    "dual_edge_weight": "steepest_edge",
+                    "scale": "solver_scaling",
+                    "price": "row",
+                    "primal_feasibility_tolerance": 1e-7
+                }
+            }
+        }"#;
+        let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
+        let backward = cfg.solver.backward.as_ref().expect("backward present");
+        assert_eq!(backward.preset.as_deref(), Some("backward_tuned_v1"));
+        assert_eq!(
+            backward.dual_edge_weight,
+            Some(DualEdgeWeight::SteepestEdge)
+        );
+        assert_eq!(backward.scale, Some(ScaleStrategy::SolverScaling));
+        assert_eq!(backward.price, Some(PriceStrategy::Row));
+        assert_eq!(backward.primal_feasibility_tolerance, Some(1e-7));
+        assert!(cfg.solver.forward.is_none());
+    }
+
+    /// A `training.solver.forward` block round-trips independently of `backward`.
+    #[test]
+    fn forward_solver_profile_block_round_trips() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "solver": {
+                "forward": {
+                    "price": "row_hyper_sparse",
+                    "dual_edge_weight": "dantzig"
+                }
+            }
+        }"#;
+        let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
+        let forward = cfg.solver.forward.as_ref().expect("forward present");
+        assert_eq!(forward.price, Some(PriceStrategy::RowHyperSparse));
+        assert_eq!(forward.dual_edge_weight, Some(DualEdgeWeight::Dantzig));
+        assert!(forward.preset.is_none());
+        assert!(cfg.solver.backward.is_none());
+    }
+
+    /// An unknown field under `backward` (here the misspelling `dual_edge_weght`)
+    /// is a deserialize error under `deny_unknown_fields`.
+    #[test]
+    fn backward_solver_profile_unknown_field_is_deserialize_error() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "solver": { "backward": { "dual_edge_weght": "devex" } }
+        }"#;
+        let result = serde_json::from_str::<TrainingConfig>(json);
+        assert!(
+            result.is_err(),
+            "an unknown field under backward must be rejected"
+        );
+    }
+
+    /// A misspelled enum value is an unknown-variant deserialize error; the
+    /// campaign's informal `curtis_reid` label is not a valid `scale` value.
+    #[test]
+    fn backward_solver_profile_bad_enum_value_is_deserialize_error() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "solver": { "backward": { "scale": "curtis_reid" } }
+        }"#;
+        let result = serde_json::from_str::<TrainingConfig>(json);
+        assert!(result.is_err(), "an unknown scale value must be rejected");
     }
 }

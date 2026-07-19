@@ -382,16 +382,16 @@ mod tests {
     // ── Fix 1: profile-aware restore after retry escalation ──────────────────
     //
     // After `restore_default_settings()`, the tolerances reset to 1e-6 (the
-    // hardcoded table values). `apply_profile_tolerances()` must then overwrite
+    // hardcoded table values). `reapply_profile()` must then overwrite
     // them with the profile's values so HiGHS state and `current_profile` agree.
 
     /// Fix 1 — primal tolerance survives restore+profile sequence.
     ///
     /// Sets the profile primal tolerance to a non-default value (3e-8), then
-    /// calls the combined `restore_defaults_then_apply_profile_for_test` helper
+    /// calls the combined `restore_defaults_then_reapply_profile_for_test` helper
     /// (which mirrors the finalization path in `retry_escalation`). The FFI
     /// read-back must return 3e-8 (the profile value), not 1e-6 (the default
-    /// table value), proving that `apply_profile_tolerances` wins.
+    /// table value), proving that `reapply_profile` wins.
     #[test]
     fn profile_primal_tolerance_restored_after_retry_finalization() {
         let mut solver = make_solver();
@@ -400,7 +400,7 @@ mod tests {
             ..Default::default()
         });
 
-        solver.restore_defaults_then_apply_profile_for_test();
+        solver.restore_defaults_then_reapply_profile_for_test();
 
         let tol = solver
             .get_double_option(c"primal_feasibility_tolerance")
@@ -424,7 +424,7 @@ mod tests {
             ..Default::default()
         });
 
-        solver.restore_defaults_then_apply_profile_for_test();
+        solver.restore_defaults_then_reapply_profile_for_test();
 
         let tol = solver
             .get_double_option(c"dual_feasibility_tolerance")

@@ -42,8 +42,8 @@ use cobre_io::{
     write_results,
 };
 use cobre_sddp::{
-    PrepareHydroModelsResult, ResolvedParameters, StoppingMode, StoppingRule, StoppingRuleSet,
-    TrainingConfig, build_training_output,
+    Phase, PrepareHydroModelsResult, ResolvedParameters, SolverProfiles, StoppingMode,
+    StoppingRule, StoppingRuleSet, TrainingConfig, build_training_output,
     config::{CutManagementConfig, EventConfig, LoopConfig},
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
@@ -425,6 +425,7 @@ fn make_config() -> Config {
             num_scenarios: 0,
             io_channel_capacity: 64,
             scenario_source: None,
+            solver: None,
         },
         exports: ExportsConfig::default(),
         estimation: EstimationConfig::default(),
@@ -652,6 +653,7 @@ fn train_simulate_write_cycle() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .expect("train must succeed");
 
@@ -748,6 +750,7 @@ fn train_simulate_write_cycle() {
     let sim_config = SimulationConfig {
         n_scenarios: 2,
         io_channel_capacity: 4,
+        profile: Phase::Simulation.profile(),
     };
 
     let entity_counts = EntityCounts {
@@ -1441,12 +1444,14 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
         &StubComm,
         || Ok(SizedMockSolver::new(t0.num_cols, t0.num_rows)),
         None,
+        SolverProfiles::default(),
     )
     .expect("training must succeed");
 
     let sim_config = SimulationConfig {
         n_scenarios: 1,
         io_channel_capacity: 4,
+        profile: Phase::Simulation.profile(),
     };
 
     let entity_counts = EntityCounts {

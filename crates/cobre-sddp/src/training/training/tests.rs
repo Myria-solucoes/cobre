@@ -36,7 +36,7 @@ use cobre_stochastic::{
 
 use super::train;
 use crate::{
-    StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
+    SolverProfiles, StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
     config::{CutManagementConfig, EventConfig, LoopConfig},
     context::{StageContext, TrainingContext},
     cut::fcf::FutureCostFunction,
@@ -527,6 +527,7 @@ fn ac_train_completes_with_iteration_limit() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -628,6 +629,7 @@ fn ac_train_returns_partial_on_infeasible() {
         &comm,
         || Ok(MockSolver::infeasible()),
         None,
+        SolverProfiles::default(),
     );
 
     let outcome = result.unwrap();
@@ -742,6 +744,7 @@ fn ac_train_emits_correct_event_sequence() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -943,6 +946,7 @@ fn ac_worker_timing_per_worker_event_count_and_setup_invariant() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -1115,6 +1119,7 @@ fn ac_train_result_fields_populated() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -1216,6 +1221,7 @@ fn ac_train_with_no_event_sender() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     );
 
     assert!(result.is_ok(), "train with no event_sender must not panic");
@@ -1314,6 +1320,7 @@ fn ac_total_time_ms_is_non_negative() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -1420,6 +1427,7 @@ fn cut_selection_none_skips_step() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -1535,6 +1543,7 @@ fn cut_selection_level1_runs_at_frequency() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -1660,6 +1669,7 @@ fn cut_selection_stage0_exempt_preserves_cuts() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -1795,6 +1805,7 @@ fn existing_train_tests_pass_with_none() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -1902,6 +1913,7 @@ fn ac_train_partial_result_on_mid_iteration_failure() {
         &comm,
         || Ok(MockSolver::infeasible()),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -2024,6 +2036,7 @@ fn start_iteration_resumes_from_offset() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -2127,6 +2140,7 @@ fn start_iteration_at_or_beyond_max_runs_zero_iterations() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -2808,6 +2822,7 @@ fn template_freeze_event_emitted() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 

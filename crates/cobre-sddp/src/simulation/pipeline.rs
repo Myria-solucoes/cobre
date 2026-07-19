@@ -932,6 +932,7 @@ where
 {
     use crate::simulation::state::{SimulationInputs, SimulationState};
     let mut state = SimulationState::new(training_ctx.horizon.num_stages());
+    state.set_profile(config.profile);
     state.run(&mut SimulationInputs::new(
         workspaces,
         ctx,

@@ -32,6 +32,7 @@ use cobre_core::temporal::SeasonMap;
 use cobre_core::temporal::StageLagTransition;
 use cobre_core::temporal::StageStateConfig;
 use cobre_io::Config;
+use cobre_solver::ActiveProfile;
 use cobre_stochastic::par::RecentObservationSeed;
 use cobre_stochastic::par::lag_transition::compute_recent_observation_seed;
 use cobre_stochastic::par::lag_transition::derive_downstream_par_order;
@@ -43,6 +44,7 @@ use crate::config::LoopParams;
 use crate::resolved_parameters::build_resolved_parameters;
 use crate::scaling_report::ScalingReport;
 use crate::simulation::SimulationConfig;
+use crate::solve::solver_phase::Phase;
 use crate::stochastic::noise_key::build_noise_key_table;
 mod accessors;
 pub(crate) mod bucket_seed;
@@ -192,6 +194,15 @@ pub struct StudySetup {
     /// [`StudySetup::train`].
     pub(crate) events: EventParams,
 
+    /// Resolved backward-pass solver profile (`training.solver.backward`, layered
+    /// over the current per-phase constant — see
+    /// [`crate::solve::solver_phase::Phase::resolve_profile`]). Threaded into
+    /// [`StudySetup::train`].
+    pub(crate) backward_profile: ActiveProfile,
+
+    /// Resolved forward-pass solver profile (`training.solver.forward`).
+    pub(crate) forward_profile: ActiveProfile,
+
     /// Stochastic numerical methodology parameters (`horizon`, `inflow_method`).
     pub(crate) methodology: methodology_config::MethodologyConfig,
 
@@ -314,7 +325,17 @@ impl StudySetup {
             budget,
             export_states,
             scalar_parameters,
+            training_solver_backward,
+            training_solver_forward,
+            simulation_solver,
         } = config;
+
+        // `resolve_profile` is a pure function of the (identically broadcast)
+        // config, so every rank resolving independently is sufficient — the
+        // resolved `ActiveProfile` itself never needs to go on the wire.
+        let backward_profile = Phase::Backward.resolve_profile(training_solver_backward.as_ref());
+        let forward_profile = Phase::Forward.resolve_profile(training_solver_forward.as_ref());
+        let simulation_profile = Phase::Simulation.resolve_profile(simulation_solver.as_ref());
 
         // Keys are a pure function of the synced tree + fixed σ, so every rank
         // computes the identical permutation and cuts stay bit-identical across
@@ -487,6 +508,7 @@ impl StudySetup {
             simulation_config: SimulationConfig {
                 n_scenarios,
                 io_channel_capacity,
+                profile: simulation_profile,
             },
             policy_path,
             cut_management: CutManagementConfig {
@@ -497,6 +519,8 @@ impl StudySetup {
                 risk_measures,
             },
             events: EventParams { export_states },
+            backward_profile,
+            forward_profile,
             methodology: methodology_config::MethodologyConfig {
                 horizon,
                 inflow_method,

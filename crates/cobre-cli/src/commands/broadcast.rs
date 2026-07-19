@@ -4,6 +4,7 @@ use cobre_comm::Communicator;
 use cobre_core::scenario::ScenarioSource;
 use cobre_io::Config;
 use cobre_io::PolicyMode;
+use cobre_io::config::PhaseSolverProfileConfig;
 use cobre_sddp::{
     CutSelectionStrategy, DEFAULT_MAX_ITERATIONS, InflowNonNegativityMethod, StoppingMode,
     StoppingRule, StoppingRuleSet, StudyParams,
@@ -56,6 +57,14 @@ pub(crate) struct BroadcastConfig {
     pub(crate) training_source: ScenarioSource,
     /// Scenario source for the post-training simulation forward pass.
     pub(crate) simulation_source: ScenarioSource,
+    /// Backward-pass solver profile override (`training.solver.backward`),
+    /// resolved identically on every rank by
+    /// `cobre_sddp::solve::solver_phase::Phase::resolve_profile`.
+    pub(crate) training_solver_backward: Option<PhaseSolverProfileConfig>,
+    /// Forward-pass solver profile override (`training.solver.forward`).
+    pub(crate) training_solver_forward: Option<PhaseSolverProfileConfig>,
+    /// Simulation solver profile override (`simulation.solver`).
+    pub(crate) simulation_solver: Option<PhaseSolverProfileConfig>,
 }
 
 impl BroadcastConfig {
@@ -125,6 +134,9 @@ impl BroadcastConfig {
             budget: params.budget,
             training_source,
             simulation_source,
+            training_solver_backward: params.training_solver_backward,
+            training_solver_forward: params.training_solver_forward,
+            simulation_solver: params.simulation_solver,
         })
     }
 }
@@ -388,6 +400,162 @@ mod tests {
         assert_eq!(
             decoded.simulation_source.inflow_scheme,
             SamplingScheme::InSample
+        );
+        assert!(
+            decoded.training_solver_backward.is_none(),
+            "absent training.solver.backward must round-trip to None"
+        );
+        assert!(
+            decoded.training_solver_forward.is_none(),
+            "absent training.solver.forward must round-trip to None"
+        );
+        assert!(
+            decoded.simulation_solver.is_none(),
+            "absent simulation.solver must round-trip to None"
+        );
+    }
+
+    /// Postcard round-trip for a populated `training.solver.backward` /
+    /// `.forward` / `simulation.solver` block: every field, not just presence,
+    /// must survive the wire hop identically.
+    #[test]
+    fn broadcast_config_solver_profile_roundtrips_via_postcard() {
+        use super::BroadcastConfig;
+
+        let json = r#"{
+            "training": {
+                "forward_passes": 4,
+                "stopping_rules": [
+                    { "type": "iteration_limit", "limit": 10 }
+                ],
+                "solver": {
+                    "backward": {
+                        "preset": "backward_tuned_v1",
+                        "price": "row_hyper_sparse"
+                    },
+                    "forward": {
+                        "dual_edge_weight": "dantzig"
+                    }
+                }
+            },
+            "simulation": {
+                "solver": { "scale": "solver_scaling" }
+            }
+        }"#;
+        let config: cobre_io::Config = serde_json::from_str(json).unwrap();
+        let original = BroadcastConfig::from_config(&config).unwrap();
+
+        let bytes = postcard::to_allocvec(&original)
+            .expect("postcard serialization of BroadcastConfig must succeed");
+        let decoded: BroadcastConfig = postcard::from_bytes(&bytes)
+            .expect("postcard deserialization of BroadcastConfig must succeed");
+
+        let original_backward = original
+            .training_solver_backward
+            .as_ref()
+            .expect("backward profile must be Some");
+        let decoded_backward = decoded
+            .training_solver_backward
+            .as_ref()
+            .expect("backward profile must survive the round trip");
+        assert_eq!(decoded_backward.preset, original_backward.preset);
+        assert_eq!(
+            decoded_backward.preset.as_deref(),
+            Some("backward_tuned_v1")
+        );
+        assert_eq!(decoded_backward.price, original_backward.price);
+        assert_eq!(
+            decoded_backward.price,
+            Some(cobre_io::config::PriceStrategy::RowHyperSparse)
+        );
+        assert!(decoded_backward.dual_edge_weight.is_none());
+
+        let original_forward = original
+            .training_solver_forward
+            .as_ref()
+            .expect("forward profile must be Some");
+        let decoded_forward = decoded
+            .training_solver_forward
+            .as_ref()
+            .expect("forward profile must survive the round trip");
+        assert_eq!(
+            decoded_forward.dual_edge_weight,
+            original_forward.dual_edge_weight
+        );
+        assert_eq!(
+            decoded_forward.dual_edge_weight,
+            Some(cobre_io::config::DualEdgeWeight::Dantzig)
+        );
+
+        let original_sim = original
+            .simulation_solver
+            .as_ref()
+            .expect("simulation profile must be Some");
+        let decoded_sim = decoded
+            .simulation_solver
+            .as_ref()
+            .expect("simulation profile must survive the round trip");
+        assert_eq!(decoded_sim.scale, original_sim.scale);
+        assert_eq!(
+            decoded_sim.scale,
+            Some(cobre_io::config::ScaleStrategy::SolverScaling)
+        );
+    }
+
+    /// Cross-rank identity: `Phase::resolve_profile` is a pure function of the
+    /// config, so resolving against rank 0's own value and against the
+    /// postcard-decoded value (what a non-root rank sees after the broadcast)
+    /// must produce bitwise-identical `ActiveProfile`s for every phase.
+    #[test]
+    fn resolve_profile_is_identical_before_and_after_broadcast_roundtrip() {
+        use cobre_sddp::Phase;
+
+        use super::BroadcastConfig;
+
+        let json = r#"{
+            "training": {
+                "forward_passes": 4,
+                "stopping_rules": [
+                    { "type": "iteration_limit", "limit": 10 }
+                ],
+                "solver": {
+                    "backward": { "preset": "backward_tuned_v1" },
+                    "forward": { "price": "row_hyper_sparse" }
+                }
+            },
+            "simulation": {
+                "solver": { "dual_edge_weight": "steepest_edge" }
+            }
+        }"#;
+        let config: cobre_io::Config = serde_json::from_str(json).unwrap();
+        let rank0 = BroadcastConfig::from_config(&config).unwrap();
+
+        let bytes = postcard::to_allocvec(&rank0).expect("postcard serialization must succeed");
+        let non_root: BroadcastConfig =
+            postcard::from_bytes(&bytes).expect("postcard deserialization must succeed");
+
+        let rank0_backward =
+            Phase::Backward.resolve_profile(rank0.training_solver_backward.as_ref());
+        let non_root_backward =
+            Phase::Backward.resolve_profile(non_root.training_solver_backward.as_ref());
+        assert_eq!(
+            rank0_backward, non_root_backward,
+            "backward profile must resolve identically on every rank"
+        );
+
+        let rank0_forward = Phase::Forward.resolve_profile(rank0.training_solver_forward.as_ref());
+        let non_root_forward =
+            Phase::Forward.resolve_profile(non_root.training_solver_forward.as_ref());
+        assert_eq!(
+            rank0_forward, non_root_forward,
+            "forward profile must resolve identically on every rank"
+        );
+
+        let rank0_sim = Phase::Simulation.resolve_profile(rank0.simulation_solver.as_ref());
+        let non_root_sim = Phase::Simulation.resolve_profile(non_root.simulation_solver.as_ref());
+        assert_eq!(
+            rank0_sim, non_root_sim,
+            "simulation profile must resolve identically on every rank"
         );
     }
 

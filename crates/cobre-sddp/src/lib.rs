@@ -159,9 +159,9 @@ pub use simulation::{
     SimulationStageResult, SimulationSummary, aggregate_simulation, simulate,
 };
 // ── solver_phase ─────────────────────────────────────────────────────────────
-pub use solve::solver_phase::Phase;
 #[cfg(feature = "highs")]
 pub use solve::solver_phase::{BACKWARD_PROFILE, FORWARD_PROFILE, SIMULATION_PROFILE};
+pub use solve::solver_phase::{Phase, SolverProfiles};
 // ── solver_stats ──────────────────────────────────────────────────────────────
 pub use solver_stats::{
     SOLVER_STATS_DELTA_SCALAR_FIELDS, SolverStatsDelta, SolverStatsLogEntry, delta_to_stats_row,

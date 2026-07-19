@@ -192,17 +192,11 @@ impl HighsSolver {
         }
     }
 
-    /// Re-applies the current profile's feasibility tolerances to the `HiGHS` instance.
-    ///
-    /// Called immediately after `restore_default_settings()` in the retry-escalation
-    /// finalization path so that `HiGHS` state and `current_profile` remain in sync.
-    /// `restore_default_settings` resets the tolerances to the hardcoded table values
-    /// (`1e-9`); this helper layers the caller's profile values on top.
-    ///
-    /// The iteration limits are not re-applied here because `restore_iteration_limits`
-    /// always follows immediately and sets them to `i32::MAX` (unconstrained for the
-    /// post-retry default-attempt path).
-    pub(super) fn apply_profile_tolerances(&mut self) {
+    /// Every option `current_profile` carries — the two feasibility tolerances
+    /// and the three simplex strategy ints — is re-applied here; an option
+    /// restored anywhere else after `restore_default_settings` runs is a
+    /// determinism bug.
+    pub(super) fn reapply_profile(&mut self) {
         // SAFETY: `self.handle` is a valid, non-null HiGHS pointer obtained from
         // `cobre_highs_create()`. Option names are static C string literals with no
         // retained pointer after the call returns.
@@ -570,12 +564,12 @@ impl HighsSolver {
         self.apply_extended_retry_options(level);
     }
 
-    /// Invoke `restore_default_settings` then `apply_profile_tolerances`,
+    /// Invoke `restore_default_settings` then `reapply_profile`,
     /// mirroring the `retry_escalation` finalization path so tests can verify
     /// profile tolerances survive a defaults-restore.
-    pub fn restore_defaults_then_apply_profile_for_test(&mut self) {
+    pub fn restore_defaults_then_reapply_profile_for_test(&mut self) {
         self.restore_default_settings();
-        self.apply_profile_tolerances();
+        self.reapply_profile();
     }
 
     /// Read a double-valued `HiGHS` option by name.

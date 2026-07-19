@@ -753,7 +753,7 @@ mod determinism {
         },
     };
     use cobre_sddp::{
-        StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
+        Phase, SolverProfiles, StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
         config::{CutManagementConfig, EventConfig, LoopConfig},
         context::{StageContext, TrainingContext},
         cut::FutureCostFunction,
@@ -1292,6 +1292,7 @@ mod determinism {
                     &comm,
                     || Ok(MockSolver3H::new(100.0)),
                     None,
+                    SolverProfiles::default(),
                 )
             })
             .unwrap();
@@ -1315,6 +1316,7 @@ mod determinism {
         let sim_config = SimulationConfig {
             n_scenarios,
             io_channel_capacity: 64,
+            profile: Phase::Simulation.profile(),
         };
         let entity_counts = EntityCounts {
             hydro_ids: vec![1, 2, 3],

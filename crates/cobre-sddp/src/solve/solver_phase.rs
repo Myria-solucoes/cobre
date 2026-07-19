@@ -19,6 +19,9 @@
 //! trait is local and the implemented profile types are foreign, which the
 //! orphan rule permits.
 
+use cobre_io::config::PhaseSolverProfileConfig;
+#[cfg(feature = "highs")]
+use cobre_io::config::{DualEdgeWeight, PriceStrategy, ScaleStrategy};
 #[cfg(feature = "highs")]
 use cobre_solver::HighsProfile;
 use cobre_solver::{ActiveProfile, DEFAULT_PROFILE_HEURISTIC_SENTINEL};
@@ -38,6 +41,28 @@ pub enum Phase {
     /// Policy simulation: evaluating the trained policy on out-of-sample
     /// scenarios.
     Simulation,
+}
+
+/// Resolved forward/backward solver profiles, threaded from [`crate::setup::StudySetup`]
+/// into `TrainingSession::new` once per training run.
+///
+/// `Default` reproduces [`Phase::profile`]'s byte-neutral constants, so a caller
+/// that has no config override can pass `SolverProfiles::default()`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SolverProfiles {
+    /// Resolved forward-pass profile.
+    pub forward: ActiveProfile,
+    /// Resolved backward-pass profile.
+    pub backward: ActiveProfile,
+}
+
+impl Default for SolverProfiles {
+    fn default() -> Self {
+        Self {
+            forward: Phase::Forward.profile(),
+            backward: Phase::Backward.profile(),
+        }
+    }
 }
 
 /// Per-phase identity selection of a backend solver profile (see the module
@@ -193,6 +218,101 @@ impl Phase {
             Phase::Simulation => <ActiveProfile as PhaseProfiles>::SIMULATION,
         }
     }
+
+    /// Resolves this phase's [`ActiveProfile`], layered as base constant
+    /// ([`Self::profile`]) + named preset + per-field overrides (a later layer
+    /// wins). `config` absent returns [`Self::profile`] unchanged — the
+    /// byte-neutral default. An unrecognized preset name falls back to the
+    /// base constant; backend-support/unknown-preset validation is a separate
+    /// step, not performed here.
+    #[must_use]
+    pub fn resolve_profile(self, config: Option<&PhaseSolverProfileConfig>) -> ActiveProfile {
+        resolve_active_profile(self.profile(), config)
+    }
+}
+
+/// The `backward_tuned_v1` config preset — the measured tuned bundle (dual
+/// `SteepestEdge`, Curtis–Reid scaling, `Row` pricing, loosened primal
+/// feasibility tolerance) selected via
+/// `training.solver.backward = {"preset": "backward_tuned_v1"}`. Fields the
+/// bundle does not tune keep [`BACKWARD_PROFILE`]'s values.
+#[cfg(feature = "highs")]
+pub const BACKWARD_TUNED_V1_PRESET: HighsProfile = HighsProfile {
+    primal_feasibility_tolerance: 1e-7,
+    dual_feasibility_tolerance: 1e-9,
+    simplex_iteration_limit: DEFAULT_PROFILE_HEURISTIC_SENTINEL,
+    ipm_iteration_limit: 10_000,
+    simplex_dual_edge_weight_strategy: 2, // SteepestEdge
+    simplex_scale_strategy: 2,            // Curtis–Reid
+    simplex_price_strategy: 1,            // Row
+};
+
+#[cfg(feature = "highs")]
+fn highs_dual_edge_weight(value: DualEdgeWeight) -> i32 {
+    match value {
+        DualEdgeWeight::Dantzig => 0,
+        DualEdgeWeight::Devex => 1,
+        DualEdgeWeight::SteepestEdge => 2,
+    }
+}
+
+#[cfg(feature = "highs")]
+fn highs_scale_strategy(value: ScaleStrategy) -> i32 {
+    match value {
+        ScaleStrategy::Off => 0,
+        ScaleStrategy::SolverScaling => 2, // Curtis–Reid
+    }
+}
+
+#[cfg(feature = "highs")]
+fn highs_price_strategy(value: PriceStrategy) -> i32 {
+    match value {
+        PriceStrategy::Row => 1,
+        PriceStrategy::RowHyperSparse => 2,
+    }
+}
+
+/// Layers `config` onto `base`: preset replaces `base` wholesale (an
+/// unrecognized name is silently ignored — validation is a separate step),
+/// then each `Some` per-field override replaces the corresponding option on
+/// top of whichever profile the preset step produced.
+#[cfg(feature = "highs")]
+fn resolve_active_profile(
+    base: HighsProfile,
+    config: Option<&PhaseSolverProfileConfig>,
+) -> HighsProfile {
+    let Some(config) = config else {
+        return base;
+    };
+    let mut profile = match config.preset.as_deref() {
+        Some("backward_tuned_v1") => BACKWARD_TUNED_V1_PRESET,
+        _ => base,
+    };
+    if let Some(weight) = config.dual_edge_weight {
+        profile.simplex_dual_edge_weight_strategy = highs_dual_edge_weight(weight);
+    }
+    if let Some(scale) = config.scale {
+        profile.simplex_scale_strategy = highs_scale_strategy(scale);
+    }
+    if let Some(price) = config.price {
+        profile.simplex_price_strategy = highs_price_strategy(price);
+    }
+    if let Some(tolerance) = config.primal_feasibility_tolerance {
+        profile.primal_feasibility_tolerance = tolerance;
+    }
+    profile
+}
+
+// CLP support is minimal for v1 (decision D11): every override is deferred to
+// the compiled-backend validation step, which hard-rejects a CLP config
+// instead of silently applying a HiGHS-flavored preset/override to CLP's own
+// option surface.
+#[cfg(feature = "clp")]
+fn resolve_active_profile(
+    base: ClpProfile,
+    _config: Option<&PhaseSolverProfileConfig>,
+) -> ClpProfile {
+    base
 }
 
 // Compile-time drift guard: a field added to `HighsProfile` makes the compiler
@@ -236,13 +356,25 @@ const _: () = {
         <HighsProfile as PhaseProfiles>::SIMULATION.simplex_price_strategy,
         2
     ));
+
+    assert!(BACKWARD_TUNED_V1_PRESET.primal_feasibility_tolerance == 1e-7);
+    assert!(BACKWARD_TUNED_V1_PRESET.dual_feasibility_tolerance == 1e-9);
+    assert!(BACKWARD_TUNED_V1_PRESET.simplex_iteration_limit == DEFAULT_PROFILE_HEURISTIC_SENTINEL);
+    assert!(BACKWARD_TUNED_V1_PRESET.ipm_iteration_limit == 10_000);
+    assert!(BACKWARD_TUNED_V1_PRESET.simplex_dual_edge_weight_strategy == 2);
+    assert!(BACKWARD_TUNED_V1_PRESET.simplex_scale_strategy == 2);
+    assert!(BACKWARD_TUNED_V1_PRESET.simplex_price_strategy == 1);
 };
 
 #[cfg(all(test, feature = "highs"))]
 mod highs_tests {
+    use cobre_io::config::{DualEdgeWeight, PhaseSolverProfileConfig, PriceStrategy};
     use cobre_solver::HighsProfile;
 
-    use super::{BACKWARD_PROFILE, FORWARD_PROFILE, Phase, PhaseProfiles, SIMULATION_PROFILE};
+    use super::{
+        BACKWARD_PROFILE, BACKWARD_TUNED_V1_PRESET, FORWARD_PROFILE, Phase, PhaseProfiles,
+        SIMULATION_PROFILE,
+    };
 
     /// `Phase::profile()` returns the matching named constant for each variant.
     #[test]
@@ -365,10 +497,103 @@ mod highs_tests {
             SIMULATION_PROFILE
         );
     }
+
+    // ── `resolve_profile` ────────────────────────────────────────────────────
+
+    /// Absent config resolves to the current per-phase constant, unchanged —
+    /// the byte-neutrality gate.
+    #[test]
+    fn resolve_profile_absent_config_equals_named_constant() {
+        assert_eq!(Phase::Forward.resolve_profile(None), FORWARD_PROFILE);
+        assert_eq!(Phase::Backward.resolve_profile(None), BACKWARD_PROFILE);
+        assert_eq!(Phase::Simulation.resolve_profile(None), SIMULATION_PROFILE);
+    }
+
+    /// The `backward_tuned_v1` preset alone resolves to the exact measured
+    /// int/tolerance bundle.
+    #[test]
+    fn resolve_profile_preset_resolves_to_exact_bundle() {
+        let config = PhaseSolverProfileConfig {
+            preset: Some("backward_tuned_v1".to_string()),
+            dual_edge_weight: None,
+            scale: None,
+            price: None,
+            primal_feasibility_tolerance: None,
+        };
+        let resolved = Phase::Backward.resolve_profile(Some(&config));
+        assert_eq!(resolved, BACKWARD_TUNED_V1_PRESET);
+        assert_eq!(resolved.simplex_dual_edge_weight_strategy, 2);
+        assert_eq!(resolved.simplex_scale_strategy, 2);
+        assert_eq!(resolved.simplex_price_strategy, 1);
+        assert_eq!(resolved.primal_feasibility_tolerance, 1e-7);
+    }
+
+    /// A per-field override beats the preset it is layered on top of; fields
+    /// the override does not touch keep the preset's values.
+    #[test]
+    fn resolve_profile_per_field_override_beats_preset() {
+        let config = PhaseSolverProfileConfig {
+            preset: Some("backward_tuned_v1".to_string()),
+            dual_edge_weight: None,
+            scale: None,
+            price: Some(PriceStrategy::RowHyperSparse),
+            primal_feasibility_tolerance: None,
+        };
+        let resolved = Phase::Backward.resolve_profile(Some(&config));
+        assert_eq!(resolved.simplex_price_strategy, 2);
+        assert_eq!(resolved.simplex_dual_edge_weight_strategy, 2);
+        assert_eq!(resolved.simplex_scale_strategy, 2);
+        assert_eq!(resolved.primal_feasibility_tolerance, 1e-7);
+    }
+
+    /// An unrecognized preset name falls back to the base constant (ticket-007
+    /// owns rejecting it); it must not panic or silently corrupt other fields.
+    #[test]
+    fn resolve_profile_unknown_preset_falls_back_to_base_constant() {
+        let config = PhaseSolverProfileConfig {
+            preset: Some("turbo".to_string()),
+            dual_edge_weight: None,
+            scale: None,
+            price: None,
+            primal_feasibility_tolerance: None,
+        };
+        assert_eq!(
+            Phase::Backward.resolve_profile(Some(&config)),
+            BACKWARD_PROFILE
+        );
+    }
+
+    /// Per-field overrides apply directly on the base constant when no preset
+    /// is named.
+    #[test]
+    fn resolve_profile_field_overrides_without_preset_apply_on_base_constant() {
+        let config = PhaseSolverProfileConfig {
+            preset: None,
+            dual_edge_weight: Some(DualEdgeWeight::Dantzig),
+            scale: None,
+            price: None,
+            primal_feasibility_tolerance: None,
+        };
+        let resolved = Phase::Forward.resolve_profile(Some(&config));
+        assert_eq!(resolved.simplex_dual_edge_weight_strategy, 0);
+        assert_eq!(
+            resolved.simplex_scale_strategy,
+            FORWARD_PROFILE.simplex_scale_strategy
+        );
+        assert_eq!(
+            resolved.simplex_price_strategy,
+            FORWARD_PROFILE.simplex_price_strategy
+        );
+        assert_eq!(
+            resolved.primal_feasibility_tolerance,
+            FORWARD_PROFILE.primal_feasibility_tolerance
+        );
+    }
 }
 
 #[cfg(all(test, feature = "clp"))]
 mod clp_tests {
+    use cobre_io::config::PhaseSolverProfileConfig;
     use cobre_solver::{ClpAlgorithm, ClpProfile};
 
     use super::{Phase, PhaseProfiles};
@@ -455,6 +680,28 @@ mod clp_tests {
         assert_eq!(
             Phase::Simulation.profile(),
             <ClpProfile as PhaseProfiles>::SIMULATION
+        );
+    }
+
+    /// CLP support is minimal for v1 (D11): `resolve_profile` returns the base
+    /// constant regardless of `config` — absent config is byte-neutral, and a
+    /// present one is silently ignored pending the compiled-backend reject.
+    #[test]
+    fn resolve_profile_ignores_config_under_clp() {
+        assert_eq!(
+            Phase::Backward.resolve_profile(None),
+            Phase::Backward.profile()
+        );
+        let config = PhaseSolverProfileConfig {
+            preset: Some("backward_tuned_v1".to_string()),
+            dual_edge_weight: None,
+            scale: None,
+            price: None,
+            primal_feasibility_tolerance: None,
+        };
+        assert_eq!(
+            Phase::Backward.resolve_profile(Some(&config)),
+            Phase::Backward.profile()
         );
     }
 }

@@ -40,8 +40,9 @@ pub use policy::{BoundaryPolicy, CheckpointingConfig, PolicyConfig, PolicyMode};
 pub use scenario_source::{RawClassConfigEntry, RawHistoricalYearsConfig, RawScenarioSourceConfig};
 pub use simulation::SimulationConfig;
 pub use training::{
-    LipschitzConfig, RowSelectionConfig, SelectionMethod, StoppingRuleConfig, TrainingConfig,
-    TrainingSolverConfig, UpperBoundEvaluationConfig,
+    DualEdgeWeight, LipschitzConfig, PhaseSolverProfileConfig, PriceStrategy, RowSelectionConfig,
+    ScaleStrategy, SelectionMethod, StoppingRuleConfig, TrainingConfig, TrainingSolverConfig,
+    UpperBoundEvaluationConfig,
 };
 
 use cobre_core::scenario::{HistoricalYears, SamplingScheme, ScenarioSource};

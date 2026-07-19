@@ -20,6 +20,7 @@ use crate::{
         SimulationOutputSpec, error::SimulationError, pipeline::SimulationRunResult,
         types::SimulationScenarioResult,
     },
+    solve::solver_phase::SolverProfiles,
     training::{TrainingOutcome, TrainingResult},
     workspace::{CapturedBasis, SolverWorkspace, WorkspacePool, WorkspaceSizing},
 };
@@ -127,6 +128,10 @@ impl StudySetup {
         };
 
         let warm_start_basis_cache = self.warm_start_basis_cache.take();
+        let solver_profiles = SolverProfiles {
+            forward: self.forward_profile,
+            backward: self.backward_profile,
+        };
 
         train(
             solver,
@@ -137,6 +142,7 @@ impl StudySetup {
             comm,
             solver_factory,
             warm_start_basis_cache,
+            solver_profiles,
         )
     }
 

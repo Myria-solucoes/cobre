@@ -569,6 +569,9 @@ fn run_programmatic(
         budget: None,
         export_states: false,
         scalar_parameters: Vec::new(),
+        training_solver_backward: None,
+        training_solver_forward: None,
+        simulation_solver: None,
     };
     let mut setup =
         StudySetup::from_broadcast_params(system, stochastic, config, hydro_models, source, source)
@@ -904,6 +907,9 @@ fn run_with_setup(
         budget: None,
         export_states: false,
         scalar_parameters: Vec::new(),
+        training_solver_backward: None,
+        training_solver_forward: None,
+        simulation_solver: None,
     };
     let mut setup =
         StudySetup::from_broadcast_params(system, stochastic, config, hydro_models, source, source)
