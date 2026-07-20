@@ -750,7 +750,7 @@ impl BackwardPassState {
     }
 
     /// Per-`(stage, block-index)` mean `simplex_iterations` pivot from the PN
-    /// opening-block scheduler's rank-local accumulator (D6). Outer index is
+    /// opening-block scheduler's rank-local accumulator. Outer index is
     /// the backward pass's successor stage (`t + 1`); inner index is the
     /// block index. `None` where no opening was solved this iteration
     /// (count == 0); empty under `BackwardScheduler::TrialPoint`.

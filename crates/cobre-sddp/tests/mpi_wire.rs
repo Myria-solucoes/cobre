@@ -413,11 +413,8 @@ mod test_mpi_4rank_basis_broadcast_round_trip {
             assert_captured_basis_eq(ref_stage2, other_stage2, &format!("rank {rank} stage 2"));
         }
 
-        let stage0_unpacked = results[0][0].as_ref().expect("rank 0 stage 0 must be Some");
-        assert_captured_basis_eq(&stage0_basis, stage0_unpacked, "pack/unpack parity stage 0");
-
-        let stage2_unpacked = results[0][2].as_ref().expect("rank 0 stage 2 must be Some");
-        assert_captured_basis_eq(&stage2_basis, stage2_unpacked, "pack/unpack parity stage 2");
+        assert_captured_basis_eq(&stage0_basis, ref_stage0, "pack/unpack parity stage 0");
+        assert_captured_basis_eq(&stage2_basis, ref_stage2, "pack/unpack parity stage 2");
     }
 }
 

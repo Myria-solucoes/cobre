@@ -662,22 +662,16 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
             // Seed (or zero) the lag accumulator at trajectory start.
             if t == 0 {
                 if params.recent_accum_seed.is_empty() {
-                    ws.scratch.lag_accumulator.iter_mut().for_each(|v| *v = 0.0);
+                    ws.scratch.lag_accumulator.fill(0.0);
                     ws.scratch.lag_weight_accum = 0.0;
                 } else {
                     ws.scratch.lag_accumulator[..params.recent_accum_seed.len()]
                         .copy_from_slice(params.recent_accum_seed);
                     ws.scratch.lag_weight_accum = params.recent_weight_seed;
                 }
-                ws.scratch
-                    .downstream_accumulator
-                    .iter_mut()
-                    .for_each(|v| *v = 0.0);
+                ws.scratch.downstream_accumulator.fill(0.0);
                 ws.scratch.downstream_weight_accum = 0.0;
-                ws.scratch
-                    .downstream_completed_lags
-                    .iter_mut()
-                    .for_each(|v| *v = 0.0);
+                ws.scratch.downstream_completed_lags.fill(0.0);
                 ws.scratch.downstream_n_completed = 0;
             }
 

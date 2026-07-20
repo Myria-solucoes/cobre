@@ -2,9 +2,9 @@
 //!
 //! Verifies that primal and dual feasibility tolerances at retry levels 3, 7,
 //! 10, and 11 satisfy `applied = max(level_default, profile_value)`. Also
-//! verifies the iteration-cap composition at retry level 0, and that the
-//! profile is re-applied on every solve call (regression for the `HiGHS`
-//! internal-reset bug).
+//! verifies the iteration-cap composition at retry level 0, and that an
+//! unchanged profile is NOT re-applied on subsequent solve calls (the
+//! delta-only dispatch contract; retry finalization owns re-application).
 //!
 //! Requires the `test-support` feature:
 //!   cargo nextest run -p cobre-solver --features test-support
@@ -172,8 +172,6 @@ mod tests {
         solver
     }
 
-    /// AC-9 — level 3, loose profile: applied tolerance must be 1e-5
-    /// (= max(1e-8, 1e-5)) for both primal and dual.
     #[test]
     fn loose_profile_level3_applies_profile_value() {
         let mut solver = make_loose_profile_solver();
@@ -196,8 +194,6 @@ mod tests {
         );
     }
 
-    /// AC-9 — level 7, loose profile: applied tolerance must be 1e-5
-    /// (= max(1e-8, 1e-5)) for both primal and dual.
     #[test]
     fn loose_profile_level7_applies_profile_value() {
         let mut solver = make_loose_profile_solver();
@@ -220,8 +216,6 @@ mod tests {
         );
     }
 
-    /// AC-9 — level 10, loose profile: applied tolerance must be 1e-5
-    /// (= max(1e-7, 1e-5)) for both primal and dual.
     #[test]
     fn loose_profile_level10_applies_profile_value() {
         let mut solver = make_loose_profile_solver();
@@ -244,8 +238,6 @@ mod tests {
         );
     }
 
-    /// AC-9 — level 11, loose profile: applied tolerance must be 1e-5
-    /// (= max(1e-7, 1e-5)) for both primal and dual.
     #[test]
     fn loose_profile_level11_applies_profile_value() {
         let mut solver = make_loose_profile_solver();
@@ -284,8 +276,6 @@ mod tests {
         solver
     }
 
-    /// AC-10 — level 3, strict profile: applied tolerance must be 1e-8
-    /// (= max(1e-8, 1e-12)) for both primal and dual.
     #[test]
     fn strict_profile_level3_applies_level_default() {
         let mut solver = make_strict_profile_solver();
@@ -308,8 +298,6 @@ mod tests {
         );
     }
 
-    /// AC-10 — level 7, strict profile: applied tolerance must be 1e-8
-    /// (= max(1e-8, 1e-12)) for both primal and dual.
     #[test]
     fn strict_profile_level7_applies_level_default() {
         let mut solver = make_strict_profile_solver();
@@ -332,8 +320,6 @@ mod tests {
         );
     }
 
-    /// AC-10 — level 10, strict profile: applied tolerance must be 1e-7
-    /// (= max(1e-7, 1e-12)) for both primal and dual.
     #[test]
     fn strict_profile_level10_applies_level_default() {
         let mut solver = make_strict_profile_solver();
@@ -356,8 +342,6 @@ mod tests {
         );
     }
 
-    /// AC-10 — level 11, strict profile: applied tolerance must be 1e-7
-    /// (= max(1e-7, 1e-12)) for both primal and dual.
     #[test]
     fn strict_profile_level11_applies_level_default() {
         let mut solver = make_strict_profile_solver();
@@ -612,9 +596,6 @@ mod tests {
             }
         }
     }
-
-    // SAFETY: used only on a single thread within this test.
-    unsafe impl Send for SetterCountMock {}
 
     impl SolverInterface for SetterCountMock {
         type Profile = HighsProfile;

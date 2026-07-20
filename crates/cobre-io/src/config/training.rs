@@ -538,7 +538,6 @@ mod tests {
         }
     }
 
-    /// Omitting `selection` disables row selection (the default).
     #[test]
     fn omitting_selection_disables_row_selection() {
         let json = r#"{
@@ -580,8 +579,6 @@ mod tests {
         assert!(result.is_err(), "an unknown method tag must be rejected");
     }
 
-    /// `domination` without its required `domination_tolerance` is a
-    /// missing-field deserialize error.
     #[test]
     fn domination_without_tolerance_is_missing_field_error() {
         let json = r#"{
@@ -720,7 +717,6 @@ mod tests {
         assert!(result.is_err(), "an unknown scale value must be rejected");
     }
 
-    /// An absent `backward_opening_order` deserializes to the `Tsp` default.
     #[test]
     fn backward_opening_order_defaults_to_tsp_when_absent() {
         let json = r#"{
@@ -751,7 +747,6 @@ mod tests {
         assert_eq!(tsp.backward_opening_order, BackwardOpeningOrder::Tsp);
     }
 
-    /// An unknown `backward_opening_order` value is a deserialize error.
     #[test]
     fn backward_opening_order_bad_value_is_deserialize_error() {
         let json = r#"{
@@ -766,7 +761,6 @@ mod tests {
         );
     }
 
-    /// An absent `backward_scheduler` deserializes to the `TrialPoint` default.
     #[test]
     fn backward_scheduler_defaults_to_trial_point_when_absent() {
         let json = r#"{

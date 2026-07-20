@@ -677,18 +677,9 @@ const _: () = {
     assert!(SIMULATION_PROFILE.use_warm_start);
     assert!(SIMULATION_PROFILE.dse_devex_fallback_threshold == 10.0);
 
-    assert!(matches!(
-        <HighsProfile as PhaseProfiles>::FORWARD.simplex_price_strategy,
-        2
-    ));
-    assert!(matches!(
-        <HighsProfile as PhaseProfiles>::BACKWARD.simplex_price_strategy,
-        2
-    ));
-    assert!(matches!(
-        <HighsProfile as PhaseProfiles>::SIMULATION.simplex_price_strategy,
-        2
-    ));
+    assert!(<HighsProfile as PhaseProfiles>::FORWARD.simplex_price_strategy == 2);
+    assert!(<HighsProfile as PhaseProfiles>::BACKWARD.simplex_price_strategy == 2);
+    assert!(<HighsProfile as PhaseProfiles>::SIMULATION.simplex_price_strategy == 2);
 
     assert!(BACKWARD_TUNED_V1_PRESET.primal_feasibility_tolerance == 1e-7);
     assert!(BACKWARD_TUNED_V1_PRESET.dual_feasibility_tolerance == 1e-9);

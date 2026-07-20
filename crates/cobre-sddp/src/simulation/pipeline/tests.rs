@@ -2179,7 +2179,6 @@ mod dcs_simulation {
         let (frozen_imm, frozen) = run_one_sim_stage(None, &all_cuts);
         let (dcs_imm, dcs) = run_one_sim_stage(Some(dcs_params()), &all_cuts);
 
-        // Returned immediate cost (the f64) must match within 1e-9.
         assert!(
             (frozen_imm - dcs_imm).abs() < 1e-9,
             "immediate cost: frozen {frozen_imm} vs DCS {dcs_imm}"
