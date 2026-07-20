@@ -282,6 +282,24 @@
       "additionalProperties": false,
       "description": "Per-phase LP solver profile (`config.json → training.solver.backward` /\n`.forward`, and `simulation.solver`).\n\nBackend-agnostic. Every field is optional: an absent field leaves the\ncorresponding solver option at its backend default. `preset` names a\nbuilt-in profile applied first; the remaining fields override it.",
       "properties": {
+        "cost_perturbation": {
+          "default": null,
+          "description": "Dual simplex cost-perturbation multiplier override.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "dse_devex_fallback_threshold": {
+          "default": null,
+          "description": "Dual steepest-edge weight log-error fallback-threshold override.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "dual_edge_weight": {
           "anyOf": [
             {
@@ -294,6 +312,24 @@
           "default": null,
           "description": "Dual simplex edge-weight strategy override."
         },
+        "dual_feasibility_tolerance": {
+          "default": null,
+          "description": "Dual feasibility tolerance override.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "factor_pivot_threshold": {
+          "default": null,
+          "description": "Matrix factorization pivot-threshold override.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "preset": {
           "default": null,
           "description": "Named built-in profile to start from before applying the overrides below.",
@@ -301,6 +337,18 @@
             "string",
             "null"
           ]
+        },
+        "presolve": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PresolveMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Presolve mode override. Warm-started solves skip presolve regardless\nof this setting, so it affects only genuinely cold solves."
         },
         "price": {
           "anyOf": [
@@ -323,6 +371,15 @@
             "null"
           ]
         },
+        "refactor_error_tolerance": {
+          "default": null,
+          "description": "Refactorization solution-error tolerance override.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "scale": {
           "anyOf": [
             {
@@ -334,6 +391,24 @@
           ],
           "default": null,
           "description": "Constraint-matrix scaling strategy override."
+        },
+        "simplex_update_limit": {
+          "default": null,
+          "description": "Simplex update-count limit override before a refactorization.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "use_warm_start": {
+          "default": null,
+          "description": "Warm-start override. This is a diagnostic setting: disabling it forces\nevery solve cold.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -394,6 +469,26 @@
         {
           "const": "resume",
           "description": "Resume a previously interrupted training run from its checkpoint.",
+          "type": "string"
+        }
+      ]
+    },
+    "PresolveMode": {
+      "description": "Presolve mode for a solver profile.",
+      "oneOf": [
+        {
+          "const": "on",
+          "description": "Presolve enabled.",
+          "type": "string"
+        },
+        {
+          "const": "off",
+          "description": "Presolve disabled.",
+          "type": "string"
+        },
+        {
+          "const": "choose",
+          "description": "Solver decides whether to presolve.",
           "type": "string"
         }
       ]

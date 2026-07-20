@@ -31,6 +31,29 @@ pub struct HighsProfile {
     /// `HiGHS` `simplex_price_strategy` (`0`=Col, `1`=Row, `2`=`RowHyperSparse`,
     /// `3`=`RowSparse`).
     pub simplex_price_strategy: i32,
+    /// `HiGHS` `presolve` (`off`/`choose`/`on`).
+    pub presolve: PresolveKind,
+    /// `HiGHS` `simplex_update_limit`: limit on the number of simplex UPDATE
+    /// operations before a refactorization.
+    pub simplex_update_limit: u32,
+    /// `HiGHS` `dual_simplex_cost_perturbation_multiplier`. `0.0` disables cost
+    /// perturbation to avoid wasted cleanup pivots when the basis is already
+    /// near-optimal from a warm start (Bland's rule guards against cycling;
+    /// retry level 0 restores perturbation as a cold-solve fallback).
+    pub cost_perturbation: f64,
+    /// `HiGHS` `rebuild_refactor_solution_error_tolerance`, loosened from the
+    /// `HiGHS` default (`1e-8`) to skip conservative refactorizations that
+    /// aren't earning their keep in this numerically benign regime.
+    pub refactor_error_tolerance: f64,
+    /// `HiGHS` `factor_pivot_threshold`: matrix factorization pivot threshold.
+    pub factor_pivot_threshold: f64,
+    /// `HiGHS` `use_warm_start`. Diagnostic-only: setting `false` forces every
+    /// solve cold and is never the intended production configuration.
+    pub use_warm_start: bool,
+    /// `HiGHS` `dual_steepest_edge_weight_log_error_threshold`: the DSE weight
+    /// log-error threshold above which `HiGHS` falls back from `SteepestEdge`
+    /// to Devex pricing mid-solve.
+    pub dse_devex_fallback_threshold: f64,
 }
 
 impl Default for HighsProfile {
@@ -43,6 +66,36 @@ impl Default for HighsProfile {
             simplex_dual_edge_weight_strategy: 1,
             simplex_scale_strategy: 0,
             simplex_price_strategy: 1,
+            presolve: PresolveKind::On,
+            simplex_update_limit: 5000,
+            cost_perturbation: 0.0,
+            refactor_error_tolerance: 1e-6,
+            factor_pivot_threshold: 0.1,
+            use_warm_start: true,
+            dse_devex_fallback_threshold: 10.0,
+        }
+    }
+}
+
+/// `HiGHS` `presolve` mode (`kPresolveString`): `"off"`, `"choose"`, or `"on"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresolveKind {
+    /// `HiGHS` presolve disabled.
+    Off,
+    /// `HiGHS` decides whether to presolve.
+    Choose,
+    /// `HiGHS` presolve enabled (cobre baseline).
+    On,
+}
+
+impl PresolveKind {
+    /// The `HiGHS` option string for this mode.
+    #[must_use]
+    pub const fn as_option(self) -> &'static CStr {
+        match self {
+            PresolveKind::Off => c"off",
+            PresolveKind::Choose => c"choose",
+            PresolveKind::On => c"on",
         }
     }
 }
@@ -103,18 +156,17 @@ impl DefaultOption {
 /// scaler is disabled to avoid double-scaling. Retry escalation levels 5+ keep
 /// this strategy.
 ///
-/// The last four entries diverge from `HiGHS` defaults to suit warm-started
-/// solves on master LPs with tens of thousands of mostly-slack rows: Devex
-/// pricing avoids per-pivot edge-weight maintenance scaling with row count;
-/// disabling cost perturbation removes wasted cleanup pivots when the basis
-/// is already near-optimal (Bland's rule guards against cycling, and retry
-/// level 0 restores perturbation as a fallback); skipping the initial
-/// condition check eliminates O(m)–O(m²) work whose guarantees are already
-/// provided by the caller's slot-tracked basis reconstruction; row-wise
-/// PRICE wins on hyper-sparse basis-inverse rows; loosening the
-/// rebuild-refactor tolerance skips conservative refactorizations that
-/// aren't earning their keep in this numerically benign regime.
-pub(super) fn default_options() -> [DefaultOption; 13] {
+/// Several entries diverge from `HiGHS` defaults to suit warm-started solves
+/// on master LPs with tens of thousands of mostly-slack rows: Devex pricing
+/// avoids per-pivot edge-weight maintenance scaling with row count; skipping
+/// the initial condition check eliminates O(m)–O(m²) work whose guarantees
+/// are already provided by the caller's slot-tracked basis reconstruction;
+/// row-wise PRICE wins on hyper-sparse basis-inverse rows. The
+/// cost-perturbation and refactor-tolerance pins carry their rationale on
+/// [`HighsProfile::cost_perturbation`] and
+/// [`HighsProfile::refactor_error_tolerance`] — this table restores only
+/// their base (restore-path) values.
+pub(super) fn default_options() -> [DefaultOption; 17] {
     [
         DefaultOption {
             name: c"solver",
@@ -167,6 +219,22 @@ pub(super) fn default_options() -> [DefaultOption; 13] {
         DefaultOption {
             name: c"rebuild_refactor_solution_error_tolerance",
             value: OptionValue::Double(1e-6), // Loosened from HiGHS default 1e-8
+        },
+        DefaultOption {
+            name: c"simplex_update_limit",
+            value: OptionValue::Int(5000),
+        },
+        DefaultOption {
+            name: c"factor_pivot_threshold",
+            value: OptionValue::Double(0.1),
+        },
+        DefaultOption {
+            name: c"use_warm_start",
+            value: OptionValue::Bool(1),
+        },
+        DefaultOption {
+            name: c"dual_steepest_edge_weight_log_error_threshold",
+            value: OptionValue::Double(10.0),
         },
     ]
 }

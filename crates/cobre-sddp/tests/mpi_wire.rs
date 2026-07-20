@@ -436,12 +436,19 @@ mod retry_armed_determinism {
     //! `restore_default_settings`) that manifests only once a solve genuinely
     //! retries; it has no power on a case/length that produces zero retries.
     //! `total_retries > 0` is asserted per shape as the gate's own
-    //! self-check, not an incidental fact.
+    //! self-check, not an incidental fact. `forced_retry_profiles` arms every
+    //! new profile field this gate can reach — including `use_warm_start`,
+    //! which the d03 fixture tolerates without ever driving a shape's
+    //! `total_retries` to zero — at a non-default in-range value, so the
+    //! four-shape bitwise `final_lb` comparison also proves each survives the
+    //! seam at integration scope; this complements the unit-level
+    //! `full_profile_survives_retry_finalization_seam` readback in
+    //! `crates/cobre-solver/tests/profile_retry_composition.rs`.
 
     use std::path::Path;
 
     use cobre_comm::Communicator;
-    use cobre_io::config::{BackwardScheduler, PhaseSolverProfileConfig};
+    use cobre_io::config::{BackwardScheduler, PhaseSolverProfileConfig, PresolveMode};
     use cobre_sddp::{Phase, RiskMeasure, SolverProfiles, StudySetup};
     use cobre_solver::ActiveSolver;
 
@@ -465,6 +472,14 @@ mod retry_armed_determinism {
             scale: None,
             price: None,
             primal_feasibility_tolerance: None,
+            dual_feasibility_tolerance: Some(1e-8),
+            presolve: Some(PresolveMode::Off),
+            simplex_update_limit: Some(1000),
+            cost_perturbation: Some(1.0),
+            refactor_error_tolerance: Some(1e-5),
+            factor_pivot_threshold: Some(0.2),
+            use_warm_start: Some(false),
+            dse_devex_fallback_threshold: Some(20.0),
         };
         let mut backward = Phase::Backward.resolve_profile(Some(&tuned));
         backward.simplex_iteration_limit = FORCED_SIMPLEX_ITERATION_LIMIT;
@@ -1405,7 +1420,6 @@ mod pn_scratch {
         let inflow_models: Vec<_> = (0..n_stages)
             .map(|idx| InflowModel {
                 hydro_id: EntityId(1),
-                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
                 stage_id: idx as i32,
                 mean_m3s: 100.0,
                 std_m3s: 30.0,
@@ -1749,10 +1763,7 @@ mod pn_scratch {
         let local_count = exchange.local_count();
         let mut state =
             BackwardPassState::new(1, 1, n_openings, n_state, local_count, n_state, n_stages);
-        state.set_scheduler(
-            BackwardScheduler::OpeningBlock,
-            Some(NonZeroUsize::new(1).expect("1 is nonzero")),
-        );
+        state.set_scheduler(BackwardScheduler::OpeningBlock, NonZeroUsize::new(1));
 
         let mut inputs = BackwardPassInputs {
             workspaces: &mut workspace_pool.workspaces,

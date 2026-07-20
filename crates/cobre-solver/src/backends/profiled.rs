@@ -141,7 +141,7 @@ mod tests {
 
     use super::ProfiledSolver;
     use crate::{
-        HighsProfile, SolverInterface,
+        HighsProfile, PresolveKind, SolverInterface,
         types::{Basis, RowBatch, SolutionView, SolverError, SolverStatistics, StageTemplate},
     };
 
@@ -174,15 +174,6 @@ mod tests {
             self.calls.borrow().clone()
         }
     }
-
-    // SAFETY for `Send`: `RecordingMockSolver` is only ever constructed and
-    // used on a single thread within these unit tests. `RefCell` is not `Sync`,
-    // but the `Send` bound on `SolverInterface` merely permits transferring
-    // ownership to another thread — it does not permit concurrent access. The
-    // mock is never actually transferred across threads; the `unsafe impl Send`
-    // is required by the trait bound and is safe in this single-threaded test
-    // context.
-    unsafe impl Send for RecordingMockSolver {}
 
     impl SolverInterface for RecordingMockSolver {
         type Profile = HighsProfile;
@@ -426,6 +417,13 @@ mod tests {
             simplex_dual_edge_weight_strategy: 0, // Dantzig
             simplex_scale_strategy: 2,            // Curtis-Reid
             simplex_price_strategy: 2,            // RowHyperSparse
+            presolve: PresolveKind::Off,
+            simplex_update_limit: 1000,
+            cost_perturbation: 1.0,
+            refactor_error_tolerance: 1e-5,
+            factor_pivot_threshold: 0.2,
+            use_warm_start: false,
+            dse_devex_fallback_threshold: 20.0,
         };
         solver.set_profile(&p);
 

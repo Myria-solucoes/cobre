@@ -23,12 +23,12 @@ use std::num::NonZeroUsize;
 
 use cobre_io::config::{BackwardScheduler, PhaseSolverProfileConfig};
 #[cfg(feature = "highs")]
-use cobre_io::config::{DualEdgeWeight, PriceStrategy, ScaleStrategy};
-#[cfg(feature = "highs")]
-use cobre_solver::HighsProfile;
+use cobre_io::config::{DualEdgeWeight, PresolveMode, PriceStrategy, ScaleStrategy};
 use cobre_solver::{ActiveProfile, DEFAULT_PROFILE_HEURISTIC_SENTINEL};
 #[cfg(feature = "clp")]
 use cobre_solver::{ClpAlgorithm, ClpProfile};
+#[cfg(feature = "highs")]
+use cobre_solver::{HighsProfile, PresolveKind};
 
 use crate::SddpError;
 
@@ -117,6 +117,13 @@ impl PhaseProfiles for HighsProfile {
         simplex_dual_edge_weight_strategy: 1, // Devex
         simplex_scale_strategy: 0,            // Off — cobre prescaler conditions the matrix
         simplex_price_strategy: 2,            // RowHyperSparse
+        presolve: PresolveKind::On,
+        simplex_update_limit: 5000,
+        cost_perturbation: 0.0,
+        refactor_error_tolerance: 1e-6,
+        factor_pivot_threshold: 0.1,
+        use_warm_start: true,
+        dse_devex_fallback_threshold: 10.0,
     };
     const BACKWARD: Self = HighsProfile {
         primal_feasibility_tolerance: 1e-9,
@@ -126,6 +133,13 @@ impl PhaseProfiles for HighsProfile {
         simplex_dual_edge_weight_strategy: 1, // Devex
         simplex_scale_strategy: 0,            // Off — cobre prescaler conditions the matrix
         simplex_price_strategy: 2,            // RowHyperSparse
+        presolve: PresolveKind::On,
+        simplex_update_limit: 5000,
+        cost_perturbation: 0.0,
+        refactor_error_tolerance: 1e-6,
+        factor_pivot_threshold: 0.1,
+        use_warm_start: true,
+        dse_devex_fallback_threshold: 10.0,
     };
     const SIMULATION: Self = HighsProfile {
         primal_feasibility_tolerance: 1e-9,
@@ -135,6 +149,13 @@ impl PhaseProfiles for HighsProfile {
         simplex_dual_edge_weight_strategy: 1, // Devex
         simplex_scale_strategy: 0,            // Off — cobre prescaler conditions the matrix
         simplex_price_strategy: 2,            // RowHyperSparse
+        presolve: PresolveKind::On,
+        simplex_update_limit: 5000,
+        cost_perturbation: 0.0,
+        refactor_error_tolerance: 1e-6,
+        factor_pivot_threshold: 0.1,
+        use_warm_start: true,
+        dse_devex_fallback_threshold: 10.0,
     };
 }
 
@@ -199,6 +220,13 @@ pub const FORWARD_PROFILE: HighsProfile = HighsProfile {
     simplex_dual_edge_weight_strategy: 1, // Devex
     simplex_scale_strategy: 0,            // Off — cobre prescaler conditions the matrix
     simplex_price_strategy: 2,            // RowHyperSparse
+    presolve: PresolveKind::On,
+    simplex_update_limit: 5000,
+    cost_perturbation: 0.0,
+    refactor_error_tolerance: 1e-6,
+    factor_pivot_threshold: 0.1,
+    use_warm_start: true,
+    dse_devex_fallback_threshold: 10.0,
 };
 
 /// Solver profile applied during the SDDP backward pass — the tuned
@@ -213,6 +241,13 @@ pub const BACKWARD_PROFILE: HighsProfile = HighsProfile {
     simplex_dual_edge_weight_strategy: 1, // Devex
     simplex_scale_strategy: 0,            // Off — cobre prescaler conditions the matrix
     simplex_price_strategy: 2,            // RowHyperSparse
+    presolve: PresolveKind::On,
+    simplex_update_limit: 5000,
+    cost_perturbation: 0.0,
+    refactor_error_tolerance: 1e-6,
+    factor_pivot_threshold: 0.1,
+    use_warm_start: true,
+    dse_devex_fallback_threshold: 10.0,
 };
 
 /// Solver profile applied during policy simulation — the tuned deep-cut-pool
@@ -227,6 +262,13 @@ pub const SIMULATION_PROFILE: HighsProfile = HighsProfile {
     simplex_dual_edge_weight_strategy: 1, // Devex
     simplex_scale_strategy: 0,            // Off — cobre prescaler conditions the matrix
     simplex_price_strategy: 2,            // RowHyperSparse
+    presolve: PresolveKind::On,
+    simplex_update_limit: 5000,
+    cost_perturbation: 0.0,
+    refactor_error_tolerance: 1e-6,
+    factor_pivot_threshold: 0.1,
+    use_warm_start: true,
+    dse_devex_fallback_threshold: 10.0,
 };
 
 impl Phase {
@@ -283,9 +325,25 @@ pub(crate) fn validate_phase_solver_config(
     }
 }
 
+/// `HiGHS` `factor_pivot_threshold`'s accepted range (`kMinPivotThreshold`/
+/// `kMaxPivotThreshold`,
+/// `crates/cobre-solver/vendor/HiGHS/highs/util/HFactorConst.h`).
+#[cfg(feature = "highs")]
+const MIN_FACTOR_PIVOT_THRESHOLD: f64 = 8e-4;
+#[cfg(feature = "highs")]
+const MAX_FACTOR_PIVOT_THRESHOLD: f64 = 0.5;
+
+#[cfg(feature = "highs")]
+const MIN_DUAL_FEASIBILITY_TOLERANCE: f64 = 1e-10;
+
+#[cfg(feature = "highs")]
+const MAX_SIMPLEX_UPDATE_LIMIT: u32 = i32::MAX as u32;
+
 /// Under `highs`, every [`DualEdgeWeight`]/[`ScaleStrategy`]/[`PriceStrategy`]
 /// variant is supported (the enums are already closed to the supported set),
-/// so only the preset name and the tolerance's finiteness need checking.
+/// and `presolve`/`use_warm_start` are unconditionally valid (closed enum /
+/// bool); every other field is checked against `HighsProfile`'s accepted
+/// range, each failure naming the field, its value, and the phase.
 #[cfg(feature = "highs")]
 fn validate_backend_support(
     config: &PhaseSolverProfileConfig,
@@ -306,7 +364,103 @@ fn validate_backend_support(
             "unsupported primal_feasibility_tolerance {tolerance} for backend \"highs\" in phase \"{phase_key}\": value must be finite"
         )));
     }
+    if let Some(tolerance) = config.dual_feasibility_tolerance
+        && (!tolerance.is_finite() || tolerance < MIN_DUAL_FEASIBILITY_TOLERANCE)
+    {
+        return Err(SddpError::Validation(format!(
+            "unsupported dual_feasibility_tolerance {tolerance} for backend \"highs\" in phase \"{phase_key}\": value must be finite and >= {MIN_DUAL_FEASIBILITY_TOLERANCE}"
+        )));
+    }
+    if let Some(limit) = config.simplex_update_limit
+        && limit > MAX_SIMPLEX_UPDATE_LIMIT
+    {
+        return Err(SddpError::Validation(format!(
+            "unsupported simplex_update_limit {limit} for backend \"highs\" in phase \"{phase_key}\": value must be <= {MAX_SIMPLEX_UPDATE_LIMIT}"
+        )));
+    }
+    if let Some(value) = config.cost_perturbation
+        && (!value.is_finite() || value < 0.0)
+    {
+        return Err(SddpError::Validation(format!(
+            "unsupported cost_perturbation {value} for backend \"highs\" in phase \"{phase_key}\": value must be finite and >= 0"
+        )));
+    }
+    if let Some(value) = config.refactor_error_tolerance
+        && (!value.is_finite() || value < 0.0)
+    {
+        return Err(SddpError::Validation(format!(
+            "unsupported refactor_error_tolerance {value} for backend \"highs\" in phase \"{phase_key}\": value must be finite and >= 0"
+        )));
+    }
+    if let Some(value) = config.factor_pivot_threshold
+        && !(MIN_FACTOR_PIVOT_THRESHOLD..=MAX_FACTOR_PIVOT_THRESHOLD).contains(&value)
+    {
+        return Err(SddpError::Validation(format!(
+            "unsupported factor_pivot_threshold {value} for backend \"highs\" in phase \"{phase_key}\": value must be in [{MIN_FACTOR_PIVOT_THRESHOLD}, {MAX_FACTOR_PIVOT_THRESHOLD}]"
+        )));
+    }
+    if let Some(value) = config.dse_devex_fallback_threshold
+        && (!value.is_finite() || value < 1.0)
+    {
+        return Err(SddpError::Validation(format!(
+            "unsupported dse_devex_fallback_threshold {value} for backend \"highs\" in phase \"{phase_key}\": value must be finite and >= 1.0"
+        )));
+    }
     Ok(())
+}
+
+/// Name of the first field `config` sets, in declaration order, or `None` if
+/// none are. Destructures the config struct exhaustively (no `..`), so a
+/// field added to `PhaseSolverProfileConfig` fails this function to compile
+/// until it is given an arm here — the single source of truth the CLP branch
+/// of `validate_backend_support` dispatches through instead of a
+/// field-by-field enumeration that a new field could silently bypass.
+#[cfg(feature = "clp")]
+fn first_set_override(config: &PhaseSolverProfileConfig) -> Option<&'static str> {
+    let PhaseSolverProfileConfig {
+        preset,
+        dual_edge_weight,
+        scale,
+        price,
+        primal_feasibility_tolerance,
+        dual_feasibility_tolerance,
+        presolve,
+        simplex_update_limit,
+        cost_perturbation,
+        refactor_error_tolerance,
+        factor_pivot_threshold,
+        use_warm_start,
+        dse_devex_fallback_threshold,
+    } = config;
+    if preset.is_some() {
+        Some("preset")
+    } else if dual_edge_weight.is_some() {
+        Some("dual_edge_weight")
+    } else if scale.is_some() {
+        Some("scale")
+    } else if price.is_some() {
+        Some("price")
+    } else if primal_feasibility_tolerance.is_some() {
+        Some("primal_feasibility_tolerance")
+    } else if dual_feasibility_tolerance.is_some() {
+        Some("dual_feasibility_tolerance")
+    } else if presolve.is_some() {
+        Some("presolve")
+    } else if simplex_update_limit.is_some() {
+        Some("simplex_update_limit")
+    } else if cost_perturbation.is_some() {
+        Some("cost_perturbation")
+    } else if refactor_error_tolerance.is_some() {
+        Some("refactor_error_tolerance")
+    } else if factor_pivot_threshold.is_some() {
+        Some("factor_pivot_threshold")
+    } else if use_warm_start.is_some() {
+        Some("use_warm_start")
+    } else if dse_devex_fallback_threshold.is_some() {
+        Some("dse_devex_fallback_threshold")
+    } else {
+        None
+    }
 }
 
 // CLP support is minimal for v1 (decision D11): reject every preset/override
@@ -318,25 +472,21 @@ fn validate_backend_support(
     phase: Phase,
 ) -> Result<(), SddpError> {
     let phase_key = phase_config_key(phase);
-    if let Some(preset) = config.preset.as_deref() {
+    let Some(field) = first_set_override(config) else {
+        return Ok(());
+    };
+    if field == "preset" {
+        let preset = config.preset.as_deref().unwrap_or_default();
         return Err(clp_unsupported(format!("preset {preset:?}"), phase_key));
     }
-    if config.dual_edge_weight.is_some() {
-        return Err(clp_unsupported("field \"dual_edge_weight\"", phase_key));
-    }
-    if config.scale.is_some() {
-        return Err(clp_unsupported("field \"scale\"", phase_key));
-    }
-    if config.price.is_some() {
-        return Err(clp_unsupported("field \"price\"", phase_key));
-    }
-    if let Some(tolerance) = config.primal_feasibility_tolerance {
+    if field == "primal_feasibility_tolerance" {
+        let tolerance = config.primal_feasibility_tolerance.unwrap_or_default();
         return Err(clp_unsupported(
             format!("field \"primal_feasibility_tolerance\" ({tolerance})"),
             phase_key,
         ));
     }
-    Ok(())
+    Err(clp_unsupported(format!("field \"{field}\""), phase_key))
 }
 
 #[cfg(feature = "clp")]
@@ -360,6 +510,13 @@ pub const BACKWARD_TUNED_V1_PRESET: HighsProfile = HighsProfile {
     simplex_dual_edge_weight_strategy: 2, // SteepestEdge
     simplex_scale_strategy: 2,            // Curtis–Reid
     simplex_price_strategy: 1,            // Row
+    presolve: PresolveKind::On,
+    simplex_update_limit: 5000,
+    cost_perturbation: 0.0,
+    refactor_error_tolerance: 1e-6,
+    factor_pivot_threshold: 0.1,
+    use_warm_start: true,
+    dse_devex_fallback_threshold: 10.0,
 };
 
 #[cfg(feature = "highs")]
@@ -384,6 +541,15 @@ fn highs_price_strategy(value: PriceStrategy) -> i32 {
     match value {
         PriceStrategy::Row => 1,
         PriceStrategy::RowHyperSparse => 2,
+    }
+}
+
+#[cfg(feature = "highs")]
+fn highs_presolve(value: PresolveMode) -> PresolveKind {
+    match value {
+        PresolveMode::On => PresolveKind::On,
+        PresolveMode::Off => PresolveKind::Off,
+        PresolveMode::Choose => PresolveKind::Choose,
     }
 }
 
@@ -415,6 +581,30 @@ fn resolve_active_profile(
     if let Some(tolerance) = config.primal_feasibility_tolerance {
         profile.primal_feasibility_tolerance = tolerance;
     }
+    if let Some(tolerance) = config.dual_feasibility_tolerance {
+        profile.dual_feasibility_tolerance = tolerance;
+    }
+    if let Some(mode) = config.presolve {
+        profile.presolve = highs_presolve(mode);
+    }
+    if let Some(limit) = config.simplex_update_limit {
+        profile.simplex_update_limit = limit;
+    }
+    if let Some(value) = config.cost_perturbation {
+        profile.cost_perturbation = value;
+    }
+    if let Some(value) = config.refactor_error_tolerance {
+        profile.refactor_error_tolerance = value;
+    }
+    if let Some(value) = config.factor_pivot_threshold {
+        profile.factor_pivot_threshold = value;
+    }
+    if let Some(value) = config.use_warm_start {
+        profile.use_warm_start = value;
+    }
+    if let Some(value) = config.dse_devex_fallback_threshold {
+        profile.dse_devex_fallback_threshold = value;
+    }
     profile
 }
 
@@ -442,6 +632,13 @@ const _: () = {
     assert!(FORWARD_PROFILE.simplex_dual_edge_weight_strategy == 1);
     assert!(FORWARD_PROFILE.simplex_scale_strategy == 0);
     assert!(FORWARD_PROFILE.simplex_price_strategy == 2);
+    assert!(matches!(FORWARD_PROFILE.presolve, PresolveKind::On));
+    assert!(FORWARD_PROFILE.simplex_update_limit == 5000);
+    assert!(FORWARD_PROFILE.cost_perturbation == 0.0);
+    assert!(FORWARD_PROFILE.refactor_error_tolerance == 1e-6);
+    assert!(FORWARD_PROFILE.factor_pivot_threshold == 0.1);
+    assert!(FORWARD_PROFILE.use_warm_start);
+    assert!(FORWARD_PROFILE.dse_devex_fallback_threshold == 10.0);
 
     assert!(BACKWARD_PROFILE.primal_feasibility_tolerance == 1e-9);
     assert!(BACKWARD_PROFILE.dual_feasibility_tolerance == 1e-9);
@@ -450,6 +647,13 @@ const _: () = {
     assert!(BACKWARD_PROFILE.simplex_dual_edge_weight_strategy == 1);
     assert!(BACKWARD_PROFILE.simplex_scale_strategy == 0);
     assert!(BACKWARD_PROFILE.simplex_price_strategy == 2);
+    assert!(matches!(BACKWARD_PROFILE.presolve, PresolveKind::On));
+    assert!(BACKWARD_PROFILE.simplex_update_limit == 5000);
+    assert!(BACKWARD_PROFILE.cost_perturbation == 0.0);
+    assert!(BACKWARD_PROFILE.refactor_error_tolerance == 1e-6);
+    assert!(BACKWARD_PROFILE.factor_pivot_threshold == 0.1);
+    assert!(BACKWARD_PROFILE.use_warm_start);
+    assert!(BACKWARD_PROFILE.dse_devex_fallback_threshold == 10.0);
 
     assert!(SIMULATION_PROFILE.primal_feasibility_tolerance == 1e-9);
     assert!(SIMULATION_PROFILE.dual_feasibility_tolerance == 1e-9);
@@ -458,6 +662,13 @@ const _: () = {
     assert!(SIMULATION_PROFILE.simplex_dual_edge_weight_strategy == 1);
     assert!(SIMULATION_PROFILE.simplex_scale_strategy == 0);
     assert!(SIMULATION_PROFILE.simplex_price_strategy == 2);
+    assert!(matches!(SIMULATION_PROFILE.presolve, PresolveKind::On));
+    assert!(SIMULATION_PROFILE.simplex_update_limit == 5000);
+    assert!(SIMULATION_PROFILE.cost_perturbation == 0.0);
+    assert!(SIMULATION_PROFILE.refactor_error_tolerance == 1e-6);
+    assert!(SIMULATION_PROFILE.factor_pivot_threshold == 0.1);
+    assert!(SIMULATION_PROFILE.use_warm_start);
+    assert!(SIMULATION_PROFILE.dse_devex_fallback_threshold == 10.0);
 
     assert!(matches!(
         <HighsProfile as PhaseProfiles>::FORWARD.simplex_price_strategy,
@@ -479,6 +690,16 @@ const _: () = {
     assert!(BACKWARD_TUNED_V1_PRESET.simplex_dual_edge_weight_strategy == 2);
     assert!(BACKWARD_TUNED_V1_PRESET.simplex_scale_strategy == 2);
     assert!(BACKWARD_TUNED_V1_PRESET.simplex_price_strategy == 1);
+    assert!(matches!(
+        BACKWARD_TUNED_V1_PRESET.presolve,
+        PresolveKind::On
+    ));
+    assert!(BACKWARD_TUNED_V1_PRESET.simplex_update_limit == 5000);
+    assert!(BACKWARD_TUNED_V1_PRESET.cost_perturbation == 0.0);
+    assert!(BACKWARD_TUNED_V1_PRESET.refactor_error_tolerance == 1e-6);
+    assert!(BACKWARD_TUNED_V1_PRESET.factor_pivot_threshold == 0.1);
+    assert!(BACKWARD_TUNED_V1_PRESET.use_warm_start);
+    assert!(BACKWARD_TUNED_V1_PRESET.dse_devex_fallback_threshold == 10.0);
 };
 
 #[cfg(test)]
@@ -497,13 +718,33 @@ mod validate_phase_solver_config_tests {
 
 #[cfg(all(test, feature = "highs"))]
 mod highs_tests {
-    use cobre_io::config::{DualEdgeWeight, PhaseSolverProfileConfig, PriceStrategy};
-    use cobre_solver::HighsProfile;
+    use cobre_io::config::{DualEdgeWeight, PhaseSolverProfileConfig, PresolveMode, PriceStrategy};
+    use cobre_solver::{HighsProfile, PresolveKind};
 
     use super::{
         BACKWARD_PROFILE, BACKWARD_TUNED_V1_PRESET, FORWARD_PROFILE, Phase, PhaseProfiles,
         SIMULATION_PROFILE, validate_phase_solver_config,
     };
+
+    /// A `PhaseSolverProfileConfig` with every field absent — the base every
+    /// per-field test starts from via `..blank_config()`.
+    fn blank_config() -> PhaseSolverProfileConfig {
+        PhaseSolverProfileConfig {
+            preset: None,
+            dual_edge_weight: None,
+            scale: None,
+            price: None,
+            primal_feasibility_tolerance: None,
+            dual_feasibility_tolerance: None,
+            presolve: None,
+            simplex_update_limit: None,
+            cost_perturbation: None,
+            refactor_error_tolerance: None,
+            factor_pivot_threshold: None,
+            use_warm_start: None,
+            dse_devex_fallback_threshold: None,
+        }
+    }
 
     /// `Phase::profile()` returns the matching named constant for each variant.
     #[test]
@@ -647,6 +888,14 @@ mod highs_tests {
             scale: None,
             price: None,
             primal_feasibility_tolerance: None,
+            dual_feasibility_tolerance: None,
+            presolve: None,
+            simplex_update_limit: None,
+            cost_perturbation: None,
+            refactor_error_tolerance: None,
+            factor_pivot_threshold: None,
+            use_warm_start: None,
+            dse_devex_fallback_threshold: None,
         };
         let resolved = Phase::Backward.resolve_profile(Some(&config));
         assert_eq!(resolved, BACKWARD_TUNED_V1_PRESET);
@@ -666,6 +915,14 @@ mod highs_tests {
             scale: None,
             price: Some(PriceStrategy::RowHyperSparse),
             primal_feasibility_tolerance: None,
+            dual_feasibility_tolerance: None,
+            presolve: None,
+            simplex_update_limit: None,
+            cost_perturbation: None,
+            refactor_error_tolerance: None,
+            factor_pivot_threshold: None,
+            use_warm_start: None,
+            dse_devex_fallback_threshold: None,
         };
         let resolved = Phase::Backward.resolve_profile(Some(&config));
         assert_eq!(resolved.simplex_price_strategy, 2);
@@ -685,6 +942,14 @@ mod highs_tests {
             scale: None,
             price: None,
             primal_feasibility_tolerance: None,
+            dual_feasibility_tolerance: None,
+            presolve: None,
+            simplex_update_limit: None,
+            cost_perturbation: None,
+            refactor_error_tolerance: None,
+            factor_pivot_threshold: None,
+            use_warm_start: None,
+            dse_devex_fallback_threshold: None,
         };
         assert_eq!(
             Phase::Backward.resolve_profile(Some(&config)),
@@ -702,6 +967,14 @@ mod highs_tests {
             scale: None,
             price: None,
             primal_feasibility_tolerance: None,
+            dual_feasibility_tolerance: None,
+            presolve: None,
+            simplex_update_limit: None,
+            cost_perturbation: None,
+            refactor_error_tolerance: None,
+            factor_pivot_threshold: None,
+            use_warm_start: None,
+            dse_devex_fallback_threshold: None,
         };
         let resolved = Phase::Forward.resolve_profile(Some(&config));
         assert_eq!(resolved.simplex_dual_edge_weight_strategy, 0);
@@ -719,6 +992,79 @@ mod highs_tests {
         );
     }
 
+    /// Each of the 8 new fields overrides the base constant when set to a
+    /// valid non-default value, and `presolve` maps through `PresolveKind`;
+    /// fields not set here keep the base constant's values.
+    #[test]
+    fn resolve_profile_new_fields_apply_overrides() {
+        let config = PhaseSolverProfileConfig {
+            dual_feasibility_tolerance: Some(1e-8),
+            presolve: Some(PresolveMode::Off),
+            simplex_update_limit: Some(2000),
+            cost_perturbation: Some(0.5),
+            refactor_error_tolerance: Some(1e-5),
+            factor_pivot_threshold: Some(0.2),
+            use_warm_start: Some(false),
+            dse_devex_fallback_threshold: Some(20.0),
+            ..blank_config()
+        };
+        let resolved = Phase::Backward.resolve_profile(Some(&config));
+        assert_eq!(resolved.dual_feasibility_tolerance, 1e-8);
+        assert!(matches!(resolved.presolve, PresolveKind::Off));
+        assert_eq!(resolved.simplex_update_limit, 2000);
+        assert_eq!(resolved.cost_perturbation, 0.5);
+        assert_eq!(resolved.refactor_error_tolerance, 1e-5);
+        assert_eq!(resolved.factor_pivot_threshold, 0.2);
+        assert!(!resolved.use_warm_start);
+        assert_eq!(resolved.dse_devex_fallback_threshold, 20.0);
+        assert_eq!(
+            resolved.primal_feasibility_tolerance,
+            BACKWARD_PROFILE.primal_feasibility_tolerance
+        );
+        assert_eq!(
+            resolved.simplex_dual_edge_weight_strategy,
+            BACKWARD_PROFILE.simplex_dual_edge_weight_strategy
+        );
+    }
+
+    /// `backward_tuned_v1` tunes only edge-weight/scale/price/primal-tolerance;
+    /// the 8 fields added after it was measured must stay at
+    /// `HighsProfile::default()` until the preset is deliberately re-measured
+    /// to include them.
+    #[test]
+    fn backward_tuned_v1_preset_new_fields_at_default() {
+        let default = HighsProfile::default();
+        assert_eq!(
+            BACKWARD_TUNED_V1_PRESET.dual_feasibility_tolerance,
+            default.dual_feasibility_tolerance
+        );
+        assert_eq!(BACKWARD_TUNED_V1_PRESET.presolve, default.presolve);
+        assert_eq!(
+            BACKWARD_TUNED_V1_PRESET.simplex_update_limit,
+            default.simplex_update_limit
+        );
+        assert_eq!(
+            BACKWARD_TUNED_V1_PRESET.cost_perturbation,
+            default.cost_perturbation
+        );
+        assert_eq!(
+            BACKWARD_TUNED_V1_PRESET.refactor_error_tolerance,
+            default.refactor_error_tolerance
+        );
+        assert_eq!(
+            BACKWARD_TUNED_V1_PRESET.factor_pivot_threshold,
+            default.factor_pivot_threshold
+        );
+        assert_eq!(
+            BACKWARD_TUNED_V1_PRESET.use_warm_start,
+            default.use_warm_start
+        );
+        assert_eq!(
+            BACKWARD_TUNED_V1_PRESET.dse_devex_fallback_threshold,
+            default.dse_devex_fallback_threshold
+        );
+    }
+
     // ── `validate_phase_solver_config` (HiGHS) ──────────────────────────────
 
     /// An unrecognized preset name is rejected, naming the preset and the phase.
@@ -730,6 +1076,14 @@ mod highs_tests {
             scale: None,
             price: None,
             primal_feasibility_tolerance: None,
+            dual_feasibility_tolerance: None,
+            presolve: None,
+            simplex_update_limit: None,
+            cost_perturbation: None,
+            refactor_error_tolerance: None,
+            factor_pivot_threshold: None,
+            use_warm_start: None,
+            dse_devex_fallback_threshold: None,
         };
         let err = validate_phase_solver_config(Some(&config), Phase::Backward)
             .expect_err("unknown preset must be rejected");
@@ -751,6 +1105,14 @@ mod highs_tests {
             scale: None,
             price: None,
             primal_feasibility_tolerance: Some(f64::NAN),
+            dual_feasibility_tolerance: None,
+            presolve: None,
+            simplex_update_limit: None,
+            cost_perturbation: None,
+            refactor_error_tolerance: None,
+            factor_pivot_threshold: None,
+            use_warm_start: None,
+            dse_devex_fallback_threshold: None,
         };
         let err = validate_phase_solver_config(Some(&config), Phase::Forward)
             .expect_err("non-finite tolerance must be rejected");
@@ -775,6 +1137,149 @@ mod highs_tests {
             scale: None,
             price: Some(PriceStrategy::RowHyperSparse),
             primal_feasibility_tolerance: Some(1e-8),
+            dual_feasibility_tolerance: None,
+            presolve: None,
+            simplex_update_limit: None,
+            cost_perturbation: None,
+            refactor_error_tolerance: None,
+            factor_pivot_threshold: None,
+            use_warm_start: None,
+            dse_devex_fallback_threshold: None,
+        };
+        assert!(validate_phase_solver_config(Some(&config), Phase::Backward).is_ok());
+    }
+
+    /// A `dual_feasibility_tolerance` below `1e-10` is rejected, naming the
+    /// field.
+    #[test]
+    fn validate_phase_solver_config_rejects_dual_feasibility_tolerance_below_min() {
+        let config = PhaseSolverProfileConfig {
+            dual_feasibility_tolerance: Some(1e-11),
+            ..blank_config()
+        };
+        let err = validate_phase_solver_config(Some(&config), Phase::Forward)
+            .expect_err("dual_feasibility_tolerance below 1e-10 must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("dual_feasibility_tolerance"),
+            "message must name the field: {msg}"
+        );
+    }
+
+    /// A `simplex_update_limit` above `i32::MAX` is rejected, naming the field.
+    #[test]
+    fn validate_phase_solver_config_rejects_simplex_update_limit_above_i32_max() {
+        let config = PhaseSolverProfileConfig {
+            simplex_update_limit: Some(u32::MAX),
+            ..blank_config()
+        };
+        let err = validate_phase_solver_config(Some(&config), Phase::Forward)
+            .expect_err("simplex_update_limit above i32::MAX must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("simplex_update_limit"),
+            "message must name the field: {msg}"
+        );
+    }
+
+    /// A negative `cost_perturbation` is rejected, naming the field — the
+    /// exact AC scenario (`-1.0`).
+    #[test]
+    fn validate_phase_solver_config_rejects_negative_cost_perturbation() {
+        let config = PhaseSolverProfileConfig {
+            cost_perturbation: Some(-1.0),
+            ..blank_config()
+        };
+        let err = validate_phase_solver_config(Some(&config), Phase::Forward)
+            .expect_err("negative cost_perturbation must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cost_perturbation"),
+            "message must name the field: {msg}"
+        );
+    }
+
+    /// A negative `refactor_error_tolerance` is rejected, naming the field.
+    #[test]
+    fn validate_phase_solver_config_rejects_negative_refactor_error_tolerance() {
+        let config = PhaseSolverProfileConfig {
+            refactor_error_tolerance: Some(-1e-6),
+            ..blank_config()
+        };
+        let err = validate_phase_solver_config(Some(&config), Phase::Forward)
+            .expect_err("negative refactor_error_tolerance must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("refactor_error_tolerance"),
+            "message must name the field: {msg}"
+        );
+    }
+
+    /// A `factor_pivot_threshold` above `kMaxPivotThreshold` (`0.5`,
+    /// `HFactorConst.h`) is rejected, naming the field — the exact AC
+    /// scenario (`0.9`).
+    #[test]
+    fn validate_phase_solver_config_rejects_factor_pivot_threshold_above_max() {
+        let config = PhaseSolverProfileConfig {
+            factor_pivot_threshold: Some(0.9),
+            ..blank_config()
+        };
+        let err = validate_phase_solver_config(Some(&config), Phase::Forward)
+            .expect_err("factor_pivot_threshold above kMaxPivotThreshold must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("factor_pivot_threshold"),
+            "message must name the field: {msg}"
+        );
+    }
+
+    /// `factor_pivot_threshold` at exactly `kMinPivotThreshold`/
+    /// `kMaxPivotThreshold` (`8e-4`/`0.5`, `HFactorConst.h`) is accepted —
+    /// the range is inclusive.
+    #[test]
+    fn validate_phase_solver_config_accepts_factor_pivot_threshold_at_bounds() {
+        for value in [8e-4, 0.5] {
+            let config = PhaseSolverProfileConfig {
+                factor_pivot_threshold: Some(value),
+                ..blank_config()
+            };
+            assert!(
+                validate_phase_solver_config(Some(&config), Phase::Forward).is_ok(),
+                "factor_pivot_threshold={value} is within [kMinPivotThreshold, kMaxPivotThreshold] and must be accepted"
+            );
+        }
+    }
+
+    /// A `dse_devex_fallback_threshold` below `1.0` is rejected, naming the
+    /// field — the exact AC scenario (`0.5`).
+    #[test]
+    fn validate_phase_solver_config_rejects_dse_devex_fallback_threshold_below_one() {
+        let config = PhaseSolverProfileConfig {
+            dse_devex_fallback_threshold: Some(0.5),
+            ..blank_config()
+        };
+        let err = validate_phase_solver_config(Some(&config), Phase::Forward)
+            .expect_err("dse_devex_fallback_threshold below 1.0 must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("dse_devex_fallback_threshold"),
+            "message must name the field: {msg}"
+        );
+    }
+
+    /// Every new field set to a valid non-default value is accepted.
+    #[test]
+    fn validate_phase_solver_config_accepts_new_fields_at_valid_values() {
+        let config = PhaseSolverProfileConfig {
+            dual_feasibility_tolerance: Some(1e-8),
+            presolve: Some(PresolveMode::Off),
+            simplex_update_limit: Some(2000),
+            cost_perturbation: Some(0.5),
+            refactor_error_tolerance: Some(1e-5),
+            factor_pivot_threshold: Some(0.2),
+            use_warm_start: Some(false),
+            dse_devex_fallback_threshold: Some(20.0),
+            ..blank_config()
         };
         assert!(validate_phase_solver_config(Some(&config), Phase::Backward).is_ok());
     }
@@ -782,10 +1287,45 @@ mod highs_tests {
 
 #[cfg(all(test, feature = "clp"))]
 mod clp_tests {
-    use cobre_io::config::{DualEdgeWeight, PhaseSolverProfileConfig};
+    use cobre_io::config::{
+        DualEdgeWeight, PhaseSolverProfileConfig, PresolveMode, PriceStrategy, ScaleStrategy,
+    };
     use cobre_solver::{ClpAlgorithm, ClpProfile};
 
-    use super::{Phase, PhaseProfiles, validate_phase_solver_config};
+    use super::{Phase, PhaseProfiles, first_set_override, validate_phase_solver_config};
+
+    /// A `PhaseSolverProfileConfig` with every field absent — the base every
+    /// per-field test starts from via `..blank_config()`.
+    fn blank_config() -> PhaseSolverProfileConfig {
+        PhaseSolverProfileConfig {
+            preset: None,
+            dual_edge_weight: None,
+            scale: None,
+            price: None,
+            primal_feasibility_tolerance: None,
+            dual_feasibility_tolerance: None,
+            presolve: None,
+            simplex_update_limit: None,
+            cost_perturbation: None,
+            refactor_error_tolerance: None,
+            factor_pivot_threshold: None,
+            use_warm_start: None,
+            dse_devex_fallback_threshold: None,
+        }
+    }
+
+    /// Runs `validate_phase_solver_config` on `config` and asserts it is
+    /// rejected, naming both the backend and `field_name`.
+    fn assert_clp_rejects_field(config: &PhaseSolverProfileConfig, field_name: &str) {
+        let err = validate_phase_solver_config(Some(config), Phase::Backward)
+            .expect_err("CLP must hard-reject a set field it does not support");
+        let msg = err.to_string();
+        assert!(msg.contains("clp"), "message must name the backend: {msg}");
+        assert!(
+            msg.contains(field_name),
+            "message must name the field {field_name:?}: {msg}"
+        );
+    }
 
     /// The CLP `FORWARD` and `BACKWARD` profiles are the identical tuned
     /// deep-cut-pool profile (dual simplex, `dual_pricing_mode = 1`,
@@ -887,6 +1427,14 @@ mod clp_tests {
             scale: None,
             price: None,
             primal_feasibility_tolerance: None,
+            dual_feasibility_tolerance: None,
+            presolve: None,
+            simplex_update_limit: None,
+            cost_perturbation: None,
+            refactor_error_tolerance: None,
+            factor_pivot_threshold: None,
+            use_warm_start: None,
+            dse_devex_fallback_threshold: None,
         };
         assert_eq!(
             Phase::Backward.resolve_profile(Some(&config)),
@@ -905,6 +1453,14 @@ mod clp_tests {
             scale: None,
             price: None,
             primal_feasibility_tolerance: None,
+            dual_feasibility_tolerance: None,
+            presolve: None,
+            simplex_update_limit: None,
+            cost_perturbation: None,
+            refactor_error_tolerance: None,
+            factor_pivot_threshold: None,
+            use_warm_start: None,
+            dse_devex_fallback_threshold: None,
         };
         let err = validate_phase_solver_config(Some(&config), Phase::Backward)
             .expect_err("CLP must hard-reject the tuned preset");
@@ -926,9 +1482,178 @@ mod clp_tests {
             scale: None,
             price: None,
             primal_feasibility_tolerance: None,
+            dual_feasibility_tolerance: None,
+            presolve: None,
+            simplex_update_limit: None,
+            cost_perturbation: None,
+            refactor_error_tolerance: None,
+            factor_pivot_threshold: None,
+            use_warm_start: None,
+            dse_devex_fallback_threshold: None,
         };
         let err = validate_phase_solver_config(Some(&config), Phase::Forward)
             .expect_err("CLP must hard-reject an unsupported override");
         assert!(err.to_string().contains("clp"));
+    }
+
+    /// Each of the 8 new fields is hard-rejected on CLP when it is the only
+    /// field set, naming both the backend and the field.
+    #[test]
+    fn validate_phase_solver_config_rejects_clp_new_fields() {
+        assert_clp_rejects_field(
+            &PhaseSolverProfileConfig {
+                dual_feasibility_tolerance: Some(1e-8),
+                ..blank_config()
+            },
+            "dual_feasibility_tolerance",
+        );
+        assert_clp_rejects_field(
+            &PhaseSolverProfileConfig {
+                presolve: Some(PresolveMode::Off),
+                ..blank_config()
+            },
+            "presolve",
+        );
+        assert_clp_rejects_field(
+            &PhaseSolverProfileConfig {
+                simplex_update_limit: Some(2000),
+                ..blank_config()
+            },
+            "simplex_update_limit",
+        );
+        assert_clp_rejects_field(
+            &PhaseSolverProfileConfig {
+                cost_perturbation: Some(0.5),
+                ..blank_config()
+            },
+            "cost_perturbation",
+        );
+        assert_clp_rejects_field(
+            &PhaseSolverProfileConfig {
+                refactor_error_tolerance: Some(1e-5),
+                ..blank_config()
+            },
+            "refactor_error_tolerance",
+        );
+        assert_clp_rejects_field(
+            &PhaseSolverProfileConfig {
+                factor_pivot_threshold: Some(0.2),
+                ..blank_config()
+            },
+            "factor_pivot_threshold",
+        );
+        assert_clp_rejects_field(
+            &PhaseSolverProfileConfig {
+                use_warm_start: Some(false),
+                ..blank_config()
+            },
+            "use_warm_start",
+        );
+        assert_clp_rejects_field(
+            &PhaseSolverProfileConfig {
+                dse_devex_fallback_threshold: Some(20.0),
+                ..blank_config()
+            },
+            "dse_devex_fallback_threshold",
+        );
+    }
+
+    /// `first_set_override` names each of the 13 fields when it is the only
+    /// one set, and returns `None` for a fully-absent config — the single
+    /// source of truth `validate_backend_support` dispatches through.
+    #[test]
+    fn first_set_override_detects_every_field() {
+        assert_eq!(first_set_override(&blank_config()), None);
+        assert_eq!(
+            first_set_override(&PhaseSolverProfileConfig {
+                preset: Some("backward_tuned_v1".to_string()),
+                ..blank_config()
+            }),
+            Some("preset")
+        );
+        assert_eq!(
+            first_set_override(&PhaseSolverProfileConfig {
+                dual_edge_weight: Some(DualEdgeWeight::Dantzig),
+                ..blank_config()
+            }),
+            Some("dual_edge_weight")
+        );
+        assert_eq!(
+            first_set_override(&PhaseSolverProfileConfig {
+                scale: Some(ScaleStrategy::Off),
+                ..blank_config()
+            }),
+            Some("scale")
+        );
+        assert_eq!(
+            first_set_override(&PhaseSolverProfileConfig {
+                price: Some(PriceStrategy::Row),
+                ..blank_config()
+            }),
+            Some("price")
+        );
+        assert_eq!(
+            first_set_override(&PhaseSolverProfileConfig {
+                primal_feasibility_tolerance: Some(1e-8),
+                ..blank_config()
+            }),
+            Some("primal_feasibility_tolerance")
+        );
+        assert_eq!(
+            first_set_override(&PhaseSolverProfileConfig {
+                dual_feasibility_tolerance: Some(1e-8),
+                ..blank_config()
+            }),
+            Some("dual_feasibility_tolerance")
+        );
+        assert_eq!(
+            first_set_override(&PhaseSolverProfileConfig {
+                presolve: Some(PresolveMode::Off),
+                ..blank_config()
+            }),
+            Some("presolve")
+        );
+        assert_eq!(
+            first_set_override(&PhaseSolverProfileConfig {
+                simplex_update_limit: Some(2000),
+                ..blank_config()
+            }),
+            Some("simplex_update_limit")
+        );
+        assert_eq!(
+            first_set_override(&PhaseSolverProfileConfig {
+                cost_perturbation: Some(0.5),
+                ..blank_config()
+            }),
+            Some("cost_perturbation")
+        );
+        assert_eq!(
+            first_set_override(&PhaseSolverProfileConfig {
+                refactor_error_tolerance: Some(1e-5),
+                ..blank_config()
+            }),
+            Some("refactor_error_tolerance")
+        );
+        assert_eq!(
+            first_set_override(&PhaseSolverProfileConfig {
+                factor_pivot_threshold: Some(0.2),
+                ..blank_config()
+            }),
+            Some("factor_pivot_threshold")
+        );
+        assert_eq!(
+            first_set_override(&PhaseSolverProfileConfig {
+                use_warm_start: Some(false),
+                ..blank_config()
+            }),
+            Some("use_warm_start")
+        );
+        assert_eq!(
+            first_set_override(&PhaseSolverProfileConfig {
+                dse_devex_fallback_threshold: Some(20.0),
+                ..blank_config()
+            }),
+            Some("dse_devex_fallback_threshold")
+        );
     }
 }

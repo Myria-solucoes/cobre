@@ -25,7 +25,9 @@ mod tests {
     use std::cell::Cell;
 
     use cobre_solver::types::{Basis, RowBatch, SolutionView, SolverError, SolverStatistics};
-    use cobre_solver::{HighsProfile, HighsSolver, ProfiledSolver, SolverInterface, StageTemplate};
+    use cobre_solver::{
+        HighsProfile, HighsSolver, PresolveKind, ProfiledSolver, SolverInterface, StageTemplate,
+    };
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -440,13 +442,16 @@ mod tests {
     // Power statement: catches a `HighsProfile` field that `reapply_profile`
     // forgets to re-install after `restore_default_settings` — the seam the two
     // `Fix 1` tests above only sample via the tolerances. It does NOT catch a
-    // HiGHS-internal option the profile never carries (only the fields
-    // `reapply_profile` owns are read back below).
+    // HiGHS-internal option the profile never carries, and the `presolve`/
+    // `use_warm_start` fields are exercised through `apply_profile` but not
+    // read back here — `HighsSolver`'s test-support surface has no
+    // string/bool option getter (only the fields readable via
+    // `get_double_option`/`get_int_option` are asserted below).
 
-    /// Every field `reapply_profile` is responsible for — both feasibility
-    /// tolerances and all three simplex strategy ints — survives
-    /// `restore_default_settings` followed by `reapply_profile`, with every one
-    /// of those fields installed at a non-default value simultaneously.
+    /// Every int/double-valued field `reapply_profile` restores survives
+    /// `restore_default_settings` followed by `reapply_profile`, with every
+    /// profile field (including `presolve`/`use_warm_start`) installed at a
+    /// non-default value simultaneously.
     #[test]
     fn full_profile_survives_retry_finalization_seam() {
         let mut solver = make_solver();
@@ -458,6 +463,13 @@ mod tests {
             simplex_dual_edge_weight_strategy: 0, // Dantzig
             simplex_scale_strategy: 2,            // Curtis-Reid
             simplex_price_strategy: 2,            // RowHyperSparse
+            presolve: PresolveKind::Off,
+            simplex_update_limit: 1000,
+            cost_perturbation: 1.0,
+            refactor_error_tolerance: 1e-5,
+            factor_pivot_threshold: 0.2,
+            use_warm_start: false,
+            dse_devex_fallback_threshold: 20.0,
         };
         assert_ne!(
             profile,
@@ -483,6 +495,21 @@ mod tests {
         let price = solver
             .get_int_option(c"simplex_price_strategy")
             .expect("simplex_price_strategy must be readable");
+        let simplex_update_limit = solver
+            .get_int_option(c"simplex_update_limit")
+            .expect("simplex_update_limit must be readable");
+        let cost_perturbation = solver
+            .get_double_option(c"dual_simplex_cost_perturbation_multiplier")
+            .expect("dual_simplex_cost_perturbation_multiplier must be readable");
+        let refactor_error_tolerance = solver
+            .get_double_option(c"rebuild_refactor_solution_error_tolerance")
+            .expect("rebuild_refactor_solution_error_tolerance must be readable");
+        let factor_pivot_threshold = solver
+            .get_double_option(c"factor_pivot_threshold")
+            .expect("factor_pivot_threshold must be readable");
+        let dse_devex_fallback_threshold = solver
+            .get_double_option(c"dual_steepest_edge_weight_log_error_threshold")
+            .expect("dual_steepest_edge_weight_log_error_threshold must be readable");
 
         assert!(
             (primal - profile.primal_feasibility_tolerance).abs() < 1e-20,
@@ -505,6 +532,32 @@ mod tests {
         assert_eq!(
             price, profile.simplex_price_strategy,
             "simplex_price_strategy must survive the finalization seam"
+        );
+        #[allow(clippy::cast_possible_wrap)]
+        let expected_simplex_update_limit = profile.simplex_update_limit as i32;
+        assert_eq!(
+            simplex_update_limit, expected_simplex_update_limit,
+            "simplex_update_limit must survive the finalization seam"
+        );
+        assert!(
+            (cost_perturbation - profile.cost_perturbation).abs() < 1e-20,
+            "cost_perturbation must survive the finalization seam; expected {}, got {cost_perturbation}",
+            profile.cost_perturbation
+        );
+        assert!(
+            (refactor_error_tolerance - profile.refactor_error_tolerance).abs() < 1e-20,
+            "refactor_error_tolerance must survive the finalization seam; expected {}, got {refactor_error_tolerance}",
+            profile.refactor_error_tolerance
+        );
+        assert!(
+            (factor_pivot_threshold - profile.factor_pivot_threshold).abs() < 1e-20,
+            "factor_pivot_threshold must survive the finalization seam; expected {}, got {factor_pivot_threshold}",
+            profile.factor_pivot_threshold
+        );
+        assert!(
+            (dse_devex_fallback_threshold - profile.dse_devex_fallback_threshold).abs() < 1e-20,
+            "dse_devex_fallback_threshold must survive the finalization seam; expected {}, got {dse_devex_fallback_threshold}",
+            profile.dse_devex_fallback_threshold
         );
     }
 
@@ -613,6 +666,13 @@ mod tests {
             simplex_dual_edge_weight_strategy: 0,
             simplex_scale_strategy: 0,
             simplex_price_strategy: 2,
+            presolve: PresolveKind::Off,
+            simplex_update_limit: 1000,
+            cost_perturbation: 1.0,
+            refactor_error_tolerance: 1e-5,
+            factor_pivot_threshold: 0.2,
+            use_warm_start: false,
+            dse_devex_fallback_threshold: 20.0,
         };
         solver.set_profile(&non_default);
 

@@ -259,6 +259,53 @@ pub struct PhaseSolverProfileConfig {
     /// Primal feasibility tolerance override.
     #[serde(default)]
     pub primal_feasibility_tolerance: Option<f64>,
+
+    /// Dual feasibility tolerance override.
+    #[serde(default)]
+    pub dual_feasibility_tolerance: Option<f64>,
+
+    /// Presolve mode override. Warm-started solves skip presolve regardless
+    /// of this setting, so it affects only genuinely cold solves.
+    #[serde(default)]
+    pub presolve: Option<PresolveMode>,
+
+    /// Simplex update-count limit override before a refactorization.
+    #[serde(default)]
+    pub simplex_update_limit: Option<u32>,
+
+    /// Dual simplex cost-perturbation multiplier override.
+    #[serde(default)]
+    pub cost_perturbation: Option<f64>,
+
+    /// Refactorization solution-error tolerance override.
+    #[serde(default)]
+    pub refactor_error_tolerance: Option<f64>,
+
+    /// Matrix factorization pivot-threshold override.
+    #[serde(default)]
+    pub factor_pivot_threshold: Option<f64>,
+
+    /// Warm-start override. This is a diagnostic setting: disabling it forces
+    /// every solve cold.
+    #[serde(default)]
+    pub use_warm_start: Option<bool>,
+
+    /// Dual steepest-edge weight log-error fallback-threshold override.
+    #[serde(default)]
+    pub dse_devex_fallback_threshold: Option<f64>,
+}
+
+/// Presolve mode for a solver profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum PresolveMode {
+    /// Presolve enabled.
+    On,
+    /// Presolve disabled.
+    Off,
+    /// Solver decides whether to presolve.
+    Choose,
 }
 
 /// Backward opening solve order.
@@ -418,8 +465,8 @@ pub struct LipschitzConfig {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{
-        BackwardOpeningOrder, BackwardScheduler, DualEdgeWeight, NonZeroUsize, PriceStrategy,
-        ScaleStrategy, SelectionMethod, TrainingConfig,
+        BackwardOpeningOrder, BackwardScheduler, DualEdgeWeight, NonZeroUsize, PresolveMode,
+        PriceStrategy, ScaleStrategy, SelectionMethod, TrainingConfig,
     };
 
     /// A `dynamic` selection block round-trips through the tagged enum, with
@@ -580,6 +627,33 @@ mod tests {
         assert!(cfg.solver.forward.is_none());
     }
 
+    /// A `training.solver.backward` block setting `presolve`, `use_warm_start`,
+    /// and `factor_pivot_threshold` round-trips into the new fields.
+    #[test]
+    fn backward_solver_profile_new_fields_round_trip() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "solver": {
+                "backward": {
+                    "presolve": "off",
+                    "use_warm_start": false,
+                    "factor_pivot_threshold": 0.2
+                }
+            }
+        }"#;
+        let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
+        let backward = cfg.solver.backward.as_ref().expect("backward present");
+        assert_eq!(backward.presolve, Some(PresolveMode::Off));
+        assert_eq!(backward.use_warm_start, Some(false));
+        assert_eq!(backward.factor_pivot_threshold, Some(0.2));
+        assert!(backward.dual_feasibility_tolerance.is_none());
+        assert!(backward.simplex_update_limit.is_none());
+        assert!(backward.cost_perturbation.is_none());
+        assert!(backward.refactor_error_tolerance.is_none());
+        assert!(backward.dse_devex_fallback_threshold.is_none());
+    }
+
     /// A `training.solver.forward` block round-trips independently of `backward`.
     #[test]
     fn forward_solver_profile_block_round_trips() {
@@ -614,6 +688,22 @@ mod tests {
         assert!(
             result.is_err(),
             "an unknown field under backward must be rejected"
+        );
+    }
+
+    /// The misspelled `presolv` field under `backward` is a deserialize error
+    /// under `deny_unknown_fields`.
+    #[test]
+    fn backward_solver_profile_presolv_typo_is_deserialize_error() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "solver": { "backward": { "presolv": "off" } }
+        }"#;
+        let result = serde_json::from_str::<TrainingConfig>(json);
+        assert!(
+            result.is_err(),
+            "the presolv typo under backward must be rejected"
         );
     }
 

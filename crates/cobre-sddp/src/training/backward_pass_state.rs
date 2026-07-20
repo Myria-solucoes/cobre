@@ -1918,6 +1918,14 @@ mod tests {
                 scale: None,
                 price: None,
                 primal_feasibility_tolerance: None,
+                dual_feasibility_tolerance: None,
+                presolve: None,
+                simplex_update_limit: None,
+                cost_perturbation: None,
+                refactor_error_tolerance: None,
+                factor_pivot_threshold: None,
+                use_warm_start: None,
+                dse_devex_fallback_threshold: None,
             }));
         bwd_state.set_profile(resolved);
 
@@ -2075,9 +2083,6 @@ mod tests {
             .run(&mut inputs)
             .expect("backward pass must not error");
 
-        // After the backward pass, the sole worker's `state_duals_buf` must
-        // hold exactly `n_state` entries — the duals from the last opening
-        // processed during the last trial-point/stage iteration.
         assert_eq!(
             inputs.workspaces[0].backward_accum.state_duals_buf.len(),
             n_state,

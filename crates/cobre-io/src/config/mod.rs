@@ -40,8 +40,9 @@ pub use scenario_source::{RawClassConfigEntry, RawHistoricalYearsConfig, RawScen
 pub use simulation::SimulationConfig;
 pub use training::{
     BackwardOpeningOrder, BackwardScheduler, DualEdgeWeight, LipschitzConfig,
-    PhaseSolverProfileConfig, PriceStrategy, RowSelectionConfig, ScaleStrategy, SelectionMethod,
-    StoppingRuleConfig, TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+    PhaseSolverProfileConfig, PresolveMode, PriceStrategy, RowSelectionConfig, ScaleStrategy,
+    SelectionMethod, StoppingRuleConfig, TrainingConfig, TrainingSolverConfig,
+    UpperBoundEvaluationConfig,
 };
 
 use cobre_core::scenario::{HistoricalYears, SamplingScheme, ScenarioSource};

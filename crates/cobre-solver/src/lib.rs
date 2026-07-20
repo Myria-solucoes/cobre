@@ -77,7 +77,7 @@ pub mod backends;
 pub use backends::profiled::ProfiledSolver;
 
 #[cfg(feature = "highs")]
-pub use backends::highs::{HighsProfile, HighsSolver, highs_version};
+pub use backends::highs::{HighsProfile, HighsSolver, PresolveKind, highs_version};
 
 #[cfg(feature = "clp")]
 pub use backends::clp::{ClpAlgorithm, ClpProfile, ClpSolver, clp_version};

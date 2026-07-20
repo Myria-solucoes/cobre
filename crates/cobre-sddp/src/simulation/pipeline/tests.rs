@@ -496,6 +496,55 @@ fn zero_energy_conversion(n_hydros: usize, n_stages: usize) -> EnergyConversionS
     )
 }
 
+/// Like `single_workspace`, but sizes the patch buffer and reserves
+/// `load_rhs_buf` for `n_load_buses` stochastic load buses.
+fn single_workspace_with_load_buses(
+    solver: MockSolver,
+    n_load_buses: usize,
+) -> Vec<SolverWorkspace<MockSolver>> {
+    vec![SolverWorkspace {
+        rank: 0,
+        worker_id: 0,
+        solver: ProfiledSolver::new(solver),
+        patch_buf: PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0),
+        current_state: Vec::with_capacity(1),
+        scratch: ScratchBuffers {
+            noise_buf: Vec::new(),
+            inflow_m3s_buf: Vec::new(),
+            lag_matrix_buf: Vec::new(),
+            par_inflow_buf: Vec::new(),
+            eta_floor_buf: Vec::new(),
+            zero_targets_buf: Vec::new(),
+            ncs_col_upper_buf: Vec::new(),
+            ncs_col_lower_buf: Vec::new(),
+            ncs_col_indices_buf: Vec::new(),
+            ncs_col_lower_active_buf: Vec::new(),
+            ncs_col_upper_active_buf: Vec::new(),
+            last_ncs_col_start: usize::MAX,
+            ncs_col_upper_extract_buf: Vec::new(),
+            load_rhs_buf: Vec::with_capacity(n_load_buses),
+            row_lower_buf: Vec::new(),
+            z_inflow_rhs_buf: Vec::new(),
+            effective_eta_buf: Vec::new(),
+            unscaled_primal: Vec::new(),
+            unscaled_dual: Vec::new(),
+            lag_accumulator: vec![],
+            lag_weight_accum: 0.0,
+            downstream_accumulator: Vec::new(),
+            downstream_weight_accum: 0.0,
+            downstream_completed_lags: Vec::new(),
+            downstream_n_completed: 0,
+            recon_slot_lookup: Vec::new(),
+            trajectory_costs_buf: Vec::new(),
+            raw_noise_buf: Vec::new(),
+            perm_scratch: Vec::new(),
+        },
+        scratch_basis: Basis::new(0, 0),
+        backward_accum: BackwardAccumulators::default(),
+        worker_timing_buf: WorkerPhaseTimings::default(),
+    }]
+}
+
 /// Wrap a `MockSolver` in a single-workspace slice for `simulate()` calls.
 ///
 /// All tests use a single workspace (serial execution) so that existing
@@ -746,47 +795,7 @@ fn simulation_load_patches_applied() {
 
     let (tx, _rx) = mpsc::sync_channel(4);
 
-    let mut workspaces = vec![SolverWorkspace {
-        rank: 0,
-        worker_id: 0,
-        solver: ProfiledSolver::new(solver),
-        patch_buf: PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0),
-        current_state: Vec::with_capacity(1),
-        scratch: ScratchBuffers {
-            noise_buf: Vec::new(),
-            inflow_m3s_buf: Vec::new(),
-            lag_matrix_buf: Vec::new(),
-            par_inflow_buf: Vec::new(),
-            eta_floor_buf: Vec::new(),
-            zero_targets_buf: Vec::new(),
-            ncs_col_upper_buf: Vec::new(),
-            ncs_col_lower_buf: Vec::new(),
-            ncs_col_indices_buf: Vec::new(),
-            ncs_col_lower_active_buf: Vec::new(),
-            ncs_col_upper_active_buf: Vec::new(),
-            last_ncs_col_start: usize::MAX,
-            ncs_col_upper_extract_buf: Vec::new(),
-            load_rhs_buf: Vec::with_capacity(n_load_buses),
-            row_lower_buf: Vec::new(),
-            z_inflow_rhs_buf: Vec::new(),
-            effective_eta_buf: Vec::new(),
-            unscaled_primal: Vec::new(),
-            unscaled_dual: Vec::new(),
-            lag_accumulator: vec![],
-            lag_weight_accum: 0.0,
-            downstream_accumulator: Vec::new(),
-            downstream_weight_accum: 0.0,
-            downstream_completed_lags: Vec::new(),
-            downstream_n_completed: 0,
-            recon_slot_lookup: Vec::new(),
-            trajectory_costs_buf: Vec::new(),
-            raw_noise_buf: Vec::new(),
-            perm_scratch: Vec::new(),
-        },
-        scratch_basis: Basis::new(0, 0),
-        backward_accum: BackwardAccumulators::default(),
-        worker_timing_buf: WorkerPhaseTimings::default(),
-    }];
+    let mut workspaces = single_workspace_with_load_buses(solver, n_load_buses);
 
     // load_balance_row_starts[0]=2 (load balance row is row 2 in the template).
     // load_bus_indices=[0] (bus position 0 in the block layout).
@@ -1087,6 +1096,14 @@ fn simulation_state_set_profile_reaches_current_profile_after_run() {
             scale: Some(cobre_io::config::ScaleStrategy::SolverScaling),
             price: None,
             primal_feasibility_tolerance: None,
+            dual_feasibility_tolerance: None,
+            presolve: None,
+            simplex_update_limit: None,
+            cost_perturbation: None,
+            refactor_error_tolerance: None,
+            factor_pivot_threshold: None,
+            use_warm_start: None,
+            dse_devex_fallback_threshold: None,
         }));
 
     run_simulate_with_profile(
@@ -1227,47 +1244,7 @@ fn simulation_inflow_extraction_unaffected() {
 
     let (tx, _rx) = mpsc::sync_channel(4);
 
-    let mut workspaces = vec![SolverWorkspace {
-        rank: 0,
-        worker_id: 0,
-        solver: ProfiledSolver::new(solver),
-        patch_buf: PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0),
-        current_state: Vec::with_capacity(1),
-        scratch: ScratchBuffers {
-            noise_buf: Vec::new(),
-            inflow_m3s_buf: Vec::new(),
-            lag_matrix_buf: Vec::new(),
-            par_inflow_buf: Vec::new(),
-            eta_floor_buf: Vec::new(),
-            zero_targets_buf: Vec::new(),
-            ncs_col_upper_buf: Vec::new(),
-            ncs_col_lower_buf: Vec::new(),
-            ncs_col_indices_buf: Vec::new(),
-            ncs_col_lower_active_buf: Vec::new(),
-            ncs_col_upper_active_buf: Vec::new(),
-            last_ncs_col_start: usize::MAX,
-            ncs_col_upper_extract_buf: Vec::new(),
-            load_rhs_buf: Vec::with_capacity(n_load_buses),
-            row_lower_buf: Vec::new(),
-            z_inflow_rhs_buf: Vec::new(),
-            effective_eta_buf: Vec::new(),
-            unscaled_primal: Vec::new(),
-            unscaled_dual: Vec::new(),
-            lag_accumulator: vec![],
-            lag_weight_accum: 0.0,
-            downstream_accumulator: Vec::new(),
-            downstream_weight_accum: 0.0,
-            downstream_completed_lags: Vec::new(),
-            downstream_n_completed: 0,
-            recon_slot_lookup: Vec::new(),
-            trajectory_costs_buf: Vec::new(),
-            raw_noise_buf: Vec::new(),
-            perm_scratch: Vec::new(),
-        },
-        scratch_basis: Basis::new(0, 0),
-        backward_accum: BackwardAccumulators::default(),
-        worker_timing_buf: WorkerPhaseTimings::default(),
-    }];
+    let mut workspaces = single_workspace_with_load_buses(solver, n_load_buses);
 
     let load_balance_row_starts = vec![2usize];
     let load_bus_indices = vec![0usize];

@@ -29,6 +29,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   option surface; CLP solver-profile support is deferred until it is
   separately measured.
 
+- **The per-phase solver-profile block gains further override fields**:
+  `dual_feasibility_tolerance`, `presolve`, `simplex_update_limit`,
+  `cost_perturbation`, `refactor_error_tolerance`, `factor_pivot_threshold`,
+  `use_warm_start`, and `dse_devex_fallback_threshold`, layered on top of the
+  named `preset` the same way as the existing override fields. `presolve`
+  only affects a solve that starts genuinely cold — a warm-started solve
+  skips presolve regardless of the setting. `use_warm_start` is a
+  diagnostic override: setting it `false` forces every solve in the phase
+  cold and is not an intended production configuration. Every new field is
+  optional; leaving it unset resolves to the value already in effect before
+  this override existed, so a study with no override for a new field
+  resolves byte-identically to before, and the `backward_tuned_v1` preset
+  leaves every new field at that value. On the CLP backend, setting any new
+  field is rejected at setup the same way the existing override fields are.
+
 - **An opt-in opening-block backward scheduler distributes backward-pass
   work at finer granularity than a whole trial point.** Setting
   `training.backward_scheduler = "opening_block"` (the default remains
