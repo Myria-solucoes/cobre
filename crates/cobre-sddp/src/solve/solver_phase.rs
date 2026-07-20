@@ -501,6 +501,13 @@ fn clp_unsupported(item: impl std::fmt::Display, phase_key: &str) -> SddpError {
 /// feasibility tolerance) selected via
 /// `training.solver.backward = {"preset": "backward_tuned_v1"}`. Fields the
 /// bundle does not tune keep [`BACKWARD_PROFILE`]'s values.
+///
+/// The dual `SteepestEdge` selection above is a request, not a guarantee:
+/// under a warm-started solve `HiGHS` silently falls back to Devex pricing
+/// once the DSE weight log error exceeds
+/// `dual_steepest_edge_weight_log_error_threshold`, so a resolve may run
+/// partly on Devex regardless of this preset —
+/// [`HighsProfile::dse_devex_fallback_threshold`] pins that threshold.
 #[cfg(feature = "highs")]
 pub const BACKWARD_TUNED_V1_PRESET: HighsProfile = HighsProfile {
     primal_feasibility_tolerance: 1e-7,
@@ -884,18 +891,7 @@ mod highs_tests {
     fn resolve_profile_preset_resolves_to_exact_bundle() {
         let config = PhaseSolverProfileConfig {
             preset: Some("backward_tuned_v1".to_string()),
-            dual_edge_weight: None,
-            scale: None,
-            price: None,
-            primal_feasibility_tolerance: None,
-            dual_feasibility_tolerance: None,
-            presolve: None,
-            simplex_update_limit: None,
-            cost_perturbation: None,
-            refactor_error_tolerance: None,
-            factor_pivot_threshold: None,
-            use_warm_start: None,
-            dse_devex_fallback_threshold: None,
+            ..blank_config()
         };
         let resolved = Phase::Backward.resolve_profile(Some(&config));
         assert_eq!(resolved, BACKWARD_TUNED_V1_PRESET);
@@ -911,18 +907,8 @@ mod highs_tests {
     fn resolve_profile_per_field_override_beats_preset() {
         let config = PhaseSolverProfileConfig {
             preset: Some("backward_tuned_v1".to_string()),
-            dual_edge_weight: None,
-            scale: None,
             price: Some(PriceStrategy::RowHyperSparse),
-            primal_feasibility_tolerance: None,
-            dual_feasibility_tolerance: None,
-            presolve: None,
-            simplex_update_limit: None,
-            cost_perturbation: None,
-            refactor_error_tolerance: None,
-            factor_pivot_threshold: None,
-            use_warm_start: None,
-            dse_devex_fallback_threshold: None,
+            ..blank_config()
         };
         let resolved = Phase::Backward.resolve_profile(Some(&config));
         assert_eq!(resolved.simplex_price_strategy, 2);
@@ -938,18 +924,7 @@ mod highs_tests {
     fn resolve_profile_unknown_preset_falls_back_to_base_constant() {
         let config = PhaseSolverProfileConfig {
             preset: Some("turbo".to_string()),
-            dual_edge_weight: None,
-            scale: None,
-            price: None,
-            primal_feasibility_tolerance: None,
-            dual_feasibility_tolerance: None,
-            presolve: None,
-            simplex_update_limit: None,
-            cost_perturbation: None,
-            refactor_error_tolerance: None,
-            factor_pivot_threshold: None,
-            use_warm_start: None,
-            dse_devex_fallback_threshold: None,
+            ..blank_config()
         };
         assert_eq!(
             Phase::Backward.resolve_profile(Some(&config)),
@@ -962,19 +937,8 @@ mod highs_tests {
     #[test]
     fn resolve_profile_field_overrides_without_preset_apply_on_base_constant() {
         let config = PhaseSolverProfileConfig {
-            preset: None,
             dual_edge_weight: Some(DualEdgeWeight::Dantzig),
-            scale: None,
-            price: None,
-            primal_feasibility_tolerance: None,
-            dual_feasibility_tolerance: None,
-            presolve: None,
-            simplex_update_limit: None,
-            cost_perturbation: None,
-            refactor_error_tolerance: None,
-            factor_pivot_threshold: None,
-            use_warm_start: None,
-            dse_devex_fallback_threshold: None,
+            ..blank_config()
         };
         let resolved = Phase::Forward.resolve_profile(Some(&config));
         assert_eq!(resolved.simplex_dual_edge_weight_strategy, 0);
@@ -1072,18 +1036,7 @@ mod highs_tests {
     fn validate_phase_solver_config_rejects_unknown_preset() {
         let config = PhaseSolverProfileConfig {
             preset: Some("turbo".to_string()),
-            dual_edge_weight: None,
-            scale: None,
-            price: None,
-            primal_feasibility_tolerance: None,
-            dual_feasibility_tolerance: None,
-            presolve: None,
-            simplex_update_limit: None,
-            cost_perturbation: None,
-            refactor_error_tolerance: None,
-            factor_pivot_threshold: None,
-            use_warm_start: None,
-            dse_devex_fallback_threshold: None,
+            ..blank_config()
         };
         let err = validate_phase_solver_config(Some(&config), Phase::Backward)
             .expect_err("unknown preset must be rejected");
@@ -1100,19 +1053,8 @@ mod highs_tests {
     #[test]
     fn validate_phase_solver_config_rejects_non_finite_tolerance() {
         let config = PhaseSolverProfileConfig {
-            preset: None,
-            dual_edge_weight: None,
-            scale: None,
-            price: None,
             primal_feasibility_tolerance: Some(f64::NAN),
-            dual_feasibility_tolerance: None,
-            presolve: None,
-            simplex_update_limit: None,
-            cost_perturbation: None,
-            refactor_error_tolerance: None,
-            factor_pivot_threshold: None,
-            use_warm_start: None,
-            dse_devex_fallback_threshold: None,
+            ..blank_config()
         };
         let err = validate_phase_solver_config(Some(&config), Phase::Forward)
             .expect_err("non-finite tolerance must be rejected");
@@ -1134,17 +1076,9 @@ mod highs_tests {
         let config = PhaseSolverProfileConfig {
             preset: Some("backward_tuned_v1".to_string()),
             dual_edge_weight: Some(DualEdgeWeight::Dantzig),
-            scale: None,
             price: Some(PriceStrategy::RowHyperSparse),
             primal_feasibility_tolerance: Some(1e-8),
-            dual_feasibility_tolerance: None,
-            presolve: None,
-            simplex_update_limit: None,
-            cost_perturbation: None,
-            refactor_error_tolerance: None,
-            factor_pivot_threshold: None,
-            use_warm_start: None,
-            dse_devex_fallback_threshold: None,
+            ..blank_config()
         };
         assert!(validate_phase_solver_config(Some(&config), Phase::Backward).is_ok());
     }
@@ -1423,18 +1357,7 @@ mod clp_tests {
         );
         let config = PhaseSolverProfileConfig {
             preset: Some("backward_tuned_v1".to_string()),
-            dual_edge_weight: None,
-            scale: None,
-            price: None,
-            primal_feasibility_tolerance: None,
-            dual_feasibility_tolerance: None,
-            presolve: None,
-            simplex_update_limit: None,
-            cost_perturbation: None,
-            refactor_error_tolerance: None,
-            factor_pivot_threshold: None,
-            use_warm_start: None,
-            dse_devex_fallback_threshold: None,
+            ..blank_config()
         };
         assert_eq!(
             Phase::Backward.resolve_profile(Some(&config)),
@@ -1449,18 +1372,7 @@ mod clp_tests {
     fn validate_phase_solver_config_rejects_clp_preset() {
         let config = PhaseSolverProfileConfig {
             preset: Some("backward_tuned_v1".to_string()),
-            dual_edge_weight: None,
-            scale: None,
-            price: None,
-            primal_feasibility_tolerance: None,
-            dual_feasibility_tolerance: None,
-            presolve: None,
-            simplex_update_limit: None,
-            cost_perturbation: None,
-            refactor_error_tolerance: None,
-            factor_pivot_threshold: None,
-            use_warm_start: None,
-            dse_devex_fallback_threshold: None,
+            ..blank_config()
         };
         let err = validate_phase_solver_config(Some(&config), Phase::Backward)
             .expect_err("CLP must hard-reject the tuned preset");
@@ -1477,19 +1389,8 @@ mod clp_tests {
     #[test]
     fn validate_phase_solver_config_rejects_clp_override_without_preset() {
         let config = PhaseSolverProfileConfig {
-            preset: None,
             dual_edge_weight: Some(DualEdgeWeight::Dantzig),
-            scale: None,
-            price: None,
-            primal_feasibility_tolerance: None,
-            dual_feasibility_tolerance: None,
-            presolve: None,
-            simplex_update_limit: None,
-            cost_perturbation: None,
-            refactor_error_tolerance: None,
-            factor_pivot_threshold: None,
-            use_warm_start: None,
-            dse_devex_fallback_threshold: None,
+            ..blank_config()
         };
         let err = validate_phase_solver_config(Some(&config), Phase::Forward)
             .expect_err("CLP must hard-reject an unsupported override");
