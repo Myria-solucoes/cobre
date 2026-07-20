@@ -1298,7 +1298,6 @@ mod tests {
         let mut state = ForwardPassState::new(1, fx.n_stages, fx.n_scenarios);
         let resolved =
             Phase::Forward.resolve_profile(Some(&cobre_io::config::PhaseSolverProfileConfig {
-                preset: None,
                 dual_edge_weight: Some(cobre_io::config::DualEdgeWeight::Dantzig),
                 scale: None,
                 price: None,

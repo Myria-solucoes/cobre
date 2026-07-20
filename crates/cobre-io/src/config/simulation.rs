@@ -53,14 +53,12 @@ mod tests {
             "enabled": true,
             "num_scenarios": 500,
             "solver": {
-                "preset": "sim_v1",
                 "scale": "off",
                 "price": "row"
             }
         }"#;
         let cfg: SimulationConfig = serde_json::from_str(json).unwrap();
         let solver = cfg.solver.as_ref().expect("solver present");
-        assert_eq!(solver.preset.as_deref(), Some("sim_v1"));
         assert_eq!(solver.scale, Some(ScaleStrategy::Off));
         assert_eq!(solver.price, Some(PriceStrategy::Row));
     }

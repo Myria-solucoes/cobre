@@ -313,9 +313,9 @@ impl StudySetup {
     ///
     /// # Errors
     ///
-    /// - [`SddpError::Validation`] — a per-phase solver profile config names an
-    ///   unknown preset, or sets a preset/field the compiled backend does not
-    ///   support (see `validate_phase_solver_config`).
+    /// - [`SddpError::Validation`] — a per-phase solver profile config sets a
+    ///   field the compiled backend does not support (see
+    ///   `validate_phase_solver_config`).
     /// - [`SddpError::Validation`] — if `build_stage_templates` succeeds but
     ///   the template list is empty ("system has no study stages").
     /// - [`SddpError::Solver`] — propagated from `build_stage_templates` on LP
@@ -353,9 +353,9 @@ impl StudySetup {
             opening_block_size,
         } = config;
 
-        // Fail fast on a backend-unsupported preset/field before any template
-        // exists; validation runs on every rank (`from_broadcast_params` is the
-        // shared setup path), so it is deterministic across the run.
+        // Fail fast on a backend-unsupported field before any template exists;
+        // validation runs on every rank (`from_broadcast_params` is the shared
+        // setup path), so it is deterministic across the run.
         validate_phase_solver_config(training_solver_backward.as_ref(), Phase::Backward)?;
         validate_phase_solver_config(training_solver_forward.as_ref(), Phase::Forward)?;
         validate_phase_solver_config(simulation_solver.as_ref(), Phase::Simulation)?;

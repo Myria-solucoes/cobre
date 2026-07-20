@@ -234,16 +234,11 @@ impl Default for TrainingSolverConfig {
 /// `.forward`, and `simulation.solver`).
 ///
 /// Backend-agnostic. Every field is optional: an absent field leaves the
-/// corresponding solver option at its backend default. `preset` names a
-/// built-in profile applied first; the remaining fields override it.
+/// corresponding solver option at its backend default.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PhaseSolverProfileConfig {
-    /// Named built-in profile to start from before applying the overrides below.
-    #[serde(default)]
-    pub preset: Option<String>,
-
     /// Dual simplex edge-weight strategy override.
     #[serde(default)]
     pub dual_edge_weight: Option<DualEdgeWeight>,
@@ -593,9 +588,9 @@ mod tests {
         );
     }
 
-    /// A full `training.solver.backward` block round-trips: `preset` plus every
-    /// per-field override lands in `PhaseSolverProfileConfig`, and the sibling
-    /// `forward` phase stays absent.
+    /// A full `training.solver.backward` block round-trips: every per-field
+    /// override lands in `PhaseSolverProfileConfig`, and the sibling `forward`
+    /// phase stays absent.
     #[test]
     fn backward_solver_profile_block_round_trips() {
         let json = r#"{
@@ -603,7 +598,6 @@ mod tests {
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
             "solver": {
                 "backward": {
-                    "preset": "backward_tuned_v1",
                     "dual_edge_weight": "steepest_edge",
                     "scale": "solver_scaling",
                     "price": "row",
@@ -613,7 +607,6 @@ mod tests {
         }"#;
         let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
         let backward = cfg.solver.backward.as_ref().expect("backward present");
-        assert_eq!(backward.preset.as_deref(), Some("backward_tuned_v1"));
         assert_eq!(
             backward.dual_edge_weight,
             Some(DualEdgeWeight::SteepestEdge)
@@ -668,7 +661,6 @@ mod tests {
         let forward = cfg.solver.forward.as_ref().expect("forward present");
         assert_eq!(forward.price, Some(PriceStrategy::RowHyperSparse));
         assert_eq!(forward.dual_edge_weight, Some(DualEdgeWeight::Dantzig));
-        assert!(forward.preset.is_none());
         assert!(cfg.solver.backward.is_none());
     }
 

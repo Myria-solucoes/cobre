@@ -13,36 +13,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Per-phase LP solver settings are now configurable.**
   `training.solver.backward`, `training.solver.forward`, and
-  `simulation.solver` each accept an optional solver-profile block — a named
-  `preset` plus per-field overrides (`dual_edge_weight`, `scale`, `price`,
+  `simulation.solver` each accept an optional solver-profile block of
+  per-field overrides (`dual_edge_weight`, `scale`, `price`,
   `primal_feasibility_tolerance`) — resolved once at setup and broadcast
-  identically to every MPI rank. A recognized `preset` replaces the phase's
-  built-in profile before the per-field overrides layer on top of it; the
-  `backward_tuned_v1` preset selects the measured tuned bundle for the
-  backward pass (dual `SteepestEdge`, Curtis–Reid scaling, `Row` pricing, a
-  loosened primal feasibility tolerance). Every field is optional, and a
-  study with no solver-profile config resolves byte-identically to the
-  prior, unconfigurable per-phase defaults. On the CLP backend, any
-  solver-profile config — the preset or any override field — is rejected at
-  setup with a named error identifying the phase and the unsupported
-  setting, instead of silently applying a HiGHS-tuned option to CLP's own
-  option surface; CLP solver-profile support is deferred until it is
-  separately measured.
+  identically to every MPI rank, a later field always overriding the
+  phase's built-in profile. The measured tuned bundle for the backward pass
+  (dual `SteepestEdge`, Curtis–Reid scaling, `Row` pricing, a loosened
+  primal feasibility tolerance) is configured explicitly:
+
+  ```json
+  "backward": {
+    "dual_edge_weight": "steepest_edge",
+    "scale": "solver_scaling",
+    "price": "row",
+    "primal_feasibility_tolerance": 1e-7
+  }
+  ```
+
+  Every field is optional, and a study with no solver-profile config
+  resolves byte-identically to the prior, unconfigurable per-phase
+  defaults. On the CLP backend, any solver-profile config — any override
+  field — is rejected at setup with a named error identifying the phase and
+  the unsupported setting, instead of silently applying a HiGHS-tuned
+  option to CLP's own option surface; CLP solver-profile support is
+  deferred until it is separately measured.
 
 - **The per-phase solver-profile block gains further override fields**:
   `dual_feasibility_tolerance`, `presolve`, `simplex_update_limit`,
   `cost_perturbation`, `refactor_error_tolerance`, `factor_pivot_threshold`,
-  `use_warm_start`, and `dse_devex_fallback_threshold`, layered on top of the
-  named `preset` the same way as the existing override fields. `presolve`
-  only affects a solve that starts genuinely cold — a warm-started solve
-  skips presolve regardless of the setting. `use_warm_start` is a
-  diagnostic override: setting it `false` forces every solve in the phase
-  cold and is not an intended production configuration. Every new field is
-  optional; leaving it unset resolves to the value already in effect before
-  this override existed, so a study with no override for a new field
-  resolves byte-identically to before, and the `backward_tuned_v1` preset
-  leaves every new field at that value. On the CLP backend, setting any new
-  field is rejected at setup the same way the existing override fields are.
+  `use_warm_start`, and `dse_devex_fallback_threshold`, layered on top of
+  the base profile the same way as the existing override fields.
+  `presolve` only affects a solve that starts genuinely cold — a
+  warm-started solve skips presolve regardless of the setting.
+  `use_warm_start` is a diagnostic override: setting it `false` forces
+  every solve in the phase cold and is not an intended production
+  configuration. Every new field is optional; leaving it unset resolves to
+  the value already in effect before this override existed, so a study
+  with no override for a new field resolves byte-identically to before. On
+  the CLP backend, setting any new field is rejected at setup the same way
+  the existing override fields are.
 
 - **An opt-in opening-block backward scheduler distributes backward-pass
   work at finer granularity than a whole trial point.** Setting

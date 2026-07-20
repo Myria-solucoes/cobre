@@ -280,7 +280,7 @@
     },
     "PhaseSolverProfileConfig": {
       "additionalProperties": false,
-      "description": "Per-phase LP solver profile (`config.json → training.solver.backward` /\n`.forward`, and `simulation.solver`).\n\nBackend-agnostic. Every field is optional: an absent field leaves the\ncorresponding solver option at its backend default. `preset` names a\nbuilt-in profile applied first; the remaining fields override it.",
+      "description": "Per-phase LP solver profile (`config.json → training.solver.backward` /\n`.forward`, and `simulation.solver`).\n\nBackend-agnostic. Every field is optional: an absent field leaves the\ncorresponding solver option at its backend default.",
       "properties": {
         "cost_perturbation": {
           "default": null,
@@ -327,14 +327,6 @@
           "format": "double",
           "type": [
             "number",
-            "null"
-          ]
-        },
-        "preset": {
-          "default": null,
-          "description": "Named built-in profile to start from before applying the overrides below.",
-          "type": [
-            "string",
             "null"
           ]
         },

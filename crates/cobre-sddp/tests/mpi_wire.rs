@@ -420,10 +420,12 @@ mod test_mpi_4rank_basis_broadcast_round_trip {
 
 #[cfg(all(feature = "highs", feature = "test-support"))]
 mod retry_armed_determinism {
-    //! Retry-armed determinism gate: the `backward_tuned_v1` preset with a
-    //! deliberately low `simplex_iteration_limit` forces the `HiGHS` retry
-    //! escalation ladder (`crates/cobre-solver/src/backends/highs/retry.rs`)
-    //! to fire, then asserts the final training lower bound is bitwise
+    //! Retry-armed determinism gate: the tuned backward profile (`SteepestEdge`
+    //! dual edge weight, Curtis-Reid scaling, `Row` pricing, primal tolerance
+    //! `1e-7`) with a deliberately low `simplex_iteration_limit` forces the
+    //! `HiGHS` retry escalation ladder
+    //! (`crates/cobre-solver/src/backends/highs/retry.rs`) to fire, then
+    //! asserts the final training lower bound is bitwise
     //! identical across four execution shapes of the SAME config: threads=k,
     //! threads=1, a same-shape repeat, and a faithful 2-rank leg. Runs on both
     //! an expectation and a `CVaR` risk configuration of the same fixture.
@@ -445,30 +447,32 @@ mod retry_armed_determinism {
     use std::path::Path;
 
     use cobre_comm::Communicator;
-    use cobre_io::config::{BackwardScheduler, PhaseSolverProfileConfig, PresolveMode};
+    use cobre_io::config::{
+        BackwardScheduler, DualEdgeWeight, PhaseSolverProfileConfig, PresolveMode, PriceStrategy,
+        ScaleStrategy,
+    };
     use cobre_sddp::{Phase, RiskMeasure, SolverProfiles, StudySetup};
     use cobre_solver::ActiveSolver;
 
     use crate::common::{Rank0Of2, StubComm};
 
-    /// Low enough that the tuned `backward_tuned_v1` profile's first attempt
-    /// cannot finish within the cap on every stage solve of the d03 fixture,
-    /// arming the retry-escalation ladder on every solve rather than
-    /// occasionally; tuned empirically against this fixture, not derived
-    /// from a closed form.
+    /// Low enough that the tuned backward profile's first attempt cannot
+    /// finish within the cap on every stage solve of the d03 fixture, arming
+    /// the retry-escalation ladder on every solve rather than occasionally;
+    /// tuned empirically against this fixture, not derived from a closed
+    /// form.
     const FORCED_SIMPLEX_ITERATION_LIMIT: u32 = 1;
 
-    /// `backward_tuned_v1` (`SteepestEdge` / Curtis-Reid / Row / ptol `1e-7`)
-    /// forced to [`FORCED_SIMPLEX_ITERATION_LIMIT`]. `forward` stays
+    /// The tuned backward profile (`SteepestEdge` / Curtis-Reid / Row / ptol
+    /// `1e-7`) forced to [`FORCED_SIMPLEX_ITERATION_LIMIT`]. `forward` stays
     /// byte-neutral (`Phase::Forward.resolve_profile(None)`): only the
     /// backward-pass retry-finalization seam is under test.
     fn forced_retry_profiles() -> SolverProfiles {
         let tuned = PhaseSolverProfileConfig {
-            preset: Some("backward_tuned_v1".to_string()),
-            dual_edge_weight: None,
-            scale: None,
-            price: None,
-            primal_feasibility_tolerance: None,
+            dual_edge_weight: Some(DualEdgeWeight::SteepestEdge),
+            scale: Some(ScaleStrategy::SolverScaling),
+            price: Some(PriceStrategy::Row),
+            primal_feasibility_tolerance: Some(1e-7),
             dual_feasibility_tolerance: Some(1e-8),
             presolve: Some(PresolveMode::Off),
             simplex_update_limit: Some(1000),

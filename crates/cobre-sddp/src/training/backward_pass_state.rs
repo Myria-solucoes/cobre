@@ -1913,11 +1913,10 @@ mod tests {
         );
         let resolved =
             Phase::Backward.resolve_profile(Some(&cobre_io::config::PhaseSolverProfileConfig {
-                preset: Some("backward_tuned_v1".to_string()),
-                dual_edge_weight: None,
-                scale: None,
-                price: None,
-                primal_feasibility_tolerance: None,
+                dual_edge_weight: Some(cobre_io::config::DualEdgeWeight::SteepestEdge),
+                scale: Some(cobre_io::config::ScaleStrategy::SolverScaling),
+                price: Some(cobre_io::config::PriceStrategy::Row),
+                primal_feasibility_tolerance: Some(1e-7),
                 dual_feasibility_tolerance: None,
                 presolve: None,
                 simplex_update_limit: None,

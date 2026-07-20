@@ -482,7 +482,6 @@ mod tests {
                 ],
                 "solver": {
                     "backward": {
-                        "preset": "backward_tuned_v1",
                         "price": "row_hyper_sparse"
                     },
                     "forward": {
@@ -510,11 +509,6 @@ mod tests {
             .training_solver_backward
             .as_ref()
             .expect("backward profile must survive the round trip");
-        assert_eq!(decoded_backward.preset, original_backward.preset);
-        assert_eq!(
-            decoded_backward.preset.as_deref(),
-            Some("backward_tuned_v1")
-        );
         assert_eq!(decoded_backward.price, original_backward.price);
         assert_eq!(
             decoded_backward.price,
@@ -571,7 +565,7 @@ mod tests {
                     { "type": "iteration_limit", "limit": 10 }
                 ],
                 "solver": {
-                    "backward": { "preset": "backward_tuned_v1" },
+                    "backward": { "dual_edge_weight": "steepest_edge" },
                     "forward": { "price": "row_hyper_sparse" }
                 }
             },

@@ -1091,7 +1091,6 @@ fn simulation_state_set_profile_reaches_current_profile_after_run() {
 
     let resolved =
         Phase::Simulation.resolve_profile(Some(&cobre_io::config::PhaseSolverProfileConfig {
-            preset: None,
             dual_edge_weight: None,
             scale: Some(cobre_io::config::ScaleStrategy::SolverScaling),
             price: None,
