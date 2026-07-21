@@ -5099,7 +5099,7 @@ fn d33_converges_to_known_optimum() {
 
 /// Chronological-blocks telescoping ⇒ parallel bound-agreement anchor.
 ///
-/// Pins the §9 "telescoping ⇒ parallel agreement when interiors are inert" contract
+/// Pins the "telescoping ⇒ parallel agreement when interiors are inert" contract
 /// at the solved-bound level: with `γᵥ = 0` (constant productivity), no
 /// storage-dependent evaporation, and non-binding interior storage bounds, a
 /// chronological (`K = 2`) run's converged lower bound equals the matched parallel

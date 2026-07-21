@@ -782,7 +782,7 @@ pub fn build_stage_templates_resolving_layout(
 /// `ζ_t = total_hours_per_stage[stage_idx]·M3S_TO_HM3`; `rate`/`min_storage` are
 /// the RESOLVED per-stage bounds. The clip at `min_storage` enforces that no floor
 /// exceeds the dead volume — dropping it would let an over-provisioned schedule
-/// demand a floor ABOVE the dead volume (the design §3.1 forbidden alternative).
+/// demand a floor ABOVE the dead volume — the forbidden alternative.
 /// The fold runs on the UNCLIPPED running value, clipping each stored `V_target[t]`
 /// independently to mirror the closed form.
 ///

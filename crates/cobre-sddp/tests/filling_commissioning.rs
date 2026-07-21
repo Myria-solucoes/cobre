@@ -478,7 +478,7 @@ mod d38_dead_volume_filling_simulation {
             let routed_gap = delta_storage - incremental_balance;
             assert!(
                 routed_gap >= routed_floor_hm3 - 1e-3,
-                "§7.1 PreFilling stage {prefilling_stage}: the routed-water gap on H3 \
+                "PreFilling stage {prefilling_stage}: the routed-water gap on H3 \
              ({routed_gap:.6} hm³ = Δstorage {delta_storage:.6} − incremental-only balance \
              {incremental_balance:.6}) must be at least H2's own routed incremental \
              ζ·incr_H2 = {routed_floor_hm3:.6} hm³; a smaller gap means short-circuited water \
@@ -503,7 +503,7 @@ mod d38_dead_volume_filling_simulation {
                 stage_hydro(scenario, H2_ID, filling_stage).filling_target_violation_hm3;
             assert!(
                 sigma_fill > 1e-6,
-                "§7.4: H2 σ_fill must be strictly positive at Filling stage {filling_stage} (the \
+                "H2 σ_fill must be strictly positive at Filling stage {filling_stage} (the \
              short inflow leaves storage below V_target[{filling_stage}] = {v_target}); got \
              {sigma_fill}"
             );
@@ -511,7 +511,7 @@ mod d38_dead_volume_filling_simulation {
         let sigma_floor_s5 = stage_hydro(scenario, H2_ID, 5).storage_violation_below_hm3;
         assert!(
             sigma_floor_s5 < 1e-6,
-            "§7.4: H2 σ^{{v-}} must be ~0 at the last Operating stage (id 5) after the inflow \
+            "H2 σ^{{v-}} must be ~0 at the last Operating stage (id 5) after the inflow \
          recovers and storage climbs above the dead volume {H2_MIN_STORAGE_HM3}; got \
          {sigma_floor_s5}"
         );
@@ -520,7 +520,7 @@ mod d38_dead_volume_filling_simulation {
         let h2_s4_initial = stage_hydro(scenario, H2_ID, 4).storage_initial_hm3;
         assert!(
             (h2_s3_final - h2_s4_initial).abs() < 1e-6,
-            "§7.5: end-of-Filling storage at id 3 ({h2_s3_final}) must equal incoming storage at \
+            "end-of-Filling storage at id 3 ({h2_s3_final}) must equal incoming storage at \
          id 4 ({h2_s4_initial}) via the pin chain"
         );
 

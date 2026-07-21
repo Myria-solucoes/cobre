@@ -32,7 +32,7 @@ mod tests {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /// Minimal 2-column, no-constraint LP fixture. `num_cols = 2` feeds the
-    /// `set_iteration_limits` heuristic the AC-8 tests check.
+    /// `set_iteration_limits` heuristic the iteration-cap tests check.
     fn make_minimal_template() -> StageTemplate {
         StageTemplate {
             num_cols: 2,
@@ -62,9 +62,9 @@ mod tests {
         solver
     }
 
-    // ── AC-8: iteration-cap composition ──────────────────────────────────────
+    // ── Iteration-cap composition ─────────────────────────────────────────────
 
-    /// AC-8 sentinel branch: when the profile simplex cap is the sentinel
+    /// Sentinel branch: when the profile simplex cap is the sentinel
     /// value (0), `apply_retry_level_options(0)` must apply the historical
     /// heuristic `max(100_000, num_cols * 50)`.
     ///
@@ -89,7 +89,7 @@ mod tests {
         );
     }
 
-    /// AC-8 literal-value branch: when the profile simplex cap is non-zero,
+    /// Literal-value branch: when the profile simplex cap is non-zero,
     /// `apply_retry_level_options(0)` must apply that exact value verbatim.
     #[test]
     fn nonzero_simplex_cap_used_verbatim() {
@@ -111,7 +111,7 @@ mod tests {
         );
     }
 
-    /// AC-8 IPM cap branch: `ipm_iteration_limit` from the profile is applied
+    /// IPM cap branch: `ipm_iteration_limit` from the profile is applied
     /// verbatim regardless of which retry level is active (`set_iteration_limits`
     /// always sets it).
     #[test]
@@ -134,7 +134,7 @@ mod tests {
         );
     }
 
-    // ── AC-8 bonus: default-attempt tolerance setter wires to FFI ────────────
+    // ── Default-attempt tolerance setter wires to FFI ────────────────────────
 
     /// Verify that `apply_profile` writes the primal tolerance to the
     /// underlying `HiGHS` option immediately (not only at retry time).
@@ -156,7 +156,7 @@ mod tests {
         );
     }
 
-    // ── AC-9: loose profile (profile_value > level_default) ──────────────────
+    // ── Loose profile (profile_value > level_default) ────────────────────────
     //
     // Profile primal = dual = 1e-5.
     // Levels 3 and 7  have level_default = 1e-8  →  max(1e-8, 1e-5) = 1e-5.
@@ -260,7 +260,7 @@ mod tests {
         );
     }
 
-    // ── AC-10: strict profile (profile_value < level_default) ────────────────
+    // ── Strict profile (profile_value < level_default) ───────────────────────
     //
     // Profile primal = dual = 1e-12.
     // Levels 3 and 7  have level_default = 1e-8  →  max(1e-8, 1e-12) = 1e-8.
@@ -548,13 +548,13 @@ mod tests {
         );
     }
 
-    // ── Fix 2: IPM iteration_limit sentinel for "unbounded" ──────────────────
+    // ── IPM iteration_limit sentinel for "unbounded" ─────────────────────────
     //
     // When `ipm_iteration_limit == 0` (DEFAULT_PROFILE_IPM_UNBOUNDED_SENTINEL),
     // `set_iteration_limits` must pass `i32::MAX` to HiGHS — not 0, which HiGHS
     // would interpret as "no iterations allowed".
 
-    /// Fix 2 — `ipm_iteration_limit = 0` maps to `i32::MAX` at the FFI layer.
+    /// `ipm_iteration_limit = 0` maps to `i32::MAX` at the FFI layer.
     ///
     /// Sets the profile IPM cap to 0 (the "unbounded" sentinel), triggers
     /// `set_iteration_limits` via `apply_retry_level_options(0)`, and reads
