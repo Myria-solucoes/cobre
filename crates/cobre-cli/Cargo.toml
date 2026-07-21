@@ -18,12 +18,12 @@ path = "src/main.rs"
 doc = false
 
 [dependencies]
-cobre-core = { version = "0.11.1", path = "../cobre-core", features = ["serde"] }
-cobre-io = { version = "0.11.1", path = "../cobre-io", features = ["schema"] }
-cobre-sddp = { version = "0.11.1", path = "../cobre-sddp", default-features = false }
-cobre-solver = { version = "0.11.1", path = "../cobre-solver", default-features = false }
-cobre-comm = { version = "0.11.1", path = "../cobre-comm" }
-cobre-stochastic = { version = "0.11.1", path = "../cobre-stochastic" }
+cobre-core = { version = "0.12.0", path = "../cobre-core", features = ["serde"] }
+cobre-io = { version = "0.12.0", path = "../cobre-io", features = ["schema"] }
+cobre-sddp = { version = "0.12.0", path = "../cobre-sddp", default-features = false }
+cobre-solver = { version = "0.12.0", path = "../cobre-solver", default-features = false }
+cobre-comm = { version = "0.12.0", path = "../cobre-comm" }
+cobre-stochastic = { version = "0.12.0", path = "../cobre-stochastic" }
 clap = { version = "4", features = ["derive"] }
 postcard = { version = "1", features = ["alloc"] }
 console = "0.16"
@@ -59,8 +59,8 @@ slow-tests = []
 arrow = { version = "59", default-features = false }
 assert_cmd = "2"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
-cobre-io = { version = "0.11.1", path = "../cobre-io" }
-cobre-solver = { version = "0.11.1", path = "../cobre-solver", default-features = false }
+cobre-io = { version = "0.12.0", path = "../cobre-io" }
+cobre-solver = { version = "0.12.0", path = "../cobre-solver", default-features = false }
 parquet = { version = "59", default-features = false, features = ["arrow"] }
 predicates = "3"
 tempfile = "3"
