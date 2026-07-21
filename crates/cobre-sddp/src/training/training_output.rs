@@ -428,7 +428,7 @@ pub struct PhaseTimingTotals {
 
 /// Sum the phase-wall/wait/serial timing components across every iteration in
 /// `records`. Integer-ms accumulation only — the caller converts to seconds once
-/// (declaration-order invariance; D5).
+/// (declaration-order invariance).
 #[must_use]
 pub fn sum_phase_timing_ms(records: &[IterationRecord]) -> PhaseTimingTotals {
     records

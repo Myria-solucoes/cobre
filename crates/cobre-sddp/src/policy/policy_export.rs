@@ -235,8 +235,8 @@ pub fn build_stage_cut_records(fcf: &FutureCostFunction) -> Vec<Vec<PolicyCutRec
 }
 
 /// Rescale [`build_stage_cut_records`]'s output from the writing study's
-/// internal scaled cost space to canonical currency units at rest (§5 Option
-/// A): every `coefficients` entry and `intercept`, multiplied by
+/// internal scaled cost space to canonical currency units at rest: every
+/// `coefficients` entry and `intercept`, multiplied by
 /// `cost_scale_factor`.
 ///
 /// Returns owned records because [`PolicyCutRecord::coefficients`] borrows —

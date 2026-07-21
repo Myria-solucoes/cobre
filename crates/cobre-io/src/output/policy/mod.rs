@@ -1393,7 +1393,7 @@ mod tests {
         );
     }
 
-    /// §5 Option A legacy-migration contract: a checkpoint written before
+    /// Legacy-migration contract: a checkpoint written before
     /// `cost_scale_factor` provenance existed (JSON with no such key)
     /// deserializes to `None` — the "interpreted as scaled-at-1e6" marker.
     #[test]

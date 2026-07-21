@@ -19,8 +19,8 @@ pub const DEFAULT_MAX_ITERATIONS: u64 = 100;
 /// Default random seed for stochastic scenario generation.
 pub const DEFAULT_SEED: u64 = 42;
 
-/// Default `modeling.cost_scale_factor` when absent from config — byte-identical
-/// to the prior hard-coded `COST_SCALE_FACTOR` constant.
+/// Default `modeling.cost_scale_factor` when absent from config — the value
+/// every golden parity baseline is pinned at.
 pub const DEFAULT_COST_SCALE_FACTOR: f64 = 1_000_000.0;
 
 /// Advisory range for `modeling.cost_scale_factor`; values outside this range
@@ -450,7 +450,7 @@ mod tests {
         config
     }
 
-    /// AC: an absent `modeling.cost_scale_factor` resolves to
+    /// An absent `modeling.cost_scale_factor` resolves to
     /// [`DEFAULT_COST_SCALE_FACTOR`] — the byte-neutral-at-default contract.
     #[test]
     fn cost_scale_factor_absent_resolves_to_default() {
@@ -460,7 +460,7 @@ mod tests {
         assert_eq!(params.cost_scale_factor, 1_000_000.0);
     }
 
-    /// AC: a valid custom `modeling.cost_scale_factor` resolves verbatim.
+    /// A valid custom `modeling.cost_scale_factor` resolves verbatim.
     #[test]
     fn cost_scale_factor_custom_value_resolves_verbatim() {
         let params = StudyParams::from_config(&config_with_cost_scale_factor(Some(500.0)))
@@ -468,7 +468,7 @@ mod tests {
         assert_eq!(params.cost_scale_factor, 500.0);
     }
 
-    /// AC: `from_config` rejects a non-finite `cost_scale_factor` (NaN, +inf,
+    /// `from_config` rejects a non-finite `cost_scale_factor` (NaN, +inf,
     /// -inf) with `SddpError::Validation` naming the field.
     #[test]
     fn cost_scale_factor_rejects_non_finite() {
@@ -488,7 +488,7 @@ mod tests {
         }
     }
 
-    /// AC: `from_config` rejects a non-positive `cost_scale_factor` (zero and
+    /// `from_config` rejects a non-positive `cost_scale_factor` (zero and
     /// negative) with `SddpError::Validation` naming the field.
     #[test]
     fn cost_scale_factor_rejects_non_positive() {
@@ -508,7 +508,7 @@ mod tests {
         }
     }
 
-    /// AC: a `cost_scale_factor` outside the advisory range `[1.0, 1e12]` is
+    /// A `cost_scale_factor` outside the advisory range `[1.0, 1e12]` is
     /// ACCEPTED (construction succeeds) but emits a WARN-level tracing event
     /// naming the field — never a hard rejection.
     #[test]
@@ -533,7 +533,7 @@ mod tests {
         }
     }
 
-    /// AC: the advisory-range boundaries `1.0` and `1e12` are inclusive — no
+    /// The advisory-range boundaries `1.0` and `1e12` are inclusive — no
     /// warning fires exactly at either edge.
     #[test]
     fn cost_scale_factor_advisory_range_boundaries_are_inclusive() {
@@ -556,7 +556,7 @@ mod tests {
         }
     }
 
-    /// AC: `from_config` must return `SddpError::Validation` when the stopping
+    /// `from_config` must return `SddpError::Validation` when the stopping
     /// rules list contains a `simulation_based` entry, because the feature is
     /// not yet implemented. Silent no-op (fold into iteration limit) is
     /// forbidden.
@@ -581,7 +581,7 @@ mod tests {
         );
     }
 
-    /// AC: when `max_active_per_stage` is less than `forward_passes`, `StudyParams::from_config`
+    /// When `max_active_per_stage` is less than `forward_passes`, `StudyParams::from_config`
     /// emits a WARN-level tracing event whose message contains `max_active_per_stage`.
     #[test]
     fn study_params_warns_when_budget_below_forward_passes() {

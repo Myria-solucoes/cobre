@@ -61,13 +61,12 @@ pub(crate) fn resolve_warm_start_counts(
     }
 }
 
-/// The constant a policy checkpoint written before `cost_scale_factor`
-/// provenance was recorded (§5 Option A) was unconditionally scaled at — the
-/// pre-this-feature hard-coded `COST_SCALE_FACTOR`. A checkpoint whose
+/// The constant every unmarked policy checkpoint (no `cost_scale_factor`
+/// provenance) was unconditionally scaled at. A checkpoint whose
 /// `metadata.cost_scale_factor` is `None` is interpreted under this constant.
 pub const LEGACY_COST_SCALE_FACTOR: f64 = 1_000_000.0;
 
-/// Rescale one stage's cut records (§5 Option A) from their at-rest
+/// Rescale one stage's cut records from their at-rest
 /// representation into the LOADING study's internal scaled cost space.
 ///
 /// - **Marked** (`source_cost_scale_factor: Some(s)`): the checkpoint holds
@@ -76,18 +75,16 @@ pub const LEGACY_COST_SCALE_FACTOR: f64 = 1_000_000.0;
 ///   Every value here is divided by `loading_cost_scale_factor`, UNCONDITIONALLY
 ///   — even when `s` equals `loading_cost_scale_factor` — since the file
 ///   already carries one export-side rounding; a second division is the
-///   accepted same-factor ULP drift (§5 Option A trade-off), never special-cased
+///   accepted same-factor ULP drift, never special-cased
 ///   away.
 /// - **Legacy** (`None`): the checkpoint holds the writing study's OWN internal
-///   scaled values under the hard-coded historical constant
-///   [`LEGACY_COST_SCALE_FACTOR`] — no export-side multiply ever ran, because
-///   Option A did not exist yet. When `loading_cost_scale_factor ==
+///   scaled values under [`LEGACY_COST_SCALE_FACTOR`] — legacy files carry
+///   no export-side multiply. When `loading_cost_scale_factor ==
 ///   LEGACY_COST_SCALE_FACTOR` (the overwhelmingly common case: every existing
-///   policy directory read at the still-default factor) this is an exact
-///   no-op, bit-identical to pre-this-feature behavior — skipping it is a
-///   correctness requirement, not an optimization: a legacy checkpoint loaded
-///   at the default factor is NOT part of the one-time re-baseline the ticket
-///   scopes to newly-written Option-A files. Otherwise every value is
+///   policy directory read at the still-default factor) this is an exact,
+///   bit-identical no-op — a correctness requirement, not an optimization: a
+///   legacy checkpoint at the default factor must load bit-identically, never
+///   re-baselined. Otherwise every value is
 ///   multiplied by `LEGACY_COST_SCALE_FACTOR / loading_cost_scale_factor`.
 pub(crate) fn rescale_cut_records_for_load(
     records: &mut [OwnedPolicyCutRecord],
@@ -116,7 +113,7 @@ pub(crate) fn rescale_cut_records_for_load(
     }
 }
 
-/// [`rescale_cut_records_for_load`] applied to every stage of a full policy
+/// `rescale_cut_records_for_load` applied to every stage of a full policy
 /// checkpoint — the [`FullFcf`] load path (training warm-start/resume and
 /// simulation-only runs both route through this before the records reach
 /// [`crate::FutureCostFunction::from_deserialized`] /
@@ -692,8 +689,8 @@ mod tests {
         cobre_io::write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).unwrap();
     }
 
-    /// Behavioral: [`load_boundary_cuts`] on a MARKED checkpoint (§5 Option A,
-    /// canonical currency units at rest) loaded at a series of differing
+    /// Behavioral: [`load_boundary_cuts`] on a MARKED checkpoint (canonical
+    /// currency units at rest) loaded at a series of differing
     /// `loading_cost_scale_factor` values recovers `at_rest / loading_factor`
     /// for every value, matching [`rescale_cut_records_for_load`]'s contract at
     /// the file-I/O boundary — not just as a pure-function unit test.
@@ -793,7 +790,7 @@ mod tests {
         assert!((cuts_nondefault[0].intercept - raw_intercept * ratio).abs() < 1e-9);
     }
 
-    // ── §5 Option A: rescale_cut_records_for_load unit tests ─────────────────
+    // ── rescale_cut_records_for_load unit tests ──────────────────────────────
 
     use super::{LEGACY_COST_SCALE_FACTOR, rescale_cut_records_for_load};
     use crate::policy_export::scale_cut_records_for_export;
@@ -811,10 +808,10 @@ mod tests {
         }
     }
 
-    /// AC: a legacy checkpoint (`source_cost_scale_factor: None`) loaded at the
+    /// A legacy checkpoint (`source_cost_scale_factor: None`) loaded at the
     /// still-default [`LEGACY_COST_SCALE_FACTOR`] is a bit-exact no-op — the
-    /// correctness requirement backing "no re-baseline except the §5-A
-    /// policy-load-hashed set".
+    /// requirement that a legacy policy at the default factor never
+    /// re-baselines.
     #[test]
     fn legacy_no_marker_at_default_factor_is_bit_exact_noop() {
         let mut records = vec![owned_cut(42.5, vec![1.0, -2.5, 3.75])];
@@ -839,7 +836,7 @@ mod tests {
         }
     }
 
-    /// AC: a legacy checkpoint loaded at a NON-default factor is interpreted as
+    /// A legacy checkpoint loaded at a NON-default factor is interpreted as
     /// scaled-at-[`LEGACY_COST_SCALE_FACTOR`] and rescaled by
     /// `LEGACY_COST_SCALE_FACTOR / loading_cost_scale_factor`.
     #[test]
@@ -855,7 +852,7 @@ mod tests {
         assert!((records[0].coefficients[1] - 4.0 * ratio).abs() < 1e-9);
     }
 
-    /// AC: a marked checkpoint (`Some(s)`) is ALWAYS divided by
+    /// A marked checkpoint (`Some(s)`) is ALWAYS divided by
     /// `loading_cost_scale_factor` — even when `s` equals the loading factor —
     /// never special-cased to a no-op. The `source_cost_scale_factor` VALUE is
     /// irrelevant once the file holds canonical currency units; only its
@@ -881,7 +878,7 @@ mod tests {
         assert!((with_matching_source[0].intercept - 100.0 / loading_factor).abs() < 1e-12);
     }
 
-    /// §5 Option A transform property: export (multiply by `S`) then load at
+    /// Export/load transform property: export (multiply by `S`) then load at
     /// the SAME factor (divide by `S`) recovers the original value within 1
     /// ULP per value — the accepted same-factor round-trip drift (1e6 is not a
     /// power of two, so two roundings do not cancel exactly).
@@ -931,7 +928,7 @@ mod tests {
         }
     }
 
-    /// §5 Option A transform property: cross-factor linearity — exporting at
+    /// Export/load transform property: cross-factor linearity — exporting at
     /// `S_train` then loading at `S_prime` recovers `original * (S_train /
     /// S_prime)` (the net two-rounding transform), for `S_prime != S_train`.
     #[test]

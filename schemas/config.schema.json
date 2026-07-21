@@ -289,7 +289,7 @@
       "properties": {
         "cost_scale_factor": {
           "default": null,
-          "description": "Divisor applied to every non-theta objective coefficient at template\nbuild time, multiplied back at every cost-domain reporting boundary.\nDefault `1_000_000.0`, matching prior hard-coded behavior byte-for-byte.\n\nObjective conditioning only — results are identical in exact arithmetic;\nthis does not alter the model, unlike `modeling`'s other fields. The\neffective dual tolerance in currency units is\n`dual_feasibility_tolerance × this factor`: raising the factor without\nlowering `dual_feasibility_tolerance` proportionally loosens optimality\nin currency terms even though the configured tolerance value is\nunchanged — the inverse-direction trap a name cannot carry.\n\nAbsent uses the default. Must be finite and `> 0`; a value outside\n`[1.0, 1e12]` is accepted but logs an advisory warning.",
+          "description": "Divisor applied to every non-theta objective coefficient at template\nbuild time, multiplied back at every cost-domain reporting boundary.\nDefault `1_000_000.0` — the value every golden parity baseline is pinned at.\n\nObjective conditioning only — results are identical in exact arithmetic;\nthis does not alter the model, unlike `modeling`'s other fields. The\neffective dual tolerance in currency units is\n`dual_feasibility_tolerance × this factor`: raising the factor without\nlowering `dual_feasibility_tolerance` proportionally loosens optimality\nin currency terms even though the configured tolerance value is\nunchanged — the inverse-direction trap a name cannot carry.\n\nAbsent uses the default. Must be finite and `> 0`; a value outside\n`[1.0, 1e12]` is accepted but logs an advisory warning.",
           "format": "double",
           "type": [
             "number",
@@ -337,7 +337,7 @@
     },
     "PhaseSolverProfileConfig": {
       "additionalProperties": false,
-      "description": "Per-phase LP solver profile (`config.json → training.solver.backward` /\n`.forward`, and `simulation.solver`).\n\nBackend-agnostic. Every field is optional: an absent field leaves the\ncorresponding solver option at its backend default.",
+      "description": "Per-phase LP solver profile (`config.json → training.solver.backward` /\n`.forward`, and `simulation.solver`).\n\nBackend-agnostic. Every field is optional: an absent field leaves the\ncorresponding option at the phase's built-in tuned-profile value.",
       "properties": {
         "cost_perturbation": {
           "default": null,
@@ -887,7 +887,7 @@
             }
           ],
           "default": null,
-          "description": "Simulation solver profile. Absent leaves the backend defaults."
+          "description": "Simulation solver profile. Absent leaves the phase's built-in\ntuned profile."
         }
       },
       "type": "object"
@@ -1068,7 +1068,7 @@
             "retry_max_attempts": 5,
             "retry_time_budget_seconds": 30.0
           },
-          "description": "LP solver retry settings."
+          "description": "LP solver retry settings and optional per-phase solver profiles."
         },
         "stopping_mode": {
           "default": "any",
@@ -1111,7 +1111,7 @@
             }
           ],
           "default": null,
-          "description": "Backward-pass solver profile. Absent leaves the backend defaults."
+          "description": "Backward-pass solver profile. Absent leaves the phase's built-in\ntuned profile."
         },
         "forward": {
           "anyOf": [
@@ -1123,7 +1123,7 @@
             }
           ],
           "default": null,
-          "description": "Forward-pass solver profile. Absent leaves the backend defaults."
+          "description": "Forward-pass solver profile. Absent leaves the phase's built-in\ntuned profile."
         },
         "retry_max_attempts": {
           "default": 5,

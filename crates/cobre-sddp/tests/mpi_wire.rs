@@ -598,8 +598,7 @@ mod retry_armed_determinism {
     }
 
     /// `alpha=0.5, lambda=1.0` mirror `conformance.rs`'s
-    /// `cvar_alpha_half_concentrates_on_worst` fixture — first `CVaR`
-    /// determinism coverage in the suite.
+    /// `cvar_alpha_half_concentrates_on_worst` fixture.
     #[test]
     #[cfg_attr(
         not(feature = "slow-tests"),
@@ -725,7 +724,7 @@ mod opening_order_determinism {
 
 mod opening_block_scheduler_determinism {
     //! opening-block scheduler determinism gates: train `examples/1dtoy`
-    //! under `training.backward_scheduler = opening_block` via the public
+    //! under `training.parallelism.backward_scheduler` via the public
     //! `train` entry point. Hardest-first claim ordering is always-on under
     //! `opening_block` (no config field gates it), so
     //! `opening_block_scheduler_determinism_expectation` and `opening_block_scheduler_determinism_cvar`
@@ -759,10 +758,10 @@ mod opening_block_scheduler_determinism {
     //! self-check, mirroring `opening_order_determinism`'s `n_openings >= 3`
     //! check.
     //!
-    //! A real multi-rank opening-block run is exercised by the cluster-confirmation
-    //! runbook; the in-process `Rank0Of2` 2-rank stub is the CI-time signal —
-    //! The opening-block scheduler is opt-in and the existing MPI SLURM Integration job trains the
-    //! default scheduler on `examples/4ree`, not `opening_block`.
+    //! A real multi-rank opening-block run is not CI-covered; the in-process
+    //! `Rank0Of2` 2-rank stub is the CI-time signal. The opening-block
+    //! scheduler is opt-in and the existing MPI SLURM Integration job trains
+    //! the default scheduler on `examples/4ree`, not `opening_block`.
 
     use std::path::Path;
     use std::sync::mpsc;
@@ -877,9 +876,9 @@ mod opening_block_scheduler_determinism {
     }
 
     /// Resolved opening-block count for `n_openings` under the default
-    /// (unconfigured) block size — mirrors `pn::resolve_block_size` /
-    /// `pn::opening_block_count` (both `pub(crate)`, unreachable from this
-    /// external test crate).
+    /// (unconfigured) block size — mirrors `opening_block::resolve_block_size`
+    /// / `opening_block::opening_block_count` (both `pub(crate)`, unreachable
+    /// from this external test crate).
     fn resolved_block_count(n_openings: usize) -> usize {
         let block_size = n_openings.div_ceil(2).min(n_openings);
         n_openings.div_ceil(block_size.max(1))
@@ -946,7 +945,7 @@ mod opening_block_scheduler_determinism {
     /// bitwise identical across all five: threads=4, a same-shape threads=4
     /// repeat (the claim loop's run-to-run assignment randomization),
     /// threads=2, threads=1, and a `Rank0Of2` 2-rank stub at threads=4.
-    fn assert_pn_shapes_agree(case_dir: &Path, risk_measures: Option<Vec<RiskMeasure>>) {
+    fn assert_opening_block_shapes_agree(case_dir: &Path, risk_measures: Option<Vec<RiskMeasure>>) {
         assert_has_multi_block_stage(case_dir);
 
         let stub = StubComm;
@@ -979,7 +978,7 @@ mod opening_block_scheduler_determinism {
         ignore = "slow: run with --features slow-tests"
     )]
     fn opening_block_scheduler_determinism_expectation() {
-        assert_pn_shapes_agree(fixture_case_dir(), None);
+        assert_opening_block_shapes_agree(fixture_case_dir(), None);
     }
 
     /// `alpha=0.5, lambda=1.0` mirrors `retry_armed_determinism_cvar`'s
@@ -1004,7 +1003,7 @@ mod opening_block_scheduler_determinism {
             };
             num_stages
         ];
-        assert_pn_shapes_agree(case_dir, Some(risk_measures));
+        assert_opening_block_shapes_agree(case_dir, Some(risk_measures));
     }
 
     /// Hardest-first claim-order byte-neutrality gate (sddp.md "Opening-block
@@ -1024,18 +1023,18 @@ mod opening_block_scheduler_determinism {
         assert_has_multi_block_stage(case_dir);
         let stub = StubComm;
 
-        let lb_lpt_on = run_shape(case_dir, 4, &stub, None);
+        let lb_hardest_first_on = run_shape(case_dir, 4, &stub, None);
 
-        let mut setup_lpt_off = fresh_setup(
+        let mut setup_hardest_first_off = fresh_setup(
             case_dir,
             BackwardScheduler::OpeningBlock { block_size: None },
         );
-        setup_lpt_off.set_hardest_first_claim_order(false);
-        let lb_lpt_off = train_final_lb(setup_lpt_off, 4, &stub);
+        setup_hardest_first_off.set_hardest_first_claim_order(false);
+        let lb_hardest_first_off = train_final_lb(setup_hardest_first_off, 4, &stub);
 
         assert_eq!(
-            lb_lpt_on.to_bits(),
-            lb_lpt_off.to_bits(),
+            lb_hardest_first_on.to_bits(),
+            lb_hardest_first_off.to_bits(),
             "Hardest-first-on and -off (canonical claim order) must produce a bit-identical final \
              lower bound"
         );
@@ -1089,10 +1088,9 @@ mod opening_block_scheduler_determinism {
     /// Non-uniform cut-projection gate: `d43-storage-only-cut` disables
     /// `inflow_lags` on one interior stage only, so successive backward
     /// stages solved by the SAME worker hand `process_stage_backward_opening_block` (and
-    /// `opening_block_finish`) a `cut_n_state` that shrinks then regrows across stages —
-    /// before the fix, the per-worker opening-block out-buffer and the scratch arena
-    /// reused a stale length across that change and `copy_from_slice`
-    /// panicked. `d43` is also single-opening per stage (like `d01` above),
+    /// `opening_block_finish`) a `cut_n_state` that shrinks then regrows across
+    /// stages — a stale-length buffer reuse across that change panics in
+    /// `copy_from_slice`. `d43` is also single-opening per stage (like `d01` above),
     /// so `opening_block` degenerates to a trial-point-equivalent unit here too, and
     /// `final_lb` must equal the `trial_point` run bit-for-bit.
     #[test]

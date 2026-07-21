@@ -364,13 +364,13 @@ mod tests {
         );
     }
 
-    // ── Fix 1: profile-aware restore after retry escalation ──────────────────
+    // ── Profile-aware restore after retry escalation ─────────────────────────
     //
     // After `restore_default_settings()`, the tolerances reset to 1e-6 (the
     // hardcoded table values). `reapply_profile()` must then overwrite
     // them with the profile's values so HiGHS state and `current_profile` agree.
 
-    /// Fix 1 — primal tolerance survives restore+profile sequence.
+    /// Primal tolerance survives restore+profile sequence.
     ///
     /// Sets the profile primal tolerance to a non-default value (3e-8), then
     /// calls the combined `restore_defaults_then_reapply_profile_for_test` helper
@@ -397,7 +397,7 @@ mod tests {
         );
     }
 
-    /// Fix 1 — dual tolerance survives restore+profile sequence.
+    /// Dual tolerance survives restore+profile sequence.
     ///
     /// Sets the profile dual tolerance to 5e-9 (below the 1e-6 default),
     /// simulates the retry finalization path, and verifies the profile value wins.
@@ -425,7 +425,7 @@ mod tests {
     //
     // Power statement: catches a `HighsProfile` field that `reapply_profile`
     // forgets to re-install after `restore_default_settings` — the seam the two
-    // `Fix 1` tests above only sample via the tolerances. It does NOT catch a
+    // tolerance-readback tests above only sample. It does NOT catch a
     // HiGHS-internal option the profile never carries, and the `presolve`/
     // `use_warm_start` fields are exercised through `apply_profile` but not
     // read back here — `HighsSolver`'s test-support surface has no

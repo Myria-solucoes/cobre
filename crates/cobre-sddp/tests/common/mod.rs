@@ -9,14 +9,18 @@ use std::path::Path;
 use std::sync::mpsc;
 
 use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
+use cobre_core::System;
 use cobre_core::scenario::{SamplingScheme, ScenarioSource};
+use cobre_io::Config;
 use cobre_sddp::{
     SimulationScenarioResult, StudySetup,
     hydro_models::{PrepareHydroModelsResult, prepare_hydro_models},
     setup::{StudyParams, prepare_stochastic},
 };
 use cobre_solver::ActiveSolver;
-use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
+use cobre_stochastic::{
+    ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context,
+};
 
 pub mod anticipated_structural_assertions;
 pub mod builders;
@@ -131,10 +135,10 @@ impl Communicator for Rank0Of2 {
 /// override into `hydro_models`; this helper does no parquet I/O.
 pub fn build_setup_for_case(
     _case_dir: &Path,
-    config: &cobre_io::Config,
-    system: &cobre_core::System,
-    stochastic: cobre_stochastic::StochasticContext,
-    hydro_models: cobre_sddp::PrepareHydroModelsResult,
+    config: &Config,
+    system: &System,
+    stochastic: StochasticContext,
+    hydro_models: PrepareHydroModelsResult,
 ) -> StudySetup {
     let sentinel = Path::new("config.json");
     let training_source = config
@@ -163,7 +167,7 @@ pub fn build_setup_for_case(
 /// (seed `42`, [`ScenarioSource::default`]), prepare hydro models, then
 /// build via [`build_setup_for_case`] — the pipeline shared by every
 /// `mpi_wire.rs` determinism gate's `fresh_setup`.
-pub fn fresh_setup_with(case_dir: &Path, mutate: impl FnOnce(&mut cobre_io::Config)) -> StudySetup {
+pub fn fresh_setup_with(case_dir: &Path, mutate: impl FnOnce(&mut Config)) -> StudySetup {
     let config_path = case_dir.join("config.json");
     let mut config = cobre_io::parse_config(&config_path).expect("config must parse");
     mutate(&mut config);
@@ -186,7 +190,7 @@ pub fn fresh_setup_with(case_dir: &Path, mutate: impl FnOnce(&mut cobre_io::Conf
 // Taken by value so callers pass an owned `System` inline without a separate
 // binding; the body only borrows it.
 #[allow(clippy::needless_pass_by_value)]
-pub fn build_setup_in_code(system: cobre_core::System, config: &cobre_io::Config) -> StudySetup {
+pub fn build_setup_in_code(system: System, config: &Config) -> StudySetup {
     let stochastic = build_stochastic_context(
         &system,
         42,

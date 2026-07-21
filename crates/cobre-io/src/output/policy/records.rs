@@ -206,9 +206,9 @@ pub struct PolicyCheckpointMetadata {
     /// `coefficients`/`intercept` scale-independent at rest (canonical
     /// currency units, not the writer's internal scaled cost space).
     ///
-    /// Absent in checkpoints written before this field was added; a missing
-    /// marker is interpreted as scaled-at-`1_000_000.0`, the constant every
-    /// pre-field checkpoint was unconditionally written under.
+    /// Absent in legacy checkpoints; a missing marker is interpreted as
+    /// scaled-at-`1_000_000.0`, the constant every unmarked checkpoint was
+    /// unconditionally written under.
     #[serde(default)]
     pub cost_scale_factor: Option<f64>,
 }

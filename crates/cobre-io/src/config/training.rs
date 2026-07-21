@@ -44,7 +44,7 @@ pub struct TrainingConfig {
     #[serde(default)]
     pub cut_selection: RowSelectionConfig,
 
-    /// LP solver retry settings.
+    /// LP solver retry settings and optional per-phase solver profiles.
     #[serde(default)]
     pub solver: TrainingSolverConfig,
 
@@ -200,11 +200,13 @@ pub struct TrainingSolverConfig {
     /// Total time budget in seconds across all retry attempts for one solve.
     pub retry_time_budget_seconds: f64,
 
-    /// Backward-pass solver profile. Absent leaves the backend defaults.
+    /// Backward-pass solver profile. Absent leaves the phase's built-in
+    /// tuned profile.
     #[serde(default)]
     pub backward: Option<PhaseSolverProfileConfig>,
 
-    /// Forward-pass solver profile. Absent leaves the backend defaults.
+    /// Forward-pass solver profile. Absent leaves the phase's built-in
+    /// tuned profile.
     #[serde(default)]
     pub forward: Option<PhaseSolverProfileConfig>,
 }
@@ -224,7 +226,7 @@ impl Default for TrainingSolverConfig {
 /// `.forward`, and `simulation.solver`).
 ///
 /// Backend-agnostic. Every field is optional: an absent field leaves the
-/// corresponding solver option at its backend default.
+/// corresponding option at the phase's built-in tuned-profile value.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -712,7 +714,7 @@ mod tests {
     }
 
     /// A misspelled enum value is an unknown-variant deserialize error; the
-    /// campaign's informal `curtis_reid` label is not a valid `scale` value.
+    /// informal `curtis_reid` spelling is not a valid `scale` value.
     #[test]
     fn backward_solver_profile_bad_enum_value_is_deserialize_error() {
         let json = r#"{
@@ -825,10 +827,9 @@ mod tests {
         );
     }
 
-    /// The removed root-level scheduler keys are hard-rejected, never silently
-    /// ignored: `backward_scheduler`/`opening_block_size` moved into
-    /// `training.parallelism`, and `backward_opening_order` was removed with
-    /// the solve order now intrinsic.
+    /// The retired root-level scheduler keys are hard-rejected, never silently
+    /// ignored: the scheduler lives under `training.parallelism`, and the
+    /// backward solve order is intrinsic (no config field selects it).
     #[test]
     fn removed_root_scheduler_keys_are_rejected() {
         for stale in [

@@ -110,7 +110,7 @@ per-opening mechanism.
 - **Solver-side steepest-edge / factorization persistence across re-solves.** The
   dual simplex carries steepest-edge (DSE) pricing weights and a factorization
   that could in principle persist across the opening chain. The backward solver
-  profile's `dse_devex_fallback_threshold` field is the related lever (it governs
+  profile's `steepest_edge_devex_fallback_threshold` field is the related lever (it governs
   when DSE weights are dropped for Devex pricing). Quantifying its effect on chain
   pivots is left as measurement, not asserted here.
 
@@ -171,7 +171,7 @@ or rank-invariance regresses.
 
 ## H2 — cross-iteration backward-basis cache per `(stage, block)`
 
-**Mechanism.** Under the opening-block scheduler (`process_stage_backward_pn`)
+**Mechanism.** Under the opening-block scheduler (`process_stage_backward_opening_block`)
 each work unit is an opening-block of one trial point, its head anchored on the
 forward capture and warm-continued across the block. The forward capture carries
 the primal geometry of the sampled `ξ` but not the `ω`-specific dual geometry of

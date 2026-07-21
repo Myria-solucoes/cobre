@@ -363,6 +363,10 @@ fn fmt_sci(v: f64) -> String {
 }
 
 /// Training convergence metrics and timing for display in the post-run summary.
+///
+/// Every `*_seconds` timing field is the run-level sum of its per-iteration
+/// `*_ms` source counter divided by 1000, and is `None` when per-iteration
+/// timing is unavailable (e.g. a `metadata.json`-reconstructed summary).
 pub struct TrainingSummary {
     /// Total number of iterations completed.
     pub iterations: u64,
@@ -459,43 +463,33 @@ pub struct TrainingSummary {
     /// data is unavailable or the run completed in zero iterations.
     pub initial_gap_percent: Option<f64>,
 
-    /// Coordinator-measured forward-phase wall, summed across iterations
-    /// (`Σ forward_wall_ms / 1000`). `None` when per-iteration timing is
-    /// unavailable (e.g. a `metadata.json`-reconstructed summary).
+    /// Coordinator-measured forward-phase wall, from `forward_wall_ms`.
     pub forward_phase_wall_seconds: Option<f64>,
 
-    /// Coordinator-measured backward-phase wall, summed across iterations
-    /// (`Σ backward_wall_ms / 1000`). See [`Self::forward_phase_wall_seconds`].
+    /// Coordinator-measured backward-phase wall, from `backward_wall_ms`.
     pub backward_phase_wall_seconds: Option<f64>,
 
-    /// Forward-phase worker wait (load imbalance), summed across iterations
-    /// (`Σ fwd_load_imbalance_ms / 1000`).
+    /// Forward-phase worker wait (load imbalance), from `fwd_load_imbalance_ms`.
     pub forward_wait_seconds: Option<f64>,
 
-    /// Backward-phase worker wait (load imbalance), summed across iterations
-    /// (`Σ bwd_load_imbalance_ms / 1000`).
+    /// Backward-phase worker wait (load imbalance), from `bwd_load_imbalance_ms`.
     pub backward_wait_seconds: Option<f64>,
 
-    /// Lower-bound evaluation time, summed across iterations, for the
-    /// `Serial` bucket breakdown (`Σ lower_bound_ms / 1000`).
+    /// `Serial`-bucket lower-bound evaluation time, from `lower_bound_ms`.
     pub serial_lower_bound_seconds: Option<f64>,
 
-    /// Row-selection time, summed across iterations, for the `Serial`
-    /// bucket breakdown (`Σ cut_selection_ms / 1000`).
+    /// `Serial`-bucket row-selection time, from `cut_selection_ms`.
     pub serial_cut_selection_seconds: Option<f64>,
 
-    /// Per-stage row-sync `allgatherv` time, summed across iterations, for
-    /// the `Serial` bucket breakdown (`Σ cut_sync_ms / 1000`).
+    /// `Serial`-bucket per-stage row-sync `allgatherv` time, from `cut_sync_ms`.
     pub serial_cut_sync_seconds: Option<f64>,
 
-    /// MPI allreduce (forward bound synchronization) time, summed across
-    /// iterations, for the `Serial` bucket breakdown
-    /// (`Σ mpi_allreduce_ms / 1000`).
+    /// `Serial`-bucket MPI allreduce (forward bound synchronization) time,
+    /// from `mpi_allreduce_ms`.
     pub serial_allreduce_seconds: Option<f64>,
 
-    /// Rayon scheduling/synchronisation overhead, summed across iterations
-    /// and phases, for the `Serial` bucket breakdown
-    /// (`Σ (fwd_scheduling_overhead_ms + bwd_scheduling_overhead_ms) / 1000`).
+    /// `Serial`-bucket rayon scheduling overhead, summed over both phases
+    /// (`fwd_scheduling_overhead_ms + bwd_scheduling_overhead_ms`).
     pub serial_scheduling_seconds: Option<f64>,
 }
 

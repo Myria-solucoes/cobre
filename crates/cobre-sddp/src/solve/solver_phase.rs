@@ -299,7 +299,8 @@ fn phase_config_key(phase: Phase) -> &'static str {
 }
 
 /// Validates a resolved per-phase solver config against the compiled
-/// backend's support matrix (decision D11: everything HiGHS-scoped for v1).
+/// backend's support matrix (per-phase overrides are HiGHS-only; CLP
+/// hard-rejects every override).
 ///
 /// `config` absent is always `Ok(())` — the byte-neutral path
 /// ([`Phase::resolve_profile`]) is untouched by this validator.
@@ -447,7 +448,7 @@ fn first_set_override(config: &PhaseSolverProfileConfig) -> Option<&'static str>
     }
 }
 
-// CLP support is minimal for v1 (decision D11): reject every override instead
+// CLP support is deliberately minimal: reject every override instead
 // of silently applying a HiGHS-flavored value to CLP's own option surface.
 #[cfg(feature = "clp")]
 fn validate_backend_support(
@@ -566,7 +567,7 @@ fn resolve_active_profile(
     profile
 }
 
-// CLP support is minimal for v1 (decision D11): every override is deferred to
+// CLP support is deliberately minimal: every override is deferred to
 // the compiled-backend validation step, which hard-rejects a CLP config
 // instead of silently applying a HiGHS-flavored override to CLP's own option
 // surface.
@@ -936,8 +937,7 @@ mod highs_tests {
         );
     }
 
-    /// A negative `cost_perturbation` is rejected, naming the field — the
-    /// exact AC scenario (`-1.0`).
+    /// A negative `cost_perturbation` (`-1.0`) is rejected, naming the field.
     #[test]
     fn validate_phase_solver_config_rejects_negative_cost_perturbation() {
         let config = PhaseSolverProfileConfig {
@@ -969,9 +969,8 @@ mod highs_tests {
         );
     }
 
-    /// A `factor_pivot_threshold` above `kMaxPivotThreshold` (`0.5`,
-    /// `HFactorConst.h`) is rejected, naming the field — the exact AC
-    /// scenario (`0.9`).
+    /// A `factor_pivot_threshold` (`0.9`) above `kMaxPivotThreshold` (`0.5`,
+    /// `HFactorConst.h`) is rejected, naming the field.
     #[test]
     fn validate_phase_solver_config_rejects_factor_pivot_threshold_above_max() {
         let config = PhaseSolverProfileConfig {
@@ -1004,8 +1003,8 @@ mod highs_tests {
         }
     }
 
-    /// A `steepest_edge_devex_fallback_threshold` below `1.0` is rejected, naming the
-    /// field — the exact AC scenario (`0.5`).
+    /// A `steepest_edge_devex_fallback_threshold` below `1.0` (`0.5`) is
+    /// rejected, naming the field.
     #[test]
     fn validate_phase_solver_config_rejects_steepest_edge_devex_fallback_threshold_below_one() {
         let config = PhaseSolverProfileConfig {
@@ -1165,7 +1164,7 @@ mod clp_tests {
         );
     }
 
-    /// CLP support is minimal for v1 (D11): `resolve_profile` returns the base
+    /// CLP support is deliberately minimal: `resolve_profile` returns the base
     /// constant regardless of `config` — absent config is byte-neutral, and a
     /// present one is silently ignored pending the compiled-backend reject.
     #[test]
@@ -1184,10 +1183,10 @@ mod clp_tests {
         );
     }
 
-    // ── `validate_phase_solver_config` (CLP, D11 hard-reject) ───────────────
+    // ── `validate_phase_solver_config` (CLP hard-reject) ────────────────────
 
-    /// A per-field override is hard-rejected on CLP — D11 rejects every
-    /// HiGHS-only override.
+    /// A per-field override is hard-rejected on CLP — every HiGHS-only
+    /// override is rejected.
     #[test]
     fn validate_phase_solver_config_rejects_clp_override() {
         let config = PhaseSolverProfileConfig {

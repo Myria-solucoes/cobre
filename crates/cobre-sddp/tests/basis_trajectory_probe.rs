@@ -23,13 +23,10 @@
 //! path can name it; the probes panic with a clear message if the checkout
 //! is absent rather than silently skipping.
 //!
-//! One additive, schema-neutral production change backs these probes:
-//! `StageGeometry::fpha` (`crates/cobre-sddp/src/lp/builder/template.rs`) —
-//! the FPHA row range was previously internal-only and undecidable
-//! probe-side (per-hydro plane counts are non-uniform, so no exposed count
-//! multiplies out to it). A `training_ctx()`/`solve_stage_for_probe`
-//! test-support widening (`src/setup/accessors.rs`, `src/test_support.rs`)
-//! supplies the rest of the reach, none of it behavior-changing.
+//! `StageGeometry::fpha` exposes the FPHA row range these probes read
+//! (per-hydro plane counts are non-uniform, so no exposed count multiplies
+//! out to it); `training_ctx()`/`solve_stage_for_probe` are the test-support
+//! entry points supplying the rest of the reach.
 
 #![allow(
     clippy::unwrap_used,

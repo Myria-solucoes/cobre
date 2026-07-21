@@ -24,7 +24,8 @@ pub struct SimulationConfig {
     #[serde(default)]
     pub scenario_source: Option<RawScenarioSourceConfig>,
 
-    /// Simulation solver profile. Absent leaves the backend defaults.
+    /// Simulation solver profile. Absent leaves the phase's built-in
+    /// tuned profile.
     #[serde(default)]
     pub solver: Option<PhaseSolverProfileConfig>,
 }

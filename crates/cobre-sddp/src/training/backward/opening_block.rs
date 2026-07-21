@@ -46,7 +46,7 @@ pub(crate) struct OpeningOutcome {
     pub(crate) outcome: BackwardOutcome,
 }
 
-/// Resolve the per-stage opening-block size `B_s` (D5): the caller-configured
+/// Resolve the per-stage opening-block size `B_s`: the caller-configured
 /// size clamped to `n_openings`, or half the openings (rounded up) when unset.
 /// Never a function of worker or rank count.
 pub(crate) fn resolve_block_size(
@@ -475,7 +475,8 @@ mod tests {
 
     /// Two workers' per-block `simplex_iterations` sums/counts merged into the
     /// same `(stage, block)` bucket yield the expected combined sum, count,
-    /// and mean — the D6 aggregate-over-`m` contract at its smallest scale.
+    /// and mean — the aggregate-over-`m` contract (sddp.md "Hardest-first claim
+    /// order is result-neutral") at its smallest scale.
     #[test]
     fn merge_block_pivots_sums_two_workers_into_one_bucket() {
         let n_blocks = 2_usize;

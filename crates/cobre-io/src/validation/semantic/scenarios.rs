@@ -1361,7 +1361,7 @@ mod tests {
     }
 
     /// A stationary mixed-order (`orders = [3, 1, 2, 1]`) hydro -- the same
-    /// fixture Epic 01's `t2_mixed_orders_gate_passes` verified stationary --
+    /// fixture `t2_mixed_orders_gate_passes` verifies stationary --
     /// produces no stationarity rejection.
     #[test]
     fn par_gate_accepts_stationary() {
@@ -1530,7 +1530,7 @@ mod tests {
 
     /// A PAR-A hydro whose classical part is stationary but whose effective
     /// 12-lag system (widened by the annual term) is explosive -- the same
-    /// parameterization as Epic 01's `par_a_explosive_effective_rejected` --
+    /// parameterization as `par_a_explosive_effective_rejected` --
     /// produces a stationarity rejection (the annual gate fired, not merely
     /// a singular closure).
     #[test]

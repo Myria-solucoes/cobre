@@ -4,7 +4,11 @@
 > the hardest-first claim order (`hardest_first_block_order`,
 > `hardest_first_claim_order_is_result_neutral`), and the "PN" scheduler is the
 > opening-block scheduler (`training.parallelism.backward_scheduler`,
-> `training/backward/opening_block.rs`).
+> `training/backward/opening_block.rs`). The Protocol section's
+> `training.backward_scheduler` / `opening_block_size` keys are the retired
+> root-level spellings; today the scheduler is
+> `training.parallelism.backward_scheduler = { "method": "opening_block",
+> "block_size": N }`.
 
 > **Status**: Implemented (always-on under the `opening_block` backward
 > scheduler). This note records a local, single-box A/B measuring the

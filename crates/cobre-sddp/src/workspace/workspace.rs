@@ -398,7 +398,7 @@ pub(crate) struct BackwardAccumulators {
     /// `Vec<SolverStatsDelta>` in `BackwardResult::stage_stats`.
     pub(crate) per_opening_stats: Vec<SolverStatsDelta>,
     /// Per-block `simplex_iterations` sum for the opening-block
-    /// scheduler's pivot accumulator (D6), index `b` in `[0, n_blocks)` for
+    /// scheduler's pivot accumulator, index `b` in `[0, n_blocks)` for
     /// the current stage. Re-initialised once per stage (never per trial
     /// point); merged into `OpeningBlockScratch::block_pivots` after the
     /// parallel region.
@@ -480,7 +480,7 @@ impl BackwardAccumulators {
 // ---------------------------------------------------------------------------
 
 /// Rank-level pre-allocated scratch for the opening-block scheduler
-/// (`training.backward_scheduler = opening_block`), held on `BackwardPassState`
+/// (`training.parallelism.backward_scheduler`), held on `BackwardPassState`
 /// and reused across every backward stage for the lifetime of a training run.
 ///
 /// Empty (`arena` capacity `0`) under `BackwardScheduler::TrialPoint` (the
@@ -509,10 +509,10 @@ pub(crate) struct OpeningBlockScratch {
     /// capacity) to each stage's `cut_n_state` — see [`Self::arena`].
     pub(crate) coeffs_buf: Vec<f64>,
     /// Per-`(stage, block-index)` `(simplex_iterations sum, solved-opening
-    /// count)` pivot accumulator (D6), addressed `block_pivots[stage *
+    /// count)` pivot accumulator, addressed `block_pivots[stage *
     /// n_blocks_max + block_index]`. `stage` is the backward pass's successor
     /// index (`t + 1`); aggregated over every trial point `m` claimed for that
-    /// block, never keyed per-`m` (D6 — the wrong-but-plausible variant, since
+    /// block, never keyed per-`m` (the wrong-but-plausible variant, since
     /// resampled trial points make per-`m` hardness noise where the
     /// opening-block component is iteration-stable). Reset to `(0, 0)` at the
     /// start of every `BackwardPassState::run` call, never per stage.
@@ -1186,7 +1186,7 @@ mod tests {
 
     #[test]
     fn test_backward_accumulators_opening_outcomes_buf_starts_empty() {
-        // AC: a nonzero max_openings must not eagerly build opening_outcomes_buf —
+        // A nonzero max_openings must not eagerly build opening_outcomes_buf —
         // the default TrialPoint scheduler never touches it (zero opening-block footprint).
         let pool = WorkspacePool::new(
             0,

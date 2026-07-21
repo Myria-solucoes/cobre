@@ -58,7 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-field overrides (`dual_edge_weight`, `scale`, `price`,
   `primal_feasibility_tolerance`) — resolved once at setup and broadcast
   identically to every MPI rank, a later field always overriding the
-  phase's built-in profile. The measured tuned bundle for the backward pass
+  phase's built-in profile. A tuned bundle for the backward pass
   (dual `SteepestEdge`, Curtis–Reid scaling, `Row` pricing, a loosened
   primal feasibility tolerance) is configured explicitly:
 
@@ -122,7 +122,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `wait` (load imbalance across workers); a new `Serial` line replaces
   the previous opaque `Other` bucket, breaking the non-parallel portion of
   training down into lower-bound evaluation, row (cut) selection,
-  cross-rank cut synchronization, MPI allreduce, and scheduling overhead.
+  cross-rank cut synchronization, MPI allreduce, and a residual `other`
+  bucket that absorbs scheduling overhead.
   The three lines' durations sum to the training wall and match the
   per-iteration progress line. A summary reconstructed from a completed
   output directory (`cobre summary`) omits the `Time split` block entirely,

@@ -39,7 +39,7 @@ pub struct ModelingConfig {
 
     /// Divisor applied to every non-theta objective coefficient at template
     /// build time, multiplied back at every cost-domain reporting boundary.
-    /// Default `1_000_000.0`, matching prior hard-coded behavior byte-for-byte.
+    /// Default `1_000_000.0` — the value every golden parity baseline is pinned at.
     ///
     /// Objective conditioning only — results are identical in exact arithmetic;
     /// this does not alter the model, unlike `modeling`'s other fields. The

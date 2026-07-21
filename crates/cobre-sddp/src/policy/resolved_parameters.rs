@@ -1340,7 +1340,7 @@ mod tests {
         }
     }
 
-    /// AC (E6 round-trip): `cost_scale_factor` at a non-default value
+    /// Wire-envelope round-trip: `cost_scale_factor` at a non-default value
     /// survives the postcard wire envelope bit-exactly — the field the wire
     /// version was bumped to `2` for.
     #[test]

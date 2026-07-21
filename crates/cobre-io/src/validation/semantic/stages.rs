@@ -508,8 +508,8 @@ mod tests {
     #[test]
     fn test_5b_all_stages_inflow_lags_disabled_under_par_warns_once() {
         let mut stages = make_stages_5b(vec![0, 1, 2]); // make_stage defaults inflow_lags false
-        // Order-bearing inflow_ar_coefficients now trigger the ticket-005 PAR
-        // stationarity gate, which hard-errors without a resolvable season map.
+        // Order-bearing inflow_ar_coefficients trigger the PAR stationarity
+        // gate, which hard-errors without a resolvable season map.
         for (i, stage) in stages.stages.iter_mut().enumerate() {
             stage.season_id = Some(i);
         }

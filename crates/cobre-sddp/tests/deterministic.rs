@@ -328,8 +328,8 @@ fn d02_single_hydro() {
 
 /// Behavioral: `modeling.cost_scale_factor` is objective conditioning only —
 /// D02 trained at a non-default factor converges to the SAME cost as the
-/// default-factor run (scale-invariance of the model, the real correctness
-/// claim §5 of the cost-scale-factor ticket asks for; the LP builder divides
+/// default-factor run (scale-invariance of the model — the real correctness
+/// claim; the LP builder divides
 /// by the resolved factor at template build and every reporting boundary
 /// multiplies back, so the argmin — and its cost — does not depend on which
 /// factor was configured).
@@ -5499,7 +5499,7 @@ mod chronological_telescoping {
     /// never `==`).
     ///
     /// `scale == 1.0` compares raw internal-scaled values (a `checkpoint`
-    /// whose cuts were never routed through the §5 Option A export
+    /// whose cuts were never routed through the canonical-currency export
     /// transform, e.g. `FutureCostFunction::new_with_warm_start` fed
     /// `checkpoint.stage_cuts` directly). `scale ==
     /// setup.stage_data.stage_templates.cost_scale_factor` compares against a
@@ -5553,15 +5553,15 @@ mod chronological_telescoping {
     /// evaluate `theta` against the load-mode LP.
     ///
     /// Asserts (1) the written checkpoint holds the trained FCF's cuts scaled
-    /// by the writing study's `cost_scale_factor` (§5 Option A: canonical
+    /// by the writing study's `cost_scale_factor` (canonical
     /// currency units at rest — exact, a single multiply), (2) the cross-mode
     /// warm-start load succeeds, (3) `FutureCostFunction::new_with_warm_start`
-    /// (constructor fidelity only, bypassing the §5 load-side rescale this
+    /// (constructor fidelity only, bypassing the load-side rescale this
     /// narrow test does not exercise) copies the checkpoint's raw bytes
     /// unchanged, and (4) a load-mode simulation runs the cross-mode FCF
     /// without error. Only cut bytes are asserted portable; the persisted
     /// basis is column-count-dependent (hence mode-dependent) and is
-    /// intentionally not asserted (design §5).
+    /// intentionally not asserted.
     fn assert_cross_mode_load_preserves_cut_bytes(train_mode: BlockMode, load_mode: BlockMode) {
         let (trained_setup, checkpoint, _policy_dir) = train_and_checkpoint(train_mode);
         let cost_scale_factor = trained_setup.stage_data.stage_templates.cost_scale_factor;
@@ -5580,7 +5580,7 @@ mod chronological_telescoping {
             setup2.loop_params.forward_passes,
             setup2.loop_params.max_iterations.saturating_add(1),
         )
-        .expect("cross-mode warm-start load must succeed (cuts are n_blks-independent, design §5)");
+        .expect("cross-mode warm-start load must succeed (cuts are n_blks-independent)");
 
         assert_cuts_bit_identical(&warm_fcf, &checkpoint, 1.0);
 

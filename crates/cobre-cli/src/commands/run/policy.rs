@@ -31,7 +31,7 @@ use super::RunContext;
 /// study's cost-scale space, and validate compatibility.
 ///
 /// Every warm-start, resume, and simulation-only load shares this one function,
-/// so [`cobre_sddp::rescale_checkpoint_cuts_for_load`] (§5 Option A) and
+/// so [`cobre_sddp::rescale_checkpoint_cuts_for_load`] and
 /// validation both run exactly once per load, unconditionally. Validation
 /// routes through [`cobre_sddp::validate_policy_load`] typed to [`FullFcf`],
 /// checking `state_dimension` and `num_stages`, then the checkpoint terminal
