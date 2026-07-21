@@ -215,6 +215,7 @@ mod tests {
             total_visited_states: 0,
             training_block_mode: "parallel".to_string(),
             training_block_mode_per_stage: vec![],
+            cost_scale_factor: None,
         };
 
         let json = serde_json::to_string_pretty(&meta)
@@ -279,6 +280,7 @@ mod tests {
             total_visited_states: 0,
             training_block_mode: "parallel".to_string(),
             training_block_mode_per_stage: vec![],
+            cost_scale_factor: None,
         };
 
         let json = serde_json::to_string_pretty(&meta)
@@ -312,6 +314,7 @@ mod tests {
             total_visited_states: 0,
             training_block_mode: "parallel".to_string(),
             training_block_mode_per_stage: vec![],
+            cost_scale_factor: None,
         }
     }
 
@@ -1034,6 +1037,7 @@ mod tests {
             total_visited_states: 0,
             training_block_mode: "parallel".to_string(),
             training_block_mode_per_stage: vec![],
+            cost_scale_factor: None,
         };
 
         let json = serde_json::to_string(&meta).expect("serialize must succeed");
@@ -1070,6 +1074,7 @@ mod tests {
             total_visited_states: 0,
             training_block_mode: "parallel".to_string(),
             training_block_mode_per_stage: vec![],
+            cost_scale_factor: None,
         };
 
         let json = serde_json::to_string(&meta).expect("serialize must succeed");
@@ -1248,6 +1253,7 @@ mod tests {
             total_visited_states: 0,
             training_block_mode: "parallel".to_string(),
             training_block_mode_per_stage: vec![],
+            cost_scale_factor: None,
         };
 
         let stage_cuts_payloads: [StageCutsPayload<'_>; 0] = [];
@@ -1289,6 +1295,7 @@ mod tests {
             total_visited_states: 0,
             training_block_mode: "parallel".to_string(),
             training_block_mode_per_stage: vec![],
+            cost_scale_factor: None,
         };
 
         let json = serde_json::to_string(&meta).expect("serialize must succeed");
@@ -1386,6 +1393,50 @@ mod tests {
         );
     }
 
+    /// §5 Option A legacy-migration contract: a checkpoint written before
+    /// `cost_scale_factor` provenance existed (JSON with no such key)
+    /// deserializes to `None` — the "interpreted as scaled-at-1e6" marker.
+    #[test]
+    fn policy_checkpoint_metadata_cost_scale_factor_absent_defaults_to_none() {
+        let json = r#"{
+            "cobre_version": "0.0.1",
+            "created_at": "2026-01-01T00:00:00Z",
+            "completed_iterations": 5,
+            "final_lower_bound": 0.0,
+            "best_upper_bound": null,
+            "state_dimension": 2,
+            "num_stages": 3,
+            "max_iterations": 10,
+            "forward_passes": 1,
+            "warm_start_cuts": 5,
+            "rng_seed": 0,
+            "total_visited_states": 0
+        }"#;
+
+        let meta: PolicyCheckpointMetadata =
+            serde_json::from_str(json).expect("pre-field JSON must deserialize");
+
+        assert!(
+            meta.cost_scale_factor.is_none(),
+            "absent cost_scale_factor must default to None (legacy interpretation)"
+        );
+    }
+
+    /// A written (marked) `cost_scale_factor` round-trips through JSON exactly.
+    #[test]
+    fn policy_checkpoint_metadata_cost_scale_factor_round_trips() {
+        let meta = PolicyCheckpointMetadata {
+            cost_scale_factor: Some(2_500_000.0),
+            ..make_metadata(3, 2)
+        };
+
+        let json = serde_json::to_string(&meta).expect("serialize must succeed");
+        let back: PolicyCheckpointMetadata =
+            serde_json::from_str(&json).expect("deserialize must succeed");
+
+        assert_eq!(back.cost_scale_factor, Some(2_500_000.0));
+    }
+
     #[test]
     fn read_policy_checkpoint_warm_start_counts_in_metadata() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1455,6 +1506,7 @@ mod tests {
             total_visited_states: 0,
             training_block_mode: "parallel".to_string(),
             training_block_mode_per_stage: vec![],
+            cost_scale_factor: None,
         };
 
         write_policy_checkpoint(tmp.path(), &stage_cuts_payloads, &[], &metadata, &[])

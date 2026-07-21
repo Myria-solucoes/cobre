@@ -11,6 +11,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The objective cost-scale factor is now configurable** via
+  `modeling.cost_scale_factor` (`config.json`), replacing a hard-coded
+  divisor applied to every non-theta objective coefficient at template
+  build time. Absent uses the previous default, byte-identical to prior
+  behavior; the field is validated finite and `> 0`, with an advisory
+  warning outside `[1.0, 1e12]`. The resolved factor is visible in the
+  training scaling report and in exported policy metadata. Effective dual
+  tolerance in currency units is `dual_feasibility_tolerance × this factor`
+  — raising the factor without adjusting the tolerance loosens optimality
+  in currency terms even though the configured tolerance value is
+  unchanged.
+
+- **Exported policies now store cut coefficients and intercepts in
+  canonical currency units, independent of the writing study's cost-scale
+  factor.** Export multiplies every value by the writing study's factor;
+  every load — warm-start, resume, simulation-only, and boundary-cut
+  injection — divides by the loading study's own factor, so a policy
+  trained under one factor loads correctly into a study configured with a
+  different one. `policy/metadata.json` gains a `cost_scale_factor`
+  provenance field; a checkpoint written before this field existed is
+  interpreted as scaled at the previous hard-coded default, so every
+  existing policy directory remains loadable.
+
+### Changed
+
+- **Loading a policy written by this release's export path applies one
+  additional floating-point division that was not needed before**, since
+  cut values now round-trip through canonical currency units rather than
+  being carried in the writer's internal scaled representation unchanged.
+  The shift is below solver tolerance and does not change training or
+  simulation results, but it moves cut coefficients, intercepts, and
+  therefore any bit-exact hash computed over a policy-load path by up to a
+  few ULP — a resumed-run trajectory or a golden case that hashes a
+  loaded policy shifts once. A checkpoint written before this release and
+  loaded at the still-default cost-scale factor is unaffected (bit-exact,
+  no re-baseline). This is one-directional: a checkpoint written by this
+  release stores canonical currency-unit values and must not be read by an
+  earlier release, which would silently reinterpret them under the old
+  scaled convention; a checkpoint written by an earlier release remains
+  fully loadable by this one.
+
 - **Per-phase LP solver settings are now configurable.**
   `training.solver.backward`, `training.solver.forward`, and
   `simulation.solver` each accept an optional solver-profile block of
@@ -70,8 +111,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   iteration always falls back to the `trial_point` scheduler: the
   opening-block path's frozen-LP load is incompatible with Dynamic Cut
   Selection's cut-free lazy core.
-
-### Changed
 
 - **The training `Time split` report now reflects coordinator-measured
   phase time instead of a per-worker average.** The `Forward`/`Backward`

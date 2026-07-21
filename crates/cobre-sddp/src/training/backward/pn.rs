@@ -264,15 +264,11 @@ pub(crate) fn process_stage_backward_pn<S: SolverInterface + Send>(
                     ws.backward_accum.stats_before_buf = stats_before;
                     ws.backward_accum.stats_after_buf = stats_after;
 
-                    // Grow-once record into the pre-allocated per-worker
-                    // out-buffer: a fresh slot is pushed only the first time
-                    // `count` exceeds every prior stage's high-water mark. A
-                    // reused slot's `coefficients` may still carry a DIFFERENT
-                    // prior stage's `cut_n_state` (a successor disabling a
-                    // state group shrinks it, a later stage regrows it), so it
-                    // is resized to THIS stage's `cut_n_state` before every
-                    // write — otherwise `copy_from_slice` panics on a length
-                    // mismatch.
+                    // A reused slot's `coefficients` may carry a DIFFERENT prior
+                    // stage's `cut_n_state` (a successor disabling a state group
+                    // shrinks it, a later stage regrows it), so it is resized to
+                    // THIS stage's `cut_n_state` before every write — otherwise
+                    // `copy_from_slice` panics on a length mismatch.
                     if ws.backward_accum.pn_outcomes_buf.len() <= count {
                         ws.backward_accum.pn_outcomes_buf.push(PnOutcome {
                             m: 0,

@@ -291,6 +291,7 @@ mod tests {
             schema: None,
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig::default(),
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,

@@ -1185,6 +1185,7 @@ mod interior_storage_bound_tests {
                 resolved_parameters: ResolvedParameters {
                     per_param: vec![],
                     id_to_slot: vec![],
+                    cost_scale_factor: 1_000_000.0,
                 },
             }
         }
@@ -1671,6 +1672,7 @@ mod diversion_bound_tests {
                 resolved_parameters: ResolvedParameters {
                     per_param: vec![],
                     id_to_slot: vec![],
+                    cost_scale_factor: 1_000_000.0,
                 },
             }
         }
@@ -2054,6 +2056,7 @@ mod filling_phase_gating_tests {
                 resolved_parameters: ResolvedParameters {
                     per_param: vec![],
                     id_to_slot: vec![],
+                    cost_scale_factor: 1_000_000.0,
                 },
             }
         }
@@ -2903,6 +2906,7 @@ mod anticipated_objective_tests {
                 resolved_parameters: ResolvedParameters {
                     per_param: vec![],
                     id_to_slot: vec![],
+                    cost_scale_factor: 1_000_000.0,
                 },
             }
         }
@@ -3190,6 +3194,7 @@ mod anticipated_objective_tests {
                 resolved_parameters: ResolvedParameters {
                     per_param: vec![],
                     id_to_slot: vec![],
+                    cost_scale_factor: 1_000_000.0,
                 },
                 n_stages,
                 k_max,
@@ -3643,6 +3648,7 @@ mod block_family_slack_tests {
                 resolved_parameters: ResolvedParameters {
                     per_param: vec![],
                     id_to_slot: vec![],
+                    cost_scale_factor: 1_000_000.0,
                 },
             }
         }
@@ -4051,6 +4057,7 @@ mod evaporation_slack_objective_tests {
                 resolved_parameters: ResolvedParameters {
                     per_param: vec![],
                     id_to_slot: vec![],
+                    cost_scale_factor: 1_000_000.0,
                 },
             }
         }
@@ -4351,6 +4358,7 @@ mod contract_column_tests {
                 resolved_parameters: ResolvedParameters {
                     per_param: vec![],
                     id_to_slot: vec![],
+                    cost_scale_factor: 1_000_000.0,
                 },
                 contracts,
             }

@@ -142,9 +142,10 @@ pub use lp::builder::build_stage_templates_resolving_layout;
 pub use lp::builder::{StageTemplates, build_stage_templates};
 // ── policy_load ───────────────────────────────────────────────────────────────
 pub use policy::policy_load::{
-    BoundaryInjection, FullFcf, PolicyLoadKind, PolicyLoadProof, PolicyStageManifest,
-    ValidatedBoundaryCuts, build_basis_cache_from_checkpoint, compare_manifest_slot_identity,
-    inject_boundary_cuts, load_boundary_cuts, validate_policy_load,
+    BoundaryInjection, FullFcf, LEGACY_COST_SCALE_FACTOR, PolicyLoadKind, PolicyLoadProof,
+    PolicyStageManifest, ValidatedBoundaryCuts, build_basis_cache_from_checkpoint,
+    compare_manifest_slot_identity, inject_boundary_cuts, load_boundary_cuts,
+    rescale_checkpoint_cuts_for_load, validate_policy_load,
 };
 // ── provenance ────────────────────────────────────────────────────────────────
 pub use policy::provenance::{
@@ -157,8 +158,8 @@ pub use training::rank_reconcile::reconcile_global_ok;
 pub use convergence::risk_measure::{BackwardOutcome, RiskMeasure};
 // ── setup ─────────────────────────────────────────────────────────────────────
 pub use setup::{
-    DEFAULT_MAX_ITERATIONS, DEFAULT_SEED, PrepareStochasticResult, StudyParams, StudySetup,
-    prepare_stochastic,
+    DEFAULT_COST_SCALE_FACTOR, DEFAULT_MAX_ITERATIONS, DEFAULT_SEED, PrepareStochasticResult,
+    StudyParams, StudySetup, prepare_stochastic,
 };
 // ── simulation ────────────────────────────────────────────────────────────────
 pub use simulation::{

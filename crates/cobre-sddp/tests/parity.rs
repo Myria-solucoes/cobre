@@ -1244,6 +1244,7 @@ mod determinism {
             base_rows: &fx.base_rows,
             noise_scale: &[],
             n_hydros: 0,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
@@ -1382,6 +1383,7 @@ mod determinism {
                         base_rows: &fx.base_rows,
                         noise_scale: &[],
                         n_hydros: 0,
+                        cost_scale_factor: 1_000_000.0,
                         n_load_buses: 0,
                         load_balance_row_starts: &[],
                         load_bus_indices: &[],
@@ -2153,6 +2155,8 @@ mod water_travel_time_no_arc_byte_identity {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::None,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,

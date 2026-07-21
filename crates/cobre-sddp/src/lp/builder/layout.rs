@@ -1663,6 +1663,7 @@ impl<'a> StageLayout<'a> {
             contract_export: self.equipment.contract_export.clone(),
             water_balance: self.rows.water_balance.clone(),
             load_balance: self.rows.load_balance.clone(),
+            fpha: self.row_fpha_start()..self.rows.fpha_rows_end,
             filling_target: self.filling_target(),
             filling_target_col: self.filling_target_col(),
             filled_min_storage_floor: self.filled_min_storage_floor(),

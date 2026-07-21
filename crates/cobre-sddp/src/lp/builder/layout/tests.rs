@@ -92,6 +92,7 @@ impl ZeroEntityFixtures {
             resolved_parameters: ResolvedParameters {
                 per_param: vec![],
                 id_to_slot: vec![],
+                cost_scale_factor: 1_000_000.0,
             },
             production_models: ProductionModelSet::new(vec![], 0, 1),
             evaporation_models: EvaporationModelSet::new(vec![]),
@@ -335,6 +336,7 @@ impl TwoHydroFixtures {
             resolved_parameters: ResolvedParameters {
                 per_param: vec![],
                 id_to_slot: vec![],
+                cost_scale_factor: 1_000_000.0,
             },
             production_models: ProductionModelSet::new(models, 2, 1),
             evaporation_models: EvaporationModelSet::new(vec![
@@ -663,6 +665,7 @@ impl FphaMixFixtures {
             resolved_parameters: ResolvedParameters {
                 per_param: vec![],
                 id_to_slot: vec![],
+                cost_scale_factor: 1_000_000.0,
             },
             production_models: ProductionModelSet::new(models, 3, 1),
             evaporation_models: EvaporationModelSet::new(vec![
@@ -844,6 +847,7 @@ impl FillingMembershipFixtures {
             resolved_parameters: ResolvedParameters {
                 per_param: vec![],
                 id_to_slot: vec![],
+                cost_scale_factor: 1_000_000.0,
             },
             production_models: ProductionModelSet::new(models, 2, 1),
             evaporation_models,
@@ -1715,6 +1719,7 @@ impl AntFixturesWithNStages {
             resolved_parameters: ResolvedParameters {
                 per_param: vec![],
                 id_to_slot: vec![],
+                cost_scale_factor: 1_000_000.0,
             },
             production_models: ProductionModelSet::new(vec![], 0, 1),
             evaporation_models: EvaporationModelSet::new(vec![]),
@@ -1986,6 +1991,7 @@ impl PumpingFixtures {
             resolved_parameters: ResolvedParameters {
                 per_param: vec![],
                 id_to_slot: vec![],
+                cost_scale_factor: 1_000_000.0,
             },
             production_models: ProductionModelSet::new(vec![], 0, 1),
             evaporation_models: EvaporationModelSet::new(vec![]),

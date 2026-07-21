@@ -489,6 +489,7 @@ fn minimal_config(forward_passes: u32, max_iterations: u32) -> Config {
             inflow_non_negativity: InflowNonNegativityConfig {
                 method: CfgInflowMethod::Penalty,
             },
+            cost_scale_factor: None,
         },
         training: TrainingConfig {
             enabled: true,
@@ -1237,6 +1238,7 @@ fn study_params_from_config_defaults() {
             inflow_non_negativity: InflowNonNegativityConfig {
                 method: CfgInflowMethod::None,
             },
+            cost_scale_factor: None,
         },
         training: TrainingConfig {
             enabled: true,
@@ -1311,6 +1313,7 @@ fn study_params_from_config_explicit() {
             inflow_non_negativity: InflowNonNegativityConfig {
                 method: CfgInflowMethod::Penalty,
             },
+            cost_scale_factor: None,
         },
         training: TrainingConfig {
             enabled: true,
@@ -1404,6 +1407,7 @@ fn minimal_prepare_config() -> cobre_io::Config {
             inflow_non_negativity: InflowNonNegativityConfig {
                 method: CfgInflowMethod::None,
             },
+            cost_scale_factor: None,
         },
         training: TrainingConfig {
             enabled: true,

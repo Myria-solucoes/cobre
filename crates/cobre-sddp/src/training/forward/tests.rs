@@ -677,6 +677,7 @@ fn ac_two_scenarios_three_stages_fixed_solution() {
         base_rows: &base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -807,6 +808,7 @@ fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
         base_rows: &base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -941,6 +943,7 @@ fn cost_statistics_accumulated_correctly() {
         base_rows: &base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -1380,6 +1383,7 @@ fn run_one_iteration(
         base_rows: &base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -1540,6 +1544,7 @@ fn test_forward_pass_parallel_cost_agreement() {
         base_rows: &base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -1701,6 +1706,7 @@ fn test_forward_pass_work_distribution() {
         base_rows: &base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -2006,6 +2012,7 @@ fn run_single_stage_forward(
         base_rows: &base_rows,
         noise_scale: &noise_scale,
         n_hydros: 1,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -2212,6 +2219,7 @@ fn none_method_unchanged_with_truncation_code_present() {
         base_rows: &base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -2466,6 +2474,7 @@ fn test_forward_pass_parallel_infeasibility() {
         base_rows: &base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -2631,6 +2640,7 @@ fn forward_pass_load_noise_positive_realization() {
         base_rows: &base_rows,
         noise_scale: &[1.0],
         n_hydros: 1,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses,
         load_balance_row_starts: &load_balance_row_starts,
         load_bus_indices: &load_bus_indices,
@@ -2791,6 +2801,7 @@ fn forward_pass_load_noise_clamped_to_zero() {
         base_rows: &base_rows,
         noise_scale: &[1.0],
         n_hydros: 1,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses,
         load_balance_row_starts: &load_balance_row_starts,
         load_bus_indices: &load_bus_indices,
@@ -2897,7 +2908,8 @@ fn forward_pass_no_load_buses_unchanged() {
         base_rows: &base_rows,
         noise_scale: &[], // noise_scale empty when n_hydros=0
         n_hydros: 0,      // skip inflow noise loop (minimal_template_1_0 has 1 row)
-        n_load_buses: 0,  // no load patches
+        cost_scale_factor: 1_000_000.0,
+        n_load_buses: 0, // no load patches
         load_balance_row_starts: &[],
         load_bus_indices: &[],
         block_counts_per_stage: &[1, 1, 1],
@@ -3355,8 +3367,9 @@ mod dcs_forward {
     use crate::dcs::DcsParams;
     use crate::horizon_mode::HorizonMode;
 
+    use crate::DEFAULT_COST_SCALE_FACTOR;
     use crate::inflow_method::InflowNonNegativityMethod;
-    use crate::lp_builder::{COST_SCALE_FACTOR, PatchBuffer};
+    use crate::lp_builder::PatchBuffer;
     use crate::test_support;
     use crate::trajectory::TrajectoryRecord;
     use crate::workspace::{BasisStore, SolverWorkspace, WorkspaceSizing};
@@ -3559,6 +3572,7 @@ mod dcs_forward {
             base_rows: &base_rows,
             noise_scale: &[],
             n_hydros: 0,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
@@ -3669,8 +3683,8 @@ mod dcs_forward {
         );
         // The binding cut floor is 4 at x_hat=2; minimise-theta gives theta=4.
         // With discount 0, stage_cost = objective * SCALE = theta * SCALE, so
-        // both paths land on 4 * COST_SCALE_FACTOR.
-        assert!((dcs_cost - 4.0 * COST_SCALE_FACTOR).abs() < 1e-3);
+        // both paths land on 4 * DEFAULT_COST_SCALE_FACTOR.
+        assert!((dcs_cost - 4.0 * DEFAULT_COST_SCALE_FACTOR).abs() < 1e-3);
         assert_eq!(frozen_state.len(), dcs_state.len());
         for (b, d) in frozen_state.iter().zip(&dcs_state) {
             assert!((b - d).abs() < 1e-9, "state: frozen {b} vs DCS {d}");
@@ -3909,6 +3923,7 @@ mod transit_bucket_copy_gap {
             base_rows: &base_rows,
             noise_scale: &[],
             n_hydros: 0,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],

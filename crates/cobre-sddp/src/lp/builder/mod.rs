@@ -80,12 +80,6 @@ pub(crate) use scaling::{
 /// `Block::duration_hours`: `volume_hm3 = flow_m3s * M3S_TO_HM3 * duration_hours`.
 pub(crate) const M3S_TO_HM3: f64 = 3_600.0 / 1_000_000.0;
 
-/// Divisor applied to all objective-function cost coefficients to improve LP
-/// conditioning without changing the argmin. Every cost-domain output (objective,
-/// duals, cost breakdowns) is multiplied back by this factor at the reporting
-/// boundary to recover original units.
-pub(crate) const COST_SCALE_FACTOR: f64 = 1_000_000.0;
-
 /// Margin on the symmetric magnitude bound `[-q_max, +q_max]` of the evaporation
 /// outflow variable, absorbing linearization error where the area-volume curve
 /// exceeds the linear estimate near `v_max`. Symmetric because that error runs both

@@ -117,6 +117,7 @@ mod simulation_only {
             total_visited_states: 0,
             training_block_mode: "parallel".to_string(),
             training_block_mode_per_stage: vec![],
+            cost_scale_factor: None,
         };
 
         write_policy_checkpoint(&policy_dir, &stage_cuts, &stage_bases, &metadata, &[])
@@ -979,6 +980,7 @@ mod decomp_integration {
             total_visited_states: 0,
             training_block_mode: "parallel".to_string(),
             training_block_mode_per_stage: vec![],
+            cost_scale_factor: None,
         };
         write_policy_checkpoint(policy_dir, &stage_cuts, &stage_bases, &metadata, &[])
             .expect("write checkpoint");
@@ -1185,6 +1187,7 @@ mod decomp_integration {
             source_stage,
             state_dim,
             &current_manifest,
+            1_000_000.0,
             &mut |msg| warnings.push(msg.to_string()),
         )
         .expect("load_boundary_cuts");
@@ -1274,6 +1277,7 @@ mod decomp_integration {
             source_stage,
             state_dim,
             &current_manifest,
+            1_000_000.0,
             &mut |_| {},
         );
 

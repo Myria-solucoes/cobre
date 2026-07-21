@@ -149,6 +149,7 @@ impl StudySetup {
             geometry_per_stage: &self.stage_data.stage_templates.geometry_per_stage,
             noise_scale: &self.stage_data.stage_templates.noise_scale,
             n_hydros: self.stage_data.stage_templates.n_hydros,
+            cost_scale_factor: self.stage_data.stage_templates.cost_scale_factor,
             n_load_buses: self.stage_data.stage_templates.n_load_buses,
             load_balance_row_starts: &self.stage_data.stage_templates.load_balance_row_starts,
             load_bus_indices: &self.stage_data.stage_templates.load_bus_indices,

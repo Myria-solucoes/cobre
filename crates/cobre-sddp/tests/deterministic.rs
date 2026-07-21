@@ -32,6 +32,7 @@ use cobre_solver::{ActiveSolver, SolverInterface};
 mod common;
 use common::StubComm;
 use common::build_setup_for_case;
+use common::fresh_setup_with;
 
 /// Train a case (`StubComm`, seed 42, 1 thread) and return the result plus the
 /// live solver, so callers can inspect `solver.statistics()` after training.
@@ -323,6 +324,58 @@ fn d02_single_hydro() {
         "D02: gap={:.2e}",
         result.final_gap
     );
+}
+
+/// Behavioral: `modeling.cost_scale_factor` is objective conditioning only —
+/// D02 trained at a non-default factor converges to the SAME cost as the
+/// default-factor run (scale-invariance of the model, the real correctness
+/// claim §5 of the cost-scale-factor ticket asks for; the LP builder divides
+/// by the resolved factor at template build and every reporting boundary
+/// multiplies back, so the argmin — and its cost — does not depend on which
+/// factor was configured).
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+#[test]
+fn d02_single_hydro_cost_scale_invariant() {
+    let case_dir = Path::new("../../examples/deterministic/d02-single-hydro");
+
+    let default_result = run_deterministic(case_dir);
+    assert_cost(
+        default_result.final_lb,
+        D02_EXPECTED_COST,
+        1e-4,
+        "D02-default-factor",
+    );
+
+    for non_default_factor in [10_000.0, 5_000_000.0] {
+        let mut setup = fresh_setup_with(case_dir, |config| {
+            config.modeling.cost_scale_factor = Some(non_default_factor);
+        });
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("train must return Ok");
+        assert!(
+            outcome.error.is_none(),
+            "cost_scale_factor={non_default_factor}: expected no training error"
+        );
+        assert_cost(
+            outcome.result.final_lb,
+            D02_EXPECTED_COST,
+            1e-4,
+            &format!("D02-factor-{non_default_factor}"),
+        );
+        assert!(
+            (outcome.result.final_lb - default_result.final_lb).abs() < 1e-3,
+            "cost_scale_factor={non_default_factor}: final_lb {} must match the \
+             default-factor run's final_lb {} to behavioral tolerance",
+            outcome.result.final_lb,
+            default_result.final_lb
+        );
+    }
 }
 
 /// Three-stage cascade hydrothermal dispatch (2 hydros in series).
@@ -1353,6 +1406,7 @@ fn d12_checkpoint_round_trip() {
         total_visited_states: 0,
         training_block_mode: "parallel".to_string(),
         training_block_mode_per_stage: vec![],
+        cost_scale_factor: None,
     };
 
     write_policy_checkpoint(
@@ -5341,6 +5395,8 @@ mod chronological_telescoping {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::None,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,
@@ -5441,8 +5497,22 @@ mod chronological_telescoping {
     }
 
     /// Assert every checkpoint cut's coefficients and intercept are bit-for-bit
-    /// identical (`f64::to_bits`, never `==`) to the records written from `fcf`.
-    fn assert_cuts_bit_identical(fcf: &FutureCostFunction, checkpoint: &PolicyCheckpoint) {
+    /// identical to `scale * (the records written from fcf)` (`f64::to_bits`,
+    /// never `==`).
+    ///
+    /// `scale == 1.0` compares raw internal-scaled values (a `checkpoint`
+    /// whose cuts were never routed through the §5 Option A export
+    /// transform, e.g. `FutureCostFunction::new_with_warm_start` fed
+    /// `checkpoint.stage_cuts` directly). `scale ==
+    /// setup.stage_data.stage_templates.cost_scale_factor` compares against a
+    /// checkpoint written by [`write_checkpoint`] (`orchestration.rs`), which
+    /// multiplies every value by that same factor at export — a single
+    /// multiply, so the comparison is exact, not tolerance-based.
+    fn assert_cuts_bit_identical(
+        fcf: &FutureCostFunction,
+        checkpoint: &PolicyCheckpoint,
+        scale: f64,
+    ) {
         let written = build_stage_cut_records(fcf);
         assert_eq!(
             written.len(),
@@ -5459,9 +5529,9 @@ mod chronological_telescoping {
             );
             for (cut_idx, (w, r)) in stage_written.iter().zip(stage_read.cuts.iter()).enumerate() {
                 assert_eq!(
-                    w.intercept.to_bits(),
+                    (w.intercept * scale).to_bits(),
                     r.intercept.to_bits(),
-                    "stage {stage} cut {cut_idx}: intercept bits differ ({} vs {})",
+                    "stage {stage} cut {cut_idx}: intercept bits differ ({} * {scale} vs {})",
                     w.intercept,
                     r.intercept
                 );
@@ -5472,9 +5542,9 @@ mod chronological_telescoping {
                 );
                 for (k, (wc, rc)) in w.coefficients.iter().zip(r.coefficients.iter()).enumerate() {
                     assert_eq!(
-                        wc.to_bits(),
+                        (wc * scale).to_bits(),
                         rc.to_bits(),
-                        "stage {stage} cut {cut_idx} coeff {k}: bits differ ({wc} vs {rc})"
+                        "stage {stage} cut {cut_idx} coeff {k}: bits differ ({wc} * {scale} vs {rc})"
                     );
                 }
             }
@@ -5484,15 +5554,20 @@ mod chronological_telescoping {
     /// Train in `train_mode`, checkpoint, then load into a `load_mode` study and
     /// evaluate `theta` against the load-mode LP.
     ///
-    /// Asserts (1) the written cut bytes survive the checkpoint round-trip, (2)
-    /// the cross-mode warm-start load succeeds, (3) the loaded cuts are byte-
-    /// identical to the written ones, and (4) a load-mode simulation runs the
-    /// cross-mode FCF without error. Only cut bytes are asserted portable; the
-    /// persisted basis is column-count-dependent (hence mode-dependent) and is
+    /// Asserts (1) the written checkpoint holds the trained FCF's cuts scaled
+    /// by the writing study's `cost_scale_factor` (§5 Option A: canonical
+    /// currency units at rest — exact, a single multiply), (2) the cross-mode
+    /// warm-start load succeeds, (3) `FutureCostFunction::new_with_warm_start`
+    /// (constructor fidelity only, bypassing the §5 load-side rescale this
+    /// narrow test does not exercise) copies the checkpoint's raw bytes
+    /// unchanged, and (4) a load-mode simulation runs the cross-mode FCF
+    /// without error. Only cut bytes are asserted portable; the persisted
+    /// basis is column-count-dependent (hence mode-dependent) and is
     /// intentionally not asserted (design §5).
     fn assert_cross_mode_load_preserves_cut_bytes(train_mode: BlockMode, load_mode: BlockMode) {
         let (trained_setup, checkpoint, _policy_dir) = train_and_checkpoint(train_mode);
-        assert_cuts_bit_identical(&trained_setup.fcf, &checkpoint);
+        let cost_scale_factor = trained_setup.stage_data.stage_templates.cost_scale_factor;
+        assert_cuts_bit_identical(&trained_setup.fcf, &checkpoint, cost_scale_factor);
 
         let config = build_config();
         let mut setup2 = build_setup_in_code(build_system(load_mode), &config);
@@ -5509,7 +5584,7 @@ mod chronological_telescoping {
         )
         .expect("cross-mode warm-start load must succeed (cuts are n_blks-independent, design §5)");
 
-        assert_cuts_bit_identical(&warm_fcf, &checkpoint);
+        assert_cuts_bit_identical(&warm_fcf, &checkpoint, 1.0);
 
         setup2.replace_fcf(warm_fcf);
         setup2.simulation_config.n_scenarios = 1;
@@ -5875,6 +5950,8 @@ mod chronological_attribution {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::None,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,

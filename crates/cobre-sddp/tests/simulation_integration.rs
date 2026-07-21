@@ -402,6 +402,7 @@ fn make_config() -> Config {
         schema: None,
         modeling: ModelingConfig {
             inflow_non_negativity: InflowNonNegativityConfig::default(),
+            cost_scale_factor: None,
         },
         training: IoTrainingConfig {
             enabled: true,
@@ -610,6 +611,7 @@ fn train_simulate_write_cycle() {
         base_rows: &fx.base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -736,6 +738,7 @@ fn train_simulate_write_cycle() {
         total_visited_states: 0,
         training_block_mode: "parallel".to_string(),
         training_block_mode_per_stage: vec![],
+        cost_scale_factor: None,
     };
 
     write_policy_checkpoint(
@@ -807,6 +810,7 @@ fn train_simulate_write_cycle() {
             base_rows: &fx.base_rows,
             noise_scale: &[],
             n_hydros: 0,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
@@ -1376,6 +1380,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
         base_rows: &base_rows,
         noise_scale: &templates_result.noise_scale,
         n_hydros: 1,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &templates_result.load_balance_row_starts,
         load_bus_indices: &[],

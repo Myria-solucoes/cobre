@@ -548,6 +548,7 @@ fn run_programmatic(
         backward_opening_order: cobre_io::config::BackwardOpeningOrder::default(),
         backward_scheduler: cobre_io::config::BackwardScheduler::default(),
         opening_block_size: None,
+        cost_scale_factor: cobre_sddp::DEFAULT_COST_SCALE_FACTOR,
     };
     let mut setup =
         StudySetup::from_broadcast_params(system, stochastic, config, hydro_models, source, source)
@@ -889,6 +890,7 @@ fn run_with_setup(
         backward_opening_order: cobre_io::config::BackwardOpeningOrder::default(),
         backward_scheduler: cobre_io::config::BackwardScheduler::default(),
         opening_block_size: None,
+        cost_scale_factor: cobre_sddp::DEFAULT_COST_SCALE_FACTOR,
     };
     let mut setup =
         StudySetup::from_broadcast_params(system, stochastic, config, hydro_models, source, source)

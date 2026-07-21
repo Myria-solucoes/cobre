@@ -378,6 +378,8 @@ mod anticipated_backward_cut {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,
@@ -1156,6 +1158,8 @@ mod anticipated_pre_horizon_seed_delivery {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,
@@ -2120,6 +2124,8 @@ mod anticipated_d_t_saturation {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,
@@ -2689,6 +2695,8 @@ mod anticipated_forward_pass {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,
@@ -3291,6 +3299,8 @@ mod anticipated_closed_form_lb_k1_single_thermal {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,
@@ -3658,6 +3668,8 @@ mod lead_time_single_decider_end_to_end {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,
@@ -4142,6 +4154,8 @@ mod anticipated_numerical_reconciliation_k2 {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,
@@ -4694,6 +4708,8 @@ mod anticipated_bridge_st_cruz_nova_k1 {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,
@@ -5258,6 +5274,7 @@ mod anticipated_convergence_slow {
             backward_opening_order: cobre_io::config::BackwardOpeningOrder::default(),
             backward_scheduler: cobre_io::config::BackwardScheduler::default(),
             opening_block_size: None,
+            cost_scale_factor: cobre_sddp::DEFAULT_COST_SCALE_FACTOR,
         };
 
         let source = ScenarioSource {
@@ -5635,6 +5652,8 @@ mod a1b_value_cut_identity_anchor {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,
@@ -6269,6 +6288,8 @@ mod a1c_stage_count_mode_anchor {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,

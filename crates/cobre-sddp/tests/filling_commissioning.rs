@@ -1660,6 +1660,8 @@ mod filling_cut_validity {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,

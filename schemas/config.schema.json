@@ -253,6 +253,15 @@
       "additionalProperties": false,
       "description": "Modeling options (`config.json → modeling`).",
       "properties": {
+        "cost_scale_factor": {
+          "default": null,
+          "description": "Divisor applied to every non-theta objective coefficient at template\nbuild time, multiplied back at every cost-domain reporting boundary.\nDefault `1_000_000.0`, matching prior hard-coded behavior byte-for-byte.\n\nObjective conditioning only — results are identical in exact arithmetic;\nthis does not alter the model, unlike `modeling`'s other fields. The\neffective dual tolerance in currency units is\n`dual_feasibility_tolerance × this factor`: raising the factor without\nlowering `dual_feasibility_tolerance` proportionally loosens optimality\nin currency terms even though the configured tolerance value is\nunchanged — the inverse-direction trap a name cannot carry.\n\nAbsent uses the default. Must be finite and `> 0`; a value outside\n`[1.0, 1e12]` is accepted but logs an advisory warning.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "inflow_non_negativity": {
           "$ref": "#/$defs/InflowNonNegativityConfig",
           "default": {
@@ -1185,6 +1194,7 @@
     "modeling": {
       "$ref": "#/$defs/ModelingConfig",
       "default": {
+        "cost_scale_factor": null,
         "inflow_non_negativity": {
           "method": "penalty"
         }

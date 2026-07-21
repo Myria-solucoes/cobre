@@ -200,6 +200,7 @@ fn empty_resolved_params() -> ResolvedParameters {
     ResolvedParameters {
         per_param: vec![],
         id_to_slot: vec![],
+        cost_scale_factor: 1_000_000.0,
     }
 }
 
@@ -1757,7 +1758,7 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
 #[test]
 fn stage_templates_empty_is_all_empty_with_n_hydros() {
     let n = 7_usize;
-    let empty = super::StageTemplates::empty(n);
+    let empty = super::StageTemplates::empty(n, DEFAULT_COST_SCALE_FACTOR);
 
     assert_eq!(empty.n_hydros, n, "empty(n).n_hydros must equal n");
     assert_eq!(empty.n_load_buses, 0, "n_load_buses must be 0");
@@ -1963,7 +1964,12 @@ fn postprocessed_stage_templates_carry_discounted_factors() {
     )
     .expect("build_stage_templates: valid system");
 
-    let _report = postprocess_templates(&mut templates, &system, &state_layout);
+    let _report = postprocess_templates(
+        &mut templates,
+        &system,
+        &state_layout,
+        DEFAULT_COST_SCALE_FACTOR,
+    );
 
     let cumulative = templates.cumulative_discount_factors();
     assert_eq!(
@@ -1989,7 +1995,7 @@ fn postprocessed_stage_templates_carry_discounted_factors() {
 // ── Operational-violation RHS & matrix-coefficient verification ──────────
 
 use super::super::layout::StageLayout;
-use super::COST_SCALE_FACTOR;
+use crate::DEFAULT_COST_SCALE_FACTOR;
 use crate::hydro_models::{ProductionModelSet, ResolvedProductionModel};
 use cobre_core::System;
 use cobre_solver::StageTemplate;
@@ -2237,6 +2243,7 @@ fn build_active_violations_layout_and_template() -> (StageLayout<'static>, Stage
     let resolved_params = Box::leak(Box::new(ResolvedParameters {
         per_param: vec![],
         id_to_slot: vec![],
+        cost_scale_factor: 1_000_000.0,
     }));
 
     let (
@@ -2567,7 +2574,7 @@ fn relocated_diagnostic_template_operational_violation_correctness() {
         "outflow_below_slack col_upper must be +inf when min_outflow > 0"
     );
 
-    let expected_objective = 1000.0 * block_hours_0 / COST_SCALE_FACTOR;
+    let expected_objective = 1000.0 * block_hours_0 / DEFAULT_COST_SCALE_FACTOR;
     assert!(
         t.objective[col] > 0.0,
         "outflow_below_slack objective must be positive (penalty), got {}",
@@ -2579,7 +2586,7 @@ fn relocated_diagnostic_template_operational_violation_correctness() {
         t.objective[col],
         expected_objective,
         block_hours_0,
-        COST_SCALE_FACTOR
+        DEFAULT_COST_SCALE_FACTOR
     );
 
     let col_above = layout.slack.oper_violation.outflow_above_slack.start;
@@ -3119,6 +3126,7 @@ fn block_layout_and_template(
     let resolved_params = Box::leak(Box::new(ResolvedParameters {
         per_param: vec![],
         id_to_slot: vec![],
+        cost_scale_factor: 1_000_000.0,
     }));
 
     let (
@@ -4123,6 +4131,7 @@ fn filling_block_layout_and_template(
     let resolved_params = Box::leak(Box::new(ResolvedParameters {
         per_param: vec![],
         id_to_slot: vec![],
+        cost_scale_factor: 1_000_000.0,
     }));
 
     let (

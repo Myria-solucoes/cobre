@@ -23,6 +23,15 @@ pub const DEFAULT_MAX_ITERATIONS: u64 = 100;
 /// Default random seed for stochastic scenario generation.
 pub const DEFAULT_SEED: u64 = 42;
 
+/// Default `modeling.cost_scale_factor` when absent from config — byte-identical
+/// to the prior hard-coded `COST_SCALE_FACTOR` constant.
+pub const DEFAULT_COST_SCALE_FACTOR: f64 = 1_000_000.0;
+
+/// Advisory range for `modeling.cost_scale_factor`; values outside this range
+/// are accepted but logged via `tracing::warn!`.
+const COST_SCALE_FACTOR_ADVISORY_MIN: f64 = 1.0;
+const COST_SCALE_FACTOR_ADVISORY_MAX: f64 = 1e12;
+
 // ---------------------------------------------------------------------------
 // StudyParams
 // ---------------------------------------------------------------------------
@@ -70,6 +79,10 @@ pub struct StudyParams {
     /// Opening-block size override for `backward_scheduler = opening_block`
     /// (`training.opening_block_size`).
     pub opening_block_size: Option<NonZeroUsize>,
+    /// Resolved objective cost-scale factor (`modeling.cost_scale_factor`,
+    /// default [`DEFAULT_COST_SCALE_FACTOR`]). Baked into the template at build
+    /// time — one value per study.
+    pub cost_scale_factor: f64,
 }
 
 impl StudyParams {
@@ -179,6 +192,27 @@ impl StudyParams {
             );
         }
 
+        let cost_scale_factor = config
+            .modeling
+            .cost_scale_factor
+            .unwrap_or(DEFAULT_COST_SCALE_FACTOR);
+        if !cost_scale_factor.is_finite() || cost_scale_factor <= 0.0 {
+            return Err(SddpError::Validation(format!(
+                "modeling.cost_scale_factor ({cost_scale_factor}) must be finite and > 0"
+            )));
+        }
+        if !(COST_SCALE_FACTOR_ADVISORY_MIN..=COST_SCALE_FACTOR_ADVISORY_MAX)
+            .contains(&cost_scale_factor)
+        {
+            tracing::warn!(
+                "modeling.cost_scale_factor ({cost_scale_factor}) is outside the advisory \
+                 range [{COST_SCALE_FACTOR_ADVISORY_MIN}, {COST_SCALE_FACTOR_ADVISORY_MAX}]; \
+                 this only affects LP conditioning, not results in exact arithmetic, but an \
+                 extreme value may change how many economically-meaningless pivots run \
+                 before optimality"
+            );
+        }
+
         Ok(Self {
             seed,
             forward_passes,
@@ -196,6 +230,7 @@ impl StudyParams {
             backward_opening_order,
             backward_scheduler,
             opening_block_size,
+            cost_scale_factor,
         })
     }
 
@@ -224,6 +259,7 @@ impl StudyParams {
             backward_opening_order: self.backward_opening_order,
             backward_scheduler: self.backward_scheduler,
             opening_block_size: self.opening_block_size,
+            cost_scale_factor: self.cost_scale_factor,
         }
     }
 }
@@ -286,6 +322,10 @@ pub struct ConstructionConfig {
     /// Opening-block size override for `backward_scheduler = opening_block`
     /// (`training.opening_block_size`).
     pub opening_block_size: Option<NonZeroUsize>,
+    /// Resolved objective cost-scale factor (`modeling.cost_scale_factor`,
+    /// default [`DEFAULT_COST_SCALE_FACTOR`]). Baked into the template at build
+    /// time — one value per study.
+    pub cost_scale_factor: f64,
 }
 
 #[cfg(test)]
@@ -370,106 +410,184 @@ mod tests {
         fn exit(&self, _span: &span::Id) {}
     }
 
-    /// Build a minimal `Config` with `max_active_per_stage` and
-    /// `forward_passes` set so that the budget-below-forward-passes warning fires.
+    /// Minimal valid `Config` the `config_with_*` fixtures below mutate: one
+    /// forward pass, an iteration-limit stopping rule, every other section
+    /// default.
+    fn base_test_config() -> Config {
+        Config {
+            schema: None,
+            modeling: ModelingConfig {
+                inflow_non_negativity: InflowNonNegativityConfig {
+                    method: CfgInflowMethod::Penalty,
+                },
+                cost_scale_factor: None,
+            },
+            training: TrainingConfig {
+                enabled: true,
+                tree_seed: Some(42),
+                forward_passes: Some(1),
+                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
+                stopping_mode: "any".to_string(),
+                cut_selection: RowSelectionConfig::default(),
+                solver: TrainingSolverConfig::default(),
+                backward_opening_order: BackwardOpeningOrder::default(),
+                backward_scheduler: BackwardScheduler::default(),
+                opening_block_size: None,
+                scenario_source: None,
+            },
+            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
+            policy: PolicyConfig::default(),
+            simulation: IoSimulationConfig::default(),
+            exports: ExportsConfig::default(),
+            estimation: EstimationConfig::default(),
+        }
+    }
+
+    /// `max_active_per_stage` below `forward_passes`, so the
+    /// budget-below-forward-passes warning fires.
     fn config_with_budget_below_forward_passes() -> Config {
-        Config {
-            schema: None,
-            modeling: ModelingConfig {
-                inflow_non_negativity: InflowNonNegativityConfig {
-                    method: CfgInflowMethod::Penalty,
-                },
-            },
-            training: TrainingConfig {
-                enabled: true,
-                tree_seed: Some(42),
-                forward_passes: Some(2),
-                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
-                stopping_mode: "any".to_string(),
-                cut_selection: RowSelectionConfig {
-                    max_active_per_stage: Some(1),
-                    ..RowSelectionConfig::default()
-                },
-                solver: TrainingSolverConfig::default(),
-                backward_opening_order: BackwardOpeningOrder::default(),
-                backward_scheduler: BackwardScheduler::default(),
-                opening_block_size: None,
-                scenario_source: None,
-            },
-            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
-            policy: PolicyConfig::default(),
-            simulation: IoSimulationConfig::default(),
-            exports: ExportsConfig::default(),
-            estimation: EstimationConfig::default(),
-        }
+        let mut config = base_test_config();
+        config.training.forward_passes = Some(2);
+        config.training.cut_selection = RowSelectionConfig {
+            max_active_per_stage: Some(1),
+            ..RowSelectionConfig::default()
+        };
+        config
     }
 
-    /// Build a minimal `Config` with `opening_block_size` set while
-    /// `backward_scheduler` stays `trial_point` (the default), so the
-    /// ignored-key advisory fires.
+    /// `opening_block_size` set while `backward_scheduler` stays
+    /// `trial_point`, so the ignored-key advisory fires.
     fn config_with_opening_block_size_ignored_under_trial_point() -> Config {
-        Config {
-            schema: None,
-            modeling: ModelingConfig {
-                inflow_non_negativity: InflowNonNegativityConfig {
-                    method: CfgInflowMethod::Penalty,
-                },
-            },
-            training: TrainingConfig {
-                enabled: true,
-                tree_seed: Some(42),
-                forward_passes: Some(1),
-                stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
-                stopping_mode: "any".to_string(),
-                cut_selection: RowSelectionConfig::default(),
-                solver: TrainingSolverConfig::default(),
-                backward_opening_order: BackwardOpeningOrder::default(),
-                backward_scheduler: BackwardScheduler::TrialPoint,
-                opening_block_size: NonZeroUsize::new(4),
-                scenario_source: None,
-            },
-            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
-            policy: PolicyConfig::default(),
-            simulation: IoSimulationConfig::default(),
-            exports: ExportsConfig::default(),
-            estimation: EstimationConfig::default(),
+        let mut config = base_test_config();
+        config.training.backward_scheduler = BackwardScheduler::TrialPoint;
+        config.training.opening_block_size = NonZeroUsize::new(4);
+        config
+    }
+
+    /// Stopping rules containing a `Simulation` entry.
+    fn config_with_simulation_stopping_rule() -> Config {
+        let mut config = base_test_config();
+        config.training.stopping_rules = Some(vec![StoppingRuleConfig::Simulation {
+            replications: 100,
+            period: 12,
+            bound_window: 10,
+            distance_tol: 0.05,
+            bound_tol: 0.01,
+        }]);
+        config
+    }
+
+    /// `modeling.cost_scale_factor` set to `value` (`None` reproduces the
+    /// byte-neutral default-absent shape).
+    fn config_with_cost_scale_factor(value: Option<f64>) -> Config {
+        let mut config = base_test_config();
+        config.modeling.cost_scale_factor = value;
+        config
+    }
+
+    /// AC: an absent `modeling.cost_scale_factor` resolves to
+    /// [`DEFAULT_COST_SCALE_FACTOR`] — the byte-neutral-at-default contract.
+    #[test]
+    fn cost_scale_factor_absent_resolves_to_default() {
+        let params = StudyParams::from_config(&config_with_cost_scale_factor(None))
+            .expect("absent cost_scale_factor is valid");
+        assert_eq!(params.cost_scale_factor, super::DEFAULT_COST_SCALE_FACTOR);
+        assert_eq!(params.cost_scale_factor, 1_000_000.0);
+    }
+
+    /// AC: a valid custom `modeling.cost_scale_factor` resolves verbatim.
+    #[test]
+    fn cost_scale_factor_custom_value_resolves_verbatim() {
+        let params = StudyParams::from_config(&config_with_cost_scale_factor(Some(500.0)))
+            .expect("500.0 is within [1.0, 1e12] and > 0");
+        assert_eq!(params.cost_scale_factor, 500.0);
+    }
+
+    /// AC: `from_config` rejects a non-finite `cost_scale_factor` (NaN, +inf,
+    /// -inf) with `SddpError::Validation` naming the field.
+    #[test]
+    fn cost_scale_factor_rejects_non_finite() {
+        use crate::SddpError;
+
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let err = StudyParams::from_config(&config_with_cost_scale_factor(Some(bad)))
+                .expect_err("non-finite cost_scale_factor must be rejected");
+            assert!(
+                matches!(err, SddpError::Validation(_)),
+                "expected SddpError::Validation for {bad}, got: {err:?}"
+            );
+            assert!(
+                err.to_string().contains("cost_scale_factor"),
+                "error message must mention 'cost_scale_factor'; got: {err}"
+            );
         }
     }
 
-    /// Build a minimal `Config` whose stopping rules contain a
-    /// `Simulation` entry.
-    fn config_with_simulation_stopping_rule() -> Config {
-        Config {
-            schema: None,
-            modeling: ModelingConfig {
-                inflow_non_negativity: InflowNonNegativityConfig {
-                    method: CfgInflowMethod::Penalty,
-                },
-            },
-            training: TrainingConfig {
-                enabled: true,
-                tree_seed: Some(42),
-                forward_passes: Some(1),
-                stopping_rules: Some(vec![StoppingRuleConfig::Simulation {
-                    replications: 100,
-                    period: 12,
-                    bound_window: 10,
-                    distance_tol: 0.05,
-                    bound_tol: 0.01,
-                }]),
-                stopping_mode: "any".to_string(),
-                cut_selection: RowSelectionConfig::default(),
-                solver: TrainingSolverConfig::default(),
-                backward_opening_order: BackwardOpeningOrder::default(),
-                backward_scheduler: BackwardScheduler::default(),
-                opening_block_size: None,
-                scenario_source: None,
-            },
-            upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
-            policy: PolicyConfig::default(),
-            simulation: IoSimulationConfig::default(),
-            exports: ExportsConfig::default(),
-            estimation: EstimationConfig::default(),
+    /// AC: `from_config` rejects a non-positive `cost_scale_factor` (zero and
+    /// negative) with `SddpError::Validation` naming the field.
+    #[test]
+    fn cost_scale_factor_rejects_non_positive() {
+        use crate::SddpError;
+
+        for bad in [0.0, -1.0, -1e6] {
+            let err = StudyParams::from_config(&config_with_cost_scale_factor(Some(bad)))
+                .expect_err("non-positive cost_scale_factor must be rejected");
+            assert!(
+                matches!(err, SddpError::Validation(_)),
+                "expected SddpError::Validation for {bad}, got: {err:?}"
+            );
+            assert!(
+                err.to_string().contains("cost_scale_factor"),
+                "error message must mention 'cost_scale_factor'; got: {err}"
+            );
+        }
+    }
+
+    /// AC: a `cost_scale_factor` outside the advisory range `[1.0, 1e12]` is
+    /// ACCEPTED (construction succeeds) but emits a WARN-level tracing event
+    /// naming the field — never a hard rejection.
+    #[test]
+    fn cost_scale_factor_outside_advisory_range_warns_but_succeeds() {
+        for outside in [0.5, 1e13] {
+            let (subscriber, messages) = WarnRecorder::new();
+            let params = tracing::subscriber::with_default(subscriber, || {
+                StudyParams::from_config(&config_with_cost_scale_factor(Some(outside)))
+                    .expect("outside-advisory-range value must still construct successfully")
+            });
+            assert_eq!(params.cost_scale_factor, outside);
+            let recorded = messages.lock().unwrap();
+            let relevant: Vec<&str> = recorded
+                .iter()
+                .map(std::string::String::as_str)
+                .filter(|msg| msg.contains("cost_scale_factor"))
+                .collect();
+            assert!(
+                !relevant.is_empty(),
+                "expected a WARN event containing 'cost_scale_factor' for {outside}, got: {recorded:?}"
+            );
+        }
+    }
+
+    /// AC: the advisory-range boundaries `1.0` and `1e12` are inclusive — no
+    /// warning fires exactly at either edge.
+    #[test]
+    fn cost_scale_factor_advisory_range_boundaries_are_inclusive() {
+        for boundary in [1.0, 1e12] {
+            let (subscriber, messages) = WarnRecorder::new();
+            let _params = tracing::subscriber::with_default(subscriber, || {
+                StudyParams::from_config(&config_with_cost_scale_factor(Some(boundary)))
+                    .expect("boundary value must construct successfully")
+            });
+            let recorded = messages.lock().unwrap();
+            let relevant: Vec<&str> = recorded
+                .iter()
+                .map(std::string::String::as_str)
+                .filter(|msg| msg.contains("cost_scale_factor"))
+                .collect();
+            assert!(
+                relevant.is_empty(),
+                "boundary value {boundary} must not warn, got: {recorded:?}"
+            );
         }
     }
 

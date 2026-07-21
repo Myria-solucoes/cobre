@@ -1842,6 +1842,7 @@ mod parameter_resolution_tests {
             &stage_to_season,
             &stage_ids,
             n_stages,
+            1_000_000.0,
         )
         .expect("empty_resolved_params: valid")
     }
@@ -1870,6 +1871,7 @@ mod parameter_resolution_tests {
             &stage_to_season,
             &stage_ids,
             n_stages,
+            1_000_000.0,
         )
         .expect("constant_param_resolved: valid")
     }
@@ -1895,6 +1897,7 @@ mod parameter_resolution_tests {
             &stage_to_season,
             &stage_ids,
             n_stages,
+            1_000_000.0,
         )
         .expect("per_stage_param_resolved: valid")
     }
@@ -2224,6 +2227,7 @@ mod zero_cost_tests {
                 resolved_parameters: ResolvedParameters {
                     per_param: vec![],
                     id_to_slot: vec![],
+                    cost_scale_factor: 1_000_000.0,
                 },
                 production_models: ProductionModelSet::new(vec![], 0, 1),
                 evaporation_models: EvaporationModelSet::new(vec![]),
@@ -3485,6 +3489,7 @@ mod pumping_water_tests {
                 resolved_parameters: ResolvedParameters {
                     per_param: vec![],
                     id_to_slot: vec![],
+                    cost_scale_factor: 1_000_000.0,
                 },
                 production_models,
                 evaporation_models,

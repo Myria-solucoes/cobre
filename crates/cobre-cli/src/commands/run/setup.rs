@@ -587,6 +587,7 @@ fn build_study_setup(
         backward_opening_order: bcast_config.backward_opening_order,
         backward_scheduler: bcast_config.backward_scheduler,
         opening_block_size: bcast_config.opening_block_size,
+        cost_scale_factor: bcast_config.cost_scale_factor,
     };
     StudySetup::from_broadcast_params(
         system,

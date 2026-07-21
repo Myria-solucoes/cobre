@@ -60,7 +60,8 @@ pub mod stochastic_pipeline;
 pub(crate) mod template_postprocess;
 
 pub use params::{
-    ConstructionConfig, DEFAULT_FORWARD_PASSES, DEFAULT_MAX_ITERATIONS, DEFAULT_SEED, StudyParams,
+    ConstructionConfig, DEFAULT_COST_SCALE_FACTOR, DEFAULT_FORWARD_PASSES, DEFAULT_MAX_ITERATIONS,
+    DEFAULT_SEED, StudyParams,
 };
 pub use scenario_library_set::{PhaseLibraries, ScenarioLibraries};
 pub use stage_data::StageData;
@@ -351,6 +352,7 @@ impl StudySetup {
             backward_opening_order,
             backward_scheduler,
             opening_block_size,
+            cost_scale_factor,
         } = config;
 
         // Fail fast on a backend-unsupported field before any template exists;
@@ -398,6 +400,7 @@ impl StudySetup {
             &hydro_models,
             &scalar_parameters,
             &state_layout,
+            cost_scale_factor,
             &transit_bucket_topology.per_stage_mask,
             &transit_bucket_topology.arc_stage_weights,
             &transit_bucket_topology.arc_spread_chrono,
@@ -687,6 +690,7 @@ fn build_energy_and_templates(
     hydro_models: &PrepareHydroModelsResult,
     scalar_parameters: &[cobre_core::ScalarParameter],
     state_layout: &StateSpace,
+    cost_scale_factor: f64,
     per_stage_mask: &[Vec<usize>],
     arc_stage_weights: &HashMap<usize, Vec<Vec<f64>>>,
     arc_spread_chrono: &HashMap<usize, Vec<Option<SpreadResolution>>>,
@@ -731,6 +735,7 @@ fn build_energy_and_templates(
         &stage_to_season,
         &study_stage_ids,
         n_stages_pre,
+        cost_scale_factor,
     )
     .map_err(|e| SddpError::Validation(e.to_string()))?;
 
@@ -749,8 +754,12 @@ fn build_energy_and_templates(
         arc_arrival_density,
     )?;
 
-    let scaling_report =
-        template_postprocess::postprocess_templates(&mut stage_templates, system, state_layout);
+    let scaling_report = template_postprocess::postprocess_templates(
+        &mut stage_templates,
+        system,
+        state_layout,
+        cost_scale_factor,
+    );
 
     if stage_templates.templates.is_empty() {
         return Err(SddpError::Validation(

@@ -74,6 +74,9 @@ pub(crate) struct BroadcastConfig {
     /// Opening-block size override for `backward_scheduler = opening_block`
     /// (`training.opening_block_size`).
     pub(crate) opening_block_size: Option<NonZeroUsize>,
+    /// Resolved objective cost-scale factor (`modeling.cost_scale_factor`),
+    /// resolved identically on every rank by [`StudyParams::from_config`].
+    pub(crate) cost_scale_factor: f64,
 }
 
 impl BroadcastConfig {
@@ -149,6 +152,7 @@ impl BroadcastConfig {
             backward_opening_order: params.backward_opening_order,
             backward_scheduler: params.backward_scheduler,
             opening_block_size: params.opening_block_size,
+            cost_scale_factor: params.cost_scale_factor,
         })
     }
 }

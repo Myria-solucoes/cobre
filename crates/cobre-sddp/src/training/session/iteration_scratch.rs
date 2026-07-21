@@ -219,6 +219,7 @@ mod tests {
             base_rows: &[],
             noise_scale: &[],
             n_hydros: 0,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],

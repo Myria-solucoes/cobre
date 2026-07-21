@@ -21,9 +21,9 @@ use cobre_stochastic::StochasticContext;
 
 use crate::TrainingResult;
 use crate::policy_export::{
-    build_active_indices, build_stage_basis_records, build_stage_cut_records,
+    borrow_cut_records, build_active_indices, build_stage_basis_records, build_stage_cut_records,
     build_stage_cuts_payloads, build_stage_entity_manifest, build_stage_states_payloads,
-    convert_basis_cache,
+    convert_basis_cache, scale_cut_records_for_export,
 };
 use crate::setup::StudySetup;
 use crate::stochastic_summary::{
@@ -113,7 +113,11 @@ pub fn write_checkpoint(
         })
         .collect();
 
-    let stage_records = build_stage_cut_records(fcf);
+    let cost_scale_factor = setup.stage_data.stage_templates.cost_scale_factor;
+    let stage_records_internal = build_stage_cut_records(fcf);
+    let stage_records_owned =
+        scale_cut_records_for_export(&stage_records_internal, cost_scale_factor);
+    let stage_records = borrow_cut_records(&stage_records_owned);
     let stage_active_indices = build_active_indices(&stage_records);
     let stage_cuts =
         build_stage_cuts_payloads(fcf, &stage_records, &stage_active_indices, &stage_manifests);
@@ -151,6 +155,7 @@ pub fn write_checkpoint(
             .map_or(0, |a| (0..a.num_stages()).map(|t| a.count(t) as u64).sum()),
         training_block_mode,
         training_block_mode_per_stage,
+        cost_scale_factor: Some(setup.stage_data.stage_templates.cost_scale_factor),
     };
 
     let stage_states = if params.export_states {

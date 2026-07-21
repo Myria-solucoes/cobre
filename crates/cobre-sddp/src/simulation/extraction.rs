@@ -29,8 +29,7 @@ use crate::indexer::{
     FphaLocal, HydroSys, StateSpace, StudyDimensions, anticipated_resolution_for,
     is_anticipated_decision_active_for_delivery,
 };
-use crate::lp_builder::StageGeometry;
-use crate::lp_builder::{COST_SCALE_FACTOR, GenericConstraintRowEntry};
+use crate::lp_builder::{GenericConstraintRowEntry, StageGeometry};
 use crate::simulation::types::{
     ScenarioCategoryCosts, SimulationBusResult, SimulationContractResult, SimulationCostResult,
     SimulationExchangeResult, SimulationGenericViolationResult, SimulationHydroResult,
@@ -469,6 +468,9 @@ pub struct StageExtractionSpec<'a> {
     pub row_scale: &'a [f64],
     /// Product of one-step discount factors for transitions before this stage; `1.0` for stage 0.
     pub cumulative_discount_factor: f64,
+    /// Resolved objective cost-scale factor (`modeling.cost_scale_factor`).
+    /// Multiplies a scaled-objective quantity back to currency units.
+    pub cost_scale_factor: f64,
     /// `ρ_eq` and `ρ_acum` scalars per `(hydro, stage)` via [`EnergyConversionSet`].
     pub energy_conversion: &'a EnergyConversionSet,
     /// `V_min` per hydro (hm³), in `entity_counts.hydro_ids` order. Feeds
@@ -547,7 +549,7 @@ fn extract_hydro_no_turbine(
         .get(spec.geometry.water_balance.start + h)
         .copied()
         .unwrap_or(0.0)
-        * COST_SCALE_FACTOR;
+        * spec.cost_scale_factor;
 
     // Per-block slacks aggregated to stage-level as an hours-weighted average.
     let (turbined_slack, outflow_slack_below, outflow_slack_above, generation_slack) =
@@ -732,7 +734,7 @@ impl HydroStageContext {
             .get(spec.geometry.water_balance.start + h)
             .copied()
             .unwrap_or(0.0)
-            * COST_SCALE_FACTOR;
+            * spec.cost_scale_factor;
         let fpha_local = lookup.fpha[h];
         let evap_local = lookup.evap[h];
         let (evaporation_m3s, evaporation_violation_neg_m3s, evaporation_violation_pos_m3s) =
@@ -936,7 +938,7 @@ fn extract_hydro_per_block<'a>(
             stored_energy_initial_mwh,
             stored_energy_final_mwh,
             spillage_cost: spillage * view.objective_coeffs[s_col] / spec.col_scale_factor(s_col)
-                * COST_SCALE_FACTOR,
+                * spec.cost_scale_factor,
             water_value_per_hm3: ctx.water_value,
             storage_binding_code: 0,
             operative_state_code: 1,
@@ -1025,7 +1027,7 @@ fn extract_thermals(
                     generation_mw: gen_mw,
                     generation_cost: gen_mw * view.objective_coeffs[col]
                         / spec.col_scale_factor(col)
-                        * COST_SCALE_FACTOR,
+                        * spec.cost_scale_factor,
                     is_anticipated,
                     anticipated_committed_mw,
                     anticipated_decision_mw,
@@ -1081,7 +1083,7 @@ fn extract_exchanges(
                             / spec.col_scale_factor(fwd_col)
                             + rev * view.objective_coeffs[rev_col]
                                 / spec.col_scale_factor(rev_col))
-                            * COST_SCALE_FACTOR,
+                            * spec.cost_scale_factor,
                         operative_state_code: 2,
                     }
                 })
@@ -1148,7 +1150,7 @@ fn extract_buses(
                         deficit_mw,
                         excess_mw: view.primal[excess_col],
                         spot_price: if hrs > 0.0 {
-                            raw_dual * COST_SCALE_FACTOR / hrs
+                            raw_dual * spec.cost_scale_factor / hrs
                         } else {
                             0.0
                         },
@@ -1275,6 +1277,7 @@ pub(crate) fn extract_stage_result_with_lookups(
         spec.col_scale,
         generic_violation_cost,
         spec.cumulative_discount_factor,
+        spec.cost_scale_factor,
         ncs_curtailment_cost,
         stage_id,
     )];
@@ -1323,29 +1326,30 @@ fn compute_hydro_violation_costs(
     equipment: &StageGeometry,
     col_cost: impl Fn(usize) -> f64,
     range_sum: impl Fn(Range<usize>) -> f64,
+    cost_scale_factor: f64,
 ) -> HydroViolationCosts {
     let evaporation = equipment
         .evap_indices
         .iter()
         .map(|ei| col_cost(ei.f_evap_plus_col) + col_cost(ei.f_evap_minus_col))
         .sum::<f64>()
-        * COST_SCALE_FACTOR;
+        * cost_scale_factor;
 
     let withdrawal = if equipment.withdrawal_slack_neg.is_empty() {
         0.0
     } else {
         (range_sum(equipment.withdrawal_slack_neg.clone())
             + range_sum(equipment.withdrawal_slack_pos.clone()))
-            * COST_SCALE_FACTOR
+            * cost_scale_factor
     };
 
     let (outflow_below, outflow_above, turbined, generation) =
         if study_dims.has_operational_violations {
             (
-                range_sum(equipment.outflow_below_slack.clone()) * COST_SCALE_FACTOR,
-                range_sum(equipment.outflow_above_slack.clone()) * COST_SCALE_FACTOR,
-                range_sum(equipment.turbine_below_slack.clone()) * COST_SCALE_FACTOR,
-                range_sum(equipment.generation_below_slack.clone()) * COST_SCALE_FACTOR,
+                range_sum(equipment.outflow_below_slack.clone()) * cost_scale_factor,
+                range_sum(equipment.outflow_above_slack.clone()) * cost_scale_factor,
+                range_sum(equipment.turbine_below_slack.clone()) * cost_scale_factor,
+                range_sum(equipment.generation_below_slack.clone()) * cost_scale_factor,
             )
         } else {
             (0.0, 0.0, 0.0, 0.0)
@@ -1363,10 +1367,14 @@ fn compute_hydro_violation_costs(
 
 /// Compute the single-stage cost breakdown from an LP solution view.
 ///
-/// All cost fields are returned in original monetary units. The LP operates
-/// in scaled cost space (objective coefficients divided by [`COST_SCALE_FACTOR`]);
-/// this function multiplies back by [`COST_SCALE_FACTOR`] at the reporting
-/// boundary to recover original units.
+/// All cost fields are returned in original monetary units. The LP operates in
+/// scaled cost space (objective coefficients divided by `cost_scale_factor` at
+/// template build time); this function multiplies back by `cost_scale_factor`
+/// at the reporting boundary to recover original units.
+// Rationale: each parameter is an independently-sourced per-stage scalar/slice
+// the single-solve cost breakdown needs once; a wrapper struct would just move
+// the arity to the one call site that already builds this from `spec` fields.
+#[allow(clippy::too_many_arguments)]
 fn compute_cost_result(
     view: &SolutionView<'_>,
     study_dims: &StudyDimensions,
@@ -1375,6 +1383,7 @@ fn compute_cost_result(
     col_scale: &[f64],
     generic_violation_cost: f64,
     cumulative_discount_factor: f64,
+    cost_scale_factor: f64,
     ncs_curtailment_cost: f64,
     stage_id: u32,
 ) -> SimulationCostResult {
@@ -1395,15 +1404,15 @@ fn compute_cost_result(
         .copied()
         .unwrap_or(1.0);
     let theta_contribution = view.primal[state.theta] * theta_obj_coeff;
-    let future_cost = theta_contribution * COST_SCALE_FACTOR;
-    let immediate_cost = (view.objective - theta_contribution) * COST_SCALE_FACTOR;
+    let future_cost = theta_contribution * cost_scale_factor;
+    let immediate_cost = (view.objective - theta_contribution) * cost_scale_factor;
 
     // Every range summed below must sum the whole per-stage `equipment` family, not
     // just active columns: this is what keeps `Σ(breakdown) == immediate_cost`.
     let thermal_cost = if equipment.thermal.is_empty() {
         0.0
     } else {
-        range_sum(equipment.thermal.clone()) * COST_SCALE_FACTOR
+        range_sum(equipment.thermal.clone()) * cost_scale_factor
     };
     // Inactive anticipated-decision columns are `[0, 0]`-pinned (primal 0), so
     // summing the whole range books the fuel only where the decision is live —
@@ -1411,7 +1420,7 @@ fn compute_cost_result(
     let anticipated_thermal_cost = if equipment.anticipated_decision.is_empty() {
         0.0
     } else {
-        range_sum(equipment.anticipated_decision.clone()) * COST_SCALE_FACTOR
+        range_sum(equipment.anticipated_decision.clone()) * cost_scale_factor
     };
     // Contract objective coeff is `price_per_mwh * block_hours`, so `col_cost`
     // sums `power * price * hours` with the stored sign (export price < 0 nets
@@ -1427,12 +1436,12 @@ fn compute_cost_result(
                 .chain(equipment.contract_export.clone())
                 .map(col_cost)
                 .sum::<f64>()
-                * COST_SCALE_FACTOR
+                * cost_scale_factor
         };
     let spillage_cost = if equipment.spillage.is_empty() {
         0.0
     } else {
-        range_sum(equipment.spillage.clone()) * COST_SCALE_FACTOR
+        range_sum(equipment.spillage.clone()) * cost_scale_factor
     };
     let exchange_cost = if equipment.line_fwd.is_empty() {
         0.0
@@ -1443,40 +1452,46 @@ fn compute_cost_result(
             .chain(equipment.line_rev.clone())
             .map(col_cost)
             .sum::<f64>()
-            * COST_SCALE_FACTOR
+            * cost_scale_factor
     };
     let deficit_cost = if equipment.deficit.is_empty() {
         0.0
     } else {
-        range_sum(equipment.deficit.clone()) * COST_SCALE_FACTOR
+        range_sum(equipment.deficit.clone()) * cost_scale_factor
     };
     let excess_cost = if equipment.excess.is_empty() {
         0.0
     } else {
-        range_sum(equipment.excess.clone()) * COST_SCALE_FACTOR
+        range_sum(equipment.excess.clone()) * cost_scale_factor
     };
     let turbined_cost = if equipment.turbine.is_empty() {
         0.0
     } else {
-        range_sum(equipment.turbine.clone()) * COST_SCALE_FACTOR
+        range_sum(equipment.turbine.clone()) * cost_scale_factor
     };
     let inflow_penalty_cost = if equipment.inflow_slack.is_empty() {
         0.0
     } else {
-        range_sum(equipment.inflow_slack.clone()) * COST_SCALE_FACTOR
+        range_sum(equipment.inflow_slack.clone()) * cost_scale_factor
     };
     let diversion_cost = if equipment.diversion.is_empty() {
         0.0
     } else {
-        range_sum(equipment.diversion.clone()) * COST_SCALE_FACTOR
+        range_sum(equipment.diversion.clone()) * cost_scale_factor
     };
 
-    let hv = compute_hydro_violation_costs(study_dims, equipment, col_cost, range_sum);
+    let hv = compute_hydro_violation_costs(
+        study_dims,
+        equipment,
+        col_cost,
+        range_sum,
+        cost_scale_factor,
+    );
 
     SimulationCostResult {
         stage_id,
         block_id: None,
-        total_cost: view.objective * COST_SCALE_FACTOR,
+        total_cost: view.objective * cost_scale_factor,
         immediate_cost,
         future_cost,
         discount_factor: cumulative_discount_factor,
@@ -1609,7 +1624,7 @@ fn extract_non_controllables(
             // NCS obj coefficient is negative, so negate to report a positive cost.
             let col_cost = -(curtailment_mw * view.objective_coeffs[col]
                 / spec.col_scale_factor(col))
-                * COST_SCALE_FACTOR;
+                * spec.cost_scale_factor;
             total_curtailment_cost += col_cost;
 
             #[allow(clippy::cast_possible_truncation)]

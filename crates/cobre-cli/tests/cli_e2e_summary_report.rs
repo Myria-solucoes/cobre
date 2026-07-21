@@ -121,12 +121,11 @@ fn run_then_summary_and_report_preserve_the_deterministic_end_block() {
         );
     }
 
-    // Time split (training): reworked three-line Forward/Backward/Serial
-    // format. Asserted against `run_stderr` only — `cobre summary`
-    // reconstructs `TrainingSummary` from `metadata.json`, which does not
-    // persist per-iteration phase-wall timing, so this block never appears
-    // in `summary_stderr` (see `build_training_summary` in
-    // `commands/summary.rs`).
+    // Time split (training): three-line Forward/Backward/Serial format.
+    // Asserted against `run_stderr` only — `cobre summary` reconstructs
+    // `TrainingSummary` from `metadata.json`, which does not persist
+    // per-iteration phase-wall timing, so this block never appears in
+    // `summary_stderr` (see `build_training_summary`).
     let forward_line = run_stderr
         .lines()
         .find(|l| l.contains("Forward"))

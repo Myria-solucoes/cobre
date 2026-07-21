@@ -80,13 +80,30 @@ pub enum ResolvedParametersError {
 ///
 /// `id_to_slot` is sorted ascending by key — for declaration-order invariance
 /// (a `HashMap` would not be deterministic) and `O(log n)` binary-search lookup.
-#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ResolvedParameters {
     /// Outer index: parameter slot (matches `Vec<ScalarParameter>` order).
     /// Inner index: `stage_idx` in `0..n_stages`.
     pub per_param: Vec<Vec<f64>>,
     /// Maps `EntityId.0` of the parameter to its slot in `per_param`.
     pub id_to_slot: Vec<(i32, usize)>,
+    /// Resolved `modeling.cost_scale_factor` (default `1_000_000.0`): the
+    /// divisor applied to every non-theta objective coefficient at template
+    /// build time, multiplied back at every cost-domain reporting boundary.
+    pub cost_scale_factor: f64,
+}
+
+impl Default for ResolvedParameters {
+    /// `cost_scale_factor` defaults to [`crate::DEFAULT_COST_SCALE_FACTOR`],
+    /// never `#[derive(Default)]`'s `0.0` — a template built against a
+    /// zero factor divides every non-theta objective coefficient by zero.
+    fn default() -> Self {
+        Self {
+            per_param: Vec::new(),
+            id_to_slot: Vec::new(),
+            cost_scale_factor: crate::DEFAULT_COST_SCALE_FACTOR,
+        }
+    }
 }
 
 impl ResolvedParameters {
@@ -159,12 +176,19 @@ impl ResolvedParameters {
 /// let overrides = HydroEnergyProductivityOverride::default();
 /// let stage_ids = [StageId(0), StageId(1), StageId(2), StageId(3)];
 ///
-/// let table = build_resolved_parameters(&params, &ec, &overrides, &[], &[0, 0, 1, 1], &stage_ids, 4)
+/// let table = build_resolved_parameters(
+///     &params, &ec, &overrides, &[], &[0, 0, 1, 1], &stage_ids, 4, 1_000_000.0,
+/// )
 ///     .unwrap();
 ///
 /// assert!((table.get(EntityId(1), 0) - 3.6).abs() < 1e-12);
 /// assert!((table.get(EntityId(1), 3) - 3.6).abs() < 1e-12);
 /// ```
+// Rationale (too_many_arguments): every parameter is a distinct study-resolved
+// input the resolver needs once; a wrapper struct would just move the arity to
+// the literal callers already build (`ResolvedTables`-style bundling happens one
+// layer up, at the LP builder context).
+#[allow(clippy::too_many_arguments)]
 pub fn build_resolved_parameters(
     parameters: &[ScalarParameter],
     energy_conversion: &EnergyConversionSet,
@@ -173,6 +197,7 @@ pub fn build_resolved_parameters(
     stage_to_season: &[i32],
     stage_ids: &[StageId],
     n_stages: usize,
+    cost_scale_factor: f64,
 ) -> Result<ResolvedParameters, ResolvedParametersError> {
     debug_assert_eq!(
         stage_ids.len(),
@@ -220,6 +245,7 @@ pub fn build_resolved_parameters(
     Ok(ResolvedParameters {
         per_param,
         id_to_slot,
+        cost_scale_factor,
     })
 }
 
@@ -399,7 +425,7 @@ fn resolve_computed(
 /// Decoding rejects any mismatch so a heterogeneous MPI cluster (new binary on
 /// one rank, old on another) fails fast rather than misinterpreting bytes. Bump
 /// in lockstep with any envelope-layout change.
-pub const RESOLVED_PARAMETERS_WIRE_VERSION: u32 = 1;
+pub const RESOLVED_PARAMETERS_WIRE_VERSION: u32 = 2;
 
 /// Version-tagged envelope wrapping a [`ResolvedParameters`] payload for MPI
 /// broadcast; decode rejects a non-matching `version`.
@@ -436,7 +462,9 @@ struct ResolvedParametersWireEnvelope {
 /// let ec = EnergyConversionSet::new(vec![], vec![], 0, 4);
 /// let overrides = HydroEnergyProductivityOverride::default();
 /// let stage_ids = [StageId(0), StageId(1), StageId(2), StageId(3)];
-/// let table = build_resolved_parameters(&params, &ec, &overrides, &[], &[0, 0, 1, 1], &stage_ids, 4)
+/// let table = build_resolved_parameters(
+///     &params, &ec, &overrides, &[], &[0, 0, 1, 1], &stage_ids, 4, 1_000_000.0,
+/// )
 ///     .unwrap();
 ///
 /// let bytes = serialize_resolved_parameters(&table).unwrap();
@@ -486,7 +514,9 @@ pub fn serialize_resolved_parameters(table: &ResolvedParameters) -> Result<Vec<u
 /// let ec = EnergyConversionSet::new(vec![], vec![], 0, 4);
 /// let overrides = HydroEnergyProductivityOverride::default();
 /// let stage_ids = [StageId(0), StageId(1), StageId(2), StageId(3)];
-/// let table = build_resolved_parameters(&params, &ec, &overrides, &[], &[0, 0, 1, 1], &stage_ids, 4)
+/// let table = build_resolved_parameters(
+///     &params, &ec, &overrides, &[], &[0, 0, 1, 1], &stage_ids, 4, 1_000_000.0,
+/// )
 ///     .unwrap();
 ///
 /// let bytes = serialize_resolved_parameters(&table).unwrap();
@@ -676,6 +706,7 @@ mod tests {
             &stage_to_season,
             &stage_ids,
             4,
+            1_000_000.0,
         )
         .unwrap();
 
@@ -710,6 +741,7 @@ mod tests {
             &stage_to_season,
             &stage_ids,
             3,
+            1_000_000.0,
         );
 
         assert!(matches!(
@@ -747,6 +779,7 @@ mod tests {
             &stage_to_season,
             &stage_ids,
             3,
+            1_000_000.0,
         )
         .unwrap();
 
@@ -782,6 +815,7 @@ mod tests {
             &stage_to_season,
             &stage_ids,
             n_stages,
+            1_000_000.0,
         )
         .unwrap();
 
@@ -830,6 +864,7 @@ mod tests {
             &stage_to_season,
             &stage_ids,
             n_stages,
+            1_000_000.0,
         )
         .unwrap();
 
@@ -886,6 +921,7 @@ mod tests {
             &stage_to_season,
             &stage_ids,
             n_stages,
+            1_000_000.0,
         )
         .unwrap();
 
@@ -949,6 +985,7 @@ mod tests {
             &stage_to_season,
             &stage_ids,
             1,
+            1_000_000.0,
         )
         .unwrap();
 
@@ -995,6 +1032,7 @@ mod tests {
             &stage_to_season,
             &stage_ids,
             n_stages,
+            1_000_000.0,
         );
 
         assert!(matches!(
@@ -1043,6 +1081,7 @@ mod tests {
             &stage_to_season,
             &stage_ids,
             n_stages,
+            1_000_000.0,
         )
         .unwrap();
         let table_cab = build_resolved_parameters(
@@ -1053,6 +1092,7 @@ mod tests {
             &stage_to_season,
             &stage_ids,
             n_stages,
+            1_000_000.0,
         )
         .unwrap();
 
@@ -1095,6 +1135,7 @@ mod tests {
             &stage_to_season,
             &stage_ids,
             n_stages,
+            1_000_000.0,
         );
 
         assert!(matches!(
@@ -1143,6 +1184,7 @@ mod tests {
             &stage_to_season,
             &stage_ids,
             n_stages,
+            1_000_000.0,
         )
         .unwrap();
 
@@ -1171,7 +1213,8 @@ mod tests {
         let ec = EnergyConversionSet::new(vec![], vec![], 0, 0);
         let overrides = HydroEnergyProductivityOverride::default();
 
-        let table = build_resolved_parameters(&[], &ec, &overrides, &[], &[], &[], 0).unwrap();
+        let table =
+            build_resolved_parameters(&[], &ec, &overrides, &[], &[], &[], 0, 1_000_000.0).unwrap();
         // Nothing to query — just verify it doesn't panic.
         let _ = table;
     }
@@ -1213,6 +1256,7 @@ mod tests {
             &stage_to_season,
             &stage_ids,
             n_stages,
+            1_000_000.0,
         )
         .unwrap()
     }
@@ -1294,6 +1338,24 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// AC (E6 round-trip): `cost_scale_factor` at a non-default value
+    /// survives the postcard wire envelope bit-exactly — the field the wire
+    /// version was bumped to `2` for.
+    #[test]
+    fn resolved_parameters_wire_envelope_round_trips_non_default_cost_scale_factor() {
+        let mut original = broadcast_fixture();
+        original.cost_scale_factor = 2_500_000.0;
+        let bytes = super::serialize_resolved_parameters(&original).unwrap();
+        let restored = super::deserialize_resolved_parameters(&bytes).unwrap();
+
+        assert_eq!(
+            restored.cost_scale_factor.to_bits(),
+            original.cost_scale_factor.to_bits(),
+            "cost_scale_factor must round-trip bit-exactly"
+        );
+        assert_eq!(restored.cost_scale_factor, 2_500_000.0);
     }
 
     #[test]

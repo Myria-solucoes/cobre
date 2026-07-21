@@ -142,6 +142,7 @@ pub struct StageCutsPayload<'a> {
 ///     total_visited_states: 0,
 ///     training_block_mode: "parallel".to_string(),
 ///     training_block_mode_per_stage: vec![],
+///     cost_scale_factor: None,
 /// };
 /// let json = serde_json::to_string_pretty(&meta).unwrap();
 /// assert!(json.contains("completed_iterations"));
@@ -200,6 +201,16 @@ pub struct PolicyCheckpointMetadata {
     /// mode, and in pre-field checkpoints).
     #[serde(default)]
     pub training_block_mode_per_stage: Vec<String>,
+    /// Objective cost-scale factor the writing study resolved
+    /// (`modeling.cost_scale_factor`) — the provenance marker that makes cut
+    /// `coefficients`/`intercept` scale-independent at rest (canonical
+    /// currency units, not the writer's internal scaled cost space).
+    ///
+    /// Absent in checkpoints written before this field was added; a missing
+    /// marker is interpreted as scaled-at-`1_000_000.0`, the constant every
+    /// pre-field checkpoint was unconditionally written under.
+    #[serde(default)]
+    pub cost_scale_factor: Option<f64>,
 }
 
 // ── Owned output types for deserialization ───────────────────────────────────

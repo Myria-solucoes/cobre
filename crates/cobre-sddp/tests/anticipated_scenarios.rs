@@ -352,6 +352,8 @@ mod anticipated_5stage_k2_smoke {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,
@@ -827,6 +829,8 @@ mod anticipated_two_plants_smoke {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,
@@ -1289,6 +1293,8 @@ mod anticipated_simulation_ring_buffer {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,
@@ -1826,6 +1832,8 @@ mod anticipated_generic_constraint_e2e {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::None,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,
@@ -2830,6 +2838,8 @@ mod anticipated_commitment_at_cap {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,

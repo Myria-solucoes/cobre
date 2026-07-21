@@ -11,8 +11,8 @@ use cobre_core::System;
 use cobre_core::Thermal;
 use cobre_core::commissioning::{commissioning_active, hydro_operating_active};
 use cobre_io::output::policy::{
-    ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL, EntitySlot, PolicyBasisRecord, PolicyCutRecord,
-    StageCutsPayload, StageStatesPayload,
+    ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL, EntitySlot, OwnedPolicyCutRecord, PolicyBasisRecord,
+    PolicyCutRecord, StageCutsPayload, StageStatesPayload,
 };
 
 use crate::cut::FutureCostFunction;
@@ -228,6 +228,68 @@ pub fn build_stage_cut_records(fcf: &FutureCostFunction) -> Vec<Vec<PolicyCutRec
                         coefficients: pool.coefficient_row(i),
                         is_active: pool.is_active(i),
                     }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Rescale [`build_stage_cut_records`]'s output from the writing study's
+/// internal scaled cost space to canonical currency units at rest (§5 Option
+/// A): every `coefficients` entry and `intercept`, multiplied by
+/// `cost_scale_factor`.
+///
+/// Returns owned records because [`PolicyCutRecord::coefficients`] borrows —
+/// the writing study's [`FutureCostFunction`] pool storage cannot be mutated
+/// in place (it stays live for further training/warm-start), so the scaled
+/// values need a fresh, owned home. Pair with [`borrow_cut_records`] to
+/// rebuild the `PolicyCutRecord` views [`build_stage_cuts_payloads`] needs.
+#[must_use]
+pub fn scale_cut_records_for_export(
+    stage_records: &[Vec<PolicyCutRecord<'_>>],
+    cost_scale_factor: f64,
+) -> Vec<Vec<OwnedPolicyCutRecord>> {
+    stage_records
+        .iter()
+        .map(|records| {
+            records
+                .iter()
+                .map(|r| OwnedPolicyCutRecord {
+                    cut_id: r.cut_id,
+                    slot_index: r.slot_index,
+                    iteration: r.iteration,
+                    forward_pass_index: r.forward_pass_index,
+                    intercept: r.intercept * cost_scale_factor,
+                    coefficients: r
+                        .coefficients
+                        .iter()
+                        .map(|c| c * cost_scale_factor)
+                        .collect(),
+                    is_active: r.is_active,
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Rebuild borrowed [`PolicyCutRecord`] views over
+/// [`scale_cut_records_for_export`]'s owned output, for
+/// [`build_stage_cuts_payloads`] and [`build_active_indices`].
+#[must_use]
+pub fn borrow_cut_records(owned: &[Vec<OwnedPolicyCutRecord>]) -> Vec<Vec<PolicyCutRecord<'_>>> {
+    owned
+        .iter()
+        .map(|records| {
+            records
+                .iter()
+                .map(|r| PolicyCutRecord {
+                    cut_id: r.cut_id,
+                    slot_index: r.slot_index,
+                    iteration: r.iteration,
+                    forward_pass_index: r.forward_pass_index,
+                    intercept: r.intercept,
+                    coefficients: &r.coefficients,
+                    is_active: r.is_active,
                 })
                 .collect()
         })

@@ -20,7 +20,7 @@ use crate::{
     cut::row::build_cut_row_batch_into,
     error::SddpError,
     inflow_method::InflowNonNegativityMethod,
-    lp_builder::{COST_SCALE_FACTOR, PatchBuffer},
+    lp_builder::PatchBuffer,
     noise::compute_effective_eta,
     rank_reconcile::reconcile_error_flag,
     risk_measure::RiskMeasure,
@@ -272,7 +272,7 @@ fn lb_evaluate_stage_0<S: SolverInterface>(
 }
 
 /// Apply `risk_measure` to the per-opening objectives (uniform probabilities),
-/// scale by [`COST_SCALE_FACTOR`], then broadcast the scalar from rank 0.
+/// scale by `cost_scale_factor`, then broadcast the scalar from rank 0.
 ///
 /// # Errors
 ///
@@ -281,6 +281,7 @@ fn lb_aggregate_and_broadcast<C: Communicator>(
     objectives: &[f64],
     risk_measure: &RiskMeasure,
     uniform_prob_buf: &mut Vec<f64>,
+    cost_scale_factor: f64,
     comm: &C,
 ) -> Result<f64, SddpError> {
     #[allow(clippy::cast_precision_loss)]
@@ -288,7 +289,7 @@ fn lb_aggregate_and_broadcast<C: Communicator>(
     uniform_prob_buf.clear();
     uniform_prob_buf.resize(objectives.len(), uniform_prob);
     let mut lb =
-        risk_measure.evaluate_risk(objectives, uniform_prob_buf.as_slice()) * COST_SCALE_FACTOR;
+        risk_measure.evaluate_risk(objectives, uniform_prob_buf.as_slice()) * cost_scale_factor;
     comm.broadcast(std::slice::from_mut(&mut lb), 0)
         .map_err(SddpError::from)?;
     Ok(lb)
@@ -356,6 +357,7 @@ pub fn evaluate_lower_bound<S: SolverInterface, C: Communicator>(
             &scratch.lb_scratch.objectives_buf,
             risk_measure,
             &mut scratch.lb_scratch.uniform_prob_buf,
+            ctx.cost_scale_factor,
             comm,
         );
     }
@@ -863,6 +865,7 @@ mod tests {
                 geometry_per_stage: &[],
                 noise_scale: &self.noise_scale,
                 n_hydros: self.n_hydros,
+                cost_scale_factor: 1_000_000.0,
                 n_load_buses: 0,
                 load_balance_row_starts: &[],
                 load_bus_indices: &[],
@@ -1845,6 +1848,7 @@ mod tests {
             geometry_per_stage: &[],
             noise_scale: &[],
             n_hydros: 0,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
@@ -2302,6 +2306,7 @@ mod tests {
         let resolved_params = ResolvedParameters {
             per_param: vec![],
             id_to_slot: vec![],
+            cost_scale_factor: 1_000_000.0,
         };
 
         let templates = build_stage_templates_resolving_layout(
@@ -2630,6 +2635,7 @@ mod tests {
             geometry_per_stage: &templates.geometry_per_stage,
             noise_scale: &templates.noise_scale,
             n_hydros: 2,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
@@ -2738,6 +2744,7 @@ mod tests {
             geometry_per_stage: &[],
             noise_scale: &[],
             n_hydros: 0,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],

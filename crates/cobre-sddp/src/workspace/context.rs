@@ -33,6 +33,11 @@ pub struct StageContext<'a> {
     pub noise_scale: &'a [f64],
     /// Hydro plants with LP variables.
     pub n_hydros: usize,
+    /// Resolved objective cost-scale factor (`modeling.cost_scale_factor`),
+    /// mirroring [`StageTemplates::cost_scale_factor`](crate::lp_builder::StageTemplates::cost_scale_factor).
+    /// Multiplies a scaled-objective quantity back to currency units at the
+    /// stage-cost / immediate-cost reporting boundary.
+    pub cost_scale_factor: f64,
     /// Buses with stochastic load noise.
     pub n_load_buses: usize,
     /// Row index of the first load-balance row in each stage template.

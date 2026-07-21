@@ -34,7 +34,6 @@ use crate::{
     context::{StageContext, TrainingContext},
     dcs::{DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
     indexer::StateSpace,
-    lp_builder::COST_SCALE_FACTOR,
     simulation::{
         config::SimulationConfig,
         error::SimulationError,
@@ -572,7 +571,7 @@ fn extract_sim_stage_result(
         .and_then(|tmpl| tmpl.objective.get(state.theta).copied())
         .unwrap_or(1.0);
     let theta_contribution = unscaled_primal[state.theta] * theta_obj_coeff;
-    let immediate_cost = (view_objective - theta_contribution) * COST_SCALE_FACTOR;
+    let immediate_cost = (view_objective - theta_contribution) * ctx.cost_scale_factor;
     // Realized inflow Z_t from the z_h primal: total natural inflow (PAR lag
     // included), gross of withdrawal.
     inflow_m3s_buf.clear();
@@ -720,6 +719,7 @@ fn extract_sim_stage_result(
                 .get(t)
                 .copied()
                 .unwrap_or(1.0),
+            cost_scale_factor: ctx.cost_scale_factor,
             energy_conversion: output.energy_conversion,
             hydro_min_storage_hm3: output.hydro_min_storage_hm3,
             stage_index: t,

@@ -814,6 +814,7 @@ fn simulation_load_patches_applied() {
             base_rows: &base_rows,
             noise_scale: &noise_scale,
             n_hydros: 1,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses,
             load_balance_row_starts: &load_balance_row_starts,
             load_bus_indices: &load_bus_indices,
@@ -978,6 +979,7 @@ fn simulation_no_load_buses_unchanged() {
             base_rows: &base_rows,
             noise_scale: &[],
             n_hydros: 0,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
@@ -1113,6 +1115,7 @@ fn simulation_state_set_profile_reaches_current_profile_after_run() {
             base_rows: &base_rows,
             noise_scale: &[],
             n_hydros: 0,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
@@ -1260,6 +1263,7 @@ fn simulation_inflow_extraction_unaffected() {
             base_rows: &base_rows,
             noise_scale: &noise_scale,
             n_hydros: 1,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses,
             load_balance_row_starts: &load_balance_row_starts,
             load_bus_indices: &load_bus_indices,
@@ -1633,6 +1637,7 @@ fn simulation_truncation_clamps_negative_inflow_noise() {
             base_rows: &base_rows,
             noise_scale: &noise_scale,
             n_hydros: 1,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
@@ -1764,6 +1769,7 @@ fn simulation_none_method_produces_raw_negative_noise() {
             base_rows: &base_rows,
             noise_scale: &noise_scale,
             n_hydros: 1,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
@@ -2072,6 +2078,7 @@ mod dcs_simulation {
             base_rows: &base_rows,
             noise_scale: &[1.0],
             n_hydros: 1,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
@@ -2204,7 +2211,7 @@ mod dcs_simulation {
             dc.total_cost
         );
         assert!(
-            (dc.future_cost - 4.0 * super::super::COST_SCALE_FACTOR).abs() < 1e-3,
+            (dc.future_cost - 4.0 * crate::DEFAULT_COST_SCALE_FACTOR).abs() < 1e-3,
             "DCS future_cost must reflect the binding cut theta=4, got {}",
             dc.future_cost
         );
@@ -2614,6 +2621,7 @@ mod anticipated_ring_matches_forward_propagation {
             base_rows: &base_rows,
             noise_scale: &[],
             n_hydros: 0,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],

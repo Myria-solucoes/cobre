@@ -168,6 +168,7 @@ impl StudySetup {
             geometry_per_stage: &self.stage_data.stage_templates.geometry_per_stage,
             noise_scale: &self.stage_data.stage_templates.noise_scale,
             n_hydros: self.stage_data.stage_templates.n_hydros,
+            cost_scale_factor: self.stage_data.stage_templates.cost_scale_factor,
             n_load_buses: self.stage_data.stage_templates.n_load_buses,
             load_balance_row_starts: &self.stage_data.stage_templates.load_balance_row_starts,
             load_bus_indices: &self.stage_data.stage_templates.load_bus_indices,
@@ -191,10 +192,17 @@ impl StudySetup {
         }
     }
 
-    /// Construct a [`TrainingContext`] borrowing from this setup. Test-only.
-    #[cfg(test)]
+    /// Construct a [`TrainingContext`] borrowing from this setup.
+    ///
+    /// Test-support hook (mirrors [`Self::set_risk_measures`] /
+    /// [`Self::set_scheduler`] in this file): reachable from downstream
+    /// integration tests via the `test-support` feature so a probe can drive
+    /// production entry points (e.g. `forward::run_forward_pass`,
+    /// `solve::stage_solve::run_stage_solve`) that take a `&TrainingContext`
+    /// without duplicating this crate's private field layout.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
-    pub(crate) fn training_ctx(&self) -> TrainingContext<'_> {
+    pub fn training_ctx(&self) -> TrainingContext<'_> {
         let tr = &self.scenario_libraries.training;
         TrainingContext {
             horizon: &self.methodology.horizon,

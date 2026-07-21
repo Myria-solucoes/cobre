@@ -86,6 +86,7 @@ use cobre_sddp::load_boundary_cuts;
 use cobre_sddp::orchestration::CheckpointParams;
 use cobre_sddp::orchestration::export_stochastic_artifacts;
 use cobre_sddp::orchestration::write_checkpoint;
+use cobre_sddp::rescale_checkpoint_cuts_for_load;
 use cobre_sddp::solver_stats_log_to_rows;
 use cobre_sddp::validate_policy_load;
 use cobre_sddp::{
@@ -938,7 +939,9 @@ pub(crate) fn build_study_setup(
     })
 }
 
-/// Validate a loaded policy checkpoint against `setup`/`system` via the shared
+/// Rescale `checkpoint`'s cut coefficients into the loading study's
+/// `cost_scale_factor` (see [`rescale_checkpoint_cuts_for_load`]), then validate
+/// it against `setup`/`system` via the shared
 /// [`cobre_sddp::validate_policy_load`] entry point, building both
 /// [`cobre_sddp::PolicyStageManifest`]s exactly as the CLI's
 /// `load_and_validate_checkpoint` does (the checkpoint's terminal-stage entity
@@ -954,10 +957,16 @@ pub(crate) fn build_study_setup(
 /// Returns `Err(String)` formatted as `"policy validation error: {e}"` on a
 /// `state_dimension`, `num_stages`, or entity-manifest mismatch.
 fn validate_loaded_policy(
-    checkpoint: &cobre_io::PolicyCheckpoint,
+    checkpoint: &mut cobre_io::PolicyCheckpoint,
     system: &System,
     setup: &StudySetup,
 ) -> Result<PolicyLoadProof<FullFcf>, String> {
+    rescale_checkpoint_cuts_for_load(
+        &mut checkpoint.stage_cuts,
+        checkpoint.metadata.cost_scale_factor,
+        setup.stage_data.stage_templates.cost_scale_factor,
+    );
+
     #[allow(clippy::cast_possible_truncation)]
     let n_stages = system.stages().iter().filter(|s| s.id >= 0).count() as u32;
     #[allow(clippy::cast_possible_truncation)]
@@ -1020,10 +1029,9 @@ pub(crate) fn apply_training_policy_mode(
             ));
         }
 
-        let checkpoint = read_policy_checkpoint(&policy_dir)
+        let mut checkpoint = read_policy_checkpoint(&policy_dir)
             .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
-
-        let proof = validate_loaded_policy(&checkpoint, system, setup)?;
+        let proof = validate_loaded_policy(&mut checkpoint, system, setup)?;
 
         // Reserve one extra slot for cuts added in the final iteration.
         let warm_fcf = FutureCostFunction::new_with_warm_start(
@@ -1055,10 +1063,9 @@ pub(crate) fn apply_training_policy_mode(
             ));
         }
 
-        let checkpoint = read_policy_checkpoint(&policy_dir)
+        let mut checkpoint = read_policy_checkpoint(&policy_dir)
             .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
-
-        let proof = validate_loaded_policy(&checkpoint, system, setup)?;
+        let proof = validate_loaded_policy(&mut checkpoint, system, setup)?;
 
         let completed = u64::from(checkpoint.metadata.completed_iterations);
 
@@ -1099,6 +1106,7 @@ pub(crate) fn apply_training_policy_mode(
             bp.source_stage,
             state_dim,
             &current_manifest,
+            setup.stage_data.stage_templates.cost_scale_factor,
             &mut on_warning,
         )
         .map_err(|e| format!("boundary cut error: {e}"))?;
@@ -1145,10 +1153,9 @@ pub(crate) fn reconstruct_policy_from_checkpoint(
         ));
     }
 
-    let checkpoint = read_policy_checkpoint(policy_dir)
+    let mut checkpoint = read_policy_checkpoint(policy_dir)
         .map_err(|e| format!("failed to read policy checkpoint: {e}"))?;
-
-    let proof = validate_loaded_policy(&checkpoint, system, setup)?;
+    let proof = validate_loaded_policy(&mut checkpoint, system, setup)?;
 
     let loaded_fcf = FutureCostFunction::from_deserialized(&proof, &checkpoint.stage_cuts)
         .map_err(|e| format!("FCF reconstruction error: {e}"))?;
