@@ -296,11 +296,8 @@ where
             ranks.num_stages,
         );
         bwd_state.set_profile(solver_profiles.backward);
-        bwd_state.set_scheduler(
-            solver_profiles.backward_scheduler,
-            solver_profiles.opening_block_size,
-        );
-        bwd_state.set_lpt_claim_order(solver_profiles.lpt_claim_order);
+        bwd_state.set_scheduler(solver_profiles.backward_scheduler);
+        bwd_state.set_hardest_first_claim_order(solver_profiles.hardest_first_claim_order);
 
         Ok(Self {
             solver,

@@ -6,9 +6,6 @@ use cobre_core::scenario::SamplingScheme;
 use cobre_io::EntitySlot;
 
 #[cfg(any(test, feature = "test-support"))]
-use std::num::NonZeroUsize;
-
-#[cfg(any(test, feature = "test-support"))]
 use cobre_io::config::BackwardScheduler;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -66,25 +63,20 @@ impl StudySetup {
     }
 
     /// Test-support hook: override the backward-pass scheduler
-    /// (`training.backward_scheduler`/`training.opening_block_size`) to force
-    /// `opening_block` without a config file edit.
+    /// (`training.parallelism.backward_scheduler`) to force `opening_block`
+    /// without a config file edit.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn set_scheduler(
-        &mut self,
-        scheduler: BackwardScheduler,
-        opening_block_size: Option<NonZeroUsize>,
-    ) {
+    pub fn set_scheduler(&mut self, scheduler: BackwardScheduler) {
         self.backward_scheduler = scheduler;
-        self.opening_block_size = opening_block_size;
     }
 
-    /// Test-support hook: override the PN opening-block scheduler's claim
-    /// order (`BackwardPassState::set_lpt_claim_order`) — `false` forces the
-    /// canonical ascending block order for the byte-neutrality gate.
+    /// Test-support hook: override the opening-block scheduler's claim order
+    /// (`BackwardPassState::set_hardest_first_claim_order`) — `false` forces
+    /// the canonical ascending block order for the byte-neutrality gate.
     /// Production always resolves `true`; no config field surfaces this.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn set_lpt_claim_order(&mut self, enabled: bool) {
-        self.lpt_claim_order = enabled;
+    pub fn set_hardest_first_claim_order(&mut self, enabled: bool) {
+        self.hardest_first_claim_order = enabled;
     }
 
     /// Return the pre-computed [`EnergyConversionSet`] for this study.

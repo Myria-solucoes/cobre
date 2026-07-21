@@ -1104,7 +1104,7 @@ fn simulation_state_set_profile_reaches_current_profile_after_run() {
             refactor_error_tolerance: None,
             factor_pivot_threshold: None,
             use_warm_start: None,
-            dse_devex_fallback_threshold: None,
+            steepest_edge_devex_fallback_threshold: None,
         }));
 
     run_simulate_with_profile(

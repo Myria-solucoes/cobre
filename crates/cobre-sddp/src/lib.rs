@@ -94,7 +94,7 @@ pub(crate) use training::{
 pub use training::{forward, lower_bound};
 
 // Test/tooling-only re-export: exposes `BackwardPassState`/`BackwardPassInputs`
-// to downstream integration tests driving the backward pass directly (e.g. PN
+// to downstream integration tests driving the backward pass directly (e.g. the opening-block scheduler
 // scratch capacity/sizing assertions) without widening the crate's production
 // public API. Never reachable outside `test`/`test-support` builds.
 #[cfg(any(test, feature = "test-support"))]

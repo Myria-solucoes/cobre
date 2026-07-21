@@ -1311,7 +1311,7 @@ mod tests {
                 refactor_error_tolerance: None,
                 factor_pivot_threshold: None,
                 use_warm_start: None,
-                dse_devex_fallback_threshold: None,
+                steepest_edge_devex_fallback_threshold: None,
             }));
         state.set_profile(resolved);
         let mut inputs = ForwardPassInputs {

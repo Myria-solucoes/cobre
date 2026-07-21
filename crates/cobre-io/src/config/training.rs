@@ -48,19 +48,9 @@ pub struct TrainingConfig {
     #[serde(default)]
     pub solver: TrainingSolverConfig,
 
-    /// Backward opening solve order.
+    /// Parallel-execution settings.
     #[serde(default)]
-    pub backward_opening_order: BackwardOpeningOrder,
-
-    /// Backward-pass scheduler: per-trial-point or opening-block claim loop.
-    #[serde(default)]
-    pub backward_scheduler: BackwardScheduler,
-
-    /// Opening-block size for `backward_scheduler = "opening_block"`. Absent
-    /// resolves per stage to `⌈|Ω_s|/2⌉` (half the openings, rounded up); a set
-    /// value is clamped to `min(|Ω_s|, size)`.
-    #[serde(default)]
-    pub opening_block_size: Option<NonZeroUsize>,
+    pub parallelism: ParallelismConfig,
 
     /// Scenario source configuration for the training forward pass.
     /// When absent, all classes default to `in_sample`.
@@ -285,9 +275,10 @@ pub struct PhaseSolverProfileConfig {
     #[serde(default)]
     pub use_warm_start: Option<bool>,
 
-    /// Dual steepest-edge weight log-error fallback-threshold override.
+    /// Dual steepest-edge weight log-error threshold override above which the
+    /// solver falls back to Devex pricing.
     #[serde(default)]
-    pub dse_devex_fallback_threshold: Option<f64>,
+    pub steepest_edge_devex_fallback_threshold: Option<f64>,
 }
 
 /// Presolve mode for a solver profile.
@@ -303,28 +294,50 @@ pub enum PresolveMode {
     Choose,
 }
 
-/// Backward opening solve order.
+/// Parallel-execution settings (`config.json → training.parallelism`).
+///
+/// Groups the result-preserving knobs that shape how training work is
+/// scheduled across workers, apart from the algorithm-semantics fields at the
+/// `training` root. Thread count itself stays a CLI concern (`--threads`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(default, deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub enum BackwardOpeningOrder {
-    /// Traveling-salesman-path ordering of openings.
-    #[default]
-    Tsp,
-    /// Sigma-key ordering of openings.
-    SigmaKey,
+pub struct ParallelismConfig {
+    /// Backward-pass scheduler selection.
+    pub backward_scheduler: BackwardScheduler,
 }
 
-/// Backward-pass scheduler selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
+/// Backward-pass scheduler and its scheduler-specific parameters
+/// (`config.json → training.parallelism.backward_scheduler`).
+///
+/// Internally tagged on `method`; each variant carries only the fields it
+/// uses, so supplying a parameter that does not belong to the chosen method is
+/// a load-time error under `deny_unknown_fields`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum BackwardScheduler {
-    /// Per-trial-point backward scheduling (the default).
-    #[default]
-    TrialPoint,
-    /// Opening-block backward scheduling.
-    OpeningBlock,
+    /// Per-trial-point backward scheduling (the default): each parallel work
+    /// unit is one whole trial point.
+    // A braced variant, not a unit one: serde enforces `deny_unknown_fields`
+    // only for braced variants of an internally tagged enum, and this variant
+    // must reject `block_size`.
+    TrialPoint {},
+    /// Opening-block backward scheduling: each parallel work unit is one
+    /// (trial point, opening-block) pair claimed dynamically by workers.
+    OpeningBlock {
+        /// Openings per block. Absent resolves per stage to `⌈|Ω_s|/2⌉` (half
+        /// the openings, rounded up); a set value is clamped to
+        /// `min(|Ω_s|, block_size)`.
+        #[serde(default)]
+        block_size: Option<NonZeroUsize>,
+    },
+}
+
+impl Default for BackwardScheduler {
+    fn default() -> Self {
+        Self::TrialPoint {}
+    }
 }
 
 /// Dual simplex edge-weight (pricing) strategy.
@@ -365,7 +378,9 @@ pub enum PriceStrategy {
 /// Deserialized configuration for one entry in `training.stopping_rules[]`.
 ///
 /// Uses a `"type"` discriminator field (internally tagged) with `snake_case`
-/// variant names matching the JSON schema.
+/// variant names matching the JSON schema. `deny_unknown_fields` makes a
+/// parameter belonging to a different rule type a load-time error rather
+/// than a silently ignored key.
 ///
 /// The `GracefulShutdown` rule has no JSON representation — it is injected at
 /// runtime by `StoppingRuleSet` construction and is never deserialized.
@@ -380,7 +395,7 @@ pub enum PriceStrategy {
 /// assert!(matches!(rule, StoppingRuleConfig::IterationLimit { limit: 100 }));
 /// ```
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum StoppingRuleConfig {
     /// Stop after a fixed number of iterations. **Mandatory** — every rule set must
@@ -460,8 +475,8 @@ pub struct LipschitzConfig {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::{
-        BackwardOpeningOrder, BackwardScheduler, DualEdgeWeight, NonZeroUsize, PresolveMode,
-        PriceStrategy, ScaleStrategy, SelectionMethod, TrainingConfig,
+        BackwardScheduler, DualEdgeWeight, NonZeroUsize, PresolveMode, PriceStrategy,
+        ScaleStrategy, SelectionMethod, TrainingConfig,
     };
 
     /// A `dynamic` selection block round-trips through the tagged enum, with
@@ -641,7 +656,7 @@ mod tests {
         assert!(backward.simplex_update_limit.is_none());
         assert!(backward.cost_perturbation.is_none());
         assert!(backward.refactor_error_tolerance.is_none());
-        assert!(backward.dse_devex_fallback_threshold.is_none());
+        assert!(backward.steepest_edge_devex_fallback_threshold.is_none());
     }
 
     /// A `training.solver.forward` block round-trips independently of `backward`.
@@ -710,87 +725,147 @@ mod tests {
     }
 
     #[test]
-    fn backward_opening_order_defaults_to_tsp_when_absent() {
-        let json = r#"{
-            "forward_passes": 4,
-            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }]
-        }"#;
-        let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(cfg.backward_opening_order, BackwardOpeningOrder::Tsp);
-    }
-
-    /// `"tsp"` and `"sigma_key"` round-trip into their respective variants.
-    #[test]
-    fn backward_opening_order_variants_round_trip() {
-        let sigma_json = r#"{
-            "forward_passes": 4,
-            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
-            "backward_opening_order": "sigma_key"
-        }"#;
-        let sigma: TrainingConfig = serde_json::from_str(sigma_json).unwrap();
-        assert_eq!(sigma.backward_opening_order, BackwardOpeningOrder::SigmaKey);
-
-        let tsp_json = r#"{
-            "forward_passes": 4,
-            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
-            "backward_opening_order": "tsp"
-        }"#;
-        let tsp: TrainingConfig = serde_json::from_str(tsp_json).unwrap();
-        assert_eq!(tsp.backward_opening_order, BackwardOpeningOrder::Tsp);
-    }
-
-    #[test]
-    fn backward_opening_order_bad_value_is_deserialize_error() {
-        let json = r#"{
-            "forward_passes": 4,
-            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
-            "backward_opening_order": "tsp_2opt"
-        }"#;
-        let result = serde_json::from_str::<TrainingConfig>(json);
-        assert!(
-            result.is_err(),
-            "an unknown backward_opening_order value must be rejected"
-        );
-    }
-
-    #[test]
     fn backward_scheduler_defaults_to_trial_point_when_absent() {
         let json = r#"{
             "forward_passes": 4,
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }]
         }"#;
         let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(cfg.backward_scheduler, BackwardScheduler::TrialPoint);
-        assert_eq!(cfg.opening_block_size, None);
+        assert_eq!(
+            cfg.parallelism.backward_scheduler,
+            BackwardScheduler::TrialPoint {}
+        );
     }
 
-    /// `"opening_block"` with `opening_block_size: 4` round-trips into the
-    /// `OpeningBlock` variant and `Some(4)`.
+    /// `{"method": "opening_block", "block_size": 4}` round-trips into the
+    /// `OpeningBlock` variant carrying `Some(4)`.
     #[test]
-    fn backward_scheduler_and_block_size_round_trip() {
+    fn opening_block_scheduler_and_block_size_round_trip() {
         let json = r#"{
             "forward_passes": 4,
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
-            "backward_scheduler": "opening_block",
-            "opening_block_size": 4
+            "parallelism": {
+                "backward_scheduler": { "method": "opening_block", "block_size": 4 }
+            }
         }"#;
         let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(cfg.backward_scheduler, BackwardScheduler::OpeningBlock);
-        assert_eq!(cfg.opening_block_size, NonZeroUsize::new(4));
+        assert_eq!(
+            cfg.parallelism.backward_scheduler,
+            BackwardScheduler::OpeningBlock {
+                block_size: NonZeroUsize::new(4)
+            }
+        );
     }
 
-    /// `opening_block_size: 0` is an out-of-range deserialize error (`NonZeroUsize`).
+    /// An `opening_block` scheduler without `block_size` round-trips into
+    /// `block_size: None` (the per-stage `⌈|Ω_s|/2⌉` resolution).
     #[test]
-    fn opening_block_size_zero_is_deserialize_error() {
+    fn opening_block_scheduler_without_block_size_round_trips() {
         let json = r#"{
             "forward_passes": 4,
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
-            "opening_block_size": 0
+            "parallelism": {
+                "backward_scheduler": { "method": "opening_block" }
+            }
+        }"#;
+        let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            cfg.parallelism.backward_scheduler,
+            BackwardScheduler::OpeningBlock { block_size: None }
+        );
+    }
+
+    /// `block_size` under `trial_point` is a deserialize error under
+    /// `deny_unknown_fields` — the invalid combination is unrepresentable, not
+    /// warned-and-ignored.
+    #[test]
+    fn block_size_under_trial_point_is_deserialize_error() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "parallelism": {
+                "backward_scheduler": { "method": "trial_point", "block_size": 4 }
+            }
         }"#;
         let result = serde_json::from_str::<TrainingConfig>(json);
         assert!(
             result.is_err(),
-            "opening_block_size = 0 must be rejected by NonZeroUsize"
+            "block_size under trial_point must be rejected"
+        );
+    }
+
+    /// A misspelled scheduler `method` is an unknown-variant deserialize error.
+    #[test]
+    fn unknown_scheduler_method_is_deserialize_error() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "parallelism": {
+                "backward_scheduler": { "method": "openin_block" }
+            }
+        }"#;
+        let result = serde_json::from_str::<TrainingConfig>(json);
+        assert!(result.is_err(), "an unknown method tag must be rejected");
+    }
+
+    /// `block_size: 0` is an out-of-range deserialize error (`NonZeroUsize`).
+    #[test]
+    fn block_size_zero_is_deserialize_error() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "parallelism": {
+                "backward_scheduler": { "method": "opening_block", "block_size": 0 }
+            }
+        }"#;
+        let result = serde_json::from_str::<TrainingConfig>(json);
+        assert!(
+            result.is_err(),
+            "block_size = 0 must be rejected by NonZeroUsize"
+        );
+    }
+
+    /// The removed root-level scheduler keys are hard-rejected, never silently
+    /// ignored: `backward_scheduler`/`opening_block_size` moved into
+    /// `training.parallelism`, and `backward_opening_order` was removed with
+    /// the solve order now intrinsic.
+    #[test]
+    fn removed_root_scheduler_keys_are_rejected() {
+        for stale in [
+            r#""backward_scheduler": "opening_block""#,
+            r#""opening_block_size": 4"#,
+            r#""backward_opening_order": "sigma_key""#,
+        ] {
+            let json = format!(
+                r#"{{
+                    "forward_passes": 4,
+                    "stopping_rules": [{{ "type": "iteration_limit", "limit": 100 }}],
+                    {stale}
+                }}"#
+            );
+            let result = serde_json::from_str::<TrainingConfig>(&json);
+            assert!(
+                result.is_err(),
+                "removed root key must be rejected, got Ok for: {stale}"
+            );
+        }
+    }
+
+    /// A parameter belonging to a different stopping-rule type is a
+    /// deserialize error under `deny_unknown_fields` (here `seconds` under
+    /// `iteration_limit`), never a silently ignored key.
+    #[test]
+    fn wrong_stopping_rule_field_is_deserialize_error() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [
+                { "type": "iteration_limit", "limit": 100, "seconds": 60.0 }
+            ]
+        }"#;
+        let result = serde_json::from_str::<TrainingConfig>(json);
+        assert!(
+            result.is_err(),
+            "a time_limit-only field under iteration_limit must be rejected"
         );
     }
 }

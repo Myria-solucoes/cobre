@@ -1,5 +1,10 @@
 # Warm-start-friendly opening ordering in the backward pass
 
+> **Terminology**: this note predates a naming pass. In current code the
+> "TSP"/σ-key orders are the intrinsic shortest-chain order with a σ-key
+> fallback below 3 openings (`noise_key::apply_chain_order`); the
+> `backward_opening_order` config field was removed.
+
 > **Status**: Implemented (default-on, descending). The backward pass always
 > solves openings in descending noise-key order; configuration options were
 > removed after the A/B measurement confirmed the gain (§8.6–8.7). Wired at

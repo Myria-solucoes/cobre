@@ -3,7 +3,6 @@
 //! [`BackwardPassState`] owns pre-allocated scratch buffers reused each iteration.
 //! [`BackwardPassInputs`] bundles per-call borrowed inputs (no allocation on hot path).
 
-use std::num::NonZeroUsize;
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
@@ -20,8 +19,9 @@ use crate::risk_measure::BackwardOutcome;
 use crate::{
     backward::{
         BackwardResult, StageOpeningSolver, StageWorkerOpeningDelta, StagedCut, SuccessorSpec,
-        identity_block_order, lpt_block_order, pn_block_count, pn_finish, pn_merge_block_pivots,
-        process_stage_backward_pn, process_trial_point_backward, resolve_block_size,
+        hardest_first_block_order, identity_block_order, merge_block_pivots, opening_block_count,
+        opening_block_finish, process_stage_backward_opening_block, process_trial_point_backward,
+        resolve_block_size,
     },
     config::CutManagementConfig,
     context::{StageContext, TrainingContext},
@@ -42,7 +42,7 @@ use crate::{
     trajectory::TrajectoryRecord,
     visited_states::VisitedStatesArchive,
     workspace::{
-        BackwardPnScratch, BasisStore, BasisStoreSliceMut, SolverWorkspace, WorkspacePool,
+        BasisStore, BasisStoreSliceMut, OpeningBlockScratch, SolverWorkspace, WorkspacePool,
     },
 };
 
@@ -241,25 +241,22 @@ pub struct BackwardPassState {
     /// [`Self::set_profile`] before the first `run()` call.
     profile: ActiveProfile,
 
-    /// Backward-pass work-unit scheduler. Defaults to
+    /// Backward-pass work-unit scheduler, carrying the opening-block size
+    /// when the `OpeningBlock` method is selected. Defaults to
     /// [`BackwardScheduler::TrialPoint`] (byte-neutral with the pre-scheduler
     /// path); override with [`Self::set_scheduler`] before the first `run()`
     /// call.
     scheduler: BackwardScheduler,
 
-    /// Opening-block size override for `scheduler == OpeningBlock`; `None`
-    /// resolves per stage via `resolve_block_size`.
-    opening_block_size: Option<NonZeroUsize>,
-
-    /// Whether the PN opening-block scheduler claims hardest-`(stage,
-    /// block)`-first (LPT) using [`Self::pn_scratch`]'s
+    /// Whether the opening-block scheduler claims hardest-`(stage,
+    /// block)`-first using [`Self::opening_block_scratch`]'s
     /// `block_pivots_prev` row, or the canonical ascending block order.
-    /// Defaults to `true`; override with [`Self::set_lpt_claim_order`]
+    /// Defaults to `true`; override with [`Self::set_hardest_first_claim_order`]
     /// before the first `run()` call.
-    lpt_claim_order: bool,
+    hardest_first_claim_order: bool,
 
     /// Maximum local forward-pass count across the run; with
-    /// `bwd_max_openings` and `n_state`, sizes [`Self::pn_scratch`] when
+    /// `bwd_max_openings` and `n_state`, sizes [`Self::opening_block_scratch`] when
     /// [`Self::set_scheduler`] resolves `OpeningBlock`.
     max_local_fwd: usize,
 
@@ -270,15 +267,15 @@ pub struct BackwardPassState {
     n_state: usize,
 
     /// Number of stages in the study; with `bwd_max_openings`, sizes
-    /// [`Self::pn_scratch`]'s per-`(stage, block-index)` pivot accumulator
+    /// [`Self::opening_block_scratch`]'s per-`(stage, block-index)` pivot accumulator
     /// when [`Self::set_scheduler`] resolves `OpeningBlock`.
     num_stages: usize,
 
-    /// Pre-allocated PN opening-block scheduler scratch (per-`(m, ω)` outcome
+    /// Pre-allocated opening-block scheduler scratch (per-`(m, ω)` outcome
     /// arena + aggregation buffers). Empty until [`Self::set_scheduler`] sizes
-    /// it for `BackwardScheduler::OpeningBlock` (sddp.md "PN opening-block
+    /// it for `BackwardScheduler::OpeningBlock` (sddp.md "Opening-block
     /// scheduler is warm-start-only").
-    pn_scratch: BackwardPnScratch,
+    opening_block_scratch: OpeningBlockScratch,
 }
 
 impl BackwardPassState {
@@ -296,8 +293,8 @@ impl BackwardPassState {
     /// - `num_stages`: number of stages in the study.
     ///
     /// `max_local_fwd`, `n_state`, and `num_stages`, together with
-    /// `bwd_max_openings`, size `Self::pn_scratch` when
-    /// [`Self::set_scheduler`] later resolves `OpeningBlock`; `pn_scratch`
+    /// `bwd_max_openings`, size `Self::opening_block_scratch` when
+    /// [`Self::set_scheduler`] later resolves `OpeningBlock`; `opening_block_scratch`
     /// starts empty regardless of the resolved scheduler.
     #[must_use]
     pub fn new(
@@ -333,13 +330,12 @@ impl BackwardPassState {
             reconcile_scratch: [0_i32; 1],
             profile: Phase::Backward.profile(),
             scheduler: BackwardScheduler::default(),
-            opening_block_size: None,
-            lpt_claim_order: true,
+            hardest_first_claim_order: true,
             max_local_fwd,
             bwd_max_openings,
             n_state,
             num_stages,
-            pn_scratch: BackwardPnScratch::default(),
+            opening_block_scratch: OpeningBlockScratch::default(),
         }
     }
 
@@ -349,38 +345,32 @@ impl BackwardPassState {
         self.profile = profile;
     }
 
-    /// Overrides the backward-pass scheduler and opening-block size applied at
-    /// [`Self::run`] entry (default: [`BackwardScheduler::TrialPoint`], `None`).
-    /// Call before `run()`.
+    /// Overrides the backward-pass scheduler applied at [`Self::run`] entry
+    /// (default: [`BackwardScheduler::TrialPoint`]). Call before `run()`.
     ///
-    /// Sizes `Self::pn_scratch` once, here, from the dimensions passed to
+    /// Sizes `Self::opening_block_scratch` once, here, from the dimensions passed to
     /// [`Self::new`]: the full `max_local_fwd * bwd_max_openings` shape for
-    /// `OpeningBlock`, empty (zero PN footprint) for `TrialPoint` — never on the
-    /// hot path.
-    pub fn set_scheduler(
-        &mut self,
-        scheduler: BackwardScheduler,
-        opening_block_size: Option<NonZeroUsize>,
-    ) {
+    /// `OpeningBlock`, empty (zero opening-block footprint) for `TrialPoint` —
+    /// never on the hot path.
+    pub fn set_scheduler(&mut self, scheduler: BackwardScheduler) {
         self.scheduler = scheduler;
-        self.opening_block_size = opening_block_size;
-        self.pn_scratch = match scheduler {
-            BackwardScheduler::OpeningBlock => BackwardPnScratch::sized(
+        self.opening_block_scratch = match scheduler {
+            BackwardScheduler::OpeningBlock { .. } => OpeningBlockScratch::sized(
                 self.max_local_fwd,
                 self.bwd_max_openings,
                 self.n_state,
                 self.num_stages,
             ),
-            BackwardScheduler::TrialPoint => BackwardPnScratch::default(),
+            BackwardScheduler::TrialPoint {} => OpeningBlockScratch::default(),
         };
     }
 
-    /// Overrides whether the PN opening-block scheduler claims work
-    /// hardest-`(stage, block)`-first (LPT) using the previous iteration's
+    /// Overrides whether the opening-block scheduler claims work
+    /// hardest-`(stage, block)`-first using the previous iteration's
     /// mean pivots (default `true`). `false` forces the canonical ascending
     /// block order — the byte-neutrality gate's off leg. Call before `run()`.
-    pub fn set_lpt_claim_order(&mut self, enabled: bool) {
-        self.lpt_claim_order = enabled;
+    pub fn set_hardest_first_claim_order(&mut self, enabled: bool) {
+        self.hardest_first_claim_order = enabled;
     }
 
     /// Execute the backward pass for one training iteration on this rank.
@@ -436,17 +426,17 @@ impl BackwardPassState {
             );
             ws.worker_timing_buf = WorkerPhaseTimings::default();
         }
-        // PN's per-(stage, block-index) pivot accumulator is iteration-local:
-        // swapped here (once per `run()` call), never per stage. LPT reads the
+        // The opening-block scheduler's per-(stage, block-index) pivot accumulator is iteration-local:
+        // swapped here (once per `run()` call), never per stage. the hardest-first order reads the
         // swapped-in `block_pivots_prev` (last iteration's fully-merged means);
         // reading `block_pivots` during the sweep instead is the
         // wrong-but-compiling alternative — it is reset-then-partially-filled,
         // yielding zeros or a half-filled row.
         std::mem::swap(
-            &mut self.pn_scratch.block_pivots,
-            &mut self.pn_scratch.block_pivots_prev,
+            &mut self.opening_block_scratch.block_pivots,
+            &mut self.opening_block_scratch.block_pivots_prev,
         );
-        self.pn_scratch.block_pivots.fill((0, 0));
+        self.opening_block_scratch.block_pivots.fill((0, 0));
 
         #[allow(clippy::cast_precision_loss)]
         let params = StageDerivedParams {
@@ -730,37 +720,37 @@ impl BackwardPassState {
     }
 }
 
-/// Test/tooling accessors for `BackwardPassState::pn_scratch` — never called
+/// Test/tooling accessors for `BackwardPassState::opening_block_scratch` — never called
 /// from production hot-path code.
 #[cfg(any(test, feature = "test-support"))]
 impl BackwardPassState {
-    /// `.capacity()` of the PN scratch arena — `0` under `TrialPoint`, else the
-    /// `max_local_fwd * bwd_max_openings` shape `BackwardPnScratch::sized`
+    /// `.capacity()` of the opening-block scratch arena — `0` under `TrialPoint`, else the
+    /// `max_local_fwd * bwd_max_openings` shape `OpeningBlockScratch::sized`
     /// allocated at [`Self::set_scheduler`].
     #[must_use]
-    pub fn pn_scratch_arena_capacity(&self) -> usize {
-        self.pn_scratch.arena.capacity()
+    pub fn opening_block_scratch_arena_capacity(&self) -> usize {
+        self.opening_block_scratch.arena.capacity()
     }
 
-    /// Read-only view of the PN scratch arena, for sizing assertions
+    /// Read-only view of the opening-block scratch arena, for sizing assertions
     /// (`.len()`, each entry's `coefficients.len()`).
     #[must_use]
-    pub fn pn_scratch_arena(&self) -> &[BackwardOutcome] {
-        &self.pn_scratch.arena
+    pub fn opening_block_scratch_arena(&self) -> &[BackwardOutcome] {
+        &self.opening_block_scratch.arena
     }
 
-    /// Per-`(stage, block-index)` mean `simplex_iterations` pivot from the PN
+    /// Per-`(stage, block-index)` mean `simplex_iterations` pivot from the
     /// opening-block scheduler's rank-local accumulator. Outer index is
     /// the backward pass's successor stage (`t + 1`); inner index is the
     /// block index. `None` where no opening was solved this iteration
     /// (count == 0); empty under `BackwardScheduler::TrialPoint`.
     #[must_use]
-    pub fn pn_block_pivot_means(&self) -> Vec<Vec<Option<f64>>> {
-        let stride = self.pn_scratch.n_blocks_max;
+    pub fn block_pivot_means(&self) -> Vec<Vec<Option<f64>>> {
+        let stride = self.opening_block_scratch.n_blocks_max;
         if stride == 0 {
             return Vec::new();
         }
-        self.pn_scratch
+        self.opening_block_scratch
             .block_pivots
             .chunks(stride)
             .map(|stage_row| {
@@ -909,30 +899,34 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
         cut_state: cut_state_projection,
     };
 
-    // PN needs the frozen-LP path (`load_backward_lp`), incompatible with DCS's
-    // cut-free lazy core, so an active DCS iteration always falls back to PS
-    // (sddp.md "PN opening-block scheduler is warm-start-only").
-    let use_pn = matches!(state.scheduler, BackwardScheduler::OpeningBlock)
+    // The opening-block scheduler needs the frozen-LP path (`load_backward_lp`), incompatible with DCS's
+    // cut-free lazy core, so an active DCS iteration always falls back to the trial-point path
+    // (sddp.md "Opening-block scheduler is warm-start-only").
+    let use_opening_block = matches!(state.scheduler, BackwardScheduler::OpeningBlock { .. })
         && training_ctx
             .dcs
             .filter(|p| p.is_active(inputs.iteration))
             .is_none();
 
     let process_start = Instant::now();
-    let (local_solve, parallel_wall_ms): (Result<usize, SddpError>, u64) = if use_pn {
-        let block_size = resolve_block_size(n_openings, state.opening_block_size);
-        let n_blocks = pn_block_count(n_openings, block_size);
-        if state.lpt_claim_order {
-            let row_start = successor * state.pn_scratch.n_blocks_max;
-            lpt_block_order(
-                &state.pn_scratch.block_pivots_prev[row_start..row_start + n_blocks],
+    let (local_solve, parallel_wall_ms): (Result<usize, SddpError>, u64) = if use_opening_block {
+        let configured_block_size = match state.scheduler {
+            BackwardScheduler::OpeningBlock { block_size } => block_size,
+            BackwardScheduler::TrialPoint {} => None,
+        };
+        let block_size = resolve_block_size(n_openings, configured_block_size);
+        let n_blocks = opening_block_count(n_openings, block_size);
+        if state.hardest_first_claim_order {
+            let row_start = successor * state.opening_block_scratch.n_blocks_max;
+            hardest_first_block_order(
+                &state.opening_block_scratch.block_pivots_prev[row_start..row_start + n_blocks],
                 n_blocks,
-                &mut state.pn_scratch.block_order,
+                &mut state.opening_block_scratch.block_order,
             );
         } else {
-            identity_block_order(n_blocks, &mut state.pn_scratch.block_order);
+            identity_block_order(n_blocks, &mut state.opening_block_scratch.block_order);
         }
-        let worker_out = process_stage_backward_pn(
+        let worker_out = process_stage_backward_opening_block(
             inputs.workspaces,
             ctx,
             training_ctx,
@@ -943,14 +937,14 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
             &succ_spec,
             &*inputs.basis_store,
             block_size,
-            &state.pn_scratch.block_order[..n_blocks],
+            &state.opening_block_scratch.block_order[..n_blocks],
         );
         #[allow(clippy::cast_possible_truncation)]
         let elapsed_ms = process_start.elapsed().as_millis() as u64;
-        // Telemetry-only merge (sddp.md "PN opening-block scheduler is
+        // Telemetry-only merge (sddp.md "opening-block scheduler is
         // warm-start-only" — disjoint from the per-`(m, ω)` arena scatter and
-        // ascending-m aggregation `pn_finish` performs below).
-        pn_merge_block_pivots(
+        // ascending-m aggregation `opening_block_finish` performs below).
+        merge_block_pivots(
             inputs.workspaces.iter().map(|ws| {
                 (
                     ws.backward_accum.block_pivot_sum.as_slice(),
@@ -959,9 +953,9 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
             }),
             n_blocks,
             successor,
-            &mut state.pn_scratch,
+            &mut state.opening_block_scratch,
         );
-        let result = pn_finish(
+        let result = opening_block_finish(
             worker_out,
             &*inputs.workspaces,
             inputs.local_work,
@@ -973,7 +967,7 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
             t,
             inputs.iteration,
             inputs.fwd_offset,
-            &mut state.pn_scratch,
+            &mut state.opening_block_scratch,
         );
         (result, elapsed_ms)
     } else {
@@ -1926,7 +1920,7 @@ mod tests {
                 refactor_error_tolerance: None,
                 factor_pivot_threshold: None,
                 use_warm_start: None,
-                dse_devex_fallback_threshold: None,
+                steepest_edge_devex_fallback_threshold: None,
             }));
         bwd_state.set_profile(resolved);
 

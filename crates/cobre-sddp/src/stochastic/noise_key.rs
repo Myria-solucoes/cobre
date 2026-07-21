@@ -20,15 +20,14 @@
 //!
 //! ## Opening order
 //!
-//! [`BackwardOpeningOrder::SigmaKey`] sorts by the σ-weighted key above.
-//! [`BackwardOpeningOrder::Tsp`] instead sorts each stage with 3 or more
-//! openings by a nearest-neighbor + 2-opt tour over unweighted L2 distance
+//! Each stage with 3 or more openings is ordered along its shortest chain: a
+//! nearest-neighbor + 2-opt minimum-distance path over unweighted L2 distance
 //! between openings' hydro-prefix noise vectors, shortening the warm-start
-//! chain the backward pass walks; a stage with fewer than 3 openings keeps its
-//! σ-key (there is no tour to improve).
+//! chain the backward pass walks. A stage with fewer than 3 openings keeps its
+//! σ-key from above (there is no path to improve), so the σ computation is a
+//! live fallback, not dead machinery.
 
 use cobre_core::{EntityId, System};
-use cobre_io::config::BackwardOpeningOrder;
 use cobre_stochastic::{OpeningTreeView, StochasticContext};
 
 use crate::error::SddpError;
@@ -37,9 +36,8 @@ use crate::error::SddpError;
 /// setup-constant data.
 ///
 /// Always computes the σ-weighted key first (also performs the noise-dimension
-/// validation every path relies on), then, under
-/// [`BackwardOpeningOrder::Tsp`], overwrites each stage's keys with its winning
-/// TSP tour's reversed path positions (see the module docs).
+/// validation every path relies on), then overwrites each stage's keys with
+/// its winning shortest-chain path's reversed positions (see the module docs).
 ///
 /// # Errors
 ///
@@ -49,7 +47,6 @@ use crate::error::SddpError;
 pub(crate) fn build_noise_key_table(
     system: &System,
     stochastic: &StochasticContext,
-    order: BackwardOpeningOrder,
 ) -> Result<Vec<Vec<f64>>, SddpError> {
     let n_hydros = stochastic.n_hydros();
     let hydro_ids: Vec<EntityId> = system.hydros().iter().map(|h| h.id).collect();
@@ -76,9 +73,7 @@ pub(crate) fn build_noise_key_table(
         keys.push(stage_keys);
     }
 
-    if matches!(order, BackwardOpeningOrder::Tsp) {
-        apply_tsp_order(&mut keys, &tree, n_hydros);
-    }
+    apply_chain_order(&mut keys, &tree, n_hydros);
 
     Ok(keys)
 }
@@ -200,11 +195,11 @@ fn two_opt_improve(tour: &mut [usize], cost: &mut f64, distances: &[f64], n_o: u
 /// full 2-opt, keeping the winning tour. All comparisons use `total_cmp` — a
 /// `partial_cmp`/`<`/`min_by` reintroduces a NaN/`-0.0`-dependent order that
 /// breaks run-to-run reproducibility.
-fn tsp_path(distances: &[f64], n_o: usize) -> Vec<usize> {
+fn shortest_chain_path(distances: &[f64], n_o: usize) -> Vec<usize> {
     debug_assert_eq!(
         distances.len(),
         n_o * n_o,
-        "tsp_path: distance matrix must be n_o x n_o"
+        "shortest_chain_path: distance matrix must be n_o x n_o"
     );
 
     let mut best: Vec<usize> = (0..n_o).collect();
@@ -248,24 +243,24 @@ fn l2_distance_matrix(
 }
 
 #[allow(clippy::cast_precision_loss)]
-fn tsp_key(n_o: usize, pos: usize) -> f64 {
+fn chain_position_key(n_o: usize, pos: usize) -> f64 {
     (n_o - pos) as f64
 }
 
-/// Overwrite each stage's keys with its TSP tour's reversed path positions
-/// (`keys[stage][ω] = n_o - pos`, where `pos` is ω's index in the winning
-/// tour); a stage below 3 openings keeps its σ-key — there is no tour to
-/// improve.
-fn apply_tsp_order(keys: &mut [Vec<f64>], tree: &OpeningTreeView<'_>, n_hydros: usize) {
+/// Overwrite each stage's keys with its shortest-chain path's reversed
+/// positions (`keys[stage][ω] = n_o - pos`, where `pos` is ω's index in the
+/// winning path); a stage below 3 openings keeps its σ-key — there is no path
+/// to improve.
+fn apply_chain_order(keys: &mut [Vec<f64>], tree: &OpeningTreeView<'_>, n_hydros: usize) {
     for (stage, stage_keys) in keys.iter_mut().enumerate() {
         let n_o = stage_keys.len();
         if n_o < 3 {
             continue;
         }
         let distances = l2_distance_matrix(tree, stage, n_o, n_hydros);
-        let path = tsp_path(&distances, n_o);
+        let path = shortest_chain_path(&distances, n_o);
         for (pos, &omega) in path.iter().enumerate() {
-            stage_keys[omega] = tsp_key(n_o, pos);
+            stage_keys[omega] = chain_position_key(n_o, pos);
         }
     }
 }
@@ -280,7 +275,7 @@ mod tests {
     };
     use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
-    use super::{BackwardOpeningOrder, StochasticContext, build_noise_key_table, noise_key};
+    use super::{StochasticContext, build_noise_key_table, noise_key};
 
     #[test]
     fn test_noise_key_sums_sigma_weighted_components() {
@@ -311,13 +306,13 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // tsp_path: pure-kernel tests over hand-built distance matrices.
+    // shortest_chain_path: pure-kernel tests over hand-built distance matrices.
     // ------------------------------------------------------------------
 
     #[test]
     #[allow(clippy::cast_precision_loss)]
-    fn tsp_path_orders_collinear_points() {
-        use super::tsp_path;
+    fn shortest_chain_path_orders_collinear_points() {
+        use super::shortest_chain_path;
 
         let n_o = 4;
         let mut distances = vec![0.0_f64; n_o * n_o];
@@ -327,21 +322,21 @@ mod tests {
             }
         }
 
-        let path = tsp_path(&distances, n_o);
+        let path = shortest_chain_path(&distances, n_o);
         assert_eq!(path.len(), n_o);
         let ascending = path.windows(2).all(|w| w[1] == w[0] + 1);
         let descending = path.windows(2).all(|w| w[0] == w[1] + 1);
         assert!(
             ascending || descending,
-            "expected a monotone tour over collinear points, got {path:?}"
+            "expected a monotone path over collinear points, got {path:?}"
         );
     }
 
-    mod tsp_path_proptests {
+    mod shortest_chain_path_proptests {
         use proptest::prelude::*;
         use proptest::test_runner::RngSeed;
 
-        use super::super::tsp_path;
+        use super::super::shortest_chain_path;
 
         /// Fixed seed so a failing shrink is reproducible run-to-run.
         fn fixed_config() -> ProptestConfig {
@@ -362,8 +357,8 @@ mod tests {
             #![proptest_config(fixed_config())]
 
             #[test]
-            fn tsp_path_is_always_a_permutation((n_o, distances) in size_and_matrix()) {
-                let path = tsp_path(&distances, n_o);
+            fn shortest_chain_path_is_always_a_permutation((n_o, distances) in size_and_matrix()) {
+                let path = shortest_chain_path(&distances, n_o);
                 let mut sorted = path.clone();
                 sorted.sort_unstable();
                 prop_assert_eq!(sorted, (0..n_o).collect::<Vec<_>>());
@@ -372,7 +367,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // build_noise_key_table + BackwardOpeningOrder fixture tests.
+    // build_noise_key_table fixture tests.
     // ------------------------------------------------------------------
 
     fn bus_fixture(id: i32) -> Bus {
@@ -525,17 +520,15 @@ mod tests {
     }
 
     #[test]
-    fn tsp_order_is_declaration_order_invariant() {
+    fn chain_order_is_declaration_order_invariant() {
         let system_a = build_system(&[10, 20, 30], 2, 4);
         let system_b = build_system(&[30, 10, 20], 2, 4);
 
         let ctx_a = build_ctx(&system_a, 99);
         let ctx_b = build_ctx(&system_b, 99);
 
-        let table_a = build_noise_key_table(&system_a, &ctx_a, BackwardOpeningOrder::Tsp)
-            .expect("table must build");
-        let table_b = build_noise_key_table(&system_b, &ctx_b, BackwardOpeningOrder::Tsp)
-            .expect("table must build");
+        let table_a = build_noise_key_table(&system_a, &ctx_a).expect("table must build");
+        let table_b = build_noise_key_table(&system_b, &ctx_b).expect("table must build");
 
         assert_eq!(table_a.len(), table_b.len());
         for (stage_a, stage_b) in table_a.iter().zip(&table_b) {
@@ -544,30 +537,32 @@ mod tests {
                 assert_eq!(
                     ka.to_bits(),
                     kb.to_bits(),
-                    "TSP key tables must be bit-identical across hydro declaration order"
+                    "shortest-chain key tables must be bit-identical across hydro declaration order"
                 );
             }
         }
     }
 
+    /// A stage with fewer than 3 openings keeps its σ-weighted key — the σ
+    /// computation is the live small-stage fallback, not dead machinery. The
+    /// fixture's single hydro (id 10) carries `std_m3s = 20.0` on every stage,
+    /// so each expected key is `20.0 · η_ω[0]` verbatim.
     #[test]
-    fn tsp_is_noop_below_three_openings() {
+    fn small_stages_keep_sigma_keys() {
         let system = build_system(&[10], 2, 2);
         let ctx = build_ctx(&system, 7);
 
-        let sigma_table = build_noise_key_table(&system, &ctx, BackwardOpeningOrder::SigmaKey)
-            .expect("sigma table must build");
-        let tsp_table = build_noise_key_table(&system, &ctx, BackwardOpeningOrder::Tsp)
-            .expect("tsp table must build");
+        let table = build_noise_key_table(&system, &ctx).expect("table must build");
 
-        assert_eq!(sigma_table.len(), tsp_table.len());
-        for (sigma_stage, tsp_stage) in sigma_table.iter().zip(&tsp_table) {
-            assert_eq!(sigma_stage.len(), tsp_stage.len());
-            for (&s, &t) in sigma_stage.iter().zip(tsp_stage) {
+        let tree = ctx.tree_view();
+        for (stage, stage_keys) in table.iter().enumerate() {
+            assert_eq!(stage_keys.len(), 2, "fixture branches 2 openings per stage");
+            for (omega, &key) in stage_keys.iter().enumerate() {
+                let expected = 20.0 * tree.opening(stage, omega)[0];
                 assert_eq!(
-                    s.to_bits(),
-                    t.to_bits(),
-                    "Tsp must be a no-op for stages with fewer than 3 openings"
+                    key.to_bits(),
+                    expected.to_bits(),
+                    "a below-3-openings stage must keep its σ-key"
                 );
             }
         }

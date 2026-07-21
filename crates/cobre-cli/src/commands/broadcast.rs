@@ -6,7 +6,7 @@ use cobre_comm::Communicator;
 use cobre_core::scenario::ScenarioSource;
 use cobre_io::Config;
 use cobre_io::PolicyMode;
-use cobre_io::config::{BackwardOpeningOrder, BackwardScheduler, PhaseSolverProfileConfig};
+use cobre_io::config::{BackwardScheduler, PhaseSolverProfileConfig};
 use cobre_sddp::{
     CutSelectionStrategy, DEFAULT_MAX_ITERATIONS, InflowNonNegativityMethod, StoppingMode,
     StoppingRule, StoppingRuleSet, StudyParams,
@@ -30,6 +30,35 @@ pub(crate) enum BroadcastStoppingRule {
 pub(crate) enum BroadcastStoppingMode {
     Any,
     All,
+}
+
+/// Postcard-serializable backward scheduler. Mirrors
+/// [`BackwardScheduler`], whose internally-tagged serde representation
+/// postcard (non-self-describing) refuses to deserialize (`WontImplement`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum BroadcastBackwardScheduler {
+    TrialPoint,
+    OpeningBlock { block_size: Option<NonZeroUsize> },
+}
+
+impl From<BackwardScheduler> for BroadcastBackwardScheduler {
+    fn from(value: BackwardScheduler) -> Self {
+        match value {
+            BackwardScheduler::TrialPoint {} => Self::TrialPoint,
+            BackwardScheduler::OpeningBlock { block_size } => Self::OpeningBlock { block_size },
+        }
+    }
+}
+
+impl From<BroadcastBackwardScheduler> for BackwardScheduler {
+    fn from(value: BroadcastBackwardScheduler) -> Self {
+        match value {
+            BroadcastBackwardScheduler::TrialPoint => Self::TrialPoint {},
+            BroadcastBackwardScheduler::OpeningBlock { block_size } => {
+                Self::OpeningBlock { block_size }
+            }
+        }
+    }
 }
 
 /// Configuration snapshot broadcast from rank 0 to all ranks.
@@ -67,13 +96,10 @@ pub(crate) struct BroadcastConfig {
     pub(crate) training_solver_forward: Option<PhaseSolverProfileConfig>,
     /// Simulation solver profile override (`simulation.solver`).
     pub(crate) simulation_solver: Option<PhaseSolverProfileConfig>,
-    /// Backward opening solve order (`training.backward_opening_order`).
-    pub(crate) backward_opening_order: BackwardOpeningOrder,
-    /// Backward-pass scheduler (`training.backward_scheduler`).
-    pub(crate) backward_scheduler: BackwardScheduler,
-    /// Opening-block size override for `backward_scheduler = opening_block`
-    /// (`training.opening_block_size`).
-    pub(crate) opening_block_size: Option<NonZeroUsize>,
+    /// Backward-pass scheduler (`training.parallelism.backward_scheduler`),
+    /// carrying the opening-block size when the `opening_block` method is
+    /// selected.
+    pub(crate) backward_scheduler: BroadcastBackwardScheduler,
     /// Resolved objective cost-scale factor (`modeling.cost_scale_factor`),
     /// resolved identically on every rank by [`StudyParams::from_config`].
     pub(crate) cost_scale_factor: f64,
@@ -149,9 +175,7 @@ impl BroadcastConfig {
             training_solver_backward: params.training_solver_backward,
             training_solver_forward: params.training_solver_forward,
             simulation_solver: params.simulation_solver,
-            backward_opening_order: params.backward_opening_order,
-            backward_scheduler: params.backward_scheduler,
-            opening_block_size: params.opening_block_size,
+            backward_scheduler: params.backward_scheduler.into(),
             cost_scale_factor: params.cost_scale_factor,
         })
     }
@@ -431,22 +455,20 @@ mod tests {
         );
     }
 
-    /// Postcard round-trip for the scheduler/opening-order fields at their
-    /// non-default values — `broadcast_config_roundtrips_via_postcard` above
-    /// only exercises the `TrialPoint`/`Tsp`/`None` defaults.
+    /// Postcard round-trip for the scheduler field at its non-default value —
+    /// `broadcast_config_roundtrips_via_postcard` above only exercises the
+    /// `TrialPoint` default.
     #[test]
     fn broadcast_config_roundtrips_via_postcard_with_opening_block_scheduler() {
         use std::num::NonZeroUsize;
 
-        use cobre_io::config::{BackwardOpeningOrder, BackwardScheduler};
-
-        use super::BroadcastConfig;
+        use super::{BroadcastBackwardScheduler, BroadcastConfig};
 
         let json = r#"{
             "training": {
-                "backward_scheduler": "opening_block",
-                "backward_opening_order": "sigma_key",
-                "opening_block_size": 4
+                "parallelism": {
+                    "backward_scheduler": { "method": "opening_block", "block_size": 4 }
+                }
             }
         }"#;
         let config: cobre_io::Config = serde_json::from_str(json).unwrap();
@@ -458,17 +480,12 @@ mod tests {
             .expect("postcard deserialization of BroadcastConfig must succeed");
 
         assert_eq!(decoded.backward_scheduler, original.backward_scheduler);
-        assert_eq!(decoded.backward_scheduler, BackwardScheduler::OpeningBlock);
         assert_eq!(
-            decoded.backward_opening_order,
-            original.backward_opening_order
+            decoded.backward_scheduler,
+            BroadcastBackwardScheduler::OpeningBlock {
+                block_size: NonZeroUsize::new(4)
+            }
         );
-        assert_eq!(
-            decoded.backward_opening_order,
-            BackwardOpeningOrder::SigmaKey
-        );
-        assert_eq!(decoded.opening_block_size, original.opening_block_size);
-        assert_eq!(decoded.opening_block_size, NonZeroUsize::new(4));
     }
 
     /// Postcard round-trip for a populated `training.solver.backward` /

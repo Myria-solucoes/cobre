@@ -1,5 +1,11 @@
 # LPT claim ordering in the opening-block backward scheduler — local A/B
 
+> **Terminology**: this note predates a naming pass. In current code "LPT" is
+> the hardest-first claim order (`hardest_first_block_order`,
+> `hardest_first_claim_order_is_result_neutral`), and the "PN" scheduler is the
+> opening-block scheduler (`training.parallelism.backward_scheduler`,
+> `training/backward/opening_block.rs`).
+
 > **Status**: Implemented (always-on under the `opening_block` backward
 > scheduler). This note records a local, single-box A/B measuring the
 > realized value of the claim ordering and states the keep/drop recommendation.

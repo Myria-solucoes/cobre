@@ -1,32 +1,45 @@
 {
   "$defs": {
-    "BackwardOpeningOrder": {
-      "description": "Backward opening solve order.",
-      "oneOf": [
-        {
-          "const": "tsp",
-          "description": "Traveling-salesman-path ordering of openings.",
-          "type": "string"
-        },
-        {
-          "const": "sigma_key",
-          "description": "Sigma-key ordering of openings.",
-          "type": "string"
-        }
-      ]
-    },
     "BackwardScheduler": {
-      "description": "Backward-pass scheduler selection.",
+      "description": "Backward-pass scheduler and its scheduler-specific parameters\n(`config.json → training.parallelism.backward_scheduler`).\n\nInternally tagged on `method`; each variant carries only the fields it\nuses, so supplying a parameter that does not belong to the chosen method is\na load-time error under `deny_unknown_fields`.",
       "oneOf": [
         {
-          "const": "trial_point",
-          "description": "Per-trial-point backward scheduling (the default).",
-          "type": "string"
+          "additionalProperties": false,
+          "description": "Per-trial-point backward scheduling (the default): each parallel work\nunit is one whole trial point.",
+          "properties": {
+            "method": {
+              "const": "trial_point",
+              "type": "string"
+            }
+          },
+          "required": [
+            "method"
+          ],
+          "type": "object"
         },
         {
-          "const": "opening_block",
-          "description": "Opening-block backward scheduling.",
-          "type": "string"
+          "additionalProperties": false,
+          "description": "Opening-block backward scheduling: each parallel work unit is one\n(trial point, opening-block) pair claimed dynamically by workers.",
+          "properties": {
+            "block_size": {
+              "default": null,
+              "description": "Openings per block. Absent resolves per stage to `⌈|Ω_s|/2⌉` (half\nthe openings, rounded up); a set value is clamped to\n`min(|Ω_s|, block_size)`.",
+              "format": "uint",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "method": {
+              "const": "opening_block",
+              "type": "string"
+            }
+          },
+          "required": [
+            "method"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -179,6 +192,27 @@
       },
       "type": "object"
     },
+    "HistoricalYearRange": {
+      "additionalProperties": false,
+      "description": "Inclusive `{\"from\", \"to\"}` range form of `historical_years`.",
+      "properties": {
+        "from": {
+          "description": "First year (inclusive).",
+          "format": "int32",
+          "type": "integer"
+        },
+        "to": {
+          "description": "Last year (inclusive).",
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "type": "object"
+    },
     "InflowNonNegativityConfig": {
       "additionalProperties": false,
       "description": "Inflow non-negativity treatment settings.",
@@ -287,6 +321,20 @@
         }
       ]
     },
+    "ParallelismConfig": {
+      "additionalProperties": false,
+      "description": "Parallel-execution settings (`config.json → training.parallelism`).\n\nGroups the result-preserving knobs that shape how training work is\nscheduled across workers, apart from the algorithm-semantics fields at the\n`training` root. Thread count itself stays a CLI concern (`--threads`).",
+      "properties": {
+        "backward_scheduler": {
+          "$ref": "#/$defs/BackwardScheduler",
+          "default": {
+            "method": "trial_point"
+          },
+          "description": "Backward-pass scheduler selection."
+        }
+      },
+      "type": "object"
+    },
     "PhaseSolverProfileConfig": {
       "additionalProperties": false,
       "description": "Per-phase LP solver profile (`config.json → training.solver.backward` /\n`.forward`, and `simulation.solver`).\n\nBackend-agnostic. Every field is optional: an absent field leaves the\ncorresponding solver option at its backend default.",
@@ -294,15 +342,6 @@
         "cost_perturbation": {
           "default": null,
           "description": "Dual simplex cost-perturbation multiplier override.",
-          "format": "double",
-          "type": [
-            "number",
-            "null"
-          ]
-        },
-        "dse_devex_fallback_threshold": {
-          "default": null,
-          "description": "Dual steepest-edge weight log-error fallback-threshold override.",
           "format": "double",
           "type": [
             "number",
@@ -400,6 +439,15 @@
           "minimum": 0,
           "type": [
             "integer",
+            "null"
+          ]
+        },
+        "steepest_edge_devex_fallback_threshold": {
+          "default": null,
+          "description": "Dual steepest-edge weight log-error threshold override above which the\nsolver falls back to Devex pricing.",
+          "format": "double",
+          "type": [
+            "number",
             "null"
           ]
         },
@@ -534,24 +582,8 @@
           "type": "array"
         },
         {
-          "description": "Inclusive range shorthand.",
-          "properties": {
-            "from": {
-              "description": "First year (inclusive).",
-              "format": "int32",
-              "type": "integer"
-            },
-            "to": {
-              "description": "Last year (inclusive).",
-              "format": "int32",
-              "type": "integer"
-            }
-          },
-          "required": [
-            "from",
-            "to"
-          ],
-          "type": "object"
+          "$ref": "#/$defs/HistoricalYearRange",
+          "description": "Inclusive range shorthand."
         }
       ],
       "description": "Intermediate serde type for `historical_years` in `config.json`.\n\nHandles two JSON representations via `#[serde(untagged)]`:\n- Array: `[1940, 1953, 1971]` → [`RawHistoricalYearsConfig::List`]\n- Object: `{\"from\": 1940, \"to\": 2010}` → [`RawHistoricalYearsConfig::Range`]\n\nThe `List` variant must be declared first so serde tries it before `Range`\n(an integer array is tried before an object)."
@@ -861,9 +893,10 @@
       "type": "object"
     },
     "StoppingRuleConfig": {
-      "description": "Deserialized configuration for one entry in `training.stopping_rules[]`.\n\nUses a `\"type\"` discriminator field (internally tagged) with `snake_case`\nvariant names matching the JSON schema.\n\nThe `GracefulShutdown` rule has no JSON representation — it is injected at\nruntime by `StoppingRuleSet` construction and is never deserialized.\n\n# Examples\n\n```\nuse cobre_io::config::StoppingRuleConfig;\n\nlet json = r#\"{\"type\": \"iteration_limit\", \"limit\": 100}\"#;\nlet rule: StoppingRuleConfig = serde_json::from_str(json).unwrap();\nassert!(matches!(rule, StoppingRuleConfig::IterationLimit { limit: 100 }));\n```",
+      "description": "Deserialized configuration for one entry in `training.stopping_rules[]`.\n\nUses a `\"type\"` discriminator field (internally tagged) with `snake_case`\nvariant names matching the JSON schema. `deny_unknown_fields` makes a\nparameter belonging to a different rule type a load-time error rather\nthan a silently ignored key.\n\nThe `GracefulShutdown` rule has no JSON representation — it is injected at\nruntime by `StoppingRuleSet` construction and is never deserialized.\n\n# Examples\n\n```\nuse cobre_io::config::StoppingRuleConfig;\n\nlet json = r#\"{\"type\": \"iteration_limit\", \"limit\": 100}\"#;\nlet rule: StoppingRuleConfig = serde_json::from_str(json).unwrap();\nassert!(matches!(rule, StoppingRuleConfig::IterationLimit { limit: 100 }));\n```",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "Stop after a fixed number of iterations. **Mandatory** — every rule set must\ncontain at least one `iteration_limit` rule.",
           "properties": {
             "limit": {
@@ -884,6 +917,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Stop after a wall-clock time limit.",
           "properties": {
             "seconds": {
@@ -903,6 +937,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Stop when the lower bound stalls (relative improvement falls below tolerance).",
           "properties": {
             "iterations": {
@@ -929,6 +964,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Stop when both the bound and simulated policy costs have stabilized.",
           "properties": {
             "bound_tol": {
@@ -980,16 +1016,6 @@
       "additionalProperties": false,
       "description": "Training parameters (`config.json → training`).\n\n`forward_passes` and `stopping_rules` are mandatory — the loader returns\n[`crate::LoadError::SchemaError`] if either is absent.",
       "properties": {
-        "backward_opening_order": {
-          "$ref": "#/$defs/BackwardOpeningOrder",
-          "default": "tsp",
-          "description": "Backward opening solve order."
-        },
-        "backward_scheduler": {
-          "$ref": "#/$defs/BackwardScheduler",
-          "default": "trial_point",
-          "description": "Backward-pass scheduler: per-trial-point or opening-block claim loop."
-        },
         "cut_selection": {
           "$ref": "#/$defs/RowSelectionConfig",
           "default": {
@@ -1013,15 +1039,14 @@
             "null"
           ]
         },
-        "opening_block_size": {
-          "default": null,
-          "description": "Opening-block size for `backward_scheduler = \"opening_block\"`. Absent\nresolves per stage to `⌈|Ω_s|/2⌉` (half the openings, rounded up); a set\nvalue is clamped to `min(|Ω_s|, size)`.",
-          "format": "uint",
-          "minimum": 1,
-          "type": [
-            "integer",
-            "null"
-          ]
+        "parallelism": {
+          "$ref": "#/$defs/ParallelismConfig",
+          "default": {
+            "backward_scheduler": {
+              "method": "trial_point"
+            }
+          },
+          "description": "Parallel-execution settings."
         },
         "scenario_source": {
           "anyOf": [

@@ -89,7 +89,7 @@ impl SolverInterface for HighsSolver {
             ffi::cobre_highs_set_double_option(
                 self.handle,
                 c"dual_steepest_edge_weight_log_error_threshold".as_ptr(),
-                profile.dse_devex_fallback_threshold,
+                profile.steepest_edge_devex_fallback_threshold,
             );
         }
         self.current_profile = *profile;

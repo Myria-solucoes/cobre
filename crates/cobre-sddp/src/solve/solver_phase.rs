@@ -19,8 +19,6 @@
 //! trait is local and the implemented profile types are foreign, which the
 //! orphan rule permits.
 
-use std::num::NonZeroUsize;
-
 use cobre_io::config::{BackwardScheduler, PhaseSolverProfileConfig};
 #[cfg(feature = "highs")]
 use cobre_io::config::{DualEdgeWeight, PresolveMode, PriceStrategy, ScaleStrategy};
@@ -49,9 +47,8 @@ pub enum Phase {
 
 /// Resolved per-run backward/forward tuning, threaded from [`crate::setup::StudySetup`]
 /// into `TrainingSession::new` once per training run: the solver profiles plus
-/// the backward-pass scheduler (`training.backward_scheduler`/
-/// `training.opening_block_size`), which has no forward-pass analogue but
-/// travels the same seam.
+/// the backward-pass scheduler (`training.parallelism.backward_scheduler`),
+/// which has no forward-pass analogue but travels the same seam.
 ///
 /// `Default` reproduces [`Phase::profile`]'s byte-neutral constants and the
 /// byte-neutral trial-point scheduler, so a caller with no config override can
@@ -62,18 +59,18 @@ pub struct SolverProfiles {
     pub forward: ActiveProfile,
     /// Resolved backward-pass profile.
     pub backward: ActiveProfile,
-    /// Backward-pass scheduler (`training.backward_scheduler`).
+    /// Backward-pass scheduler (`training.parallelism.backward_scheduler`),
+    /// carrying the opening-block size when the `opening_block` method is
+    /// selected.
     pub backward_scheduler: BackwardScheduler,
-    /// Opening-block size override for `backward_scheduler = opening_block`
-    /// (`training.opening_block_size`).
-    pub opening_block_size: Option<NonZeroUsize>,
-    /// PN opening-block-scheduler claim order
-    /// (`BackwardPassState::set_lpt_claim_order`): `true` claims hardest-
-    /// `(stage, block)`-first by the previous iteration's mean pivots (LPT);
-    /// `false` forces the canonical ascending block order. No `training.*`
-    /// config field resolves this yet — a reserved test-support seam for the
-    /// byte-neutrality gate; production always resolves `true`.
-    pub lpt_claim_order: bool,
+    /// Opening-block-scheduler claim order
+    /// (`BackwardPassState::set_hardest_first_claim_order`): `true` claims
+    /// hardest-`(stage, block)`-first by the previous iteration's mean pivots
+    /// (longest-processing-time-first); `false` forces the canonical ascending
+    /// block order. No `training.*` config field resolves this yet — a
+    /// reserved test-support seam for the byte-neutrality gate; production
+    /// always resolves `true`.
+    pub hardest_first_claim_order: bool,
 }
 
 impl Default for SolverProfiles {
@@ -82,8 +79,7 @@ impl Default for SolverProfiles {
             forward: Phase::Forward.profile(),
             backward: Phase::Backward.profile(),
             backward_scheduler: BackwardScheduler::default(),
-            opening_block_size: None,
-            lpt_claim_order: true,
+            hardest_first_claim_order: true,
         }
     }
 }
@@ -123,7 +119,7 @@ impl PhaseProfiles for HighsProfile {
         refactor_error_tolerance: 1e-6,
         factor_pivot_threshold: 0.1,
         use_warm_start: true,
-        dse_devex_fallback_threshold: 10.0,
+        steepest_edge_devex_fallback_threshold: 10.0,
     };
     const BACKWARD: Self = HighsProfile {
         primal_feasibility_tolerance: 1e-9,
@@ -139,7 +135,7 @@ impl PhaseProfiles for HighsProfile {
         refactor_error_tolerance: 1e-6,
         factor_pivot_threshold: 0.1,
         use_warm_start: true,
-        dse_devex_fallback_threshold: 10.0,
+        steepest_edge_devex_fallback_threshold: 10.0,
     };
     const SIMULATION: Self = HighsProfile {
         primal_feasibility_tolerance: 1e-9,
@@ -155,7 +151,7 @@ impl PhaseProfiles for HighsProfile {
         refactor_error_tolerance: 1e-6,
         factor_pivot_threshold: 0.1,
         use_warm_start: true,
-        dse_devex_fallback_threshold: 10.0,
+        steepest_edge_devex_fallback_threshold: 10.0,
     };
 }
 
@@ -226,7 +222,7 @@ pub const FORWARD_PROFILE: HighsProfile = HighsProfile {
     refactor_error_tolerance: 1e-6,
     factor_pivot_threshold: 0.1,
     use_warm_start: true,
-    dse_devex_fallback_threshold: 10.0,
+    steepest_edge_devex_fallback_threshold: 10.0,
 };
 
 /// Solver profile applied during the SDDP backward pass — the tuned
@@ -247,7 +243,7 @@ pub const BACKWARD_PROFILE: HighsProfile = HighsProfile {
     refactor_error_tolerance: 1e-6,
     factor_pivot_threshold: 0.1,
     use_warm_start: true,
-    dse_devex_fallback_threshold: 10.0,
+    steepest_edge_devex_fallback_threshold: 10.0,
 };
 
 /// Solver profile applied during policy simulation — the tuned deep-cut-pool
@@ -268,7 +264,7 @@ pub const SIMULATION_PROFILE: HighsProfile = HighsProfile {
     refactor_error_tolerance: 1e-6,
     factor_pivot_threshold: 0.1,
     use_warm_start: true,
-    dse_devex_fallback_threshold: 10.0,
+    steepest_edge_devex_fallback_threshold: 10.0,
 };
 
 impl Phase {
@@ -390,11 +386,11 @@ fn validate_backend_support(
             "unsupported factor_pivot_threshold {value} for backend \"highs\" in phase \"{phase_key}\": value must be in [{MIN_FACTOR_PIVOT_THRESHOLD}, {MAX_FACTOR_PIVOT_THRESHOLD}]"
         )));
     }
-    if let Some(value) = config.dse_devex_fallback_threshold
+    if let Some(value) = config.steepest_edge_devex_fallback_threshold
         && (!value.is_finite() || value < 1.0)
     {
         return Err(SddpError::Validation(format!(
-            "unsupported dse_devex_fallback_threshold {value} for backend \"highs\" in phase \"{phase_key}\": value must be finite and >= 1.0"
+            "unsupported steepest_edge_devex_fallback_threshold {value} for backend \"highs\" in phase \"{phase_key}\": value must be finite and >= 1.0"
         )));
     }
     Ok(())
@@ -420,7 +416,7 @@ fn first_set_override(config: &PhaseSolverProfileConfig) -> Option<&'static str>
         refactor_error_tolerance,
         factor_pivot_threshold,
         use_warm_start,
-        dse_devex_fallback_threshold,
+        steepest_edge_devex_fallback_threshold,
     } = config;
     if dual_edge_weight.is_some() {
         Some("dual_edge_weight")
@@ -444,8 +440,8 @@ fn first_set_override(config: &PhaseSolverProfileConfig) -> Option<&'static str>
         Some("factor_pivot_threshold")
     } else if use_warm_start.is_some() {
         Some("use_warm_start")
-    } else if dse_devex_fallback_threshold.is_some() {
-        Some("dse_devex_fallback_threshold")
+    } else if steepest_edge_devex_fallback_threshold.is_some() {
+        Some("steepest_edge_devex_fallback_threshold")
     } else {
         None
     }
@@ -484,7 +480,7 @@ fn clp_unsupported(item: impl std::fmt::Display, phase_key: &str) -> SddpError {
 /// Selecting `SteepestEdge` is a request, not a guarantee: under a
 /// warm-started solve `HiGHS` silently falls back to Devex pricing once the
 /// DSE weight log error exceeds
-/// [`HighsProfile::dse_devex_fallback_threshold`], so a resolve may run
+/// [`HighsProfile::steepest_edge_devex_fallback_threshold`], so a resolve may run
 /// partly on Devex regardless of this setting.
 #[cfg(feature = "highs")]
 fn highs_dual_edge_weight(value: DualEdgeWeight) -> i32 {
@@ -564,8 +560,8 @@ fn resolve_active_profile(
     if let Some(value) = config.use_warm_start {
         profile.use_warm_start = value;
     }
-    if let Some(value) = config.dse_devex_fallback_threshold {
-        profile.dse_devex_fallback_threshold = value;
+    if let Some(value) = config.steepest_edge_devex_fallback_threshold {
+        profile.steepest_edge_devex_fallback_threshold = value;
     }
     profile
 }
@@ -600,7 +596,7 @@ const _: () = {
     assert!(FORWARD_PROFILE.refactor_error_tolerance == 1e-6);
     assert!(FORWARD_PROFILE.factor_pivot_threshold == 0.1);
     assert!(FORWARD_PROFILE.use_warm_start);
-    assert!(FORWARD_PROFILE.dse_devex_fallback_threshold == 10.0);
+    assert!(FORWARD_PROFILE.steepest_edge_devex_fallback_threshold == 10.0);
 
     assert!(BACKWARD_PROFILE.primal_feasibility_tolerance == 1e-9);
     assert!(BACKWARD_PROFILE.dual_feasibility_tolerance == 1e-9);
@@ -615,7 +611,7 @@ const _: () = {
     assert!(BACKWARD_PROFILE.refactor_error_tolerance == 1e-6);
     assert!(BACKWARD_PROFILE.factor_pivot_threshold == 0.1);
     assert!(BACKWARD_PROFILE.use_warm_start);
-    assert!(BACKWARD_PROFILE.dse_devex_fallback_threshold == 10.0);
+    assert!(BACKWARD_PROFILE.steepest_edge_devex_fallback_threshold == 10.0);
 
     assert!(SIMULATION_PROFILE.primal_feasibility_tolerance == 1e-9);
     assert!(SIMULATION_PROFILE.dual_feasibility_tolerance == 1e-9);
@@ -630,7 +626,7 @@ const _: () = {
     assert!(SIMULATION_PROFILE.refactor_error_tolerance == 1e-6);
     assert!(SIMULATION_PROFILE.factor_pivot_threshold == 0.1);
     assert!(SIMULATION_PROFILE.use_warm_start);
-    assert!(SIMULATION_PROFILE.dse_devex_fallback_threshold == 10.0);
+    assert!(SIMULATION_PROFILE.steepest_edge_devex_fallback_threshold == 10.0);
 
     assert!(<HighsProfile as PhaseProfiles>::FORWARD.simplex_price_strategy == 2);
     assert!(<HighsProfile as PhaseProfiles>::BACKWARD.simplex_price_strategy == 2);
@@ -676,7 +672,7 @@ mod highs_tests {
             refactor_error_tolerance: None,
             factor_pivot_threshold: None,
             use_warm_start: None,
-            dse_devex_fallback_threshold: None,
+            steepest_edge_devex_fallback_threshold: None,
         }
     }
 
@@ -849,7 +845,7 @@ mod highs_tests {
             refactor_error_tolerance: Some(1e-5),
             factor_pivot_threshold: Some(0.2),
             use_warm_start: Some(false),
-            dse_devex_fallback_threshold: Some(20.0),
+            steepest_edge_devex_fallback_threshold: Some(20.0),
             ..blank_config()
         };
         let resolved = Phase::Backward.resolve_profile(Some(&config));
@@ -860,7 +856,7 @@ mod highs_tests {
         assert_eq!(resolved.refactor_error_tolerance, 1e-5);
         assert_eq!(resolved.factor_pivot_threshold, 0.2);
         assert!(!resolved.use_warm_start);
-        assert_eq!(resolved.dse_devex_fallback_threshold, 20.0);
+        assert_eq!(resolved.steepest_edge_devex_fallback_threshold, 20.0);
         assert_eq!(
             resolved.primal_feasibility_tolerance,
             BACKWARD_PROFILE.primal_feasibility_tolerance
@@ -1008,19 +1004,19 @@ mod highs_tests {
         }
     }
 
-    /// A `dse_devex_fallback_threshold` below `1.0` is rejected, naming the
+    /// A `steepest_edge_devex_fallback_threshold` below `1.0` is rejected, naming the
     /// field — the exact AC scenario (`0.5`).
     #[test]
-    fn validate_phase_solver_config_rejects_dse_devex_fallback_threshold_below_one() {
+    fn validate_phase_solver_config_rejects_steepest_edge_devex_fallback_threshold_below_one() {
         let config = PhaseSolverProfileConfig {
-            dse_devex_fallback_threshold: Some(0.5),
+            steepest_edge_devex_fallback_threshold: Some(0.5),
             ..blank_config()
         };
         let err = validate_phase_solver_config(Some(&config), Phase::Forward)
-            .expect_err("dse_devex_fallback_threshold below 1.0 must be rejected");
+            .expect_err("steepest_edge_devex_fallback_threshold below 1.0 must be rejected");
         let msg = err.to_string();
         assert!(
-            msg.contains("dse_devex_fallback_threshold"),
+            msg.contains("steepest_edge_devex_fallback_threshold"),
             "message must name the field: {msg}"
         );
     }
@@ -1036,7 +1032,7 @@ mod highs_tests {
             refactor_error_tolerance: Some(1e-5),
             factor_pivot_threshold: Some(0.2),
             use_warm_start: Some(false),
-            dse_devex_fallback_threshold: Some(20.0),
+            steepest_edge_devex_fallback_threshold: Some(20.0),
             ..blank_config()
         };
         assert!(validate_phase_solver_config(Some(&config), Phase::Backward).is_ok());
@@ -1067,7 +1063,7 @@ mod clp_tests {
             refactor_error_tolerance: None,
             factor_pivot_threshold: None,
             use_warm_start: None,
-            dse_devex_fallback_threshold: None,
+            steepest_edge_devex_fallback_threshold: None,
         }
     }
 
@@ -1258,10 +1254,10 @@ mod clp_tests {
         );
         assert_clp_rejects_field(
             &PhaseSolverProfileConfig {
-                dse_devex_fallback_threshold: Some(20.0),
+                steepest_edge_devex_fallback_threshold: Some(20.0),
                 ..blank_config()
             },
-            "dse_devex_fallback_threshold",
+            "steepest_edge_devex_fallback_threshold",
         );
     }
 
@@ -1350,10 +1346,10 @@ mod clp_tests {
         );
         assert_eq!(
             first_set_override(&PhaseSolverProfileConfig {
-                dse_devex_fallback_threshold: Some(20.0),
+                steepest_edge_devex_fallback_threshold: Some(20.0),
                 ..blank_config()
             }),
-            Some("dse_devex_fallback_threshold")
+            Some("steepest_edge_devex_fallback_threshold")
         );
     }
 }

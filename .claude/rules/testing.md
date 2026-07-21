@@ -74,16 +74,17 @@ rule; the rules below are the Cobre-specific ones.
     previously let a per-stage cut-state-projection crash class through
     undetected; a new backward-path gate is incomplete until it covers
     both, or the omission is justified.
-  - A scheduler-determinism gate asserts PN-vs-PN reproducibility and
-    thread/rank-shape invariance for the same scheduler; it never asserts
-    PN-vs-PS bitwise equality beyond the single-opening case where PN's
-    chain IS PS's chain. PN warm-chains a block from a fresh frozen-LP load
-    while PS warm-chains the whole trial point, so at a degenerate optimum
-    a multi-opening comparison may settle on a different-but-equally-valid
-    dual vertex — the hot≠cold divergence the Cobre determinism contract
-    explicitly permits (CLAUDE.md: "never hot == cold") — so a
-    multi-opening PN-vs-PS bit-identity gate is not a gateable contract,
-    even where a fixture happens to pass it today.
+  - A scheduler-determinism gate asserts same-scheduler reproducibility and
+    thread/rank-shape invariance; it never asserts opening-block-vs-
+    trial-point bitwise equality beyond the single-opening case where the
+    opening-block chain IS the trial-point chain. The opening-block
+    scheduler warm-chains a block from a fresh frozen-LP load while the
+    trial-point scheduler warm-chains the whole trial point, so at a
+    degenerate optimum a multi-opening comparison may settle on a
+    different-but-equally-valid dual vertex — the hot≠cold divergence the
+    Cobre determinism contract explicitly permits (CLAUDE.md: "never hot ==
+    cold") — so a multi-opening cross-scheduler bit-identity gate is not a
+    gateable contract, even where a fixture happens to pass it today.
 
 ## Re-baselining parity hashes
 

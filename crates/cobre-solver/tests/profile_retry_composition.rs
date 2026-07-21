@@ -453,7 +453,7 @@ mod tests {
             refactor_error_tolerance: 1e-5,
             factor_pivot_threshold: 0.2,
             use_warm_start: false,
-            dse_devex_fallback_threshold: 20.0,
+            steepest_edge_devex_fallback_threshold: 20.0,
         };
         assert_ne!(
             profile,
@@ -491,7 +491,7 @@ mod tests {
         let factor_pivot_threshold = solver
             .get_double_option(c"factor_pivot_threshold")
             .expect("factor_pivot_threshold must be readable");
-        let dse_devex_fallback_threshold = solver
+        let steepest_edge_devex_fallback_threshold = solver
             .get_double_option(c"dual_steepest_edge_weight_log_error_threshold")
             .expect("dual_steepest_edge_weight_log_error_threshold must be readable");
 
@@ -539,9 +539,12 @@ mod tests {
             profile.factor_pivot_threshold
         );
         assert!(
-            (dse_devex_fallback_threshold - profile.dse_devex_fallback_threshold).abs() < 1e-20,
-            "dse_devex_fallback_threshold must survive the finalization seam; expected {}, got {dse_devex_fallback_threshold}",
-            profile.dse_devex_fallback_threshold
+            (steepest_edge_devex_fallback_threshold
+                - profile.steepest_edge_devex_fallback_threshold)
+                .abs()
+                < 1e-20,
+            "steepest_edge_devex_fallback_threshold must survive the finalization seam; expected {}, got {steepest_edge_devex_fallback_threshold}",
+            profile.steepest_edge_devex_fallback_threshold
         );
     }
 
@@ -653,7 +656,7 @@ mod tests {
             refactor_error_tolerance: 1e-5,
             factor_pivot_threshold: 0.2,
             use_warm_start: false,
-            dse_devex_fallback_threshold: 20.0,
+            steepest_edge_devex_fallback_threshold: 20.0,
         };
         solver.set_profile(&non_default);
 

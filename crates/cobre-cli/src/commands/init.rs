@@ -128,7 +128,18 @@ fn execute_scaffold(
             })?;
         }
 
-        std::fs::write(&dest, file.content).map_err(|source| CliError::Io {
+        let is_json = std::path::Path::new(file.relative_path)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("json"));
+        let pinned;
+        let content: &[u8] = match std::str::from_utf8(file.content) {
+            Ok(text) if is_json => {
+                pinned = pin_schema_urls(text);
+                pinned.as_bytes()
+            }
+            _ => file.content,
+        };
+        std::fs::write(&dest, content).map_err(|source| CliError::Io {
             source,
             context: dest.display().to_string(),
         })?;
@@ -138,6 +149,21 @@ fn execute_scaffold(
     print_summary(&stderr, template, directory);
 
     Ok(())
+}
+
+/// Rewrite a template's floating `$schema` URLs (`refs/heads/main`) to this
+/// binary's own release tag, so a scaffolded case's editor completion and
+/// validation match the `cobre` version that will consume it rather than
+/// whatever `main` has since become.
+fn pin_schema_urls(content: &str) -> String {
+    content.replace(
+        "/cobre-rs/cobre/refs/heads/main/schemas/",
+        concat!(
+            "/cobre-rs/cobre/refs/tags/v",
+            env!("CARGO_PKG_VERSION"),
+            "/schemas/"
+        ),
+    )
 }
 
 fn print_summary(stderr: &Term, template: &templates::Template, directory: &std::path::Path) {
@@ -261,9 +287,17 @@ mod tests {
         assert!(execute(args).is_ok());
 
         let config_content = std::fs::read_to_string(target.join("config.json")).unwrap();
+        let expected = format!(
+            "https://raw.githubusercontent.com/cobre-rs/cobre/refs/tags/v{}/schemas/config.schema.json",
+            env!("CARGO_PKG_VERSION")
+        );
         assert!(
-            config_content.contains("https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/schemas/config.schema.json"),
-            "generated config.json must contain the $schema URL"
+            config_content.contains(&expected),
+            "generated config.json must contain the version-pinned $schema URL '{expected}'"
+        );
+        assert!(
+            !config_content.contains("refs/heads/main"),
+            "generated config.json must not keep the floating main $schema URL"
         );
     }
 
@@ -279,7 +313,11 @@ mod tests {
         };
         assert!(execute(args).is_ok());
 
-        let base = "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/schemas/";
+        let base = concat!(
+            "https://raw.githubusercontent.com/cobre-rs/cobre/refs/tags/v",
+            env!("CARGO_PKG_VERSION"),
+            "/schemas/"
+        );
 
         let checks: &[(&str, &str)] = &[
             ("system/buses.json", "buses.schema.json"),

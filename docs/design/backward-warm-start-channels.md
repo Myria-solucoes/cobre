@@ -1,5 +1,12 @@
 # Backward-pass warm-start channels
 
+> **Terminology**: this note predates a naming pass. In current code the "PN"
+> scheduler is the opening-block scheduler
+> (`training.parallelism.backward_scheduler`,
+> `training/backward/opening_block.rs`), "LPT" is the hardest-first claim order
+> (`hardest_first_block_order`), and the "TSP" opening order is the intrinsic
+> shortest-chain order (`noise_key::apply_chain_order`; no config field).
+
 > **Status**: Design evaluation — no implementation in this document. It records
 > one measured-and-closed channel (H3) and evaluates two open, cluster-gated
 > channels (H1, H2) for lowering backward-pass solve cost by warm-starting from a

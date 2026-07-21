@@ -71,7 +71,6 @@ pub use stochastic_pipeline::{
 };
 
 use std::collections::HashMap;
-use std::num::NonZeroUsize;
 use std::path::Path;
 
 use cobre_core::{
@@ -206,20 +205,17 @@ pub struct StudySetup {
     /// Resolved forward-pass solver profile (`training.solver.forward`).
     pub(crate) forward_profile: ActiveProfile,
 
-    /// Backward-pass scheduler (`training.backward_scheduler`), threaded into
-    /// [`StudySetup::train`] alongside [`Self::backward_profile`].
+    /// Backward-pass scheduler (`training.parallelism.backward_scheduler`,
+    /// carrying the opening-block size), threaded into [`StudySetup::train`]
+    /// alongside [`Self::backward_profile`].
     pub(crate) backward_scheduler: BackwardScheduler,
 
-    /// Opening-block size override for `backward_scheduler = opening_block`
-    /// (`training.opening_block_size`).
-    pub(crate) opening_block_size: Option<NonZeroUsize>,
-
-    /// PN opening-block-scheduler claim-order override, threaded into
+    /// Opening-block-scheduler claim-order override, threaded into
     /// [`StudySetup::train`] alongside [`Self::backward_scheduler`]. No
     /// `training.*` config field resolves this yet — a reserved test-support
     /// seam; production always resolves `true` (see
-    /// [`crate::solve::solver_phase::SolverProfiles::lpt_claim_order`]).
-    pub(crate) lpt_claim_order: bool,
+    /// [`crate::solve::solver_phase::SolverProfiles::hardest_first_claim_order`]).
+    pub(crate) hardest_first_claim_order: bool,
 
     /// Stochastic numerical methodology parameters (`horizon`, `inflow_method`).
     pub(crate) methodology: methodology_config::MethodologyConfig,
@@ -349,9 +345,7 @@ impl StudySetup {
             training_solver_backward,
             training_solver_forward,
             simulation_solver,
-            backward_opening_order,
             backward_scheduler,
-            opening_block_size,
             cost_scale_factor,
         } = config;
 
@@ -372,7 +366,7 @@ impl StudySetup {
         // Keys are a pure function of the synced tree + fixed σ, so every rank
         // computes the identical permutation and cuts stay bit-identical across
         // thread/rank counts (canonical-ω aggregation is order-independent).
-        let solve_order_keys = build_noise_key_table(system, &stochastic, backward_opening_order)?;
+        let solve_order_keys = build_noise_key_table(system, &stochastic)?;
         stochastic
             .set_solve_order(&solve_order_keys, SweepDirection::Descending)
             .map_err(|e| SddpError::Validation(e.to_string()))?;
@@ -555,8 +549,7 @@ impl StudySetup {
             backward_profile,
             forward_profile,
             backward_scheduler,
-            opening_block_size,
-            lpt_claim_order: true,
+            hardest_first_claim_order: true,
             methodology: methodology_config::MethodologyConfig {
                 horizon,
                 inflow_method,

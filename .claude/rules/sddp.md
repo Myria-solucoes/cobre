@@ -80,12 +80,15 @@ Read: `training/backward_pass_state.rs`.
 
 A trial point's backward openings are SOLVED in the installed `solve_order`
 permutation (`OpeningTree::set_solve_order`, keyed by
-`noise_key::build_noise_key_table` — `BackwardOpeningOrder::Tsp` by default,
-`SigmaKey` on override) but each opening's outcome is WRITTEN and AGGREGATED by
-**canonical ω**. The aggregation therefore carries no solve-order dependence:
-under a FIXED configured order, results are declaration-order-invariant and
-run-to-run reproducible across thread and rank shapes (the pinned gates).
-CHANGING the configured order (`Tsp` ↔ `SigmaKey`) changes the warm-start
+`noise_key::build_noise_key_table` — the intrinsic shortest-chain order, a
+nearest-neighbor + 2-opt minimum-distance path over the openings'
+inflow-noise vectors; a stage below 3 openings keeps its σ-weighted key, the
+live fallback that also owns the noise-dimension validation) but each
+opening's outcome is WRITTEN and AGGREGATED by **canonical ω**. The
+aggregation therefore carries no solve-order dependence: results are
+declaration-order-invariant and run-to-run reproducible across thread and
+rank shapes (the pinned gates). No config field selects the order.
+CHANGING the order (a code change to `noise_key`) changes the warm-start
 chain each opening's solve starts from, and at a degenerate optimum a
 differently-warmed solve may settle on a different-but-equally-valid vertex
 with different duals — the hot≠cold divergence the Cobre determinism contract
@@ -93,9 +96,9 @@ permits — so an order change re-checks the golden parity baselines instead of
 assuming byte-identical outputs. Aggregating the outcome slice indexed by
 solve position — or handing solve-order-permuted probabilities to
 `RiskMeasure::aggregate_cut_into` — is the wrong-but-compiling alternative: it
-makes the cut depend on solve order even at a fixed configuration, silently
+makes the cut depend on solve order, silently
 breaking declaration-order invariance and run-to-run reproducibility.
-Read: `stochastic/noise_key.rs` (`build_noise_key_table`),
+Read: `stochastic/noise_key.rs` (`build_noise_key_table`, `apply_chain_order`),
 `training/backward/trial_point.rs` (`process_trial_point_backward` — solves by
 `solve_order`, aggregates by canonical ω), `training/backward/outcome_aggregation.rs`
 (`write_opening_outcome`). Pinned by the `opening_order_determinism` gate in
@@ -103,9 +106,10 @@ Read: `stochastic/noise_key.rs` (`build_noise_key_table`),
 stub, bitwise `final_lb`) and the MPI SLURM Integration job's rank-invariance
 comparison on `examples/4ree`.
 
-## PN opening-block scheduler is warm-start-only
+## Opening-block scheduler is warm-start-only
 
-The opt-in PN scheduler (`training.backward_scheduler = opening_block`)
+The opt-in opening-block scheduler
+(`training.parallelism.backward_scheduler = { method = opening_block }`)
 reassigns the backward pass's work unit from a whole trial point to an
 opening-block: workers claim `(trial point, block)` units in any order from a
 shared atomic counter, warm-chaining each block's openings from a fresh
@@ -120,27 +124,33 @@ alternative — CVaR's tail weighting is order-sensitive, so it silently breaks
 CVaR reproducibility and declaration-order invariance the same way a
 solve-order-keyed aggregation would break the trial-point path above. An
 active Dynamic Cut Selection iteration always falls back to the trial-point
-path: PN's frozen-LP load is incompatible with DCS's cut-free lazy core.
-Read: `training/backward/pn.rs` (`process_stage_backward_pn`'s claim loop,
-`pn_finish`'s per-`(m, ω)` arena and ascending-m aggregation),
-`training/backward_pass_state.rs` (`run_one_backward_stage`'s `use_pn`
-dispatch). Pinned by `pn_scheduler_determinism_expectation` and
-`pn_scheduler_determinism_cvar` in `tests/mpi_wire.rs` (threads=4 / a
-same-shape threads=4 repeat / threads=2 / threads=1 / a `Rank0Of2` 2-rank
-stub, bitwise `final_lb`, on both an expectation and a `CVaR` configuration),
-`pn_opening_block_degenerates_on_single_opening` (PN-vs-PS equality on a
-single-opening case whose resolved block count is `1`), and
-`pn_handles_non_uniform_cut_projection` (PN-vs-PS equality on a case whose
-per-stage cut-state projection dimension varies across stages).
+path: the opening-block scheduler's frozen-LP load is incompatible with
+DCS's cut-free lazy core.
+Read: `training/backward/opening_block.rs`
+(`process_stage_backward_opening_block`'s claim loop,
+`opening_block_finish`'s per-`(m, ω)` arena and ascending-m aggregation),
+`training/backward_pass_state.rs` (`run_one_backward_stage`'s
+`use_opening_block` dispatch). Pinned by
+`opening_block_scheduler_determinism_expectation` and
+`opening_block_scheduler_determinism_cvar` in `tests/mpi_wire.rs` (threads=4
+/ a same-shape threads=4 repeat / threads=2 / threads=1 / a `Rank0Of2`
+2-rank stub, bitwise `final_lb`, on both an expectation and a `CVaR`
+configuration), `opening_block_degenerates_on_single_opening`
+(opening-block-vs-trial-point equality on a single-opening case whose
+resolved block count is `1`), and
+`opening_block_handles_non_uniform_cut_projection`
+(opening-block-vs-trial-point equality on a case whose per-stage cut-state
+projection dimension varies across stages).
 
-**LPT claim order is result-neutral.** Under `OpeningBlock`, claims are
-further ordered hardest-`(stage, block)`-first (LPT) by the PREVIOUS
-iteration's per-`(stage, block)` mean `simplex_iterations` pivot — never
-per-`(m, block)`, since resampled trial points make per-m hardness noise
-where the opening-block component is iteration-stable. LPT touches only the
+**Hardest-first claim order is result-neutral.** Under `OpeningBlock`,
+claims are further ordered hardest-`(stage, block)`-first
+(longest-processing-time, LPT) by the PREVIOUS iteration's per-`(stage,
+block)` mean `simplex_iterations` pivot — never per-`(m, block)`, since
+resampled trial points make per-m hardness noise where the opening-block
+component is iteration-stable. The hardest-first order touches only the
 claim decode: the per-`(m, ω)` write and the ascending-m aggregation above
-are unchanged, so LPT-on and canonical (identity-order) PN produce a
-bit-identical cut set and `final_lb`. Keying the order on per-`(m, block)`
+are unchanged, so hardest-first-on and the canonical identity order produce
+a bit-identical cut set and `final_lb`. Keying the order on per-`(m, block)`
 pivots, reordering the arena or the aggregation instead of only the claim
 decode, and a tie-break that leaves equal-mean blocks unordered (not a total
 order) are each wrong-but-compiling: the first two reintroduce a
@@ -150,11 +160,13 @@ claim order itself nondeterministic across otherwise-identical runs.
 `BackwardPassState::run` swaps it in from `block_pivots` once per call, never
 per stage; reading `block_pivots` instead during the sweep is stale
 (reset-then-partially-filled).
-Read: `training/backward/pn.rs` (`process_stage_backward_pn`'s
-`block_order`-indexed decode, `lpt_block_order`, `identity_block_order`),
+Read: `training/backward/opening_block.rs`
+(`process_stage_backward_opening_block`'s `block_order`-indexed decode,
+`hardest_first_block_order`, `identity_block_order`),
 `training/backward_pass_state.rs` (`run_one_backward_stage`'s block-order
-computation, the `run` swap). Pinned by `lpt_claim_order_is_result_neutral`
-in `tests/mpi_wire.rs` (LPT-on vs LPT-off, bitwise `final_lb`).
+computation, the `run` swap). Pinned by
+`hardest_first_claim_order_is_result_neutral` in `tests/mpi_wire.rs`
+(hardest-first on vs off, bitwise `final_lb`).
 
 ## No EWMA upper bound
 

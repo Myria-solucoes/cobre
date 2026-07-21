@@ -69,16 +69,16 @@ mod tests {
     }
 
     #[test]
-    fn simulation_solver_profile_dse_devex_fallback_threshold_round_trips() {
+    fn simulation_solver_profile_steepest_edge_fallback_threshold_round_trips() {
         let json = r#"{
             "enabled": true,
             "num_scenarios": 500,
             "solver": {
-                "dse_devex_fallback_threshold": 12.5
+                "steepest_edge_devex_fallback_threshold": 12.5
             }
         }"#;
         let cfg: SimulationConfig = serde_json::from_str(json).unwrap();
         let solver = cfg.solver.as_ref().expect("solver present");
-        assert_eq!(solver.dse_devex_fallback_threshold, Some(12.5));
+        assert_eq!(solver.steepest_edge_devex_fallback_threshold, Some(12.5));
     }
 }

@@ -59,10 +59,19 @@ pub enum RawHistoricalYearsConfig {
     /// Explicit list of year integers.
     List(Vec<i32>),
     /// Inclusive range shorthand.
-    Range {
-        /// First year (inclusive).
-        from: i32,
-        /// Last year (inclusive).
-        to: i32,
-    },
+    Range(HistoricalYearRange),
+}
+
+/// Inclusive `{"from", "to"}` range form of `historical_years`.
+// A named struct, not an inline variant: `deny_unknown_fields` is unenforced
+// on an untagged enum's inline struct variant, and the range form must reject
+// a stray key instead of silently dropping it.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct HistoricalYearRange {
+    /// First year (inclusive).
+    pub from: i32,
+    /// Last year (inclusive).
+    pub to: i32,
 }

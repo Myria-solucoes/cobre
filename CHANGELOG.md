@@ -82,7 +82,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The per-phase solver-profile block gains further override fields**:
   `dual_feasibility_tolerance`, `presolve`, `simplex_update_limit`,
   `cost_perturbation`, `refactor_error_tolerance`, `factor_pivot_threshold`,
-  `use_warm_start`, and `dse_devex_fallback_threshold`, layered on top of
+  `use_warm_start`, and `steepest_edge_devex_fallback_threshold`, layered on top of
   the base profile the same way as the existing override fields.
   `presolve` only affects a solve that starts genuinely cold — a
   warm-started solve skips presolve regardless of the setting.
@@ -96,13 +96,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **An opt-in opening-block backward scheduler distributes backward-pass
   work at finer granularity than a whole trial point.** Setting
-  `training.backward_scheduler = "opening_block"` (the default remains
-  `"trial_point"`) reassigns each backward work unit from a whole trial
-  point to a `(trial point, opening block)` pair, claimed off a shared
-  counter and warm-chained from a fresh frozen-LP load;
-  `training.opening_block_size` controls the block size (default: half of
-  each stage's opening count, rounded up; an explicit value is clamped to
-  the stage's own opening count). Claims within a stage are ordered
+  `training.parallelism.backward_scheduler` to
+  `{ "method": "opening_block" }` (the default remains
+  `{ "method": "trial_point" }`) reassigns each backward work unit from a
+  whole trial point to a `(trial point, opening block)` pair, claimed off a
+  shared counter and warm-chained from a fresh frozen-LP load. The optional
+  `block_size` field of the `opening_block` method controls the block size
+  (default: half of each stage's opening count, rounded up; an explicit
+  value is clamped to the stage's own opening count); supplying
+  `block_size` under `trial_point` is a load-time error rather than a
+  silently ignored key. Claims within a stage are ordered
   hardest-first by each `(stage, block)`'s mean simplex-iteration cost
   measured on the previous iteration, load-balancing workers without
   changing which cuts are generated or how they are aggregated — the
@@ -125,21 +128,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   output directory (`cobre summary`) omits the `Time split` block entirely,
   since per-iteration phase timing is not persisted to `metadata.json`.
 
-- **The backward pass now solves each stage's openings in a shorter
-  warm-start tour by default.** `training.backward_opening_order` (default
-  `"tsp"`) orders each stage's openings along a nearest-neighbor-plus-2-opt
-  tour over their inflow-noise vectors before solving, replacing the
-  previous fixed sigma-weighted-key order (still available via
-  `backward_opening_order = "sigma_key"`). The chosen order only changes
+- **The backward pass now solves each stage's openings along a shortest
+  warm-start chain.** Each stage's openings are ordered along a
+  nearest-neighbor-plus-2-opt minimum-distance path over their inflow-noise
+  vectors before solving, replacing the previous fixed
+  sigma-weighted-key order (a stage with fewer than three openings keeps
+  the sigma-weighted order — there is no path to improve). The order is
+  intrinsic; no config field selects it. The chosen order only changes
   which warm-start chain the backward pass walks: each opening's cut is
   still written and aggregated by its own canonical opening identity,
   independent of solve order, so declaration-order invariance and
-  run-to-run reproducibility are unaffected. The default warm-start chain
+  run-to-run reproducibility are unaffected. The warm-start chain
   itself changes, not only training time: at a degenerate optimum a
   multi-opening stage can settle on a different — but equally optimal —
   vertex than the prior order, so training and simulation outputs on such a
-  stage can shift; set `backward_opening_order = "sigma_key"` to restore
-  the previous solve order.
+  stage can shift.
 
 ## [0.11.1] - 2026-07-17
 

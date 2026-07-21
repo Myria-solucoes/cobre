@@ -378,7 +378,7 @@ mod tests {
             refactor_error_tolerance: 1e-5,
             factor_pivot_threshold: 0.2,
             use_warm_start: false,
-            dse_devex_fallback_threshold: 20.0,
+            steepest_edge_devex_fallback_threshold: 20.0,
         };
         solver.set_profile(&p);
 

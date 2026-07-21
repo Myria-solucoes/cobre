@@ -1,12 +1,8 @@
 //! `StudyParams`, `ConstructionConfig`, and associated constants.
 
-use std::num::NonZeroUsize;
-
 use cobre_core::ScalarParameter;
 use cobre_io::Config;
-use cobre_io::config::{
-    BackwardOpeningOrder, BackwardScheduler, PhaseSolverProfileConfig, StoppingRuleConfig,
-};
+use cobre_io::config::{BackwardScheduler, PhaseSolverProfileConfig, StoppingRuleConfig};
 
 use crate::{
     InflowNonNegativityMethod, SddpError,
@@ -72,13 +68,10 @@ pub struct StudyParams {
     pub training_solver_forward: Option<PhaseSolverProfileConfig>,
     /// Simulation solver profile override (`simulation.solver`).
     pub simulation_solver: Option<PhaseSolverProfileConfig>,
-    /// Backward opening solve order (`training.backward_opening_order`).
-    pub backward_opening_order: BackwardOpeningOrder,
-    /// Backward-pass scheduler (`training.backward_scheduler`).
+    /// Backward-pass scheduler (`training.parallelism.backward_scheduler`),
+    /// carrying the opening-block size when the `opening_block` method is
+    /// selected.
     pub backward_scheduler: BackwardScheduler,
-    /// Opening-block size override for `backward_scheduler = opening_block`
-    /// (`training.opening_block_size`).
-    pub opening_block_size: Option<NonZeroUsize>,
     /// Resolved objective cost-scale factor (`modeling.cost_scale_factor`,
     /// default [`DEFAULT_COST_SCALE_FACTOR`]). Baked into the template at build
     /// time — one value per study.
@@ -171,9 +164,7 @@ impl StudyParams {
         let training_solver_backward = config.training.solver.backward.clone();
         let training_solver_forward = config.training.solver.forward.clone();
         let simulation_solver = config.simulation.solver.clone();
-        let backward_opening_order = config.training.backward_opening_order;
-        let backward_scheduler = config.training.backward_scheduler;
-        let opening_block_size = config.training.opening_block_size;
+        let backward_scheduler = config.training.parallelism.backward_scheduler;
 
         if let Some(b) = budget
             && u64::from(b) < u64::from(forward_passes)
@@ -182,13 +173,6 @@ impl StudyParams {
                 "max_active_per_stage ({b}) is less than forward_passes \
                  ({forward_passes}); budget enforcement will evict all \
                  non-current-iteration cuts every iteration"
-            );
-        }
-
-        if opening_block_size.is_some() && backward_scheduler == BackwardScheduler::TrialPoint {
-            tracing::warn!(
-                "opening_block_size is set but backward_scheduler is trial_point; \
-                 opening_block_size has no effect and is ignored"
             );
         }
 
@@ -227,9 +211,7 @@ impl StudyParams {
             training_solver_backward,
             training_solver_forward,
             simulation_solver,
-            backward_opening_order,
             backward_scheduler,
-            opening_block_size,
             cost_scale_factor,
         })
     }
@@ -256,9 +238,7 @@ impl StudyParams {
             training_solver_backward: self.training_solver_backward,
             training_solver_forward: self.training_solver_forward,
             simulation_solver: self.simulation_solver,
-            backward_opening_order: self.backward_opening_order,
             backward_scheduler: self.backward_scheduler,
-            opening_block_size: self.opening_block_size,
             cost_scale_factor: self.cost_scale_factor,
         }
     }
@@ -315,13 +295,10 @@ pub struct ConstructionConfig {
     pub training_solver_forward: Option<PhaseSolverProfileConfig>,
     /// Simulation solver profile override (`simulation.solver`).
     pub simulation_solver: Option<PhaseSolverProfileConfig>,
-    /// Backward opening solve order (`training.backward_opening_order`).
-    pub backward_opening_order: BackwardOpeningOrder,
-    /// Backward-pass scheduler (`training.backward_scheduler`).
+    /// Backward-pass scheduler (`training.parallelism.backward_scheduler`),
+    /// carrying the opening-block size when the `opening_block` method is
+    /// selected.
     pub backward_scheduler: BackwardScheduler,
-    /// Opening-block size override for `backward_scheduler = opening_block`
-    /// (`training.opening_block_size`).
-    pub opening_block_size: Option<NonZeroUsize>,
     /// Resolved objective cost-scale factor (`modeling.cost_scale_factor`,
     /// default [`DEFAULT_COST_SCALE_FACTOR`]). Baked into the template at build
     /// time — one value per study.
@@ -332,12 +309,11 @@ pub struct ConstructionConfig {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use std::num::NonZeroUsize;
     use std::sync::{Arc, Mutex};
 
     use cobre_io::config::{
-        BackwardOpeningOrder, BackwardScheduler, Config, EstimationConfig, ExportsConfig,
-        InflowNonNegativityConfig, InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig,
+        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
+        InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, ParallelismConfig,
         PolicyConfig, RowSelectionConfig, SimulationConfig as IoSimulationConfig,
         StoppingRuleConfig, TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
     };
@@ -430,9 +406,7 @@ mod tests {
                 stopping_mode: "any".to_string(),
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
-                backward_opening_order: BackwardOpeningOrder::default(),
-                backward_scheduler: BackwardScheduler::default(),
-                opening_block_size: None,
+                parallelism: ParallelismConfig::default(),
                 scenario_source: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
@@ -452,15 +426,6 @@ mod tests {
             max_active_per_stage: Some(1),
             ..RowSelectionConfig::default()
         };
-        config
-    }
-
-    /// `opening_block_size` set while `backward_scheduler` stays
-    /// `trial_point`, so the ignored-key advisory fires.
-    fn config_with_opening_block_size_ignored_under_trial_point() -> Config {
-        let mut config = base_test_config();
-        config.training.backward_scheduler = BackwardScheduler::TrialPoint;
-        config.training.opening_block_size = NonZeroUsize::new(4);
         config
     }
 
@@ -634,30 +599,6 @@ mod tests {
         assert!(
             !relevant.is_empty(),
             "expected at least one WARN event containing 'max_active_per_stage', got: {recorded:?}"
-        );
-    }
-
-    /// AC: when `opening_block_size` is set but `backward_scheduler` is
-    /// `trial_point`, `StudyParams::from_config` emits a WARN-level tracing
-    /// event whose message contains `opening_block_size`.
-    #[test]
-    fn study_params_warns_when_opening_block_size_ignored_under_trial_point() {
-        let (subscriber, messages) = WarnRecorder::new();
-        tracing::subscriber::with_default(subscriber, || {
-            let _params = StudyParams::from_config(
-                &config_with_opening_block_size_ignored_under_trial_point(),
-            )
-            .expect("config is valid; warning must not prevent construction");
-        });
-        let recorded = messages.lock().unwrap();
-        let relevant: Vec<&str> = recorded
-            .iter()
-            .map(std::string::String::as_str)
-            .filter(|msg| msg.contains("opening_block_size"))
-            .collect();
-        assert!(
-            !relevant.is_empty(),
-            "expected at least one WARN event containing 'opening_block_size', got: {recorded:?}"
         );
     }
 }

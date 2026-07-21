@@ -545,9 +545,7 @@ fn run_programmatic(
         training_solver_backward: None,
         training_solver_forward: None,
         simulation_solver: None,
-        backward_opening_order: cobre_io::config::BackwardOpeningOrder::default(),
         backward_scheduler: cobre_io::config::BackwardScheduler::default(),
-        opening_block_size: None,
         cost_scale_factor: cobre_sddp::DEFAULT_COST_SCALE_FACTOR,
     };
     let mut setup =
@@ -887,9 +885,7 @@ fn run_with_setup(
         training_solver_backward: None,
         training_solver_forward: None,
         simulation_solver: None,
-        backward_opening_order: cobre_io::config::BackwardOpeningOrder::default(),
         backward_scheduler: cobre_io::config::BackwardScheduler::default(),
-        opening_block_size: None,
         cost_scale_factor: cobre_sddp::DEFAULT_COST_SCALE_FACTOR,
     };
     let mut setup =

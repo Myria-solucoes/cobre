@@ -59,16 +59,17 @@ use std::ops::Range;
 
 mod duals_extraction;
 mod lp_setup;
+mod opening_block;
 mod outcome_aggregation;
-mod pn;
 mod trial_point;
 
 #[cfg(test)]
 mod tests;
 
-pub(crate) use pn::{
-    PnOutcome, identity_block_order, lpt_block_order, pn_block_count, pn_finish,
-    pn_merge_block_pivots, process_stage_backward_pn, resolve_block_size,
+pub(crate) use opening_block::{
+    OpeningOutcome, hardest_first_block_order, identity_block_order, merge_block_pivots,
+    opening_block_count, opening_block_finish, process_stage_backward_opening_block,
+    resolve_block_size,
 };
 pub(crate) use trial_point::{StageOpeningSolver, process_trial_point_backward};
 

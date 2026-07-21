@@ -50,10 +50,10 @@ pub struct HighsProfile {
     /// `HiGHS` `use_warm_start`. Diagnostic-only: setting `false` forces every
     /// solve cold and is never the intended production configuration.
     pub use_warm_start: bool,
-    /// `HiGHS` `dual_steepest_edge_weight_log_error_threshold`: the DSE weight
-    /// log-error threshold above which `HiGHS` falls back from `SteepestEdge`
-    /// to Devex pricing mid-solve.
-    pub dse_devex_fallback_threshold: f64,
+    /// `HiGHS` `dual_steepest_edge_weight_log_error_threshold`: the dual
+    /// steepest-edge weight log-error threshold above which `HiGHS` falls back
+    /// from `SteepestEdge` to Devex pricing mid-solve.
+    pub steepest_edge_devex_fallback_threshold: f64,
 }
 
 impl Default for HighsProfile {
@@ -72,7 +72,7 @@ impl Default for HighsProfile {
             refactor_error_tolerance: 1e-6,
             factor_pivot_threshold: 0.1,
             use_warm_start: true,
-            dse_devex_fallback_threshold: 10.0,
+            steepest_edge_devex_fallback_threshold: 10.0,
         }
     }
 }
