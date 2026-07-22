@@ -192,20 +192,16 @@ impl HighsSolver {
         }
     }
 
-    /// Re-applies the current profile's feasibility tolerances to the `HiGHS` instance.
-    ///
-    /// Called immediately after `restore_default_settings()` in the retry-escalation
-    /// finalization path so that `HiGHS` state and `current_profile` remain in sync.
-    /// `restore_default_settings` resets the tolerances to the hardcoded table values
-    /// (`1e-9`); this helper layers the caller's profile values on top.
-    ///
-    /// The iteration limits are not re-applied here because `restore_iteration_limits`
-    /// always follows immediately and sets them to `i32::MAX` (unconstrained for the
-    /// post-retry default-attempt path).
-    pub(super) fn apply_profile_tolerances(&mut self) {
+    /// Re-applies every `current_profile` field `HiGHS` exposes as an option;
+    /// restoring any of them anywhere else after `restore_default_settings`
+    /// runs is a determinism bug. The profile's iteration limits are the one
+    /// sanctioned exception — `restore_iteration_limits` re-installs them
+    /// immediately after this call.
+    pub(super) fn reapply_profile(&mut self) {
         // SAFETY: `self.handle` is a valid, non-null HiGHS pointer obtained from
         // `cobre_highs_create()`. Option names are static C string literals with no
-        // retained pointer after the call returns.
+        // retained pointer after the call returns; `simplex_update_limit` is
+        // clamped to `i32::MAX` before the u32 -> i32 cast so the cast cannot wrap.
         unsafe {
             ffi::cobre_highs_set_double_option(
                 self.handle,
@@ -217,9 +213,6 @@ impl HighsSolver {
                 c"dual_feasibility_tolerance".as_ptr(),
                 self.current_profile.dual_feasibility_tolerance,
             );
-            // The strategy int options must be reinstalled too: a preceding
-            // `restore_default_settings` reset them to HiGHS defaults, so without
-            // this a tuned profile would not survive the retry boundary.
             ffi::cobre_highs_set_int_option(
                 self.handle,
                 c"simplex_dual_edge_weight_strategy".as_ptr(),
@@ -234,6 +227,46 @@ impl HighsSolver {
                 self.handle,
                 c"simplex_price_strategy".as_ptr(),
                 self.current_profile.simplex_price_strategy,
+            );
+            ffi::cobre_highs_set_string_option(
+                self.handle,
+                c"presolve".as_ptr(),
+                self.current_profile.presolve.as_option().as_ptr(),
+            );
+            ffi::cobre_highs_set_bool_option(
+                self.handle,
+                c"use_warm_start".as_ptr(),
+                i32::from(self.current_profile.use_warm_start),
+            );
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let simplex_update_limit = self
+                .current_profile
+                .simplex_update_limit
+                .min(i32::MAX as u32) as i32;
+            ffi::cobre_highs_set_int_option(
+                self.handle,
+                c"simplex_update_limit".as_ptr(),
+                simplex_update_limit,
+            );
+            ffi::cobre_highs_set_double_option(
+                self.handle,
+                c"dual_simplex_cost_perturbation_multiplier".as_ptr(),
+                self.current_profile.cost_perturbation,
+            );
+            ffi::cobre_highs_set_double_option(
+                self.handle,
+                c"rebuild_refactor_solution_error_tolerance".as_ptr(),
+                self.current_profile.refactor_error_tolerance,
+            );
+            ffi::cobre_highs_set_double_option(
+                self.handle,
+                c"factor_pivot_threshold".as_ptr(),
+                self.current_profile.factor_pivot_threshold,
+            );
+            ffi::cobre_highs_set_double_option(
+                self.handle,
+                c"dual_steepest_edge_weight_log_error_threshold".as_ptr(),
+                self.current_profile.steepest_edge_devex_fallback_threshold,
             );
         }
     }
@@ -570,12 +603,12 @@ impl HighsSolver {
         self.apply_extended_retry_options(level);
     }
 
-    /// Invoke `restore_default_settings` then `apply_profile_tolerances`,
+    /// Invoke `restore_default_settings` then `reapply_profile`,
     /// mirroring the `retry_escalation` finalization path so tests can verify
     /// profile tolerances survive a defaults-restore.
-    pub fn restore_defaults_then_apply_profile_for_test(&mut self) {
+    pub fn restore_defaults_then_reapply_profile_for_test(&mut self) {
         self.restore_default_settings();
-        self.apply_profile_tolerances();
+        self.reapply_profile();
     }
 
     /// Read a double-valued `HiGHS` option by name.

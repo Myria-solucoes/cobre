@@ -10,7 +10,7 @@ use cobre_solver::{Basis, BasisStatus, ProfiledSolver, SolverInterface};
 
 use crate::SddpError;
 use crate::SddpError::Validation;
-use crate::backward::StagedCut;
+use crate::backward::{OpeningOutcome, StagedCut};
 use crate::dcs::DcsSolveScratch;
 use crate::lp_builder::PatchBuffer;
 use crate::risk_measure::{BackwardOutcome, RiskMeasureScratch};
@@ -397,6 +397,14 @@ pub(crate) struct BackwardAccumulators {
     /// `n_openings`). Re-initialised once per stage; merged into the per-stage
     /// `Vec<SolverStatsDelta>` in `BackwardResult::stage_stats`.
     pub(crate) per_opening_stats: Vec<SolverStatsDelta>,
+    /// Per-block `simplex_iterations` sum for the opening-block
+    /// scheduler's pivot accumulator, index `b` in `[0, n_blocks)` for
+    /// the current stage. Re-initialised once per stage (never per trial
+    /// point); merged into `OpeningBlockScratch::block_pivots` after the
+    /// parallel region.
+    pub(crate) block_pivot_sum: Vec<u64>,
+    /// Per-block solved-opening count, parallel to `block_pivot_sum`.
+    pub(crate) block_pivot_count: Vec<u64>,
     /// Per-opening scratch for state-fixing-row duals; grows to `indexer.n_state`.
     pub(crate) state_duals_buf: Vec<f64>,
     /// Per-opening scratch for cut-row duals; grows to
@@ -405,6 +413,15 @@ pub(crate) struct BackwardAccumulators {
     /// Per-worker staging buffer for cuts produced within one stage; drained at
     /// the rayon closure boundary so ownership can cross the closure return.
     pub(crate) staged_cuts_buf: Vec<StagedCut>,
+    /// Per-worker opening-block scheduler out-buffer (`process_stage_backward_opening_block`'s
+    /// claim loop). Starts empty — zero footprint under the default `TrialPoint`
+    /// scheduler, which never touches it. The outer `Vec` grows once, per worker,
+    /// to a stage's claimed-unit high-water mark (indexed by a per-stage count,
+    /// never `clear`ed/`drain`ed); each slot's `coefficients` resizes to the
+    /// CURRENT stage's `cut_n_state` before every write, so capacity — not
+    /// length — is the no-reallocation invariant once every `cut_n_state` value
+    /// in the run has been visited (trivially within iteration 1).
+    pub(crate) opening_outcomes_buf: Vec<OpeningOutcome>,
     /// Scratch for `CVaR` weight computation; the internal `Vec`s grow to
     /// `n_openings` on the first `CVaR` call. Never accessed under
     /// `RiskMeasure::Expectation`.
@@ -443,14 +460,113 @@ impl BackwardAccumulators {
             agg_arena: Vec::new(),
             metadata_sync_contribution: vec![0u64; initial_pool_capacity],
             per_opening_stats: Vec::new(),
+            block_pivot_sum: Vec::new(),
+            block_pivot_count: Vec::new(),
             state_duals_buf: Vec::new(),
             cut_duals_buf: Vec::new(),
             staged_cuts_buf: Vec::new(),
+            opening_outcomes_buf: Vec::new(),
             risk_scratch: RiskMeasureScratch::new(),
             dcs_solve,
             dcs_initial_resident: Vec::with_capacity(initial_pool_capacity),
             stats_before_buf: SolverStatistics::default(),
             stats_after_buf: SolverStatistics::default(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OpeningBlockScratch
+// ---------------------------------------------------------------------------
+
+/// Rank-level pre-allocated scratch for the opening-block scheduler
+/// (`training.parallelism.backward_scheduler`), held on `BackwardPassState`
+/// and reused across every backward stage for the lifetime of a training run.
+///
+/// Empty (`arena` capacity `0`) under `BackwardScheduler::TrialPoint` (the
+/// default) — sized once by `BackwardPassState::set_scheduler` when the resolved
+/// scheduler is `OpeningBlock`, never on the hot path (sddp.md "Opening-block
+/// scheduler is warm-start-only").
+#[derive(Default)]
+pub(crate) struct OpeningBlockScratch {
+    /// Per-`(m, ω)` outcome arena, addressed `arena[m * n_openings + omega]` for
+    /// the CURRENT stage's `n_openings` — a prefix of the full
+    /// `max_local_fwd * bwd_max_openings`-outcome allocation; a stage with fewer
+    /// openings than the run's max simply uses less of it. Mirrors
+    /// `BackwardAccumulators::agg_arena`'s grow-once/overwrite-before-read
+    /// discipline: every `(m, ω)` in the active region is written by
+    /// `opening_block_finish`'s scatter before the aggregation loop reads it, so no clear
+    /// pass is required between stages. Each entry's `coefficients` starts at
+    /// `n_state` length but is resized (never reallocated — capacity is the
+    /// invariant) to the CURRENT stage's `cut_n_state` during that scatter, a
+    /// stage whose successor disables a state group projecting to fewer slots.
+    pub(crate) arena: Vec<BackwardOutcome>,
+    /// `CVaR` weight-computation scratch for `opening_block_finish`'s per-trial-point
+    /// aggregation loop.
+    pub(crate) risk_scratch: RiskMeasureScratch,
+    /// Aggregated cut coefficients buffer for `opening_block_finish`'s per-trial-point
+    /// aggregation loop; starts at `n_state` length, resized (within reserved
+    /// capacity) to each stage's `cut_n_state` — see [`Self::arena`].
+    pub(crate) coeffs_buf: Vec<f64>,
+    /// Per-`(stage, block-index)` `(simplex_iterations sum, solved-opening
+    /// count)` pivot accumulator, addressed `block_pivots[stage *
+    /// n_blocks_max + block_index]`. `stage` is the backward pass's successor
+    /// index (`t + 1`); aggregated over every trial point `m` claimed for that
+    /// block, never keyed per-`m` (the wrong-but-plausible variant, since
+    /// resampled trial points make per-`m` hardness noise where the
+    /// opening-block component is iteration-stable). Reset to `(0, 0)` at the
+    /// start of every `BackwardPassState::run` call, never per stage.
+    pub(crate) block_pivots: Vec<(u64, u64)>,
+    /// Double-buffer companion to [`Self::block_pivots`]: holds the
+    /// PREVIOUS iteration's fully-merged row, swapped in at the top of
+    /// `BackwardPassState::run` (never per stage) so the hardest-first claim-order
+    /// computation reads a row the current sweep has not yet started
+    /// overwriting. Reading `block_pivots` directly during the sweep is the
+    /// wrong-but-compiling alternative it rules out — that buffer is
+    /// reset-then-partially-filled mid-run, yielding zeros or a half-filled
+    /// row. Same shape as `block_pivots`.
+    pub(crate) block_pivots_prev: Vec<(u64, u64)>,
+    /// Row width of `block_pivots` (block slots per stage) — the run's max
+    /// opening count, an upper bound on any stage's actual block count (block
+    /// size >= 1 implies `n_blocks <= n_openings <= n_blocks_max`).
+    pub(crate) n_blocks_max: usize,
+    /// Hardest-first claim-order scratch: the successor stage's sorted (or identity)
+    /// `0..n_blocks` block-index permutation, recomputed into this buffer
+    /// once per stage from [`Self::block_pivots_prev`] — never a fresh `Vec`
+    /// per stage. Length `n_blocks_max`, an upper bound on any stage's
+    /// `n_blocks` (see [`Self::n_blocks_max`]).
+    pub(crate) block_order: Vec<u32>,
+}
+
+impl OpeningBlockScratch {
+    /// Allocate the arena and aggregation scratch for `OpeningBlock`: `arena`
+    /// holds `max_local_fwd * bwd_max_openings` outcomes, each with an
+    /// `n_state`-length coefficient vector; `block_pivots` and
+    /// `block_pivots_prev` each hold `num_stages * bwd_max_openings`
+    /// accumulator cells (see [`Self::block_pivots`]); `block_order` holds
+    /// `bwd_max_openings` claim-order scratch slots.
+    #[must_use]
+    pub(crate) fn sized(
+        max_local_fwd: usize,
+        bwd_max_openings: usize,
+        n_state: usize,
+        num_stages: usize,
+    ) -> Self {
+        let arena = (0..max_local_fwd * bwd_max_openings)
+            .map(|_| BackwardOutcome {
+                intercept: 0.0,
+                coefficients: vec![0.0_f64; n_state],
+                objective_value: 0.0,
+            })
+            .collect();
+        Self {
+            arena,
+            risk_scratch: RiskMeasureScratch::new(),
+            coeffs_buf: vec![0.0_f64; n_state],
+            block_pivots: vec![(0u64, 0u64); num_stages * bwd_max_openings],
+            block_pivots_prev: vec![(0u64, 0u64); num_stages * bwd_max_openings],
+            n_blocks_max: bwd_max_openings,
+            block_order: vec![0u32; bwd_max_openings],
         }
     }
 }
@@ -962,7 +1078,8 @@ mod tests {
     #[cfg(feature = "highs")]
     use super::PatchBuffer;
     use super::{
-        BasisStore, CapturedBasis, ScratchBuffers, SolverWorkspace, WorkspacePool, WorkspaceSizing,
+        BasisStore, CapturedBasis, OpeningBlockScratch, ScratchBuffers, SolverWorkspace,
+        WorkspacePool, WorkspaceSizing,
     };
     use cobre_solver::{
         Basis, BasisStatus, SolutionView, SolverError, SolverInterface, SolverStatistics,
@@ -1068,6 +1185,28 @@ mod tests {
     }
 
     #[test]
+    fn test_backward_accumulators_opening_outcomes_buf_starts_empty() {
+        // A nonzero max_openings must not eagerly build opening_outcomes_buf —
+        // the default TrialPoint scheduler never touches it (zero opening-block footprint).
+        let pool = WorkspacePool::new(
+            0,
+            2,
+            9,
+            WorkspaceSizing {
+                max_openings: 5,
+                ..sizing(3, 2, 0)
+            },
+            || MockSolver,
+        );
+        for ws in &pool.workspaces {
+            assert!(
+                ws.backward_accum.opening_outcomes_buf.is_empty(),
+                "opening_outcomes_buf must start empty regardless of max_openings"
+            );
+        }
+    }
+
+    #[test]
     fn test_scratch_buffers_zero_downstream_par_order_empty_buffers() {
         // AC: downstream_par_order=0 → all downstream fields are zero/empty.
         let scratch = ScratchBuffers::new(WorkspaceSizing {
@@ -1160,6 +1299,87 @@ mod tests {
             assert_eq!(ws.scratch.downstream_weight_accum, 0.0);
             assert_eq!(ws.scratch.downstream_n_completed, 0);
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // OpeningBlockScratch tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn backward_opening_block_scratch_default_is_empty() {
+        let scratch = OpeningBlockScratch::default();
+        assert_eq!(scratch.arena.capacity(), 0, "arena must start capacity 0");
+        assert!(scratch.arena.is_empty());
+        assert!(scratch.coeffs_buf.is_empty());
+        assert!(scratch.block_pivots.is_empty());
+        assert!(scratch.block_pivots_prev.is_empty());
+        assert_eq!(scratch.n_blocks_max, 0);
+        assert!(scratch.block_order.is_empty());
+    }
+
+    #[test]
+    fn backward_opening_block_scratch_sized_matches_study_dims() {
+        let max_local_fwd = 3_usize;
+        let bwd_max_openings = 4_usize;
+        let n_state = 5_usize;
+        let num_stages = 6_usize;
+
+        let scratch =
+            OpeningBlockScratch::sized(max_local_fwd, bwd_max_openings, n_state, num_stages);
+
+        assert_eq!(
+            scratch.arena.len(),
+            max_local_fwd * bwd_max_openings,
+            "arena must hold max_local_fwd * bwd_max_openings outcomes"
+        );
+        assert!(
+            scratch
+                .arena
+                .iter()
+                .all(|outcome| outcome.coefficients.len() == n_state),
+            "every outcome's coefficients must be pre-sized to n_state"
+        );
+        assert_eq!(scratch.coeffs_buf.len(), n_state);
+        assert_eq!(
+            scratch.block_pivots.len(),
+            num_stages * bwd_max_openings,
+            "block_pivots must hold num_stages * bwd_max_openings accumulator cells"
+        );
+        assert!(
+            scratch
+                .block_pivots
+                .iter()
+                .all(|&(sum, count)| sum == 0 && count == 0),
+            "a freshly sized accumulator must start zeroed"
+        );
+        assert_eq!(
+            scratch.block_pivots_prev.len(),
+            num_stages * bwd_max_openings,
+            "block_pivots_prev must mirror block_pivots' shape"
+        );
+        assert!(
+            scratch
+                .block_pivots_prev
+                .iter()
+                .all(|&(sum, count)| sum == 0 && count == 0),
+            "a freshly sized double-buffer companion must start zeroed"
+        );
+        assert_eq!(scratch.n_blocks_max, bwd_max_openings);
+        assert_eq!(
+            scratch.block_order.len(),
+            bwd_max_openings,
+            "block_order must hold n_blocks_max claim-order scratch slots"
+        );
+    }
+
+    #[test]
+    fn backward_opening_block_scratch_sized_zero_dims_yields_empty_arena() {
+        let scratch = OpeningBlockScratch::sized(0, 0, 0, 0);
+        assert!(scratch.arena.is_empty());
+        assert!(scratch.coeffs_buf.is_empty());
+        assert!(scratch.block_pivots.is_empty());
+        assert!(scratch.block_pivots_prev.is_empty());
+        assert!(scratch.block_order.is_empty());
     }
 
     // ---------------------------------------------------------------------------

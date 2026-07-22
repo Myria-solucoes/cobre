@@ -49,6 +49,49 @@ impl SolverInterface for HighsSolver {
                 profile.simplex_price_strategy,
             );
         }
+        // SAFETY: self.handle is a valid, non-null HiGHS pointer; option names
+        // are static C strings with no retained pointer after the call
+        // returns; `simplex_update_limit` is clamped to `i32::MAX` before the
+        // u32 -> i32 cast so the cast cannot wrap.
+        unsafe {
+            ffi::cobre_highs_set_string_option(
+                self.handle,
+                c"presolve".as_ptr(),
+                profile.presolve.as_option().as_ptr(),
+            );
+            ffi::cobre_highs_set_bool_option(
+                self.handle,
+                c"use_warm_start".as_ptr(),
+                i32::from(profile.use_warm_start),
+            );
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let simplex_update_limit = profile.simplex_update_limit.min(i32::MAX as u32) as i32;
+            ffi::cobre_highs_set_int_option(
+                self.handle,
+                c"simplex_update_limit".as_ptr(),
+                simplex_update_limit,
+            );
+            ffi::cobre_highs_set_double_option(
+                self.handle,
+                c"dual_simplex_cost_perturbation_multiplier".as_ptr(),
+                profile.cost_perturbation,
+            );
+            ffi::cobre_highs_set_double_option(
+                self.handle,
+                c"rebuild_refactor_solution_error_tolerance".as_ptr(),
+                profile.refactor_error_tolerance,
+            );
+            ffi::cobre_highs_set_double_option(
+                self.handle,
+                c"factor_pivot_threshold".as_ptr(),
+                profile.factor_pivot_threshold,
+            );
+            ffi::cobre_highs_set_double_option(
+                self.handle,
+                c"dual_steepest_edge_weight_log_error_threshold".as_ptr(),
+                profile.steepest_edge_devex_fallback_threshold,
+            );
+        }
         self.current_profile = *profile;
     }
 

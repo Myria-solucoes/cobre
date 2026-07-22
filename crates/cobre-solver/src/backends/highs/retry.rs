@@ -92,12 +92,12 @@ impl HighsSolver {
             }
         }
 
-        // Unconditional restore: `apply_profile_tolerances` re-applies the
+        // Unconditional restore: `reapply_profile` re-applies the
         // caller's profile on top of `restore_default_settings` so HiGHS state
         // and `current_profile` stay in sync; retry-only options
         // (`user_objective_scale` / `user_bound_scale`) need explicit reset.
         self.restore_default_settings();
-        self.apply_profile_tolerances();
+        self.reapply_profile();
         self.restore_iteration_limits();
         unsafe {
             ffi::cobre_highs_set_int_option(self.handle, c"user_objective_scale".as_ptr(), 0);

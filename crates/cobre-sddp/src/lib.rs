@@ -93,6 +93,13 @@ pub(crate) use training::{
 };
 pub use training::{forward, lower_bound};
 
+// Test/tooling-only re-export: exposes `BackwardPassState`/`BackwardPassInputs`
+// to downstream integration tests driving the backward pass directly (e.g. the opening-block scheduler
+// scratch capacity/sizing assertions) without widening the crate's production
+// public API. Never reachable outside `test`/`test-support` builds.
+#[cfg(any(test, feature = "test-support"))]
+pub use training::backward_pass_state::{BackwardPassInputs, BackwardPassState};
+
 // Re-export shim: aliases `training::session` at `crate::training_session` for
 // the `crate::training_session::` references in `training/forward_pass_state.rs`.
 pub(crate) use training::session as training_session;
@@ -135,9 +142,10 @@ pub use lp::builder::build_stage_templates_resolving_layout;
 pub use lp::builder::{StageTemplates, build_stage_templates};
 // ── policy_load ───────────────────────────────────────────────────────────────
 pub use policy::policy_load::{
-    BoundaryInjection, FullFcf, PolicyLoadKind, PolicyLoadProof, PolicyStageManifest,
-    ValidatedBoundaryCuts, build_basis_cache_from_checkpoint, compare_manifest_slot_identity,
-    inject_boundary_cuts, load_boundary_cuts, validate_policy_load,
+    BoundaryInjection, FullFcf, LEGACY_COST_SCALE_FACTOR, PolicyLoadKind, PolicyLoadProof,
+    PolicyStageManifest, ValidatedBoundaryCuts, build_basis_cache_from_checkpoint,
+    compare_manifest_slot_identity, inject_boundary_cuts, load_boundary_cuts,
+    rescale_checkpoint_cuts_for_load, validate_policy_load,
 };
 // ── provenance ────────────────────────────────────────────────────────────────
 pub use policy::provenance::{
@@ -150,8 +158,8 @@ pub use training::rank_reconcile::reconcile_global_ok;
 pub use convergence::risk_measure::{BackwardOutcome, RiskMeasure};
 // ── setup ─────────────────────────────────────────────────────────────────────
 pub use setup::{
-    DEFAULT_MAX_ITERATIONS, DEFAULT_SEED, PrepareStochasticResult, StudyParams, StudySetup,
-    prepare_stochastic,
+    DEFAULT_COST_SCALE_FACTOR, DEFAULT_MAX_ITERATIONS, DEFAULT_SEED, PrepareStochasticResult,
+    StudyParams, StudySetup, prepare_stochastic,
 };
 // ── simulation ────────────────────────────────────────────────────────────────
 pub use simulation::{
@@ -159,9 +167,9 @@ pub use simulation::{
     SimulationStageResult, SimulationSummary, aggregate_simulation, simulate,
 };
 // ── solver_phase ─────────────────────────────────────────────────────────────
-pub use solve::solver_phase::Phase;
 #[cfg(feature = "highs")]
 pub use solve::solver_phase::{BACKWARD_PROFILE, FORWARD_PROFILE, SIMULATION_PROFILE};
+pub use solve::solver_phase::{Phase, SolverProfiles};
 // ── solver_stats ──────────────────────────────────────────────────────────────
 pub use solver_stats::{
     SOLVER_STATS_DELTA_SCALAR_FIELDS, SolverStatsDelta, SolverStatsLogEntry, delta_to_stats_row,
@@ -179,7 +187,9 @@ pub use convergence::stopping_rule::{MonitorState, StoppingMode, StoppingRule, S
 // ── training ──────────────────────────────────────────────────────────────────
 pub use training::training::{TrainingOutcome, TrainingResult, train};
 // ── training_output ───────────────────────────────────────────────────────────
-pub use training::training_output::build_training_output;
+pub use training::training_output::{
+    PhaseTimingTotals, build_training_output, sum_phase_timing_ms,
+};
 // ── resolved_parameters ───────────────────────────────────────────────────────
 pub use policy::resolved_parameters::{
     ResolvedParameters, ResolvedParametersError, build_resolved_parameters,

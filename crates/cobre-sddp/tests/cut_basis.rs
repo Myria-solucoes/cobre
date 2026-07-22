@@ -81,6 +81,7 @@ mod boundary_cuts {
             total_visited_states: 0,
             training_block_mode: "parallel".to_string(),
             training_block_mode_per_stage: vec![],
+            cost_scale_factor: None,
         };
         write_policy_checkpoint(policy_dir, &stage_cuts, &stage_bases, &metadata, &[])
             .expect("write checkpoint");
@@ -139,6 +140,7 @@ mod boundary_cuts {
             source_stage,
             state_dim,
             &current_manifest,
+            1_000_000.0,
             &mut |msg| warnings.push(msg.to_string()),
         )
         .expect("load_boundary_cuts");
@@ -1521,6 +1523,7 @@ mod warm_start {
             total_visited_states: 0,
             training_block_mode: "parallel".to_string(),
             training_block_mode_per_stage: vec![],
+            cost_scale_factor: None,
         };
         write_policy_checkpoint(policy_dir, &stage_cuts, &stage_bases, &metadata, &[])
             .expect("write checkpoint");

@@ -38,7 +38,8 @@ use cobre_core::{
     },
 };
 use cobre_sddp::{
-    ResolvedParameters, StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
+    Phase, ResolvedParameters, SolverProfiles, StoppingMode, StoppingRule, StoppingRuleSet,
+    TrainingConfig,
     config::{CutManagementConfig, EventConfig, LoopConfig},
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
@@ -432,9 +433,7 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
 
     let n_stages = stage_templates.templates.len();
     let first_tmpl = stage_templates.templates.first().expect("at least 1 stage");
-    let n_blks = system.stages().first().map_or(1, |s| s.blocks.len().max(1));
     let has_inflow_penalty = inflow_method.has_slack_columns() && first_tmpl.n_hydro > 0;
-    let _ = n_blks;
     let study_dims = study_dims_for(
         system.thermals().len(),
         system.lines().len(),
@@ -493,7 +492,6 @@ fn train_fixture(
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
     let comm = StubComm;
 
-    let _n_stages = fx.stage_templates.templates.len();
     let block_counts: Vec<usize> = fx
         .stage_templates
         .block_hours_per_stage
@@ -508,6 +506,7 @@ fn train_fixture(
         base_rows: &fx.stage_templates.base_rows,
         noise_scale: &fx.stage_templates.noise_scale,
         n_hydros: fx.stage_templates.n_hydros,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: fx.stage_templates.n_load_buses,
         load_balance_row_starts: &fx.stage_templates.load_balance_row_starts,
         load_bus_indices: &fx.stage_templates.load_bus_indices,
@@ -579,6 +578,7 @@ fn train_fixture(
         &comm,
         ActiveSolver::new,
         None,
+        SolverProfiles::default(),
     )
 }
 
@@ -640,6 +640,7 @@ fn simulate_fixture(
             base_rows: &fx.stage_templates.base_rows,
             noise_scale: &fx.stage_templates.noise_scale,
             n_hydros: fx.stage_templates.n_hydros,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses: fx.stage_templates.n_load_buses,
             load_balance_row_starts: &fx.stage_templates.load_balance_row_starts,
             load_bus_indices: &fx.stage_templates.load_bus_indices,
@@ -685,6 +686,7 @@ fn simulate_fixture(
         &SimulationConfig {
             n_scenarios: 20,
             io_channel_capacity: 32,
+            profile: Phase::Simulation.profile(),
         },
         SimulationOutputSpec {
             result_tx: &result_tx,

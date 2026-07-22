@@ -161,6 +161,10 @@ pub(crate) struct SimulationState {
     freeze_batch: RowBatch,
     /// Reusable scratch for `freeze_rows_into_template`, reused across re-freeze stages.
     freeze_scratch: cobre_solver::FreezeScratch,
+    /// Resolved simulation solver profile applied at [`Self::run`] entry.
+    /// Defaults to `Phase::Simulation.profile()`; override with
+    /// [`Self::set_profile`] before the first `run()` call.
+    profile: ActiveProfile,
 }
 
 impl SimulationState {
@@ -178,7 +182,14 @@ impl SimulationState {
                 row_upper: Vec::new(),
             },
             freeze_scratch: FreezeScratch::new(),
+            profile: Simulation.profile(),
         }
+    }
+
+    /// Overrides the simulation solver profile applied at [`Self::run`] entry
+    /// (default: `Phase::Simulation.profile()`). Call before `run()`.
+    pub(crate) fn set_profile(&mut self, profile: ActiveProfile) {
+        self.profile = profile;
     }
 
     /// Execute a simulation run, evaluating the trained SDDP policy on
@@ -277,7 +288,7 @@ impl SimulationState {
         // Apply the simulation solver profile before the parallel region. For CLP
         // this selects the primal simplex, which eliminates the dual simplex's
         // false-infeasibility on the warm-started, fully-frozen cut-laden LPs.
-        let simulation_profile = Simulation.profile();
+        let simulation_profile = self.profile;
         for ws in inputs.workspaces.iter_mut() {
             ws.solver.set_profile(&simulation_profile);
         }

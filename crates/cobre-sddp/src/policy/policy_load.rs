@@ -61,6 +61,77 @@ pub(crate) fn resolve_warm_start_counts(
     }
 }
 
+/// The constant every unmarked policy checkpoint (no `cost_scale_factor`
+/// provenance) was unconditionally scaled at. A checkpoint whose
+/// `metadata.cost_scale_factor` is `None` is interpreted under this constant.
+pub const LEGACY_COST_SCALE_FACTOR: f64 = 1_000_000.0;
+
+/// Rescale one stage's cut records from their at-rest
+/// representation into the LOADING study's internal scaled cost space.
+///
+/// - **Marked** (`source_cost_scale_factor: Some(s)`): the checkpoint holds
+///   canonical currency units — export multiplied every value by the writing
+///   study's own `s` ([`crate::policy_export::scale_cut_records_for_export`]).
+///   Every value here is divided by `loading_cost_scale_factor`, UNCONDITIONALLY
+///   — even when `s` equals `loading_cost_scale_factor` — since the file
+///   already carries one export-side rounding; a second division is the
+///   accepted same-factor ULP drift, never special-cased
+///   away.
+/// - **Legacy** (`None`): the checkpoint holds the writing study's OWN internal
+///   scaled values under [`LEGACY_COST_SCALE_FACTOR`] — legacy files carry
+///   no export-side multiply. When `loading_cost_scale_factor ==
+///   LEGACY_COST_SCALE_FACTOR` (the overwhelmingly common case: every existing
+///   policy directory read at the still-default factor) this is an exact,
+///   bit-identical no-op — a correctness requirement, not an optimization: a
+///   legacy checkpoint at the default factor must load bit-identically, never
+///   re-baselined. Otherwise every value is
+///   multiplied by `LEGACY_COST_SCALE_FACTOR / loading_cost_scale_factor`.
+pub(crate) fn rescale_cut_records_for_load(
+    records: &mut [OwnedPolicyCutRecord],
+    source_cost_scale_factor: Option<f64>,
+    loading_cost_scale_factor: f64,
+) {
+    if source_cost_scale_factor.is_some() {
+        for cut in records {
+            cut.intercept /= loading_cost_scale_factor;
+            for c in &mut cut.coefficients {
+                *c /= loading_cost_scale_factor;
+            }
+        }
+        return;
+    }
+
+    if loading_cost_scale_factor == LEGACY_COST_SCALE_FACTOR {
+        return;
+    }
+    let ratio = LEGACY_COST_SCALE_FACTOR / loading_cost_scale_factor;
+    for cut in records {
+        cut.intercept *= ratio;
+        for c in &mut cut.coefficients {
+            *c *= ratio;
+        }
+    }
+}
+
+/// `rescale_cut_records_for_load` applied to every stage of a full policy
+/// checkpoint — the [`FullFcf`] load path (training warm-start/resume and
+/// simulation-only runs both route through this before the records reach
+/// [`crate::FutureCostFunction::from_deserialized`] /
+/// [`crate::FutureCostFunction::new_with_warm_start`]).
+pub fn rescale_checkpoint_cuts_for_load(
+    stage_cuts: &mut [StageCutsReadResult],
+    source_cost_scale_factor: Option<f64>,
+    loading_cost_scale_factor: f64,
+) {
+    for stage in stage_cuts {
+        rescale_cut_records_for_load(
+            &mut stage.cuts,
+            source_cost_scale_factor,
+            loading_cost_scale_factor,
+        );
+    }
+}
+
 /// Per-side state layout fed to [`validate_policy_load`]: one manifest for the
 /// loaded policy (`source`) and one for the study being trained or simulated
 /// (`current`). The caller builds both — one from checkpoint metadata and its
@@ -348,6 +419,7 @@ pub fn load_boundary_cuts(
     source_stage: u32,
     current_state_dimension: u32,
     current_manifest: &[EntitySlot],
+    loading_cost_scale_factor: f64,
     on_warning: &mut dyn FnMut(&str),
 ) -> Result<ValidatedBoundaryCuts, SddpError> {
     let checkpoint = read_policy_checkpoint(boundary_path).map_err(|e| {
@@ -389,9 +461,14 @@ pub fn load_boundary_cuts(
         on_warning(warning);
     }
 
-    Ok(ValidatedBoundaryCuts {
-        records: stage_result.cuts.clone(),
-    })
+    let mut records = stage_result.cuts.clone();
+    rescale_cut_records_for_load(
+        &mut records,
+        checkpoint.metadata.cost_scale_factor,
+        loading_cost_scale_factor,
+    );
+
+    Ok(ValidatedBoundaryCuts { records })
 }
 
 /// Boundary cut records that passed [`validate_policy_load`]'s
@@ -552,9 +629,335 @@ mod tests {
             total_visited_states: 0,
             training_block_mode: "parallel".to_string(),
             training_block_mode_per_stage: vec![],
+            cost_scale_factor: None,
         };
 
         cobre_io::write_policy_checkpoint(dir, &payloads, &[], &metadata, &[]).unwrap();
+    }
+
+    /// Write a single-stage checkpoint whose one cut has the given at-rest
+    /// `intercept`/`coefficients` (written byte-for-byte, no transform applied
+    /// here) and `metadata.cost_scale_factor` set to `cost_scale_factor`, for
+    /// [`load_boundary_cuts`] round-trip tests across differing loading
+    /// factors.
+    fn write_checkpoint_with_scale(
+        dir: &std::path::Path,
+        stage_id: u32,
+        intercept: f64,
+        coefficients: &[f64],
+        cost_scale_factor: Option<f64>,
+    ) {
+        let state_dimension = coefficients.len() as u32;
+        let cut = cobre_io::PolicyCutRecord {
+            cut_id: 0,
+            slot_index: 0,
+            iteration: 0,
+            forward_pass_index: 0,
+            intercept,
+            coefficients,
+            is_active: true,
+        };
+        let cuts = vec![cut];
+        let payload = StageCutsPayload {
+            stage_id,
+            state_dimension,
+            capacity: 1,
+            warm_start_count: 0,
+            cuts: &cuts,
+            active_cut_indices: &[0],
+            populated_count: 1,
+            entity_manifest: &[],
+        };
+        let metadata = PolicyCheckpointMetadata {
+            cobre_version: "0.11.0".to_string(),
+            created_at: "2026-07-20T00:00:00Z".to_string(),
+            completed_iterations: 10,
+            final_lower_bound: 0.0,
+            best_upper_bound: None,
+            state_dimension,
+            num_stages: stage_id + 1,
+            max_iterations: 50,
+            forward_passes: 1,
+            warm_start_cuts: 0,
+            warm_start_counts: vec![],
+            rng_seed: 0,
+            total_visited_states: 0,
+            training_block_mode: "parallel".to_string(),
+            training_block_mode_per_stage: vec![],
+            cost_scale_factor,
+        };
+        cobre_io::write_policy_checkpoint(dir, &[payload], &[], &metadata, &[]).unwrap();
+    }
+
+    /// Behavioral: [`load_boundary_cuts`] on a MARKED checkpoint (canonical
+    /// currency units at rest) loaded at a series of differing
+    /// `loading_cost_scale_factor` values recovers `at_rest / loading_factor`
+    /// for every value, matching [`rescale_cut_records_for_load`]'s contract at
+    /// the file-I/O boundary — not just as a pure-function unit test.
+    #[test]
+    fn load_boundary_cuts_across_differing_loading_factors() {
+        let at_rest_intercept = 1_234_000.0;
+        let at_rest_coefficients = [10_000.0, -25_000.0];
+
+        for loading_factor in [500_000.0, 1_000_000.0, 2_500_000.0, 1e10] {
+            let tmp = tempfile::tempdir().unwrap();
+            write_checkpoint_with_scale(
+                tmp.path(),
+                0,
+                at_rest_intercept,
+                &at_rest_coefficients,
+                Some(1_000_000.0),
+            );
+
+            let cuts = load_boundary_cuts(
+                tmp.path(),
+                0,
+                2,
+                &[],
+                loading_factor,
+                &mut ignore_warnings(),
+            )
+            .unwrap();
+
+            assert_eq!(cuts.len(), 1);
+            let expected_intercept = at_rest_intercept / loading_factor;
+            assert!(
+                (cuts[0].intercept - expected_intercept).abs()
+                    < expected_intercept.abs().max(1.0) * 1e-9,
+                "loading_factor={loading_factor}: intercept {} != expected {expected_intercept}",
+                cuts[0].intercept
+            );
+            for (c, &at_rest) in cuts[0].coefficients.iter().zip(&at_rest_coefficients) {
+                let expected = at_rest / loading_factor;
+                assert!(
+                    (c - expected).abs() < expected.abs().max(1.0) * 1e-9,
+                    "loading_factor={loading_factor}: coefficient {c} != expected {expected}"
+                );
+            }
+        }
+    }
+
+    /// Behavioral: a legacy (no-marker) boundary checkpoint loaded at the
+    /// default factor is bit-exact; loaded at a non-default factor is
+    /// rescaled by `LEGACY_COST_SCALE_FACTOR / loading_factor`.
+    #[test]
+    fn load_boundary_cuts_legacy_checkpoint_migration() {
+        let raw_intercept = 5.0;
+        let raw_coefficients = [1.0, 2.0];
+
+        let tmp_default = tempfile::tempdir().unwrap();
+        write_checkpoint_with_scale(
+            tmp_default.path(),
+            0,
+            raw_intercept,
+            &raw_coefficients,
+            None,
+        );
+        let cuts_default = load_boundary_cuts(
+            tmp_default.path(),
+            0,
+            2,
+            &[],
+            LEGACY_COST_SCALE_FACTOR,
+            &mut ignore_warnings(),
+        )
+        .unwrap();
+        assert_eq!(
+            cuts_default[0].intercept.to_bits(),
+            raw_intercept.to_bits(),
+            "legacy checkpoint at default factor must be bit-exact"
+        );
+
+        let tmp_nondefault = tempfile::tempdir().unwrap();
+        write_checkpoint_with_scale(
+            tmp_nondefault.path(),
+            0,
+            raw_intercept,
+            &raw_coefficients,
+            None,
+        );
+        let loading_factor = 2_000_000.0;
+        let cuts_nondefault = load_boundary_cuts(
+            tmp_nondefault.path(),
+            0,
+            2,
+            &[],
+            loading_factor,
+            &mut ignore_warnings(),
+        )
+        .unwrap();
+        let ratio = LEGACY_COST_SCALE_FACTOR / loading_factor;
+        assert!((cuts_nondefault[0].intercept - raw_intercept * ratio).abs() < 1e-9);
+    }
+
+    // ── rescale_cut_records_for_load unit tests ──────────────────────────────
+
+    use super::{LEGACY_COST_SCALE_FACTOR, rescale_cut_records_for_load};
+    use crate::policy_export::scale_cut_records_for_export;
+    use cobre_io::OwnedPolicyCutRecord;
+
+    fn owned_cut(intercept: f64, coefficients: Vec<f64>) -> OwnedPolicyCutRecord {
+        OwnedPolicyCutRecord {
+            cut_id: 1,
+            slot_index: 0,
+            iteration: 0,
+            forward_pass_index: 0,
+            intercept,
+            coefficients,
+            is_active: true,
+        }
+    }
+
+    /// A legacy checkpoint (`source_cost_scale_factor: None`) loaded at the
+    /// still-default [`LEGACY_COST_SCALE_FACTOR`] is a bit-exact no-op — the
+    /// requirement that a legacy policy at the default factor never
+    /// re-baselines.
+    #[test]
+    fn legacy_no_marker_at_default_factor_is_bit_exact_noop() {
+        let mut records = vec![owned_cut(42.5, vec![1.0, -2.5, 3.75])];
+        let original = records.clone();
+
+        rescale_cut_records_for_load(&mut records, None, LEGACY_COST_SCALE_FACTOR);
+
+        assert_eq!(
+            records[0].intercept.to_bits(),
+            original[0].intercept.to_bits()
+        );
+        for (a, b) in records[0]
+            .coefficients
+            .iter()
+            .zip(&original[0].coefficients)
+        {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "legacy default-factor load must be bit-exact"
+            );
+        }
+    }
+
+    /// A legacy checkpoint loaded at a NON-default factor is interpreted as
+    /// scaled-at-[`LEGACY_COST_SCALE_FACTOR`] and rescaled by
+    /// `LEGACY_COST_SCALE_FACTOR / loading_cost_scale_factor`.
+    #[test]
+    fn legacy_no_marker_at_non_default_factor_rescales_by_ratio() {
+        let mut records = vec![owned_cut(10.0, vec![2.0, 4.0])];
+        let loading_factor = 2_000_000.0;
+
+        rescale_cut_records_for_load(&mut records, None, loading_factor);
+
+        let ratio = LEGACY_COST_SCALE_FACTOR / loading_factor;
+        assert!((records[0].intercept - 10.0 * ratio).abs() < 1e-9);
+        assert!((records[0].coefficients[0] - 2.0 * ratio).abs() < 1e-9);
+        assert!((records[0].coefficients[1] - 4.0 * ratio).abs() < 1e-9);
+    }
+
+    /// A marked checkpoint (`Some(s)`) is ALWAYS divided by
+    /// `loading_cost_scale_factor` — even when `s` equals the loading factor —
+    /// never special-cased to a no-op. The `source_cost_scale_factor` VALUE is
+    /// irrelevant once the file holds canonical currency units; only its
+    /// presence (marked vs. legacy) selects the code path.
+    #[test]
+    fn marked_checkpoint_always_divides_regardless_of_source_value() {
+        let loading_factor = 1_000_000.0;
+        let mut with_matching_source = vec![owned_cut(100.0, vec![50.0])];
+        let mut with_different_source = vec![owned_cut(100.0, vec![50.0])];
+
+        rescale_cut_records_for_load(
+            &mut with_matching_source,
+            Some(loading_factor),
+            loading_factor,
+        );
+        rescale_cut_records_for_load(&mut with_different_source, Some(42.0), loading_factor);
+
+        assert_eq!(
+            with_matching_source[0].intercept.to_bits(),
+            with_different_source[0].intercept.to_bits(),
+            "the source factor's VALUE must not affect the loaded result"
+        );
+        assert!((with_matching_source[0].intercept - 100.0 / loading_factor).abs() < 1e-12);
+    }
+
+    /// Export/load transform property: export (multiply by `S`) then load at
+    /// the SAME factor (divide by `S`) recovers the original value within 1
+    /// ULP per value — the accepted same-factor round-trip drift (1e6 is not a
+    /// power of two, so two roundings do not cancel exactly).
+    #[test]
+    fn export_then_load_same_factor_round_trips_within_one_ulp() {
+        let cost_scale_factor = 1_000_000.0;
+        let originals = [vec![1.0_f64, -3.5, 1e-6, 123_456.789]];
+        let intercepts = [7.25_f64];
+
+        let internal_records: Vec<Vec<cobre_io::PolicyCutRecord<'_>>> = vec![
+            originals
+                .iter()
+                .zip(&intercepts)
+                .map(|(coeffs, &intercept)| cobre_io::PolicyCutRecord {
+                    cut_id: 0,
+                    slot_index: 0,
+                    iteration: 0,
+                    forward_pass_index: 0,
+                    intercept,
+                    coefficients: coeffs,
+                    is_active: true,
+                })
+                .collect(),
+        ];
+
+        let exported = scale_cut_records_for_export(&internal_records, cost_scale_factor);
+        let mut round_tripped = exported[0].clone();
+        rescale_cut_records_for_load(
+            &mut round_tripped,
+            Some(cost_scale_factor),
+            cost_scale_factor,
+        );
+
+        let original_intercept = intercepts[0];
+        let ulp_intercept = (round_tripped[0].intercept - original_intercept).abs();
+        assert!(
+            ulp_intercept <= original_intercept.abs() * f64::EPSILON * 4.0,
+            "intercept round-trip drift {ulp_intercept} exceeds a few ULP of {original_intercept}"
+        );
+        for (rt, orig) in round_tripped[0].coefficients.iter().zip(&originals[0]) {
+            let drift = (rt - orig).abs();
+            let tol = (orig.abs().max(1.0)) * f64::EPSILON * 4.0;
+            assert!(
+                drift <= tol,
+                "coefficient round-trip drift {drift} exceeds tolerance {tol} for original {orig}"
+            );
+        }
+    }
+
+    /// Export/load transform property: cross-factor linearity — exporting at
+    /// `S_train` then loading at `S_prime` recovers `original * (S_train /
+    /// S_prime)` (the net two-rounding transform), for `S_prime != S_train`.
+    #[test]
+    fn export_then_load_cross_factor_is_linear() {
+        let s_train = 1_000_000.0;
+        let s_prime = 4_000_000.0;
+        let original = [vec![2.0_f64, -0.5]];
+        let intercept = 9.0_f64;
+
+        let internal_records: Vec<Vec<cobre_io::PolicyCutRecord<'_>>> =
+            vec![vec![cobre_io::PolicyCutRecord {
+                cut_id: 0,
+                slot_index: 0,
+                iteration: 0,
+                forward_pass_index: 0,
+                intercept,
+                coefficients: &original[0],
+                is_active: true,
+            }]];
+
+        let exported = scale_cut_records_for_export(&internal_records, s_train);
+        let mut loaded = exported[0].clone();
+        rescale_cut_records_for_load(&mut loaded, Some(s_train), s_prime);
+
+        let ratio = s_train / s_prime;
+        assert!((loaded[0].intercept - intercept * ratio).abs() < 1e-9);
+        for (l, o) in loaded[0].coefficients.iter().zip(&original[0]) {
+            assert!((l - o * ratio).abs() < 1e-9);
+        }
     }
 
     // ── load_boundary_cuts tests ──────────────────────────────────────────────
@@ -568,7 +971,8 @@ mod tests {
         let intercepts = vec![10.0, 20.0, 30.0];
         write_minimal_checkpoint(tmp.path(), 12, 10, &intercepts);
 
-        let cuts = load_boundary_cuts(tmp.path(), 2, 10, &[], &mut ignore_warnings()).unwrap();
+        let cuts = load_boundary_cuts(tmp.path(), 2, 10, &[], 1_000_000.0, &mut ignore_warnings())
+            .unwrap();
 
         assert_eq!(cuts.len(), 3, "should return all 3 cuts from stage 2");
         let returned_intercepts: Vec<f64> = cuts.iter().map(|c| c.intercept).collect();
@@ -593,7 +997,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_minimal_checkpoint(tmp.path(), 5, 10, &[1.0]);
 
-        let result = load_boundary_cuts(tmp.path(), 99, 10, &[], &mut ignore_warnings());
+        let result =
+            load_boundary_cuts(tmp.path(), 99, 10, &[], 1_000_000.0, &mut ignore_warnings());
 
         assert!(result.is_err(), "should fail for missing stage");
         let msg = result.unwrap_err().to_string();
@@ -615,7 +1020,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_minimal_checkpoint(tmp.path(), 5, 10, &[1.0]);
 
-        let result = load_boundary_cuts(tmp.path(), 0, 5, &[], &mut ignore_warnings());
+        let result = load_boundary_cuts(tmp.path(), 0, 5, &[], 1_000_000.0, &mut ignore_warnings());
 
         assert!(result.is_err(), "should fail for dimension mismatch");
         let msg = result.unwrap_err().to_string();
@@ -634,6 +1039,7 @@ mod tests {
             0,
             10,
             &[],
+            1_000_000.0,
             &mut ignore_warnings(),
         );
 
@@ -684,7 +1090,7 @@ mod tests {
 
         let current = storage_manifest(1, 2);
         let mut warnings: Vec<String> = Vec::new();
-        let cuts = load_boundary_cuts(tmp.path(), 0, 2, &current, &mut |m| {
+        let cuts = load_boundary_cuts(tmp.path(), 0, 2, &current, 1_000_000.0, &mut |m| {
             warnings.push(m.to_string());
         })
         .unwrap();
@@ -706,7 +1112,14 @@ mod tests {
         write_checkpoint_with_manifest(tmp.path(), 5, 2, &[10.0, 20.0], &boundary);
 
         let current = storage_manifest(9, 2);
-        let result = load_boundary_cuts(tmp.path(), 0, 2, &current, &mut ignore_warnings());
+        let result = load_boundary_cuts(
+            tmp.path(),
+            0,
+            2,
+            &current,
+            1_000_000.0,
+            &mut ignore_warnings(),
+        );
 
         assert!(result.is_err(), "entity_id mismatch at slot 0 must reject");
         let msg = result.unwrap_err().to_string();
@@ -733,7 +1146,14 @@ mod tests {
         write_checkpoint_with_manifest(tmp.path(), 5, 2, &[10.0, 20.0], &boundary);
 
         let current = storage_manifest(1, 2);
-        let result = load_boundary_cuts(tmp.path(), 0, 2, &current, &mut ignore_warnings());
+        let result = load_boundary_cuts(
+            tmp.path(),
+            0,
+            2,
+            &current,
+            1_000_000.0,
+            &mut ignore_warnings(),
+        );
 
         assert!(result.is_err(), "type mismatch at slot 1 must reject");
         let msg = result.unwrap_err().to_string();
@@ -758,7 +1178,7 @@ mod tests {
 
         let current = storage_manifest(1, 2);
         let mut warnings: Vec<String> = Vec::new();
-        let cuts = load_boundary_cuts(tmp.path(), 0, 2, &current, &mut |m| {
+        let cuts = load_boundary_cuts(tmp.path(), 0, 2, &current, 1_000_000.0, &mut |m| {
             warnings.push(m.to_string());
         })
         .unwrap();
@@ -785,7 +1205,7 @@ mod tests {
 
         let current = storage_manifest(1, 2);
         let mut warnings: Vec<String> = Vec::new();
-        let cuts = load_boundary_cuts(tmp.path(), 0, 2, &current, &mut |m| {
+        let cuts = load_boundary_cuts(tmp.path(), 0, 2, &current, 1_000_000.0, &mut |m| {
             warnings.push(m.to_string());
         })
         .unwrap();
@@ -812,7 +1232,7 @@ mod tests {
 
         let current = vec![storage_slot(1), transit_bucket_slot(2, 1)];
         let mut warnings: Vec<String> = Vec::new();
-        let cuts = load_boundary_cuts(tmp.path(), 0, 2, &current, &mut |m| {
+        let cuts = load_boundary_cuts(tmp.path(), 0, 2, &current, 1_000_000.0, &mut |m| {
             warnings.push(m.to_string());
         })
         .unwrap();
@@ -837,7 +1257,14 @@ mod tests {
         write_checkpoint_with_manifest(tmp.path(), 5, 2, &[10.0, 20.0], &boundary);
 
         let current = vec![storage_slot(1), transit_bucket_slot(2, 1)];
-        let result = load_boundary_cuts(tmp.path(), 0, 2, &current, &mut ignore_warnings());
+        let result = load_boundary_cuts(
+            tmp.path(),
+            0,
+            2,
+            &current,
+            1_000_000.0,
+            &mut ignore_warnings(),
+        );
 
         assert!(
             result.is_err(),
@@ -865,7 +1292,14 @@ mod tests {
         write_checkpoint_with_manifest(tmp.path(), 5, 2, &[10.0, 20.0], &storage_manifest(1, 2));
 
         let current = vec![storage_slot(1), storage_slot(2), transit_bucket_slot(2, 1)];
-        let result = load_boundary_cuts(tmp.path(), 0, 3, &current, &mut ignore_warnings());
+        let result = load_boundary_cuts(
+            tmp.path(),
+            0,
+            3,
+            &current,
+            1_000_000.0,
+            &mut ignore_warnings(),
+        );
 
         assert!(
             result.is_err(),
@@ -1209,6 +1643,7 @@ mod tests {
             total_visited_states: 0,
             training_block_mode: "parallel".to_string(),
             training_block_mode_per_stage: vec![],
+            cost_scale_factor: None,
         }
     }
 

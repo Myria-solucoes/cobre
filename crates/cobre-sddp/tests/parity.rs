@@ -753,7 +753,7 @@ mod determinism {
         },
     };
     use cobre_sddp::{
-        StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
+        Phase, SolverProfiles, StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
         config::{CutManagementConfig, EventConfig, LoopConfig},
         context::{StageContext, TrainingContext},
         cut::FutureCostFunction,
@@ -1244,6 +1244,7 @@ mod determinism {
             base_rows: &fx.base_rows,
             noise_scale: &[],
             n_hydros: 0,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
@@ -1292,6 +1293,7 @@ mod determinism {
                     &comm,
                     || Ok(MockSolver3H::new(100.0)),
                     None,
+                    SolverProfiles::default(),
                 )
             })
             .unwrap();
@@ -1315,6 +1317,7 @@ mod determinism {
         let sim_config = SimulationConfig {
             n_scenarios,
             io_channel_capacity: 64,
+            profile: Phase::Simulation.profile(),
         };
         let entity_counts = EntityCounts {
             hydro_ids: vec![1, 2, 3],
@@ -1380,6 +1383,7 @@ mod determinism {
                         base_rows: &fx.base_rows,
                         noise_scale: &[],
                         n_hydros: 0,
+                        cost_scale_factor: 1_000_000.0,
                         n_load_buses: 0,
                         load_balance_row_starts: &[],
                         load_bus_indices: &[],
@@ -1518,14 +1522,11 @@ mod determinism {
 
         // Keys are arbitrary: the determinism property needs the order to be
         // run-constant, not noise-derived.
-        let n_openings_per_stage: Vec<usize> = (0..fx.n_stages)
-            .map(|s| fx.stochastic.tree_view().n_openings(s))
-            .collect();
-        let keys: Vec<Vec<f64>> = n_openings_per_stage
-            .iter()
-            .map(|&n| {
+        let keys: Vec<Vec<f64>> = (0..fx.n_stages)
+            .map(|s| {
                 assert_eq!(
-                    n, BRANCHING,
+                    fx.stochastic.tree_view().n_openings(s),
+                    BRANCHING,
                     "fixture must have BRANCHING openings per stage"
                 );
                 vec![3.0, 1.0, 4.0, 2.0]
@@ -2154,6 +2155,8 @@ mod water_travel_time_no_arc_byte_identity {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::None,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,
@@ -2163,6 +2166,7 @@ mod water_travel_time_no_arc_byte_identity {
                 stopping_mode: "any".to_string(),
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
+                parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),

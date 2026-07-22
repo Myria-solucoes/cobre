@@ -119,7 +119,6 @@ pub fn print_execution_topology(
 
     let _ = stderr.write_line(&format!("{}", console::style("Execution").bold()));
 
-    // Solver line — always shown regardless of backend.
     let solver_line = match solver_version {
         Some(v) => format!("{solver_name} {v}"),
         None => solver_name.to_string(),
@@ -364,6 +363,10 @@ fn fmt_sci(v: f64) -> String {
 }
 
 /// Training convergence metrics and timing for display in the post-run summary.
+///
+/// Every `*_seconds` timing field is the run-level sum of its per-iteration
+/// `*_ms` source counter divided by 1000, and is `None` when per-iteration
+/// timing is unavailable (e.g. a `metadata.json`-reconstructed summary).
 pub struct TrainingSummary {
     /// Total number of iterations completed.
     pub iterations: u64,
@@ -459,6 +462,35 @@ pub struct TrainingSummary {
     /// first row of `convergence.parquet`. `None` when convergence
     /// data is unavailable or the run completed in zero iterations.
     pub initial_gap_percent: Option<f64>,
+
+    /// Coordinator-measured forward-phase wall, from `forward_wall_ms`.
+    pub forward_phase_wall_seconds: Option<f64>,
+
+    /// Coordinator-measured backward-phase wall, from `backward_wall_ms`.
+    pub backward_phase_wall_seconds: Option<f64>,
+
+    /// Forward-phase worker wait (load imbalance), from `fwd_load_imbalance_ms`.
+    pub forward_wait_seconds: Option<f64>,
+
+    /// Backward-phase worker wait (load imbalance), from `bwd_load_imbalance_ms`.
+    pub backward_wait_seconds: Option<f64>,
+
+    /// `Serial`-bucket lower-bound evaluation time, from `lower_bound_ms`.
+    pub serial_lower_bound_seconds: Option<f64>,
+
+    /// `Serial`-bucket row-selection time, from `cut_selection_ms`.
+    pub serial_cut_selection_seconds: Option<f64>,
+
+    /// `Serial`-bucket per-stage row-sync `allgatherv` time, from `cut_sync_ms`.
+    pub serial_cut_sync_seconds: Option<f64>,
+
+    /// `Serial`-bucket MPI allreduce (forward bound synchronization) time,
+    /// from `mpi_allreduce_ms`.
+    pub serial_allreduce_seconds: Option<f64>,
+
+    /// `Serial`-bucket rayon scheduling overhead, summed over both phases
+    /// (`fwd_scheduling_overhead_ms + bwd_scheduling_overhead_ms`).
+    pub serial_scheduling_seconds: Option<f64>,
 }
 
 /// Simulation completion statistics for display in the post-run summary.
@@ -557,15 +589,150 @@ fn format_split_duration(seconds: f64) -> String {
 
 /// Per-worker average wall time = `cumulative_seconds / parallelism`, where
 /// `cumulative_seconds` is summed across all `(rank, worker)` pairs. Bounded by
-/// `cap_seconds` (the total run wall time) defensively against arithmetic edge
-/// cases.
-fn solver_wall_seconds(cumulative_seconds: f64, parallelism: u32, cap_seconds: f64) -> f64 {
+/// `cap_seconds` (the enclosing wall this average cannot exceed) defensively
+/// against arithmetic edge cases.
+fn per_worker_mean_seconds(cumulative_seconds: f64, parallelism: u32, cap_seconds: f64) -> f64 {
     if parallelism == 0 {
         return 0.0;
     }
     (cumulative_seconds / f64::from(parallelism))
         .min(cap_seconds)
         .max(0.0)
+}
+
+/// Render a percentage for the time-split breakdown, showing `<1%` instead of
+/// rounding a nonzero share down to `0%`.
+fn format_pct(pct: f64) -> String {
+    if pct > 0.0 && pct < 1.0 {
+        "<1%".to_string()
+    } else {
+        format!("{pct:.0}%")
+    }
+}
+
+/// The three training Time-split component walls (forward, backward, serial),
+/// in seconds. `None` when per-iteration phase-wall timing is unavailable
+/// (e.g. a `metadata.json`-reconstructed [`TrainingSummary`]).
+#[allow(clippy::cast_precision_loss)]
+fn time_split_training_walls(t: &TrainingSummary) -> Option<(f64, f64, f64)> {
+    let forward_wall = t.forward_phase_wall_seconds?;
+    let backward_wall = t.backward_phase_wall_seconds?;
+    let total_s = t.total_time_ms as f64 / 1000.0;
+    let serial_wall = (total_s - forward_wall - backward_wall).max(0.0);
+    Some((forward_wall, backward_wall, serial_wall))
+}
+
+/// The `solve {..} · wait {..} (N% of phase)` suffix for a Forward/Backward
+/// Time-split line. Empty when per-worker solve data is unavailable — this is
+/// the seam that lets a phase-wall-only path (no per-worker walls yet) land
+/// without printing a bogus `solve 0`.
+fn format_phase_solve_wait(
+    solve_cumulative: Option<f64>,
+    wait: Option<f64>,
+    parallelism: Option<u32>,
+    phase_wall: f64,
+) -> String {
+    let (Some(solve_cumulative), Some(wait), Some(parallelism)) =
+        (solve_cumulative, wait, parallelism)
+    else {
+        return String::new();
+    };
+    if parallelism == 0 {
+        return String::new();
+    }
+    let solve = per_worker_mean_seconds(solve_cumulative, parallelism, phase_wall);
+    let wait_pct = if phase_wall > 0.0 {
+        100.0 * wait / phase_wall
+    } else {
+        0.0
+    };
+    format!(
+        "   solve {} \u{b7} wait {} ({} of phase)",
+        format_split_duration(solve),
+        format_split_duration(wait),
+        format_pct(wait_pct)
+    )
+}
+
+/// The `bound {..} · selection {..} · other {..}` breakdown for the Serial
+/// Time-split line. `allreduce`/`sync` are inserted only when nonzero (MPI
+/// runs); `other` absorbs scheduling overhead plus whatever residual remains.
+fn format_serial_breakdown(t: &TrainingSummary, serial_wall: f64) -> String {
+    let bound = t.serial_lower_bound_seconds.unwrap_or(0.0);
+    let selection = t.serial_cut_selection_seconds.unwrap_or(0.0);
+    let allreduce = t.serial_allreduce_seconds.unwrap_or(0.0);
+    let cut_sync = t.serial_cut_sync_seconds.unwrap_or(0.0);
+    let scheduling = t.serial_scheduling_seconds.unwrap_or(0.0);
+
+    let mut parts = vec![
+        format!("bound {}", format_split_duration(bound)),
+        format!("selection {}", format_split_duration(selection)),
+    ];
+    let mut accounted = bound + selection;
+    if allreduce > 0.0 {
+        parts.push(format!("allreduce {}", format_split_duration(allreduce)));
+        accounted += allreduce;
+    }
+    if cut_sync > 0.0 {
+        parts.push(format!("sync {}", format_split_duration(cut_sync)));
+        accounted += cut_sync;
+    }
+    // Floored at `scheduling` so a known-but-unlabeled component is never
+    // hidden below the residual clamp.
+    let other = (serial_wall - accounted).max(scheduling).max(0.0);
+    parts.push(format!("other {}", format_split_duration(other)));
+
+    format!("   {}", parts.join(" \u{b7} "))
+}
+
+/// The three-line training `Time split` block: `Forward`/`Backward` phase
+/// walls decomposed into solve/wait, plus the `Serial` residual. Empty when
+/// per-iteration phase-wall timing is unavailable (see
+/// [`time_split_training_walls`]).
+#[allow(clippy::cast_precision_loss)]
+fn format_time_split_training(t: &TrainingSummary) -> Vec<String> {
+    let Some((forward_wall, backward_wall, serial_wall)) = time_split_training_walls(t) else {
+        return Vec::new();
+    };
+    let total_s = t.total_time_ms as f64 / 1000.0;
+    let pct = |part: f64| -> f64 {
+        if total_s > 0.0 {
+            100.0 * part / total_s
+        } else {
+            0.0
+        }
+    };
+
+    vec![
+        format!(
+            "  Time split:   Forward  {} ({}){}",
+            format_split_duration(forward_wall),
+            format_pct(pct(forward_wall)),
+            format_phase_solve_wait(
+                t.total_forward_solve_seconds,
+                t.forward_wait_seconds,
+                t.parallelism,
+                forward_wall,
+            )
+        ),
+        format!(
+            "                Backward {} ({}){}",
+            format_split_duration(backward_wall),
+            format_pct(pct(backward_wall)),
+            format_phase_solve_wait(
+                t.total_backward_solve_seconds,
+                t.backward_wait_seconds,
+                t.parallelism,
+                backward_wall,
+            )
+        ),
+        format!(
+            "                Serial   {} ({}){}",
+            format_split_duration(serial_wall),
+            format_pct(pct(serial_wall)),
+            format_serial_breakdown(t, serial_wall)
+        ),
+    ]
 }
 
 /// Render the complete post-run summary as a plain-text `String`.
@@ -611,6 +778,7 @@ pub fn format_summary_string(summary: &RunSummary) -> String {
     lines.push(format!("  Gap:          {:.1}%", t.gap_percent));
     lines.extend(policy_rows_lines(t));
     lines.push(format!("  LP solves:    {}", t.total_lp_solves));
+    lines.extend(format_time_split_training(t));
 
     if let Some(sim) = &summary.simulation {
         let sim_duration = format_duration(sim.total_time_ms);
@@ -714,38 +882,8 @@ pub fn print_training_summary(stderr: &Term, t: &TrainingSummary) {
         let avg_iter_ms = t.total_time_ms as f64 / t.iterations as f64;
         let _ = stderr.write_line(&format!("  Avg iter:     {avg_iter_ms:.0}ms"));
     }
-    if let (Some(forward), Some(backward), Some(parallelism)) = (
-        t.total_forward_solve_seconds,
-        t.total_backward_solve_seconds,
-        t.parallelism,
-    ) {
-        #[allow(clippy::cast_precision_loss)]
-        let total_s = t.total_time_ms as f64 / 1000.0;
-        let fwd = solver_wall_seconds(forward, parallelism, total_s);
-        let bwd = solver_wall_seconds(backward, parallelism, total_s);
-        let other = (total_s - fwd - bwd).max(0.0);
-        let pct = |part: f64| -> f64 {
-            if total_s > 0.0 {
-                100.0 * part / total_s
-            } else {
-                0.0
-            }
-        };
-        let _ = stderr.write_line(&format!(
-            "  Time split:   Forward  {} ({:.0}%)",
-            format_split_duration(fwd),
-            pct(fwd)
-        ));
-        let _ = stderr.write_line(&format!(
-            "                Backward {} ({:.0}%)",
-            format_split_duration(bwd),
-            pct(bwd)
-        ));
-        let _ = stderr.write_line(&format!(
-            "                Other    {} ({:.0}%)",
-            format_split_duration(other),
-            pct(other)
-        ));
+    for line in format_time_split_training(t) {
+        let _ = stderr.write_line(&line);
     }
 }
 
@@ -792,7 +930,7 @@ pub fn print_simulation_summary(stderr: &Term, sim: &SimulationSummary) {
     if let (Some(solve_time), Some(parallelism)) = (sim.total_solve_time_seconds, sim.parallelism) {
         #[allow(clippy::cast_precision_loss)]
         let total_s = sim.total_time_ms as f64 / 1000.0;
-        let solver = solver_wall_seconds(solve_time, parallelism, total_s);
+        let solver = per_worker_mean_seconds(solve_time, parallelism, total_s);
         let other = (total_s - solver).max(0.0);
         let pct = |part: f64| -> f64 {
             if total_s > 0.0 {
@@ -845,8 +983,8 @@ mod tests {
     use console::Term;
 
     use super::{
-        RunSummary, SimulationSummary, TrainingSummary, format_duration, format_summary_string,
-        policy_rows_lines, print_summary,
+        RunSummary, SimulationSummary, TrainingSummary, format_duration, format_split_duration,
+        format_summary_string, policy_rows_lines, print_summary, time_split_training_walls,
     };
 
     fn make_training_summary() -> TrainingSummary {
@@ -874,6 +1012,15 @@ mod tests {
             total_backward_solve_seconds: Some(16.8),
             parallelism: Some(1),
             initial_gap_percent: Some(28.0),
+            forward_phase_wall_seconds: Some(15.0),
+            backward_phase_wall_seconds: Some(20.0),
+            forward_wait_seconds: Some(3.0),
+            backward_wait_seconds: Some(5.0),
+            serial_lower_bound_seconds: Some(0.5),
+            serial_cut_selection_seconds: Some(0.3),
+            serial_cut_sync_seconds: Some(0.2),
+            serial_allreduce_seconds: Some(0.1),
+            serial_scheduling_seconds: Some(0.4),
         }
     }
 
@@ -1128,6 +1275,327 @@ mod tests {
         assert!(
             s.contains("480 active / 1200 generated"),
             "summary must contain policy row counts, got: {s}"
+        );
+    }
+
+    // ── Time split (training) tests ───────────────────────────────────────
+
+    #[test]
+    fn format_time_split_training_forward_line_shows_solve_and_wait() {
+        let summary = make_run_summary(None);
+        let s = format_summary_string(&summary);
+
+        let forward_line = s.lines().find(|l| l.contains("Forward"));
+        assert!(forward_line.is_some(), "expected a Forward line in: {s}");
+        let forward_line = forward_line.expect("checked above");
+        assert!(
+            forward_line.contains("solve") && forward_line.contains("wait"),
+            "Forward line must show the solve/wait decomposition, got: {forward_line:?}"
+        );
+        assert!(
+            s.lines().any(|l| l.contains("Serial")),
+            "summary must contain a Serial line, got: {s}"
+        );
+    }
+
+    #[test]
+    fn format_time_split_training_backward_degrades_without_solve_data() {
+        let training = TrainingSummary {
+            total_backward_solve_seconds: None,
+            ..make_training_summary()
+        };
+        let summary = RunSummary {
+            training,
+            simulation: None,
+            output_dir: PathBuf::from("/tmp/out"),
+        };
+        let s = format_summary_string(&summary);
+
+        let backward_line = s.lines().find(|l| l.contains("Backward"));
+        assert!(backward_line.is_some(), "expected a Backward line in: {s}");
+        let backward_line = backward_line.expect("checked above");
+        assert!(
+            !backward_line.contains("solve") && !backward_line.contains("wait"),
+            "Backward line must omit the solve/wait decomposition when solve data is absent, got: {backward_line:?}"
+        );
+
+        let forward_line = s.lines().find(|l| l.contains("Forward"));
+        assert!(forward_line.is_some(), "expected a Forward line in: {s}");
+        let forward_line = forward_line.expect("checked above");
+        assert!(
+            forward_line.contains("solve") && forward_line.contains("wait"),
+            "Forward line must still decompose into solve/wait when its own data is present, got: {forward_line:?}"
+        );
+    }
+
+    #[test]
+    fn format_phase_solve_wait_degrades_when_parallelism_zero() {
+        let training = TrainingSummary {
+            parallelism: Some(0),
+            ..make_training_summary()
+        };
+        let summary = RunSummary {
+            training,
+            simulation: None,
+            output_dir: PathBuf::from("/tmp/out"),
+        };
+        let s = format_summary_string(&summary);
+
+        let forward_line = s.lines().find(|l| l.contains("Forward"));
+        assert!(forward_line.is_some(), "expected a Forward line in: {s}");
+        let forward_line = forward_line.expect("checked above");
+        assert!(
+            !forward_line.contains("solve"),
+            "zero parallelism must never be rendered as 'solve 0', got: {forward_line:?}"
+        );
+    }
+
+    #[test]
+    fn time_split_training_walls_sum_to_total_wall() {
+        let training = TrainingSummary {
+            total_time_ms: 40_000,
+            forward_phase_wall_seconds: Some(25.0),
+            backward_phase_wall_seconds: Some(12.0),
+            ..make_training_summary()
+        };
+        let (forward_wall, backward_wall, serial_wall) =
+            time_split_training_walls(&training).expect("phase walls are present");
+        assert!(
+            (forward_wall + backward_wall + serial_wall - 40.0).abs() < 1e-9,
+            "the three phase walls must sum to total_time_ms/1000, got {forward_wall} + {backward_wall} + {serial_wall}"
+        );
+
+        let summary = RunSummary {
+            training,
+            simulation: None,
+            output_dir: PathBuf::from("/tmp/out"),
+        };
+        let s = format_summary_string(&summary);
+        assert!(s.contains(&format_split_duration(forward_wall)), "got: {s}");
+        assert!(
+            s.contains(&format_split_duration(backward_wall)),
+            "got: {s}"
+        );
+        assert!(s.contains(&format_split_duration(serial_wall)), "got: {s}");
+    }
+
+    #[test]
+    fn format_time_split_training_omits_block_when_phase_wall_absent() {
+        let training = TrainingSummary {
+            forward_phase_wall_seconds: None,
+            backward_phase_wall_seconds: None,
+            ..make_training_summary()
+        };
+        assert!(time_split_training_walls(&training).is_none());
+
+        let summary = RunSummary {
+            training,
+            simulation: None,
+            output_dir: PathBuf::from("/tmp/out"),
+        };
+        let s = format_summary_string(&summary);
+        assert!(
+            !s.contains("Time split"),
+            "the training Time split block must be omitted entirely when phase-wall data is unavailable, got: {s}"
+        );
+    }
+
+    #[test]
+    fn format_serial_breakdown_computes_other_residual() {
+        let bound = 1.5;
+        let selection = 0.4;
+        let scheduling = 0.3;
+        let training = TrainingSummary {
+            total_time_ms: 20_000,
+            forward_phase_wall_seconds: Some(10.0),
+            backward_phase_wall_seconds: Some(4.0),
+            serial_lower_bound_seconds: Some(bound),
+            serial_cut_selection_seconds: Some(selection),
+            serial_allreduce_seconds: Some(0.0),
+            serial_cut_sync_seconds: Some(0.0),
+            serial_scheduling_seconds: Some(scheduling),
+            ..make_training_summary()
+        };
+        let (_, _, serial_wall) =
+            time_split_training_walls(&training).expect("phase walls are present");
+        let expected_other = (serial_wall - bound - selection).max(scheduling).max(0.0);
+
+        let summary = RunSummary {
+            training,
+            simulation: None,
+            output_dir: PathBuf::from("/tmp/out"),
+        };
+        let s = format_summary_string(&summary);
+        let serial_line = s.lines().find(|l| l.contains("Serial"));
+        assert!(serial_line.is_some(), "expected a Serial line in: {s}");
+        let serial_line = serial_line.expect("checked above");
+
+        assert!(
+            serial_line.contains(&format!("bound {}", format_split_duration(bound))),
+            "got: {serial_line}"
+        );
+        assert!(
+            serial_line.contains(&format!("selection {}", format_split_duration(selection))),
+            "got: {serial_line}"
+        );
+        assert!(
+            serial_line.contains(&format!("other {}", format_split_duration(expected_other))),
+            "got: {serial_line}"
+        );
+        assert!(
+            !serial_line.contains("allreduce") && !serial_line.contains("sync"),
+            "zero MPI serial components must collapse into other, got: {serial_line}"
+        );
+    }
+
+    // ── Progress-line / summary-builder phase-wall invariant ───────────────
+
+    use std::sync::mpsc;
+
+    use cobre_core::TrainingEvent;
+    use cobre_io::IterationRecord;
+    use cobre_sddp::sum_phase_timing_ms;
+
+    use crate::progress::{RenderMode, run_progress_thread};
+
+    fn make_synthetic_iteration_summary(
+        iteration: u64,
+        forward_ms: u64,
+        backward_ms: u64,
+    ) -> TrainingEvent {
+        TrainingEvent::IterationSummary {
+            iteration,
+            lower_bound: 100.0,
+            upper_bound: 110.0,
+            gap: 0.09,
+            wall_time_ms: forward_ms + backward_ms,
+            iteration_time_ms: forward_ms + backward_ms,
+            forward_ms,
+            backward_ms,
+            lp_solves: 12,
+            solve_time_ms: 0.0,
+            lower_bound_eval_ms: 0,
+            fwd_setup_time_ms: 0,
+            fwd_load_imbalance_ms: 0,
+            fwd_scheduling_overhead_ms: 0,
+            rows_in_lp_sum: 0,
+            rows_in_lp_count: 0,
+            rows_in_lp_max: 0,
+        }
+    }
+
+    fn zero_iteration_record_with_walls(
+        iteration: u32,
+        forward_wall_ms: u64,
+        backward_wall_ms: u64,
+    ) -> IterationRecord {
+        IterationRecord {
+            iteration,
+            lower_bound: 0.0,
+            upper_bound_mean: 0.0,
+            upper_bound_std: 0.0,
+            gap_percent: None,
+            cuts_added: 0,
+            cuts_removed: 0,
+            cuts_active: 0,
+            time_forward_ms: 0,
+            time_backward_ms: 0,
+            time_total_ms: 0,
+            time_forward_wall_ms: forward_wall_ms,
+            time_backward_wall_ms: backward_wall_ms,
+            time_cut_selection_ms: 0,
+            time_mpi_allreduce_ms: 0,
+            time_cut_sync_ms: 0,
+            time_lower_bound_ms: 0,
+            time_state_exchange_ms: 0,
+            time_cut_batch_build_ms: 0,
+            time_bwd_setup_ms: 0,
+            time_bwd_load_imbalance_ms: 0,
+            time_bwd_scheduling_overhead_ms: 0,
+            time_fwd_setup_ms: 0,
+            time_fwd_load_imbalance_ms: 0,
+            time_fwd_scheduling_overhead_ms: 0,
+            time_overhead_ms: 0,
+            forward_passes: 0,
+            lp_solves: 0,
+            solve_time_ms: 0.0,
+            mean_rows_in_lp: 0.0,
+        }
+    }
+
+    /// Feeds the same synthetic per-iteration `forward_ms`/`backward_ms` sequence
+    /// through the real progress-line accumulator (`run_progress_thread`, the
+    /// code the per-iteration `fwd: {forward_ms}ms / bwd: {backward_ms}ms` line
+    /// renders from) and the real summary-builder accumulation path
+    /// (`sum_phase_timing_ms`, what `commands/run/training.rs` calls to
+    /// populate `TrainingSummary::forward_phase_wall_seconds`), then asserts
+    /// both totals agree.
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn forward_backward_phase_wall_seconds_match_summed_progress_line_walls() {
+        let iter_1 = (1_u64, 1_250_u64, 3_400_u64);
+        let iter_2 = (2_u64, 980_u64, 2_100_u64);
+        let iter_3 = (3_u64, 1_430_u64, 3_050_u64);
+
+        let (tx, rx) = mpsc::channel::<TrainingEvent>();
+        let handle = run_progress_thread(rx, RenderMode::Log, 3, 120);
+        for &(iteration, forward_ms, backward_ms) in &[iter_1, iter_2, iter_3] {
+            tx.send(make_synthetic_iteration_summary(
+                iteration,
+                forward_ms,
+                backward_ms,
+            ))
+            .unwrap();
+        }
+        drop(tx);
+
+        let (progress_forward_ms, progress_backward_ms) =
+            handle.join().iter().fold((0_u64, 0_u64), |(f, b), event| {
+                if let TrainingEvent::IterationSummary {
+                    forward_ms,
+                    backward_ms,
+                    ..
+                } = event
+                {
+                    (f + forward_ms, b + backward_ms)
+                } else {
+                    (f, b)
+                }
+            });
+
+        let expected_forward_ms = iter_1.1 + iter_2.1 + iter_3.1;
+        let expected_backward_ms = iter_1.2 + iter_2.2 + iter_3.2;
+        assert_eq!(
+            progress_forward_ms, expected_forward_ms,
+            "the progress accumulator must not drop or alter forward_ms"
+        );
+        assert_eq!(
+            progress_backward_ms, expected_backward_ms,
+            "the progress accumulator must not drop or alter backward_ms"
+        );
+
+        let records = vec![
+            zero_iteration_record_with_walls(1, iter_1.1, iter_1.2),
+            zero_iteration_record_with_walls(2, iter_2.1, iter_2.2),
+            zero_iteration_record_with_walls(3, iter_3.1, iter_3.2),
+        ];
+        let totals = sum_phase_timing_ms(&records);
+
+        let training = TrainingSummary {
+            forward_phase_wall_seconds: Some(totals.forward_wall_ms as f64 / 1000.0),
+            backward_phase_wall_seconds: Some(totals.backward_wall_ms as f64 / 1000.0),
+            ..make_training_summary()
+        };
+
+        assert_eq!(
+            training.forward_phase_wall_seconds,
+            Some(progress_forward_ms as f64 / 1000.0),
+            "forward_phase_wall_seconds must equal the summed progress-line forward walls"
+        );
+        assert_eq!(
+            training.backward_phase_wall_seconds,
+            Some(progress_backward_ms as f64 / 1000.0),
+            "backward_phase_wall_seconds must equal the summed progress-line backward walls"
         );
     }
 

@@ -76,6 +76,98 @@ Read: `training/lower_bound.rs`, `training/stage_solve_prep.rs`.
 separate pre-pass before the loop.
 Read: `training/backward_pass_state.rs`.
 
+## Backward opening order is warm-start-only
+
+A trial point's backward openings are SOLVED in the installed `solve_order`
+permutation (`OpeningTree::set_solve_order`, keyed by
+`noise_key::build_noise_key_table` — the intrinsic shortest-chain order, a
+nearest-neighbor + 2-opt minimum-distance path over the openings'
+inflow-noise vectors; a stage below 3 openings keeps its σ-weighted key, the
+live fallback that also owns the noise-dimension validation) but each
+opening's outcome is WRITTEN and AGGREGATED by **canonical ω**. The
+aggregation therefore carries no solve-order dependence: results are
+declaration-order-invariant and run-to-run reproducible across thread and
+rank shapes (the pinned gates). No config field selects the order.
+CHANGING the order (a code change to `noise_key`) changes the warm-start
+chain each opening's solve starts from, and at a degenerate optimum a
+differently-warmed solve may settle on a different-but-equally-valid vertex
+with different duals — the hot≠cold divergence the Cobre determinism contract
+permits — so an order change re-checks the golden parity baselines instead of
+assuming byte-identical outputs. Aggregating the outcome slice indexed by
+solve position — or handing solve-order-permuted probabilities to
+`RiskMeasure::aggregate_cut_into` — is the wrong-but-compiling alternative: it
+makes the cut depend on solve order, silently
+breaking declaration-order invariance and run-to-run reproducibility.
+Read: `stochastic/noise_key.rs` (`build_noise_key_table`, `apply_chain_order`),
+`training/backward/trial_point.rs` (`process_trial_point_backward` — solves by
+`solve_order`, aggregates by canonical ω), `training/backward/outcome_aggregation.rs`
+(`write_opening_outcome`). Pinned by the `opening_order_determinism` gate in
+`tests/mpi_wire.rs` (threads=k / threads=1 / a same-shape repeat / a 2-rank
+stub, bitwise `final_lb`) and the MPI SLURM Integration job's rank-invariance
+comparison on `examples/4ree`.
+
+## Opening-block scheduler is warm-start-only
+
+The opt-in opening-block scheduler
+(`training.parallelism.backward_scheduler = { method = opening_block }`)
+reassigns the backward pass's work unit from a whole trial point to an
+opening-block: workers claim `(trial point, block)` units in any order from a
+shared atomic counter, warm-chaining each block's openings from a fresh
+frozen-LP load. Units are SOLVED in claim order — dependent on worker count and
+scheduling timing — but each opening's outcome is WRITTEN into a per-`(m, ω)`
+arena and AGGREGATED per trial point over CANONICAL ω, in ASCENDING m. The
+generated cut set is therefore independent of claim order and worker count:
+reordering claims changes only which worker warms which block, never which cut
+is produced. Aggregating the arena in claim/solve-position order, or keying it
+on the claim index instead of `(m, ω)`, is the wrong-but-compiling
+alternative — CVaR's tail weighting is order-sensitive, so it silently breaks
+CVaR reproducibility and declaration-order invariance the same way a
+solve-order-keyed aggregation would break the trial-point path above. An
+active Dynamic Cut Selection iteration always falls back to the trial-point
+path: the opening-block scheduler's frozen-LP load is incompatible with
+DCS's cut-free lazy core.
+Read: `training/backward/opening_block.rs`
+(`process_stage_backward_opening_block`'s claim loop,
+`opening_block_finish`'s per-`(m, ω)` arena and ascending-m aggregation),
+`training/backward_pass_state.rs` (`run_one_backward_stage`'s
+`use_opening_block` dispatch). Pinned by
+`opening_block_scheduler_determinism_expectation` and
+`opening_block_scheduler_determinism_cvar` in `tests/mpi_wire.rs` (threads=4
+/ a same-shape threads=4 repeat / threads=2 / threads=1 / a `Rank0Of2`
+2-rank stub, bitwise `final_lb`, on both an expectation and a `CVaR`
+configuration), `opening_block_degenerates_on_single_opening`
+(opening-block-vs-trial-point equality on a single-opening case whose
+resolved block count is `1`), and
+`opening_block_handles_non_uniform_cut_projection`
+(opening-block-vs-trial-point equality on a case whose per-stage cut-state
+projection dimension varies across stages).
+
+**Hardest-first claim order is result-neutral.** Under `OpeningBlock`,
+claims are further ordered hardest-`(stage, block)`-first
+(longest-processing-time, LPT) by the PREVIOUS iteration's per-`(stage,
+block)` mean `simplex_iterations` pivot — never per-`(m, block)`, since
+resampled trial points make per-m hardness noise where the opening-block
+component is iteration-stable. The hardest-first order touches only the
+claim decode: the per-`(m, ω)` write and the ascending-m aggregation above
+are unchanged, so hardest-first-on and the canonical identity order produce
+a bit-identical cut set and `final_lb`. Keying the order on per-`(m, block)`
+pivots, reordering the arena or the aggregation instead of only the claim
+decode, and a tie-break that leaves equal-mean blocks unordered (not a total
+order) are each wrong-but-compiling: the first two reintroduce a
+claim-order dependence the invariant above forbids; the third makes the
+claim order itself nondeterministic across otherwise-identical runs.
+`block_pivots_prev` is the previous iteration's fully-merged row —
+`BackwardPassState::run` swaps it in from `block_pivots` once per call, never
+per stage; reading `block_pivots` instead during the sweep is stale
+(reset-then-partially-filled).
+Read: `training/backward/opening_block.rs`
+(`process_stage_backward_opening_block`'s `block_order`-indexed decode,
+`hardest_first_block_order`, `identity_block_order`),
+`training/backward_pass_state.rs` (`run_one_backward_stage`'s block-order
+computation, the `run` swap). Pinned by
+`hardest_first_claim_order_is_result_neutral` in `tests/mpi_wire.rs`
+(hardest-first on vs off, bitwise `final_lb`).
+
 ## No EWMA upper bound
 
 `ConvergenceMonitor::upper_bound()` returns the raw per-iteration upper bound —

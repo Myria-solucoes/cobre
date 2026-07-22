@@ -23,8 +23,7 @@
 //! println!("forward_passes = {:?}", cfg.training.forward_passes);
 //! ```
 
-use serde_json::Map;
-use serde_json::Value;
+use serde_json::{Map, Value};
 pub mod estimation;
 pub mod exports;
 pub mod modeling;
@@ -37,11 +36,15 @@ pub use estimation::{EstimationConfig, OrderSelectionMethod};
 pub use exports::ExportsConfig;
 pub use modeling::{InflowNonNegativityConfig, InflowNonNegativityMethod, ModelingConfig};
 pub use policy::{BoundaryPolicy, CheckpointingConfig, PolicyConfig, PolicyMode};
-pub use scenario_source::{RawClassConfigEntry, RawHistoricalYearsConfig, RawScenarioSourceConfig};
+pub use scenario_source::{
+    HistoricalYearRange, RawClassConfigEntry, RawHistoricalYearsConfig, RawScenarioSourceConfig,
+};
 pub use simulation::SimulationConfig;
 pub use training::{
-    LipschitzConfig, RowSelectionConfig, SelectionMethod, StoppingRuleConfig, TrainingConfig,
-    TrainingSolverConfig, UpperBoundEvaluationConfig,
+    BackwardScheduler, DualEdgeWeight, LipschitzConfig, ParallelismConfig,
+    PhaseSolverProfileConfig, PresolveMode, PriceStrategy, RowSelectionConfig, ScaleStrategy,
+    SelectionMethod, StoppingRuleConfig, TrainingConfig, TrainingSolverConfig,
+    UpperBoundEvaluationConfig,
 };
 
 use cobre_core::scenario::{HistoricalYears, SamplingScheme, ScenarioSource};
@@ -238,9 +241,9 @@ fn convert_scenario_source_config(
         seed: r.seed,
         historical_years: r.historical_years.as_ref().map(|hy| match hy {
             RawHistoricalYearsConfig::List(years) => HistoricalYears::List(years.clone()),
-            RawHistoricalYearsConfig::Range { from, to } => HistoricalYears::Range {
-                from: *from,
-                to: *to,
+            RawHistoricalYearsConfig::Range(range) => HistoricalYears::Range {
+                from: range.from,
+                to: range.to,
             },
         }),
     };
@@ -1587,6 +1590,203 @@ mod tests {
                 assert!(message.contains("must be a JSON object"));
             }
             other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// A stray key in the `historical_years` range form is a deserialize
+    /// error, never a silently dropped key (the untagged enum's `Range`
+    /// variant routes through `HistoricalYearRange`'s `deny_unknown_fields`).
+    #[test]
+    fn historical_years_range_stray_key_is_deserialize_error() {
+        let json = r#"{
+            "training": {
+                "forward_passes": 4,
+                "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+                "scenario_source": {
+                    "seed": 7,
+                    "inflow": { "scheme": "historical" },
+                    "historical_years": { "from": 1940, "to": 2010, "step": 2 }
+                }
+            }
+        }"#;
+        let result = serde_json::from_str::<Config>(json);
+        assert!(
+            result.is_err(),
+            "a stray key in the historical_years range form must be rejected"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Unknown-key injection sweep
+    // ------------------------------------------------------------------
+
+    /// Maximal valid configs for the injection sweep: together they exercise
+    /// every config section and each internally-tagged / untagged variant
+    /// family (both scheduler methods, a `level1` and a `dynamic` selection,
+    /// all four stopping-rule types, both `historical_years` forms).
+    fn injection_sweep_base_configs() -> Vec<serde_json::Value> {
+        let trial_point_flavored = serde_json::json!({
+            "modeling": {
+                "inflow_non_negativity": { "method": "penalty" },
+                "cost_scale_factor": 1_000_000.0
+            },
+            "training": {
+                "enabled": true,
+                "tree_seed": 42,
+                "forward_passes": 4,
+                "stopping_rules": [
+                    { "type": "iteration_limit", "limit": 10 },
+                    { "type": "time_limit", "seconds": 60.0 },
+                    { "type": "bound_stalling", "iterations": 5, "tolerance": 0.001 },
+                    { "type": "simulation", "replications": 10, "period": 5,
+                      "bound_window": 5, "distance_tol": 0.05, "bound_tol": 0.01 }
+                ],
+                "stopping_mode": "any",
+                "cut_selection": {
+                    "row_activity_tolerance": 1e-6,
+                    "max_active_per_stage": 1000,
+                    "selection": {
+                        "method": "level1", "tie_tolerance": 1e-10, "check_frequency": 5
+                    }
+                },
+                "solver": {
+                    "retry_max_attempts": 3,
+                    "retry_time_budget_seconds": 10.0,
+                    "backward": {
+                        "dual_edge_weight": "devex",
+                        "scale": "off",
+                        "price": "row",
+                        "primal_feasibility_tolerance": 1e-9,
+                        "dual_feasibility_tolerance": 1e-9,
+                        "presolve": "on",
+                        "simplex_update_limit": 5000,
+                        "cost_perturbation": 0.0,
+                        "refactor_error_tolerance": 1e-6,
+                        "factor_pivot_threshold": 0.1,
+                        "use_warm_start": true,
+                        "steepest_edge_devex_fallback_threshold": 10.0
+                    },
+                    "forward": { "price": "row_hyper_sparse" }
+                },
+                "parallelism": {
+                    "backward_scheduler": { "method": "trial_point" }
+                },
+                "scenario_source": {
+                    "seed": 7,
+                    "historical_years": { "from": 1940, "to": 2010 },
+                    "inflow": { "scheme": "historical" },
+                    "load": { "scheme": "in_sample" },
+                    "ncs": { "scheme": "in_sample" }
+                }
+            },
+            "upper_bound_evaluation": {
+                "enabled": true,
+                "initial_iteration": 5,
+                "interval_iterations": 10,
+                "lipschitz": { "mode": "auto", "fallback_value": 1.0, "scale_factor": 1.1 }
+            },
+            "policy": {
+                "path": "./policy",
+                "mode": "fresh",
+                "checkpointing": {
+                    "enabled": true, "initial_iteration": 1, "interval_iterations": 5,
+                    "store_basis": true, "compress": false
+                },
+                "boundary": { "path": "./boundary", "source_stage": 3 }
+            },
+            "simulation": {
+                "enabled": true,
+                "num_scenarios": 100,
+                "io_channel_capacity": 64,
+                "scenario_source": {
+                    "seed": 9,
+                    "historical_years": [1940, 1953],
+                    "inflow": { "scheme": "historical" }
+                },
+                "solver": { "price": "row" }
+            },
+            "exports": { "states": true, "stochastic": true, "fpha_deviation_points": true },
+            "estimation": {
+                "max_order": 6,
+                "order_selection": "pacf",
+                "min_observations_per_season": 30,
+                "max_coefficient_magnitude": 2.0
+            }
+        });
+        let opening_block_flavored = serde_json::json!({
+            "training": {
+                "forward_passes": 4,
+                "stopping_rules": [{ "type": "iteration_limit", "limit": 10 }],
+                "cut_selection": {
+                    "selection": {
+                        "method": "dynamic",
+                        "start_iteration": 2,
+                        "seed_window": 5,
+                        "candidate_recency": 20,
+                        "max_added_per_round": 10,
+                        "violation_tolerance": 1e-10
+                    }
+                },
+                "parallelism": {
+                    "backward_scheduler": { "method": "opening_block", "block_size": 4 }
+                }
+            }
+        });
+        vec![trial_point_flavored, opening_block_flavored]
+    }
+
+    /// Collect the JSON Pointer of every object node in `value`.
+    fn collect_object_pointers(value: &serde_json::Value, pointer: &str, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                out.push(pointer.to_string());
+                for (key, child) in map {
+                    let escaped = key.replace('~', "~0").replace('/', "~1");
+                    collect_object_pointers(child, &format!("{pointer}/{escaped}"), out);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (idx, child) in items.iter().enumerate() {
+                    collect_object_pointers(child, &format!("{pointer}/{idx}"), out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Every JSON object node in a maximal valid config rejects an injected
+    /// unknown key. This is the mechanical closure over serde's per-attribute
+    /// enforcement gaps — an internally-tagged unit variant, an untagged
+    /// inline struct variant, or a plain missing `deny_unknown_fields` each
+    /// silently ignore unknown keys, and a per-type reject test only covers
+    /// the types someone remembered to test.
+    #[test]
+    fn unknown_key_injection_is_rejected_at_every_object_path() {
+        for (i, base) in injection_sweep_base_configs().into_iter().enumerate() {
+            serde_json::from_value::<Config>(base.clone())
+                .unwrap_or_else(|e| panic!("sweep base config {i} must be valid: {e}"));
+
+            let mut pointers = Vec::new();
+            collect_object_pointers(&base, "", &mut pointers);
+            assert!(
+                pointers.len() > 1,
+                "sweep base config {i} must contain nested objects"
+            );
+
+            for pointer in &pointers {
+                let mut mutated = base.clone();
+                mutated
+                    .pointer_mut(pointer)
+                    .and_then(serde_json::Value::as_object_mut)
+                    .unwrap_or_else(|| panic!("pointer {pointer:?} must resolve to an object"))
+                    .insert("__unknown_key__".to_string(), serde_json::json!(1));
+                let result = serde_json::from_value::<Config>(mutated);
+                assert!(
+                    result.is_err(),
+                    "config {i}: an unknown key injected at {pointer:?} must be rejected, \
+                     but the config loaded successfully"
+                );
+            }
         }
     }
 }

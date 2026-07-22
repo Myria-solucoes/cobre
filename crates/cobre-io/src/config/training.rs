@@ -1,5 +1,7 @@
 //! Training-phase configuration types for `config.json → training`.
 
+use std::num::NonZeroUsize;
+
 use serde::{Deserialize, Serialize};
 
 use super::scenario_source::RawScenarioSourceConfig;
@@ -42,9 +44,13 @@ pub struct TrainingConfig {
     #[serde(default)]
     pub cut_selection: RowSelectionConfig,
 
-    /// LP solver retry settings.
+    /// LP solver retry settings and optional per-phase solver profiles.
     #[serde(default)]
     pub solver: TrainingSolverConfig,
+
+    /// Parallel-execution settings.
+    #[serde(default)]
+    pub parallelism: ParallelismConfig,
 
     /// Scenario source configuration for the training forward pass.
     /// When absent, all classes default to `in_sample`.
@@ -182,7 +188,8 @@ fn default_violation_tolerance() -> f64 {
     1e-10
 }
 
-/// LP solver retry settings (`config.json → training.solver`).
+/// LP solver settings (`config.json → training.solver`): retry policy plus
+/// optional per-phase solver profiles.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -192,6 +199,16 @@ pub struct TrainingSolverConfig {
 
     /// Total time budget in seconds across all retry attempts for one solve.
     pub retry_time_budget_seconds: f64,
+
+    /// Backward-pass solver profile. Absent leaves the phase's built-in
+    /// tuned profile.
+    #[serde(default)]
+    pub backward: Option<PhaseSolverProfileConfig>,
+
+    /// Forward-pass solver profile. Absent leaves the phase's built-in
+    /// tuned profile.
+    #[serde(default)]
+    pub forward: Option<PhaseSolverProfileConfig>,
 }
 
 impl Default for TrainingSolverConfig {
@@ -199,14 +216,173 @@ impl Default for TrainingSolverConfig {
         Self {
             retry_max_attempts: 5,
             retry_time_budget_seconds: 30.0,
+            backward: None,
+            forward: None,
         }
     }
+}
+
+/// Per-phase LP solver profile (`config.json → training.solver.backward` /
+/// `.forward`, and `simulation.solver`).
+///
+/// Backend-agnostic. Every field is optional: an absent field leaves the
+/// corresponding option at the phase's built-in tuned-profile value.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct PhaseSolverProfileConfig {
+    /// Dual simplex edge-weight strategy override.
+    #[serde(default)]
+    pub dual_edge_weight: Option<DualEdgeWeight>,
+
+    /// Constraint-matrix scaling strategy override.
+    #[serde(default)]
+    pub scale: Option<ScaleStrategy>,
+
+    /// Simplex pricing strategy override.
+    #[serde(default)]
+    pub price: Option<PriceStrategy>,
+
+    /// Primal feasibility tolerance override.
+    #[serde(default)]
+    pub primal_feasibility_tolerance: Option<f64>,
+
+    /// Dual feasibility tolerance override.
+    #[serde(default)]
+    pub dual_feasibility_tolerance: Option<f64>,
+
+    /// Presolve mode override. Warm-started solves skip presolve regardless
+    /// of this setting, so it affects only genuinely cold solves.
+    #[serde(default)]
+    pub presolve: Option<PresolveMode>,
+
+    /// Simplex update-count limit override before a refactorization.
+    #[serde(default)]
+    pub simplex_update_limit: Option<u32>,
+
+    /// Dual simplex cost-perturbation multiplier override.
+    #[serde(default)]
+    pub cost_perturbation: Option<f64>,
+
+    /// Refactorization solution-error tolerance override.
+    #[serde(default)]
+    pub refactor_error_tolerance: Option<f64>,
+
+    /// Matrix factorization pivot-threshold override.
+    #[serde(default)]
+    pub factor_pivot_threshold: Option<f64>,
+
+    /// Warm-start override. This is a diagnostic setting: disabling it forces
+    /// every solve cold.
+    #[serde(default)]
+    pub use_warm_start: Option<bool>,
+
+    /// Dual steepest-edge weight log-error threshold override above which the
+    /// solver falls back to Devex pricing.
+    #[serde(default)]
+    pub steepest_edge_devex_fallback_threshold: Option<f64>,
+}
+
+/// Presolve mode for a solver profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum PresolveMode {
+    /// Presolve enabled.
+    On,
+    /// Presolve disabled.
+    Off,
+    /// Solver decides whether to presolve.
+    Choose,
+}
+
+/// Parallel-execution settings (`config.json → training.parallelism`).
+///
+/// Groups the result-preserving knobs that shape how training work is
+/// scheduled across workers, apart from the algorithm-semantics fields at the
+/// `training` root. Thread count itself stays a CLI concern (`--threads`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ParallelismConfig {
+    /// Backward-pass scheduler selection.
+    pub backward_scheduler: BackwardScheduler,
+}
+
+/// Backward-pass scheduler and its scheduler-specific parameters
+/// (`config.json → training.parallelism.backward_scheduler`).
+///
+/// Internally tagged on `method`; each variant carries only the fields it
+/// uses, so supplying a parameter that does not belong to the chosen method is
+/// a load-time error under `deny_unknown_fields`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum BackwardScheduler {
+    /// Per-trial-point backward scheduling (the default): each parallel work
+    /// unit is one whole trial point.
+    // A braced variant, not a unit one: serde enforces `deny_unknown_fields`
+    // only for braced variants of an internally tagged enum, and this variant
+    // must reject `block_size`.
+    TrialPoint {},
+    /// Opening-block backward scheduling: each parallel work unit is one
+    /// (trial point, opening-block) pair claimed dynamically by workers.
+    OpeningBlock {
+        /// Openings per block. Absent resolves per stage to `⌈|Ω_s|/2⌉` (half
+        /// the openings, rounded up); a set value is clamped to
+        /// `min(|Ω_s|, block_size)`.
+        #[serde(default)]
+        block_size: Option<NonZeroUsize>,
+    },
+}
+
+impl Default for BackwardScheduler {
+    fn default() -> Self {
+        Self::TrialPoint {}
+    }
+}
+
+/// Dual simplex edge-weight (pricing) strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum DualEdgeWeight {
+    /// Devex approximate edge weights.
+    Devex,
+    /// Exact steepest-edge weights.
+    SteepestEdge,
+    /// Dantzig most-negative-reduced-cost rule.
+    Dantzig,
+}
+
+/// LP constraint-matrix scaling strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum ScaleStrategy {
+    /// No scaling.
+    Off,
+    /// Solver-managed scaling.
+    SolverScaling,
+}
+
+/// Simplex pricing (column-selection) strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum PriceStrategy {
+    /// Row-wise pricing.
+    Row,
+    /// Row-wise pricing with hyper-sparse updates.
+    RowHyperSparse,
 }
 
 /// Deserialized configuration for one entry in `training.stopping_rules[]`.
 ///
 /// Uses a `"type"` discriminator field (internally tagged) with `snake_case`
-/// variant names matching the JSON schema.
+/// variant names matching the JSON schema. `deny_unknown_fields` makes a
+/// parameter belonging to a different rule type a load-time error rather
+/// than a silently ignored key.
 ///
 /// The `GracefulShutdown` rule has no JSON representation — it is injected at
 /// runtime by `StoppingRuleSet` construction and is never deserialized.
@@ -221,7 +397,7 @@ impl Default for TrainingSolverConfig {
 /// assert!(matches!(rule, StoppingRuleConfig::IterationLimit { limit: 100 }));
 /// ```
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum StoppingRuleConfig {
     /// Stop after a fixed number of iterations. **Mandatory** — every rule set must
@@ -300,7 +476,10 @@ pub struct LipschitzConfig {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::{SelectionMethod, TrainingConfig};
+    use super::{
+        BackwardScheduler, DualEdgeWeight, NonZeroUsize, PresolveMode, PriceStrategy,
+        ScaleStrategy, SelectionMethod, TrainingConfig,
+    };
 
     /// A `dynamic` selection block round-trips through the tagged enum, with
     /// every method-specific field landing in the `Dynamic` variant.
@@ -371,7 +550,6 @@ mod tests {
         }
     }
 
-    /// Omitting `selection` disables row selection (the default).
     #[test]
     fn omitting_selection_disables_row_selection() {
         let json = r#"{
@@ -413,8 +591,6 @@ mod tests {
         assert!(result.is_err(), "an unknown method tag must be rejected");
     }
 
-    /// `domination` without its required `domination_tolerance` is a
-    /// missing-field deserialize error.
     #[test]
     fn domination_without_tolerance_is_missing_field_error() {
         let json = r#"{
@@ -426,6 +602,271 @@ mod tests {
         assert!(
             result.is_err(),
             "domination requires domination_tolerance; absence must be rejected"
+        );
+    }
+
+    /// A full `training.solver.backward` block round-trips: every per-field
+    /// override lands in `PhaseSolverProfileConfig`, and the sibling `forward`
+    /// phase stays absent.
+    #[test]
+    fn backward_solver_profile_block_round_trips() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "solver": {
+                "backward": {
+                    "dual_edge_weight": "steepest_edge",
+                    "scale": "solver_scaling",
+                    "price": "row",
+                    "primal_feasibility_tolerance": 1e-7
+                }
+            }
+        }"#;
+        let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
+        let backward = cfg.solver.backward.as_ref().expect("backward present");
+        assert_eq!(
+            backward.dual_edge_weight,
+            Some(DualEdgeWeight::SteepestEdge)
+        );
+        assert_eq!(backward.scale, Some(ScaleStrategy::SolverScaling));
+        assert_eq!(backward.price, Some(PriceStrategy::Row));
+        assert_eq!(backward.primal_feasibility_tolerance, Some(1e-7));
+        assert!(cfg.solver.forward.is_none());
+    }
+
+    /// A `training.solver.backward` block setting `presolve`, `use_warm_start`,
+    /// and `factor_pivot_threshold` round-trips into the new fields.
+    #[test]
+    fn backward_solver_profile_new_fields_round_trip() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "solver": {
+                "backward": {
+                    "presolve": "off",
+                    "use_warm_start": false,
+                    "factor_pivot_threshold": 0.2
+                }
+            }
+        }"#;
+        let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
+        let backward = cfg.solver.backward.as_ref().expect("backward present");
+        assert_eq!(backward.presolve, Some(PresolveMode::Off));
+        assert_eq!(backward.use_warm_start, Some(false));
+        assert_eq!(backward.factor_pivot_threshold, Some(0.2));
+        assert!(backward.dual_feasibility_tolerance.is_none());
+        assert!(backward.simplex_update_limit.is_none());
+        assert!(backward.cost_perturbation.is_none());
+        assert!(backward.refactor_error_tolerance.is_none());
+        assert!(backward.steepest_edge_devex_fallback_threshold.is_none());
+    }
+
+    /// A `training.solver.forward` block round-trips independently of `backward`.
+    #[test]
+    fn forward_solver_profile_block_round_trips() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "solver": {
+                "forward": {
+                    "price": "row_hyper_sparse",
+                    "dual_edge_weight": "dantzig"
+                }
+            }
+        }"#;
+        let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
+        let forward = cfg.solver.forward.as_ref().expect("forward present");
+        assert_eq!(forward.price, Some(PriceStrategy::RowHyperSparse));
+        assert_eq!(forward.dual_edge_weight, Some(DualEdgeWeight::Dantzig));
+        assert!(cfg.solver.backward.is_none());
+    }
+
+    /// An unknown field under `backward` (here the misspelling `dual_edge_weght`)
+    /// is a deserialize error under `deny_unknown_fields`.
+    #[test]
+    fn backward_solver_profile_unknown_field_is_deserialize_error() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "solver": { "backward": { "dual_edge_weght": "devex" } }
+        }"#;
+        let result = serde_json::from_str::<TrainingConfig>(json);
+        assert!(
+            result.is_err(),
+            "an unknown field under backward must be rejected"
+        );
+    }
+
+    /// The misspelled `presolv` field under `backward` is a deserialize error
+    /// under `deny_unknown_fields`.
+    #[test]
+    fn backward_solver_profile_presolv_typo_is_deserialize_error() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "solver": { "backward": { "presolv": "off" } }
+        }"#;
+        let result = serde_json::from_str::<TrainingConfig>(json);
+        assert!(
+            result.is_err(),
+            "the presolv typo under backward must be rejected"
+        );
+    }
+
+    /// A misspelled enum value is an unknown-variant deserialize error; the
+    /// informal `curtis_reid` spelling is not a valid `scale` value.
+    #[test]
+    fn backward_solver_profile_bad_enum_value_is_deserialize_error() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "solver": { "backward": { "scale": "curtis_reid" } }
+        }"#;
+        let result = serde_json::from_str::<TrainingConfig>(json);
+        assert!(result.is_err(), "an unknown scale value must be rejected");
+    }
+
+    #[test]
+    fn backward_scheduler_defaults_to_trial_point_when_absent() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }]
+        }"#;
+        let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            cfg.parallelism.backward_scheduler,
+            BackwardScheduler::TrialPoint {}
+        );
+    }
+
+    /// `{"method": "opening_block", "block_size": 4}` round-trips into the
+    /// `OpeningBlock` variant carrying `Some(4)`.
+    #[test]
+    fn opening_block_scheduler_and_block_size_round_trip() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "parallelism": {
+                "backward_scheduler": { "method": "opening_block", "block_size": 4 }
+            }
+        }"#;
+        let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            cfg.parallelism.backward_scheduler,
+            BackwardScheduler::OpeningBlock {
+                block_size: NonZeroUsize::new(4)
+            }
+        );
+    }
+
+    /// An `opening_block` scheduler without `block_size` round-trips into
+    /// `block_size: None` (the per-stage `⌈|Ω_s|/2⌉` resolution).
+    #[test]
+    fn opening_block_scheduler_without_block_size_round_trips() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "parallelism": {
+                "backward_scheduler": { "method": "opening_block" }
+            }
+        }"#;
+        let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            cfg.parallelism.backward_scheduler,
+            BackwardScheduler::OpeningBlock { block_size: None }
+        );
+    }
+
+    /// `block_size` under `trial_point` is a deserialize error under
+    /// `deny_unknown_fields` — the invalid combination is unrepresentable, not
+    /// warned-and-ignored.
+    #[test]
+    fn block_size_under_trial_point_is_deserialize_error() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "parallelism": {
+                "backward_scheduler": { "method": "trial_point", "block_size": 4 }
+            }
+        }"#;
+        let result = serde_json::from_str::<TrainingConfig>(json);
+        assert!(
+            result.is_err(),
+            "block_size under trial_point must be rejected"
+        );
+    }
+
+    /// A misspelled scheduler `method` is an unknown-variant deserialize error.
+    #[test]
+    fn unknown_scheduler_method_is_deserialize_error() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "parallelism": {
+                "backward_scheduler": { "method": "openin_block" }
+            }
+        }"#;
+        let result = serde_json::from_str::<TrainingConfig>(json);
+        assert!(result.is_err(), "an unknown method tag must be rejected");
+    }
+
+    /// `block_size: 0` is an out-of-range deserialize error (`NonZeroUsize`).
+    #[test]
+    fn block_size_zero_is_deserialize_error() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "parallelism": {
+                "backward_scheduler": { "method": "opening_block", "block_size": 0 }
+            }
+        }"#;
+        let result = serde_json::from_str::<TrainingConfig>(json);
+        assert!(
+            result.is_err(),
+            "block_size = 0 must be rejected by NonZeroUsize"
+        );
+    }
+
+    /// The retired root-level scheduler keys are hard-rejected, never silently
+    /// ignored: the scheduler lives under `training.parallelism`, and the
+    /// backward solve order is intrinsic (no config field selects it).
+    #[test]
+    fn removed_root_scheduler_keys_are_rejected() {
+        for stale in [
+            r#""backward_scheduler": "opening_block""#,
+            r#""opening_block_size": 4"#,
+            r#""backward_opening_order": "sigma_key""#,
+        ] {
+            let json = format!(
+                r#"{{
+                    "forward_passes": 4,
+                    "stopping_rules": [{{ "type": "iteration_limit", "limit": 100 }}],
+                    {stale}
+                }}"#
+            );
+            let result = serde_json::from_str::<TrainingConfig>(&json);
+            assert!(
+                result.is_err(),
+                "removed root key must be rejected, got Ok for: {stale}"
+            );
+        }
+    }
+
+    /// A parameter belonging to a different stopping-rule type is a
+    /// deserialize error under `deny_unknown_fields` (here `seconds` under
+    /// `iteration_limit`), never a silently ignored key.
+    #[test]
+    fn wrong_stopping_rule_field_is_deserialize_error() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [
+                { "type": "iteration_limit", "limit": 100, "seconds": 60.0 }
+            ]
+        }"#;
+        let result = serde_json::from_str::<TrainingConfig>(json);
+        assert!(
+            result.is_err(),
+            "a time_limit-only field under iteration_limit must be rejected"
         );
     }
 }

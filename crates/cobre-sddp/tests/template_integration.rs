@@ -910,7 +910,7 @@ fn two_bus_system_with_stochastic_load(
 }
 
 // -------------------------------------------------------------------------
-// FPHA constraint tests (AC-1 through AC-5)
+// FPHA constraint tests
 // -------------------------------------------------------------------------
 
 /// CSC coefficient at (`col`, `row`); `None` if the column has no entry in that row.
@@ -3054,7 +3054,7 @@ fn two_hydro_par_system(ar_order: usize, inflow_models: Vec<InflowModel>) -> cob
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Anticipated-decision column bounds tests (AC-2 through AC-5)
+// Anticipated-decision column bounds tests
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Build a minimal system with one anticipated thermal (`K_i = lead_stages`,
@@ -3806,9 +3806,9 @@ fn one_hydro_one_ant_system(n_stages: usize) -> cobre_core::System {
         .expect("one_hydro_one_ant_system: valid")
 }
 
-// ── AC-1 through AC-8 ────────────────────────────────────────────────────────
+// ── Anticipated-ring geometry fixtures ───────────────────────────────────────
 //
-// Geometry for AC-1..3, AC-6..8 (two-anticipated-thermal system):
+// Two-anticipated-thermal system geometry:
 //   n_hydros=0, n_anticipated=2 (K_0=1, K_1=2), k_max=2, n_ant_state=4
 //   col_anticipated_slots_out_start = 0   (N*(1+L) = 0, outgoing ring)
 //   theta = 2 * n_ant_state = 8  (outgoing + incoming ring blocks)
@@ -3816,7 +3816,7 @@ fn one_hydro_one_ant_system(n_stages: usize) -> cobre_core::System {
 //   col_thermal_start = 9  (0 turbine/spillage/diversion cols)
 //   col_anticipated_decision_start = 9 + 2*1 = 11  (2 thermals, 1 blk)
 //
-// Geometry for AC-4..5 (one-anticipated-thermal system, K=2):
+// One-anticipated-thermal system geometry (K=2):
 //   n_hydros=0, n_anticipated=1, k_max=2, n_ant_state=2
 //   col_anticipated_slots_out_start = 0
 //   col_anticipated_decision_start = anticipated_decision_col(2) = 6
@@ -3837,7 +3837,7 @@ fn one_hydro_one_ant_system(n_stages: usize) -> cobre_core::System {
 //   n_stages=4, no FPHA, no evaporation, no generic constraints
 //
 // Column layout derivation (K >= 1 anticipated; for the K=0 non-anticipated
-// baseline the formula differs — see the AC-4 test for the correct value):
+// baseline the formula differs — see the K=0 baseline test below):
 //   n_ant_state = 1 * K = K
 //   n_state = N*(1+L) + n_ant_state = 1 + K
 //   col_anticipated_state_start = N*(1+L) = 1
@@ -3878,7 +3878,7 @@ fn one_hydro_one_ant_system(n_stages: usize) -> cobre_core::System {
 ///
 /// Block durations are 360h so that total_stage_hours = 720h (consistent
 /// across stages), which keeps the NPV objective computation tractable for
-/// AC-5's discount-rate verification.
+/// the discount-rate verification below.
 #[allow(
     clippy::cast_possible_wrap,
     clippy::cast_possible_truncation,

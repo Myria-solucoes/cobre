@@ -63,6 +63,7 @@ pub(crate) fn postprocess_templates(
     stage_templates: &mut StageTemplates,
     system: &System,
     state_layout: &StateSpace,
+    cost_scale_factor: f64,
 ) -> ScalingReport {
     // The setter derives cumulative factors in the same call, so the two slices
     // cannot drift.
@@ -141,7 +142,7 @@ pub(crate) fn postprocess_templates(
         });
     }
 
-    let scaling_report = build_scaling_report(lp_builder::COST_SCALE_FACTOR, stage_scaling_reports);
+    let scaling_report = build_scaling_report(cost_scale_factor, stage_scaling_reports);
 
     // Pre-scale noise_scale by row_scale so the perturbation (noise_scale * eta)
     // shares the units of the already-row-scaled row bounds; otherwise

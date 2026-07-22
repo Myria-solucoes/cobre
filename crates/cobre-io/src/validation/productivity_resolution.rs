@@ -94,7 +94,6 @@ pub(crate) fn validate_productivity_resolution(data: &ParsedData, ctx: &mut Vali
 
 // ── Parquet lookup ────────────────────────────────────────────────────────────
 
-/// Key type for the parquet lookup map.
 type ParquetKey = (EntityId, Option<i32>);
 
 /// Build a `HashMap` from `(hydro_id, stage_id)` to `rho_eq` value.
@@ -180,8 +179,8 @@ mod tests {
     use super::{find_productivity_for_stage, validate_productivity_resolution};
     use crate::{
         config::{
-            Config, EstimationConfig, ExportsConfig, ModelingConfig, PolicyConfig,
-            RowSelectionConfig, SimulationConfig, StoppingRuleConfig, TrainingConfig,
+            Config, EstimationConfig, ExportsConfig, ModelingConfig, ParallelismConfig,
+            PolicyConfig, RowSelectionConfig, SimulationConfig, StoppingRuleConfig, TrainingConfig,
             TrainingSolverConfig, UpperBoundEvaluationConfig,
         },
         extensions::{
@@ -314,6 +313,7 @@ mod tests {
                 stopping_mode: "any".to_string(),
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
+                parallelism: ParallelismConfig::default(),
                 scenario_source: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),

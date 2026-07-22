@@ -1,8 +1,10 @@
 //! Simulation configuration type for the SDDP policy evaluation phase.
 //!
 //! [`SimulationConfig`] bundles all parameters that control the simulation
-//! pipeline: number of scenarios to evaluate and the bounded channel capacity
-//! that throttles the background I/O thread.
+//! pipeline: number of scenarios to evaluate, the bounded channel capacity
+//! that throttles the background I/O thread, and the resolved solver profile.
+
+use cobre_solver::ActiveProfile;
 
 /// Parameters controlling the SDDP simulation pipeline.
 ///
@@ -13,10 +15,12 @@
 ///
 /// ```rust
 /// use cobre_sddp::simulation::SimulationConfig;
+/// use cobre_sddp::Phase;
 ///
 /// let config = SimulationConfig {
 ///     n_scenarios: 500,
 ///     io_channel_capacity: 32,
+///     profile: Phase::Simulation.profile(),
 /// };
 /// assert_eq!(config.n_scenarios, 500);
 /// assert_eq!(config.io_channel_capacity, 32);
@@ -32,17 +36,25 @@ pub struct SimulationConfig {
     /// channel to the background I/O thread; a full channel blocks simulation
     /// threads, providing backpressure.
     pub io_channel_capacity: usize,
+
+    /// Resolved simulation solver profile (`simulation.solver`, layered over
+    /// the current per-phase constant — see
+    /// [`crate::solve::solver_phase::Phase::resolve_profile`]), applied at
+    /// `SimulationState::run` entry.
+    pub profile: ActiveProfile,
 }
 
 #[cfg(test)]
 mod tests {
     use super::SimulationConfig;
+    use crate::solve::solver_phase::Phase;
 
     #[test]
     fn simulation_config_construction() {
         let config = SimulationConfig {
             n_scenarios: 2000,
             io_channel_capacity: 64,
+            profile: Phase::Simulation.profile(),
         };
         assert_eq!(config.n_scenarios, 2000);
         assert_eq!(config.io_channel_capacity, 64);
@@ -53,6 +65,7 @@ mod tests {
         let config = SimulationConfig {
             n_scenarios: 1,
             io_channel_capacity: 1,
+            profile: Phase::Simulation.profile(),
         };
         assert_eq!(config.n_scenarios, 1);
         assert_eq!(config.io_channel_capacity, 1);
@@ -63,6 +76,7 @@ mod tests {
         let config = SimulationConfig {
             n_scenarios: 100,
             io_channel_capacity: 16,
+            profile: Phase::Simulation.profile(),
         };
         let debug = format!("{config:?}");
         assert!(!debug.is_empty());

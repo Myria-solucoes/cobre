@@ -20,5 +20,5 @@ mod solver;
 #[cfg(test)]
 mod tests;
 
-pub use config::HighsProfile;
+pub use config::{HighsProfile, PresolveKind};
 pub use solver::{HighsSolver, highs_version};

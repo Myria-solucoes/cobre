@@ -16,9 +16,7 @@ use crate::setup::template_postprocess::{
 };
 
 use super::layout::{ResolvedTables, StageLayout, TemplateBuildCtx};
-use super::{
-    COST_SCALE_FACTOR, GenericConstraintRowEntry, M3S_TO_HM3, columns, entries, rows, scaling,
-};
+use super::{GenericConstraintRowEntry, M3S_TO_HM3, columns, entries, rows, scaling};
 use crate::indexer::Boundary;
 use crate::indexer::EvaporationIndices;
 use crate::indexer::HydroSys;
@@ -57,6 +55,11 @@ pub struct StageTemplates {
     pub block_hours_per_stage: Vec<Vec<f64>>,
     /// Number of hydro plants (N) used to stride into `noise_scale`.
     pub n_hydros: usize,
+    /// Resolved objective cost-scale factor (`modeling.cost_scale_factor`,
+    /// [`ResolvedParameters::cost_scale_factor`]). Every non-theta objective
+    /// coefficient was divided by this at template build time; cost-domain
+    /// reporting boundaries multiply back by it.
+    pub cost_scale_factor: f64,
     /// Per-stage row index of the first load-balance constraint.
     ///
     /// `load_balance_row_starts[s]` is `StageLayout::row_load_balance_start()`
@@ -148,11 +151,11 @@ pub struct StageTemplates {
 }
 
 impl StageTemplates {
-    /// All-empty [`StageTemplates`] for a study with zero stages. Only `n_hydros`
-    /// (the stride into `noise_scale`) carries through; it is a system-level count
-    /// well-defined even with no stages.
+    /// All-empty [`StageTemplates`] for a study with zero stages. `n_hydros` (the
+    /// stride into `noise_scale`) and `cost_scale_factor` carry through; both are
+    /// system-level values well-defined even with no stages.
     #[must_use]
-    pub(crate) fn empty(n_hydros: usize) -> Self {
+    pub(crate) fn empty(n_hydros: usize, cost_scale_factor: f64) -> Self {
         Self {
             templates: Vec::new(),
             base_rows: Vec::new(),
@@ -160,6 +163,7 @@ impl StageTemplates {
             zeta_per_stage: Vec::new(),
             block_hours_per_stage: Vec::new(),
             n_hydros,
+            cost_scale_factor,
             load_balance_row_starts: Vec::new(),
             n_load_buses: 0,
             load_bus_indices: Vec::new(),
@@ -279,6 +283,10 @@ pub struct StageGeometry {
     pub water_balance: Range<usize>,
     /// Load-balance row range (one row per bus per block; `n_buses · n_blks`).
     pub load_balance: Range<usize>,
+    /// FPHA hyperplane row range, immediately following `load_balance`. Length
+    /// varies per stage: `for_each_fpha_plane` sums plane counts that differ per
+    /// hydro (`fpha_hydro_indices.len() * n_blks` is NOT the row count).
+    pub fpha: Range<usize>,
     /// Per-stage `σ_fill`-target row range (one row per Filling-phase hydro); empty
     /// `start..start` (not `0..0`) at every non-Filling stage.
     // Voice 4: no read site consumes this yet — it is the per-stage carrier that
@@ -421,9 +429,10 @@ pub(super) fn build_single_stage_template(
     // `stage_cost + future_cost/K` at the boundary — wrong. `layout.col_theta()`
     // reads the correct index even when `n_anticipated > 0` shifts theta.
     let theta_col = layout.col_theta();
+    let cost_scale_factor = ctx.resolved.resolved_parameters.cost_scale_factor;
     for (i, coeff) in objective.iter_mut().enumerate() {
         if i != theta_col {
-            *coeff /= COST_SCALE_FACTOR;
+            *coeff /= cost_scale_factor;
         }
     }
 
@@ -642,7 +651,10 @@ pub fn build_stage_templates(
     let n_hydros = system.hydros().len();
 
     if study_stages.is_empty() {
-        return Ok(StageTemplates::empty(n_hydros));
+        return Ok(StageTemplates::empty(
+            n_hydros,
+            resolved_parameters.cost_scale_factor,
+        ));
     }
 
     let (ctx, load_bus_indices, diversion_upstream_output) = build_template_build_ctx(
@@ -770,7 +782,7 @@ pub fn build_stage_templates_resolving_layout(
 /// `ζ_t = total_hours_per_stage[stage_idx]·M3S_TO_HM3`; `rate`/`min_storage` are
 /// the RESOLVED per-stage bounds. The clip at `min_storage` enforces that no floor
 /// exceeds the dead volume — dropping it would let an over-provisioned schedule
-/// demand a floor ABOVE the dead volume (the design §3.1 forbidden alternative).
+/// demand a floor ABOVE the dead volume — the forbidden alternative.
 /// The fold runs on the UNCLIPPED running value, clipping each stored `V_target[t]`
 /// independently to mirror the closed form.
 ///
@@ -1138,6 +1150,7 @@ fn assemble_stage_templates_output(
         zeta_per_stage,
         block_hours_per_stage,
         n_hydros,
+        cost_scale_factor: ctx.resolved.resolved_parameters.cost_scale_factor,
         load_balance_row_starts,
         n_load_buses,
         load_bus_indices,

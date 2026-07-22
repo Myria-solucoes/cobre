@@ -867,6 +867,7 @@ mod lb_conformance {
             geometry_per_stage: &[],
             noise_scale: &[],
             n_hydros: 0,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
@@ -1063,8 +1064,8 @@ fn build_geometry(
         let gb = tb.end..tb.end + n_op;
         (ob, oa, tb, gb)
     };
-    // Rows: z_inflow → water_balance → load_balance (the only row families
-    // `StageGeometry` exposes; FPHA/evap/op-violation rows are internal).
+    // Rows: z_inflow → water_balance → load_balance; evap/op-violation rows stay
+    // internal (`StageGeometry` does not expose them).
     let water_balance_start = hydro_count;
     let load_balance_start = water_balance_start + hydro_count;
     let load_balance_end = load_balance_start + n_buses * n_blks;
@@ -1098,6 +1099,7 @@ fn build_geometry(
         contract_export: 0..0,
         water_balance: water_balance_start..water_balance_start + hydro_count,
         load_balance: load_balance_start..load_balance_end,
+        fpha: load_balance_end..load_balance_end,
         // This conformance geometry models no filling hydros, so the
         // terminal-target and operating-floor blocks are empty — including the
         // sparse `σ_fill` / `σ^{v-}` system→slot index vectors.

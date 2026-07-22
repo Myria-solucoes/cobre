@@ -141,7 +141,7 @@ mod tests {
 
     use super::ProfiledSolver;
     use crate::{
-        HighsProfile, SolverInterface,
+        HighsProfile, PresolveKind, SolverInterface,
         types::{Basis, RowBatch, SolutionView, SolverError, SolverStatistics, StageTemplate},
     };
 
@@ -174,15 +174,6 @@ mod tests {
             self.calls.borrow().clone()
         }
     }
-
-    // SAFETY for `Send`: `RecordingMockSolver` is only ever constructed and
-    // used on a single thread within these unit tests. `RefCell` is not `Sync`,
-    // but the `Send` bound on `SolverInterface` merely permits transferring
-    // ownership to another thread — it does not permit concurrent access. The
-    // mock is never actually transferred across threads; the `unsafe impl Send`
-    // is required by the trait bound and is safe in this single-threaded test
-    // context.
-    unsafe impl Send for RecordingMockSolver {}
 
     impl SolverInterface for RecordingMockSolver {
         type Profile = HighsProfile;
@@ -310,105 +301,60 @@ mod tests {
     /// `PartialEq` on the whole profile.
     #[test]
     fn set_profile_dispatches_apply_profile_when_changed() {
-        {
+        let cases = [
+            (
+                "primal-only",
+                HighsProfile {
+                    primal_feasibility_tolerance: 1e-7,
+                    ..HighsProfile::default()
+                },
+            ),
+            (
+                "dual-only",
+                HighsProfile {
+                    dual_feasibility_tolerance: 1e-7,
+                    ..HighsProfile::default()
+                },
+            ),
+            (
+                "simplex-cap-only",
+                HighsProfile {
+                    simplex_iteration_limit: 50_000,
+                    ..HighsProfile::default()
+                },
+            ),
+            (
+                "ipm-cap-only",
+                HighsProfile {
+                    ipm_iteration_limit: 5_000,
+                    ..HighsProfile::default()
+                },
+            ),
+            (
+                "dual-edge-weight-only",
+                HighsProfile {
+                    simplex_dual_edge_weight_strategy: 0, // Dantzig
+                    ..HighsProfile::default()
+                },
+            ),
+            (
+                "price-strategy-only",
+                HighsProfile {
+                    simplex_price_strategy: 2, // RowHyperSparse
+                    ..HighsProfile::default()
+                },
+            ),
+        ];
+        for (label, p) in cases {
             let mock = RecordingMockSolver::new();
             let mut solver = ProfiledSolver::new(mock);
-            let p = HighsProfile {
-                primal_feasibility_tolerance: 1e-7,
-                ..HighsProfile::default()
-            };
             solver.set_profile(&p);
             let calls = solver.inner.recorded_calls();
             let profile_calls = filter_profile_calls(&calls);
             assert_eq!(
                 profile_calls,
                 vec![&RecordedCall::ApplyProfile(p)],
-                "expected one ApplyProfile(p) for primal-only change"
-            );
-        }
-
-        {
-            let mock = RecordingMockSolver::new();
-            let mut solver = ProfiledSolver::new(mock);
-            let p = HighsProfile {
-                dual_feasibility_tolerance: 1e-7,
-                ..HighsProfile::default()
-            };
-            solver.set_profile(&p);
-            let calls = solver.inner.recorded_calls();
-            let profile_calls = filter_profile_calls(&calls);
-            assert_eq!(
-                profile_calls,
-                vec![&RecordedCall::ApplyProfile(p)],
-                "expected one ApplyProfile(p) for dual-only change"
-            );
-        }
-
-        {
-            let mock = RecordingMockSolver::new();
-            let mut solver = ProfiledSolver::new(mock);
-            let p = HighsProfile {
-                simplex_iteration_limit: 50_000,
-                ..HighsProfile::default()
-            };
-            solver.set_profile(&p);
-            let calls = solver.inner.recorded_calls();
-            let profile_calls = filter_profile_calls(&calls);
-            assert_eq!(
-                profile_calls,
-                vec![&RecordedCall::ApplyProfile(p)],
-                "expected one ApplyProfile(p) for simplex-cap-only change"
-            );
-        }
-
-        {
-            let mock = RecordingMockSolver::new();
-            let mut solver = ProfiledSolver::new(mock);
-            let p = HighsProfile {
-                ipm_iteration_limit: 5_000,
-                ..HighsProfile::default()
-            };
-            solver.set_profile(&p);
-            let calls = solver.inner.recorded_calls();
-            let profile_calls = filter_profile_calls(&calls);
-            assert_eq!(
-                profile_calls,
-                vec![&RecordedCall::ApplyProfile(p)],
-                "expected one ApplyProfile(p) for ipm-cap-only change"
-            );
-        }
-
-        {
-            let mock = RecordingMockSolver::new();
-            let mut solver = ProfiledSolver::new(mock);
-            let p = HighsProfile {
-                simplex_dual_edge_weight_strategy: 0, // Dantzig
-                ..HighsProfile::default()
-            };
-            solver.set_profile(&p);
-            let calls = solver.inner.recorded_calls();
-            let profile_calls = filter_profile_calls(&calls);
-            assert_eq!(
-                profile_calls,
-                vec![&RecordedCall::ApplyProfile(p)],
-                "expected one ApplyProfile(p) for dual-edge-weight-only change"
-            );
-        }
-
-        {
-            let mock = RecordingMockSolver::new();
-            let mut solver = ProfiledSolver::new(mock);
-            let p = HighsProfile {
-                simplex_price_strategy: 2, // RowHyperSparse
-                ..HighsProfile::default()
-            };
-            solver.set_profile(&p);
-            let calls = solver.inner.recorded_calls();
-            let profile_calls = filter_profile_calls(&calls);
-            assert_eq!(
-                profile_calls,
-                vec![&RecordedCall::ApplyProfile(p)],
-                "expected one ApplyProfile(p) for price-strategy-only change"
+                "expected one ApplyProfile(p) for {label} change"
             );
         }
     }
@@ -426,6 +372,13 @@ mod tests {
             simplex_dual_edge_weight_strategy: 0, // Dantzig
             simplex_scale_strategy: 2,            // Curtis-Reid
             simplex_price_strategy: 2,            // RowHyperSparse
+            presolve: PresolveKind::Off,
+            simplex_update_limit: 1000,
+            cost_perturbation: 1.0,
+            refactor_error_tolerance: 1e-5,
+            factor_pivot_threshold: 0.2,
+            use_warm_start: false,
+            steepest_edge_devex_fallback_threshold: 20.0,
         };
         solver.set_profile(&p);
 

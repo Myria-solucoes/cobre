@@ -409,6 +409,56 @@ fn test_clp_escalation_restores_floor_after_exhaustion() {
     assert_eq!(solver.stats.retry_count, LADDER_RUNGS as u64);
 }
 
+/// Power statement: CLP has no `HiGHS`-style narrower `reapply_profile` — the
+/// `solve()` retry finalization (`interface.rs`) re-installs the WHOLE cached
+/// `current_profile` through the SAME `apply_profile` used for the initial
+/// install, unconditionally, after the escalation ladder runs. CLP exposes no
+/// FFI option-readback getters (unlike `HiGHS`'s `get_double_option`/
+/// `get_int_option`), so this pins the seam with the closest available
+/// assertion: every `ClpProfile` field — not merely perturbation/scaling, as
+/// `test_clp_escalation_restores_floor_after_exhaustion` above checks — equals
+/// the caller's installed profile after a genuinely exhausted escalation
+/// ladder. It does NOT prove the live CLP option state matches (no getter
+/// exists to read that back); it proves the cache the rest of `ClpSolver`
+/// reads (`resolve_simplex_cap`, the next `solve()`'s dispatch) was not
+/// silently reset to a narrower or default profile.
+#[test]
+fn test_clp_full_profile_survives_escalation_finalization() {
+    let mut solver = ClpSolver::new().expect("CLP solver creation failed");
+    solver.load_model(&make_fixture_stage_template());
+
+    let profile = ClpProfile {
+        perturbation: 100,
+        scaling: 1,
+        primal_feasibility_tolerance: 1e-7,
+        dual_feasibility_tolerance: 1e-7,
+        simplex_iteration_limit: 50_000,
+        algorithm: ClpAlgorithm::Primal,
+        dual_pricing_mode: 1,
+        factorization_frequency: 200,
+    };
+    assert_ne!(
+        profile,
+        ClpProfile::default(),
+        "fixture profile must differ from every ClpProfile::default() field"
+    );
+    solver.apply_profile(&profile);
+
+    // Pin x0 = 100 (violates row0 equality x0 = 6): the LP has no feasible
+    // point, so the escalation ladder genuinely exhausts every rung.
+    solver.set_col_bounds(&[0], &[100.0], &[100.0]);
+    let infeasible = solver.solve(None);
+    assert!(
+        matches!(infeasible, Err(SolverError::Infeasible)),
+        "expected Err(Infeasible), got {infeasible:?}"
+    );
+
+    assert_eq!(
+        solver.current_profile, profile,
+        "every ClpProfile field must survive the escalation finalization"
+    );
+}
+
 #[test]
 fn test_clp_solve_unbounded() {
     let mut solver = ClpSolver::new().expect("CLP solver creation failed");
@@ -535,7 +585,6 @@ fn test_clp_warm_start_roundtrip_objective() {
     solver.load_model(&make_fixture_stage_template());
     let _ = solver.solve(None).expect("first solve should be optimal");
 
-    // Capture the optimal basis.
     let mut captured = Basis::new(0, 0);
     solver.get_basis(&mut captured);
 

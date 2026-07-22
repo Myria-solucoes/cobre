@@ -40,8 +40,6 @@
     )
 )]
 
-// Selecting neither backend is rejected here so downstream code fails with this
-// message rather than opaque missing-symbol errors.
 #[cfg(all(feature = "highs", feature = "clp"))]
 compile_error!(
     "enable exactly one LP backend: `highs` OR `clp`. \
@@ -77,7 +75,7 @@ pub mod backends;
 pub use backends::profiled::ProfiledSolver;
 
 #[cfg(feature = "highs")]
-pub use backends::highs::{HighsProfile, HighsSolver, highs_version};
+pub use backends::highs::{HighsProfile, HighsSolver, PresolveKind, highs_version};
 
 #[cfg(feature = "clp")]
 pub use backends::clp::{ClpAlgorithm, ClpProfile, ClpSolver, clp_version};

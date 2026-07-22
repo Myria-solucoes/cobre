@@ -10,7 +10,6 @@ use crate::{
     context::{StageContext, TrainingContext},
     dcs::{DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
     error::SddpError,
-    lp_builder::COST_SCALE_FACTOR,
     noise::{DownstreamAccumState, LagAccumState, accumulate_and_shift_lag_state},
     stage_solve::{
         StageInputs, debug_assert_bucket_copy_gap_intact, fill_unscaled, run_stage_solve,
@@ -165,7 +164,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     };
 
     let d_t = ctx.discount_factors.get(t).copied().unwrap_or(1.0);
-    let stage_cost = (view_objective - d_t * unscaled_primal[state.theta]) * COST_SCALE_FACTOR;
+    let stage_cost = (view_objective - d_t * unscaled_primal[state.theta]) * ctx.cost_scale_factor;
     let rec = &mut worker_records[local_m * num_stages + t];
     // Only rec.state is consumed downstream; the backward pass needs no primal
     // or dual here, and simulation reads them directly from the solver.

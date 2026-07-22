@@ -41,7 +41,7 @@ use cobre_stochastic::{
 };
 
 use cobre_sddp::{
-    SddpError, StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
+    SddpError, SolverProfiles, StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
     config::{CutManagementConfig, EventConfig, LoopConfig},
     context::{StageContext, TrainingContext},
     cut::fcf::FutureCostFunction,
@@ -551,6 +551,7 @@ fn run_one_deterministic_pass(
         base_rows: &fx.base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -619,6 +620,7 @@ fn run_one_deterministic_pass(
         &StubComm,
         || Ok(MockSolver::with_fixed(50.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap()
 }
@@ -660,6 +662,7 @@ fn train_converges_with_mock_solver() {
         base_rows: &fx.base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -706,6 +709,7 @@ fn train_converges_with_mock_solver() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -776,6 +780,7 @@ fn train_lb_monotonically_nondecreasing() {
         base_rows: &fx.base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -822,6 +827,7 @@ fn train_lb_monotonically_nondecreasing() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -881,6 +887,7 @@ fn train_emits_correct_event_sequence() {
         base_rows: &fx.base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -927,6 +934,7 @@ fn train_emits_correct_event_sequence() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -970,6 +978,7 @@ fn train_stops_at_iteration_limit() {
         base_rows: &fx.base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -1038,6 +1047,7 @@ fn train_stops_at_iteration_limit() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -1068,6 +1078,7 @@ fn train_stops_on_graceful_shutdown() {
         base_rows: &fx.base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -1136,6 +1147,7 @@ fn train_stops_on_graceful_shutdown() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -1156,6 +1168,7 @@ fn train_propagates_infeasible_error() {
         base_rows: &fx.base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -1224,6 +1237,7 @@ fn train_propagates_infeasible_error() {
         &comm,
         || Ok(MockSolver::infeasible_on_first()),
         None,
+        SolverProfiles::default(),
     );
 
     let outcome = result.expect("train must return Ok(TrainingOutcome) with captured error");
@@ -1287,6 +1301,7 @@ fn d17_level1_cut_selection_convergence() {
         base_rows: &fx.base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -1333,6 +1348,7 @@ fn d17_level1_cut_selection_convergence() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -1417,6 +1433,7 @@ fn d17_level1_cut_selection_reconstruction() {
         base_rows: &fx.base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -1489,6 +1506,7 @@ fn d17_level1_cut_selection_reconstruction() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -1553,6 +1571,7 @@ fn d18_lml1_cut_selection_convergence() {
         base_rows: &fx.base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -1599,6 +1618,7 @@ fn d18_lml1_cut_selection_convergence() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -1661,11 +1681,9 @@ fn d18_lml1_cut_selection_convergence() {
 fn test_forward_basis_reconstruct_bit_identical_d01() {
     use std::path::Path;
 
-    use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
     use cobre_core::scenario::ScenarioSource;
     use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
     use cobre_solver::ActiveSolver;
-    use cobre_solver::SolverInterface;
 
     struct LocalStubComm;
 
@@ -1763,6 +1781,7 @@ fn frozen_backward_pass_smoke_test() {
         base_rows: &fx.base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -1832,6 +1851,7 @@ fn frozen_backward_pass_smoke_test() {
         &StubComm,
         || Ok(ExpandingMockSolver::with_objectives(vec![50.0])),
         None,
+        SolverProfiles::default(),
     )
     .expect("frozen backward pass smoke: train must not error");
 

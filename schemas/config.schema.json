@@ -1,5 +1,48 @@
 {
   "$defs": {
+    "BackwardScheduler": {
+      "description": "Backward-pass scheduler and its scheduler-specific parameters\n(`config.json → training.parallelism.backward_scheduler`).\n\nInternally tagged on `method`; each variant carries only the fields it\nuses, so supplying a parameter that does not belong to the chosen method is\na load-time error under `deny_unknown_fields`.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Per-trial-point backward scheduling (the default): each parallel work\nunit is one whole trial point.",
+          "properties": {
+            "method": {
+              "const": "trial_point",
+              "type": "string"
+            }
+          },
+          "required": [
+            "method"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Opening-block backward scheduling: each parallel work unit is one\n(trial point, opening-block) pair claimed dynamically by workers.",
+          "properties": {
+            "block_size": {
+              "default": null,
+              "description": "Openings per block. Absent resolves per stage to `⌈|Ω_s|/2⌉` (half\nthe openings, rounded up); a set value is clamped to\n`min(|Ω_s|, block_size)`.",
+              "format": "uint",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "method": {
+              "const": "opening_block",
+              "type": "string"
+            }
+          },
+          "required": [
+            "method"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "BoundaryPolicy": {
       "additionalProperties": false,
       "description": "Boundary-row configuration for terminal-stage FCF coupling.\n\nWhen present, the solver loads rows from a source Cobre policy\ncheckpoint and injects them as fixed boundary conditions at the\nterminal stage of the current study.",
@@ -72,6 +115,26 @@
       },
       "type": "object"
     },
+    "DualEdgeWeight": {
+      "description": "Dual simplex edge-weight (pricing) strategy.",
+      "oneOf": [
+        {
+          "const": "devex",
+          "description": "Devex approximate edge weights.",
+          "type": "string"
+        },
+        {
+          "const": "steepest_edge",
+          "description": "Exact steepest-edge weights.",
+          "type": "string"
+        },
+        {
+          "const": "dantzig",
+          "description": "Dantzig most-negative-reduced-cost rule.",
+          "type": "string"
+        }
+      ]
+    },
     "EstimationConfig": {
       "additionalProperties": false,
       "description": "Time series estimation settings (`config.json → estimation`).\n\nControls automatic parameter estimation when historical inflow data is\nprovided without explicit model statistics or coefficients.",
@@ -127,6 +190,27 @@
           "type": "boolean"
         }
       },
+      "type": "object"
+    },
+    "HistoricalYearRange": {
+      "additionalProperties": false,
+      "description": "Inclusive `{\"from\", \"to\"}` range form of `historical_years`.",
+      "properties": {
+        "from": {
+          "description": "First year (inclusive).",
+          "format": "int32",
+          "type": "integer"
+        },
+        "to": {
+          "description": "Last year (inclusive).",
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
       "type": "object"
     },
     "InflowNonNegativityConfig": {
@@ -203,6 +287,15 @@
       "additionalProperties": false,
       "description": "Modeling options (`config.json → modeling`).",
       "properties": {
+        "cost_scale_factor": {
+          "default": null,
+          "description": "Divisor applied to every non-theta objective coefficient at template\nbuild time, multiplied back at every cost-domain reporting boundary.\nDefault `1_000_000.0` — the value every golden parity baseline is pinned at.\n\nObjective conditioning only — results are identical in exact arithmetic;\nthis does not alter the model, unlike `modeling`'s other fields. The\neffective dual tolerance in currency units is\n`dual_feasibility_tolerance × this factor`: raising the factor without\nlowering `dual_feasibility_tolerance` proportionally loosens optimality\nin currency terms even though the configured tolerance value is\nunchanged — the inverse-direction trap a name cannot carry.\n\nAbsent uses the default. Must be finite and `> 0`; a value outside\n`[1.0, 1e12]` is accepted but logs an advisory warning.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "inflow_non_negativity": {
           "$ref": "#/$defs/InflowNonNegativityConfig",
           "default": {
@@ -227,6 +320,147 @@
           "type": "string"
         }
       ]
+    },
+    "ParallelismConfig": {
+      "additionalProperties": false,
+      "description": "Parallel-execution settings (`config.json → training.parallelism`).\n\nGroups the result-preserving knobs that shape how training work is\nscheduled across workers, apart from the algorithm-semantics fields at the\n`training` root. Thread count itself stays a CLI concern (`--threads`).",
+      "properties": {
+        "backward_scheduler": {
+          "$ref": "#/$defs/BackwardScheduler",
+          "default": {
+            "method": "trial_point"
+          },
+          "description": "Backward-pass scheduler selection."
+        }
+      },
+      "type": "object"
+    },
+    "PhaseSolverProfileConfig": {
+      "additionalProperties": false,
+      "description": "Per-phase LP solver profile (`config.json → training.solver.backward` /\n`.forward`, and `simulation.solver`).\n\nBackend-agnostic. Every field is optional: an absent field leaves the\ncorresponding option at the phase's built-in tuned-profile value.",
+      "properties": {
+        "cost_perturbation": {
+          "default": null,
+          "description": "Dual simplex cost-perturbation multiplier override.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "dual_edge_weight": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DualEdgeWeight"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Dual simplex edge-weight strategy override."
+        },
+        "dual_feasibility_tolerance": {
+          "default": null,
+          "description": "Dual feasibility tolerance override.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "factor_pivot_threshold": {
+          "default": null,
+          "description": "Matrix factorization pivot-threshold override.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "presolve": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PresolveMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Presolve mode override. Warm-started solves skip presolve regardless\nof this setting, so it affects only genuinely cold solves."
+        },
+        "price": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PriceStrategy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Simplex pricing strategy override."
+        },
+        "primal_feasibility_tolerance": {
+          "default": null,
+          "description": "Primal feasibility tolerance override.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "refactor_error_tolerance": {
+          "default": null,
+          "description": "Refactorization solution-error tolerance override.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "scale": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScaleStrategy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Constraint-matrix scaling strategy override."
+        },
+        "simplex_update_limit": {
+          "default": null,
+          "description": "Simplex update-count limit override before a refactorization.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "steepest_edge_devex_fallback_threshold": {
+          "default": null,
+          "description": "Dual steepest-edge weight log-error threshold override above which the\nsolver falls back to Devex pricing.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "use_warm_start": {
+          "default": null,
+          "description": "Warm-start override. This is a diagnostic setting: disabling it forces\nevery solve cold.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
     },
     "PolicyConfig": {
       "additionalProperties": false,
@@ -288,6 +522,41 @@
         }
       ]
     },
+    "PresolveMode": {
+      "description": "Presolve mode for a solver profile.",
+      "oneOf": [
+        {
+          "const": "on",
+          "description": "Presolve enabled.",
+          "type": "string"
+        },
+        {
+          "const": "off",
+          "description": "Presolve disabled.",
+          "type": "string"
+        },
+        {
+          "const": "choose",
+          "description": "Solver decides whether to presolve.",
+          "type": "string"
+        }
+      ]
+    },
+    "PriceStrategy": {
+      "description": "Simplex pricing (column-selection) strategy.",
+      "oneOf": [
+        {
+          "const": "row",
+          "description": "Row-wise pricing.",
+          "type": "string"
+        },
+        {
+          "const": "row_hyper_sparse",
+          "description": "Row-wise pricing with hyper-sparse updates.",
+          "type": "string"
+        }
+      ]
+    },
     "RawClassConfigEntry": {
       "additionalProperties": false,
       "description": "Intermediate serde type for a single per-class scenario scheme in `config.json`.",
@@ -313,24 +582,8 @@
           "type": "array"
         },
         {
-          "description": "Inclusive range shorthand.",
-          "properties": {
-            "from": {
-              "description": "First year (inclusive).",
-              "format": "int32",
-              "type": "integer"
-            },
-            "to": {
-              "description": "Last year (inclusive).",
-              "format": "int32",
-              "type": "integer"
-            }
-          },
-          "required": [
-            "from",
-            "to"
-          ],
-          "type": "object"
+          "$ref": "#/$defs/HistoricalYearRange",
+          "description": "Inclusive range shorthand."
         }
       ],
       "description": "Intermediate serde type for `historical_years` in `config.json`.\n\nHandles two JSON representations via `#[serde(untagged)]`:\n- Array: `[1940, 1953, 1971]` → [`RawHistoricalYearsConfig::List`]\n- Object: `{\"from\": 1940, \"to\": 2010}` → [`RawHistoricalYearsConfig::Range`]\n\nThe `List` variant must be declared first so serde tries it before `Range`\n(an integer array is tried before an object)."
@@ -436,6 +689,21 @@
         }
       },
       "type": "object"
+    },
+    "ScaleStrategy": {
+      "description": "LP constraint-matrix scaling strategy.",
+      "oneOf": [
+        {
+          "const": "off",
+          "description": "No scaling.",
+          "type": "string"
+        },
+        {
+          "const": "solver_scaling",
+          "description": "Solver-managed scaling.",
+          "type": "string"
+        }
+      ]
     },
     "SelectionMethod": {
       "description": "Row-selection method and its method-specific parameters.\n\nInternally tagged on `method`; each variant carries only the fields it uses,\nso supplying a parameter that does not belong to the chosen method is a\nload-time error under `deny_unknown_fields`, and a misspelled `method` is an\n`unknown variant` error at parse time.",
@@ -608,14 +876,27 @@
           ],
           "default": null,
           "description": "Scenario source configuration for the post-training simulation forward pass.\nWhen absent, falls back to the training scenario source."
+        },
+        "solver": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PhaseSolverProfileConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Simulation solver profile. Absent leaves the phase's built-in\ntuned profile."
         }
       },
       "type": "object"
     },
     "StoppingRuleConfig": {
-      "description": "Deserialized configuration for one entry in `training.stopping_rules[]`.\n\nUses a `\"type\"` discriminator field (internally tagged) with `snake_case`\nvariant names matching the JSON schema.\n\nThe `GracefulShutdown` rule has no JSON representation — it is injected at\nruntime by `StoppingRuleSet` construction and is never deserialized.\n\n# Examples\n\n```\nuse cobre_io::config::StoppingRuleConfig;\n\nlet json = r#\"{\"type\": \"iteration_limit\", \"limit\": 100}\"#;\nlet rule: StoppingRuleConfig = serde_json::from_str(json).unwrap();\nassert!(matches!(rule, StoppingRuleConfig::IterationLimit { limit: 100 }));\n```",
+      "description": "Deserialized configuration for one entry in `training.stopping_rules[]`.\n\nUses a `\"type\"` discriminator field (internally tagged) with `snake_case`\nvariant names matching the JSON schema. `deny_unknown_fields` makes a\nparameter belonging to a different rule type a load-time error rather\nthan a silently ignored key.\n\nThe `GracefulShutdown` rule has no JSON representation — it is injected at\nruntime by `StoppingRuleSet` construction and is never deserialized.\n\n# Examples\n\n```\nuse cobre_io::config::StoppingRuleConfig;\n\nlet json = r#\"{\"type\": \"iteration_limit\", \"limit\": 100}\"#;\nlet rule: StoppingRuleConfig = serde_json::from_str(json).unwrap();\nassert!(matches!(rule, StoppingRuleConfig::IterationLimit { limit: 100 }));\n```",
       "oneOf": [
         {
+          "additionalProperties": false,
           "description": "Stop after a fixed number of iterations. **Mandatory** — every rule set must\ncontain at least one `iteration_limit` rule.",
           "properties": {
             "limit": {
@@ -636,6 +917,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Stop after a wall-clock time limit.",
           "properties": {
             "seconds": {
@@ -655,6 +937,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Stop when the lower bound stalls (relative improvement falls below tolerance).",
           "properties": {
             "iterations": {
@@ -681,6 +964,7 @@
           "type": "object"
         },
         {
+          "additionalProperties": false,
           "description": "Stop when both the bound and simulated policy costs have stabilized.",
           "properties": {
             "bound_tol": {
@@ -755,6 +1039,15 @@
             "null"
           ]
         },
+        "parallelism": {
+          "$ref": "#/$defs/ParallelismConfig",
+          "default": {
+            "backward_scheduler": {
+              "method": "trial_point"
+            }
+          },
+          "description": "Parallel-execution settings."
+        },
         "scenario_source": {
           "anyOf": [
             {
@@ -770,10 +1063,12 @@
         "solver": {
           "$ref": "#/$defs/TrainingSolverConfig",
           "default": {
+            "backward": null,
+            "forward": null,
             "retry_max_attempts": 5,
             "retry_time_budget_seconds": 30.0
           },
-          "description": "LP solver retry settings."
+          "description": "LP solver retry settings and optional per-phase solver profiles."
         },
         "stopping_mode": {
           "default": "any",
@@ -804,8 +1099,32 @@
     },
     "TrainingSolverConfig": {
       "additionalProperties": false,
-      "description": "LP solver retry settings (`config.json → training.solver`).",
+      "description": "LP solver settings (`config.json → training.solver`): retry policy plus\noptional per-phase solver profiles.",
       "properties": {
+        "backward": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PhaseSolverProfileConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Backward-pass solver profile. Absent leaves the phase's built-in\ntuned profile."
+        },
+        "forward": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PhaseSolverProfileConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Forward-pass solver profile. Absent leaves the phase's built-in\ntuned profile."
+        },
         "retry_max_attempts": {
           "default": 5,
           "description": "Maximum solver retry attempts before propagating a hard error.",
@@ -900,6 +1219,7 @@
     "modeling": {
       "$ref": "#/$defs/ModelingConfig",
       "default": {
+        "cost_scale_factor": null,
         "inflow_non_negativity": {
           "method": "penalty"
         }
@@ -928,7 +1248,8 @@
         "enabled": false,
         "io_channel_capacity": 64,
         "num_scenarios": 2000,
-        "scenario_source": null
+        "scenario_source": null,
+        "solver": null
       },
       "description": "Post-training simulation settings."
     },

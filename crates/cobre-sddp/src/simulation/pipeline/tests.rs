@@ -26,6 +26,7 @@ use crate::{
         extraction::EntityCounts,
         state::{SimulationInputs, SimulationState},
     },
+    solve::solver_phase::Phase,
     test_support,
     workspace::{BackwardAccumulators, CapturedBasis, ScratchBuffers, SolverWorkspace},
 };
@@ -48,6 +49,42 @@ where
 {
     let num_stages = training_ctx.horizon.num_stages();
     let mut state = SimulationState::new(num_stages);
+    let mut inputs = SimulationInputs {
+        workspaces,
+        ctx,
+        fcf,
+        training_ctx,
+        config,
+        output,
+        frozen_templates,
+        stage_bases,
+        comm,
+    };
+    state.run(&mut inputs)
+}
+
+/// Identical to [`run_simulate`], but installs `profile` via `set_profile`
+/// before `run()` — exercises the resolved-profile threading mechanism.
+// A params struct would churn every call site; the wide arity is deliberate.
+#[allow(clippy::too_many_arguments)]
+fn run_simulate_with_profile<S, C: cobre_comm::Communicator>(
+    workspaces: &mut [SolverWorkspace<S>],
+    ctx: &StageContext<'_>,
+    fcf: &FutureCostFunction,
+    training_ctx: &TrainingContext<'_>,
+    config: &SimulationConfig,
+    output: SimulationOutputSpec<'_>,
+    frozen_templates: Option<&[cobre_solver::StageTemplate]>,
+    stage_bases: &[Option<CapturedBasis>],
+    comm: &C,
+    profile: cobre_solver::ActiveProfile,
+) -> Result<super::SimulationRunResult, SimulationError>
+where
+    S: cobre_solver::SolverInterface<Profile = cobre_solver::ActiveProfile> + Send,
+{
+    let num_stages = training_ctx.horizon.num_stages();
+    let mut state = SimulationState::new(num_stages);
+    state.set_profile(profile);
     let mut inputs = SimulationInputs {
         workspaces,
         ctx,
@@ -259,7 +296,7 @@ fn minimal_template_1_0() -> StageTemplate {
 fn fixed_solution(objective: f64, theta_val: f64) -> LpSolution {
     let num_cols = 4;
     let mut primal = vec![0.0_f64; num_cols];
-    primal[3] = theta_val; // theta at col 3 (N=1, L=0 → theta = N*(3+L) = 3)
+    primal[3] = theta_val;
     LpSolution {
         objective,
         primal,
@@ -457,6 +494,55 @@ fn zero_energy_conversion(n_hydros: usize, n_stages: usize) -> EnergyConversionS
         n_hydros,
         n_stages,
     )
+}
+
+/// Like `single_workspace`, but sizes the patch buffer and reserves
+/// `load_rhs_buf` for `n_load_buses` stochastic load buses.
+fn single_workspace_with_load_buses(
+    solver: MockSolver,
+    n_load_buses: usize,
+) -> Vec<SolverWorkspace<MockSolver>> {
+    vec![SolverWorkspace {
+        rank: 0,
+        worker_id: 0,
+        solver: ProfiledSolver::new(solver),
+        patch_buf: PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0),
+        current_state: Vec::with_capacity(1),
+        scratch: ScratchBuffers {
+            noise_buf: Vec::new(),
+            inflow_m3s_buf: Vec::new(),
+            lag_matrix_buf: Vec::new(),
+            par_inflow_buf: Vec::new(),
+            eta_floor_buf: Vec::new(),
+            zero_targets_buf: Vec::new(),
+            ncs_col_upper_buf: Vec::new(),
+            ncs_col_lower_buf: Vec::new(),
+            ncs_col_indices_buf: Vec::new(),
+            ncs_col_lower_active_buf: Vec::new(),
+            ncs_col_upper_active_buf: Vec::new(),
+            last_ncs_col_start: usize::MAX,
+            ncs_col_upper_extract_buf: Vec::new(),
+            load_rhs_buf: Vec::with_capacity(n_load_buses),
+            row_lower_buf: Vec::new(),
+            z_inflow_rhs_buf: Vec::new(),
+            effective_eta_buf: Vec::new(),
+            unscaled_primal: Vec::new(),
+            unscaled_dual: Vec::new(),
+            lag_accumulator: vec![],
+            lag_weight_accum: 0.0,
+            downstream_accumulator: Vec::new(),
+            downstream_weight_accum: 0.0,
+            downstream_completed_lags: Vec::new(),
+            downstream_n_completed: 0,
+            recon_slot_lookup: Vec::new(),
+            trajectory_costs_buf: Vec::new(),
+            raw_noise_buf: Vec::new(),
+            perm_scratch: Vec::new(),
+        },
+        scratch_basis: Basis::new(0, 0),
+        backward_accum: BackwardAccumulators::default(),
+        worker_timing_buf: WorkerPhaseTimings::default(),
+    }]
 }
 
 /// Wrap a `MockSolver` in a single-workspace slice for `simulate()` calls.
@@ -694,6 +780,7 @@ fn simulation_load_patches_applied() {
     let config = SimulationConfig {
         n_scenarios: 1,
         io_channel_capacity: 4,
+        profile: Phase::Simulation.profile(),
     };
     let state = test_support::state_layout(1, 0);
     let horizon = HorizonMode::Finite {
@@ -708,47 +795,7 @@ fn simulation_load_patches_applied() {
 
     let (tx, _rx) = mpsc::sync_channel(4);
 
-    let mut workspaces = vec![SolverWorkspace {
-        rank: 0,
-        worker_id: 0,
-        solver: ProfiledSolver::new(solver),
-        patch_buf: PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0),
-        current_state: Vec::with_capacity(1),
-        scratch: ScratchBuffers {
-            noise_buf: Vec::new(),
-            inflow_m3s_buf: Vec::new(),
-            lag_matrix_buf: Vec::new(),
-            par_inflow_buf: Vec::new(),
-            eta_floor_buf: Vec::new(),
-            zero_targets_buf: Vec::new(),
-            ncs_col_upper_buf: Vec::new(),
-            ncs_col_lower_buf: Vec::new(),
-            ncs_col_indices_buf: Vec::new(),
-            ncs_col_lower_active_buf: Vec::new(),
-            ncs_col_upper_active_buf: Vec::new(),
-            last_ncs_col_start: usize::MAX,
-            ncs_col_upper_extract_buf: Vec::new(),
-            load_rhs_buf: Vec::with_capacity(n_load_buses),
-            row_lower_buf: Vec::new(),
-            z_inflow_rhs_buf: Vec::new(),
-            effective_eta_buf: Vec::new(),
-            unscaled_primal: Vec::new(),
-            unscaled_dual: Vec::new(),
-            lag_accumulator: vec![],
-            lag_weight_accum: 0.0,
-            downstream_accumulator: Vec::new(),
-            downstream_weight_accum: 0.0,
-            downstream_completed_lags: Vec::new(),
-            downstream_n_completed: 0,
-            recon_slot_lookup: Vec::new(),
-            trajectory_costs_buf: Vec::new(),
-            raw_noise_buf: Vec::new(),
-            perm_scratch: Vec::new(),
-        },
-        scratch_basis: Basis::new(0, 0),
-        backward_accum: BackwardAccumulators::default(),
-        worker_timing_buf: WorkerPhaseTimings::default(),
-    }];
+    let mut workspaces = single_workspace_with_load_buses(solver, n_load_buses);
 
     // load_balance_row_starts[0]=2 (load balance row is row 2 in the template).
     // load_bus_indices=[0] (bus position 0 in the block layout).
@@ -767,6 +814,7 @@ fn simulation_load_patches_applied() {
             base_rows: &base_rows,
             noise_scale: &noise_scale,
             n_hydros: 1,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses,
             load_balance_row_starts: &load_balance_row_starts,
             load_bus_indices: &load_bus_indices,
@@ -905,6 +953,7 @@ fn simulation_no_load_buses_unchanged() {
     let config = SimulationConfig {
         n_scenarios: 1,
         io_channel_capacity: 4,
+        profile: Phase::Simulation.profile(),
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -930,6 +979,7 @@ fn simulation_no_load_buses_unchanged() {
             base_rows: &base_rows,
             noise_scale: &[],
             n_hydros: 0,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
@@ -1009,6 +1059,139 @@ fn simulation_no_load_buses_unchanged() {
     );
 }
 
+/// A profile installed via `set_profile` before `run()` is the one
+/// `ProfiledSolver::current_profile()` reports afterwards.
+#[test]
+fn simulation_state_set_profile_reaches_current_profile_after_run() {
+    let n_stages = 1;
+    let templates = vec![minimal_template_1_0()];
+    let base_rows = vec![0usize];
+
+    let stochastic = make_stochastic_context(n_stages);
+    let state = test_support::state_layout(1, 0);
+    let fcf = FutureCostFunction::new(n_stages, 1, 1, 10, &vec![0; n_stages]);
+    let config = SimulationConfig {
+        n_scenarios: 1,
+        io_channel_capacity: 4,
+        profile: Phase::Simulation.profile(),
+    };
+    let horizon = HorizonMode::Finite {
+        num_stages: n_stages,
+    };
+    let initial_state = vec![50.0_f64];
+
+    let solution = fixed_solution(100.0, 30.0);
+    let solver = MockSolver::always_ok(solution);
+    let comm = StubComm { rank: 0, size: 1 };
+    let entity_counts = entity_counts_1_hydro();
+
+    let (tx, _rx) = mpsc::sync_channel(4);
+
+    let hprod = hydro_productivities_1hydro(n_stages);
+    let ec = zero_energy_conversion(1, n_stages);
+    let mut workspaces = single_workspace(solver);
+
+    let resolved =
+        Phase::Simulation.resolve_profile(Some(&cobre_io::config::PhaseSolverProfileConfig {
+            dual_edge_weight: None,
+            scale: Some(cobre_io::config::ScaleStrategy::SolverScaling),
+            price: None,
+            primal_feasibility_tolerance: None,
+            dual_feasibility_tolerance: None,
+            presolve: None,
+            simplex_update_limit: None,
+            cost_perturbation: None,
+            refactor_error_tolerance: None,
+            factor_pivot_threshold: None,
+            use_warm_start: None,
+            steepest_edge_devex_fallback_threshold: None,
+        }));
+
+    run_simulate_with_profile(
+        &mut workspaces,
+        &StageContext {
+            geometry_per_stage: &[],
+            templates: &templates,
+            base_rows: &base_rows,
+            noise_scale: &[],
+            n_hydros: 0,
+            cost_scale_factor: 1_000_000.0,
+            n_load_buses: 0,
+            load_balance_row_starts: &[],
+            load_bus_indices: &[],
+            block_counts_per_stage: &[1],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+            ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
+            discount_factors: &[],
+            cumulative_discount_factors: &[],
+            stage_lag_transitions: &[],
+            noise_group_ids: &[],
+            downstream_par_order: 0,
+        },
+        &fcf,
+        &TrainingContext {
+            horizon: &horizon,
+            state: &state,
+            cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
+            study_dims: &test_support::study_dims(),
+            inflow_method: &InflowNonNegativityMethod::None,
+            stochastic: &stochastic,
+            initial_state: &initial_state,
+            inflow_scheme: SamplingScheme::InSample,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            stages: &[],
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+            recent_accum_seed: &[],
+            recent_weight_seed: 0.0,
+            dcs: None,
+        },
+        &config,
+        SimulationOutputSpec {
+            result_tx: &tx,
+            zeta_per_stage: &[],
+            block_hours_per_stage: &[],
+            entity_counts: &entity_counts,
+            generic_constraint_row_entries: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            pumping_col_starts: &[],
+            n_pumping: 0,
+            geometry_per_stage: &[],
+            pumping_consumption_mw_per_m3s: &[],
+            contract_prices_per_stage: &[],
+            contract_is_import: &[],
+            ncs_entity_ids_per_stage: &[],
+            diversion_upstream: &HashMap::new(),
+            hydro_productivities_per_stage: &hprod,
+            energy_conversion: &ec,
+            hydro_min_storage_hm3: &[0.0],
+            event_sender: None,
+        },
+        None,
+        &[],
+        &comm,
+        resolved,
+    )
+    .unwrap();
+
+    assert_eq!(
+        workspaces[0].solver.current_profile(),
+        &resolved,
+        "the profile installed via set_profile must be the one stored on \
+         current_profile after run()"
+    );
+}
+
 /// When load noise is present,
 /// `noise_buf` still contains only inflow values (not contaminated by load noise).
 ///
@@ -1049,6 +1232,7 @@ fn simulation_inflow_extraction_unaffected() {
     let config = SimulationConfig {
         n_scenarios: 1,
         io_channel_capacity: 4,
+        profile: Phase::Simulation.profile(),
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -1062,47 +1246,7 @@ fn simulation_inflow_extraction_unaffected() {
 
     let (tx, _rx) = mpsc::sync_channel(4);
 
-    let mut workspaces = vec![SolverWorkspace {
-        rank: 0,
-        worker_id: 0,
-        solver: ProfiledSolver::new(solver),
-        patch_buf: PatchBuffer::new(1, 0, n_load_buses, 1, 0, 0, 0),
-        current_state: Vec::with_capacity(1),
-        scratch: ScratchBuffers {
-            noise_buf: Vec::new(),
-            inflow_m3s_buf: Vec::new(),
-            lag_matrix_buf: Vec::new(),
-            par_inflow_buf: Vec::new(),
-            eta_floor_buf: Vec::new(),
-            zero_targets_buf: Vec::new(),
-            ncs_col_upper_buf: Vec::new(),
-            ncs_col_lower_buf: Vec::new(),
-            ncs_col_indices_buf: Vec::new(),
-            ncs_col_lower_active_buf: Vec::new(),
-            ncs_col_upper_active_buf: Vec::new(),
-            last_ncs_col_start: usize::MAX,
-            ncs_col_upper_extract_buf: Vec::new(),
-            load_rhs_buf: Vec::with_capacity(n_load_buses),
-            row_lower_buf: Vec::new(),
-            z_inflow_rhs_buf: Vec::new(),
-            effective_eta_buf: Vec::new(),
-            unscaled_primal: Vec::new(),
-            unscaled_dual: Vec::new(),
-            lag_accumulator: vec![],
-            lag_weight_accum: 0.0,
-            downstream_accumulator: Vec::new(),
-            downstream_weight_accum: 0.0,
-            downstream_completed_lags: Vec::new(),
-            downstream_n_completed: 0,
-            recon_slot_lookup: Vec::new(),
-            trajectory_costs_buf: Vec::new(),
-            raw_noise_buf: Vec::new(),
-            perm_scratch: Vec::new(),
-        },
-        scratch_basis: Basis::new(0, 0),
-        backward_accum: BackwardAccumulators::default(),
-        worker_timing_buf: WorkerPhaseTimings::default(),
-    }];
+    let mut workspaces = single_workspace_with_load_buses(solver, n_load_buses);
 
     let load_balance_row_starts = vec![2usize];
     let load_bus_indices = vec![0usize];
@@ -1119,6 +1263,7 @@ fn simulation_inflow_extraction_unaffected() {
             base_rows: &base_rows,
             noise_scale: &noise_scale,
             n_hydros: 1,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses,
             load_balance_row_starts: &load_balance_row_starts,
             load_bus_indices: &load_bus_indices,
@@ -1467,6 +1612,7 @@ fn simulation_truncation_clamps_negative_inflow_noise() {
     let config = SimulationConfig {
         n_scenarios: 4,
         io_channel_capacity: 16,
+        profile: Phase::Simulation.profile(),
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -1491,6 +1637,7 @@ fn simulation_truncation_clamps_negative_inflow_noise() {
             base_rows: &base_rows,
             noise_scale: &noise_scale,
             n_hydros: 1,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
@@ -1597,6 +1744,7 @@ fn simulation_none_method_produces_raw_negative_noise() {
     let config = SimulationConfig {
         n_scenarios: 4,
         io_channel_capacity: 16,
+        profile: Phase::Simulation.profile(),
     };
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
@@ -1621,6 +1769,7 @@ fn simulation_none_method_produces_raw_negative_noise() {
             base_rows: &base_rows,
             noise_scale: &noise_scale,
             n_hydros: 1,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
@@ -1733,7 +1882,6 @@ mod dcs_simulation {
 
     use crate::inflow_method::InflowNonNegativityMethod;
     use crate::lp_builder::{PatchBuffer, StageGeometry};
-    use crate::simulation::extraction::EntityCounts;
     use crate::simulation::types::{SimulationCostResult, SimulationStageResult};
     use crate::test_support;
     use crate::workspace::{SolverWorkspace, WorkspaceSizing};
@@ -1905,16 +2053,7 @@ mod dcs_simulation {
         let stochastic = super::make_stochastic_context(1);
         let horizon = HorizonMode::Finite { num_stages: 1 };
         let fcf = sim_pool();
-        let entity_counts = EntityCounts {
-            hydro_ids: vec![1],
-            hydro_productivities: vec![1.0],
-            thermal_ids: vec![],
-            line_ids: vec![],
-            bus_ids: vec![],
-            pumping_station_ids: vec![],
-            contract_ids: vec![],
-            non_controllable_ids: vec![],
-        };
+        let entity_counts = super::entity_counts_1_hydro();
         let hprod = vec![vec![1.0]];
         let zero_ec = EnergyConversion {
             equivalent_productivity_mw_per_m3s: 0.0,
@@ -1939,6 +2078,7 @@ mod dcs_simulation {
             base_rows: &base_rows,
             noise_scale: &[1.0],
             n_hydros: 1,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
@@ -2045,7 +2185,6 @@ mod dcs_simulation {
         let (frozen_imm, frozen) = run_one_sim_stage(None, &all_cuts);
         let (dcs_imm, dcs) = run_one_sim_stage(Some(dcs_params()), &all_cuts);
 
-        // Returned immediate cost (the f64) must match within 1e-9.
         assert!(
             (frozen_imm - dcs_imm).abs() < 1e-9,
             "immediate cost: frozen {frozen_imm} vs DCS {dcs_imm}"
@@ -2072,7 +2211,7 @@ mod dcs_simulation {
             dc.total_cost
         );
         assert!(
-            (dc.future_cost - 4.0 * super::super::COST_SCALE_FACTOR).abs() < 1e-3,
+            (dc.future_cost - 4.0 * crate::DEFAULT_COST_SCALE_FACTOR).abs() < 1e-3,
             "DCS future_cost must reflect the binding cut theta=4, got {}",
             dc.future_cost
         );
@@ -2482,6 +2621,7 @@ mod anticipated_ring_matches_forward_propagation {
             base_rows: &base_rows,
             noise_scale: &[],
             n_hydros: 0,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],

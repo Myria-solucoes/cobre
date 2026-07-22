@@ -20,6 +20,7 @@ use crate::{
         SimulationOutputSpec, error::SimulationError, pipeline::SimulationRunResult,
         types::SimulationScenarioResult,
     },
+    solve::solver_phase::SolverProfiles,
     training::{TrainingOutcome, TrainingResult},
     workspace::{CapturedBasis, SolverWorkspace, WorkspacePool, WorkspaceSizing},
 };
@@ -44,6 +45,75 @@ impl StudySetup {
         solver_factory: impl Fn() -> Result<S, SolverError>,
         event_sender: Option<Sender<TrainingEvent>>,
         shutdown_flag: Option<&Arc<AtomicBool>>,
+    ) -> Result<TrainingOutcome, SddpError>
+    where
+        S: SolverInterface<Profile = ActiveProfile> + Send,
+    {
+        let solver_profiles = SolverProfiles {
+            forward: self.forward_profile,
+            backward: self.backward_profile,
+            backward_scheduler: self.backward_scheduler,
+            hardest_first_claim_order: self.hardest_first_claim_order,
+        };
+        self.train_inner(
+            solver,
+            comm,
+            n_threads,
+            solver_factory,
+            event_sender,
+            shutdown_flag,
+            solver_profiles,
+        )
+    }
+
+    /// Test-support hook: [`Self::train`] with an explicit [`SolverProfiles`]
+    /// override, bypassing the config-resolved `self.forward_profile`/
+    /// `self.backward_profile`. Exists to force a low `simplex_iteration_limit`
+    /// for the retry-armed determinism gate — a value the config surface
+    /// deliberately does not expose (see `PhaseSolverProfileConfig`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `SddpError::Infeasible`, `SddpError::Solver`, or
+    /// `SddpError::Communication` on LP, solver, or MPI failure.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn train_with_solver_profiles<S, C: Communicator>(
+        &mut self,
+        solver: &mut S,
+        comm: &C,
+        n_threads: usize,
+        solver_factory: impl Fn() -> Result<S, SolverError>,
+        solver_profiles: SolverProfiles,
+    ) -> Result<TrainingOutcome, SddpError>
+    where
+        S: SolverInterface<Profile = ActiveProfile> + Send,
+    {
+        self.train_inner(
+            solver,
+            comm,
+            n_threads,
+            solver_factory,
+            None,
+            None,
+            solver_profiles,
+        )
+    }
+
+    // Rationale: `solver_profiles` splits `train`'s config-resolved default from
+    // `train_with_solver_profiles`'s explicit override; both public callers stay
+    // at or below the pedantic threshold by fixing `event_sender`/`shutdown_flag`
+    // (the test-support caller has no use for either), so only this shared,
+    // private assembly step carries the full parameter count.
+    #[allow(clippy::too_many_arguments)]
+    fn train_inner<S, C: Communicator>(
+        &mut self,
+        solver: &mut S,
+        comm: &C,
+        n_threads: usize,
+        solver_factory: impl Fn() -> Result<S, SolverError>,
+        event_sender: Option<Sender<TrainingEvent>>,
+        shutdown_flag: Option<&Arc<AtomicBool>>,
+        solver_profiles: SolverProfiles,
     ) -> Result<TrainingOutcome, SddpError>
     where
         S: SolverInterface<Profile = ActiveProfile> + Send,
@@ -78,6 +148,7 @@ impl StudySetup {
             geometry_per_stage: &self.stage_data.stage_templates.geometry_per_stage,
             noise_scale: &self.stage_data.stage_templates.noise_scale,
             n_hydros: self.stage_data.stage_templates.n_hydros,
+            cost_scale_factor: self.stage_data.stage_templates.cost_scale_factor,
             n_load_buses: self.stage_data.stage_templates.n_load_buses,
             load_balance_row_starts: &self.stage_data.stage_templates.load_balance_row_starts,
             load_bus_indices: &self.stage_data.stage_templates.load_bus_indices,
@@ -137,6 +208,7 @@ impl StudySetup {
             comm,
             solver_factory,
             warm_start_basis_cache,
+            solver_profiles,
         )
     }
 

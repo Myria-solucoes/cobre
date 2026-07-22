@@ -214,6 +214,11 @@ pub(crate) struct ForwardPassState {
     /// Cross-rank error-reconciliation scratch, reused each iteration by the
     /// pre-`sync_forward` reconcile so that reconciliation never allocates.
     pub(crate) reconcile_scratch: [i32; 1],
+
+    /// Resolved forward-phase solver profile applied at [`Self::run`] entry.
+    /// Defaults to `Phase::Forward.profile()`; override with
+    /// [`Self::set_profile`] before the first `run()` call.
+    profile: ActiveProfile,
 }
 
 impl ForwardPassState {
@@ -245,7 +250,14 @@ impl ForwardPassState {
             scenario_costs: Vec::with_capacity(max_local_fwd),
             stage_stats,
             reconcile_scratch: [0_i32; 1],
+            profile: Phase::Forward.profile(),
         }
+    }
+
+    /// Overrides the forward-phase solver profile applied at [`Self::run`]
+    /// entry (default: `Phase::Forward.profile()`). Call before `run()`.
+    pub(crate) fn set_profile(&mut self, profile: ActiveProfile) {
+        self.profile = profile;
     }
 
     /// Execute the forward pass for one training iteration on this rank.
@@ -365,7 +377,7 @@ impl ForwardPassState {
         // Apply the forward-phase solver profile to every workspace. `set_profile`
         // is delta-tracked: it issues solver-option FFI calls only for fields that
         // differ from each solver's current state.
-        let forward_profile = Phase::Forward.profile();
+        let forward_profile = self.profile;
         for ws in inputs.workspaces.iter_mut() {
             ws.solver.set_profile(&forward_profile);
             debug_assert!(
@@ -650,22 +662,16 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
             // Seed (or zero) the lag accumulator at trajectory start.
             if t == 0 {
                 if params.recent_accum_seed.is_empty() {
-                    ws.scratch.lag_accumulator.iter_mut().for_each(|v| *v = 0.0);
+                    ws.scratch.lag_accumulator.fill(0.0);
                     ws.scratch.lag_weight_accum = 0.0;
                 } else {
                     ws.scratch.lag_accumulator[..params.recent_accum_seed.len()]
                         .copy_from_slice(params.recent_accum_seed);
                     ws.scratch.lag_weight_accum = params.recent_weight_seed;
                 }
-                ws.scratch
-                    .downstream_accumulator
-                    .iter_mut()
-                    .for_each(|v| *v = 0.0);
+                ws.scratch.downstream_accumulator.fill(0.0);
                 ws.scratch.downstream_weight_accum = 0.0;
-                ws.scratch
-                    .downstream_completed_lags
-                    .iter_mut()
-                    .for_each(|v| *v = 0.0);
+                ws.scratch.downstream_completed_lags.fill(0.0);
                 ws.scratch.downstream_n_completed = 0;
             }
 
@@ -1173,6 +1179,7 @@ mod tests {
             base_rows: &fx.base_rows,
             noise_scale: &fx.noise_scale,
             n_hydros: 1,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
@@ -1238,6 +1245,100 @@ mod tests {
         );
     }
 
+    /// A profile installed via `set_profile` before `run()` is the one
+    /// `ProfiledSolver::current_profile()` reports afterwards.
+    #[test]
+    fn forward_pass_state_set_profile_reaches_current_profile_after_run() {
+        let mut fx = ForwardFixture::new();
+        let ctx = StageContext {
+            geometry_per_stage: &[],
+            templates: &fx.templates,
+            base_rows: &fx.base_rows,
+            noise_scale: &fx.noise_scale,
+            n_hydros: 1,
+            cost_scale_factor: 1_000_000.0,
+            n_load_buses: 0,
+            load_balance_row_starts: &[],
+            load_bus_indices: &[],
+            block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+            ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
+            discount_factors: &[],
+            cumulative_discount_factors: &[],
+            stage_lag_transitions: &[],
+            noise_group_ids: &[],
+            downstream_par_order: 0,
+        };
+        let study_dims = study_dims();
+        let training_ctx = TrainingContext {
+            horizon: &fx.horizon,
+            state: &fx.state,
+            cut_state_layouts: &[],
+            study_dims: &study_dims,
+            inflow_method: &InflowNonNegativityMethod::None,
+            stochastic: &fx.stochastic,
+            initial_state: &fx.initial_state,
+            inflow_scheme: SamplingScheme::InSample,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            stages: &fx.stages,
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+            recent_accum_seed: &[],
+            recent_weight_seed: 0.0,
+            dcs: None,
+        };
+
+        let mut state = ForwardPassState::new(1, fx.n_stages, fx.n_scenarios);
+        let resolved =
+            Phase::Forward.resolve_profile(Some(&cobre_io::config::PhaseSolverProfileConfig {
+                dual_edge_weight: Some(cobre_io::config::DualEdgeWeight::Dantzig),
+                scale: None,
+                price: None,
+                primal_feasibility_tolerance: None,
+                dual_feasibility_tolerance: None,
+                presolve: None,
+                simplex_update_limit: None,
+                cost_perturbation: None,
+                refactor_error_tolerance: None,
+                factor_pivot_threshold: None,
+                use_warm_start: None,
+                steepest_edge_devex_fallback_threshold: None,
+            }));
+        state.set_profile(resolved);
+        let mut inputs = ForwardPassInputs {
+            workspaces: &mut fx.workspaces,
+            basis_store: &mut fx.basis_store,
+            ctx: &ctx,
+            frozen: &fx.templates,
+            fcf: &fx.fcf,
+            training_ctx: &training_ctx,
+            records: &mut fx.records,
+            local_forward_passes: fx.n_scenarios,
+            total_forward_passes: fx.n_scenarios,
+            iteration: 1,
+            fwd_offset: 0,
+            event_sender: None,
+        };
+
+        let _ = state.run(&mut inputs).expect("forward pass must not error");
+
+        assert_eq!(
+            inputs.workspaces[0].solver.current_profile(),
+            &resolved,
+            "the profile installed via set_profile must be the one stored on \
+             current_profile after run()"
+        );
+    }
+
     /// Verify that `run_forward_worker` produces exactly `n_local` trajectory
     /// costs for the worker's scenario partition.
     #[test]
@@ -1249,6 +1350,7 @@ mod tests {
             base_rows: &fx.base_rows,
             noise_scale: &fx.noise_scale,
             n_hydros: 1,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
@@ -1380,6 +1482,7 @@ mod tests {
             base_rows: &fx.base_rows,
             noise_scale: &fx.noise_scale,
             n_hydros: 1,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
@@ -1514,6 +1617,7 @@ mod tests {
             base_rows: &fx.base_rows,
             noise_scale: &fx.noise_scale,
             n_hydros: 1,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],

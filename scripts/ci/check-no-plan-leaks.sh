@@ -23,14 +23,41 @@
 #                          distinct from the "W2 reset" phase form above. Added
 #                          after a "W-5" tag slipped past the phase-anchored form.
 #
+# Informal plan vocabulary (added after a standards review found these shapes
+# shipped while evading the formal-token patterns above):
+#   \b[Tt]he (ticket|campaign)\b — prose references to the driving plan artefact.
+#   \b[Dd]ecision [A-Z][0-9]+\b  — anchored plan-decision ids ("decision D11").
+#                          The "decision" anchor is what disambiguates from the
+#                          bare-D<n> collision documented below.
+#   \bOption [A-Z]\b     — plan-alternative labels ("Option A"). Never collides
+#                          with Rust `Option<T>` (no space before `<`). Name the
+#                          chosen design by its durable invariant instead.
+#   \bFix [0-9]\b        — plan fix-numbering ("Fix 1 — ..."). Test *names*
+#                          carry no such tokens; banners/docs must not either.
+#   \bAC: |\bAC[0-9]\b|\bAC-[0-9] — acceptance-criteria tags ("AC:", "AC1",
+#                          "AC-3"). Deliberately colon/digit-anchored: the bare
+#                          word "AC" stays free for the electrical domain sense
+#                          (AC power flow) that cobre-flow will legitimately use.
+#
+# Section-reference pass (separate stage below, not part of PATTERN):
+#   `§<n>` references are gated UNLESS the same line anchors them to a named
+#   source-of-truth document — an `.md` filename, "spec"/"Spec", or a spec-doc
+#   title word (Structures/Scenarios/Entities) immediately before the `§`.
+#   Anchored spec refs ("internal-structures.md §15", "the spec (§15)",
+#   "Internal Structures §1.9.4", a markdown link whose .md target follows the
+#   §, "the paper's §3.4") are the N3-sanctioned durable form; a bare
+#   "§5" ("design §5", "the §5 rescale") anchors into a gitignored plan doc and
+#   is unrecoverable for a code-alone reader. A new legitimately-anchored doc
+#   title extends SECTION_REF_ALLOW below.
+#
 # NOT gated (lexical collision — caught by review + the epic/plan hygiene sweep,
-# not a regex): owner-decision tokens "D<n>" (D0-D8) are lexically identical to
-# the comment-rule directives D1-D5 (.claude/rules/comments.md), which ARE
+# not a regex): BARE owner-decision tokens "D<n>" (D0-D8) are lexically identical
+# to the comment-rule directives D1-D5 (.claude/rules/comments.md), which ARE
 # legitimately cited inline ("Determinism (D5)"). A bare \bD[0-9]\b gate would
-# false-positive on every such directive citation, so plan D-decisions are
-# stripped by the comment/plan hygiene sweep and review, not this script. The
-# 2-digit deterministic case ids ("D06", "D15") never collide (single-digit
-# gate) and are always allowed.
+# false-positive on every such directive citation, so bare plan D-decisions are
+# stripped by the comment/plan hygiene sweep and review, not this script (the
+# "decision D<n>"-anchored form IS gated above). The 2-digit deterministic case
+# ids ("D06", "D15") never collide (single-digit gate) and are always allowed.
 #
 # Scope: production source under crates/*/src/ (including the umbrella
 #   crates/cobre/src and the reserved stub crates), test/bench source under
@@ -43,7 +70,9 @@
 # cfg(test) tail-block exclusion (borrowed from check-infra-genericity.sh):
 #   For each .rs file under crates/*/src/, scanning stops at the first line
 #   matching `#[cfg(test)]`; all subsequent lines until end-of-file are
-#   considered test scope and skipped. Plan refs in test names and test-only
+#   considered test scope and skipped. Sibling test files (`tests.rs`, the
+#   `#[cfg(test)] mod tests;` sibling-file convention) carry no in-file
+#   `#[cfg(test)]` line, so they are excluded by filename instead. Plan refs in test names and test-only
 #   comments are out of the user-facing-artifact scope, so the gate truncates
 #   each .rs file at the test-module boundary before applying PATTERN. This
 #   mirrors the awk pre-filter mechanism in check-infra-genericity.sh.
@@ -70,7 +99,13 @@ source "${REPO_ROOT}/scripts/ci/lib/comment_scan.sh"
 command -v cs_emit_production_lines >/dev/null \
     || { echo "FATAL: scripts/ci/lib/comment_scan.sh did not load its helpers." >&2; exit 2; }
 
-readonly PATTERN='[Ee]pic[ -][0-9]+|[Tt]icket[ -][0-9]+|T0[0-9][0-9]|\bsprint\b|\bF[0-9]?-[0-9]{2,}\b|\bW[0-9]+ (reset|rebake|workstream|phase)\b|\bW-[0-9]+\b'
+readonly PATTERN='[Ee]pic[ -][0-9]+|[Tt]icket[ -][0-9]+|T0[0-9][0-9]|\bsprint\b|\bF[0-9]?-[0-9]{2,}\b|\bW[0-9]+ (reset|rebake|workstream|phase)\b|\bW-[0-9]+\b|\b[Tt]he (ticket|campaign)\b|\b[Dd]ecision [A-Z][0-9]+\b|\bOption [A-Z]\b|\bFix [0-9]\b|\bAC: |\bAC[0-9]\b|\bAC-[0-9]'
+
+# Section-reference pass: flag `§<n>` unless the line anchors it to a named
+# source-of-truth document (see header). Two-stage because "allowed unless
+# anchored" is a negative match grep -E alone cannot express in PATTERN.
+readonly SECTION_REF='§[0-9]'
+readonly SECTION_REF_ALLOW='\.md|([Ss]pec|Structures|Scenarios|Entities|Principles|Model|paper.s)[] )]*[ (]?§'
 
 # .rs source directories: scanned per-file with the cfg(test) tail-block
 # exclusion (see header). The umbrella crates/cobre/src and the reserved stub
@@ -126,7 +161,12 @@ for dir in "${SCAN_DIRS[@]}"; do
         if [[ -n "$matches" ]]; then
             violations+="${matches}"$'\n'
         fi
-    done < <(find "$dir" -name "*.rs" -print0)
+        section_matches=$(cs_emit_production_lines "$file" \
+            | grep -E "$SECTION_REF" | grep -vE "$SECTION_REF_ALLOW") || true
+        if [[ -n "$section_matches" ]]; then
+            violations+="${section_matches}"$'\n'
+        fi
+    done < <(find "$dir" -name "*.rs" -not -name "tests.rs" -print0)
 done
 
 # Non-.rs targets: plain whole-file recursive grep. *.min.js files are
@@ -136,6 +176,12 @@ file_violations=$(grep -rnE "$PATTERN" \
     || true)
 if [[ -n "$file_violations" ]]; then
     violations+="${file_violations}"$'\n'
+fi
+file_section_violations=$(grep -rnE "$SECTION_REF" \
+    --exclude='*.min.js' "${SCAN_FILES[@]}" 2>/dev/null \
+    | grep -vE "$SECTION_REF_ALLOW" || true)
+if [[ -n "$file_section_violations" ]]; then
+    violations+="${file_section_violations}"$'\n'
 fi
 
 # Strip the trailing newline accumulated above.
@@ -155,6 +201,12 @@ if [[ -n "$violations" ]]; then
     echo "rot, keep the invariant: replace the plan ID with the behavioural"
     echo "phrase it tags and leave the surrounding invariant intact — never"
     echo "delete the comment line."
+    echo ""
+    echo "For informal plan vocabulary (Option A, decision D11, AC:, Fix 1,"
+    echo "the ticket, bare §5): name the design by its durable invariant"
+    echo "instead of the plan label. A §-reference is allowed only when the"
+    echo "same line names its source-of-truth document (an .md filename or"
+    echo "spec-doc title); extend SECTION_REF_ALLOW for a new legitimate one."
     exit 1
 fi
 

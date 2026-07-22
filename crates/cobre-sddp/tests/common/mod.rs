@@ -9,13 +9,18 @@ use std::path::Path;
 use std::sync::mpsc;
 
 use cobre_comm::{CommData, CommError, Communicator, ReduceOp};
-use cobre_core::scenario::SamplingScheme;
+use cobre_core::System;
+use cobre_core::scenario::{SamplingScheme, ScenarioSource};
+use cobre_io::Config;
 use cobre_sddp::{
-    SimulationScenarioResult, StudySetup, hydro_models::PrepareHydroModelsResult,
-    setup::StudyParams,
+    SimulationScenarioResult, StudySetup,
+    hydro_models::{PrepareHydroModelsResult, prepare_hydro_models},
+    setup::{StudyParams, prepare_stochastic},
 };
 use cobre_solver::ActiveSolver;
-use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
+use cobre_stochastic::{
+    ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context,
+};
 
 pub mod anticipated_structural_assertions;
 pub mod builders;
@@ -69,16 +74,71 @@ impl Communicator for StubComm {
     }
 }
 
+/// `size() == 2` sibling of [`StubComm`]: every collective writes only this
+/// rank's own slot (`recv[displs[0]..displs[0] + send.len()]`), mirroring
+/// `state_exchange.rs`'s own `Rank1Of2` test pattern rather than echoing rank
+/// 0's data into rank 1's slot. Faithful — not a dishonest tautology — only
+/// when the caller trains with `forward_passes == 1`: `RankDistribution`
+/// (`base_fwd=0, remainder=1` for `num_ranks=2`) assigns rank 0 the sole real
+/// forward pass and rank 1 exactly zero, so the zero contribution this stub
+/// leaves unwritten IS what a genuine rank 1 would also send. Every caller
+/// must keep its own fixture at `forward_passes == 1`.
+pub struct Rank0Of2;
+
+impl Communicator for Rank0Of2 {
+    fn allgatherv<T: CommData>(
+        &self,
+        send: &[T],
+        recv: &mut [T],
+        _counts: &[usize],
+        displs: &[usize],
+    ) -> Result<(), CommError> {
+        let start = displs[0];
+        recv[start..start + send.len()].clone_from_slice(send);
+        Ok(())
+    }
+
+    fn allreduce<T: CommData>(
+        &self,
+        send: &[T],
+        recv: &mut [T],
+        _op: ReduceOp,
+    ) -> Result<(), CommError> {
+        recv.clone_from_slice(send);
+        Ok(())
+    }
+
+    fn broadcast<T: CommData>(&self, _buf: &mut [T], _root: usize) -> Result<(), CommError> {
+        Ok(())
+    }
+
+    fn barrier(&self) -> Result<(), CommError> {
+        Ok(())
+    }
+
+    fn rank(&self) -> usize {
+        0
+    }
+
+    fn size(&self) -> usize {
+        2
+    }
+
+    fn abort(&self, error_code: i32) -> ! {
+        std::process::exit(error_code)
+    }
+}
+
 /// Build a [`StudySetup`] for a case directory.
 ///
 /// The caller's `prepare_hydro_models` has already folded the productivity
 /// override into `hydro_models`; this helper does no parquet I/O.
 pub fn build_setup_for_case(
     _case_dir: &Path,
-    config: &cobre_io::Config,
-    system: &cobre_core::System,
-    stochastic: cobre_stochastic::StochasticContext,
-    hydro_models: cobre_sddp::PrepareHydroModelsResult,
+    config: &Config,
+    system: &System,
+    stochastic: StochasticContext,
+    hydro_models: PrepareHydroModelsResult,
 ) -> StudySetup {
     let sentinel = Path::new("config.json");
     let training_source = config
@@ -102,12 +162,35 @@ pub fn build_setup_for_case(
     .expect("StudySetup::from_broadcast_params must build")
 }
 
+/// Build a fresh [`StudySetup`] from `case_dir`'s config: parse, apply
+/// `mutate` to the config, load the case, prepare the stochastic context
+/// (seed `42`, [`ScenarioSource::default`]), prepare hydro models, then
+/// build via [`build_setup_for_case`] — the pipeline shared by every
+/// `mpi_wire.rs` determinism gate's `fresh_setup`.
+pub fn fresh_setup_with(case_dir: &Path, mutate: impl FnOnce(&mut Config)) -> StudySetup {
+    let config_path = case_dir.join("config.json");
+    let mut config = cobre_io::parse_config(&config_path).expect("config must parse");
+    mutate(&mut config);
+    let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
+
+    let prepare_result =
+        prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
+            .expect("prepare_stochastic must succeed");
+    let system = prepare_result.system;
+    let stochastic = prepare_result.stochastic;
+
+    let hydro_models =
+        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
+
+    build_setup_for_case(case_dir, &config, &system, stochastic, hydro_models)
+}
+
 /// Construct a [`StudySetup`] in-process, building the stochastic context
 /// directly so the test stays hermetic (no external scenario files).
 // Taken by value so callers pass an owned `System` inline without a separate
 // binding; the body only borrows it.
 #[allow(clippy::needless_pass_by_value)]
-pub fn build_setup_in_code(system: cobre_core::System, config: &cobre_io::Config) -> StudySetup {
+pub fn build_setup_in_code(system: System, config: &Config) -> StudySetup {
     let stochastic = build_stochastic_context(
         &system,
         42,

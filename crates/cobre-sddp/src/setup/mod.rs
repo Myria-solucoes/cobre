@@ -32,6 +32,8 @@ use cobre_core::temporal::SeasonMap;
 use cobre_core::temporal::StageLagTransition;
 use cobre_core::temporal::StageStateConfig;
 use cobre_io::Config;
+use cobre_io::config::BackwardScheduler;
+use cobre_solver::ActiveProfile;
 use cobre_stochastic::par::RecentObservationSeed;
 use cobre_stochastic::par::lag_transition::compute_recent_observation_seed;
 use cobre_stochastic::par::lag_transition::derive_downstream_par_order;
@@ -43,6 +45,7 @@ use crate::config::LoopParams;
 use crate::resolved_parameters::build_resolved_parameters;
 use crate::scaling_report::ScalingReport;
 use crate::simulation::SimulationConfig;
+use crate::solve::solver_phase::{Phase, validate_phase_solver_config};
 use crate::stochastic::noise_key::build_noise_key_table;
 mod accessors;
 pub(crate) mod bucket_seed;
@@ -57,7 +60,8 @@ pub mod stochastic_pipeline;
 pub(crate) mod template_postprocess;
 
 pub use params::{
-    ConstructionConfig, DEFAULT_FORWARD_PASSES, DEFAULT_MAX_ITERATIONS, DEFAULT_SEED, StudyParams,
+    ConstructionConfig, DEFAULT_COST_SCALE_FACTOR, DEFAULT_FORWARD_PASSES, DEFAULT_MAX_ITERATIONS,
+    DEFAULT_SEED, StudyParams,
 };
 pub use scenario_library_set::{PhaseLibraries, ScenarioLibraries};
 pub use stage_data::StageData;
@@ -192,6 +196,27 @@ pub struct StudySetup {
     /// [`StudySetup::train`].
     pub(crate) events: EventParams,
 
+    /// Resolved backward-pass solver profile (`training.solver.backward`, layered
+    /// over the current per-phase constant — see
+    /// [`crate::solve::solver_phase::Phase::resolve_profile`]). Threaded into
+    /// [`StudySetup::train`].
+    pub(crate) backward_profile: ActiveProfile,
+
+    /// Resolved forward-pass solver profile (`training.solver.forward`).
+    pub(crate) forward_profile: ActiveProfile,
+
+    /// Backward-pass scheduler (`training.parallelism.backward_scheduler`,
+    /// carrying the opening-block size), threaded into [`StudySetup::train`]
+    /// alongside [`Self::backward_profile`].
+    pub(crate) backward_scheduler: BackwardScheduler,
+
+    /// Opening-block-scheduler claim-order override, threaded into
+    /// [`StudySetup::train`] alongside [`Self::backward_scheduler`]. No
+    /// `training.*` config field resolves this yet — a reserved test-support
+    /// seam; production always resolves `true` (see
+    /// [`crate::solve::solver_phase::SolverProfiles::hardest_first_claim_order`]).
+    pub(crate) hardest_first_claim_order: bool,
+
     /// Stochastic numerical methodology parameters (`horizon`, `inflow_method`).
     pub(crate) methodology: methodology_config::MethodologyConfig,
 
@@ -285,6 +310,9 @@ impl StudySetup {
     ///
     /// # Errors
     ///
+    /// - [`SddpError::Validation`] — a per-phase solver profile config sets a
+    ///   field the compiled backend does not support (see
+    ///   `validate_phase_solver_config`).
     /// - [`SddpError::Validation`] — if `build_stage_templates` succeeds but
     ///   the template list is empty ("system has no study stages").
     /// - [`SddpError::Solver`] — propagated from `build_stage_templates` on LP
@@ -314,7 +342,26 @@ impl StudySetup {
             budget,
             export_states,
             scalar_parameters,
+            training_solver_backward,
+            training_solver_forward,
+            simulation_solver,
+            backward_scheduler,
+            cost_scale_factor,
         } = config;
+
+        // Fail fast on a backend-unsupported field before any template exists;
+        // validation runs on every rank (`from_broadcast_params` is the shared
+        // setup path), so it is deterministic across the run.
+        validate_phase_solver_config(training_solver_backward.as_ref(), Phase::Backward)?;
+        validate_phase_solver_config(training_solver_forward.as_ref(), Phase::Forward)?;
+        validate_phase_solver_config(simulation_solver.as_ref(), Phase::Simulation)?;
+
+        // `resolve_profile` is a pure function of the (identically broadcast)
+        // config, so every rank resolving independently is sufficient — the
+        // resolved `ActiveProfile` itself never needs to go on the wire.
+        let backward_profile = Phase::Backward.resolve_profile(training_solver_backward.as_ref());
+        let forward_profile = Phase::Forward.resolve_profile(training_solver_forward.as_ref());
+        let simulation_profile = Phase::Simulation.resolve_profile(simulation_solver.as_ref());
 
         // Keys are a pure function of the synced tree + fixed σ, so every rank
         // computes the identical permutation and cuts stay bit-identical across
@@ -347,6 +394,7 @@ impl StudySetup {
             &hydro_models,
             &scalar_parameters,
             &state_layout,
+            cost_scale_factor,
             &transit_bucket_topology.per_stage_mask,
             &transit_bucket_topology.arc_stage_weights,
             &transit_bucket_topology.arc_spread_chrono,
@@ -487,6 +535,7 @@ impl StudySetup {
             simulation_config: SimulationConfig {
                 n_scenarios,
                 io_channel_capacity,
+                profile: simulation_profile,
             },
             policy_path,
             cut_management: CutManagementConfig {
@@ -497,6 +546,10 @@ impl StudySetup {
                 risk_measures,
             },
             events: EventParams { export_states },
+            backward_profile,
+            forward_profile,
+            backward_scheduler,
+            hardest_first_claim_order: true,
             methodology: methodology_config::MethodologyConfig {
                 horizon,
                 inflow_method,
@@ -630,6 +683,7 @@ fn build_energy_and_templates(
     hydro_models: &PrepareHydroModelsResult,
     scalar_parameters: &[cobre_core::ScalarParameter],
     state_layout: &StateSpace,
+    cost_scale_factor: f64,
     per_stage_mask: &[Vec<usize>],
     arc_stage_weights: &HashMap<usize, Vec<Vec<f64>>>,
     arc_spread_chrono: &HashMap<usize, Vec<Option<SpreadResolution>>>,
@@ -674,6 +728,7 @@ fn build_energy_and_templates(
         &stage_to_season,
         &study_stage_ids,
         n_stages_pre,
+        cost_scale_factor,
     )
     .map_err(|e| SddpError::Validation(e.to_string()))?;
 
@@ -692,8 +747,12 @@ fn build_energy_and_templates(
         arc_arrival_density,
     )?;
 
-    let scaling_report =
-        template_postprocess::postprocess_templates(&mut stage_templates, system, state_layout);
+    let scaling_report = template_postprocess::postprocess_templates(
+        &mut stage_templates,
+        system,
+        state_layout,
+        cost_scale_factor,
+    );
 
     if stage_templates.templates.is_empty() {
         return Err(SddpError::Validation(

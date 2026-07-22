@@ -525,11 +525,11 @@ dependencies = [
 
 [[package]]
 name = "cobre"
-version = "0.11.1"
+version = "0.12.0"
 
 [[package]]
 name = "cobre-cli"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "arrow",
  "assert_cmd",
@@ -558,7 +558,7 @@ dependencies = [
 
 [[package]]
 name = "cobre-comm"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "ferrompi",
  "gethostname",
@@ -567,7 +567,7 @@ dependencies = [
 
 [[package]]
 name = "cobre-core"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "chrono",
  "postcard",
@@ -579,15 +579,15 @@ dependencies = [
 
 [[package]]
 name = "cobre-emt"
-version = "0.11.1"
+version = "0.12.0"
 
 [[package]]
 name = "cobre-flow"
-version = "0.11.1"
+version = "0.12.0"
 
 [[package]]
 name = "cobre-io"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "arrow",
  "chrono",
@@ -608,11 +608,11 @@ dependencies = [
 
 [[package]]
 name = "cobre-mcp"
-version = "0.11.1"
+version = "0.12.0"
 
 [[package]]
 name = "cobre-sddp"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "arrow",
  "cc",
@@ -642,7 +642,7 @@ dependencies = [
 
 [[package]]
 name = "cobre-solver"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "cc",
  "cmake",
@@ -651,7 +651,7 @@ dependencies = [
 
 [[package]]
 name = "cobre-stochastic"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "chrono",
  "cobre-core",
@@ -666,11 +666,11 @@ dependencies = [
 
 [[package]]
 name = "cobre-tui"
-version = "0.11.1"
+version = "0.12.0"
 
 [[package]]
 name = "cobre-uc"
-version = "0.11.1"
+version = "0.12.0"
 
 [[package]]
 name = "cobs"

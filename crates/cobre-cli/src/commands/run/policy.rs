@@ -20,21 +20,25 @@ use cobre_sddp::TrainingResult;
 use cobre_sddp::build_basis_cache_from_checkpoint;
 use cobre_sddp::inject_boundary_cuts;
 use cobre_sddp::load_boundary_cuts;
+use cobre_sddp::rescale_checkpoint_cuts_for_load;
 use cobre_sddp::validate_policy_load;
 
 use crate::error::CliError;
 
 use super::RunContext;
 
-/// Load a policy checkpoint from disk and validate its compatibility.
+/// Load a policy checkpoint from disk, rescale its cuts into the current
+/// study's cost-scale space, and validate compatibility.
 ///
-/// Validation is unconditional: every warm-start, resume, and simulation-only
-/// load routes through [`cobre_sddp::validate_policy_load`] typed to
-/// [`FullFcf`], checking `state_dimension` and `num_stages`, then the
-/// checkpoint terminal manifest against the current study's terminal manifest
-/// — rejecting a same-dimension-different-entity policy the dims check alone
-/// would pass. Returns the checkpoint alongside the resulting
-/// [`PolicyLoadProof<FullFcf>`], the sole credential
+/// Every warm-start, resume, and simulation-only load shares this one function,
+/// so [`cobre_sddp::rescale_checkpoint_cuts_for_load`] and
+/// validation both run exactly once per load, unconditionally. Validation
+/// routes through [`cobre_sddp::validate_policy_load`] typed to [`FullFcf`],
+/// checking `state_dimension` and `num_stages`, then the checkpoint terminal
+/// manifest against the current study's terminal manifest — rejecting a
+/// same-dimension-different-entity policy the dims check alone would pass.
+/// Returns the checkpoint alongside the resulting [`PolicyLoadProof<FullFcf>`],
+/// the sole credential
 /// [`FutureCostFunction::new_with_warm_start`](cobre_sddp::FutureCostFunction::new_with_warm_start)
 /// and
 /// [`FutureCostFunction::from_deserialized`](cobre_sddp::FutureCostFunction::from_deserialized)
@@ -45,9 +49,14 @@ fn load_and_validate_checkpoint(
     system: &System,
     setup: &StudySetup,
 ) -> Result<(cobre_io::PolicyCheckpoint, PolicyLoadProof<FullFcf>), CliError> {
-    let checkpoint = read_policy_checkpoint(policy_dir).map_err(|e| CliError::Internal {
+    let mut checkpoint = read_policy_checkpoint(policy_dir).map_err(|e| CliError::Internal {
         message: format!("failed to read policy checkpoint: {e}"),
     })?;
+    rescale_checkpoint_cuts_for_load(
+        &mut checkpoint.stage_cuts,
+        checkpoint.metadata.cost_scale_factor,
+        setup.stage_data.stage_templates.cost_scale_factor,
+    );
 
     // Rationale: the cast cannot truncate — `n_stages` is the validated study
     // horizon (a `u16`-scale stage count), far below `u32::MAX`.
@@ -213,6 +222,7 @@ pub(super) fn apply_training_policy(
             bp.source_stage,
             state_dim,
             &current_manifest,
+            setup.stage_data.stage_templates.cost_scale_factor,
             &mut on_warning,
         )
         .map_err(CliError::from)?;

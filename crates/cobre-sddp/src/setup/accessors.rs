@@ -5,6 +5,11 @@ use cobre_core::commissioning::commissioning_active;
 use cobre_core::scenario::SamplingScheme;
 use cobre_io::EntitySlot;
 
+#[cfg(any(test, feature = "test-support"))]
+use cobre_io::config::BackwardScheduler;
+
+#[cfg(any(test, feature = "test-support"))]
+use crate::convergence::risk_measure::RiskMeasure;
 use crate::{
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
@@ -47,6 +52,31 @@ impl StudySetup {
     /// Set the active-cut budget cap per stage.
     pub fn set_budget(&mut self, budget: Option<u32>) {
         self.cut_management.budget = budget;
+    }
+
+    /// Test-support hook: override the per-stage backward-pass risk measures
+    /// (`length` must equal `num_stages`), e.g. to swap `Expectation` for
+    /// `CVaR { alpha, lambda }` without a config file exposing it per case.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_risk_measures(&mut self, risk_measures: Vec<RiskMeasure>) {
+        self.cut_management.risk_measures = risk_measures;
+    }
+
+    /// Test-support hook: override the backward-pass scheduler
+    /// (`training.parallelism.backward_scheduler`) to force `opening_block`
+    /// without a config file edit.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_scheduler(&mut self, scheduler: BackwardScheduler) {
+        self.backward_scheduler = scheduler;
+    }
+
+    /// Test-support hook: override the opening-block scheduler's claim order
+    /// (`BackwardPassState::set_hardest_first_claim_order`) — `false` forces
+    /// the canonical ascending block order for the byte-neutrality gate.
+    /// Production always resolves `true`; no config field surfaces this.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_hardest_first_claim_order(&mut self, enabled: bool) {
+        self.hardest_first_claim_order = enabled;
     }
 
     /// Return the pre-computed [`EnergyConversionSet`] for this study.
@@ -130,6 +160,7 @@ impl StudySetup {
             geometry_per_stage: &self.stage_data.stage_templates.geometry_per_stage,
             noise_scale: &self.stage_data.stage_templates.noise_scale,
             n_hydros: self.stage_data.stage_templates.n_hydros,
+            cost_scale_factor: self.stage_data.stage_templates.cost_scale_factor,
             n_load_buses: self.stage_data.stage_templates.n_load_buses,
             load_balance_row_starts: &self.stage_data.stage_templates.load_balance_row_starts,
             load_bus_indices: &self.stage_data.stage_templates.load_bus_indices,
@@ -153,10 +184,17 @@ impl StudySetup {
         }
     }
 
-    /// Construct a [`TrainingContext`] borrowing from this setup. Test-only.
-    #[cfg(test)]
+    /// Construct a [`TrainingContext`] borrowing from this setup.
+    ///
+    /// Test-support hook (mirrors [`Self::set_risk_measures`] /
+    /// [`Self::set_scheduler`] in this file): reachable from downstream
+    /// integration tests via the `test-support` feature so a probe can drive
+    /// production entry points (e.g. `forward::run_forward_pass`,
+    /// `solve::stage_solve::run_stage_solve`) that take a `&TrainingContext`
+    /// without duplicating this crate's private field layout.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
-    pub(crate) fn training_ctx(&self) -> TrainingContext<'_> {
+    pub fn training_ctx(&self) -> TrainingContext<'_> {
         let tr = &self.scenario_libraries.training;
         TrainingContext {
             horizon: &self.methodology.horizon,

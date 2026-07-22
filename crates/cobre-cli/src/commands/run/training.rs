@@ -10,6 +10,7 @@ use cobre_sddp::SddpError;
 use cobre_sddp::SolverStatsDelta;
 use cobre_sddp::StudySetup;
 use cobre_sddp::TrainingResult;
+use cobre_sddp::sum_phase_timing_ms;
 use cobre_solver::ActiveSolver;
 
 use crate::error::CliError;
@@ -27,15 +28,27 @@ pub(super) struct TrainingPhaseResult {
     pub(super) error: Option<SddpError>,
 }
 
-/// Single owner of the globally-reduced training solve-stats: the printed
-/// [`TrainingSummary`] and the persisted [`cobre_io::MetadataTrainingSolveStats`]
-/// must read identical values, so both read from this one source.
+/// Single owner of the training-run stats the printed [`TrainingSummary`] and
+/// the persisted [`cobre_io::MetadataTrainingSolveStats`] both read from, so the
+/// two stay identical. `first_try`/`retried`/`failed`/`*_solve_seconds` are
+/// cross-rank allreduce sums; the phase-wall/wait/serial `*_ms` fields are a
+/// rank-0-local sum over this rank's own convergence records (never allreduced
+/// — printing is gated to root, so no other rank's copy is ever observed).
 struct GlobalTrainingStats {
     first_try: u64,
     retried: u64,
     failed: u64,
     forward_solve_seconds: f64,
     backward_solve_seconds: f64,
+    forward_phase_wall_ms: u64,
+    backward_phase_wall_ms: u64,
+    forward_wait_ms: u64,
+    backward_wait_ms: u64,
+    serial_lower_bound_ms: u64,
+    serial_cut_selection_ms: u64,
+    serial_cut_sync_ms: u64,
+    serial_allreduce_ms: u64,
+    serial_scheduling_ms: u64,
 }
 
 /// Run training and collect results, events, and summary stats.
@@ -148,6 +161,8 @@ pub(super) fn run_training_phase(
         .map_err(|e| CliError::Internal {
             message: format!("training solver stats allreduce error: {e}"),
         })?;
+    let phase_timing = sum_phase_timing_ms(&training_output.convergence_records);
+
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let global_stats = GlobalTrainingStats {
         first_try: recv_stats[0] as u64,
@@ -155,6 +170,15 @@ pub(super) fn run_training_phase(
         failed: recv_stats[2] as u64,
         forward_solve_seconds: recv_stats[3],
         backward_solve_seconds: recv_stats[4],
+        forward_phase_wall_ms: phase_timing.forward_wall_ms,
+        backward_phase_wall_ms: phase_timing.backward_wall_ms,
+        forward_wait_ms: phase_timing.forward_wait_ms,
+        backward_wait_ms: phase_timing.backward_wait_ms,
+        serial_lower_bound_ms: phase_timing.lower_bound_ms,
+        serial_cut_selection_ms: phase_timing.cut_selection_ms,
+        serial_cut_sync_ms: phase_timing.cut_sync_ms,
+        serial_allreduce_ms: phase_timing.allreduce_ms,
+        serial_scheduling_ms: phase_timing.scheduling_ms,
     };
 
     // The convergence records are not yet persisted at this point, so the
@@ -167,6 +191,7 @@ pub(super) fn run_training_phase(
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let parallelism = (ctx.n_threads as u32).saturating_mul(ctx.comm.size() as u32);
 
+    #[allow(clippy::cast_precision_loss)]
     let training_summary = TrainingSummary {
         iterations: training_result.iterations,
         converged: training_output.converged,
@@ -195,6 +220,15 @@ pub(super) fn run_training_phase(
         total_backward_solve_seconds: Some(global_stats.backward_solve_seconds),
         parallelism: Some(parallelism),
         initial_gap_percent,
+        forward_phase_wall_seconds: Some(global_stats.forward_phase_wall_ms as f64 / 1000.0),
+        backward_phase_wall_seconds: Some(global_stats.backward_phase_wall_ms as f64 / 1000.0),
+        forward_wait_seconds: Some(global_stats.forward_wait_ms as f64 / 1000.0),
+        backward_wait_seconds: Some(global_stats.backward_wait_ms as f64 / 1000.0),
+        serial_lower_bound_seconds: Some(global_stats.serial_lower_bound_ms as f64 / 1000.0),
+        serial_cut_selection_seconds: Some(global_stats.serial_cut_selection_ms as f64 / 1000.0),
+        serial_cut_sync_seconds: Some(global_stats.serial_cut_sync_ms as f64 / 1000.0),
+        serial_allreduce_seconds: Some(global_stats.serial_allreduce_ms as f64 / 1000.0),
+        serial_scheduling_seconds: Some(global_stats.serial_scheduling_ms as f64 / 1000.0),
     };
     if !ctx.quiet && ctx.is_root {
         print_training_summary(&ctx.stderr, &training_summary);

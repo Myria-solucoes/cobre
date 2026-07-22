@@ -378,6 +378,8 @@ mod anticipated_backward_cut {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,
@@ -389,6 +391,7 @@ mod anticipated_backward_cut {
                 stopping_mode: "any".to_string(),
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
+                parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
@@ -457,7 +460,7 @@ mod anticipated_backward_cut {
         let active_count = pool0.active_count();
         assert_eq!(
             active_count, 1,
-            "AC-2: stage 0 FCF must contain exactly one active cut; got {active_count}",
+            "stage 0 FCF must contain exactly one active cut; got {active_count}",
         );
 
         let state = setup.stage_state();
@@ -476,7 +479,7 @@ mod anticipated_backward_cut {
             .fcf
             .active_cuts(0)
             .next()
-            .expect("AC-3: exactly one active cut must be retrievable from stage 0 pool");
+            .expect("exactly one active cut must be retrievable from stage 0 pool");
         assert_eq!(
             coefficients.len(),
             state.anticipated_slots_out.end,
@@ -486,7 +489,7 @@ mod anticipated_backward_cut {
         let actual_coeff = coefficients[ant_state_idx];
         assert!(
             (actual_coeff - EXPECTED_COEFFICIENT).abs() < TOL,
-            "AC-3 / AC-5: cut coefficient at anticipated_slots_out index {ant_state_idx} \
+            "cut coefficient at anticipated_slots_out index {ant_state_idx} \
          (slot={slot}, n_state={n_state}) does not match analytical value: \
          actual = {actual_coeff}, expected = {EXPECTED_COEFFICIENT} (= -c_reg/K = -{C_REG}/{COST_SCALE_FACTOR})",
             n_state = coefficients.len(),
@@ -494,7 +497,7 @@ mod anticipated_backward_cut {
 
         assert!(
             (intercept - EXPECTED_INTERCEPT).abs() < TOL,
-            "AC-4: cut intercept does not match analytical value: actual = {intercept}, \
+            "cut intercept does not match analytical value: actual = {intercept}, \
          expected = {EXPECTED_INTERCEPT} (= c_reg * D_1 / K = {C_REG} * {D_1} / {COST_SCALE_FACTOR})",
         );
     }
@@ -553,7 +556,7 @@ mod anticipated_backward_cut {
         let active_count = pool0.active_count();
         assert!(
             active_count >= 1,
-            "AC-2: stage 0 FCF must contain at least one active cut after \
+            "stage 0 FCF must contain at least one active cut after \
          {N_ITERATIONS} iterations; got {active_count}",
         );
 
@@ -579,12 +582,10 @@ mod anticipated_backward_cut {
         // CutPool::slot_index); later iterations add zero-subgradient cuts at shifted
         // trial points. Select slot 0 explicitly rather than the most-recent cut.
         let analytical = setup
-        .fcf
-        .active_cuts(0)
-        .find(|(slot, _, _)| *slot == 0)
-        .expect(
-            "AC-3: iteration-1 cut (slot 0 under dense packing) must be present in stage 0 pool",
-        );
+            .fcf
+            .active_cuts(0)
+            .find(|(slot, _, _)| *slot == 0)
+            .expect("iteration-1 cut (slot 0 under dense packing) must be present in stage 0 pool");
         let (slot, _intercept, coefficients) = analytical;
 
         assert_eq!(
@@ -599,7 +600,7 @@ mod anticipated_backward_cut {
         let actual_coeff_slot1 = coefficients[slot1_idx];
         assert!(
             (actual_coeff_slot1 - EXPECTED_COEFF_SLOT1).abs() < TOL,
-            "AC-3 / AC-5: stage 0 cut coefficient at anticipated_slots_out slot 1 \
+            "stage 0 cut coefficient at anticipated_slots_out slot 1 \
          (state-vector index {slot1_idx}) does not match analytical value: \
          actual = {actual_coeff_slot1}, expected = {EXPECTED_COEFF_SLOT1} \
          (= -C_REG / COST_SCALE_FACTOR * BLOCK_HOURS = \
@@ -614,7 +615,7 @@ mod anticipated_backward_cut {
         let actual_coeff_slot0 = coefficients[slot0_idx];
         assert!(
             (actual_coeff_slot0 - EXPECTED_COEFF_SLOT0).abs() < TOL,
-            "AC-4 / AC-5: stage 0 cut coefficient at anticipated_slots_out slot 0 \
+            "stage 0 cut coefficient at anticipated_slots_out slot 0 \
          (state-vector index {slot0_idx}) does not match analytical value: \
          actual = {actual_coeff_slot0}, expected = {EXPECTED_COEFF_SLOT0} \
          (= -C_REG / COST_SCALE_FACTOR * BLOCK_HOURS = \
@@ -675,7 +676,7 @@ mod anticipated_backward_cut {
         let active_count = pool0.active_count();
         assert!(
             active_count >= 1,
-            "AC-1: stage 0 FCF must contain at least one active cut after \
+            "stage 0 FCF must contain at least one active cut after \
          {N_ITERATIONS} iterations; got {active_count}",
         );
 
@@ -720,7 +721,7 @@ mod anticipated_backward_cut {
         let actual_coeff_slot2 = coefficients[slot2_idx];
         assert!(
             (actual_coeff_slot2 - EXPECTED_COEFF_SLOT2).abs() < TOL,
-            "AC-2: slot 2 coefficient {actual_coeff_slot2} != {EXPECTED_COEFF_SLOT2} \
+            "slot 2 coefficient {actual_coeff_slot2} != {EXPECTED_COEFF_SLOT2} \
          (stage-3 fishing dual via two FCF frozen cuts and successive in-LP \
          ring-shift definition rows)",
         );
@@ -728,7 +729,7 @@ mod anticipated_backward_cut {
         let actual_coeff_slot1 = coefficients[slot1_idx];
         assert!(
             (actual_coeff_slot1 - EXPECTED_COEFF_SLOT1).abs() < TOL,
-            "AC-3: slot 1 coefficient {actual_coeff_slot1} != {EXPECTED_COEFF_SLOT1} \
+            "slot 1 coefficient {actual_coeff_slot1} != {EXPECTED_COEFF_SLOT1} \
          (stage-2 fishing dual via one in-LP ring-shift definition row through \
          stage-1 FCF cut)",
         );
@@ -736,7 +737,7 @@ mod anticipated_backward_cut {
         let actual_coeff_slot0 = coefficients[slot0_idx];
         assert!(
             (actual_coeff_slot0 - EXPECTED_COEFF_SLOT0).abs() < TOL,
-            "AC-4: slot 0 coefficient {actual_coeff_slot0} != {EXPECTED_COEFF_SLOT0} \
+            "slot 0 coefficient {actual_coeff_slot0} != {EXPECTED_COEFF_SLOT0} \
          (stage-1 fishing equality dual under always-active predicate)",
         );
     }
@@ -1153,6 +1154,8 @@ mod anticipated_pre_horizon_seed_delivery {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,
@@ -1164,6 +1167,7 @@ mod anticipated_pre_horizon_seed_delivery {
                 stopping_mode: "any".to_string(),
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
+                parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
@@ -1178,10 +1182,6 @@ mod anticipated_pre_horizon_seed_delivery {
             estimation: EstimationConfig::default(),
         }
     }
-
-    // ---------------------------------------------------------------------------
-    // Train + simulate + drain helper
-    // ---------------------------------------------------------------------------
 
     // ---------------------------------------------------------------------------
     // Tests
@@ -1246,14 +1246,14 @@ mod anticipated_pre_horizon_seed_delivery {
         };
 
         let c0 = committed_at(0).expect(
-            "AC1 FAIL: committed_at(0) is None. \
+            "committed_at(0) is None. \
          The always-active fishing predicate is not delivering the 100 MW seed \
          at stage 0. Legacy behaviour: predicate `K_i > stage_idx` gated \
          fishing off at stage 0 with K=1.",
         );
         assert!(
             (c0 - 100.0).abs() < 1e-6,
-            "AC1 FAIL: committed_at(0) = {c0} MW, expected 100.0 MW (the seed). \
+            "committed_at(0) = {c0} MW, expected 100.0 MW (the seed). \
          The fishing equality at stage 0 must pin the anticipated thermal to \
          slot 0 = 100.0 MW of the ring buffer.",
         );
@@ -1262,20 +1262,20 @@ mod anticipated_pre_horizon_seed_delivery {
         for t in 0..4_usize {
             let dt = decision_at(t).unwrap_or_else(|| {
                 panic!(
-                    "AC2 FAIL: decision_at({t}) is None; anticipated thermal id=31 \
+                    "decision_at({t}) is None; anticipated thermal id=31 \
                  was not found in stage {t} thermals or anticipated_decision_mw \
                  is absent (stage {t} is an active-decision stage: {t} + 1 < 5)",
                 )
             });
             assert!(
                 dt.abs() > 1e-6,
-                "AC2 FAIL: decision_at({t}) = {dt} MW is zero (≤ 1e-6). \
+                "decision_at({t}) = {dt} MW is zero (≤ 1e-6). \
              The LP should commit a non-trivial anticipated amount at stage {t} \
              to avoid $5000/MWh backup at the delivery stage.",
             );
             assert!(
                 dt <= 200.0 + 1e-6,
-                "AC2 FAIL: decision_at({t}) = {dt} MW exceeds max_gen=200 MW. \
+                "decision_at({t}) = {dt} MW exceeds max_gen=200 MW. \
              This indicates a bounds violation in the LP.",
             );
         }
@@ -1285,21 +1285,21 @@ mod anticipated_pre_horizon_seed_delivery {
         for t in 1..5_usize {
             let ct = committed_at(t).unwrap_or_else(|| {
                 panic!(
-                    "AC3 FAIL: committed_at({t}) is None; expected a matured \
+                    "committed_at({t}) is None; expected a matured \
                  commitment from decision at stage {}",
                     t - 1,
                 )
             });
             let d_prev = decision_at(t - 1).unwrap_or_else(|| {
                 panic!(
-                    "AC3 FAIL: decision_at({}) is None (needed to check ring-buffer \
+                    "decision_at({}) is None (needed to check ring-buffer \
                  invariant at stage {t})",
                     t - 1,
                 )
             });
             assert!(
                 (ct - d_prev).abs() < 1e-6,
-                "AC3 FAIL (ring-buffer shift): committed_at({t}) = {ct} MW should \
+                "ring-buffer shift: committed_at({t}) = {ct} MW should \
              equal decision_at({}) = {d_prev} MW (within 1e-6 MW). \
              The ring buffer is not correctly propagating in-study decisions.",
                 t - 1,
@@ -1316,7 +1316,7 @@ mod anticipated_pre_horizon_seed_delivery {
 
         assert!(
             observed_total <= EXPECTED_TOTAL_UPPER_BOUND_USD,
-            "AC4 FAIL: observed_total = ${observed_total:.2} exceeds upper bound \
+            "observed_total = ${observed_total:.2} exceeds upper bound \
          ${EXPECTED_TOTAL_UPPER_BOUND_USD:.2}. \
          Breakdown: STAGE_0_BACKUP_COST_USD=${STAGE_0_BACKUP_COST_USD:.2}, \
          MAX_DECISION_COST_USD=${MAX_DECISION_COST_USD:.2}, \
@@ -1414,27 +1414,27 @@ mod anticipated_pre_horizon_seed_delivery {
         };
 
         let c0 = committed_at(0).expect(
-            "AC1 FAIL: committed_at(0) is None. \
+            "committed_at(0) is None. \
          The always-active fishing predicate is not delivering the 80 MW seed \
          at stage 0. Legacy behaviour: predicate `K_i > stage_idx` gated \
          fishing off at pre-horizon stages.",
         );
         assert!(
             (c0 - 80.0).abs() < 1e-6,
-            "AC1 FAIL: committed_at(0) = {c0} MW, expected 80.0 MW (values_mw[0]). \
+            "committed_at(0) = {c0} MW, expected 80.0 MW (values_mw[0]). \
          The fishing equality at stage 0 must pin the anticipated thermal to \
          slot 0 = 80.0 MW of the ring buffer.",
         );
 
         // K=2-specific: ring-buffer shift between pre-horizon stages 0→1.
         let c1 = committed_at(1).expect(
-        "AC2 FAIL: committed_at(1) is None. \
+        "committed_at(1) is None. \
          The fishing constraint is always active for every anticipated plant, so it must be active at stage 1. \
          If committed_at(1) is None, the fishing constraint is absent for stage 1.",
     );
         assert!(
             (c1 - 50.0).abs() < 1e-6,
-            "AC2 FAIL: committed_at(1) = {c1} MW, expected 50.0 MW (values_mw[1]). \
+            "committed_at(1) = {c1} MW, expected 50.0 MW (values_mw[1]). \
          The in-LP ring-shift definition row must move slot 1 (50.0 MW) into \
          slot 0 at the start of stage 1, and the fishing equality must read \
          that value. If the result is 80.0 MW, the ring-buffer shift is not \
@@ -1445,21 +1445,21 @@ mod anticipated_pre_horizon_seed_delivery {
         for t in 2..5_usize {
             let ct = committed_at(t).unwrap_or_else(|| {
                 panic!(
-                    "AC3 FAIL: committed_at({t}) is None; expected a matured \
+                    "committed_at({t}) is None; expected a matured \
                  commitment from decision at stage {}",
                     t - 2,
                 )
             });
             let d_prev2 = decision_at(t - 2).unwrap_or_else(|| {
                 panic!(
-                    "AC3 FAIL: decision_at({}) is None (needed to check K=2 \
+                    "decision_at({}) is None (needed to check K=2 \
                  ring-buffer invariant at stage {t})",
                     t - 2,
                 )
             });
             assert!(
                 (ct - d_prev2).abs() < 1e-6,
-                "AC3 FAIL (K=2 ring-buffer shift): committed_at({t}) = {ct} MW should \
+                "K=2 ring-buffer shift: committed_at({t}) = {ct} MW should \
              equal decision_at({}) = {d_prev2} MW (within 1e-6 MW). \
              With K=2, decisions mature two stages later (slot K-1=1 shifts into \
              slot 0 after two forward steps). The ring buffer is not correctly \
@@ -1472,21 +1472,21 @@ mod anticipated_pre_horizon_seed_delivery {
         for t in 0..3_usize {
             let dt = decision_at(t).unwrap_or_else(|| {
                 panic!(
-                    "AC4 FAIL: decision_at({t}) is None; anticipated thermal id=42 \
+                    "decision_at({t}) is None; anticipated thermal id=42 \
                  was not found in stage {t} thermals or anticipated_decision_mw \
                  is absent (stage {t} is an active-decision stage: {t} + 2 < 5)",
                 )
             });
             assert!(
                 dt.abs() > 1e-6,
-                "AC4 FAIL: decision_at({t}) = {dt} MW is zero (≤ 1e-6). \
+                "decision_at({t}) = {dt} MW is zero (≤ 1e-6). \
              The LP should commit a non-trivial anticipated amount at stage {t} \
              to avoid $5000/MWh backup at the delivery stage (stage {}).",
                 t + 2,
             );
             assert!(
                 dt <= 200.0 + 1e-6,
-                "AC4 FAIL: decision_at({t}) = {dt} MW exceeds max_gen=200 MW. \
+                "decision_at({t}) = {dt} MW exceeds max_gen=200 MW. \
              This indicates a bounds violation in the LP.",
             );
         }
@@ -1501,7 +1501,7 @@ mod anticipated_pre_horizon_seed_delivery {
 
         assert!(
             observed_total <= EXPECTED_TOTAL_UPPER_BOUND_USD,
-            "AC5 FAIL: observed_total = ${observed_total:.2} exceeds upper bound \
+            "observed_total = ${observed_total:.2} exceeds upper bound \
          ${EXPECTED_TOTAL_UPPER_BOUND_USD:.2}. \
          Breakdown: STAGE_0_BACKUP_COST_USD=${STAGE_0_BACKUP_COST_USD:.2}, \
          STAGE_1_BACKUP_COST_USD=${STAGE_1_BACKUP_COST_USD:.2}, \
@@ -1611,26 +1611,26 @@ mod anticipated_pre_horizon_seed_delivery {
         };
 
         let c0 = committed_at(0).expect(
-            "AC1 FAIL: committed_at(0) is None. \
+            "committed_at(0) is None. \
          The always-active fishing predicate is not delivering the 50 MW seed \
          at stage 0. Legacy behaviour: predicate `K_i > stage_idx` gated \
          fishing off at pre-horizon stages.",
         );
         assert!(
             (c0 - 50.0).abs() < 1e-6,
-            "AC1 FAIL: committed_at(0) = {c0} MW, expected 50.0 MW (values_mw[0]). \
+            "committed_at(0) = {c0} MW, expected 50.0 MW (values_mw[0]). \
          The fishing equality at stage 0 must pin the anticipated thermal to \
          slot 0 = 50.0 MW of the ring buffer.",
         );
 
         let c1 = committed_at(1).expect(
-        "AC2 FAIL: committed_at(1) is None. \
+        "committed_at(1) is None. \
          The fishing constraint is always active for every anticipated plant, so it must be active at stage 1. \
          If committed_at(1) is None, the fishing constraint is absent for stage 1.",
     );
         assert!(
             (c1 - 30.0).abs() < 1e-6,
-            "AC2 FAIL: committed_at(1) = {c1} MW, expected 30.0 MW (values_mw[1]). \
+            "committed_at(1) = {c1} MW, expected 30.0 MW (values_mw[1]). \
          The in-LP ring-shift definition row must move slot 1 (30.0 MW) into \
          slot 0 at the start of stage 1, and the fishing equality must read \
          that value. If the result is 50.0 MW, the first ring-buffer shift is not \
@@ -1638,13 +1638,13 @@ mod anticipated_pre_horizon_seed_delivery {
         );
 
         let c2 = committed_at(2).expect(
-        "AC3 FAIL: committed_at(2) is None. \
+        "committed_at(2) is None. \
          The fishing constraint is always active for every anticipated plant, so it must be active at stage 2. \
          If committed_at(2) is None, the fishing constraint is absent for stage 2.",
     );
         assert!(
             (c2 - 10.0).abs() < 1e-6,
-            "AC3 FAIL: committed_at(2) = {c2} MW, expected 10.0 MW (values_mw[2]). \
+            "committed_at(2) = {c2} MW, expected 10.0 MW (values_mw[2]). \
          After two ring-buffer shifts, slot 0 must hold 10.0 MW. \
          If the result is 30.0 MW, the second ring-buffer shift (between stages 1 \
          and 2) is not moving slot 1 (10.0 MW) into slot 0 correctly. \
@@ -1654,21 +1654,21 @@ mod anticipated_pre_horizon_seed_delivery {
         for t in 3..6_usize {
             let ct = committed_at(t).unwrap_or_else(|| {
                 panic!(
-                    "AC4 FAIL: committed_at({t}) is None; expected a matured \
+                    "committed_at({t}) is None; expected a matured \
                  commitment from decision at stage {}",
                     t - 3,
                 )
             });
             let d_prev3 = decision_at(t - 3).unwrap_or_else(|| {
                 panic!(
-                    "AC4 FAIL: decision_at({}) is None (needed to check K=3 \
+                    "decision_at({}) is None (needed to check K=3 \
                  ring-buffer invariant at stage {t})",
                     t - 3,
                 )
             });
             assert!(
                 (ct - d_prev3).abs() < 1e-6,
-                "AC4 FAIL (K=3 ring-buffer shift): committed_at({t}) = {ct} MW should \
+                "K=3 ring-buffer shift: committed_at({t}) = {ct} MW should \
              equal decision_at({}) = {d_prev3} MW (within 1e-6 MW). \
              With K=3, decisions mature three stages later (slot K-1=2 shifts into \
              slot 0 after three forward steps). The ring buffer is not correctly \
@@ -1680,21 +1680,21 @@ mod anticipated_pre_horizon_seed_delivery {
         for t in 0..3_usize {
             let dt = decision_at(t).unwrap_or_else(|| {
                 panic!(
-                    "AC5 FAIL: decision_at({t}) is None; anticipated thermal id=52 \
+                    "decision_at({t}) is None; anticipated thermal id=52 \
                  was not found in stage {t} thermals or anticipated_decision_mw \
                  is absent (stage {t} is an active-decision stage: {t} + 3 < 6)",
                 )
             });
             assert!(
                 dt.abs() > 1e-6,
-                "AC5 FAIL: decision_at({t}) = {dt} MW is zero (≤ 1e-6). \
+                "decision_at({t}) = {dt} MW is zero (≤ 1e-6). \
              The LP should commit a non-trivial anticipated amount at stage {t} \
              to avoid $5000/MWh backup at the delivery stage (stage {}).",
                 t + 3,
             );
             assert!(
                 dt <= 200.0 + 1e-6,
-                "AC5 FAIL: decision_at({t}) = {dt} MW exceeds max_gen=200 MW. \
+                "decision_at({t}) = {dt} MW exceeds max_gen=200 MW. \
              This indicates a bounds violation in the LP.",
             );
         }
@@ -1709,7 +1709,7 @@ mod anticipated_pre_horizon_seed_delivery {
 
         assert!(
             observed_total <= EXPECTED_TOTAL_UPPER_BOUND_USD,
-            "AC6 FAIL: observed_total = ${observed_total:.2} exceeds upper bound \
+            "observed_total = ${observed_total:.2} exceeds upper bound \
          ${EXPECTED_TOTAL_UPPER_BOUND_USD:.2}. \
          Breakdown: STAGE_0_BACKUP_COST_USD=${STAGE_0_BACKUP_COST_USD:.2}, \
          STAGE_1_BACKUP_COST_USD=${STAGE_1_BACKUP_COST_USD:.2}, \
@@ -2118,6 +2118,8 @@ mod anticipated_d_t_saturation {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,
@@ -2129,6 +2131,7 @@ mod anticipated_d_t_saturation {
                 stopping_mode: "any".to_string(),
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
+                parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
@@ -2143,10 +2146,6 @@ mod anticipated_d_t_saturation {
             estimation: EstimationConfig::default(),
         }
     }
-
-    // ---------------------------------------------------------------------------
-    // Train + simulate + drain helper
-    // ---------------------------------------------------------------------------
 
     // ---------------------------------------------------------------------------
     // Tests
@@ -2688,6 +2687,8 @@ mod anticipated_forward_pass {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,
@@ -2697,6 +2698,7 @@ mod anticipated_forward_pass {
                 stopping_mode: "any".to_string(),
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
+                parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
@@ -2737,12 +2739,12 @@ mod anticipated_forward_pass {
 
         assert!(
             outcome.error.is_none(),
-            "AC-1: training error must be None; got {:?}",
+            "training error must be None; got {:?}",
             outcome.error
         );
         assert!(
             outcome.result.iterations >= 1,
-            "AC-1: at least 1 iteration must complete; got {}",
+            "at least 1 iteration must complete; got {}",
             outcome.result.iterations
         );
 
@@ -2766,17 +2768,17 @@ mod anticipated_forward_pass {
         // slot 1 = LP decision d_0 ∈ [0, 100].
         let s0 = basis_cache[0]
             .as_ref()
-            .expect("AC-2: stage 0 basis must be captured")
+            .expect("stage 0 basis must be captured")
             .state_at_capture
             .as_slice();
         assert!(
             (s0[ant_start] - 50.0).abs() < 1e-9,
-            "AC-2: stage 0 slot 0 must equal seeded slot 1 = 50.0; got {}",
+            "stage 0 slot 0 must equal seeded slot 1 = 50.0; got {}",
             s0[ant_start]
         );
         assert!(
             (-0.01..=100.01).contains(&s0[ant_start + 1]),
-            "AC-2: stage 0 slot 1 (= d_0) must lie in [0, 100]; got {}",
+            "stage 0 slot 1 (= d_0) must lie in [0, 100]; got {}",
             s0[ant_start + 1]
         );
 
@@ -2784,19 +2786,19 @@ mod anticipated_forward_pass {
         // trial point x_hat, so basis_cache[1] equals basis_cache[0].
         let s1 = basis_cache[1]
             .as_ref()
-            .expect("AC-3: stage 1 basis must be captured")
+            .expect("stage 1 basis must be captured")
             .state_at_capture
             .as_slice();
         assert!(
             (s1[ant_start] - s0[ant_start]).abs() < 1e-9,
-            "AC-3: stage 1 slot 0 ({}) must equal stage 0 slot 0 ({}) — both carry \
+            "stage 1 slot 0 ({}) must equal stage 0 slot 0 ({}) — both carry \
          the post-shift outgoing state of forward stage 0",
             s1[ant_start],
             s0[ant_start],
         );
         assert!(
             (s1[ant_start + 1] - s0[ant_start + 1]).abs() < 1e-9,
-            "AC-3: stage 1 slot 1 ({}) must equal stage 0 slot 1 ({}) — both carry \
+            "stage 1 slot 1 ({}) must equal stage 0 slot 1 ({}) — both carry \
          d_0 from the forward pass",
             s1[ant_start + 1],
             s0[ant_start + 1],
@@ -2807,18 +2809,18 @@ mod anticipated_forward_pass {
         for t in 2..5_usize {
             let s_curr = basis_cache[t]
                 .as_ref()
-                .unwrap_or_else(|| panic!("AC-4: stage {t} basis must be captured"))
+                .unwrap_or_else(|| panic!("stage {t} basis must be captured"))
                 .state_at_capture
                 .as_slice();
             let s_prev = basis_cache[t - 1]
                 .as_ref()
-                .unwrap_or_else(|| panic!("AC-4: stage {} basis must be captured", t - 1))
+                .unwrap_or_else(|| panic!("stage {} basis must be captured", t - 1))
                 .state_at_capture
                 .as_slice();
 
             assert!(
                 (s_curr[ant_start] - s_prev[ant_start + 1]).abs() < 1e-9,
-                "AC-4: stage {t} slot 0 ({}) must equal stage {} slot 1 ({})",
+                "stage {t} slot 0 ({}) must equal stage {} slot 1 ({})",
                 s_curr[ant_start],
                 t - 1,
                 s_prev[ant_start + 1],
@@ -2828,13 +2830,13 @@ mod anticipated_forward_pass {
         for t in 0..5_usize {
             let s_t = basis_cache[t]
                 .as_ref()
-                .unwrap_or_else(|| panic!("AC-5: stage {t} basis must be captured"))
+                .unwrap_or_else(|| panic!("stage {t} basis must be captured"))
                 .state_at_capture
                 .as_slice();
             let decision = s_t[ant_start + 1];
             assert!(
                 (-0.01..=100.01).contains(&decision),
-                "AC-5: stage {t} slot 1 must lie in [0, 100]; got {decision}",
+                "stage {t} slot 1 must lie in [0, 100]; got {decision}",
             );
         }
     }
@@ -3287,6 +3289,8 @@ mod anticipated_closed_form_lb_k1_single_thermal {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,
@@ -3296,6 +3300,7 @@ mod anticipated_closed_form_lb_k1_single_thermal {
                 stopping_mode: "any".to_string(),
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
+                parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
@@ -3651,6 +3656,8 @@ mod lead_time_single_decider_end_to_end {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,
@@ -3662,6 +3669,7 @@ mod lead_time_single_decider_end_to_end {
                 stopping_mode: "any".to_string(),
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
+                parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
@@ -4132,6 +4140,8 @@ mod anticipated_numerical_reconciliation_k2 {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,
@@ -4141,6 +4151,7 @@ mod anticipated_numerical_reconciliation_k2 {
                 stopping_mode: "any".to_string(),
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
+                parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
@@ -4681,6 +4692,8 @@ mod anticipated_bridge_st_cruz_nova_k1 {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,
@@ -4690,6 +4703,7 @@ mod anticipated_bridge_st_cruz_nova_k1 {
                 stopping_mode: "any".to_string(),
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
+                parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
@@ -5236,6 +5250,11 @@ mod anticipated_convergence_slow {
             budget: None,
             export_states: false,
             scalar_parameters: Vec::new(),
+            training_solver_backward: None,
+            training_solver_forward: None,
+            simulation_solver: None,
+            backward_scheduler: cobre_io::config::BackwardScheduler::default(),
+            cost_scale_factor: cobre_sddp::DEFAULT_COST_SCALE_FACTOR,
         };
 
         let source = ScenarioSource {
@@ -5613,6 +5632,8 @@ mod a1b_value_cut_identity_anchor {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,
@@ -5624,6 +5645,7 @@ mod a1b_value_cut_identity_anchor {
                 stopping_mode: "any".to_string(),
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
+                parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
@@ -6244,6 +6266,8 @@ mod a1c_stage_count_mode_anchor {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
                 },
+
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,
@@ -6255,6 +6279,7 @@ mod a1c_stage_count_mode_anchor {
                 stopping_mode: "any".to_string(),
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
+                parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),

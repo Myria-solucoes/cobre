@@ -42,23 +42,15 @@ pub fn read_convergence_summary(path: &Path) -> Result<ConvergenceSummary, Outpu
     let file = std::fs::File::open(path).map_err(|e| OutputError::io(path, e))?;
 
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| OutputError::SerializationError {
-            entity: "convergence".to_string(),
-            message: e.to_string(),
-        })?
+        .map_err(|e| OutputError::serialization("convergence", e.to_string()))?
         .build()
-        .map_err(|e| OutputError::SerializationError {
-            entity: "convergence".to_string(),
-            message: e.to_string(),
-        })?;
+        .map_err(|e| OutputError::serialization("convergence", e.to_string()))?;
 
     let mut totals = BatchTotals::default();
 
     for batch_result in reader {
-        let batch = batch_result.map_err(|e| OutputError::SerializationError {
-            entity: "convergence".to_string(),
-            message: e.to_string(),
-        })?;
+        let batch =
+            batch_result.map_err(|e| OutputError::serialization("convergence", e.to_string()))?;
         if batch.num_rows() > 0 {
             accumulate_batch(&batch, &mut totals)?;
         }
@@ -291,13 +283,15 @@ mod tests {
     fn make_config() -> crate::Config {
         use crate::config::{
             CheckpointingConfig, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
-            ModelingConfig, PolicyConfig, PolicyMode, RowSelectionConfig, SimulationConfig,
-            StoppingRuleConfig, TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+            ModelingConfig, ParallelismConfig, PolicyConfig, PolicyMode, RowSelectionConfig,
+            SimulationConfig, StoppingRuleConfig, TrainingConfig, TrainingSolverConfig,
+            UpperBoundEvaluationConfig,
         };
         crate::Config {
             schema: None,
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig::default(),
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,
@@ -307,6 +301,7 @@ mod tests {
                 stopping_mode: "any".to_string(),
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
+                parallelism: ParallelismConfig::default(),
                 scenario_source: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
@@ -321,6 +316,7 @@ mod tests {
                 num_scenarios: 0,
                 io_channel_capacity: 64,
                 scenario_source: None,
+                solver: None,
             },
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),

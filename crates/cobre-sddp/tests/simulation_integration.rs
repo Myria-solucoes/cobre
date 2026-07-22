@@ -42,8 +42,8 @@ use cobre_io::{
     write_results,
 };
 use cobre_sddp::{
-    PrepareHydroModelsResult, ResolvedParameters, StoppingMode, StoppingRule, StoppingRuleSet,
-    TrainingConfig, build_training_output,
+    Phase, PrepareHydroModelsResult, ResolvedParameters, SolverProfiles, StoppingMode,
+    StoppingRule, StoppingRuleSet, TrainingConfig, build_training_output,
     config::{CutManagementConfig, EventConfig, LoopConfig},
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
@@ -402,6 +402,7 @@ fn make_config() -> Config {
         schema: None,
         modeling: ModelingConfig {
             inflow_non_negativity: InflowNonNegativityConfig::default(),
+            cost_scale_factor: None,
         },
         training: IoTrainingConfig {
             enabled: true,
@@ -411,6 +412,7 @@ fn make_config() -> Config {
             stopping_mode: "any".to_string(),
             cut_selection: RowSelectionConfig::default(),
             solver: TrainingSolverConfig::default(),
+            parallelism: cobre_io::config::ParallelismConfig::default(),
             scenario_source: None,
         },
         upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
@@ -425,6 +427,7 @@ fn make_config() -> Config {
             num_scenarios: 0,
             io_channel_capacity: 64,
             scenario_source: None,
+            solver: None,
         },
         exports: ExportsConfig::default(),
         estimation: EstimationConfig::default(),
@@ -606,6 +609,7 @@ fn train_simulate_write_cycle() {
         base_rows: &fx.base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -652,6 +656,7 @@ fn train_simulate_write_cycle() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .expect("train must succeed");
 
@@ -731,6 +736,7 @@ fn train_simulate_write_cycle() {
         total_visited_states: 0,
         training_block_mode: "parallel".to_string(),
         training_block_mode_per_stage: vec![],
+        cost_scale_factor: None,
     };
 
     write_policy_checkpoint(
@@ -748,6 +754,7 @@ fn train_simulate_write_cycle() {
     let sim_config = SimulationConfig {
         n_scenarios: 2,
         io_channel_capacity: 4,
+        profile: Phase::Simulation.profile(),
     };
 
     let entity_counts = EntityCounts {
@@ -801,6 +808,7 @@ fn train_simulate_write_cycle() {
             base_rows: &fx.base_rows,
             noise_scale: &[],
             n_hydros: 0,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses: 0,
             load_balance_row_starts: &[],
             load_bus_indices: &[],
@@ -1370,6 +1378,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
         base_rows: &base_rows,
         noise_scale: &templates_result.noise_scale,
         n_hydros: 1,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &templates_result.load_balance_row_starts,
         load_bus_indices: &[],
@@ -1441,12 +1450,14 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
         &StubComm,
         || Ok(SizedMockSolver::new(t0.num_cols, t0.num_rows)),
         None,
+        SolverProfiles::default(),
     )
     .expect("training must succeed");
 
     let sim_config = SimulationConfig {
         n_scenarios: 1,
         io_channel_capacity: 4,
+        profile: Phase::Simulation.profile(),
     };
 
     let entity_counts = EntityCounts {

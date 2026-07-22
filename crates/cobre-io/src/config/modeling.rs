@@ -36,6 +36,23 @@ pub struct ModelingConfig {
     /// Strategy for handling non-negative inflow constraints.
     #[serde(default)]
     pub inflow_non_negativity: InflowNonNegativityConfig,
+
+    /// Divisor applied to every non-theta objective coefficient at template
+    /// build time, multiplied back at every cost-domain reporting boundary.
+    /// Default `1_000_000.0` — the value every golden parity baseline is pinned at.
+    ///
+    /// Objective conditioning only — results are identical in exact arithmetic;
+    /// this does not alter the model, unlike `modeling`'s other fields. The
+    /// effective dual tolerance in currency units is
+    /// `dual_feasibility_tolerance × this factor`: raising the factor without
+    /// lowering `dual_feasibility_tolerance` proportionally loosens optimality
+    /// in currency terms even though the configured tolerance value is
+    /// unchanged — the inverse-direction trap a name cannot carry.
+    ///
+    /// Absent uses the default. Must be finite and `> 0`; a value outside
+    /// `[1.0, 1e12]` is accepted but logs an advisory warning.
+    #[serde(default)]
+    pub cost_scale_factor: Option<f64>,
 }
 
 /// Inflow non-negativity treatment settings.

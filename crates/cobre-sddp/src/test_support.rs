@@ -20,6 +20,9 @@ use cobre_core::{
 };
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
+use crate::context::{StageContext, TrainingContext};
+use crate::cut::pool::CutPool;
+use crate::error::SddpError;
 use crate::hydro_models::{
     EvaporationModel, EvaporationModelSet, FphaPlane, ProductionModelSet, ResolvedProductionModel,
 };
@@ -30,8 +33,13 @@ use crate::policy::policy_load::{
     FullFcf, PolicyLoadProof, PolicyStageManifest, validate_policy_load,
 };
 use crate::resolved_parameters::ResolvedParameters;
+use crate::solve::stage_solve::{StageInputs, run_stage_solve};
+use crate::training::stage_solve_prep::{
+    InflowNoise, LoadNoise, OpeningMode, StageSolvePrep, StageSolvePrepParams, StateSource,
+};
 use crate::trajectory::TrajectoryRecord;
-use cobre_solver::{Basis, BasisStatus, StageTemplate};
+use crate::workspace::{CapturedBasis, SolverWorkspace};
+use cobre_solver::{Basis, BasisStatus, SolutionView, SolverInterface, StageTemplate};
 
 /// Equipment dimensions for the [`geometry`] / [`study_dims_for`] test builders.
 ///
@@ -370,6 +378,7 @@ pub fn geometry(
     let resolved_parameters = ResolvedParameters {
         per_param: vec![],
         id_to_slot: vec![],
+        cost_scale_factor: 1_000_000.0,
     };
     let cascade = CascadeTopology::build(&[]);
     let par_lp = PrecomputedPar::default();
@@ -628,6 +637,76 @@ pub fn trivial_full_fcf_proof(state_dimension: u32, num_stages: u32) -> PolicyLo
     };
     validate_policy_load::<FullFcf>(&manifest, &manifest)
         .expect("trivial matching manifest cannot fail validate_policy_load")
+}
+
+/// Patch one stage-LP solve exactly as the production backward pass's
+/// `patch_opening_bounds` does (`training/backward/lp_setup.rs`): delegates
+/// verbatim to `StageSolvePrep::run` with the backward-opening variation
+/// point (`OpeningMode::PerOpening`, `LoadNoise::Present`,
+/// `InflowNoise::Transform`) — no probe-side reimplementation of the
+/// patch pipeline (lag-folded water-balance RHS, NCS availability,
+/// commitment reconciliation).
+///
+/// # Errors
+///
+/// Propagates [`SddpError::AnticipatedCommitmentOutOfBounds`] exactly as
+/// `StageSolvePrep::run` does.
+pub fn patch_backward_opening_for_probe<S: SolverInterface + Send>(
+    ws: &mut SolverWorkspace<S>,
+    ctx: &StageContext<'_>,
+    training_ctx: &TrainingContext<'_>,
+    stage: usize,
+    pinned_state: &[f64],
+    raw_noise: &[f64],
+) -> Result<(), SddpError> {
+    let prep_params = StageSolvePrepParams {
+        state_source: StateSource(pinned_state),
+        opening_mode: OpeningMode::PerOpening,
+        load_noise: LoadNoise::Present,
+        inflow_noise: InflowNoise::Transform,
+        raw_noise,
+    };
+    StageSolvePrep::run(
+        &mut ws.solver,
+        &mut ws.patch_buf,
+        &mut ws.scratch,
+        ctx,
+        training_ctx,
+        stage,
+        &prep_params,
+    )
+}
+
+/// Run one stage-LP solve exactly as production's shared `run_stage_solve`
+/// entry point does (`solve::stage_solve`, `pub(crate)` — the module
+/// forward/backward/simulation all route through, no external consumer by
+/// design): basis reconstruction by cut-pool slot identity when
+/// `stored_basis` is `Some`, else an implicit warm start from whatever the
+/// solver instance currently retains. Reachable here so a probe can drive the
+/// identical hot path on a scratch workspace without duplicating its
+/// reconstruction/invariant-enforcement logic.
+///
+/// # Errors
+///
+/// Propagates the same [`SddpError`] variants as production's stage solve
+/// (`Infeasible`, `Solver`, or a basis-shape mismatch).
+pub fn solve_stage_for_probe<'ws, S: SolverInterface>(
+    ws: &'ws mut SolverWorkspace<S>,
+    stage_context: &StageContext<'_>,
+    pool: &CutPool,
+    stored_basis: Option<&CapturedBasis>,
+    stage_index: usize,
+    scenario_index: usize,
+) -> Result<SolutionView<'ws>, SddpError> {
+    let inputs = StageInputs {
+        stage_context,
+        pool,
+        stored_basis,
+        stage_index,
+        scenario_index,
+        iteration: None,
+    };
+    run_stage_solve(ws, &inputs)
 }
 
 /// Trial-point states in the flat shape the passes index, `records[m * n_stages + stage]`.

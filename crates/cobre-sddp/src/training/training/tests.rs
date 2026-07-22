@@ -27,8 +27,7 @@ use cobre_core::{
     },
 };
 use cobre_solver::{
-    Basis, BasisStatus, LpSolution, RowBatch, SolverError, SolverInterface, SolverStatistics,
-    StageTemplate,
+    Basis, BasisStatus, RowBatch, SolverError, SolverInterface, SolverStatistics, StageTemplate,
 };
 use cobre_stochastic::{
     ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context,
@@ -36,7 +35,7 @@ use cobre_stochastic::{
 
 use super::train;
 use crate::{
-    StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
+    SolverProfiles, StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
     config::{CutManagementConfig, EventConfig, LoopConfig},
     context::{StageContext, TrainingContext},
     cut::fcf::FutureCostFunction,
@@ -85,17 +84,6 @@ fn minimal_template(n_state: usize) -> StageTemplate {
         max_par_order: 0,
         col_scale: Vec::new(),
         row_scale: Vec::new(),
-    }
-}
-
-fn fixed_solution(objective: f64) -> LpSolution {
-    LpSolution {
-        objective,
-        primal: vec![0.0; 4],
-        dual: vec![0.0; 2],
-        reduced_costs: vec![0.0; 4],
-        iterations: 0,
-        solve_time_seconds: 0.0,
     }
 }
 
@@ -153,12 +141,7 @@ impl SolverInterface for MockSolver {
         let obj = self.objectives[call % self.objectives.len()];
         // Return a view with primal[3] = 0.0 (theta = 0, N=1 L=0 → theta at col 3)
         // so that the forward pass computes stage_cost = objective - primal[theta]
-        // = obj - 0 = obj.  The fixed_solution helper provides compatible arrays.
-        let sol = fixed_solution(obj);
-        // We cannot borrow from a temporary, so we use static empty slices.
-        // training.rs mock only needs to satisfy the SolverInterface bound;
-        // the actual slice contents are not checked by the training loop.
-        let _ = sol;
+        // = obj - 0 = obj.
         Ok(cobre_solver::SolutionView {
             objective: obj,
             primal: &[0.0, 0.0, 0.0, 0.0],
@@ -481,6 +464,7 @@ fn ac_train_completes_with_iteration_limit() {
         base_rows: &base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -527,6 +511,7 @@ fn ac_train_completes_with_iteration_limit() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -582,6 +567,7 @@ fn ac_train_returns_partial_on_infeasible() {
         base_rows: &base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -628,6 +614,7 @@ fn ac_train_returns_partial_on_infeasible() {
         &comm,
         || Ok(MockSolver::infeasible()),
         None,
+        SolverProfiles::default(),
     );
 
     let outcome = result.unwrap();
@@ -696,6 +683,7 @@ fn ac_train_emits_correct_event_sequence() {
         base_rows: &base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -742,10 +730,10 @@ fn ac_train_emits_correct_event_sequence() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
-    drop(fcf); // not needed; just for clarity
     let events: Vec<TrainingEvent> = rx.try_iter().collect();
 
     // 1 TrainingStarted + 2*(9 per-iteration) + 1 TrainingFinished = 20
@@ -897,6 +885,7 @@ fn ac_worker_timing_per_worker_event_count_and_setup_invariant() {
         base_rows: &base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -943,6 +932,7 @@ fn ac_worker_timing_per_worker_event_count_and_setup_invariant() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -1069,6 +1059,7 @@ fn ac_train_result_fields_populated() {
         base_rows: &base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -1115,6 +1106,7 @@ fn ac_train_result_fields_populated() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -1170,6 +1162,7 @@ fn ac_train_with_no_event_sender() {
         base_rows: &base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -1216,6 +1209,7 @@ fn ac_train_with_no_event_sender() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     );
 
     assert!(result.is_ok(), "train with no event_sender must not panic");
@@ -1268,6 +1262,7 @@ fn ac_total_time_ms_is_non_negative() {
         base_rows: &base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -1314,6 +1309,7 @@ fn ac_total_time_ms_is_non_negative() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -1374,6 +1370,7 @@ fn cut_selection_none_skips_step() {
         base_rows: &base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -1420,6 +1417,7 @@ fn cut_selection_none_skips_step() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -1489,6 +1487,7 @@ fn cut_selection_level1_runs_at_frequency() {
         base_rows: &base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -1535,6 +1534,7 @@ fn cut_selection_level1_runs_at_frequency() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -1614,6 +1614,7 @@ fn cut_selection_stage0_exempt_preserves_cuts() {
         base_rows: &base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -1660,6 +1661,7 @@ fn cut_selection_stage0_exempt_preserves_cuts() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -1749,6 +1751,7 @@ fn existing_train_tests_pass_with_none() {
         base_rows: &base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -1795,6 +1798,7 @@ fn existing_train_tests_pass_with_none() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -1856,6 +1860,7 @@ fn ac_train_partial_result_on_mid_iteration_failure() {
         base_rows: &base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -1902,6 +1907,7 @@ fn ac_train_partial_result_on_mid_iteration_failure() {
         &comm,
         || Ok(MockSolver::infeasible()),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -1978,6 +1984,7 @@ fn start_iteration_resumes_from_offset() {
         base_rows: &base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -2024,6 +2031,7 @@ fn start_iteration_resumes_from_offset() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -2081,6 +2089,7 @@ fn start_iteration_at_or_beyond_max_runs_zero_iterations() {
         base_rows: &base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -2127,6 +2136,7 @@ fn start_iteration_at_or_beyond_max_runs_zero_iterations() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 
@@ -2761,6 +2771,7 @@ fn template_freeze_event_emitted() {
         base_rows: &base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -2808,6 +2819,7 @@ fn template_freeze_event_emitted() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .unwrap();
 

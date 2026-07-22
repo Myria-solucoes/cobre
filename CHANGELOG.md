@@ -9,6 +9,144 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-21
+
+### Added
+
+- **The objective cost-scale factor is now configurable** via
+  `modeling.cost_scale_factor` (`config.json`), replacing a hard-coded
+  divisor applied to every non-theta objective coefficient at template
+  build time. Absent uses the previous default, byte-identical to prior
+  behavior; the field is validated finite and `> 0`, with an advisory
+  warning outside `[1.0, 1e12]`. The resolved factor is visible in the
+  training scaling report and in exported policy metadata. Effective dual
+  tolerance in currency units is `dual_feasibility_tolerance × this factor`
+  — raising the factor without adjusting the tolerance loosens optimality
+  in currency terms even though the configured tolerance value is
+  unchanged.
+
+- **Exported policies now store cut coefficients and intercepts in
+  canonical currency units, independent of the writing study's cost-scale
+  factor.** Export multiplies every value by the writing study's factor;
+  every load — warm-start, resume, simulation-only, and boundary-cut
+  injection — divides by the loading study's own factor, so a policy
+  trained under one factor loads correctly into a study configured with a
+  different one. `policy/metadata.json` gains a `cost_scale_factor`
+  provenance field; a checkpoint written before this field existed is
+  interpreted as scaled at the previous hard-coded default, so every
+  existing policy directory remains loadable.
+
+### Changed
+
+- **Loading a policy written by this release's export path applies one
+  additional floating-point division that was not needed before**, since
+  cut values now round-trip through canonical currency units rather than
+  being carried in the writer's internal scaled representation unchanged.
+  The shift is below solver tolerance and does not change training or
+  simulation results, but it moves cut coefficients, intercepts, and
+  therefore any bit-exact hash computed over a policy-load path by up to a
+  few ULP — a resumed-run trajectory or a golden case that hashes a
+  loaded policy shifts once. A checkpoint written before this release and
+  loaded at the still-default cost-scale factor is unaffected (bit-exact,
+  no re-baseline). This is one-directional: a checkpoint written by this
+  release stores canonical currency-unit values and must not be read by an
+  earlier release, which would silently reinterpret them under the old
+  scaled convention; a checkpoint written by an earlier release remains
+  fully loadable by this one.
+
+- **Per-phase LP solver settings are now configurable.**
+  `training.solver.backward`, `training.solver.forward`, and
+  `simulation.solver` each accept an optional solver-profile block of
+  per-field overrides (`dual_edge_weight`, `scale`, `price`,
+  `primal_feasibility_tolerance`) — resolved once at setup and broadcast
+  identically to every MPI rank, a later field always overriding the
+  phase's built-in profile. A tuned bundle for the backward pass
+  (dual `SteepestEdge`, Curtis–Reid scaling, `Row` pricing, a loosened
+  primal feasibility tolerance) is configured explicitly:
+
+  ```json
+  "backward": {
+    "dual_edge_weight": "steepest_edge",
+    "scale": "solver_scaling",
+    "price": "row",
+    "primal_feasibility_tolerance": 1e-7
+  }
+  ```
+
+  Every field is optional, and a study with no solver-profile config
+  resolves byte-identically to the prior, unconfigurable per-phase
+  defaults. On the CLP backend, any solver-profile config — any override
+  field — is rejected at setup with a named error identifying the phase and
+  the unsupported setting, instead of silently applying a HiGHS-tuned
+  option to CLP's own option surface; CLP solver-profile support is
+  deferred until it is separately measured.
+
+- **The per-phase solver-profile block gains further override fields**:
+  `dual_feasibility_tolerance`, `presolve`, `simplex_update_limit`,
+  `cost_perturbation`, `refactor_error_tolerance`, `factor_pivot_threshold`,
+  `use_warm_start`, and `steepest_edge_devex_fallback_threshold`, layered on top of
+  the base profile the same way as the existing override fields.
+  `presolve` only affects a solve that starts genuinely cold — a
+  warm-started solve skips presolve regardless of the setting.
+  `use_warm_start` is a diagnostic override: setting it `false` forces
+  every solve in the phase cold and is not an intended production
+  configuration. Every new field is optional; leaving it unset resolves to
+  the value already in effect before this override existed, so a study
+  with no override for a new field resolves byte-identically to before. On
+  the CLP backend, setting any new field is rejected at setup the same way
+  the existing override fields are.
+
+- **An opt-in opening-block backward scheduler distributes backward-pass
+  work at finer granularity than a whole trial point.** Setting
+  `training.parallelism.backward_scheduler` to
+  `{ "method": "opening_block" }` (the default remains
+  `{ "method": "trial_point" }`) reassigns each backward work unit from a
+  whole trial point to a `(trial point, opening block)` pair, claimed off a
+  shared counter and warm-chained from a fresh frozen-LP load. The optional
+  `block_size` field of the `opening_block` method controls the block size
+  (default: half of each stage's opening count, rounded up; an explicit
+  value is clamped to the stage's own opening count); supplying
+  `block_size` under `trial_point` is a load-time error rather than a
+  silently ignored key. Claims within a stage are ordered
+  hardest-first by each `(stage, block)`'s mean simplex-iteration cost
+  measured on the previous iteration, load-balancing workers without
+  changing which cuts are generated or how they are aggregated — the
+  produced cut set and the training lower bound are identical to claiming
+  blocks in their canonical order. An active Dynamic Cut Selection
+  iteration always falls back to the `trial_point` scheduler: the
+  opening-block path's frozen-LP load is incompatible with Dynamic Cut
+  Selection's cut-free lazy core.
+
+- **The training `Time split` report now reflects coordinator-measured
+  phase time instead of a per-worker average.** The `Forward`/`Backward`
+  lines report the coordinator's own measured phase wall (previously a
+  per-worker mean), each decomposed into `solve` (mean worker busy time)
+  and `wait` (load imbalance across workers); a new `Serial` line replaces
+  the previous opaque `Other` bucket, breaking the non-parallel portion of
+  training down into lower-bound evaluation, row (cut) selection,
+  cross-rank cut synchronization, MPI allreduce, and a residual `other`
+  bucket that absorbs scheduling overhead.
+  The three lines' durations sum to the training wall and match the
+  per-iteration progress line. A summary reconstructed from a completed
+  output directory (`cobre summary`) omits the `Time split` block entirely,
+  since per-iteration phase timing is not persisted to `metadata.json`.
+
+- **The backward pass now solves each stage's openings along a shortest
+  warm-start chain.** Each stage's openings are ordered along a
+  nearest-neighbor-plus-2-opt minimum-distance path over their inflow-noise
+  vectors before solving, replacing the previous fixed
+  sigma-weighted-key order (a stage with fewer than three openings keeps
+  the sigma-weighted order — there is no path to improve). The order is
+  intrinsic; no config field selects it. The chosen order only changes
+  which warm-start chain the backward pass walks: each opening's cut is
+  still written and aggregated by its own canonical opening identity,
+  independent of solve order, so declaration-order invariance and
+  run-to-run reproducibility are unaffected. The warm-start chain
+  itself changes, not only training time: at a degenerate optimum a
+  multi-opening stage can settle on a different — but equally optimal —
+  vertex than the prior order, so training and simulation outputs on such a
+  stage can shift.
+
 ## [0.11.1] - 2026-07-17
 
 ### Fixed
@@ -2596,7 +2734,8 @@ disappears from `cobre.results.load_policy` per-cut dicts.
 
 <!-- next-url -->
 
-[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.11.1...HEAD
+[Unreleased]: https://github.com/cobre-rs/cobre/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/cobre-rs/cobre/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/cobre-rs/cobre/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/cobre-rs/cobre/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/cobre-rs/cobre/compare/v0.9.1...v0.10.0

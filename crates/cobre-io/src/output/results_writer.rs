@@ -269,13 +269,15 @@ mod tests {
     fn make_config() -> crate::Config {
         use crate::config::{
             CheckpointingConfig, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
-            ModelingConfig, PolicyConfig, PolicyMode, RowSelectionConfig, SimulationConfig,
-            StoppingRuleConfig, TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+            ModelingConfig, ParallelismConfig, PolicyConfig, PolicyMode, RowSelectionConfig,
+            SimulationConfig, StoppingRuleConfig, TrainingConfig, TrainingSolverConfig,
+            UpperBoundEvaluationConfig,
         };
         crate::Config {
             schema: None,
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig::default(),
+                cost_scale_factor: None,
             },
             training: TrainingConfig {
                 enabled: true,
@@ -285,6 +287,7 @@ mod tests {
                 stopping_mode: "any".to_string(),
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
+                parallelism: ParallelismConfig::default(),
                 scenario_source: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
@@ -299,6 +302,7 @@ mod tests {
                 num_scenarios: 0,
                 io_channel_capacity: 64,
                 scenario_source: None,
+                solver: None,
             },
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),

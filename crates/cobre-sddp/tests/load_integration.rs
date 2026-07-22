@@ -30,7 +30,7 @@ use cobre_core::{
     },
 };
 use cobre_sddp::{
-    StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
+    SolverProfiles, StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
     config::{CutManagementConfig, EventConfig, LoopConfig},
     context::{StageContext, TrainingContext},
     cut::fcf::FutureCostFunction,
@@ -379,7 +379,6 @@ fn test_stochastic_load_training_completes() {
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
     };
-    let state = state_layout_for(1, 0);
     let risk_measures = vec![RiskMeasure::Expectation; n_stages];
     let mut fcf = make_fcf(n_stages);
     let mut solver = MockSolver::with_fixed(100.0);
@@ -422,6 +421,7 @@ fn test_stochastic_load_training_completes() {
         base_rows: &base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses,
         load_balance_row_starts: &load_balance_row_starts,
         load_bus_indices: &load_bus_indices,
@@ -468,6 +468,7 @@ fn test_stochastic_load_training_completes() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .expect("train must succeed with stochastic load");
 
@@ -533,6 +534,7 @@ fn test_deterministic_load_training_matches_baseline() {
         base_rows: &base_rows,
         noise_scale: &[],
         n_hydros: 0,
+        cost_scale_factor: 1_000_000.0,
         n_load_buses: 0,
         load_balance_row_starts: &[],
         load_bus_indices: &[],
@@ -601,6 +603,7 @@ fn test_deterministic_load_training_matches_baseline() {
         &comm,
         || Ok(MockSolver::with_fixed(100.0)),
         None,
+        SolverProfiles::default(),
     )
     .expect("train must succeed with deterministic load");
 
@@ -671,6 +674,7 @@ fn test_stochastic_load_seed_determinism() {
             base_rows: &base_rows,
             noise_scale: &[],
             n_hydros: 0,
+            cost_scale_factor: 1_000_000.0,
             n_load_buses,
             load_balance_row_starts: &load_balance_row_starts,
             load_bus_indices: &load_bus_indices,
@@ -717,6 +721,7 @@ fn test_stochastic_load_seed_determinism() {
             &comm,
             || Ok(MockSolver::with_fixed(100.0)),
             None,
+            SolverProfiles::default(),
         )
         .expect("train must succeed");
 

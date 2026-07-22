@@ -2,9 +2,9 @@
 //!
 //! Verifies that primal and dual feasibility tolerances at retry levels 3, 7,
 //! 10, and 11 satisfy `applied = max(level_default, profile_value)`. Also
-//! verifies the iteration-cap composition at retry level 0, and that the
-//! profile is re-applied on every solve call (regression for the `HiGHS`
-//! internal-reset bug).
+//! verifies the iteration-cap composition at retry level 0, and that an
+//! unchanged profile is NOT re-applied on subsequent solve calls (the
+//! delta-only dispatch contract; retry finalization owns re-application).
 //!
 //! Requires the `test-support` feature:
 //!   cargo nextest run -p cobre-solver --features test-support
@@ -25,12 +25,14 @@ mod tests {
     use std::cell::Cell;
 
     use cobre_solver::types::{Basis, RowBatch, SolutionView, SolverError, SolverStatistics};
-    use cobre_solver::{HighsProfile, HighsSolver, ProfiledSolver, SolverInterface, StageTemplate};
+    use cobre_solver::{
+        HighsProfile, HighsSolver, PresolveKind, ProfiledSolver, SolverInterface, StageTemplate,
+    };
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /// Minimal 2-column, no-constraint LP fixture. `num_cols = 2` feeds the
-    /// `set_iteration_limits` heuristic the AC-8 tests check.
+    /// `set_iteration_limits` heuristic the iteration-cap tests check.
     fn make_minimal_template() -> StageTemplate {
         StageTemplate {
             num_cols: 2,
@@ -60,9 +62,9 @@ mod tests {
         solver
     }
 
-    // ── AC-8: iteration-cap composition ──────────────────────────────────────
+    // ── Iteration-cap composition ─────────────────────────────────────────────
 
-    /// AC-8 sentinel branch: when the profile simplex cap is the sentinel
+    /// Sentinel branch: when the profile simplex cap is the sentinel
     /// value (0), `apply_retry_level_options(0)` must apply the historical
     /// heuristic `max(100_000, num_cols * 50)`.
     ///
@@ -81,14 +83,13 @@ mod tests {
             .get_int_option(c"simplex_iteration_limit")
             .expect("simplex_iteration_limit must be readable");
 
-        // num_cols = 2  →  heuristic = max(100_000, 2 * 50) = 100_000
         assert_eq!(
             cap, 100_000,
             "sentinel should produce heuristic cap 100_000; got {cap}"
         );
     }
 
-    /// AC-8 literal-value branch: when the profile simplex cap is non-zero,
+    /// Literal-value branch: when the profile simplex cap is non-zero,
     /// `apply_retry_level_options(0)` must apply that exact value verbatim.
     #[test]
     fn nonzero_simplex_cap_used_verbatim() {
@@ -110,7 +111,7 @@ mod tests {
         );
     }
 
-    /// AC-8 IPM cap branch: `ipm_iteration_limit` from the profile is applied
+    /// IPM cap branch: `ipm_iteration_limit` from the profile is applied
     /// verbatim regardless of which retry level is active (`set_iteration_limits`
     /// always sets it).
     #[test]
@@ -133,7 +134,7 @@ mod tests {
         );
     }
 
-    // ── AC-8 bonus: default-attempt tolerance setter wires to FFI ────────────
+    // ── Default-attempt tolerance setter wires to FFI ────────────────────────
 
     /// Verify that `apply_profile` writes the primal tolerance to the
     /// underlying `HiGHS` option immediately (not only at retry time).
@@ -155,7 +156,7 @@ mod tests {
         );
     }
 
-    // ── AC-9: loose profile (profile_value > level_default) ──────────────────
+    // ── Loose profile (profile_value > level_default) ────────────────────────
     //
     // Profile primal = dual = 1e-5.
     // Levels 3 and 7  have level_default = 1e-8  →  max(1e-8, 1e-5) = 1e-5.
@@ -171,8 +172,6 @@ mod tests {
         solver
     }
 
-    /// AC-9 — level 3, loose profile: applied tolerance must be 1e-5
-    /// (= max(1e-8, 1e-5)) for both primal and dual.
     #[test]
     fn loose_profile_level3_applies_profile_value() {
         let mut solver = make_loose_profile_solver();
@@ -195,8 +194,6 @@ mod tests {
         );
     }
 
-    /// AC-9 — level 7, loose profile: applied tolerance must be 1e-5
-    /// (= max(1e-8, 1e-5)) for both primal and dual.
     #[test]
     fn loose_profile_level7_applies_profile_value() {
         let mut solver = make_loose_profile_solver();
@@ -219,8 +216,6 @@ mod tests {
         );
     }
 
-    /// AC-9 — level 10, loose profile: applied tolerance must be 1e-5
-    /// (= max(1e-7, 1e-5)) for both primal and dual.
     #[test]
     fn loose_profile_level10_applies_profile_value() {
         let mut solver = make_loose_profile_solver();
@@ -243,8 +238,6 @@ mod tests {
         );
     }
 
-    /// AC-9 — level 11, loose profile: applied tolerance must be 1e-5
-    /// (= max(1e-7, 1e-5)) for both primal and dual.
     #[test]
     fn loose_profile_level11_applies_profile_value() {
         let mut solver = make_loose_profile_solver();
@@ -267,7 +260,7 @@ mod tests {
         );
     }
 
-    // ── AC-10: strict profile (profile_value < level_default) ────────────────
+    // ── Strict profile (profile_value < level_default) ───────────────────────
     //
     // Profile primal = dual = 1e-12.
     // Levels 3 and 7  have level_default = 1e-8  →  max(1e-8, 1e-12) = 1e-8.
@@ -283,8 +276,6 @@ mod tests {
         solver
     }
 
-    /// AC-10 — level 3, strict profile: applied tolerance must be 1e-8
-    /// (= max(1e-8, 1e-12)) for both primal and dual.
     #[test]
     fn strict_profile_level3_applies_level_default() {
         let mut solver = make_strict_profile_solver();
@@ -307,8 +298,6 @@ mod tests {
         );
     }
 
-    /// AC-10 — level 7, strict profile: applied tolerance must be 1e-8
-    /// (= max(1e-8, 1e-12)) for both primal and dual.
     #[test]
     fn strict_profile_level7_applies_level_default() {
         let mut solver = make_strict_profile_solver();
@@ -331,8 +320,6 @@ mod tests {
         );
     }
 
-    /// AC-10 — level 10, strict profile: applied tolerance must be 1e-7
-    /// (= max(1e-7, 1e-12)) for both primal and dual.
     #[test]
     fn strict_profile_level10_applies_level_default() {
         let mut solver = make_strict_profile_solver();
@@ -355,8 +342,6 @@ mod tests {
         );
     }
 
-    /// AC-10 — level 11, strict profile: applied tolerance must be 1e-7
-    /// (= max(1e-7, 1e-12)) for both primal and dual.
     #[test]
     fn strict_profile_level11_applies_level_default() {
         let mut solver = make_strict_profile_solver();
@@ -379,19 +364,19 @@ mod tests {
         );
     }
 
-    // ── Fix 1: profile-aware restore after retry escalation ──────────────────
+    // ── Profile-aware restore after retry escalation ─────────────────────────
     //
     // After `restore_default_settings()`, the tolerances reset to 1e-6 (the
-    // hardcoded table values). `apply_profile_tolerances()` must then overwrite
+    // hardcoded table values). `reapply_profile()` must then overwrite
     // them with the profile's values so HiGHS state and `current_profile` agree.
 
-    /// Fix 1 — primal tolerance survives restore+profile sequence.
+    /// Primal tolerance survives restore+profile sequence.
     ///
     /// Sets the profile primal tolerance to a non-default value (3e-8), then
-    /// calls the combined `restore_defaults_then_apply_profile_for_test` helper
+    /// calls the combined `restore_defaults_then_reapply_profile_for_test` helper
     /// (which mirrors the finalization path in `retry_escalation`). The FFI
     /// read-back must return 3e-8 (the profile value), not 1e-6 (the default
-    /// table value), proving that `apply_profile_tolerances` wins.
+    /// table value), proving that `reapply_profile` wins.
     #[test]
     fn profile_primal_tolerance_restored_after_retry_finalization() {
         let mut solver = make_solver();
@@ -400,7 +385,7 @@ mod tests {
             ..Default::default()
         });
 
-        solver.restore_defaults_then_apply_profile_for_test();
+        solver.restore_defaults_then_reapply_profile_for_test();
 
         let tol = solver
             .get_double_option(c"primal_feasibility_tolerance")
@@ -412,7 +397,7 @@ mod tests {
         );
     }
 
-    /// Fix 1 — dual tolerance survives restore+profile sequence.
+    /// Dual tolerance survives restore+profile sequence.
     ///
     /// Sets the profile dual tolerance to 5e-9 (below the 1e-6 default),
     /// simulates the retry finalization path, and verifies the profile value wins.
@@ -424,7 +409,7 @@ mod tests {
             ..Default::default()
         });
 
-        solver.restore_defaults_then_apply_profile_for_test();
+        solver.restore_defaults_then_reapply_profile_for_test();
 
         let tol = solver
             .get_double_option(c"dual_feasibility_tolerance")
@@ -436,13 +421,140 @@ mod tests {
         );
     }
 
-    // ── Fix 2: IPM iteration_limit sentinel for "unbounded" ──────────────────
+    // ── Full-field profile-seam readback ─────────────────────────────────────
+    //
+    // Power statement: catches a `HighsProfile` field that `reapply_profile`
+    // forgets to re-install after `restore_default_settings` — the seam the two
+    // tolerance-readback tests above only sample. It does NOT catch a
+    // HiGHS-internal option the profile never carries, and the `presolve`/
+    // `use_warm_start` fields are exercised through `apply_profile` but not
+    // read back here — `HighsSolver`'s test-support surface has no
+    // string/bool option getter (only the fields readable via
+    // `get_double_option`/`get_int_option` are asserted below).
+
+    /// Every int/double-valued field `reapply_profile` restores survives
+    /// `restore_default_settings` followed by `reapply_profile`, with every
+    /// profile field (including `presolve`/`use_warm_start`) installed at a
+    /// non-default value simultaneously.
+    #[test]
+    fn full_profile_survives_retry_finalization_seam() {
+        let mut solver = make_solver();
+        let profile = HighsProfile {
+            primal_feasibility_tolerance: 1e-7,
+            dual_feasibility_tolerance: 1e-7,
+            simplex_iteration_limit: 50_000,
+            ipm_iteration_limit: 5_000,
+            simplex_dual_edge_weight_strategy: 0, // Dantzig
+            simplex_scale_strategy: 2,            // Curtis-Reid
+            simplex_price_strategy: 2,            // RowHyperSparse
+            presolve: PresolveKind::Off,
+            simplex_update_limit: 1000,
+            cost_perturbation: 1.0,
+            refactor_error_tolerance: 1e-5,
+            factor_pivot_threshold: 0.2,
+            use_warm_start: false,
+            steepest_edge_devex_fallback_threshold: 20.0,
+        };
+        assert_ne!(
+            profile,
+            HighsProfile::default(),
+            "fixture profile must differ from every HighsProfile::default() field"
+        );
+        solver.apply_profile(&profile);
+
+        solver.restore_defaults_then_reapply_profile_for_test();
+
+        let primal = solver
+            .get_double_option(c"primal_feasibility_tolerance")
+            .expect("primal_feasibility_tolerance must be readable");
+        let dual = solver
+            .get_double_option(c"dual_feasibility_tolerance")
+            .expect("dual_feasibility_tolerance must be readable");
+        let dual_edge_weight = solver
+            .get_int_option(c"simplex_dual_edge_weight_strategy")
+            .expect("simplex_dual_edge_weight_strategy must be readable");
+        let scale = solver
+            .get_int_option(c"simplex_scale_strategy")
+            .expect("simplex_scale_strategy must be readable");
+        let price = solver
+            .get_int_option(c"simplex_price_strategy")
+            .expect("simplex_price_strategy must be readable");
+        let simplex_update_limit = solver
+            .get_int_option(c"simplex_update_limit")
+            .expect("simplex_update_limit must be readable");
+        let cost_perturbation = solver
+            .get_double_option(c"dual_simplex_cost_perturbation_multiplier")
+            .expect("dual_simplex_cost_perturbation_multiplier must be readable");
+        let refactor_error_tolerance = solver
+            .get_double_option(c"rebuild_refactor_solution_error_tolerance")
+            .expect("rebuild_refactor_solution_error_tolerance must be readable");
+        let factor_pivot_threshold = solver
+            .get_double_option(c"factor_pivot_threshold")
+            .expect("factor_pivot_threshold must be readable");
+        let steepest_edge_devex_fallback_threshold = solver
+            .get_double_option(c"dual_steepest_edge_weight_log_error_threshold")
+            .expect("dual_steepest_edge_weight_log_error_threshold must be readable");
+
+        assert!(
+            (primal - profile.primal_feasibility_tolerance).abs() < 1e-20,
+            "primal tolerance must survive the finalization seam; expected {}, got {primal}",
+            profile.primal_feasibility_tolerance
+        );
+        assert!(
+            (dual - profile.dual_feasibility_tolerance).abs() < 1e-20,
+            "dual tolerance must survive the finalization seam; expected {}, got {dual}",
+            profile.dual_feasibility_tolerance
+        );
+        assert_eq!(
+            dual_edge_weight, profile.simplex_dual_edge_weight_strategy,
+            "simplex_dual_edge_weight_strategy must survive the finalization seam"
+        );
+        assert_eq!(
+            scale, profile.simplex_scale_strategy,
+            "simplex_scale_strategy must survive the finalization seam"
+        );
+        assert_eq!(
+            price, profile.simplex_price_strategy,
+            "simplex_price_strategy must survive the finalization seam"
+        );
+        #[allow(clippy::cast_possible_wrap)]
+        let expected_simplex_update_limit = profile.simplex_update_limit as i32;
+        assert_eq!(
+            simplex_update_limit, expected_simplex_update_limit,
+            "simplex_update_limit must survive the finalization seam"
+        );
+        assert!(
+            (cost_perturbation - profile.cost_perturbation).abs() < 1e-20,
+            "cost_perturbation must survive the finalization seam; expected {}, got {cost_perturbation}",
+            profile.cost_perturbation
+        );
+        assert!(
+            (refactor_error_tolerance - profile.refactor_error_tolerance).abs() < 1e-20,
+            "refactor_error_tolerance must survive the finalization seam; expected {}, got {refactor_error_tolerance}",
+            profile.refactor_error_tolerance
+        );
+        assert!(
+            (factor_pivot_threshold - profile.factor_pivot_threshold).abs() < 1e-20,
+            "factor_pivot_threshold must survive the finalization seam; expected {}, got {factor_pivot_threshold}",
+            profile.factor_pivot_threshold
+        );
+        assert!(
+            (steepest_edge_devex_fallback_threshold
+                - profile.steepest_edge_devex_fallback_threshold)
+                .abs()
+                < 1e-20,
+            "steepest_edge_devex_fallback_threshold must survive the finalization seam; expected {}, got {steepest_edge_devex_fallback_threshold}",
+            profile.steepest_edge_devex_fallback_threshold
+        );
+    }
+
+    // ── IPM iteration_limit sentinel for "unbounded" ─────────────────────────
     //
     // When `ipm_iteration_limit == 0` (DEFAULT_PROFILE_IPM_UNBOUNDED_SENTINEL),
     // `set_iteration_limits` must pass `i32::MAX` to HiGHS — not 0, which HiGHS
     // would interpret as "no iterations allowed".
 
-    /// Fix 2 — `ipm_iteration_limit = 0` maps to `i32::MAX` at the FFI layer.
+    /// `ipm_iteration_limit = 0` maps to `i32::MAX` at the FFI layer.
     ///
     /// Sets the profile IPM cap to 0 (the "unbounded" sentinel), triggers
     /// `set_iteration_limits` via `apply_retry_level_options(0)`, and reads
@@ -450,7 +562,6 @@ mod tests {
     #[test]
     fn ipm_sentinel_zero_maps_to_i32_max() {
         let mut solver = make_solver();
-        // 0 is DEFAULT_PROFILE_IPM_UNBOUNDED_SENTINEL — "unbounded".
         solver.apply_profile(&HighsProfile {
             ipm_iteration_limit: 0,
             ..Default::default()
@@ -488,9 +599,6 @@ mod tests {
             }
         }
     }
-
-    // SAFETY: used only on a single thread within this test.
-    unsafe impl Send for SetterCountMock {}
 
     impl SolverInterface for SetterCountMock {
         type Profile = HighsProfile;
@@ -542,6 +650,13 @@ mod tests {
             simplex_dual_edge_weight_strategy: 0,
             simplex_scale_strategy: 0,
             simplex_price_strategy: 2,
+            presolve: PresolveKind::Off,
+            simplex_update_limit: 1000,
+            cost_perturbation: 1.0,
+            refactor_error_tolerance: 1e-5,
+            factor_pivot_threshold: 0.2,
+            use_warm_start: false,
+            steepest_edge_devex_fallback_threshold: 20.0,
         };
         solver.set_profile(&non_default);
 
