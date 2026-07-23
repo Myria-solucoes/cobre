@@ -8,6 +8,15 @@ determinism) and ran precedent research the original streams did not cover —
 results, harnesses, and raw logs in `feasibility-verification-2026-07.md` and
 `spikes/` (this directory). Sections and forks below have been amended in place
 where that evidence landed; each amendment cites the addendum.
+**State re-verification (2026-07-23):** the Part-I forensic snapshot was
+re-verified claim-by-claim against `develop` at v0.12.0 (three releases after
+the snapshot). Every load-bearing claim holds — `cobre-core` saw zero v0.12.0
+commits — and the v0.11.0–v0.12.0 deltas that bear on the roadmap (new CLI
+subcommands, the per-phase solver-profile surface, checkpoint cost-scale
+provenance, a live admission-gate precedent) are amended in place, each tagged
+(2026-07-23); micro-precision corrections (exact type names, counts) are
+applied silently. The addendum's measurement erratum is recorded in
+`feasibility-verification-2026-07.md` §5.
 **Scope:** How to evolve Cobre from a single-vertical SDDP hydrothermal-dispatch
 tool into a genuine multi-vertical power-system optimization ecosystem — the data
 model, the crate/module borders, the solver and orchestration seams, and a
@@ -104,11 +113,12 @@ real second consumer (economic dispatch), not **pushed** by refactoring the core
 the abstract. The genuinely irreversible or contract-touching forks — the
 case-format break's timing, the MILP determinism policy, universal-model vs a shared
 physical cadastre, and whether AC-OPF is ever in scope — are surfaced for explicit
-sign-off in **Part VI**, not resolved in passing. _(Status 2026-07-16: the
-owner has since resolved D1, D2, D9, D12, and D14 — each Part VI entry records
-the decision, its grounds, and the trigger that would reopen it; D3 is scoped
-to determinism tiers with UC's tier signed off at Phase 3; D4–D8, D11, and D13
-remain open recommendations.)_
+sign-off in **Part VI**, not resolved in passing. _(Status: the owner resolved D1, D2,
+D9, D12, and D14 on 2026-07-16, and D7, D8, D11, D13, and the added D15 — the
+horizon boundary-condition axis — on 2026-07-23; each Part VI entry records the
+decision, its grounds, and the trigger that would reopen it. D3 is scoped to
+determinism tiers with UC's tier signed off at Phase 3; D4–D6 remain open
+recommendations.)_
 
 ---
 
@@ -185,6 +195,11 @@ name…"`. The naming decision that a "vertical" is a sibling crate to
    decisions in Part III.6 (parallel MILP branch-and-bound is a determinism
    hazard).
 
+(Two workspace details omitted from the diagram for clarity — 2026-07-23: a
+reserved umbrella lib crate `cobre` whose `lib.rs` re-exports nothing yet, and
+the `cobre` _binary_ target, which is `cobre-cli`'s `[[bin]]`. Neither affects
+the topology or the roadmap's moves.)
+
 ### I.2 The data model as it stands (`cobre-core`)
 
 `cobre-core` describes itself as "the shared, solver-agnostic power-system data
@@ -197,15 +212,15 @@ shows — a large amount of stochastic-SDDP input data carried as first-class fi
 a name, an `operational_start_date`, and a commissioning window
 (`entry_stage_id`/`exit_stage_id`).
 
-| Entity                  | File                              | Shape                                                                                                                                                                                                                       |
-| ----------------------- | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Bus`                   | `entities/bus.rs:27`              | Electrical node; a piecewise `DeficitSegment` unserved-energy curve + `excess_cost`.                                                                                                                                        |
-| `Line`                  | `entities/line.rs:14`             | **Transport** interconnection: directional MW capacity (`direct`/`reverse`), `losses_percent`, `exchange_cost`. No electrical parameters.                                                                                   |
-| `Hydro`                 | `entities/hydro.rs:170`           | ~30-field reservoir/turbine/spill entity; cascade via `downstream_id` + scalar `travel_time_hours`; head/tailrace/efficiency/evaporation sub-models; `HydroGenerationModel ∈ {ConstantProductivity, LinearizedHead, Fpha}`. |
-| `Thermal`               | `entities/thermal.rs:36`          | **Monolithic** plant: single scalar `cost_per_mwh`, `min`/`max_generation_mw`, optional `AnticipatedConfig` (a continuous forward-commitment _lead_, not a binary UC decision).                                             |
-| `NonControllableSource` | `entities/non_controllable.rs:16` | Renewables: `max_generation_mw`, `allow_curtailment`, `curtailment_cost`.                                                                                                                                                   |
-| `PumpingStation`        | `entities/pumping_station.rs:14`  | Water transfer between two reservoirs consuming bus power.                                                                                                                                                                  |
-| `EnergyContract`        | `entities/energy_contract.rs:21`  | Import/export with an external system at a price.                                                                                                                                                                           |
+| Entity                  | File                              | Shape                                                                                                                                                                                                                      |
+| ----------------------- | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Bus`                   | `entities/bus.rs:27`              | Electrical node; a piecewise `DeficitSegment` unserved-energy curve + `excess_cost`.                                                                                                                                       |
+| `Line`                  | `entities/line.rs:14`             | **Transport** interconnection: directional MW capacity (`direct`/`reverse`), `losses_percent`, `exchange_cost`. No electrical parameters.                                                                                  |
+| `Hydro`                 | `entities/hydro.rs:170`           | 26-field reservoir/turbine/spill entity; cascade via `downstream_id` + scalar `travel_time_hours`; head/tailrace/efficiency/evaporation sub-models; `HydroGenerationModel ∈ {ConstantProductivity, LinearizedHead, Fpha}`. |
+| `Thermal`               | `entities/thermal.rs:36`          | **Monolithic** plant: single scalar `cost_per_mwh`, `min`/`max_generation_mw`, optional `AnticipatedConfig` (a continuous forward-commitment _lead_, not a binary UC decision).                                            |
+| `NonControllableSource` | `entities/non_controllable.rs:16` | Renewables: `max_generation_mw`, `allow_curtailment`, `curtailment_cost`.                                                                                                                                                  |
+| `PumpingStation`        | `entities/pumping_station.rs:14`  | Water transfer between two reservoirs consuming bus power.                                                                                                                                                                 |
+| `EnergyContract`        | `entities/energy_contract.rs:21`  | Import/export with an external system at a price.                                                                                                                                                                          |
 
 **The one genuinely extensible seam** is `GenericConstraint`
 (`constraints/generic_constraint.rs:362`): a user-defined linear constraint over a
@@ -217,7 +232,8 @@ but its variable catalog is itself the current LP's variable set.
 **Temporal model** (`model/temporal.rs`). A two-level **`Stage` → `Block`**
 hierarchy (stages are decision periods; blocks are intra-stage load levels such as
 "LEVE/MEDIA/PESADA"), an orthogonal **`Season`** calendar, and a **`PolicyGraph`**
-(`FiniteHorizon` or `Cyclic`) of weighted stage `Transition`s with discount rates.
+struct — its `graph_type: PolicyGraphType` selects `FiniteHorizon` or `Cyclic` —
+of weighted stage `Transition`s with discount rates.
 Three stage-addressing newtypes (`StageId`, `StudyPos`, `CalendarMonth`) make
 addressing-convention mismatches compile errors — a good instinct that Part III
 generalizes. `BlockMode ∈ {Parallel, Chronological}` selects whether intra-stage
@@ -239,10 +255,16 @@ excluded from travel-time modeling (`hydro.rs:182`).
 ### I.3 The leakage points — SDDP and stochastic concepts inside the "generic" core
 
 The infrastructure-genericity hard rule forbids the tokens `sddp`/`SDDP`/`Benders`
-in the five infrastructure crates, checked by a CI grep. That check **passes to the
-letter** — there are zero token violations. But the check is lexical, and the
-_concepts_ have leaked structurally. These are the load-bearing findings for the
-generalization effort:
+in the five infrastructure crates, checked by a CI grep
+(`scripts/ci/check-infra-genericity.sh`). That check **passes to the letter** —
+zero token violations in scanned files — though (2026-07-23) the gate itself
+carries a documented exemption: the four policy-checkpoint files
+(`cobre-io/src/output/policy/{mod,records,codec,checkpoint}.rs`) are excluded
+because their cut vocabulary (`PolicyCutRecord`, `StageCutsPayload`, …) is the
+persisted FlatBuffers format, renameable only under a format-version bump —
+finding 6 below, pre-acknowledged as deferred tech debt by the gate's own
+header. And the check is lexical: the _concepts_ have leaked structurally.
+These are the load-bearing findings for the generalization effort:
 
 1. **`System` stores the stochastic input model as first-class fields**
    (`system/mod.rs:107`): `inflow_models: Vec<InflowModel>` (PAR(p) autoregressive
@@ -277,13 +299,27 @@ generalization effort:
    `cuts/stage_NNN.bin` directory of FlatBuffers `Cut`/`StageCuts` tables
    (`output/policy/…`). This is the single largest algorithm coupling in the
    infrastructure tier — a format seam a second vertical would collide with
-   immediately.
+   immediately. _(2026-07-23: the format additionally carries a
+   `cost_scale_factor` provenance field in `policy/metadata.json` — cuts are
+   stored in canonical currency units, every load rescales by the loading
+   study's factor, and the CHANGELOG states a one-directional compatibility
+   contract. A checkpoint provenance/versioning discipline therefore now
+   exists de facto — groundwork the Phase-1 shim and the Phase-4
+   `ValueFunctionArtifact` inherit.)_
 
 7. **The config type is SDDP-shaped**: `cobre_io::Config.training` carries
    `forward_passes`, `stopping_rules`, `cut_selection`, `tree_seed`; and the _real_
    config→domain conversion is `cobre_sddp::StudyParams::from_config`, not a generic
    seam. The MPI-broadcastable `BroadcastConfig` is a hand-maintained SDDP-parameter
-   subset.
+   subset. _(2026-07-23: v0.12.0 grew this surface — `training.solver.backward`/
+   `.forward` and `simulation.solver` carry a 12-field per-phase LP
+   solver-profile block keyed by SDDP phase names, and
+   `training.parallelism.backward_scheduler` selects the backward scheduler;
+   `BroadcastConfig` gained `backward_scheduler` and `cost_scale_factor`. The
+   containment held one layer down: the `Phase` enum lives in `cobre-sddp`
+   (`solve/solver_phase.rs`) and `cobre-solver` stayed phase-agnostic — a flat
+   option bag behind a generic `ProfiledSolver<S>` — so this leakage stopped at
+   the config/engine boundary rather than reaching L0.)_
 
 8. **The leakage reaches one layer below `cobre-core`**: `cobre-solver`'s
    `StageTemplate` — the L0 CSC problem container — carries `n_state` (a contiguous
@@ -328,17 +364,24 @@ algorithm-selection seam**:
   `n_scenarios`.
 - The run is typed on the concrete `cobre_sddp::StudySetup`; training is
   `setup.train(...)`, simulation is `setup.simulate(...)` — inherent methods, no
-  trait indirection or dispatch enum. The CLI imports ~50 symbols from `cobre_sddp`.
+  trait indirection or dispatch enum. The CLI imports ~70 symbols from `cobre_sddp`.
 - Config conversion goes through `cobre_sddp::StudyParams::from_config`; the output
   tree is `training/` + `simulation/` + `hydro_models/` with a cut-based policy
   checkpoint; the summary vocabulary is lower-bound/upper-bound/gap and
   hydro-model-fit sections.
 - Only `schema` and `version` are near-generic commands. `init` ships a single
-  hydrothermal template.
+  hydrothermal template (and stamps a version-pinned `$schema`). _(2026-07-23:
+  three subcommands were added since the snapshot — `validate`, `report`, and
+  `summary` — and none is engine-neutral: `validate` runs the same
+  `StudyParams::from_config` conversion, and `report`/`summary` read the SDDP
+  output tree. The seam must dispatch them per engine, not only `run`.)_
 
 The insertion points for an algorithm-selection seam are therefore well-localized:
 the `Command`/`RunArgs` dispatch, the `StudySetup`/`.train()`/`.simulate()` calls,
-the `StudyParams::from_config` conversion, and the output-writer layer.
+the `StudyParams::from_config` conversion, and the output-writer layer — plus,
+since v0.12.0, the per-phase solver-profile resolution (SDDP-phase-keyed today;
+a Direct engine has no forward/backward phases) and the `validate`/`report`/
+`summary` subcommands (2026-07-23).
 
 ### I.6 Diagnosis
 
@@ -703,6 +746,13 @@ PLEXOS), aggregates as derived projections,
 `Option`-gated features, commitment assigned per entity class with
 `CommitmentConfig::None` emitting zero binaries; permit a
 parallel entity type only where attributes provably cannot capture the physics.
+(DECOMP reconciliation, 2026-07-23: the hierarchy arrives earlier and in
+continuous form — bridge-D9 mandates `unit_groups[]` under `Hydro` as the
+long-term canonical capability representation, with per-group `bus_id` and
+nominal unit ratings, cobre computing per-group capability, and same-bus
+groups collapsing to today's LP. Phase-3 commitment then attaches to that
+substrate as cluster commitment over `n_units`-identical units per group —
+`decomp-program-reconciliation.md`.)
 
 ### III.3 Data / formulation / algorithm separation — the central seam
 
@@ -853,7 +903,19 @@ requirements of that schema, not afterthought metadata. So: **design the boundar
 type enforces "value-function edges are convex-producer-only; any edge into a
 MILP/nonconvex vertical is fixed-decision feedforward") and **defer building** the
 general DAG and the artifact promotion until a _second_ value-function producer or
-consumer actually exists. This also interacts with Cobre's MPI decomposition (a
+consumer actually exists. (2026-07-23: the horizon **boundary condition** is
+this hand-off's data-side face — D15 makes it a per-study axis whose
+`ValueFunction` kind is exactly what a composition edge delivers, and SDDP's
+existing `policy.boundary` terminal-row injection is its in-tree precursor.)
+(DECOMP reconciliation, same date: the deferral's precondition has since been
+met in the field — the cobre-bridge FCF importer is a second value-function
+_producer_ and DECOMP-like studies are consumers via `policy.boundary`, the
+first live composition instance, executed manually by the bridge rather than
+by a `cobre-study` orchestrator. The artifact promotion still does not happen
+in isolation: it folds into the node-axis checkpoint redesign Rung 2 licenses,
+designed jointly with the `HorizonGraph` generalization —
+`decomp-program-reconciliation.md`.)
+This also interacts with Cobre's MPI decomposition (a
 study-level DAG raises "which axis owns parallelism" and how edges serialize across
 ranks) — a question to answer before, not after, building it.
 
@@ -961,7 +1023,11 @@ about the _current_ bindings keep the MILP leg honest: the in-tree HiGHS FFI exp
 **no MIP surface today** (no integrality marking, no MIP solve/solution path), so
 `SupportsIntegers` is new binding + solve-path work, not a trait split; and the CLP
 backend can never provide it (Cbc is not vendored), so the admission gate must
-**reject any integer formulation on a `clp`-feature binary**. A third MIP option
+**reject any integer formulation on a `clp`-feature binary** — a rejection shape
+the codebase now practices (2026-07-23): since v0.12.0 the CLP backend rejects
+any per-phase solver-profile override at setup with a named error identifying
+the phase and the unsupported setting, the live in-tree precedent the admission
+gate generalizes. A third MIP option
 now exists and deserves a named place: **SCIP is fully Apache-2.0** (since
 v8.0.3, reaffirmed through v10) and `russcip` ships a bundled build — the same
 thin-FFI-to-vendored-C philosophy as Cobre's own backends, and SCIP documents
@@ -1400,6 +1466,25 @@ they are frozen. Concretely, the roadmap obeys three rules:
    timing, and universal-model-vs-shared-cadastre are owner decisions (VI), not
    choices to make silently mid-implementation.
 
+_Owner scoping (2026-07-23):_ the near-term program is **generalization only**.
+The first scope is defining the framework — the engine seam, the data schemas,
+the user-interface contract — landable against the existing engine alone, with
+no new problem or engine required to complete it; the cobre schema's
+flexibility and generality is itself the headline deliverable (D8). Engine
+internals are **default-path byte-frozen** (refined later the same day —
+DECOMP reconciliation): what any existing study computes does not change, and
+speculative engine work stays deferred (D13; adapters deferred at D8) — but
+the opt-in engine extensions commissioned by the DECOMP program (Rung 1,
+bridge-D8/D9, W1/W2 — `decomp-program-reconciliation.md`) do land, each
+byte-neutral at defaults, the same discipline the per-phase solver profiles
+and the cost-scale factor shipped under. ED then validates the seam per D7.
+This slices Phase 0a's internal order
+(V.1); it changes no phase gate. _(Sequencing, 2026-07-23, later: the DECOMP
+program takes implementation priority — this roadmap's Phase-0a work queues
+behind the commissioned DECOMP-pulled items, per
+`decomp-program-reconciliation.md` §5. Phase content and gates are unchanged;
+only the start order moves.)_
+
 The phases below are capability milestones, each with an explicit **gate** that must
 pass before the next begins.
 
@@ -1414,8 +1499,13 @@ copper-plate/transport network, no MILP/NLP, no new solver, no determinism landm
 It nonetheless _forces the seam into existence_ — the CLI must stop naming
 `cobre_sddp::StudySetup` and start dispatching on an `Engine`. The existing case
 format already carries everything ED needs, demand included: `LoadModel.mean_mw`
-is already the deterministic load-balance RHS (`std_mw = 0` is the documented
-deterministic case), so **no new input field is required**. What ED surfaces is a
+is already the deterministic load-balance RHS with `std_mw = 0`, so **no new
+input field is required** — with one correction (2026-07-23): the std-zero
+deterministic semantics is _not_ documented at the field (`scenario.rs`
+documents only "seasonal mean/standard deviation"), so Phase 0a verifies that
+the `std = 0` noise term annihilates in exact arithmetic (the V.2 obligation,
+checked here rather than assumed) and adds that doc comment, instead of leaning
+on documentation that does not exist. What ED surfaces is a
 _relocation_ requirement instead — demand lives inside the stochastic scenario
 pipeline rather than as first-class data (III.7) — which is exactly the kind of
 concrete pull that should shape the general model, rather than a guess.
@@ -1425,13 +1515,30 @@ concrete pull that should shape the general model, rather than a guess.
 ED in `cobre-direct` at copper-plate/transport fidelity, reading the current v1 case
 unchanged (demand = `LoadModel.mean_mw`; no new field); implement the resolved
 **D14** MPI semantics — rank 0 executes the Direct study serially, non-roots
-skip setup and idle to a final barrier, `ranks_participated` records 1 — with
+skip setup and idle to a final barrier, `ranks_participated` records 1 (an
+existing manifest field — D14) — with
 the engine-tagged
 setup stages skipping stochastic reconstruction for engines that do not consume
 it (IV.4); add the **shared output-orchestration entry point** in `cobre-io`
 (the re-specified results seam, III.7) and wire ED outputs in _both_ CLI and
 Python through it (Python-parity
-from day one). That is **Phase 0a**. **Phase 0b** (per the resolved D12 split)
+from day one). Two deliverables the v0.12.0 surface adds (2026-07-23): the seam
+covers the full command surface — `validate`, `report`, and `summary` are
+SDDP-shaped today (I.5) — and the study/config layer defines **per-engine
+solver-profile scoping**: the per-phase profile blocks are SDDP-phase-keyed
+(backward/forward/simulation), so an `Engine::Direct` study needs its own
+single-solve profile surface, and phase-keyed config naming phases the chosen
+engine lacks is an admission-gate rejection, not a silent ignore. That is
+**Phase 0a**. _Owner-scoped internal order (2026-07-23):_ the framework
+surfaces — the seam, the `study`/config schema, the admission gate, the
+output-orchestration entry point — land **first and alone**, against the
+existing SDDP engine with byte-identical behavior and no second engine
+required; `cobre-direct` ED then follows through the standing seam as its
+validating consumer, carrying the **D15 boundary-condition axis**
+(`TargetStorage` + the documented zero-terminal-value degenerate; the
+`ValueFunction` kind generalizes SDDP's existing `policy.boundary` injection
+and reaches Direct with the composition currency, III.4). **Phase 0b** (per
+the resolved D12 split)
 then carves the `cobre-model` kernel (`BuildProblem`, `ProblemTemplate`,
 `VarDomain` — continuous only, for now), pulled by the two live engines and
 priced as new construction
@@ -1443,7 +1550,10 @@ on the real kernel once it exists as a regression check, not as a gate.
 **Gate.** One `cobre run` binary dispatches SDDP _and_ ED end-to-end over the same
 loaded system — **including under MPI (`mpirun -n > 1`), exercising the D14
 semantics**, not only single-rank; SDDP results are bit-for-bit unchanged from
-today; ED output is mirrored
+a **pinned pre-seam develop baseline** (2026-07-23: pin the baseline commit
+explicitly — v0.12.0's backward solve-order default legitimately moved
+degenerate-optimum outputs since this document's snapshot, so "today" is a
+moving referent); ED output is mirrored
 in Python through the shared orchestration entry point; kernel
 `cargo-bloat`/compile-time regression check within budget. Under the
 D12 split, the kernel carve that follows re-proves the same bit-for-bit condition
@@ -1604,7 +1714,9 @@ The v1→v2 case migration (V.2) ships behind a compat shim proven bit-for-bit, 
 existing SDDP studies keep running unchanged through the transition. Cobre already
 plans a `cobre-bridge convert newave` path (per the documentation strategy); the
 import-adapter order (MATPOWER → PSS®E → ONS/CEPEL deck, III / Appendix) gives the
-network verticals free validation corpora and serves the NEWAVE-user audience. The
+network verticals free validation corpora and serves the NEWAVE-user audience.
+_(D8 — resolved 2026-07-23: the stance is (a); no adapter is scheduled — the
+first importer activates with Phase 2's validation-corpus need.)_ The
 schema-export CI gate extends to cover the multi-vertical v2 schema.
 
 ### V.9 The user's view — what changes at the desk
@@ -1638,20 +1750,24 @@ than a promise).
 **Phase 0 — selection appears; nothing moves.** The run config gains a `study`
 section naming a preset — "operation-planning" (the default, ≡ today's SDDP
 train + simulate) or "economic-dispatch" — which expands to a `ProblemTemplate`
-
-- `Engine` (IV.4). A config that does not name a study behaves exactly as
-  today. An ED run reads the **same v1 case** (demand = `LoadModel.mean_mw`,
-  V.1), writes a new dispatch-results family (per-stage/per-block dispatch,
-  marginal costs, no `training/` tree), mirrored in Python from day one. Two new
-  user-facing surfaces: the **typed admission gate** turns unsupported
-  (study × engine × backend) combinations into a structured error naming the
-  offending tuple — e.g. an integer formulation on a `clp`-feature binary — where
-  today the failure would surface as a deep solver error; and under MPI,
-  `mpirun` on a Direct study runs rank-0-only (D14 — resolved): the same
-  submission script works for every study preset, non-root ranks idle to the
-  final barrier, the run summary records `ranks_participated = 1`, and a
-  warning notes the idle allocation — documented, never
-  silent. `cobre init` ships an ED template beside the hydrothermal one.
+and an `Engine` (IV.4). A config that does not name a study behaves exactly as
+today. An ED run reads the **same v1 case** (demand = `LoadModel.mean_mw`,
+V.1), writes a new dispatch-results family (per-stage/per-block dispatch,
+marginal costs, no `training/` tree), mirrored in Python from day one. Two new
+user-facing surfaces: the **typed admission gate** turns unsupported
+(study × engine × backend) combinations into a structured error naming the
+offending tuple — e.g. an integer formulation on a `clp`-feature binary — where
+today the failure would surface as a deep solver error; and under MPI,
+`mpirun` on a Direct study runs rank-0-only (D14 — resolved): the same
+submission script works for every study preset, non-root ranks idle to the
+final barrier, the run summary records `ranks_participated = 1`, and a
+warning notes the idle allocation — documented, never
+silent. One config surface takes a per-engine shape (2026-07-23): the
+per-phase solver-profile blocks are SDDP-phase-keyed
+(`training.solver.backward`/`.forward`, `simulation.solver`), so an ED study
+carries a single solve profile, and phase-keyed config naming phases the
+chosen engine lacks is an admission-gate rejection, not a silent ignore.
+`cobre init` ships an ED template beside the hydrothermal one.
 
 **Phase 1 — the one breaking event, shaped for migration.** Case format v2
 relocates fields; it does not change results. The user-visible shape: a
@@ -1806,17 +1922,36 @@ III.7); (b) relocate it into an SDDP-private module and generalize later. _Stake
 (b) risks each future vertical growing a private uncertainty representation —
 re-fragmenting the very seam the redesign unifies.
 
-**D7 — Second-consumer choice.** Options: (a) deterministic economic dispatch
-(recommended — cheapest, no new solver, LP degenerate case); (b) a unit-commitment study
-(forces MILP + determinism landmines immediately); (c) OPF. _Recommendation:_ (a).
-_Stakes:_ picking a harder second consumer front-loads risk before the seam is proven.
+**D7 — Second-consumer choice. _Resolved (owner, 2026-07-23): (a) —
+deterministic economic dispatch._** Options were: (a) deterministic economic
+dispatch (cheapest, no new solver, LP degenerate case); (b) a unit-commitment
+study (forces MILP + determinism landmines immediately); (c) OPF. _Grounds:_
+the D2/D10 evidence base is built on (a) — ED needs no new input field and no
+new solver capability. _Scoping rider (owner):_ the first scope of Phase 0a is
+**defining the framework — the seam, the data schemas, the user interfaces —
+landable against the existing engine alone**, with no second problem or engine
+required to complete it; ED then follows through the standing seam as its
+validating consumer (V.0, V.1). The pull-don't-push rule is unchanged: nothing
+freezes until ED has exercised it. _Reopen trigger:_ none realistic — (b)/(c)
+would resurface only if ED proved structurally unable to exercise the seam,
+which the D2 code evidence refutes. _Stakes (unchanged):_ picking a harder
+second consumer front-loads risk before the seam is proven.
 
-**D8 — Data-standard stance.** Options: (a) domain-native model + import-only adapters,
-build order MATPOWER → PSS®E → ONS/CEPEL deck (recommended, III/Appendix); (b) align
-the core to CIM/CGMES. _Recommendation:_ (a), while studying CIM / PowSyBl IIDM so the
-model is a _deliberate_ simplification of a known ontology rather than an ad-hoc one,
-and round-tripping MATPOWER/PSS®E for free validation corpora. _Stakes:_ (b) imports
-CIM's asset/business baggage without closing Cobre's actual modeling gaps.
+**D8 — Data-standard stance. _Resolved (owner, 2026-07-23): (a) — domain-native
+model, import-only adapters; adapter construction deferred._** Options were:
+(a) domain-native model + import-only adapters, build order MATPOWER → PSS®E →
+ONS/CEPEL deck (III/Appendix); (b) align the core to CIM/CGMES. _Grounds:_ (b)
+imports CIM's asset/business baggage without closing Cobre's actual modeling
+gaps, and the near-term effort goes to **the native cobre schema itself — its
+flexibility and generality is the deliverable** — informed by CIM / PowSyBl
+IIDM as reference ontologies so it is a deliberate simplification of a known
+ontology rather than an ad-hoc one. No adapter is scheduled: the stance is
+resolved, and the MATPOWER-first build order applies _when_ adapter work
+activates. _Reopen trigger (activation, not reversal):_ Phase 2's
+validation-corpus need (the Rosemberg direction check, V.3) activates the
+first importer; only a mandated CIM/CGMES interchange requirement would reopen
+the stance itself. _Stakes (unchanged):_ (b) imports CIM's asset/business
+baggage without closing Cobre's actual modeling gaps.
 
 **D9 — Engine selection: runtime-config-driven vs compile-fixed per binary.
 _Resolved (owner, 2026-07-16): (a) — runtime-config-driven, one binary._**
@@ -1861,10 +1996,13 @@ capability traits and the `Formulation`/vertical enums (closed to out-of-tree
 implementers — the standard Rust sealed-trait pattern; note `embedded-hal`, cited in
 III.3 for capability granularity, is the counter-example on this axis: its traits
 are deliberately open to third-party implementations); (b) leave them open for
-external verticals/backends. _Recommendation:_ seal by default (it matches the
-no-`dyn`, closed-world discipline and the determinism contract); revisit only if a
-concrete out-of-tree extension need appears. _Stakes:_ open→sealed later is a breaking
-change; sealed→open is not — so sealing is the reversible default.
+external verticals/backends. **_Resolved (owner, 2026-07-23): (a) — seal by
+default._** _Grounds:_ sealing matches the no-`dyn`, closed-world discipline
+and the determinism contract, and it is the reversible arm — sealed→open is a
+non-breaking relaxation, open→sealed is a breaking change. _Reopen trigger:_ a
+concrete out-of-tree backend or vertical with a named owner. _Stakes
+(unchanged):_ open→sealed later is a breaking change; sealed→open is not — so
+sealing is the reversible default.
 
 **D12 — Phase-0 scope: bundle the kernel carve, split the phase, or carve after
 purification. _Resolved (owner, 2026-07-16): (b) — split into 0a/0b._** The
@@ -1895,15 +2033,20 @@ the demand/uncertainty homes. _Stakes (unchanged):_ (a) concentrates the
 riskiest construction in the phase meant to de-risk; (b) costs a temporary
 bespoke ED builder that the kernel later replaces.
 
-**D13 — SDDiP: fund as its own effort, or defer indefinitely.** SDDiP is
+**D13 — SDDiP: fund as its own effort, or defer indefinitely. _Resolved
+(owner, 2026-07-23): (b) — deferred; no SDDiP work is scheduled._** SDDiP is
 architecturally an intra-SDDP duality sub-strategy (III.3) and a new algorithm stack
 in cost (III.6, V.6): binarized state, MIP backward solves, Lagrangian cut loops —
 none of which reuses the simplex-basis warm-start or the reduced-cost dual
-extraction. Options: (a) fund after Phase 3's deterministic UC proves the integer
-kernel plumbing; (b) defer indefinitely (deterministic UC plus continuous-state SDDP
-may cover the practical need). _Recommendation:_ decide only after Phase 3 lands; do
-not schedule it inside Phase 3. _Stakes:_ treating it as a Phase-3 line item hides
-an effort comparable to a new engine.
+extraction. Options were: (a) fund after Phase 3's deterministic UC proves the
+integer kernel plumbing; (b) defer indefinitely (deterministic UC plus
+continuous-state SDDP may cover the practical need). _Grounds:_ the program
+focus is generalization — engine internals are behavior-frozen ("no big
+changes in any engine"); raw functionality is kept and prepared for the
+future, not extended algorithmically (V.0 owner scoping). _Reopen trigger:_ a
+concrete multistage-stochastic-integer requirement arriving after Phase 3's
+deterministic UC lands. _Stakes (unchanged):_ treating it as a Phase-3 line
+item hides an effort comparable to a new engine.
 
 **D14 — `Engine::Direct` execution semantics under MPI** _(added 2026-07-16,
 verification addendum)_. The run pipeline is rank-collective before the engine
@@ -1935,7 +2078,47 @@ reconstruction for engines that do not consume it (IV.4) is part of this
 resolution. _Reopen trigger → (d):_ a single-engine multi-period/
 multi-scenario Direct workload that materially needs rank parallelism before
 the composition layer exists. _Stakes (now bounded):_ the semantics are
-defined, tested at the gate, and recorded in output metadata.
+defined, tested at the gate, and recorded in output metadata. _(2026-07-23:
+`cobre-io`'s output manifest already carries `ranks_participated`, documented
+"may differ from `world_size` if some ranks were idle" — the recording surface
+pre-exists; D14's deliverable is the write path and the idle-rank warning, not
+new schema.)_
+
+**D15 — Horizon boundary condition as a generic problem axis** _(added
+2026-07-23; surfaced by the state re-verification)_. V.1's deterministic ED
+has no defined storage boundary condition: a finite-horizon LP with free
+terminal water is myopic (it drains reservoirs), the v1 case carries no
+terminal-value input, and SDDP never faced the question because it _builds_
+its terminal value function. Options: (a) hard-code one behavior per engine
+(ED always zero terminal value, documented); (b) make the boundary condition
+a **per-study axis of the generic problem layer** — a closed multi-kind
+choice, engine-gated at admission; (c) defer until the composition layer
+delivers value functions (Phase 4). **_Resolved (owner, 2026-07-23): (b) — a
+multi-kind boundary-condition axis in the generic layer._** The working kind
+set: **`ValueFunction`** — a cost-to-go hand-off; SDDP's existing
+`policy.boundary` config (loads rows from a source checkpoint and injects
+them as fixed terminal boundary conditions) is the in-tree precursor and
+becomes this kind's first expression, and it is exactly what a Phase-4
+composition edge delivers (III.4); **`TargetStorage`** — reach a stated
+storage at horizon end; the reserved, currently-unwired
+`Hydro.filling_target_violation_cost` penalty vocabulary is the natural
+surface to examine first, per the unwired-config hard rule; and the
+**documented zero-terminal-value degenerate** — explicit and warned, myopic
+by declaration, never by accident. Engines admit subsets via the gate
+(III.3): SDDP builds its own cost-to-go and already admits `ValueFunction`
+injection; Phase-0 ED admits `TargetStorage` and the documented zero-value;
+`ValueFunction` into a Direct LP is a convex-consumer hand-off and arrives
+with the composition currency. The exact kind set and its schema are
+finalized during the schema-design focus (D8 grounds). _Reopen trigger:_ a
+vertical needing a boundary form not expressible as one of these kinds
+(e.g. a chance/terminal-distribution constraint). _Stakes:_ without the
+axis, each engine grows a private terminal-condition convention — the exact
+per-engine fragmentation the redesign exists to prevent. _(DECOMP
+reconciliation, 2026-07-23: the `ValueFunction` kind now has an external
+producer — the cobre-bridge FCF importer authors synthetic checkpoints
+consumed through `policy.boundary` — and Rung 2 generalizes the source
+selector from a stage to a node; the Phase-1 unification into
+`study.boundary` must carry both facts.)_
 
 ---
 

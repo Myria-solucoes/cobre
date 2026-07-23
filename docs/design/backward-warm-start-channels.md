@@ -14,15 +14,19 @@
 > plant-level network granularity a backward opening cannot be made free, so the
 > remaining upside is fewer _pivots per solve_, never fewer _solves_.
 >
-> **Companions:**
+> **Companions** (the two standalone design notes were retired with the naming
+> pass; the code and rules below are the surviving anchors):
 >
-> - `docs/design/backward-opening-ordering.md` — the warm-start-friendly opening
->   solve order (TSP path / σ-key) that H1 rotates; the mechanism H1 builds on.
-> - `docs/design/lpt-claim-order.md` — the opening-block claim scheduler whose
->   per-`(stage, block)` structure H2 keys its cache on, and the house precedent
->   for the pre-registered, matched-epoch decision-rule register used below.
-> - `.claude/rules/sddp.md` — the opening-order, PN-scheduler, and slot-identity
->   basis-reconstruction contracts H1 and H2 must not disturb.
+> - `crates/cobre-sddp/src/stochastic/noise_key.rs` (`apply_chain_order`) — the
+>   warm-start-friendly opening solve order (shortest-chain path; σ-key kept
+>   below three openings) that H1 rotates; the mechanism H1 builds on.
+> - `crates/cobre-sddp/src/training/backward/opening_block.rs` — the
+>   opening-block claim scheduler (hardest-first claim order) whose
+>   per-`(stage, block)` structure H2 keys its cache on. Its retired note was
+>   also the house precedent for the pre-registered, matched-epoch
+>   decision-rule register used below.
+> - `.claude/rules/sddp.md` — the opening-order, opening-block-scheduler, and
+>   slot-identity basis-reconstruction contracts H1 and H2 must not disturb.
 
 ## The motivating question
 

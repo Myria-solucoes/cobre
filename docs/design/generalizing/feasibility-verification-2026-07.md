@@ -282,3 +282,37 @@ _Amendment application to `beyond-sddp-generalization.md` awaits owner
 sign-off per the anti-simplification discipline: several items add or modify
 forks (D12c, D14) or change recommendations (results seam, per-class
 formulation map)._
+
+---
+
+## 5. Errata & re-audit (2026-07-23)
+
+The closing note above is consummated: the owner signed off and every
+amendment this report proposed (including D12c and D14) was applied to the
+roadmap on 2026-07-16; D1, D2, D9, D12, and D14 were resolved the same day.
+
+A follow-up state audit (develop @ v0.12.0, three releases after this report)
+re-verified this report's code claims; all hold except one measurement basis:
+
+- **§1.1 "the real `lp/` volume (~9.7k lines ≈ 5.4× the spike)"** — the basis
+  for 9.7k is unreproducible. Measured 2026-07-23 (and essentially unchanged
+  since the roadmap snapshot): `crates/cobre-sddp/src/lp/` = 33.9k total
+  lines, 23.8k excluding `tests.rs` files (builder 19.1k, indexer 3.7k). The
+  D10 conclusion is unaffected — the spike's findings are the _ratios_ (no
+  formulation-matrix multiplier for the value-based template; linearity in
+  legalized tuples), not the extrapolated absolute seconds — but any future
+  absolute extrapolation should start from the measured non-test volume, or
+  better, from the fifth-to-quarter carve estimate (roadmap IV.2), which is
+  the code an engine actually duplicates.
+
+Post-report code deltas relevant to this report's subjects are amended into
+the roadmap directly, each tagged (2026-07-23): the CLP backend now rejects
+per-phase solver-profile overrides at setup with a named error (a live
+in-tree precedent for the §3-recommended typed admission gate); the policy
+checkpoint stores cuts in canonical currency units with a `cost_scale_factor`
+provenance field and a one-directional compatibility contract (a de-facto
+format-provenance discipline the eventual `ValueFunctionArtifact` inherits);
+and the output manifest already carries `ranks_participated` (D14's recording
+surface pre-exists). The finding-1 skip points are now concrete:
+`reconstruct_stochastic_context_non_root` and
+`rebuild_historical_library_non_root` in `cobre-cli`'s run setup.
