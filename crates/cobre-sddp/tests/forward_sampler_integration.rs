@@ -686,9 +686,11 @@ fn build_inflow_history(hydro_id: EntityId, n_years: usize) -> Vec<InflowHistory
     for y in 0..n_years {
         for m in 0..12u32 {
             let value = 80.0 + 15.0 * (f64::from(m) * std::f64::consts::PI / 6.0).sin();
+            let start_date = NaiveDate::from_ymd_opt(base_year + y as i32, m + 1, 1).unwrap();
             rows.push(InflowHistoryRow {
                 hydro_id,
-                date: NaiveDate::from_ymd_opt(base_year + y as i32, m + 1, 1).unwrap(),
+                start_date,
+                end_date: start_date.succ_opt().unwrap(),
                 value_m3s: value,
             });
         }
@@ -2325,11 +2327,13 @@ fn differential_lag_chain_forward_external_historical_agree_at_quarterly_transit
         HistoricalScenarioLibrary::new(1, DLC_N_STAGES, DLC_N_HYDROS, 1, vec![window_year]);
     let mut hist_rows = Vec::with_capacity(DLC_N_STAGES * DLC_N_HYDROS);
     for t in 0..DLC_N_STAGES {
-        let date = fx.stages[t].start_date;
+        let start_date = fx.stages[t].start_date;
+        let end_date = fx.stages[t].end_date;
         for h in 0..DLC_N_HYDROS {
             hist_rows.push(InflowHistoryRow {
                 hydro_id: fx.hydro_ids[h],
-                date,
+                start_date,
+                end_date,
                 value_m3s: fx.raw[t][h],
             });
         }
@@ -2427,11 +2431,13 @@ fn opening_tree_historical_standardization_ring_aware_eta_requires_derived_downs
     let window_year = 2026;
     let mut hist_rows = Vec::with_capacity(DLC_N_STAGES * DLC_N_HYDROS);
     for t in 0..DLC_N_STAGES {
-        let date = fx.stages[t].start_date;
+        let start_date = fx.stages[t].start_date;
+        let end_date = fx.stages[t].end_date;
         for h in 0..DLC_N_HYDROS {
             hist_rows.push(InflowHistoryRow {
                 hydro_id: fx.hydro_ids[h],
-                date,
+                start_date,
+                end_date,
                 value_m3s: fx.raw[t][h],
             });
         }

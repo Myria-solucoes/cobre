@@ -528,10 +528,11 @@ pub(super) fn make_history_rows(hydro_id: i32, n_obs: usize) -> Vec<InflowHistor
     for i in 0..n_obs {
         let year = 2000 + (i / 12) as i32;
         let month = (i % 12) as u32 + 1;
-        let date = chrono::NaiveDate::from_ymd_opt(year, month, 15).unwrap();
+        let start_date = chrono::NaiveDate::from_ymd_opt(year, month, 15).unwrap();
         rows.push(InflowHistoryRow {
             hydro_id: EntityId::from(hydro_id),
-            date,
+            start_date,
+            end_date: start_date.succ_opt().unwrap(),
             value_m3s: 100.0,
         });
     }

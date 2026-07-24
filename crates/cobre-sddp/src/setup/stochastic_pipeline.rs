@@ -592,7 +592,8 @@ mod tests {
             .enumerate()
             .map(|(t, stage)| InflowHistoryRow {
                 hydro_id,
-                date: stage.start_date,
+                start_date: stage.start_date,
+                end_date: stage.end_date,
                 value_m3s: raw[t],
             })
             .collect();
@@ -601,9 +602,11 @@ mod tests {
         // before the first study season). Its value is never read by
         // `standardize_historical_windows`, which only consumes the 5
         // study-stage entries above.
+        let lag_start = NaiveDate::from_ymd_opt(2025, 7, 15).unwrap();
         inflow_history.push(InflowHistoryRow {
             hydro_id,
-            date: NaiveDate::from_ymd_opt(2025, 7, 15).unwrap(),
+            start_date: lag_start,
+            end_date: lag_start.succ_opt().unwrap(),
             value_m3s: 999.0,
         });
 

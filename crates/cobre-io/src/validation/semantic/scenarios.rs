@@ -6,6 +6,7 @@ use cobre_core::Hydro;
 use cobre_stochastic::par::{
     AnnualParams, ClosureRejection, check_stationarity, check_stationarity_annual,
 };
+use cobre_stochastic::season_cast::{RealizedWindow, SeasonPeriodWindow, cast};
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 
@@ -540,6 +541,15 @@ pub(super) fn check_load_factor_consistency(data: &ParsedData, ctx: &mut Validat
 
 // ── Rules 19-21: Estimation prerequisites ─────────────────────────────────────
 
+/// Total hours in `[start, end)`, for constructing a [`SeasonPeriodWindow`]
+/// directly from a study stage's own dates (the stage's dates already are its
+/// occurrence bounds, so no `season_cast` calendar disambiguation is needed).
+fn window_hours(start: chrono::NaiveDate, end: chrono::NaiveDate) -> f64 {
+    let days = u32::try_from((end - start).num_days().max(0))
+        .unwrap_or_else(|_| unreachable!("a study stage's day count always fits in u32"));
+    f64::from(days) * 24.0
+}
+
 /// Validates prerequisites for the history-based PAR(p) estimation path.
 ///
 /// Runs only when `inflow_history.parquet` is present and
@@ -610,18 +620,45 @@ pub(super) fn check_estimation_prerequisites(data: &ParsedData, ctx: &mut Valida
             .filter_map(|s| s.season_id.map(|sid| (s.start_date, s.end_date, sid)))
             .collect();
 
-        let mut counts: HashMap<(i32, usize), usize> = HashMap::new();
+        // Bucket rows by the study-stage occurrence they fall within, keyed by
+        // (hydro_id, stage_index position): a stage's rows may be split across
+        // several partial windows, and only their combined coverage decides
+        // whether the occurrence counts toward the minimum — a
+        // partial occurrence must not count.
+        let mut rows_by_occurrence: HashMap<(i32, usize), Vec<RealizedWindow>> = HashMap::new();
         for row in &data.inflow_history {
-            let pos = stage_index.partition_point(|(start, _, _)| *start <= row.date);
-            let season_id = if pos > 0 {
-                let (_, end_date, sid) = stage_index[pos - 1];
-                if row.date < end_date { Some(sid) } else { None }
-            } else {
-                None
-            };
+            let pos = stage_index.partition_point(|(start, _, _)| *start <= row.start_date);
+            if pos == 0 {
+                continue;
+            }
+            let (_, end_date, _) = stage_index[pos - 1];
+            if row.start_date >= end_date {
+                continue;
+            }
+            rows_by_occurrence
+                .entry((row.hydro_id.0, pos - 1))
+                .or_default()
+                .push(RealizedWindow {
+                    start_date: row.start_date,
+                    end_date: row.end_date,
+                    value_m3s: row.value_m3s,
+                });
+        }
 
-            if let Some(sid) = season_id {
-                *counts.entry((row.hydro_id.0, sid)).or_insert(0) += 1;
+        let mut counts: HashMap<(i32, usize), usize> = HashMap::new();
+        for (&(hydro_id, stage_pos), rows) in &rows_by_occurrence {
+            let (start_date, end_date, season_id) = stage_index[stage_pos];
+            let period = SeasonPeriodWindow {
+                start: start_date,
+                end: end_date,
+                hours: window_hours(start_date, end_date),
+            };
+            // Exact gate, not a tolerance shortcut: see `resolve_coverage_gated_observations`
+            // in `scenarios/estimation.rs` for why a full-coverage ratio is bit-exact 1.0.
+            #[allow(clippy::float_cmp)]
+            let is_full_coverage = cast(rows, &period).coverage == 1.0;
+            if is_full_coverage {
+                *counts.entry((hydro_id, season_id)).or_insert(0) += 1;
             }
         }
 
@@ -1456,7 +1493,7 @@ mod tests {
     }
 
     /// Bare per-stage `season_id`s with no `season_map` resolve via
-    /// `resolve_stage_seasons`'s fallback (amended 2026-07-14): no
+    /// `resolve_stage_seasons`'s fallback: no
     /// missing-season-context error is added, and the stationarity check
     /// actually runs -- proven here by an explosive AR(1) still being
     /// rejected on this path, not merely "no error".
@@ -1726,12 +1763,20 @@ mod tests {
     /// validation produces a `ModelQuality` warning containing "has 3 observations".
     #[test]
     fn test_estimation_warns_low_observations() {
-        // 3 observations for hydro 1: one per January (season 0) over 3 years.
+        // 3 full-coverage observations for hydro 1: one per January (season 0)
+        // over 3 years — full-month windows so each counts under the
+        // coverage gate, matching `make_stages_with_seasons`'s
+        // own [1st, next-1st) January stage bounds exactly.
         let history: Vec<InflowHistoryRow> = (0..3)
-            .map(|y| InflowHistoryRow {
-                hydro_id: EntityId::from(1),
-                date: chrono::NaiveDate::from_ymd_opt(2000 + y, 1, 15).unwrap(),
-                value_m3s: 100.0,
+            .map(|y| {
+                let start_date = chrono::NaiveDate::from_ymd_opt(2000 + y, 1, 1).unwrap();
+                let end_date = chrono::NaiveDate::from_ymd_opt(2000 + y, 2, 1).unwrap();
+                InflowHistoryRow {
+                    hydro_id: EntityId::from(1),
+                    start_date,
+                    end_date,
+                    value_m3s: 100.0,
+                }
             })
             .collect();
 
@@ -2150,7 +2195,7 @@ mod tests {
         );
     }
 
-    // ── F2-002: External scheme requires external scenario files ──────────────
+    // ── External scheme requires external scenario files ──────────────
 
     /// `config.training.scenario_source.inflow.scheme = "external"` with no
     /// `external_scenarios` data produces an error referencing `"config.json"` and

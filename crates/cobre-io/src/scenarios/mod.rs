@@ -268,7 +268,7 @@ pub struct ScenarioData {
     pub ncs_models: Vec<NcsModel>,
     /// Correlation model (profiles + schedule).
     pub correlation: CorrelationModel,
-    /// Inflow history rows, sorted by `(hydro_id, date)`.
+    /// Inflow history rows, sorted by `(hydro_id, start_date)`.
     pub inflow_history: Vec<InflowHistoryRow>,
     /// External inflow scenario rows, sorted by `(stage_id, scenario_id, hydro_id)`.
     pub external_scenarios: Vec<ExternalScenarioRow>,

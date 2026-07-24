@@ -340,16 +340,18 @@ fn test_inflow_history_wired_into_system() {
 
     let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
     let mut hydro_ids: Vec<i32> = Vec::with_capacity(360);
-    let mut dates: Vec<i32> = Vec::with_capacity(360);
+    let mut start_dates: Vec<i32> = Vec::with_capacity(360);
+    let mut end_dates: Vec<i32> = Vec::with_capacity(360);
     let mut values: Vec<f64> = Vec::with_capacity(360);
 
     for hid in 1_i32..=3 {
         for year in 2000_i32..=2009 {
             for month in 1_u32..=12 {
-                let date = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
-                let days = i32::try_from((date - epoch).num_days()).unwrap();
+                let start = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+                let end = start.checked_add_months(chrono::Months::new(1)).unwrap();
                 hydro_ids.push(hid);
-                dates.push(days);
+                start_dates.push(i32::try_from((start - epoch).num_days()).unwrap());
+                end_dates.push(i32::try_from((end - epoch).num_days()).unwrap());
                 values.push(f64::from(hid) * 100.0 + f64::from(month));
             }
         }
@@ -357,14 +359,16 @@ fn test_inflow_history_wired_into_system() {
 
     let history_schema = Arc::new(Schema::new(vec![
         Field::new("hydro_id", DataType::Int32, false),
-        Field::new("date", DataType::Date32, false),
+        Field::new("start_date", DataType::Date32, false),
+        Field::new("end_date", DataType::Date32, false),
         Field::new("value_m3s", DataType::Float64, false),
     ]));
     let history_batch = RecordBatch::try_new(
         Arc::clone(&history_schema),
         vec![
             Arc::new(Int32Array::from(hydro_ids)),
-            Arc::new(Date32Array::from(dates)),
+            Arc::new(Date32Array::from(start_dates)),
+            Arc::new(Date32Array::from(end_dates)),
             Arc::new(Float64Array::from(values)),
         ],
     )

@@ -90,10 +90,14 @@ use crate::{StochasticError, par::fitting::find_season_for_date};
 /// let hydro_id = EntityId(1);
 /// let history: Vec<InflowHistoryRow> = (1990_i32..=1991)
 ///     .flat_map(|y| {
-///         (1u32..=12).map(move |m| InflowHistoryRow {
-///             hydro_id,
-///             date: NaiveDate::from_ymd_opt(y, m, 1).unwrap(),
-///             value_m3s: 100.0,
+///         (1u32..=12).map(move |m| {
+///             let start_date = NaiveDate::from_ymd_opt(y, m, 1).unwrap();
+///             InflowHistoryRow {
+///                 hydro_id,
+///                 start_date,
+///                 end_date: start_date.checked_add_months(chrono::Months::new(1)).unwrap(),
+///                 value_m3s: 100.0,
+///             }
 ///         })
 ///     })
 ///     .collect();
@@ -144,7 +148,7 @@ pub fn discover_historical_windows(
     season_map: Option<&SeasonMap>,
     forward_passes: u32,
 ) -> Result<Vec<i32>, StochasticError> {
-    let all_years: HashSet<i32> = inflow_history.iter().map(|r| r.date.year()).collect();
+    let all_years: HashSet<i32> = inflow_history.iter().map(|r| r.start_date.year()).collect();
 
     let mut stage_index: Vec<(NaiveDate, NaiveDate, i32, usize)> = stages
         .iter()
@@ -155,16 +159,10 @@ pub fn discover_historical_windows(
     let lookup: HashSet<(EntityId, i32, usize)> = inflow_history
         .iter()
         .filter_map(|r| {
-            let season_id = find_season_for_date(&stage_index, r.date)
-                .or_else(|| season_map.and_then(|sm| sm.season_for_date(r.date)))
-                .or_else(|| {
-                    if season_map.is_none() {
-                        Some(r.date.month0() as usize)
-                    } else {
-                        None
-                    }
-                })?;
-            Some((r.hydro_id, r.date.year(), season_id))
+            let season_id = find_season_for_date(&stage_index, r.start_date)
+                .or_else(|| season_map.and_then(|sm| sm.season_for_date(r.start_date)))
+                .or_else(|| season_map.is_none().then(|| r.start_date.month0() as usize))?;
+            Some((r.hydro_id, r.start_date.year(), season_id))
         })
         .collect();
 
@@ -177,15 +175,11 @@ pub fn discover_historical_windows(
     let required_sequence: Vec<(i32, usize)> =
         super::build_observation_sequence(stages, max_par_order, n_seasons);
 
-    let candidate_years: Vec<i32> = if let Some(pool) = user_pool {
-        let mut years: Vec<i32> = pool.to_years().into_iter().collect();
-        years.sort_unstable();
-        years
-    } else {
-        let mut years: Vec<i32> = all_years.into_iter().collect();
-        years.sort_unstable();
-        years
+    let mut candidate_years: Vec<i32> = match user_pool {
+        Some(pool) => pool.to_years(),
+        None => all_years.into_iter().collect(),
     };
+    candidate_years.sort_unstable();
 
     let mut valid_windows: Vec<i32> = candidate_years
         .into_iter()
@@ -269,10 +263,16 @@ mod tests {
     fn monthly_history(hydro_id: EntityId, from_year: i32, to_year: i32) -> Vec<InflowHistoryRow> {
         (from_year..=to_year)
             .flat_map(|y| {
-                (1u32..=12).map(move |m| InflowHistoryRow {
-                    hydro_id,
-                    date: NaiveDate::from_ymd_opt(y, m, 1).unwrap(),
-                    value_m3s: 100.0,
+                (1u32..=12).map(move |m| {
+                    let start_date = NaiveDate::from_ymd_opt(y, m, 1).unwrap();
+                    InflowHistoryRow {
+                        hydro_id,
+                        start_date,
+                        end_date: start_date
+                            .checked_add_months(chrono::Months::new(1))
+                            .unwrap(),
+                        value_m3s: 100.0,
+                    }
                 })
             })
             .collect()
@@ -556,10 +556,16 @@ mod tests {
         let quarter_months = [1u32, 4, 7, 10];
         (from_year..=to_year)
             .flat_map(|y| {
-                quarter_months.iter().map(move |&m| InflowHistoryRow {
-                    hydro_id,
-                    date: NaiveDate::from_ymd_opt(y, m, 1).unwrap(),
-                    value_m3s: 100.0,
+                quarter_months.iter().map(move |&m| {
+                    let start_date = NaiveDate::from_ymd_opt(y, m, 1).unwrap();
+                    InflowHistoryRow {
+                        hydro_id,
+                        start_date,
+                        end_date: start_date
+                            .checked_add_months(chrono::Months::new(3))
+                            .unwrap(),
+                        value_m3s: 100.0,
+                    }
                 })
             })
             .collect()

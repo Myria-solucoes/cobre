@@ -1873,9 +1873,11 @@ fn coverage_gap_returns_validation_error() {
 // ── long-term mean inflow for the lateral secant ────────────────────
 
 fn inflow_row(hydro_id: i32, day: u32, value_m3s: f64) -> InflowHistoryRow {
+    let start_date = NaiveDate::from_ymd_opt(2000, 1, day).unwrap();
     InflowHistoryRow {
         hydro_id: EntityId::from(hydro_id),
-        date: NaiveDate::from_ymd_opt(2000, 1, day).unwrap(),
+        start_date,
+        end_date: start_date.succ_opt().unwrap(),
         value_m3s,
     }
 }

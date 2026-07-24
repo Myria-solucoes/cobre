@@ -18,7 +18,7 @@
 //!   window's own pre-study lags; inverting against the window lags offsets the
 //!   replay algebraically whenever the two differ.
 
-use chrono::NaiveDate;
+use chrono::{Months, NaiveDate};
 use cobre_core::{
     EntityId, HydroPastInflows,
     scenario::{AnnualComponent, InflowHistoryRow, InflowModel},
@@ -59,9 +59,13 @@ fn monthly_stage(index: usize, season_id: usize) -> Stage {
 }
 
 fn row(hydro_id: EntityId, year: i32, month0: u32, value: f64) -> InflowHistoryRow {
+    let start_date = NaiveDate::from_ymd_opt(year, month0 + 1, 1).expect("valid date");
     InflowHistoryRow {
         hydro_id,
-        date: NaiveDate::from_ymd_opt(year, month0 + 1, 1).expect("valid date"),
+        start_date,
+        end_date: start_date
+            .checked_add_months(Months::new(1))
+            .expect("valid date"),
         value_m3s: value,
     }
 }

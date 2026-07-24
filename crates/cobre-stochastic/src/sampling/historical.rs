@@ -373,8 +373,8 @@ pub fn standardize_historical_windows(
         .collect();
 
     let (Some(min_year), Some(max_year)) = (
-        inflow_history.iter().map(|r| r.date.year()).min(),
-        inflow_history.iter().map(|r| r.date.year()).max(),
+        inflow_history.iter().map(|r| r.start_date.year()).min(),
+        inflow_history.iter().map(|r| r.start_date.year()).max(),
     ) else {
         return;
     };
@@ -400,12 +400,12 @@ pub fn standardize_historical_windows(
     stage_index.sort_unstable_by_key(|(start, _, _, _)| *start);
 
     for r in inflow_history {
-        let season_id = find_season_for_date(&stage_index, r.date)
-            .or_else(|| season_map.and_then(|sm| sm.season_for_date(r.date)))
-            .or_else(|| season_map.is_none().then(|| r.date.month0() as usize));
+        let season_id = find_season_for_date(&stage_index, r.start_date)
+            .or_else(|| season_map.and_then(|sm| sm.season_for_date(r.start_date)))
+            .or_else(|| season_map.is_none().then(|| r.start_date.month0() as usize));
         if let Some(sid) = season_id
             && let Some(&h) = hydro_id_to_idx.get(&r.hydro_id)
-            && let Some(idx) = table_idx(h, r.date.year(), sid)
+            && let Some(idx) = table_idx(h, r.start_date.year(), sid)
         {
             obs_table[idx] = r.value_m3s;
         }
@@ -773,7 +773,7 @@ mod tests {
     // Helpers for standardize_historical_windows tests
     // -----------------------------------------------------------------------
 
-    use chrono::{Datelike, NaiveDate};
+    use chrono::{Datelike, Months, NaiveDate};
     use cobre_core::{
         EntityId, HydroPastInflows,
         scenario::{InflowHistoryRow, InflowModel},
@@ -819,12 +819,14 @@ mod tests {
 
     /// Build a row keyed by `month0` (0-based month: 0=Jan, 11=Dec).
     ///
-    /// The lookup in `standardize_historical_windows` uses `date.month0()` as
-    /// the `season_id`. This helper makes that mapping explicit.
+    /// The lookup in `standardize_historical_windows` uses `start_date.month0()`
+    /// as the `season_id`. This helper makes that mapping explicit.
     fn make_row(hydro_id: EntityId, year: i32, month0: u32, value: f64) -> InflowHistoryRow {
+        let start_date = NaiveDate::from_ymd_opt(year, month0 + 1, 1).unwrap();
         InflowHistoryRow {
             hydro_id,
-            date: NaiveDate::from_ymd_opt(year, month0 + 1, 1).unwrap(),
+            start_date,
+            end_date: start_date.checked_add_months(Months::new(1)).unwrap(),
             value_m3s: value,
         }
     }
@@ -1554,22 +1556,26 @@ mod tests {
         let history = vec![
             InflowHistoryRow {
                 hydro_id: hydro,
-                date: NaiveDate::from_ymd_opt(2000, 1, 1).unwrap(),
+                start_date: NaiveDate::from_ymd_opt(2000, 1, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2000, 4, 1).unwrap(),
                 value_m3s: 120.0,
             },
             InflowHistoryRow {
                 hydro_id: hydro,
-                date: NaiveDate::from_ymd_opt(2000, 4, 1).unwrap(),
+                start_date: NaiveDate::from_ymd_opt(2000, 4, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2000, 7, 1).unwrap(),
                 value_m3s: 130.0,
             },
             InflowHistoryRow {
                 hydro_id: hydro,
-                date: NaiveDate::from_ymd_opt(2000, 7, 1).unwrap(),
+                start_date: NaiveDate::from_ymd_opt(2000, 7, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2000, 10, 1).unwrap(),
                 value_m3s: 140.0,
             },
             InflowHistoryRow {
                 hydro_id: hydro,
-                date: NaiveDate::from_ymd_opt(2000, 10, 1).unwrap(),
+                start_date: NaiveDate::from_ymd_opt(2000, 10, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2001, 1, 1).unwrap(),
                 value_m3s: 150.0,
             },
         ];
@@ -1755,10 +1761,14 @@ mod tests {
         let quarter_months = [1u32, 4, 7, 10];
         (from_year..=to_year)
             .flat_map(|y| {
-                quarter_months.iter().map(move |&m| InflowHistoryRow {
-                    hydro_id,
-                    date: NaiveDate::from_ymd_opt(y, m, 1).unwrap(),
-                    value_m3s: 100.0,
+                quarter_months.iter().map(move |&m| {
+                    let start_date = NaiveDate::from_ymd_opt(y, m, 1).unwrap();
+                    InflowHistoryRow {
+                        hydro_id,
+                        start_date,
+                        end_date: start_date.checked_add_months(Months::new(3)).unwrap(),
+                        value_m3s: 100.0,
+                    }
                 })
             })
             .collect()
@@ -1890,11 +1900,11 @@ mod tests {
 
         // Overwrite the 2000 observations for h1 and h2 with the test values.
         for row in &mut history {
-            if row.date.year() == 2000 {
+            if row.start_date.year() == 2000 {
                 let q = quarter_months
                     .iter()
-                    .position(|&m| m == row.date.month())
-                    .expect("date month must be a quarter month");
+                    .position(|&m| m == row.start_date.month())
+                    .expect("start_date month must be a quarter month");
                 if row.hydro_id == h1 {
                     row.value_m3s = h1_obs_2000[q];
                 } else if row.hydro_id == h2 {

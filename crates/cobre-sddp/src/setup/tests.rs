@@ -1665,10 +1665,14 @@ fn test_prepare_stochastic_historical_residuals_noise_method() {
     // Historical inflow data: 1990 and 1991 cover 12 months each — 2 valid windows.
     let inflow_history: Vec<InflowHistoryRow> = (1990_i32..=1991)
         .flat_map(|year| {
-            (1u32..=12).map(move |month| InflowHistoryRow {
-                hydro_id: EntityId(3),
-                date: NaiveDate::from_ymd_opt(year, month, 1).unwrap(),
-                value_m3s: 80.0 + f64::from(year - 1990) * 5.0,
+            (1u32..=12).map(move |month| {
+                let start_date = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+                InflowHistoryRow {
+                    hydro_id: EntityId(3),
+                    start_date,
+                    end_date: start_date.succ_opt().unwrap(),
+                    value_m3s: 80.0 + f64::from(year - 1990) * 5.0,
+                }
             })
         })
         .collect();
@@ -4231,10 +4235,14 @@ fn system_with_historical_inflow(n_stages: usize) -> cobre_core::System {
 
     let inflow_history: Vec<InflowHistoryRow> = (1990_i32..=1991)
         .flat_map(|year| {
-            (1u32..=12).map(move |month| InflowHistoryRow {
-                hydro_id: EntityId(3),
-                date: NaiveDate::from_ymd_opt(year, month, 1).unwrap(),
-                value_m3s: 80.0 + f64::from(year - 1990) * 5.0,
+            (1u32..=12).map(move |month| {
+                let start_date = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+                InflowHistoryRow {
+                    hydro_id: EntityId(3),
+                    start_date,
+                    end_date: start_date.succ_opt().unwrap(),
+                    value_m3s: 80.0 + f64::from(year - 1990) * 5.0,
+                }
             })
         })
         .collect();

@@ -279,7 +279,7 @@ impl SystemBuilder {
     }
 
     /// Set the raw historical inflow observations; rows must be sorted by
-    /// `(hydro_id, date)` ascending.
+    /// `(hydro_id, start_date)` ascending.
     #[must_use]
     pub fn inflow_history(mut self, rows: Vec<InflowHistoryRow>) -> Self {
         self.inflow_history = rows;

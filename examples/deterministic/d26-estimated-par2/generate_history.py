@@ -151,14 +151,23 @@ def main() -> None:
         f"Last date should be {START_YEAR + N_YEARS - 1}-12-01, got {dates[-1]}"
     )
 
-    # ── Write parquet file ────────────────────────────────────────────────────
+    # ── Write parquet file (windowed layout) ──────────────────────────────────
+    # Each row is a full-coverage monthly window [start_date, next month's
+    # start_date), equivalent to the prior point-dated `date` value.
     hydro_ids = [HYDRO_ID] * len(inflows)
-    date32_values = [(d - date(1970, 1, 1)).days for d in dates]
+    epoch = date(1970, 1, 1)
+    start_date32_values = [(d - epoch).days for d in dates]
+    end_dates = [
+        date(d.year + 1, 1, 1) if d.month == 12 else date(d.year, d.month + 1, 1)
+        for d in dates
+    ]
+    end_date32_values = [(d - epoch).days for d in end_dates]
 
     table = pa.table(
         {
             "hydro_id": pa.array(hydro_ids, type=pa.int32()),
-            "date": pa.array(date32_values, type=pa.date32()),
+            "start_date": pa.array(start_date32_values, type=pa.date32()),
+            "end_date": pa.array(end_date32_values, type=pa.date32()),
             "value_m3s": pa.array(inflows.tolist(), type=pa.float64()),
         }
     )

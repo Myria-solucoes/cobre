@@ -40,22 +40,24 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 
 stats_hydro_ids = [0] * 11
 stats_stage_ids = [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-mean_m3s        = [100.0] * 11
-std_m3s         = [20.0] * 11
+mean_m3s = [100.0] * 11
+std_m3s = [20.0] * 11
 
-stats_schema = pa.schema([
-    pa.field("hydro_id", pa.int32(),   nullable=False),
-    pa.field("stage_id", pa.int32(),   nullable=False),
-    pa.field("mean_m3s", pa.float64(), nullable=False),
-    pa.field("std_m3s",  pa.float64(), nullable=False),
-])
+stats_schema = pa.schema(
+    [
+        pa.field("hydro_id", pa.int32(), nullable=False),
+        pa.field("stage_id", pa.int32(), nullable=False),
+        pa.field("mean_m3s", pa.float64(), nullable=False),
+        pa.field("std_m3s", pa.float64(), nullable=False),
+    ]
+)
 
 stats_table = pa.table(
     {
         "hydro_id": pa.array(stats_hydro_ids, type=pa.int32()),
         "stage_id": pa.array(stats_stage_ids, type=pa.int32()),
-        "mean_m3s": pa.array(mean_m3s,        type=pa.float64()),
-        "std_m3s":  pa.array(std_m3s,         type=pa.float64()),
+        "mean_m3s": pa.array(mean_m3s, type=pa.float64()),
+        "std_m3s": pa.array(std_m3s, type=pa.float64()),
     },
     schema=stats_schema,
 )
@@ -72,26 +74,28 @@ print(f"wrote {len(stats_table)} rows -> {stats_path}")
 # PAR(1): 1 lag per stage, coefficient=0.5, residual_std_ratio=0.85.
 # Covers all 10 study stages (0..9).
 
-ar_hydro_ids          = [0] * 10
-ar_stage_ids          = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-ar_lags               = [1] * 10
-ar_coefficients       = [0.5] * 10
+ar_hydro_ids = [0] * 10
+ar_stage_ids = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+ar_lags = [1] * 10
+ar_coefficients = [0.5] * 10
 ar_residual_std_ratio = [0.85] * 10
 
-ar_schema = pa.schema([
-    pa.field("hydro_id",          pa.int32(),   nullable=False),
-    pa.field("stage_id",          pa.int32(),   nullable=False),
-    pa.field("lag",               pa.int32(),   nullable=False),
-    pa.field("coefficient",       pa.float64(), nullable=False),
-    pa.field("residual_std_ratio",pa.float64(), nullable=False),
-])
+ar_schema = pa.schema(
+    [
+        pa.field("hydro_id", pa.int32(), nullable=False),
+        pa.field("stage_id", pa.int32(), nullable=False),
+        pa.field("lag", pa.int32(), nullable=False),
+        pa.field("coefficient", pa.float64(), nullable=False),
+        pa.field("residual_std_ratio", pa.float64(), nullable=False),
+    ]
+)
 
 ar_table = pa.table(
     {
-        "hydro_id":           pa.array(ar_hydro_ids,          type=pa.int32()),
-        "stage_id":           pa.array(ar_stage_ids,          type=pa.int32()),
-        "lag":                pa.array(ar_lags,               type=pa.int32()),
-        "coefficient":        pa.array(ar_coefficients,       type=pa.float64()),
+        "hydro_id": pa.array(ar_hydro_ids, type=pa.int32()),
+        "stage_id": pa.array(ar_stage_ids, type=pa.int32()),
+        "lag": pa.array(ar_lags, type=pa.int32()),
+        "coefficient": pa.array(ar_coefficients, type=pa.float64()),
         "residual_std_ratio": pa.array(ar_residual_std_ratio, type=pa.float64()),
     },
     schema=ar_schema,
@@ -107,24 +111,26 @@ print(f"wrote {len(ar_table)} rows -> {ar_path}")
 #
 # Deterministic load: mean=50.0 MW, std=0.0 for all 10 study stages.
 
-load_bus_ids   = [0] * 10
+load_bus_ids = [0] * 10
 load_stage_ids = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-load_mean_mw   = [50.0] * 10
-load_std_mw    = [0.0] * 10
+load_mean_mw = [50.0] * 10
+load_std_mw = [0.0] * 10
 
-load_schema = pa.schema([
-    pa.field("bus_id",   pa.int32(),   nullable=False),
-    pa.field("stage_id", pa.int32(),   nullable=False),
-    pa.field("mean_mw",  pa.float64(), nullable=False),
-    pa.field("std_mw",   pa.float64(), nullable=False),
-])
+load_schema = pa.schema(
+    [
+        pa.field("bus_id", pa.int32(), nullable=False),
+        pa.field("stage_id", pa.int32(), nullable=False),
+        pa.field("mean_mw", pa.float64(), nullable=False),
+        pa.field("std_mw", pa.float64(), nullable=False),
+    ]
+)
 
 load_table = pa.table(
     {
-        "bus_id":   pa.array(load_bus_ids,   type=pa.int32()),
+        "bus_id": pa.array(load_bus_ids, type=pa.int32()),
         "stage_id": pa.array(load_stage_ids, type=pa.int32()),
-        "mean_mw":  pa.array(load_mean_mw,   type=pa.float64()),
-        "std_mw":   pa.array(load_std_mw,    type=pa.float64()),
+        "mean_mw": pa.array(load_mean_mw, type=pa.float64()),
+        "std_mw": pa.array(load_std_mw, type=pa.float64()),
     },
     schema=load_schema,
 )
@@ -135,9 +141,10 @@ print(f"wrote {len(load_table)} rows -> {load_path}")
 
 # ── inflow_history.parquet ────────────────────────────────────────────────────
 #
-# Schema: hydro_id (INT32), date (DATE32), value_m3s (FLOAT64)
+# Schema: hydro_id (INT32), start_date (DATE32), end_date (DATE32), value_m3s (FLOAT64)
 #
-# 5 years of monthly observations (Jan 2019 - Dec 2023), 60 rows total.
+# 5 years of monthly observations (Jan 2019 - Dec 2023), 60 rows total. Each
+# row is a full-coverage monthly window [start_date, next month's start_date).
 # Values vary seasonally: 80 + 40 * sin(month * pi / 6) where month is 1-based.
 # This provides the monthly history for the aggregation pipeline to aggregate
 # monthly observations into quarterly stats.
@@ -146,30 +153,39 @@ print(f"wrote {len(load_table)} rows -> {load_path}")
 
 epoch = date(1970, 1, 1)
 history_hydro_ids = []
-history_dates = []
+history_start_dates = []
+history_end_dates = []
 history_values = []
 
 for year in range(2019, 2024):  # 2019..2023 inclusive
     for month in range(1, 13):  # 1..12 inclusive
         d = date(year, month, 1)
+        end_year, end_month = (year + 1, 1) if month == 12 else (year, month + 1)
         history_hydro_ids.append(0)
-        history_dates.append((d - epoch).days)
+        history_start_dates.append((d - epoch).days)
+        history_end_dates.append((date(end_year, end_month, 1) - epoch).days)
         # Seasonal variation: 80 + 40 * sin(month * pi / 6)
         history_values.append(80.0 + 40.0 * math.sin(month * math.pi / 6.0))
 
-assert len(history_hydro_ids) == 60, f"Expected 60 history rows, got {len(history_hydro_ids)}"
+assert len(history_hydro_ids) == 60, (
+    f"Expected 60 history rows, got {len(history_hydro_ids)}"
+)
 
-history_schema = pa.schema([
-    pa.field("hydro_id", pa.int32(),   nullable=False),
-    pa.field("date",     pa.date32(),  nullable=False),
-    pa.field("value_m3s",pa.float64(), nullable=False),
-])
+history_schema = pa.schema(
+    [
+        pa.field("hydro_id", pa.int32(), nullable=False),
+        pa.field("start_date", pa.date32(), nullable=False),
+        pa.field("end_date", pa.date32(), nullable=False),
+        pa.field("value_m3s", pa.float64(), nullable=False),
+    ]
+)
 
 history_table = pa.table(
     {
-        "hydro_id":  pa.array(history_hydro_ids, type=pa.int32()),
-        "date":      pa.array(history_dates,     type=pa.date32()),
-        "value_m3s": pa.array(history_values,    type=pa.float64()),
+        "hydro_id": pa.array(history_hydro_ids, type=pa.int32()),
+        "start_date": pa.array(history_start_dates, type=pa.date32()),
+        "end_date": pa.array(history_end_dates, type=pa.date32()),
+        "value_m3s": pa.array(history_values, type=pa.float64()),
     },
     schema=history_schema,
 )

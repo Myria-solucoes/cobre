@@ -123,7 +123,7 @@ pub struct System {
     /// User-defined generic linear constraints, sorted by `id`.
     generic_constraints: Vec<GenericConstraint>,
 
-    /// Raw historical inflow observations, sorted by `(hydro_id, date)` ascending.
+    /// Raw historical inflow observations, sorted by `(hydro_id, start_date)` ascending.
     inflow_history: Vec<InflowHistoryRow>,
     /// Raw external inflow scenario rows, sorted by `(stage_id, scenario_id, hydro_id)` ascending.
     external_scenarios: Vec<ExternalScenarioRow>,
@@ -471,7 +471,7 @@ impl System {
         &self.generic_constraints
     }
 
-    /// Returns the raw historical inflow observations, sorted by `(hydro_id, date)`.
+    /// Returns the raw historical inflow observations, sorted by `(hydro_id, start_date)`.
     ///
     /// Returns an empty slice when `scenarios/inflow_history.parquet` was absent
     /// at case-load time.
@@ -1974,12 +1974,14 @@ mod tests {
         let inflow_history = vec![
             InflowHistoryRow {
                 hydro_id: EntityId(1),
-                date: NaiveDate::from_ymd_opt(2000, 1, 1).unwrap(),
+                start_date: NaiveDate::from_ymd_opt(2000, 1, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2000, 2, 1).unwrap(),
                 value_m3s: 500.0,
             },
             InflowHistoryRow {
                 hydro_id: EntityId(2),
-                date: NaiveDate::from_ymd_opt(2000, 2, 1).unwrap(),
+                start_date: NaiveDate::from_ymd_opt(2000, 2, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2000, 3, 1).unwrap(),
                 value_m3s: 420.0,
             },
         ];
@@ -2060,12 +2062,14 @@ mod tests {
 
         let row1 = InflowHistoryRow {
             hydro_id: EntityId(1),
-            date: NaiveDate::from_ymd_opt(2000, 1, 1).expect("valid date"),
+            start_date: NaiveDate::from_ymd_opt(2000, 1, 1).expect("valid date"),
+            end_date: NaiveDate::from_ymd_opt(2000, 2, 1).expect("valid date"),
             value_m3s: 500.0,
         };
         let row2 = InflowHistoryRow {
             hydro_id: EntityId(1),
-            date: NaiveDate::from_ymd_opt(2000, 2, 1).expect("valid date"),
+            start_date: NaiveDate::from_ymd_opt(2000, 2, 1).expect("valid date"),
+            end_date: NaiveDate::from_ymd_opt(2000, 3, 1).expect("valid date"),
             value_m3s: 420.0,
         };
 
