@@ -1590,7 +1590,6 @@ mod tests {
                 value_hm3: 15_000.0,
             }],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
@@ -1680,8 +1679,8 @@ mod tests {
             AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
             ConstraintExpression, ConstraintSense, ContractStageBounds, CorrelationEntity,
             CorrelationGroup, CorrelationProfile, CorrelationScheduleEntry, DeficitSegment,
-            HydroPastDefluence, HydroPastInflows, HydroStageBounds, HydroStagePenalties,
-            HydroStorage, LineStageBounds, LineStagePenalties, LinearTerm, NcsStagePenalties,
+            HydroPastDefluence, HydroStageBounds, HydroStagePenalties, HydroStorage,
+            LineStageBounds, LineStagePenalties, LinearTerm, NcsStagePenalties,
             PenaltiesCountsSpec, PenaltiesDefaults, PolicyGraphType, PumpingStageBounds,
             RecentObservation, SlackConfig, ThermalStageBounds, Transition, VariableRef,
         };
@@ -1927,11 +1926,6 @@ mod tests {
             filling_storage: vec![HydroStorage {
                 hydro_id: EntityId(1),
                 value_hm3: 50.0,
-            }],
-            past_inflows: vec![HydroPastInflows {
-                hydro_id: EntityId(1),
-                values_m3s: vec![600.0, 500.0],
-                season_ids: None,
             }],
             past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
                 thermal_id: EntityId(1),

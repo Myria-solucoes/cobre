@@ -188,8 +188,8 @@ impl StudySetup {
             external_inflow_library: tr.external_inflow.as_ref(),
             external_load_library: tr.external_load.as_ref(),
             external_ncs_library: tr.external_ncs.as_ref(),
-            recent_accum_seed: &self.recent_observation_seed.accum_seed,
-            recent_weight_seed: self.recent_observation_seed.weight_seed,
+            lag_accum_seed: &self.derived_inflow_seeds.accum,
+            lag_weight_seed: &self.derived_inflow_seeds.weight,
             dcs: self
                 .cut_management
                 .cut_selection

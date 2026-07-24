@@ -10,16 +10,16 @@ use cobre_core::{
     ThermalStageBounds,
 };
 use cobre_core::{
-    EntityId, HydroPastInflows, InitialConditions, SystemBuilder,
+    EntityId, InitialConditions, SystemBuilder,
     entities::{
         bus::{Bus, DeficitSegment},
         hydro::{Hydro, HydroGenerationModel, HydroPenalties},
         thermal::{AnticipatedConfig, Thermal},
     },
-    scenario::{InflowModel, LoadModel, SamplingScheme},
+    scenario::{InflowHistoryRow, InflowModel, LoadModel, SamplingScheme},
     temporal::{
-        Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
-        StageStateConfig,
+        Block, BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig,
+        SeasonMap, Stage, StageRiskConfig, StageStateConfig,
     },
 };
 use cobre_io::config::{
@@ -1976,18 +1976,19 @@ fn layout_with_anticipated(n_anticipated: usize, k_values: &[usize]) -> StateSpa
     test_support::state_layout_full(1, 0, n_anticipated, k_max, k_values.to_vec())
 }
 
-/// 2-hydro PAR(2) system with `inflow_lags` and the given `past_inflows` for
-/// hydros 1 and 2.
+/// 2-hydro PAR(2) system with `inflow_lags`, `season_map`, and
+/// `inflow_history` threaded through (empty/`None` when a caller does not
+/// need them) so a caller can exercise the derived-seed path end-to-end.
 #[allow(
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::items_after_statements
 )]
-fn minimal_system_2_hydros_with_past_inflows(
+fn minimal_system_2_hydros_with_history(
     n_stages: usize,
-    h1_past: Vec<f64>,
-    h2_past: Vec<f64>,
+    season_map: Option<SeasonMap>,
+    inflow_history: Vec<InflowHistoryRow>,
 ) -> cobre_core::System {
     use chrono::NaiveDate;
 
@@ -2190,19 +2191,6 @@ fn minimal_system_2_hydros_with_past_inflows(
         },
     );
 
-    let past_inflows = vec![
-        cobre_core::HydroPastInflows {
-            hydro_id: EntityId(1),
-            values_m3s: h1_past,
-            season_ids: None,
-        },
-        cobre_core::HydroPastInflows {
-            hydro_id: EntityId(2),
-            values_m3s: h2_past,
-            season_ids: None,
-        },
-    ];
-
     SystemBuilder::new()
         .buses(vec![bus])
         .thermals(vec![])
@@ -2210,31 +2198,64 @@ fn minimal_system_2_hydros_with_past_inflows(
         .stages(stages)
         .inflow_models(inflow_models)
         .load_models(load_models)
+        .inflow_history(inflow_history)
         .bounds(bounds)
         .penalties(penalties)
+        .policy_graph(PolicyGraph {
+            graph_type: PolicyGraphType::FiniteHorizon,
+            annual_discount_rate: 0.0,
+            transitions: vec![],
+            season_map,
+        })
         .initial_conditions(cobre_core::InitialConditions {
             storage: vec![],
             filling_storage: vec![],
-            past_inflows,
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
         })
         .build()
-        .expect("minimal_system_2_hydros_with_past_inflows: valid")
+        .expect("minimal_system_2_hydros_with_history: valid")
+}
+
+/// 12-month `Monthly` season map (`id == month_start - 1`), matching
+/// [`minimal_system_2_hydros_with_history`]'s `season_id: Some(i)` stage
+/// convention.
+fn monthly_season_map_for_lag_seed_test() -> SeasonMap {
+    let seasons = (0..12u32)
+        .map(|i| cobre_core::temporal::SeasonDefinition {
+            id: i as usize,
+            label: format!("Month{}", i + 1),
+            month_start: i + 1,
+            day_start: None,
+            month_end: None,
+            day_end: None,
+        })
+        .collect();
+    SeasonMap {
+        cycle_type: cobre_core::temporal::SeasonCycleType::Monthly,
+        seasons,
+    }
 }
 
 /// Expected lag seeds — hydro 0 (id=1): lag0=600, lag1=500;
 /// hydro 1 (id=2): lag0=200, lag1=100.
 #[test]
-fn build_initial_state_populates_lags_from_past_inflows() {
+fn build_initial_state_populates_lags_from_derived_values() {
     use super::build_initial_state;
 
-    let system =
-        minimal_system_2_hydros_with_past_inflows(1, vec![600.0, 500.0], vec![200.0, 100.0]);
+    let system = minimal_system_2_hydros_with_history(1, None, vec![]);
     let layout = layout_for_lag_test(2, 2);
+    // Entity-major: hydro 0 (id=1) at [0]=lag0, [1]=lag1; hydro 1 (id=2) at
+    // [2]=lag0, [3]=lag1.
+    let derived_lag_values = [600.0, 500.0, 200.0, 100.0];
 
-    let state = build_initial_state(&system, &test_support::study_dims(), &layout);
+    let state = build_initial_state(
+        &system,
+        &test_support::study_dims(),
+        &layout,
+        &derived_lag_values,
+    );
 
     // State layout: storage(0..2), lags(2..6) in lag-major order.
     // Lag-major: slot = s + lag * N + h, where N = 2.
@@ -2269,45 +2290,120 @@ fn build_initial_state_populates_lags_from_past_inflows() {
 }
 
 #[test]
-fn build_initial_state_empty_past_inflows_leaves_zero_lags() {
+fn build_initial_state_zero_derived_lag_values_leaves_zero_lags() {
     use super::build_initial_state;
 
     let system = minimal_system(2);
     let layout = layout_for_lag_test(1, 3);
+    let derived_lag_values = [0.0; 3];
 
-    let state = build_initial_state(&system, &test_support::study_dims(), &layout);
+    let state = build_initial_state(
+        &system,
+        &test_support::study_dims(),
+        &layout,
+        &derived_lag_values,
+    );
 
     let s = layout.inflow_lags.start;
     for l in 0..3 {
         assert!(
             state[s + l].abs() < 1e-10,
-            "lag slot {l} should be 0.0 when past_inflows is empty, got {}",
+            "lag slot {l} should be 0.0 when the derived lag values are zero, got {}",
             state[s + l]
         );
     }
 }
 
+/// No `recent_observations`, a monthly full-coverage `inflow_history` record:
+/// the derived lag block must be bit-identical to what the pre-epic
+/// positional-seed path produced for the same numeric values (December 2019
+/// = lag0, November 2019 = lag1, per hydro).
 #[test]
-fn build_initial_state_unknown_hydro_in_past_inflows_stays_zero() {
+fn build_initial_state_derived_lags_match_positional_seed() {
     use super::build_initial_state;
+    use cobre_stochastic::derive_inflow_seeds;
 
-    // minimal_system cannot override IC, so its past_inflows is empty and both
-    // lag slots stay 0.0 — the same outcome as past_inflows for an unknown hydro.
-    let system = minimal_system(2);
-    let layout = layout_for_lag_test(1, 2);
+    let inflow_history = vec![
+        InflowHistoryRow {
+            hydro_id: EntityId(1),
+            start_date: chrono::NaiveDate::from_ymd_opt(2019, 12, 1).unwrap(),
+            end_date: chrono::NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
+            value_m3s: 600.0,
+        },
+        InflowHistoryRow {
+            hydro_id: EntityId(1),
+            start_date: chrono::NaiveDate::from_ymd_opt(2019, 11, 1).unwrap(),
+            end_date: chrono::NaiveDate::from_ymd_opt(2019, 12, 1).unwrap(),
+            value_m3s: 500.0,
+        },
+        InflowHistoryRow {
+            hydro_id: EntityId(2),
+            start_date: chrono::NaiveDate::from_ymd_opt(2019, 12, 1).unwrap(),
+            end_date: chrono::NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
+            value_m3s: 200.0,
+        },
+        InflowHistoryRow {
+            hydro_id: EntityId(2),
+            start_date: chrono::NaiveDate::from_ymd_opt(2019, 11, 1).unwrap(),
+            end_date: chrono::NaiveDate::from_ymd_opt(2019, 12, 1).unwrap(),
+            value_m3s: 100.0,
+        },
+    ];
+    let system = minimal_system_2_hydros_with_history(
+        3,
+        Some(monthly_season_map_for_lag_seed_test()),
+        inflow_history,
+    );
+    let layout = layout_for_lag_test(2, 2);
+    let first_stage = system
+        .stages()
+        .iter()
+        .find(|s| s.id >= 0)
+        .expect("study has a stage");
+    let season_map = system
+        .policy_graph()
+        .season_map
+        .as_ref()
+        .expect("season map is set");
 
-    let state = build_initial_state(&system, &test_support::study_dims(), &layout);
+    let seeds = derive_inflow_seeds(
+        system.inflow_history(),
+        &system.initial_conditions().recent_observations,
+        system.hydros(),
+        first_stage,
+        season_map,
+        layout.max_par_order,
+    );
 
+    let state = build_initial_state(
+        &system,
+        &test_support::study_dims(),
+        &layout,
+        &seeds.lag_values,
+    );
+
+    // Lag-major: slot = s + lag * N + h. Identical to the values the pre-epic
+    // positional-seed path produced for h1=[600, 500], h2=[200, 100].
     let s = layout.inflow_lags.start;
     assert!(
-        state[s].abs() < 1e-10,
-        "lag 0 should be 0.0 when past_inflows is absent, got {}",
+        (state[s] - 600.0).abs() < 1e-10,
+        "lag0 hydro 0: expected 600.0, got {}",
         state[s]
     );
     assert!(
-        state[s + 1].abs() < 1e-10,
-        "lag 1 should be 0.0 when past_inflows is absent, got {}",
+        (state[s + 1] - 200.0).abs() < 1e-10,
+        "lag0 hydro 1: expected 200.0, got {}",
         state[s + 1]
+    );
+    assert!(
+        (state[s + 2] - 500.0).abs() < 1e-10,
+        "lag1 hydro 0: expected 500.0, got {}",
+        state[s + 2]
+    );
+    assert!(
+        (state[s + 3] - 100.0).abs() < 1e-10,
+        "lag1 hydro 1: expected 100.0, got {}",
+        state[s + 3]
     );
 }
 
@@ -2315,8 +2411,8 @@ fn build_initial_state_unknown_hydro_in_past_inflows_stays_zero() {
 /// `operational_start_date` than hydro id=2 (the LARGER id), so the canonical
 /// `(operational_start_date, id)` order (`System::hydros()`) is
 /// `[id=2, id=1]` — id-DESCENDING, not id-ascending. Accepts a caller-supplied
-/// `InitialConditions` so a test can seed `storage`/`past_inflows` per hydro
-/// and check each lands on its OWN coordinate.
+/// `InitialConditions` so a test can seed `storage` per hydro and check each
+/// lands on its OWN coordinate.
 #[allow(
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
@@ -2560,9 +2656,13 @@ fn staggered_dates_system_2_hydros(
 /// Regression: under a STAGGERED-commissioning system where the canonical
 /// `(operational_start_date, id)` hydro order is id-DESCENDING (hydro id=1's
 /// later commissioning date sorts it after hydro id=2), `build_initial_state`
-/// must seed each hydro's OWN declared storage and past-inflow lag —
+/// must seed each hydro's OWN declared storage and lag values —
 /// `binary_search_by_key` over `hydros()` requires id-ascending order and
-/// silently drops the out-of-order record to the default `0.0`.
+/// silently drops the out-of-order record to the default `0.0`. The lag block
+/// is fed positionally via `derived_lag_values` (entity-major, position 0 =
+/// hydro id=2, position 1 = hydro id=1 — the canonical order), so this also
+/// exercises that `build_initial_state` trusts the caller's pre-ordering with
+/// no id lookup of its own.
 #[test]
 fn test_initial_state_seeds_correctly_under_staggered_commissioning_dates() {
     use super::build_initial_state;
@@ -2584,26 +2684,22 @@ fn test_initial_state_seeds_correctly_under_staggered_commissioning_dates() {
             },
         ],
         filling_storage: vec![],
-        past_inflows: vec![
-            cobre_core::HydroPastInflows {
-                hydro_id: EntityId(1),
-                values_m3s: h1_past.to_vec(),
-                season_ids: None,
-            },
-            cobre_core::HydroPastInflows {
-                hydro_id: EntityId(2),
-                values_m3s: h2_past.to_vec(),
-                season_ids: None,
-            },
-        ],
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
     };
     let system = staggered_dates_system_2_hydros(1, ic);
     let layout = layout_for_lag_test(2, 2);
+    // Entity-major, canonical position order [id=2, id=1]: position 0 (h2)
+    // carries h2_past, position 1 (h1) carries h1_past.
+    let derived_lag_values = [h2_past[0], h2_past[1], h1_past[0], h1_past[1]];
 
-    let state = build_initial_state(&system, &test_support::study_dims(), &layout);
+    let state = build_initial_state(
+        &system,
+        &test_support::study_dims(),
+        &layout,
+        &derived_lag_values,
+    );
 
     // Storage: state[0] is hydro id=2's own coordinate (canonical position 0),
     // state[1] is hydro id=1's own coordinate (canonical position 1).
@@ -2618,29 +2714,29 @@ fn test_initial_state_seeds_correctly_under_staggered_commissioning_dates() {
         state[1]
     );
 
-    // Past-inflow lags: lag-major layout, slot = lag_start + lag * N + idx.
+    // Lag block: lag-major layout, slot = lag_start + lag * N + idx.
     let s = layout.inflow_lags.start;
     assert!(
         (state[s] - h2_past[0]).abs() < 1e-10,
-        "hydro id=2 lag0 should be its own IC value {}, got {}",
+        "hydro id=2 lag0 should be its own derived value {}, got {}",
         h2_past[0],
         state[s]
     );
     assert!(
         (state[s + 1] - h1_past[0]).abs() < 1e-10,
-        "hydro id=1 lag0 should be its own IC value {}, got {}",
+        "hydro id=1 lag0 should be its own derived value {}, got {}",
         h1_past[0],
         state[s + 1]
     );
     assert!(
         (state[s + 2] - h2_past[1]).abs() < 1e-10,
-        "hydro id=2 lag1 should be its own IC value {}, got {}",
+        "hydro id=2 lag1 should be its own derived value {}, got {}",
         h2_past[1],
         state[s + 2]
     );
     assert!(
         (state[s + 3] - h1_past[1]).abs() < 1e-10,
-        "hydro id=1 lag1 should be its own IC value {}, got {}",
+        "hydro id=1 lag1 should be its own derived value {}, got {}",
         h1_past[1],
         state[s + 3]
     );
@@ -2897,7 +2993,6 @@ fn build_initial_state_seeds_filling_storage() {
             hydro_id: EntityId(2),
             value_hm3: seed,
         }],
-        past_inflows: vec![],
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
@@ -2905,7 +3000,7 @@ fn build_initial_state_seeds_filling_storage() {
     let system = filling_system_2_hydros(1, 0, ic);
     let layout = layout_for_lag_test(2, 2);
 
-    let state = build_initial_state(&system, &test_support::study_dims(), &layout);
+    let state = build_initial_state(&system, &test_support::study_dims(), &layout, &[0.0; 4]);
 
     // Hydro id=2 is at system index 1; its storage coordinate is state[1].
     assert!(
@@ -2931,7 +3026,6 @@ fn build_initial_state_filling_empty_pit_is_zero() {
             hydro_id: EntityId(2),
             value_hm3: 0.0,
         }],
-        past_inflows: vec![],
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
@@ -2939,7 +3033,7 @@ fn build_initial_state_filling_empty_pit_is_zero() {
     let system = filling_system_2_hydros(1, 1, ic);
     let layout = layout_for_lag_test(2, 2);
 
-    let state = build_initial_state(&system, &test_support::study_dims(), &layout);
+    let state = build_initial_state(&system, &test_support::study_dims(), &layout, &[0.0; 4]);
 
     assert!(
         state[1].abs() < 1e-10,
@@ -2958,13 +3052,12 @@ fn build_initial_state_unknown_filling_hydro_skipped() {
     let baseline_ic = cobre_core::InitialConditions {
         storage: vec![],
         filling_storage: vec![],
-        past_inflows: vec![],
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
     };
     let baseline_system = filling_system_2_hydros(1, 0, baseline_ic);
-    let baseline = build_initial_state(&baseline_system, &study_dims, &layout);
+    let baseline = build_initial_state(&baseline_system, &study_dims, &layout, &[0.0; 4]);
 
     let ic = cobre_core::InitialConditions {
         storage: vec![],
@@ -2972,13 +3065,12 @@ fn build_initial_state_unknown_filling_hydro_skipped() {
             hydro_id: EntityId(99),
             value_hm3: 150.0,
         }],
-        past_inflows: vec![],
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
     };
     let system = filling_system_2_hydros(1, 0, ic);
-    let state = build_initial_state(&system, &study_dims, &layout);
+    let state = build_initial_state(&system, &study_dims, &layout, &[0.0; 4]);
 
     assert_eq!(
         state, baseline,
@@ -2993,18 +3085,6 @@ fn build_initial_state_mixed_operating_and_filling_seeds() {
 
     let operating_seed = 175.0_f64;
     let filling_seed = 90.0_f64;
-    let past_inflows = vec![
-        cobre_core::HydroPastInflows {
-            hydro_id: EntityId(1),
-            values_m3s: vec![600.0, 500.0],
-            season_ids: None,
-        },
-        cobre_core::HydroPastInflows {
-            hydro_id: EntityId(2),
-            values_m3s: vec![200.0, 100.0],
-            season_ids: None,
-        },
-    ];
     let ic = cobre_core::InitialConditions {
         storage: vec![cobre_core::HydroStorage {
             hydro_id: EntityId(1),
@@ -3014,15 +3094,22 @@ fn build_initial_state_mixed_operating_and_filling_seeds() {
             hydro_id: EntityId(2),
             value_hm3: filling_seed,
         }],
-        past_inflows,
         past_anticipated_commitments: vec![],
         recent_observations: vec![],
         past_defluences: vec![],
     };
     let system = filling_system_2_hydros(1, 0, ic);
     let layout = layout_for_lag_test(2, 2);
+    // Entity-major: hydro 0 (id=1) at [0]=lag0, [1]=lag1; hydro 1 (id=2) at
+    // [2]=lag0, [3]=lag1 — identical to the operating-only case.
+    let derived_lag_values = [600.0, 500.0, 200.0, 100.0];
 
-    let state = build_initial_state(&system, &test_support::study_dims(), &layout);
+    let state = build_initial_state(
+        &system,
+        &test_support::study_dims(),
+        &layout,
+        &derived_lag_values,
+    );
 
     assert!(
         (state[0] - operating_seed).abs() < 1e-10,
@@ -3035,8 +3122,8 @@ fn build_initial_state_mixed_operating_and_filling_seeds() {
         state[1]
     );
 
-    // AR-lag slots are seeded by the shared `past_inflows` path, identical to
-    // the operating-only case (lag-major: slot = s + lag * N + h, N = 2).
+    // Lag block, identical to the operating-only case (lag-major: slot = s +
+    // lag * N + h, N = 2).
     let s = layout.inflow_lags.start;
     assert!(
         (state[s] - 600.0).abs() < 1e-10,
@@ -3060,10 +3147,47 @@ fn build_initial_state_mixed_operating_and_filling_seeds() {
     );
 }
 
+/// End-to-end: `StudySetup::new`'s hoisted `derive_inflow_seeds` call feeds
+/// `build_initial_state`'s lag block from `inflow_history`. Stage 0 is
+/// January 2020 (`season_id: Some(0)`, a full-coverage month), so each
+/// hydro's k=1/k=2 previous-occurrence windows (December/November 2019)
+/// resolve to their record's `value_m3s` verbatim — the exact values the
+/// pre-epic positional-seed path produced for this fixture.
 #[test]
-fn study_setup_initial_state_has_nonzero_lags_from_past_inflows() {
-    let system =
-        minimal_system_2_hydros_with_past_inflows(3, vec![600.0, 500.0], vec![200.0, 100.0]);
+fn study_setup_initial_state_has_nonzero_lags_from_derived_inflow_history() {
+    use cobre_core::scenario::InflowHistoryRow;
+
+    let inflow_history = vec![
+        InflowHistoryRow {
+            hydro_id: EntityId(1),
+            start_date: chrono::NaiveDate::from_ymd_opt(2019, 12, 1).unwrap(),
+            end_date: chrono::NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
+            value_m3s: 600.0,
+        },
+        InflowHistoryRow {
+            hydro_id: EntityId(1),
+            start_date: chrono::NaiveDate::from_ymd_opt(2019, 11, 1).unwrap(),
+            end_date: chrono::NaiveDate::from_ymd_opt(2019, 12, 1).unwrap(),
+            value_m3s: 500.0,
+        },
+        InflowHistoryRow {
+            hydro_id: EntityId(2),
+            start_date: chrono::NaiveDate::from_ymd_opt(2019, 12, 1).unwrap(),
+            end_date: chrono::NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
+            value_m3s: 200.0,
+        },
+        InflowHistoryRow {
+            hydro_id: EntityId(2),
+            start_date: chrono::NaiveDate::from_ymd_opt(2019, 11, 1).unwrap(),
+            end_date: chrono::NaiveDate::from_ymd_opt(2019, 12, 1).unwrap(),
+            value_m3s: 100.0,
+        },
+    ];
+    let system = minimal_system_2_hydros_with_history(
+        3,
+        Some(monthly_season_map_for_lag_seed_test()),
+        inflow_history,
+    );
     let config = minimal_config(1, 10);
     let stochastic = build_stochastic_context(
         &system,
@@ -3086,7 +3210,7 @@ fn study_setup_initial_state_has_nonzero_lags_from_past_inflows() {
         stochastic,
         PrepareHydroModelsResult::default_from_system(&system),
     )
-    .expect("setup with past_inflows");
+    .expect("setup with inflow_history");
 
     let state = &setup.initial_state;
 
@@ -3132,7 +3256,7 @@ fn build_initial_state_no_lags_state_is_storage_only() {
         "inflow_lags range should be empty for L=0"
     );
 
-    let state = build_initial_state(&system, &test_support::study_dims(), &layout);
+    let state = build_initial_state(&system, &test_support::study_dims(), &layout, &[]);
 
     assert_eq!(state.len(), 1, "state length must equal n_state=1");
 }
@@ -3401,7 +3525,6 @@ fn system_with_anticipated_thermals(
         .initial_conditions(cobre_core::InitialConditions {
             storage: vec![],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: past_commits,
             recent_observations: vec![],
             past_defluences: vec![],
@@ -3662,7 +3785,6 @@ fn system_with_two_anticipated_thermals_staggered_dates(
         .initial_conditions(cobre_core::InitialConditions {
             storage: vec![],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: past_commits,
             recent_observations: vec![],
             past_defluences: vec![],
@@ -3712,6 +3834,7 @@ fn build_initial_state_anticipated_seed_correct_under_staggered_commissioning_da
         &system,
         &test_support::study_dims_for(&counts_with_anticipated(2, &[3, 2], &[0, 1])),
         &layout,
+        &[],
     );
 
     let s = layout.anticipated_slots_out.start;
@@ -3759,7 +3882,7 @@ fn build_initial_state_no_anticipated_state_unchanged() {
     assert_eq!(layout.n_anticipated, 0);
     assert!(layout.anticipated_slots_out.is_empty());
 
-    let state = build_initial_state(&system, &test_support::study_dims(), &layout);
+    let state = build_initial_state(&system, &test_support::study_dims(), &layout, &[]);
 
     assert_eq!(
         state.len(),
@@ -3795,6 +3918,7 @@ fn build_initial_state_single_anticipated_thermal_k2() {
         &system,
         &test_support::study_dims_for(&counts_with_anticipated(1, &[2], &[0])),
         &layout,
+        &[],
     );
 
     assert_eq!(
@@ -3847,6 +3971,7 @@ fn build_initial_state_two_anticipated_thermals_mixed_k() {
         &system,
         &test_support::study_dims_for(&counts_with_anticipated(2, &[2, 3], &[0, 1])),
         &layout,
+        &[],
     );
 
     assert_eq!(
@@ -3901,6 +4026,7 @@ fn build_initial_state_empty_past_commitments_leaves_zeros() {
         &system,
         &test_support::study_dims_for(&counts_with_anticipated(1, &[2], &[0])),
         &layout,
+        &[],
     );
 
     assert_eq!(
@@ -3935,6 +4061,7 @@ fn build_initial_state_unknown_thermal_id_silently_skipped() {
         &system,
         &test_support::study_dims_for(&counts_with_anticipated(1, &[2], &[0])),
         &layout,
+        &[],
     );
 
     assert_eq!(
@@ -3986,6 +4113,7 @@ fn build_initial_state_anticipated_seed_padding_slot_stays_zero() {
         &system,
         &test_support::study_dims_for(&counts_with_anticipated(2, &[1, 2], &[0, 1])),
         &layout,
+        &[],
     );
 
     assert_eq!(
@@ -6267,7 +6395,6 @@ fn system_with_travel_time_arc(n_stages: usize) -> cobre_core::System {
         .initial_conditions(InitialConditions {
             storage: vec![],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
@@ -6760,14 +6887,7 @@ fn par2_system_with_state_configs(state_configs: &[StageStateConfig]) -> cobre_c
         },
     );
 
-    let initial_conditions = InitialConditions {
-        past_inflows: vec![HydroPastInflows {
-            hydro_id,
-            values_m3s: vec![1000.0, 1000.0],
-            season_ids: None,
-        }],
-        ..InitialConditions::default()
-    };
+    let initial_conditions = InitialConditions::default();
 
     SystemBuilder::new()
         .buses(vec![bus])
@@ -7368,7 +7488,6 @@ fn system_with_two_thermals_one_fanning() -> cobre_core::System {
         .initial_conditions(InitialConditions {
             storage: vec![],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],

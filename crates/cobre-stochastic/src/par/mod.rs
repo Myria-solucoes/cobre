@@ -45,8 +45,7 @@ pub use lag_kernel::{
     DownstreamLagAccum, EntityMajor, LagIndex, LagMajor, PrimaryLagAccum, advance_lag_chain,
 };
 pub use lag_transition::{
-    RecentObservationSeed, compute_recent_observation_seed, derive_downstream_par_order,
-    precompute_noise_groups, precompute_stage_lag_transitions,
+    derive_downstream_par_order, precompute_noise_groups, precompute_stage_lag_transitions,
 };
 pub use precompute::PrecomputedPar;
 pub use validation::{ParValidationReport, ParWarning, validate_par_parameters};

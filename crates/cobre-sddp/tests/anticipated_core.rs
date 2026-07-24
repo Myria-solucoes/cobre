@@ -346,7 +346,6 @@ mod anticipated_backward_cut {
         let initial_conditions = InitialConditions {
             storage: vec![],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
                 thermal_id: fixture.ant_id,
                 values_mw: fixture.seeds_mw.to_vec(),
@@ -1112,7 +1111,6 @@ mod anticipated_pre_horizon_seed_delivery {
                 value_hm3: 0.0,
             }],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
                 thermal_id: fixture.anticipated_id,
                 values_mw: fixture.seeds_mw.to_vec(),
@@ -2080,7 +2078,6 @@ mod anticipated_d_t_saturation {
                 value_hm3: 0.0,
             }],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
                 thermal_id: anticipated_id,
                 values_mw: fixture.seeds_mw.to_vec(),
@@ -2653,7 +2650,6 @@ mod anticipated_forward_pass {
                 value_hm3: 100.0,
             }],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
                 thermal_id: anticipated_id,
                 values_mw: vec![100.0, 50.0],
@@ -3254,7 +3250,6 @@ mod anticipated_closed_form_lb_k1_single_thermal {
         let initial_conditions = InitialConditions {
             storage: vec![],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
                 thermal_id: ANTICIPATED_ID,
                 values_mw: vec![0.0],
@@ -3628,7 +3623,6 @@ mod lead_time_single_decider_end_to_end {
         let initial_conditions = InitialConditions {
             storage: vec![],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
                 thermal_id: ANTICIPATED_ID,
                 values_mw: vec![0.0],
@@ -4093,7 +4087,6 @@ mod anticipated_numerical_reconciliation_k2 {
                 value_hm3: 0.0,
             }],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
                 thermal_id: anticipated_id,
                 values_mw: vec![0.0, 0.0],
@@ -4647,7 +4640,6 @@ mod anticipated_bridge_st_cruz_nova_k1 {
                 value_hm3: 0.0,
             }],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
                 thermal_id: anticipated_id,
                 values_mw: vec![204.5647],
@@ -5165,7 +5157,6 @@ mod anticipated_convergence_slow {
                 value_hm3: 100.0,
             }],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
                 thermal_id: anticipated_id,
                 values_mw: vec![40.0, 20.0],
@@ -5596,7 +5587,6 @@ mod a1b_value_cut_identity_anchor {
         let initial_conditions = InitialConditions {
             storage: vec![],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
                 thermal_id: ANT_ID,
                 values_mw: vec![0.0],
@@ -6238,7 +6228,6 @@ mod a1c_stage_count_mode_anchor {
         let initial_conditions = InitialConditions {
             storage: vec![],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
                 thermal_id: ANTICIPATED_ID,
                 values_mw: vec![0.0],

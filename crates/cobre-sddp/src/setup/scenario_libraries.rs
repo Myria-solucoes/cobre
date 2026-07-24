@@ -4,7 +4,7 @@
 //! standardization semantics.
 
 use cobre_core::{
-    EntityId, HydroPastInflows, InflowHistoryRow, Stage,
+    EntityId, InflowHistoryRow, Stage,
     scenario::{
         ExternalLoadRow, ExternalNcsRow, ExternalScenarioRow, HistoricalYears, LoadModel, NcsModel,
     },
@@ -21,11 +21,11 @@ use crate::SddpError;
 
 /// Build and validate a [`HistoricalScenarioLibrary`] for inflow.
 ///
-/// `past_inflows` and `stage_lag_transitions` seed the rolling η-inversion chain
-/// (mirroring `build_external_inflow_library`). Pass
-/// `system.initial_conditions().past_inflows` and the pre-computed transitions
-/// so that every forward pass starting from `past_inflows` exactly reconstructs
-/// the raw historical observations.
+/// `derived_lag_values` and `stage_lag_transitions` seed the rolling
+/// η-inversion chain (mirroring `build_external_inflow_library`). Pass the
+/// shared `StudySetup::derived_inflow_seeds` lag values and the pre-computed
+/// transitions so that every forward pass starting from the same derived seed
+/// exactly reconstructs the raw historical observations.
 ///
 /// # Errors
 ///
@@ -39,7 +39,8 @@ pub(crate) fn build_historical_inflow_library(
     stages: &[Stage],
     par: &PrecomputedPar,
     season_map: Option<&SeasonMap>,
-    past_inflows: &[HydroPastInflows],
+    derived_lag_values: &[f64],
+    l_state: usize,
     stage_lag_transitions: &[StageLagTransition],
     user_pool: Option<&HistoricalYears>,
     forward_passes: u32,
@@ -71,7 +72,8 @@ pub(crate) fn build_historical_inflow_library(
         par,
         &window_years,
         season_map,
-        past_inflows,
+        derived_lag_values,
+        l_state,
         stage_lag_transitions,
         downstream_par_order,
     );
@@ -98,7 +100,8 @@ pub(crate) fn build_external_inflow_library(
     hydro_ids: &[EntityId],
     stages: &[Stage],
     par: &PrecomputedPar,
-    past_inflows: &[HydroPastInflows],
+    derived_lag_values: &[f64],
+    l_state: usize,
     stage_lag_transitions: &[StageLagTransition],
     forward_passes: u32,
     downstream_par_order: usize,
@@ -143,7 +146,8 @@ pub(crate) fn build_external_inflow_library(
         hydro_ids,
         stages,
         par,
-        past_inflows,
+        derived_lag_values,
+        l_state,
         stage_lag_transitions,
         downstream_par_order,
     );

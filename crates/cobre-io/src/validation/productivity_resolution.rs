@@ -344,7 +344,6 @@ mod tests {
             initial_conditions: InitialConditions {
                 storage: vec![],
                 filling_storage: vec![],
-                past_inflows: vec![],
                 past_anticipated_commitments: vec![],
                 recent_observations: vec![],
                 past_defluences: vec![],

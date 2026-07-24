@@ -596,7 +596,6 @@ mod tests {
         let original = InitialConditions {
             storage: vec![],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![
                 AnticipatedCommitmentHistory {
                     thermal_id: EntityId(1),
@@ -643,7 +642,6 @@ mod tests {
         let original = InitialConditions {
             storage: vec![],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],

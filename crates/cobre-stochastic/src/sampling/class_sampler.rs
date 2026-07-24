@@ -138,11 +138,11 @@ impl ClassSampler<'_> {
     /// injection.
     ///
     /// `Historical` deliberately does NOT inject window-preceding lags: initial
-    /// inflow lags come from `initial_conditions.past_inflows` for every scenario
-    /// regardless of the replayed window, so forward, backward, and lower-bound
-    /// evaluators all consume the same `x_0` (a window-dependent lag would make the
-    /// reported convergence gap meaningless). The window contributes only
-    /// standardized noise residuals via [`ClassSampler::fill`].
+    /// inflow lags come from the derived inflow seed (`DerivedInflowSeeds`) for
+    /// every scenario regardless of the replayed window, so forward, backward, and
+    /// lower-bound evaluators all consume the same `x_0` (a window-dependent lag
+    /// would make the reported convergence gap meaningless). The window
+    /// contributes only standardized noise residuals via [`ClassSampler::fill`].
     pub fn apply_initial_state(
         &self,
         _req: &ClassSampleRequest,

@@ -321,8 +321,8 @@ fn run_matches_open_coded_forward_block_for_minimal_fixture() {
         external_inflow_library: None,
         external_load_library: None,
         external_ncs_library: None,
-        recent_accum_seed: &[],
-        recent_weight_seed: 0.0,
+        lag_accum_seed: &[],
+        lag_weight_seed: &[],
         dcs: None,
     };
 
@@ -597,8 +597,8 @@ fn run_wires_ncs_patch_matching_pre_collapse_inline_pattern() {
         external_inflow_library: None,
         external_load_library: None,
         external_ncs_library: None,
-        recent_accum_seed: &[],
-        recent_weight_seed: 0.0,
+        lag_accum_seed: &[],
+        lag_weight_seed: &[],
         dcs: None,
     };
 
@@ -753,8 +753,8 @@ fn run_skips_load_and_inflow_transform_under_absent_and_prebuilt() {
         external_inflow_library: None,
         external_load_library: None,
         external_ncs_library: None,
-        recent_accum_seed: &[],
-        recent_weight_seed: 0.0,
+        lag_accum_seed: &[],
+        lag_weight_seed: &[],
         dcs: None,
     };
 

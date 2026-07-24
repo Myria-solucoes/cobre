@@ -133,9 +133,10 @@ pub(crate) struct ForwardWorkerParams<'a> {
     /// Initial reservoir state shared across all workers.
     pub initial_state: &'a [f64],
     /// Lag-accumulator seed values at trajectory start (empty → zero-init).
-    pub recent_accum_seed: &'a [f64],
-    /// Lag-accumulator weight seed at trajectory start.
-    pub recent_weight_seed: f64,
+    pub lag_accum_seed: &'a [f64],
+    /// Per-entity lag-accumulator weight seed at trajectory start, copied
+    /// alongside [`Self::lag_accum_seed`] (length matches).
+    pub lag_weight_seed: &'a [f64],
     /// Stage-invariant state layout; only `inflow_lags.start` is read (the
     /// initial-state lag base).
     pub state: &'a StateSpace,
@@ -293,11 +294,10 @@ impl ForwardPassState {
             state,
             stochastic,
             initial_state,
-            recent_accum_seed,
-            recent_weight_seed,
+            lag_accum_seed,
+            lag_weight_seed,
             ..
         } = training_ctx;
-        let recent_weight_seed = *recent_weight_seed;
 
         let num_stages = horizon.num_stages();
         let forward_passes = inputs.local_forward_passes;
@@ -406,8 +406,8 @@ impl ForwardPassState {
             terminal_has_boundary_cuts,
             noise_dim,
             initial_state,
-            recent_accum_seed,
-            recent_weight_seed,
+            lag_accum_seed,
+            lag_weight_seed,
             state,
             ctx: inputs.ctx,
             frozen: inputs.frozen,
@@ -661,13 +661,14 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
 
             // Seed (or zero) the lag accumulator at trajectory start.
             if t == 0 {
-                if params.recent_accum_seed.is_empty() {
+                if params.lag_accum_seed.is_empty() {
                     ws.scratch.lag_accumulator.fill(0.0);
-                    ws.scratch.lag_weight_accum = 0.0;
+                    ws.scratch.lag_weight_accum.fill(0.0);
                 } else {
-                    ws.scratch.lag_accumulator[..params.recent_accum_seed.len()]
-                        .copy_from_slice(params.recent_accum_seed);
-                    ws.scratch.lag_weight_accum = params.recent_weight_seed;
+                    ws.scratch.lag_accumulator[..params.lag_accum_seed.len()]
+                        .copy_from_slice(params.lag_accum_seed);
+                    ws.scratch.lag_weight_accum[..params.lag_weight_seed.len()]
+                        .copy_from_slice(params.lag_weight_seed);
                 }
                 ws.scratch.downstream_accumulator.fill(0.0);
                 ws.scratch.downstream_weight_accum = 0.0;
@@ -920,8 +921,8 @@ mod tests {
                 effective_eta_buf: Vec::new(),
                 unscaled_primal: Vec::new(),
                 unscaled_dual: Vec::new(),
-                lag_accumulator: vec![],
-                lag_weight_accum: 0.0,
+                lag_accumulator: vec![0.0_f64; state.hydro_count],
+                lag_weight_accum: vec![0.0_f64; state.hydro_count],
                 downstream_accumulator: Vec::new(),
                 downstream_weight_accum: 0.0,
                 downstream_completed_lags: Vec::new(),
@@ -1215,8 +1216,8 @@ mod tests {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         };
 
@@ -1292,8 +1293,8 @@ mod tests {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         };
 
@@ -1386,8 +1387,8 @@ mod tests {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         };
 
@@ -1421,8 +1422,8 @@ mod tests {
             terminal_has_boundary_cuts: false,
             noise_dim: fx.stochastic.dim(),
             initial_state: &fx.initial_state,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             state: &fx.state,
             ctx: &ctx,
             frozen: &fx.templates,
@@ -1518,8 +1519,8 @@ mod tests {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         };
 
@@ -1653,8 +1654,8 @@ mod tests {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         };
 
@@ -1708,6 +1709,331 @@ mod tests {
             "run 2: scenario_costs capacity {} must be >= n_scenarios {}",
             result2.scenario_costs.capacity(),
             fx.n_scenarios
+        );
+    }
+
+    // ── Per-entity weight-seed reset fixture (2 hydros, 1 stage) ────────────
+
+    fn minimal_template_2_hydros() -> StageTemplate {
+        StageTemplate {
+            num_cols: 7,
+            num_rows: 2,
+            num_nz: 2,
+            col_starts: vec![0, 0, 0, 0, 0, 1, 2, 2],
+            row_indices: vec![0, 1],
+            values: vec![1.0, 1.0],
+            col_lower: vec![
+                0.0,
+                0.0,
+                f64::NEG_INFINITY,
+                f64::NEG_INFINITY,
+                0.0,
+                0.0,
+                0.0,
+            ],
+            col_upper: vec![f64::INFINITY; 7],
+            objective: vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+            row_lower: vec![0.0, 0.0],
+            row_upper: vec![0.0, 0.0],
+            n_state: 2,
+            n_transfer: 0,
+            n_dual_relevant: 2,
+            n_hydro: 2,
+            max_par_order: 0,
+            col_scale: Vec::new(),
+            row_scale: Vec::new(),
+        }
+    }
+
+    fn make_stage_1_2_hydros() -> Vec<Stage> {
+        vec![Stage {
+            index: 0,
+            id: 0,
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            season_id: Some(0),
+            blocks: vec![Block {
+                index: 0,
+                name: "S".to_string(),
+                duration_hours: 744.0,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: true,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        }]
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn make_stochastic_context_2_hydros_1_stage(stages: &[Stage]) -> StochasticContext {
+        let bus = Bus {
+            id: EntityId(0),
+            name: "B0".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 1000.0,
+            }],
+            excess_cost: 0.0,
+        };
+        let make_hydro = |id: i32, name: &str| Hydro {
+            id: EntityId(id),
+            name: name.to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: EntityId(0),
+            downstream_id: None,
+            travel_time_hours: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 100.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 100.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: HydroPenalties {
+                spillage_cost: 0.0,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 0.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+        };
+        let inflow_models: Vec<InflowModel> = [1_i32, 2]
+            .into_iter()
+            .map(|hid| InflowModel {
+                hydro_id: EntityId(hid),
+                stage_id: 0,
+                mean_m3s: 100.0,
+                std_m3s: 30.0,
+                ar_coefficients: vec![],
+                residual_std_ratio: 1.0,
+                annual: None,
+            })
+            .collect();
+        let mut profiles = BTreeMap::new();
+        profiles.insert(
+            "default".to_string(),
+            CorrelationProfile {
+                groups: vec![CorrelationGroup {
+                    name: "g1".to_string(),
+                    entities: vec![
+                        CorrelationEntity {
+                            entity_type: "inflow".to_string(),
+                            id: EntityId(1),
+                        },
+                        CorrelationEntity {
+                            entity_type: "inflow".to_string(),
+                            id: EntityId(2),
+                        },
+                    ],
+                    matrix: vec![vec![1.0, 0.0], vec![0.0, 1.0]],
+                }],
+            },
+        );
+        let correlation = CorrelationModel {
+            method: "spectral".to_string(),
+            profiles,
+            schedule: vec![],
+        };
+        let system = SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(vec![make_hydro(1, "H1"), make_hydro(2, "H2")])
+            .stages(stages.to_vec())
+            .inflow_models(inflow_models)
+            .correlation(correlation)
+            .build()
+            .unwrap();
+        build_stochastic_context(
+            &system,
+            42,
+            None,
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::InSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .unwrap()
+    }
+
+    /// Two hydros, one stage: hydro A carries a full-coverage weight seed
+    /// (1.0), hydro B a half-coverage weight seed (0.5). After the
+    /// trajectory-start reset, `ws.scratch.lag_weight_accum` must carry each
+    /// hydro's OWN weight — a shared scalar (the pre-widening behavior) would
+    /// instead broadcast one value to both entities.
+    #[test]
+    fn forward_reset_copies_per_entity_weight_seed() {
+        let state = state_layout(2, 0);
+        let stages = make_stage_1_2_hydros();
+        let stochastic = make_stochastic_context_2_hydros_1_stage(&stages);
+        let templates = vec![minimal_template_2_hydros()];
+        let base_rows = vec![0_usize];
+        let initial_state = vec![0.0_f64; state.n_state];
+        let noise_scale = vec![0.0_f64; state.hydro_count];
+        let fcf = FutureCostFunction::new(1, state.n_state, 1, 10, &[0_u32]);
+        let horizon = HorizonMode::Finite { num_stages: 1 };
+
+        let ctx = StageContext {
+            geometry_per_stage: &[],
+            templates: &templates,
+            base_rows: &base_rows,
+            noise_scale: &noise_scale,
+            n_hydros: 2,
+            cost_scale_factor: 1_000_000.0,
+            n_load_buses: 0,
+            load_balance_row_starts: &[],
+            load_bus_indices: &[],
+            block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+            ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
+            discount_factors: &[],
+            cumulative_discount_factors: &[],
+            stage_lag_transitions: &[],
+            noise_group_ids: &[],
+            downstream_par_order: 0,
+        };
+        let study_dims = study_dims();
+        let lag_accum_seed = [0.0_f64, 0.0_f64];
+        let lag_weight_seed = [1.0_f64, 0.5_f64];
+        let training_ctx = TrainingContext {
+            horizon: &horizon,
+            state: &state,
+            cut_state_layouts: &[],
+            study_dims: &study_dims,
+            inflow_method: &InflowNonNegativityMethod::None,
+            stochastic: &stochastic,
+            initial_state: &initial_state,
+            inflow_scheme: SamplingScheme::InSample,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            stages: &stages,
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+            lag_accum_seed: &lag_accum_seed,
+            lag_weight_seed: &lag_weight_seed,
+            dcs: None,
+        };
+
+        let sampler = build_forward_sampler(ForwardSamplerConfig {
+            class_schemes: ClassSchemes {
+                inflow: Some(SamplingScheme::InSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+            ctx: &stochastic,
+            stages: &stages,
+            dims: ClassDimensions {
+                n_hydros: stochastic.n_hydros(),
+                n_load_buses: stochastic.n_load_buses(),
+                n_ncs: stochastic.n_stochastic_ncs(),
+            },
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+        })
+        .expect("sampler build must not error");
+
+        let params = ForwardWorkerParams {
+            forward_passes: 1,
+            total_forward_passes: 1,
+            num_stages: 1,
+            n_workers: 1,
+            iteration: 1,
+            fwd_offset: 0,
+            terminal_has_boundary_cuts: false,
+            noise_dim: stochastic.dim(),
+            initial_state: &initial_state,
+            lag_accum_seed: &lag_accum_seed,
+            lag_weight_seed: &lag_weight_seed,
+            state: &state,
+            ctx: &ctx,
+            frozen: &templates,
+            fcf: &fcf,
+            training_ctx: &training_ctx,
+            sampler: &sampler,
+        };
+
+        let solution = LpSolution {
+            objective: 0.0,
+            primal: vec![0.0; 7],
+            dual: vec![0.0; 2],
+            reduced_costs: vec![0.0; 7],
+            iterations: 0,
+            solve_time_seconds: 0.0,
+        };
+        let mut ws = single_workspace(MockSolver::always_ok(solution), &state);
+        let mut basis_store = BasisStore::new(1, 1);
+        let mut basis_slices = basis_store.split_workers_mut(1);
+        let mut basis_slice = basis_slices.remove(0);
+        let mut records: Vec<TrajectoryRecord> = vec![TrajectoryRecord {
+            primal: Vec::new(),
+            dual: Vec::new(),
+            stage_cost: 0.0,
+            state: Vec::new(),
+        }];
+        let mut per_stage_stats = vec![SolverStatsDelta::default()];
+
+        // Reset happens at trajectory start (t == 0), before any LP solve;
+        // the mock solver's outcome is irrelevant to this assertion.
+        let _ = run_forward_worker(
+            0,
+            &mut ws,
+            &mut records,
+            &mut basis_slice,
+            &mut per_stage_stats,
+            &params,
+        );
+
+        assert_eq!(
+            ws.scratch.lag_weight_accum[0], 1.0,
+            "hydro A (full coverage) weight should be 1.0, got {}",
+            ws.scratch.lag_weight_accum[0]
+        );
+        assert_eq!(
+            ws.scratch.lag_weight_accum[1], 0.5,
+            "hydro B (half coverage) weight should be 0.5, got {}",
+            ws.scratch.lag_weight_accum[1]
         );
     }
 }

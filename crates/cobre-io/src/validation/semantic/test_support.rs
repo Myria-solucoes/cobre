@@ -194,7 +194,6 @@ pub(super) fn make_data(
         initial_conditions: InitialConditions {
             storage: vec![],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
@@ -265,7 +264,6 @@ pub(super) fn make_data_5b(
         initial_conditions: InitialConditions {
             storage: vec![],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
@@ -606,7 +604,6 @@ pub(super) fn make_data_estimation(
         initial_conditions: InitialConditions {
             storage: vec![],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
@@ -666,142 +663,6 @@ pub(super) fn make_ar_row(hydro_id: i32, stage_id: i32, lag: i32) -> InflowArCoe
         lag,
         coefficient: 0.5,
     }
-}
-
-/// Build a `ParsedData` suitable for rules 22-24 (past-inflows coverage) tests.
-///
-/// `inflow_lags_enabled` controls `state_config.inflow_lags` on stage 0.
-/// `past_inflows` is placed directly in `initial_conditions`.
-pub(super) fn make_data_past_inflows(
-    hydros: Vec<Hydro>,
-    inflow_lags_enabled: bool,
-    past_inflows: Vec<cobre_core::HydroPastInflows>,
-    inflow_ar_coefficients: Vec<InflowArCoefficientRow>,
-) -> ParsedData {
-    use cobre_core::EntityId as EId;
-    let stage_0_start = chrono::NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
-    let stage_0 = Stage {
-        id: 0,
-        index: 0,
-        start_date: stage_0_start,
-        end_date: stage_0_start
-            .checked_add_months(chrono::Months::new(1))
-            .unwrap_or(stage_0_start),
-        season_id: None,
-        blocks: vec![],
-        block_mode: BlockMode::Parallel,
-        state_config: StageStateConfig {
-            storage: true,
-            inflow_lags: inflow_lags_enabled,
-        },
-        risk_config: StageRiskConfig::Expectation,
-        scenario_config: ScenarioSourceConfig {
-            branching_factor: 1,
-            noise_method: NoiseMethod::Saa,
-        },
-    };
-    ParsedData {
-        config: minimal_config(),
-        penalties: minimal_global_penalties(),
-        stages: StagesData {
-            stages: vec![stage_0],
-            policy_graph: PolicyGraph {
-                graph_type: PolicyGraphType::FiniteHorizon,
-                annual_discount_rate: 0.06,
-                transitions: vec![],
-                season_map: None,
-            },
-        },
-        initial_conditions: cobre_core::InitialConditions {
-            storage: vec![],
-            filling_storage: vec![],
-            past_inflows,
-            past_anticipated_commitments: vec![],
-            recent_observations: vec![],
-            past_defluences: vec![],
-        },
-        buses: vec![Bus {
-            id: EId::from(1),
-            name: "BUS_1".to_string(),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            deficit_segments: vec![],
-            excess_cost: 100.0,
-        }],
-        thermals: vec![],
-        hydros,
-        lines: vec![],
-        non_controllable_sources: vec![],
-        pumping_stations: vec![],
-        energy_contracts: vec![],
-        hydro_geometry: vec![],
-        production_models: vec![],
-        plane_reduction: None,
-        hydro_energy_productivity_rows: vec![],
-        fpha_hyperplanes: vec![],
-        inflow_history: vec![],
-        // Populate a sentinel entry so the estimation path (rules 19-21) is
-        // inactive. Rules 22-24 are independent of the estimation path.
-        inflow_seasonal_stats: vec![InflowSeasonalStatsRow {
-            hydro_id: EId::from(1),
-            stage_id: 0,
-            mean_m3s: 500.0,
-            std_m3s: 50.0,
-        }],
-        inflow_ar_coefficients,
-        inflow_annual_components: vec![],
-        external_scenarios: vec![],
-        external_load_scenarios: vec![],
-        external_ncs_scenarios: vec![],
-        load_seasonal_stats: vec![],
-        load_factors: vec![],
-        correlation: None,
-        non_controllable_factors: vec![],
-        ncs_models: vec![],
-        thermal_bounds: vec![],
-        hydro_bounds: vec![],
-        line_bounds: vec![],
-        pumping_bounds: vec![],
-        contract_bounds: vec![],
-        exchange_factors: vec![],
-        generic_constraints: vec![],
-        generic_constraint_bounds: vec![],
-        penalty_overrides_bus: vec![],
-        penalty_overrides_line: vec![],
-        penalty_overrides_hydro: vec![],
-        penalty_overrides_ncs: vec![],
-        ncs_bounds: vec![],
-        scalar_parameters: vec![],
-    }
-}
-
-/// Build a `ParsedData` like `make_data_past_inflows` but with a `SeasonMap`
-/// containing seasons with IDs `0..num_seasons`.
-pub(super) fn make_data_past_inflows_with_season_map(
-    hydros: Vec<Hydro>,
-    past_inflows: Vec<cobre_core::HydroPastInflows>,
-    inflow_ar_coefficients: Vec<InflowArCoefficientRow>,
-    num_seasons: usize,
-) -> ParsedData {
-    use cobre_core::temporal::{SeasonCycleType, SeasonDefinition, SeasonMap};
-
-    let seasons = (0..num_seasons)
-        .map(|i| SeasonDefinition {
-            id: i,
-            label: format!("Season{i}"),
-            month_start: (i % 12 + 1) as u32,
-            day_start: None,
-            month_end: None,
-            day_end: None,
-        })
-        .collect();
-    let season_map = SeasonMap {
-        cycle_type: SeasonCycleType::Monthly,
-        seasons,
-    };
-
-    let mut data = make_data_past_inflows(hydros, true, past_inflows, inflow_ar_coefficients);
-    data.stages.policy_graph.season_map = Some(season_map);
-    data
 }
 
 // dead_code: a helper may be unused by some sibling modules but is kept here for

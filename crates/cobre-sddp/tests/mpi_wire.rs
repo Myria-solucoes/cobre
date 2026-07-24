@@ -722,6 +722,98 @@ mod opening_order_determinism {
     }
 }
 
+#[cfg(all(feature = "highs", feature = "test-support"))]
+mod derived_inflow_seeds_rank_invariance {
+    //! Rank-invariance gate for the derived PAR lag/accumulator seed: every
+    //! rank derives `DerivedInflowSeeds` locally from the broadcast `System`
+    //! inside `StudySetup::from_broadcast_params`, so a 1-rank run and a
+    //! `Rank0Of2` 2-rank stub of the same fixture must seed a bit-identical
+    //! stage-0 state vector and converge to a bit-identical final lower
+    //! bound; a same-shape repeat must reproduce both as well.
+    //!
+    //! `examples/deterministic/d16-par1-lag-shift` is the fixture: single
+    //! hydro, PAR(1), monthly, one opening per stage, and its
+    //! `recent_observations` window is the sole source of the stage-0 lag-1
+    //! seed (see the case's own pin in `deterministic.rs`), so the seed this
+    //! gate exercises is non-trivial.
+
+    use std::path::Path;
+
+    use cobre_comm::Communicator;
+    use cobre_solver::ActiveSolver;
+
+    use crate::common::{Rank0Of2, StubComm};
+
+    fn fixture_case_dir() -> &'static Path {
+        Path::new("../../examples/deterministic/d16-par1-lag-shift")
+    }
+
+    /// Build a fresh `StudySetup` (see `crate::common::fresh_setup_with`'s doc
+    /// for the construction pipeline — the same `from_broadcast_params` entry
+    /// point every rank runs), capture the stage-0 seeded state vector, then
+    /// train via the public `train` entry point and return
+    /// `(state_bits, final_lb_bits)`.
+    fn run_shape(case_dir: &Path, comm: &impl Communicator) -> (Vec<u64>, u64) {
+        let mut setup = crate::common::fresh_setup_with(case_dir, |_| {});
+        let state_bits: Vec<u64> = setup
+            .training_ctx()
+            .initial_state
+            .iter()
+            .map(|v| v.to_bits())
+            .collect();
+
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = setup
+            .train(&mut solver, comm, 1, ActiveSolver::new, None, None)
+            .expect("train must return Ok");
+        assert!(
+            outcome.error.is_none(),
+            "expected no training error, got: {:?}",
+            outcome.error
+        );
+
+        (state_bits, outcome.result.final_lb.to_bits())
+    }
+
+    #[test]
+    fn derived_inflow_seeds_rank_invariant() {
+        let case_dir = fixture_case_dir();
+
+        let probe = crate::common::fresh_setup_with(case_dir, |_| {});
+        assert!(
+            probe.training_ctx().initial_state.iter().any(|&v| v != 0.0),
+            "derived_inflow_seeds_rank_invariant: fixture {case_dir:?} seeds an all-zero \
+             stage-0 state vector — the gate is powerless here; point it at a fixture whose \
+             recent_observations window feeds a non-trivial seed"
+        );
+
+        let stub = StubComm;
+        let rank0_of_2 = Rank0Of2;
+
+        let (state_1rank, lb_1rank) = run_shape(case_dir, &stub);
+        let (state_1rank_repeat, lb_1rank_repeat) = run_shape(case_dir, &stub);
+        let (state_2rank, lb_2rank) = run_shape(case_dir, &rank0_of_2);
+
+        assert_eq!(
+            state_1rank, state_1rank_repeat,
+            "same-shape repeat: stage-0 seeded state vector must be bitwise identical"
+        );
+        assert_eq!(
+            lb_1rank, lb_1rank_repeat,
+            "same-shape repeat: final lower bound must be bitwise identical"
+        );
+
+        assert_eq!(
+            state_1rank, state_2rank,
+            "1-rank vs 2-rank stub: stage-0 seeded state vector must be bitwise identical"
+        );
+        assert_eq!(
+            lb_1rank, lb_2rank,
+            "1-rank vs 2-rank stub: final lower bound must be bitwise identical"
+        );
+    }
+}
+
 mod opening_block_scheduler_determinism {
     //! opening-block scheduler determinism gates: train `examples/1dtoy`
     //! under `training.parallelism.backward_scheduler` via the public
@@ -1650,8 +1742,8 @@ mod opening_block_scratch {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         };
 
@@ -1787,8 +1879,8 @@ mod opening_block_scratch {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         };
 

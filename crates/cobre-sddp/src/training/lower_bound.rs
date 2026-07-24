@@ -903,8 +903,8 @@ mod tests {
                 external_inflow_library: None,
                 external_load_library: None,
                 external_ncs_library: None,
-                recent_accum_seed: &[],
-                recent_weight_seed: 0.0,
+                lag_accum_seed: &[],
+                lag_weight_seed: &[],
                 dcs: None,
             }
         }
@@ -1894,8 +1894,8 @@ mod tests {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         };
 
@@ -2676,8 +2676,8 @@ mod tests {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         };
         let (mut row_batch, mut lb_scratch) = make_lb_locals();
@@ -2782,8 +2782,8 @@ mod tests {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         };
         let (mut row_batch, mut lb_scratch) = make_lb_locals();

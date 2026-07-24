@@ -59,8 +59,8 @@ pub use constraints::generic_constraint::{
     ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
 };
 pub use constraints::initial_conditions::{
-    AnticipatedCommitmentHistory, HydroPastDefluence, HydroPastInflows, HydroStorage,
-    InitialConditions, RecentObservation,
+    AnticipatedCommitmentHistory, HydroPastDefluence, HydroStorage, InitialConditions,
+    RecentObservation,
 };
 pub use constraints::training_event::{
     StageRowSelectionRecord, StoppingRuleResult, TrainingEvent, WORKER_TIMING_SLOT_BWD_SETUP,

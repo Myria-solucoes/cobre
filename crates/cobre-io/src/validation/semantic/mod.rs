@@ -34,9 +34,9 @@
 //! |22 | `travel_time_hours == 0.0` — treated as undeclared, no arc created     | `system/hydros.json`                  | `ModelQuality` (warning) |
 //! |23 | Declared arc: `max_t(t_v/h_t)` below a smallness threshold             | `system/hydros.json`                  | `ModelQuality` (warning) |
 //! |24 | Declared arc: `t_v` exceeds the remaining study horizon at some stage  | `system/hydros.json`                  | `ModelQuality` (warning) |
-//! |25 | Declared arc: `past_defluences` history shorter than the required pre-study depth (derived-from-`past_inflows` fallback logs a caveat instead) | `initial_conditions.json` | `BusinessRuleViolation` (or `ModelQuality` warning) |
+//! |25 | Declared arc: `past_defluences` windows do not cover the arc's required pre-study depth | `initial_conditions.json` | `BusinessRuleViolation` (or `ModelQuality` warning) |
 //! |26 | 2+ declared arcs into one downstream plant with differing `travel_time_hours`, while any study stage is `Chronological` | `system/hydros.json` | `NotImplemented` |
-//! |27 | `recent_observations` present but the season cycle is not `Monthly` — mid-period PAR lag seeding silently skipped | `initial_conditions.json` | `ModelQuality` (warning) |
+//! |27 | *(retired — number never reused)* | — | — |
 //! |28 | `lead_stages` anticipated active window spans a stage-cadence transition (adjacent unequal stage durations); `lead_time` is the physically-anchored alternative | `system/thermals.json` | `ModelQuality` (warning) |
 //! |29 | Study supplies an inflow annual component (`inflow_annual_components` non-empty) while `season_map.cycle_type` is not `Monthly` — PAR(p)-A is monthly-exclusive by design | `scenarios/inflow_annual_component.parquet` | `BusinessRuleViolation` |
 //!
@@ -65,9 +65,9 @@
 //! |19  | `season_definitions` required in `stages.json` when estimating          | `scenarios/inflow_history.parquet`             | `BusinessRuleViolation`  |
 //! |20  | Minimum observations per `(hydro, season)` group for estimation         | `scenarios/inflow_history.parquet`             | `ModelQuality` (warning) |
 //! |21  | All hydros in `hydros.json` must have observations in history           | `scenarios/inflow_history.parquet`             | `BusinessRuleViolation`  |
-//! |22  | `inflow_lags: true` with PAR order > 0 requires non-empty `past_inflows` | `initial_conditions.json`                      | `BusinessRuleViolation`  |
-//! |23  | Each hydro with PAR order `p` must have a `past_inflows` entry with `values_m3s.len() >= p` | `initial_conditions.json` | `BusinessRuleViolation`  |
-//! |24  | All hydro IDs in `past_inflows` must exist in the hydro registry        | `initial_conditions.json`                      | `BusinessRuleViolation`  |
+//! |22  | *(retired — number never reused)* | — | — |
+//! |23  | *(retired — number never reused)* | — | — |
+//! |24  | *(retired — number never reused)* | — | — |
 //! |25  | Sobol stages: `branching_factor` should be a power of 2                 | `stages.json`                                  | `ModelQuality` (warning) |
 //! |26  | `simulation.sampling_scheme.type` must be a known scheme string          | `config.json`                                  | `InvalidValue`           |
 //! |27  | Every stage `season_id` must reference a season defined in `season_definitions` | `stages.json`                        | `BusinessRuleViolation`  |
@@ -75,7 +75,7 @@
 //! |29  | All stages sharing a `season_id` must have compatible durations (within 7d) | `stages.json`                        | `BusinessRuleViolation`  |
 //! |30  | Season defined in `season_definitions` but not referenced by any stage   | `stages.json`                                  | `ModelQuality` (warning) |
 //! |31  | Observation resolution must not be finer than season resolution          | `scenarios/inflow_history.parquet`             | `BusinessRuleViolation`  |
-//! |32  | Each `season_id` in `past_inflows[i].season_ids` must exist in `SeasonMap` | `initial_conditions.json`                    | `BusinessRuleViolation`  |
+//! |32  | *(retired — number never reused)* | — | — |
 //! |33  | Filling schedule reaches the dead volume: `Σ ζ_s·rate_s >= min_storage − seed` | `system/hydros.json`               | `BusinessRuleViolation`  |
 //! |34  | PAR order > 0 but every study stage has `inflow_lags == false` (inflow-lag state omitted) | `stages.json`        | `ModelQuality` (warning) |
 //! |35  | User-supplied `inflow_ar_coefficients.parquet` must pass the periodic-ACF closure stationarity gate (external-input path only; annual-aware; season resolved via `resolve_stage_seasons`'s `season_map`-or-fallback) | `scenarios/inflow_ar_coefficients.parquet` | `InvalidValue` (or `BusinessRuleViolation` when a stage's season is genuinely unresolvable) |
@@ -115,7 +115,6 @@ pub(crate) fn validate_semantic_hydro_thermal(data: &ParsedData, ctx: &mut Valid
     constraints::check_per_block_storage_interior_reference(data, ctx);
     pumping::check_pumping_semantics(data, ctx);
     travel_time::validate_travel_time(data, ctx);
-    travel_time::check_recent_observations_non_monthly_seed_gap(data, ctx);
     travel_time::check_annual_component_monthly_only(data, ctx);
 }
 
@@ -147,8 +146,6 @@ pub(crate) fn validate_semantic_stages_penalties_scenarios(
     scenarios::check_external_scheme_has_files(data, ctx);
     scenarios::check_load_factor_consistency(data, ctx);
     scenarios::check_estimation_prerequisites(data, ctx);
-    scenarios::check_past_inflows_coverage(data, ctx);
-    scenarios::check_past_inflows_season_ids(data, ctx);
     season::check_season_id_consistency(data, ctx);
     season::check_observation_season_alignment(data, ctx);
 }

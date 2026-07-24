@@ -23,6 +23,7 @@ use cobre_stochastic::ClassSchemes;
 use cobre_stochastic::HistoricalScenarioLibrary;
 use cobre_stochastic::PrecomputedPar;
 use cobre_stochastic::build_stochastic_context;
+use cobre_stochastic::derive_inflow_seeds;
 use cobre_stochastic::discover_historical_windows;
 use cobre_stochastic::normal::precompute::EntityFactorEntry;
 use cobre_stochastic::par::lag_transition::derive_downstream_par_order;
@@ -233,6 +234,20 @@ fn build_opening_tree_library(
         derive_downstream_par_order(&study_stages, max_order, season_map_ref);
     let stage_lag_transitions =
         precompute_stage_lag_transitions(&study_stages, effective_season_map, downstream_par_order);
+    let derived_lag_values = match study_stages.first() {
+        None => Vec::new(),
+        Some(first_stage) => {
+            derive_inflow_seeds(
+                system.inflow_history(),
+                &system.initial_conditions().recent_observations,
+                system.hydros(),
+                first_stage,
+                effective_season_map,
+                max_order,
+            )
+            .lag_values
+        }
+    };
     standardize_historical_windows(
         &mut lib,
         system.inflow_history(),
@@ -241,7 +256,8 @@ fn build_opening_tree_library(
         &par,
         &window_years,
         season_map_ref,
-        &system.initial_conditions().past_inflows,
+        &derived_lag_values,
+        max_order,
         &stage_lag_transitions,
         downstream_par_order,
     );
@@ -431,10 +447,10 @@ mod tests {
     use super::*;
     use chrono::NaiveDate;
     use cobre_core::{
-        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, HydroPastInflows,
-        HydroStageBounds, HydroStagePenalties, InitialConditions, LineStageBounds,
-        LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
-        PumpingStageBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalStageBounds,
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, HydroStageBounds,
+        HydroStagePenalties, InitialConditions, LineStageBounds, LineStagePenalties,
+        NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds,
+        ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalStageBounds,
         entities::{
             bus::{Bus, DeficitSegment},
             hydro::{Hydro, HydroGenerationModel, HydroPenalties},
@@ -493,7 +509,7 @@ mod tests {
 
     // Rationale: one flat literal `System` fixture (bus, hydro, 5 stages,
     // inflow models, bounds, penalties) mirroring `setup/tests.rs`'s
-    // `minimal_system_2_hydros_with_past_inflows`; splitting it fragments a
+    // `minimal_system_2_hydros_with_history`; splitting it fragments a
     // single-purpose, single-call fixture across artificial sub-functions.
     #[allow(clippy::too_many_lines)]
     fn build_ring_fixture() -> RingFixture {
@@ -774,11 +790,6 @@ mod tests {
             .initial_conditions(InitialConditions {
                 storage: vec![],
                 filling_storage: vec![],
-                past_inflows: vec![HydroPastInflows {
-                    hydro_id,
-                    values_m3s: vec![past_inflow_seed],
-                    season_ids: None,
-                }],
                 past_anticipated_commitments: vec![],
                 recent_observations: vec![],
                 past_defluences: vec![],
@@ -813,7 +824,7 @@ mod tests {
         let mut lag_state = vec![fx.past_inflow_seed];
         let mut incoming = vec![0.0];
         let mut primary_acc = vec![0.0];
-        let mut primary_w = 0.0_f64;
+        let mut primary_w = vec![0.0];
         let mut ds_acc = if downstream_par_order > 0 {
             vec![0.0]
         } else {

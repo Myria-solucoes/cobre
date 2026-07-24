@@ -23,10 +23,10 @@ use std::collections::BTreeMap;
 use chrono::NaiveDate;
 use cobre_core::{
     BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, DeficitSegment,
-    EntityId, HydroPastInflows, HydroStageBounds, HydroStagePenalties, LineStageBounds,
-    LineStagePenalties, NcsStagePenalties, NonControllableSource, PenaltiesCountsSpec,
-    PenaltiesDefaults, PumpingStageBounds, ResolvedBounds, ResolvedPenalties, ScenarioSource,
-    SystemBuilder, ThermalStageBounds,
+    EntityId, HydroStageBounds, HydroStagePenalties, LineStageBounds, LineStagePenalties,
+    NcsStagePenalties, NonControllableSource, PenaltiesCountsSpec, PenaltiesDefaults,
+    PumpingStageBounds, ResolvedBounds, ResolvedPenalties, ScenarioSource, SystemBuilder,
+    ThermalStageBounds,
     entities::hydro::{HydroGenerationModel, HydroPenalties},
     scenario::{
         CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, ExternalLoadRow,
@@ -2023,7 +2023,8 @@ struct DlcFixture {
     hydro_ids: Vec<EntityId>,
     par: PrecomputedPar,
     transitions: Vec<StageLagTransition>,
-    past_inflows: Vec<HydroPastInflows>,
+    /// Per-hydro lag-1 seed value (m³/s) driving `derived_lag_values`.
+    lag_seed: [f64; DLC_N_HYDROS],
     /// `raw[stage][hydro]` — the realized inflow (m³/s) driven through all
     /// three call sites.
     raw: [[f64; DLC_N_HYDROS]; DLC_N_STAGES],
@@ -2149,18 +2150,7 @@ fn build_dlc_fixture() -> DlcFixture {
     assert!(!transitions[4].accumulate_downstream);
     assert!(!transitions[4].rebuild_from_downstream);
 
-    let past_inflows = vec![
-        HydroPastInflows {
-            hydro_id: hydro1,
-            values_m3s: vec![70.0],
-            season_ids: None,
-        },
-        HydroPastInflows {
-            hydro_id: hydro2,
-            values_m3s: vec![280.0],
-            season_ids: None,
-        },
-    ];
+    let lag_seed = [70.0, 280.0];
 
     let raw = [
         [80.0, 300.0],
@@ -2176,8 +2166,18 @@ fn build_dlc_fixture() -> DlcFixture {
         hydro_ids,
         par,
         transitions,
-        past_inflows,
+        lag_seed,
         raw,
+    }
+}
+
+impl DlcFixture {
+    /// `lag_seed` in the entity-major derived-seed layout (`pos * l_state +
+    /// lag`) `standardize_external_inflow` / `standardize_historical_windows`
+    /// take directly; `hydro_ids` order matches `lag_seed` order by
+    /// construction in `build_dlc_fixture`.
+    fn derived_lag_values(&self) -> Vec<f64> {
+        self.lag_seed.to_vec()
     }
 }
 
@@ -2190,13 +2190,10 @@ fn dlc_forward_oracle_incoming_lags(fx: &DlcFixture) -> Vec<[f64; DLC_N_HYDROS]>
         entity_count: DLC_N_HYDROS,
         max_order: 1,
     };
-    let mut lag_state = vec![
-        fx.past_inflows[0].values_m3s[0],
-        fx.past_inflows[1].values_m3s[0],
-    ];
+    let mut lag_state = vec![fx.lag_seed[0], fx.lag_seed[1]];
     let mut incoming = vec![0.0; DLC_N_HYDROS];
     let mut primary_acc = vec![0.0; DLC_N_HYDROS];
-    let mut primary_w = 0.0_f64;
+    let mut primary_w = vec![0.0; DLC_N_HYDROS];
     let mut ds_acc = vec![0.0; DLC_N_HYDROS];
     let mut ds_w = 0.0_f64;
     let mut ds_completed = vec![0.0; DLC_N_HYDROS];
@@ -2236,10 +2233,7 @@ fn dlc_forward_oracle_incoming_lags(fx: &DlcFixture) -> Vec<[f64; DLC_N_HYDROS]>
 /// `accumulate_weight`-weighted realized values and, at `finalize_period`,
 /// shifts the lag to the period average.
 fn dlc_naive_primary_only_incoming_lags(fx: &DlcFixture) -> Vec<[f64; DLC_N_HYDROS]> {
-    let mut lag_state = [
-        fx.past_inflows[0].values_m3s[0],
-        fx.past_inflows[1].values_m3s[0],
-    ];
+    let mut lag_state = [fx.lag_seed[0], fx.lag_seed[1]];
     let mut accumulator = [0.0_f64; DLC_N_HYDROS];
     let mut weight_accum = 0.0_f64;
 
@@ -2279,11 +2273,8 @@ fn differential_lag_chain_forward_external_historical_agree_at_quarterly_transit
 
     assert_eq!(
         oracle_incoming[0],
-        [
-            fx.past_inflows[0].values_m3s[0],
-            fx.past_inflows[1].values_m3s[0],
-        ],
-        "stage 0's incoming lag must be the unmodified past_inflows seed"
+        [fx.lag_seed[0], fx.lag_seed[1],],
+        "stage 0's incoming lag must be the unmodified lag seed"
     );
     for h in 0..DLC_N_HYDROS {
         assert!(
@@ -2311,13 +2302,15 @@ fn differential_lag_chain_forward_external_historical_agree_at_quarterly_transit
             });
         }
     }
+    let derived_lag_values = fx.derived_lag_values();
     standardize_external_inflow(
         &mut ext_lib,
         &ext_rows,
         &fx.hydro_ids,
         &fx.stages,
         &fx.par,
-        &fx.past_inflows,
+        &derived_lag_values,
+        1,
         &fx.transitions,
         1,
     );
@@ -2346,7 +2339,8 @@ fn differential_lag_chain_forward_external_historical_agree_at_quarterly_transit
         &fx.par,
         &[window_year],
         None,
-        &fx.past_inflows,
+        &derived_lag_values,
+        1,
         &fx.transitions,
         1,
     );
@@ -2443,6 +2437,7 @@ fn opening_tree_historical_standardization_ring_aware_eta_requires_derived_downs
         }
     }
 
+    let derived_lag_values = fx.derived_lag_values();
     let mut hist_lib_ring_aware =
         HistoricalScenarioLibrary::new(1, DLC_N_STAGES, DLC_N_HYDROS, 1, vec![window_year]);
     standardize_historical_windows(
@@ -2453,7 +2448,8 @@ fn opening_tree_historical_standardization_ring_aware_eta_requires_derived_downs
         &fx.par,
         &[window_year],
         None,
-        &fx.past_inflows,
+        &derived_lag_values,
+        1,
         &fx.transitions,
         derived,
     );
@@ -2468,7 +2464,8 @@ fn opening_tree_historical_standardization_ring_aware_eta_requires_derived_downs
         &fx.par,
         &[window_year],
         None,
-        &fx.past_inflows,
+        &derived_lag_values,
+        1,
         &fx.transitions,
         0,
     );

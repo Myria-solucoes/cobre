@@ -1945,7 +1945,7 @@ fn d18_ncs_commissioning_window() {
 /// ## PAR(1) model
 ///
 /// psi = 0.5 at all stages, mean = 100 m3/s, std ~ 0 (deterministic).
-/// Initial lag (past_inflows) = 200 m3/s.
+/// Initial lag seed = 200 m3/s.
 ///
 /// ## Expected inflows with correct lag shift
 ///
@@ -2094,7 +2094,8 @@ fn incremental_lb_reduces_load_model_count() {
 ///     storage 0–150 hm3, PAR(2) with psi = [0.4, 0.2], mean = 25 m3/s
 /// - Deterministic load: 100 MW per stage
 /// - Initial storage: H0 = 100 hm3, H1 = 75 hm3
-/// - Past inflows: H0 = [50, 45] m3/s, H1 = [30, 28] m3/s
+/// - Pre-study lag seed (Nov/Dec 2023 `recent_observations`): H0 = [50, 45] m3/s,
+///   H1 = [30, 28] m3/s
 /// - 3 stages × 730 h, `inflow_non_negativity: {method: "truncation"}`
 ///
 /// ## What this tests
@@ -2129,27 +2130,13 @@ fn d19_multi_hydro_par_truncation() {
 
 /// Expected lower bound for D19 (2-hydro PAR(2) with truncation, 3 stages).
 ///
-/// Empirical, not hand-computable (2-hydro × 2-lag state space). D19's 3 study
-/// stages all carry `season_id=0` in 2024, so `precompute_noise_groups` assigns
-/// one group ID and `generate_opening_tree` makes stages 1 and 2 share stage 0's
-/// correlated noise draws — a different but still deterministic optimal cost.
-///
-/// A lag-major/hydro-major indexing regression reads the wrong lag for each
-/// hydro in PAR evaluation, producing a different cost.
-///
-/// Re-blessed when `residual_std_ratio` became closure-derived: D19 supplies
-/// its AR(2) coefficients directly (both hydros share the single `season_id=0`
-/// used by every stage, so there is no per-season order heterogeneity —
-/// structurally uniform, not mixed), with a stored `residual_std_ratio` of
-/// `1.0` for both hydros that was never fit against ψ = `[0.5, 0.3]` (hydro 0)
-/// / `[0.4, 0.2]` (hydro 1). The closure-derived values (`0.667618...` /
-/// `0.848528...`) differ from that stored literal far outside the mixed-order
-/// `~1e-4` band — the same stored-value-inconsistency class as `D30` (see
-/// `common::parity_hash::case_dir`'s doc), not a closure defect. The resulting
-/// cost shift here is small only because `std_m3s = 0.001` keeps the absolute
-/// noise scale (`σ = s·r`) tiny regardless of `r`. Determinism (same input ->
-/// same output; declaration-order / rank invariance) is unaffected.
-pub const D19_EXPECTED_COST: f64 = 1_334_681.498_530_595;
+/// Empirical, not hand-computable (2-hydro × 2-lag state space). D19 is a
+/// 2-hydro AR(2) windowed case whose stage-0 lags reference the pre-study
+/// Nov/Dec 2023 seasons (`stage_id = -1, -2`); the seed `[50, 45, 30, 28]`
+/// (hydro 0 then hydro 1, most-recent-lag-first) produces this cost, while a
+/// zero seed or a wrong-hydro-major seed produces a materially different one
+/// — the hydro-major/lag-major lag-indexing regression guard.
+pub const D19_EXPECTED_COST: f64 = 1_334_568.013_586_834_3;
 
 /// Operational violation slacks: 1 hydro with active min_outflow, max_outflow,
 /// min_turbined, and min_generation bounds.
@@ -5335,7 +5322,6 @@ mod chronological_telescoping {
                 value_hm3: 200.0,
             }],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
@@ -5905,7 +5891,6 @@ mod chronological_attribution {
                 },
             ],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             // Empty is safe: `build_initial_transit_bucket_state`'s history selection

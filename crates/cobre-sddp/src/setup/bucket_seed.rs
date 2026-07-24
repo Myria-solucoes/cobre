@@ -25,7 +25,7 @@ use super::bucket_topology::{TransitBucketTopology, ic_anchor_k, study_stage_dur
 ///
 /// `cobre-io`'s `validate_travel_time` coverage gate guarantees every declared
 /// arc's windows cover `[start_0 − t_v, start_0)` before this runs; there is no
-/// `past_inflows` fallback.
+/// fallback for incomplete coverage.
 #[must_use]
 pub(crate) fn build_initial_transit_bucket_state(
     system: &System,

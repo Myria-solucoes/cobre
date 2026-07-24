@@ -626,7 +626,7 @@ mod tests {
             unscaled_primal: Vec::new(),
             unscaled_dual: Vec::new(),
             lag_accumulator: Vec::new(),
-            lag_weight_accum: 0.0,
+            lag_weight_accum: Vec::new(),
             downstream_accumulator: Vec::new(),
             downstream_weight_accum: 0.0,
             downstream_completed_lags: Vec::new(),
@@ -999,8 +999,8 @@ mod tests {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         };
         let mut scratch = make_scratch(1);
@@ -1083,8 +1083,8 @@ mod tests {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         };
         let mut scratch = make_scratch(1);
@@ -1167,8 +1167,8 @@ mod tests {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         };
         let mut scratch = make_scratch(1);
@@ -1457,7 +1457,7 @@ mod tests {
         // Accumulate: single stage with identity weights.
         let mut state_acc = vec![500.0, 99.0];
         let mut lag_accumulator = vec![0.0_f64; 1];
-        let mut lag_weight_accum = 0.0_f64;
+        let mut lag_weight_accum = vec![0.0_f64; 1];
         let stage_lag = StageLagTransition {
             accumulate_weight: 1.0,
             spillover_weight: 0.0,
@@ -1496,7 +1496,7 @@ mod tests {
         );
         // Accumulator must be zeroed (clean for next period).
         assert_eq!(lag_accumulator[0], 0.0);
-        assert_eq!(lag_weight_accum, 0.0);
+        assert_eq!(lag_weight_accum[0], 0.0);
     }
 
     /// Four weekly stages each contributing weight=0.25, finalize only on stage 3.
@@ -1510,7 +1510,7 @@ mod tests {
         let mut state = vec![500.0, 0.0]; // storage, lag0
         let incoming_lags = vec![0.0]; // lag-major: lag0 for hydro 0
         let mut lag_accumulator = vec![0.0_f64; 1];
-        let mut lag_weight_accum = 0.0_f64;
+        let mut lag_weight_accum = vec![0.0_f64; 1];
 
         let z_inflows = [500.0_f64, 480.0, 520.0, 510.0];
         let mut ds_accum: Vec<f64> = vec![];
@@ -1560,7 +1560,7 @@ mod tests {
         );
         // Accumulator reset after finalization.
         assert_eq!(lag_accumulator[0], 0.0);
-        assert_eq!(lag_weight_accum, 0.0);
+        assert_eq!(lag_weight_accum[0], 0.0);
     }
 
     /// Spillover seeds the next lag period with raw `z_inflow` * `spillover_weight`.
@@ -1571,7 +1571,7 @@ mod tests {
         let mut state = vec![0.0, 0.0];
         let incoming_lags = vec![0.0];
         let mut lag_accumulator = vec![0.0_f64; 1];
-        let mut lag_weight_accum = 0.0_f64;
+        let mut lag_weight_accum = vec![0.0_f64; 1];
         let mut primal = vec![0.0; 10];
         primal[layout.z_inflow.start] = 200.0;
 
@@ -1615,8 +1615,9 @@ mod tests {
             lag_accumulator[0]
         );
         assert!(
-            (lag_weight_accum - 0.032).abs() < 1e-12,
-            "lag_weight_accum must equal spillover_weight = 0.032, got {lag_weight_accum}"
+            (lag_weight_accum[0] - 0.032).abs() < 1e-12,
+            "lag_weight_accum must equal spillover_weight = 0.032, got {}",
+            lag_weight_accum[0]
         );
     }
 
@@ -1629,7 +1630,7 @@ mod tests {
         let incoming_lags: Vec<f64> = vec![];
         let primal = vec![0.0; 10];
         let mut lag_accumulator: Vec<f64> = vec![]; // empty — should never be accessed
-        let mut lag_weight_accum = 0.0_f64;
+        let mut lag_weight_accum: Vec<f64> = vec![]; // empty — should never be accessed
         let stage_lag = StageLagTransition {
             accumulate_weight: 1.0,
             spillover_weight: 0.0,
@@ -1666,7 +1667,11 @@ mod tests {
             vec![100.0, 200.0],
             "state must be unchanged for PAR(0)"
         );
-        assert_eq!(lag_weight_accum, 0.0, "weight must be unchanged for PAR(0)");
+        assert_eq!(
+            lag_weight_accum,
+            Vec::<f64>::new(),
+            "weight must be unchanged for PAR(0)"
+        );
     }
 
     /// Storage region of state (indices 0..N) must not be touched by the shift.
@@ -1681,7 +1686,7 @@ mod tests {
         primal[layout.z_inflow.start] = 50.0;
         primal[layout.z_inflow.start + 1] = 60.0;
         let mut lag_accumulator = vec![0.0_f64; 2];
-        let mut lag_weight_accum = 0.0_f64;
+        let mut lag_weight_accum = vec![0.0_f64; 2];
         let stage_lag = StageLagTransition {
             accumulate_weight: 1.0,
             spillover_weight: 0.0,
@@ -1800,7 +1805,7 @@ mod tests {
         let mut state = vec![500.0, 42.0];
         let incoming_lags = vec![0.0];
         let mut lag_acc = vec![0.0_f64; 1];
-        let mut lag_w = 0.0_f64;
+        let mut lag_w = vec![0.0_f64; 1];
         // downstream: par_order=1, ring buf capacity n_h * 1 = 1.
         let mut ds_acc = vec![0.0_f64; 1];
         let mut ds_w = 0.0_f64;
@@ -1904,7 +1909,7 @@ mod tests {
         let mut state = vec![0.0; 1 + 2]; // storage + lag0 + lag1
         let incoming_lags = vec![0.0, 0.0]; // lag-major: lag0 h0, lag1 h0
         let mut lag_acc = vec![0.0_f64; 1];
-        let mut lag_w = 0.0_f64;
+        let mut lag_w = vec![0.0_f64; 1];
         // par_order=2: ring buf capacity n_h * 2 = 2.
         let mut ds_acc = vec![0.0_f64; 1];
         let mut ds_w = 0.0_f64;
@@ -2031,9 +2036,9 @@ mod tests {
         let z_inflows = [100.0_f64, 110.0, 120.0];
 
         let mut lag_acc_ref = vec![0.0_f64; 1];
-        let mut lag_w_ref = 0.0_f64;
+        let mut lag_w_ref = vec![0.0_f64; 1];
         let mut lag_acc_ds = vec![0.0_f64; 1];
-        let mut lag_w_ds = 0.0_f64;
+        let mut lag_w_ds = vec![0.0_f64; 1];
 
         for (i, &z) in z_inflows.iter().enumerate() {
             let finalize = i == 2;
@@ -2113,7 +2118,7 @@ mod tests {
         let mut state = vec![0.0, 0.0];
         let incoming_lags = vec![0.0];
         let mut lag_acc = vec![0.0_f64; 1];
-        let mut lag_w = 0.0_f64;
+        let mut lag_w = vec![0.0_f64; 1];
         let mut ds_acc = vec![0.0_f64; 1];
         let mut ds_w = 0.5_f64; // non-zero before rebuild
         let mut ds_completed = vec![77.0_f64; 1]; // non-zero before rebuild
@@ -2176,7 +2181,7 @@ mod tests {
         let mut state = vec![0.0, 0.0];
         let incoming_lags = vec![0.0];
         let mut lag_acc = vec![0.0_f64; 1];
-        let mut lag_w = 0.0_f64;
+        let mut lag_w = vec![0.0_f64; 1];
         let mut ds_acc = vec![0.0_f64; 1];
         let mut ds_completed = vec![0.0_f64; 1];
         let mut ds_n = 0_usize;
@@ -2248,7 +2253,7 @@ mod tests {
         let mut state = vec![0.0; 2 + 2]; // 2 storage + 2 lag entries (lag0 h0, lag0 h1)
         let incoming_lags = vec![0.0, 0.0]; // lag-major: lag0 h0, lag0 h1
         let mut lag_acc = vec![0.0_f64; 2];
-        let mut lag_w = 0.0_f64;
+        let mut lag_w = vec![0.0_f64; 2];
         // ring buf capacity: n_h * par_order = 2 * 1 = 2
         let mut ds_acc = vec![0.0_f64; 2];
         let mut ds_w = 0.0_f64;

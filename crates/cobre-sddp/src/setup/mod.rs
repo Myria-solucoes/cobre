@@ -34,8 +34,8 @@ use cobre_core::temporal::StageStateConfig;
 use cobre_io::Config;
 use cobre_io::config::BackwardScheduler;
 use cobre_solver::ActiveProfile;
-use cobre_stochastic::par::RecentObservationSeed;
-use cobre_stochastic::par::lag_transition::compute_recent_observation_seed;
+use cobre_stochastic::DerivedInflowSeeds;
+use cobre_stochastic::derive_inflow_seeds;
 use cobre_stochastic::par::lag_transition::derive_downstream_par_order;
 use cobre_stochastic::par::lag_transition::precompute_noise_groups;
 use cobre_stochastic::par::lag_transition::precompute_stage_lag_transitions;
@@ -220,11 +220,11 @@ pub struct StudySetup {
     /// Stochastic numerical methodology parameters (`horizon`, `inflow_method`).
     pub(crate) methodology: methodology_config::MethodologyConfig,
 
-    /// Lag accumulator seed from `initial_conditions.recent_observations`, applied
-    /// at every trajectory start in the forward pass and simulation pipeline instead
-    /// of zero-filling. All-zero (a plain zero reset) when `recent_observations` is
-    /// empty.
-    pub(crate) recent_observation_seed: RecentObservationSeed,
+    /// Derived per-hydro PAR lag-slot and accumulator seeds ([`derive_inflow_seeds`]),
+    /// applied to the stage-0 lag block and to every trajectory start in the
+    /// forward pass and simulation pipeline instead of zero-filling. All-zero
+    /// when the derivation has no resolvable data.
+    pub(crate) derived_inflow_seeds: DerivedInflowSeeds,
 
     /// PAR order of the downstream (coarser) resolution model. Non-zero only when
     /// the study includes stages with `season_id >= 12` (a monthly-to-quarterly
@@ -383,6 +383,34 @@ impl StudySetup {
         let (state_layout, hydro_count, anticipated_thermal_indices) =
             resolve_state_layout(system, stochastic.par(), &transit_bucket_topology)?;
 
+        // The sole `derive_inflow_seeds` call site: every consumer (the lag block
+        // below, `StudySetup::derived_inflow_seeds`) reads this one value — do not
+        // add a second call. Computed locally on every rank from the already-
+        // broadcast `system` rather than carried over the wire: the derivation is
+        // a pure function of `system`, so every rank derives a bit-identical seed
+        // with no extra broadcast.
+        let noop_season_map;
+        let season_map_ref = if let Some(sm) = system.policy_graph().season_map.as_ref() {
+            sm
+        } else {
+            noop_season_map = SeasonMap {
+                cycle_type: Monthly,
+                seasons: Vec::new(),
+            };
+            &noop_season_map
+        };
+        let derived_inflow_seeds = match system.stages().iter().find(|s| s.id >= 0) {
+            None => DerivedInflowSeeds::zero(system.hydros().len(), state_layout.max_par_order),
+            Some(first_stage) => derive_inflow_seeds(
+                system.inflow_history(),
+                &system.initial_conditions().recent_observations,
+                system.hydros(),
+                first_stage,
+                season_map_ref,
+                state_layout.max_par_order,
+            ),
+        };
+
         let EnergyAndTemplates {
             energy_conversion,
             stage_templates,
@@ -409,7 +437,12 @@ impl StudySetup {
             anticipated_thermal_indices,
         );
 
-        let mut initial_state = build_initial_state(system, &study_dims, &state_layout);
+        let mut initial_state = build_initial_state(
+            system,
+            &study_dims,
+            &state_layout,
+            &derived_inflow_seeds.lag_values,
+        );
         splice_transit_bucket_seed(
             &mut initial_state,
             &state_layout,
@@ -475,9 +508,8 @@ impl StudySetup {
         let LagData {
             stage_lag_transitions,
             noise_group_ids,
-            recent_observation_seed,
             downstream_par_order,
-        } = precompute_lag_data(system, &stages, &stochastic);
+        } = precompute_lag_data(system, &stages, &stochastic, season_map_ref);
 
         let hydro_ids: Vec<EntityId> = system.hydros().iter().map(|h| h.id).collect();
 
@@ -491,6 +523,8 @@ impl StudySetup {
             simulation_source,
             forward_passes,
             downstream_par_order,
+            &derived_inflow_seeds.lag_values,
+            state_layout.max_par_order,
         )?;
 
         let hydro_min_storage_hm3: Vec<f64> =
@@ -554,7 +588,7 @@ impl StudySetup {
                 horizon,
                 inflow_method,
             },
-            recent_observation_seed,
+            derived_inflow_seeds,
             downstream_par_order,
             energy_conversion,
             hydro_min_storage_hm3,
@@ -1108,28 +1142,18 @@ const FULL_STATE_CONFIG: StageStateConfig = StageStateConfig {
 struct LagData {
     stage_lag_transitions: Vec<StageLagTransition>,
     noise_group_ids: Vec<u32>,
-    recent_observation_seed: RecentObservationSeed,
     downstream_par_order: usize,
 }
 
-/// Precompute per-stage lag accumulation weights, noise-group ids, the
-/// recent-observation seed, and the downstream PAR order.
+/// Precompute per-stage lag accumulation weights, noise-group ids, and the
+/// downstream PAR order. `season_map_ref` is the caller's already-resolved
+/// no-op-fallback season map (see the `from_broadcast_params` hoist).
 fn precompute_lag_data(
     system: &System,
     stages: &[Stage],
     stochastic: &StochasticContext,
+    season_map_ref: &SeasonMap,
 ) -> LagData {
-    let noop_season_map;
-    let season_map_ref = if let Some(sm) = system.policy_graph().season_map.as_ref() {
-        sm
-    } else {
-        // No season map: all stages produce zero-weight no-op transitions.
-        noop_season_map = SeasonMap {
-            cycle_type: Monthly,
-            seasons: Vec::new(),
-        };
-        &noop_season_map
-    };
     // Proxy: the global `max_par_order` stands in for the quarterly PAR order until a
     // separate quarterly stochastic context exists.
     let downstream_par_order = derive_downstream_par_order(
@@ -1144,21 +1168,9 @@ fn precompute_lag_data(
     // from `System` and is for callers that have no filtered slice.
     let noise_group_ids = precompute_noise_groups(stages);
 
-    let recent_observation_seed = if stages.is_empty() {
-        RecentObservationSeed::zero(system.hydros().len())
-    } else {
-        compute_recent_observation_seed(
-            &system.initial_conditions().recent_observations,
-            &stages[0],
-            season_map_ref,
-            system.hydros(),
-        )
-    };
-
     LagData {
         stage_lag_transitions,
         noise_group_ids,
-        recent_observation_seed,
         downstream_par_order,
     }
 }
@@ -1176,6 +1188,9 @@ fn precompute_lag_data(
 ///
 /// Propagates [`SddpError`] from the individual library builders on validation
 /// or padding failure.
+// Rationale: mirrors build_historical_inflow_library/build_external_inflow_library's
+// own arity; a context struct would just relocate the arity, not reduce it.
+#[allow(clippy::too_many_arguments)]
 fn build_scenario_libraries(
     system: &System,
     stages: &[Stage],
@@ -1186,6 +1201,8 @@ fn build_scenario_libraries(
     simulation_source: &ScenarioSource,
     forward_passes: u32,
     downstream_par_order: usize,
+    derived_lag_values: &[f64],
+    l_state: usize,
 ) -> Result<ScenarioLibraries, SddpError> {
     let inflow_scheme = training_source.inflow_scheme;
     let load_scheme = training_source.load_scheme;
@@ -1202,7 +1219,8 @@ fn build_scenario_libraries(
                 stages,
                 stochastic.par(),
                 system.policy_graph().season_map.as_ref(),
-                &system.initial_conditions().past_inflows,
+                derived_lag_values,
+                l_state,
                 stage_lag_transitions,
                 training_source.historical_years.as_ref(),
                 forward_passes,
@@ -1219,7 +1237,8 @@ fn build_scenario_libraries(
                 hydro_ids,
                 stages,
                 stochastic.par(),
-                &system.initial_conditions().past_inflows,
+                derived_lag_values,
+                l_state,
                 stage_lag_transitions,
                 forward_passes,
                 downstream_par_order,
@@ -1260,7 +1279,8 @@ fn build_scenario_libraries(
                 stages,
                 stochastic.par(),
                 system.policy_graph().season_map.as_ref(),
-                &system.initial_conditions().past_inflows,
+                derived_lag_values,
+                l_state,
                 stage_lag_transitions,
                 simulation_source.historical_years.as_ref(),
                 forward_passes,
@@ -1277,7 +1297,8 @@ fn build_scenario_libraries(
                 hydro_ids,
                 stages,
                 stochastic.par(),
-                &system.initial_conditions().past_inflows,
+                derived_lag_values,
+                l_state,
                 stage_lag_transitions,
                 forward_passes,
                 downstream_par_order,
@@ -1466,13 +1487,16 @@ fn id_to_position<T>(entities: &[T], id_of: impl Fn(&T) -> i32) -> HashMap<i32, 
 ///
 /// Layout `[storage(0..N), lags(N..N*(1+L))]` (N hydros, L = max PAR order),
 /// storage indexed by each hydro's position in `system.hydros()`'s canonical
-/// order. Lag slots come from `initial_conditions.past_inflows`:
-/// `values_m3s[l]` with index 0 = lag 1 (most recent), index L-1 = lag L
-/// (oldest). Storage-only when `max_par_order == 0`.
+/// order. Lag slots come from `derived_lag_values` (entity-major,
+/// `derived_lag_values[pos * L + lag]`, lag 0 = most recent) — already
+/// pre-ordered by canonical hydro position at its single derivation site
+/// ([`derive_inflow_seeds`]), so `pos` here needs no id lookup. Storage-only
+/// when `max_par_order == 0`.
 fn build_initial_state(
     system: &System,
     study_dims: &StudyDimensions,
     layout: &StateSpace,
+    derived_lag_values: &[f64],
 ) -> Vec<f64> {
     let mut state = vec![0.0_f64; layout.n_state];
     let hydros = system.hydros();
@@ -1497,13 +1521,11 @@ fn build_initial_state(
 
     if layout.max_par_order > 0 {
         let n_h = layout.hydro_count;
-        for pi in &ic.past_inflows {
-            if let Some(&idx) = hydro_positions.get(&pi.hydro_id.0) {
-                let n_lags = pi.values_m3s.len().min(layout.max_par_order);
-                for lag in 0..n_lags {
-                    let slot = layout.inflow_lags.start + lag * n_h + idx;
-                    state[slot] = pi.values_m3s[lag];
-                }
+        let l = layout.max_par_order;
+        for idx in 0..n_h {
+            for lag in 0..l {
+                let slot = layout.inflow_lags.start + lag * n_h + idx;
+                state[slot] = derived_lag_values[idx * l + lag];
             }
         }
     }
@@ -1528,7 +1550,7 @@ fn build_initial_state(
         for history in &ic.past_anticipated_commitments {
             let Some(&global_idx) = thermal_positions.get(&history.thermal_id.0) else {
                 // Defense-in-depth — the cobre-io validator rejects an unknown ID in
-                // production; matches the existing `past_inflows` skip behavior.
+                // production.
                 continue;
             };
             // O(n) over the small `n_anticipated` list, not a map.

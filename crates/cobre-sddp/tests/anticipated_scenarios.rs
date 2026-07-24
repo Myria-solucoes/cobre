@@ -318,7 +318,6 @@ mod anticipated_5stage_k2_smoke {
                 value_hm3: 100.0,
             }],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
                 thermal_id: anticipated_id,
                 values_mw: vec![100.0, 50.0],
@@ -787,7 +786,6 @@ mod anticipated_two_plants_smoke {
                 value_hm3: 100.0,
             }],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![
                 AnticipatedCommitmentHistory {
                     thermal_id: ant_id_k2,
@@ -1255,7 +1253,6 @@ mod anticipated_simulation_ring_buffer {
                 value_hm3: 0.0,
             }],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
                 thermal_id: anticipated_id,
                 values_mw: past_commitments_mw,
@@ -1787,7 +1784,6 @@ mod anticipated_generic_constraint_e2e {
         let initial_conditions = InitialConditions {
             storage: vec![],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
                 thermal_id: ANT_THERMAL_ID,
                 values_mw: vec![0.0, 0.0],
@@ -2797,7 +2793,6 @@ mod anticipated_commitment_at_cap {
                 value_hm3: 100.0,
             }],
             filling_storage: vec![],
-            past_inflows: vec![],
             // Two pre-study commitments at `seed_mw`: the stage-0 delivery is
             // pinned directly, the stage-1 delivery is carried one K=2 ring
             // shift first.

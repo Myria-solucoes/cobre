@@ -9,9 +9,6 @@
 //!
 //! - `storage` — initial reservoir volumes for operating hydros (hm³).
 //! - `filling_storage` — initial reservoir volumes for filling hydros (hm³).
-//! - `past_inflows` — past inflow values for PAR(p) lag initialization (m³/s),
-//!   ordered from most recent (lag 1) to oldest (lag p). Optional; defaults to
-//!   an empty array when absent.
 //! - `recent_observations` — observed inflow data for partial periods before
 //!   the study start (m³/s per date range per hydro). Optional; defaults to an
 //!   empty array when absent.
@@ -32,10 +29,6 @@
 //!     { "hydro_id": 1, "value_hm3": 8500.0 }
 //!   ],
 //!   "filling_storage": [{ "hydro_id": 10, "value_hm3": 200.0 }],
-//!   "past_inflows": [
-//!     { "hydro_id": 0, "values_m3s": [600.0, 500.0] },
-//!     { "hydro_id": 1, "values_m3s": [200.0, 100.0] }
-//!   ],
 //!   "recent_observations": [
 //!     { "hydro_id": 0, "start_date": "2026-04-01", "end_date": "2026-04-04", "value_m3s": 500.0 },
 //!     { "hydro_id": 0, "start_date": "2026-04-04", "end_date": "2026-04-11", "value_m3s": 480.0 }
@@ -55,18 +48,16 @@
 //!    `filling_storage` (no intra-array duplicates).
 //! 3. No `hydro_id` appears in both `storage` and `filling_storage`
 //!    (mutual exclusion).
-//! 4. No `hydro_id` appears more than once in `past_inflows`.
-//! 5. Every value in `past_inflows[i].values_m3s` is finite and non-negative.
-//! 6. Every `start_date` and `end_date` in `recent_observations` parses as
+//! 4. Every `start_date` and `end_date` in `recent_observations` parses as
 //!    ISO 8601 (`YYYY-MM-DD`), and `end_date > start_date`.
-//! 7. Every `value_m3s` in `recent_observations` is finite and non-negative.
-//! 8. For observations with the same `hydro_id`, date ranges do not overlap
+//! 5. Every `value_m3s` in `recent_observations` is finite and non-negative.
+//! 6. For observations with the same `hydro_id`, date ranges do not overlap
 //!    (adjacent ranges where `start == prev_end` are accepted).
-//! 9. No `thermal_id` appears more than once in `past_anticipated_commitments`.
-//! 10. Every `past_anticipated_commitments[i].values_mw` is non-empty.
-//! 11. Every value in `past_anticipated_commitments[i].values_mw` is finite and
-//!     non-negative (`>= 0.0`) (parse-time check).
-//! 12. `past_anticipated_commitments[i].values_mw.len()` equals the
+//! 7. No `thermal_id` appears more than once in `past_anticipated_commitments`.
+//! 8. Every `past_anticipated_commitments[i].values_mw` is non-empty.
+//! 9. Every value in `past_anticipated_commitments[i].values_mw` is finite and
+//!    non-negative (`>= 0.0`) (parse-time check).
+//! 10. `past_anticipated_commitments[i].values_mw.len()` equals the
 //!     calendar-derived count of pre-study-committed delivery stages for that
 //!     thermal's lead mode — not `lead_stages` on a non-uniform calendar — and
 //!     every value lies within the plant's `[min_generation_mw, max_generation_mw]`
@@ -74,10 +65,10 @@
 //!     All three are enforced by the semantic validator (Layer 5a); the committed
 //!     values are sunk cost and do not enter the study objective. See
 //!     [`AnticipatedCommitmentHistory`] in `cobre-core` for the full contract.
-//! 13. Every `start_date` and `end_date` in `past_defluences` parses as ISO 8601
+//! 11. Every `start_date` and `end_date` in `past_defluences` parses as ISO 8601
 //!     (`YYYY-MM-DD`), and `end_date > start_date`.
-//! 14. Every `value_m3s` in `past_defluences` is finite and non-negative.
-//! 15. For defluence windows with the same `hydro_id`, date ranges do not overlap
+//! 12. Every `value_m3s` in `past_defluences` is finite and non-negative.
+//! 13. For defluence windows with the same `hydro_id`, date ranges do not overlap
 //!     (adjacent ranges where `start == prev_end` are accepted).
 //!
 //! Cross-reference validation (checking that hydro IDs exist in the hydro
@@ -87,8 +78,8 @@
 
 use chrono::NaiveDate;
 use cobre_core::{
-    AnticipatedCommitmentHistory, EntityId, HydroPastDefluence, HydroPastInflows, HydroStorage,
-    InitialConditions, RecentObservation,
+    AnticipatedCommitmentHistory, EntityId, HydroPastDefluence, HydroStorage, InitialConditions,
+    RecentObservation,
 };
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -114,14 +105,6 @@ pub(crate) struct RawInitialConditions {
     /// Initial reservoir volumes for filling hydros [hm³].
     /// A filling hydro may not also appear in `storage`.
     filling_storage: Vec<RawHydroStorage>,
-
-    /// Past inflow values for PAR(p) lag initialization [m³/s], one entry per
-    /// hydro. For each hydro, `values_m3s[0]` is the most recent past inflow
-    /// (lag 1) and `values_m3s[p-1]` is the oldest (lag p). Required when
-    /// `inflow_lags` is enabled and the PAR order is > 0. Optional; defaults
-    /// to empty.
-    #[serde(default)]
-    past_inflows: Vec<RawHydroPastInflows>,
 
     /// Observed inflow data for partial periods before the study start
     /// [m³/s per date range per hydro]. Used to seed the lag accumulator when
@@ -155,24 +138,6 @@ struct RawHydroStorage {
     hydro_id: i32,
     /// Reservoir volume [hm³]. Must be >= 0.0.
     value_hm3: f64,
-}
-
-/// Past inflow values for PAR(p) lag initialization for one hydro plant.
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawHydroPastInflows {
-    /// Hydro plant identifier. Must be unique within `past_inflows`.
-    hydro_id: i32,
-    /// Past inflow values [m³/s], ordered from most recent (lag 1, index 0) to
-    /// oldest (lag p, index p-1). Must have length >= the hydro's PAR order.
-    values_m3s: Vec<f64>,
-    /// Optional season IDs corresponding to each lag entry in `values_m3s`,
-    /// one per entry. When present, length must equal `values_m3s.length`.
-    /// Each value must reference a season ID defined in `season_definitions`.
-    /// Absent from legacy JSON files (backward compatible).
-    #[serde(default)]
-    season_ids: Option<Vec<u32>>,
 }
 
 /// Past defluence (release) for the arc fed by a single upstream hydro over a
@@ -257,8 +222,6 @@ pub(crate) struct RawAnticipatedCommitmentHistory {
 /// | Duplicate `hydro_id` within `storage`                 | [`LoadError::SchemaError`] |
 /// | Duplicate `hydro_id` within `filling_storage`         | [`LoadError::SchemaError`] |
 /// | `hydro_id` in both `storage` and `filling_storage`    | [`LoadError::SchemaError`] |
-/// | Duplicate `hydro_id` within `past_inflows`            | [`LoadError::SchemaError`] |
-/// | Non-finite or negative value in `past_inflows`        | [`LoadError::SchemaError`] |
 /// | Invalid date / non-finite value / overlap in `past_defluences` | [`LoadError::SchemaError`] |
 ///
 /// # Examples
@@ -293,9 +256,6 @@ fn validate_raw(raw: &RawInitialConditions, path: &Path) -> Result<(), LoadError
     validate_no_duplicates(&raw.storage, "storage", path)?;
     validate_no_duplicates(&raw.filling_storage, "filling_storage", path)?;
     validate_mutual_exclusion(raw, path)?;
-    validate_past_inflows_no_duplicates(&raw.past_inflows, path)?;
-    validate_past_inflows_values(&raw.past_inflows, path)?;
-    validate_past_inflows_season_ids(&raw.past_inflows, path)?;
     validate_recent_observations_dates(&raw.recent_observations, path)?;
     validate_recent_observations_values(&raw.recent_observations, path)?;
     validate_recent_observations_no_overlap(&raw.recent_observations, path)?;
@@ -353,68 +313,6 @@ fn validate_mutual_exclusion(raw: &RawInitialConditions, path: &Path) -> Result<
                     "hydro_id {} appears in both storage and filling_storage; \
                      a hydro must appear in exactly one of the two arrays",
                     entry.hydro_id
-                ),
-            });
-        }
-    }
-    Ok(())
-}
-
-fn validate_past_inflows_no_duplicates(
-    entries: &[RawHydroPastInflows],
-    path: &Path,
-) -> Result<(), LoadError> {
-    let mut seen: HashSet<i32> = HashSet::new();
-    for (i, entry) in entries.iter().enumerate() {
-        if !seen.insert(entry.hydro_id) {
-            return Err(LoadError::SchemaError {
-                path: path.to_path_buf(),
-                field: format!("past_inflows[{i}].hydro_id"),
-                message: format!("duplicate hydro_id {} in past_inflows", entry.hydro_id),
-            });
-        }
-    }
-    Ok(())
-}
-
-fn validate_past_inflows_values(
-    entries: &[RawHydroPastInflows],
-    path: &Path,
-) -> Result<(), LoadError> {
-    for (i, entry) in entries.iter().enumerate() {
-        for (j, &v) in entry.values_m3s.iter().enumerate() {
-            if !v.is_finite() {
-                return Err(LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: format!("past_inflows[{i}].values_m3s[{j}]"),
-                    message: format!(
-                        "past_inflows[{i}].values_m3s[{j}] is not finite (got {v}); \
-                         all inflow values must be finite numbers"
-                    ),
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_past_inflows_season_ids(
-    entries: &[RawHydroPastInflows],
-    path: &Path,
-) -> Result<(), LoadError> {
-    for (i, entry) in entries.iter().enumerate() {
-        if let Some(season_ids) = &entry.season_ids
-            && season_ids.len() != entry.values_m3s.len()
-        {
-            return Err(LoadError::SchemaError {
-                path: path.to_path_buf(),
-                field: format!("past_inflows[{i}].season_ids"),
-                message: format!(
-                    "past_inflows[{i}].season_ids has {} element(s) but \
-                         past_inflows[{i}].values_m3s has {} element(s); \
-                         season_ids length must equal values_m3s length",
-                    season_ids.len(),
-                    entry.values_m3s.len()
                 ),
             });
         }
@@ -719,17 +617,6 @@ fn convert(raw: RawInitialConditions) -> InitialConditions {
         .collect();
     filling_storage.sort_by_key(|e| e.hydro_id.0);
 
-    let mut past_inflows: Vec<HydroPastInflows> = raw
-        .past_inflows
-        .into_iter()
-        .map(|e| HydroPastInflows {
-            hydro_id: EntityId(e.hydro_id),
-            values_m3s: e.values_m3s,
-            season_ids: e.season_ids,
-        })
-        .collect();
-    past_inflows.sort_by_key(|e| e.hydro_id.0);
-
     let mut recent_observations: Vec<RecentObservation> = raw
         .recent_observations
         .into_iter()
@@ -771,7 +658,6 @@ fn convert(raw: RawInitialConditions) -> InitialConditions {
     InitialConditions {
         storage,
         filling_storage,
-        past_inflows,
         past_anticipated_commitments,
         recent_observations,
         past_defluences,
@@ -818,10 +704,6 @@ mod tests {
 
         assert_eq!(ic.storage.len(), 2);
         assert_eq!(ic.filling_storage.len(), 1);
-        assert!(
-            ic.past_inflows.is_empty(),
-            "past_inflows absent defaults to empty"
-        );
 
         assert_eq!(ic.storage[0].hydro_id, EntityId(0));
         assert!(
@@ -844,31 +726,6 @@ mod tests {
         );
     }
 
-    /// Given a valid `initial_conditions.json` with `past_inflows`, the values
-    /// are parsed correctly and sorted by `hydro_id`.
-    #[test]
-    fn test_parse_valid_past_inflows() {
-        let json = r#"{
-          "storage": [
-            { "hydro_id": 0, "value_hm3": 1000.0 },
-            { "hydro_id": 1, "value_hm3": 2000.0 }
-          ],
-          "filling_storage": [],
-          "past_inflows": [
-            { "hydro_id": 1, "values_m3s": [200.0, 100.0] },
-            { "hydro_id": 0, "values_m3s": [600.0, 500.0] }
-          ]
-        }"#;
-        let f = write_json(json);
-        let ic = parse_initial_conditions(f.path()).unwrap();
-
-        assert_eq!(ic.past_inflows.len(), 2);
-        assert_eq!(ic.past_inflows[0].hydro_id, EntityId(0));
-        assert_eq!(ic.past_inflows[0].values_m3s, vec![600.0, 500.0]);
-        assert_eq!(ic.past_inflows[1].hydro_id, EntityId(1));
-        assert_eq!(ic.past_inflows[1].values_m3s, vec![200.0, 100.0]);
-    }
-
     // ── AC: empty arrays → Ok ─────────────────────────────────────────────────
 
     /// Given an `initial_conditions.json` with empty arrays, `parse_initial_conditions`
@@ -880,7 +737,6 @@ mod tests {
         let ic = parse_initial_conditions(f.path()).unwrap();
         assert!(ic.storage.is_empty());
         assert!(ic.filling_storage.is_empty());
-        assert!(ic.past_inflows.is_empty());
     }
 
     // ── AC: negative value_hm3 → SchemaError ─────────────────────────────────
@@ -1033,37 +889,6 @@ mod tests {
         }
     }
 
-    // ── AC: past_inflows duplicate hydro_id → SchemaError ─────────────────────
-
-    /// Given `past_inflows` with a duplicate `hydro_id`, `parse_initial_conditions`
-    /// returns `Err(LoadError::SchemaError)` mentioning "duplicate" and "`past_inflows`".
-    #[test]
-    fn test_duplicate_hydro_id_in_past_inflows() {
-        let json = r#"{
-          "storage": [],
-          "filling_storage": [],
-          "past_inflows": [
-            { "hydro_id": 3, "values_m3s": [100.0] },
-            { "hydro_id": 3, "values_m3s": [200.0] }
-          ]
-        }"#;
-        let f = write_json(json);
-        let err = parse_initial_conditions(f.path()).unwrap_err();
-        match &err {
-            LoadError::SchemaError { field, message, .. } => {
-                assert!(
-                    field.contains("past_inflows"),
-                    "field should mention 'past_inflows', got: {field}"
-                );
-                assert!(
-                    message.contains("duplicate"),
-                    "message should mention 'duplicate', got: {message}"
-                );
-            }
-            other => panic!("expected SchemaError, got: {other:?}"),
-        }
-    }
-
     // ── AC: file not found → IoError ─────────────────────────────────────────
 
     /// Given a nonexistent path, `parse_initial_conditions` returns
@@ -1125,22 +950,14 @@ mod tests {
             { "hydro_id": 0, "value_hm3": 1000.0 },
             { "hydro_id": 1, "value_hm3": 2000.0 }
           ],
-          "filling_storage": [],
-          "past_inflows": [
-            { "hydro_id": 0, "values_m3s": [600.0, 500.0] },
-            { "hydro_id": 1, "values_m3s": [200.0, 100.0] }
-          ]
+          "filling_storage": []
         }"#;
         let json_reversed = r#"{
           "storage": [
             { "hydro_id": 1, "value_hm3": 2000.0 },
             { "hydro_id": 0, "value_hm3": 1000.0 }
           ],
-          "filling_storage": [],
-          "past_inflows": [
-            { "hydro_id": 1, "values_m3s": [200.0, 100.0] },
-            { "hydro_id": 0, "values_m3s": [600.0, 500.0] }
-          ]
+          "filling_storage": []
         }"#;
 
         let f1 = write_json(json_ordered);
@@ -1154,8 +971,6 @@ mod tests {
         );
         assert_eq!(ic1.storage[0].hydro_id, EntityId(0));
         assert_eq!(ic1.storage[1].hydro_id, EntityId(1));
-        assert_eq!(ic1.past_inflows[0].hydro_id, EntityId(0));
-        assert_eq!(ic1.past_inflows[1].hydro_id, EntityId(1));
     }
 
     /// Invalid JSON syntax → `ParseError`.
@@ -1178,42 +993,6 @@ mod tests {
         assert!(
             matches!(err, LoadError::ParseError { .. }),
             "expected ParseError for missing storage field, got: {err:?}"
-        );
-    }
-
-    /// Zero value in `past_inflows.values_m3s` is valid (dry season).
-    #[test]
-    fn test_zero_past_inflow_value_is_valid() {
-        let json = r#"{
-          "storage": [],
-          "filling_storage": [],
-          "past_inflows": [
-            { "hydro_id": 1, "values_m3s": [0.0, 50.0] }
-          ]
-        }"#;
-        let f = write_json(json);
-        let result = parse_initial_conditions(f.path());
-        assert!(
-            result.is_ok(),
-            "0.0 in past_inflows is valid (dry season), got: {result:?}"
-        );
-    }
-
-    /// Empty `values_m3s` array is accepted — no lag initialization needed.
-    #[test]
-    fn test_empty_values_m3s_is_valid() {
-        let json = r#"{
-          "storage": [],
-          "filling_storage": [],
-          "past_inflows": [
-            { "hydro_id": 1, "values_m3s": [] }
-          ]
-        }"#;
-        let f = write_json(json);
-        let result = parse_initial_conditions(f.path());
-        assert!(
-            result.is_ok(),
-            "empty values_m3s should be accepted, got: {result:?}"
         );
     }
 
@@ -1525,83 +1304,6 @@ mod tests {
         );
     }
 
-    // ── AC: past_inflows season_ids ───────────────────────────────────────────
-
-    /// Given a `past_inflows` entry with matching `season_ids` and `values_m3s`
-    /// lengths, `parse_initial_conditions` returns `Ok(ic)` with the `season_ids`
-    /// preserved.
-    #[test]
-    fn test_parse_past_inflows_with_valid_season_ids() {
-        let json = r#"{
-          "storage": [],
-          "filling_storage": [],
-          "past_inflows": [
-            { "hydro_id": 0, "values_m3s": [600.0, 500.0], "season_ids": [3, 2] }
-          ]
-        }"#;
-        let f = write_json(json);
-        let ic = parse_initial_conditions(f.path()).unwrap();
-        assert_eq!(ic.past_inflows.len(), 1);
-        assert_eq!(ic.past_inflows[0].hydro_id, EntityId(0));
-        assert_eq!(ic.past_inflows[0].values_m3s, vec![600.0, 500.0]);
-        assert_eq!(ic.past_inflows[0].season_ids, Some(vec![3, 2]));
-    }
-
-    /// Given a `past_inflows` entry where `season_ids` has length 3 but
-    /// `values_m3s` has length 2, `parse_initial_conditions` returns
-    /// `Err(LoadError::SchemaError)` with field containing `season_ids`.
-    #[test]
-    fn test_parse_past_inflows_season_ids_length_mismatch() {
-        let json = r#"{
-          "storage": [],
-          "filling_storage": [],
-          "past_inflows": [
-            { "hydro_id": 0, "values_m3s": [600.0, 500.0], "season_ids": [3, 2, 1] }
-          ]
-        }"#;
-        let f = write_json(json);
-        let err = parse_initial_conditions(f.path()).unwrap_err();
-        match &err {
-            LoadError::SchemaError { field, message, .. } => {
-                assert!(
-                    field.contains("season_ids"),
-                    "field should contain 'season_ids', got: {field}"
-                );
-                assert!(
-                    field.contains("past_inflows[0]"),
-                    "field should reference 'past_inflows[0]', got: {field}"
-                );
-                assert!(
-                    message.contains("season_ids length must equal values_m3s length")
-                        || message.contains('3')
-                        || message.contains('2'),
-                    "message should describe the mismatch, got: {message}"
-                );
-            }
-            other => panic!("expected SchemaError, got: {other:?}"),
-        }
-    }
-
-    /// Given a `past_inflows` entry without a `season_ids` key (legacy JSON),
-    /// `parse_initial_conditions` returns `Ok(ic)` with `season_ids == None`.
-    #[test]
-    fn test_parse_past_inflows_without_season_ids_backward_compat() {
-        let json = r#"{
-          "storage": [],
-          "filling_storage": [],
-          "past_inflows": [
-            { "hydro_id": 0, "values_m3s": [600.0, 500.0] }
-          ]
-        }"#;
-        let f = write_json(json);
-        let ic = parse_initial_conditions(f.path()).unwrap();
-        assert_eq!(ic.past_inflows.len(), 1);
-        assert_eq!(
-            ic.past_inflows[0].season_ids, None,
-            "absent season_ids must deserialize as None"
-        );
-    }
-
     // ── AC: past_anticipated_commitments ─────────────────────────────────────
 
     /// Given an `initial_conditions.json` with one `past_anticipated_commitments`
@@ -1878,6 +1580,32 @@ mod tests {
                 );
             }
             other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    // ── AC: legacy past_inflows field → rejected ──────────────────────────────
+
+    /// A legacy `initial_conditions.json` still carrying a `past_inflows` array
+    /// is rejected by `deny_unknown_fields` rather than silently dropped.
+    #[test]
+    fn test_legacy_past_inflows_field_is_rejected() {
+        let json = r#"{
+          "storage": [],
+          "filling_storage": [],
+          "past_inflows": [
+            { "hydro_id": 0, "values_m3s": [600.0, 500.0] }
+          ]
+        }"#;
+        let f = write_json(json);
+        let err = parse_initial_conditions(f.path()).unwrap_err();
+        match &err {
+            LoadError::ParseError { message, .. } => {
+                assert!(
+                    message.contains("past_inflows"),
+                    "message should name the unknown 'past_inflows' field, got: {message}"
+                );
+            }
+            other => panic!("expected ParseError, got: {other:?}"),
         }
     }
 }

@@ -885,16 +885,14 @@ pub(crate) fn build_study_setup(
         system.hydros().len(),
         &setup.hydro_models.provenance,
     );
-    // Fingerprint past_inflows (training-side library only) so stale-library
-    // detection can compare against a fresh digest on later runs.
-    provenance_report
-        .inflow
-        .historical_library_past_inflows_digest = setup
+    // Fingerprint the derived lag seed (training-side library only) so
+    // stale-library detection can compare against a fresh digest on later runs.
+    provenance_report.inflow.historical_library_seed_digest = setup
         .scenario_libraries
         .training
         .historical
         .as_ref()
-        .map(HistoricalScenarioLibrary::past_inflows_digest);
+        .map(HistoricalScenarioLibrary::seed_digest);
 
     if config.exports.stochastic {
         let mut on_warning = |msg: &str| {

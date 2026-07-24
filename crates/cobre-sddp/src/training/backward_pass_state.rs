@@ -1438,7 +1438,7 @@ mod tests {
                 unscaled_primal: Vec::new(),
                 unscaled_dual: Vec::new(),
                 lag_accumulator: Vec::new(),
-                lag_weight_accum: 0.0,
+                lag_weight_accum: Vec::new(),
                 downstream_accumulator: Vec::new(),
                 downstream_weight_accum: 0.0,
                 downstream_completed_lags: Vec::new(),
@@ -1753,8 +1753,8 @@ mod tests {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         };
 
@@ -1891,8 +1891,8 @@ mod tests {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         };
 
@@ -2037,8 +2037,8 @@ mod tests {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         };
 

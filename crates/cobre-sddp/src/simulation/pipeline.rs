@@ -751,8 +751,8 @@ fn reset_scenario_state<S: SolverInterface>(
 
     let TrainingContext {
         initial_state,
-        recent_accum_seed,
-        recent_weight_seed,
+        lag_accum_seed,
+        lag_weight_seed,
         ..
     } = training_ctx;
     ws.current_state.clear();
@@ -771,12 +771,12 @@ fn reset_scenario_state<S: SolverInterface>(
     );
     // Seed (or zero) the lag accumulator so it does not carry state across
     // scenarios; a non-empty seed pre-fills the partial period with pre-study data.
-    if recent_accum_seed.is_empty() {
+    if lag_accum_seed.is_empty() {
         ws.scratch.lag_accumulator.fill(0.0);
-        ws.scratch.lag_weight_accum = 0.0;
+        ws.scratch.lag_weight_accum.fill(0.0);
     } else {
-        ws.scratch.lag_accumulator[..recent_accum_seed.len()].copy_from_slice(recent_accum_seed);
-        ws.scratch.lag_weight_accum = *recent_weight_seed;
+        ws.scratch.lag_accumulator[..lag_accum_seed.len()].copy_from_slice(lag_accum_seed);
+        ws.scratch.lag_weight_accum[..lag_weight_seed.len()].copy_from_slice(lag_weight_seed);
     }
     ws.scratch.downstream_accumulator.fill(0.0);
     ws.scratch.downstream_weight_accum = 0.0;

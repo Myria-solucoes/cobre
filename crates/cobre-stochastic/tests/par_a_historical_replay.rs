@@ -6,21 +6,21 @@
 )]
 
 //! Regression tests: PAR(p)-A annual + historical replay must reproduce the
-//! historical observation exactly when the stage-0 lag state equals
-//! `past_inflows` (the rolling-chain seed).
+//! historical observation exactly when the stage-0 lag state equals the
+//! derived lag seed (the rolling-chain seed).
 //!
 //! Two standing contracts the tests pin:
 //! - When a model carries `annual: Some(_)`, `PrecomputedPar` widens the `psi`
 //!   stride to 12 and spreads ψ̂ across the extra positions as `psi_hat / 12`;
 //!   any PAR primitive that iterates only `psi[0..order]` drops the annual
 //!   contribution at standardisation time and diverges the replay.
-//! - `standardize_historical_windows` inverts η against `past_inflows`, not the
-//!   window's own pre-study lags; inverting against the window lags offsets the
-//!   replay algebraically whenever the two differ.
+//! - `standardize_historical_windows` inverts η against the derived lag seed,
+//!   not the window's own pre-study lags; inverting against the window lags
+//!   offsets the replay algebraically whenever the two differ.
 
 use chrono::{Months, NaiveDate};
 use cobre_core::{
-    EntityId, HydroPastInflows,
+    EntityId,
     scenario::{AnnualComponent, InflowHistoryRow, InflowModel},
     temporal::{
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageLagTransition,
@@ -94,11 +94,11 @@ fn advance_lag_state_uniform(lag_state: &mut [f64], realised: f64, max_order: us
 }
 
 // ---------------------------------------------------------------------------
-// T1: AR(1)+PAR-A, past_inflows == window pre-study lags
+// T1: AR(1)+PAR-A, derived lag seed == window pre-study lags
 // ---------------------------------------------------------------------------
 
-/// AR(1) + PAR(p)-A on a single hydro, `past_inflows` == the window's own
-/// pre-study lags: every stage's observation must reproduce exactly.
+/// AR(1) + PAR(p)-A on a single hydro, the derived lag seed == the window's
+/// own pre-study lags: every stage's observation must reproduce exactly.
 #[test]
 fn par_a_historical_replay_roundtrip() {
     let hydro = EntityId(1);
@@ -151,15 +151,10 @@ fn par_a_historical_replay_roundtrip() {
         history.push(row(hydro, window_year, m, history_values[12 + m as usize]));
     }
 
-    // past_inflows are in lag order: lag-1 first (Dec 1989 = history_values[11]),
-    // down to lag-12 (Jan 1989 = history_values[0]).
+    // The derived seed is in lag order: lag-1 first (Dec 1989 =
+    // history_values[11]), down to lag-12 (Jan 1989 = history_values[0]).
     let max_order = par.max_order();
     let past_values_m3s: Vec<f64> = (0..max_order).map(|lag| history_values[11 - lag]).collect();
-    let past_inflows = vec![HydroPastInflows {
-        hydro_id: hydro,
-        values_m3s: past_values_m3s.clone(),
-        season_ids: None,
-    }];
     let transitions: Vec<StageLagTransition> =
         (0..12).map(|_| uniform_monthly_transition()).collect();
 
@@ -172,7 +167,8 @@ fn par_a_historical_replay_roundtrip() {
         &par,
         &[window_year],
         None,
-        &past_inflows,
+        &past_values_m3s,
+        max_order,
         &transitions,
         0,
     );
@@ -206,14 +202,14 @@ fn par_a_historical_replay_roundtrip() {
 }
 
 // ---------------------------------------------------------------------------
-// T2: AR(1)+PAR-A, past_inflows deliberately differ from window pre-study lags
+// T2: AR(1)+PAR-A, derived lag seed deliberately differs from window pre-study lags
 // ---------------------------------------------------------------------------
 
-/// `past_inflows` differ from the window's antecedent lags: η is inverted against
-/// `past_inflows`, so a forward pass from `past_inflows` reproduces the target
-/// exactly while one from the window lags would diverge.
+/// The derived lag seed differs from the window's antecedent lags: η is
+/// inverted against the derived seed, so a forward pass from that seed
+/// reproduces the target exactly while one from the window lags would diverge.
 #[test]
-fn t2_past_inflows_differ_from_window_lags_roundtrip() {
+fn t2_derived_seed_differs_from_window_lags_roundtrip() {
     let hydro = EntityId(1);
     let stages: Vec<Stage> = (0..12).map(|i| monthly_stage(i, i)).collect();
 
@@ -265,11 +261,6 @@ fn t2_past_inflows_differ_from_window_lags_roundtrip() {
     }
 
     let past_values_m3s: Vec<f64> = vec![200.0; max_order];
-    let past_inflows = vec![HydroPastInflows {
-        hydro_id: hydro,
-        values_m3s: past_values_m3s.clone(),
-        season_ids: None,
-    }];
     let transitions: Vec<StageLagTransition> =
         (0..12).map(|_| uniform_monthly_transition()).collect();
 
@@ -282,7 +273,8 @@ fn t2_past_inflows_differ_from_window_lags_roundtrip() {
         &par,
         &[window_year],
         None,
-        &past_inflows,
+        &past_values_m3s,
+        max_order,
         &transitions,
         0,
     );
@@ -301,7 +293,7 @@ fn t2_past_inflows_differ_from_window_lags_roundtrip() {
         let got = reconstructed[0];
         assert!(
             (got - target).abs() < 1e-9,
-            "T2 stage {t}: replay from past_inflows: reconstructed {got:.12} != \
+            "T2 stage {t}: replay from derived seed: reconstructed {got:.12} != \
              target {target:.12} (diff {:.3e})",
             (got - target).abs(),
         );
@@ -311,11 +303,11 @@ fn t2_past_inflows_differ_from_window_lags_roundtrip() {
 }
 
 // ---------------------------------------------------------------------------
-// T3: AR(0), past_inflows == window lags (no-AR regression baseline)
+// T3: AR(0), derived lag seed == window lags (no-AR regression baseline)
 // ---------------------------------------------------------------------------
 
 /// AR(0)+PAR-A: with no AR coefficient, `η = (obs - det_base) / sigma`, so a
-/// replay from `past_inflows` matching the window lags reproduces each observation.
+/// replay from a derived seed matching the window lags reproduces each observation.
 #[test]
 fn t3_ar0_par_a_roundtrip() {
     let hydro = EntityId(1);
@@ -365,11 +357,6 @@ fn t3_ar0_par_a_roundtrip() {
 
     // Lag order: lag-1 first (Dec 1989), down to lag-12 (Jan 1989).
     let past_values_m3s: Vec<f64> = (0..max_order).map(|lag| pre_values[11 - lag]).collect();
-    let past_inflows = vec![HydroPastInflows {
-        hydro_id: hydro,
-        values_m3s: past_values_m3s.clone(),
-        season_ids: None,
-    }];
     let transitions: Vec<StageLagTransition> =
         (0..12).map(|_| uniform_monthly_transition()).collect();
 
@@ -382,7 +369,8 @@ fn t3_ar0_par_a_roundtrip() {
         &par,
         &[window_year],
         None,
-        &past_inflows,
+        &past_values_m3s,
+        max_order,
         &transitions,
         0,
     );
@@ -411,14 +399,14 @@ fn t3_ar0_par_a_roundtrip() {
 }
 
 // ---------------------------------------------------------------------------
-// T4: AR(1), past_inflows has fewer entries than max_order (absent = 0)
+// T4: AR(1), derived lag seed has fewer entries than max_order (absent = 0)
 // ---------------------------------------------------------------------------
 
-/// `past_inflows.values_m3s` shorter than `max_order`: missing lag slots default
+/// A derived lag seed shorter than `max_order`: missing lag slots default
 /// to `0.0`, and a replay seeded from the same truncated state still reproduces
 /// every study observation.
 #[test]
-fn t4_past_inflows_shorter_than_max_order_roundtrip() {
+fn t4_derived_seed_shorter_than_max_order_roundtrip() {
     let hydro = EntityId(1);
     let stages: Vec<Stage> = (0..4).map(|i| monthly_stage(i, i)).collect();
 
@@ -472,11 +460,7 @@ fn t4_past_inflows_shorter_than_max_order_roundtrip() {
         ));
     }
 
-    let past_inflows = vec![HydroPastInflows {
-        hydro_id: hydro,
-        values_m3s: vec![66.0], // lag-1 only; lag-2 defaults to 0.0
-        season_ids: None,
-    }];
+    let derived_lag_values = [66.0]; // lag-1 only; lag-2 defaults to 0.0
     let transitions: Vec<StageLagTransition> =
         (0..4).map(|_| uniform_monthly_transition()).collect();
 
@@ -489,7 +473,8 @@ fn t4_past_inflows_shorter_than_max_order_roundtrip() {
         &par,
         &[window_year],
         None,
-        &past_inflows,
+        &derived_lag_values,
+        1,
         &transitions,
         0,
     );
@@ -507,7 +492,7 @@ fn t4_past_inflows_shorter_than_max_order_roundtrip() {
         let got = reconstructed[0];
         assert!(
             (got - target).abs() < 1e-9,
-            "T4 stage {t}: truncated past_inflows: reconstructed {got:.12} != \
+            "T4 stage {t}: truncated derived seed: reconstructed {got:.12} != \
              target {target:.12} (diff {:.3e})",
             (got - target).abs(),
         );
@@ -517,11 +502,11 @@ fn t4_past_inflows_shorter_than_max_order_roundtrip() {
 }
 
 // ---------------------------------------------------------------------------
-// T5: Two windows, past_inflows shared; both windows replay exactly
+// T5: Two windows, derived lag seed shared; both windows replay exactly
 // ---------------------------------------------------------------------------
 
 #[test]
-fn t5_two_windows_shared_past_inflows_roundtrip() {
+fn t5_two_windows_shared_derived_seed_roundtrip() {
     let hydro = EntityId(1);
     let stages: Vec<Stage> = (0..12).map(|i| monthly_stage(i, i)).collect();
 
@@ -571,14 +556,10 @@ fn t5_two_windows_shared_past_inflows_roundtrip() {
     let mut full_history = history_for(1990, 0.0);
     full_history.extend(history_for(1992, 50.0));
 
-    // Shared across windows and different from both windows' antecedent lags, so
-    // the replay re-roots against past_inflows rather than the window lags.
+    // Shared across windows and different from both windows' antecedent lags,
+    // so the replay re-roots against the derived seed rather than the window
+    // lags.
     let past_values_m3s = vec![150.0_f64; max_order];
-    let past_inflows = vec![HydroPastInflows {
-        hydro_id: hydro,
-        values_m3s: past_values_m3s.clone(),
-        season_ids: None,
-    }];
     let transitions: Vec<StageLagTransition> =
         (0..12).map(|_| uniform_monthly_transition()).collect();
 
@@ -591,7 +572,8 @@ fn t5_two_windows_shared_past_inflows_roundtrip() {
         &par,
         &window_years,
         None,
-        &past_inflows,
+        &past_values_m3s,
+        max_order,
         &transitions,
         0,
     );

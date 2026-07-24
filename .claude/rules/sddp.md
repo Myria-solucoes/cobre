@@ -218,16 +218,21 @@ plants — the entire point of `operational_start_date`) breaks that
 coincidence, so `binary_search_by_key` over the canonical slice — which
 requires id-ascending order — silently returns `Err` (or the wrong index) for
 an out-of-id-order entity, dropping its seed to the default `0.0`. Every
-id-keyed initial-condition lookup (`storage`, `filling_storage`,
-`past_inflows`, thermal `past_anticipated_commitments`, the recent-observation
-lag seed) resolves through an `id -> position` map built once from the
-canonical slice, never a `binary_search_by_key` call. The map is built from
-the canonical order, but every write still iterates the IC record list (not
-the map) — a map iteration order is unspecified and would violate
+id-keyed initial-condition lookup (`storage`, `filling_storage`, thermal
+`past_anticipated_commitments`) resolves through an `id -> position` map built
+once from the canonical slice, never a `binary_search_by_key` call. The map is
+built from the canonical order, but every write still iterates the IC record
+list (not the map) — a map iteration order is unspecified and would violate
 declaration-order invariance if used to drive writes.
+
+The derived inflow lag seed (`derive_inflow_seeds`) satisfies the same
+invariant a different way: it carries no id->position map at all — it
+iterates `hydros` directly, so the loop index IS the canonical position, then
+filters each hydro's own historical windows by id. `build_initial_state`'s lag
+block trusts this pre-ordering and does a plain positional read, with no id
+lookup of its own.
 Read: `setup/mod.rs` (`id_to_position`, `build_initial_state`),
-`crates/cobre-stochastic/src/par/lag_transition.rs`
-(`compute_recent_observation_seed`). Pinned by
+`crates/cobre-stochastic/src/seeds.rs` (`derive_inflow_seeds`). Pinned by
 `test_initial_state_seeds_correctly_under_staggered_commissioning_dates`,
 `build_initial_state_anticipated_seed_correct_under_staggered_commissioning_dates`,
 and `test_seed_correct_under_staggered_commissioning_dates`, each using a
@@ -362,10 +367,10 @@ windows; the seed must `filter` over every window with a matching `hydro_id`
 and deposit each one independently
 (`volume = width · M3S_TO_HM3 · value_m3s`, `seed[start+d] += k[d] · volume`)
 — a `.find()` would silently keep only the first window and drop the rest,
-understating the seed with no error. There is no `past_inflows` fallback:
-`cobre-io`'s `validate_travel_time` row-5 gate guarantees every declared
-arc's windows cover `[start_0 − t_v, start_0)` before setup ever runs this
-seed.
+understating the seed with no error. There is no fallback for incomplete
+coverage: `cobre-io`'s `validate_travel_time` row-5 gate guarantees every
+declared arc's windows cover `[start_0 − t_v, start_0)` before setup ever
+runs this seed.
 Read: `setup/bucket_seed.rs` (`build_initial_transit_bucket_state`),
 `setup/bucket_topology.rs` (`ic_anchor_k`). Pinned by the single-window
 unroll regression (the `k`-weighted deposit matches the closed-form
@@ -465,8 +470,8 @@ depend on it), and hard-rejects any length mismatch as a
 `BusinessRuleViolation`. A `len == lead_stages` gate is a plausible-looking
 alternative that silently mis-covers a `LeadTime`-configured plant on a
 non-uniform calendar, since the required count is calendar-derived, not a
-constant stage count; there is no fallback comparable to the
-(already-rejected) `past_inflows` fallback for `past_defluences`.
+constant stage count; there is no fallback comparable to the one already
+rejected for `past_defluences` coverage above.
 Read: `crates/cobre-io/src/validation/semantic/thermal.rs`
 (`required_anticipated_commitment_count`, `check_anticipated_thermals`).
 Pinned by `test_anticipated_lead_time_coverage_pmo_calendar` and
