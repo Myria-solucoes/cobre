@@ -2017,6 +2017,7 @@ const DLC_N_STAGES: usize = 5;
 /// rebuilt lag under its own AR(1) model.
 struct DlcFixture {
     stages: Vec<Stage>,
+    season_map: SeasonMap,
     hydro_ids: Vec<EntityId>,
     par: PrecomputedPar,
     transitions: Vec<StageLagTransition>,
@@ -2169,6 +2170,7 @@ fn build_dlc_fixture() -> DlcFixture {
 
     DlcFixture {
         stages,
+        season_map,
         hydro_ids,
         par,
         transitions,
@@ -2414,7 +2416,7 @@ fn opening_tree_historical_standardization_ring_aware_eta_requires_derived_downs
     let oracle_incoming = dlc_forward_oracle_incoming_lags(&fx);
     let naive_incoming = dlc_naive_primary_only_incoming_lags(&fx);
 
-    let derived = derive_downstream_par_order(&fx.stages, fx.par.max_order());
+    let derived = derive_downstream_par_order(&fx.stages, fx.par.max_order(), Some(&fx.season_map));
     assert_eq!(
         derived,
         fx.par.max_order(),

@@ -7,12 +7,17 @@
 
 use std::collections::HashMap;
 
-use chrono::{Datelike, NaiveDate, TimeDelta, Weekday};
+use chrono::{Datelike, NaiveDate};
 use cobre_core::{
     entities::hydro::Hydro,
     initial_conditions::RecentObservation,
     temporal::{SeasonCycleType, SeasonDefinition, SeasonMap, Stage, StageLagTransition},
     window_period_overlaps,
+};
+
+use crate::season_cast::{
+    find_season_year_monthly, month_total_hours, next_season_period_window, resolved_year,
+    season_period_window,
 };
 
 /// Pre-computed seed values for the lag accumulator, derived from
@@ -116,225 +121,6 @@ pub fn compute_recent_observation_seed(
     }
 }
 
-/// Compute the exclusive end date of the calendar month identified by
-/// `month` (1–12) and `year`.
-pub(crate) fn month_exclusive_end(year: i32, month: u32) -> NaiveDate {
-    let (next_year, next_month) = if month == 12 {
-        (year + 1, 1u32)
-    } else {
-        (year, month + 1)
-    };
-    NaiveDate::from_ymd_opt(next_year, next_month, 1)
-        .unwrap_or_else(|| unreachable!("next-month date is always valid"))
-}
-
-/// Returns the total hours in the calendar month identified by `year` and
-/// `month` (1–12). Each day is exactly 24 hours (timezone-free calendar dates, no DST).
-pub(crate) fn month_total_hours(year: i32, month: u32) -> f64 {
-    f64::from(days_in_month(year, month)) * 24.0
-}
-
-/// Determine the calendar year whose occurrence of `season_month` overlaps the
-/// stage interval `[start_date, end_date)`, in a `Monthly` cycle.
-///
-/// Candidates are checked in order: `start_date.year()`, then the previous year
-/// (a December-season stage starting in January), then the next year as a
-/// fallback against unexpected gaps.
-pub(crate) fn find_season_year_monthly(
-    start_date: NaiveDate,
-    end_date: NaiveDate,
-    season_month: u32,
-) -> i32 {
-    let candidate_year = start_date.year();
-    let period_start = NaiveDate::from_ymd_opt(candidate_year, season_month, 1)
-        .unwrap_or_else(|| unreachable!("season month is always valid"));
-    let period_end = month_exclusive_end(candidate_year, season_month);
-
-    if start_date < period_end && end_date > period_start {
-        return candidate_year;
-    }
-
-    let prev_year = candidate_year - 1;
-    let period_start_prev = NaiveDate::from_ymd_opt(prev_year, season_month, 1)
-        .unwrap_or_else(|| unreachable!("season month with previous year is always valid"));
-    let period_end_prev = month_exclusive_end(prev_year, season_month);
-
-    if start_date < period_end_prev && end_date > period_start_prev {
-        return prev_year;
-    }
-
-    candidate_year + 1
-}
-
-/// Concrete `[start, end)` calendar window for one occurrence of a season
-/// period, plus its total duration in hours.
-struct PeriodWindow {
-    start: NaiveDate,
-    end: NaiveDate,
-    hours: f64,
-}
-
-/// Number of real calendar days in `year`-`month` (1–12).
-fn days_in_month(year: i32, month: u32) -> u32 {
-    let first = NaiveDate::from_ymd_opt(year, month, 1)
-        .unwrap_or_else(|| unreachable!("month-start date is always valid"));
-    let next = month_exclusive_end(year, month);
-    u32::try_from((next - first).num_days())
-        .unwrap_or_else(|_| unreachable!("days in a month always fit in u32"))
-}
-
-/// Resolve a `Custom` `season_def`'s `[start, end)` range anchored in `year`.
-///
-/// Mirrors `season_for_date`'s `Custom` arm (`day_start`/`day_end` defaults,
-/// `start <= end` wrap-around); `day_end` is clamped to the real month length
-/// here because a concrete date must be constructed (the tuple comparison in
-/// `season_for_date` needs no such clamp).
-fn custom_period_bounds(year: i32, season_def: &SeasonDefinition) -> (NaiveDate, NaiveDate) {
-    let month_start = season_def.month_start;
-    let day_start = season_def.day_start.unwrap_or(1);
-    let month_end = season_def.month_end.unwrap_or(month_start);
-    let day_end = season_def.day_end.unwrap_or(31);
-
-    let start_day = day_start.min(days_in_month(year, month_start));
-    let start = NaiveDate::from_ymd_opt(year, month_start, start_day)
-        .unwrap_or_else(|| unreachable!("clamped custom start date is always valid"));
-
-    let wraps = (month_start, day_start) > (month_end, day_end);
-    let end_year = if wraps { year + 1 } else { year };
-    let end_day = day_end.min(days_in_month(end_year, month_end));
-    let end_inclusive = NaiveDate::from_ymd_opt(end_year, month_end, end_day)
-        .unwrap_or_else(|| unreachable!("clamped custom end date is always valid"));
-
-    (start, end_inclusive + TimeDelta::days(1))
-}
-
-/// Determine the calendar year whose occurrence of a `Custom` `season_def`
-/// overlaps `[start_date, end_date)`. Generalizes
-/// `find_season_year_monthly`'s candidate/previous-year/fallback search to a
-/// day-level range.
-fn find_season_year_custom(
-    start_date: NaiveDate,
-    end_date: NaiveDate,
-    season_def: &SeasonDefinition,
-) -> i32 {
-    let candidate_year = start_date.year();
-    let (period_start, period_end) = custom_period_bounds(candidate_year, season_def);
-    if start_date < period_end && end_date > period_start {
-        return candidate_year;
-    }
-
-    let prev_year = candidate_year - 1;
-    let (period_start_prev, period_end_prev) = custom_period_bounds(prev_year, season_def);
-    if start_date < period_end_prev && end_date > period_start_prev {
-        return prev_year;
-    }
-
-    candidate_year + 1
-}
-
-/// Resolve `season_def`'s concrete calendar window for `stage`'s occurrence.
-///
-/// `Monthly` routes through `find_season_year_monthly`/`month_exclusive_end`/
-/// `month_total_hours` verbatim. `Weekly` derives the 7-day ISO-week window
-/// containing `stage.start_date` directly — `season_for_date`'s week-53→52
-/// fold is a season-id label fold, not a window fold, so the physical week
-/// stays 7 real days regardless. `Custom` resolves `season_def`'s own range
-/// via `find_season_year_custom`/`custom_period_bounds`.
-fn period_window(
-    season_map: &SeasonMap,
-    season_def: &SeasonDefinition,
-    stage: &Stage,
-) -> PeriodWindow {
-    match season_map.cycle_type {
-        SeasonCycleType::Monthly => {
-            let season_month = season_def.month_start;
-            let year = find_season_year_monthly(stage.start_date, stage.end_date, season_month);
-            let start = NaiveDate::from_ymd_opt(year, season_month, 1)
-                .unwrap_or_else(|| unreachable!("season month is always valid"));
-            let end = month_exclusive_end(year, season_month);
-            let hours = month_total_hours(year, season_month);
-            PeriodWindow { start, end, hours }
-        }
-        SeasonCycleType::Weekly => {
-            let iso_week = stage.start_date.iso_week();
-            let start = NaiveDate::from_isoywd_opt(iso_week.year(), iso_week.week(), Weekday::Mon)
-                .unwrap_or_else(|| unreachable!("iso week start date is always valid"));
-            let end = start + TimeDelta::days(7);
-            PeriodWindow {
-                start,
-                end,
-                hours: 7.0 * 24.0,
-            }
-        }
-        SeasonCycleType::Custom => {
-            let year = find_season_year_custom(stage.start_date, stage.end_date, season_def);
-            let (start, end) = custom_period_bounds(year, season_def);
-            let days = u32::try_from((end - start).num_days())
-                .unwrap_or_else(|_| unreachable!("custom period day count always fits in u32"));
-            PeriodWindow {
-                start,
-                end,
-                hours: f64::from(days) * 24.0,
-            }
-        }
-    }
-}
-
-/// Resolve the period window immediately following `current`, for forward
-/// spillover accounting.
-///
-/// `Monthly` and `Weekly` derive the next window arithmetically (next
-/// calendar month; next 7-day span). `Custom` advances to the next
-/// `season_def` in id order, wrapping the season list — `season_map.seasons`
-/// is sorted by id, so this is the next entry in the list.
-fn next_period_window(
-    season_map: &SeasonMap,
-    season_def: &SeasonDefinition,
-    current: &PeriodWindow,
-) -> Option<PeriodWindow> {
-    match season_map.cycle_type {
-        SeasonCycleType::Monthly => {
-            let season_month = season_def.month_start;
-            let year = current.start.year();
-            let (next_year, next_month) = if season_month == 12 {
-                (year + 1, 1u32)
-            } else {
-                (year, season_month + 1)
-            };
-            let start = current.end;
-            let end = month_exclusive_end(next_year, next_month);
-            let hours = month_total_hours(next_year, next_month);
-            Some(PeriodWindow { start, end, hours })
-        }
-        SeasonCycleType::Weekly => {
-            let start = current.end;
-            let end = start + TimeDelta::days(7);
-            Some(PeriodWindow {
-                start,
-                end,
-                hours: 7.0 * 24.0,
-            })
-        }
-        SeasonCycleType::Custom => {
-            let pos = season_map
-                .seasons
-                .iter()
-                .position(|s| s.id == season_def.id)?;
-            let next_def = &season_map.seasons[(pos + 1) % season_map.seasons.len()];
-            let probe_end = current.end + TimeDelta::days(1);
-            let year = find_season_year_custom(current.end, probe_end, next_def);
-            let (start, end) = custom_period_bounds(year, next_def);
-            let days = u32::try_from((end - start).num_days())
-                .unwrap_or_else(|_| unreachable!("custom period day count always fits in u32"));
-            Some(PeriodWindow {
-                start,
-                end,
-                hours: f64::from(days) * 24.0,
-            })
-        }
-    }
-}
-
 /// Overlap hours between `stage`'s calendar span and a single period of
 /// `period_hours` duration starting at `period_start`, via
 /// [`window_period_overlaps`] framed with the origin at `period_start`.
@@ -355,25 +141,6 @@ fn single_period_overlap_hours(stage: &Stage, period_start: NaiveDate, period_ho
         .first()
         .copied()
         .unwrap_or(0.0)
-}
-
-/// The calendar year identifying which occurrence of `season_def` `stage`
-/// belongs to, disambiguating repeated season ids across years.
-///
-/// `Weekly` uses the ISO week-numbering year (`iso_week().year()`), not the
-/// calendar year of the window start: a week's Monday can fall in the prior
-/// December (`from_isoywd_opt(2004, 1, Mon)` is 2003-12-29), so the window
-/// start's calendar year would misclassify that week as the prior year's.
-fn resolved_year(season_map: &SeasonMap, season_def: &SeasonDefinition, stage: &Stage) -> i32 {
-    match season_map.cycle_type {
-        SeasonCycleType::Monthly => {
-            find_season_year_monthly(stage.start_date, stage.end_date, season_def.month_start)
-        }
-        SeasonCycleType::Weekly => stage.start_date.iso_week().year(),
-        SeasonCycleType::Custom => {
-            find_season_year_custom(stage.start_date, stage.end_date, season_def)
-        }
-    }
 }
 
 /// An all-zero, non-finalizing [`StageLagTransition`] — the shared absent-case
@@ -400,12 +167,12 @@ pub(crate) fn compute_period_transition(
     season_def: &SeasonDefinition,
     all_stages: &[Stage],
 ) -> StageLagTransition {
-    let current = period_window(season_map, season_def, stage);
+    let current = season_period_window(season_map, season_def, stage);
 
     let accumulate_weight =
         single_period_overlap_hours(stage, current.start, current.hours) / current.hours;
 
-    let spillover_weight = next_period_window(season_map, season_def, &current)
+    let spillover_weight = next_season_period_window(season_map, season_def, &current)
         .map_or(0.0, |next| {
             single_period_overlap_hours(stage, next.start, next.hours) / next.hours
         });
@@ -432,17 +199,26 @@ pub(crate) fn compute_period_transition(
 /// Derives the `downstream_par_order` gate consumed by
 /// [`precompute_stage_lag_transitions`] and by η-inversion
 /// (`standardize_historical_windows`): `par_max_order` once any stage crosses
-/// into the quarterly range (`season_id >= 12`), else `0` (ring-inert). Every
+/// into the quarterly range (`season_id >= 12`), gated off only for `Weekly`
+/// — an ISO week number reaching 12 has nothing to do with quarters, while a
+/// `Monthly` or `Custom` cycle's `season_id >= 12` is a deliberate quarterly
+/// convention; a `None` `season_map` also leaves the ring inert (`0`). Every
 /// call site that needs this gate — training/simulation lag transitions and
 /// both the rank-0 and non-root opening-tree builds — routes through this one
 /// function; an independent re-derivation risks the two opening-tree sides
 /// diverging across MPI ranks.
 #[must_use]
-pub fn derive_downstream_par_order(stages: &[Stage], par_max_order: usize) -> usize {
+pub fn derive_downstream_par_order(
+    stages: &[Stage],
+    par_max_order: usize,
+    season_map: Option<&SeasonMap>,
+) -> usize {
+    let cycle_admits_ring =
+        season_map.is_some_and(|sm| !matches!(sm.cycle_type, SeasonCycleType::Weekly));
     let has_quarterly_stages = stages
         .iter()
         .any(|s| s.season_id.is_some_and(|id| id >= 12));
-    if has_quarterly_stages {
+    if has_quarterly_stages && cycle_admits_ring {
         par_max_order
     } else {
         0
@@ -685,6 +461,80 @@ mod tests {
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    // -----------------------------------------------------------------------
+    // derive_downstream_par_order gate (Monthly-only convention)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_derive_downstream_par_order_weekly_returns_zero() {
+        let season_map = weekly_season_map();
+        let stages = vec![
+            make_stage(0, d(2026, 1, 1), d(2026, 1, 8), Some(0)),
+            make_stage(1, d(2026, 1, 8), d(2026, 1, 15), Some(1)),
+            make_stage(2, d(2026, 1, 15), d(2026, 1, 22), Some(2)),
+            make_stage(3, d(2026, 1, 22), d(2026, 1, 29), Some(12)),
+        ];
+
+        let derived = derive_downstream_par_order(&stages, 1, Some(&season_map));
+        assert_eq!(
+            derived, 0,
+            "a Weekly season cycle must never activate the quarterly ring, even \
+             when a stage crosses season_id >= 12"
+        );
+
+        let transitions = precompute_stage_lag_transitions(&stages, &season_map, derived);
+        assert!(
+            transitions.iter().all(|t| !t.rebuild_from_downstream),
+            "the ring must stay provably inert: no stage rebuilds from downstream"
+        );
+    }
+
+    #[test]
+    fn test_derive_downstream_par_order_monthly_quarterly_unchanged() {
+        let season_map = monthly_season_map();
+        let stages = vec![
+            make_stage(0, d(2026, 1, 1), d(2026, 2, 1), Some(0)),
+            make_stage(1, d(2026, 2, 1), d(2026, 3, 1), Some(1)),
+            make_stage(2, d(2026, 3, 1), d(2026, 4, 1), Some(2)),
+            make_stage(3, d(2026, 4, 1), d(2026, 7, 1), Some(12)),
+        ];
+
+        let derived = derive_downstream_par_order(&stages, 1, Some(&season_map));
+        assert_eq!(
+            derived, 1,
+            "a Monthly season cycle crossing season_id >= 12 must activate the \
+             quarterly ring at par_max_order"
+        );
+    }
+
+    #[test]
+    fn test_derive_downstream_par_order_no_season_map_returns_zero() {
+        let stages = vec![
+            make_stage(0, d(2026, 1, 1), d(2026, 2, 1), Some(0)),
+            make_stage(1, d(2026, 2, 1), d(2026, 3, 1), Some(1)),
+            make_stage(2, d(2026, 3, 1), d(2026, 4, 1), Some(2)),
+            make_stage(3, d(2026, 4, 1), d(2026, 7, 1), Some(12)),
+        ];
+
+        let derived = derive_downstream_par_order(&stages, 1, None);
+        assert_eq!(derived, 0, "a None season_map must leave the ring inert");
+    }
+
+    #[test]
+    fn test_derive_downstream_par_order_custom_quarterly_stays_active() {
+        let season_map = custom_multi_resolution_season_map();
+        let june_stage = make_stage(0, d(2024, 6, 1), d(2024, 7, 1), Some(5));
+        let q3_stage = make_stage(1, d(2024, 7, 1), d(2024, 10, 1), Some(12));
+        let stages = vec![june_stage, q3_stage];
+
+        let derived = derive_downstream_par_order(&stages, 1, Some(&season_map));
+        assert_eq!(
+            derived, 1,
+            "a Custom season cycle crossing season_id >= 12 must keep the \
+             quarterly ring active at par_max_order — only Weekly is gated off"
+        );
     }
 
     #[test]

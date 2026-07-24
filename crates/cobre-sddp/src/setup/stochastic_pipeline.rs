@@ -180,7 +180,7 @@ pub fn load_load_factors_for_stochastic(
 fn build_opening_tree_library(
     system: &System,
     training_source: &ScenarioSource,
-) -> Result<Option<cobre_stochastic::HistoricalScenarioLibrary>, SddpError> {
+) -> Result<Option<HistoricalScenarioLibrary>, SddpError> {
     use cobre_core::temporal::NoiseMethod;
     let needs_historical_tree = system
         .stages()
@@ -229,7 +229,8 @@ fn build_opening_tree_library(
         seasons: Vec::new(),
     };
     let effective_season_map: &SeasonMap = season_map_ref.unwrap_or(&noop_season_map);
-    let downstream_par_order = derive_downstream_par_order(&study_stages, max_order);
+    let downstream_par_order =
+        derive_downstream_par_order(&study_stages, max_order, season_map_ref);
     let stage_lag_transitions =
         precompute_stage_lag_transitions(&study_stages, effective_season_map, downstream_par_order);
     standardize_historical_windows(
@@ -257,13 +258,7 @@ fn compute_external_scenario_counts(
     system: &System,
     training_source: &ScenarioSource,
 ) -> Option<Vec<usize>> {
-    let study_stages: Vec<_> = system
-        .stages()
-        .iter()
-        .filter(|s| s.id >= 0)
-        .cloned()
-        .collect();
-    let n_stages = study_stages.len();
+    let n_stages = system.stages().iter().filter(|s| s.id >= 0).count();
 
     let inflow_counts: Option<Vec<usize>> =
         if training_source.inflow_scheme == SamplingScheme::External && n_stages > 0 {
@@ -885,7 +880,11 @@ mod tests {
                 .expect("oracle PrecomputedPar must build");
         assert_eq!(par.max_order(), 1);
 
-        let derived = derive_downstream_par_order(&fx.stages, par.max_order());
+        let derived = derive_downstream_par_order(
+            &fx.stages,
+            par.max_order(),
+            fx.system.policy_graph().season_map.as_ref(),
+        );
         assert_eq!(
             derived,
             par.max_order(),

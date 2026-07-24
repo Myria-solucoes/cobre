@@ -61,7 +61,7 @@
 //! |15  | Correlation matrix diagonal entries equal 1.0 (±1e-9)                  | `scenarios/correlation.json`                   | `BusinessRuleViolation`  |
 //! |16  | Correlation off-diagonal entries in [-1.0, 1.0]                        | `scenarios/correlation.json`                   | `BusinessRuleViolation`  |
 //! |17  | Each `block_factors[j].block_id` matches a `Block.index` in its stage  | `scenarios/load_factors.json`                  | `BusinessRuleViolation`  |
-//! |18  | Load-factors entry for `(bus_id, stage_id)` with `std_mw == 0.0`       | `scenarios/load_factors.json`                  | `ModelQuality` (warning) |
+//! |18  | *(retired — number never reused)* | — | — |
 //! |19  | `season_definitions` required in `stages.json` when estimating          | `scenarios/inflow_history.parquet`             | `BusinessRuleViolation`  |
 //! |20  | Minimum observations per `(hydro, season)` group for estimation         | `scenarios/inflow_history.parquet`             | `ModelQuality` (warning) |
 //! |21  | All hydros in `hydros.json` must have observations in history           | `scenarios/inflow_history.parquet`             | `BusinessRuleViolation`  |
@@ -129,7 +129,7 @@ pub(crate) fn validate_semantic_hydro_thermal(data: &ParsedData, ctx: &mut Valid
 ///
 /// Rule 12 is only checked when `data.inflow_seasonal_stats` is non-empty.
 /// Rules 14-16 are only checked when `data.correlation` is `Some`.
-/// Rules 17-18 are only checked when `data.load_factors` is non-empty.
+/// Rule 17 is only checked when `data.load_factors` is non-empty.
 pub(crate) fn validate_semantic_stages_penalties_scenarios(
     data: &ParsedData,
     ctx: &mut ValidationContext,

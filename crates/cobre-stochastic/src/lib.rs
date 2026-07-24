@@ -27,6 +27,7 @@ pub mod normal;
 pub mod par;
 pub mod provenance;
 pub mod sampling;
+pub mod season_cast;
 pub mod tree;
 
 pub use context::{ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context};

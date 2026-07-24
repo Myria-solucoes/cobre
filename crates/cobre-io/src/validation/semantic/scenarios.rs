@@ -480,18 +480,19 @@ pub(super) fn check_external_scheme_has_files(data: &ParsedData, ctx: &mut Valid
     }
 }
 
-// ── Rules 17-18: Load factor consistency ─────────────────────────────────────
+// ── Rule 17: Load factor consistency ──────────────────────────────────────────
+//
+// Rule 18 is retired; the number is never reused — rule 19 is referenced by
+// number elsewhere in this module and in the crate-level rule catalogue
+// (`validation/semantic/mod.rs`). Its claim that block factors have no effect
+// at `std_mw == 0.0` was false: `PrecomputedNormal::build` applies factors
+// unconditionally, independent of `std`.
 
 /// Validates cross-file consistency between `load_factors.json` and
 /// `load_seasonal_stats.parquet`.
 ///
 /// Rule 17: For every `LoadFactorEntry`, each `block_factors[j].block_id` must
 /// match a `Block.index` in the corresponding stage's `blocks` array.
-///
-/// Rule 18: A `LoadFactorEntry` for a `(bus_id, stage_id)` pair where
-/// `load_seasonal_stats` has `std_mw == 0.0` (deterministic load) produces a
-/// `ModelQuality` warning because block factors have no effect on deterministic
-/// loads.
 ///
 /// Silently skips when `data.load_factors` is empty.
 pub(super) fn check_load_factor_consistency(data: &ParsedData, ctx: &mut ValidationContext) {
@@ -510,50 +511,29 @@ pub(super) fn check_load_factor_consistency(data: &ParsedData, ctx: &mut Validat
         })
         .collect();
 
-    let load_std: HashMap<(i32, i32), f64> = data
-        .load_seasonal_stats
-        .iter()
-        .map(|row| ((row.bus_id.0, row.stage_id), row.std_mw))
-        .collect();
-
     for (i, entry) in data.load_factors.iter().enumerate() {
-        if let Some(valid_indices) = stage_block_indices.get(&entry.stage_id) {
-            for bf in &entry.block_factors {
-                let block_idx = usize::try_from(bf.block_id).unwrap_or(usize::MAX);
-                if !valid_indices.contains(&block_idx) {
-                    let sorted: Vec<usize> = {
-                        let mut v: Vec<usize> = valid_indices.iter().copied().collect();
-                        v.sort_unstable();
-                        v
-                    };
-                    ctx.add_error(
-                        ErrorKind::BusinessRuleViolation,
-                        "scenarios/load_factors.json",
-                        Some(format!("LoadFactorEntry[{i}]")),
-                        format!(
-                            "LoadFactorEntry[{i}] has block_id {} which is not in the block set \
-                             {sorted:?} for stage {}",
-                            bf.block_id, entry.stage_id
-                        ),
-                    );
-                }
+        let Some(valid_indices) = stage_block_indices.get(&entry.stage_id) else {
+            continue;
+        };
+        for bf in &entry.block_factors {
+            let block_idx = usize::try_from(bf.block_id).unwrap_or(usize::MAX);
+            if !valid_indices.contains(&block_idx) {
+                let sorted: Vec<usize> = {
+                    let mut v: Vec<usize> = valid_indices.iter().copied().collect();
+                    v.sort_unstable();
+                    v
+                };
+                ctx.add_error(
+                    ErrorKind::BusinessRuleViolation,
+                    "scenarios/load_factors.json",
+                    Some(format!("LoadFactorEntry[{i}]")),
+                    format!(
+                        "LoadFactorEntry[{i}] has block_id {} which is not in the block set \
+                         {sorted:?} for stage {}",
+                        bf.block_id, entry.stage_id
+                    ),
+                );
             }
-        }
-
-        let key = (entry.bus_id.0, entry.stage_id);
-        if let Some(&std_mw) = load_std.get(&key)
-            && std_mw == 0.0
-        {
-            ctx.add_warning(
-                ErrorKind::ModelQuality,
-                "scenarios/load_factors.json",
-                Some(format!("LoadFactorEntry[{i}]")),
-                format!(
-                    "LoadFactorEntry[{i}] (bus {}, stage {}) references a deterministic load \
-                         (std_mw == 0.0); block factors have no effect on deterministic loads",
-                    entry.bus_id.0, entry.stage_id
-                ),
-            );
         }
     }
 }
@@ -1584,12 +1564,12 @@ mod tests {
         );
     }
 
-    // ── Rules 17-18: Load factor consistency ─────────────────────────────────
+    // ── Rule 17: Load factor consistency ──────────────────────────────────────
 
     /// `LoadFactorEntry` with a `block_id` not present in the stage's blocks
-    /// produces 1 `BusinessRuleViolation` error.
+    /// still produces 1 rule-17 `BusinessRuleViolation` error.
     #[test]
-    fn test_5b_load_factors_invalid_block_id() {
+    fn test_rule17_invalid_block_id_still_errors() {
         let mut data = make_data_5b(
             vec![],
             make_stages_with_block(0),
@@ -1630,10 +1610,13 @@ mod tests {
         );
     }
 
-    /// `LoadFactorEntry` for a `(bus_id, stage_id)` where `load_seasonal_stats`
-    /// has `std_mw == 0.0` produces 1 `ModelQuality` warning.
+    /// A deterministic load (`std_mw == 0.0`) with defined block factors
+    /// produces zero ModelQuality warnings mentioning "deterministic" or "no
+    /// effect" — block factors are applied at σ = 0 (see
+    /// `test_block_factors_applied_at_zero_sigma` in `cobre-stochastic`), so
+    /// the retired rule-18 claim does not resurface.
     #[test]
-    fn test_5b_load_factors_deterministic_bus_warning() {
+    fn test_deterministic_load_emits_no_factor_warning() {
         let mut data = make_data_5b(
             vec![],
             make_stages_with_block(0),
@@ -1642,7 +1625,6 @@ mod tests {
             vec![],
             None,
         );
-        // Bus 1, stage 0 with std_mw == 0.0 (deterministic load).
         data.load_seasonal_stats = vec![LoadSeasonalStatsRow {
             bus_id: EntityId::from(1),
             stage_id: 0,
@@ -1661,19 +1643,22 @@ mod tests {
         validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
         assert!(
             !ctx.has_errors(),
-            "deterministic load warning should not produce an error, got: {:?}",
+            "deterministic load should not produce an error, got: {:?}",
             ctx.errors()
         );
         let warnings = ctx.warnings();
         let relevant: Vec<_> = warnings
             .iter()
             .filter(|w| w.kind == ErrorKind::ModelQuality)
-            .filter(|w| w.file.to_string_lossy().contains("load_factors"))
+            .filter(|w| {
+                let msg = w.message.to_lowercase();
+                msg.contains("deterministic") || msg.contains("no effect")
+            })
             .collect();
-        assert_eq!(
-            relevant.len(),
-            1,
-            "expected 1 ModelQuality warning for load_factors.json, got: {warnings:?}"
+        assert!(
+            relevant.is_empty(),
+            "expected zero ModelQuality warnings mentioning \"deterministic\"/\"no effect\", \
+             got: {relevant:?}"
         );
     }
 

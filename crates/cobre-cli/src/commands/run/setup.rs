@@ -528,7 +528,11 @@ fn rebuild_historical_library_non_root(
                 };
                 &noop_season_map
             };
-        let downstream_par_order = derive_downstream_par_order(&study_stages, max_order);
+        let downstream_par_order = derive_downstream_par_order(
+            &study_stages,
+            max_order,
+            system.policy_graph().season_map.as_ref(),
+        );
         let stage_lag_transitions = precompute_stage_lag_transitions(
             &study_stages,
             season_map_for_transitions,
