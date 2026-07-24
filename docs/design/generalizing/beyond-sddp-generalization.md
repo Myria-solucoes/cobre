@@ -284,7 +284,13 @@ These are the load-bearing findings for the generalization effort:
 
 4. **`InitialConditions`** (`constraints/initial_conditions.rs:183`) is
    SDDP-warm-start-shaped: `past_inflows` (PAR lag seeds), `past_defluences`
-   (in-transit routing seeds), `past_anticipated_commitments`.
+   (in-transit routing seeds), `past_anticipated_commitments`. _(2026-07-24:
+   the windowed inflow epic removes `past_inflows` — lag seeding derives from
+   dated realized-inflow windows (historical record + conditioning layer) via
+   a cycle-generic cast operator, carried internally as `DerivedInflowSeeds`.
+   One of the three warm-start-shaped fields becomes paradigm-neutral realized
+   data; `past_defluences` — already windowed — and
+   `past_anticipated_commitments` remain.)_
 
 5. **`training_event.rs` lives in `cobre-core`** (`constraints/training_event.rs`,
    ≈940 lines): a `TrainingEvent` enum with `ForwardPassComplete`/
@@ -1181,6 +1187,16 @@ one shared output-orchestration entry point in `cobre-io` (per-engine results
 values; results-schema generalization deferred to the second engine) so
 Python-parity scales; bulk-series binary layer decided as a named trade-off.
 
+_(2026-07-24: the windowed inflow epic ships a concrete precursor of the
+store's realized-history axis: one primitive — a dated realized-inflow window
+`{hydro_id, start, end, value}` — in two layers (historical record;
+conditioning windows that shadow it day-wise), with a cycle-generic
+`cast(windows, period) → {value, coverage}` operator in `cobre-stochastic`
+from which lag seeds, mid-period accumulator seeds, estimation samples, and
+replay-chain seeds all derive. The Phase-1 store design inherits layered dated
+windows as the paradigm-neutral representation of realized history — keep it,
+do not re-derive a positional convention.)_
+
 ---
 
 ## Part IV — Target Crate & Module Architecture _(where things go)_
@@ -1484,6 +1500,17 @@ program takes implementation priority — this roadmap's Phase-0a work queues
 behind the commissioned DECOMP-pulled items, per
 `decomp-program-reconciliation.md` §5. Phase content and gates are unchanged;
 only the start order moves.)_
+
+_(Freeze refinement, 2026-07-24: the windowed inflow-history & seeding epic —
+ratified as the successor that subsumes W1 — is the first commissioned
+**breaking input-format change** (targets v0.13.0): `past_inflows` and the
+point-dated `inflow_history` layout are removed with loud rejection, replaced
+by layered dated windows plus a cycle-generic cast operator. The freeze
+discipline for it is **value-equivalence, not input compatibility**: a
+migrated observation-free case must reproduce its pre-epic training trace
+bit-exactly; cases using `recent_observations` change by design — that is the
+seed-unit bug fix. Local working plan `plans/inflow-windows-epic.md`
+(untracked); reconciliation record in `decomp-program-reconciliation.md` §7.)_
 
 The phases below are capability milestones, each with an explicit **gate** that must
 pass before the next begins.

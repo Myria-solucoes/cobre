@@ -14,12 +14,19 @@ has started). Cobre-side execution order:
 
 1. **bridge-D1** — cobre-python checkpoint-writer binding (small; unblocks
    the FCF importer the moment cut files arrive).
-2. **Rung-1 bundle + bridge-D8** — the faithful-DECOMP-training gate (full
-   item list in the commissioned section below).
-3. **bridge-D9 / W2, Phase 0–1** — unit-groups schema + capability parity,
+2. **Windowed inflow-history & seeding epic** — ratified 2026-07-24
+   (local plan `plans/inflow-windows-epic.md`, untracked; reconciliation in
+   `decomp-program-reconciliation.md` §7). Subsumes and supersedes W1;
+   breaking input change → v0.13.0; lands **before** Rung 1 (shares the
+   external-ingest/replay surfaces and hands Rung 1 the shared
+   `DerivedInflowSeeds` helper). **← ACTIVE: in implementation planning.**
+3. **Rung-1 bundle + bridge-D8** — the faithful-DECOMP-training gate (full
+   item list in the commissioned section below); bridge-D8's depth validation
+   lands in the epic's `inflow_seeding.rs` module.
+4. **bridge-D9 / W2, Phase 0–1** — unit-groups schema + capability parity,
    staged alongside; needed before fidelity validation, not for the zero-FCF
    smoke.
-4. **Rung-2 joint design doc** — after Rung 1; the 0a seam is NOT a
+5. **Rung-2 joint design doc** — after Rung 1; the 0a seam is NOT a
    prerequisite (engine-internal + checkpoint format).
 
 Known accepted cost of this ordering: DECOMP output-schema additions
@@ -74,8 +81,10 @@ namespace disambiguation (`bridge-D<n>` ≠ roadmap `D<n>`) in
    bit-parity; Phase 1 cobre-computed per-group capability gated on parity
    with the bridge's head-corrected bounds; nullable `block_id` column on
    bounds parquets (also settles per-block thermal capacity).
-5. **W1** — `recent_observations` seeding under Weekly/Custom cycles;
-   robustness item, off the DECOMP critical path; schedule opportunistically.
+5. ~~**W1** — `recent_observations` seeding under Weekly/Custom cycles~~ —
+   **superseded 2026-07-24** by the windowed inflow epic (which found the
+   underlying seed path critically defective, not merely cycle-limited; see
+   `decomp-program-reconciliation.md` §7).
 6. **Rung-2 joint design doc** (this directory) — node-axis policy graph +
    per-node cut pools + path traversal + node-aware checkpoint redesign
    (+ the `ValueFunctionArtifact` decision folded in; `policy.boundary`

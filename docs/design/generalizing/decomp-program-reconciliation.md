@@ -138,3 +138,42 @@ double-mirror tax).
 
 `study-schema-design.md` gains the corresponding §9 (config-surface impact);
 `refinement-todo.md` gains the commissioned work-item section.
+
+## 7. Addendum (2026-07-24): the windowed inflow-history & seeding epic
+
+A ratified cobre-side epic (local working plan `plans/inflow-windows-epic.md`,
+untracked; conversion-toolchain half follows in cobre-bridge) replaces the
+three pre-study inflow representations (`past_inflows` positional lags,
+point-dated `inflow_history`, `recent_observations`) with one primitive —
+dated realized-inflow windows in two layers (record + conditioning) — and one
+cycle-generic `cast` operator. Consequences for this reconciliation:
+
+- **W1 is superseded and subsumed.** What §4 item 5 filed as an off-critical-
+  path robustness item turned out, on examination, to sit on top of a critical
+  seed-unit defect (`compute_recent_observation_seed` mixes `value·hours`
+  against fraction-scale stage weights — the observed share of the first
+  finalized lag is inflated ~720×) plus a scalar-weight defect and unvalidated
+  windows. The epic fixes all of these by construction and is cycle-generic
+  (Weekly/Custom included), so W1's narrow scope no longer exists.
+- **First commissioned breaking input change (v0.13.0).** The V.0 freeze
+  refinement (§1: "default-path byte-frozen, opt-in extensions byte-neutral at
+  defaults") gains a second, sharper discipline for this epic:
+  **value-equivalence, not input compatibility** — migrated observation-free
+  cases reproduce pre-epic training traces bit-exactly; old formats are
+  rejected loudly, never half-loaded. The bridge repins `>=0.13,<0.14` and
+  switches to windowed emission after this lands (its own repo's ticket).
+- **Sequencing insertion: the epic lands before the Rung-1 bundle.** Its T2
+  touches `standardize_external_inflow` and the historical-replay chain — the
+  same surfaces Rung 1's external-openings work modifies. Landing the epic
+  first hands Rung 1 a single shared seeding helper (`DerivedInflowSeeds`)
+  instead of a defect to work around. bridge-D1 (checkpoint-writer binding)
+  stays first — tiny and disjoint.
+- **bridge-D8 composes, unchanged.** The epic's slot-coverage rule is
+  parameterized by `L_state` however derived; when bridge-D8's declared
+  `inflow_lag_depth` lands (Rung-1 bundle), `L_state = max(AR order, declared
+depth)` flows straight into the same rule, and the epic's new
+  `validation/semantic/inflow_seeding.rs` is the natural home for bridge-D8's
+  boundary-cut-vs-depth validation error.
+- **The tree/enumeration surfaces stay out of scope** (per the epic's §6):
+  per-opening probabilities, enumeration, and the external-scheme stats
+  convention remain the Rung-1 work package.

@@ -239,3 +239,10 @@ Binding inputs from `~/git/cobre-bridge/plans/` (see
   `node_id`, `unit_group_id` columns) — a further argument for landing the
   shared output-orchestration entry point early in 0a, so each lands as a
   one-list change mirrored in Python by construction.
+- **The stable-spine baseline moves at v0.13.0** (2026-07-24): the windowed
+  inflow epic breaks case inputs (`initial_conditions.past_inflows` removed;
+  `inflow_history` re-laid as dated windows — see
+  `decomp-program-reconciliation.md` §7). The §1 constraint's mechanism is
+  untouched (it governs the `study` block in `config.json`), but "every
+  existing config valid unedited" reads against the current major input
+  format: pre-0.13 cases migrate their inflow inputs first.
