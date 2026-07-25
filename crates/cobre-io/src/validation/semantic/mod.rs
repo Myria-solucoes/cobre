@@ -39,6 +39,11 @@
 //! |27 | *(retired — number never reused)* | — | — |
 //! |28 | `lead_stages` anticipated active window spans a stage-cadence transition (adjacent unequal stage durations); `lead_time` is the physically-anchored alternative | `system/thermals.json` | `ModelQuality` (warning) |
 //! |29 | Study supplies an inflow annual component (`inflow_annual_components` non-empty) while `season_map.cycle_type` is not `Monthly` — PAR(p)-A is monthly-exclusive by design | `scenarios/inflow_annual_component.parquet` | `BusinessRuleViolation` |
+//! |30 | PAR lag slots `1..=max_AR_order` (read by the PAR equation at every stage) must have full record/conditioning coverage (`coverage == 1.0`) | `scenarios/inflow_history.parquet` | `BusinessRuleViolation` |
+//! |31 | PAR lag slots `max_AR_order < s <= L_state − n_fin` require the same full coverage (still terminal-reachable); slots `s > L_state − n_fin` are provably never read, so a gap there is advisory only | `scenarios/inflow_history.parquet` | `BusinessRuleViolation` / `ModelQuality` (warning) |
+//! |32 | A `recent_observations` conditioning window extends past the study start, into the solved study itself | `initial_conditions.json` | `InvalidValue` |
+//! |33 | The in-progress period `[period_start, study_start)` is covered strictly between 0 and 1 | `scenarios/inflow_history.parquet` | `ModelQuality` (warning) |
+//! |34 | The first study stage's season is unresolvable (no `season_map`, no `season_id`, or an unmatched id) while PAR seeding is active | `initial_conditions.json` | `ModelQuality` (warning) |
 //!
 //! ## Layer 5b rules (stages, penalties, and scenario domain) — `validate_semantic_stages_penalties_scenarios`
 //!
@@ -85,6 +90,7 @@ use super::{ValidationContext, schema::ParsedData};
 mod constraints;
 mod correlation;
 mod hydro;
+mod inflow_seeding;
 mod pumping;
 mod scenarios;
 mod season;
@@ -115,7 +121,8 @@ pub(crate) fn validate_semantic_hydro_thermal(data: &ParsedData, ctx: &mut Valid
     constraints::check_per_block_storage_interior_reference(data, ctx);
     pumping::check_pumping_semantics(data, ctx);
     travel_time::validate_travel_time(data, ctx);
-    travel_time::check_annual_component_monthly_only(data, ctx);
+    inflow_seeding::validate_inflow_seeding(data, ctx);
+    inflow_seeding::check_annual_component_monthly_only(data, ctx);
 }
 
 // ── validate_semantic_stages_penalties_scenarios ──────────────────────────────

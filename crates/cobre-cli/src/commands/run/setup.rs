@@ -44,6 +44,7 @@ use cobre_sddp::{
 use cobre_solver::active_solver_name;
 use cobre_solver::active_solver_version;
 use cobre_stochastic::ClassSchemes;
+use cobre_stochastic::DerivedInflowSeeds;
 use cobre_stochastic::HistoricalScenarioLibrary;
 use cobre_stochastic::PrecomputedPar;
 use cobre_stochastic::derive_inflow_seeds;
@@ -541,19 +542,16 @@ fn rebuild_historical_library_non_root(
             season_map_for_transitions,
             downstream_par_order,
         );
-        let derived_lag_values = match study_stages.first() {
-            None => Vec::new(),
-            Some(first_stage) => {
-                derive_inflow_seeds(
-                    system.inflow_history(),
-                    &system.initial_conditions().recent_observations,
-                    system.hydros(),
-                    first_stage,
-                    season_map_for_transitions,
-                    max_order,
-                )
-                .lag_values
-            }
+        let derived_inflow_seeds = match study_stages.first() {
+            None => DerivedInflowSeeds::zero(hydro_ids.len(), max_order),
+            Some(first_stage) => derive_inflow_seeds(
+                system.inflow_history(),
+                &system.initial_conditions().recent_observations,
+                system.hydros(),
+                first_stage,
+                season_map_for_transitions,
+                max_order,
+            ),
         };
         standardize_historical_windows(
             &mut lib,
@@ -563,8 +561,10 @@ fn rebuild_historical_library_non_root(
             &par,
             &window_years,
             system.policy_graph().season_map.as_ref(),
-            &derived_lag_values,
+            &derived_inflow_seeds.lag_values,
             max_order,
+            &derived_inflow_seeds.accum,
+            &derived_inflow_seeds.weight,
             &stage_lag_transitions,
             downstream_par_order,
         );

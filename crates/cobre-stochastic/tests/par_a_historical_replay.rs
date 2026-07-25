@@ -169,6 +169,8 @@ fn par_a_historical_replay_roundtrip() {
         None,
         &past_values_m3s,
         max_order,
+        &[],
+        &[],
         &transitions,
         0,
     );
@@ -275,6 +277,8 @@ fn t2_derived_seed_differs_from_window_lags_roundtrip() {
         None,
         &past_values_m3s,
         max_order,
+        &[],
+        &[],
         &transitions,
         0,
     );
@@ -371,6 +375,8 @@ fn t3_ar0_par_a_roundtrip() {
         None,
         &past_values_m3s,
         max_order,
+        &[],
+        &[],
         &transitions,
         0,
     );
@@ -475,6 +481,8 @@ fn t4_derived_seed_shorter_than_max_order_roundtrip() {
         None,
         &derived_lag_values,
         1,
+        &[],
+        &[],
         &transitions,
         0,
     );
@@ -574,6 +582,8 @@ fn t5_two_windows_shared_derived_seed_roundtrip() {
         None,
         &past_values_m3s,
         max_order,
+        &[],
+        &[],
         &transitions,
         0,
     );

@@ -2311,6 +2311,8 @@ fn differential_lag_chain_forward_external_historical_agree_at_quarterly_transit
         &fx.par,
         &derived_lag_values,
         1,
+        &[],
+        &[],
         &fx.transitions,
         1,
     );
@@ -2341,6 +2343,8 @@ fn differential_lag_chain_forward_external_historical_agree_at_quarterly_transit
         None,
         &derived_lag_values,
         1,
+        &[],
+        &[],
         &fx.transitions,
         1,
     );
@@ -2450,6 +2454,8 @@ fn opening_tree_historical_standardization_ring_aware_eta_requires_derived_downs
         None,
         &derived_lag_values,
         1,
+        &[],
+        &[],
         &fx.transitions,
         derived,
     );
@@ -2466,6 +2472,8 @@ fn opening_tree_historical_standardization_ring_aware_eta_requires_derived_downs
         None,
         &derived_lag_values,
         1,
+        &[],
+        &[],
         &fx.transitions,
         0,
     );

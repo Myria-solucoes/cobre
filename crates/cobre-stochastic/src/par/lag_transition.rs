@@ -307,6 +307,15 @@ mod tests {
         Block, BlockMode, NoiseMethod, ScenarioSourceConfig, SeasonCycleType, SeasonDefinition,
         SeasonMap, Stage, StageRiskConfig, StageStateConfig,
     };
+    use cobre_core::{
+        EntityId, Hydro, InflowHistoryRow, RecentObservation,
+        entities::hydro::{HydroGenerationModel, HydroPenalties},
+    };
+
+    use crate::par::lag_kernel::{
+        DownstreamLagAccum, EntityMajor, PrimaryLagAccum, advance_lag_chain,
+    };
+    use crate::seeds::{DerivedInflowSeeds, derive_inflow_seeds};
 
     fn monthly_season_map() -> SeasonMap {
         let seasons: Vec<SeasonDefinition> = (0..12u32)
@@ -1138,5 +1147,206 @@ mod tests {
         );
         assert_eq!(groups[0], 0);
         assert_eq!(groups[1], 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Seeded weekly-to-monthly finalize (item 9, RV0/RV1 fixtures)
+    // -----------------------------------------------------------------------
+
+    fn make_hydro(id: i32) -> Hydro {
+        Hydro {
+            id: EntityId(id),
+            name: format!("H{id}"),
+            operational_start_date: d(2020, 1, 1),
+            bus_id: EntityId(1),
+            downstream_id: None,
+            travel_time_hours: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 100.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 100.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: HydroPenalties {
+                spillage_cost: 0.0,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 0.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+        }
+    }
+
+    /// Finalizes `derived`'s `accum`/`weight` seed through `stage_lag_transitions`
+    /// for a single entity, accumulating `realized_per_stage[i]` at stage `i`;
+    /// returns the resulting lag-1 value.
+    fn finalize_seeded_single_entity(
+        derived: &DerivedInflowSeeds,
+        stage_lag_transitions: &[StageLagTransition],
+        realized_per_stage: &[f64],
+    ) -> f64 {
+        let mut lag_state = vec![0.0_f64; 1];
+        let mut accumulator = derived.accum.clone();
+        let mut weight_accum = derived.weight.clone();
+        let incoming_lags = vec![0.0_f64; 1];
+        let mut downstream_accumulator: Vec<f64> = Vec::new();
+        let mut downstream_weight_accum = 0.0_f64;
+        let mut completed_lags: Vec<f64> = Vec::new();
+        let mut n_completed = 0_usize;
+
+        for (t, &realized) in realized_per_stage.iter().enumerate() {
+            let mut primary = PrimaryLagAccum {
+                accumulator: &mut accumulator,
+                weight_accum: &mut weight_accum,
+            };
+            let mut downstream = DownstreamLagAccum {
+                accumulator: &mut downstream_accumulator,
+                weight_accum: &mut downstream_weight_accum,
+                completed_lags: &mut completed_lags,
+                n_completed: &mut n_completed,
+                par_order: 0,
+            };
+            advance_lag_chain(
+                EntityMajor {
+                    entity_count: 1,
+                    max_order: 1,
+                },
+                &mut lag_state,
+                &incoming_lags,
+                &[realized],
+                &stage_lag_transitions[t],
+                &mut primary,
+                &mut downstream,
+            );
+        }
+
+        lag_state[0]
+    }
+
+    /// Four weekly-shaped stages fully covering April 2026, study starting
+    /// April 4 (a 3-day pre-study record seeds the in-progress accumulator).
+    #[test]
+    fn test_seeded_weekly_to_monthly_finalize_values_exact() {
+        let season_map = monthly_season_map();
+        let hydro_id = EntityId(1);
+        let hydros = vec![make_hydro(1)];
+
+        let stages = vec![
+            make_stage(0, d(2026, 4, 4), d(2026, 4, 11), Some(3)),
+            make_stage(1, d(2026, 4, 11), d(2026, 4, 18), Some(3)),
+            make_stage(2, d(2026, 4, 18), d(2026, 4, 25), Some(3)),
+            make_stage(3, d(2026, 4, 25), d(2026, 5, 1), Some(3)),
+        ];
+        let first_stage = stages[0].clone();
+
+        let record = vec![InflowHistoryRow {
+            hydro_id,
+            start_date: d(2026, 4, 1),
+            end_date: d(2026, 4, 4),
+            value_m3s: 210.0,
+        }];
+
+        let derived = derive_inflow_seeds(&record, &[], &hydros, &first_stage, &season_map, 0);
+        assert!(
+            derived.weight[0] > 0.0 && derived.weight[0] < 1.0,
+            "the pre-study seed must be a genuine partial-coverage fraction, \
+             got weight={}",
+            derived.weight[0]
+        );
+
+        let stage_lag_transitions = precompute_stage_lag_transitions(&stages, &season_map, 0);
+        assert!(
+            stage_lag_transitions[..3]
+                .iter()
+                .all(|t| !t.finalize_period),
+            "only the last weekly stage may finalize April's monthly lag"
+        );
+        assert!(
+            stage_lag_transitions[3].finalize_period,
+            "the last weekly stage must finalize April's monthly lag"
+        );
+
+        let realized = [400.0, 420.0, 440.0, 460.0];
+        let finalized = finalize_seeded_single_entity(&derived, &stage_lag_transitions, &realized);
+
+        let expected = (210.0 * 3.0 + 400.0 * 7.0 + 420.0 * 7.0 + 440.0 * 7.0 + 460.0 * 6.0) / 30.0;
+        assert_eq!(
+            finalized, expected,
+            "seeded weekly-to-monthly finalize must equal the exact \
+             day-weighted average across the pre-study seed and the four \
+             weekly stages"
+        );
+    }
+
+    /// RV1: the same four weekly-shaped stages, but the seed is a single
+    /// elapsed-week conditioning window straddling the March/April boundary
+    /// (4 March days + 3 April days) instead of a pre-cut record row —
+    /// exercising item 3's straddling-window contract (only the
+    /// April-overlapping days seed the accumulator) through seed derivation.
+    #[test]
+    fn test_rv1_elapsed_week_conditioning_with_straddle() {
+        let season_map = monthly_season_map();
+        let hydro_id = EntityId(1);
+        let hydros = vec![make_hydro(1)];
+
+        let stages = vec![
+            make_stage(0, d(2026, 4, 4), d(2026, 4, 11), Some(3)),
+            make_stage(1, d(2026, 4, 11), d(2026, 4, 18), Some(3)),
+            make_stage(2, d(2026, 4, 18), d(2026, 4, 25), Some(3)),
+            make_stage(3, d(2026, 4, 25), d(2026, 5, 1), Some(3)),
+        ];
+        let first_stage = stages[0].clone();
+
+        let conditioning = vec![RecentObservation {
+            hydro_id,
+            start_date: d(2026, 3, 28),
+            end_date: d(2026, 4, 4),
+            value_m3s: 220.0,
+        }];
+
+        let derived =
+            derive_inflow_seeds(&[], &conditioning, &hydros, &first_stage, &season_map, 0);
+        let expected_seed_weight = 3.0 * 24.0 / (30.0 * 24.0);
+        assert_eq!(
+            derived.weight[0], expected_seed_weight,
+            "the straddling conditioning window must seed only its 3 \
+             April-overlapping days, not the full 7-day observation"
+        );
+
+        let stage_lag_transitions = precompute_stage_lag_transitions(&stages, &season_map, 0);
+        let realized = [400.0, 420.0, 440.0, 460.0];
+        let finalized = finalize_seeded_single_entity(&derived, &stage_lag_transitions, &realized);
+
+        let expected = (220.0 * 3.0 + 400.0 * 7.0 + 420.0 * 7.0 + 440.0 * 7.0 + 460.0 * 6.0) / 30.0;
+        assert_eq!(
+            finalized, expected,
+            "the elapsed-week straddling conditioning must finalize to the \
+             same exact day-weighted average as an equivalent non-straddling \
+             seed"
+        );
     }
 }

@@ -21,11 +21,12 @@ use crate::SddpError;
 
 /// Build and validate a [`HistoricalScenarioLibrary`] for inflow.
 ///
-/// `derived_lag_values` and `stage_lag_transitions` seed the rolling
-/// η-inversion chain (mirroring `build_external_inflow_library`). Pass the
-/// shared `StudySetup::derived_inflow_seeds` lag values and the pre-computed
-/// transitions so that every forward pass starting from the same derived seed
-/// exactly reconstructs the raw historical observations.
+/// `derived_lag_values`/`derived_accum`/`derived_weight` and
+/// `stage_lag_transitions` seed the rolling η-inversion chain (mirroring
+/// `build_external_inflow_library`). Pass the shared
+/// `StudySetup::derived_inflow_seeds` fields and the pre-computed transitions
+/// so that every forward pass starting from the same derived seed exactly
+/// reconstructs the raw historical observations.
 ///
 /// # Errors
 ///
@@ -41,6 +42,8 @@ pub(crate) fn build_historical_inflow_library(
     season_map: Option<&SeasonMap>,
     derived_lag_values: &[f64],
     l_state: usize,
+    derived_accum: &[f64],
+    derived_weight: &[f64],
     stage_lag_transitions: &[StageLagTransition],
     user_pool: Option<&HistoricalYears>,
     forward_passes: u32,
@@ -74,6 +77,8 @@ pub(crate) fn build_historical_inflow_library(
         season_map,
         derived_lag_values,
         l_state,
+        derived_accum,
+        derived_weight,
         stage_lag_transitions,
         downstream_par_order,
     );
@@ -95,6 +100,9 @@ pub(crate) fn build_historical_inflow_library(
 /// # Errors
 ///
 /// Returns `SddpError::Stochastic` on validation failure.
+// Rationale: mirrors standardize_external_inflow's own arity; a context
+// struct would just relocate the arity, not reduce it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_external_inflow_library(
     external_rows: &[ExternalScenarioRow],
     hydro_ids: &[EntityId],
@@ -102,6 +110,8 @@ pub(crate) fn build_external_inflow_library(
     par: &PrecomputedPar,
     derived_lag_values: &[f64],
     l_state: usize,
+    derived_accum: &[f64],
+    derived_weight: &[f64],
     stage_lag_transitions: &[StageLagTransition],
     forward_passes: u32,
     downstream_par_order: usize,
@@ -148,6 +158,8 @@ pub(crate) fn build_external_inflow_library(
         par,
         derived_lag_values,
         l_state,
+        derived_accum,
+        derived_weight,
         stage_lag_transitions,
         downstream_par_order,
     );

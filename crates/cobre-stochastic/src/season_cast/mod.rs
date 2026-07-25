@@ -744,6 +744,47 @@ mod tests {
     }
 
     #[test]
+    fn test_straddling_window_contributes_each_day_once() {
+        let april = april_2026();
+        let may = SeasonPeriodWindow {
+            start: NaiveDate::from_ymd_opt(2026, 5, 1).unwrap(),
+            end: NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
+            hours: 31.0 * 24.0,
+        };
+        let window_start = NaiveDate::from_ymd_opt(2026, 4, 25).unwrap();
+        let window_end = NaiveDate::from_ymd_opt(2026, 5, 8).unwrap();
+        let value = 350.0;
+        let straddling = [RealizedWindow {
+            start_date: window_start,
+            end_date: window_end,
+            value_m3s: value,
+        }];
+        let window_total_hours =
+            f64::from(u32::try_from((window_end - window_start).num_days()).unwrap()) * 24.0;
+
+        let april_projection = cast(&straddling, &april);
+        let may_projection = cast(&straddling, &may);
+
+        let april_overlap_hours = april_projection.coverage * april.hours;
+        let may_overlap_hours = may_projection.coverage * may.hours;
+        assert_eq!(
+            april_overlap_hours + may_overlap_hours,
+            window_total_hours,
+            "each day of the straddling window must contribute to exactly one \
+             period: overlap hours must sum to the window's total, no double-count"
+        );
+
+        let april_partial = april_overlap_hours * april_projection.value;
+        let may_partial = may_overlap_hours * may_projection.value;
+        assert_eq!(
+            april_partial + may_partial,
+            window_total_hours * value,
+            "the two per-period partial values must sum to the window's \
+             day-weighted total"
+        );
+    }
+
+    #[test]
     fn test_cast_out_of_period_window_contributes_zero() {
         let period = april_2026();
         let march_window = [RealizedWindow {

@@ -339,13 +339,13 @@ fn test_inflow_history_wired_into_system() {
     }
 
     let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-    let mut hydro_ids: Vec<i32> = Vec::with_capacity(360);
-    let mut start_dates: Vec<i32> = Vec::with_capacity(360);
-    let mut end_dates: Vec<i32> = Vec::with_capacity(360);
-    let mut values: Vec<f64> = Vec::with_capacity(360);
+    let mut hydro_ids: Vec<i32> = Vec::with_capacity(864);
+    let mut start_dates: Vec<i32> = Vec::with_capacity(864);
+    let mut end_dates: Vec<i32> = Vec::with_capacity(864);
+    let mut values: Vec<f64> = Vec::with_capacity(864);
 
     for hid in 1_i32..=3 {
-        for year in 2000_i32..=2009 {
+        for year in 2000_i32..=2023 {
             for month in 1_u32..=12 {
                 let start = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
                 let end = start.checked_add_months(chrono::Months::new(1)).unwrap();
@@ -383,8 +383,8 @@ fn test_inflow_history_wired_into_system() {
 
     assert_eq!(
         system.inflow_history().len(),
-        360,
-        "system.inflow_history() must have 360 rows (3 hydros × 10 years × 12 months)"
+        864,
+        "system.inflow_history() must have 864 rows (3 hydros × 24 years × 12 months)"
     );
     for row in system.inflow_history() {
         assert!(

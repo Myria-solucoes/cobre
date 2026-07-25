@@ -9,6 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0]
+
+### Changed
+
+- **BREAKING — `scenarios/inflow_history.parquet` is now windowed, and the
+  legacy point-dated layout is rejected outright.** Every row carries
+  `hydro_id`, `start_date` (inclusive), `end_date` (exclusive), and
+  `value_m3s` — the mean inflow observed over that window — replacing the
+  previous single-`date`-per-row layout; windowed `inflow_history` is the
+  sole record layout the loader accepts. A file still carrying the legacy
+  `date` column is rejected at load, with no inference or conversion path
+  back to the windowed form — every case must re-emit its history as dated
+  windows before it will load.
+
+### Removed
+
+- **BREAKING — `past_inflows` is gone from `initial_conditions.json`.** The
+  positional `past_inflows` array — backed by the `HydroPastInflows` type,
+  which paired a raw per-lag value list with a parallel `season_ids` array —
+  is removed entirely, along with its dedicated coverage and season-id
+  validation rules. An `initial_conditions.json` still carrying `past_inflows`
+  is rejected at load: the file's existing deny-unknown-field contract turns
+  the field into a named parse error rather than a silent partial load.
+  Seeding the PAR lag chain and the mid-period accumulator from history no
+  longer reads a positional array at all — it derives from the windowed
+  `inflow_history` record above, shadowed day-wise by `recent_observations`
+  wherever the two overlap.
+
+### Fixed
+
+- **The PAR lag-slot and mid-period accumulator seed derivation is
+  corrected, and any case that supplied `recent_observations` now trains
+  against different — and correct — seed values.** The previous derivation
+  mixed an inflow value scaled by raw observation hours against a stage
+  weight scaled by the *fraction* of the period observed — an hours-scale
+  numerator against a fraction-scale weight — inflating the seeded share of
+  the most-recent lag by a factor on the order of the observation period's
+  own hour count, and averaged one scalar weight across every hydro instead
+  of weighting each hydro by its own observed coverage. The derivation now
+  casts the layered `inflow_history` record and `recent_observations`
+  conditioning through one coverage-normalized, day-weighted operator per
+  hydro, and an under-covered lag slot or a partially-covered mid-period
+  window is now flagged or rejected at load instead of silently seeding a
+  wrong value. A case with no `recent_observations` reproduces its pre-fix
+  training trace bit-exactly; a case that supplied it gets corrected seed
+  values and can therefore retrain to a different trajectory. No released
+  version of the conversion tooling ever emitted `recent_observations`, so
+  this is a bug fix, not a compatibility break — no input migration is
+  owed.
+
 ## [0.12.0] - 2026-07-21
 
 ### Added

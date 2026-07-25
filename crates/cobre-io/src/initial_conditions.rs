@@ -9,8 +9,11 @@
 //!
 //! - `storage` — initial reservoir volumes for operating hydros (hm³).
 //! - `filling_storage` — initial reservoir volumes for filling hydros (hm³).
-//! - `recent_observations` — observed inflow data for partial periods before
-//!   the study start (m³/s per date range per hydro). Optional; defaults to an
+//! - `recent_observations` — the conditioning layer over the windowed
+//!   `inflow_history` record ([`crate::scenarios::parse_inflow_history`]):
+//!   observed inflow data for partial periods before the study start (m³/s
+//!   per date range per hydro), shadowing the record day-wise wherever both
+//!   cover the same date (the two never blend). Optional; defaults to an
 //!   empty array when absent.
 //! - `past_anticipated_commitments` — committed MW values for each anticipated
 //!   thermal plant, ordered by delivery stage ascending. Optional; defaults to

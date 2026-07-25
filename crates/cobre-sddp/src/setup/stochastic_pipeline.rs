@@ -20,6 +20,7 @@ use cobre_io::scenarios::validate_noise_openings;
 use cobre_io::validate_structure;
 use cobre_stochastic::BlockFactorPair;
 use cobre_stochastic::ClassSchemes;
+use cobre_stochastic::DerivedInflowSeeds;
 use cobre_stochastic::HistoricalScenarioLibrary;
 use cobre_stochastic::PrecomputedPar;
 use cobre_stochastic::build_stochastic_context;
@@ -234,19 +235,16 @@ fn build_opening_tree_library(
         derive_downstream_par_order(&study_stages, max_order, season_map_ref);
     let stage_lag_transitions =
         precompute_stage_lag_transitions(&study_stages, effective_season_map, downstream_par_order);
-    let derived_lag_values = match study_stages.first() {
-        None => Vec::new(),
-        Some(first_stage) => {
-            derive_inflow_seeds(
-                system.inflow_history(),
-                &system.initial_conditions().recent_observations,
-                system.hydros(),
-                first_stage,
-                effective_season_map,
-                max_order,
-            )
-            .lag_values
-        }
+    let derived_inflow_seeds = match study_stages.first() {
+        None => DerivedInflowSeeds::zero(hydro_ids.len(), max_order),
+        Some(first_stage) => derive_inflow_seeds(
+            system.inflow_history(),
+            &system.initial_conditions().recent_observations,
+            system.hydros(),
+            first_stage,
+            effective_season_map,
+            max_order,
+        ),
     };
     standardize_historical_windows(
         &mut lib,
@@ -256,8 +254,10 @@ fn build_opening_tree_library(
         &par,
         &window_years,
         season_map_ref,
-        &derived_lag_values,
+        &derived_inflow_seeds.lag_values,
         max_order,
+        &derived_inflow_seeds.accum,
+        &derived_inflow_seeds.weight,
         &stage_lag_transitions,
         downstream_par_order,
     );

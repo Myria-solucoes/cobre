@@ -2,7 +2,9 @@
 //! observation windows per hydro.
 //!
 //! [`parse_inflow_history`] reads `scenarios/inflow_history.parquet` and
-//! returns a sorted `Vec<InflowHistoryRow>`.
+//! returns a sorted `Vec<InflowHistoryRow>`. These windows are the
+//! default-seeding record [`cobre_stochastic::derive_inflow_seeds`] casts
+//! from, layered under `recent_observations` conditioning.
 //!
 //! ## Parquet schema (spec SS2.4)
 //!

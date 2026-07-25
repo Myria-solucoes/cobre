@@ -610,6 +610,74 @@ mod tests {
         }
     }
 
+    /// A seeded accumulator (mirroring `derive_inflow_seeds`'s `accum = rate *
+    /// coverage`, `crates/cobre-stochastic/src/seeds.rs`) for a 3-day
+    /// conditioning window at 500 m3/s out of a 30-day month, carried through
+    /// the finalize where the remaining 27 days complete at 480 m3/s — the
+    /// seed-unit-bug killer: an accumulator seeded in raw hours (or days) but
+    /// divided by the wrong denominator would miss this exact average.
+    #[test]
+    fn test_finalized_lag1_mixes_conditioning_and_completing_month_exactly() {
+        let entity_count = 1;
+        let max_order = 1;
+        let layout = LagMajor {
+            entity_count,
+            max_order,
+        };
+
+        let conditioning_rate = 500.0_f64;
+        let conditioning_hours = 3.0 * 24.0;
+        let completing_rate = 480.0_f64;
+        let completing_hours = 27.0 * 24.0;
+        let month_hours = 30.0 * 24.0;
+
+        let conditioning_weight = conditioning_hours / month_hours;
+        let completing_weight = completing_hours / month_hours;
+
+        let incoming_lags = vec![0.0; entity_count];
+        let realized = [completing_rate];
+
+        let mut lag_state = vec![0.0; entity_count];
+        let mut accumulator = vec![conditioning_rate * conditioning_weight];
+        let mut weight_accum = vec![conditioning_weight];
+        let mut downstream_accumulator: Vec<f64> = Vec::new();
+        let mut downstream_weight_accum = 0.0;
+        let mut completed_lags: Vec<f64> = Vec::new();
+        let mut n_completed = 0;
+
+        let stage_lag = primary_transition(completing_weight, 0.0, true);
+        let mut primary = PrimaryLagAccum {
+            accumulator: &mut accumulator,
+            weight_accum: &mut weight_accum,
+        };
+        let mut downstream = DownstreamLagAccum {
+            accumulator: &mut downstream_accumulator,
+            weight_accum: &mut downstream_weight_accum,
+            completed_lags: &mut completed_lags,
+            n_completed: &mut n_completed,
+            par_order: 0,
+        };
+        advance_lag_chain(
+            layout,
+            &mut lag_state,
+            &incoming_lags,
+            &realized,
+            &stage_lag,
+            &mut primary,
+            &mut downstream,
+        );
+
+        let expected = (conditioning_rate * conditioning_hours
+            + completing_rate * completing_hours)
+            / month_hours;
+        assert_eq!(
+            lag_state[0], expected,
+            "finalized lag-1 must mix the conditioning seed and the completing \
+             month exactly: got {}, expected {expected}",
+            lag_state[0]
+        );
+    }
+
     #[test]
     fn advance_lag_chain_spillover_seeds_next_period_with_raw_value() {
         let entity_count = 2;
@@ -902,6 +970,83 @@ mod tests {
         assert_eq!(
             lag_state, oracle_accumulator,
             "uniform per-entity weight broadcast must match the shared-scalar-weight result bit-for-bit"
+        );
+    }
+
+    /// Per-hydro uneven coverage from a hand-built `DerivedInflowSeeds`:
+    /// entity 0 (hydro A) carries a pre-study seed (`accum`/`weight` from a
+    /// partial in-progress window); entity 1 (hydro B) has no windows at all
+    /// (`accum = weight = 0.0`). Both finalize over the same two in-study
+    /// stages. Hydro B's zero seed weight must not make its finalize divide
+    /// by zero or fall back to a zero-inflow imputation — the
+    /// `weight_accum[entity] > 0.0` finalize gate must still fire once the
+    /// in-study stages contribute weight, averaging hydro B's own realized
+    /// values.
+    #[test]
+    fn test_no_window_hydro_finalizes_to_in_study_average() {
+        let entity_count = 2;
+        let max_order = 1;
+        let layout = LagMajor {
+            entity_count,
+            max_order,
+        };
+
+        let derived = crate::seeds::DerivedInflowSeeds {
+            lag_values: vec![0.0; entity_count],
+            accum: vec![100.0, 0.0],
+            weight: vec![0.4, 0.0],
+        };
+
+        let incoming_lags = vec![0.0; entity_count];
+        let mut lag_state = vec![0.0; entity_count];
+        let mut accumulator = derived.accum.clone();
+        let mut weight_accum = derived.weight.clone();
+        let mut downstream_accumulator: Vec<f64> = Vec::new();
+        let mut downstream_weight_accum = 0.0;
+        let mut completed_lags: Vec<f64> = Vec::new();
+        let mut n_completed = 0;
+
+        // Two in-study stages of the same finalizing period: hydro A reaches
+        // full coverage (seed 0.4 + 0.3 + 0.3 = 1.0); hydro B, with no seed,
+        // reaches only the in-study weight (0.3 + 0.3 = 0.6).
+        let weights = [0.3, 0.3];
+        let realized_per_stage = [[300.0, 150.0], [340.0, 170.0]];
+        for (stage, &w) in weights.iter().enumerate() {
+            let finalize = stage == weights.len() - 1;
+            let stage_lag = primary_transition(w, 0.0, finalize);
+            let realized = realized_per_stage[stage];
+            let mut primary = PrimaryLagAccum {
+                accumulator: &mut accumulator,
+                weight_accum: &mut weight_accum,
+            };
+            let mut downstream = DownstreamLagAccum {
+                accumulator: &mut downstream_accumulator,
+                weight_accum: &mut downstream_weight_accum,
+                completed_lags: &mut completed_lags,
+                n_completed: &mut n_completed,
+                par_order: 0,
+            };
+            advance_lag_chain(
+                layout,
+                &mut lag_state,
+                &incoming_lags,
+                &realized,
+                &stage_lag,
+                &mut primary,
+                &mut downstream,
+            );
+        }
+
+        assert_eq!(
+            lag_state[0], 292.0,
+            "hydro A finalizes to its own coverage-weighted value, mixing the \
+             pre-study seed with the in-study accumulation"
+        );
+        assert_eq!(
+            lag_state[1],
+            f64::midpoint(150.0, 170.0),
+            "the no-window hydro must finalize to the in-study average of its \
+             own realized values, not a zero-inflow imputation"
         );
     }
 }
