@@ -31,7 +31,10 @@ pub mod season_cast;
 pub mod seeds;
 pub mod tree;
 
-pub use context::{ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context};
+pub use context::{
+    ClassSchemes, NoiseEntityOrder, OpeningTreeInputs, StochasticContext, build_stochastic_context,
+    noise_entity_order,
+};
 pub use correlation::{DecomposedCorrelation, GroupFactor, SpectralFactor};
 pub use error::StochasticError;
 pub use noise::quantile::norm_quantile;

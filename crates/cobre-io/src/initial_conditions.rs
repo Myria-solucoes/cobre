@@ -53,7 +53,10 @@
 //!    (mutual exclusion).
 //! 4. Every `start_date` and `end_date` in `recent_observations` parses as
 //!    ISO 8601 (`YYYY-MM-DD`), and `end_date > start_date`.
-//! 5. Every `value_m3s` in `recent_observations` is finite and non-negative.
+//! 5. Every `value_m3s` in `recent_observations` is finite. A negative value is
+//!    accepted — the quantity is incremental inflow, a difference between a
+//!    plant's natural flow and its upstream plants' — and Layer 5a reports the
+//!    count.
 //! 6. For observations with the same `hydro_id`, date ranges do not overlap
 //!    (adjacent ranges where `start == prev_end` are accepted).
 //! 7. No `thermal_id` appears more than once in `past_anticipated_commitments`.
@@ -186,8 +189,8 @@ struct RawRecentObservation {
     /// End of the observation period (exclusive), as an ISO 8601 date
     /// (YYYY-MM-DD). Must be after `start_date`.
     end_date: String,
-    /// Average inflow observed during the period [m³/s]. Must be finite and
-    /// non-negative.
+    /// Average inflow observed during the period [m³/s]. Must be finite;
+    /// negative values are accepted (the quantity is incremental inflow).
     value_m3s: f64,
 }
 
@@ -369,14 +372,16 @@ fn validate_recent_observations_values(
     entries: &[RawRecentObservation],
     path: &Path,
 ) -> Result<(), LoadError> {
+    // Observations carry the same incremental quantity as `inflow_history`, so a
+    // negative value is legitimate for the same reason `parse_inflow_history`
+    // documents; restoring a `< 0.0` reject here rejects production records.
     for (i, entry) in entries.iter().enumerate() {
-        if !entry.value_m3s.is_finite() || entry.value_m3s < 0.0 {
+        if !entry.value_m3s.is_finite() {
             return Err(LoadError::SchemaError {
                 path: path.to_path_buf(),
                 field: format!("recent_observations[{i}].value_m3s"),
                 message: format!(
-                    "recent_observations[{i}].value_m3s must be a finite non-negative number, \
-                     got {}",
+                    "recent_observations[{i}].value_m3s must be a finite number, got {}",
                     entry.value_m3s
                 ),
             });
@@ -1163,13 +1168,10 @@ mod tests {
         }
     }
 
-    // ── AC: negative value_m3s → SchemaError ─────────────────────────────────
+    // ── AC: negative value_m3s loads (incremental inflow) ────────────────────
 
-    /// Given a `recent_observations` entry with `value_m3s: -1.0`,
-    /// `parse_initial_conditions` returns `Err(LoadError::SchemaError)` with
-    /// field containing `"value_m3s"`.
     #[test]
-    fn test_recent_observations_negative_value() {
+    fn test_recent_observations_negative_value_accepted() {
         let json = r#"{
           "storage": [],
           "filling_storage": [],
@@ -1178,16 +1180,9 @@ mod tests {
           ]
         }"#;
         let f = write_json(json);
-        let err = parse_initial_conditions(f.path()).unwrap_err();
-        match &err {
-            LoadError::SchemaError { field, .. } => {
-                assert!(
-                    field.contains("value_m3s"),
-                    "field should contain 'value_m3s', got: {field}"
-                );
-            }
-            other => panic!("expected SchemaError, got: {other:?}"),
-        }
+        let ic = parse_initial_conditions(f.path()).unwrap();
+        assert_eq!(ic.recent_observations.len(), 1);
+        assert!((ic.recent_observations[0].value_m3s - (-1.0)).abs() < f64::EPSILON);
     }
 
     // ── AC: overlapping date ranges → SchemaError ─────────────────────────────

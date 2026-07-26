@@ -56,6 +56,66 @@ use crate::{
 
 pub use crate::tree::opening_tree::OpeningTree;
 
+/// The entity IDs occupying a [`System`]'s noise vector, one block per class.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoiseEntityOrder {
+    /// Hydro IDs, in `System::hydros` canonical order.
+    pub hydro_ids: Vec<EntityId>,
+    /// Buses carrying load noise (`std_mw > 0`), ID-sorted and deduplicated.
+    pub load_bus_ids: Vec<EntityId>,
+    /// NCS IDs, ID-sorted and deduplicated.
+    pub ncs_entity_ids: Vec<EntityId>,
+}
+
+impl NoiseEntityOrder {
+    /// The noise dimension: the three blocks' combined length.
+    #[must_use]
+    pub fn dim(&self) -> usize {
+        self.hydro_ids.len() + self.load_bus_ids.len() + self.ncs_entity_ids.len()
+    }
+
+    /// The three blocks concatenated as `hydro_ids ++ load_bus_ids ++ ncs_entity_ids`.
+    #[must_use]
+    pub fn entity_order(&self) -> Vec<EntityId> {
+        self.hydro_ids
+            .iter()
+            .copied()
+            .chain(self.load_bus_ids.iter().copied())
+            .chain(self.ncs_entity_ids.iter().copied())
+            .collect()
+    }
+}
+
+/// Derive `system`'s canonical noise-entity layout.
+///
+/// Single owner: every site sizing or slicing the noise vector calls this rather
+/// than re-deriving a class block — a second copy that omits the NCS block sizes
+/// the noise vector short, and the samplers' NCS class offset
+/// (`hydro_ids.len() + load_bus_ids.len()`) then indexes past the end of a row.
+/// An NCS with `std = 0` is included: it contributes zero noise after the
+/// transform, and dropping it would shift the canonical entity order.
+#[must_use]
+pub fn noise_entity_order(system: &System) -> NoiseEntityOrder {
+    let sorted_dedup = |mut ids: Vec<EntityId>| {
+        ids.sort_unstable_by_key(|id| id.0);
+        ids.dedup();
+        ids
+    };
+
+    NoiseEntityOrder {
+        hydro_ids: system.hydros().iter().map(|h| h.id).collect(),
+        load_bus_ids: sorted_dedup(
+            system
+                .load_models()
+                .iter()
+                .filter(|m| m.std_mw > 0.0)
+                .map(|m| m.bus_id)
+                .collect(),
+        ),
+        ncs_entity_ids: sorted_dedup(system.ncs_models().iter().map(|m| m.ncs_id).collect()),
+    }
+}
+
 /// Fully-initialized stochastic pipeline components, owned in one place.
 ///
 /// # Examples
@@ -384,33 +444,16 @@ pub fn build_stochastic_context(
         .cloned()
         .collect();
 
-    let hydro_ids: Vec<EntityId> = system.hydros().iter().map(|h| h.id).collect();
-
-    let load_bus_ids: Vec<EntityId> = {
-        let mut ids: Vec<EntityId> = system
-            .load_models()
-            .iter()
-            .filter(|m| m.std_mw > 0.0)
-            .map(|m| m.bus_id)
-            .collect();
-        ids.sort_unstable_by_key(|id| id.0);
-        ids.dedup();
-        ids
-    };
+    let noise_order = noise_entity_order(system);
+    let dim = noise_order.dim();
+    let entity_order = noise_order.entity_order();
+    let NoiseEntityOrder {
+        hydro_ids,
+        load_bus_ids,
+        ncs_entity_ids,
+    } = noise_order;
     let n_load_buses = load_bus_ids.len();
-
-    // An NCS with `std = 0` still occupies a noise dimension (contributing zero
-    // noise after the transform), not excluded — excluding it would shift the
-    // canonical entity-order layout.
-    let ncs_entity_ids: Vec<EntityId> = {
-        let mut ids: Vec<EntityId> = system.ncs_models().iter().map(|m| m.ncs_id).collect();
-        ids.sort_unstable_by_key(|id| id.0);
-        ids.dedup();
-        ids
-    };
     let n_stochastic_ncs = ncs_entity_ids.len();
-
-    let dim = hydro_ids.len() + n_load_buses + n_stochastic_ncs;
 
     let provenance = {
         let opening_tree_prov = if user_opening_tree.is_some() {
@@ -456,13 +499,6 @@ pub fn build_stochastic_context(
     } else {
         DecomposedCorrelation::build(system.correlation())?
     };
-
-    let entity_order: Vec<EntityId> = hydro_ids
-        .iter()
-        .copied()
-        .chain(load_bus_ids.iter().copied())
-        .chain(ncs_entity_ids.iter().copied())
-        .collect();
 
     let opening_tree = if let Some(tree) = user_opening_tree {
         tree
@@ -551,7 +587,7 @@ mod tests {
         entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties},
         scenario::{
             CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, InflowModel,
-            LoadModel, SamplingScheme,
+            LoadModel, NcsModel, SamplingScheme,
         },
         temporal::{
             Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
@@ -559,7 +595,7 @@ mod tests {
         },
     };
 
-    use super::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
+    use super::{ClassSchemes, OpeningTreeInputs, build_stochastic_context, noise_entity_order};
     use crate::StochasticError;
 
     fn make_stage(index: usize, id: i32, branching_factor: usize) -> Stage {
@@ -1140,6 +1176,56 @@ mod tests {
             "dim must equal n_hydros + n_load_buses + n_ncs = 2 + 1 + 0"
         );
         assert_eq!(ctx.n_load_buses(), 1, "one load bus with std_mw > 0");
+    }
+
+    /// A reader that sizes the noise vector without the NCS block leaves the
+    /// samplers' NCS class offset indexing past the end of a row.
+    #[test]
+    fn noise_entity_order_counts_every_ncs_including_zero_std() {
+        let system = SystemBuilder::new()
+            .buses(vec![make_bus(0), make_bus(10)])
+            .hydros(vec![make_hydro(2), make_hydro(1)])
+            .stages(vec![make_stage(0, 0, 3)])
+            .inflow_models(vec![
+                make_inflow_model(1, 0, 30.0, vec![]),
+                make_inflow_model(2, 0, 20.0, vec![]),
+            ])
+            .load_models(vec![
+                make_load_model(10, 0, 100.0, 10.0),
+                make_load_model(0, 0, 50.0, 0.0),
+            ])
+            .ncs_models(vec![
+                NcsModel {
+                    ncs_id: EntityId(21),
+                    stage_id: 0,
+                    mean: 0.8,
+                    std: 0.0,
+                },
+                NcsModel {
+                    ncs_id: EntityId(20),
+                    stage_id: 0,
+                    mean: 0.7,
+                    std: 0.1,
+                },
+            ])
+            .correlation(identity_correlation(&[1, 2]))
+            .build()
+            .unwrap();
+
+        let order = noise_entity_order(&system);
+
+        assert_eq!(order.dim(), 5, "2 hydros + 1 stochastic load bus + 2 NCS");
+        assert_eq!(
+            order.entity_order(),
+            vec![
+                EntityId(1),
+                EntityId(2),
+                EntityId(10),
+                EntityId(20),
+                EntityId(21)
+            ],
+            "blocks concatenate as hydros ++ load buses ++ NCS, each canonically ordered"
+        );
     }
 
     /// AC: system with hydros only produces `dim` = `n_hydros` and `n_load_buses` = 0.

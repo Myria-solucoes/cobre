@@ -34,6 +34,13 @@ Known accepted cost of this ordering: DECOMP output-schema additions
 current hand-mirrored CLI + Python writer lists — each pays the double-mirror
 tax until 0a's shared orchestration entry point exists.
 
+**Paper-cut inbox:** `plans/conversion-found-improvements.md` tracks cobre
+limitations surfaced by real-deck conversion (zero block factors,
+availability-fraction float bound, snappy-less parquet build, mandatory
+empty `lines.json`) — each backed by an explicitly-interim bridge
+workaround with a removal condition; sweep it when touching the affected
+surfaces.
+
 ## Queued — generalization refinement (behind the DECOMP track)
 
 1. **Schema design (headline when resumed)** — the `study` block, the D15
@@ -77,10 +84,24 @@ namespace disambiguation (`bridge-D<n>` ≠ roadmap `D<n>`) in
 3. **bridge-D8** — `state_space.inflow_lag_depth` first-class declaration;
    `L_state = max(AR order, declared depth)`; activeness from declaration;
    crisp boundary-cut-depth validation error.
-4. **bridge-D9 / W2 — unit groups, staged** — Phase 0 optional schema +
-   bit-parity; Phase 1 cobre-computed per-group capability gated on parity
-   with the bridge's head-corrected bounds; nullable `block_id` column on
-   bounds parquets (also settles per-block thermal capacity).
+4. **bridge-D9 / W2 — unit groups, staged** — **Phase 0 is now a written
+   epic: `plans/blocks-and-units-epic.md`** (local, untracked; target
+   v0.14.0, 9 tickets across the block axis and the group axis, five
+   decisions listed for ratification). Phase 1 — cobre-computed per-group
+   capability from unit nominals, gated on parity with the bridge's
+   head-corrected bounds — stays a separate epic and is explicitly out of
+   that document's scope, with its schema and precedence slots reserved.
+   Phase 0 covers the nullable `block_id` column on bounds parquets (also
+   settling per-block thermal capacity) and activates the column that is
+   parsed and silently dropped today.
+   _Additions 2026-07-24 (from the decoded Itaipu `RI` records + the
+   contract decision, bridge `decomp-converter-core.md` §1.4/§1.5):_
+   (a) hydro generation bounds need a **group axis** —
+   `(hydro_id, unit_group_id, stage_id, block_id?)` min/max MW — because
+   the 50/60 Hz floors genuinely vary per stage _and_ per block (the 50 Hz
+   floor = ANDE load + committed HVDC flow); (b) `contract_bounds.parquet`
+   joins the same nullable `block_id` convention (per-block contract
+   limits are supported, no aggregation fallback).
 5. ~~**W1** — `recent_observations` seeding under Weekly/Custom cycles~~ —
    **superseded 2026-07-24** by the windowed inflow epic (which found the
    underlying seed path critically defective, not merely cycle-limited; see

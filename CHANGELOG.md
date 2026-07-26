@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A negative realized inflow is accepted again, in both
+  `scenarios/inflow_history.parquet` and `initial_conditions.json`'s
+  `recent_observations`.** Both parsers reject only non-finite values;
+  `value_m3s < 0.0` loads. The quantity is _incremental_ inflow — a plant's
+  natural flow minus its upstream plants' — so a negative window is real
+  hydrology (a reach that loses water over the window), and the LP already
+  prices it through the inflow non-negativity slack. Semantic validation
+  reports one warning per file naming the negative count and the most
+  negative value with its hydro, so a genuinely sign-flipped series still
+  stands out. Any file that loaded before still loads.
+
 - **BREAKING — `scenarios/inflow_history.parquet` is now windowed, and the
   legacy point-dated layout is rejected outright.** Every row carries
   `hydro_id`, `start_date` (inclusive), `end_date` (exclusive), and
@@ -39,11 +50,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A user-supplied `scenarios/noise_openings.parquet` no longer panics a
+  study that has non-controllable sources.** The reader sized the opening
+  tree at `n_hydros + n_load_buses`, omitting the NCS block, while the
+  samplers slice that same tree at the NCS class offset — so any case with
+  NCS entities indexed past the end of a row and aborted with a slice-range
+  panic instead of a diagnostic, and padding the file to its true width was
+  rejected by the same short dimension. The noise-vector layout now has a
+  single owner (`cobre_stochastic::noise_entity_order`) that the reader and
+  the context builder share, so a full-width openings file loads and a
+  genuinely mis-sized one is reported as a dimension mismatch. A study with
+  no NCS entities is unaffected.
+
 - **The PAR lag-slot and mid-period accumulator seed derivation is
   corrected, and any case that supplied `recent_observations` now trains
   against different — and correct — seed values.** The previous derivation
   mixed an inflow value scaled by raw observation hours against a stage
-  weight scaled by the *fraction* of the period observed — an hours-scale
+  weight scaled by the _fraction_ of the period observed — an hours-scale
   numerator against a fraction-scale weight — inflating the seeded share of
   the most-recent lag by a factor on the order of the observation period's
   own hour count, and averaged one scalar weight across every hydro instead

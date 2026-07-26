@@ -135,8 +135,8 @@ pub struct RecentObservation {
     pub start_date: NaiveDate,
     /// End of the observation period (exclusive). Must be after `start_date`.
     pub end_date: NaiveDate,
-    /// Average inflow observed during the period, in m³/s. Must be finite and
-    /// non-negative.
+    /// Average inflow observed during the period, in m³/s. Must be finite;
+    /// negative values are accepted (the quantity is incremental inflow).
     pub value_m3s: f64,
 }
 

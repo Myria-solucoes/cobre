@@ -13,6 +13,7 @@
 //! | 4 | The in-progress period `[period_start, study_start)` is covered strictly between 0 and 1 | `ModelQuality` (warning) |
 //! | 5 | The first study stage's season is unresolvable while PAR seeding is active (`L_state > 0`) | `ModelQuality` (warning) |
 //! | 6 | Study supplies an inflow annual component (`inflow_annual_components` non-empty) while `season_map.cycle_type` is not `Monthly` | `BusinessRuleViolation` |
+//! | 7 | A realized inflow record (`inflow_history` or `recent_observations`) is negative — accepted, since incremental inflow is a difference | `ModelQuality` (warning) |
 
 use std::collections::HashMap;
 
@@ -29,6 +30,52 @@ pub(super) fn validate_inflow_seeding(data: &ParsedData, ctx: &mut ValidationCon
     check_conditioning_window_bound(data, ctx);
     check_inprogress_partial_coverage(data, ctx);
     check_slot_coverage(data, ctx);
+    report_negative_realized_inflows(data, ctx);
+}
+
+/// Row 7: reports realized inflows below zero. One warning per file, naming the
+/// count and the worst offender — a handful of lossy reaches is legitimate
+/// incremental inflow, a sign-flipped series is not, and only the magnitude
+/// separates them.
+fn report_negative_realized_inflows(data: &ParsedData, ctx: &mut ValidationContext) {
+    let mut report = |negatives: Vec<(i32, f64)>, file: &str, field: &str| {
+        let Some((worst_hydro, worst_value)) =
+            negatives.iter().copied().min_by(|a, b| a.1.total_cmp(&b.1))
+        else {
+            return;
+        };
+        let count = negatives.len();
+        ctx.add_warning(
+            ErrorKind::ModelQuality,
+            file,
+            None::<String>,
+            format!(
+                "{count} {field} value(s) are negative (most negative {worst_value} m³/s at \
+                 hydro {worst_hydro}); accepted as incremental inflow, which the LP prices \
+                 through the inflow non-negativity slack"
+            ),
+        );
+    };
+
+    report(
+        data.inflow_history
+            .iter()
+            .filter(|row| row.value_m3s < 0.0)
+            .map(|row| (row.hydro_id.0, row.value_m3s))
+            .collect(),
+        "scenarios/inflow_history.parquet",
+        "inflow_history",
+    );
+    report(
+        data.initial_conditions
+            .recent_observations
+            .iter()
+            .filter(|entry| entry.value_m3s < 0.0)
+            .map(|entry| (entry.hydro_id.0, entry.value_m3s))
+            .collect(),
+        "initial_conditions.json",
+        "recent_observations",
+    );
 }
 
 /// Row 6: rejects a study supplying an inflow annual component
@@ -854,6 +901,93 @@ mod tests {
             !ctx.has_errors(),
             "a Weekly-cycle study with no annual component must not reject, got: {:?}",
             ctx.errors()
+        );
+    }
+
+    // ── Row 7: negative realized inflows ──────────────────────────────────
+
+    fn negative_inflow_data() -> crate::validation::schema::ParsedData {
+        let mut data = make_data(
+            vec![make_hydro(1, None)],
+            vec![],
+            vec![],
+            make_stages_with_seasons(3, true),
+            vec![],
+            vec![],
+        );
+        data.inflow_history = vec![
+            crate::InflowHistoryRow {
+                hydro_id: EntityId::from(1),
+                start_date: d(1999, 11, 1),
+                end_date: d(1999, 12, 1),
+                value_m3s: -12.0,
+            },
+            crate::InflowHistoryRow {
+                hydro_id: EntityId::from(2),
+                start_date: d(1999, 12, 1),
+                end_date: d(2000, 1, 1),
+                value_m3s: -30.0,
+            },
+        ];
+        data.initial_conditions.recent_observations = vec![RecentObservation {
+            hydro_id: EntityId::from(1),
+            start_date: d(2000, 1, 1),
+            end_date: d(2000, 1, 8),
+            value_m3s: -4.0,
+        }];
+        data
+    }
+
+    #[test]
+    fn test_negative_realized_inflows_warn_once_per_file_naming_the_worst() {
+        let data = negative_inflow_data();
+
+        let mut ctx = ValidationContext::new();
+        report_negative_realized_inflows(&data, &mut ctx);
+
+        assert!(
+            !ctx.has_errors(),
+            "negative incremental inflow must warn, never reject, got: {:?}",
+            ctx.errors()
+        );
+        let warnings = ctx.warnings();
+        assert_eq!(
+            warnings.len(),
+            2,
+            "one warning per file, not per row, got: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.kind == ErrorKind::ModelQuality
+                && w.file.ends_with("inflow_history.parquet")
+                && w.message.contains('2')
+                && w.message.contains("-30")
+                && w.message.contains("hydro 2")),
+            "expected the history warning to name the count and the worst offender, got: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.kind == ErrorKind::ModelQuality
+                && w.file.ends_with("initial_conditions.json")
+                && w.message.contains("-4")
+                && w.message.contains("hydro 1")),
+            "expected the observation warning to name its own worst offender, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_non_negative_realized_inflows_produce_no_warning() {
+        let mut data = negative_inflow_data();
+        for row in &mut data.inflow_history {
+            row.value_m3s = 500.0;
+        }
+        data.initial_conditions.recent_observations[0].value_m3s = 0.0;
+
+        let mut ctx = ValidationContext::new();
+        report_negative_realized_inflows(&data, &mut ctx);
+
+        assert!(
+            ctx.warnings().is_empty(),
+            "no negative value must produce no warning, got: {:?}",
+            ctx.warnings()
         );
     }
 }

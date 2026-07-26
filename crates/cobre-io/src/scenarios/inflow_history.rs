@@ -29,7 +29,9 @@
 //!
 //! - All four columns must be present with the correct types.
 //! - `end_date` must be strictly after `start_date`.
-//! - `value_m3s` must be finite and non-negative.
+//! - `value_m3s` must be finite. A negative value is accepted — the quantity is
+//!   incremental inflow, a difference between a plant's natural flow and its
+//!   upstream plants' — and Layer 5a reports the count.
 //! - For a given `hydro_id`, windows must not overlap; adjacent windows
 //!   (`start_date == previous end_date`) are accepted.
 //!
@@ -72,7 +74,7 @@ const LEGACY_LAYOUT_MESSAGE: &str = "scenarios/inflow_history.parquet uses the l
 /// | `start_date`/`end_date` missing, or `date` present   | [`LoadError::SchemaError`] |
 /// | Required column missing or wrong type                | [`LoadError::SchemaError`] |
 /// | `end_date` is not strictly after `start_date`         | [`LoadError::SchemaError`] |
-/// | `value_m3s` is NaN, infinite, or negative             | [`LoadError::SchemaError`] |
+/// | `value_m3s` is NaN or infinite                        | [`LoadError::SchemaError`] |
 /// | Two windows for the same `hydro_id` overlap           | [`LoadError::SchemaError`] |
 ///
 /// # Examples
@@ -137,12 +139,16 @@ pub fn parse_inflow_history(path: &Path) -> Result<Vec<InflowHistoryRow>, LoadEr
                 });
             }
 
+            // A negative value is real hydrology, not corruption: incremental
+            // inflow is a difference (a plant's natural flow minus its upstream
+            // plants'), so restoring a `< 0.0` reject here rejects production
+            // records. Layer 5a reports the count instead.
             let value_m3s = value_col.value(i);
-            if !value_m3s.is_finite() || value_m3s < 0.0 {
+            if !value_m3s.is_finite() {
                 return Err(LoadError::SchemaError {
                     path: path.to_path_buf(),
                     field: format!("inflow_history[{row_idx}].value_m3s"),
-                    message: format!("value must be finite and non-negative, got {value_m3s}"),
+                    message: format!("value must be finite, got {value_m3s}"),
                 });
             }
 
@@ -484,19 +490,14 @@ mod tests {
     }
 
     #[test]
-    fn test_negative_value_m3s_rejected() {
+    fn test_negative_value_m3s_accepted() {
         let (start, end) = month_window(2000, 1);
         let batch = make_batch(&[1], &[start], &[end], &[-1.0]);
         let tmp = write_parquet(&batch);
-        let err = parse_inflow_history(tmp.path()).unwrap_err();
+        let rows = parse_inflow_history(tmp.path()).unwrap();
 
-        match &err {
-            LoadError::SchemaError { field, message, .. } => {
-                assert!(field.contains("value_m3s"));
-                assert!(message.contains("non-negative"), "got: {message}");
-            }
-            other => panic!("expected SchemaError, got: {other:?}"),
-        }
+        assert_eq!(rows.len(), 1);
+        assert!((rows[0].value_m3s - (-1.0)).abs() < f64::EPSILON);
     }
 
     #[test]

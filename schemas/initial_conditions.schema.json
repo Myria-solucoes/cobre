@@ -94,7 +94,7 @@
           "type": "string"
         },
         "value_m3s": {
-          "description": "Average inflow observed during the period [m³/s]. Must be finite and\nnon-negative.",
+          "description": "Average inflow observed during the period [m³/s]. Must be finite;\nnegative values are accepted (the quantity is incremental inflow).",
           "format": "double",
           "type": "number"
         }

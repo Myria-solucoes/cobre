@@ -26,6 +26,7 @@ use cobre_stochastic::PrecomputedPar;
 use cobre_stochastic::build_stochastic_context;
 use cobre_stochastic::derive_inflow_seeds;
 use cobre_stochastic::discover_historical_windows;
+use cobre_stochastic::noise_entity_order;
 use cobre_stochastic::normal::precompute::EntityFactorEntry;
 use cobre_stochastic::par::lag_transition::derive_downstream_par_order;
 use cobre_stochastic::par::lag_transition::precompute_noise_groups;
@@ -71,17 +72,7 @@ fn load_user_opening_tree_inner(
 
     let rows = load_noise_openings(Some(&path))?;
 
-    let n_hydros = system.hydros().len();
-    let mut load_bus_ids: Vec<EntityId> = system
-        .load_models()
-        .iter()
-        .filter(|m| m.std_mw > 0.0)
-        .map(|m| m.bus_id)
-        .collect();
-    load_bus_ids.sort_unstable_by_key(|id| id.0);
-    load_bus_ids.dedup();
-    let n_load_buses = load_bus_ids.len();
-    let expected_dim = n_hydros + n_load_buses;
+    let expected_dim = noise_entity_order(system).dim();
 
     let expected_stages = system.stages().iter().filter(|s| s.id >= 0).count();
     let mut openings_by_stage: BTreeMap<i32, BTreeSet<u32>> = BTreeMap::new();
@@ -275,11 +266,12 @@ fn compute_external_scenario_counts(
     training_source: &ScenarioSource,
 ) -> Option<Vec<usize>> {
     let n_stages = system.stages().iter().filter(|s| s.id >= 0).count();
+    let noise_order = noise_entity_order(system);
 
     let inflow_counts: Option<Vec<usize>> =
         if training_source.inflow_scheme == SamplingScheme::External && n_stages > 0 {
             let external_rows = system.external_scenarios();
-            let n_hydros = system.hydros().len();
+            let n_hydros = noise_order.hydro_ids.len();
             let mut rows_per_stage = vec![0usize; n_stages];
             #[allow(clippy::cast_sign_loss)]
             for row in external_rows {
@@ -300,15 +292,7 @@ fn compute_external_scenario_counts(
     let load_counts: Option<Vec<usize>> =
         if training_source.load_scheme == SamplingScheme::External && n_stages > 0 {
             let external_rows = system.external_load_scenarios();
-            let mut bus_ids: Vec<EntityId> = system
-                .load_models()
-                .iter()
-                .filter(|m| m.std_mw > 0.0)
-                .map(|m| m.bus_id)
-                .collect();
-            bus_ids.sort_unstable_by_key(|id| id.0);
-            bus_ids.dedup();
-            let n_buses = bus_ids.len();
+            let n_buses = noise_order.load_bus_ids.len();
             let mut rows_per_stage = vec![0usize; n_stages];
             #[allow(clippy::cast_sign_loss)]
             for row in external_rows {
@@ -329,10 +313,7 @@ fn compute_external_scenario_counts(
     let ncs_counts: Option<Vec<usize>> =
         if training_source.ncs_scheme == SamplingScheme::External && n_stages > 0 {
             let external_rows = system.external_ncs_scenarios();
-            let mut ncs_ids: Vec<EntityId> = system.ncs_models().iter().map(|m| m.ncs_id).collect();
-            ncs_ids.sort_unstable_by_key(|id| id.0);
-            ncs_ids.dedup();
-            let n_ncs = ncs_ids.len();
+            let n_ncs = noise_order.ncs_entity_ids.len();
             let mut rows_per_stage = vec![0usize; n_stages];
             #[allow(clippy::cast_sign_loss)]
             for row in external_rows {
