@@ -100,8 +100,9 @@ fn fill_storage_columns(
         let storage_lower = if floor_off { 0.0 } else { hb.min_storage_hm3 };
         bufs.col_lower[h_idx] = storage_lower;
         bufs.col_upper[h_idx] = hb.max_storage_hm3;
-        bufs.col_lower[layout.col_storage_in_start() + h_idx] = f64::NEG_INFINITY;
-        bufs.col_upper[layout.col_storage_in_start() + h_idx] = f64::INFINITY;
+        let storage_in_col = layout.col_storage_in_start() + h_idx;
+        bufs.col_lower[storage_in_col] = f64::NEG_INFINITY;
+        bufs.col_upper[storage_in_col] = f64::INFINITY;
         // Interior Sᵏ reuse the outgoing column's EXACT bounds, floor_off included: the
         // frozen-identity chain pins each interior to the inert IC, so a hard floor above
         // IC would reject the pin.
@@ -161,12 +162,10 @@ fn fill_ar_lag_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
 /// Incoming anticipated-ring columns: open `(-INF, +INF)`, left open because pinning
 /// is via `set_col_bounds` at solve time (`fill_col_state_patches`), not an equality row.
 fn fill_anticipated_state_columns(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
-    for slot in 0..layout.k_max {
-        for plant in 0..layout.n_anticipated {
-            let col = layout.col_anticipated_state_start() + slot * layout.n_anticipated + plant;
-            bufs.col_lower[col] = f64::NEG_INFINITY;
-            bufs.col_upper[col] = f64::INFINITY;
-        }
+    let start = layout.col_anticipated_state_start();
+    for col in start..start + layout.k_max * layout.n_anticipated {
+        bufs.col_lower[col] = f64::NEG_INFINITY;
+        bufs.col_upper[col] = f64::INFINITY;
     }
 }
 
@@ -1019,6 +1018,7 @@ mod interior_storage_bound_tests {
     /// the layout reserves only the structural storage families.
     fn operating_hydro() -> Hydro {
         Hydro {
+            unit_groups: Vec::new(),
             id: EntityId(1),
             name: "H1".to_string(),
             operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -1527,6 +1527,7 @@ mod diversion_bound_tests {
     /// model (so the layout reserves no FPHA/evaporation columns).
     fn diverting_hydro() -> Hydro {
         Hydro {
+            unit_groups: Vec::new(),
             id: EntityId(1),
             name: "H1".to_string(),
             operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -1890,6 +1891,7 @@ mod filling_phase_gating_tests {
     /// generation-column gate can be exercised.
     fn hydro(filling: Option<FillingConfig>, entry: Option<i32>, fpha: bool) -> Hydro {
         Hydro {
+            unit_groups: Vec::new(),
             id: EntityId(1),
             name: "H1".to_string(),
             operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -3469,6 +3471,7 @@ mod block_family_slack_tests {
     /// Independent constant-productivity hydro (no FPHA/evaporation columns).
     fn fixture_hydro(id: i32) -> Hydro {
         Hydro {
+            unit_groups: Vec::new(),
             id: EntityId(id),
             name: format!("H{id}"),
             operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -3852,6 +3855,7 @@ mod evaporation_slack_objective_tests {
     /// `identify_evap_hydros` reserves the `EVAP_COLS_PER_HYDRO` triple per block.
     fn evaporating_hydro() -> Hydro {
         Hydro {
+            unit_groups: Vec::new(),
             id: EntityId(1),
             name: "H1".to_string(),
             operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -5736,6 +5740,7 @@ mod hydro_block_bound_tests {
 
     fn fixture_hydro(id: i32, entry_stage_id: Option<i32>) -> Hydro {
         Hydro {
+            unit_groups: Vec::new(),
             id: EntityId(id),
             name: format!("H{id}"),
             operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),

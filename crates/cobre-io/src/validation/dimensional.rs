@@ -337,6 +337,7 @@ mod tests {
         exit_stage_id: Option<i32>,
     ) -> Hydro {
         Hydro {
+            unit_groups: Vec::new(),
             id: EntityId(id),
             name: format!("Hydro {id}"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),

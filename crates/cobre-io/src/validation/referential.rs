@@ -102,7 +102,7 @@ fn check_line_references(data: &ParsedData, ctx: &mut ValidationContext, bus_ids
     }
 }
 
-/// Hydro -> bus, downstream hydro, and diversion references.
+/// Hydro -> bus, downstream hydro, diversion, and unit group bus references.
 fn check_hydro_references(
     data: &ParsedData,
     ctx: &mut ValidationContext,
@@ -150,6 +150,21 @@ fn check_hydro_references(
                         diversion.downstream_id.0
                     ),
                 );
+        }
+
+        for group in &hydro.unit_groups {
+            if group.bus_id != hydro.bus_id && !bus_ids.contains(&group.bus_id.0) {
+                let group_str = format!("{entity_str} unit group {}", group.id.0);
+                ctx.add_error(
+                    ErrorKind::InvalidReference,
+                    "system/hydros.json",
+                    Some(&group_str),
+                    format!(
+                        "{group_str} references non-existent Bus {} via field 'bus_id'",
+                        group.bus_id.0
+                    ),
+                );
+            }
         }
     }
 }
@@ -975,8 +990,8 @@ mod tests {
     use cobre_core::{
         EntityId,
         entities::{
-            DiversionChannel, Hydro, HydroGenerationModel, HydroPenalties, Line,
-            NonControllableSource, PumpingStation, Thermal,
+            Bus, DiversionChannel, Hydro, HydroGenerationModel, HydroPenalties, HydroUnitGroup,
+            Line, NonControllableSource, PumpingStation, Thermal,
         },
         scenario::{CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile},
     };
@@ -1128,7 +1143,8 @@ mod tests {
     }
 
     fn make_hydro(id: i32, bus_id: i32) -> Hydro {
-        Hydro {
+        let mut hydro = Hydro {
+            unit_groups: Vec::new(),
             id: EntityId::from(id),
             name: format!("Hydro_{id}"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -1155,7 +1171,9 @@ mod tests {
             diversion: None,
             filling: None,
             penalties: hydro_penalties(),
-        }
+        };
+        hydro.normalize_unit_groups();
+        hydro
     }
 
     fn make_line(id: i32, source_bus: i32, target_bus: i32) -> Line {
@@ -1392,7 +1410,7 @@ mod tests {
         assert!(inv_ref[0].message.contains("bus_id"));
     }
 
-    /// Hydro with `downstream_id = None` must not produce any error for rule 7.
+    /// Hydro with `downstream_id = None` must not produce any error.
     #[test]
     fn test_hydro_downstream_id_none_no_error() {
         let dir = TempDir::new().unwrap();
@@ -1409,7 +1427,7 @@ mod tests {
         );
     }
 
-    /// Hydro with `diversion = None` must not produce any error for rule 8.
+    /// Hydro with `diversion = None` must not produce any error.
     #[test]
     fn test_hydro_diversion_none_no_error() {
         let dir = TempDir::new().unwrap();
@@ -1449,6 +1467,75 @@ mod tests {
         assert_eq!(inv.len(), 1);
         assert!(inv[0].message.contains("diversion.downstream_id"));
         assert!(inv[0].message.contains("999"));
+    }
+
+    /// Given a two-hydro study with buses `{0, 1}` declared, where hydro 1's
+    /// unit group sits on bus 0 (valid, distinct from its own bus 1) and hydro
+    /// 2's unit group sits on bus 42 (nonexistent), exactly one
+    /// `InvalidReference` is emitted naming hydro 2 and its group, and hydro 1
+    /// produces no finding.
+    #[test]
+    fn test_unit_group_on_nonexistent_bus_is_rejected() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+        data.buses.push(Bus {
+            id: EntityId::from(0),
+            name: "BUS_0".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            deficit_segments: vec![],
+            excess_cost: 100.0,
+        });
+
+        let mut hydro1 = make_hydro(1, 1);
+        hydro1.unit_groups = vec![HydroUnitGroup {
+            id: EntityId::from(4),
+            name: "Group A".to_string(),
+            bus_id: EntityId::from(0), // bus 0 exists, distinct from hydro1's own bus 1
+            min_generation_mw: 0.0,
+            max_generation_mw: 100.0,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+        }];
+
+        let mut hydro2 = make_hydro(2, 1);
+        hydro2.unit_groups = vec![HydroUnitGroup {
+            id: EntityId::from(7),
+            name: "Group B".to_string(),
+            bus_id: EntityId::from(42), // does not exist
+            min_generation_mw: 0.0,
+            max_generation_mw: 100.0,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+        }];
+
+        data.hydros = vec![hydro1, hydro2];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidReference)
+            .collect();
+        assert_eq!(
+            inv.len(),
+            1,
+            "expected exactly 1 InvalidReference, got: {:?}",
+            inv.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        assert!(
+            inv[0].message.contains("Hydro 2 unit group 7"),
+            "message should name Hydro 2 unit group 7, got: {}",
+            inv[0].message
+        );
+        assert!(inv[0].message.contains("Bus 42"));
+        assert!(inv[0].message.contains("bus_id"));
+        assert!(
+            !inv.iter().any(|e| e.message.contains("Hydro 1")),
+            "hydro 1's valid-bus group must produce no finding, got: {:?}",
+            inv.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
     }
 
     /// PumpingStation with valid bus and hydro references produces no error.
@@ -1582,8 +1669,8 @@ mod tests {
         assert!(inv[0].message.contains("bus_id"));
     }
 
-    /// `CorrelationEntity` with invalid inflow, load, and ncs entity references
-    /// produces one `InvalidReference` error per invalid reference.
+    /// `CorrelationEntity` with a dangling inflow reference and one with an
+    /// unknown `entity_type` each produce one `InvalidReference` error.
     #[test]
     fn test_correlation_entity_inflow_invalid_hydro() {
         let dir = TempDir::new().unwrap();
@@ -2134,9 +2221,9 @@ mod tests {
         assert!(inv[0].message.contains("negative"));
     }
 
-    // ── AC-7: AnticipatedDecision referential validation ─────────────────────
+    // ── AnticipatedDecision referential validation ─────────────────────
 
-    /// AC-7: A constraint with `anticipated_decision(99)` where Thermal 99 does
+    /// A constraint with `anticipated_decision(99)` where Thermal 99 does
     /// not exist produces `ErrorKind::InvalidReference` naming Thermal 99 and
     /// including the constraint id in the context.
     #[test]

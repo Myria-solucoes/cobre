@@ -98,6 +98,7 @@ pub struct PenaltiesOverrides<'a> {
 ///     max_turbined_m3s: 50.0,
 ///     min_generation_mw: 0.0,
 ///     max_generation_mw: 50.0,
+///     unit_groups: Vec::new(),
 ///     tailrace: None,
 ///     hydraulic_losses: None,
 ///     efficiency: None,
@@ -473,6 +474,7 @@ mod tests {
     /// Build a `Hydro` with all 11 penalty fields set to the given value.
     fn make_hydro(id: i32, penalty_value: f64) -> Hydro {
         Hydro {
+            unit_groups: Vec::new(),
             id: EntityId::from(id),
             name: format!("Hydro {id}"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -522,6 +524,7 @@ mod tests {
     /// Build a `Hydro` with distinct penalty values for each field.
     fn make_hydro_distinct_penalties(id: i32) -> Hydro {
         Hydro {
+            unit_groups: Vec::new(),
             id: EntityId::from(id),
             name: format!("Hydro {id}"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),

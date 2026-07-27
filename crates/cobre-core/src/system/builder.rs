@@ -320,6 +320,9 @@ impl SystemBuilder {
         sort_canonical(&mut self.buses, |b| b.operational_start_date, |b| b.id.0);
         sort_canonical(&mut self.lines, |l| l.operational_start_date, |l| l.id.0);
         sort_canonical(&mut self.hydros, |h| h.operational_start_date, |h| h.id.0);
+        for hydro in &mut self.hydros {
+            hydro.normalize_unit_groups();
+        }
         sort_canonical(&mut self.thermals, |t| t.operational_start_date, |t| t.id.0);
         sort_canonical(
             &mut self.pumping_stations,
@@ -465,24 +468,24 @@ fn sort_canonical<T>(entities: &mut [T], date: impl Fn(&T) -> NaiveDate, id: imp
 }
 
 #[cfg(test)]
-mod proptests {
+mod tests {
     use super::*;
-    use crate::{
-        Block, BlockMode, ConstraintExpression, ConstraintSense, ContractType, DeficitSegment,
-        HydroGenerationModel, HydroPenalties, NoiseMethod, ScenarioSourceConfig, SlackConfig,
-        StageRiskConfig, StageStateConfig,
-    };
-    use proptest::prelude::*;
+    use crate::{DeficitSegment, HydroGenerationModel, HydroPenalties};
 
-    fn date_early() -> NaiveDate {
-        NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date")
+    fn bus(id: i32) -> Bus {
+        Bus {
+            id: EntityId(id),
+            name: format!("bus-{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 5000.0,
+            }],
+            excess_cost: 0.0,
+        }
     }
 
-    fn date_late() -> NaiveDate {
-        NaiveDate::from_ymd_opt(2024, 2, 1).expect("valid date")
-    }
-
-    fn zero_penalties() -> HydroPenalties {
+    pub(super) fn zero_penalties() -> HydroPenalties {
         HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
@@ -501,6 +504,128 @@ mod proptests {
             evaporation_violation_neg_cost: 0.0,
             inflow_nonnegativity_cost: 0.0,
         }
+    }
+
+    fn hydro_without_groups(
+        id: i32,
+        name: &str,
+        bus_id: i32,
+        min_generation_mw: f64,
+        max_generation_mw: f64,
+        min_turbined_m3s: f64,
+        max_turbined_m3s: f64,
+    ) -> Hydro {
+        Hydro {
+            id: EntityId(id),
+            name: name.to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            bus_id: EntityId(bus_id),
+            downstream_id: None,
+            travel_time_hours: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 1000.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s,
+            max_turbined_m3s,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw,
+            max_generation_mw,
+            unit_groups: Vec::new(),
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: zero_penalties(),
+        }
+    }
+
+    /// Given two hydros with no declared `unit_groups`, differing `bus_id` and
+    /// pairwise-distinct bound values, `build()` materializes for each an implicit
+    /// group carrying its OWN plant's bus, name, and bounds — never the other
+    /// plant's and never a fixed template.
+    #[test]
+    fn test_builder_materializes_implicit_unit_group() {
+        let alpha = hydro_without_groups(1, "AlphaPlant", 10, 10.0, 90.0, 5.0, 200.0);
+        let beta = hydro_without_groups(2, "BetaPlant", 20, 25.0, 150.0, 15.0, 300.0);
+
+        let system = SystemBuilder::new()
+            .buses(vec![bus(10), bus(20)])
+            .hydros(vec![alpha, beta])
+            .build()
+            .expect("valid system");
+
+        let hydros = system.hydros();
+        assert_eq!(hydros.len(), 2);
+
+        let a = &hydros[0];
+        assert_eq!(a.unit_groups.len(), 1);
+        assert_eq!(a.unit_groups[0].id, EntityId(0));
+        assert_eq!(a.unit_groups[0].name, "AlphaPlant");
+        assert_eq!(a.unit_groups[0].bus_id, EntityId(10));
+        assert_eq!(
+            a.unit_groups[0].min_generation_mw.to_bits(),
+            10.0_f64.to_bits()
+        );
+        assert_eq!(
+            a.unit_groups[0].max_generation_mw.to_bits(),
+            90.0_f64.to_bits()
+        );
+        assert_eq!(
+            a.unit_groups[0].min_turbined_m3s.to_bits(),
+            5.0_f64.to_bits()
+        );
+        assert_eq!(
+            a.unit_groups[0].max_turbined_m3s.to_bits(),
+            200.0_f64.to_bits()
+        );
+
+        let b = &hydros[1];
+        assert_eq!(b.unit_groups.len(), 1);
+        assert_eq!(b.unit_groups[0].id, EntityId(0));
+        assert_eq!(b.unit_groups[0].name, "BetaPlant");
+        assert_eq!(b.unit_groups[0].bus_id, EntityId(20));
+        assert_eq!(
+            b.unit_groups[0].min_generation_mw.to_bits(),
+            25.0_f64.to_bits()
+        );
+        assert_eq!(
+            b.unit_groups[0].max_generation_mw.to_bits(),
+            150.0_f64.to_bits()
+        );
+        assert_eq!(
+            b.unit_groups[0].min_turbined_m3s.to_bits(),
+            15.0_f64.to_bits()
+        );
+        assert_eq!(
+            b.unit_groups[0].max_turbined_m3s.to_bits(),
+            300.0_f64.to_bits()
+        );
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::{
+        Block, BlockMode, ConstraintExpression, ConstraintSense, ContractType, DeficitSegment,
+        HydroGenerationModel, NoiseMethod, ScenarioSourceConfig, SlackConfig, StageRiskConfig,
+        StageStateConfig,
+    };
+    use proptest::prelude::*;
+
+    fn date_early() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date")
+    }
+
+    fn date_late() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2024, 2, 1).expect("valid date")
     }
 
     fn bus(id: i32, name: &str, date: NaiveDate) -> Bus {
@@ -534,6 +659,7 @@ mod proptests {
 
     fn hydro(id: i32, name: &str, date: NaiveDate, bus_id: i32) -> Hydro {
         Hydro {
+            unit_groups: Vec::new(),
             id: EntityId(id),
             name: name.to_string(),
             operational_start_date: date,
@@ -559,7 +685,7 @@ mod proptests {
             evaporation_reference_volumes_hm3: None,
             diversion: None,
             filling: None,
-            penalties: zero_penalties(),
+            penalties: super::tests::zero_penalties(),
         }
     }
 

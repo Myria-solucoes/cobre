@@ -54,6 +54,14 @@
 //! |36 | Bound-override row uniqueness per `(entity_id, stage_id, block_id, column)`, across all five bound families (thermal, hydro, line, pumping, contract); a `None` `block_id` is a distinct key from `Some(b)` | `constraints/*_bounds.parquet` | `DuplicateId` |
 //! |37 | `block_id` on a hydro/thermal bound column with no per-block LP variable (hydro storage/filling-rate/withdrawal, thermal cost) | `constraints/{hydro,thermal}_bounds.parquet` | `BusinessRuleViolation` |
 //! |38 | `block_id` on a `thermal_bounds` row targeting an anticipated thermal (commitment decision is stage-level; delivery-stage reconciliation compares per-block bounds) | `constraints/thermal_bounds.parquet` | `BusinessRuleViolation` |
+//! |39 | Hydro unit group `id` unique within its own plant (ids are plant-scoped, not global) | `system/hydros.json` | `DuplicateId` |
+//! |40 | Hydro unit group bounds internally consistent: `min_turbined_m3s <= max_turbined_m3s` and `min_generation_mw <= max_generation_mw`, checked independently | `system/hydros.json` | `InvalidValue` |
+//! |41 | Sum of unit group maxima (`max_turbined_m3s`, `max_generation_mw`, checked independently) must not exceed the plant's own value; checked against the entity declaration only, never against per-stage resolved bounds | `system/hydros.json` | `InvalidValue` |
+//! |42 | Hydro unit group turbined-bound sign: `min_turbined_m3s >= 0` and `max_turbined_m3s >= 0` (mirrors rule 4 at the plant level; `min_generation_mw`/`max_generation_mw` are unguarded for sign at both plant and group level, inherited, not introduced here) | `system/hydros.json` | `InvalidValue` |
+//!
+//! A hydro unit group bounds row referencing a non-existent unit group id is not
+//! yet checked here: the per-stage bound overlay for the group axis does not exist
+//! yet, so that reference check is deferred until it does.
 //!
 //! ## Layer 5b rules (stages, penalties, and scenario domain) — `validate_semantic_stages_penalties_scenarios`
 //!
@@ -123,6 +131,7 @@ pub(crate) fn validate_semantic_hydro_thermal(data: &ParsedData, ctx: &mut Valid
     hydro::check_geometry_monotonicity(data, ctx);
     hydro::check_evaporation_geometry_coverage(data, ctx);
     hydro::check_fpha_constraints(data, ctx);
+    hydro::check_hydro_unit_groups(data, ctx);
     thermal::check_thermal_generation_bounds(data, ctx);
     thermal::check_anticipated_thermals(data, ctx);
     thermal::check_anticipated_cadence_transition(data, ctx);
@@ -140,9 +149,8 @@ pub(crate) fn validate_semantic_hydro_thermal(data: &ParsedData, ctx: &mut Valid
     inflow_seeding::check_annual_component_monthly_only(data, ctx);
 }
 
-/// Performs Layer 5b semantic validation: stage structure, penalty ordering,
-/// and scenario model rules. Every violation is collected into `ctx` before
-/// returning — no rule short-circuits another.
+/// Layer 5b. Every violation is collected into `ctx` before returning — no rule
+/// short-circuits another.
 pub(crate) fn validate_semantic_stages_penalties_scenarios(
     data: &ParsedData,
     ctx: &mut ValidationContext,
@@ -169,3 +177,8 @@ pub(crate) fn validate_semantic_stages_penalties_scenarios(
 const PROB_TOLERANCE: f64 = 1e-6;
 
 const CORR_TOLERANCE: f64 = 1e-9;
+
+/// Absorbs binary rounding when declared group maxima sum to the plant's value in
+/// decimal but not in binary (0.1 + 0.2 > 0.3); a plant declaring no groups is
+/// already exact and is admitted by the strict `>` in `check_hydro_unit_groups`.
+const ENVELOPE_TOLERANCE: f64 = 1e-9;

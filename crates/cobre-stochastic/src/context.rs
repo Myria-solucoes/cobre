@@ -180,6 +180,7 @@ pub fn noise_entity_order(system: &System) -> NoiseEntityOrder {
 /// #         max_turbined_m3s: 100.0,
 /// #         min_generation_mw: 0.0,
 /// #         max_generation_mw: 100.0,
+/// #         unit_groups: Vec::new(),
 /// #         tailrace: None,
 /// #         hydraulic_losses: None,
 /// #         efficiency: None,
@@ -638,6 +639,7 @@ mod tests {
 
     fn make_hydro(id: i32) -> Hydro {
         Hydro {
+            unit_groups: Vec::new(),
             id: EntityId(id),
             name: format!("H{id}"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),

@@ -612,6 +612,7 @@ mod tests {
     /// `entry_stage_id = 4`. With `filling = true` a stage id `< 2` is PreFilling.
     fn noise_hydro(id: i32, filling: bool) -> Hydro {
         Hydro {
+            unit_groups: Vec::new(),
             id: EntityId(id),
             name: format!("H{id}"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),

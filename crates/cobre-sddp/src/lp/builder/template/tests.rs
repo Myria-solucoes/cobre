@@ -233,6 +233,7 @@ fn hydro_penalties_zero() -> HydroPenalties {
 /// Minimal independent (no-downstream) hydro for pumping-station refs.
 fn fixture_hydro(id: i32) -> Hydro {
     Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(id),
         name: format!("H{id}"),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -1972,11 +1973,12 @@ use cobre_solver::StageTemplate;
 /// `1000.0` violation penalties — the fixture the operational-violation
 /// builder tests exercise.
 fn one_hydro_active_violations(n_stages: usize) -> System {
-    use cobre_core::scenario::{InflowModel, LoadModel};
+    use cobre_core::scenario::InflowModel;
 
     let bus = fixture_bus();
 
     let hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(2),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -2177,6 +2179,15 @@ fn csc_entries_for_col(t: &StageTemplate, col: usize) -> Vec<(usize, f64)> {
         .collect()
 }
 
+/// Sum of column `col`'s CSC entries that land on row `row`.
+fn csc_entry_sum(t: &StageTemplate, col: usize, row: usize) -> f64 {
+    csc_entries_for_col(t, col)
+        .iter()
+        .filter(|(r, _)| *r == row)
+        .map(|(_, v)| *v)
+        .sum()
+}
+
 /// Build the active-violations stage-0 `StageLayout` (the owner of the
 /// op-violation row/column ranges) and the matching `StageTemplate` (RHS,
 /// bounds, objective, CSC) from one shared `TemplateBuildCtx`, so the row
@@ -2232,9 +2243,6 @@ fn build_active_violations_layout_and_template() -> (StageLayout<'static>, Stage
     let state = Box::leak(Box::new(state_layout_for(ctx)));
     let stage = &system.stages()[0];
 
-    // `build_single_stage_template` and `StageLayout::new` are deterministic
-    // functions of the same `(ctx, state, stage, 0)`, so the template and the
-    // layout agree on every row/column offset.
     let template = super::build_single_stage_template(ctx, state, stage, 0).template;
     let layout = StageLayout::new(ctx, state, stage, 0);
     (layout, template)
@@ -2591,6 +2599,7 @@ use std::collections::BTreeMap as VTargetMap;
 /// fold tests. All other fields are inert.
 fn vtarget_filling_hydro(id: i32, start: i32, entry: i32) -> Hydro {
     Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(id),
         name: format!("H{id}"),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -2827,7 +2836,7 @@ fn assert_templates_byte_identical(tpl_a: &StageTemplate, tpl_b: &StageTemplate)
 /// coefficient on both the incoming and outgoing storage columns, so the
 /// byte-identity check actually exercises the storage-bearing rows.
 fn one_hydro_block_system(block_mode: BlockMode, n_blks: usize) -> System {
-    use cobre_core::scenario::{InflowModel, LoadModel};
+    use cobre_core::scenario::InflowModel;
 
     let bus = fixture_bus();
 
@@ -3454,6 +3463,7 @@ fn system_with_contracts_filling_and_anticipated() -> cobre_core::System {
     let bus = fixture_bus();
 
     let hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(1),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -3775,13 +3785,7 @@ fn chronological_d06_gamma_v_on_both_block_columns() {
     // matrix fill (matrix values are not cost-scaled).
     let half_gamma_v = -0.2 / 2.0;
 
-    let entry = |col: usize, row: usize| -> f64 {
-        csc_entries_for_col(&t, col)
-            .iter()
-            .filter(|(r, _)| *r == row)
-            .map(|(_, v)| *v)
-            .sum()
-    };
+    let entry = |col: usize, row: usize| csc_entry_sum(&t, col, row);
 
     for k in 1..=n_blks {
         let blk = k - 1;
@@ -3851,11 +3855,12 @@ const FILL_FILL_HYDRO_ID: i32 = 3;
 /// id 0 it is `Filling`. Both share `entry = FILL_ENTRY_ID`. A backup thermal and a
 /// bus deficit segment keep the LP feasible regardless of the frozen filling storage.
 fn filling_block_system(block_mode: BlockMode, n_blks: usize) -> System {
-    use cobre_core::scenario::{InflowModel, LoadModel};
+    use cobre_core::scenario::InflowModel;
 
     let bus = fixture_bus();
 
     let filling_hydro = |id: i32, downstream: Option<i32>, start: i32| Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(id),
         name: format!("H{id}"),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -4114,13 +4119,7 @@ fn chronological_prefilling_d38_d42_per_block() {
     let h_pre = 0_usize;
     let h_fill = 1_usize;
 
-    let entry = |col: usize, row: usize| -> f64 {
-        csc_entries_for_col(&t, col)
-            .iter()
-            .filter(|(r, _)| *r == row)
-            .map(|(_, v)| *v)
-            .sum()
-    };
+    let entry = |col: usize, row: usize| csc_entry_sum(&t, col, row);
 
     for k in 1..=n_blks {
         let blk = k - 1;
@@ -4208,13 +4207,7 @@ fn chronological_filling_target_on_final_storage() {
         "block_storage_col(h, K) aliases the outgoing endpoint (= dense hydro index)"
     );
     let row = chr_layout.filling.row_filling_target_start;
-    let entry = |col: usize| -> f64 {
-        csc_entries_for_col(&chr_t, col)
-            .iter()
-            .filter(|(r, _)| *r == row)
-            .map(|(_, v)| *v)
-            .sum()
-    };
+    let entry = |col: usize| csc_entry_sum(&chr_t, col, row);
     assert_eq!(
         entry(sk_col),
         1.0,

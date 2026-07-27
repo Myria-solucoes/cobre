@@ -192,6 +192,7 @@ fn geometry_zero_penalties() -> HydroPenalties {
 fn geometry_hydro(idx: usize) -> Hydro {
     let id = EntityId(i32::try_from(idx).unwrap_or(i32::MAX));
     Hydro {
+        unit_groups: Vec::new(),
         id,
         name: String::new(),
         operational_start_date: NaiveDate::default(),

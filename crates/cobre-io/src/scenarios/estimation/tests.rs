@@ -441,6 +441,7 @@ fn build_system_with_user_stats(n_years: usize) -> System {
         .collect();
 
     let hydro = Hydro {
+        unit_groups: Vec::new(),
         id: hydro_id,
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -1282,6 +1283,7 @@ fn build_system_empty_models(n_years: usize) -> System {
     }
 
     let hydro = Hydro {
+        unit_groups: Vec::new(),
         id: hydro_id,
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -1520,6 +1522,7 @@ fn test_user_ar_estimation_returns_user_provided_report() {
 fn make_hydro(hydro_id: EntityId, bus_id: EntityId) -> Hydro {
     use cobre_core::entities::hydro::HydroGenerationModel;
     Hydro {
+        unit_groups: Vec::new(),
         id: hydro_id,
         name: format!("H{}", hydro_id.0),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),

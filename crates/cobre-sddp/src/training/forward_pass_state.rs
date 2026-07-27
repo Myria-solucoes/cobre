@@ -955,6 +955,7 @@ mod tests {
             excess_cost: 0.0,
         };
         let hydro = Hydro {
+            unit_groups: Vec::new(),
             id: EntityId(1),
             name: "H1".to_string(),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -1783,6 +1784,7 @@ mod tests {
             excess_cost: 0.0,
         };
         let make_hydro = |id: i32, name: &str| Hydro {
+            unit_groups: Vec::new(),
             id: EntityId(id),
             name: name.to_string(),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),

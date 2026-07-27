@@ -199,6 +199,7 @@ mod tests {
 
     fn make_hydro(id: i32) -> Hydro {
         Hydro {
+            unit_groups: Vec::new(),
             id: EntityId::from(id),
             name: format!("Hydro{id}"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),

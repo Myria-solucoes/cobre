@@ -122,6 +122,7 @@ fn make_hydro(id: i32, downstream_id: Option<i32>) -> Hydro {
         inflow_nonnegativity_cost: 1000.0,
     };
     Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(id),
         name: String::new(),
         operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),

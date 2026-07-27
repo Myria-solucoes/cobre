@@ -570,6 +570,7 @@ mod tests {
         specific_productivity: Option<f64>,
     ) -> Hydro {
         Hydro {
+            unit_groups: Vec::new(),
             id: EntityId(id),
             name: format!("h{id}"),
             operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),

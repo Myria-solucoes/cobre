@@ -2107,6 +2107,7 @@ mod tests {
         // keeps the LP simple (no FPHA rows); the soft-floor/target slacks come from
         // the filling family, not the generation model.
         let filling_hydro = |id: i32, start_stage_id: i32, entry: i32| Hydro {
+            unit_groups: Vec::new(),
             id: EntityId(id),
             name: format!("H{id}"),
             operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),

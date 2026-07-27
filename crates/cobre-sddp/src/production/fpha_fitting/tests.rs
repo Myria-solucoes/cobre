@@ -589,6 +589,7 @@ fn make_hydro(min_storage_hm3: f64, max_storage_hm3: f64) -> Hydro {
         inflow_nonnegativity_cost: 1000.0,
     };
     Hydro {
+        unit_groups: Vec::new(),
         id: EntityId::from(1),
         name: "TestHydro".to_owned(),
         operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -1308,6 +1309,7 @@ fn make_sobradinho_hydro() -> Hydro {
         inflow_nonnegativity_cost: 1000.0,
     };
     Hydro {
+        unit_groups: Vec::new(),
         id: EntityId::from(1),
         name: "Sobradinho".to_owned(),
         operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -1608,6 +1610,7 @@ fn fit_fpha_planes_linear_function_produces_one_plane() {
         inflow_nonnegativity_cost: 1000.0,
     };
     let hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId::from(1),
         name: "FlatHydro".to_owned(),
         operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),

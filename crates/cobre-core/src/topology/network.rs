@@ -241,6 +241,7 @@ mod tests {
             inflow_nonnegativity_cost: 1000.0,
         };
         Hydro {
+            unit_groups: Vec::new(),
             id: EntityId(id),
             name: String::new(),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),

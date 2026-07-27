@@ -3042,6 +3042,7 @@ mod pumping_water_tests {
     /// here with `None`, keeping every existing caller's cascade empty.
     fn fixture_hydro_ds(id: i32, downstream_id: Option<i32>) -> Hydro {
         Hydro {
+            unit_groups: Vec::new(),
             id: EntityId(id),
             name: format!("H{id}"),
             operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -5968,6 +5969,7 @@ mod pumping_water_tests {
     /// downstream can be built. Constant productivity (no FPHA columns).
     fn ret_hydro(id: i32, downstream: Option<i32>, entry: Option<i32>, filling: bool) -> Hydro {
         Hydro {
+            unit_groups: Vec::new(),
             id: EntityId(id),
             name: format!("H{id}"),
             operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),

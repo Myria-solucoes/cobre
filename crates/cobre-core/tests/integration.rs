@@ -68,6 +68,7 @@ fn make_line(id: i32, source_bus_id: i32, target_bus_id: i32) -> Line {
 
 fn make_hydro(id: i32, bus_id: i32, downstream_id: Option<i32>) -> Hydro {
     Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(id),
         name: format!("hydro-{id}").to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),

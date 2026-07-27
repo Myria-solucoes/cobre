@@ -546,6 +546,8 @@ impl System {
 mod tests {
     use super::*;
     use crate::ValidationError;
+    #[cfg(feature = "serde")]
+    use crate::entities::HydroUnitGroup;
     use crate::entities::{ContractType, FillingConfig, HydroGenerationModel, HydroPenalties};
     use chrono::NaiveDate;
 
@@ -613,6 +615,7 @@ mod tests {
             specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 1.0,
+            unit_groups: Vec::new(),
             tailrace: None,
             hydraulic_losses: None,
             efficiency: None,
@@ -1647,6 +1650,58 @@ mod tests {
 
     #[cfg(feature = "serde")]
     #[test]
+    fn test_system_postcard_roundtrip_preserves_unit_groups() {
+        let bus0 = make_bus(0);
+        let bus4 = make_bus(4);
+        let bus9 = make_bus(9);
+
+        let no_groups_hydro = make_hydro_on_bus(1, 0);
+        let mut two_groups_hydro = make_hydro_on_bus(2, 0);
+        two_groups_hydro.unit_groups = vec![
+            HydroUnitGroup {
+                id: EntityId(3),
+                name: "Group A".to_string(),
+                bus_id: EntityId(4),
+                min_generation_mw: 10.0,
+                max_generation_mw: 20.0,
+                min_turbined_m3s: 30.0,
+                max_turbined_m3s: 40.0,
+            },
+            HydroUnitGroup {
+                id: EntityId(7),
+                name: "Group B".to_string(),
+                bus_id: EntityId(9),
+                min_generation_mw: 50.0,
+                max_generation_mw: 60.0,
+                min_turbined_m3s: 70.0,
+                max_turbined_m3s: 80.0,
+            },
+        ];
+
+        let system = SystemBuilder::new()
+            .buses(vec![bus0, bus4, bus9])
+            .hydros(vec![no_groups_hydro, two_groups_hydro.clone()])
+            .build()
+            .expect("valid system");
+
+        let bytes = postcard::to_allocvec(&system).unwrap();
+        let deserialized: System = postcard::from_bytes(&bytes).unwrap();
+
+        let decoded_no_groups = deserialized
+            .hydro(EntityId(1))
+            .expect("hydro 1 must round-trip");
+        assert_eq!(decoded_no_groups.unit_groups.len(), 1);
+        assert_eq!(decoded_no_groups.unit_groups[0].id, EntityId(0));
+        assert_eq!(decoded_no_groups.unit_groups[0].bus_id, EntityId(0));
+
+        let decoded_two_groups = deserialized
+            .hydro(EntityId(2))
+            .expect("hydro 2 must round-trip");
+        assert_eq!(decoded_two_groups.unit_groups, two_groups_hydro.unit_groups);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
     fn fully_populated_system_survives_postcard_roundtrip_intact() {
         use crate::{
             AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
@@ -1681,6 +1736,26 @@ mod tests {
         hydro1.downstream_id = Some(EntityId(2));
         hydro1.travel_time_hours = Some(6.0);
         hydro1.entry_stage_id = Some(0);
+        hydro1.unit_groups = vec![
+            HydroUnitGroup {
+                id: EntityId(10),
+                name: "Group A".to_string(),
+                bus_id: EntityId(1),
+                min_generation_mw: 0.0,
+                max_generation_mw: 0.4,
+                min_turbined_m3s: 0.0,
+                max_turbined_m3s: 0.4,
+            },
+            HydroUnitGroup {
+                id: EntityId(20),
+                name: "Group B".to_string(),
+                bus_id: EntityId(2),
+                min_generation_mw: 0.0,
+                max_generation_mw: 0.6,
+                min_turbined_m3s: 0.0,
+                max_turbined_m3s: 0.6,
+            },
+        ];
         let hydro2 = make_hydro_on_bus(2, 2);
 
         let thermal1 = make_thermal_on_bus(1, 1);

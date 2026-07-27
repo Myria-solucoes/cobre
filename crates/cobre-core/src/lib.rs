@@ -66,8 +66,8 @@ pub use constraints::training_event::{
 pub use entities::{
     AnticipatedConfig, Bus, ContractType, DeficitSegment, DiversionChannel, EfficiencyModel,
     EnergyContract, FillingConfig, HydraulicLossesModel, Hydro, HydroGenerationModel,
-    HydroPenalties, Line, NonControllableSource, PumpingStation, TailraceModel, TailracePoint,
-    Thermal,
+    HydroPenalties, HydroUnitGroup, Line, NonControllableSource, PumpingStation, TailraceModel,
+    TailracePoint, Thermal,
 };
 pub use entity_id::EntityId;
 pub use error::ValidationError;

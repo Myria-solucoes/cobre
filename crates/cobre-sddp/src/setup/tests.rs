@@ -66,6 +66,7 @@ fn minimal_system(n_stages: usize) -> cobre_core::System {
     };
 
     let hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(3),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -296,6 +297,7 @@ fn minimal_fpha_misconfigured_system(n_stages: usize) -> cobre_core::System {
     };
 
     let hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(3),
         name: "H_FPHA_BAD".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -1015,8 +1017,6 @@ fn train_generates_cuts_in_fcf() {
 
 #[test]
 fn simulation_config_reflects_setup_fields() {
-    use cobre_io::config::SimulationConfig as IoSimulationConfig;
-
     let mut config = minimal_config(1, 5);
     config.simulation = IoSimulationConfig {
         enabled: true,
@@ -1151,7 +1151,6 @@ fn build_training_output_non_empty() {
 #[test]
 fn simulate_after_train_returns_nonempty_costs() {
     use cobre_comm::LocalBackend;
-    use cobre_io::config::SimulationConfig as IoSimulationConfig;
     use cobre_solver::ActiveSolver;
 
     let mut config = minimal_config(1, 3);
@@ -1223,12 +1222,6 @@ fn simulate_after_train_returns_nonempty_costs() {
 fn study_params_from_config_defaults() {
     use super::{DEFAULT_FORWARD_PASSES, DEFAULT_SEED, StudyParams};
     use crate::stopping_rule::{StoppingMode, StoppingRule};
-    use cobre_io::config::{
-        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
-        InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
-        RowSelectionConfig, SimulationConfig as IoSimulationConfig, TrainingConfig,
-        TrainingSolverConfig, UpperBoundEvaluationConfig,
-    };
 
     let config = Config {
         schema: None,
@@ -1296,12 +1289,6 @@ fn study_params_from_config_defaults() {
 fn study_params_from_config_explicit() {
     use super::StudyParams;
     use crate::stopping_rule::{StoppingMode, StoppingRule};
-    use cobre_io::config::{
-        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
-        InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
-        RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
-        TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
-    };
 
     let config = Config {
         schema: None,
@@ -1388,13 +1375,6 @@ fn write_minimal_case_dir(root: &std::path::Path) {
 }
 
 fn minimal_prepare_config() -> cobre_io::Config {
-    use cobre_io::config::{
-        Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
-        InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
-        RowSelectionConfig, SimulationConfig as IoSimulationConfig, TrainingConfig,
-        TrainingSolverConfig, UpperBoundEvaluationConfig,
-    };
-
     Config {
         schema: None,
         modeling: ModelingConfig {
@@ -1539,10 +1519,7 @@ fn prepare_stochastic_no_opening_tree_gives_non_user_supplied_provenance() {
 fn test_prepare_stochastic_historical_residuals_noise_method() {
     use super::prepare_stochastic;
     use chrono::NaiveDate;
-    use cobre_core::{
-        scenario::{InflowHistoryRow, ScenarioSource},
-        system::SystemBuilder,
-    };
+    use cobre_core::scenario::ScenarioSource;
     use tempfile::TempDir;
 
     let n_stages = 2usize;
@@ -1570,6 +1547,7 @@ fn test_prepare_stochastic_historical_residuals_noise_method() {
         exit_stage_id: None,
     };
     let hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(3),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -1899,7 +1877,7 @@ fn energy_conversion_accessor_returns_built_set() {
     let n_study_stages = system.stages().iter().filter(|s| s.id >= 0).count();
     let hydro_models_result = {
         let mut result = PrepareHydroModelsResult::default_from_system(&system);
-        let pm = ProductionModelSet::new(
+        result.production = ProductionModelSet::new(
             vec![vec![
                 ResolvedProductionModel::ConstantProductivity {
                     productivity: 2.5
@@ -1909,7 +1887,6 @@ fn energy_conversion_accessor_returns_built_set() {
             1,
             n_study_stages,
         );
-        result.production = pm;
         result
     };
 
@@ -1917,7 +1894,6 @@ fn energy_conversion_accessor_returns_built_set() {
 
     let ec = setup.energy_conversion();
     assert_eq!(ec.n_hydros(), system.hydros().len());
-    // ρ_acum must equal ρ_eq = 2.5 (ConstantProductivity, no downstream).
     for s in 0..ec.n_stages() {
         assert!(
             (ec.accumulated_productivity(0, s) - 2.5).abs() < f64::EPSILON,
@@ -2004,6 +1980,7 @@ fn minimal_system_2_hydros_with_history(
     };
 
     let make_hydro = |id: i32, name: &str| Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(id),
         name: name.to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -2259,8 +2236,6 @@ fn build_initial_state_populates_lags_from_derived_values() {
 
     // State layout: storage(0..2), lags(2..6) in lag-major order.
     // Lag-major: slot = s + lag * N + h, where N = 2.
-    // lag0_h0 = 600.0 at s+0, lag0_h1 = 200.0 at s+1,
-    // lag1_h0 = 500.0 at s+2, lag1_h1 = 100.0 at s+3.
     let s = layout.inflow_lags.start;
     assert!(
         (state[s] - 600.0).abs() < 1e-10,
@@ -2437,6 +2412,7 @@ fn staggered_dates_system_2_hydros(
     };
 
     let make_hydro = |id: i32, name: &str, start: NaiveDate| Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(id),
         name: name.to_string(),
         operational_start_date: start,
@@ -2770,6 +2746,7 @@ fn filling_system_2_hydros(
     };
 
     let make_hydro = |id: i32, name: &str, filling: Option<cobre_core::FillingConfig>| Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(id),
         name: name.to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -3155,8 +3132,6 @@ fn build_initial_state_mixed_operating_and_filling_seeds() {
 /// pre-epic positional-seed path produced for this fixture.
 #[test]
 fn study_setup_initial_state_has_nonzero_lags_from_derived_inflow_history() {
-    use cobre_core::scenario::InflowHistoryRow;
-
     let inflow_history = vec![
         InflowHistoryRow {
             hydro_id: EntityId(1),
@@ -3216,8 +3191,6 @@ fn study_setup_initial_state_has_nonzero_lags_from_derived_inflow_history() {
 
     // With 2 hydros (N=2) and max_par_order=2 (L=2), lag slots start at N=2.
     // Lag-major layout: slot = lag_start + lag * N + h.
-    // lag0_h0 = 600.0 at [2], lag0_h1 = 200.0 at [3],
-    // lag1_h0 = 500.0 at [4], lag1_h1 = 100.0 at [5].
     let n_hydros = 2;
     let lag_start = n_hydros;
     assert!(
@@ -3330,6 +3303,7 @@ fn system_with_anticipated_thermals(
         .collect();
 
     let hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(3),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -3593,6 +3567,7 @@ fn system_with_two_anticipated_thermals_staggered_dates(
     ];
 
     let hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(3),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -4206,7 +4181,6 @@ fn historical_library_none_for_insample() {
 )]
 fn system_with_historical_inflow(n_stages: usize) -> cobre_core::System {
     use chrono::NaiveDate;
-    use cobre_core::{scenario::InflowHistoryRow, system::SystemBuilder};
 
     fn default_hydro_bounds() -> HydroStageBounds {
         HydroStageBounds {
@@ -4270,6 +4244,7 @@ fn system_with_historical_inflow(n_stages: usize) -> cobre_core::System {
     };
 
     let hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(3),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -4498,7 +4473,7 @@ fn historical_library_built_when_scheme_is_historical() {
 fn external_inflow_library_built_when_scheme_is_external() {
     use chrono::NaiveDate;
     use cobre_core::scenario::ExternalScenarioRow;
-    use cobre_core::{scenario::InflowModel as CoreInflowModel, system::SystemBuilder};
+    use cobre_core::scenario::InflowModel as CoreInflowModel;
 
     let hydro_id = EntityId(3);
     let mut external_rows: Vec<ExternalScenarioRow> = Vec::new();
@@ -4538,6 +4513,7 @@ fn external_inflow_library_built_when_scheme_is_external() {
         exit_stage_id: None,
     };
     let hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(3),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -4770,7 +4746,7 @@ fn external_inflow_library_built_when_scheme_is_external() {
 fn external_load_library_built_when_scheme_is_external() {
     use chrono::NaiveDate;
     use cobre_core::scenario::ExternalLoadRow;
-    use cobre_core::{scenario::InflowModel as CoreInflowModel, system::SystemBuilder};
+    use cobre_core::scenario::InflowModel as CoreInflowModel;
 
     let bus = Bus {
         id: EntityId(1),
@@ -4795,6 +4771,7 @@ fn external_load_library_built_when_scheme_is_external() {
         exit_stage_id: None,
     };
     let hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(3),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -5043,7 +5020,6 @@ fn external_ncs_library_built_when_scheme_is_external() {
     use cobre_core::{
         NonControllableSource,
         scenario::{ExternalNcsRow, NcsModel},
-        system::SystemBuilder,
     };
 
     let bus = Bus {
@@ -5069,6 +5045,7 @@ fn external_ncs_library_built_when_scheme_is_external() {
         exit_stage_id: None,
     };
     let hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(3),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -5336,13 +5313,10 @@ fn external_ncs_library_built_when_scheme_is_external() {
     clippy::cast_lossless
 )]
 fn historical_library_fails_when_no_valid_windows() {
-    use cobre_core::system::SystemBuilder;
+    use chrono::NaiveDate;
 
     // Historical scheme with empty inflow_history guarantees zero candidate
     // years in discovery.
-    use chrono::NaiveDate;
-    use cobre_core::scenario::InflowModel;
-
     let bus = Bus {
         id: EntityId(1),
         name: "B1".to_string(),
@@ -5366,6 +5340,7 @@ fn historical_library_fails_when_no_valid_windows() {
         exit_stage_id: None,
     };
     let hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(3),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -5724,6 +5699,7 @@ fn minimal_system_with_anticipated(
     };
 
     let hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(3),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -6197,6 +6173,7 @@ fn system_with_travel_time_arc(n_stages: usize) -> cobre_core::System {
 
     let make_hydro =
         |id: i32, name: &str, downstream_id: Option<i32>, travel_time_hours: Option<f64>| Hydro {
+            unit_groups: Vec::new(),
             id: EntityId(id),
             name: name.to_string(),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -6704,6 +6681,7 @@ fn par2_system_with_state_configs(state_configs: &[StageStateConfig]) -> cobre_c
     };
 
     let hydro = Hydro {
+        unit_groups: Vec::new(),
         id: hydro_id,
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -6887,8 +6865,6 @@ fn par2_system_with_state_configs(state_configs: &[StageStateConfig]) -> cobre_c
         },
     );
 
-    let initial_conditions = InitialConditions::default();
-
     SystemBuilder::new()
         .buses(vec![bus])
         .thermals(vec![thermal])
@@ -6898,7 +6874,7 @@ fn par2_system_with_state_configs(state_configs: &[StageStateConfig]) -> cobre_c
         .load_models(load_models)
         .bounds(bounds)
         .penalties(penalties)
-        .initial_conditions(initial_conditions)
+        .initial_conditions(InitialConditions::default())
         .build()
         .expect("par2_system_with_state_configs: valid")
 }
@@ -7307,11 +7283,6 @@ fn lead_time_fanout_rejected_at_setup() {
 )]
 fn system_with_two_thermals_one_fanning() -> cobre_core::System {
     use chrono::NaiveDate;
-    use cobre_core::{
-        Bus, EntityId, InitialConditions, SystemBuilder,
-        entities::bus::DeficitSegment,
-        temporal::{Block, BlockMode, NoiseMethod, ScenarioSourceConfig, StageRiskConfig},
-    };
 
     let bus = Bus {
         id: EntityId(1),

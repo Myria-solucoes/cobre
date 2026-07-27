@@ -348,6 +348,7 @@ fn make_stochastic_context(n_stages: usize) -> StochasticContext {
         excess_cost: 0.0,
     };
     let hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(1),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -635,6 +636,7 @@ fn make_stochastic_context_1_hydro_1_load_bus_sim(mean_mw: f64, std_mw: f64) -> 
         excess_cost: 0.0,
     };
     let hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(10),
         name: "H10".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -1383,6 +1385,7 @@ fn make_stochastic_1h_1s(mean_m3s: f64, std_m3s: f64) -> StochasticContext {
         excess_cost: 0.0,
     };
     let hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(1),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
