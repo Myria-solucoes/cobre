@@ -5,8 +5,8 @@ use cobre_core::commissioning::{Phase, filling_phase};
 use cobre_core::{
     BlockMode, Bus, CascadeTopology, ConstraintSense, EnergyContract, EntityId, GenericConstraint,
     Hydro, Line, LoadModel, NonControllableSource, PumpingStation, ResolvedBounds,
-    ResolvedExchangeFactors, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
-    ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, Stage, Thermal,
+    ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
+    ResolvedPenalties, Stage, Thermal,
 };
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -39,8 +39,6 @@ pub(crate) struct ResolvedTables<'a> {
     pub(crate) resolved_generic_bounds: &'a ResolvedGenericConstraintBounds,
     /// Per-block load scaling factors.
     pub(crate) resolved_load_factors: &'a ResolvedLoadFactors,
-    /// Per-block exchange capacity factors.
-    pub(crate) resolved_exchange_factors: &'a ResolvedExchangeFactors,
     /// Per-stage NCS available generation bounds.
     pub(crate) resolved_ncs_bounds: &'a ResolvedNcsBounds,
     /// Per-block NCS generation scaling factors.
@@ -363,10 +361,9 @@ pub(crate) struct OperViolationRanges {
 
 impl OperViolationRanges {
     /// Allocate the four column families then the four row families,
-    /// contiguously in that order — the exact sequence `StageLayout::new` ran
-    /// inline before this extraction; reordering these eight `alloc` calls
-    /// would shift every downstream column/row, so `col`/`row` are threaded
-    /// through unchanged and consumed in the same order.
+    /// contiguously in that order: reordering these eight `alloc` calls would
+    /// shift every downstream column/row, so `col`/`row` are threaded through
+    /// and consumed in exactly this order.
     fn new(col: &mut RangeCursor, row: &mut RangeCursor, n_op: usize) -> Self {
         Self {
             outflow_below_slack: col.alloc(n_op),
@@ -643,10 +640,13 @@ fn build_anticipated_slot_row_pos(
     let mut row_pos = vec![None; n_anticipated * k_max];
     let mut n_reachable = 0_usize;
     for slot in 0..k_max {
+        let m = stage_idx + slot + 1;
+        if m >= n_stages {
+            continue;
+        }
         for (plant, point) in points.iter().enumerate() {
-            let m = stage_idx + slot + 1;
-            let is_deposit = m < n_stages && point.decider[m] == Some(stage_idx);
-            let is_interior = m < n_stages && !is_deposit && point.is_ready_at(m, stage_idx);
+            let is_deposit = point.decider[m] == Some(stage_idx);
+            let is_interior = !is_deposit && point.is_ready_at(m, stage_idx);
             if is_interior {
                 row_pos[slot * n_anticipated + plant] = Some(n_reachable);
                 n_reachable += 1;
@@ -950,84 +950,34 @@ fn enumerate_generic_constraint_rows(
 
         let collapse_stage_level = expression_is_block_independent(&constraint.expression);
 
-        // Bind the constraint-invariant fields once so the three arms below stay
-        // field-for-field identical (only per-row fields vary).
-        let entity_id = constraint.id.0;
-        let sense = constraint.sense;
-        let slack_enabled = constraint.slack.enabled;
-        let slack_penalty = constraint.slack.penalty.unwrap_or(0.0);
-        let make_entry = |block_idx: usize,
-                          is_stage_level: bool,
-                          slack_plus_col: Option<usize>,
-                          slack_minus_col: Option<usize>,
-                          bound: f64| {
-            GenericConstraintRowEntry {
-                constraint_idx,
-                entity_id,
-                block_idx,
-                is_stage_level,
-                bound,
-                sense,
-                slack_enabled,
-                slack_penalty,
-                slack_plus_col,
-                slack_minus_col,
-            }
-        };
-
         for &(block_id, bound) in bound_entries {
-            match block_id {
-                None if collapse_stage_level => {
-                    let (slack_plus_col, slack_minus_col) = allocate_generic_slack_cols(
-                        constraint,
-                        col_generic_slack_start,
-                        &mut n_generic_slack_cols,
-                    );
-                    n_generic_rows += 1;
-                    generic_constraint_rows.push(make_entry(
-                        0,
-                        true,
-                        slack_plus_col,
-                        slack_minus_col,
-                        bound,
-                    ));
-                }
-                None => {
-                    for block_idx in 0..n_blks {
-                        let (slack_plus_col, slack_minus_col) = allocate_generic_slack_cols(
-                            constraint,
-                            col_generic_slack_start,
-                            &mut n_generic_slack_cols,
-                        );
-                        n_generic_rows += 1;
-                        generic_constraint_rows.push(make_entry(
-                            block_idx,
-                            false,
-                            slack_plus_col,
-                            slack_minus_col,
-                            bound,
-                        ));
-                    }
-                }
-                Some(blk_id) => {
-                    // block_id is a non-negative 0-indexed block position (upstream
-                    // validation), so the cast_sign_loss is safe.
-                    #[allow(clippy::cast_sign_loss)]
-                    let block_idx = blk_id as usize;
-                    let (slack_plus_col, slack_minus_col) = allocate_generic_slack_cols(
-                        constraint,
-                        col_generic_slack_start,
-                        &mut n_generic_slack_cols,
-                    );
-                    n_generic_rows += 1;
-                    generic_constraint_rows.push(make_entry(
-                        block_idx,
-                        false,
-                        slack_plus_col,
-                        slack_minus_col,
-                        bound,
-                    ));
-                }
+            // block_id is a non-negative 0-indexed block position (upstream
+            // validation), so the cast_sign_loss is safe.
+            #[allow(clippy::cast_sign_loss)]
+            let (block_start, block_count, is_stage_level) = match block_id {
+                None if collapse_stage_level => (0, 1, true),
+                None => (0, n_blks, false),
+                Some(blk_id) => (blk_id as usize, 1, false),
+            };
+            for block_idx in block_start..block_start + block_count {
+                let (slack_plus_col, slack_minus_col) = allocate_generic_slack_cols(
+                    constraint,
+                    col_generic_slack_start,
+                    &mut n_generic_slack_cols,
+                );
+                n_generic_rows += 1;
+                generic_constraint_rows.push(GenericConstraintRowEntry {
+                    constraint_idx,
+                    entity_id: constraint.id.0,
+                    block_idx,
+                    is_stage_level,
+                    bound,
+                    sense: constraint.sense,
+                    slack_enabled: constraint.slack.enabled,
+                    slack_penalty: constraint.slack.penalty.unwrap_or(0.0),
+                    slack_plus_col,
+                    slack_minus_col,
+                });
             }
         }
     }

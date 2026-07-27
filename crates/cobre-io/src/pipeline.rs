@@ -15,8 +15,8 @@ use crate::{
     report::{ValidationReport, generate_report},
     resolution::{
         BoundsEntitySlices, BoundsOverrides, PenaltiesEntitySlices, PenaltiesOverrides,
-        resolve_bounds, resolve_exchange_factors, resolve_generic_constraint_bounds,
-        resolve_load_factors, resolve_ncs_bounds, resolve_ncs_factors, resolve_penalties,
+        resolve_bounds, resolve_generic_constraint_bounds, resolve_load_factors,
+        resolve_ncs_bounds, resolve_ncs_factors, resolve_penalties,
     },
     scenarios::assembly::{assemble_inflow_models, assemble_load_models},
     scenarios::residual_derivation::{populate_derived_residual_ratios, resolve_stage_seasons},
@@ -88,22 +88,15 @@ pub(crate) fn run_pipeline_with_artifacts(
     validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
 
     validate_productivity_resolution(&data, &mut ctx);
-    // n_stages counts study stages (id >= 0) only — must match what
+    // Pre-study stages have negative IDs; this study-stage count must match what
     // `build_resolved_parameters` consumes downstream.
-    let n_study_stages = data.stages.stages.iter().filter(|s| s.id >= 0).count();
-    validate_scalar_parameters(
-        &data.scalar_parameters,
-        &data.hydros,
-        n_study_stages,
-        &mut ctx,
-    );
+    let study_stages: Vec<_> = data.stages.stages.iter().filter(|s| s.id >= 0).collect();
+    let n_stages = study_stages.len();
+    validate_scalar_parameters(&data.scalar_parameters, &data.hydros, n_stages, &mut ctx);
 
     let report = generate_report(&ctx);
     ctx.into_result()?;
 
-    // Pre-study stages have negative IDs.
-    let study_stages: Vec<_> = data.stages.stages.iter().filter(|s| s.id >= 0).collect();
-    let n_stages = study_stages.len();
     let stage_index: HashMap<i32, usize> = study_stages
         .iter()
         .enumerate()
@@ -171,8 +164,6 @@ pub(crate) fn run_pipeline_with_artifacts(
 
     let resolved_load_factors =
         resolve_load_factors(&data.load_factors, &data.buses, &data.stages.stages);
-    let resolved_exchange_factors =
-        resolve_exchange_factors(&data.exchange_factors, &data.lines, &data.stages.stages);
 
     let resolved_ncs_bounds = resolve_ncs_bounds(
         &data.ncs_bounds,
@@ -199,9 +190,8 @@ pub(crate) fn run_pipeline_with_artifacts(
     populate_derived_residual_ratios(&mut inflow_models, &stage_to_season, n_seasons)?;
     let load_models = assemble_load_models(data.load_seasonal_stats);
 
-    // Load tailrace curves only when the manifest detected the file: without
-    // them the fit collapses to the constant entity tailrace, which zeroes γ_S
-    // and emits sub-ULP LP coefficients.
+    // Without tailrace curves the fit collapses to the constant entity tailrace,
+    // which zeroes γ_S and emits sub-ULP LP coefficients.
     let tailrace_curves = if manifest.system_tailrace_curves_parquet {
         let tailrace_path = path.join("system").join("tailrace_curves.parquet");
         load_tailrace_curves(Some(tailrace_path.as_path()))?
@@ -234,7 +224,6 @@ pub(crate) fn run_pipeline_with_artifacts(
         .bounds(bounds)
         .resolved_generic_bounds(resolved_generic_bounds)
         .resolved_load_factors(resolved_load_factors)
-        .resolved_exchange_factors(resolved_exchange_factors)
         .resolved_ncs_bounds(resolved_ncs_bounds)
         .resolved_ncs_factors(resolved_ncs_factors)
         .inflow_models(inflow_models)

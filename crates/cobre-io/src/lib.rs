@@ -65,13 +65,12 @@ pub use config::{
     BoundaryPolicy, Config, EstimationConfig, OrderSelectionMethod, PolicyMode, parse_config,
 };
 pub use constraints::{
-    BlockExchangeFactor, BusPenaltyOverrideRow, ContractBoundsRow, ExchangeFactorEntry,
-    GenericConstraintBoundsRow, HydroBoundsRow, HydroPenaltyOverrideRow, LineBoundsRow,
-    LinePenaltyOverrideRow, NcsPenaltyOverrideRow, PumpingBoundsRow, ThermalBoundsRow,
-    load_contract_bounds, load_exchange_factors, load_generic_constraint_bounds,
+    BusPenaltyOverrideRow, ContractBoundsRow, GenericConstraintBoundsRow, HydroBoundsRow,
+    HydroPenaltyOverrideRow, LineBoundsRow, LinePenaltyOverrideRow, NcsPenaltyOverrideRow,
+    PumpingBoundsRow, ThermalBoundsRow, load_contract_bounds, load_generic_constraint_bounds,
     load_generic_constraints, load_hydro_bounds, load_line_bounds, load_penalty_overrides_bus,
     load_penalty_overrides_hydro, load_penalty_overrides_line, load_penalty_overrides_ncs,
-    load_pumping_bounds, load_thermal_bounds, parse_contract_bounds, parse_exchange_factors,
+    load_pumping_bounds, load_thermal_bounds, parse_contract_bounds,
     parse_generic_constraint_bounds, parse_generic_constraints, parse_hydro_bounds,
     parse_line_bounds, parse_penalty_overrides_bus, parse_penalty_overrides_hydro,
     parse_penalty_overrides_line, parse_penalty_overrides_ncs, parse_pumping_bounds,
@@ -195,16 +194,8 @@ pub struct LoadedCase {
 /// `path` must point to the root case directory containing `config.json` and the
 /// standard subdirectories (`system/`, `scenarios/`, `constraints/`, `policy/`).
 ///
-/// The function executes a six-layer validation pipeline:
-///
-/// 1. **Structural** — all required files exist on disk.
-/// 2. **Schema** — required fields, types, and value ranges are valid.
-/// 3. **Referential integrity** — all cross-entity ID references resolve.
-/// 4. **Dimensional consistency** — entity coverage across optional files.
-/// 5. **Semantic** — domain business rules (acyclic cascade, penalty ordering, etc.).
-/// 6. **Cross-file resolution and cross-validation** — multi-file consistency checks
-///    (productivity source conflict detection, scalar-parameter hydro-ID existence,
-///    per-stage length checks).
+/// The function executes a six-layer validation pipeline; see the
+/// [crate-level docs](crate) for the layer-by-layer breakdown.
 ///
 /// After all layers pass, three-tier penalty/bound resolution and scenario assembly
 /// are performed before constructing the [`System`].
@@ -212,11 +203,9 @@ pub struct LoadedCase {
 /// Warnings collected during validation are silently discarded. Use [`validate_case`]
 /// when you need to inspect or display warnings alongside the loaded [`System`].
 ///
-/// Prefer [`load_case_with_artifacts`] when the downstream consumer needs the
-/// auxiliary parquet/JSON rows that this pipeline already parsed (production
-/// models, hydro geometry, FPHA hyperplanes, scalar parameters): it returns
-/// them as a [`CaseArtifacts`] bundle so downstream code can skip the
-/// duplicate disk reads.
+/// Prefer [`load_case_with_artifacts`] when the downstream consumer also needs the
+/// auxiliary parquet/JSON rows this pipeline already parsed: it returns them as a
+/// [`CaseArtifacts`] bundle so downstream code can skip the duplicate disk reads.
 ///
 /// # Errors
 ///
@@ -284,8 +273,6 @@ pub fn validate_case_with_artifacts(
 mod tests {
     use crate::CaseArtifacts;
 
-    /// `CaseArtifacts` exposes a `plane_reduction` field that defaults to `None`
-    /// (the off-by-default carried-but-unconsumed plane-reduction config).
     #[test]
     fn case_artifacts_plane_reduction_defaults_to_none() {
         let artifacts = CaseArtifacts::default();

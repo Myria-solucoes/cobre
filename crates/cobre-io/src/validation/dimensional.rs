@@ -17,7 +17,7 @@
 //! | 4 | For each `CorrelationGroup`, every row `matrix[i].len() == entities.len()`. | `scenarios/correlation.json` |
 //! | 5 | Every `profile_name` in the correlation schedule exists in `profiles`. | `scenarios/correlation.json` |
 //! | 6 | Every FPHA-configured hydro must have at least 1 row in `fpha_hyperplanes`. | `system/fpha_hyperplanes.parquet` |
-//! | 7 | Every FPHA- or `LinearizedHead`-configured hydro must have ≥ 2 rows in `hydro_geometry`. | `system/hydro_geometry.parquet` |
+//! | 7 | Every FPHA- or `LinearizedHead`-configured hydro must have rows in `hydro_geometry`: ≥ 1 if FPHA is configured, ≥ 2 otherwise. | `system/hydro_geometry.parquet` |
 
 use std::collections::{HashMap, HashSet};
 
@@ -606,7 +606,6 @@ mod tests {
             line_bounds: vec![],
             pumping_bounds: vec![],
             contract_bounds: vec![],
-            exchange_factors: vec![],
             generic_constraints: vec![],
             generic_constraint_bounds: vec![],
             penalty_overrides_bus: vec![],
@@ -663,7 +662,6 @@ mod tests {
             make_hydro(3, HydroGenerationModel::ConstantProductivity, None, None),
         ];
 
-        // Hydro 2 is missing stage 1.
         data.inflow_seasonal_stats = vec![
             inflow_stats_row(1, 0),
             inflow_stats_row(1, 1),
@@ -865,7 +863,6 @@ mod tests {
     fn test_hydro_lifecycle_entry_stage_id_skips_earlier_stages() {
         let mut data = base_parsed_data();
         // Stages 0 and 1 are study stages.
-        // Hydro enters service at stage 1: only stage 1 requires inflow stats.
         data.hydros = vec![make_hydro(
             1,
             HydroGenerationModel::ConstantProductivity,
@@ -873,7 +870,6 @@ mod tests {
             None,
         )];
 
-        // Only provide inflow stats for stage 1.
         data.inflow_seasonal_stats = vec![inflow_stats_row(1, 1)];
 
         let mut ctx = ValidationContext::new();
@@ -894,7 +890,6 @@ mod tests {
     fn test_hydro_lifecycle_exit_stage_id_skips_later_stages() {
         let mut data = base_parsed_data();
         // Stages 0 and 1 are study stages.
-        // Hydro exits at stage 1 (exclusive): only stage 0 requires inflow stats.
         data.hydros = vec![make_hydro(
             1,
             HydroGenerationModel::ConstantProductivity,
@@ -902,7 +897,6 @@ mod tests {
             Some(1), // decommissioned at stage 1 (exclusive)
         )];
 
-        // Only provide inflow stats for stage 0.
         data.inflow_seasonal_stats = vec![inflow_stats_row(1, 0)];
 
         let mut ctx = ValidationContext::new();
@@ -957,7 +951,6 @@ mod tests {
         let mut data = base_parsed_data();
         data.buses = vec![make_bus(1), make_bus(2)];
 
-        // Bus 2 is missing stage 1.
         data.load_seasonal_stats = vec![
             load_stats_row(1, 0),
             load_stats_row(1, 1),
@@ -987,7 +980,7 @@ mod tests {
         );
     }
 
-    // ── AC 11 (renumbered 12): Correlation schedule references non-existent profile ───────────
+    // ── AC 12: Correlation schedule references non-existent profile ───────────
 
     /// A schedule entry referencing a profile name that does not exist in
     /// `profiles` produces one DimensionMismatch error.
@@ -1034,7 +1027,6 @@ mod tests {
             None,
         )];
 
-        // Only 1 geometry row — minimum is 2.
         data.hydro_geometry = vec![geometry_row(1, 100.0)];
 
         let mut ctx = ValidationContext::new();
@@ -1057,7 +1049,6 @@ mod tests {
     fn test_fpha_hydro_single_geometry_row_accepted() {
         let mut data = base_parsed_data();
         data.hydros = vec![make_hydro(1, HydroGenerationModel::Fpha, None, None)];
-        // One geometry row — valid for FPHA (constant run-of-river forebay).
         data.hydro_geometry = vec![geometry_row(1, 100.0)];
 
         let mut ctx = ValidationContext::new();
@@ -1119,7 +1110,6 @@ mod tests {
         let mut ctx = ValidationContext::new();
         validate_dimensional_consistency(&data, &mut ctx);
 
-        // Both rules fire — at least 2 errors.
         let errors = ctx.errors();
         assert!(
             errors.len() >= 2,

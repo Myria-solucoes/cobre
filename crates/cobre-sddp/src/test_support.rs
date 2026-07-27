@@ -14,9 +14,9 @@ use std::collections::{BTreeMap, HashMap};
 use chrono::NaiveDate;
 use cobre_core::{
     Block, BlockMode, Bus, CascadeTopology, DeficitSegment, EntityId, Hydro, HydroGenerationModel,
-    HydroPenalties, NoiseMethod, ResolvedBounds, ResolvedExchangeFactors,
-    ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
-    ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig,
+    HydroPenalties, NoiseMethod, ResolvedBounds, ResolvedGenericConstraintBounds,
+    ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties,
+    ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig,
 };
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -108,8 +108,8 @@ pub fn fill_consistent_basis(out: &mut Basis) {
     out.row_status[..num_row - basic_cols].fill(BasisStatus::Basic);
 }
 
-/// Build [`GeometryDims`] with the seven scalar entity counts set and no
-/// anticipated thermals.
+/// Build [`GeometryDims`] with the scalar entity counts set and no anticipated
+/// thermals.
 #[must_use]
 pub fn eq(
     hydro_count: usize,
@@ -372,7 +372,6 @@ pub fn geometry(
     let penalties = ResolvedPenalties::empty();
     let resolved_generic_bounds = ResolvedGenericConstraintBounds::empty();
     let resolved_load_factors = ResolvedLoadFactors::empty();
-    let resolved_exchange_factors = ResolvedExchangeFactors::empty();
     let resolved_ncs_bounds = ResolvedNcsBounds::empty();
     let resolved_ncs_factors = ResolvedNcsFactors::empty();
     let resolved_parameters = ResolvedParameters {
@@ -396,7 +395,6 @@ pub fn geometry(
             penalties: &penalties,
             resolved_generic_bounds: &resolved_generic_bounds,
             resolved_load_factors: &resolved_load_factors,
-            resolved_exchange_factors: &resolved_exchange_factors,
             resolved_ncs_bounds: &resolved_ncs_bounds,
             resolved_ncs_factors: &resolved_ncs_factors,
             resolved_parameters: &resolved_parameters,
@@ -470,17 +468,7 @@ pub fn geom(_hydro_count: usize, _max_par_order: usize) -> StageGeometry {
 /// `crate::setup::resolve_state_layout` finalizes with no per-hydro AR truncation.
 #[must_use]
 pub fn state_layout(hydro_count: usize, max_par_order: usize) -> StateSpace {
-    let effective_lag_count = vec![max_par_order; hydro_count];
-    StateSpace::new(
-        hydro_count,
-        max_par_order,
-        0,
-        Vec::new(),
-        0,
-        0,
-        vec![],
-        &effective_lag_count,
-    )
+    state_layout_full(hydro_count, max_par_order, 0, 0, Vec::new())
 }
 
 /// Build a finalized [`StateSpace`] from explicit state-vector dimensions,
@@ -496,8 +484,7 @@ pub fn state_layout_full(
     k_max: usize,
     anticipated_lead_stages: Vec<usize>,
 ) -> StateSpace {
-    let effective_lag_count = vec![max_par_order; hydro_count];
-    StateSpace::new(
+    state_layout_with_transit_buckets(
         hydro_count,
         max_par_order,
         0,
@@ -505,7 +492,6 @@ pub fn state_layout_full(
         n_anticipated,
         k_max,
         anticipated_lead_stages,
-        &effective_lag_count,
     )
 }
 

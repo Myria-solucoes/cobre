@@ -10,9 +10,8 @@ use crate::{
     Bus, CascadeTopology, CorrelationModel, EnergyContract, EntityId, ExternalLoadRow,
     ExternalNcsRow, ExternalScenarioRow, GenericConstraint, Hydro, InflowHistoryRow, InflowModel,
     InitialConditions, Line, LoadModel, NcsModel, NetworkTopology, NonControllableSource,
-    PolicyGraph, PumpingStation, ResolvedBounds, ResolvedExchangeFactors,
-    ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
-    ResolvedPenalties, Stage, Thermal,
+    PolicyGraph, PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds,
+    ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, Stage, Thermal,
 };
 
 mod builder;
@@ -102,8 +101,6 @@ pub struct System {
     resolved_generic_bounds: ResolvedGenericConstraintBounds,
     /// Pre-resolved per-block load scaling factors.
     resolved_load_factors: ResolvedLoadFactors,
-    /// Pre-resolved per-block exchange capacity factors.
-    resolved_exchange_factors: ResolvedExchangeFactors,
     /// Pre-resolved per-stage NCS available generation bounds.
     resolved_ncs_bounds: ResolvedNcsBounds,
     /// Pre-resolved per-block NCS generation scaling factors.
@@ -135,10 +132,7 @@ pub struct System {
 
 const _: () = {
     const fn assert_send_sync<T: Send + Sync>() {}
-    const fn check() {
-        assert_send_sync::<System>();
-    }
-    let _ = check;
+    assert_send_sync::<System>();
 };
 
 /// Deserialize-only mirror of [`System`] without the derived indices. Field
@@ -162,7 +156,6 @@ struct SystemRepr {
     bounds: ResolvedBounds,
     resolved_generic_bounds: ResolvedGenericConstraintBounds,
     resolved_load_factors: ResolvedLoadFactors,
-    resolved_exchange_factors: ResolvedExchangeFactors,
     resolved_ncs_bounds: ResolvedNcsBounds,
     resolved_ncs_factors: ResolvedNcsFactors,
     inflow_models: Vec<InflowModel>,
@@ -204,7 +197,6 @@ impl From<SystemRepr> for System {
             bounds: repr.bounds,
             resolved_generic_bounds: repr.resolved_generic_bounds,
             resolved_load_factors: repr.resolved_load_factors,
-            resolved_exchange_factors: repr.resolved_exchange_factors,
             resolved_ncs_bounds: repr.resolved_ncs_bounds,
             resolved_ncs_factors: repr.resolved_ncs_factors,
             inflow_models: repr.inflow_models,
@@ -417,12 +409,6 @@ impl System {
         &self.resolved_load_factors
     }
 
-    /// Returns a reference to the pre-resolved per-block exchange capacity factors.
-    #[must_use]
-    pub fn resolved_exchange_factors(&self) -> &ResolvedExchangeFactors {
-        &self.resolved_exchange_factors
-    }
-
     /// Returns a reference to the pre-resolved per-stage NCS available generation bounds.
     #[must_use]
     pub fn resolved_ncs_bounds(&self) -> &ResolvedNcsBounds {
@@ -560,7 +546,7 @@ impl System {
 mod tests {
     use super::*;
     use crate::ValidationError;
-    use crate::entities::{ContractType, HydroGenerationModel, HydroPenalties};
+    use crate::entities::{ContractType, FillingConfig, HydroGenerationModel, HydroPenalties};
     use chrono::NaiveDate;
 
     fn make_bus(id: i32) -> Bus {
@@ -574,7 +560,7 @@ mod tests {
     }
 
     fn make_line(id: i32, source_bus_id: i32, target_bus_id: i32) -> Line {
-        crate::Line {
+        Line {
             id: EntityId(id),
             name: format!("line-{id}"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -753,7 +739,6 @@ mod tests {
 
     #[test]
     fn test_lookup_by_id() {
-        // Hydros reference bus id=0; supply it so cross-reference validation passes.
         let system = SystemBuilder::new()
             .buses(vec![make_bus(0)])
             .hydros(vec![make_hydro(10), make_hydro(5), make_hydro(20)])
@@ -767,7 +752,6 @@ mod tests {
 
     #[test]
     fn test_lookup_missing_id() {
-        // Hydros reference bus id=0; supply it so cross-reference validation passes.
         let system = SystemBuilder::new()
             .buses(vec![make_bus(0)])
             .hydros(vec![make_hydro(1), make_hydro(2)])
@@ -891,7 +875,6 @@ mod tests {
 
     #[test]
     fn test_cascade_accessible() {
-        // Hydros reference bus id=0; supply it so cross-reference validation passes.
         let mut h0 = make_hydro_on_bus(0, 0);
         h0.downstream_id = Some(EntityId(1));
         let mut h1 = make_hydro_on_bus(1, 0);
@@ -1245,7 +1228,6 @@ mod tests {
 
     #[test]
     fn test_filling_without_entry_stage() {
-        use crate::entities::FillingConfig;
         let bus = make_bus(0);
         let mut hydro = make_hydro(1);
         hydro.entry_stage_id = None;
@@ -1279,7 +1261,6 @@ mod tests {
     #[test]
     fn test_filling_negative_rate() {
         // Only a negative rate is rejected; zero is valid (test_filling_zero_rate_accepted).
-        use crate::entities::FillingConfig;
         let bus = make_bus(0);
         let mut hydro = make_hydro(1);
         hydro.entry_stage_id = Some(10);
@@ -1314,7 +1295,6 @@ mod tests {
     #[test]
     fn test_filling_zero_rate_accepted() {
         // A zero rate is valid: no minimum accumulation is required this stage.
-        use crate::entities::FillingConfig;
         let bus = make_bus(0);
         let mut hydro = make_hydro(1);
         hydro.entry_stage_id = Some(10);
@@ -1337,7 +1317,6 @@ mod tests {
 
     #[test]
     fn test_valid_filling_config_passes() {
-        use crate::entities::FillingConfig;
         let bus = make_bus(0);
         let mut hydro = make_hydro(1);
         hydro.entry_stage_id = Some(10);
@@ -1362,7 +1341,6 @@ mod tests {
     fn test_filling_start_not_before_entry_rejected() {
         // SystemBuilder rejects start_stage_id >= entry_stage_id even when cobre-io
         // is bypassed; an inverted ordering otherwise mis-phases the reservoir.
-        use crate::entities::FillingConfig;
         let bus = make_bus(0);
         let mut hydro = make_hydro(1);
         hydro.entry_stage_id = Some(5);
@@ -1395,7 +1373,6 @@ mod tests {
 
     #[test]
     fn test_cascade_cycle_and_invalid_filling_both_reported() {
-        use crate::entities::FillingConfig;
         let bus = make_bus(0);
 
         let mut h0 = make_hydro(0);
@@ -1478,7 +1455,6 @@ mod tests {
         use crate::temporal::{
             Block, BlockMode, NoiseMethod, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
         };
-        use chrono::NaiveDate;
         Stage {
             index: usize::try_from(id.max(0)).unwrap_or(0),
             id,
@@ -1527,10 +1503,7 @@ mod tests {
 
     #[test]
     fn test_system_resolved_generic_bounds_accessor() {
-        use crate::resolved::ResolvedGenericConstraintBounds;
-        use std::collections::HashMap as StdHashMap;
-
-        let id_map: StdHashMap<i32, usize> = [(0, 0), (1, 1)].into_iter().collect();
+        let id_map: HashMap<i32, usize> = [(0, 0), (1, 1)].into_iter().collect();
         let rows = vec![(0i32, 0i32, None::<i32>, 100.0f64)];
         let table = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
 
@@ -1830,9 +1803,6 @@ mod tests {
         resolved_load_factors.set(0, 0, 0, 0.92);
         resolved_load_factors.set(1, 1, 0, 1.08);
 
-        let mut resolved_exchange_factors = ResolvedExchangeFactors::new(1, 2, 1);
-        resolved_exchange_factors.set(0, 0, 0, 0.95, 0.9);
-
         let resolved_ncs_bounds = ResolvedNcsBounds::new(1, 2, &[45.0]);
 
         let mut resolved_ncs_factors = ResolvedNcsFactors::new(1, 2, 1);
@@ -2015,7 +1985,6 @@ mod tests {
             .bounds(bounds)
             .resolved_generic_bounds(resolved_generic_bounds)
             .resolved_load_factors(resolved_load_factors)
-            .resolved_exchange_factors(resolved_exchange_factors)
             .resolved_ncs_bounds(resolved_ncs_bounds)
             .resolved_ncs_factors(resolved_ncs_factors)
             .inflow_models(inflow_models)
@@ -2051,9 +2020,6 @@ mod tests {
 
     #[test]
     fn test_system_inflow_history_stores_rows() {
-        use crate::scenario::InflowHistoryRow;
-        use chrono::NaiveDate;
-
         let row1 = InflowHistoryRow {
             hydro_id: EntityId(1),
             start_date: NaiveDate::from_ymd_opt(2000, 1, 1).expect("valid date"),
@@ -2088,8 +2054,6 @@ mod tests {
 
     #[test]
     fn test_system_external_scenarios_stores_rows() {
-        use crate::scenario::ExternalScenarioRow;
-
         let row = ExternalScenarioRow {
             stage_id: 0,
             scenario_id: 2,

@@ -13,9 +13,9 @@ use crate::{
     Bus, CascadeTopology, CorrelationModel, EnergyContract, EntityId, ExternalLoadRow,
     ExternalNcsRow, ExternalScenarioRow, GenericConstraint, Hydro, InflowHistoryRow, InflowModel,
     InitialConditions, Line, LoadModel, NcsModel, NetworkTopology, NonControllableSource,
-    PolicyGraph, PumpingStation, ResolvedBounds, ResolvedExchangeFactors,
-    ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
-    ResolvedPenalties, Stage, Thermal, ValidationError,
+    PolicyGraph, PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds,
+    ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, Stage, Thermal,
+    ValidationError,
 };
 
 /// Builder for constructing a validated, immutable [`System`].
@@ -41,9 +41,9 @@ use crate::{
 ///
 /// // Canonical ordering: by operational_start_date, then by id; never by name.
 /// // The two early-date buses order by id (2 then 3), not by name (which would be A then Z).
-/// assert_eq!(system.buses()[0].id, EntityId(2)); // early date, smaller id (name "Z")
-/// assert_eq!(system.buses()[1].id, EntityId(3)); // early date, larger id (name "A")
-/// assert_eq!(system.buses()[2].id, EntityId(1)); // later date
+/// assert_eq!(system.buses()[0].id, EntityId(2));
+/// assert_eq!(system.buses()[1].id, EntityId(3));
+/// assert_eq!(system.buses()[2].id, EntityId(1));
 /// ```
 pub struct SystemBuilder {
     buses: Vec<Bus>,
@@ -59,7 +59,6 @@ pub struct SystemBuilder {
     bounds: ResolvedBounds,
     resolved_generic_bounds: ResolvedGenericConstraintBounds,
     resolved_load_factors: ResolvedLoadFactors,
-    resolved_exchange_factors: ResolvedExchangeFactors,
     resolved_ncs_bounds: ResolvedNcsBounds,
     resolved_ncs_factors: ResolvedNcsFactors,
     inflow_models: Vec<InflowModel>,
@@ -98,7 +97,6 @@ impl SystemBuilder {
             bounds: ResolvedBounds::empty(),
             resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
             resolved_load_factors: ResolvedLoadFactors::empty(),
-            resolved_exchange_factors: ResolvedExchangeFactors::empty(),
             resolved_ncs_bounds: ResolvedNcsBounds::empty(),
             resolved_ncs_factors: ResolvedNcsFactors::empty(),
             inflow_models: Vec::new(),
@@ -207,16 +205,6 @@ impl SystemBuilder {
     #[must_use]
     pub fn resolved_load_factors(mut self, resolved_load_factors: ResolvedLoadFactors) -> Self {
         self.resolved_load_factors = resolved_load_factors;
-        self
-    }
-
-    /// Set the pre-resolved per-block exchange capacity factors.
-    #[must_use]
-    pub fn resolved_exchange_factors(
-        mut self,
-        resolved_exchange_factors: ResolvedExchangeFactors,
-    ) -> Self {
-        self.resolved_exchange_factors = resolved_exchange_factors;
         self
     }
 
@@ -451,7 +439,6 @@ impl SystemBuilder {
             bounds: self.bounds,
             resolved_generic_bounds: self.resolved_generic_bounds,
             resolved_load_factors: self.resolved_load_factors,
-            resolved_exchange_factors: self.resolved_exchange_factors,
             resolved_ncs_bounds: self.resolved_ncs_bounds,
             resolved_ncs_factors: self.resolved_ncs_factors,
             inflow_models: self.inflow_models,
@@ -472,9 +459,9 @@ impl SystemBuilder {
 /// within an entity type (duplicates are rejected), so this is a total order and
 /// upholds the declaration-order hard rule without relying on input order. The
 /// secondary key is the id, not the name, because names are user-chosen and vary
-/// between authors of the same system, whereas the id is the stable canonical key.
+/// between authors of the same system.
 fn sort_canonical<T>(entities: &mut [T], date: impl Fn(&T) -> NaiveDate, id: impl Fn(&T) -> i32) {
-    entities.sort_by(|a, b| date(a).cmp(&date(b)).then_with(|| id(a).cmp(&id(b))));
+    entities.sort_by_key(|e| (date(e), id(e)));
 }
 
 #[cfg(test)]
@@ -690,7 +677,7 @@ mod proptests {
 
     // Each operational collection mixes two distinct dates so the primary date key
     // is exercised; the bus set additionally carries a same-date pair ("Z"/"A") so
-    // the name tiebreak is exercised. Declaration order is non-canonical so a
+    // the id-not-name tiebreak is exercised. Declaration order is non-canonical so a
     // permutation that happens to be canonical is not the only case the property
     // sees. Cross-references resolve: bus ids {1,2,3}, hydro ids {1,2}.
     fn reference_buses() -> Vec<Bus> {
@@ -809,10 +796,6 @@ mod proptests {
         g.iter().map(|c| c.id.0).collect()
     }
 
-    fn is_sorted<T: PartialOrd>(seq: &[T]) -> bool {
-        seq.windows(2).all(|w| w[0] <= w[1])
-    }
-
     proptest! {
         /// Declaration-order invariance guard: `SystemBuilder::build()` canonicalizes
         /// every collection identically regardless of input order. Each parameter is
@@ -855,15 +838,15 @@ mod proptests {
 
             // Sortedness: the precomputed expectation is itself non-decreasing under
             // the canonical key, so a mistake in the expectation cannot mask a sort bug.
-            prop_assert!(is_sorted(&expected_buses));
-            prop_assert!(is_sorted(&expected_lines));
-            prop_assert!(is_sorted(&expected_hydros));
-            prop_assert!(is_sorted(&expected_thermals));
-            prop_assert!(is_sorted(&expected_pumping));
-            prop_assert!(is_sorted(&expected_contracts));
-            prop_assert!(is_sorted(&expected_ncs));
-            prop_assert!(is_sorted(&expected_stages));
-            prop_assert!(is_sorted(&expected_gcs));
+            prop_assert!(expected_buses.is_sorted());
+            prop_assert!(expected_lines.is_sorted());
+            prop_assert!(expected_hydros.is_sorted());
+            prop_assert!(expected_thermals.is_sorted());
+            prop_assert!(expected_pumping.is_sorted());
+            prop_assert!(expected_contracts.is_sorted());
+            prop_assert!(expected_ncs.is_sorted());
+            prop_assert!(expected_stages.is_sorted());
+            prop_assert!(expected_gcs.is_sorted());
 
             prop_assert_eq!(project_op(system.buses()), expected_buses);
             prop_assert_eq!(project_op(system.lines()), expected_lines);

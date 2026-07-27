@@ -90,9 +90,9 @@ pub struct ThermalStageBounds {
 /// Transmission line bound values for a given (line, stage) pair.
 ///
 /// Resolved from `lines.json` overlaid with `constraints/line_bounds.parquet`.
-/// Per-block exchange factors are stored separately
-/// ([`ResolvedExchangeFactors`](crate::ResolvedExchangeFactors)) and applied on top
-/// of these stage-level bounds at LP construction time.
+/// A per-block capacity override
+/// ([`LineBlockOverride`](crate::resolved::LineBlockOverride)) wins over these
+/// stage-level bounds at LP construction time.
 ///
 /// # Examples
 ///
@@ -843,7 +843,6 @@ mod tests {
             },
         );
         assert_eq!(table.thermal_stage_axis_len(), 5);
-        // Padded region inherits the default ThermalStageBounds.
         let padded = table.thermal_bounds(1, 4);
         assert!((padded.max_generation_mw - 100.0).abs() < f64::EPSILON);
     }
@@ -871,7 +870,6 @@ mod tests {
             },
         );
         assert_eq!(table.thermal_stage_axis_len(), table.n_stages());
-        // Last valid horizon stage still works.
         let last = table.thermal_bounds(0, 3);
         assert!((last.max_generation_mw - 50.0).abs() < f64::EPSILON);
     }
@@ -1247,8 +1245,6 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn deserialize_missing_thermal_axis_len_with_thermals_is_rejected() {
-        // One thermal, one stage: the thermal table is non-empty, so the
-        // absent stride must trigger a deserialization error.
         let json = r#"{
             "n_stages": 1,
             "hydro": [],

@@ -12,7 +12,7 @@ use chrono::NaiveDate;
 use cobre_core::{
     Block, BlockMode, BoundsCountsSpec, BoundsDefaults, CascadeTopology, ContractStageBounds,
     EntityId, FillingConfig, Hydro, HydroGenerationModel, HydroStageBounds, LineStageBounds,
-    NoiseMethod, PumpingStageBounds, PumpingStation, ResolvedBounds, ResolvedExchangeFactors,
+    NoiseMethod, PumpingStageBounds, PumpingStation, ResolvedBounds,
     ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
     ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig,
     ThermalStageBounds,
@@ -69,7 +69,6 @@ struct ZeroEntityFixtures {
     penalties: ResolvedPenalties,
     resolved_generic_bounds: ResolvedGenericConstraintBounds,
     resolved_load_factors: ResolvedLoadFactors,
-    resolved_exchange_factors: ResolvedExchangeFactors,
     resolved_ncs_bounds: ResolvedNcsBounds,
     resolved_ncs_factors: ResolvedNcsFactors,
     resolved_parameters: ResolvedParameters,
@@ -86,7 +85,6 @@ impl ZeroEntityFixtures {
             penalties: ResolvedPenalties::empty(),
             resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
             resolved_load_factors: ResolvedLoadFactors::empty(),
-            resolved_exchange_factors: ResolvedExchangeFactors::empty(),
             resolved_ncs_bounds: ResolvedNcsBounds::empty(),
             resolved_ncs_factors: ResolvedNcsFactors::empty(),
             resolved_parameters: ResolvedParameters {
@@ -123,7 +121,6 @@ impl ZeroEntityFixtures {
                 penalties: &self.penalties,
                 resolved_generic_bounds: &self.resolved_generic_bounds,
                 resolved_load_factors: &self.resolved_load_factors,
-                resolved_exchange_factors: &self.resolved_exchange_factors,
                 resolved_ncs_bounds: &self.resolved_ncs_bounds,
                 resolved_ncs_factors: &self.resolved_ncs_factors,
                 resolved_parameters: &self.resolved_parameters,
@@ -265,8 +262,8 @@ fn membership_hydro(
 
 /// AC-3: `StageLayout` built from a context with `n_anticipated == 0` has
 /// `n_ant_state == 0`, `n_anticipated == 0`, `k_max == 0`, and
-/// `col_turbine_start == idx.theta + 1` where `idx` is the legacy
-/// the N=0, L=0 state layout (zero hydros, zero lag order).
+/// `col_turbine_start == idx.theta + 1` where `idx` is the N=0, L=0 state
+/// layout (zero hydros, zero lag order).
 ///
 /// This verifies that the decision-region offset before the anticipated-ring
 /// insertion is preserved when no anticipated thermals are present.
@@ -303,7 +300,6 @@ struct TwoHydroFixtures {
     penalties: ResolvedPenalties,
     resolved_generic_bounds: ResolvedGenericConstraintBounds,
     resolved_load_factors: ResolvedLoadFactors,
-    resolved_exchange_factors: ResolvedExchangeFactors,
     resolved_ncs_bounds: ResolvedNcsBounds,
     resolved_ncs_factors: ResolvedNcsFactors,
     resolved_parameters: ResolvedParameters,
@@ -330,7 +326,6 @@ impl TwoHydroFixtures {
             penalties: ResolvedPenalties::empty(),
             resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
             resolved_load_factors: ResolvedLoadFactors::empty(),
-            resolved_exchange_factors: ResolvedExchangeFactors::empty(),
             resolved_ncs_bounds: ResolvedNcsBounds::empty(),
             resolved_ncs_factors: ResolvedNcsFactors::empty(),
             resolved_parameters: ResolvedParameters {
@@ -359,7 +354,6 @@ impl TwoHydroFixtures {
                 penalties: &self.penalties,
                 resolved_generic_bounds: &self.resolved_generic_bounds,
                 resolved_load_factors: &self.resolved_load_factors,
-                resolved_exchange_factors: &self.resolved_exchange_factors,
                 resolved_ncs_bounds: &self.resolved_ncs_bounds,
                 resolved_ncs_factors: &self.resolved_ncs_factors,
                 resolved_parameters: &self.resolved_parameters,
@@ -619,7 +613,6 @@ struct FphaMixFixtures {
     penalties: ResolvedPenalties,
     resolved_generic_bounds: ResolvedGenericConstraintBounds,
     resolved_load_factors: ResolvedLoadFactors,
-    resolved_exchange_factors: ResolvedExchangeFactors,
     resolved_ncs_bounds: ResolvedNcsBounds,
     resolved_ncs_factors: ResolvedNcsFactors,
     resolved_parameters: ResolvedParameters,
@@ -659,7 +652,6 @@ impl FphaMixFixtures {
             penalties: ResolvedPenalties::empty(),
             resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
             resolved_load_factors: ResolvedLoadFactors::empty(),
-            resolved_exchange_factors: ResolvedExchangeFactors::empty(),
             resolved_ncs_bounds: ResolvedNcsBounds::empty(),
             resolved_ncs_factors: ResolvedNcsFactors::empty(),
             resolved_parameters: ResolvedParameters {
@@ -689,7 +681,6 @@ impl FphaMixFixtures {
                 penalties: &self.penalties,
                 resolved_generic_bounds: &self.resolved_generic_bounds,
                 resolved_load_factors: &self.resolved_load_factors,
-                resolved_exchange_factors: &self.resolved_exchange_factors,
                 resolved_ncs_bounds: &self.resolved_ncs_bounds,
                 resolved_ncs_factors: &self.resolved_ncs_factors,
                 resolved_parameters: &self.resolved_parameters,
@@ -774,7 +765,6 @@ struct FillingMembershipFixtures {
     penalties: ResolvedPenalties,
     resolved_generic_bounds: ResolvedGenericConstraintBounds,
     resolved_load_factors: ResolvedLoadFactors,
-    resolved_exchange_factors: ResolvedExchangeFactors,
     resolved_ncs_bounds: ResolvedNcsBounds,
     resolved_ncs_factors: ResolvedNcsFactors,
     resolved_parameters: ResolvedParameters,
@@ -786,9 +776,6 @@ impl FillingMembershipFixtures {
     const START_STAGE_ID: i32 = 1;
     const ENTRY_STAGE_ID: i32 = 3;
 
-    /// `filling`/`fpha` flags: hydro 0 is FPHA + filling, hydro 1 is
-    /// non-FPHA + filling-with-evaporation. Both hydros use the same filling
-    /// window so the phase is a pure function of `stage.id` under test.
     fn new() -> Self {
         use crate::hydro_models::{
             EvaporationModel, FphaPlane, LinearizedEvaporation, ResolvedProductionModel,
@@ -841,7 +828,6 @@ impl FillingMembershipFixtures {
             penalties: ResolvedPenalties::empty(),
             resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
             resolved_load_factors: ResolvedLoadFactors::empty(),
-            resolved_exchange_factors: ResolvedExchangeFactors::empty(),
             resolved_ncs_bounds: ResolvedNcsBounds::empty(),
             resolved_ncs_factors: ResolvedNcsFactors::empty(),
             resolved_parameters: ResolvedParameters {
@@ -867,7 +853,6 @@ impl FillingMembershipFixtures {
                 penalties: &self.penalties,
                 resolved_generic_bounds: &self.resolved_generic_bounds,
                 resolved_load_factors: &self.resolved_load_factors,
-                resolved_exchange_factors: &self.resolved_exchange_factors,
                 resolved_ncs_bounds: &self.resolved_ncs_bounds,
                 resolved_ncs_factors: &self.resolved_ncs_factors,
                 resolved_parameters: &self.resolved_parameters,
@@ -947,15 +932,6 @@ impl FillingMembershipFixtures {
         StageLayout::new(&ctx, &state, &stage, 0)
             .filling
             .filled_min_storage_floor_hydro_indices
-    }
-
-    /// `num_rows` for a stage built at `stage_id` — the structural row count
-    /// the append-only cut rows begin at.
-    fn num_rows_at(&self, stage_id: i32) -> usize {
-        let ctx = self.make_ctx();
-        let stage = stage_with_id(stage_id);
-        let state = state_layout_for(&ctx);
-        StageLayout::new(&ctx, &state, &stage, 0).rows.num_rows
     }
 }
 
@@ -1101,8 +1077,6 @@ fn filling_target_adds_rows_at_every_filling_stage() {
             layout.filling.filling_target_hydro_indices.is_empty(),
             "no σ_fill target rows at non-Filling id {stage_id}"
         );
-        // Anchor unaffected: same fixture exercised in num_rows_at below.
-        let _ = fixtures.num_rows_at(stage_id);
     }
     // Every Filling stage (ids 1, 2) adds exactly 2 target rows (one per hydro).
     for stage_id in [1, 2] {
@@ -1442,11 +1416,6 @@ fn anticipated_decision_columns_placed_between_thermal_and_line_fwd() {
     let state = state_layout_for(&ctx);
     let layout = StageLayout::new(&ctx, &state, &stage, 0);
 
-    // n_thermals = 0, n_blks = 4:
-    // col_thermal_start = col_diversion_start + 0 * 4 = col_diversion_start
-    // col_anticipated_decision_start = col_thermal_start + 0 * 4 = col_thermal_start
-    // col_line_fwd_start = col_anticipated_decision_start + n_anticipated
-    //   (state_out lives in the state region, not the control region)
     assert_eq!(
         layout.anticipated.col_anticipated_decision_start, layout.equipment.thermal.start,
         "col_anticipated_decision_start must equal col_thermal_start \
@@ -1504,12 +1473,9 @@ fn stage_layout_with_anticipated_shifts_decision_region() {
     let state = state_layout_for(&ctx);
     let layout = StageLayout::new(&ctx, &state, &stage, 0);
 
-    // n_ant_state = n_anticipated * k_max = 2 * 3 = 6
     let expected_n_ant_state = n_anticipated * k_max;
     assert_eq!(layout.n_ant_state, expected_n_ant_state, "n_ant_state");
 
-    // theta = N*(3+L) + 2*n_ant_state = 0*(3+0) + 2*6 = 12 (B=0 here)
-    // col_turbine_start = theta + 1 = 13
     let expected_col_turbine_start = n_hydros * (3 + max_par_order) + 2 * expected_n_ant_state + 1;
     assert_eq!(
         layout.equipment.turbine.start, expected_col_turbine_start,
@@ -1641,50 +1607,7 @@ fn num_rows_drops_by_n_state_with_anticipated_thermals() {
 /// Used to exercise the `is_anticipated_decision_active` gate
 /// in `n_anticipated_state_out_def_rows` without needing real entity data.
 fn bounds_with_n_stages(n_stages: usize) -> ResolvedBounds {
-    ResolvedBounds::new(
-        &BoundsCountsSpec {
-            n_hydros: 0,
-            n_thermals: 0,
-            n_lines: 0,
-            n_pumping: 0,
-            n_contracts: 0,
-            n_stages,
-            k_max: 0,
-        },
-        &BoundsDefaults {
-            hydro: HydroStageBounds {
-                min_storage_hm3: 0.0,
-                max_storage_hm3: 0.0,
-                min_turbined_m3s: 0.0,
-                max_turbined_m3s: 0.0,
-                min_outflow_m3s: 0.0,
-                max_outflow_m3s: None,
-                min_generation_mw: 0.0,
-                max_generation_mw: 0.0,
-                max_diversion_m3s: None,
-                filling_min_rate_m3s: 0.0,
-                water_withdrawal_m3s: 0.0,
-            },
-            thermal: ThermalStageBounds {
-                min_generation_mw: 0.0,
-                max_generation_mw: 0.0,
-                cost_per_mwh: 0.0,
-            },
-            line: LineStageBounds {
-                direct_mw: 0.0,
-                reverse_mw: 0.0,
-            },
-            pumping: PumpingStageBounds {
-                min_flow_m3s: 0.0,
-                max_flow_m3s: 0.0,
-            },
-            contract: ContractStageBounds {
-                min_mw: 0.0,
-                max_mw: 0.0,
-                price_per_mwh: 0.0,
-            },
-        },
-    )
+    bounds_with_pumping(0, n_stages)
 }
 
 /// Builds a fixture struct owning all data for a context with anticipated
@@ -1696,7 +1619,6 @@ struct AntFixturesWithNStages {
     penalties: ResolvedPenalties,
     resolved_generic_bounds: ResolvedGenericConstraintBounds,
     resolved_load_factors: ResolvedLoadFactors,
-    resolved_exchange_factors: ResolvedExchangeFactors,
     resolved_ncs_bounds: ResolvedNcsBounds,
     resolved_ncs_factors: ResolvedNcsFactors,
     resolved_parameters: ResolvedParameters,
@@ -1713,7 +1635,6 @@ impl AntFixturesWithNStages {
             penalties: ResolvedPenalties::empty(),
             resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
             resolved_load_factors: ResolvedLoadFactors::empty(),
-            resolved_exchange_factors: ResolvedExchangeFactors::empty(),
             resolved_ncs_bounds: ResolvedNcsBounds::empty(),
             resolved_ncs_factors: ResolvedNcsFactors::empty(),
             resolved_parameters: ResolvedParameters {
@@ -1746,7 +1667,6 @@ impl AntFixturesWithNStages {
                 penalties: &self.penalties,
                 resolved_generic_bounds: &self.resolved_generic_bounds,
                 resolved_load_factors: &self.resolved_load_factors,
-                resolved_exchange_factors: &self.resolved_exchange_factors,
                 resolved_ncs_bounds: &self.resolved_ncs_bounds,
                 resolved_ncs_factors: &self.resolved_ncs_factors,
                 resolved_parameters: &self.resolved_parameters,
@@ -1944,7 +1864,6 @@ struct PumpingFixtures {
     penalties: ResolvedPenalties,
     resolved_generic_bounds: ResolvedGenericConstraintBounds,
     resolved_load_factors: ResolvedLoadFactors,
-    resolved_exchange_factors: ResolvedExchangeFactors,
     resolved_ncs_bounds: ResolvedNcsBounds,
     resolved_ncs_factors: ResolvedNcsFactors,
     resolved_parameters: ResolvedParameters,
@@ -1985,7 +1904,6 @@ impl PumpingFixtures {
             penalties: ResolvedPenalties::empty(),
             resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
             resolved_load_factors: ResolvedLoadFactors::empty(),
-            resolved_exchange_factors: ResolvedExchangeFactors::empty(),
             resolved_ncs_bounds: ResolvedNcsBounds::empty(),
             resolved_ncs_factors: ResolvedNcsFactors::empty(),
             resolved_parameters: ResolvedParameters {
@@ -2013,7 +1931,6 @@ impl PumpingFixtures {
                 penalties: &self.penalties,
                 resolved_generic_bounds: &self.resolved_generic_bounds,
                 resolved_load_factors: &self.resolved_load_factors,
-                resolved_exchange_factors: &self.resolved_exchange_factors,
                 resolved_ncs_bounds: &self.resolved_ncs_bounds,
                 resolved_ncs_factors: &self.resolved_ncs_factors,
                 resolved_parameters: &self.resolved_parameters,
@@ -2080,12 +1997,12 @@ impl PumpingFixtures {
                 })
                 .collect(),
             block_mode: BlockMode::Parallel,
-            state_config: cobre_core::StageStateConfig {
+            state_config: StageStateConfig {
                 storage: false,
                 inflow_lags: false,
             },
             risk_config: StageRiskConfig::Expectation,
-            scenario_config: cobre_core::ScenarioSourceConfig {
+            scenario_config: ScenarioSourceConfig {
                 branching_factor: 1,
                 noise_method: NoiseMethod::Saa,
             },

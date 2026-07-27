@@ -5,11 +5,11 @@
 #![allow(
     clippy::unwrap_used,
     clippy::panic,
-    clippy::too_many_lines,
     clippy::doc_markdown,
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
-    clippy::cast_sign_loss
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
 )]
 
 use chrono::NaiveDate;
@@ -19,7 +19,7 @@ use cobre_core::{
     initial_conditions::InitialConditions,
     penalty::GlobalPenaltyDefaults,
     temporal::{
-        BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig, Stage,
+        Block, BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig, Stage,
         StageRiskConfig, StageStateConfig,
     },
 };
@@ -30,12 +30,13 @@ use crate::{
     extensions::{FphaHyperplaneRow, HydroGeometryRow},
     parse_config,
     stages::StagesData,
-    validation::{ValidationContext, schema::ParsedData},
+    validation::schema::ParsedData,
 };
 
 // ── Penalty helpers ───────────────────────────────────────────────────────────
 
-/// Build a minimal valid `HydroPenalties` with all fields set to `v`.
+/// Build `HydroPenalties` with every field set to `v` except
+/// `inflow_nonnegativity_cost`.
 pub(super) fn penalties_all(v: f64) -> HydroPenalties {
     HydroPenalties {
         spillage_cost: v,
@@ -144,8 +145,8 @@ pub(super) fn make_stage(id: i32) -> Stage {
     Stage {
         id,
         index: 0,
-        start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        end_date: chrono::NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
         season_id: None,
         blocks: vec![],
         block_mode: BlockMode::Parallel,
@@ -159,6 +160,20 @@ pub(super) fn make_stage(id: i32) -> Stage {
             noise_method: NoiseMethod::Saa,
         },
     }
+}
+
+/// Build a stage with `id` and `n` blocks of equal duration, reusing
+/// [`make_stage`] for every other field so the two builders cannot drift.
+pub(super) fn make_stage_with_blocks(id: i32, n: usize) -> Stage {
+    let mut stage = make_stage(id);
+    stage.blocks = (0..n)
+        .map(|index| Block {
+            index,
+            name: format!("B{index}"),
+            duration_hours: 720.0 / n as f64,
+        })
+        .collect();
+    stage
 }
 
 /// Build a minimal valid `StagesData` with the given stage IDs.
@@ -178,7 +193,6 @@ pub(super) fn make_stages(ids: Vec<i32>) -> StagesData {
 
 /// Build a minimal `ParsedData` with the provided hydros, thermals, stages,
 /// geometry, and FPHA rows.  All other fields are empty/minimal.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn make_data(
     hydros: Vec<Hydro>,
     thermals: Vec<Thermal>,
@@ -234,7 +248,6 @@ pub(super) fn make_data(
         line_bounds: vec![],
         pumping_bounds: vec![],
         contract_bounds: vec![],
-        exchange_factors: vec![],
         generic_constraints: vec![],
         generic_constraint_bounds: vec![],
         penalty_overrides_bus: vec![],
@@ -298,7 +311,6 @@ pub(super) fn make_data_5b(
         line_bounds: vec![],
         pumping_bounds: vec![],
         contract_bounds: vec![],
-        exchange_factors: vec![],
         generic_constraints: vec![],
         generic_constraint_bounds: vec![],
         penalty_overrides_bus: vec![],
@@ -310,7 +322,6 @@ pub(super) fn make_data_5b(
 }
 
 /// Build a hydro with penalties satisfying the ordering hierarchy.
-/// filling (1000) > storage_viol (500) > constraint_viol (50) > resource (1)
 pub(super) fn make_hydro_ordered_penalties(id: i32) -> Hydro {
     let mut h = make_hydro(id, None);
     h.penalties = HydroPenalties {
@@ -334,18 +345,8 @@ pub(super) fn make_hydro_ordered_penalties(id: i32) -> Hydro {
     h
 }
 
-/// Build a minimal valid `StagesData` with the given stage IDs and a
-/// `FiniteHorizon` policy graph with valid transitions.
 pub(super) fn make_stages_5b(ids: Vec<i32>) -> StagesData {
-    StagesData {
-        stages: ids.into_iter().map(make_stage).collect(),
-        policy_graph: PolicyGraph {
-            graph_type: PolicyGraphType::FiniteHorizon,
-            annual_discount_rate: 0.06,
-            transitions: vec![],
-            season_map: None,
-        },
-    }
+    make_stages(ids)
 }
 
 /// Build a bus with a single deficit segment at the given cost.
@@ -502,7 +503,7 @@ pub(super) fn config_with_simulation_external_load() -> Config {
 
 /// Build a monthly `SeasonMap` with 12 seasons (January=0 .. December=11).
 pub(super) fn make_monthly_season_map() -> SeasonMap {
-    use cobre_core::temporal::{SeasonCycleType, SeasonDefinition, SeasonMap};
+    use cobre_core::temporal::{SeasonCycleType, SeasonDefinition};
     let seasons = (0..12u32)
         .map(|m| SeasonDefinition {
             id: m as usize,
@@ -526,7 +527,7 @@ pub(super) fn make_history_rows(hydro_id: i32, n_obs: usize) -> Vec<InflowHistor
     for i in 0..n_obs {
         let year = 2000 + (i / 12) as i32;
         let month = (i % 12) as u32 + 1;
-        let start_date = chrono::NaiveDate::from_ymd_opt(year, month, 15).unwrap();
+        let start_date = NaiveDate::from_ymd_opt(year, month, 15).unwrap();
         rows.push(InflowHistoryRow {
             hydro_id: EntityId::from(hydro_id),
             start_date,
@@ -545,45 +546,25 @@ pub(super) fn make_stages_with_seasons(n_months: usize, with_season_map: bool) -
     for i in 0..n_months {
         let year = 2000 + (i / 12) as i32;
         let month = (i % 12) as u32 + 1;
-        let start_date = chrono::NaiveDate::from_ymd_opt(year, month, 1).unwrap();
         let (end_year, end_month) = if month == 12 {
             (year + 1, 1u32)
         } else {
             (year, month + 1)
         };
-        let end_date = chrono::NaiveDate::from_ymd_opt(end_year, end_month, 1).unwrap();
-        let season_id = i % 12;
-        stages.push(Stage {
-            index: i,
-            id: i as i32,
-            start_date,
-            end_date,
-            season_id: Some(season_id),
-            blocks: vec![],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
-        });
+        let mut stage = make_stage(i as i32);
+        stage.index = i;
+        stage.start_date = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+        stage.end_date = NaiveDate::from_ymd_opt(end_year, end_month, 1).unwrap();
+        stage.season_id = Some(i % 12);
+        stages.push(stage);
     }
-    let season_map = if with_season_map {
-        Some(make_monthly_season_map())
-    } else {
-        None
-    };
     StagesData {
         stages,
         policy_graph: PolicyGraph {
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.06,
             transitions: vec![],
-            season_map,
+            season_map: with_season_map.then(make_monthly_season_map),
         },
     }
 }
@@ -643,7 +624,6 @@ pub(super) fn make_data_estimation(
         line_bounds: vec![],
         pumping_bounds: vec![],
         contract_bounds: vec![],
-        exchange_factors: vec![],
         generic_constraints: vec![],
         generic_constraint_bounds: vec![],
         penalty_overrides_bus: vec![],
@@ -664,8 +644,3 @@ pub(super) fn make_ar_row(hydro_id: i32, stage_id: i32, lag: i32) -> InflowArCoe
         coefficient: 0.5,
     }
 }
-
-// dead_code: a helper may be unused by some sibling modules but is kept here for
-// discoverability rather than scattered per-module.
-#[allow(dead_code)]
-pub(super) fn _assert_helpers_present(_ctx: &mut ValidationContext) {}

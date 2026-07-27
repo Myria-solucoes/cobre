@@ -434,7 +434,6 @@ fn unit_for(file: &str, column: &str) -> &'static str {
         _ => {}
     }
     match (file, column) {
-        (_, "total_cost" | "pumping_cost" | "spillage_cost" | "exchange_cost") => "$",
         ("hydros", "water_value_per_hm3") => "$/hm3",
         ("hydros", "equivalent_productivity_mw_per_m3s") => "MW/(m3/s)",
         ("hydros", "accumulated_productivity_mw_per_m3s") => "MW/(m3/s)",
@@ -729,12 +728,22 @@ fn description_for(file: &str, column: &str) -> &'static str {
 
 // ─── bounds.parquet ──────────────────────────────────────────────────────────
 
-/// Write `bounds.parquet` with per-entity, per-stage resolved bounds: one row
-/// per (entity, stage, `bound_type`), `block_id` always null.
+/// Write `bounds.parquet` with per-entity, per-stage resolved bounds: one
+/// null-`block_id` row per (entity, stage, `bound_type`), plus one non-null-
+/// `block_id` row for each (entity, stage, block, `bound_type`) a per-block
+/// override resolved. Only the ten coded `bound_type`s (`write_codes_json`) are
+/// reported at either row class; `LineBlockOverride::reverse_mw`,
+/// `ContractBlockOverride::price_per_mwh`, and
+/// `HydroBlockOverride::max_diversion_m3s` resolve into the LP but have no
+/// `bound_type` code and are not emitted here.
 // Rationale: all five entity classes share the pre-allocated Arrow column
 // builders; per-entity helpers would force passing six builders through each or
 // rebuilding per class, losing the single pre-estimated capacity allocation.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap
+)]
 fn write_bounds_parquet(
     path: &Path,
     system: &System,
@@ -768,6 +777,20 @@ fn write_bounds_parquet(
             bound_values.append_value($value);
         };
     }
+
+    macro_rules! append_block_bound {
+        ($entity_type:expr, $entity_id:expr, $stage_id:expr, $block_id:expr, $bound_type:expr, $value:expr) => {
+            entity_type_codes.append_value($entity_type);
+            entity_ids.append_value($entity_id);
+            stage_ids.append_value($stage_id);
+            block_ids.append_value($block_id);
+            bound_type_codes.append_value($bound_type);
+            bound_values.append_value($value);
+        };
+    }
+
+    let overlay = system.bounds().block_overlay();
+    let has_overlay = !overlay.is_empty();
 
     for (hydro_idx, hydro) in system.hydros().iter().enumerate() {
         let entity_id = hydro.id.0;
@@ -833,6 +856,73 @@ fn write_bounds_parquet(
                 BOUND_GENERATION_MAX,
                 b.max_generation_mw
             );
+
+            if has_overlay {
+                for blk in 0..system.stages()[stage_idx].blocks.len() {
+                    let block_id = blk as i32;
+                    let o = overlay.hydro_override(hydro_idx, stage_idx, blk);
+                    if let Some(v) = o.min_turbined_m3s {
+                        append_block_bound!(
+                            ENTITY_TYPE_HYDRO,
+                            entity_id,
+                            stage_id,
+                            block_id,
+                            BOUND_TURBINED_MIN,
+                            v
+                        );
+                    }
+                    if let Some(v) = o.max_turbined_m3s {
+                        append_block_bound!(
+                            ENTITY_TYPE_HYDRO,
+                            entity_id,
+                            stage_id,
+                            block_id,
+                            BOUND_TURBINED_MAX,
+                            v
+                        );
+                    }
+                    if let Some(v) = o.min_outflow_m3s {
+                        append_block_bound!(
+                            ENTITY_TYPE_HYDRO,
+                            entity_id,
+                            stage_id,
+                            block_id,
+                            BOUND_OUTFLOW_MIN,
+                            v
+                        );
+                    }
+                    if let Some(v) = o.max_outflow_m3s {
+                        append_block_bound!(
+                            ENTITY_TYPE_HYDRO,
+                            entity_id,
+                            stage_id,
+                            block_id,
+                            BOUND_OUTFLOW_MAX,
+                            v
+                        );
+                    }
+                    if let Some(v) = o.min_generation_mw {
+                        append_block_bound!(
+                            ENTITY_TYPE_HYDRO,
+                            entity_id,
+                            stage_id,
+                            block_id,
+                            BOUND_GENERATION_MIN,
+                            v
+                        );
+                    }
+                    if let Some(v) = o.max_generation_mw {
+                        append_block_bound!(
+                            ENTITY_TYPE_HYDRO,
+                            entity_id,
+                            stage_id,
+                            block_id,
+                            BOUND_GENERATION_MAX,
+                            v
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -856,6 +946,33 @@ fn write_bounds_parquet(
                 BOUND_GENERATION_MAX,
                 b.max_generation_mw
             );
+
+            if has_overlay {
+                for blk in 0..system.stages()[stage_idx].blocks.len() {
+                    let block_id = blk as i32;
+                    let o = overlay.thermal_override(thermal_idx, stage_idx, blk);
+                    if let Some(v) = o.min_generation_mw {
+                        append_block_bound!(
+                            ENTITY_TYPE_THERMAL,
+                            entity_id,
+                            stage_id,
+                            block_id,
+                            BOUND_GENERATION_MIN,
+                            v
+                        );
+                    }
+                    if let Some(v) = o.max_generation_mw {
+                        append_block_bound!(
+                            ENTITY_TYPE_THERMAL,
+                            entity_id,
+                            stage_id,
+                            block_id,
+                            BOUND_GENERATION_MAX,
+                            v
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -879,6 +996,23 @@ fn write_bounds_parquet(
                 BOUND_FLOW_MAX,
                 b.direct_mw
             );
+
+            if has_overlay {
+                for blk in 0..system.stages()[stage_idx].blocks.len() {
+                    let block_id = blk as i32;
+                    let o = overlay.line_override(line_idx, stage_idx, blk);
+                    if let Some(v) = o.direct_mw {
+                        append_block_bound!(
+                            ENTITY_TYPE_LINE,
+                            entity_id,
+                            stage_id,
+                            block_id,
+                            BOUND_FLOW_MAX,
+                            v
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -902,6 +1036,33 @@ fn write_bounds_parquet(
                 BOUND_FLOW_MAX,
                 b.max_flow_m3s
             );
+
+            if has_overlay {
+                for blk in 0..system.stages()[stage_idx].blocks.len() {
+                    let block_id = blk as i32;
+                    let o = overlay.pumping_override(pumping_idx, stage_idx, blk);
+                    if let Some(v) = o.min_flow_m3s {
+                        append_block_bound!(
+                            ENTITY_TYPE_PUMPING_STATION,
+                            entity_id,
+                            stage_id,
+                            block_id,
+                            BOUND_FLOW_MIN,
+                            v
+                        );
+                    }
+                    if let Some(v) = o.max_flow_m3s {
+                        append_block_bound!(
+                            ENTITY_TYPE_PUMPING_STATION,
+                            entity_id,
+                            stage_id,
+                            block_id,
+                            BOUND_FLOW_MAX,
+                            v
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -925,6 +1086,33 @@ fn write_bounds_parquet(
                 BOUND_FLOW_MAX,
                 b.max_mw
             );
+
+            if has_overlay {
+                for blk in 0..system.stages()[stage_idx].blocks.len() {
+                    let block_id = blk as i32;
+                    let o = overlay.contract_override(contract_idx, stage_idx, blk);
+                    if let Some(v) = o.min_mw {
+                        append_block_bound!(
+                            ENTITY_TYPE_CONTRACT,
+                            entity_id,
+                            stage_id,
+                            block_id,
+                            BOUND_FLOW_MIN,
+                            v
+                        );
+                    }
+                    if let Some(v) = o.max_mw {
+                        append_block_bound!(
+                            ENTITY_TYPE_CONTRACT,
+                            entity_id,
+                            stage_id,
+                            block_id,
+                            BOUND_FLOW_MAX,
+                            v
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -970,14 +1158,16 @@ fn bounds_schema() -> Schema {
 )]
 mod tests {
     use super::*;
+    use arrow::array::Array;
     use chrono::NaiveDate;
     use cobre_core::{
-        Block, BlockMode, Bus, DeficitSegment, EntityId, Hydro, HydroGenerationModel,
-        HydroPenalties, NoiseMethod, ScenarioSourceConfig, Stage, StageRiskConfig,
-        StageStateConfig, SystemBuilder, Thermal,
+        Block, BlockMode, Bus, ContractType, DeficitSegment, EnergyContract, EntityId, Hydro,
+        HydroGenerationModel, HydroPenalties, Line, NoiseMethod, PumpingStation,
+        ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig, SystemBuilder, Thermal,
         resolved::{
-            BoundsCountsSpec, BoundsDefaults, ContractStageBounds, HydroStageBounds,
-            LineStageBounds, PumpingStageBounds, ResolvedBounds, ThermalStageBounds,
+            BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, ContractStageBounds,
+            HydroStageBounds, LineStageBounds, PumpingStageBounds, ResolvedBlockBounds,
+            ResolvedBounds, ThermalStageBounds,
         },
     };
 
@@ -1088,17 +1278,10 @@ mod tests {
         }
     }
 
-    /// Build a `System` with 2 hydros and 1 thermal for standard tests.
-    fn make_system_2h_1t() -> System {
-        let bus = make_bus(1);
-        let h1 = make_hydro(1, "Hydro1", 1);
-        let h2 = make_hydro(2, "Hydro2", 1);
-        let t1 = make_thermal(1, "Thermal1", 1);
-        let stage = make_stage(0);
-
-        let hydro_bounds_default = HydroStageBounds {
-            min_storage_hm3: 0.0,
-            max_storage_hm3: 100.0,
+    fn hydro_stage_bounds(min_storage_hm3: f64, max_storage_hm3: f64) -> HydroStageBounds {
+        HydroStageBounds {
+            min_storage_hm3,
+            max_storage_hm3,
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 50.0,
             min_outflow_m3s: 0.0,
@@ -1108,7 +1291,18 @@ mod tests {
             max_diversion_m3s: None,
             filling_min_rate_m3s: 0.0,
             water_withdrawal_m3s: 0.0,
-        };
+        }
+    }
+
+    /// Build a `System` with 2 hydros and 1 thermal for standard tests.
+    fn make_system_2h_1t() -> System {
+        let bus = make_bus(1);
+        let h1 = make_hydro(1, "Hydro1", 1);
+        let h2 = make_hydro(2, "Hydro2", 1);
+        let t1 = make_thermal(1, "Thermal1", 1);
+        let stage = make_stage(0);
+
+        let hydro_bounds_default = hydro_stage_bounds(0.0, 100.0);
         let thermal_bounds_default = ThermalStageBounds {
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
@@ -1163,19 +1357,7 @@ mod tests {
         let stage0 = make_stage(0);
         let stage1 = make_stage(1);
 
-        let hydro_bounds_default = HydroStageBounds {
-            min_storage_hm3: min_storage,
-            max_storage_hm3: max_storage,
-            min_turbined_m3s: 0.0,
-            max_turbined_m3s: 50.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            min_generation_mw: 0.0,
-            max_generation_mw: 45.0,
-            max_diversion_m3s: None,
-            filling_min_rate_m3s: 0.0,
-            water_withdrawal_m3s: 0.0,
-        };
+        let hydro_bounds_default = hydro_stage_bounds(min_storage, max_storage);
         let thermal_default = ThermalStageBounds {
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
@@ -1220,6 +1402,283 @@ mod tests {
             .bounds(bounds)
             .build()
             .expect("valid system")
+    }
+
+    /// Build a stage with `n` equal-duration blocks, indices `0..n`.
+    fn make_stage_with_blocks(id: i32, n: usize) -> Stage {
+        Stage {
+            index: id.max(0) as usize,
+            id,
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            season_id: Some(0),
+            blocks: (0..n)
+                .map(|i| Block {
+                    index: i,
+                    name: format!("BLK{i}"),
+                    duration_hours: 1.0,
+                })
+                .collect(),
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: true,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 10,
+                noise_method: NoiseMethod::Saa,
+            },
+        }
+    }
+
+    /// Build a 2-hydro, 2-thermal, 2-stage system (stage 0 has 3 blocks, stage
+    /// 1 has 2) installing `overlay` as the bounds' per-block override table.
+    fn make_system_2h_2t_blocks(overlay: ResolvedBlockBounds) -> System {
+        let bus = make_bus(1);
+        let h1 = make_hydro(1, "Hydro1", 1);
+        let h2 = make_hydro(2, "Hydro2", 1);
+        let t1 = make_thermal(1, "Thermal1", 1);
+        let t2 = make_thermal(2, "Thermal2", 1);
+        let stage0 = make_stage_with_blocks(0, 3);
+        let stage1 = make_stage_with_blocks(1, 2);
+
+        let hydro_bounds_default = hydro_stage_bounds(0.0, 100.0);
+        let thermal_bounds_default = ThermalStageBounds {
+            min_generation_mw: 0.0,
+            max_generation_mw: 100.0,
+            cost_per_mwh: 0.0,
+        };
+        let line_default = LineStageBounds {
+            direct_mw: 500.0,
+            reverse_mw: 500.0,
+        };
+        let pumping_default = PumpingStageBounds {
+            min_flow_m3s: 0.0,
+            max_flow_m3s: 0.0,
+        };
+        let contract_default = ContractStageBounds {
+            min_mw: 0.0,
+            max_mw: 0.0,
+            price_per_mwh: 0.0,
+        };
+        let mut bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 2,
+                n_thermals: 2,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: 2,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: hydro_bounds_default,
+                thermal: thermal_bounds_default,
+                line: line_default,
+                pumping: pumping_default,
+                contract: contract_default,
+            },
+        );
+        bounds.set_block_overlay(overlay);
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(vec![h1, h2])
+            .thermals(vec![t1, t2])
+            .stages(vec![stage0, stage1])
+            .bounds(bounds)
+            .build()
+            .expect("valid system")
+    }
+
+    /// Build a per-block override table sized for [`make_system_2h_2t_blocks`]
+    /// with `max_turbined_m3s = 42.0` on `(hydro_idx=1, stage_idx=1,
+    /// block_idx=1)` and `max_generation_mw = 7.0` on `(thermal_idx=0,
+    /// stage_idx=0, block_idx=2)` — different entity, stage, and block on each.
+    fn make_two_block_overrides() -> ResolvedBlockBounds {
+        let mut overlay = ResolvedBlockBounds::new(&BlockBoundsCountsSpec {
+            n_hydros: 2,
+            n_thermals: 2,
+            n_lines: 0,
+            n_pumping: 0,
+            n_contracts: 0,
+            n_stages: 2,
+            max_blocks: 3,
+        });
+        overlay
+            .hydro_override_mut(1, 1, 1)
+            .expect("cell must exist for a fixture-sized overlay")
+            .max_turbined_m3s = Some(42.0);
+        overlay
+            .thermal_override_mut(0, 0, 2)
+            .expect("cell must exist for a fixture-sized overlay")
+            .max_generation_mw = Some(7.0);
+        overlay
+    }
+
+    fn make_line(id: i32, bus_id: i32) -> Line {
+        Line {
+            id: EntityId(id),
+            name: format!("Line{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            source_bus_id: EntityId(bus_id),
+            target_bus_id: EntityId(bus_id),
+            entry_stage_id: None,
+            exit_stage_id: None,
+            direct_capacity_mw: 500.0,
+            reverse_capacity_mw: 500.0,
+            losses_percent: 0.0,
+            exchange_cost: 0.0,
+        }
+    }
+
+    fn make_pumping_station(
+        id: i32,
+        bus_id: i32,
+        source_hydro_id: i32,
+        destination_hydro_id: i32,
+    ) -> PumpingStation {
+        PumpingStation {
+            id: EntityId(id),
+            name: format!("Pumping{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: EntityId(bus_id),
+            source_hydro_id: EntityId(source_hydro_id),
+            destination_hydro_id: EntityId(destination_hydro_id),
+            entry_stage_id: None,
+            exit_stage_id: None,
+            consumption_mw_per_m3s: 0.5,
+            min_flow_m3s: 0.0,
+            max_flow_m3s: 100.0,
+        }
+    }
+
+    fn make_contract(id: i32, bus_id: i32) -> EnergyContract {
+        EnergyContract {
+            id: EntityId(id),
+            name: format!("Contract{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: EntityId(bus_id),
+            contract_type: ContractType::Import,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            price_per_mwh: 50.0,
+            min_mw: 0.0,
+            max_mw: 200.0,
+        }
+    }
+
+    /// Build a system with 2 hydros (referenced only as the pumping station's
+    /// distinct source/destination reservoirs), 2 lines, 1 pumping station,
+    /// and 2 contracts across 2 stages (stage 0 has 3 blocks, stage 1 has 2),
+    /// installing `overlay` as the bounds' per-block override table.
+    ///
+    /// A companion to [`make_system_2h_2t_blocks`] rather than an extension of
+    /// it: `bounds_parquet_emits_no_block_rows_when_overlay_empty` hard-codes
+    /// its expected row count from that fixture's hydro/thermal counts alone,
+    /// so adding line/pumping/contract entities there would require editing
+    /// that count instead of only adding coverage.
+    fn make_system_lines_pumping_contracts_blocks(overlay: ResolvedBlockBounds) -> System {
+        let bus = make_bus(1);
+        let h1 = make_hydro(1, "Hydro1", 1);
+        let h2 = make_hydro(2, "Hydro2", 1);
+        let l1 = make_line(1, 1);
+        let l2 = make_line(2, 1);
+        let p1 = make_pumping_station(1, 1, 1, 2);
+        let c1 = make_contract(1, 1);
+        let c2 = make_contract(2, 1);
+        let stage0 = make_stage_with_blocks(0, 3);
+        let stage1 = make_stage_with_blocks(1, 2);
+
+        let hydro_bounds_default = hydro_stage_bounds(0.0, 100.0);
+        let thermal_bounds_default = ThermalStageBounds {
+            min_generation_mw: 0.0,
+            max_generation_mw: 0.0,
+            cost_per_mwh: 0.0,
+        };
+        let line_default = LineStageBounds {
+            direct_mw: 500.0,
+            reverse_mw: 500.0,
+        };
+        let pumping_default = PumpingStageBounds {
+            min_flow_m3s: 0.0,
+            max_flow_m3s: 80.0,
+        };
+        let contract_default = ContractStageBounds {
+            min_mw: 0.0,
+            max_mw: 200.0,
+            price_per_mwh: 50.0,
+        };
+        let mut bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 2,
+                n_thermals: 0,
+                n_lines: 2,
+                n_pumping: 1,
+                n_contracts: 2,
+                n_stages: 2,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: hydro_bounds_default,
+                thermal: thermal_bounds_default,
+                line: line_default,
+                pumping: pumping_default,
+                contract: contract_default,
+            },
+        );
+        bounds.set_block_overlay(overlay);
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(vec![h1, h2])
+            .lines(vec![l1, l2])
+            .pumping_stations(vec![p1])
+            .contracts(vec![c1, c2])
+            .stages(vec![stage0, stage1])
+            .bounds(bounds)
+            .build()
+            .expect("valid system")
+    }
+
+    /// Build a per-block override table sized for
+    /// [`make_system_lines_pumping_contracts_blocks`]. Each of the three
+    /// families sits at a cell where `stage_idx != block_idx` (guards against
+    /// a `block_id`-from-`stage_idx` regression), and the entity index varies
+    /// (`line_idx=1`, `contract_idx=1`) so a hard-coded-index regression is
+    /// also caught:
+    ///
+    /// - line: `direct_mw = 123.0` at `(line_idx=1, stage_idx=0, block_idx=2)`.
+    /// - pumping: `min_flow_m3s = 11.0` at `(pumping_idx=0, stage_idx=1,
+    ///   block_idx=0)` — `max_flow_m3s` left unset, to catch a bug that
+    ///   re-emits unset columns.
+    /// - contract: `min_mw = 5.0`, `max_mw = 50.0` at `(contract_idx=1,
+    ///   stage_idx=0, block_idx=1)`.
+    fn make_line_pumping_contract_block_overrides() -> ResolvedBlockBounds {
+        let mut overlay = ResolvedBlockBounds::new(&BlockBoundsCountsSpec {
+            n_hydros: 2,
+            n_thermals: 0,
+            n_lines: 2,
+            n_pumping: 1,
+            n_contracts: 2,
+            n_stages: 2,
+            max_blocks: 3,
+        });
+        overlay
+            .line_override_mut(1, 0, 2)
+            .expect("cell must exist for a fixture-sized overlay")
+            .direct_mw = Some(123.0);
+        overlay
+            .pumping_override_mut(0, 1, 0)
+            .expect("cell must exist for a fixture-sized overlay")
+            .min_flow_m3s = Some(11.0);
+        let contract = overlay
+            .contract_override_mut(1, 0, 1)
+            .expect("cell must exist for a fixture-sized overlay");
+        contract.min_mw = Some(5.0);
+        contract.max_mw = Some(50.0);
+        overlay
     }
 
     // ── codes.json ────────────────────────────────────────────────────────────
@@ -1504,6 +1963,379 @@ mod tests {
             (bound_value_col.value(row) - 500.0).abs() < f64::EPSILON,
             "storage_max must be 500.0, got {}",
             bound_value_col.value(row)
+        );
+    }
+
+    #[test]
+    fn bounds_parquet_emits_no_block_rows_when_overlay_empty() {
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        let system = make_system_2h_2t_blocks(ResolvedBlockBounds::empty());
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ParquetWriterConfig::default();
+
+        write_bounds_parquet(tmp.path(), &system, &config)
+            .expect("write_bounds_parquet must succeed");
+
+        let file = std::fs::File::open(tmp.path().join("bounds.parquet")).unwrap();
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+        let mut reader = builder.build().unwrap();
+        let batch = reader.next().expect("must have rows").expect("batch Ok");
+
+        // 2 hydros x 2 stages x 7 stage-level bounds (no max_outflow) = 28,
+        // plus 2 thermals x 2 stages x 2 stage-level bounds = 8.
+        let expected_rows = 2 * 2 * 7 + 2 * 2 * 2;
+        assert_eq!(
+            batch.num_rows(),
+            expected_rows,
+            "row count must equal the stage-level mapping alone"
+        );
+
+        let block_id_col = batch.column_by_name("block_id").unwrap();
+        for row in 0..batch.num_rows() {
+            assert!(
+                block_id_col.is_null(row),
+                "block_id must be null at row {row} when the overlay is empty"
+            );
+        }
+    }
+
+    #[test]
+    fn bounds_parquet_emits_per_block_override_rows() {
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        let system = make_system_2h_2t_blocks(make_two_block_overrides());
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ParquetWriterConfig::default();
+
+        write_bounds_parquet(tmp.path(), &system, &config)
+            .expect("write_bounds_parquet must succeed");
+
+        let file = std::fs::File::open(tmp.path().join("bounds.parquet")).unwrap();
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+        let mut reader = builder.build().unwrap();
+        let batch = reader.next().expect("must have rows").expect("batch Ok");
+
+        let entity_type_col = batch
+            .column_by_name("entity_type_code")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int8Array>()
+            .unwrap();
+        let entity_id_col = batch
+            .column_by_name("entity_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap();
+        let stage_id_col = batch
+            .column_by_name("stage_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap();
+        let block_id_col = batch
+            .column_by_name("block_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap();
+        let bound_type_col = batch
+            .column_by_name("bound_type_code")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int8Array>()
+            .unwrap();
+        let bound_value_col = batch
+            .column_by_name("bound_value")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .unwrap();
+
+        let block_rows: Vec<usize> = (0..batch.num_rows())
+            .filter(|&i| !block_id_col.is_null(i))
+            .collect();
+        assert_eq!(
+            block_rows.len(),
+            2,
+            "expected exactly two non-null-block_id rows"
+        );
+
+        let h2_id = system.hydros()[1].id.0;
+        let t1_id = system.thermals()[0].id.0;
+        let stage0_id = system.stages()[0].id;
+        let stage1_id = system.stages()[1].id;
+
+        let hydro_row = block_rows
+            .iter()
+            .copied()
+            .find(|&i| entity_type_col.value(i) == ENTITY_TYPE_HYDRO)
+            .expect("must have a hydro block row");
+        assert_eq!(entity_id_col.value(hydro_row), h2_id, "hydro entity_id");
+        assert_eq!(stage_id_col.value(hydro_row), stage1_id, "hydro stage_id");
+        assert_eq!(block_id_col.value(hydro_row), 1, "hydro block_id");
+        assert_eq!(
+            bound_type_col.value(hydro_row),
+            BOUND_TURBINED_MAX,
+            "hydro bound_type_code"
+        );
+        assert_eq!(
+            bound_value_col.value(hydro_row).to_bits(),
+            42.0_f64.to_bits(),
+            "hydro bound_value"
+        );
+
+        let thermal_row = block_rows
+            .iter()
+            .copied()
+            .find(|&i| entity_type_col.value(i) == ENTITY_TYPE_THERMAL)
+            .expect("must have a thermal block row");
+        assert_eq!(entity_id_col.value(thermal_row), t1_id, "thermal entity_id");
+        assert_eq!(
+            stage_id_col.value(thermal_row),
+            stage0_id,
+            "thermal stage_id"
+        );
+        assert_eq!(block_id_col.value(thermal_row), 2, "thermal block_id");
+        assert_eq!(
+            bound_type_col.value(thermal_row),
+            BOUND_GENERATION_MAX,
+            "thermal bound_type_code"
+        );
+        assert_eq!(
+            bound_value_col.value(thermal_row).to_bits(),
+            7.0_f64.to_bits(),
+            "thermal bound_value"
+        );
+    }
+
+    #[test]
+    fn bounds_parquet_stage_rows_unchanged_by_overlay() {
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        fn read_null_block_rows(path: &std::path::Path) -> Vec<(i8, i32, i32, i8, u64)> {
+            let file = std::fs::File::open(path).unwrap();
+            let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+            let mut reader = builder.build().unwrap();
+            let batch = reader.next().expect("must have rows").expect("batch Ok");
+
+            let entity_type_col = batch
+                .column_by_name("entity_type_code")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<arrow::array::Int8Array>()
+                .unwrap();
+            let entity_id_col = batch
+                .column_by_name("entity_id")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<arrow::array::Int32Array>()
+                .unwrap();
+            let stage_id_col = batch
+                .column_by_name("stage_id")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<arrow::array::Int32Array>()
+                .unwrap();
+            let block_id_col = batch.column_by_name("block_id").unwrap();
+            let bound_type_col = batch
+                .column_by_name("bound_type_code")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<arrow::array::Int8Array>()
+                .unwrap();
+            let bound_value_col = batch
+                .column_by_name("bound_value")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<arrow::array::Float64Array>()
+                .unwrap();
+
+            (0..batch.num_rows())
+                .filter(|&i| block_id_col.is_null(i))
+                .map(|i| {
+                    (
+                        entity_type_col.value(i),
+                        entity_id_col.value(i),
+                        stage_id_col.value(i),
+                        bound_type_col.value(i),
+                        bound_value_col.value(i).to_bits(),
+                    )
+                })
+                .collect()
+        }
+
+        let config = ParquetWriterConfig::default();
+
+        let empty_system = make_system_2h_2t_blocks(ResolvedBlockBounds::empty());
+        let tmp_empty = tempfile::tempdir().unwrap();
+        write_bounds_parquet(tmp_empty.path(), &empty_system, &config)
+            .expect("write_bounds_parquet must succeed");
+        let empty_rows = read_null_block_rows(&tmp_empty.path().join("bounds.parquet"));
+
+        let overlaid_system = make_system_2h_2t_blocks(make_two_block_overrides());
+        let tmp_overlaid = tempfile::tempdir().unwrap();
+        write_bounds_parquet(tmp_overlaid.path(), &overlaid_system, &config)
+            .expect("write_bounds_parquet must succeed");
+        let overlaid_rows = read_null_block_rows(&tmp_overlaid.path().join("bounds.parquet"));
+
+        assert_eq!(
+            empty_rows, overlaid_rows,
+            "the null-block_id row subsequence must be bit-identical regardless of the overlay"
+        );
+    }
+
+    #[test]
+    fn bounds_parquet_emits_per_block_override_rows_for_line_pumping_contract() {
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        let system = make_system_lines_pumping_contracts_blocks(
+            make_line_pumping_contract_block_overrides(),
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ParquetWriterConfig::default();
+
+        write_bounds_parquet(tmp.path(), &system, &config)
+            .expect("write_bounds_parquet must succeed");
+
+        let file = std::fs::File::open(tmp.path().join("bounds.parquet")).unwrap();
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+        let mut reader = builder.build().unwrap();
+        let batch = reader.next().expect("must have rows").expect("batch Ok");
+
+        let entity_type_col = batch
+            .column_by_name("entity_type_code")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int8Array>()
+            .unwrap();
+        let entity_id_col = batch
+            .column_by_name("entity_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap();
+        let stage_id_col = batch
+            .column_by_name("stage_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap();
+        let block_id_col = batch
+            .column_by_name("block_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap();
+        let bound_type_col = batch
+            .column_by_name("bound_type_code")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int8Array>()
+            .unwrap();
+        let bound_value_col = batch
+            .column_by_name("bound_value")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .unwrap();
+
+        let block_rows: Vec<usize> = (0..batch.num_rows())
+            .filter(|&i| !block_id_col.is_null(i))
+            .collect();
+        assert_eq!(
+            block_rows.len(),
+            4,
+            "expected exactly one line row, one pumping row, and two contract rows"
+        );
+
+        let line_id = system.lines()[1].id.0;
+        let pumping_id = system.pumping_stations()[0].id.0;
+        let contract_id = system.contracts()[1].id.0;
+        let stage0_id = system.stages()[0].id;
+        let stage1_id = system.stages()[1].id;
+
+        let line_row = block_rows
+            .iter()
+            .copied()
+            .find(|&i| entity_type_col.value(i) == ENTITY_TYPE_LINE)
+            .expect("must have a line block row");
+        assert_eq!(entity_id_col.value(line_row), line_id, "line entity_id");
+        assert_eq!(stage_id_col.value(line_row), stage0_id, "line stage_id");
+        assert_eq!(block_id_col.value(line_row), 2, "line block_id");
+        assert_eq!(
+            bound_type_col.value(line_row),
+            BOUND_FLOW_MAX,
+            "line bound_type_code"
+        );
+        assert_eq!(
+            bound_value_col.value(line_row).to_bits(),
+            123.0_f64.to_bits(),
+            "line bound_value"
+        );
+
+        let pumping_row = block_rows
+            .iter()
+            .copied()
+            .find(|&i| entity_type_col.value(i) == ENTITY_TYPE_PUMPING_STATION)
+            .expect("must have a pumping block row");
+        assert_eq!(
+            entity_id_col.value(pumping_row),
+            pumping_id,
+            "pumping entity_id"
+        );
+        assert_eq!(
+            stage_id_col.value(pumping_row),
+            stage1_id,
+            "pumping stage_id"
+        );
+        assert_eq!(block_id_col.value(pumping_row), 0, "pumping block_id");
+        assert_eq!(
+            bound_type_col.value(pumping_row),
+            BOUND_FLOW_MIN,
+            "pumping bound_type_code"
+        );
+        assert_eq!(
+            bound_value_col.value(pumping_row).to_bits(),
+            11.0_f64.to_bits(),
+            "pumping bound_value"
+        );
+
+        let contract_rows: Vec<usize> = block_rows
+            .iter()
+            .copied()
+            .filter(|&i| entity_type_col.value(i) == ENTITY_TYPE_CONTRACT)
+            .collect();
+        assert_eq!(
+            contract_rows.len(),
+            2,
+            "expected exactly two contract block rows (min_mw and max_mw)"
+        );
+        for &i in &contract_rows {
+            assert_eq!(entity_id_col.value(i), contract_id, "contract entity_id");
+            assert_eq!(stage_id_col.value(i), stage0_id, "contract stage_id");
+            assert_eq!(block_id_col.value(i), 1, "contract block_id");
+        }
+        let contract_min_row = contract_rows
+            .iter()
+            .copied()
+            .find(|&i| bound_type_col.value(i) == BOUND_FLOW_MIN)
+            .expect("must have a contract min_mw row");
+        assert_eq!(
+            bound_value_col.value(contract_min_row).to_bits(),
+            5.0_f64.to_bits(),
+            "contract min_mw value"
+        );
+        let contract_max_row = contract_rows
+            .iter()
+            .copied()
+            .find(|&i| bound_type_col.value(i) == BOUND_FLOW_MAX)
+            .expect("must have a contract max_mw row");
+        assert_eq!(
+            bound_value_col.value(contract_max_row).to_bits(),
+            50.0_f64.to_bits(),
+            "contract max_mw value"
         );
     }
 

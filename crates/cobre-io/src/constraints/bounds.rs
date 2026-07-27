@@ -14,8 +14,8 @@
 //! | `stage_id`         | INT32  | Yes      | Stage ID                                             |
 //! | `min_generation_mw`| DOUBLE | No       | Minimum generation (MW)                              |
 //! | `max_generation_mw`| DOUBLE | No       | Maximum generation (MW)                              |
-//! | `cost_per_mwh`     | DOUBLE | No       | Dispatch cost override (`$/MWh`); ignored if `block_id` is non-null |
-//! | `block_id`         | INT32 (null) | No | 0-based block index within the stage (matches `Block::index`) selecting one block's `min_generation_mw`/`max_generation_mw` override; a value outside `[0, n_blocks)` for the referenced stage is silently skipped; does not create a per-block `cost_per_mwh` |
+//! | `cost_per_mwh`     | DOUBLE | No       | Dispatch cost override (`$/MWh`); rejected at validation if `block_id` is also non-null |
+//! | `block_id`         | INT32 (null) | No | 0-based block index within the stage (matches `Block::index`) selecting one block's `min_generation_mw`/`max_generation_mw` override; a value outside `[0, n_blocks)` for the referenced stage, a non-null `cost_per_mwh` on the same row, or any `block_id` on a thermal declaring `anticipated_config` is rejected at validation |
 //!
 //! ### `hydro_bounds`
 //!
@@ -34,7 +34,7 @@
 //! | `max_diversion_m3s`   | DOUBLE | No       | Max diversion flow (m3/s)          |
 //! | `filling_min_rate_m3s`| DOUBLE | No       | Filling min-rate override (m3/s)   |
 //! | `water_withdrawal_m3s`| DOUBLE | No       | Water withdrawal (m3/s)            |
-//! | `block_id`            | INT32 (null) | No | 0-based block index within the stage (matches `Block::index`) selecting one block's turbined/outflow/generation/diversion override; a value outside `[0, n_blocks)` for the referenced stage is silently skipped; storage, filling-rate, and withdrawal values are ignored when `block_id` is non-null (stage-level only, no per-block variant) |
+//! | `block_id`            | INT32 (null) | No | 0-based block index within the stage (matches `Block::index`) selecting one block's turbined/outflow/generation/diversion override; a value outside `[0, n_blocks)` for the referenced stage is rejected at validation; a non-null storage, filling-rate, or withdrawal value on the same row is rejected at validation (stage-level only, no per-block variant) |
 //!
 //! ### `line_bounds`
 //!
@@ -44,7 +44,7 @@
 //! | `stage_id`   | INT32  | Yes      | Stage ID                           |
 //! | `direct_mw`  | DOUBLE | No       | Direct-flow capacity (MW)          |
 //! | `reverse_mw` | DOUBLE | No       | Reverse-flow capacity (MW)         |
-//! | `block_id`   | INT32 (null) | No | 0-based block index within the stage (matches `Block::index`) selecting one block's `direct_mw`/`reverse_mw` override; a value outside `[0, n_blocks)` for the referenced stage is silently skipped |
+//! | `block_id`   | INT32 (null) | No | 0-based block index within the stage (matches `Block::index`) selecting one block's `direct_mw`/`reverse_mw` override; a value outside `[0, n_blocks)` for the referenced stage is rejected at validation |
 //!
 //! ### `pumping_bounds`
 //!
@@ -54,7 +54,7 @@
 //! | `stage_id`   | INT32  | Yes      | Stage ID                           |
 //! | `min_m3s`    | DOUBLE | No       | Minimum pumping flow (m3/s)        |
 //! | `max_m3s`    | DOUBLE | No       | Maximum pumping flow (m3/s)        |
-//! | `block_id`   | INT32 (null) | No | 0-based block index within the stage (matches `Block::index`) selecting one block's `min_m3s`/`max_m3s` override; a value outside `[0, n_blocks)` for the referenced stage is silently skipped |
+//! | `block_id`   | INT32 (null) | No | 0-based block index within the stage (matches `Block::index`) selecting one block's `min_m3s`/`max_m3s` override; a value outside `[0, n_blocks)` for the referenced stage is rejected at validation |
 //!
 //! ### `contract_bounds`
 //!
@@ -65,19 +65,18 @@
 //! | `min_mw`         | DOUBLE | No       | Minimum power (MW)             |
 //! | `max_mw`         | DOUBLE | No       | Maximum power (MW)             |
 //! | `price_per_mwh`  | DOUBLE | No       | Price override ($/`MWh`)       |
-//! | `block_id`       | INT32 (null) | No | 0-based block index within the stage (matches `Block::index`) selecting one block's `min_mw`/`max_mw`/`price_per_mwh` override; a value outside `[0, n_blocks)` for the referenced stage is silently skipped |
+//! | `block_id`       | INT32 (null) | No | 0-based block index within the stage (matches `Block::index`) selecting one block's `min_mw`/`max_mw`/`price_per_mwh` override; a value outside `[0, n_blocks)` for the referenced stage is rejected at validation |
 //!
 //! ## Block eligibility
 //!
 //! A bound column is block-eligible exactly when its family's
 //! `<Family>BlockOverride` struct (`cobre_core::resolved`) carries a field for
 //! it — the struct's field set is the check, not this table. A column marked
-//! "no" below has no per-block variant: its *value* is ignored on any row that
-//! also carries a non-null `block_id` (see the per-file tables above) — the
-//! row's `block_id` itself is not dropped, and the column never falls back to
-//! applying stage-wide from that row.
-//! [`resolve_bounds`](crate::resolution::resolve_bounds) documents the
-//! precedence law these columns feed.
+//! "no" below has no per-block variant: a row combining a non-null value here
+//! with a non-null `block_id` is rejected at validation (see the per-file
+//! tables above) and never reaches
+//! [`resolve_bounds`](crate::resolution::resolve_bounds), which documents the
+//! precedence law the block-eligible columns feed.
 //!
 //! | Family   | Column                 | Block-eligible | Note                                                                                          |
 //! |----------|------------------------|:--------------:|------------------------------------------------------------------------------------------------|
@@ -123,11 +122,14 @@
 //! Deferred validations (not performed here):
 //!
 //! - Entity ID existence in registries — Layer 3.
-//! - Duplicate `(entity_id, stage_id)` pairs — deferred; for every family the
-//!   key is `(entity_id, stage_id, block_id)`, since a stage-wide row and a
-//!   block row sharing `(entity_id, stage_id)` is designed usage, not a
-//!   duplicate.
-//! - `block_id` validity for the referenced stage — deferred.
+//! - Duplicate `(entity_id, stage_id, block_id, column)` keys — Layer 5a
+//!   (`check_duplicate_bound_rows`); a stage-wide row and a block row sharing
+//!   `(entity_id, stage_id)` is designed usage, not a duplicate, so `block_id`
+//!   is part of the key, and each bound column is keyed independently since
+//!   two rows setting disjoint columns for the same `(entity, stage, block)`
+//!   are legitimate sparse input.
+//! - `block_id` validity for the referenced stage — Layer 5a
+//!   (`check_bound_block_id_range`).
 //! - Cross-field validation for the remaining bounds types — deferred.
 
 use arrow::array::{Array, Float64Array, Int32Array};
@@ -180,14 +182,17 @@ pub struct ThermalBoundsRow {
     /// Maximum generation override (MW).
     pub max_generation_mw: Option<f64>,
     /// Dispatch cost override (`$/MWh`). Overrides `Thermal.cost_per_mwh` when `Some` and
-    /// `block_id` is `None`. Ignored when `block_id` is `Some`.
+    /// `block_id` is `None`. Rejected at validation when `block_id` is also `Some`
+    /// (see the `block_id` field).
     pub cost_per_mwh: Option<f64>,
     /// Selects one block within the stage for `min_generation_mw` /
     /// `max_generation_mw`; `None` applies the row at the stage level. A
     /// 0-based index matching `Block::index`; a value outside `[0, n_blocks)`
-    /// for the referenced stage is silently skipped. Does not create a
-    /// per-block cost — a row with a non-null `block_id` has its
-    /// `cost_per_mwh` dropped (see the `cost_per_mwh` field).
+    /// for the referenced stage is rejected at validation. Does not create a
+    /// per-block cost — a row with a non-null `block_id` and a non-null
+    /// `cost_per_mwh` is rejected at validation (see the `cost_per_mwh` field),
+    /// as is any `block_id` on a thermal declaring `anticipated_config`
+    /// (commitment is stage-level).
     pub block_id: Option<i32>,
 }
 
@@ -251,7 +256,10 @@ pub struct HydroBoundsRow {
     /// Water withdrawal override (m³/s).
     pub water_withdrawal_m3s: Option<f64>,
     /// `None` applies at the stage level; `Some(b)` applies to block `b` only and is
-    /// valid on the turbined/outflow/generation/diversion columns.
+    /// valid on the turbined/outflow/generation/diversion columns. A row combining
+    /// `Some(b)` with a non-null `min_storage_hm3`/`max_storage_hm3`/
+    /// `filling_min_rate_m3s`/`water_withdrawal_m3s` is rejected at validation —
+    /// those four are stage-level with no per-block variant.
     pub block_id: Option<i32>,
 }
 
@@ -1121,7 +1129,6 @@ mod tests {
     /// Parquet without cost_per_mwh and block_id columns — all rows have None.
     #[test]
     fn test_thermal_missing_cost_and_block_id_columns_are_none() {
-        // make_thermal_batch's schema omits cost_per_mwh and block_id.
         let batch = make_thermal_batch(
             &[1, 2],
             &[0, 0],
@@ -1316,7 +1323,6 @@ mod tests {
     /// AC: only a subset of optional columns present in the schema.
     #[test]
     fn test_hydro_subset_of_optional_columns() {
-        // Only min_turbined_m3s and max_generation_mw present; all others absent.
         let schema = Arc::new(Schema::new(vec![
             Field::new("hydro_id", DataType::Int32, false),
             Field::new("stage_id", DataType::Int32, false),
@@ -2154,8 +2160,6 @@ mod tests {
         .unwrap();
         let contract_rows = parse_contract_bounds(write_parquet(&contract_batch).path()).unwrap();
         assert_eq!(contract_rows.len(), 2);
-        // Sorted by (contract_id, stage_id, block_id); both rows tie on
-        // (contract_id, stage_id), so `None` sorts before `Some(2)`.
         assert_eq!(contract_rows[0].block_id, None);
         assert_eq!(contract_rows[1].block_id, Some(2));
 
@@ -2177,8 +2181,6 @@ mod tests {
         .unwrap();
         let pumping_rows = parse_pumping_bounds(write_parquet(&pumping_batch).path()).unwrap();
         assert_eq!(pumping_rows.len(), 2);
-        // Sorted by (station_id, stage_id, block_id); both rows tie on
-        // (station_id, stage_id), so `None` sorts before `Some(2)`.
         assert_eq!(pumping_rows[0].block_id, None);
         assert_eq!(pumping_rows[1].block_id, Some(2));
     }

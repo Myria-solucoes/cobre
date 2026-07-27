@@ -12,11 +12,9 @@ use super::M3S_TO_HM3;
 use super::delivery_ring::DeliveryRing;
 use super::fpha_cursor::for_each_fpha_plane;
 use super::layout::{StageLayout, TemplateBuildCtx};
-use crate::generic_constraints::CascadeRefs;
-use crate::generic_constraints::ContractRefs;
-use crate::generic_constraints::EntityPositionMaps;
-use crate::generic_constraints::PumpingRefs;
-use crate::generic_constraints::contract_family_slot;
+use crate::generic_constraints::{
+    CascadeRefs, ContractRefs, EntityPositionMaps, PumpingRefs, contract_family_slot,
+};
 
 use std::ops::Range;
 
@@ -328,18 +326,9 @@ fn fill_parallel_water_entries(
         if is_prefilling(ctx, stage, h_idx) {
             continue;
         }
-        let col = layout.slack.withdrawal_slack_neg.start + h_idx;
         let row = row_water + h_idx;
-        col_entries[col].push((row, -zeta));
-    }
-
-    for h_idx in 0..n_h {
-        if is_prefilling(ctx, stage, h_idx) {
-            continue;
-        }
-        let col = layout.slack.withdrawal_slack_pos.start + h_idx;
-        let row = row_water + h_idx;
-        col_entries[col].push((row, zeta));
+        col_entries[layout.slack.withdrawal_slack_neg.start + h_idx].push((row, -zeta));
+        col_entries[layout.slack.withdrawal_slack_pos.start + h_idx].push((row, zeta));
     }
 }
 
@@ -347,17 +336,14 @@ fn fill_parallel_water_entries(
 /// `transit_buckets_out`/`transit_buckets_in`'s own start), in
 /// `transit_bucket_column_order`'s plant-major order.
 pub(super) fn transit_bucket_plant_ranges(state: &StateSpace) -> Vec<Range<usize>> {
-    let order = &state.transit_bucket_column_order;
     let mut ranges = Vec::new();
     let mut start = 0;
-    while start < order.len() {
-        let plant_idx = order[start].0;
-        let mut end = start + 1;
-        while end < order.len() && order[end].0 == plant_idx {
-            end += 1;
-        }
-        ranges.push(start..end);
-        start = end;
+    for chunk in state
+        .transit_bucket_column_order
+        .chunk_by(|a, b| a.0 == b.0)
+    {
+        ranges.push(start..start + chunk.len());
+        start += chunk.len();
     }
     ranges
 }
@@ -473,16 +459,12 @@ fn fill_arc_release_block_entries(
 /// `transit_buckets_in`'s own start) for downstream plant `plant_idx`, or `None` when
 /// it declares no incoming arc.
 fn plant_transit_bucket_range(state: &StateSpace, plant_idx: usize) -> Option<Range<usize>> {
-    let start = state
-        .transit_bucket_column_order
-        .iter()
-        .position(|&(p, _)| p == plant_idx)?;
-    let end = state.transit_bucket_column_order[start..]
+    let order = &state.transit_bucket_column_order;
+    let start = order.iter().position(|&(p, _)| p == plant_idx)?;
+    let end = order[start..]
         .iter()
         .position(|&(p, _)| p != plant_idx)
-        .map_or(state.transit_bucket_column_order.len(), |offset| {
-            start + offset
-        });
+        .map_or(order.len(), |offset| start + offset);
     Some(start..end)
 }
 
@@ -1212,14 +1194,14 @@ pub(super) fn fill_generic_constraint_entries(
     layout: &StageLayout,
     buffers: &mut LpMatrixBuffers<'_>,
 ) {
+    if layout.rows.n_generic_rows == 0 {
+        return;
+    }
     let col_entries = &mut *buffers.col_entries;
     let col_upper = &mut *buffers.col_upper;
     let objective = &mut *buffers.objective;
     let row_lower = &mut *buffers.row_lower;
     let row_upper = &mut *buffers.row_upper;
-    if layout.rows.n_generic_rows == 0 {
-        return;
-    }
 
     let geom = layout.resolver_geom();
     let positions = EntityPositionMaps {
@@ -2111,9 +2093,9 @@ mod zero_cost_tests {
 
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, CascadeTopology, ContractStageBounds, HydroStageBounds,
-        LineStageBounds, PumpingStageBounds, ResolvedBounds, ResolvedExchangeFactors,
-        ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
-        ResolvedNcsFactors, ResolvedPenalties, Stage, ThermalStageBounds,
+        LineStageBounds, PumpingStageBounds, ResolvedBounds, ResolvedGenericConstraintBounds,
+        ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, Stage,
+        ThermalStageBounds,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -2141,7 +2123,6 @@ mod zero_cost_tests {
         penalties: ResolvedPenalties,
         resolved_generic_bounds: ResolvedGenericConstraintBounds,
         resolved_load_factors: ResolvedLoadFactors,
-        resolved_exchange_factors: ResolvedExchangeFactors,
         resolved_ncs_bounds: ResolvedNcsBounds,
         resolved_ncs_factors: ResolvedNcsFactors,
         resolved_parameters: ResolvedParameters,
@@ -2221,7 +2202,6 @@ mod zero_cost_tests {
                 penalties: ResolvedPenalties::empty(),
                 resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
                 resolved_load_factors: ResolvedLoadFactors::empty(),
-                resolved_exchange_factors: ResolvedExchangeFactors::empty(),
                 resolved_ncs_bounds: ResolvedNcsBounds::empty(),
                 resolved_ncs_factors: ResolvedNcsFactors::empty(),
                 resolved_parameters: ResolvedParameters {
@@ -2254,7 +2234,6 @@ mod zero_cost_tests {
                     penalties: &self.penalties,
                     resolved_generic_bounds: &self.resolved_generic_bounds,
                     resolved_load_factors: &self.resolved_load_factors,
-                    resolved_exchange_factors: &self.resolved_exchange_factors,
                     resolved_ncs_bounds: &self.resolved_ncs_bounds,
                     resolved_ncs_factors: &self.resolved_ncs_factors,
                     resolved_parameters: &self.resolved_parameters,
@@ -3028,9 +3007,9 @@ mod pumping_water_tests {
         DeficitSegment, EnergyContract, EntityId, GenericConstraint, Hydro, HydroGenerationModel,
         HydroStageBounds, HydroStagePenalties, Line, LineStageBounds, LineStagePenalties,
         LinearTerm, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds,
-        PumpingStation, ResolvedBounds, ResolvedExchangeFactors, ResolvedGenericConstraintBounds,
-        ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, SlackConfig,
-        Stage, Thermal, ThermalStageBounds, VariableRef,
+        PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
+        ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, SlackConfig, Stage, Thermal,
+        ThermalStageBounds, VariableRef,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -3273,7 +3252,6 @@ mod pumping_water_tests {
         penalties: ResolvedPenalties,
         resolved_generic_bounds: ResolvedGenericConstraintBounds,
         resolved_load_factors: ResolvedLoadFactors,
-        resolved_exchange_factors: ResolvedExchangeFactors,
         resolved_ncs_bounds: ResolvedNcsBounds,
         resolved_ncs_factors: ResolvedNcsFactors,
         resolved_parameters: ResolvedParameters,
@@ -3483,7 +3461,6 @@ mod pumping_water_tests {
                 penalties: ResolvedPenalties::empty(),
                 resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
                 resolved_load_factors: ResolvedLoadFactors::empty(),
-                resolved_exchange_factors: ResolvedExchangeFactors::empty(),
                 resolved_ncs_bounds: ResolvedNcsBounds::empty(),
                 resolved_ncs_factors: ResolvedNcsFactors::empty(),
                 resolved_parameters: ResolvedParameters {
@@ -3623,7 +3600,6 @@ mod pumping_water_tests {
                     penalties: &self.penalties,
                     resolved_generic_bounds: &self.resolved_generic_bounds,
                     resolved_load_factors: &self.resolved_load_factors,
-                    resolved_exchange_factors: &self.resolved_exchange_factors,
                     resolved_ncs_bounds: &self.resolved_ncs_bounds,
                     resolved_ncs_factors: &self.resolved_ncs_factors,
                     resolved_parameters: &self.resolved_parameters,

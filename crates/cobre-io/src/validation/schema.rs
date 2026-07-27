@@ -23,13 +23,13 @@ use crate::{
     LoadError,
     config::{Config, parse_config},
     constraints::{
-        BusPenaltyOverrideRow, ContractBoundsRow, ExchangeFactorEntry, GenericConstraintBoundsRow,
-        HydroBoundsRow, HydroPenaltyOverrideRow, LineBoundsRow, LinePenaltyOverrideRow,
-        NcsBoundsRow, NcsPenaltyOverrideRow, PumpingBoundsRow, ThermalBoundsRow,
-        load_contract_bounds, load_exchange_factors, load_generic_constraint_bounds,
-        load_generic_constraints, load_hydro_bounds, load_line_bounds, load_ncs_bounds,
-        load_penalty_overrides_bus, load_penalty_overrides_hydro, load_penalty_overrides_line,
-        load_penalty_overrides_ncs, load_pumping_bounds, load_thermal_bounds,
+        BusPenaltyOverrideRow, ContractBoundsRow, GenericConstraintBoundsRow, HydroBoundsRow,
+        HydroPenaltyOverrideRow, LineBoundsRow, LinePenaltyOverrideRow, NcsBoundsRow,
+        NcsPenaltyOverrideRow, PumpingBoundsRow, ThermalBoundsRow, load_contract_bounds,
+        load_generic_constraint_bounds, load_generic_constraints, load_hydro_bounds,
+        load_line_bounds, load_ncs_bounds, load_penalty_overrides_bus,
+        load_penalty_overrides_hydro, load_penalty_overrides_line, load_penalty_overrides_ncs,
+        load_pumping_bounds, load_thermal_bounds,
     },
     extensions::{
         FphaHyperplaneRow, HydroEnergyProductivityRow, HydroGeometryRow, PlaneReductionConfig,
@@ -62,9 +62,6 @@ use crate::{
 /// One field per input file (the field doc names the file). Required files use
 /// direct types; optional files use `Vec<T>` (Parquet rows) or `Option<T>`
 /// (structured JSON) and are empty or `None` when the file is absent.
-///
-/// This type is `pub(crate)` — it is only used within the validation pipeline
-/// and is never exposed to downstream crates.
 pub(crate) struct ParsedData {
     /// `config.json`.
     pub(crate) config: Config,
@@ -147,12 +144,6 @@ pub(crate) struct ParsedData {
     pub(crate) pumping_bounds: Vec<PumpingBoundsRow>,
     /// `constraints/contract_bounds.parquet`.
     pub(crate) contract_bounds: Vec<ContractBoundsRow>,
-    /// `constraints/exchange_factors.json`.
-    // Rationale: the field is populated by the schema-validation layer to confirm the file
-    // parses correctly against the schema; dropping the field would silently skip schema
-    // validation for this file when no consumer is present.
-    #[allow(dead_code)]
-    pub(crate) exchange_factors: Vec<ExchangeFactorEntry>,
     /// `constraints/generic_constraints.json`.
     pub(crate) generic_constraints: Vec<GenericConstraint>,
     /// `constraints/generic_constraint_bounds.parquet`.
@@ -459,17 +450,13 @@ pub(crate) fn validate_schema(
     );
 
     // `Option` (not `Vec`) so callers distinguish "no file" from "empty model".
-    let correlation: Option<CorrelationModel> = if manifest.scenarios_correlation_json {
-        match load_correlation(Some(&case_root.join("scenarios/correlation.json"))) {
-            Ok(model) => Some(model),
-            Err(ref err) => {
-                map_load_error(err, "scenarios/correlation.json", ctx);
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let correlation: Option<CorrelationModel> = optional_or_error(
+        manifest.scenarios_correlation_json,
+        || load_correlation(Some(&case_root.join("scenarios/correlation.json"))).map(Some),
+        || None,
+        "scenarios/correlation.json",
+        ctx,
+    );
 
     let non_controllable_factors = optional_or_error(
         manifest.scenarios_non_controllable_factors_json,
@@ -532,14 +519,6 @@ pub(crate) fn validate_schema(
         || load_contract_bounds(Some(&case_root.join("constraints/contract_bounds.parquet"))),
         Vec::new,
         "constraints/contract_bounds.parquet",
-        ctx,
-    );
-
-    let exchange_factors = optional_or_error(
-        manifest.constraints_exchange_factors_json,
-        || load_exchange_factors(Some(&case_root.join("constraints/exchange_factors.json"))),
-        Vec::new,
-        "constraints/exchange_factors.json",
         ctx,
     );
 
@@ -645,30 +624,16 @@ pub(crate) fn validate_schema(
         return None;
     }
 
-    // The guard above already ensures every required file parsed; this destructure
-    // only narrows the Options to satisfy the type checker.
-    let (
-        Some(config),
-        Some(penalties),
-        Some(stages),
-        Some(initial_conditions),
-        Some(buses),
-        Some(lines),
-        Some(hydros),
-        Some(thermals),
-    ) = (
-        config,
-        penalties,
-        stages,
-        initial_conditions,
-        buses,
-        lines,
-        hydros,
-        thermals,
-    )
-    else {
-        return None;
-    };
+    // The guard above already ensures every required file parsed; these `?`s only
+    // narrow the Options to satisfy the type checker.
+    let config = config?;
+    let penalties = penalties?;
+    let stages = stages?;
+    let initial_conditions = initial_conditions?;
+    let buses = buses?;
+    let lines = lines?;
+    let hydros = hydros?;
+    let thermals = thermals?;
 
     Some(ParsedData {
         config,
@@ -705,7 +670,6 @@ pub(crate) fn validate_schema(
         line_bounds,
         pumping_bounds,
         contract_bounds,
-        exchange_factors,
         generic_constraints,
         generic_constraint_bounds,
         penalty_overrides_bus,
@@ -963,7 +927,6 @@ mod tests {
     fn test_invalid_json_returns_none_and_parse_error() {
         let dir = TempDir::new().unwrap();
         make_valid_case(&dir);
-        // Overwrite hydros.json with malformed JSON.
         write_file(dir.path(), "system/hydros.json", "{ invalid json !!!");
 
         let mut ctx = ValidationContext::new();
@@ -1035,14 +998,12 @@ mod tests {
                 .collect::<Vec<_>>()
         );
 
-        // Verify one error references penalties.json
         assert!(
             ctx.errors()
                 .iter()
                 .any(|e| e.file.to_string_lossy().contains("penalties.json")),
             "expected an error referencing penalties.json"
         );
-        // Verify one error references buses.json
         assert!(
             ctx.errors()
                 .iter()

@@ -50,6 +50,10 @@
 //! |32 | A `recent_observations` conditioning window extends past the study start, into the solved study itself | `initial_conditions.json` | `InvalidValue` |
 //! |33 | The in-progress period `[period_start, study_start)` is covered strictly between 0 and 1 | `scenarios/inflow_history.parquet` | `ModelQuality` (warning) |
 //! |34 | The first study stage's season is unresolvable (no `season_map`, no `season_id`, or an unmatched id) while PAR seeding is active | `initial_conditions.json` | `ModelQuality` (warning) |
+//! |35 | Bound-override row `block_id` within `[0, n_blocks)` for its stage, across all five bound families (thermal, hydro, line, pumping, contract) | `constraints/*_bounds.parquet` | `BusinessRuleViolation` |
+//! |36 | Bound-override row uniqueness per `(entity_id, stage_id, block_id, column)`, across all five bound families (thermal, hydro, line, pumping, contract); a `None` `block_id` is a distinct key from `Some(b)` | `constraints/*_bounds.parquet` | `DuplicateId` |
+//! |37 | `block_id` on a hydro/thermal bound column with no per-block LP variable (hydro storage/filling-rate/withdrawal, thermal cost) | `constraints/{hydro,thermal}_bounds.parquet` | `BusinessRuleViolation` |
+//! |38 | `block_id` on a `thermal_bounds` row targeting an anticipated thermal (commitment decision is stage-level; delivery-stage reconciliation compares per-block bounds) | `constraints/thermal_bounds.parquet` | `BusinessRuleViolation` |
 //!
 //! ## Layer 5b rules (stages, penalties, and scenario domain) — `validate_semantic_stages_penalties_scenarios`
 //!
@@ -93,6 +97,7 @@
 
 use super::{ValidationContext, schema::ParsedData};
 
+mod block_bounds;
 mod constraints;
 mod correlation;
 mod hydro;
@@ -125,23 +130,19 @@ pub(crate) fn validate_semantic_hydro_thermal(data: &ParsedData, ctx: &mut Valid
     thermal::check_anticipated_decision_target_is_anticipated(data, ctx);
     thermal::warn_thermal_generation_on_anticipated_thermal(data, ctx);
     constraints::check_per_block_storage_interior_reference(data, ctx);
+    block_bounds::check_bound_block_id_range(data, ctx);
+    block_bounds::check_duplicate_bound_rows(data, ctx);
+    block_bounds::check_block_id_on_ineligible_column(data, ctx);
+    block_bounds::check_block_id_on_anticipated_thermal(data, ctx);
     pumping::check_pumping_semantics(data, ctx);
     travel_time::validate_travel_time(data, ctx);
     inflow_seeding::validate_inflow_seeding(data, ctx);
     inflow_seeding::check_annual_component_monthly_only(data, ctx);
 }
 
-// ── validate_semantic_stages_penalties_scenarios ──────────────────────────────
-
 /// Performs Layer 5b semantic validation: stage structure, penalty ordering,
 /// and scenario model rules. Every violation is collected into `ctx` before
 /// returning — no rule short-circuits another.
-///
-/// # Conditional checks
-///
-/// Rule 12 is only checked when `data.inflow_seasonal_stats` is non-empty.
-/// Rules 14-16 are only checked when `data.correlation` is `Some`.
-/// Rule 17 is only checked when `data.load_factors` is non-empty.
 pub(crate) fn validate_semantic_stages_penalties_scenarios(
     data: &ParsedData,
     ctx: &mut ValidationContext,

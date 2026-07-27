@@ -7,8 +7,6 @@
 //! # Usage
 //!
 //! ```rust
-//! # #[cfg(feature = "schema")]
-//! # {
 //! use cobre_io::schema::generate_schemas;
 //!
 //! let schemas = generate_schemas().expect("schema generation must not fail");
@@ -16,12 +14,11 @@
 //! for (filename, value) in &schemas {
 //!     println!("{filename}: {} top-level keys", value.as_object().map_or(0, |o| o.len()));
 //! }
-//! # }
 //! ```
 
 use crate::{
     config::Config,
-    constraints::{exchange_factors::RawExchangeFactorsFile, generic::RawGenericConstraintsFile},
+    constraints::generic::RawGenericConstraintsFile,
     extensions::{
         production_models::RawProductionModelFile, scalar_parameters::ScalarParametersFile,
     },
@@ -39,8 +36,7 @@ use crate::{
     },
 };
 
-use serde_json::Error;
-use serde_json::Value;
+use serde_json::{Error, Value};
 
 /// Generate JSON Schema documents for all user-facing case directory input files.
 ///
@@ -63,7 +59,6 @@ use serde_json::Value;
 /// | `stages.schema.json`                  | `stages.json`                          |
 /// | `penalties.schema.json`               | `penalties.json`                       |
 /// | `generic_constraints.schema.json`     | `constraints/generic_constraints.json` |
-/// | `exchange_factors.schema.json`        | `constraints/exchange_factors.json`    |
 /// | `load_factors.schema.json`            | `scenarios/load_factors.json`          |
 /// | `non_controllable_factors.schema.json`| `scenarios/non_controllable_factors.json` |
 /// | `correlation.schema.json`             | `scenarios/correlation.json`           |
@@ -84,7 +79,7 @@ use serde_json::Value;
 /// use cobre_io::schema::generate_schemas;
 ///
 /// let schemas = generate_schemas().expect("schema generation must not fail");
-/// assert!(schemas.len() >= 18);
+/// assert!(schemas.len() >= 17);
 /// let config_schema = schemas.iter().find(|(name, _)| name == "config.schema.json");
 /// assert!(config_schema.is_some());
 /// ```
@@ -115,10 +110,6 @@ pub fn generate_schemas() -> Result<Vec<(String, Value)>, Error> {
         (
             "generic_constraints.schema.json",
             schemars::schema_for!(RawGenericConstraintsFile),
-        ),
-        (
-            "exchange_factors.schema.json",
-            schemars::schema_for!(RawExchangeFactorsFile),
         ),
         (
             "load_factors.schema.json",
@@ -199,14 +190,13 @@ mod tests {
             let obj = value.as_object().unwrap_or_else(|| {
                 panic!("schema for {name} is not an object");
             });
-            let has_properties = obj.contains_key("properties");
-            let has_one_of = obj.contains_key("oneOf");
-            let has_any_of = obj.contains_key("anyOf");
-            let has_defs = obj.contains_key("$defs");
             // schemars v1 may hoist definitions and reference them; at minimum
             // a non-trivial schema always has one of these structural keys.
             assert!(
-                has_properties || has_one_of || has_any_of || has_defs,
+                obj.contains_key("properties")
+                    || obj.contains_key("oneOf")
+                    || obj.contains_key("anyOf")
+                    || obj.contains_key("$defs"),
                 "schema for {name} has no expected structural keys (properties/oneOf/anyOf/$defs)"
             );
         }
@@ -275,7 +265,6 @@ mod tests {
             "stages.schema.json",
             "penalties.schema.json",
             "generic_constraints.schema.json",
-            "exchange_factors.schema.json",
             "load_factors.schema.json",
             "non_controllable_factors.schema.json",
         ];

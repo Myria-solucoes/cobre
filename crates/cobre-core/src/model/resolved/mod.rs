@@ -24,9 +24,7 @@ pub use bounds::{
     BoundsCountsSpec, BoundsDefaults, ContractStageBounds, HydroStageBounds, LineStageBounds,
     PumpingStageBounds, ResolvedBounds, ThermalStageBounds,
 };
-pub use factors::{
-    ResolvedExchangeFactors, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
-};
+pub use factors::{ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors};
 pub use generic::ResolvedGenericConstraintBounds;
 pub use penalties::{
     BusStagePenalties, HydroStagePenalties, LineStagePenalties, NcsStagePenalties,

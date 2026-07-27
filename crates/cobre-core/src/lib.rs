@@ -46,8 +46,7 @@ pub mod system;
 pub mod topology;
 
 // Crate-root module aliases so `cobre_core::<module>::Symbol` paths resolve for
-// external consumers; the canonical sources are the `model::` and `constraints::`
-// submodules.
+// external consumers.
 pub use model::{parameters, penalty, resolved, scenario, temporal};
 
 pub use constraints::{generic_constraint, initial_conditions, training_event};
@@ -83,9 +82,9 @@ pub use model::resolved::{
     ContractBlockOverride, ContractStageBounds, HydroBlockOverride, HydroStageBounds,
     HydroStagePenalties, LineBlockOverride, LineStageBounds, LineStagePenalties, NcsStagePenalties,
     PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockOverride, PumpingStageBounds,
-    ResolvedBlockBounds, ResolvedBounds, ResolvedExchangeFactors, ResolvedGenericConstraintBounds,
-    ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties,
-    ThermalBlockOverride, ThermalStageBounds,
+    ResolvedBlockBounds, ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
+    ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, ThermalBlockOverride,
+    ThermalStageBounds,
 };
 pub use model::scenario::{
     CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile,

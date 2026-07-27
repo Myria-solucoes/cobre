@@ -79,14 +79,8 @@ fn default_hydro_penalties() -> HydroStagePenalties {
     }
 }
 
-/// Build a one-bus system with exactly the thermals provided.
-///
-/// Uses one study stage with a single block of 744 hours and no hydros.
-fn system_with_thermals(thermals: Vec<Thermal>) -> cobre_core::System {
-    let n_thermals = thermals.len();
-    let n_stages = 1_usize;
-
-    let bus = Bus {
+fn fixture_bus() -> Bus {
+    Bus {
         id: EntityId(1),
         name: "B1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -95,7 +89,17 @@ fn system_with_thermals(thermals: Vec<Thermal>) -> cobre_core::System {
             cost_per_mwh: 500.0,
         }],
         excess_cost: 0.0,
-    };
+    }
+}
+
+/// Build a one-bus system with exactly the thermals provided.
+///
+/// Uses one study stage with a single block of 744 hours and no hydros.
+fn system_with_thermals(thermals: Vec<Thermal>) -> cobre_core::System {
+    let n_thermals = thermals.len();
+    let n_stages = 1_usize;
+
+    let bus = fixture_bus();
 
     let stages: Vec<Stage> = vec![Stage {
         index: 0,
@@ -270,16 +274,7 @@ fn system_with_pumping_stations(stations: Vec<PumpingStation>) -> cobre_core::Sy
     let n_hydros = 2_usize;
     let n_stages = 1_usize;
 
-    let bus = Bus {
-        id: EntityId(1),
-        name: "B1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 500.0,
-        }],
-        excess_cost: 0.0,
-    };
+    let bus = fixture_bus();
 
     let hydros = vec![fixture_hydro(1), fixture_hydro(2)];
 
@@ -628,16 +623,7 @@ fn system_with_contracts(contracts: Vec<EnergyContract>, n_blks: usize) -> cobre
     let n_hydros = 2_usize;
     let n_stages = 1_usize;
 
-    let bus = Bus {
-        id: EntityId(1),
-        name: "B1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 500.0,
-        }],
-        excess_cost: 0.0,
-    };
+    let bus = fixture_bus();
 
     let hydros = vec![fixture_hydro(1), fixture_hydro(2)];
 
@@ -918,16 +904,7 @@ fn stage_layout_geometry_empty_contracts_are_pumping_end_anchored() {
 #[test]
 #[should_panic(expected = "resolved-bounds")]
 fn build_template_build_ctx_contract_count_divergence_panics() {
-    let bus = Bus {
-        id: EntityId(1),
-        name: "B1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 500.0,
-        }],
-        excess_cost: 0.0,
-    };
+    let bus = fixture_bus();
     let stages: Vec<Stage> = vec![Stage {
         index: 0,
         id: 0,
@@ -1623,7 +1600,6 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
             penalties: ctx_a.resolved.penalties,
             resolved_generic_bounds: ctx_a.resolved.resolved_generic_bounds,
             resolved_load_factors: ctx_a.resolved.resolved_load_factors,
-            resolved_exchange_factors: ctx_a.resolved.resolved_exchange_factors,
             resolved_ncs_bounds: ctx_a.resolved.resolved_ncs_bounds,
             resolved_ncs_factors: ctx_a.resolved.resolved_ncs_factors,
             resolved_parameters: ctx_a.resolved.resolved_parameters,
@@ -1820,16 +1796,7 @@ fn discounted_multi_stage_system() -> cobre_core::System {
     }];
     let n_thermals = thermals.len();
 
-    let bus = Bus {
-        id: EntityId(1),
-        name: "B1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 500.0,
-        }],
-        excess_cost: 0.0,
-    };
+    let bus = fixture_bus();
 
     let stages: Vec<Stage> = (0..n_stages)
         .map(|i| Stage {
@@ -2007,16 +1974,7 @@ use cobre_solver::StageTemplate;
 fn one_hydro_active_violations(n_stages: usize) -> System {
     use cobre_core::scenario::{InflowModel, LoadModel};
 
-    let bus = Bus {
-        id: EntityId(1),
-        name: "B1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 500.0,
-        }],
-        excess_cost: 0.0,
-    };
+    let bus = fixture_bus();
 
     let hydro = Hydro {
         id: EntityId(2),
@@ -2871,16 +2829,7 @@ fn assert_templates_byte_identical(tpl_a: &StageTemplate, tpl_b: &StageTemplate)
 fn one_hydro_block_system(block_mode: BlockMode, n_blks: usize) -> System {
     use cobre_core::scenario::{InflowModel, LoadModel};
 
-    let bus = Bus {
-        id: EntityId(1),
-        name: "B1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 500.0,
-        }],
-        excess_cost: 0.0,
-    };
+    let bus = fixture_bus();
 
     let hydro = fixture_hydro(2);
 
@@ -3502,16 +3451,7 @@ fn stage_layout_geometry_field_equals_layout_source_at_k3() {
 fn system_with_contracts_filling_and_anticipated() -> cobre_core::System {
     let n_stages = 4_usize;
 
-    let bus = Bus {
-        id: EntityId(1),
-        name: "B1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 500.0,
-        }],
-        excess_cost: 0.0,
-    };
+    let bus = fixture_bus();
 
     let hydro = Hydro {
         id: EntityId(1),
@@ -3913,16 +3853,7 @@ const FILL_FILL_HYDRO_ID: i32 = 3;
 fn filling_block_system(block_mode: BlockMode, n_blks: usize) -> System {
     use cobre_core::scenario::{InflowModel, LoadModel};
 
-    let bus = Bus {
-        id: EntityId(1),
-        name: "B1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 500.0,
-        }],
-        excess_cost: 0.0,
-    };
+    let bus = fixture_bus();
 
     let filling_hydro = |id: i32, downstream: Option<i32>, start: i32| Hydro {
         id: EntityId(id),
@@ -4342,16 +4273,7 @@ fn anticipated_lead_config_system(
     anticipated_config: AnticipatedConfig,
     k_max_bounds: usize,
 ) -> cobre_core::System {
-    let bus = Bus {
-        id: EntityId(1),
-        name: "B1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 500.0,
-        }],
-        excess_cost: 0.0,
-    };
+    let bus = fixture_bus();
 
     let thermal = Thermal {
         id: EntityId(1),
@@ -4609,7 +4531,7 @@ fn template_leadstages_byte_identical_to_setup_and_fallback() {
     assert_eq!(setup_lead_stages, ctx.anticipated_lead_stages);
     assert_eq!(setup_resolution.per_plant[0].decider, template_decider);
 
-    let fallback_state = super::super::test_support::state_layout_for(&ctx);
+    let fallback_state = state_layout_for(&ctx);
     let fallback_decider = anticipated_resolution_for(&fallback_state, AnticipatedLocal::new(0), 3)
         .decider
         .clone();

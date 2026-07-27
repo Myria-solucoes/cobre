@@ -119,8 +119,8 @@ fn parquet_lookup(
     stage_id: i32,
 ) -> Option<f64> {
     map.get(&(hydro_id, Some(stage_id)))
+        .or_else(|| map.get(&(hydro_id, None)))
         .copied()
-        .or_else(|| map.get(&(hydro_id, None)).copied())
 }
 
 // ── JSON model lookup ─────────────────────────────────────────────────────────
@@ -387,7 +387,6 @@ mod tests {
             line_bounds: vec![],
             pumping_bounds: vec![],
             contract_bounds: vec![],
-            exchange_factors: vec![],
             generic_constraints: vec![],
             generic_constraint_bounds: vec![],
             penalty_overrides_bus: vec![],
@@ -400,15 +399,11 @@ mod tests {
 
     // ── Unit tests ─────────────────────────────────────────────────────────────
 
-    /// One non-FPHA hydro, JSON has `None`, parquet has a stage-specific row
-    /// with `rho_eq = 0.9` — no errors expected.
     #[test]
     fn test_no_error_when_only_parquet_supplies_value() {
         let mut data = base_parsed_data();
         data.hydros = vec![make_hydro(0, HydroGenerationModel::ConstantProductivity)];
-        // JSON: no production_model entry for hydro 0.
         data.production_models = vec![];
-        // Parquet: stage-specific row supplies rho_eq.
         data.hydro_energy_productivity_rows = vec![parquet_row(0, Some(0), Some(0.9))];
 
         let mut ctx = ValidationContext::new();
@@ -420,7 +415,6 @@ mod tests {
         );
     }
 
-    /// One non-FPHA hydro, JSON has `Some(0.9)`, no parquet row — no errors.
     #[test]
     fn test_no_error_when_only_json_supplies_value() {
         let mut data = base_parsed_data();
@@ -437,8 +431,6 @@ mod tests {
         );
     }
 
-    /// Both JSON (`Some(0.9)`) and parquet (`Some(1.1)`) supply a value for
-    /// the same `(hydro_id=0, stage_id=0)` — one conflict error expected.
     #[test]
     fn test_conflict_when_both_supply_value() {
         let mut data = base_parsed_data();
@@ -467,8 +459,6 @@ mod tests {
         );
     }
 
-    /// JSON has `None` and no parquet row exists for `(hydro_id=0, stage_id=0)` —
-    /// one gap error expected.
     #[test]
     fn test_gap_when_neither_supplies_value() {
         let mut data = base_parsed_data();
@@ -490,9 +480,6 @@ mod tests {
         );
     }
 
-    /// JSON has `None` for stage 0, but parquet has a per-hydro default row
-    /// (`stage_id = None`, `rho_eq = Some(0.7)`) — the default row covers the
-    /// gap, so no error is expected.
     #[test]
     fn test_per_hydro_default_covers_when_stage_specific_absent() {
         let mut data = base_parsed_data();
@@ -533,8 +520,6 @@ mod tests {
         );
     }
 
-    /// Hydro is FPHA — the validator must skip it entirely. No parquet row,
-    /// no JSON productivity → no error.
     #[test]
     fn test_fpha_hydros_are_not_validated() {
         let mut data = base_parsed_data();
@@ -552,8 +537,6 @@ mod tests {
         );
     }
 
-    /// Two non-FPHA hydros: hydro 0 has a conflict, hydro 1 has a gap.
-    /// Both errors must be collected in one pass.
     #[test]
     fn test_multiple_issues_collected_in_one_pass() {
         let mut data = base_parsed_data();
@@ -592,7 +575,6 @@ mod tests {
 
     // ── Helper unit tests for find_productivity_for_stage ─────────────────────
 
-    /// `StageRanges` with a single open-ended range covers stage 0.
     #[test]
     fn test_find_productivity_stage_ranges_match() {
         let config = stage_range_config(0, Some(0.5));
@@ -601,7 +583,6 @@ mod tests {
         assert_eq!(result, Some(0.5));
     }
 
-    /// `StageRanges` with no range covering stage 99 returns `None`.
     #[test]
     fn test_find_productivity_stage_ranges_no_match() {
         let config = ProductionModelConfig {
@@ -617,13 +598,11 @@ mod tests {
                 }],
             },
         };
-        let mut stage = make_stage(99);
-        stage.id = 99;
+        let stage = make_stage(99);
         let result = find_productivity_for_stage(&config, &stage);
         assert_eq!(result, None);
     }
 
-    /// `Seasonal` with a matching season entry returns the season's productivity.
     #[test]
     fn test_find_productivity_seasonal_match() {
         let config = ProductionModelConfig {
@@ -645,8 +624,6 @@ mod tests {
         assert_eq!(result, Some(0.8));
     }
 
-    /// `Seasonal` with no matching season entry falls back to default, returning
-    /// `None` (the default model carries no explicit productivity).
     #[test]
     fn test_find_productivity_seasonal_fallback_to_default_is_none() {
         let config = ProductionModelConfig {

@@ -1,7 +1,7 @@
 //! Parsers for constraint files in the `constraints/` subdirectory.
 //!
-//! Constraint files provide stage-varying bound overrides for entity types,
-//! user-defined generic linear constraints, and transmission capacity multipliers.
+//! Constraint files provide stage-varying bound overrides for entity types and
+//! user-defined generic linear constraints.
 //! All files are optional — when absent, the `load_*` wrappers return
 //! `Ok(Vec::new())` without touching the filesystem.
 //!
@@ -19,14 +19,10 @@
 //! `fs::read_to_string` → `serde_json::from_str` → `validate_raw` → `convert`.
 //!
 //! Cross-reference validation (checking that entity IDs exist in registries)
-//! and duplicate-key validation are deferred to Layer 3.
+//! is deferred to Layer 3.
 //! Semantic bound validation (e.g., min < max) is deferred.
 
-use cobre_core::EntityId;
-
-use std::collections::HashMap;
 pub mod bounds;
-pub mod exchange_factors;
 pub mod generic;
 pub mod generic_bounds;
 pub mod ncs_bounds;
@@ -37,7 +33,6 @@ pub use bounds::{
     parse_contract_bounds, parse_hydro_bounds, parse_line_bounds, parse_pumping_bounds,
     parse_thermal_bounds,
 };
-pub use exchange_factors::{BlockExchangeFactor, ExchangeFactorEntry, parse_exchange_factors};
 pub use generic::parse_generic_constraints;
 pub use generic_bounds::{GenericConstraintBoundsRow, parse_generic_constraint_bounds};
 pub use ncs_bounds::{NcsBoundsRow, parse_ncs_bounds};
@@ -47,9 +42,11 @@ pub use penalty_overrides::{
     parse_penalty_overrides_ncs,
 };
 
-use crate::LoadError;
-use cobre_core::GenericConstraint;
+use cobre_core::{EntityId, GenericConstraint};
+use std::collections::HashMap;
 use std::path::Path;
+
+use crate::LoadError;
 
 /// Load `constraints/thermal_bounds.parquet` when the path is known, or
 /// return an empty `Vec` when the file is absent (optional file).
@@ -310,28 +307,6 @@ pub fn load_generic_constraint_bounds(
     match path {
         None => Ok(Vec::new()),
         Some(p) => parse_generic_constraint_bounds(p),
-    }
-}
-
-/// Load `constraints/exchange_factors.json` when the path is known, or
-/// return an empty `Vec` when the file is absent (optional file).
-///
-/// # Errors
-///
-/// Propagates [`LoadError`] from [`parse_exchange_factors`] when `path` is `Some`.
-///
-/// # Examples
-///
-/// ```
-/// use cobre_io::constraints::load_exchange_factors;
-///
-/// let entries = load_exchange_factors(None).expect("no file is fine");
-/// assert!(entries.is_empty());
-/// ```
-pub fn load_exchange_factors(path: Option<&Path>) -> Result<Vec<ExchangeFactorEntry>, LoadError> {
-    match path {
-        None => Ok(Vec::new()),
-        Some(p) => parse_exchange_factors(p),
     }
 }
 
