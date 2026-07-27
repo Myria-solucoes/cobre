@@ -15,7 +15,7 @@
 //! | `min_generation_mw`| DOUBLE | No       | Minimum generation (MW)                              |
 //! | `max_generation_mw`| DOUBLE | No       | Maximum generation (MW)                              |
 //! | `cost_per_mwh`     | DOUBLE | No       | Dispatch cost override (`$/MWh`); ignored if `block_id` is non-null |
-//! | `block_id`         | INT32  | No       | Reserved for future per-block costs; rows with non-null value are silently ignored |
+//! | `block_id`         | INT32 (null) | No | 0-based block index within the stage (matches `Block::index`) selecting one block's `min_generation_mw`/`max_generation_mw` override; a value outside `[0, n_blocks)` for the referenced stage is silently skipped; does not create a per-block `cost_per_mwh` |
 //!
 //! ### `hydro_bounds`
 //!
@@ -65,7 +65,10 @@
 //!
 //! ## Output ordering
 //!
-//! All parsers return rows sorted by `(entity_id, stage_id)` ascending.
+//! All parsers return rows sorted by `(entity_id, stage_id)` ascending, except
+//! `thermal_bounds`, which sorts by `(thermal_id, stage_id, block_id)` (`None`
+//! before `Some(i)`) since a stage-wide row and a block row may share
+//! `(thermal_id, stage_id)`.
 //!
 //! ## Validation
 //!
@@ -81,7 +84,11 @@
 //! Deferred validations (not performed here):
 //!
 //! - Entity ID existence in registries — Layer 3.
-//! - Duplicate `(entity_id, stage_id)` pairs — deferred.
+//! - Duplicate `(entity_id, stage_id)` pairs — deferred; for `thermal_bounds`
+//!   the key is `(thermal_id, stage_id, block_id)`, since a stage-wide row and
+//!   a block row sharing `(thermal_id, stage_id)` is designed usage, not a
+//!   duplicate.
+//! - `block_id` validity for the referenced stage — deferred.
 //! - Cross-field validation for the remaining bounds types — deferred.
 
 use arrow::array::Array;
@@ -136,8 +143,12 @@ pub struct ThermalBoundsRow {
     /// Dispatch cost override (`$/MWh`). Overrides `Thermal.cost_per_mwh` when `Some` and
     /// `block_id` is `None`. Ignored when `block_id` is `Some`.
     pub cost_per_mwh: Option<f64>,
-    /// Reserved for future per-block cost support. Rows with non-null `block_id`
-    /// are parsed but silently ignored during bounds resolution.
+    /// Selects one block within the stage for `min_generation_mw` /
+    /// `max_generation_mw`; `None` applies the row at the stage level. A
+    /// 0-based index matching `Block::index`; a value outside `[0, n_blocks)`
+    /// for the referenced stage is silently skipped. Does not create a
+    /// per-block cost — a row with a non-null `block_id` has its
+    /// `cost_per_mwh` dropped (see the `cost_per_mwh` field).
     pub block_id: Option<i32>,
 }
 
@@ -325,7 +336,7 @@ fn validate_optional_finite(
 }
 
 /// Parse `constraints/thermal_bounds.parquet`, returning rows sorted by
-/// `(thermal_id, stage_id)` ascending.
+/// `(thermal_id, stage_id, block_id)` ascending (`None` before `Some(i)`).
 ///
 /// # Errors
 ///
@@ -392,27 +403,13 @@ pub fn parse_thermal_bounds(path: &Path) -> Result<Vec<ThermalBoundsRow>, LoadEr
                 .filter(|col| !col.is_null(i))
                 .map(|col| col.value(i));
 
-            validate_optional_finite(
-                min_generation_mw,
-                "thermal_bounds",
-                row_idx,
-                "min_generation_mw",
-                path,
-            )?;
-            validate_optional_finite(
-                max_generation_mw,
-                "thermal_bounds",
-                row_idx,
-                "max_generation_mw",
-                path,
-            )?;
-            validate_optional_finite(
-                cost_per_mwh,
-                "thermal_bounds",
-                row_idx,
-                "cost_per_mwh",
-                path,
-            )?;
+            for (value, column) in [
+                (min_generation_mw, "min_generation_mw"),
+                (max_generation_mw, "max_generation_mw"),
+                (cost_per_mwh, "cost_per_mwh"),
+            ] {
+                validate_optional_finite(value, "thermal_bounds", row_idx, column, path)?;
+            }
             if let Some(v) = cost_per_mwh
                 && v < 0.0
             {
@@ -434,12 +431,7 @@ pub fn parse_thermal_bounds(path: &Path) -> Result<Vec<ThermalBoundsRow>, LoadEr
         }
     }
 
-    rows.sort_by(|a, b| {
-        a.thermal_id
-            .0
-            .cmp(&b.thermal_id.0)
-            .then_with(|| a.stage_id.cmp(&b.stage_id))
-    });
+    rows.sort_by_key(|r| (r.thermal_id.0, r.stage_id, r.block_id));
 
     Ok(rows)
 }
@@ -547,83 +539,21 @@ pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError>
                 .filter(|col| !col.is_null(i))
                 .map(|col| col.value(i));
 
-            validate_optional_finite(
-                min_turbined_m3s,
-                "hydro_bounds",
-                row_idx,
-                "min_turbined_m3s",
-                path,
-            )?;
-            validate_optional_finite(
-                max_turbined_m3s,
-                "hydro_bounds",
-                row_idx,
-                "max_turbined_m3s",
-                path,
-            )?;
-            validate_optional_finite(
-                min_storage_hm3,
-                "hydro_bounds",
-                row_idx,
-                "min_storage_hm3",
-                path,
-            )?;
-            validate_optional_finite(
-                max_storage_hm3,
-                "hydro_bounds",
-                row_idx,
-                "max_storage_hm3",
-                path,
-            )?;
-            validate_optional_finite(
-                min_outflow_m3s,
-                "hydro_bounds",
-                row_idx,
-                "min_outflow_m3s",
-                path,
-            )?;
-            validate_optional_finite(
-                max_outflow_m3s,
-                "hydro_bounds",
-                row_idx,
-                "max_outflow_m3s",
-                path,
-            )?;
-            validate_optional_finite(
-                min_generation_mw,
-                "hydro_bounds",
-                row_idx,
-                "min_generation_mw",
-                path,
-            )?;
-            validate_optional_finite(
-                max_generation_mw,
-                "hydro_bounds",
-                row_idx,
-                "max_generation_mw",
-                path,
-            )?;
-            validate_optional_finite(
-                max_diversion_m3s,
-                "hydro_bounds",
-                row_idx,
-                "max_diversion_m3s",
-                path,
-            )?;
-            validate_optional_finite(
-                filling_min_rate_m3s,
-                "hydro_bounds",
-                row_idx,
-                "filling_min_rate_m3s",
-                path,
-            )?;
-            validate_optional_finite(
-                water_withdrawal_m3s,
-                "hydro_bounds",
-                row_idx,
-                "water_withdrawal_m3s",
-                path,
-            )?;
+            for (value, column) in [
+                (min_turbined_m3s, "min_turbined_m3s"),
+                (max_turbined_m3s, "max_turbined_m3s"),
+                (min_storage_hm3, "min_storage_hm3"),
+                (max_storage_hm3, "max_storage_hm3"),
+                (min_outflow_m3s, "min_outflow_m3s"),
+                (max_outflow_m3s, "max_outflow_m3s"),
+                (min_generation_mw, "min_generation_mw"),
+                (max_generation_mw, "max_generation_mw"),
+                (max_diversion_m3s, "max_diversion_m3s"),
+                (filling_min_rate_m3s, "filling_min_rate_m3s"),
+                (water_withdrawal_m3s, "water_withdrawal_m3s"),
+            ] {
+                validate_optional_finite(value, "hydro_bounds", row_idx, column, path)?;
+            }
 
             // build_filling_v_target and check_filling_sufficiency assume rate ≥ 0;
             // a negative override silently inverts the V_target floor (validate_filling_configs
@@ -656,12 +586,7 @@ pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError>
         }
     }
 
-    rows.sort_by(|a, b| {
-        a.hydro_id
-            .0
-            .cmp(&b.hydro_id.0)
-            .then_with(|| a.stage_id.cmp(&b.stage_id))
-    });
+    rows.sort_by_key(|r| (r.hydro_id.0, r.stage_id));
 
     Ok(rows)
 }
@@ -738,12 +663,7 @@ pub fn parse_line_bounds(path: &Path) -> Result<Vec<LineBoundsRow>, LoadError> {
         }
     }
 
-    rows.sort_by(|a, b| {
-        a.line_id
-            .0
-            .cmp(&b.line_id.0)
-            .then_with(|| a.stage_id.cmp(&b.stage_id))
-    });
+    rows.sort_by_key(|r| (r.line_id.0, r.stage_id));
 
     Ok(rows)
 }
@@ -852,12 +772,7 @@ pub fn parse_pumping_bounds(path: &Path) -> Result<Vec<PumpingBoundsRow>, LoadEr
         }
     }
 
-    rows.sort_by(|a, b| {
-        a.station_id
-            .0
-            .cmp(&b.station_id.0)
-            .then_with(|| a.stage_id.cmp(&b.stage_id))
-    });
+    rows.sort_by_key(|r| (r.station_id.0, r.stage_id));
 
     Ok(rows)
 }
@@ -946,12 +861,7 @@ pub fn parse_contract_bounds(path: &Path) -> Result<Vec<ContractBoundsRow>, Load
         }
     }
 
-    rows.sort_by(|a, b| {
-        a.contract_id
-            .0
-            .cmp(&b.contract_id.0)
-            .then_with(|| a.stage_id.cmp(&b.stage_id))
-    });
+    rows.sort_by_key(|r| (r.contract_id.0, r.stage_id));
 
     Ok(rows)
 }
@@ -1166,7 +1076,6 @@ mod tests {
         let rows = parse_thermal_bounds(tmp.path()).unwrap();
 
         assert_eq!(rows.len(), 2);
-        // Sorted by (thermal_id, stage_id): (1,0) then (1,1)
         assert_eq!(rows[0].thermal_id, EntityId::from(1));
         assert_eq!(rows[0].stage_id, 0);
         assert_eq!(rows[0].cost_per_mwh, Some(50.0));
@@ -1180,7 +1089,7 @@ mod tests {
     /// Parquet without cost_per_mwh and block_id columns — all rows have None.
     #[test]
     fn test_thermal_missing_cost_and_block_id_columns_are_none() {
-        // Use the existing make_thermal_batch which builds the old schema (no cost/block_id).
+        // make_thermal_batch's schema omits cost_per_mwh and block_id.
         let batch = make_thermal_batch(
             &[1, 2],
             &[0, 0],

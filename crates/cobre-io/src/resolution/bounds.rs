@@ -49,14 +49,17 @@ pub struct BoundsOverrides<'a> {
 
 /// Pre-compute the full bound table from entity base values and stage-varying overrides.
 ///
-/// Override rows referencing unknown entity IDs or out-of-range stage IDs are silently
-/// skipped (referential integrity is deferred to validation).
+/// Override rows referencing unknown entity IDs, out-of-range stage IDs, or an
+/// out-of-range `block_id` are silently skipped (referential integrity is
+/// deferred to validation).
 ///
 /// # Arguments
 ///
 /// * `k_max` — maximum lead-stages across anticipated thermals; extends the
 ///   thermal stage axis to `n_stages + k_max`. Pass `0` when no anticipated
 ///   thermals are present (the padded region is then empty)
+/// * `blocks_per_stage` — per-stage block count, study-stage-ordered; sizes the
+///   per-block overlay's block axis and bounds `block_id` validity
 ///
 /// # Examples
 ///
@@ -154,6 +157,7 @@ pub struct BoundsOverrides<'a> {
 ///         pumping: &[],
 ///         contract: &[],
 ///     },
+///     &[1, 1, 1],
 /// );
 ///
 /// // Stage 0: base value.
@@ -178,6 +182,7 @@ pub fn resolve_bounds(
     k_max: usize,
     stage_index: &HashMap<i32, usize>,
     overrides: &BoundsOverrides<'_>,
+    blocks_per_stage: &[usize],
 ) -> ResolvedBounds {
     let hydro_overrides = overrides.hydro;
     let thermal_overrides = overrides.thermal;
@@ -269,7 +274,7 @@ pub fn resolve_bounds(
 
     // n_stages == 0: allocate with 1 (the API needs a non-zero stride) then return
     // the empty table without filling.
-    let alloc_stages = if n_stages == 0 { 1 } else { n_stages };
+    let alloc_stages = n_stages.max(1);
 
     let mut table = ResolvedBounds::new(
         &cobre_core::BoundsCountsSpec {
@@ -346,6 +351,20 @@ pub fn resolve_bounds(
         }
     }
 
+    let max_blocks = blocks_per_stage.iter().copied().max().unwrap_or(0);
+    let any_block_row = thermal_overrides.iter().any(|row| row.block_id.is_some());
+    let mut block_overlay = (any_block_row && max_blocks > 0).then(|| {
+        cobre_core::ResolvedBlockBounds::new(&cobre_core::BlockBoundsCountsSpec {
+            n_hydros: entities.hydros.len(),
+            n_thermals: entities.thermals.len(),
+            n_lines: entities.lines.len(),
+            n_pumping: entities.pumping_stations.len(),
+            n_contracts: entities.contracts.len(),
+            n_stages,
+            max_blocks,
+        })
+    });
+
     for row in hydro_overrides {
         let Some(&entity_idx) = hydro_index.get(&row.hydro_id) else {
             continue;
@@ -389,11 +408,10 @@ pub fn resolve_bounds(
         }
     }
 
-    for row in thermal_overrides {
-        // Non-null block_id is reserved for future per-block cost support; ignore here.
-        if row.block_id.is_some() {
-            continue;
-        }
+    for row in thermal_overrides
+        .iter()
+        .filter(|row| row.block_id.is_none())
+    {
         let Some(&entity_idx) = thermal_index.get(&row.thermal_id) else {
             continue;
         };
@@ -409,6 +427,38 @@ pub fn resolve_bounds(
         }
         if let Some(v) = row.cost_per_mwh {
             cell.cost_per_mwh = v;
+        }
+    }
+
+    if let Some(overlay) = block_overlay.as_mut() {
+        for row in thermal_overrides {
+            let Some(block_id) = row.block_id else {
+                continue;
+            };
+            let Some(&entity_idx) = thermal_index.get(&row.thermal_id) else {
+                continue;
+            };
+            let Some(&stage_idx) = stage_index.get(&row.stage_id) else {
+                continue;
+            };
+            let Ok(block_idx) = usize::try_from(block_id) else {
+                continue;
+            };
+            let Some(&n_blocks) = blocks_per_stage.get(stage_idx) else {
+                continue;
+            };
+            if block_idx >= n_blocks {
+                continue;
+            }
+            let Some(cell) = overlay.thermal_override_mut(entity_idx, stage_idx, block_idx) else {
+                continue;
+            };
+            if let Some(v) = row.min_generation_mw {
+                cell.min_generation_mw = Some(v);
+            }
+            if let Some(v) = row.max_generation_mw {
+                cell.max_generation_mw = Some(v);
+            }
         }
     }
 
@@ -461,6 +511,10 @@ pub fn resolve_bounds(
         if let Some(v) = row.price_per_mwh {
             cell.price_per_mwh = v;
         }
+    }
+
+    if let Some(overlay) = block_overlay {
+        table.set_block_overlay(overlay);
     }
 
     table
@@ -538,8 +592,7 @@ mod tests {
     }
 
     /// Test wrapper that passes a 0-based consecutive `stage_index` to
-    /// [`super::resolve_bounds`]. Shadows the import so existing test calls
-    /// work without modification.
+    /// [`super::resolve_bounds`].
     #[allow(clippy::too_many_arguments)]
     fn resolve_bounds(
         hydros: &[Hydro],
@@ -554,6 +607,7 @@ mod tests {
         line_overrides: &[LineBoundsRow],
         pumping_overrides: &[PumpingBoundsRow],
         contract_overrides: &[ContractBoundsRow],
+        blocks_per_stage: &[usize],
     ) -> ResolvedBounds {
         super::resolve_bounds(
             &super::BoundsEntitySlices {
@@ -573,6 +627,7 @@ mod tests {
                 pumping: pumping_overrides,
                 contract: contract_overrides,
             },
+            blocks_per_stage,
         )
     }
 
@@ -745,6 +800,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         );
 
         for stage in 0..3 {
@@ -824,6 +880,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         );
 
         assert!((result.hydro_bounds(0, 0).min_storage_hm3 - 10.0).abs() < f64::EPSILON);
@@ -857,7 +914,21 @@ mod tests {
             Some(filling),
         )];
 
-        let result = resolve_bounds(&hydros, &[], &[], &[], &[], 2, 0, &[], &[], &[], &[], &[]);
+        let result = resolve_bounds(
+            &hydros,
+            &[],
+            &[],
+            &[],
+            &[],
+            2,
+            0,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
 
         let b = result.hydro_bounds(0, 0);
         assert_eq!(b.max_diversion_m3s, Some(50.0));
@@ -873,7 +944,21 @@ mod tests {
     fn test_hydro_without_diversion() {
         let hydros = vec![make_hydro(0, 10.0, 100.0, None, None, None)];
 
-        let result = resolve_bounds(&hydros, &[], &[], &[], &[], 2, 0, &[], &[], &[], &[], &[]);
+        let result = resolve_bounds(
+            &hydros,
+            &[],
+            &[],
+            &[],
+            &[],
+            2,
+            0,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
 
         let b = result.hydro_bounds(0, 0);
         assert!(b.max_diversion_m3s.is_none());
@@ -911,6 +996,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         );
 
         assert!((result.thermal_bounds(1, 0).max_generation_mw - 500.0).abs() < f64::EPSILON);
@@ -942,6 +1028,7 @@ mod tests {
             &[],
             &[],
             &[override_row],
+            &[],
             &[],
             &[],
         );
@@ -982,6 +1069,7 @@ mod tests {
             &[],
             &[override_row],
             &[],
+            &[],
         );
 
         assert!((result.pumping_bounds(0, 0).max_flow_m3s - 100.0).abs() < f64::EPSILON);
@@ -1018,6 +1106,7 @@ mod tests {
             &[],
             &[],
             &[override_row],
+            &[],
         );
 
         assert!((result.contract_bounds(0, 0).price_per_mwh - 80.0).abs() < f64::EPSILON);
@@ -1051,6 +1140,7 @@ mod tests {
             2,
             0,
             &[override_row],
+            &[],
             &[],
             &[],
             &[],
@@ -1092,6 +1182,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         );
 
         assert_eq!(result.n_stages(), 3);
@@ -1122,6 +1213,7 @@ mod tests {
             3,
             0,
             &[override_row],
+            &[],
             &[],
             &[],
             &[],
@@ -1165,6 +1257,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         );
 
         assert!((result.thermal_bounds(1, 0).max_generation_mw - 500.0).abs() < f64::EPSILON);
@@ -1182,7 +1275,21 @@ mod tests {
         };
         let hydros = vec![make_hydro(0, 10.0, 100.0, None, Some(diversion), None)];
 
-        let result = resolve_bounds(&hydros, &[], &[], &[], &[], 1, 0, &[], &[], &[], &[], &[]);
+        let result = resolve_bounds(
+            &hydros,
+            &[],
+            &[],
+            &[],
+            &[],
+            1,
+            0,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
 
         let b = result.hydro_bounds(0, 0);
         assert_eq!(b.max_diversion_m3s, Some(50.0));
@@ -1209,6 +1316,7 @@ mod tests {
             &contracts,
             2,
             0,
+            &[],
             &[],
             &[],
             &[],
@@ -1259,6 +1367,7 @@ mod tests {
             &[],
             &[],
             &[override_row],
+            &[],
         );
 
         assert!((result.contract_bounds(0, 1).price_per_mwh - 90.0).abs() < f64::EPSILON);
@@ -1286,6 +1395,7 @@ mod tests {
             2,
             0,
             &[override_row],
+            &[],
             &[],
             &[],
             &[],
@@ -1335,6 +1445,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         );
 
         assert!(
@@ -1355,7 +1466,21 @@ mod tests {
         // make_thermal uses cost_per_mwh: 50.0 in the helper.
         let thermals = vec![make_thermal(0, 0.0, 400.0)];
 
-        let result = resolve_bounds(&[], &thermals, &[], &[], &[], 3, 0, &[], &[], &[], &[], &[]);
+        let result = resolve_bounds(
+            &[],
+            &thermals,
+            &[],
+            &[],
+            &[],
+            3,
+            0,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
 
         for stage in 0..3 {
             assert!(
@@ -1365,10 +1490,11 @@ mod tests {
         }
     }
 
-    /// Row with non-null block_id is silently ignored — no effect on bounds.
+    /// A block row's `cost_per_mwh` is never applied — `ThermalBlockOverride`
+    /// carries no cost field (per-block cost is out of scope); `min`/`max_generation_mw`
+    /// on a block row ARE applied (see `test_thermal_block_id_is_no_longer_skipped`).
     #[test]
     fn test_thermal_cost_block_id_row_ignored() {
-        // make_thermal uses cost_per_mwh: 50.0; override with block_id=1 must be ignored.
         let thermals = vec![make_thermal(0, 0.0, 400.0)];
         let override_row = ThermalBoundsRow {
             thermal_id: EntityId::from(0),
@@ -1392,12 +1518,12 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         );
 
-        // Cost must remain at the entity base value (50.0), not 999.0.
         assert!(
             (result.thermal_bounds(0, 0).cost_per_mwh - 50.0).abs() < f64::EPSILON,
-            "row with non-null block_id must be ignored; expected 50.0, got {}",
+            "a block row's cost_per_mwh must remain ignored; expected 50.0, got {}",
             result.thermal_bounds(0, 0).cost_per_mwh
         );
     }
@@ -1418,7 +1544,21 @@ mod tests {
             anticipated_config: None,
         }];
 
-        let result = resolve_bounds(&[], &thermals, &[], &[], &[], 2, 0, &[], &[], &[], &[], &[]);
+        let result = resolve_bounds(
+            &[],
+            &thermals,
+            &[],
+            &[],
+            &[],
+            2,
+            0,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
 
         for stage in 0..2 {
             assert!(
@@ -1442,7 +1582,21 @@ mod tests {
         t1.cost_per_mwh = 80.0;
         let thermals = vec![t0, t1];
 
-        let result = resolve_bounds(&[], &thermals, &[], &[], &[], 3, 2, &[], &[], &[], &[], &[]);
+        let result = resolve_bounds(
+            &[],
+            &thermals,
+            &[],
+            &[],
+            &[],
+            3,
+            2,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
 
         // Study-horizon cells [0, 3): each thermal's own base values.
         for stage in 0..3 {
@@ -1478,7 +1632,21 @@ mod tests {
         t0.cost_per_mwh = 50.0;
         let thermals = vec![t0];
 
-        let result = resolve_bounds(&[], &thermals, &[], &[], &[], 3, 0, &[], &[], &[], &[], &[]);
+        let result = resolve_bounds(
+            &[],
+            &thermals,
+            &[],
+            &[],
+            &[],
+            3,
+            0,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
 
         for stage in 0..3 {
             let b = result.thermal_bounds(0, stage);
@@ -1492,7 +1660,7 @@ mod tests {
     /// and the thermal stage axis is `n_stages + k_max`.
     #[test]
     fn test_padded_region_with_zero_thermals() {
-        let result = resolve_bounds(&[], &[], &[], &[], &[], 4, 3, &[], &[], &[], &[], &[]);
+        let result = resolve_bounds(&[], &[], &[], &[], &[], 4, 3, &[], &[], &[], &[], &[], &[]);
         assert_eq!(result.thermal_stage_axis_len(), 4 + 3);
     }
 
@@ -1501,8 +1669,8 @@ mod tests {
     // These tests pin down the per-thermal base-fill semantics of the resolver
     // at the four boundary stage indices that LP-template consumers exercise.
     // The accessor-only invariants (uniform-default fill, `n_stages()`
-    // unchanged, `thermal_stage_axis_len()` extended) live in
-    // `crates/cobre-core/src/resolved.rs::tests`.
+    // unchanged, `thermal_stage_axis_len()` extended) live in `cobre-core`'s
+    // `ResolvedBounds` tests.
 
     /// Two thermals with distinct `(min, max, cost)` bases, `n_stages = 4`,
     /// `k_max = 2`, no overrides. The last study stage and both padded stages
@@ -1517,7 +1685,21 @@ mod tests {
         t1.cost_per_mwh = 80.0;
         let thermals = vec![t0, t1];
 
-        let result = resolve_bounds(&[], &thermals, &[], &[], &[], 4, 2, &[], &[], &[], &[], &[]);
+        let result = resolve_bounds(
+            &[],
+            &thermals,
+            &[],
+            &[],
+            &[],
+            4,
+            2,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
 
         // Last study stage (T - 1 == 3): no override → thermal 0 base.
         let b0_last_study = result.thermal_bounds(0, 3);
@@ -1576,6 +1758,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         );
 
         // Override applies at T - 1 == 3.
@@ -1601,7 +1784,21 @@ mod tests {
     #[test]
     fn test_resolve_bounds_k_max_zero_no_padded_cells() {
         let thermals = vec![make_thermal(0, 0.0, 100.0)];
-        let result = resolve_bounds(&[], &thermals, &[], &[], &[], 3, 0, &[], &[], &[], &[], &[]);
+        let result = resolve_bounds(
+            &[],
+            &thermals,
+            &[],
+            &[],
+            &[],
+            3,
+            0,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
 
         assert_eq!(result.thermal_stage_axis_len(), 3);
 
@@ -1615,5 +1812,221 @@ mod tests {
                 "thermal_bounds(0, 3) must panic in debug builds when n_stages=3, k_max=0"
             );
         }
+    }
+
+    // ── Tests: thermal per-block overlay activation ───────────────────────────
+
+    /// A thermal row with `block_id = Some(1)` and `max_generation_mw = Some(100.0)`
+    /// is no longer skipped: the value reaches the per-block overlay.
+    #[test]
+    fn test_thermal_block_id_is_no_longer_skipped() {
+        let thermals = vec![make_thermal(0, 0.0, 400.0)];
+        let override_row = ThermalBoundsRow {
+            thermal_id: EntityId::from(0),
+            stage_id: 0,
+            min_generation_mw: None,
+            max_generation_mw: Some(100.0),
+            cost_per_mwh: None,
+            block_id: Some(1),
+        };
+
+        let result = resolve_bounds(
+            &[],
+            &thermals,
+            &[],
+            &[],
+            &[],
+            1,
+            0,
+            &[],
+            &[override_row],
+            &[],
+            &[],
+            &[],
+            &[2],
+        );
+
+        assert!(
+            (result.thermal_bounds_at_block(0, 0, 1).max_generation_mw - 100.0).abs()
+                < f64::EPSILON
+        );
+    }
+
+    /// Precedence: block (layer 1) beats stage-wide (layer 2) beats base (layer 3).
+    /// Thermal base `max_generation_mw = 500.0`, a stage-wide row sets `400.0`, and
+    /// a block-1 row (of 3 blocks) sets `100.0`.
+    #[test]
+    fn test_thermal_precedence_block_over_stage_over_base() {
+        let thermals = vec![make_thermal(0, 0.0, 500.0)];
+        let stage_wide_row = ThermalBoundsRow {
+            thermal_id: EntityId::from(0),
+            stage_id: 0,
+            min_generation_mw: None,
+            max_generation_mw: Some(400.0),
+            cost_per_mwh: None,
+            block_id: None,
+        };
+        let block_row = ThermalBoundsRow {
+            thermal_id: EntityId::from(0),
+            stage_id: 0,
+            min_generation_mw: None,
+            max_generation_mw: Some(100.0),
+            cost_per_mwh: None,
+            block_id: Some(1),
+        };
+
+        let result = resolve_bounds(
+            &[],
+            &thermals,
+            &[],
+            &[],
+            &[],
+            1,
+            0,
+            &[],
+            &[stage_wide_row, block_row],
+            &[],
+            &[],
+            &[],
+            &[3],
+        );
+
+        assert!(
+            (result.thermal_bounds_at_block(0, 0, 0).max_generation_mw - 400.0).abs()
+                < f64::EPSILON,
+            "block 0 has no block override: falls through to the stage-wide value"
+        );
+        assert!(
+            (result.thermal_bounds_at_block(0, 0, 1).max_generation_mw - 100.0).abs()
+                < f64::EPSILON,
+            "block 1 carries the block override"
+        );
+        assert!(
+            (result.thermal_bounds_at_block(0, 0, 2).max_generation_mw - 400.0).abs()
+                < f64::EPSILON,
+            "block 2 has no block override: falls through to the stage-wide value"
+        );
+    }
+
+    /// A block row that sets only `max_generation_mw` leaves `min_generation_mw`
+    /// and `cost_per_mwh` at the stage-wide (here: base, since no stage-wide
+    /// override is present) value — a layer-1 row replaces only the columns it names.
+    #[test]
+    fn test_thermal_block_row_is_sparse_per_column() {
+        let thermals = vec![make_thermal(0, 10.0, 400.0)];
+        let block_row = ThermalBoundsRow {
+            thermal_id: EntityId::from(0),
+            stage_id: 0,
+            min_generation_mw: None,
+            max_generation_mw: Some(999.0),
+            cost_per_mwh: None,
+            block_id: Some(1),
+        };
+
+        let result = resolve_bounds(
+            &[],
+            &thermals,
+            &[],
+            &[],
+            &[],
+            1,
+            0,
+            &[],
+            &[block_row],
+            &[],
+            &[],
+            &[],
+            &[2],
+        );
+
+        let b = result.thermal_bounds_at_block(0, 0, 1);
+        assert!((b.max_generation_mw - 999.0).abs() < f64::EPSILON);
+        assert!((b.min_generation_mw - 10.0).abs() < f64::EPSILON);
+        assert!((b.cost_per_mwh - 50.0).abs() < f64::EPSILON);
+    }
+
+    /// A `block_id` of `7` on a stage declaring 3 blocks, and separately a
+    /// `block_id` of `-1`, are both skipped: no resolved value changes and
+    /// `resolve_bounds` returns normally (no panic).
+    #[test]
+    fn test_out_of_range_thermal_block_id_is_skipped_not_panicked() {
+        let thermals = vec![make_thermal(0, 0.0, 400.0)];
+        let too_large_row = ThermalBoundsRow {
+            thermal_id: EntityId::from(0),
+            stage_id: 0,
+            min_generation_mw: None,
+            max_generation_mw: Some(999.0),
+            cost_per_mwh: None,
+            block_id: Some(7),
+        };
+        let negative_row = ThermalBoundsRow {
+            thermal_id: EntityId::from(0),
+            stage_id: 0,
+            min_generation_mw: None,
+            max_generation_mw: Some(888.0),
+            cost_per_mwh: None,
+            block_id: Some(-1),
+        };
+
+        let result = resolve_bounds(
+            &[],
+            &thermals,
+            &[],
+            &[],
+            &[],
+            1,
+            0,
+            &[],
+            &[too_large_row, negative_row],
+            &[],
+            &[],
+            &[],
+            &[3],
+        );
+
+        for block_idx in 0..3 {
+            assert!(
+                (result
+                    .thermal_bounds_at_block(0, 0, block_idx)
+                    .max_generation_mw
+                    - 400.0)
+                    .abs()
+                    < f64::EPSILON,
+                "block {block_idx}: out-of-range and negative block_id rows must not apply"
+            );
+        }
+    }
+
+    /// With no `block_id` rows in any family, the overlay stays empty — it is
+    /// never allocated unconditionally.
+    #[test]
+    fn test_no_block_rows_leaves_overlay_empty() {
+        let thermals = vec![make_thermal(0, 0.0, 400.0)];
+        let stage_wide_row = ThermalBoundsRow {
+            thermal_id: EntityId::from(0),
+            stage_id: 0,
+            min_generation_mw: None,
+            max_generation_mw: Some(300.0),
+            cost_per_mwh: None,
+            block_id: None,
+        };
+
+        let result = resolve_bounds(
+            &[],
+            &thermals,
+            &[],
+            &[],
+            &[],
+            1,
+            0,
+            &[],
+            &[stage_wide_row],
+            &[],
+            &[],
+            &[],
+            &[3],
+        );
+
+        assert!(result.block_overlay().is_empty());
     }
 }

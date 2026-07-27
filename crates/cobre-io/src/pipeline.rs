@@ -5,11 +5,12 @@
 //! during validation (e.g., the `validate` CLI subcommand).
 
 use std::collections::HashMap;
+use std::path::Path;
 
-use cobre_core::SystemBuilder;
+use cobre_core::{System, SystemBuilder};
 
 use crate::{
-    LoadError,
+    CaseArtifacts, LoadError, LoadedCase,
     extensions::load_tailrace_curves,
     report::{ValidationReport, generate_report},
     resolution::{
@@ -30,10 +31,6 @@ use crate::{
         structural::validate_structure,
     },
 };
-
-use crate::{CaseArtifacts, LoadedCase};
-use cobre_core::System;
-use std::path::Path;
 
 /// Run the complete loading pipeline for a case directory, discarding warnings.
 ///
@@ -79,9 +76,7 @@ pub(crate) fn run_pipeline_with_artifacts(
 
     let manifest = validate_structure(path, &mut ctx);
 
-    let data = validate_schema(path, &manifest, &mut ctx);
-
-    let Some(data) = data else {
+    let Some(data) = validate_schema(path, &manifest, &mut ctx) else {
         return ctx.into_result().and(Err(LoadError::ConstraintError {
             description: "schema validation failed but no errors were collected".to_string(),
         }));
@@ -106,8 +101,7 @@ pub(crate) fn run_pipeline_with_artifacts(
     let report = generate_report(&ctx);
     ctx.into_result()?;
 
-    // Study stages only (pre-study stages have negative IDs); stage_index maps
-    // domain-level stage_id to a positional 0-based index.
+    // Pre-study stages have negative IDs.
     let study_stages: Vec<_> = data.stages.stages.iter().filter(|s| s.id >= 0).collect();
     let n_stages = study_stages.len();
     let stage_index: HashMap<i32, usize> = study_stages
@@ -148,6 +142,7 @@ pub(crate) fn run_pipeline_with_artifacts(
         })
         .max()
         .unwrap_or(0);
+    let blocks_per_stage: Vec<usize> = study_stages.iter().map(|s| s.blocks.len()).collect();
     let bounds = resolve_bounds(
         &BoundsEntitySlices {
             hydros: &data.hydros,
@@ -166,6 +161,7 @@ pub(crate) fn run_pipeline_with_artifacts(
             pumping: &data.pumping_bounds,
             contract: &data.contract_bounds,
         },
+        &blocks_per_stage,
     );
 
     let resolved_generic_bounds = resolve_generic_constraint_bounds(

@@ -13,11 +13,8 @@ use crate::generic_constraints::contract_family_slot;
 
 /// Mutable column-bound and objective buffers shared by all fill helpers.
 pub(super) struct ColumnBufs<'a> {
-    /// Column lower bounds.
     pub(super) col_lower: &'a mut [f64],
-    /// Column upper bounds.
     pub(super) col_upper: &'a mut [f64],
-    /// Objective coefficients.
     pub(super) objective: &'a mut [f64],
 }
 
@@ -323,6 +320,10 @@ fn fill_diversion_columns(
 /// leaves the infeasible `[min > 0, 0]`. This generation column carries the operation-window
 /// gate; the shifted gate (decision priced `K` stages early) lives on the decision column
 /// in `fill_anticipated_columns`, not here.
+///
+/// The generation bound is read per block
+/// ([`thermal_bounds_at_block`](cobre_core::ResolvedBounds::thermal_bounds_at_block)); the
+/// cost stays stage-level (`thermal_bounds`) — `ThermalBlockOverride` has no cost field.
 pub(super) fn fill_thermal_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -332,8 +333,11 @@ pub(super) fn fill_thermal_columns(
 ) {
     for (t_idx, thermal) in ctx.thermals.iter().enumerate() {
         let active = commissioning_active(thermal.entry_stage_id, thermal.exit_stage_id, stage.id);
-        let tb = ctx.resolved.bounds.thermal_bounds(t_idx, stage_idx);
-        let marginal_cost_per_mwh = tb.cost_per_mwh;
+        let marginal_cost_per_mwh = ctx
+            .resolved
+            .bounds
+            .thermal_bounds(t_idx, stage_idx)
+            .cost_per_mwh;
         let is_anticipated =
             layout
                 .anticipated_local_by_sys_pos
@@ -342,6 +346,10 @@ pub(super) fn fill_thermal_columns(
                     layout.anticipated.anticipated_fishing_row_pos[local_idx].is_some()
                 });
         for blk in 0..layout.n_blks {
+            let tb = ctx
+                .resolved
+                .bounds
+                .thermal_bounds_at_block(t_idx, stage_idx, blk);
             let col =
                 layout
                     .block_grid()
@@ -1474,14 +1482,12 @@ mod diversion_bound_tests {
 
     use cobre_core::entities::hydro::{DiversionChannel, HydroGenerationModel};
     use cobre_core::{
-        BoundsCountsSpec, BoundsDefaults, CascadeTopology, ContractStageBounds, EntityId, Hydro,
-        HydroStageBounds, HydroStagePenalties, LineStageBounds, PenaltiesCountsSpec,
-        PenaltiesDefaults, PumpingStageBounds, ResolvedBounds, ResolvedExchangeFactors,
-        ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties,
-        ThermalStageBounds,
-    };
-    use cobre_core::{
-        BusStagePenalties, LineStagePenalties, NcsStagePenalties, ResolvedGenericConstraintBounds,
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, CascadeTopology, ContractStageBounds,
+        EntityId, Hydro, HydroStageBounds, HydroStagePenalties, LineStageBounds,
+        LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
+        PumpingStageBounds, ResolvedBounds, ResolvedExchangeFactors,
+        ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
+        ResolvedNcsFactors, ResolvedPenalties, ThermalStageBounds,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -2833,8 +2839,8 @@ mod anticipated_objective_tests {
     /// Owns the borrow targets for a one-anticipated-thermal `TemplateBuildCtx`.
     ///
     /// Thermal 0 is anticipated (`K=1`), thermal 1 is a standard thermal. Both
-    /// carry a non-zero resolved `cost_per_mwh` so the R3 skip and the R1 NPV
-    /// objective are both observable in the assertions.
+    /// carry a non-zero resolved `cost_per_mwh` so the skipped delivery objective
+    /// and the NPV-priced decision column are both observable in the assertions.
     struct AntObjFixtures {
         par_lp: PrecomputedPar,
         thermals: Vec<Thermal>,
@@ -3022,10 +3028,10 @@ mod anticipated_objective_tests {
     }
 
     /// After `fill_stage_columns`, the anticipated thermal's per-block delivery
-    /// objective is `0.0` (R3: `fill_thermal_columns` skips the objective write),
+    /// objective is `0.0` (`fill_thermal_columns` skips the objective write),
     /// while the standard thermal is priced normally; and the anticipated
-    /// decision column carries the NPV-discounted commitment cost (R1: the merged
-    /// `fill_anticipated_columns` writes `cost * hours * cumulative_discount`).
+    /// decision column carries the NPV-discounted commitment cost
+    /// (`fill_anticipated_columns` writes `cost * hours * cumulative_discount`).
     #[test]
     fn anticipated_objective_skip_and_npv_after_fill_stage_columns() {
         let fixtures = AntObjFixtures::new();
@@ -3038,8 +3044,8 @@ mod anticipated_objective_tests {
             fill_stage_columns(&ctx, &stage, STAGE_IDX, &layout);
 
         let n_blks = layout.n_blks;
-        // R3: anticipated thermal (t_idx 0) objective stays at the 0.0 default;
-        // its per-block bounds are still written by fill_thermal_columns.
+        // Anticipated thermal (t_idx 0) objective stays at the 0.0 default; its
+        // per-block bounds are still written by fill_thermal_columns.
         for blk in 0..n_blks {
             let col = layout.equipment.thermal.start + blk;
             assert_eq!(
@@ -3051,7 +3057,7 @@ mod anticipated_objective_tests {
                 "anticipated thermal per-block bounds must still be set at col {col}",
             );
         }
-        // R3 control: standard thermal (t_idx 1) is priced as cost * block_hours.
+        // Control: standard thermal (t_idx 1) is priced as cost * block_hours.
         for blk in 0..n_blks {
             let col = layout.equipment.thermal.start + n_blks + blk;
             let expected = STD_COST_PER_MWH * stage.blocks[blk].duration_hours;
@@ -3060,7 +3066,7 @@ mod anticipated_objective_tests {
                 "standard thermal objective must be priced at col {col}",
             );
         }
-        // R1: anticipated decision column carries the NPV commitment cost
+        // The anticipated decision column carries the NPV commitment cost
         // cost_per_mwh(delivery) * total_hours[delivery] * cumulative_discount[delivery].
         let decision_col = layout.anticipated.col_anticipated_decision_start;
         let expected_npv = DELIVERY_COST_PER_MWH
@@ -4546,5 +4552,444 @@ mod contract_column_tests {
 
         let (col_lower, _, _, import_start, _) = run_fill(&fixtures);
         assert_eq!(col_lower[import_start], 50.0);
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::float_cmp,
+    clippy::similar_names
+)]
+mod thermal_block_bound_tests {
+    use std::collections::{BTreeMap, HashMap};
+
+    use cobre_core::{
+        BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, CascadeTopology,
+        ContractStageBounds, EntityId, HydroStageBounds, LineStageBounds, PumpingStageBounds,
+        ResolvedBlockBounds, ResolvedBounds, ResolvedExchangeFactors,
+        ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
+        ResolvedNcsFactors, ResolvedPenalties, Thermal, ThermalStageBounds,
+    };
+    use cobre_stochastic::par::precompute::PrecomputedPar;
+
+    use crate::hydro_models::{EvaporationModelSet, ProductionModelSet};
+    use crate::lead_time::AnticipatedResolution;
+    use crate::resolved_parameters::ResolvedParameters;
+
+    use super::super::layout::ResolvedTables;
+    use super::super::test_support::{state_layout_for, two_block_stage};
+    use super::{ColumnBufs, StageLayout, TemplateBuildCtx, fill_thermal_columns};
+
+    const N_STAGES: usize = 2;
+    const N_BLKS: usize = 3;
+    const STAGE_IDX: usize = 0;
+    const BLOCK_HOURS: [f64; N_BLKS] = [200.0, 300.0, 244.0];
+
+    fn thermal(id: i32, entry_stage_id: Option<i32>, cost_per_mwh: f64) -> Thermal {
+        Thermal {
+            id: EntityId(id),
+            name: format!("T{id}"),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: EntityId(1),
+            entry_stage_id,
+            exit_stage_id: None,
+            cost_per_mwh,
+            min_generation_mw: 0.0,
+            max_generation_mw: 0.0,
+            anticipated_config: None,
+        }
+    }
+
+    /// A three-block `Stage` at `index`, otherwise mirroring `two_block_stage`'s
+    /// fixture defaults.
+    fn three_block_stage(index: usize) -> cobre_core::Stage {
+        let mut stage = two_block_stage(index, [BLOCK_HOURS[0], BLOCK_HOURS[1]]);
+        stage.blocks = BLOCK_HOURS
+            .iter()
+            .enumerate()
+            .map(|(i, &h)| cobre_core::Block {
+                index: i,
+                name: format!("BLK{i}"),
+                duration_hours: h,
+            })
+            .collect();
+        stage
+    }
+
+    fn bounds_with_thermals(n_thermals: usize) -> ResolvedBounds {
+        ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 0,
+                n_thermals,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: N_STAGES,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 0.0,
+                    min_turbined_m3s: 0.0,
+                    max_turbined_m3s: 0.0,
+                    min_outflow_m3s: 0.0,
+                    max_outflow_m3s: None,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    max_diversion_m3s: None,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        )
+    }
+
+    /// Owns the borrow targets for a thermal-only `TemplateBuildCtx`.
+    struct ThermalFixtures {
+        par_lp: PrecomputedPar,
+        cascade: CascadeTopology,
+        bounds: ResolvedBounds,
+        penalties: ResolvedPenalties,
+        production_models: ProductionModelSet,
+        evaporation_models: EvaporationModelSet,
+        resolved_generic_bounds: ResolvedGenericConstraintBounds,
+        resolved_load_factors: ResolvedLoadFactors,
+        resolved_exchange_factors: ResolvedExchangeFactors,
+        resolved_ncs_bounds: ResolvedNcsBounds,
+        resolved_ncs_factors: ResolvedNcsFactors,
+        resolved_parameters: ResolvedParameters,
+        thermals: Vec<Thermal>,
+    }
+
+    impl ThermalFixtures {
+        fn new(thermals: Vec<Thermal>) -> Self {
+            let n_thermals = thermals.len();
+            Self {
+                par_lp: PrecomputedPar::default(),
+                cascade: CascadeTopology::build(&[]),
+                bounds: bounds_with_thermals(n_thermals),
+                penalties: ResolvedPenalties::empty(),
+                production_models: ProductionModelSet::new(vec![], 0, 1),
+                evaporation_models: EvaporationModelSet::new(vec![]),
+                resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
+                resolved_load_factors: ResolvedLoadFactors::empty(),
+                resolved_exchange_factors: ResolvedExchangeFactors::empty(),
+                resolved_ncs_bounds: ResolvedNcsBounds::empty(),
+                resolved_ncs_factors: ResolvedNcsFactors::empty(),
+                resolved_parameters: ResolvedParameters {
+                    per_param: vec![],
+                    id_to_slot: vec![],
+                    cost_scale_factor: 1_000_000.0,
+                },
+                thermals,
+            }
+        }
+
+        fn set_stage_bounds(
+            &mut self,
+            t_idx: usize,
+            stage_idx: usize,
+            min_mw: f64,
+            max_mw: f64,
+            cost: f64,
+        ) {
+            let cell = self.bounds.thermal_bounds_mut(t_idx, stage_idx);
+            cell.min_generation_mw = min_mw;
+            cell.max_generation_mw = max_mw;
+            cell.cost_per_mwh = cost;
+        }
+
+        fn install_block_overlay(&mut self) {
+            self.bounds
+                .set_block_overlay(ResolvedBlockBounds::new(&BlockBoundsCountsSpec {
+                    n_hydros: 0,
+                    n_thermals: self.thermals.len(),
+                    n_lines: 0,
+                    n_pumping: 0,
+                    n_contracts: 0,
+                    n_stages: N_STAGES,
+                    max_blocks: N_BLKS,
+                }));
+        }
+
+        fn set_block_override(
+            &mut self,
+            t_idx: usize,
+            stage_idx: usize,
+            block_idx: usize,
+            min_mw: Option<f64>,
+            max_mw: Option<f64>,
+        ) {
+            let over = self
+                .bounds
+                .block_overlay_mut()
+                .thermal_override_mut(t_idx, stage_idx, block_idx)
+                .expect("overlay cell must exist for a fixture-sized overlay");
+            over.min_generation_mw = min_mw;
+            over.max_generation_mw = max_mw;
+        }
+
+        fn make_ctx(&self) -> TemplateBuildCtx<'_> {
+            let thermal_pos: BTreeMap<EntityId, usize> = self
+                .thermals
+                .iter()
+                .enumerate()
+                .map(|(i, t)| (t.id, i))
+                .collect();
+            TemplateBuildCtx {
+                hydros: &[],
+                thermals: &self.thermals,
+                lines: &[],
+                buses: &[],
+                load_models: &[],
+                cascade: &self.cascade,
+                resolved: ResolvedTables {
+                    bounds: &self.bounds,
+                    penalties: &self.penalties,
+                    resolved_generic_bounds: &self.resolved_generic_bounds,
+                    resolved_load_factors: &self.resolved_load_factors,
+                    resolved_exchange_factors: &self.resolved_exchange_factors,
+                    resolved_ncs_bounds: &self.resolved_ncs_bounds,
+                    resolved_ncs_factors: &self.resolved_ncs_factors,
+                    resolved_parameters: &self.resolved_parameters,
+                },
+                hydro_pos: BTreeMap::new(),
+                thermal_pos,
+                line_pos: BTreeMap::new(),
+                bus_pos: BTreeMap::new(),
+                par_lp: &self.par_lp,
+                production_models: &self.production_models,
+                evaporation_models: &self.evaporation_models,
+                generic_constraints: &[],
+                non_controllable_sources: &[],
+                pumping_stations: &[],
+                pumping_pos: BTreeMap::new(),
+                n_pumping: 0,
+                contracts: &[],
+                contract_pos: BTreeMap::new(),
+                n_contract_import: 0,
+                n_contract_export: 0,
+                diversion_upstream: HashMap::new(),
+                arc_stage_weights: HashMap::new(),
+                arc_spread_chrono: HashMap::new(),
+                arc_arrival_density: HashMap::new(),
+                per_stage_mask: Vec::new(),
+                n_hydros: 0,
+                n_thermals: self.thermals.len(),
+                n_lines: 0,
+                n_buses: 0,
+                max_par_order: 0,
+                n_anticipated: 0,
+                k_max: 0,
+                anticipated_lead_stages: vec![],
+                anticipated_thermal_indices: vec![],
+                anticipated_windows: vec![],
+                anticipated_resolution: AnticipatedResolution::default(),
+                study_stage_ids: (0..N_STAGES as i32).collect(),
+                has_penalty: false,
+                cumulative_discount_factors: vec![1.0; N_STAGES],
+                total_hours_per_stage: vec![BLOCK_HOURS.iter().sum(); N_STAGES],
+                filling_v_target: BTreeMap::new(),
+            }
+        }
+    }
+
+    /// Run `fill_thermal_columns` at `stage_idx` against a three-block stage,
+    /// returning `(col_lower, col_upper, objective)` and the thermal family's
+    /// block-major column base (`thermal_start + t_idx * N_BLKS + blk`).
+    fn run_fill(
+        fixtures: &ThermalFixtures,
+        stage_idx: usize,
+    ) -> (Vec<f64>, Vec<f64>, Vec<f64>, usize) {
+        let stage = three_block_stage(stage_idx);
+        let ctx = fixtures.make_ctx();
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, stage_idx);
+        let mut col_lower = vec![0.0_f64; layout.num_cols];
+        let mut col_upper = vec![f64::INFINITY; layout.num_cols];
+        let mut objective = vec![0.0_f64; layout.num_cols];
+        let mut bufs = ColumnBufs {
+            col_lower: &mut col_lower,
+            col_upper: &mut col_upper,
+            objective: &mut objective,
+        };
+        fill_thermal_columns(&ctx, &stage, stage_idx, &layout, &mut bufs);
+        (
+            col_lower,
+            col_upper,
+            objective,
+            layout.equipment.thermal.start,
+        )
+    }
+
+    /// Two thermals, three-block stage, empty overlay: every generation column
+    /// reads bit-identical to the stage-level bound (`thermal_bounds_at_block`
+    /// falls through to the stage cell). Expected values are explicit literals
+    /// derived from the fixture's own bound writes, not recomputed via the
+    /// production formula.
+    #[test]
+    fn test_thermal_columns_bit_identical_without_overlay() {
+        let mut fixtures =
+            ThermalFixtures::new(vec![thermal(1, None, 30.0), thermal(2, None, 45.0)]);
+        fixtures.set_stage_bounds(0, STAGE_IDX, 10.0, 200.0, 30.0);
+        fixtures.set_stage_bounds(1, STAGE_IDX, 5.0, 150.0, 45.0);
+
+        let (col_lower, col_upper, objective, thermal_start) = run_fill(&fixtures, STAGE_IDX);
+
+        // Thermal 0: min 10.0, max 200.0, cost 30.0 * [200.0, 300.0, 244.0] hours.
+        let expected_0 = (
+            [10.0_f64, 10.0, 10.0],
+            [200.0_f64, 200.0, 200.0],
+            [6000.0_f64, 9000.0, 7320.0],
+        );
+        // Thermal 1: min 5.0, max 150.0, cost 45.0 * [200.0, 300.0, 244.0] hours.
+        let expected_1 = (
+            [5.0_f64, 5.0, 5.0],
+            [150.0_f64, 150.0, 150.0],
+            [9000.0_f64, 13500.0, 10980.0],
+        );
+        for (t_idx, (exp_lower, exp_upper, exp_obj)) in
+            [expected_0, expected_1].into_iter().enumerate()
+        {
+            for blk in 0..N_BLKS {
+                let col = thermal_start + t_idx * N_BLKS + blk;
+                assert_eq!(
+                    col_lower[col].to_bits(),
+                    exp_lower[blk].to_bits(),
+                    "col_lower bit-identical, thermal {t_idx} blk {blk}"
+                );
+                assert_eq!(
+                    col_upper[col].to_bits(),
+                    exp_upper[blk].to_bits(),
+                    "col_upper bit-identical, thermal {t_idx} blk {blk}"
+                );
+                assert_eq!(
+                    objective[col].to_bits(),
+                    exp_obj[blk].to_bits(),
+                    "objective bit-identical, thermal {t_idx} blk {blk}"
+                );
+            }
+        }
+    }
+
+    /// A thermal with stage-wide `max_generation_mw = 500.0` and a `block_id = 1`
+    /// row overriding it to `100.0` on a three-block stage binds ONLY block 1;
+    /// `col_lower` (no override written) and `objective` are unchanged from the
+    /// no-override case.
+    #[test]
+    fn test_thermal_block_bound_binds_only_its_own_block() {
+        let mut fixtures = ThermalFixtures::new(vec![thermal(1, None, 20.0)]);
+        fixtures.set_stage_bounds(0, STAGE_IDX, 0.0, 500.0, 20.0);
+        fixtures.install_block_overlay();
+        fixtures.set_block_override(0, STAGE_IDX, 1, None, Some(100.0));
+
+        let (col_lower, col_upper, objective, thermal_start) = run_fill(&fixtures, STAGE_IDX);
+
+        assert_eq!(
+            col_upper[thermal_start..thermal_start + N_BLKS],
+            [500.0, 100.0, 500.0],
+            "only block 1 is bound to the override"
+        );
+        assert_eq!(
+            col_lower[thermal_start..thermal_start + N_BLKS],
+            [0.0, 0.0, 0.0],
+            "col_lower unaffected by the max-only override"
+        );
+        for blk in 0..N_BLKS {
+            assert_eq!(
+                objective[thermal_start + blk],
+                20.0 * BLOCK_HOURS[blk],
+                "objective unaffected by the block bound, blk {blk}"
+            );
+        }
+    }
+
+    /// An active thermal with stage-wide `min_generation_mw = 0.0` and a
+    /// `block_id = 0` row overriding it to `300.0` on a three-block stage binds
+    /// ONLY block 0's floor; `col_upper` (no override written) is unchanged.
+    #[test]
+    fn test_thermal_block_min_floor_binds_only_its_own_block() {
+        let mut fixtures = ThermalFixtures::new(vec![thermal(1, None, 20.0)]);
+        fixtures.set_stage_bounds(0, STAGE_IDX, 0.0, 500.0, 20.0);
+        fixtures.install_block_overlay();
+        fixtures.set_block_override(0, STAGE_IDX, 0, Some(300.0), None);
+
+        let (col_lower, col_upper, _objective, thermal_start) = run_fill(&fixtures, STAGE_IDX);
+
+        assert_eq!(
+            col_lower[thermal_start..thermal_start + N_BLKS],
+            [300.0, 0.0, 0.0],
+            "only block 0's floor is bound to the override"
+        );
+        assert_eq!(
+            col_upper[thermal_start..thermal_start + N_BLKS],
+            [500.0, 500.0, 500.0],
+            "col_upper unaffected by the min-only override"
+        );
+    }
+
+    /// A commissioning-dormant thermal (`entry_stage_id` after the build stage)
+    /// carrying a `block_id` row with `min_generation_mw = 300.0` still gets
+    /// `[0, 0]` at every block — the dormant gate wins over the per-block floor.
+    #[test]
+    fn test_dormant_thermal_ignores_per_block_floor() {
+        let mut fixtures = ThermalFixtures::new(vec![thermal(1, Some(1), 20.0)]);
+        fixtures.set_stage_bounds(0, STAGE_IDX, 0.0, 500.0, 20.0);
+        fixtures.install_block_overlay();
+        fixtures.set_block_override(0, STAGE_IDX, 0, Some(300.0), None);
+
+        let (col_lower, col_upper, _objective, thermal_start) = run_fill(&fixtures, STAGE_IDX);
+
+        for blk in 0..N_BLKS {
+            let col = thermal_start + blk;
+            assert_eq!(col_lower[col], 0.0, "dormant col_lower blk {blk}");
+            assert_eq!(col_upper[col], 0.0, "dormant col_upper blk {blk}");
+        }
+    }
+
+    /// A thermal whose `cost_per_mwh` differs per stage and which carries a
+    /// per-block generation-bound override at the build stage still prices
+    /// `objective[col] == stage_cost_per_mwh * block_hours` for every block — the
+    /// block bound never touches the objective.
+    #[test]
+    fn test_per_block_generation_bound_does_not_change_objective() {
+        let build_stage_idx = 1;
+        let mut fixtures = ThermalFixtures::new(vec![thermal(1, None, 30.0)]);
+        fixtures.set_stage_bounds(0, 0, 0.0, 500.0, 30.0);
+        fixtures.set_stage_bounds(0, build_stage_idx, 0.0, 500.0, 45.0);
+        fixtures.install_block_overlay();
+        fixtures.set_block_override(0, build_stage_idx, 1, None, Some(100.0));
+
+        let (_col_lower, _col_upper, objective, thermal_start) =
+            run_fill(&fixtures, build_stage_idx);
+
+        for blk in 0..N_BLKS {
+            assert_eq!(
+                objective[thermal_start + blk],
+                45.0 * BLOCK_HOURS[blk],
+                "objective reads the stage-level (not per-block) cost, blk {blk}"
+            );
+        }
     }
 }

@@ -24,8 +24,6 @@
 //!
 //! See the [repository](https://github.com/cobre-rs/cobre) for the current status.
 
-// Relax strict production lints for test builds. These lints (unwrap_used,
-// expect_used, etc.) guard library code but are normal in tests.
 #![cfg_attr(
     test,
     allow(
@@ -47,12 +45,11 @@ pub mod stats;
 pub mod system;
 pub mod topology;
 
-// Re-export as crate-root module aliases so `cobre_core::<module>::Symbol` paths
-// resolve for external consumers; canonical source is the `model::` submodules.
+// Crate-root module aliases so `cobre_core::<module>::Symbol` paths resolve for
+// external consumers; the canonical sources are the `model::` and `constraints::`
+// submodules.
 pub use model::{parameters, penalty, resolved, scenario, temporal};
 
-// Re-export as crate-root module aliases; canonical source is the `constraints::`
-// submodules.
 pub use constraints::{generic_constraint, initial_conditions, training_event};
 
 pub use constraints::generic_constraint::{
@@ -82,11 +79,13 @@ pub use model::penalty::{
     resolve_ncs_curtailment_cost,
 };
 pub use model::resolved::{
-    BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, HydroStageBounds,
-    HydroStagePenalties, LineStageBounds, LineStagePenalties, NcsStagePenalties,
-    PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
-    ResolvedExchangeFactors, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
-    ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, ThermalStageBounds,
+    BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
+    ContractBlockOverride, ContractStageBounds, HydroBlockOverride, HydroStageBounds,
+    HydroStagePenalties, LineBlockOverride, LineStageBounds, LineStagePenalties, NcsStagePenalties,
+    PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockOverride, PumpingStageBounds,
+    ResolvedBlockBounds, ResolvedBounds, ResolvedExchangeFactors, ResolvedGenericConstraintBounds,
+    ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties,
+    ThermalBlockOverride, ThermalStageBounds,
 };
 pub use model::scenario::{
     CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile,
