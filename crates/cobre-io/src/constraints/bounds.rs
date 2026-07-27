@@ -34,6 +34,7 @@
 //! | `max_diversion_m3s`   | DOUBLE | No       | Max diversion flow (m3/s)          |
 //! | `filling_min_rate_m3s`| DOUBLE | No       | Filling min-rate override (m3/s)   |
 //! | `water_withdrawal_m3s`| DOUBLE | No       | Water withdrawal (m3/s)            |
+//! | `block_id`            | INT32 (null) | No | 0-based block index within the stage (matches `Block::index`) selecting one block's turbined/outflow/generation/diversion override; a value outside `[0, n_blocks)` for the referenced stage is silently skipped; storage, filling-rate, and withdrawal values are ignored when `block_id` is non-null (stage-level only, no per-block variant) |
 //!
 //! ### `line_bounds`
 //!
@@ -43,6 +44,7 @@
 //! | `stage_id`   | INT32  | Yes      | Stage ID                           |
 //! | `direct_mw`  | DOUBLE | No       | Direct-flow capacity (MW)          |
 //! | `reverse_mw` | DOUBLE | No       | Reverse-flow capacity (MW)         |
+//! | `block_id`   | INT32 (null) | No | 0-based block index within the stage (matches `Block::index`) selecting one block's `direct_mw`/`reverse_mw` override; a value outside `[0, n_blocks)` for the referenced stage is silently skipped |
 //!
 //! ### `pumping_bounds`
 //!
@@ -52,6 +54,7 @@
 //! | `stage_id`   | INT32  | Yes      | Stage ID                           |
 //! | `min_m3s`    | DOUBLE | No       | Minimum pumping flow (m3/s)        |
 //! | `max_m3s`    | DOUBLE | No       | Maximum pumping flow (m3/s)        |
+//! | `block_id`   | INT32 (null) | No | 0-based block index within the stage (matches `Block::index`) selecting one block's `min_m3s`/`max_m3s` override; a value outside `[0, n_blocks)` for the referenced stage is silently skipped |
 //!
 //! ### `contract_bounds`
 //!
@@ -62,13 +65,49 @@
 //! | `min_mw`         | DOUBLE | No       | Minimum power (MW)             |
 //! | `max_mw`         | DOUBLE | No       | Maximum power (MW)             |
 //! | `price_per_mwh`  | DOUBLE | No       | Price override ($/`MWh`)       |
+//! | `block_id`       | INT32 (null) | No | 0-based block index within the stage (matches `Block::index`) selecting one block's `min_mw`/`max_mw`/`price_per_mwh` override; a value outside `[0, n_blocks)` for the referenced stage is silently skipped |
+//!
+//! ## Block eligibility
+//!
+//! A bound column is block-eligible exactly when its family's
+//! `<Family>BlockOverride` struct (`cobre_core::resolved`) carries a field for
+//! it — the struct's field set is the check, not this table. A column marked
+//! "no" below has no per-block variant: its *value* is ignored on any row that
+//! also carries a non-null `block_id` (see the per-file tables above) — the
+//! row's `block_id` itself is not dropped, and the column never falls back to
+//! applying stage-wide from that row.
+//! [`resolve_bounds`](crate::resolution::resolve_bounds) documents the
+//! precedence law these columns feed.
+//!
+//! | Family   | Column                 | Block-eligible | Note                                                                                          |
+//! |----------|------------------------|:--------------:|------------------------------------------------------------------------------------------------|
+//! | hydro    | `min_turbined_m3s`     | yes            | —                                                                                                |
+//! | hydro    | `max_turbined_m3s`     | yes            | —                                                                                                |
+//! | hydro    | `min_outflow_m3s`      | yes            | —                                                                                                |
+//! | hydro    | `max_outflow_m3s`      | yes            | —                                                                                                |
+//! | hydro    | `min_generation_mw`    | yes            | —                                                                                                |
+//! | hydro    | `max_generation_mw`    | yes            | —                                                                                                |
+//! | hydro    | `max_diversion_m3s`    | yes            | —                                                                                                |
+//! | hydro    | `min_storage_hm3`      | no             | storage bound; stage-level only                                                                 |
+//! | hydro    | `max_storage_hm3`      | no             | storage bound; stage-level only                                                                 |
+//! | hydro    | `filling_min_rate_m3s` | no             | filling schedule; stage-level only                                                              |
+//! | hydro    | `water_withdrawal_m3s` | no             | stage-level only                                                                                 |
+//! | thermal  | `min_generation_mw`    | yes            | —                                                                                                |
+//! | thermal  | `max_generation_mw`    | yes            | —                                                                                                |
+//! | thermal  | `cost_per_mwh`         | no             | per-block thermal cost is out of scope; deliberately asymmetric with `contract_bounds.price_per_mwh` below |
+//! | line     | `direct_mw`            | yes            | —                                                                                                |
+//! | line     | `reverse_mw`           | yes            | —                                                                                                |
+//! | contract | `min_mw`               | yes            | —                                                                                                |
+//! | contract | `max_mw`               | yes            | —                                                                                                |
+//! | contract | `price_per_mwh`        | yes            | deliberately asymmetric with `thermal_bounds.cost_per_mwh` above, which is NOT block-eligible    |
+//! | pumping  | `min_m3s`              | yes            | —                                                                                                |
+//! | pumping  | `max_m3s`              | yes            | —                                                                                                |
 //!
 //! ## Output ordering
 //!
-//! All parsers return rows sorted by `(entity_id, stage_id)` ascending, except
-//! `thermal_bounds`, which sorts by `(thermal_id, stage_id, block_id)` (`None`
-//! before `Some(i)`) since a stage-wide row and a block row may share
-//! `(thermal_id, stage_id)`.
+//! All parsers return rows sorted by `(entity_id, stage_id, block_id)`
+//! ascending (`None` before `Some(i)`), since a stage-wide row and a block row
+//! may legitimately share `(entity_id, stage_id)`.
 //!
 //! ## Validation
 //!
@@ -84,14 +123,14 @@
 //! Deferred validations (not performed here):
 //!
 //! - Entity ID existence in registries — Layer 3.
-//! - Duplicate `(entity_id, stage_id)` pairs — deferred; for `thermal_bounds`
-//!   the key is `(thermal_id, stage_id, block_id)`, since a stage-wide row and
-//!   a block row sharing `(thermal_id, stage_id)` is designed usage, not a
+//! - Duplicate `(entity_id, stage_id)` pairs — deferred; for every family the
+//!   key is `(entity_id, stage_id, block_id)`, since a stage-wide row and a
+//!   block row sharing `(entity_id, stage_id)` is designed usage, not a
 //!   duplicate.
 //! - `block_id` validity for the referenced stage — deferred.
 //! - Cross-field validation for the remaining bounds types — deferred.
 
-use arrow::array::Array;
+use arrow::array::{Array, Float64Array, Int32Array};
 use cobre_core::EntityId;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::fs::File;
@@ -177,6 +216,7 @@ pub struct ThermalBoundsRow {
 ///     max_diversion_m3s: None,
 ///     filling_min_rate_m3s: None,
 ///     water_withdrawal_m3s: None,
+///     block_id: None,
 /// };
 /// assert_eq!(row.min_turbined_m3s, Some(50.0));
 /// assert!(row.max_turbined_m3s.is_none());
@@ -210,6 +250,9 @@ pub struct HydroBoundsRow {
     pub filling_min_rate_m3s: Option<f64>,
     /// Water withdrawal override (m³/s).
     pub water_withdrawal_m3s: Option<f64>,
+    /// `None` applies at the stage level; `Some(b)` applies to block `b` only and is
+    /// valid on the turbined/outflow/generation/diversion columns.
+    pub block_id: Option<i32>,
 }
 
 /// A single row from `constraints/line_bounds.parquet`.
@@ -228,6 +271,7 @@ pub struct HydroBoundsRow {
 ///     stage_id: 0,
 ///     direct_mw: Some(500.0),
 ///     reverse_mw: Some(500.0),
+///     block_id: None,
 /// };
 /// assert_eq!(row.line_id, EntityId::from(10));
 /// assert_eq!(row.direct_mw, Some(500.0));
@@ -242,6 +286,9 @@ pub struct LineBoundsRow {
     pub direct_mw: Option<f64>,
     /// Override for reverse-flow capacity (MW). `None` means use base value.
     pub reverse_mw: Option<f64>,
+    /// `None` applies at the stage level; `Some(b)` applies to block `b` only and is
+    /// valid on both `direct_mw` and `reverse_mw`.
+    pub block_id: Option<i32>,
 }
 
 /// A single row from `constraints/pumping_bounds.parquet`.
@@ -260,6 +307,7 @@ pub struct LineBoundsRow {
 ///     stage_id: 2,
 ///     min_m3s: Some(0.0),
 ///     max_m3s: Some(100.0),
+///     block_id: None,
 /// };
 /// assert_eq!(row.station_id, EntityId::from(3));
 /// assert_eq!(row.max_m3s, Some(100.0));
@@ -274,6 +322,9 @@ pub struct PumpingBoundsRow {
     pub min_m3s: Option<f64>,
     /// Override for maximum pumping flow (m³/s). `None` means use base value.
     pub max_m3s: Option<f64>,
+    /// `None` applies at the stage level; `Some(b)` applies to block `b` only and is
+    /// valid on both `min_m3s` and `max_m3s`.
+    pub block_id: Option<i32>,
 }
 
 /// A single row from `constraints/contract_bounds.parquet`.
@@ -293,6 +344,7 @@ pub struct PumpingBoundsRow {
 ///     min_mw: Some(0.0),
 ///     max_mw: Some(200.0),
 ///     price_per_mwh: None,
+///     block_id: None,
 /// };
 /// assert_eq!(row.contract_id, EntityId::from(7));
 /// assert!(row.price_per_mwh.is_none());
@@ -309,13 +361,25 @@ pub struct ContractBoundsRow {
     pub max_mw: Option<f64>,
     /// Override for contract price (USD/`MWh`). `None` means use base value.
     pub price_per_mwh: Option<f64>,
+    /// `None` applies at the stage level; `Some(b)` applies to block `b` only and is
+    /// valid on `min_mw`, `max_mw`, and `price_per_mwh` — block-eligible here, asymmetric
+    /// with `ThermalBoundsRow.cost_per_mwh`, which stays stage-level.
+    pub block_id: Option<i32>,
 }
 
 // ── Parsers ───────────────────────────────────────────────────────────────────
 
+/// Row `i` of an optional `Float64` column; absent column or null cell yields `None`.
+fn optional_f64(col: Option<&Float64Array>, i: usize) -> Option<f64> {
+    col.filter(|c| !c.is_null(i)).map(|c| c.value(i))
+}
+
+/// Row `i` of an optional `Int32` column; absent column or null cell yields `None`.
+fn optional_i32(col: Option<&Int32Array>, i: usize) -> Option<i32> {
+    col.filter(|c| !c.is_null(i)).map(|c| c.value(i))
+}
+
 /// Validate that a present (non-null) optional float value is finite.
-///
-/// Returns `SchemaError` when the value is NaN or infinite.
 fn validate_optional_finite(
     value: Option<f64>,
     file_label: &str,
@@ -390,18 +454,10 @@ pub fn parse_thermal_bounds(path: &Path) -> Result<Vec<ThermalBoundsRow>, LoadEr
             let thermal_id = EntityId::from(thermal_id_col.value(i));
             let stage_id = stage_id_col.value(i);
 
-            let min_generation_mw = min_gen_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let max_generation_mw = max_gen_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let cost_per_mwh = cost_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let block_id = block_id_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
+            let min_generation_mw = optional_f64(min_gen_col, i);
+            let max_generation_mw = optional_f64(max_gen_col, i);
+            let cost_per_mwh = optional_f64(cost_col, i);
+            let block_id = optional_i32(block_id_col, i);
 
             for (value, column) in [
                 (min_generation_mw, "min_generation_mw"),
@@ -437,7 +493,7 @@ pub fn parse_thermal_bounds(path: &Path) -> Result<Vec<ThermalBoundsRow>, LoadEr
 }
 
 /// Parse `constraints/hydro_bounds.parquet`, returning rows sorted by
-/// `(hydro_id, stage_id)` ascending.
+/// `(hydro_id, stage_id, block_id)` ascending (`None` before `Some(i)`).
 ///
 /// The file may contain any subset of the eleven optional bound columns; columns
 /// absent from the file schema produce `None` in all rows (the sparse-override design,
@@ -494,6 +550,7 @@ pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError>
         let max_diversion_col = extract_optional_float64(&batch, "max_diversion_m3s", path)?;
         let filling_min_rate_col = extract_optional_float64(&batch, "filling_min_rate_m3s", path)?;
         let water_withdrawal_col = extract_optional_float64(&batch, "water_withdrawal_m3s", path)?;
+        let block_id_col = extract_optional_int32(&batch, "block_id", path)?;
 
         let n = batch.num_rows();
         let base_idx = rows.len();
@@ -505,39 +562,18 @@ pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError>
             let hydro_id = EntityId::from(hydro_id_col.value(i));
             let stage_id = stage_id_col.value(i);
 
-            let min_turbined_m3s = min_turbined_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let max_turbined_m3s = max_turbined_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let min_storage_hm3 = min_storage_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let max_storage_hm3 = max_storage_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let min_outflow_m3s = min_outflow_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let max_outflow_m3s = max_outflow_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let min_generation_mw = min_gen_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let max_generation_mw = max_gen_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let max_diversion_m3s = max_diversion_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let filling_min_rate_m3s = filling_min_rate_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let water_withdrawal_m3s = water_withdrawal_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
+            let min_turbined_m3s = optional_f64(min_turbined_col, i);
+            let max_turbined_m3s = optional_f64(max_turbined_col, i);
+            let min_storage_hm3 = optional_f64(min_storage_col, i);
+            let max_storage_hm3 = optional_f64(max_storage_col, i);
+            let min_outflow_m3s = optional_f64(min_outflow_col, i);
+            let max_outflow_m3s = optional_f64(max_outflow_col, i);
+            let min_generation_mw = optional_f64(min_gen_col, i);
+            let max_generation_mw = optional_f64(max_gen_col, i);
+            let max_diversion_m3s = optional_f64(max_diversion_col, i);
+            let filling_min_rate_m3s = optional_f64(filling_min_rate_col, i);
+            let water_withdrawal_m3s = optional_f64(water_withdrawal_col, i);
+            let block_id = optional_i32(block_id_col, i);
 
             for (value, column) in [
                 (min_turbined_m3s, "min_turbined_m3s"),
@@ -582,17 +618,18 @@ pub fn parse_hydro_bounds(path: &Path) -> Result<Vec<HydroBoundsRow>, LoadError>
                 max_diversion_m3s,
                 filling_min_rate_m3s,
                 water_withdrawal_m3s,
+                block_id,
             });
         }
     }
 
-    rows.sort_by_key(|r| (r.hydro_id.0, r.stage_id));
+    rows.sort_by_key(|r| (r.hydro_id.0, r.stage_id, r.block_id));
 
     Ok(rows)
 }
 
 /// Parse `constraints/line_bounds.parquet`, returning rows sorted by
-/// `(line_id, stage_id)` ascending.
+/// `(line_id, stage_id, block_id)` ascending (`None` before `Some(i)`).
 ///
 /// # Errors
 ///
@@ -633,6 +670,7 @@ pub fn parse_line_bounds(path: &Path) -> Result<Vec<LineBoundsRow>, LoadError> {
 
         let direct_col = extract_optional_float64(&batch, "direct_mw", path)?;
         let reverse_col = extract_optional_float64(&batch, "reverse_mw", path)?;
+        let block_id_col = extract_optional_int32(&batch, "block_id", path)?;
 
         let n = batch.num_rows();
         let base_idx = rows.len();
@@ -644,12 +682,9 @@ pub fn parse_line_bounds(path: &Path) -> Result<Vec<LineBoundsRow>, LoadError> {
             let line_id = EntityId::from(line_id_col.value(i));
             let stage_id = stage_id_col.value(i);
 
-            let direct_mw = direct_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let reverse_mw = reverse_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
+            let direct_mw = optional_f64(direct_col, i);
+            let reverse_mw = optional_f64(reverse_col, i);
+            let block_id = optional_i32(block_id_col, i);
 
             validate_optional_finite(direct_mw, "line_bounds", row_idx, "direct_mw", path)?;
             validate_optional_finite(reverse_mw, "line_bounds", row_idx, "reverse_mw", path)?;
@@ -659,17 +694,18 @@ pub fn parse_line_bounds(path: &Path) -> Result<Vec<LineBoundsRow>, LoadError> {
                 stage_id,
                 direct_mw,
                 reverse_mw,
+                block_id,
             });
         }
     }
 
-    rows.sort_by_key(|r| (r.line_id.0, r.stage_id));
+    rows.sort_by_key(|r| (r.line_id.0, r.stage_id, r.block_id));
 
     Ok(rows)
 }
 
 /// Parse `constraints/pumping_bounds.parquet`, returning rows sorted by
-/// `(station_id, stage_id)` ascending.
+/// `(station_id, stage_id, block_id)` ascending (`None` before `Some(i)`).
 ///
 /// # Errors
 ///
@@ -710,6 +746,7 @@ pub fn parse_pumping_bounds(path: &Path) -> Result<Vec<PumpingBoundsRow>, LoadEr
 
         let min_col = extract_optional_float64(&batch, "min_m3s", path)?;
         let max_col = extract_optional_float64(&batch, "max_m3s", path)?;
+        let block_id_col = extract_optional_int32(&batch, "block_id", path)?;
 
         let n = batch.num_rows();
         let base_idx = rows.len();
@@ -721,12 +758,9 @@ pub fn parse_pumping_bounds(path: &Path) -> Result<Vec<PumpingBoundsRow>, LoadEr
             let station_id = EntityId::from(station_id_col.value(i));
             let stage_id = stage_id_col.value(i);
 
-            let min_m3s = min_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let max_m3s = max_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
+            let min_m3s = optional_f64(min_col, i);
+            let max_m3s = optional_f64(max_col, i);
+            let block_id = optional_i32(block_id_col, i);
 
             validate_optional_finite(min_m3s, "pumping_bounds", row_idx, "min_m3s", path)?;
             validate_optional_finite(max_m3s, "pumping_bounds", row_idx, "max_m3s", path)?;
@@ -768,17 +802,18 @@ pub fn parse_pumping_bounds(path: &Path) -> Result<Vec<PumpingBoundsRow>, LoadEr
                 stage_id,
                 min_m3s,
                 max_m3s,
+                block_id,
             });
         }
     }
 
-    rows.sort_by_key(|r| (r.station_id.0, r.stage_id));
+    rows.sort_by_key(|r| (r.station_id.0, r.stage_id, r.block_id));
 
     Ok(rows)
 }
 
 /// Parse `constraints/contract_bounds.parquet`, returning rows sorted by
-/// `(contract_id, stage_id)` ascending.
+/// `(contract_id, stage_id, block_id)` ascending (`None` before `Some(i)`).
 ///
 /// # Errors
 ///
@@ -820,6 +855,7 @@ pub fn parse_contract_bounds(path: &Path) -> Result<Vec<ContractBoundsRow>, Load
         let min_col = extract_optional_float64(&batch, "min_mw", path)?;
         let max_col = extract_optional_float64(&batch, "max_mw", path)?;
         let price_col = extract_optional_float64(&batch, "price_per_mwh", path)?;
+        let block_id_col = extract_optional_int32(&batch, "block_id", path)?;
 
         let n = batch.num_rows();
         let base_idx = rows.len();
@@ -831,15 +867,10 @@ pub fn parse_contract_bounds(path: &Path) -> Result<Vec<ContractBoundsRow>, Load
             let contract_id = EntityId::from(contract_id_col.value(i));
             let stage_id = stage_id_col.value(i);
 
-            let min_mw = min_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let max_mw = max_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
-            let price_per_mwh = price_col
-                .filter(|col| !col.is_null(i))
-                .map(|col| col.value(i));
+            let min_mw = optional_f64(min_col, i);
+            let max_mw = optional_f64(max_col, i);
+            let price_per_mwh = optional_f64(price_col, i);
+            let block_id = optional_i32(block_id_col, i);
 
             validate_optional_finite(min_mw, "contract_bounds", row_idx, "min_mw", path)?;
             validate_optional_finite(max_mw, "contract_bounds", row_idx, "max_mw", path)?;
@@ -857,11 +888,12 @@ pub fn parse_contract_bounds(path: &Path) -> Result<Vec<ContractBoundsRow>, Load
                 min_mw,
                 max_mw,
                 price_per_mwh,
+                block_id,
             });
         }
     }
 
-    rows.sort_by_key(|r| (r.contract_id.0, r.stage_id));
+    rows.sort_by_key(|r| (r.contract_id.0, r.stage_id, r.block_id));
 
     Ok(rows)
 }
@@ -1488,6 +1520,84 @@ mod tests {
         assert!(rows.is_empty());
     }
 
+    /// AC: no `block_id` column in the file — every row's `block_id` is `None`
+    /// and all eleven bound columns parse unchanged.
+    #[test]
+    fn test_hydro_bounds_missing_block_id_column_is_none() {
+        let batch = RecordBatch::try_new(
+            hydro_full_schema(),
+            vec![
+                Arc::new(Int32Array::from(vec![1_i32])),
+                Arc::new(Int32Array::from(vec![0_i32])),
+                Arc::new(Float64Array::from(vec![Some(50.0_f64)])), // min_turbined
+                Arc::new(Float64Array::from(vec![None::<f64>])),    // max_turbined: null
+                Arc::new(Float64Array::from(vec![Some(100.0_f64)])), // min_storage
+                Arc::new(Float64Array::from(vec![Some(500.0_f64)])), // max_storage
+                Arc::new(Float64Array::from(vec![None::<f64>])),    // min_outflow: null
+                Arc::new(Float64Array::from(vec![Some(200.0_f64)])), // max_outflow
+                Arc::new(Float64Array::from(vec![None::<f64>])),    // min_gen: null
+                Arc::new(Float64Array::from(vec![Some(80.0_f64)])), // max_gen
+                Arc::new(Float64Array::from(vec![None::<f64>])),    // max_diversion: null
+                Arc::new(Float64Array::from(vec![Some(10.0_f64)])), // filling_min_rate
+                Arc::new(Float64Array::from(vec![None::<f64>])),    // water_withdrawal: null
+            ],
+        )
+        .unwrap();
+        let tmp = write_parquet(&batch);
+        let rows = parse_hydro_bounds(tmp.path()).unwrap();
+
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+        assert!(r.block_id.is_none());
+        assert!((r.min_turbined_m3s.unwrap() - 50.0).abs() < f64::EPSILON);
+        assert!(r.max_turbined_m3s.is_none());
+        assert!((r.min_storage_hm3.unwrap() - 100.0).abs() < f64::EPSILON);
+        assert!((r.max_storage_hm3.unwrap() - 500.0).abs() < f64::EPSILON);
+        assert!(r.min_outflow_m3s.is_none());
+        assert!((r.max_outflow_m3s.unwrap() - 200.0).abs() < f64::EPSILON);
+        assert!(r.min_generation_mw.is_none());
+        assert!((r.max_generation_mw.unwrap() - 80.0).abs() < f64::EPSILON);
+        assert!(r.max_diversion_m3s.is_none());
+        assert!((r.filling_min_rate_m3s.unwrap() - 10.0).abs() < f64::EPSILON);
+        assert!(r.water_withdrawal_m3s.is_none());
+    }
+
+    /// AC: rows with `block_id` set to `0`, `2`, and null parse to `Some(0)`,
+    /// `Some(2)`, and `None` respectively.
+    #[test]
+    fn test_hydro_bounds_block_id_column_is_parsed() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("hydro_id", DataType::Int32, false),
+            Field::new("stage_id", DataType::Int32, false),
+            Field::new("max_turbined_m3s", DataType::Float64, true),
+            Field::new("block_id", DataType::Int32, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int32Array::from(vec![1_i32, 1_i32, 1_i32])),
+                Arc::new(Int32Array::from(vec![0_i32, 0_i32, 0_i32])),
+                Arc::new(Float64Array::from(vec![
+                    Some(100.0_f64),
+                    Some(50.0_f64),
+                    Some(400.0_f64),
+                ])),
+                Arc::new(Int32Array::from(vec![Some(0_i32), Some(2_i32), None])),
+            ],
+        )
+        .unwrap();
+        let tmp = write_parquet(&batch);
+        let rows = parse_hydro_bounds(tmp.path()).unwrap();
+
+        // Sorted by (hydro_id, stage_id, block_id); all three rows tie on
+        // (hydro_id, stage_id), so `None` (the stage-wide row) sorts first,
+        // ascending `Some(i)` after it.
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].block_id, None);
+        assert_eq!(rows[1].block_id, Some(0));
+        assert_eq!(rows[2].block_id, Some(2));
+    }
+
     // ── LineBoundsRow tests ───────────────────────────────────────────────────
 
     fn line_schema() -> Arc<Schema> {
@@ -1963,5 +2073,113 @@ mod tests {
     fn test_load_contract_bounds_none() {
         let rows = super::super::load_contract_bounds(None).unwrap();
         assert!(rows.is_empty());
+    }
+
+    // ── Combined line/contract/pumping block_id tests ────────────────────────
+
+    /// AC: `line_bounds.parquet`, `contract_bounds.parquet`, and
+    /// `pumping_bounds.parquet` each written without a `block_id` column — every
+    /// row's `block_id` is `None` and every other field parses unchanged.
+    #[test]
+    fn test_line_contract_pumping_missing_block_id_column_is_none() {
+        let line_batch = make_line_batch(&[3], &[0], vec![Some(500.0)], vec![Some(400.0)]);
+        let line_rows = parse_line_bounds(write_parquet(&line_batch).path()).unwrap();
+        assert_eq!(line_rows.len(), 1);
+        assert!(line_rows[0].block_id.is_none());
+        assert_eq!(line_rows[0].direct_mw, Some(500.0));
+        assert_eq!(line_rows[0].reverse_mw, Some(400.0));
+
+        let contract_batch = make_contract_batch(
+            &[1],
+            &[0],
+            vec![Some(0.0)],
+            vec![Some(200.0)],
+            vec![Some(80.0)],
+        );
+        let contract_rows = parse_contract_bounds(write_parquet(&contract_batch).path()).unwrap();
+        assert_eq!(contract_rows.len(), 1);
+        assert!(contract_rows[0].block_id.is_none());
+        assert_eq!(contract_rows[0].max_mw, Some(200.0));
+        assert_eq!(contract_rows[0].price_per_mwh, Some(80.0));
+
+        let pumping_batch = make_pumping_batch(&[1], &[0], vec![Some(0.0)], vec![Some(100.0)]);
+        let pumping_rows = parse_pumping_bounds(write_parquet(&pumping_batch).path()).unwrap();
+        assert_eq!(pumping_rows.len(), 1);
+        assert!(pumping_rows[0].block_id.is_none());
+        assert_eq!(pumping_rows[0].max_m3s, Some(100.0));
+    }
+
+    /// AC: each of the three files written with a `block_id` column holding
+    /// `Some(2)` and null — the rows carry `Some(2)` and `None` respectively.
+    #[test]
+    fn test_line_contract_pumping_block_id_column_is_parsed() {
+        let line_schema = Arc::new(Schema::new(vec![
+            Field::new("line_id", DataType::Int32, false),
+            Field::new("stage_id", DataType::Int32, false),
+            Field::new("direct_mw", DataType::Float64, true),
+            Field::new("block_id", DataType::Int32, true),
+        ]));
+        let line_batch = RecordBatch::try_new(
+            line_schema,
+            vec![
+                Arc::new(Int32Array::from(vec![1_i32, 1_i32])),
+                Arc::new(Int32Array::from(vec![0_i32, 0_i32])),
+                Arc::new(Float64Array::from(vec![Some(100.0_f64), Some(200.0_f64)])),
+                Arc::new(Int32Array::from(vec![Some(2_i32), None])),
+            ],
+        )
+        .unwrap();
+        let line_rows = parse_line_bounds(write_parquet(&line_batch).path()).unwrap();
+        assert_eq!(line_rows.len(), 2);
+        // Sorted by (line_id, stage_id, block_id); both rows tie on (line_id,
+        // stage_id), so `None` sorts before `Some(2)`.
+        assert_eq!(line_rows[0].block_id, None);
+        assert_eq!(line_rows[1].block_id, Some(2));
+
+        let contract_schema = Arc::new(Schema::new(vec![
+            Field::new("contract_id", DataType::Int32, false),
+            Field::new("stage_id", DataType::Int32, false),
+            Field::new("max_mw", DataType::Float64, true),
+            Field::new("block_id", DataType::Int32, true),
+        ]));
+        let contract_batch = RecordBatch::try_new(
+            contract_schema,
+            vec![
+                Arc::new(Int32Array::from(vec![1_i32, 1_i32])),
+                Arc::new(Int32Array::from(vec![0_i32, 0_i32])),
+                Arc::new(Float64Array::from(vec![Some(50.0_f64), Some(60.0_f64)])),
+                Arc::new(Int32Array::from(vec![Some(2_i32), None])),
+            ],
+        )
+        .unwrap();
+        let contract_rows = parse_contract_bounds(write_parquet(&contract_batch).path()).unwrap();
+        assert_eq!(contract_rows.len(), 2);
+        // Sorted by (contract_id, stage_id, block_id); both rows tie on
+        // (contract_id, stage_id), so `None` sorts before `Some(2)`.
+        assert_eq!(contract_rows[0].block_id, None);
+        assert_eq!(contract_rows[1].block_id, Some(2));
+
+        let pumping_schema = Arc::new(Schema::new(vec![
+            Field::new("station_id", DataType::Int32, false),
+            Field::new("stage_id", DataType::Int32, false),
+            Field::new("max_m3s", DataType::Float64, true),
+            Field::new("block_id", DataType::Int32, true),
+        ]));
+        let pumping_batch = RecordBatch::try_new(
+            pumping_schema,
+            vec![
+                Arc::new(Int32Array::from(vec![1_i32, 1_i32])),
+                Arc::new(Int32Array::from(vec![0_i32, 0_i32])),
+                Arc::new(Float64Array::from(vec![Some(10.0_f64), Some(20.0_f64)])),
+                Arc::new(Int32Array::from(vec![Some(2_i32), None])),
+            ],
+        )
+        .unwrap();
+        let pumping_rows = parse_pumping_bounds(write_parquet(&pumping_batch).path()).unwrap();
+        assert_eq!(pumping_rows.len(), 2);
+        // Sorted by (station_id, stage_id, block_id); both rows tie on
+        // (station_id, stage_id), so `None` sorts before `Some(2)`.
+        assert_eq!(pumping_rows[0].block_id, None);
+        assert_eq!(pumping_rows[1].block_id, Some(2));
     }
 }

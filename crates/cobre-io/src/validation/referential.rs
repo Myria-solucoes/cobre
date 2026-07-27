@@ -336,7 +336,7 @@ fn check_extension_references(
 }
 
 /// Scenario data references.
-// Rationale: the six scenario data sources are checked in one error-accumulating pass;
+// Rationale: the scenario data sources are checked in one error-accumulating pass;
 // splitting would force multiple passes over `ParsedData` or thread sub-results between
 // helpers, obscuring that all checks share one accumulator and one return point.
 #[allow(clippy::too_many_lines)]
@@ -655,19 +655,23 @@ fn check_penalty_override_references(
     }
 }
 
+/// Study stage IDs; the negative-id pre-study stages are excluded.
+fn collect_study_stage_ids(data: &ParsedData) -> HashSet<i32> {
+    data.stages
+        .stages
+        .iter()
+        .filter(|s| s.id >= 0)
+        .map(|s| s.id)
+        .collect()
+}
+
 /// `LoadFactorEntry` -> bus and stage references.
 fn check_load_factor_references(
     data: &ParsedData,
     ctx: &mut ValidationContext,
     bus_ids: &HashSet<i32>,
 ) {
-    let study_stage_ids: HashSet<i32> = data
-        .stages
-        .stages
-        .iter()
-        .filter(|s| s.id >= 0)
-        .map(|s| s.id)
-        .collect();
+    let study_stage_ids = collect_study_stage_ids(data);
 
     for (i, entry) in data.load_factors.iter().enumerate() {
         if !bus_ids.contains(&entry.bus_id.0) {
@@ -702,20 +706,11 @@ fn check_generic_constraint_expression_references(
     ctx: &mut ValidationContext,
     ids: &LookupSets,
 ) {
-    let entity_ids = EntityIdSets {
-        hydro: &ids.hydro,
-        thermal: &ids.thermal,
-        line: &ids.line,
-        bus: &ids.bus,
-        pumping: &ids.pumping,
-        contract: &ids.contract,
-        ncs: &ids.ncs,
-    };
     for constraint in &data.generic_constraints {
         let gc_label = format!("GenericConstraint {}", constraint.id.0);
         for (term_idx, term) in constraint.expression.terms.iter().enumerate() {
             let label = format!("{gc_label} term[{term_idx}]");
-            validate_variable_ref_entity(&term.variable, &label, &entity_ids, ctx);
+            validate_variable_ref_entity(&term.variable, &label, ids, ctx);
         }
     }
 }
@@ -750,21 +745,19 @@ fn check_generic_constraint_bounds_validity(data: &ParsedData, ctx: &mut Validat
         }
     }
 
-    {
-        let mut seen_keys: HashSet<(i32, i32, Option<i32>)> = HashSet::new();
-        for (i, row) in data.generic_constraint_bounds.iter().enumerate() {
-            let key = (row.constraint_id, row.stage_id, row.block_id);
-            if !seen_keys.insert(key) {
-                ctx.add_error(
-                    ErrorKind::DuplicateId,
-                    "constraints/generic_constraint_bounds.parquet",
-                    Some(format!("GenericConstraintBoundsRow[{i}]")),
-                    format!(
-                        "Duplicate key (constraint_id={}, stage_id={}, block_id={:?}) in generic constraint bounds",
-                        row.constraint_id, row.stage_id, row.block_id
-                    ),
-                );
-            }
+    let mut seen_keys: HashSet<(i32, i32, Option<i32>)> = HashSet::new();
+    for (i, row) in data.generic_constraint_bounds.iter().enumerate() {
+        let key = (row.constraint_id, row.stage_id, row.block_id);
+        if !seen_keys.insert(key) {
+            ctx.add_error(
+                ErrorKind::DuplicateId,
+                "constraints/generic_constraint_bounds.parquet",
+                Some(format!("GenericConstraintBoundsRow[{i}]")),
+                format!(
+                    "Duplicate key (constraint_id={}, stage_id={}, block_id={:?}) in generic constraint bounds",
+                    row.constraint_id, row.stage_id, row.block_id
+                ),
+            );
         }
     }
 }
@@ -775,13 +768,7 @@ fn check_ncs_bounds_and_factors(
     ctx: &mut ValidationContext,
     ncs_ids: &HashSet<i32>,
 ) {
-    let study_stage_ids: HashSet<i32> = data
-        .stages
-        .stages
-        .iter()
-        .filter(|s| s.id >= 0)
-        .map(|s| s.id)
-        .collect();
+    let study_stage_ids = collect_study_stage_ids(data);
 
     for (i, row) in data.ncs_bounds.iter().enumerate() {
         if !ncs_ids.contains(&row.ncs_id.0) {
@@ -858,17 +845,6 @@ fn check_ncs_bounds_and_factors(
     }
 }
 
-/// Entity ID sets used to check [`cobre_core::VariableRef`] existence.
-struct EntityIdSets<'a> {
-    hydro: &'a HashSet<i32>,
-    thermal: &'a HashSet<i32>,
-    line: &'a HashSet<i32>,
-    bus: &'a HashSet<i32>,
-    pumping: &'a HashSet<i32>,
-    contract: &'a HashSet<i32>,
-    ncs: &'a HashSet<i32>,
-}
-
 /// Validate that a [`VariableRef`] references an existing entity.
 ///
 /// A dangling reference is an [`ErrorKind::InvalidReference`] error for every
@@ -878,7 +854,7 @@ struct EntityIdSets<'a> {
 fn validate_variable_ref_entity(
     var: &cobre_core::VariableRef,
     label: &str,
-    ids: &EntityIdSets<'_>,
+    ids: &LookupSets,
     ctx: &mut ValidationContext,
 ) {
     use cobre_core::VariableRef;
@@ -1625,7 +1601,7 @@ mod tests {
                             id: EntityId::from(999), // does not exist
                         },
                         CorrelationEntity {
-                            entity_type: "unknown".to_string(), // unknown type: not checked
+                            entity_type: "unknown".to_string(),
                             id: EntityId::from(9999),
                         },
                     ],
@@ -1647,8 +1623,6 @@ mod tests {
             .into_iter()
             .filter(|e| e.kind == ErrorKind::InvalidReference)
             .collect();
-        // The "inflow" entity with non-existent hydro produces an error,
-        // and the "unknown" entity_type also produces an error (M3 fix).
         assert_eq!(
             inv.len(),
             2,
@@ -1746,6 +1720,7 @@ mod tests {
             max_diversion_m3s: None,
             filling_min_rate_m3s: None,
             water_withdrawal_m3s: None,
+            block_id: None,
         }];
         let mut ctx = ValidationContext::new();
         validate_referential_integrity(&data, &mut ctx);
@@ -1772,6 +1747,7 @@ mod tests {
             stage_id: 0,
             direct_mw: None,
             reverse_mw: None,
+            block_id: None,
         }];
         let mut ctx = ValidationContext::new();
         validate_referential_integrity(&data, &mut ctx);

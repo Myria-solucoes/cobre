@@ -1,16 +1,16 @@
-use super::StudySetup;
+use super::{StudySetup, build_contract_prices_per_stage};
 use crate::hydro_models::{PrepareHydroModelsResult, ProductionModelSet, ResolvedProductionModel};
 use crate::indexer::StateSpace;
 use crate::test_support;
 
 use cobre_core::{
-    BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, HydroStageBounds,
-    HydroStagePenalties, LineStageBounds, LineStagePenalties, NcsStagePenalties,
-    PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds, ResolvedPenalties,
-    ThermalStageBounds,
+    BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
+    ContractBlockOverride, ContractStageBounds, HydroStageBounds, HydroStagePenalties,
+    LineStageBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
+    PumpingStageBounds, ResolvedBlockBounds, ResolvedBounds, ResolvedPenalties, ThermalStageBounds,
 };
 use cobre_core::{
-    EntityId, InitialConditions, SystemBuilder,
+    ContractType, EnergyContract, EntityId, InitialConditions, SystemBuilder,
     entities::{
         bus::{Bus, DeficitSegment},
         hydro::{Hydro, HydroGenerationModel, HydroPenalties},
@@ -7536,5 +7536,224 @@ fn lead_time_fanout_rejection_is_declaration_order_invariant() {
     assert!(
         msg.contains("anticipated thermal 21"),
         "message should name the fanning plant (thermal id 21), not the non-fanning one, got: {msg}"
+    );
+}
+
+// -------------------------------------------------------------------------
+// build_contract_prices_per_stage
+// -------------------------------------------------------------------------
+
+/// Two-contract, no-hydro/thermal system for exercising
+/// `build_contract_prices_per_stage` directly, with a caller-supplied `bounds`
+/// table (its contract/stage counts must match `block_counts_per_stage`).
+fn system_with_contracts(
+    block_counts_per_stage: &[usize],
+    bounds: ResolvedBounds,
+) -> cobre_core::System {
+    use chrono::NaiveDate;
+
+    let date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+    let bus = Bus {
+        id: EntityId(1),
+        name: "B1".to_string(),
+        operational_start_date: date,
+        deficit_segments: vec![],
+        excess_cost: 0.0,
+    };
+
+    let stages: Vec<Stage> = block_counts_per_stage
+        .iter()
+        .enumerate()
+        .map(|(i, &n_blk)| Stage {
+            index: i,
+            id: i as i32,
+            start_date: date,
+            end_date: date,
+            season_id: None,
+            blocks: (0..n_blk)
+                .map(|b| Block {
+                    index: b,
+                    name: format!("blk{b}"),
+                    duration_hours: 100.0,
+                })
+                .collect(),
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: false,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        })
+        .collect();
+
+    let contract_a = EnergyContract {
+        id: EntityId(10),
+        name: "CA".to_string(),
+        operational_start_date: date,
+        bus_id: EntityId(1),
+        contract_type: ContractType::Import,
+        entry_stage_id: None,
+        exit_stage_id: None,
+        price_per_mwh: 80.0,
+        min_mw: 0.0,
+        max_mw: 100.0,
+    };
+    let contract_b = EnergyContract {
+        id: EntityId(11),
+        name: "CB".to_string(),
+        ..contract_a.clone()
+    };
+
+    SystemBuilder::new()
+        .buses(vec![bus])
+        .contracts(vec![contract_a, contract_b])
+        .stages(stages)
+        .bounds(bounds)
+        .build()
+        .expect("contract-price fixture system: valid")
+}
+
+/// Zero-sized hydro/thermal/line/pumping defaults plus the given uniform
+/// contract price, for a `ResolvedBounds` covering only contracts.
+fn zero_bounds_defaults(contract_price: f64) -> BoundsDefaults {
+    BoundsDefaults {
+        hydro: HydroStageBounds {
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 0.0,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 0.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 0.0,
+            max_diversion_m3s: None,
+            filling_min_rate_m3s: 0.0,
+            water_withdrawal_m3s: 0.0,
+        },
+        thermal: ThermalStageBounds {
+            min_generation_mw: 0.0,
+            max_generation_mw: 0.0,
+            cost_per_mwh: 0.0,
+        },
+        line: LineStageBounds {
+            direct_mw: 0.0,
+            reverse_mw: 0.0,
+        },
+        pumping: PumpingStageBounds {
+            min_flow_m3s: 0.0,
+            max_flow_m3s: 0.0,
+        },
+        contract: ContractStageBounds {
+            min_mw: 0.0,
+            max_mw: 100.0,
+            price_per_mwh: contract_price,
+        },
+    }
+}
+
+/// AC: a two-contract study with per-stage block counts `[3, 2]` (differing,
+/// so a stride bug reading a global max-blocks count instead of
+/// `block_counts_per_stage[t]` would misreport stage 1's length), a price that
+/// varies per contract AND per stage (so a stage-axis bug — reading stage 0's
+/// price for every `t` — cannot hide behind a uniform fixture), and no
+/// per-block price row — every one of the `n_contracts * n_blks` cells per
+/// stage compares equal under `f64::to_bits` to that contract's OWN stage-level
+/// `price_per_mwh`.
+#[test]
+fn test_contract_prices_per_block_are_uniform_without_overlay() {
+    let block_counts_per_stage = [3_usize, 2_usize];
+    let n_contracts = 2;
+    let mut bounds = ResolvedBounds::new(
+        &BoundsCountsSpec {
+            n_hydros: 0,
+            n_thermals: 0,
+            n_lines: 0,
+            n_pumping: 0,
+            n_contracts,
+            n_stages: block_counts_per_stage.len(),
+            k_max: 0,
+        },
+        &zero_bounds_defaults(80.0),
+    );
+    bounds.contract_bounds_mut(0, 0).price_per_mwh = 80.0;
+    bounds.contract_bounds_mut(0, 1).price_per_mwh = 130.0;
+    bounds.contract_bounds_mut(1, 0).price_per_mwh = 95.0;
+    bounds.contract_bounds_mut(1, 1).price_per_mwh = 150.0;
+    let system = system_with_contracts(&block_counts_per_stage, bounds);
+
+    let prices = build_contract_prices_per_stage(
+        &system,
+        block_counts_per_stage.len(),
+        &block_counts_per_stage,
+    );
+
+    assert_eq!(prices.len(), block_counts_per_stage.len());
+    for (t, &n_blks) in block_counts_per_stage.iter().enumerate() {
+        assert_eq!(
+            prices[t].len(),
+            n_contracts * n_blks,
+            "stage {t}: price table length must be n_contracts * n_blks"
+        );
+        for c in 0..n_contracts {
+            let stage_price = system.bounds().contract_bounds(c, t).price_per_mwh;
+            for blk in 0..n_blks {
+                assert_eq!(
+                    prices[t][c * n_blks + blk].to_bits(),
+                    stage_price.to_bits(),
+                    "stage {t} contract {c} block {blk} must equal the stage-level price"
+                );
+            }
+        }
+    }
+}
+
+/// AC: contract 0's stage-0 (three-block) inner slice carries a `120.0`
+/// override at block 1 over the stage-wide `80.0`; contract 1's three cells
+/// are unaffected by contract 0's override.
+#[test]
+fn test_contract_price_table_carries_per_block_override() {
+    let block_counts_per_stage = [3_usize];
+    let mut bounds = ResolvedBounds::new(
+        &BoundsCountsSpec {
+            n_hydros: 0,
+            n_thermals: 0,
+            n_lines: 0,
+            n_pumping: 0,
+            n_contracts: 2,
+            n_stages: 1,
+            k_max: 0,
+        },
+        &zero_bounds_defaults(80.0),
+    );
+    let mut overlay = ResolvedBlockBounds::new(&BlockBoundsCountsSpec {
+        n_hydros: 0,
+        n_thermals: 0,
+        n_lines: 0,
+        n_pumping: 0,
+        n_contracts: 2,
+        n_stages: 1,
+        max_blocks: 3,
+    });
+    *overlay
+        .contract_override_mut(0, 0, 1)
+        .expect("in-range override cell") = ContractBlockOverride {
+        min_mw: None,
+        max_mw: None,
+        price_per_mwh: Some(120.0),
+    };
+    bounds.set_block_overlay(overlay);
+
+    let system = system_with_contracts(&block_counts_per_stage, bounds);
+
+    let prices = build_contract_prices_per_stage(&system, 1, &block_counts_per_stage);
+
+    assert_eq!(
+        prices[0],
+        vec![80.0, 120.0, 80.0, 80.0, 80.0, 80.0],
+        "contract 0 carries the block-1 override ([80, 120, 80]); contract 1's three cells are unaffected"
     );
 }

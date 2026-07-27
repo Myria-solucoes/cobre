@@ -145,7 +145,7 @@ pub struct GenericConstraintRowEntry {
     pub sense: ConstraintSense,
     /// Whether slack is enabled for this constraint.
     pub slack_enabled: bool,
-    /// Penalty cost per unit of slack violation (`None` when slack is disabled).
+    /// Penalty cost per unit of slack violation (`0.0` when slack is disabled).
     pub slack_penalty: f64,
     /// Positive-violation slack (`slack_plus`) column; `None` when slack is disabled.
     pub slack_plus_col: Option<usize>,

@@ -4,6 +4,12 @@
 //! ensured schema correctness, referential integrity, and dimensional
 //! consistency.
 //!
+//! ## Bound-precedence law
+//!
+//! Every block-eligible bound column resolves via a four-layer precedence
+//! law. See [`resolve_bounds`](crate::resolution::resolve_bounds) for the full
+//! law and [the per-column applicability table](crate::constraints::bounds).
+//!
 //! ## Layer 5a rules (hydro and thermal domain) — `validate_semantic_hydro_thermal`
 //!
 //! | # | Rule                                              | Source file                           | `ErrorKind`            |

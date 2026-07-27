@@ -156,8 +156,8 @@ fn fill_chronological_water_rows(
     let has_par = ctx.par_lp.n_stages() > 0 && ctx.par_lp.n_hydros() == layout.n_h;
     for h_idx in 0..layout.n_h {
         if super::entries::is_prefilling(ctx, stage, h_idx) {
-            for k in 1..=n_blks {
-                let row = layout.rows.water_balance.start + h_idx * n_blks + (k - 1);
+            for blk in 0..n_blks {
+                let row = layout.rows.water_balance.start + h_idx * n_blks + blk;
                 row_lower[row] = 0.0;
                 row_upper[row] = 0.0;
             }
@@ -173,8 +173,7 @@ fn fill_chronological_water_rows(
             .bounds
             .hydro_bounds(h_idx, stage_idx)
             .water_withdrawal_m3s;
-        for k in 1..=n_blks {
-            let blk = k - 1;
+        for blk in 0..n_blks {
             let row = layout.rows.water_balance.start + h_idx * n_blks + blk;
             let tau_k = stage.blocks[blk].duration_hours * super::M3S_TO_HM3;
             let rhs = tau_k * (base - withdrawal);
@@ -195,12 +194,12 @@ fn fill_chronological_water_rows(
             .bounds
             .hydro_bounds(h_idx, stage_idx)
             .water_withdrawal_m3s;
-        for k in 1..=n_blks {
-            let blk = k - 1;
+        for blk in 0..n_blks {
             let tau_k = stage.blocks[blk].duration_hours * super::M3S_TO_HM3;
             let row_d = layout.rows.water_balance.start + d_idx * n_blks + blk;
-            row_lower[row_d] -= tau_k * withdrawal_h;
-            row_upper[row_d] -= tau_k * withdrawal_h;
+            let delta = tau_k * withdrawal_h;
+            row_lower[row_d] -= delta;
+            row_upper[row_d] -= delta;
         }
     }
 }
@@ -417,9 +416,10 @@ fn fill_z_inflow_rows(
     row_lower: &mut [f64],
     row_upper: &mut [f64],
 ) {
+    let has_par = ctx.par_lp.n_stages() > 0 && ctx.par_lp.n_hydros() == layout.n_h;
     for h_idx in 0..layout.n_h {
         let row = layout.rows.z_inflow_row_start + h_idx;
-        let base = if ctx.par_lp.n_stages() > 0 && ctx.par_lp.n_hydros() == layout.n_h {
+        let base = if has_par {
             ctx.par_lp.deterministic_base(stage_idx, h_idx)
         } else {
             0.0
@@ -439,7 +439,7 @@ fn fill_z_inflow_rows(
 ///   (or `+INF` when the bound is absent, making the row non-binding).
 /// - **Min turbine** (`>=`): `row_lower = min_turbined_m3s`, `row_upper = +INF`.
 /// - **Min generation** (`>=`): `row_lower = min_generation_mw`, `row_upper = +INF`.
-fn fill_operational_violation_rows(
+pub(super) fn fill_operational_violation_rows(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
     layout: &StageLayout,
@@ -452,31 +452,34 @@ fn fill_operational_violation_rows(
     // write order stays auditable against the layout.
     let grid = layout.block_grid();
     for h_idx in 0..layout.n_h {
-        let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
-        let families = [
-            (
-                layout.slack.oper_violation.min_outflow_rows.start,
-                hb.min_outflow_m3s,
-                f64::INFINITY,
-            ),
-            (
-                layout.slack.oper_violation.max_outflow_rows.start,
-                f64::NEG_INFINITY,
-                hb.max_outflow_m3s.unwrap_or(f64::INFINITY),
-            ),
-            (
-                layout.slack.oper_violation.min_turbine_rows.start,
-                hb.min_turbined_m3s,
-                f64::INFINITY,
-            ),
-            (
-                layout.slack.oper_violation.min_generation_rows.start,
-                hb.min_generation_mw,
-                f64::INFINITY,
-            ),
-        ];
-        for (row_start, lower, upper) in families {
-            for blk in 0..layout.n_blks {
+        for blk in 0..layout.n_blks {
+            let hb = ctx
+                .resolved
+                .bounds
+                .hydro_bounds_at_block(h_idx, stage_idx, blk);
+            let families = [
+                (
+                    layout.slack.oper_violation.min_outflow_rows.start,
+                    hb.min_outflow_m3s,
+                    f64::INFINITY,
+                ),
+                (
+                    layout.slack.oper_violation.max_outflow_rows.start,
+                    f64::NEG_INFINITY,
+                    hb.max_outflow_m3s.unwrap_or(f64::INFINITY),
+                ),
+                (
+                    layout.slack.oper_violation.min_turbine_rows.start,
+                    hb.min_turbined_m3s,
+                    f64::INFINITY,
+                ),
+                (
+                    layout.slack.oper_violation.min_generation_rows.start,
+                    hb.min_generation_mw,
+                    f64::INFINITY,
+                ),
+            ];
+            for (row_start, lower, upper) in families {
                 let row = grid.flat(row_start, h_idx, BlockIdx::new(blk));
                 row_lower[row] = lower;
                 row_upper[row] = upper;

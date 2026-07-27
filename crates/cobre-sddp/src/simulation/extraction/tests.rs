@@ -20,9 +20,7 @@ use crate::indexer::{
 };
 use crate::lead_time::{AnticipatedResolution, PointResolution};
 use crate::lp_builder::StageGeometry;
-use crate::simulation::types::{
-    ScenarioCategoryCosts, SimulationContractResult, SimulationCostResult,
-};
+use crate::simulation::types::{ScenarioCategoryCosts, SimulationCostResult};
 use crate::test_support;
 
 // -------------------------------------------------------------------------
@@ -4742,9 +4740,7 @@ fn extract_pumping_two_blocks_reads_per_block_flow_and_power() {
 /// runs), independent of `n_blks`.
 #[test]
 fn extract_pumping_zero_stations_is_empty() {
-    let mut indexer = test_support::geom(0, 0);
     let state = test_support::state_layout(0, 0);
-    indexer.n_blks = 2;
     let entity_counts = EntityCounts {
         hydro_ids: vec![],
         hydro_productivities: vec![],
@@ -5043,6 +5039,127 @@ fn extract_contract_dormant_zero_row_keeps_state_code_1() {
     assert_eq!(rows[0].operative_state_code, 1);
 }
 
+/// AC: two import contracts on a three-block stage; contract 7's block 1
+/// carries an overridden `120.0` price over its stage-wide `80.0`, while
+/// contract 8's three blocks stay `80.0` — pins that the per-block price read
+/// is indexed `c * n_blks + blk`, not `c` alone (which would misalign every
+/// contract past the first against the flat per-block table).
+#[test]
+fn test_contract_extraction_uses_per_block_price() {
+    let state = test_support::state_layout(0, 0);
+    let entity_counts = entity_counts_contracts(vec![7, 8]);
+    let ec = zero_energy_conversion(0, 1);
+    let diversion = HashMap::new();
+
+    // Both imports, 3 blocks each: contract 7 at columns 4..7 (10, 20, 30),
+    // contract 8 at columns 7..10 (40, 50, 60); export block empty at 10..10.
+    let primal = vec![0.0, 0.0, 0.0, 0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0];
+    let dual = vec![0.0; 1];
+    let view = SolutionView {
+        primal: &primal,
+        dual: &dual,
+        objective: 0.0,
+        objective_coeffs: &[],
+        row_lower: &[],
+    };
+    let geometry = StageGeometry {
+        n_blks: 3,
+        contract_import: 4..10,
+        contract_export: 10..10,
+        ..StageGeometry::default()
+    };
+    let study_dims = test_support::study_dims();
+    let block_hours = [730.0_f64, 730.0, 730.0];
+    // contract 7 (c=0): [80, 120, 80]; contract 8 (c=1): [80, 80, 80].
+    let prices = [80.0_f64, 120.0, 80.0, 80.0, 80.0, 80.0];
+    let is_import = [true, true];
+    let spec = contract_only_spec(
+        &study_dims,
+        &geometry,
+        &state,
+        &entity_counts,
+        &block_hours,
+        &prices,
+        &is_import,
+        &ec,
+        &diversion,
+    );
+
+    let rows = extract_contracts(&view, &spec, 5);
+
+    assert_eq!(rows.len(), 6, "2 contracts x 3 blocks = 6 rows");
+
+    let c7 = &rows[0..3];
+    assert_eq!(c7[0].price_per_mwh, 80.0);
+    assert_eq!(c7[0].total_cost, 80.0 * 10.0 * 730.0);
+    assert_eq!(
+        c7[1].price_per_mwh, 120.0,
+        "contract 7 block 1 carries the override"
+    );
+    assert_eq!(c7[1].total_cost, 120.0 * 20.0 * 730.0);
+    assert_eq!(c7[2].price_per_mwh, 80.0);
+    assert_eq!(c7[2].total_cost, 80.0 * 30.0 * 730.0);
+
+    let c8 = &rows[3..6];
+    assert_eq!(c8[0].price_per_mwh, 80.0);
+    assert_eq!(c8[0].total_cost, 80.0 * 40.0 * 730.0);
+    assert_eq!(
+        c8[1].price_per_mwh, 80.0,
+        "contract 8 block 1 must not read contract 7's override"
+    );
+    assert_eq!(c8[1].total_cost, 80.0 * 50.0 * 730.0);
+    assert_eq!(c8[2].price_per_mwh, 80.0);
+    assert_eq!(c8[2].total_cost, 80.0 * 60.0 * 730.0);
+}
+
+/// AC: a `contract_prices` slice whose length is not `n_contracts * n_blks`
+/// panics via the stride `debug_assert!`, naming both lengths.
+/// `debug_assert!` compiles out in release, so this is gated on
+/// `debug_assertions`.
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "contract_prices stride mismatch")]
+fn test_contract_price_stride_mismatch_asserts() {
+    let state = test_support::state_layout(0, 0);
+    let entity_counts = entity_counts_contracts(vec![7, 8]);
+    let ec = zero_energy_conversion(0, 1);
+    let diversion = HashMap::new();
+
+    let primal = vec![0.0; 10];
+    let dual = vec![0.0; 1];
+    let view = SolutionView {
+        primal: &primal,
+        dual: &dual,
+        objective: 0.0,
+        objective_coeffs: &[],
+        row_lower: &[],
+    };
+    let geometry = StageGeometry {
+        n_blks: 3,
+        contract_import: 4..10,
+        contract_export: 10..10,
+        ..StageGeometry::default()
+    };
+    let study_dims = test_support::study_dims();
+    let block_hours = [730.0_f64, 730.0, 730.0];
+    // Wrong length: 5 instead of n_contracts * n_blks == 2 * 3 == 6.
+    let prices = [80.0_f64, 80.0, 80.0, 80.0, 80.0];
+    let is_import = [true, true];
+    let spec = contract_only_spec(
+        &study_dims,
+        &geometry,
+        &state,
+        &entity_counts,
+        &block_hours,
+        &prices,
+        &is_import,
+        &ec,
+        &diversion,
+    );
+
+    let _ = extract_contracts(&view, &spec, 0);
+}
+
 /// AC: a contract-free system yields an empty contracts vector from
 /// `extract_stub_collections`.
 #[test]
@@ -5078,8 +5195,7 @@ fn extract_stub_collections_contract_free_is_empty() {
         &diversion,
     );
 
-    let (_inflow_lags, _pumping, contracts): (Vec<_>, Vec<_>, Vec<SimulationContractResult>) =
-        extract_stub_collections(&view, &spec, 0);
+    let (_inflow_lags, _pumping, contracts) = extract_stub_collections(&view, &spec, 0);
     assert!(contracts.is_empty(), "no contracts => empty vector");
 }
 

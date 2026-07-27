@@ -200,18 +200,21 @@ fn fill_turbine_columns(
             ),
             Phase::PreFilling | Phase::Filling
         );
-        let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
         let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
         let model = ctx.production_models.model(h_idx, stage_idx);
-        let turb_upper = match model {
-            ResolvedProductionModel::ConstantProductivity { productivity }
-                if *productivity > 0.0 =>
-            {
-                hb.max_turbined_m3s.min(hb.max_generation_mw / productivity)
-            }
-            _ => hb.max_turbined_m3s,
-        };
         for blk in 0..layout.n_blks {
+            let hb = ctx
+                .resolved
+                .bounds
+                .hydro_bounds_at_block(h_idx, stage_idx, blk);
+            let turb_upper = match model {
+                ResolvedProductionModel::ConstantProductivity { productivity }
+                    if *productivity > 0.0 =>
+                {
+                    hb.max_turbined_m3s.min(hb.max_generation_mw / productivity)
+                }
+                _ => hb.max_turbined_m3s,
+            };
             let col = layout.turbine_col(HydroSys::new(h_idx), BlockIdx::new(blk));
             bufs.col_lower[col] = 0.0;
             bufs.col_upper[col] = if suspended { 0.0 } else { turb_upper };
@@ -282,19 +285,21 @@ fn fill_diversion_columns(
             ),
             Phase::PreFilling | Phase::Filling
         );
-        // CONTRACT: read the per-stage RESOLVED `max_diversion_m3s`, NOT the
-        // declaration-time `hydro.diversion.max_flow_m3s` — the entity read silently
-        // drops any wired per-stage override (mirrors every sibling column family).
-        let max_div = if hydro.filling.is_some() || suspended {
-            0.0
-        } else {
-            ctx.resolved
-                .bounds
-                .hydro_bounds(h_idx, stage_idx)
-                .max_diversion_m3s
-                .unwrap_or(0.0)
-        };
+        let dormant = hydro.filling.is_some() || suspended;
         for blk in 0..layout.n_blks {
+            // CONTRACT: read the per-stage RESOLVED `max_diversion_m3s`, NOT the
+            // declaration-time `hydro.diversion.max_flow_m3s` — the entity read silently
+            // drops any wired per-stage (or per-block) override (mirrors every sibling
+            // column family).
+            let max_div = if dormant {
+                0.0
+            } else {
+                ctx.resolved
+                    .bounds
+                    .hydro_bounds_at_block(h_idx, stage_idx, blk)
+                    .max_diversion_m3s
+                    .unwrap_or(0.0)
+            };
             let col = layout.diversion_col(HydroSys::new(h_idx), BlockIdx::new(blk));
             bufs.col_lower[col] = 0.0;
             bufs.col_upper[col] = max_div;
@@ -470,9 +475,12 @@ fn fill_line_columns(
 ) {
     for (l_idx, line) in ctx.lines.iter().enumerate() {
         let active = commissioning_active(line.entry_stage_id, line.exit_stage_id, stage.id);
-        let lb = ctx.resolved.bounds.line_bounds(l_idx, stage_idx);
         let lp = ctx.resolved.penalties.line_penalties(l_idx, stage_idx);
         for blk in 0..layout.n_blks {
+            let lb = ctx
+                .resolved
+                .bounds
+                .line_bounds_at_block(l_idx, stage_idx, blk);
             let (df, rf) = ctx
                 .resolved
                 .resolved_exchange_factors
@@ -559,8 +567,11 @@ fn fill_fpha_generation_columns(
 ) {
     for (local_idx, &h) in layout.fpha_hydro_indices.iter().enumerate() {
         let local_idx = FphaLocal::new(local_idx);
-        let hb = ctx.resolved.bounds.hydro_bounds(h.get(), stage_idx);
         for blk in (0..layout.n_blks).map(BlockIdx::new) {
+            let hb = ctx
+                .resolved
+                .bounds
+                .hydro_bounds_at_block(h.get(), stage_idx, blk.get());
             let col = layout.generation_col(local_idx, blk);
             bufs.col_lower[col] = 0.0;
             bufs.col_upper[col] = hb.max_generation_mw;
@@ -644,39 +655,39 @@ fn fill_withdrawal_slack_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     for h_idx in 0..layout.n_h {
-        let col = layout.slack.withdrawal_slack_neg.start + h_idx;
         let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
+        let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
         let t = hb.water_withdrawal_m3s;
-        bufs.col_upper[col] = if t > 0.0 {
+
+        let neg_col = layout.slack.withdrawal_slack_neg.start + h_idx;
+        bufs.col_upper[neg_col] = if t > 0.0 {
             t
         } else if t < 0.0 {
             f64::INFINITY
         } else {
             0.0
         };
-        let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
-        bufs.objective[col] = hp.water_withdrawal_violation_neg_cost * total_stage_hours;
-    }
-    for h_idx in 0..layout.n_h {
-        let col = layout.slack.withdrawal_slack_pos.start + h_idx;
-        let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
-        let t = hb.water_withdrawal_m3s;
-        bufs.col_upper[col] = if t > 0.0 {
+        bufs.objective[neg_col] = hp.water_withdrawal_violation_neg_cost * total_stage_hours;
+
+        let pos_col = layout.slack.withdrawal_slack_pos.start + h_idx;
+        bufs.col_upper[pos_col] = if t > 0.0 {
             f64::INFINITY
         } else if t < 0.0 {
             -t
         } else {
             0.0
         };
-        let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
-        bufs.objective[col] = hp.water_withdrawal_violation_pos_cost * total_stage_hours;
+        bufs.objective[pos_col] = hp.water_withdrawal_violation_pos_cost * total_stage_hours;
     }
 }
 
 /// One operational-violation slack family, addressing a disjoint `n_h * n_blks`
-/// column range. Every activation predicate reads the **resolved per-stage** bound,
-/// never the entity declaration — the declaration ignores per-stage overrides and
-/// would silently mis-activate columns while still compiling.
+/// column range. Every activation predicate reads the resolved per-block bound
+/// (`hydro_bounds_at_block`) inside the `for blk` loop — never the entity
+/// declaration on `ctx.hydros[h_idx]` (drops per-stage/per-block overrides) and
+/// never a stage-level read hoisted above the loop (drops a block-only floor,
+/// e.g. `min_outflow_m3s > 0.0` on one block only, leaving no slack column to
+/// relax it); either alternative compiles and silently mis-activates the column.
 #[derive(Clone, Copy)]
 enum BlockSlackFamily {
     /// Active iff resolved `min_outflow_m3s > 0.0`.
@@ -720,14 +731,7 @@ fn fill_block_family(
     family: BlockSlackFamily,
 ) {
     for h_idx in 0..layout.n_h {
-        let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
         let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
-        let active = match family {
-            BlockSlackFamily::OutflowBelow => hb.min_outflow_m3s > 0.0,
-            BlockSlackFamily::OutflowAbove => hb.max_outflow_m3s.is_some(),
-            BlockSlackFamily::TurbineBelow => hb.min_turbined_m3s > 0.0,
-            BlockSlackFamily::GenerationBelow => hb.min_generation_mw > 0.0,
-        };
         let cost = match family {
             BlockSlackFamily::OutflowBelow => hp.outflow_violation_below_cost,
             BlockSlackFamily::OutflowAbove => hp.outflow_violation_above_cost,
@@ -735,6 +739,16 @@ fn fill_block_family(
             BlockSlackFamily::GenerationBelow => hp.generation_violation_below_cost,
         };
         for blk in 0..layout.n_blks {
+            let hb = ctx
+                .resolved
+                .bounds
+                .hydro_bounds_at_block(h_idx, stage_idx, blk);
+            let active = match family {
+                BlockSlackFamily::OutflowBelow => hb.min_outflow_m3s > 0.0,
+                BlockSlackFamily::OutflowAbove => hb.max_outflow_m3s.is_some(),
+                BlockSlackFamily::TurbineBelow => hb.min_turbined_m3s > 0.0,
+                BlockSlackFamily::GenerationBelow => hb.min_generation_mw > 0.0,
+            };
             let col = match family {
                 BlockSlackFamily::OutflowBelow => {
                     layout.outflow_below_col(HydroSys::new(h_idx), BlockIdx::new(blk))
@@ -815,8 +829,11 @@ pub(super) fn fill_pumping_columns(
 ) {
     for (p_sys, station) in ctx.pumping_stations.iter().enumerate() {
         let active = commissioning_active(station.entry_stage_id, station.exit_stage_id, stage.id);
-        let pb = ctx.resolved.bounds.pumping_bounds(p_sys, stage_idx);
         for blk in (0..layout.n_blks).map(BlockIdx::new) {
+            let pb = ctx
+                .resolved
+                .bounds
+                .pumping_bounds_at_block(p_sys, stage_idx, blk.get());
             let col = layout
                 .block_grid()
                 .flat(layout.equipment.col_pumping_start, p_sys, blk);
@@ -843,6 +860,9 @@ pub(super) fn fill_pumping_columns(
 /// both families and regardless of commissioning — the stored price sign carries
 /// direction (import `> 0` cost, export `< 0` revenue) and the prescaling pass owns
 /// `col_scale`.
+///
+/// `price_per_mwh` IS block-eligible, unlike [`fill_thermal_columns`]'s
+/// `cost_per_mwh` — ratified, not an oversight.
 fn fill_contract_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -854,7 +874,6 @@ fn fill_contract_columns(
     for (c_sys, contract) in ctx.contracts.iter().enumerate() {
         let active =
             commissioning_active(contract.entry_stage_id, contract.exit_stage_id, stage.id);
-        let cb = ctx.resolved.bounds.contract_bounds(c_sys, stage_idx);
         let (contract_type, family_slot) = contract_family_slot(ctx.contracts, c_sys);
         let (base, family_count) = match contract_type {
             ContractType::Import => (
@@ -871,6 +890,10 @@ fn fill_contract_columns(
             "contract family slot {family_slot} out of range {family_count} at stage {stage_idx}"
         );
         for blk in 0..layout.n_blks {
+            let cb = ctx
+                .resolved
+                .bounds
+                .contract_bounds_at_block(c_sys, stage_idx, blk);
             let col = grid.flat(base, family_slot, BlockIdx::new(blk));
             if active {
                 bufs.col_lower[col] = cb.min_mw;
@@ -4579,13 +4602,11 @@ mod thermal_block_bound_tests {
     use crate::resolved_parameters::ResolvedParameters;
 
     use super::super::layout::ResolvedTables;
-    use super::super::test_support::{state_layout_for, two_block_stage};
+    use super::super::test_support::{BLOCK_HOURS, N_BLKS, state_layout_for, three_block_stage};
     use super::{ColumnBufs, StageLayout, TemplateBuildCtx, fill_thermal_columns};
 
     const N_STAGES: usize = 2;
-    const N_BLKS: usize = 3;
     const STAGE_IDX: usize = 0;
-    const BLOCK_HOURS: [f64; N_BLKS] = [200.0, 300.0, 244.0];
 
     fn thermal(id: i32, entry_stage_id: Option<i32>, cost_per_mwh: f64) -> Thermal {
         Thermal {
@@ -4600,22 +4621,6 @@ mod thermal_block_bound_tests {
             max_generation_mw: 0.0,
             anticipated_config: None,
         }
-    }
-
-    /// A three-block `Stage` at `index`, otherwise mirroring `two_block_stage`'s
-    /// fixture defaults.
-    fn three_block_stage(index: usize) -> cobre_core::Stage {
-        let mut stage = two_block_stage(index, [BLOCK_HOURS[0], BLOCK_HOURS[1]]);
-        stage.blocks = BLOCK_HOURS
-            .iter()
-            .enumerate()
-            .map(|(i, &h)| cobre_core::Block {
-                index: i,
-                name: format!("BLK{i}"),
-                duration_hours: h,
-            })
-            .collect();
-        stage
     }
 
     fn bounds_with_thermals(n_thermals: usize) -> ResolvedBounds {
@@ -4991,5 +4996,1703 @@ mod thermal_block_bound_tests {
                 "objective reads the stage-level (not per-block) cost, blk {blk}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::float_cmp,
+    clippy::similar_names
+)]
+mod line_contract_pumping_block_bound_tests {
+    use std::collections::{BTreeMap, HashMap};
+
+    use cobre_core::entities::energy_contract::{ContractType, EnergyContract};
+    use cobre_core::{
+        BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
+        CascadeTopology, ContractBlockOverride, ContractStageBounds, EntityId, HydroStageBounds,
+        HydroStagePenalties, Line, LineBlockOverride, LineStageBounds, LineStagePenalties,
+        NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockOverride,
+        PumpingStageBounds, PumpingStation, ResolvedBlockBounds, ResolvedBounds,
+        ResolvedExchangeFactors, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
+        ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, ThermalStageBounds,
+    };
+    use cobre_stochastic::par::precompute::PrecomputedPar;
+
+    use crate::hydro_models::{EvaporationModelSet, ProductionModelSet};
+    use crate::lead_time::AnticipatedResolution;
+    use crate::resolved_parameters::ResolvedParameters;
+
+    use super::super::layout::ResolvedTables;
+    use super::super::test_support::{BLOCK_HOURS, N_BLKS, state_layout_for, three_block_stage};
+    use super::{
+        ColumnBufs, StageLayout, TemplateBuildCtx, fill_contract_columns, fill_line_columns,
+        fill_pumping_columns,
+    };
+
+    const N_STAGES: usize = 1;
+    const STAGE_IDX: usize = 0;
+
+    fn line(id: i32, entry_stage_id: Option<i32>) -> Line {
+        Line {
+            id: EntityId(id),
+            name: format!("L{id}"),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            source_bus_id: EntityId(1),
+            target_bus_id: EntityId(2),
+            entry_stage_id,
+            exit_stage_id: None,
+            direct_capacity_mw: 0.0,
+            reverse_capacity_mw: 0.0,
+            losses_percent: 0.0,
+            exchange_cost: 0.0,
+        }
+    }
+
+    fn pumping_station(id: i32, entry_stage_id: Option<i32>) -> PumpingStation {
+        PumpingStation {
+            id: EntityId(id),
+            name: format!("P{id}"),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: EntityId(1),
+            source_hydro_id: EntityId(1),
+            destination_hydro_id: EntityId(2),
+            entry_stage_id,
+            exit_stage_id: None,
+            consumption_mw_per_m3s: 0.0,
+            min_flow_m3s: 0.0,
+            max_flow_m3s: 0.0,
+        }
+    }
+
+    fn contract(
+        id: i32,
+        contract_type: ContractType,
+        entry_stage_id: Option<i32>,
+    ) -> EnergyContract {
+        EnergyContract {
+            id: EntityId(id),
+            name: format!("C{id}"),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: EntityId(1),
+            contract_type,
+            entry_stage_id,
+            exit_stage_id: None,
+            price_per_mwh: 0.0,
+            min_mw: 0.0,
+            max_mw: 0.0,
+        }
+    }
+
+    fn bounds_with(n_lines: usize, n_pumping: usize, n_contracts: usize) -> ResolvedBounds {
+        ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 0,
+                n_thermals: 0,
+                n_lines,
+                n_pumping,
+                n_contracts,
+                n_stages: N_STAGES,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 0.0,
+                    min_turbined_m3s: 0.0,
+                    max_turbined_m3s: 0.0,
+                    min_outflow_m3s: 0.0,
+                    max_outflow_m3s: None,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    max_diversion_m3s: None,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        )
+    }
+
+    fn penalties_with(n_lines: usize) -> ResolvedPenalties {
+        ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 0,
+                n_buses: 0,
+                n_lines,
+                n_ncs: 0,
+                n_stages: N_STAGES,
+            },
+            &PenaltiesDefaults {
+                hydro: HydroStagePenalties {
+                    spillage_cost: 0.0,
+                    diversion_cost: 0.0,
+                    turbined_cost: 0.0,
+                    storage_violation_below_cost: 0.0,
+                    filling_target_violation_cost: 0.0,
+                    turbined_violation_below_cost: 0.0,
+                    outflow_violation_below_cost: 0.0,
+                    outflow_violation_above_cost: 0.0,
+                    generation_violation_below_cost: 0.0,
+                    evaporation_violation_cost: 0.0,
+                    water_withdrawal_violation_cost: 0.0,
+                    water_withdrawal_violation_pos_cost: 0.0,
+                    water_withdrawal_violation_neg_cost: 0.0,
+                    evaporation_violation_pos_cost: 0.0,
+                    evaporation_violation_neg_cost: 0.0,
+                    inflow_nonnegativity_cost: 0.0,
+                },
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        )
+    }
+
+    /// Owns the borrow targets for a line/pumping/contract-only `TemplateBuildCtx`.
+    struct LcpFixtures {
+        par_lp: PrecomputedPar,
+        cascade: CascadeTopology,
+        bounds: ResolvedBounds,
+        penalties: ResolvedPenalties,
+        production_models: ProductionModelSet,
+        evaporation_models: EvaporationModelSet,
+        resolved_generic_bounds: ResolvedGenericConstraintBounds,
+        resolved_load_factors: ResolvedLoadFactors,
+        resolved_exchange_factors: ResolvedExchangeFactors,
+        resolved_ncs_bounds: ResolvedNcsBounds,
+        resolved_ncs_factors: ResolvedNcsFactors,
+        resolved_parameters: ResolvedParameters,
+        lines: Vec<Line>,
+        pumping_stations: Vec<PumpingStation>,
+        contracts: Vec<EnergyContract>,
+    }
+
+    impl LcpFixtures {
+        fn new(
+            lines: Vec<Line>,
+            pumping_stations: Vec<PumpingStation>,
+            contracts: Vec<EnergyContract>,
+        ) -> Self {
+            let n_lines = lines.len();
+            let n_pumping = pumping_stations.len();
+            let n_contracts = contracts.len();
+            Self {
+                par_lp: PrecomputedPar::default(),
+                cascade: CascadeTopology::build(&[]),
+                bounds: bounds_with(n_lines, n_pumping, n_contracts),
+                penalties: penalties_with(n_lines),
+                production_models: ProductionModelSet::new(vec![], 0, 1),
+                evaporation_models: EvaporationModelSet::new(vec![]),
+                resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
+                resolved_load_factors: ResolvedLoadFactors::empty(),
+                resolved_exchange_factors: ResolvedExchangeFactors::empty(),
+                resolved_ncs_bounds: ResolvedNcsBounds::empty(),
+                resolved_ncs_factors: ResolvedNcsFactors::empty(),
+                resolved_parameters: ResolvedParameters {
+                    per_param: vec![],
+                    id_to_slot: vec![],
+                    cost_scale_factor: 1_000_000.0,
+                },
+                lines,
+                pumping_stations,
+                contracts,
+            }
+        }
+
+        fn set_line_bounds(&mut self, l_idx: usize, direct_mw: f64, reverse_mw: f64) {
+            let cell = self.bounds.line_bounds_mut(l_idx, STAGE_IDX);
+            cell.direct_mw = direct_mw;
+            cell.reverse_mw = reverse_mw;
+        }
+
+        fn set_line_exchange_cost(&mut self, l_idx: usize, exchange_cost: f64) {
+            self.penalties
+                .line_penalties_mut(l_idx, STAGE_IDX)
+                .exchange_cost = exchange_cost;
+        }
+
+        fn set_pumping_bounds(&mut self, p_idx: usize, min_flow_m3s: f64, max_flow_m3s: f64) {
+            let cell = self.bounds.pumping_bounds_mut(p_idx, STAGE_IDX);
+            cell.min_flow_m3s = min_flow_m3s;
+            cell.max_flow_m3s = max_flow_m3s;
+        }
+
+        fn set_contract_bounds(&mut self, c_idx: usize, min_mw: f64, max_mw: f64, price: f64) {
+            let cell = self.bounds.contract_bounds_mut(c_idx, STAGE_IDX);
+            cell.min_mw = min_mw;
+            cell.max_mw = max_mw;
+            cell.price_per_mwh = price;
+        }
+
+        fn install_block_overlay(&mut self) {
+            self.bounds
+                .set_block_overlay(ResolvedBlockBounds::new(&BlockBoundsCountsSpec {
+                    n_hydros: 0,
+                    n_thermals: 0,
+                    n_lines: self.lines.len(),
+                    n_pumping: self.pumping_stations.len(),
+                    n_contracts: self.contracts.len(),
+                    n_stages: N_STAGES,
+                    max_blocks: N_BLKS,
+                }));
+        }
+
+        fn set_line_block_override(
+            &mut self,
+            l_idx: usize,
+            block_idx: usize,
+            over: LineBlockOverride,
+        ) {
+            *self
+                .bounds
+                .block_overlay_mut()
+                .line_override_mut(l_idx, STAGE_IDX, block_idx)
+                .expect("overlay cell must exist for a fixture-sized overlay") = over;
+        }
+
+        fn set_pumping_block_override(
+            &mut self,
+            p_idx: usize,
+            block_idx: usize,
+            over: PumpingBlockOverride,
+        ) {
+            *self
+                .bounds
+                .block_overlay_mut()
+                .pumping_override_mut(p_idx, STAGE_IDX, block_idx)
+                .expect("overlay cell must exist for a fixture-sized overlay") = over;
+        }
+
+        fn set_contract_block_override(
+            &mut self,
+            c_idx: usize,
+            block_idx: usize,
+            over: ContractBlockOverride,
+        ) {
+            *self
+                .bounds
+                .block_overlay_mut()
+                .contract_override_mut(c_idx, STAGE_IDX, block_idx)
+                .expect("overlay cell must exist for a fixture-sized overlay") = over;
+        }
+
+        fn make_ctx(&self) -> TemplateBuildCtx<'_> {
+            let n_contract_import = self
+                .contracts
+                .iter()
+                .filter(|c| c.contract_type == ContractType::Import)
+                .count();
+            let n_contract_export = self
+                .contracts
+                .iter()
+                .filter(|c| c.contract_type == ContractType::Export)
+                .count();
+            let line_pos: BTreeMap<EntityId, usize> = self
+                .lines
+                .iter()
+                .enumerate()
+                .map(|(i, l)| (l.id, i))
+                .collect();
+            let pumping_pos: BTreeMap<EntityId, usize> = self
+                .pumping_stations
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (p.id, i))
+                .collect();
+            let contract_pos: BTreeMap<EntityId, usize> = self
+                .contracts
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (c.id, i))
+                .collect();
+            TemplateBuildCtx {
+                hydros: &[],
+                thermals: &[],
+                lines: &self.lines,
+                buses: &[],
+                load_models: &[],
+                cascade: &self.cascade,
+                resolved: ResolvedTables {
+                    bounds: &self.bounds,
+                    penalties: &self.penalties,
+                    resolved_generic_bounds: &self.resolved_generic_bounds,
+                    resolved_load_factors: &self.resolved_load_factors,
+                    resolved_exchange_factors: &self.resolved_exchange_factors,
+                    resolved_ncs_bounds: &self.resolved_ncs_bounds,
+                    resolved_ncs_factors: &self.resolved_ncs_factors,
+                    resolved_parameters: &self.resolved_parameters,
+                },
+                hydro_pos: BTreeMap::new(),
+                thermal_pos: BTreeMap::new(),
+                line_pos,
+                bus_pos: BTreeMap::new(),
+                par_lp: &self.par_lp,
+                production_models: &self.production_models,
+                evaporation_models: &self.evaporation_models,
+                generic_constraints: &[],
+                non_controllable_sources: &[],
+                pumping_stations: &self.pumping_stations,
+                pumping_pos,
+                n_pumping: self.pumping_stations.len(),
+                contracts: &self.contracts,
+                contract_pos,
+                n_contract_import,
+                n_contract_export,
+                diversion_upstream: HashMap::new(),
+                arc_stage_weights: HashMap::new(),
+                arc_spread_chrono: HashMap::new(),
+                arc_arrival_density: HashMap::new(),
+                per_stage_mask: Vec::new(),
+                n_hydros: 0,
+                n_thermals: 0,
+                n_lines: self.lines.len(),
+                n_buses: 0,
+                max_par_order: 0,
+                n_anticipated: 0,
+                k_max: 0,
+                anticipated_lead_stages: vec![],
+                anticipated_thermal_indices: vec![],
+                anticipated_windows: vec![],
+                anticipated_resolution: AnticipatedResolution::default(),
+                study_stage_ids: (0..N_STAGES as i32).collect(),
+                has_penalty: false,
+                cumulative_discount_factors: vec![1.0; N_STAGES],
+                total_hours_per_stage: vec![BLOCK_HOURS.iter().sum(); N_STAGES],
+                filling_v_target: BTreeMap::new(),
+            }
+        }
+    }
+
+    /// The per-family column start offsets `run_fill` resolves while the
+    /// `StageLayout` is alive, plus `n_blks` — enough to reconstruct every
+    /// block-major address (`start + entity_idx * n_blks + blk`) after the
+    /// layout itself is dropped.
+    struct FillOffsets {
+        line_fwd_start: usize,
+        line_rev_start: usize,
+        pumping_start: usize,
+        contract_import_start: usize,
+        contract_export_start: usize,
+        n_blks: usize,
+    }
+
+    impl FillOffsets {
+        fn at(&self, start: usize, entity_idx: usize, blk: usize) -> usize {
+            start + entity_idx * self.n_blks + blk
+        }
+    }
+
+    struct FillResult {
+        col_lower: Vec<f64>,
+        col_upper: Vec<f64>,
+        objective: Vec<f64>,
+        offsets: FillOffsets,
+    }
+
+    /// Run the line, pumping, and contract column fills against `fixtures` at
+    /// `stage_idx`, over a three-block stage.
+    fn run_fill(fixtures: &LcpFixtures, stage_idx: usize) -> FillResult {
+        let stage = three_block_stage(stage_idx);
+        let ctx = fixtures.make_ctx();
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, stage_idx);
+
+        let mut col_lower = vec![0.0_f64; layout.num_cols];
+        let mut col_upper = vec![f64::INFINITY; layout.num_cols];
+        let mut objective = vec![0.0_f64; layout.num_cols];
+        let mut bufs = ColumnBufs {
+            col_lower: &mut col_lower,
+            col_upper: &mut col_upper,
+            objective: &mut objective,
+        };
+        fill_line_columns(&ctx, &stage, stage_idx, &layout, &mut bufs);
+        fill_pumping_columns(&ctx, &stage, stage_idx, &layout, &mut bufs);
+        fill_contract_columns(&ctx, &stage, stage_idx, &layout, &mut bufs);
+
+        let offsets = FillOffsets {
+            line_fwd_start: layout.equipment.line_fwd.start,
+            line_rev_start: layout.equipment.line_rev.start,
+            pumping_start: layout.equipment.col_pumping_start,
+            contract_import_start: layout.equipment.col_contract_import_start,
+            contract_export_start: layout.equipment.col_contract_export_start,
+            n_blks: layout.n_blks,
+        };
+
+        FillResult {
+            col_lower,
+            col_upper,
+            objective,
+            offsets,
+        }
+    }
+
+    /// Two lines, one pumping station, two contracts (one import, one export),
+    /// three blocks, empty overlay: every line forward/reverse, pumping, and
+    /// contract import/export column reads bit-identical to the stage-level
+    /// formula (`*_bounds_at_block` falls through to the stage cell at every
+    /// block).
+    #[test]
+    fn test_line_contract_pumping_columns_bit_identical_without_overlay() {
+        let lines = vec![line(1, None), line(2, None)];
+        let pumping_stations = vec![pumping_station(1, None)];
+        let contracts = vec![
+            contract(1, ContractType::Import, None),
+            contract(2, ContractType::Export, None),
+        ];
+        let mut fixtures = LcpFixtures::new(lines, pumping_stations, contracts);
+        fixtures.set_line_bounds(0, 100.0, 80.0);
+        fixtures.set_line_exchange_cost(0, 2.0);
+        fixtures.set_line_bounds(1, 50.0, 40.0);
+        fixtures.set_line_exchange_cost(1, 3.0);
+        fixtures.set_pumping_bounds(0, 5.0, 60.0);
+        fixtures.set_contract_bounds(0, 10.0, 90.0, 25.0);
+        fixtures.set_contract_bounds(1, 0.0, 70.0, -15.0);
+
+        let result = run_fill(&fixtures, STAGE_IDX);
+        let off = &result.offsets;
+
+        for (blk, &hours) in BLOCK_HOURS.iter().enumerate() {
+            let l0_fwd = off.at(off.line_fwd_start, 0, blk);
+            assert_eq!(result.col_upper[l0_fwd].to_bits(), 100.0_f64.to_bits());
+            assert_eq!(result.objective[l0_fwd].to_bits(), (2.0 * hours).to_bits());
+            let l0_rev = off.at(off.line_rev_start, 0, blk);
+            assert_eq!(result.col_upper[l0_rev].to_bits(), 80.0_f64.to_bits());
+            assert_eq!(result.objective[l0_rev].to_bits(), (2.0 * hours).to_bits());
+
+            let l1_fwd = off.at(off.line_fwd_start, 1, blk);
+            assert_eq!(result.col_upper[l1_fwd].to_bits(), 50.0_f64.to_bits());
+            assert_eq!(result.objective[l1_fwd].to_bits(), (3.0 * hours).to_bits());
+            let l1_rev = off.at(off.line_rev_start, 1, blk);
+            assert_eq!(result.col_upper[l1_rev].to_bits(), 40.0_f64.to_bits());
+            assert_eq!(result.objective[l1_rev].to_bits(), (3.0 * hours).to_bits());
+
+            let pump = off.at(off.pumping_start, 0, blk);
+            assert_eq!(result.col_lower[pump].to_bits(), 5.0_f64.to_bits());
+            assert_eq!(result.col_upper[pump].to_bits(), 60.0_f64.to_bits());
+            assert_eq!(result.objective[pump].to_bits(), 0.0_f64.to_bits());
+
+            let import = off.at(off.contract_import_start, 0, blk);
+            assert_eq!(result.col_lower[import].to_bits(), 10.0_f64.to_bits());
+            assert_eq!(result.col_upper[import].to_bits(), 90.0_f64.to_bits());
+            assert_eq!(result.objective[import].to_bits(), (25.0 * hours).to_bits());
+
+            let export = off.at(off.contract_export_start, 0, blk);
+            assert_eq!(result.col_lower[export].to_bits(), 0.0_f64.to_bits());
+            assert_eq!(result.col_upper[export].to_bits(), 70.0_f64.to_bits());
+            assert_eq!(
+                result.objective[export].to_bits(),
+                (-15.0 * hours).to_bits()
+            );
+        }
+    }
+
+    /// A line with stage-wide `direct_mw = 1000.0` / `reverse_mw = 500.0` and
+    /// two separate block overrides — `direct_mw = 800.0` at block 2,
+    /// `reverse_mw = 200.0` at block 0 — no `exchange_factors.json` (every
+    /// factor `1.0`): each override caps only its own (block, direction) pair.
+    #[test]
+    fn test_per_block_line_cap_binds_only_its_own_block() {
+        let mut fixtures = LcpFixtures::new(vec![line(1, None)], vec![], vec![]);
+        fixtures.set_line_bounds(0, 1000.0, 500.0);
+        fixtures.install_block_overlay();
+        fixtures.set_line_block_override(
+            0,
+            2,
+            LineBlockOverride {
+                direct_mw: Some(800.0),
+                ..Default::default()
+            },
+        );
+        fixtures.set_line_block_override(
+            0,
+            0,
+            LineBlockOverride {
+                reverse_mw: Some(200.0),
+                ..Default::default()
+            },
+        );
+
+        let result = run_fill(&fixtures, STAGE_IDX);
+        let off = &result.offsets;
+        let fwd_upper: Vec<f64> = (0..N_BLKS)
+            .map(|blk| result.col_upper[off.at(off.line_fwd_start, 0, blk)])
+            .collect();
+        assert_eq!(
+            fwd_upper,
+            vec![1000.0, 1000.0, 800.0],
+            "only block 2 is bound to the direct override"
+        );
+        let rev_upper: Vec<f64> = (0..N_BLKS)
+            .map(|blk| result.col_upper[off.at(off.line_rev_start, 0, blk)])
+            .collect();
+        assert_eq!(
+            rev_upper,
+            vec![200.0, 500.0, 500.0],
+            "only block 0 is bound to the reverse override"
+        );
+    }
+
+    /// A contract with stage-wide `price_per_mwh = 80.0` and TWO block overrides
+    /// — block 0 sets `max_mw = 50.0`/`price_per_mwh = 120.0`, block 2 sets
+    /// `min_mw = 30.0` — plus a pumping station with TWO block overrides —
+    /// block 1 sets `max_flow_m3s = 20.0`, block 0 sets `min_flow_m3s = 15.0`:
+    /// each override binds only its own (entity, block, column) triple; every
+    /// other block keeps the stage-level value.
+    #[test]
+    fn test_per_block_contract_price_and_pumping_bounds_bind() {
+        let mut fixtures = LcpFixtures::new(
+            vec![],
+            vec![pumping_station(1, None)],
+            vec![contract(1, ContractType::Import, None)],
+        );
+        fixtures.set_contract_bounds(0, 0.0, 200.0, 80.0);
+        fixtures.set_pumping_bounds(0, 0.0, 100.0);
+        fixtures.install_block_overlay();
+        fixtures.set_contract_block_override(
+            0,
+            0,
+            ContractBlockOverride {
+                max_mw: Some(50.0),
+                price_per_mwh: Some(120.0),
+                ..Default::default()
+            },
+        );
+        fixtures.set_contract_block_override(
+            0,
+            2,
+            ContractBlockOverride {
+                min_mw: Some(30.0),
+                ..Default::default()
+            },
+        );
+        fixtures.set_pumping_block_override(
+            0,
+            1,
+            PumpingBlockOverride {
+                max_flow_m3s: Some(20.0),
+                ..Default::default()
+            },
+        );
+        fixtures.set_pumping_block_override(
+            0,
+            0,
+            PumpingBlockOverride {
+                min_flow_m3s: Some(15.0),
+                ..Default::default()
+            },
+        );
+
+        let result = run_fill(&fixtures, STAGE_IDX);
+        let off = &result.offsets;
+
+        let contract_upper: Vec<f64> = (0..N_BLKS)
+            .map(|blk| result.col_upper[off.at(off.contract_import_start, 0, blk)])
+            .collect();
+        assert_eq!(
+            contract_upper,
+            vec![50.0, 200.0, 200.0],
+            "only block 0 is bound to the contract max_mw override"
+        );
+        let contract_lower: Vec<f64> = (0..N_BLKS)
+            .map(|blk| result.col_lower[off.at(off.contract_import_start, 0, blk)])
+            .collect();
+        assert_eq!(
+            contract_lower,
+            vec![0.0, 0.0, 30.0],
+            "only block 2 is bound to the contract min_mw override"
+        );
+        let contract_obj: Vec<f64> = (0..N_BLKS)
+            .map(|blk| result.objective[off.at(off.contract_import_start, 0, blk)])
+            .collect();
+        assert_eq!(
+            contract_obj,
+            vec![
+                120.0 * BLOCK_HOURS[0],
+                80.0 * BLOCK_HOURS[1],
+                80.0 * BLOCK_HOURS[2],
+            ],
+            "only block 0 prices at the overridden price"
+        );
+
+        let pumping_upper: Vec<f64> = (0..N_BLKS)
+            .map(|blk| result.col_upper[off.at(off.pumping_start, 0, blk)])
+            .collect();
+        assert_eq!(
+            pumping_upper,
+            vec![100.0, 20.0, 100.0],
+            "only block 1 is bound to the pumping max_flow_m3s override"
+        );
+        let pumping_lower: Vec<f64> = (0..N_BLKS)
+            .map(|blk| result.col_lower[off.at(off.pumping_start, 0, blk)])
+            .collect();
+        assert_eq!(
+            pumping_lower,
+            vec![15.0, 0.0, 0.0],
+            "only block 0 is bound to the pumping min_flow_m3s override"
+        );
+    }
+
+    /// A dormant line, pumping station, and contract (each `entry_stage_id`
+    /// after the build stage) carrying a `block_id` override with a large
+    /// override value still get `[0, 0]` at every block — the commissioning
+    /// gate wins over the per-block bound.
+    #[test]
+    fn test_dormant_entity_ignores_per_block_bound() {
+        let mut fixtures = LcpFixtures::new(
+            vec![line(1, Some(1))],
+            vec![pumping_station(1, Some(1))],
+            vec![contract(1, ContractType::Import, Some(1))],
+        );
+        fixtures.set_line_bounds(0, 1000.0, 900.0);
+        fixtures.set_pumping_bounds(0, 5.0, 60.0);
+        fixtures.set_contract_bounds(0, 10.0, 90.0, 80.0);
+        fixtures.install_block_overlay();
+        fixtures.set_line_block_override(
+            0,
+            1,
+            LineBlockOverride {
+                direct_mw: Some(800.0),
+                reverse_mw: Some(700.0),
+            },
+        );
+        fixtures.set_pumping_block_override(
+            0,
+            1,
+            PumpingBlockOverride {
+                min_flow_m3s: Some(999.0),
+                max_flow_m3s: Some(999.0),
+            },
+        );
+        fixtures.set_contract_block_override(
+            0,
+            1,
+            ContractBlockOverride {
+                min_mw: Some(999.0),
+                max_mw: Some(999.0),
+                price_per_mwh: Some(999.0),
+            },
+        );
+
+        let result = run_fill(&fixtures, STAGE_IDX);
+        let off = &result.offsets;
+        for blk in 0..N_BLKS {
+            assert_eq!(
+                result.col_upper[off.at(off.line_fwd_start, 0, blk)],
+                0.0,
+                "dormant line fwd, blk {blk}"
+            );
+            assert_eq!(
+                result.col_upper[off.at(off.line_rev_start, 0, blk)],
+                0.0,
+                "dormant line rev, blk {blk}"
+            );
+            assert_eq!(
+                result.col_lower[off.at(off.pumping_start, 0, blk)],
+                0.0,
+                "dormant pumping lower, blk {blk}"
+            );
+            assert_eq!(
+                result.col_upper[off.at(off.pumping_start, 0, blk)],
+                0.0,
+                "dormant pumping upper, blk {blk}"
+            );
+            assert_eq!(
+                result.col_lower[off.at(off.contract_import_start, 0, blk)],
+                0.0,
+                "dormant contract lower, blk {blk}"
+            );
+            assert_eq!(
+                result.col_upper[off.at(off.contract_import_start, 0, blk)],
+                0.0,
+                "dormant contract upper, blk {blk}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::float_cmp,
+    clippy::similar_names
+)]
+mod hydro_block_bound_tests {
+    use std::collections::{BTreeMap, HashMap};
+
+    use cobre_core::entities::hydro::HydroGenerationModel;
+    use cobre_core::{
+        BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
+        CascadeTopology, ContractStageBounds, EntityId, Hydro, HydroBlockOverride,
+        HydroStageBounds, HydroStagePenalties, LineStageBounds, LineStagePenalties,
+        NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds,
+        ResolvedBlockBounds, ResolvedBounds, ResolvedExchangeFactors,
+        ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
+        ResolvedNcsFactors, ResolvedPenalties, ThermalStageBounds,
+    };
+    use cobre_stochastic::par::precompute::PrecomputedPar;
+
+    use crate::hydro_models::{
+        EvaporationModel, EvaporationModelSet, FphaPlane, ProductionModelSet,
+        ResolvedProductionModel,
+    };
+    use crate::indexer::{BlockIdx, FphaLocal};
+    use crate::lead_time::AnticipatedResolution;
+    use crate::resolved_parameters::ResolvedParameters;
+
+    use super::super::layout::ResolvedTables;
+    use super::super::rows::fill_operational_violation_rows;
+    use super::super::test_support::{
+        BLOCK_HOURS, N_BLKS, state_layout_for, three_block_stage, zero_hydro_penalties,
+    };
+    use super::{
+        ColumnBufs, StageLayout, TemplateBuildCtx, fill_diversion_columns,
+        fill_fpha_generation_columns, fill_operational_slack_columns, fill_turbine_columns,
+    };
+
+    const N_STAGES: usize = 1;
+    const STAGE_IDX: usize = 0;
+
+    fn fixture_hydro(id: i32, entry_stage_id: Option<i32>) -> Hydro {
+        Hydro {
+            id: EntityId(id),
+            name: format!("H{id}"),
+            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: EntityId(1),
+            downstream_id: None,
+            travel_time_hours: None,
+            entry_stage_id,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 100.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 50.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 45.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: zero_hydro_penalties(),
+        }
+    }
+
+    fn hydro_stage_bounds(
+        min_turbined_m3s: f64,
+        max_turbined_m3s: f64,
+        min_outflow_m3s: f64,
+        max_outflow_m3s: Option<f64>,
+        min_generation_mw: f64,
+        max_generation_mw: f64,
+        max_diversion_m3s: Option<f64>,
+    ) -> HydroStageBounds {
+        HydroStageBounds {
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 100.0,
+            min_turbined_m3s,
+            max_turbined_m3s,
+            min_outflow_m3s,
+            max_outflow_m3s,
+            min_generation_mw,
+            max_generation_mw,
+            max_diversion_m3s,
+            filling_min_rate_m3s: 0.0,
+            water_withdrawal_m3s: 0.0,
+        }
+    }
+
+    fn hydro_stage_penalties(
+        turbined_cost: f64,
+        diversion_cost: f64,
+        outflow_violation_below_cost: f64,
+        outflow_violation_above_cost: f64,
+        turbined_violation_below_cost: f64,
+        generation_violation_below_cost: f64,
+    ) -> HydroStagePenalties {
+        HydroStagePenalties {
+            spillage_cost: 0.0,
+            diversion_cost,
+            turbined_cost,
+            storage_violation_below_cost: 0.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost,
+            outflow_violation_below_cost,
+            outflow_violation_above_cost,
+            generation_violation_below_cost,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 0.0,
+        }
+    }
+
+    fn bounds_with_hydros(n_hydros: usize) -> ResolvedBounds {
+        ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: N_STAGES,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: hydro_stage_bounds(0.0, 0.0, 0.0, None, 0.0, 0.0, None),
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        )
+    }
+
+    fn penalties_with_hydros(n_hydros: usize) -> ResolvedPenalties {
+        ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros,
+                n_buses: 0,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: N_STAGES,
+            },
+            &PenaltiesDefaults {
+                hydro: hydro_stage_penalties(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        )
+    }
+
+    /// Owns the borrow targets for a hydro-only `TemplateBuildCtx`, sized to
+    /// however many hydros the test passes in.
+    struct HydroBlockFixtures {
+        par_lp: PrecomputedPar,
+        hydros: Vec<Hydro>,
+        cascade: CascadeTopology,
+        bounds: ResolvedBounds,
+        penalties: ResolvedPenalties,
+        production_models: ProductionModelSet,
+        evaporation_models: EvaporationModelSet,
+        resolved_generic_bounds: ResolvedGenericConstraintBounds,
+        resolved_load_factors: ResolvedLoadFactors,
+        resolved_exchange_factors: ResolvedExchangeFactors,
+        resolved_ncs_bounds: ResolvedNcsBounds,
+        resolved_ncs_factors: ResolvedNcsFactors,
+        resolved_parameters: ResolvedParameters,
+    }
+
+    impl HydroBlockFixtures {
+        /// `productivities[i]` is hydro `i`'s constant-productivity model input.
+        fn new(hydros: Vec<Hydro>, productivities: &[f64]) -> Self {
+            let n_hydros = hydros.len();
+            assert_eq!(
+                productivities.len(),
+                n_hydros,
+                "one productivity per fixture hydro"
+            );
+            let cascade = CascadeTopology::build(&hydros);
+            Self {
+                par_lp: PrecomputedPar::default(),
+                hydros,
+                cascade,
+                bounds: bounds_with_hydros(n_hydros),
+                penalties: penalties_with_hydros(n_hydros),
+                production_models: ProductionModelSet::new(
+                    productivities
+                        .iter()
+                        .map(|&productivity| {
+                            vec![
+                                ResolvedProductionModel::ConstantProductivity { productivity };
+                                N_STAGES
+                            ]
+                        })
+                        .collect(),
+                    n_hydros,
+                    N_STAGES,
+                ),
+                evaporation_models: EvaporationModelSet::new(vec![
+                    EvaporationModel::None;
+                    n_hydros
+                ]),
+                resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
+                resolved_load_factors: ResolvedLoadFactors::empty(),
+                resolved_exchange_factors: ResolvedExchangeFactors::empty(),
+                resolved_ncs_bounds: ResolvedNcsBounds::empty(),
+                resolved_ncs_factors: ResolvedNcsFactors::empty(),
+                resolved_parameters: ResolvedParameters {
+                    per_param: vec![],
+                    id_to_slot: vec![],
+                    cost_scale_factor: 1_000_000.0,
+                },
+            }
+        }
+
+        fn set_hydro_bounds(&mut self, h_idx: usize, stage_idx: usize, hb: HydroStageBounds) {
+            *self.bounds.hydro_bounds_mut(h_idx, stage_idx) = hb;
+        }
+
+        fn set_hydro_penalties(&mut self, h_idx: usize, stage_idx: usize, hp: HydroStagePenalties) {
+            *self.penalties.hydro_penalties_mut(h_idx, stage_idx) = hp;
+        }
+
+        fn install_block_overlay(&mut self) {
+            self.bounds
+                .set_block_overlay(ResolvedBlockBounds::new(&BlockBoundsCountsSpec {
+                    n_hydros: self.hydros.len(),
+                    n_thermals: 0,
+                    n_lines: 0,
+                    n_pumping: 0,
+                    n_contracts: 0,
+                    n_stages: N_STAGES,
+                    max_blocks: N_BLKS,
+                }));
+        }
+
+        fn set_hydro_block_override(
+            &mut self,
+            h_idx: usize,
+            stage_idx: usize,
+            block_idx: usize,
+            over: HydroBlockOverride,
+        ) {
+            *self
+                .bounds
+                .block_overlay_mut()
+                .hydro_override_mut(h_idx, stage_idx, block_idx)
+                .expect("overlay cell must exist for a fixture-sized overlay") = over;
+        }
+
+        fn make_ctx(&self) -> TemplateBuildCtx<'_> {
+            let mut hydro_pos = BTreeMap::new();
+            for (i, h) in self.hydros.iter().enumerate() {
+                hydro_pos.insert(h.id, i);
+            }
+            TemplateBuildCtx {
+                hydros: &self.hydros,
+                thermals: &[],
+                lines: &[],
+                buses: &[],
+                load_models: &[],
+                cascade: &self.cascade,
+                resolved: ResolvedTables {
+                    bounds: &self.bounds,
+                    penalties: &self.penalties,
+                    resolved_generic_bounds: &self.resolved_generic_bounds,
+                    resolved_load_factors: &self.resolved_load_factors,
+                    resolved_exchange_factors: &self.resolved_exchange_factors,
+                    resolved_ncs_bounds: &self.resolved_ncs_bounds,
+                    resolved_ncs_factors: &self.resolved_ncs_factors,
+                    resolved_parameters: &self.resolved_parameters,
+                },
+                hydro_pos,
+                thermal_pos: BTreeMap::new(),
+                line_pos: BTreeMap::new(),
+                bus_pos: BTreeMap::new(),
+                par_lp: &self.par_lp,
+                production_models: &self.production_models,
+                evaporation_models: &self.evaporation_models,
+                generic_constraints: &[],
+                non_controllable_sources: &[],
+                pumping_stations: &[],
+                pumping_pos: BTreeMap::new(),
+                n_pumping: 0,
+                contracts: &[],
+                contract_pos: BTreeMap::new(),
+                n_contract_import: 0,
+                n_contract_export: 0,
+                diversion_upstream: HashMap::new(),
+                arc_stage_weights: HashMap::new(),
+                arc_spread_chrono: HashMap::new(),
+                arc_arrival_density: HashMap::new(),
+                per_stage_mask: Vec::new(),
+                n_hydros: self.hydros.len(),
+                n_thermals: 0,
+                n_lines: 0,
+                n_buses: 0,
+                max_par_order: 0,
+                n_anticipated: 0,
+                k_max: 0,
+                anticipated_lead_stages: vec![],
+                anticipated_thermal_indices: vec![],
+                anticipated_windows: vec![],
+                anticipated_resolution: AnticipatedResolution::default(),
+                study_stage_ids: (0..N_STAGES as i32).collect(),
+                has_penalty: false,
+                cumulative_discount_factors: vec![1.0; N_STAGES],
+                total_hours_per_stage: vec![BLOCK_HOURS.iter().sum(); N_STAGES],
+                filling_v_target: BTreeMap::new(),
+            }
+        }
+    }
+
+    /// The per-family column/row starting offsets `run_fill` resolves while the
+    /// `StageLayout` is alive, plus `n_blks` — enough for `at` to address every
+    /// block-major cell after the layout itself is dropped.
+    struct FillOffsets {
+        turbine: usize,
+        diversion: usize,
+        outflow_below: usize,
+        outflow_above: usize,
+        turbine_below: usize,
+        generation_below: usize,
+        min_outflow_row: usize,
+        max_outflow_row: usize,
+        min_turbine_row: usize,
+        min_generation_row: usize,
+        n_blks: usize,
+    }
+
+    impl FillOffsets {
+        fn at(&self, start: usize, h_idx: usize, blk: usize) -> usize {
+            start + h_idx * self.n_blks + blk
+        }
+    }
+
+    /// Hydro 0's per-block values of `buf` for the family starting at `start`.
+    fn per_block(buf: &[f64], off: &FillOffsets, start: usize) -> Vec<f64> {
+        (0..N_BLKS).map(|blk| buf[off.at(start, 0, blk)]).collect()
+    }
+
+    struct FillResult {
+        col_lower: Vec<f64>,
+        col_upper: Vec<f64>,
+        objective: Vec<f64>,
+        row_lower: Vec<f64>,
+        row_upper: Vec<f64>,
+        offsets: FillOffsets,
+    }
+
+    /// Run the turbine, diversion, and operational-slack column fills plus the
+    /// operational-violation row fill against `fixtures` at `stage_idx`, over a
+    /// three-block stage.
+    fn run_fill(fixtures: &HydroBlockFixtures, stage_idx: usize) -> FillResult {
+        let stage = three_block_stage(stage_idx);
+        let ctx = fixtures.make_ctx();
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, stage_idx);
+
+        let mut col_lower = vec![0.0_f64; layout.num_cols];
+        let mut col_upper = vec![f64::INFINITY; layout.num_cols];
+        let mut objective = vec![0.0_f64; layout.num_cols];
+        let mut bufs = ColumnBufs {
+            col_lower: &mut col_lower,
+            col_upper: &mut col_upper,
+            objective: &mut objective,
+        };
+        fill_turbine_columns(&ctx, &stage, stage_idx, &layout, &mut bufs);
+        fill_diversion_columns(&ctx, &stage, stage_idx, &layout, &mut bufs);
+        fill_operational_slack_columns(&ctx, &stage, stage_idx, &layout, &mut bufs);
+
+        let mut row_lower = vec![0.0_f64; layout.rows.num_rows];
+        let mut row_upper = vec![0.0_f64; layout.rows.num_rows];
+        fill_operational_violation_rows(&ctx, stage_idx, &layout, &mut row_lower, &mut row_upper);
+
+        let offsets = FillOffsets {
+            turbine: layout.equipment.turbine.start,
+            diversion: layout.equipment.diversion.start,
+            outflow_below: layout.slack.oper_violation.outflow_below_slack.start,
+            outflow_above: layout.slack.oper_violation.outflow_above_slack.start,
+            turbine_below: layout.slack.oper_violation.turbine_below_slack.start,
+            generation_below: layout.slack.oper_violation.generation_below_slack.start,
+            min_outflow_row: layout.slack.oper_violation.min_outflow_rows.start,
+            max_outflow_row: layout.slack.oper_violation.max_outflow_rows.start,
+            min_turbine_row: layout.slack.oper_violation.min_turbine_rows.start,
+            min_generation_row: layout.slack.oper_violation.min_generation_rows.start,
+            n_blks: layout.n_blks,
+        };
+
+        FillResult {
+            col_lower,
+            col_upper,
+            objective,
+            row_lower,
+            row_upper,
+            offsets,
+        }
+    }
+
+    /// One hydro's expected turbine/diversion/slack/row values for
+    /// [`test_hydro_block_fill_sites_bit_identical_without_overlay`], read off the
+    /// fixture's own stage-level bound/penalty writes (never recomputed via the
+    /// production formula).
+    struct Expected {
+        turb_upper: f64,
+        turbined_cost: f64,
+        max_div: f64,
+        diversion_cost: f64,
+        active: [bool; 4],
+        costs: [f64; 4],
+        min_outflow_row_lower: f64,
+        max_outflow_row_upper: f64,
+        min_turbine_row_lower: f64,
+        min_generation_row_lower: f64,
+    }
+
+    /// Assert every turbine, diversion, operational-slack, and operational-violation
+    /// row value at `(h_idx, blk)` against `exp`, bit-for-bit.
+    fn assert_block_bit_identical(
+        result: &FillResult,
+        off: &FillOffsets,
+        h_idx: usize,
+        blk: usize,
+        hours: f64,
+        exp: &Expected,
+    ) {
+        let turb_col = off.at(off.turbine, h_idx, blk);
+        assert_eq!(result.col_lower[turb_col].to_bits(), 0.0_f64.to_bits());
+        assert_eq!(
+            result.col_upper[turb_col].to_bits(),
+            exp.turb_upper.to_bits()
+        );
+        assert_eq!(
+            result.objective[turb_col].to_bits(),
+            (exp.turbined_cost * hours).to_bits()
+        );
+
+        let div_col = off.at(off.diversion, h_idx, blk);
+        assert_eq!(result.col_lower[div_col].to_bits(), 0.0_f64.to_bits());
+        assert_eq!(result.col_upper[div_col].to_bits(), exp.max_div.to_bits());
+        let expected_div_obj = if exp.max_div > 0.0 {
+            exp.diversion_cost * hours
+        } else {
+            0.0
+        };
+        assert_eq!(
+            result.objective[div_col].to_bits(),
+            expected_div_obj.to_bits()
+        );
+
+        let family_starts = [
+            off.outflow_below,
+            off.outflow_above,
+            off.turbine_below,
+            off.generation_below,
+        ];
+        for (fam_idx, &start) in family_starts.iter().enumerate() {
+            let col = off.at(start, h_idx, blk);
+            let expected_upper = if exp.active[fam_idx] {
+                f64::INFINITY
+            } else {
+                0.0
+            };
+            assert_eq!(result.col_lower[col].to_bits(), 0.0_f64.to_bits());
+            assert_eq!(result.col_upper[col].to_bits(), expected_upper.to_bits());
+            assert_eq!(
+                result.objective[col].to_bits(),
+                (exp.costs[fam_idx] * hours).to_bits()
+            );
+        }
+
+        let row_min_outflow = off.at(off.min_outflow_row, h_idx, blk);
+        assert_eq!(
+            result.row_lower[row_min_outflow].to_bits(),
+            exp.min_outflow_row_lower.to_bits()
+        );
+        assert_eq!(
+            result.row_upper[row_min_outflow].to_bits(),
+            f64::INFINITY.to_bits()
+        );
+
+        let row_max_outflow = off.at(off.max_outflow_row, h_idx, blk);
+        assert_eq!(
+            result.row_lower[row_max_outflow].to_bits(),
+            f64::NEG_INFINITY.to_bits()
+        );
+        assert_eq!(
+            result.row_upper[row_max_outflow].to_bits(),
+            exp.max_outflow_row_upper.to_bits()
+        );
+
+        let row_min_turbine = off.at(off.min_turbine_row, h_idx, blk);
+        assert_eq!(
+            result.row_lower[row_min_turbine].to_bits(),
+            exp.min_turbine_row_lower.to_bits()
+        );
+        assert_eq!(
+            result.row_upper[row_min_turbine].to_bits(),
+            f64::INFINITY.to_bits()
+        );
+
+        let row_min_generation = off.at(off.min_generation_row, h_idx, blk);
+        assert_eq!(
+            result.row_lower[row_min_generation].to_bits(),
+            exp.min_generation_row_lower.to_bits()
+        );
+        assert_eq!(
+            result.row_upper[row_min_generation].to_bits(),
+            f64::INFINITY.to_bits()
+        );
+    }
+
+    /// Three hydros spanning every operational-slack predicate state (mirroring
+    /// `block_family_slack_tests::hydro_specs`'s coverage, including hydro 2's
+    /// `Some(0.0)` `is_some()` lock), three blocks, empty overlay: every turbine,
+    /// diversion, and operational-slack column, and every operational-violation row,
+    /// reads bit-identical to the stage-level formula — `hydro_bounds_at_block` falls
+    /// through to the stage cell at every block.
+    #[test]
+    fn test_hydro_block_fill_sites_bit_identical_without_overlay() {
+        let hydros = vec![
+            fixture_hydro(1, None),
+            fixture_hydro(2, None),
+            fixture_hydro(3, None),
+        ];
+        let mut fixtures = HydroBlockFixtures::new(hydros, &[2.0, 1.0, 1.0]);
+        fixtures.set_hydro_bounds(
+            0,
+            STAGE_IDX,
+            hydro_stage_bounds(10.0, 200.0, 12.0, None, 0.0, 190.0, None),
+        );
+        fixtures.set_hydro_penalties(
+            0,
+            STAGE_IDX,
+            hydro_stage_penalties(1.0, 0.0, 2.0, 3.0, 4.0, 5.0),
+        );
+        fixtures.set_hydro_bounds(
+            1,
+            STAGE_IDX,
+            hydro_stage_bounds(0.0, 150.0, 0.0, Some(80.0), 20.0, 140.0, Some(30.0)),
+        );
+        fixtures.set_hydro_penalties(
+            1,
+            STAGE_IDX,
+            hydro_stage_penalties(6.0, 7.0, 8.0, 9.0, 10.0, 11.0),
+        );
+        fixtures.set_hydro_bounds(
+            2,
+            STAGE_IDX,
+            hydro_stage_bounds(0.0, 0.0, 0.0, Some(0.0), 0.0, 0.0, None),
+        );
+        fixtures.set_hydro_penalties(
+            2,
+            STAGE_IDX,
+            hydro_stage_penalties(12.0, 0.0, 13.0, 14.0, 15.0, 16.0),
+        );
+
+        let result = run_fill(&fixtures, STAGE_IDX);
+        let off = &result.offsets;
+
+        let expected = [
+            Expected {
+                turb_upper: 95.0,
+                turbined_cost: 1.0,
+                max_div: 0.0,
+                diversion_cost: 0.0,
+                active: [true, false, true, false],
+                costs: [2.0, 3.0, 4.0, 5.0],
+                min_outflow_row_lower: 12.0,
+                max_outflow_row_upper: f64::INFINITY,
+                min_turbine_row_lower: 10.0,
+                min_generation_row_lower: 0.0,
+            },
+            Expected {
+                turb_upper: 140.0,
+                turbined_cost: 6.0,
+                max_div: 30.0,
+                diversion_cost: 7.0,
+                active: [false, true, false, true],
+                costs: [8.0, 9.0, 10.0, 11.0],
+                min_outflow_row_lower: 0.0,
+                max_outflow_row_upper: 80.0,
+                min_turbine_row_lower: 0.0,
+                min_generation_row_lower: 20.0,
+            },
+            Expected {
+                turb_upper: 0.0,
+                turbined_cost: 12.0,
+                max_div: 0.0,
+                diversion_cost: 0.0,
+                // Hydro 2 locks the `max_outflow_m3s.is_some()` semantics: `Some(0.0)`
+                // still activates outflow-above (a `> 0.0` regression would not).
+                active: [false, true, false, false],
+                costs: [13.0, 14.0, 15.0, 16.0],
+                min_outflow_row_lower: 0.0,
+                max_outflow_row_upper: 0.0,
+                min_turbine_row_lower: 0.0,
+                min_generation_row_lower: 0.0,
+            },
+        ];
+
+        for (h_idx, exp) in expected.iter().enumerate() {
+            for (blk, &hours) in BLOCK_HOURS.iter().enumerate() {
+                assert_block_bit_identical(&result, off, h_idx, blk, hours, exp);
+            }
+        }
+    }
+
+    /// A hydro with stage-wide `max_turbined_m3s = 500.0` (`max_generation_mw`
+    /// large enough that the constant-productivity cap never binds) and a
+    /// `block_id = 1` override to `100.0` on a three-block stage binds ONLY block 1.
+    #[test]
+    fn test_per_block_turbined_cap_binds_only_its_own_block() {
+        let hydros = vec![fixture_hydro(1, None)];
+        let mut fixtures = HydroBlockFixtures::new(hydros, &[1.0]);
+        fixtures.set_hydro_bounds(
+            0,
+            STAGE_IDX,
+            hydro_stage_bounds(0.0, 500.0, 0.0, None, 0.0, 1000.0, None),
+        );
+        fixtures.install_block_overlay();
+        fixtures.set_hydro_block_override(
+            0,
+            STAGE_IDX,
+            1,
+            HydroBlockOverride {
+                max_turbined_m3s: Some(100.0),
+                ..Default::default()
+            },
+        );
+
+        let result = run_fill(&fixtures, STAGE_IDX);
+        let off = &result.offsets;
+        let upper = per_block(&result.col_upper, off, off.turbine);
+        assert_eq!(
+            upper,
+            vec![500.0, 100.0, 500.0],
+            "only block 1 is bound to the override"
+        );
+        for blk in 0..N_BLKS {
+            assert_eq!(
+                result.col_lower[off.at(off.turbine, 0, blk)],
+                0.0,
+                "col_lower unaffected by the max-only override, blk {blk}"
+            );
+        }
+    }
+
+    /// A hydro with stage-wide `max_diversion_m3s = Some(20.0)` and a `block_id = 2`
+    /// override to `75.0` on a three-block stage binds ONLY block 2 — the diversion
+    /// analogue of the turbine per-block cap.
+    #[test]
+    fn test_per_block_diversion_cap_binds_only_its_own_block() {
+        let hydros = vec![fixture_hydro(1, None)];
+        let mut fixtures = HydroBlockFixtures::new(hydros, &[1.0]);
+        fixtures.set_hydro_bounds(
+            0,
+            STAGE_IDX,
+            hydro_stage_bounds(0.0, 0.0, 0.0, None, 0.0, 0.0, Some(20.0)),
+        );
+        fixtures.install_block_overlay();
+        fixtures.set_hydro_block_override(
+            0,
+            STAGE_IDX,
+            2,
+            HydroBlockOverride {
+                max_diversion_m3s: Some(75.0),
+                ..Default::default()
+            },
+        );
+
+        let result = run_fill(&fixtures, STAGE_IDX);
+        let off = &result.offsets;
+        let upper = per_block(&result.col_upper, off, off.diversion);
+        assert_eq!(
+            upper,
+            vec![20.0, 20.0, 75.0],
+            "only block 2 is bound to the override"
+        );
+    }
+
+    /// A filling-suspended hydro (`filling = None`, `entry_stage_id` after the
+    /// build stage — `PreFilling`) carrying a `block_id` override setting
+    /// `max_turbined_m3s = 400.0` still gets `[0, 0]` at every block: the
+    /// suspension gate wins over the per-block cap.
+    #[test]
+    fn test_suspended_hydro_ignores_per_block_turbine_cap() {
+        let hydros = vec![fixture_hydro(1, Some(3))];
+        let mut fixtures = HydroBlockFixtures::new(hydros, &[1.0]);
+        fixtures.set_hydro_bounds(
+            0,
+            STAGE_IDX,
+            hydro_stage_bounds(0.0, 500.0, 0.0, None, 0.0, 1000.0, None),
+        );
+        fixtures.install_block_overlay();
+        fixtures.set_hydro_block_override(
+            0,
+            STAGE_IDX,
+            1,
+            HydroBlockOverride {
+                max_turbined_m3s: Some(400.0),
+                ..Default::default()
+            },
+        );
+
+        let result = run_fill(&fixtures, STAGE_IDX);
+        let off = &result.offsets;
+        for blk in 0..N_BLKS {
+            let col = off.at(off.turbine, 0, blk);
+            assert_eq!(result.col_upper[col], 0.0, "suspended col_upper, blk {blk}");
+            assert_eq!(result.col_lower[col], 0.0, "suspended col_lower, blk {blk}");
+        }
+    }
+
+    /// A hydro with stage-wide `min_outflow_m3s = 0.0` (below-min-outflow slack
+    /// inactive) and a `block_id = 2` override to `200.0` activates ONLY block 2's
+    /// slack column, and the min-outflow row's `row_lower` reads `[0, 0, 200]` —
+    /// a stage-level activation predicate hoisted above the block loop would leave
+    /// this floor unenforceable (no slack column, hard infeasibility).
+    #[test]
+    fn test_block_only_floor_activates_its_slack_column() {
+        let hydros = vec![fixture_hydro(1, None)];
+        let mut fixtures = HydroBlockFixtures::new(hydros, &[1.0]);
+        fixtures.set_hydro_bounds(
+            0,
+            STAGE_IDX,
+            hydro_stage_bounds(0.0, 50.0, 0.0, None, 0.0, 45.0, None),
+        );
+        fixtures.install_block_overlay();
+        fixtures.set_hydro_block_override(
+            0,
+            STAGE_IDX,
+            2,
+            HydroBlockOverride {
+                min_outflow_m3s: Some(200.0),
+                ..Default::default()
+            },
+        );
+
+        let result = run_fill(&fixtures, STAGE_IDX);
+        let off = &result.offsets;
+
+        let slack_upper = per_block(&result.col_upper, off, off.outflow_below);
+        assert_eq!(
+            slack_upper,
+            vec![0.0, 0.0, f64::INFINITY],
+            "only block 2's slack column is active"
+        );
+
+        let row_lower = per_block(&result.row_lower, off, off.min_outflow_row);
+        assert_eq!(
+            row_lower,
+            vec![0.0, 0.0, 200.0],
+            "min-outflow row_lower reads per block"
+        );
+    }
+
+    /// A hydro with stage-wide `max_outflow_m3s = Some(300.0)` and a `block_id = 1`
+    /// override to `50.0` binds ONLY block 1's max-outflow row upper bound;
+    /// `row_lower` stays `-INF` at every block (a literal constant, not read from
+    /// the resolved bound).
+    #[test]
+    fn test_per_block_max_outflow_row_bound() {
+        let hydros = vec![fixture_hydro(1, None)];
+        let mut fixtures = HydroBlockFixtures::new(hydros, &[1.0]);
+        fixtures.set_hydro_bounds(
+            0,
+            STAGE_IDX,
+            hydro_stage_bounds(0.0, 50.0, 0.0, Some(300.0), 0.0, 45.0, None),
+        );
+        fixtures.install_block_overlay();
+        fixtures.set_hydro_block_override(
+            0,
+            STAGE_IDX,
+            1,
+            HydroBlockOverride {
+                max_outflow_m3s: Some(50.0),
+                ..Default::default()
+            },
+        );
+
+        let result = run_fill(&fixtures, STAGE_IDX);
+        let off = &result.offsets;
+        let row_upper = per_block(&result.row_upper, off, off.max_outflow_row);
+        assert_eq!(
+            row_upper,
+            vec![300.0, 50.0, 300.0],
+            "max-outflow row_upper reads per block"
+        );
+        for blk in 0..N_BLKS {
+            assert_eq!(
+                result.row_lower[off.at(off.max_outflow_row, 0, blk)],
+                f64::NEG_INFINITY,
+                "max-outflow row_lower stays -INF, blk {blk}"
+            );
+        }
+    }
+
+    /// A hydro with stage-wide `min_turbined_m3s = 0.0` and a `block_id = 1`
+    /// override to `75.0` binds ONLY block 1's min-turbine row lower bound.
+    #[test]
+    fn test_per_block_min_turbine_row_bound() {
+        let hydros = vec![fixture_hydro(1, None)];
+        let mut fixtures = HydroBlockFixtures::new(hydros, &[1.0]);
+        fixtures.set_hydro_bounds(
+            0,
+            STAGE_IDX,
+            hydro_stage_bounds(0.0, 50.0, 0.0, None, 0.0, 45.0, None),
+        );
+        fixtures.install_block_overlay();
+        fixtures.set_hydro_block_override(
+            0,
+            STAGE_IDX,
+            1,
+            HydroBlockOverride {
+                min_turbined_m3s: Some(75.0),
+                ..Default::default()
+            },
+        );
+
+        let result = run_fill(&fixtures, STAGE_IDX);
+        let off = &result.offsets;
+        let row_lower = per_block(&result.row_lower, off, off.min_turbine_row);
+        assert_eq!(
+            row_lower,
+            vec![0.0, 75.0, 0.0],
+            "min-turbine row_lower reads per block"
+        );
+    }
+
+    /// A hydro with stage-wide `min_generation_mw = 0.0` and a `block_id = 0`
+    /// override to `50.0` binds ONLY block 0's min-generation row lower bound.
+    #[test]
+    fn test_per_block_min_generation_row_bound() {
+        let hydros = vec![fixture_hydro(1, None)];
+        let mut fixtures = HydroBlockFixtures::new(hydros, &[1.0]);
+        fixtures.set_hydro_bounds(
+            0,
+            STAGE_IDX,
+            hydro_stage_bounds(0.0, 50.0, 0.0, None, 0.0, 45.0, None),
+        );
+        fixtures.install_block_overlay();
+        fixtures.set_hydro_block_override(
+            0,
+            STAGE_IDX,
+            0,
+            HydroBlockOverride {
+                min_generation_mw: Some(50.0),
+                ..Default::default()
+            },
+        );
+
+        let result = run_fill(&fixtures, STAGE_IDX);
+        let off = &result.offsets;
+        let row_lower = per_block(&result.row_lower, off, off.min_generation_row);
+        assert_eq!(
+            row_lower,
+            vec![50.0, 0.0, 0.0],
+            "min-generation row_lower reads per block"
+        );
+    }
+
+    /// An FPHA (non-`ConstantProductivity`) hydro with a stage-wide
+    /// `max_generation_mw = 300.0` and a `block_id = 1` override to `120.0` on a
+    /// three-block stage binds ONLY block 1 — the FPHA-generation-cap analogue of
+    /// the turbine/diversion per-block caps above. `max_generation_mw` is
+    /// block-eligible (`HydroBlockOverride`); reading `hydro_bounds` once above
+    /// the `for blk` loop instead of `hydro_bounds_at_block` inside it would
+    /// silently apply the stage-wide cap to every block.
+    #[test]
+    fn test_fpha_generation_cap_binds_only_its_own_block() {
+        let hydros = vec![fixture_hydro(1, None)];
+        let mut fixtures = HydroBlockFixtures::new(hydros, &[0.0]);
+        fixtures.production_models = ProductionModelSet::new(
+            vec![vec![
+                ResolvedProductionModel::Fpha {
+                    planes: vec![FphaPlane {
+                        intercept: 0.0,
+                        gamma_v: 0.0,
+                        gamma_q: 0.0,
+                        gamma_s: 0.0,
+                    }],
+                };
+                N_STAGES
+            ]],
+            1,
+            N_STAGES,
+        );
+        fixtures.set_hydro_bounds(
+            0,
+            STAGE_IDX,
+            hydro_stage_bounds(0.0, 0.0, 0.0, None, 0.0, 300.0, None),
+        );
+        fixtures.install_block_overlay();
+        fixtures.set_hydro_block_override(
+            0,
+            STAGE_IDX,
+            1,
+            HydroBlockOverride {
+                max_generation_mw: Some(120.0),
+                ..Default::default()
+            },
+        );
+
+        let stage = three_block_stage(STAGE_IDX);
+        let ctx = fixtures.make_ctx();
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, STAGE_IDX);
+        assert_eq!(
+            layout.fpha_hydro_indices.len(),
+            1,
+            "fixture hydro must classify as FPHA"
+        );
+
+        let mut col_lower = vec![0.0_f64; layout.num_cols];
+        let mut col_upper = vec![f64::INFINITY; layout.num_cols];
+        let mut objective = vec![0.0_f64; layout.num_cols];
+        let mut bufs = ColumnBufs {
+            col_lower: &mut col_lower,
+            col_upper: &mut col_upper,
+            objective: &mut objective,
+        };
+        fill_fpha_generation_columns(&ctx, STAGE_IDX, &layout, &mut bufs);
+
+        let upper: Vec<f64> = (0..N_BLKS)
+            .map(|blk| col_upper[layout.generation_col(FphaLocal::new(0), BlockIdx::new(blk))])
+            .collect();
+        assert_eq!(
+            upper,
+            vec![300.0, 120.0, 300.0],
+            "only block 1 is bound to the override"
+        );
     }
 }

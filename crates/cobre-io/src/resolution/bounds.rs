@@ -1,7 +1,8 @@
 //! Bound resolution from base entity values plus stage-varying overrides.
 //!
 //! [`resolve_bounds`] produces a [`ResolvedBounds`] table for O(1) lookup by
-//! `(entity_index, stage_index)` during LP construction.
+//! `(entity_index, stage_index, block_index)` during LP construction; see its
+//! own doc for the four-layer bound-precedence law it populates.
 
 use std::collections::HashMap;
 
@@ -9,8 +10,9 @@ use cobre_core::{
     EntityId,
     entities::{EnergyContract, Hydro, Line, PumpingStation, Thermal},
     resolved::{
-        ContractStageBounds, HydroStageBounds, LineStageBounds, PumpingStageBounds, ResolvedBounds,
-        ThermalStageBounds,
+        ContractBlockOverride, ContractStageBounds, HydroBlockOverride, HydroStageBounds,
+        LineBlockOverride, LineStageBounds, PumpingBlockOverride, PumpingStageBounds,
+        ResolvedBounds, ThermalBlockOverride, ThermalStageBounds,
     },
 };
 
@@ -48,6 +50,33 @@ pub struct BoundsOverrides<'a> {
 }
 
 /// Pre-compute the full bound table from entity base values and stage-varying overrides.
+///
+/// Resolves every block-eligible bound column via a four-layer precedence law,
+/// most specific first:
+///
+/// 1. per-block override — an override row with `block_id = Some(b)`; replaces
+///    layer 2 for block `b` only, never merges with it
+/// 2. stage-wide override — an override row with `block_id = None`
+/// 3. base value — the entity's own field
+/// 4. *(reserved, not yet implemented)* a computed capability derived from unit
+///    nominals
+///
+/// Both override layers are sparse: an absent row falls through to the next
+/// layer, never zero. The law is uniform across all five entity families —
+/// no per-family exception.
+///
+/// This function only **populates** the two storages the law reads from — a
+/// dense per-`(entity, stage)` table (layers 2/3, pre-merged: base values fill
+/// first, then stage-wide overrides patch the columns a row supplies) and,
+/// once any row carries a `block_id`, a sparse per-`(entity, stage, block)`
+/// overlay (layer 1). It does not itself enforce the law: the two passes
+/// write disjoint storage, so their relative order here is immaterial to the
+/// result. Precedence is enforced at **read time** by the `*_bounds_at_block`
+/// accessors (e.g. [`ResolvedBounds::thermal_bounds_at_block`]):
+/// `over.<field>.unwrap_or(cell.<field>)` — the block overlay wins when
+/// present, else the pre-merged stage cell. Reversing that fallback, or
+/// returning the stage cell without consulting the overlay at all, still
+/// type-checks and silently discards every block-specific override.
 ///
 /// Override rows referencing unknown entity IDs, out-of-range stage IDs, or an
 /// out-of-range `block_id` are silently skipped (referential integrity is
@@ -135,6 +164,7 @@ pub struct BoundsOverrides<'a> {
 ///     max_diversion_m3s: None,
 ///     filling_min_rate_m3s: None,
 ///     water_withdrawal_m3s: None,
+///     block_id: None,
 /// };
 ///
 /// let stage_index: std::collections::HashMap<i32, usize> =
@@ -352,7 +382,11 @@ pub fn resolve_bounds(
     }
 
     let max_blocks = blocks_per_stage.iter().copied().max().unwrap_or(0);
-    let any_block_row = thermal_overrides.iter().any(|row| row.block_id.is_some());
+    let any_block_row = thermal_overrides.iter().any(|row| row.block_id.is_some())
+        || hydro_overrides.iter().any(|row| row.block_id.is_some())
+        || line_overrides.iter().any(|row| row.block_id.is_some())
+        || pumping_overrides.iter().any(|row| row.block_id.is_some())
+        || contract_overrides.iter().any(|row| row.block_id.is_some());
     let mut block_overlay = (any_block_row && max_blocks > 0).then(|| {
         cobre_core::ResolvedBlockBounds::new(&cobre_core::BlockBoundsCountsSpec {
             n_hydros: entities.hydros.len(),
@@ -365,7 +399,7 @@ pub fn resolve_bounds(
         })
     });
 
-    for row in hydro_overrides {
+    for row in hydro_overrides.iter().filter(|row| row.block_id.is_none()) {
         let Some(&entity_idx) = hydro_index.get(&row.hydro_id) else {
             continue;
         };
@@ -408,6 +442,25 @@ pub fn resolve_bounds(
         }
     }
 
+    if let Some(overlay) = block_overlay.as_mut() {
+        for row in hydro_overrides {
+            let Some((entity_idx, stage_idx, block_idx)) = block_slot(
+                row.block_id,
+                row.hydro_id,
+                row.stage_id,
+                &hydro_index,
+                stage_index,
+                blocks_per_stage,
+            ) else {
+                continue;
+            };
+            let Some(cell) = overlay.hydro_override_mut(entity_idx, stage_idx, block_idx) else {
+                continue;
+            };
+            apply_hydro_block_row(row, cell);
+        }
+    }
+
     for row in thermal_overrides
         .iter()
         .filter(|row| row.block_id.is_none())
@@ -432,37 +485,24 @@ pub fn resolve_bounds(
 
     if let Some(overlay) = block_overlay.as_mut() {
         for row in thermal_overrides {
-            let Some(block_id) = row.block_id else {
+            let Some((entity_idx, stage_idx, block_idx)) = block_slot(
+                row.block_id,
+                row.thermal_id,
+                row.stage_id,
+                &thermal_index,
+                stage_index,
+                blocks_per_stage,
+            ) else {
                 continue;
             };
-            let Some(&entity_idx) = thermal_index.get(&row.thermal_id) else {
-                continue;
-            };
-            let Some(&stage_idx) = stage_index.get(&row.stage_id) else {
-                continue;
-            };
-            let Ok(block_idx) = usize::try_from(block_id) else {
-                continue;
-            };
-            let Some(&n_blocks) = blocks_per_stage.get(stage_idx) else {
-                continue;
-            };
-            if block_idx >= n_blocks {
-                continue;
-            }
             let Some(cell) = overlay.thermal_override_mut(entity_idx, stage_idx, block_idx) else {
                 continue;
             };
-            if let Some(v) = row.min_generation_mw {
-                cell.min_generation_mw = Some(v);
-            }
-            if let Some(v) = row.max_generation_mw {
-                cell.max_generation_mw = Some(v);
-            }
+            apply_thermal_block_row(row, cell);
         }
     }
 
-    for row in line_overrides {
+    for row in line_overrides.iter().filter(|row| row.block_id.is_none()) {
         let Some(&entity_idx) = line_index.get(&row.line_id) else {
             continue;
         };
@@ -478,7 +518,29 @@ pub fn resolve_bounds(
         }
     }
 
-    for row in pumping_overrides {
+    if let Some(overlay) = block_overlay.as_mut() {
+        for row in line_overrides {
+            let Some((entity_idx, stage_idx, block_idx)) = block_slot(
+                row.block_id,
+                row.line_id,
+                row.stage_id,
+                &line_index,
+                stage_index,
+                blocks_per_stage,
+            ) else {
+                continue;
+            };
+            let Some(cell) = overlay.line_override_mut(entity_idx, stage_idx, block_idx) else {
+                continue;
+            };
+            apply_line_block_row(row, cell);
+        }
+    }
+
+    for row in pumping_overrides
+        .iter()
+        .filter(|row| row.block_id.is_none())
+    {
         let Some(&entity_idx) = pumping_index.get(&row.station_id) else {
             continue;
         };
@@ -494,7 +556,29 @@ pub fn resolve_bounds(
         }
     }
 
-    for row in contract_overrides {
+    if let Some(overlay) = block_overlay.as_mut() {
+        for row in pumping_overrides {
+            let Some((entity_idx, stage_idx, block_idx)) = block_slot(
+                row.block_id,
+                row.station_id,
+                row.stage_id,
+                &pumping_index,
+                stage_index,
+                blocks_per_stage,
+            ) else {
+                continue;
+            };
+            let Some(cell) = overlay.pumping_override_mut(entity_idx, stage_idx, block_idx) else {
+                continue;
+            };
+            apply_pumping_block_row(row, cell);
+        }
+    }
+
+    for row in contract_overrides
+        .iter()
+        .filter(|row| row.block_id.is_none())
+    {
         let Some(&entity_idx) = contract_index.get(&row.contract_id) else {
             continue;
         };
@@ -513,11 +597,121 @@ pub fn resolve_bounds(
         }
     }
 
+    if let Some(overlay) = block_overlay.as_mut() {
+        for row in contract_overrides {
+            let Some((entity_idx, stage_idx, block_idx)) = block_slot(
+                row.block_id,
+                row.contract_id,
+                row.stage_id,
+                &contract_index,
+                stage_index,
+                blocks_per_stage,
+            ) else {
+                continue;
+            };
+            let Some(cell) = overlay.contract_override_mut(entity_idx, stage_idx, block_idx) else {
+                continue;
+            };
+            apply_contract_block_row(row, cell);
+        }
+    }
+
     if let Some(overlay) = block_overlay {
         table.set_block_overlay(overlay);
     }
 
     table
+}
+
+/// Resolve an override row's `(entity_idx, stage_idx, block_idx)` overlay slot;
+/// `None` skips the row (no `block_id`, unknown entity or stage, or a `block_id`
+/// outside the stage's block count).
+fn block_slot(
+    block_id: Option<i32>,
+    entity_id: EntityId,
+    stage_id: i32,
+    entity_index: &HashMap<EntityId, usize>,
+    stage_index: &HashMap<i32, usize>,
+    blocks_per_stage: &[usize],
+) -> Option<(usize, usize, usize)> {
+    let block_id = block_id?;
+    let &entity_idx = entity_index.get(&entity_id)?;
+    let &stage_idx = stage_index.get(&stage_id)?;
+    let block_idx = usize::try_from(block_id).ok()?;
+    if block_idx >= *blocks_per_stage.get(stage_idx)? {
+        return None;
+    }
+    Some((entity_idx, stage_idx, block_idx))
+}
+
+/// Write a hydro block row's present columns into a per-block overlay cell.
+/// Only the seven block-eligible columns are read from `row` — the four
+/// stage-level columns (`min`/`max_storage_hm3`, `filling_min_rate_m3s`,
+/// `water_withdrawal_m3s`) have no field on [`HydroBlockOverride`] and are
+/// never written here.
+fn apply_hydro_block_row(row: &HydroBoundsRow, over: &mut HydroBlockOverride) {
+    if let Some(v) = row.min_turbined_m3s {
+        over.min_turbined_m3s = Some(v);
+    }
+    if let Some(v) = row.max_turbined_m3s {
+        over.max_turbined_m3s = Some(v);
+    }
+    if let Some(v) = row.min_outflow_m3s {
+        over.min_outflow_m3s = Some(v);
+    }
+    if let Some(v) = row.max_outflow_m3s {
+        over.max_outflow_m3s = Some(v);
+    }
+    if let Some(v) = row.min_generation_mw {
+        over.min_generation_mw = Some(v);
+    }
+    if let Some(v) = row.max_generation_mw {
+        over.max_generation_mw = Some(v);
+    }
+    if let Some(v) = row.max_diversion_m3s {
+        over.max_diversion_m3s = Some(v);
+    }
+}
+
+fn apply_thermal_block_row(row: &ThermalBoundsRow, over: &mut ThermalBlockOverride) {
+    if let Some(v) = row.min_generation_mw {
+        over.min_generation_mw = Some(v);
+    }
+    if let Some(v) = row.max_generation_mw {
+        over.max_generation_mw = Some(v);
+    }
+}
+
+fn apply_line_block_row(row: &LineBoundsRow, over: &mut LineBlockOverride) {
+    if let Some(v) = row.direct_mw {
+        over.direct_mw = Some(v);
+    }
+    if let Some(v) = row.reverse_mw {
+        over.reverse_mw = Some(v);
+    }
+}
+
+fn apply_pumping_block_row(row: &PumpingBoundsRow, over: &mut PumpingBlockOverride) {
+    if let Some(v) = row.min_m3s {
+        over.min_flow_m3s = Some(v);
+    }
+    if let Some(v) = row.max_m3s {
+        over.max_flow_m3s = Some(v);
+    }
+}
+
+/// `price_per_mwh` is block-eligible here, asymmetric with
+/// `ThermalBoundsRow.cost_per_mwh`, which stays stage-level.
+fn apply_contract_block_row(row: &ContractBoundsRow, over: &mut ContractBlockOverride) {
+    if let Some(v) = row.min_mw {
+        over.min_mw = Some(v);
+    }
+    if let Some(v) = row.max_mw {
+        over.max_mw = Some(v);
+    }
+    if let Some(v) = row.price_per_mwh {
+        over.price_per_mwh = Some(v);
+    }
 }
 
 /// Derive the base [`HydroStageBounds`] from a `Hydro` entity's fields.
@@ -769,6 +963,7 @@ mod tests {
             max_diversion_m3s: None,
             filling_min_rate_m3s: None,
             water_withdrawal_m3s: None,
+            block_id: None,
         }
     }
 
@@ -1015,6 +1210,7 @@ mod tests {
             stage_id: 1,
             direct_mw: Some(750.0),
             reverse_mw: None,
+            block_id: None,
         };
 
         let result = resolve_bounds(
@@ -1054,6 +1250,7 @@ mod tests {
             stage_id: 0,
             min_m3s: None,
             max_m3s: Some(100.0),
+            block_id: None,
         };
 
         let result = resolve_bounds(
@@ -1091,6 +1288,7 @@ mod tests {
             min_mw: None,
             max_mw: None,
             price_per_mwh: Some(90.0),
+            block_id: None,
         };
 
         let result = resolve_bounds(
@@ -1352,6 +1550,7 @@ mod tests {
             min_mw: None,
             max_mw: None,
             price_per_mwh: Some(90.0),
+            block_id: None,
         };
 
         let result = resolve_bounds(
@@ -1814,6 +2013,144 @@ mod tests {
         }
     }
 
+    // ── Tests: hydro per-block overlay activation ─────────────────────────────
+
+    /// Precedence: block (layer 1) beats stage-wide (layer 2) beats base (layer 3).
+    /// Hydro base `max_turbined_m3s = 500.0`, a stage-wide row sets `400.0`, and a
+    /// block-1 row (of 3 blocks) sets `100.0`.
+    #[test]
+    fn test_hydro_precedence_block_over_stage_over_base() {
+        let mut hydro = make_hydro(0, 10.0, 200.0, None, None, None);
+        hydro.max_turbined_m3s = 500.0;
+        let hydros = vec![hydro];
+        let stage_wide_row = HydroBoundsRow {
+            max_turbined_m3s: Some(400.0),
+            ..all_none_hydro_row(0, 0)
+        };
+        let block_row = HydroBoundsRow {
+            max_turbined_m3s: Some(100.0),
+            block_id: Some(1),
+            ..all_none_hydro_row(0, 0)
+        };
+
+        let result = resolve_bounds(
+            &hydros,
+            &[],
+            &[],
+            &[],
+            &[],
+            1,
+            0,
+            &[stage_wide_row, block_row],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[3],
+        );
+
+        assert!(
+            (result.hydro_bounds_at_block(0, 0, 0).max_turbined_m3s - 400.0).abs() < f64::EPSILON,
+            "block 0 has no block override: falls through to the stage-wide value"
+        );
+        assert!(
+            (result.hydro_bounds_at_block(0, 0, 1).max_turbined_m3s - 100.0).abs() < f64::EPSILON,
+            "block 1 carries the block override"
+        );
+        assert!(
+            (result.hydro_bounds_at_block(0, 0, 2).max_turbined_m3s - 400.0).abs() < f64::EPSILON,
+            "block 2 has no block override: falls through to the stage-wide value"
+        );
+    }
+
+    /// A block row that sets only `max_storage_hm3` and `water_withdrawal_m3s` (both
+    /// stage-level, not block-eligible) leaves every field of `hydro_bounds_at_block`
+    /// identical to `hydro_bounds` — no stage-level column reaches the overlay, and
+    /// the block row's values do not leak into the stage-wide cell either.
+    #[test]
+    fn test_hydro_block_row_cannot_override_stage_level_columns() {
+        let hydros = vec![make_hydro(0, 10.0, 200.0, None, None, None)];
+        let block_row = HydroBoundsRow {
+            max_storage_hm3: Some(999.0),
+            water_withdrawal_m3s: Some(42.0),
+            block_id: Some(1),
+            ..all_none_hydro_row(0, 0)
+        };
+
+        let result = resolve_bounds(
+            &hydros,
+            &[],
+            &[],
+            &[],
+            &[],
+            1,
+            0,
+            &[block_row],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[3],
+        );
+
+        let stage_wide = *result.hydro_bounds(0, 0);
+        let at_block = result.hydro_bounds_at_block(0, 0, 1);
+
+        assert!((stage_wide.max_storage_hm3 - 200.0).abs() < f64::EPSILON);
+        assert!((stage_wide.water_withdrawal_m3s - 0.0).abs() < f64::EPSILON);
+
+        assert!((at_block.min_storage_hm3 - stage_wide.min_storage_hm3).abs() < f64::EPSILON);
+        assert!((at_block.max_storage_hm3 - stage_wide.max_storage_hm3).abs() < f64::EPSILON);
+        assert!((at_block.min_turbined_m3s - stage_wide.min_turbined_m3s).abs() < f64::EPSILON);
+        assert!((at_block.max_turbined_m3s - stage_wide.max_turbined_m3s).abs() < f64::EPSILON);
+        assert!((at_block.min_outflow_m3s - stage_wide.min_outflow_m3s).abs() < f64::EPSILON);
+        assert_eq!(at_block.max_outflow_m3s, stage_wide.max_outflow_m3s);
+        assert!((at_block.min_generation_mw - stage_wide.min_generation_mw).abs() < f64::EPSILON);
+        assert!((at_block.max_generation_mw - stage_wide.max_generation_mw).abs() < f64::EPSILON);
+        assert_eq!(at_block.max_diversion_m3s, stage_wide.max_diversion_m3s);
+        assert!(
+            (at_block.filling_min_rate_m3s - stage_wide.filling_min_rate_m3s).abs() < f64::EPSILON
+        );
+        assert!(
+            (at_block.water_withdrawal_m3s - stage_wide.water_withdrawal_m3s).abs() < f64::EPSILON
+        );
+    }
+
+    /// A block row that sets only `max_turbined_m3s` leaves `min_turbined_m3s` at
+    /// the stage-wide (here: base, since no stage-wide override is present) value —
+    /// a layer-1 row replaces only the columns it names.
+    #[test]
+    fn test_hydro_block_row_is_sparse_per_column() {
+        let mut hydro = make_hydro(0, 10.0, 200.0, None, None, None);
+        hydro.min_turbined_m3s = 5.0;
+        let hydros = vec![hydro];
+        let block_row = HydroBoundsRow {
+            max_turbined_m3s: Some(999.0),
+            block_id: Some(1),
+            ..all_none_hydro_row(0, 0)
+        };
+
+        let result = resolve_bounds(
+            &hydros,
+            &[],
+            &[],
+            &[],
+            &[],
+            1,
+            0,
+            &[block_row],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[2],
+        );
+
+        let b = result.hydro_bounds_at_block(0, 0, 1);
+        assert!((b.max_turbined_m3s - 999.0).abs() < f64::EPSILON);
+        assert!((b.min_turbined_m3s - 5.0).abs() < f64::EPSILON);
+    }
+
     // ── Tests: thermal per-block overlay activation ───────────────────────────
 
     /// A thermal row with `block_id = Some(1)` and `max_generation_mw = Some(100.0)`
@@ -2028,5 +2365,132 @@ mod tests {
         );
 
         assert!(result.block_overlay().is_empty());
+    }
+
+    // ── Tests: line/contract/pumping per-block overlay activation ────────────
+
+    /// A line `direct_mw` block-2 override, a contract `max_mw` block-0 override,
+    /// and a pumping `max_flow_m3s` block-1 override each apply at their own block
+    /// only; every other block on the 3-block stage falls through to the
+    /// stage-wide (here: base, since no stage-wide override row is present) value.
+    #[test]
+    fn test_line_contract_pumping_block_precedence() {
+        let lines = vec![make_line(0, 1000.0, 800.0)];
+        let contracts = vec![make_contract(0, 0.0, 200.0, 80.0)];
+        let pumpings = vec![make_pumping(0, 0.0, 100.0)];
+
+        let line_block_row = LineBoundsRow {
+            line_id: EntityId::from(0),
+            stage_id: 0,
+            direct_mw: Some(800.0),
+            reverse_mw: None,
+            block_id: Some(2),
+        };
+        let contract_block_row = ContractBoundsRow {
+            contract_id: EntityId::from(0),
+            stage_id: 0,
+            min_mw: None,
+            max_mw: Some(50.0),
+            price_per_mwh: None,
+            block_id: Some(0),
+        };
+        let pumping_block_row = PumpingBoundsRow {
+            station_id: EntityId::from(0),
+            stage_id: 0,
+            min_m3s: None,
+            max_m3s: Some(20.0),
+            block_id: Some(1),
+        };
+
+        let result = resolve_bounds(
+            &[],
+            &[],
+            &lines,
+            &pumpings,
+            &contracts,
+            1,
+            0,
+            &[],
+            &[],
+            &[line_block_row],
+            &[pumping_block_row],
+            &[contract_block_row],
+            &[3],
+        );
+
+        assert!((result.line_bounds_at_block(0, 0, 0).direct_mw - 1000.0).abs() < f64::EPSILON);
+        assert!((result.line_bounds_at_block(0, 0, 1).direct_mw - 1000.0).abs() < f64::EPSILON);
+        assert!(
+            (result.line_bounds_at_block(0, 0, 2).direct_mw - 800.0).abs() < f64::EPSILON,
+            "block 2 carries the line block override"
+        );
+
+        assert!(
+            (result.contract_bounds_at_block(0, 0, 0).max_mw - 50.0).abs() < f64::EPSILON,
+            "block 0 carries the contract block override"
+        );
+        assert!((result.contract_bounds_at_block(0, 0, 1).max_mw - 200.0).abs() < f64::EPSILON);
+        assert!((result.contract_bounds_at_block(0, 0, 2).max_mw - 200.0).abs() < f64::EPSILON);
+
+        assert!(
+            (result.pumping_bounds_at_block(0, 0, 0).max_flow_m3s - 100.0).abs() < f64::EPSILON
+        );
+        assert!(
+            (result.pumping_bounds_at_block(0, 0, 1).max_flow_m3s - 20.0).abs() < f64::EPSILON,
+            "block 1 carries the pumping block override"
+        );
+        assert!(
+            (result.pumping_bounds_at_block(0, 0, 2).max_flow_m3s - 100.0).abs() < f64::EPSILON
+        );
+    }
+
+    /// A contract block row that sets only `price_per_mwh` overrides price at its
+    /// own block while `min_mw`/`max_mw` at that same block fall through to the
+    /// stage-wide value — `price_per_mwh` is block-eligible on its own, independent
+    /// of the other two columns.
+    #[test]
+    fn test_contract_block_row_overrides_price_per_block() {
+        let contracts = vec![make_contract(0, 0.0, 200.0, 80.0)];
+        let block_row = ContractBoundsRow {
+            contract_id: EntityId::from(0),
+            stage_id: 0,
+            min_mw: None,
+            max_mw: None,
+            price_per_mwh: Some(120.0),
+            block_id: Some(1),
+        };
+
+        let result = resolve_bounds(
+            &[],
+            &[],
+            &[],
+            &[],
+            &contracts,
+            1,
+            0,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[block_row],
+            &[3],
+        );
+
+        assert!(
+            (result.contract_bounds_at_block(0, 0, 1).price_per_mwh - 120.0).abs() < f64::EPSILON,
+            "block 1 carries the price override"
+        );
+        assert!(
+            (result.contract_bounds_at_block(0, 0, 0).price_per_mwh - 80.0).abs() < f64::EPSILON,
+            "block 0 falls through to the stage-wide price"
+        );
+        assert!(
+            (result.contract_bounds_at_block(0, 0, 2).price_per_mwh - 80.0).abs() < f64::EPSILON,
+            "block 2 falls through to the stage-wide price"
+        );
+
+        let at_block = result.contract_bounds_at_block(0, 0, 1);
+        assert!((at_block.min_mw - 0.0).abs() < f64::EPSILON);
+        assert!((at_block.max_mw - 200.0).abs() < f64::EPSILON);
     }
 }

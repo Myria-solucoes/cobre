@@ -448,9 +448,13 @@ pub struct StageExtractionSpec<'a> {
     /// by SYSTEM station index — which under the dense layout IS the column-block
     /// position, so extraction reads it at the enumeration index.
     pub pumping_consumption_mw_per_m3s: &'a [f64],
-    /// RESOLVED per-contract price \[$/`MWh`\] for THIS stage, ID-sorted parallel to
-    /// `entity_counts.contract_ids`. The unscaled `contract_bounds(c, t).price_per_mwh`,
-    /// NOT the `col_scale`-scaled LP objective; `total_cost = price * power * hours`.
+    /// RESOLVED per-(contract, block) price \[$/`MWh`\] for THIS stage, flat with
+    /// stride `n_blks`: index `c * n_blks + blk`, `c` ID-sorted parallel to
+    /// `entity_counts.contract_ids`. The unscaled
+    /// `contract_bounds_at_block(c, t, blk).price_per_mwh`, NOT the
+    /// `col_scale`-scaled LP objective; `total_cost = price * power * hours`. Length
+    /// must equal `entity_counts.contract_ids.len() * n_blks` (debug-asserted by the
+    /// contract extractor).
     pub contract_prices: &'a [f64],
     /// Direction per contract, ID-sorted parallel to `entity_counts.contract_ids`:
     /// `true` = import (base `geometry.contract_import.start`), `false` = export
@@ -520,40 +524,11 @@ fn extract_hydro_no_turbine(
     hydro_id: i32,
     stage_id: u32,
 ) -> SimulationHydroResult {
-    let study_dims = spec.study_dims;
-    let state = spec.state;
-    let incremental_inflow = if h < spec.inflow_m3s_per_hydro.len() {
-        spec.inflow_m3s_per_hydro[h]
-    } else if state.max_par_order > 0 {
-        view.primal[state.lag_incoming_col(0, h).get()]
-    } else {
-        0.0
-    };
-    let inflow_slack = if study_dims.has_inflow_penalty {
-        view.primal[spec.geometry.inflow_slack.start + h]
-    } else {
-        0.0
-    };
-    let withdrawal_neg = if study_dims.has_withdrawal {
-        view.primal[spec.geometry.withdrawal_slack_neg.start + h]
-    } else {
-        0.0
-    };
-    let withdrawal_pos = if study_dims.has_withdrawal {
-        view.primal[spec.geometry.withdrawal_slack_pos.start + h]
-    } else {
-        0.0
-    };
-    let water_value = view
-        .dual
-        .get(spec.geometry.water_balance.start + h)
-        .copied()
-        .unwrap_or(0.0)
-        * spec.cost_scale_factor;
+    let ctx = HydroStageContext::new(view, spec, lookup, h);
 
     // Per-block slacks aggregated to stage-level as an hours-weighted average.
     let (turbined_slack, outflow_slack_below, outflow_slack_above, generation_slack) =
-        if study_dims.has_operational_violations {
+        if spec.study_dims.has_operational_violations {
             let grid = spec.block_grid();
             let n_blks = spec.n_blks;
             let mut tb = 0.0_f64;
@@ -589,76 +564,44 @@ fn extract_hydro_no_turbine(
             (0.0, 0.0, 0.0, 0.0)
         };
 
-    let (evaporation_m3s, evaporation_violation_neg_m3s, evaporation_violation_pos_m3s) =
-        if let Some(local_evap_idx) = lookup.evap[h] {
-            // The aggregate `block_id: None` row reports block 0; it is not a
-            // per-block path (`extract_hydro_per_block` owns the per-block read).
-            let ei = &spec.geometry.evap_indices[local_evap_idx.get() * spec.geometry.n_blks];
-            let evaporation_flow = view.primal[ei.evaporation_flow_col];
-            let neg = view.primal[ei.f_evap_plus_col]; // f_evap_plus = under-evaporation
-            let pos = view.primal[ei.f_evap_minus_col]; // f_evap_minus = over-evaporation
-            (Some(evaporation_flow), neg, pos)
-        } else {
-            (Some(0.0), 0.0, 0.0)
-        };
-
-    let conv = spec.energy_conversion.conversion(h, spec.stage_index);
-    let rho_acum = spec
-        .energy_conversion
-        .accumulated_productivity(h, spec.stage_index);
-    let v_min = spec.hydro_min_storage_hm3.get(h).copied().unwrap_or(0.0);
-    let storage_initial = view.primal[state.storage_incoming_col(h).get()];
-    let storage_final = view.primal[state.storage_outgoing_col(h).get()];
-
-    let filling_target_violation = read_filling_target_slack_primal(
-        view.primal,
-        &spec.geometry.filling_target_col,
-        lookup.filling_target[h],
-    );
-    let storage_violation_below = read_floor_slack_primal(
-        view.primal,
-        &spec.geometry.filled_min_storage_floor_col,
-        lookup.filled_min_storage_floor[h],
-    );
-
     SimulationHydroResult {
         stage_id,
         block_id: None,
         hydro_id,
         turbined_m3s: 0.0,
         spillage_m3s: 0.0,
-        evaporation_m3s,
+        evaporation_m3s: ctx.evaporation_m3s,
         diverted_inflow_m3s: Some(0.0),
         diverted_outflow_m3s: Some(0.0),
-        incremental_inflow_m3s: incremental_inflow,
-        inflow_m3s: incremental_inflow,
-        storage_initial_hm3: storage_initial,
-        storage_final_hm3: storage_final,
+        incremental_inflow_m3s: ctx.incremental_inflow,
+        inflow_m3s: ctx.incremental_inflow,
+        storage_initial_hm3: ctx.storage_initial,
+        storage_final_hm3: ctx.storage_final,
         generation_mw: 0.0,
-        equivalent_productivity_mw_per_m3s: conv.equivalent_productivity_mw_per_m3s,
-        accumulated_productivity_mw_per_m3s: rho_acum,
-        incremental_inflow_energy_mw: rho_acum * incremental_inflow,
-        stored_energy_initial_mwh: (storage_initial - v_min)
-            * rho_acum
+        equivalent_productivity_mw_per_m3s: ctx.equivalent_productivity_mw_per_m3s,
+        accumulated_productivity_mw_per_m3s: ctx.accumulated_productivity_mw_per_m3s,
+        incremental_inflow_energy_mw: ctx.incremental_inflow_energy_mw,
+        stored_energy_initial_mwh: (ctx.storage_initial - ctx.v_min)
+            * ctx.rho_acum
             * ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S,
-        stored_energy_final_mwh: (storage_final - v_min)
-            * rho_acum
+        stored_energy_final_mwh: (ctx.storage_final - ctx.v_min)
+            * ctx.rho_acum
             * ENERGY_FACTOR_MWH_PER_HM3_PER_MW_PER_M3S,
         spillage_cost: 0.0,
-        water_value_per_hm3: water_value,
+        water_value_per_hm3: ctx.water_value,
         storage_binding_code: 0,
         operative_state_code: 1,
         turbined_slack_m3s: turbined_slack,
         outflow_slack_below_m3s: outflow_slack_below,
         outflow_slack_above_m3s: outflow_slack_above,
         generation_slack_mw: generation_slack,
-        storage_violation_below_hm3: storage_violation_below,
-        filling_target_violation_hm3: filling_target_violation,
-        evaporation_violation_pos_m3s,
-        evaporation_violation_neg_m3s,
-        inflow_nonnegativity_slack_m3s: inflow_slack,
-        water_withdrawal_violation_pos_m3s: withdrawal_pos,
-        water_withdrawal_violation_neg_m3s: withdrawal_neg,
+        storage_violation_below_hm3: ctx.storage_violation_below,
+        filling_target_violation_hm3: ctx.filling_target_violation,
+        evaporation_violation_pos_m3s: ctx.evaporation_violation_pos_m3s,
+        evaporation_violation_neg_m3s: ctx.evaporation_violation_neg_m3s,
+        inflow_nonnegativity_slack_m3s: ctx.inflow_slack,
+        water_withdrawal_violation_pos_m3s: ctx.withdrawal_pos,
+        water_withdrawal_violation_neg_m3s: ctx.withdrawal_neg,
     }
 }
 
@@ -1708,7 +1651,10 @@ fn extract_pumping_stations(
 /// count of same-direction contracts preceding `c` in ID-sorted order — `c` itself
 /// is the wrong grid stride (imports and exports share one ID-sorted list but
 /// occupy separate column blocks). `power_mw` is read directly from `view.primal`
-/// (already unscaled). `total_cost = price * power_mw * block_hours` uses the
+/// (already unscaled). `price` is read PER BLOCK from `spec.contract_prices[c *
+/// n_blks + blk]`, inside the `for blk` loop — hoisting it to `spec.contract_prices[c]`
+/// above the loop compiles but silently misaligns every cell against the flat
+/// per-block table. `total_cost = price * power_mw * block_hours` uses the
 /// RESOLVED price, not the `col_scale`-scaled LP objective. A dormant `[0, 0]`-pinned
 /// contract emits a ZERO row with `operative_state_code = 1`.
 fn extract_contracts(
@@ -1731,6 +1677,12 @@ fn extract_contracts(
         "contract primal out of bounds: need import_end {import_end} / export_end {export_end}, have {}",
         view.primal.len()
     );
+    debug_assert!(
+        spec.contract_prices.len() == n_contracts * n_blks,
+        "contract_prices stride mismatch: expected n_contracts * n_blks = {} ({n_contracts} * {n_blks}), got len {}",
+        n_contracts * n_blks,
+        spec.contract_prices.len()
+    );
 
     let grid = spec.block_grid();
     let mut import_slot = 0_usize;
@@ -1747,12 +1699,12 @@ fn extract_contracts(
             export_slot += 1;
             (export_base, slot)
         };
-        let price = spec.contract_prices[c];
         for blk in 0..n_blks {
             let col = grid.flat(base, family_slot, BlockIdx::new(blk));
             let power_mw = view.primal[col];
             let dur = spec.block_hours[blk];
             let energy_mwh = power_mw * dur;
+            let price = spec.contract_prices[c * n_blks + blk];
             let total_cost = price * energy_mwh;
             #[allow(clippy::cast_possible_truncation)]
             results.push(SimulationContractResult {

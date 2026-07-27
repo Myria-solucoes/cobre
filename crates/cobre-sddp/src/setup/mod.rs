@@ -389,16 +389,15 @@ impl StudySetup {
         // broadcast `system` rather than carried over the wire: the derivation is
         // a pure function of `system`, so every rank derives a bit-identical seed
         // with no extra broadcast.
-        let noop_season_map;
-        let season_map_ref = if let Some(sm) = system.policy_graph().season_map.as_ref() {
-            sm
-        } else {
-            noop_season_map = SeasonMap {
-                cycle_type: Monthly,
-                seasons: Vec::new(),
-            };
-            &noop_season_map
+        let noop_season_map = SeasonMap {
+            cycle_type: Monthly,
+            seasons: Vec::new(),
         };
+        let season_map_ref = system
+            .policy_graph()
+            .season_map
+            .as_ref()
+            .unwrap_or(&noop_season_map);
         let derived_inflow_seeds = match system.stages().iter().find(|s| s.id >= 0) {
             None => DerivedInflowSeeds::zero(system.hydros().len(), state_layout.max_par_order),
             Some(first_stage) => derive_inflow_seeds(
@@ -485,16 +484,17 @@ impl StudySetup {
             ncs_max_gen,
             ncs_allow_curtailment,
         } = build_ncs_entity_data(system, &stage_templates, &stochastic)?;
-        let pumping_consumption_mw_per_m3s = build_pumping_consumption(system);
-        let contract_prices_per_stage = build_contract_prices_per_stage(system, n_stages);
-        let contract_is_import = build_contract_is_import(system);
-
         let block_counts_per_stage: Vec<usize> = stage_templates
             .block_hours_per_stage
             .iter()
             .map(Vec::len)
             .collect();
         let max_blocks = block_counts_per_stage.iter().copied().max().unwrap_or(0);
+
+        let pumping_consumption_mw_per_m3s = build_pumping_consumption(system);
+        let contract_prices_per_stage =
+            build_contract_prices_per_stage(system, n_stages, &block_counts_per_stage);
+        let contract_is_import = build_contract_is_import(system);
 
         let stages: Vec<Stage> = system
             .stages()
@@ -650,24 +650,21 @@ fn build_ncs_entity_data(
     let mut ncs_max_gen: Vec<f64> = Vec::with_capacity(stoch_ncs_ids.len());
     let mut ncs_allow_curtailment: Vec<bool> = Vec::with_capacity(stoch_ncs_ids.len());
     for slot_id in stoch_ncs_ids {
+        let not_found = || {
+            SddpError::Validation(format!(
+                "stochastic NCS entity {slot_id:?} not found in system non_controllable_sources"
+            ))
+        };
         let dense_col = entity_counts
             .non_controllable_ids
             .iter()
             .position(|&id| id == slot_id.0)
-            .ok_or_else(|| {
-                SddpError::Validation(format!(
-                    "stochastic NCS entity {slot_id:?} not found in system non_controllable_sources"
-                ))
-            })?;
+            .ok_or_else(not_found)?;
         let ncs = system
             .non_controllable_sources()
             .iter()
             .find(|n| n.id == *slot_id)
-            .ok_or_else(|| {
-                SddpError::Validation(format!(
-                    "stochastic NCS entity {slot_id:?} not found in system non_controllable_sources"
-                ))
-            })?;
+            .ok_or_else(not_found)?;
         ncs_stochastic_dense_col.push(dense_col);
         ncs_stochastic_windows.push((ncs.entry_stage_id, ncs.exit_stage_id));
         ncs_max_gen.push(ncs.max_generation_mw);
@@ -853,7 +850,7 @@ pub(crate) fn resolve_state_layout(
             "anticipated thermal {}: LeadTime fan-out (a coarse decision stage anchoring \
              several delivery stages) — per-delivery-stage fan-out simulation output is \
              not yet supported",
-            plant_id.map_or(EntityId(-1), |id| id)
+            plant_id.unwrap_or(EntityId(-1))
         )));
     }
 
@@ -1429,20 +1426,29 @@ fn build_pumping_consumption(system: &System) -> Vec<f64> {
         .collect()
 }
 
-/// Build the per-stage RESOLVED contract prices \[$/`MWh`\].
+/// Build the per-stage RESOLVED contract prices \[$/`MWh`\], per block.
 ///
 /// Outer index is the study-stage index `t` (0-based, matching the
-/// `contract_bounds` stage axis); each inner `Vec` is ID-sorted parallel to
-/// `system.contracts()` — the same order `EntityCounts::contract_ids` is built in —
-/// carrying `contract_bounds(c, t).price_per_mwh`. Empty inner `Vec`s for a
-/// contract-free system.
-fn build_contract_prices_per_stage(system: &System, n_stages: usize) -> Vec<Vec<f64>> {
+/// `contract_bounds` stage axis); each inner slice is flat with the per-stage
+/// stride `block_counts_per_stage[t]` — index `c * n_blks + blk`, `c` ID-sorted
+/// parallel to `system.contracts()` (the same order `EntityCounts::contract_ids`
+/// is built in) — carrying `contract_bounds_at_block(c, t, blk).price_per_mwh`.
+/// Empty inner slices for a contract-free system or a zero-block stage.
+fn build_contract_prices_per_stage(
+    system: &System,
+    n_stages: usize,
+    block_counts_per_stage: &[usize],
+) -> Vec<Vec<f64>> {
     let bounds = system.bounds();
     let n_contracts = system.contracts().len();
     (0..n_stages)
         .map(|t| {
+            let n_blks = block_counts_per_stage[t];
             (0..n_contracts)
-                .map(|c| bounds.contract_bounds(c, t).price_per_mwh)
+                .flat_map(|c| {
+                    (0..n_blks)
+                        .map(move |blk| bounds.contract_bounds_at_block(c, t, blk).price_per_mwh)
+                })
                 .collect()
         })
         .collect()

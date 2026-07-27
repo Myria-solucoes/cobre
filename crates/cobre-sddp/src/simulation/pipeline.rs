@@ -121,10 +121,11 @@ pub struct SimulationOutputSpec<'a> {
     /// station index — which, under the dense layout, IS the column-block position.
     pub pumping_consumption_mw_per_m3s: &'a [f64],
 
-    /// Per-stage RESOLVED contract price \[$/`MWh`\]: one inner `Vec` per study
-    /// stage, ID-sorted parallel to `entity_counts.contract_ids`. The resolved,
-    /// possibly stage-overridden `contract_bounds(c, t).price_per_mwh` — never the
-    /// `col_scale`-scaled LP objective.
+    /// Per-stage RESOLVED contract price \[$/`MWh`\]: one inner slice per study
+    /// stage, flat with the per-stage stride `n_blks` — index `c * n_blks + blk`,
+    /// `c` ID-sorted parallel to `entity_counts.contract_ids`. The resolved,
+    /// possibly block-overridden `contract_bounds_at_block(c, t, blk).price_per_mwh`
+    /// — never the `col_scale`-scaled LP objective.
     pub contract_prices_per_stage: &'a [Vec<f64>],
 
     /// Direction per contract, ID-sorted parallel to `entity_counts.contract_ids`
@@ -393,8 +394,6 @@ fn solve_simulation_stage<S: SolverInterface>(
     let col_scale = &ctx.templates[ids.t].col_scale;
     let row_scale = &ctx.templates[ids.t].row_scale;
 
-    // Each branch reads `view` (tied to `ws`) into the taken-out buffers and
-    // computes `view_objective` before the borrow ends.
     let view_objective: f64 = if let Some(params) = dcs {
         // Simulation has no iteration counter; seed with `current_iteration = 0`.
         build_initial_resident_set(
