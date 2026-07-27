@@ -2599,3 +2599,73 @@ fn reduce_planes_huge_tolerance_preserves_origin_plane_both_methods() {
         );
     }
 }
+
+/// The fitted hull contains exactly one plane through the origin
+/// (`γ₀ = 0 ∧ γ_V = 0`), the premise `reduction::is_origin_plane` protects.
+///
+/// Without this plane the LP loses its `q = 0 ⟹ g = 0` anchor and a plant can be
+/// credited generation at zero turbining. Every other origin test hand-builds the
+/// plane to exercise the merge exemption, so this is the only place the fit itself
+/// is pinned. The count is asserted because several non-origin planes carry
+/// `γ₀ = 0` with a non-zero `γ_V` — an intercept-only predicate would match them
+/// too, and the two-condition predicate is what keeps them mergeable.
+#[test]
+fn hull_fit_emits_exactly_one_origin_plane() {
+    use super::production::{ProductionFunction, TailraceSource};
+    use super::reduction::{ORIGIN_EPS, is_origin_plane};
+
+    let forebay = ForebayTable::new(
+        &[
+            row(0.0, 380.0),
+            row(10_000.0, 396.0),
+            row(20_000.0, 404.0),
+            row(30_000.0, 408.0),
+        ],
+        "OriginFit",
+    )
+    .expect("valid VHA curve");
+    let pf = ProductionFunction::new(
+        forebay,
+        TailraceSource::Entity(Some(TailraceModel::Polynomial {
+            coefficients: vec![0.0, 0.0008, -2e-8],
+        })),
+        Some(&HydraulicLossesModel::Constant { value_m: 2.0 }),
+        Some(&EfficiencyModel::Constant { value: 0.92 }),
+        3_000.0,
+        "OriginFit".to_owned(),
+    );
+    let bounds = FittingBounds {
+        v_min: 0.0,
+        v_max: 30_000.0,
+        n_volume_points: 6,
+        n_flow_points: 6,
+        n_spillage_points: 2,
+        max_planes_per_hydro: 10,
+        single_volume: false,
+    };
+
+    let planes = fit_hull_planes(&pf, &bounds).expect("hull fit succeeds");
+
+    let origin: Vec<_> = planes.iter().filter(|p| is_origin_plane(p)).collect();
+    assert_eq!(
+        origin.len(),
+        1,
+        "expected exactly one origin plane in {} fitted planes, got {}: {:?}",
+        planes.len(),
+        origin.len(),
+        planes
+    );
+    assert!(
+        origin[0].gamma_q > 0.0,
+        "the origin plane must slope upward in flow, got gamma_q={}",
+        origin[0].gamma_q
+    );
+    assert!(
+        planes
+            .iter()
+            .any(|p| p.gamma_0.abs() <= ORIGIN_EPS && !is_origin_plane(p)),
+        "fixture must retain a zero-intercept plane with non-zero gamma_v, or the \
+         count above cannot distinguish the two-condition predicate from an \
+         intercept-only one"
+    );
+}

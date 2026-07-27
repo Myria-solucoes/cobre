@@ -23,9 +23,14 @@ use cobre_io::extensions::PlaneReductionConfig;
 
 /// Tolerance on `γ₀` and `γ_V` for the origin-plane predicate.
 ///
-/// A tight numerical zero, not a physical tolerance: the origin plane is
-/// constructed exactly at `(0, 0, …)` and only carries α-scaling roundoff.
-const ORIGIN_EPS: f64 = 1e-9;
+/// A tight numerical zero, not a physical tolerance: it absorbs the facet
+/// arithmetic residual `fit_hull_planes` can leave on a coefficient that is zero
+/// in exact arithmetic (sibling planes carry residuals around `1e-12`).
+/// α-scaling multiplies such a residual but cannot create one — `0.0 * α` is
+/// exactly `0.0` — so comparing against exact zero would still be wrong: an
+/// origin plane emitted at `1e-13` would become mergeable and the zero-flow
+/// anchor could be averaged away.
+pub(super) const ORIGIN_EPS: f64 = 1e-9;
 
 /// The angle-test normal of a plane: `n = (γ_V, γ_Q, −1)`.
 ///
@@ -82,9 +87,11 @@ fn mean_plane(a: &RawPlane, b: &RawPlane) -> RawPlane {
 
 /// Whether `plane` is the plane through the origin (`γ₀ = 0 ∧ γ_V = 0`).
 ///
-/// Never merged (see the module-header invariant). Tested with [`ORIGIN_EPS`] to
-/// absorb α-scaling roundoff around an exact zero.
-fn is_origin_plane(plane: &RawPlane) -> bool {
+/// Never merged (see the module-header invariant). BOTH coefficients are tested:
+/// several non-origin planes carry `γ₀ = 0` with a non-zero `γ_V`, and an
+/// intercept-only predicate would wrongly protect them from merging. Tolerance
+/// rationale lives on [`ORIGIN_EPS`].
+pub(super) fn is_origin_plane(plane: &RawPlane) -> bool {
     plane.gamma_0.abs() <= ORIGIN_EPS && plane.gamma_v.abs() <= ORIGIN_EPS
 }
 
