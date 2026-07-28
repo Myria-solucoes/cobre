@@ -161,7 +161,7 @@ pub fn noise_entity_order(system: &System) -> NoiseEntityOrder {
 /// #     }
 /// # }
 /// # fn make_hydro(id: i32) -> Hydro {
-/// #     Hydro {
+/// #     let mut hydro = Hydro {
 /// #         id: EntityId(id),
 /// #         name: format!("H{id}"),
 /// #         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -198,7 +198,9 @@ pub fn noise_entity_order(system: &System) -> NoiseEntityOrder {
 /// #             evaporation_violation_pos_cost: 0.0, evaporation_violation_neg_cost: 0.0,
 /// #             inflow_nonnegativity_cost: 1000.0,
 /// #         },
-/// #     }
+/// #     };
+/// #     hydro.declare_mirror_unit_group();
+/// #     hydro
 /// # }
 /// # fn make_inflow_model(hydro_id: i32, stage_id: i32) -> InflowModel {
 /// #     InflowModel {
@@ -638,7 +640,7 @@ mod tests {
     }
 
     fn make_hydro(id: i32) -> Hydro {
-        Hydro {
+        let mut hydro = Hydro {
             unit_groups: Vec::new(),
             id: EntityId(id),
             name: format!("H{id}"),
@@ -683,7 +685,9 @@ mod tests {
                 evaporation_violation_neg_cost: 0.0,
                 inflow_nonnegativity_cost: 1000.0,
             },
-        }
+        };
+        hydro.declare_mirror_unit_group();
+        hydro
     }
 
     fn make_inflow_model(hydro_id: i32, stage_id: i32, std: f64, coeffs: Vec<f64>) -> InflowModel {

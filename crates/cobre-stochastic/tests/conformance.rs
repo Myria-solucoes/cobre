@@ -59,7 +59,7 @@ fn make_stage(index: usize, id: i32, branching_factor: usize) -> Stage {
 }
 
 fn make_hydro(id: i32) -> Hydro {
-    Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: EntityId(id),
         name: format!("H{id}"),
@@ -104,7 +104,9 @@ fn make_hydro(id: i32) -> Hydro {
             evaporation_violation_neg_cost: 0.0,
             inflow_nonnegativity_cost: 1000.0,
         },
-    }
+    };
+    hydro.declare_mirror_unit_group();
+    hydro
 }
 
 fn make_inflow_model(
