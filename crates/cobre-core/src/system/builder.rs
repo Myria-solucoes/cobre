@@ -333,7 +333,7 @@ impl SystemBuilder {
         }
 
         for hydro in &mut self.hydros {
-            hydro.normalize_unit_groups();
+            hydro.sort_unit_groups();
         }
         sort_canonical(&mut self.thermals, |t| t.operational_start_date, |t| t.id.0);
         sort_canonical(

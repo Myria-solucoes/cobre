@@ -264,9 +264,10 @@ pub fn geometry_hydro_with_groups(
     hydro.generation_model = generation_model;
     hydro.declare_mirror_unit_group();
     // Both calls earn their place: the declare covers a caller passing an empty
-    // vec, and the sort is what makes cell order — and so every column index
-    // derived from it — independent of the order the caller listed its groups in.
-    hydro.normalize_unit_groups();
+    // vec, and the sort supplies the id-ascending `unit_groups` that
+    // `HydroCellIndex::build` documents as its precondition for keeping
+    // `cell_group_pos` ascending within a cell.
+    hydro.sort_unit_groups();
     hydro
 }
 

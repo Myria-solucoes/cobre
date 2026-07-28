@@ -75,12 +75,11 @@ pub(super) fn minimal_global_penalties() -> GlobalPenaltyDefaults {
 
 // ── Entity builders ───────────────────────────────────────────────────────────
 
-/// Build a minimal valid `Hydro` using default sensible values. Does NOT
-/// materialize the implicit unit group — callers that need one call
-/// `normalize_unit_groups()` themselves, or route through [`make_data`] /
-/// [`make_data_5b`] / [`make_data_estimation`], which normalize at the same
-/// boundary `convert_hydros` and `SystemBuilder::build` do (after the
-/// hydros' own field values are final).
+/// Build a minimal valid `Hydro` using default sensible values, with an empty
+/// `unit_groups` — callers that need groups declare them directly, or route
+/// through [`make_data`] / [`make_data_5b`] / [`make_data_estimation`], which
+/// sort at the same boundary `convert_hydros` and `SystemBuilder::build` do
+/// (after the hydros' own field values are final).
 pub(super) fn make_hydro(id: i32, downstream_id: Option<i32>) -> Hydro {
     Hydro {
         unit_groups: Vec::new(),
@@ -262,12 +261,11 @@ fn base_parsed_data(stages: StagesData) -> ParsedData {
 /// Build a minimal `ParsedData` with the provided hydros, thermals, stages,
 /// geometry, and FPHA rows.  All other fields are empty/minimal.
 ///
-/// Normalizes `hydros` (materializing each plant's implicit unit group when
-/// none is declared) here, at the boundary — mirroring where
-/// `convert_hydros` and `SystemBuilder::build` normalize in production, after
-/// the hydros' own field values are final. Normalizing inside `make_hydro`
-/// instead would snapshot stale bounds for any caller that mutates a plant
-/// maximum afterward.
+/// Sorts each hydro's `unit_groups` here, at the boundary — mirroring where
+/// `convert_hydros` and `SystemBuilder::build` sort in production, after the
+/// hydros' own field values are final. Sorting inside `make_hydro` instead
+/// would snapshot a stale group order for any caller that mutates
+/// `unit_groups` afterward.
 pub(super) fn make_data(
     mut hydros: Vec<Hydro>,
     thermals: Vec<Thermal>,
@@ -277,7 +275,7 @@ pub(super) fn make_data(
     fpha_hyperplanes: Vec<FphaHyperplaneRow>,
 ) -> ParsedData {
     for hydro in &mut hydros {
-        hydro.normalize_unit_groups();
+        hydro.sort_unit_groups();
     }
     ParsedData {
         thermals,
@@ -294,8 +292,8 @@ pub(super) fn make_data(
 /// Build a minimal valid `ParsedData` for Layer 5b tests.
 /// All hydro penalties satisfy the ordering hierarchy by default.
 ///
-/// Normalizes `hydros` here, at the boundary — see [`make_data`]'s doc for
-/// why this must not happen inside `make_hydro`.
+/// Sorts `hydros` here, at the boundary — see [`make_data`]'s doc for why
+/// this must not happen inside `make_hydro`.
 pub(super) fn make_data_5b(
     mut hydros: Vec<Hydro>,
     stages: StagesData,
@@ -305,7 +303,7 @@ pub(super) fn make_data_5b(
     correlation: Option<CorrelationModel>,
 ) -> ParsedData {
     for hydro in &mut hydros {
-        hydro.normalize_unit_groups();
+        hydro.sort_unit_groups();
     }
     ParsedData {
         buses,
@@ -569,15 +567,15 @@ pub(super) fn make_stages_with_seasons(n_months: usize, with_season_map: bool) -
 ///
 /// `inflow_history` rows are provided directly; `inflow_seasonal_stats` is
 /// empty (triggering the estimation path when history is non-empty).
-/// Normalizes `hydros` here, at the boundary — see [`make_data`]'s doc for
-/// why this must not happen inside `make_hydro`.
+/// Sorts `hydros` here, at the boundary — see [`make_data`]'s doc for why
+/// this must not happen inside `make_hydro`.
 pub(super) fn make_data_estimation(
     mut hydros: Vec<Hydro>,
     stages: StagesData,
     inflow_history: Vec<InflowHistoryRow>,
 ) -> ParsedData {
     for hydro in &mut hydros {
-        hydro.normalize_unit_groups();
+        hydro.sort_unit_groups();
     }
     ParsedData {
         hydros,

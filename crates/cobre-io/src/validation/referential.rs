@@ -1172,7 +1172,7 @@ mod tests {
             filling: None,
             penalties: hydro_penalties(),
         };
-        hydro.normalize_unit_groups();
+        hydro.sort_unit_groups();
         hydro
     }
 

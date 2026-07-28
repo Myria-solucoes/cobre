@@ -802,9 +802,7 @@ mod tests {
 
     /// min_turbined > max_turbined produces exactly one InvalidValue error.
     /// Declares an explicit unit group with bounds that satisfy rules 40/41/42
-    /// on their own — no implicit group is materialized to mirror the plant's
-    /// inverted bounds, so rule 40 cannot coincide with the plant-level rule
-    /// this test isolates.
+    /// on their own, so only the plant-level rule 40 this test isolates fires.
     #[test]
     fn test_hydro_turbine_min_greater_than_max() {
         let mut hydro = make_hydro(2, None);
@@ -2293,9 +2291,9 @@ mod tests {
     /// declares two groups whose `max_generation_mw` sums to 8000 (exceeds) and
     /// whose `max_turbined_m3s` sums to exactly 5250 (equals — must be
     /// accepted, since containment is "must not exceed"). Hydro 11 declares no
-    /// groups at all, so its implicit single group carries the plant's own
-    /// bounds and sums to exactly the plant's own maxima on both columns — the
-    /// positive-path pin every study with no declared groups exercises.
+    /// groups at all, so the empty-group sum is `0.0` on both columns — never
+    /// exceeding the plant's own maxima — the positive-path pin every plant
+    /// with no declared groups exercises.
     #[test]
     fn test_envelope_containment_rejects_excess_and_accepts_equality() {
         let mut excess_hydro = make_hydro(9, None);
@@ -2306,13 +2304,10 @@ mod tests {
             make_unit_group(5, 1, 0.0, 5000.0, 0.0, 3250.0),
         ];
 
-        // No declared groups: normalize_unit_groups (called by make_data, at
-        // the same boundary production normalizes at) materializes the
-        // implicit group at exactly this plant's own bounds.
-        let implicit_hydro = make_hydro(11, None);
+        let no_groups_hydro = make_hydro(11, None);
 
         let data = make_data(
-            vec![excess_hydro, implicit_hydro],
+            vec![excess_hydro, no_groups_hydro],
             vec![],
             vec![],
             make_stages(vec![0]),

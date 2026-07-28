@@ -16,10 +16,10 @@
 //! `fpha_local_index`) would use — a plant's groups only ever expand into more
 //! cells, never fewer, so `hydro → range of cells` is the correct shape.
 //!
-//! `build` never materializes an implicit group for a plant that arrives with
-//! an empty `unit_groups`: that is [`Hydro::normalize_unit_groups`]'s job, and
-//! its own doc forbids a second owner of that construction. A plant reaching
-//! `build` unnormalized contributes zero cells.
+//! A plant with no groups cannot reach `build` — both `parse_hydros` and
+//! `SystemBuilder::build` reject an empty `unit_groups` before a system is
+//! ever constructed — and `build` would contribute zero cells for one
+//! regardless (`test_build_yields_no_cells_for_an_unnormalized_plant`).
 
 use std::ops::Range;
 
@@ -238,10 +238,9 @@ mod tests {
     }
 
     /// A minimal constant-productivity hydro at `id`/`bus_id`/`unit_groups`
-    /// the caller chooses; every other field is an inert default. Left
-    /// unnormalized — callers that need a production-shaped (non-empty)
-    /// `unit_groups` call `Hydro::normalize_unit_groups` explicitly, which is
-    /// the whole point of `test_build_yields_no_cells_for_an_unnormalized_plant`.
+    /// the caller chooses; every other field is an inert default.
+    /// `unit_groups` passes through unmodified — a caller needing canonical
+    /// id order calls `Hydro::sort_unit_groups` itself.
     fn base_hydro(id: i32, bus_id: EntityId, unit_groups: Vec<HydroUnitGroup>) -> Hydro {
         Hydro {
             unit_groups,
@@ -315,7 +314,6 @@ mod tests {
         let mut hydros = vec![plant0, plant1, plant2];
         for h in &mut hydros {
             h.declare_mirror_unit_group();
-            h.normalize_unit_groups();
         }
         hydros
     }
@@ -374,12 +372,11 @@ mod tests {
         }
     }
 
-    /// `build`'s chosen semantics: an unnormalized plant (empty `unit_groups`)
+    /// `build`'s chosen semantics: a plant with an empty `unit_groups`
     /// contributes zero cells rather than a defensively derived implicit one.
-    /// Unreachable in production because `Hydro::normalize_unit_groups` —
-    /// called at every fixture's finalization boundary, at
-    /// `SystemBuilder::build`, and at `cobre-io`'s parse path — is the sole
-    /// owner of that guarantee.
+    /// Unreachable in production — `SystemBuilder::build` and `cobre-io`'s
+    /// parse path both reject an empty `unit_groups` before a system is ever
+    /// constructed.
     #[test]
     fn test_build_yields_no_cells_for_an_unnormalized_plant() {
         let unnormalized = base_hydro(0, EntityId(1), Vec::new());

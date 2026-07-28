@@ -850,7 +850,7 @@ fn convert_hydros(
                 filling,
                 penalties,
             };
-            hydro.normalize_unit_groups();
+            hydro.sort_unit_groups();
             Ok(hydro)
         })
         .collect::<Result<_, LoadError>>()?;

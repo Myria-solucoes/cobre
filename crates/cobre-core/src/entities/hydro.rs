@@ -264,23 +264,9 @@ pub struct Hydro {
 
 impl Hydro {
     /// Puts `unit_groups` in canonical id order so results do not depend on
-    /// declaration order, then materializes one implicit group
-    /// (`id = EntityId(0)`) at this plant's own name, bus, and four bounds when
-    /// none are declared. Idempotent; the sole owner of implicit-group
-    /// construction — never inline this at a call site.
-    pub fn normalize_unit_groups(&mut self) {
+    /// declaration order.
+    pub fn sort_unit_groups(&mut self) {
         self.unit_groups.sort_by_key(|g| g.id.0);
-        if self.unit_groups.is_empty() {
-            self.unit_groups.push(HydroUnitGroup {
-                id: EntityId(0),
-                name: self.name.clone(),
-                bus_id: self.bus_id,
-                min_generation_mw: self.min_generation_mw,
-                max_generation_mw: self.max_generation_mw,
-                min_turbined_m3s: self.min_turbined_m3s,
-                max_turbined_m3s: self.max_turbined_m3s,
-            });
-        }
     }
 
     /// Test-only fixture helper: mirrors this plant into a single unit group
@@ -902,5 +888,54 @@ mod tests {
 
         assert_eq!(hydro.unit_groups[0].id, EntityId::from(5));
         assert_eq!(hydro.unit_groups[1].id, EntityId::from(2));
+    }
+
+    #[test]
+    fn test_sort_unit_groups_leaves_empty_groups_empty() {
+        let mut hydro = minimal_hydro(HydroGenerationModel::ConstantProductivity);
+        hydro.unit_groups = Vec::new();
+
+        hydro.sort_unit_groups();
+
+        assert!(hydro.unit_groups.is_empty());
+    }
+
+    #[test]
+    fn test_sort_unit_groups_orders_by_id_ascending() {
+        let mut hydro = minimal_hydro(HydroGenerationModel::ConstantProductivity);
+        hydro.unit_groups = vec![
+            HydroUnitGroup {
+                id: EntityId::from(5),
+                name: "GroupFive".to_string(),
+                bus_id: EntityId::from(20),
+                min_generation_mw: 1.0,
+                max_generation_mw: 2.0,
+                min_turbined_m3s: 3.0,
+                max_turbined_m3s: 4.0,
+            },
+            HydroUnitGroup {
+                id: EntityId::from(2),
+                name: "GroupTwo".to_string(),
+                bus_id: EntityId::from(21),
+                min_generation_mw: 5.0,
+                max_generation_mw: 6.0,
+                min_turbined_m3s: 7.0,
+                max_turbined_m3s: 8.0,
+            },
+            HydroUnitGroup {
+                id: EntityId::from(9),
+                name: "GroupNine".to_string(),
+                bus_id: EntityId::from(22),
+                min_generation_mw: 9.0,
+                max_generation_mw: 10.0,
+                min_turbined_m3s: 11.0,
+                max_turbined_m3s: 12.0,
+            },
+        ];
+
+        hydro.sort_unit_groups();
+
+        let ids: Vec<i32> = hydro.unit_groups.iter().map(|g| g.id.0).collect();
+        assert_eq!(ids, vec![2, 5, 9]);
     }
 }

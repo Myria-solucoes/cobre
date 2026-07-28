@@ -5886,11 +5886,12 @@ mod hydro_block_bound_tests {
             max_outflow_m3s: None,
             generation_model: HydroGenerationModel::ConstantProductivity,
             min_turbined_m3s: 0.0,
-            // Deliberately non-binding, not a realistic install capacity: empty
-            // unit_groups makes this the implicit group's own box, which every cell
-            // column bound now sums against and would otherwise cap below the
-            // resolved bounds this module's tests exercise — a bounds row raising a
-            // plant above its declared capacity is rejected in a real deck, so this
+            // Deliberately non-binding, not a realistic install capacity: this
+            // plant's own bound becomes its mirrored group's box
+            // (declare_mirror_unit_group), which every cell column bound now
+            // sums against and would otherwise cap below the resolved bounds
+            // this module's tests exercise — a bounds row raising a plant
+            // above its declared capacity is rejected in a real deck, so this
             // stays generous rather than tracking each test's resolved value.
             max_turbined_m3s: 1_000_000.0,
             specific_productivity_mw_per_m3s_per_m: None,
@@ -6930,10 +6931,10 @@ mod cell_column_bound_tests {
     }
 
     /// A `ConstantProductivity` hydro at `id`/`bus_id` with explicit `groups`
-    /// (empty for the implicit-mirror comparison), declared turbined/generation
+    /// (empty for the mirrored-group comparison), declared turbined/generation
     /// maxima matching its resolved bounds (set separately via
-    /// `Fixtures::set_hydro_bounds`) so an empty-groups plant's implicit group
-    /// mirrors them exactly.
+    /// `Fixtures::set_hydro_bounds`) so an empty-groups plant's mirrored group
+    /// carries them exactly.
     fn grouped_hydro(
         id: i32,
         bus_id: EntityId,
@@ -7298,7 +7299,7 @@ mod cell_column_bound_tests {
         assert_eq!(
             col_upper[pad_col].to_bits(),
             200.0_f64.to_bits(),
-            "the padding plant's single implicit group must mirror its own box"
+            "the padding plant's single mirrored group must carry the plant's own box"
         );
 
         let turb_low_0 = col_upper[layout.turbine_col(cell_low, BlockIdx::new(0))];
