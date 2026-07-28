@@ -440,7 +440,7 @@ fn build_system_with_user_stats(n_years: usize) -> System {
         })
         .collect();
 
-    let hydro = Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: hydro_id,
         name: "H1".to_string(),
@@ -486,6 +486,7 @@ fn build_system_with_user_stats(n_years: usize) -> System {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.declare_mirror_unit_group();
 
     SystemBuilder::new()
         .buses(vec![bus])
@@ -1282,7 +1283,7 @@ fn build_system_empty_models(n_years: usize) -> System {
         ));
     }
 
-    let hydro = Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: hydro_id,
         name: "H1".to_string(),
@@ -1328,6 +1329,7 @@ fn build_system_empty_models(n_years: usize) -> System {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.declare_mirror_unit_group();
 
     SystemBuilder::new()
         .buses(vec![bus])
@@ -1521,7 +1523,7 @@ fn test_user_ar_estimation_returns_user_provided_report() {
 
 fn make_hydro(hydro_id: EntityId, bus_id: EntityId) -> Hydro {
     use cobre_core::entities::hydro::HydroGenerationModel;
-    Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: hydro_id,
         name: format!("H{}", hydro_id.0),
@@ -1566,7 +1568,9 @@ fn make_hydro(hydro_id: EntityId, bus_id: EntityId) -> Hydro {
             evaporation_violation_neg_cost: 0.0,
             inflow_nonnegativity_cost: 1000.0,
         },
-    }
+    };
+    hydro.declare_mirror_unit_group();
+    hydro
 }
 
 /// Two-hydro system; inflow_models (user stats) are built only for

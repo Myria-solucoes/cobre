@@ -1195,7 +1195,7 @@ mod tests {
     }
 
     fn make_hydro(id: i32, name: &str, bus_id: i32) -> Hydro {
-        Hydro {
+        let mut hydro = Hydro {
             unit_groups: Vec::new(),
             id: EntityId(id),
             name: name.to_string(),
@@ -1223,7 +1223,9 @@ mod tests {
             diversion: None,
             filling: None,
             penalties: hydro_penalties_zero(),
-        }
+        };
+        hydro.declare_mirror_unit_group();
+        hydro
     }
 
     fn make_thermal(id: i32, name: &str, bus_id: i32) -> Thermal {

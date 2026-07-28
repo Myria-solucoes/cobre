@@ -382,7 +382,7 @@ mod tests {
     }
 
     fn minimal_hydro(id: i32, bus_id: i32) -> Hydro {
-        Hydro {
+        let mut hydro = Hydro {
             unit_groups: Vec::new(),
             id: EntityId(id),
             name: format!("Hydro {id}"),
@@ -410,7 +410,9 @@ mod tests {
             diversion: None,
             filling: None,
             penalties: zero_hydro_penalties(),
-        }
+        };
+        hydro.declare_mirror_unit_group();
+        hydro
     }
 
     #[test]

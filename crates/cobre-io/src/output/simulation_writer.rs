@@ -1565,7 +1565,7 @@ mod tests {
     }
 
     fn make_hydro(id: i32) -> Hydro {
-        Hydro {
+        let mut hydro = Hydro {
             unit_groups: Vec::new(),
             id: EntityId(id),
             name: format!("H{id}"),
@@ -1593,7 +1593,9 @@ mod tests {
             diversion: None,
             filling: None,
             penalties: make_hydro_penalties_zero(),
-        }
+        };
+        hydro.declare_mirror_unit_group();
+        hydro
     }
 
     fn make_stage(id: i32, duration_hours: f64) -> Stage {
