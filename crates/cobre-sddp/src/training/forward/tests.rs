@@ -238,7 +238,7 @@ fn make_stochastic_context_1_hydro_3_stages() -> StochasticContext {
         }],
         excess_cost: 0.0,
     };
-    let hydro = Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: EntityId(1),
         name: "H1".to_string(),
@@ -284,6 +284,7 @@ fn make_stochastic_context_1_hydro_3_stages() -> StochasticContext {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.declare_mirror_unit_group();
     let make_stage = |idx: usize, id: i32| Stage {
         index: idx,
         id,
@@ -1834,7 +1835,7 @@ fn make_stochastic_1h_1s(mean_m3s: f64, std_m3s: f64) -> StochasticContext {
         }],
         excess_cost: 0.0,
     };
-    let hydro = Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: EntityId(1),
         name: "H1".to_string(),
@@ -1880,6 +1881,7 @@ fn make_stochastic_1h_1s(mean_m3s: f64, std_m3s: f64) -> StochasticContext {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.declare_mirror_unit_group();
     let stage = Stage {
         index: 0,
         id: 0,
@@ -2320,7 +2322,7 @@ fn make_stochastic_context_1_hydro_1_load_bus(mean_mw: f64, std_mw: f64) -> Stoc
         }],
         excess_cost: 0.0,
     };
-    let hydro = Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: EntityId(10),
         name: "H10".to_string(),
@@ -2366,6 +2368,7 @@ fn make_stochastic_context_1_hydro_1_load_bus(mean_mw: f64, std_mw: f64) -> Stoc
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.declare_mirror_unit_group();
     let stage = Stage {
         index: 0,
         id: 0,

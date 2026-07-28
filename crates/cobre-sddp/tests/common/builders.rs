@@ -252,7 +252,7 @@ pub fn make_hydro(
         penalties,
     }: HydroSpec,
 ) -> Hydro {
-    Hydro {
+    let mut hydro = Hydro {
         id,
         name,
         operational_start_date,
@@ -280,7 +280,9 @@ pub fn make_hydro(
         diversion,
         filling,
         penalties,
-    }
+    };
+    hydro.declare_mirror_unit_group();
+    hydro
 }
 
 /// Non-identity fields of [`Bus`]; `id` is supplied positionally to

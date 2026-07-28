@@ -2106,37 +2106,41 @@ mod tests {
         // A filling hydro with the given start/entry stage ids. ConstantProductivity
         // keeps the LP simple (no FPHA rows); the soft-floor/target slacks come from
         // the filling family, not the generation model.
-        let filling_hydro = |id: i32, start_stage_id: i32, entry: i32| Hydro {
-            unit_groups: Vec::new(),
-            id: EntityId(id),
-            name: format!("H{id}"),
-            operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(1),
-            downstream_id: None,
-            travel_time_hours: None,
-            entry_stage_id: Some(entry),
-            exit_stage_id: None,
-            min_storage_hm3: 0.0,
-            max_storage_hm3: 200.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity,
-            min_turbined_m3s: 0.0,
-            max_turbined_m3s: 100.0,
-            specific_productivity_mw_per_m3s_per_m: None,
-            min_generation_mw: 0.0,
-            max_generation_mw: 250.0,
-            tailrace: None,
-            hydraulic_losses: None,
-            efficiency: None,
-            evaporation_coefficients_mm: None,
-            evaporation_reference_volumes_hm3: None,
-            diversion: None,
-            filling: Some(FillingConfig {
-                start_stage_id,
-                filling_min_rate_m3s: 0.0,
-            }),
-            penalties: zero_hydro_penalties(),
+        let filling_hydro = |id: i32, start_stage_id: i32, entry: i32| {
+            let mut hydro = Hydro {
+                unit_groups: Vec::new(),
+                id: EntityId(id),
+                name: format!("H{id}"),
+                operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                bus_id: EntityId(1),
+                downstream_id: None,
+                travel_time_hours: None,
+                entry_stage_id: Some(entry),
+                exit_stage_id: None,
+                min_storage_hm3: 0.0,
+                max_storage_hm3: 200.0,
+                min_outflow_m3s: 0.0,
+                max_outflow_m3s: None,
+                generation_model: HydroGenerationModel::ConstantProductivity,
+                min_turbined_m3s: 0.0,
+                max_turbined_m3s: 100.0,
+                specific_productivity_mw_per_m3s_per_m: None,
+                min_generation_mw: 0.0,
+                max_generation_mw: 250.0,
+                tailrace: None,
+                hydraulic_losses: None,
+                efficiency: None,
+                evaporation_coefficients_mm: None,
+                evaporation_reference_volumes_hm3: None,
+                diversion: None,
+                filling: Some(FillingConfig {
+                    start_stage_id,
+                    filling_min_rate_m3s: 0.0,
+                }),
+                penalties: zero_hydro_penalties(),
+            };
+            hydro.declare_mirror_unit_group();
+            hydro
         };
 
         let bus = Bus {

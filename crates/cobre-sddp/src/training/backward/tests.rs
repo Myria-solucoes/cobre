@@ -502,7 +502,7 @@ fn make_stochastic_context(
         }],
         excess_cost: 0.0,
     };
-    let hydro = Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: EntityId(1),
         name: "H1".to_string(),
@@ -548,6 +548,7 @@ fn make_stochastic_context(
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.declare_mirror_unit_group();
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let make_stage = |idx: usize| Stage {
@@ -2586,7 +2587,7 @@ fn make_stochastic_context_with_load(
         }],
         excess_cost: 0.0,
     };
-    let hydro = Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: EntityId(10),
         name: "H10".to_string(),
@@ -2632,6 +2633,7 @@ fn make_stochastic_context_with_load(
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.declare_mirror_unit_group();
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let make_stage = |idx: usize| Stage {

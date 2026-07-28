@@ -588,7 +588,7 @@ fn make_hydro(min_storage_hm3: f64, max_storage_hm3: f64) -> Hydro {
         evaporation_violation_neg_cost: 0.0,
         inflow_nonnegativity_cost: 1000.0,
     };
-    Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: EntityId::from(1),
         name: "TestHydro".to_owned(),
@@ -616,7 +616,9 @@ fn make_hydro(min_storage_hm3: f64, max_storage_hm3: f64) -> Hydro {
         diversion: None,
         filling: None,
         penalties: zero_penalties,
-    }
+    };
+    hydro.declare_mirror_unit_group();
+    hydro
 }
 
 /// Build a `ForebayTable` spanning `[0.0, 34_116.0]` hm³.
@@ -1308,7 +1310,7 @@ fn make_sobradinho_hydro() -> Hydro {
         evaporation_violation_neg_cost: 0.0,
         inflow_nonnegativity_cost: 1000.0,
     };
-    Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: EntityId::from(1),
         name: "Sobradinho".to_owned(),
@@ -1338,7 +1340,9 @@ fn make_sobradinho_hydro() -> Hydro {
         diversion: None,
         filling: None,
         penalties: zero_penalties,
-    }
+    };
+    hydro.declare_mirror_unit_group();
+    hydro
 }
 
 /// Fit_fpha_planes with Sobradinho-style geometry and default FphaColumnLayout
@@ -1609,7 +1613,7 @@ fn fit_fpha_planes_linear_function_produces_one_plane() {
         evaporation_violation_neg_cost: 0.0,
         inflow_nonnegativity_cost: 1000.0,
     };
-    let hydro = Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: EntityId::from(1),
         name: "FlatHydro".to_owned(),
@@ -1638,6 +1642,7 @@ fn fit_fpha_planes_linear_function_produces_one_plane() {
         filling: None,
         penalties: zero_penalties,
     };
+    hydro.declare_mirror_unit_group();
     let config = FphaColumnLayout {
         source: "computed".to_owned(),
         volume_discretization_points: None,

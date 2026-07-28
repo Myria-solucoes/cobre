@@ -162,7 +162,7 @@ mod tests {
     }
 
     fn make_hydro(id: i32, model: HydroGenerationModel) -> Hydro {
-        Hydro {
+        let mut hydro = Hydro {
             unit_groups: Vec::new(),
             id: EntityId::from(id),
             name: format!("Hydro{id}"),
@@ -190,7 +190,9 @@ mod tests {
             diversion: None,
             filling: None,
             penalties: zero_penalties(),
-        }
+        };
+        hydro.declare_mirror_unit_group();
+        hydro
     }
 
     /// Build a minimal single-bus `System` with the given hydros and one study stage.

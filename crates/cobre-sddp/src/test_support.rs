@@ -211,9 +211,9 @@ pub fn make_unit_group(
 /// Fixture hydro at system position `idx`: always `Operating` (`filling`,
 /// `entry_stage_id`, `exit_stage_id` all `None`), so `StageLayout::new`'s FPHA/
 /// evaporation membership filters never drop a caller-requested index regardless
-/// of `stage.id`. Normalizes before return — `geometry` never mutates the
-/// collected `Vec`, so the return is the finalization boundary — and stays
-/// `pub(crate)` for `indexer::hydro_cell`'s identity test, which needs these
+/// of `stage.id`. Declares its mirror unit group before return — `geometry` never
+/// mutates the collected `Vec`, so the return is the finalization boundary — and
+/// stays `pub(crate)` for `indexer::hydro_cell`'s identity test, which needs these
 /// exact hydros.
 pub(crate) fn geometry_hydro(idx: usize) -> Hydro {
     let id = EntityId(i32::try_from(idx).unwrap_or(i32::MAX));
@@ -246,7 +246,7 @@ pub(crate) fn geometry_hydro(idx: usize) -> Hydro {
         filling: None,
         penalties: geometry_zero_penalties(),
     };
-    hydro.normalize_unit_groups();
+    hydro.declare_mirror_unit_group();
     hydro
 }
 
@@ -262,6 +262,10 @@ pub fn geometry_hydro_with_groups(
     let mut hydro = geometry_hydro(idx);
     hydro.unit_groups = unit_groups;
     hydro.generation_model = generation_model;
+    hydro.declare_mirror_unit_group();
+    // Both calls earn their place: the declare covers a caller passing an empty
+    // vec, and the sort is what makes cell order — and so every column index
+    // derived from it — independent of the order the caller listed its groups in.
     hydro.normalize_unit_groups();
     hydro
 }

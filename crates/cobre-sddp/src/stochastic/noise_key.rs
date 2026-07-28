@@ -384,7 +384,7 @@ mod tests {
     }
 
     fn hydro_fixture(id: i32, bus_id: i32) -> Hydro {
-        Hydro {
+        let mut hydro = Hydro {
             unit_groups: Vec::new(),
             id: EntityId(id),
             name: format!("H{id}"),
@@ -429,7 +429,9 @@ mod tests {
                 evaporation_violation_neg_cost: 0.0,
                 inflow_nonnegativity_cost: 1000.0,
             },
-        }
+        };
+        hydro.declare_mirror_unit_group();
+        hydro
     }
 
     fn stage_fixture(index: usize, id: i32, branching_factor: usize) -> Stage {

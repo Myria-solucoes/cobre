@@ -327,8 +327,15 @@ mod tests {
 
         assert_eq!(index.n_cells(), 4);
         assert!(index.is_identity());
-        for i in 0..4 {
+        for (i, hydro) in hydros.iter().enumerate() {
             assert_eq!(index.cells_of(HydroSys::new(i)), i..i + 1);
+            // Pins declare_mirror_unit_group() sitting at geometry_hydro's return,
+            // after bus_id is finalized — a call placed earlier would mirror a stale bus.
+            assert_eq!(hydro.unit_groups.len(), 1);
+            assert_eq!(
+                hydro.unit_groups[0].bus_id,
+                EntityId(i32::try_from(i).unwrap())
+            );
         }
     }
 

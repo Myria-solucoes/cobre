@@ -78,7 +78,7 @@ fn zero_penalties() -> HydroPenalties {
 }
 
 fn make_hydro(id: i32, model: HydroGenerationModel) -> Hydro {
-    Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: EntityId::from(id),
         name: format!("Hydro{id}"),
@@ -106,7 +106,9 @@ fn make_hydro(id: i32, model: HydroGenerationModel) -> Hydro {
         diversion: None,
         filling: None,
         penalties: zero_penalties(),
-    }
+    };
+    hydro.declare_mirror_unit_group();
+    hydro
 }
 
 fn valid_row(hydro_id: i32, stage_id: Option<i32>, plane_id: i32) -> FphaHyperplaneRow {
