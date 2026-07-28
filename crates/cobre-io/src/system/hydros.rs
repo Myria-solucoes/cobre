@@ -134,10 +134,8 @@ pub(crate) struct RawHydro {
     /// Reservoir filling configuration. Absent or null = no filling operation.
     #[serde(default)]
     filling: Option<RawFillingConfig>,
-    /// Turbine groups partitioning this plant's generation envelope. Required:
-    /// every hydro declares at least one group, each with its own `id`, `name`,
-    /// `bus_id`, and generation/turbined bounds; an absent or empty array is
-    /// rejected.
+    /// Turbine groups partitioning this plant's generation envelope; an absent or
+    /// empty array is rejected.
     #[cfg_attr(feature = "schema", schemars(required))]
     unit_groups: Option<Vec<RawUnitGroup>>,
     /// Specific productivity `ρ_esp` \[MW / ((m³/s) · m)\].
@@ -532,35 +530,33 @@ fn validate_unit_groups(
     hydro_index: usize,
     path: &Path,
 ) -> Result<(), LoadError> {
-    if unit_groups.is_none_or(<[RawUnitGroup]>::is_empty) {
+    let Some(groups) = unit_groups.filter(|g| !g.is_empty()) else {
         return Err(LoadError::SchemaError {
             path: path.to_path_buf(),
             field: format!("hydros[{hydro_index}].unit_groups"),
             message: "unit_groups is required: declare at least one group with id, name, bus_id, min/max_generation_mw and min/max_turbined_m3s".to_string(),
         });
-    }
-    if let Some(groups) = unit_groups {
-        for (j, group) in groups.iter().enumerate() {
-            if group.min_turbined_m3s < 0.0 {
-                return Err(LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: format!("hydros[{hydro_index}].unit_groups[{j}].min_turbined_m3s"),
-                    message: format!(
-                        "min_turbined_m3s must be >= 0, got {}",
-                        group.min_turbined_m3s
-                    ),
-                });
-            }
-            if group.max_turbined_m3s < 0.0 {
-                return Err(LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: format!("hydros[{hydro_index}].unit_groups[{j}].max_turbined_m3s"),
-                    message: format!(
-                        "max_turbined_m3s must be >= 0, got {}",
-                        group.max_turbined_m3s
-                    ),
-                });
-            }
+    };
+    for (j, group) in groups.iter().enumerate() {
+        if group.min_turbined_m3s < 0.0 {
+            return Err(LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("hydros[{hydro_index}].unit_groups[{j}].min_turbined_m3s"),
+                message: format!(
+                    "min_turbined_m3s must be >= 0, got {}",
+                    group.min_turbined_m3s
+                ),
+            });
+        }
+        if group.max_turbined_m3s < 0.0 {
+            return Err(LoadError::SchemaError {
+                path: path.to_path_buf(),
+                field: format!("hydros[{hydro_index}].unit_groups[{j}].max_turbined_m3s"),
+                message: format!(
+                    "max_turbined_m3s must be >= 0, got {}",
+                    group.max_turbined_m3s
+                ),
+            });
         }
     }
     Ok(())

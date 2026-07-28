@@ -52,7 +52,7 @@ slow-tests = []
 ## `#[cfg(any(test, feature = "test-support"))]`, so plain `cargo test` sees
 ## them via `test` and downstream integration tests see them via this feature.
 ## Must NOT be enabled in production builds.
-test-support = []
+test-support = ["cobre-core/test-support"]
 
 [dependencies]
 cobre-core = { version = "0.12.0", path = "../cobre-core" }

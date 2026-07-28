@@ -230,6 +230,12 @@ fn hydro_penalties_zero() -> HydroPenalties {
     }
 }
 
+// Deliberately non-binding, not an install capacity: the mirror group copies
+// this value and every cell column bound sums against it, so a realistic
+// number caps the cells below what `default_hydro_bounds()`-derived resolved
+// bounds resolve to.
+const FIXTURE_NONBINDING_MAX_TURBINED_M3S: f64 = 1_000_000.0;
+
 /// Minimal independent (no-downstream) hydro for pumping-station refs.
 fn fixture_hydro(id: i32) -> Hydro {
     let mut hydro = Hydro {
@@ -248,11 +254,7 @@ fn fixture_hydro(id: i32) -> Hydro {
         max_outflow_m3s: None,
         generation_model: HydroGenerationModel::ConstantProductivity,
         min_turbined_m3s: 0.0,
-        // Deliberately non-binding, not an install capacity: the mirror group
-        // copies this value and every cell column bound sums against it, so a
-        // realistic number caps the cells below what this module's
-        // `default_hydro_bounds()` resolves to.
-        max_turbined_m3s: 1_000_000.0,
+        max_turbined_m3s: FIXTURE_NONBINDING_MAX_TURBINED_M3S,
         specific_productivity_mw_per_m3s_per_m: None,
         min_generation_mw: 0.0,
         max_generation_mw: 1_000_000.0,
@@ -2638,11 +2640,7 @@ fn vtarget_filling_hydro(id: i32, start: i32, entry: i32) -> Hydro {
         max_outflow_m3s: None,
         generation_model: HydroGenerationModel::ConstantProductivity,
         min_turbined_m3s: 0.0,
-        // Deliberately non-binding, not an install capacity: the mirror group
-        // copies this value and every cell column bound sums against it, so a
-        // realistic number caps the cells below what `vtarget_bounds()` resolves
-        // to via `default_hydro_bounds()`.
-        max_turbined_m3s: 1_000_000.0,
+        max_turbined_m3s: FIXTURE_NONBINDING_MAX_TURBINED_M3S,
         specific_productivity_mw_per_m3s_per_m: None,
         min_generation_mw: 0.0,
         max_generation_mw: 1_000_000.0,
@@ -3514,11 +3512,7 @@ fn system_with_contracts_filling_and_anticipated() -> cobre_core::System {
         max_outflow_m3s: None,
         generation_model: HydroGenerationModel::ConstantProductivity,
         min_turbined_m3s: 0.0,
-        // Deliberately non-binding, not an install capacity: the mirror group
-        // copies this value and every cell column bound sums against it, so a
-        // realistic number caps the cells below what this function's own
-        // `default_hydro_bounds()`-backed `ResolvedBounds` resolves to.
-        max_turbined_m3s: 1_000_000.0,
+        max_turbined_m3s: FIXTURE_NONBINDING_MAX_TURBINED_M3S,
         specific_productivity_mw_per_m3s_per_m: None,
         min_generation_mw: 0.0,
         max_generation_mw: 1_000_000.0,

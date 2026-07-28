@@ -15,7 +15,10 @@
 use chrono::NaiveDate;
 use cobre_core::{
     CorrelationGroup, CorrelationModel, EntityId, SeasonMap,
-    entities::{Bus, Hydro, HydroGenerationModel, HydroPenalties, HydroUnitGroup, Line, Thermal},
+    entities::{
+        Bus, DeficitSegment, Hydro, HydroGenerationModel, HydroPenalties, HydroUnitGroup, Line,
+        Thermal,
+    },
     initial_conditions::InitialConditions,
     penalty::GlobalPenaltyDefaults,
     temporal::{
@@ -60,7 +63,6 @@ pub(super) fn penalties_all(v: f64) -> HydroPenalties {
 
 /// Minimal `GlobalPenaltyDefaults` required to fill `ParsedData`.
 pub(super) fn minimal_global_penalties() -> GlobalPenaltyDefaults {
-    use cobre_core::entities::DeficitSegment;
     GlobalPenaltyDefaults {
         bus_deficit_segments: vec![DeficitSegment {
             depth_mw: None,
@@ -345,7 +347,6 @@ pub(super) fn make_stages_5b(ids: Vec<i32>) -> StagesData {
 
 /// Build a bus with a single deficit segment at the given cost.
 pub(super) fn make_bus_with_deficit(id: i32, cost_per_mwh: f64) -> Bus {
-    use cobre_core::entities::DeficitSegment;
     Bus {
         id: EntityId::from(id),
         name: format!("Bus {id}"),

@@ -1453,7 +1453,7 @@ mod cell_partition_gates {
     /// the groups bind on different sides
     /// (`Σ_g min(a_g,b_g) < min(Σa_g, Σb_g)`). This is correct behaviour, not
     /// a defect: per-group limits are the more faithful model. See
-    /// `test_three_same_bus_groups_collapse_to_the_no_groups_template`'s doc
+    /// `test_three_same_bus_groups_collapse_to_a_single_mirror_group`'s doc
     /// for why the FPHA collapse gate above cannot exercise this case (its
     /// production model's fold is the identity).
     #[test]

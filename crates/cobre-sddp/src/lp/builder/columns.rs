@@ -6849,7 +6849,7 @@ mod cell_column_bound_tests {
     const ENTRY_STAGE_ID: i32 = 4;
     const PREFILLING_ID: i32 = 1;
 
-    /// The always-`Operating`, single-implicit-group padding plant ahead of a
+    /// The always-`Operating`, single-mirror-group padding plant ahead of a
     /// split plant in every fixture below, so the split plant's cells land at
     /// global index >= 1 — mutually distinct from `h_idx` and `block_idx`, the
     /// index-coincidence check.
@@ -7356,8 +7356,8 @@ mod cell_column_bound_tests {
     }
 
     /// Three unequal same-bus groups (100/250/400) collapse into one cell whose
-    /// box is their sum, byte-identical to the same plant declaring no groups
-    /// at all (the implicit-mirror comparison). A second same-bus pair binding
+    /// box is their sum, byte-identical to the same plant declaring one group
+    /// that mirrors it. A second same-bus pair binding
     /// on OPPOSITE sides (MW-bound then flow-bound) pins fold-then-sum against
     /// sum-then-fold: whenever every group's flow side binds, as in the first
     /// pair, the two orders coincide, so this divergent-binding pair is the
