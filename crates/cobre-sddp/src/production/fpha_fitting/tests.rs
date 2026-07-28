@@ -40,7 +40,7 @@ fn sobradinho_rows() -> Vec<HydroGeometryRow> {
     ]
 }
 
-// ── AC: valid construction ────────────────────────────────────────────────
+// ── Valid construction ────────────────────────────────────────────────────
 
 #[test]
 fn valid_five_point_curve_construction_succeeds() {
@@ -49,7 +49,7 @@ fn valid_five_point_curve_construction_succeeds() {
     assert_eq!(table.v_max(), 34_116.0);
 }
 
-// ── AC: interpolation at midpoint ─────────────────────────────────────────
+// ── Interpolation at midpoint ─────────────────────────────────────────────
 
 /// height(1000.0) on segment [0, 2000] with heights [386.5, 390.0] must equal
 /// 386.5 + (390.0 - 386.5) * 1000.0 / 2000.0 = 388.25 within 1e-10.
@@ -60,7 +60,7 @@ fn interpolation_at_midpoint_segment_0_to_2000() {
     assert!((table.height(1000.0) - expected).abs() < 1e-10);
 }
 
-// ── AC: interpolation at breakpoints ──────────────────────────────────────
+// ── Interpolation at breakpoints ──────────────────────────────────────────
 
 #[test]
 fn interpolation_at_breakpoints_returns_exact_values() {
@@ -77,7 +77,7 @@ fn interpolation_at_breakpoints_returns_exact_values() {
     }
 }
 
-// ── AC: clamping below v_min ──────────────────────────────────────────────
+// ── Clamping below v_min ──────────────────────────────────────────────────
 
 #[test]
 fn height_clamped_below_v_min() {
@@ -87,7 +87,7 @@ fn height_clamped_below_v_min() {
     assert!((at_min - below).abs() < 1e-10);
 }
 
-// ── AC: clamping above v_max ──────────────────────────────────────────────
+// ── Clamping above v_max ──────────────────────────────────────────────────
 
 #[test]
 fn height_clamped_above_v_max() {
@@ -97,7 +97,7 @@ fn height_clamped_above_v_max() {
     assert!((at_max - above).abs() < 1e-10);
 }
 
-// ── AC: insufficient points (0 points) ───────────────────────────────────
+// ── Insufficient points (0 points) ───────────────────────────────────────
 
 #[test]
 fn insufficient_points_zero_rows() {
@@ -110,7 +110,7 @@ fn insufficient_points_zero_rows() {
     }
 }
 
-// ── AC: single point is accepted as a constant (run-of-river) forebay ─────
+// ── Single point is accepted as a constant (run-of-river) forebay ─────────
 
 #[test]
 fn single_row_builds_constant_forebay() {
@@ -126,7 +126,7 @@ fn single_row_builds_constant_forebay() {
     assert_eq!(table.height(9999.0), 386.5);
 }
 
-// ── AC: non-monotonic volume (duplicate) ──────────────────────────────────
+// ── Non-monotonic volume (duplicate) ──────────────────────────────────────
 
 #[test]
 fn non_monotonic_volume_duplicate() {
@@ -147,7 +147,7 @@ fn non_monotonic_volume_duplicate() {
     }
 }
 
-// ── AC: non-monotonic volume (decreasing) ─────────────────────────────────
+// ── Non-monotonic volume (decreasing) ─────────────────────────────────────
 
 #[test]
 fn non_monotonic_volume_decreasing() {
@@ -161,7 +161,7 @@ fn non_monotonic_volume_decreasing() {
     }
 }
 
-// ── AC: non-monotonic height (decreasing) ─────────────────────────────────
+// ── Non-monotonic height (decreasing) ─────────────────────────────────────
 
 #[test]
 fn non_monotonic_height_decreasing() {
@@ -182,7 +182,7 @@ fn non_monotonic_height_decreasing() {
     }
 }
 
-// ── AC: plateau heights (equal consecutive) ───────────────────────────────
+// ── Plateau heights (equal consecutive) ───────────────────────────────────
 
 #[test]
 fn equal_consecutive_heights_accepted() {
@@ -191,7 +191,7 @@ fn equal_consecutive_heights_accepted() {
     assert!(result.is_ok(), "plateau heights should be accepted");
 }
 
-// ── AC: Display messages are informative ──────────────────────────────────
+// ── Display messages are informative ──────────────────────────────────────
 
 #[test]
 fn display_insufficient_points_contains_name_and_count() {
@@ -361,7 +361,7 @@ fn losses_constant_independent_of_all_inputs() {
     assert!((r2 - 1.25).abs() < 1e-10);
 }
 
-// ── AC: two-point minimum curve ───────────────────────────────────────────
+// ── Two-point minimum curve ───────────────────────────────────────────────
 
 #[test]
 fn two_point_minimum_curve_works() {
@@ -373,7 +373,7 @@ fn two_point_minimum_curve_works() {
     assert!((table.height(500.0) - 390.0).abs() < 1e-10);
 }
 
-// ── AC: second segment midpoint interpolation ─────────────────────────────
+// ── Second segment midpoint interpolation ─────────────────────────────────
 
 #[test]
 fn interpolation_second_segment_correct() {
@@ -642,7 +642,7 @@ fn default_config() -> FphaColumnLayout {
     }
 }
 
-// ── AC: no fitting window — forebay defaults, all discretization = 5 ─────
+// ── No fitting window — forebay defaults, all discretization = 5 ─────────
 
 /// Given config with no fitting window and all discretization fields None,
 /// resolve_fitting_bounds uses forebay range and defaults all counts to 5,
@@ -663,7 +663,7 @@ fn no_fitting_window_uses_forebay_defaults() {
     assert_eq!(bounds.max_planes_per_hydro, 10);
 }
 
-// ── AC: absolute bounds — both set ────────────────────────────────────────
+// ── Absolute bounds — both set ────────────────────────────────────────────
 
 /// Given config with absolute volume_min_hm3 = 1000 and volume_max_hm3 = 30000,
 /// resolve_fitting_bounds returns those bounds unchanged (within forebay range).
@@ -687,7 +687,7 @@ fn absolute_bounds_both_set() {
     assert_eq!(bounds.v_max, 30_000.0);
 }
 
-// ── AC: absolute bounds — only min set ───────────────────────────────────
+// ── Absolute bounds — only min set ───────────────────────────────────────
 
 /// Given only volume_min_hm3, v_max falls back to forebay.v_max().
 #[test]
@@ -710,7 +710,7 @@ fn absolute_bounds_only_min() {
     assert_eq!(bounds.v_max, 34_116.0);
 }
 
-// ── AC: absolute bounds — only max set ───────────────────────────────────
+// ── Absolute bounds — only max set ───────────────────────────────────────
 
 /// Given only volume_max_hm3, v_min falls back to forebay.v_min().
 #[test]
@@ -733,7 +733,7 @@ fn absolute_bounds_only_max() {
     assert_eq!(bounds.v_max, 20_000.0);
 }
 
-// ── AC: percentile bounds ─────────────────────────────────────────────────
+// ── Percentile bounds ─────────────────────────────────────────────────────
 
 /// Given percentile bounds 0.1 and 0.9 on a hydro with range [100, 2000],
 /// v_min = 100 + 0.1 * 1900 = 290, v_max = 100 + 0.9 * 1900 = 1810.
@@ -759,7 +759,7 @@ fn percentile_bounds_both_set() {
     assert!((bounds.v_max - expected_max).abs() < 1e-10);
 }
 
-// ── AC: mixed — absolute min, percentile max (non-conflicting) ────────────
+// ── Mixed — absolute min, percentile max (non-conflicting) ────────────────
 
 /// Absolute min bound + percentile max bound is accepted (different dimensions).
 #[test]
@@ -783,7 +783,7 @@ fn mixed_absolute_min_percentile_max() {
     assert!((bounds.v_max - expected_max).abs() < 1e-10);
 }
 
-// ── AC: conflicting — both absolute and percentile for min ───────────────
+// ── Conflicting — both absolute and percentile for min ───────────────────
 
 /// volume_min_hm3 and volume_min_percentile both set -> ConflictingFittingWindow.
 #[test]
@@ -807,7 +807,7 @@ fn conflicting_min_bound_returns_error() {
     );
 }
 
-// ── AC: conflicting — both absolute and percentile for max ───────────────
+// ── Conflicting — both absolute and percentile for max ───────────────────
 
 /// volume_max_hm3 and volume_max_percentile both set -> ConflictingFittingWindow.
 #[test]
@@ -831,7 +831,7 @@ fn conflicting_max_bound_returns_error() {
     );
 }
 
-// ── AC: empty range — v_min >= v_max ─────────────────────────────────────
+// ── Empty range — v_min >= v_max ─────────────────────────────────────────
 
 /// Absolute bounds with v_min > v_max -> EmptyFittingWindow.
 #[test]
@@ -914,7 +914,7 @@ fn explicit_single_volume_point_reroutes_not_rejected() {
     );
 }
 
-// ── AC: clamping — absolute bounds outside forebay range ─────────────────
+// ── Clamping — absolute bounds outside forebay range ─────────────────────
 
 /// Absolute v_min below forebay.v_min() gets clamped to forebay.v_min().
 #[test]
@@ -960,7 +960,7 @@ fn absolute_max_above_forebay_gets_clamped() {
     assert_eq!(bounds.v_max, 34_116.0);
 }
 
-// ── AC: discretization defaults ──────────────────────────────────────────
+// ── Discretization defaults ──────────────────────────────────────────────
 
 /// All discretization fields None -> defaults to 5 for each dimension.
 #[test]
@@ -997,7 +997,7 @@ fn discretization_explicit_values_passed_through() {
     assert_eq!(bounds.max_planes_per_hydro, 20);
 }
 
-// ── AC: insufficient discretization ──────────────────────────────────────
+// ── Insufficient discretization ──────────────────────────────────────────
 
 // Note: `volume_discretization_points = 1` (NPTV = 1) is no longer rejected —
 // it is a run-of-river request rerouted through the single-volume path. See
@@ -1066,7 +1066,7 @@ fn spillage_discretization_one_returns_error() {
     );
 }
 
-// ── AC: max_planes_per_hydro ──────────────────────────────────────────────
+// ── Max_planes_per_hydro ──────────────────────────────────────────────────
 
 /// max_planes_per_hydro = None -> defaults to 10.
 #[test]
@@ -1118,7 +1118,7 @@ fn max_planes_per_hydro_zero_returns_error() {
 
 // ── validate_fitted_planes tests ──────────────────────────────────────────
 
-/// AC: valid planes and a positive alpha pass validation.
+/// Valid planes and a positive alpha pass validation.
 #[test]
 fn validate_fitted_planes_valid_input_returns_ok() {
     let planes = vec![
@@ -1139,7 +1139,7 @@ fn validate_fitted_planes_valid_input_returns_ok() {
     assert!(result.is_ok(), "expected Ok(()), got {result:?}");
 }
 
-/// AC: alpha = -0.1 returns NonPositiveAlpha (alpha must be > 0).
+/// Alpha = -0.1 returns NonPositiveAlpha (alpha must be > 0).
 #[test]
 fn validate_fitted_planes_negative_alpha_returns_non_positive_alpha() {
     let planes = vec![RawPlane {
@@ -1155,7 +1155,7 @@ fn validate_fitted_planes_negative_alpha_returns_non_positive_alpha() {
     );
 }
 
-/// AC: alpha = 0.0 returns NonPositiveAlpha.
+/// Alpha = 0.0 returns NonPositiveAlpha.
 #[test]
 fn validate_fitted_planes_zero_alpha_returns_non_positive_alpha() {
     let planes = vec![RawPlane {
@@ -1171,7 +1171,7 @@ fn validate_fitted_planes_zero_alpha_returns_non_positive_alpha() {
     );
 }
 
-/// AC: alpha > 1.0 is valid (alpha is an MSE balance, not bounded below 1).
+/// Alpha > 1.0 is valid (alpha is an MSE balance, not bounded below 1).
 #[test]
 fn validate_fitted_planes_alpha_above_one_passes() {
     let planes = vec![RawPlane {
@@ -1184,7 +1184,7 @@ fn validate_fitted_planes_alpha_above_one_passes() {
     assert!(result.is_ok(), "alpha > 1 should pass: {result:?}");
 }
 
-/// AC: empty planes returns NoHyperplanesProduced.
+/// Empty planes returns NoHyperplanesProduced.
 #[test]
 fn validate_fitted_planes_empty_planes_returns_no_hyperplanes() {
     let err = validate_fitted_planes(&[], 0.99, "TestHydro").unwrap_err();
@@ -1194,7 +1194,7 @@ fn validate_fitted_planes_empty_planes_returns_no_hyperplanes() {
     );
 }
 
-/// AC: plane with gamma_v significantly below zero returns InvalidCoefficient.
+/// Plane with gamma_v significantly below zero returns InvalidCoefficient.
 #[test]
 fn validate_fitted_planes_negative_gamma_v_returns_invalid_coefficient() {
     let planes = vec![RawPlane {
@@ -1214,7 +1214,7 @@ fn validate_fitted_planes_negative_gamma_v_returns_invalid_coefficient() {
     );
 }
 
-/// AC: plane with gamma_q significantly below zero returns InvalidCoefficient.
+/// Plane with gamma_q significantly below zero returns InvalidCoefficient.
 #[test]
 fn validate_fitted_planes_negative_gamma_q_returns_invalid_coefficient() {
     let planes = vec![RawPlane {
@@ -1234,7 +1234,7 @@ fn validate_fitted_planes_negative_gamma_q_returns_invalid_coefficient() {
     );
 }
 
-/// AC: plane with gamma_s significantly above zero returns InvalidCoefficient.
+/// Plane with gamma_s significantly above zero returns InvalidCoefficient.
 #[test]
 fn validate_fitted_planes_positive_gamma_s_returns_invalid_coefficient() {
     let planes = vec![RawPlane {
@@ -1254,7 +1254,7 @@ fn validate_fitted_planes_positive_gamma_s_returns_invalid_coefficient() {
     );
 }
 
-/// AC: near-zero gamma_v (within 1e-10 tolerance) passes validation.
+/// Near-zero gamma_v (within 1e-10 tolerance) passes validation.
 #[test]
 fn validate_fitted_planes_near_zero_gamma_v_within_tolerance_passes() {
     let planes = vec![RawPlane {
@@ -1270,7 +1270,7 @@ fn validate_fitted_planes_near_zero_gamma_v_within_tolerance_passes() {
     );
 }
 
-/// AC: near-zero gamma_s (within 1e-10 tolerance) passes validation.
+/// Near-zero gamma_s (within 1e-10 tolerance) passes validation.
 #[test]
 fn validate_fitted_planes_near_zero_gamma_s_within_tolerance_passes() {
     let planes = vec![RawPlane {
@@ -1341,7 +1341,7 @@ fn make_sobradinho_hydro() -> Hydro {
     }
 }
 
-/// AC: fit_fpha_planes with Sobradinho-style geometry and default FphaColumnLayout
+/// Fit_fpha_planes with Sobradinho-style geometry and default FphaColumnLayout
 /// returns Ok with at least one plane, all with valid coefficient signs.
 ///
 /// The fitter derives planes from the convex hull, so the contract is the
@@ -1401,7 +1401,7 @@ fn fit_fpha_planes_sobradinho_style_end_to_end() {
     }
 }
 
-/// AC: a computed-FPHA fixture with a spillage-sensitive tailrace yields planes
+/// A computed-FPHA fixture with a spillage-sensitive tailrace yields planes
 /// with `γ_S < 0` that still form a valid outer approximation.
 ///
 /// The Sobradinho fixture's tailrace rises with total outflow
@@ -1466,7 +1466,7 @@ fn fit_fpha_planes_spill_sensitive_yields_negative_gamma_s() {
     );
 }
 
-/// AC: fit_fpha_planes intercepts are finite for the Sobradinho fixture.
+/// Fit_fpha_planes intercepts are finite for the Sobradinho fixture.
 #[test]
 fn fit_fpha_planes_intercepts_are_finite() {
     let rows = sobradinho_rows();
@@ -1573,7 +1573,7 @@ fn fit_fpha_planes_run_of_river_yields_zero_gamma_v_end_to_end() {
     }
 }
 
-/// AC: fit_fpha_planes with constant-head geometry (flat forebay, no tailrace)
+/// Fit_fpha_planes with constant-head geometry (flat forebay, no tailrace)
 /// produces exactly 1 plane.
 #[test]
 fn fit_fpha_planes_linear_function_produces_one_plane() {
@@ -1685,7 +1685,7 @@ fn fit_fpha_planes_linear_function_produces_one_plane() {
     );
 }
 
-/// AC: fit_fpha_planes propagates ForebayTable construction errors (empty rows).
+/// Fit_fpha_planes propagates ForebayTable construction errors (empty rows).
 #[test]
 fn fit_fpha_planes_propagates_forebay_error_on_empty_rows() {
     let rows: Vec<HydroGeometryRow> = Vec::new();
@@ -1717,7 +1717,7 @@ fn fit_fpha_planes_propagates_forebay_error_on_empty_rows() {
     );
 }
 
-/// AC: a run-of-river plant — ONE VHA row at a single operating volume — fits
+/// A run-of-river plant — ONE VHA row at a single operating volume — fits
 /// end-to-end through the single-volume path and yields `γ_V = 0` exactly.
 ///
 /// This exercises the full chain a bridge-converted run-of-river plant takes:
@@ -1827,7 +1827,7 @@ fn display_invalid_coefficient_contains_name_and_index_and_detail() {
 
 // ── FphaFitResult alpha extraction ────────────────────────────────────────
 
-/// AC: fit_fpha_planes returns a finite positive α and each plane's coefficients
+/// Fit_fpha_planes returns a finite positive α and each plane's coefficients
 /// divide cleanly by α (the single correction factor) in the Sobradinho fixture.
 #[test]
 fn fit_fpha_planes_result_alpha_positive_and_intercept_consistent() {

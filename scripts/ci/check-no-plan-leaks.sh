@@ -70,12 +70,16 @@
 # cfg(test) tail-block exclusion (borrowed from check-infra-genericity.sh):
 #   For each .rs file under crates/*/src/, scanning stops at the first line
 #   matching `#[cfg(test)]`; all subsequent lines until end-of-file are
-#   considered test scope and skipped. Sibling test files (`tests.rs`, the
-#   `#[cfg(test)] mod tests;` sibling-file convention) carry no in-file
-#   `#[cfg(test)]` line, so they are excluded by filename instead. Plan refs in test names and test-only
-#   comments are out of the user-facing-artifact scope, so the gate truncates
-#   each .rs file at the test-module boundary before applying PATTERN. This
-#   mirrors the awk pre-filter mechanism in check-infra-genericity.sh.
+#   considered test scope and skipped. This mirrors the awk pre-filter mechanism
+#   in check-infra-genericity.sh.
+#
+#   Sibling test files (`tests.rs`, the `#[cfg(test)] mod tests;` convention)
+#   carry no in-file `#[cfg(test)]` line and are therefore scanned in FULL. They
+#   were once excluded by filename, which made the gate self-inconsistent — an
+#   integration binary under crates/*/tests/ was scanned while the unit-test
+#   sibling next to the code it tests was not — and let three leaks ship. Test
+#   NAMES stay allowed without needing a carve-out: `\b` in PATTERN does not
+#   match across the `_` that Rust identifiers join with.
 #
 #   Known limitation (same as check-infra-genericity.sh): the exclusion
 #   assumes the test module is a tail block. Files with mid-file test modules
@@ -99,7 +103,14 @@ source "${REPO_ROOT}/scripts/ci/lib/comment_scan.sh"
 command -v cs_emit_production_lines >/dev/null \
     || { echo "FATAL: scripts/ci/lib/comment_scan.sh did not load its helpers." >&2; exit 2; }
 
-readonly PATTERN='[Ee]pic[ -][0-9]+|[Tt]icket[ -][0-9]+|T0[0-9][0-9]|\bsprint\b|\bF[0-9]?-[0-9]{2,}\b|\bW[0-9]+ (reset|rebake|workstream|phase)\b|\bW-[0-9]+\b|\b[Tt]he (ticket|campaign)\b|\b[Dd]ecision [A-Z][0-9]+\b|\bOption [A-Z]\b|\bFix [0-9]\b|\bAC: |\bAC[0-9]\b|\bAC-[0-9]'
+# The epic/ticket/sprint words are matched BARE, with no digit required, because a
+# number is not what makes them leaks — "the epic's safety mechanism", "untouched by
+# this ticket" and the plural "Tickets 016-020" all named the plan and all evaded the
+# earlier digit-anchored forms (`[Ee]pic[ -][0-9]+` cannot match "epic's", and the "s"
+# in "Tickets" displaces the required separator). `\b` keeps Rust test names allowed
+# without a carve-out: identifiers join with `_`, which is a word character, so
+# `ticket_016_regression` does not match while the prose "ticket 016" does.
+readonly PATTERN='\b[Ee]pics?\b|\b[Tt]ickets?\b|\b[Ss]prints?\b|T0[0-9][0-9]|\bF[0-9]?-[0-9]{2,}\b|\bW[0-9]+ (reset|rebake|workstream|phase)\b|\bW-[0-9]+\b|\b[Tt]he campaign\b|\b[Rr]equirement [0-9]+[a-z]?\b|\b[Rr]equirements [0-9]+\b|\b[Dd]ecision [A-Z][0-9]+\b|\bOption [A-Z]\b|\bFix [0-9]\b|\bAC: |\bAC[0-9]\b|\bAC-[0-9]'
 
 # Section-reference pass: flag `§<n>` unless the line anchors it to a named
 # source-of-truth document (see header). Two-stage because "allowed unless
@@ -166,7 +177,7 @@ for dir in "${SCAN_DIRS[@]}"; do
         if [[ -n "$section_matches" ]]; then
             violations+="${section_matches}"$'\n'
         fi
-    done < <(find "$dir" -name "*.rs" -not -name "tests.rs" -print0)
+    done < <(find "$dir" -name "*.rs" -print0)
 done
 
 # Non-.rs targets: plain whole-file recursive grep. *.min.js files are

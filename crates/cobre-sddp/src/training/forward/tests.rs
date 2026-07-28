@@ -1048,7 +1048,7 @@ fn sync_result_clone_and_debug() {
 
 // ── Unit tests: UB statistics computation ───────────────────────────────
 
-/// AC: 4 scenarios with costs [60, 70, 80, 90].
+/// 4 scenarios with costs [60, 70, 80, 90].
 ///
 /// `cost_sum` = 300, `cost_sum_sq` = 60²+70²+80²+90² = 23000, count = 4.
 /// mean = 75.0
@@ -1087,7 +1087,7 @@ fn ub_statistics_four_scenarios_correct_mean_and_std() {
     );
 }
 
-/// AC: 4 scenarios, costs [60,70,80,90].
+/// 4 scenarios, costs [60,70,80,90].
 ///
 /// Matches the exact acceptance criterion values: `global_ub_mean` = 75.0,
 /// `global_ub_std` > 0.
@@ -1515,7 +1515,7 @@ fn basis_invalidated_on_solver_error() {
 
 // ── New test: parallel cost agreement ────────────────────────────────────
 
-/// AC: with 1-workspace and 4-workspace pools producing the same `cost_sum`.
+/// With 1-workspace and 4-workspace pools producing the same `cost_sum`.
 ///
 /// Given the same input data, `run_forward_pass` with a single workspace
 /// must produce identical `cost_sum` and `cost_sum_sq` values compared to
@@ -2129,7 +2129,7 @@ fn truncation_clamps_negative_inflow_noise() {
     );
 }
 
-/// AC: truncation does not clamp when inflow is positive.
+/// Truncation does not clamp when inflow is positive.
 ///
 /// With a very large positive mean (`mean_m3s = 1000.0`) and small sigma,
 /// the PAR inflow is always positive for any sampled noise. The noise buffer
@@ -3660,7 +3660,7 @@ mod dcs_forward {
         (stage_cost, records[0].state.clone(), scoring_time_seconds)
     }
 
-    /// AC1: DCS branch (binding cut omitted from the seed) yields the same
+    /// DCS branch (binding cut omitted from the seed) yields the same
     /// stage cost and advanced state as the frozen all-cuts path within 1e-9.
     #[test]
     fn forward_dcs_exact_matches_all_cuts() {
@@ -3697,7 +3697,7 @@ mod dcs_forward {
         assert!((dcs_state[0] - X_HAT).abs() < 1e-9);
     }
 
-    /// AC2: a frozen template with a DOMINATING embedded cut (floor 10,
+    /// A frozen template with a DOMINATING embedded cut (floor 10,
     /// gradient 5, NOT in the pool) must NOT change the DCS result — proving
     /// the cut-free `ctx.templates[t]` is loaded, not `params.frozen[t]`. If
     /// the DCS path erroneously loaded the dominating frozen template, the
@@ -3725,7 +3725,7 @@ mod dcs_forward {
         }
     }
 
-    /// AC3: the `run_forward_worker` `is_active` filter actually suppresses
+    /// The `run_forward_worker` `is_active` filter actually suppresses
     /// DCS before `start_iteration` and lets it through at/after it.
     ///
     /// This is a real witness, not a coincidence: the suppression is observed

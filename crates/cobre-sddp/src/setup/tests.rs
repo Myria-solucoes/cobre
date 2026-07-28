@@ -2290,9 +2290,8 @@ fn build_initial_state_zero_derived_lag_values_leaves_zero_lags() {
 }
 
 /// No `recent_observations`, a monthly full-coverage `inflow_history` record:
-/// the derived lag block must be bit-identical to what the pre-epic
-/// positional-seed path produced for the same numeric values (December 2019
-/// = lag0, November 2019 = lag1, per hydro).
+/// the derived lag block orders December 2019 as lag0 and November 2019 as
+/// lag1, per hydro.
 #[test]
 fn build_initial_state_derived_lags_match_positional_seed() {
     use super::build_initial_state;
@@ -2357,8 +2356,7 @@ fn build_initial_state_derived_lags_match_positional_seed() {
         &seeds.lag_values,
     );
 
-    // Lag-major: slot = s + lag * N + h. Identical to the values the pre-epic
-    // positional-seed path produced for h1=[600, 500], h2=[200, 100].
+    // Lag-major: slot = s + lag * N + h, with h1=[600, 500] and h2=[200, 100].
     let s = layout.inflow_lags.start;
     assert!(
         (state[s] - 600.0).abs() < 1e-10,
@@ -3128,8 +3126,7 @@ fn build_initial_state_mixed_operating_and_filling_seeds() {
 /// `build_initial_state`'s lag block from `inflow_history`. Stage 0 is
 /// January 2020 (`season_id: Some(0)`, a full-coverage month), so each
 /// hydro's k=1/k=2 previous-occurrence windows (December/November 2019)
-/// resolve to their record's `value_m3s` verbatim — the exact values the
-/// pre-epic positional-seed path produced for this fixture.
+/// resolve to their record's `value_m3s` verbatim.
 #[test]
 fn study_setup_initial_state_has_nonzero_lags_from_derived_inflow_history() {
     let inflow_history = vec![
@@ -7626,7 +7623,7 @@ fn zero_bounds_defaults(contract_price: f64) -> BoundsDefaults {
     }
 }
 
-/// AC: a two-contract study with per-stage block counts `[3, 2]` (differing,
+/// A two-contract study with per-stage block counts `[3, 2]` (differing,
 /// so a stride bug reading a global max-blocks count instead of
 /// `block_counts_per_stage[t]` would misreport stage 1's length), a price that
 /// varies per contract AND per stage (so a stage-axis bug — reading stage 0's
@@ -7682,7 +7679,7 @@ fn test_contract_prices_per_block_are_uniform_without_overlay() {
     }
 }
 
-/// AC: contract 0's stage-0 (three-block) inner slice carries a `120.0`
+/// Contract 0's stage-0 (three-block) inner slice carries a `120.0`
 /// override at block 1 over the stage-wide `80.0`; contract 1's three cells
 /// are unaffected by contract 0's override.
 #[test]
