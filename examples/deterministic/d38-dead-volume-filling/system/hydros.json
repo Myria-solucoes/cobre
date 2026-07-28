@@ -21,7 +21,18 @@
         "max_turbined_m3s": 60.0,
         "min_generation_mw": 0.0,
         "max_generation_mw": 60.0
-      }
+      },
+      "unit_groups": [
+        {
+          "id": 0,
+          "name": "H1",
+          "bus_id": 0,
+          "min_generation_mw": 0.0,
+          "max_generation_mw": 60.0,
+          "min_turbined_m3s": 0.0,
+          "max_turbined_m3s": 60.0
+        }
+      ]
     },
     {
       "id": 1,
@@ -45,7 +56,18 @@
         "max_turbined_m3s": 60.0,
         "min_generation_mw": 0.0,
         "max_generation_mw": 60.0
-      }
+      },
+      "unit_groups": [
+        {
+          "id": 0,
+          "name": "H2",
+          "bus_id": 0,
+          "min_generation_mw": 0.0,
+          "max_generation_mw": 60.0,
+          "min_turbined_m3s": 0.0,
+          "max_turbined_m3s": 60.0
+        }
+      ]
     },
     {
       "id": 2,
@@ -67,7 +89,18 @@
         "max_turbined_m3s": 80.0,
         "min_generation_mw": 0.0,
         "max_generation_mw": 80.0
-      }
+      },
+      "unit_groups": [
+        {
+          "id": 0,
+          "name": "H3",
+          "bus_id": 0,
+          "min_generation_mw": 0.0,
+          "max_generation_mw": 80.0,
+          "min_turbined_m3s": 0.0,
+          "max_turbined_m3s": 80.0
+        }
+      ]
     },
     {
       "id": 3,
@@ -89,7 +122,18 @@
         "max_turbined_m3s": 60.0,
         "min_generation_mw": 0.0,
         "max_generation_mw": 60.0
-      }
+      },
+      "unit_groups": [
+        {
+          "id": 0,
+          "name": "H4",
+          "bus_id": 0,
+          "min_generation_mw": 0.0,
+          "max_generation_mw": 60.0,
+          "min_turbined_m3s": 0.0,
+          "max_turbined_m3s": 60.0
+        }
+      ]
     }
   ]
 }

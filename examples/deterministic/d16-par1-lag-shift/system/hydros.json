@@ -21,7 +21,18 @@
         "max_turbined_m3s": 200.0,
         "min_generation_mw": 0.0,
         "max_generation_mw": 200.0
-      }
+      },
+      "unit_groups": [
+        {
+          "id": 0,
+          "name": "H0",
+          "bus_id": 0,
+          "min_generation_mw": 0.0,
+          "max_generation_mw": 200.0,
+          "min_turbined_m3s": 0.0,
+          "max_turbined_m3s": 200.0
+        }
+      ]
     }
   ]
 }
