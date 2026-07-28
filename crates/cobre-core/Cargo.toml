@@ -24,6 +24,9 @@ serde = ["dep:serde", "chrono/serde"]
 ## auto-generated JSON Schemas (e.g. `ComputedParameter` embedded in
 ## `system/scalar_parameters.json`). Implies the `serde` feature.
 schema = ["serde", "dep:schemars"]
+## Expose test-only fixture scaffolding (`Hydro::declare_mirror_unit_group`)
+## to other crates' tests. Must NOT be enabled in production builds.
+test-support = []
 
 [dependencies]
 ## `NaiveDate` is used in `Stage` and `SeasonDefinition` types. Kept as a

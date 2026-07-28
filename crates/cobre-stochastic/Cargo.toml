@@ -30,6 +30,7 @@ tracing = "0.1"
 
 [dev-dependencies]
 chrono = "0.4"
+cobre-core = { path = "../cobre-core", features = ["test-support"] }
 proptest = "1"
 
 [lints]

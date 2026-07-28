@@ -282,6 +282,25 @@ impl Hydro {
             });
         }
     }
+
+    /// Test-only fixture helper: mirrors this plant into a single unit group
+    /// when none is declared, matching the construction production code no
+    /// longer performs — a production caller is a contract violation, not a
+    /// convenience.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn declare_mirror_unit_group(&mut self) {
+        if self.unit_groups.is_empty() {
+            self.unit_groups.push(HydroUnitGroup {
+                id: EntityId(0),
+                name: self.name.clone(),
+                bus_id: self.bus_id,
+                min_generation_mw: self.min_generation_mw,
+                max_generation_mw: self.max_generation_mw,
+                min_turbined_m3s: self.min_turbined_m3s,
+                max_turbined_m3s: self.max_turbined_m3s,
+            });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -803,5 +822,81 @@ mod tests {
             err.to_string().contains("unit_groups"),
             "error message must mention unit_groups, got: {err}"
         );
+    }
+
+    #[test]
+    fn test_declare_mirror_unit_group_copies_plant_bus_name_and_bounds() {
+        let mut hydro = Hydro {
+            id: EntityId::from(1),
+            name: "AlphaPlant".to_string(),
+            bus_id: EntityId::from(10),
+            min_generation_mw: 10.0,
+            max_generation_mw: 90.0,
+            min_turbined_m3s: 5.0,
+            max_turbined_m3s: 200.0,
+            unit_groups: Vec::new(),
+            ..minimal_hydro(HydroGenerationModel::ConstantProductivity)
+        };
+
+        hydro.declare_mirror_unit_group();
+
+        assert_eq!(hydro.unit_groups.len(), 1);
+        let group = &hydro.unit_groups[0];
+        assert_eq!(group.id, EntityId(0));
+        assert_eq!(group.name, "AlphaPlant");
+        assert_eq!(group.bus_id, EntityId::from(10));
+        assert_eq!(group.min_generation_mw.to_bits(), 10.0_f64.to_bits());
+        assert_eq!(group.max_generation_mw.to_bits(), 90.0_f64.to_bits());
+        assert_eq!(group.min_turbined_m3s.to_bits(), 5.0_f64.to_bits());
+        assert_eq!(group.max_turbined_m3s.to_bits(), 200.0_f64.to_bits());
+    }
+
+    #[test]
+    fn test_declare_mirror_unit_group_is_a_noop_when_a_group_exists() {
+        let mut hydro = minimal_hydro(HydroGenerationModel::ConstantProductivity);
+        hydro.unit_groups = vec![HydroUnitGroup {
+            id: EntityId::from(7),
+            name: "ExistingGroup".to_string(),
+            bus_id: EntityId::from(20),
+            min_generation_mw: 1.0,
+            max_generation_mw: 2.0,
+            min_turbined_m3s: 3.0,
+            max_turbined_m3s: 4.0,
+        }];
+
+        hydro.declare_mirror_unit_group();
+
+        assert_eq!(hydro.unit_groups.len(), 1);
+        assert_eq!(hydro.unit_groups[0].id, EntityId::from(7));
+    }
+
+    #[test]
+    fn test_declare_mirror_unit_group_does_not_sort() {
+        let mut hydro = minimal_hydro(HydroGenerationModel::ConstantProductivity);
+        hydro.unit_groups = vec![
+            HydroUnitGroup {
+                id: EntityId::from(5),
+                name: "GroupFive".to_string(),
+                bus_id: EntityId::from(20),
+                min_generation_mw: 1.0,
+                max_generation_mw: 2.0,
+                min_turbined_m3s: 3.0,
+                max_turbined_m3s: 4.0,
+            },
+            HydroUnitGroup {
+                id: EntityId::from(2),
+                name: "GroupTwo".to_string(),
+                bus_id: EntityId::from(21),
+                min_generation_mw: 5.0,
+                max_generation_mw: 6.0,
+                min_turbined_m3s: 7.0,
+                max_turbined_m3s: 8.0,
+            },
+        ];
+
+        hydro.declare_mirror_unit_group();
+
+        assert_eq!(hydro.unit_groups[0].id, EntityId::from(5));
+        assert_eq!(hydro.unit_groups[1].id, EntityId::from(2));
     }
 }
