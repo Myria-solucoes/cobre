@@ -658,7 +658,7 @@ mod proptests {
     }
 
     fn hydro(id: i32, name: &str, date: NaiveDate, bus_id: i32) -> Hydro {
-        Hydro {
+        let mut hydro = Hydro {
             unit_groups: Vec::new(),
             id: EntityId(id),
             name: name.to_string(),
@@ -686,7 +686,9 @@ mod proptests {
             diversion: None,
             filling: None,
             penalties: super::tests::zero_penalties(),
-        }
+        };
+        hydro.declare_mirror_unit_group();
+        hydro
     }
 
     fn thermal(id: i32, name: &str, date: NaiveDate, bus_id: i32) -> Thermal {

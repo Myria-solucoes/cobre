@@ -596,7 +596,7 @@ mod tests {
             evaporation_violation_neg_cost: 0.0,
             inflow_nonnegativity_cost: 1000.0,
         };
-        Hydro {
+        let mut hydro = Hydro {
             id: EntityId(id),
             name: format!("hydro-{id}"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -624,7 +624,9 @@ mod tests {
             diversion: None,
             filling: None,
             penalties: zero_penalties,
-        }
+        };
+        hydro.declare_mirror_unit_group();
+        hydro
     }
 
     /// Creates a hydro on bus 0. Caller must supply `make_bus(0)`.

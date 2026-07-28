@@ -160,7 +160,7 @@ mod tests {
             evaporation_violation_neg_cost: 0.0,
             inflow_nonnegativity_cost: 1000.0,
         };
-        Hydro {
+        let mut hydro = Hydro {
             unit_groups: Vec::new(),
             id: EntityId(id),
             name: String::new(),
@@ -188,7 +188,9 @@ mod tests {
             diversion: None,
             filling: None,
             penalties: zero_penalties,
-        }
+        };
+        hydro.declare_mirror_unit_group();
+        hydro
     }
 
     #[test]

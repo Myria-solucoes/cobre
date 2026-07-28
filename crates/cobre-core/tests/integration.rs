@@ -67,7 +67,7 @@ fn make_line(id: i32, source_bus_id: i32, target_bus_id: i32) -> Line {
 }
 
 fn make_hydro(id: i32, bus_id: i32, downstream_id: Option<i32>) -> Hydro {
-    Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: EntityId(id),
         name: format!("hydro-{id}").to_string(),
@@ -95,7 +95,9 @@ fn make_hydro(id: i32, bus_id: i32, downstream_id: Option<i32>) -> Hydro {
         diversion: None,
         filling: None,
         penalties: zero_hydro_penalties(),
-    }
+    };
+    hydro.declare_mirror_unit_group();
+    hydro
 }
 
 fn make_thermal(id: i32, bus_id: i32) -> Thermal {

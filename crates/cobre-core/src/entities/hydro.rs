@@ -328,7 +328,7 @@ mod tests {
         }
     }
     fn minimal_hydro(model: HydroGenerationModel) -> Hydro {
-        Hydro {
+        let mut hydro = Hydro {
             id: EntityId::from(1),
             name: String::from("Itaipu"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -356,7 +356,9 @@ mod tests {
             diversion: None,
             filling: None,
             penalties: penalties_all(0.0),
-        }
+        };
+        hydro.declare_mirror_unit_group();
+        hydro
     }
 
     #[test]
@@ -394,7 +396,7 @@ mod tests {
 
     #[test]
     fn test_hydro_optional_fields_some() {
-        let hydro = Hydro {
+        let mut hydro = Hydro {
             id: EntityId::from(2),
             name: String::from("Tucuruí"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -436,6 +438,7 @@ mod tests {
             }),
             penalties: penalties_all(1.0),
         };
+        hydro.declare_mirror_unit_group();
 
         assert_eq!(hydro.downstream_id, Some(EntityId::from(3)));
         assert_eq!(hydro.travel_time_hours, Some(360.0));
@@ -568,7 +571,7 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn test_hydro_serde_roundtrip() {
-        let hydro = Hydro {
+        let mut hydro = Hydro {
             id: EntityId::from(2),
             name: "Tucuruí".to_string(),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -627,6 +630,7 @@ mod tests {
                 inflow_nonnegativity_cost: 1000.0,
             },
         };
+        hydro.declare_mirror_unit_group();
         let json = serde_json::to_string(&hydro).unwrap();
         let deserialized: Hydro = serde_json::from_str(&json).unwrap();
         assert_eq!(hydro, deserialized);

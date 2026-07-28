@@ -570,6 +570,7 @@ name = "cobre-core"
 version = "0.12.0"
 dependencies = [
  "chrono",
+ "cobre-core",
  "postcard",
  "proptest",
  "schemars",

@@ -36,6 +36,7 @@ serde = { version = "1", features = ["derive"], optional = true }
 schemars = { version = "1", optional = true }
 
 [dev-dependencies]
+cobre-core = { path = ".", features = ["test-support"] }
 postcard = { version = "1", features = ["alloc"] }
 proptest = "1"
 serde_json = { version = "1", optional = false }
