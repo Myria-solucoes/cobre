@@ -12,8 +12,8 @@
 use chrono::NaiveDate;
 use cobre_core::{
     ContractType, DeficitSegment, DiversionChannel, EnergyContract, EntityId, FillingConfig, Hydro,
-    HydroGenerationModel, HydroPenalties, Line, NonControllableSource, PumpingStation,
-    SystemBuilder, Thermal, ValidationError,
+    HydroGenerationModel, HydroPenalties, HydroUnitGroup, Line, NonControllableSource,
+    PumpingStation, SystemBuilder, Thermal, ValidationError,
 };
 
 fn zero_hydro_penalties() -> HydroPenalties {
@@ -98,6 +98,18 @@ fn make_hydro(id: i32, bus_id: i32, downstream_id: Option<i32>) -> Hydro {
     };
     hydro.declare_mirror_unit_group();
     hydro
+}
+
+fn make_group(id: i32, bus_id: i32) -> HydroUnitGroup {
+    HydroUnitGroup {
+        id: EntityId(id),
+        name: format!("group-{id}"),
+        bus_id: EntityId(bus_id),
+        min_generation_mw: 0.0,
+        max_generation_mw: 450.0,
+        min_turbined_m3s: 0.0,
+        max_turbined_m3s: 500.0,
+    }
 }
 
 fn make_thermal(id: i32, bus_id: i32) -> Thermal {
@@ -351,6 +363,46 @@ fn test_realistic_multi_entity_system() {
     let loads2 = network.bus_loads(EntityId(2));
     assert!(loads2.contract_ids.is_empty());
     assert_eq!(loads2.pumping_station_ids, vec![EntityId(30)]);
+}
+
+#[test]
+fn test_hydro_with_groups_on_multiple_buses_lists_under_each() {
+    let mut hydro = make_hydro(10, 1, None);
+    hydro.unit_groups = vec![make_group(0, 1), make_group(1, 2)];
+
+    let system = SystemBuilder::new()
+        .buses(vec![make_bus(1), make_bus(2)])
+        .hydros(vec![hydro])
+        .build()
+        .expect("hydro with groups on two buses must be valid");
+
+    let network = system.network();
+    assert_eq!(
+        network.bus_generators(EntityId(1)).hydro_ids,
+        vec![EntityId(10)]
+    );
+    assert_eq!(
+        network.bus_generators(EntityId(2)).hydro_ids,
+        vec![EntityId(10)]
+    );
+}
+
+#[test]
+fn test_hydro_with_same_bus_groups_appears_once() {
+    let mut hydro = make_hydro(10, 1, None);
+    hydro.unit_groups = vec![make_group(0, 1), make_group(1, 1), make_group(2, 1)];
+
+    let system = SystemBuilder::new()
+        .buses(vec![make_bus(1)])
+        .hydros(vec![hydro])
+        .build()
+        .expect("hydro with three same-bus groups must be valid");
+
+    let network = system.network();
+    assert_eq!(
+        network.bus_generators(EntityId(1)).hydro_ids,
+        vec![EntityId(10)]
+    );
 }
 
 #[test]
