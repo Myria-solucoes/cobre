@@ -11,9 +11,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use cobre_core::EntityId;
+use cobre_core::{EntityId, Hydro};
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
+use super::ENVELOPE_TOLERANCE;
 
 /// Per-family constants the rejection messages need: the capitalized family
 /// name, the row's id-field name, the row-kind label, and the source Parquet
@@ -454,6 +455,89 @@ pub(super) fn check_block_id_on_anticipated_thermal(
     }
 }
 
+/// Rejects a `hydro_bounds` row that raises `max_turbined_m3s` or
+/// `max_generation_mw` above the hydro's own declared value, each column
+/// checked independently. A row on an unknown `hydro_id` is skipped — Layer 3
+/// referential validation already owns that rejection. The comparison is
+/// strict `>`, not `>=`: restating a plant's declared maximum on an override
+/// row is legitimate.
+///
+/// A mid-horizon uprate is expressible without raising: declare the plant at
+/// its final capacity and tighten the earlier stages with `hydro_bounds` rows
+/// instead (the rejection message states this remedy) — but nothing enforces
+/// that the tightening rows cover every pre-uprate stage, so a missed stage
+/// silently sits at full final capacity.
+pub(super) fn check_bound_raises_declared_capacity(data: &ParsedData, ctx: &mut ValidationContext) {
+    let declared: HashMap<EntityId, &Hydro> = data.hydros.iter().map(|h| (h.id, h)).collect();
+
+    for row in &data.hydro_bounds {
+        let Some(&hydro) = declared.get(&row.hydro_id) else {
+            continue;
+        };
+
+        let columns = [
+            (
+                "max_turbined_m3s",
+                row.max_turbined_m3s,
+                hydro.max_turbined_m3s,
+            ),
+            (
+                "max_generation_mw",
+                row.max_generation_mw,
+                hydro.max_generation_mw,
+            ),
+        ];
+
+        for (column, value, declared_value) in columns {
+            let Some(value) = value else { continue };
+            let tolerance = ENVELOPE_TOLERANCE * declared_value.abs().max(1.0);
+            if value > declared_value + tolerance {
+                emit_raises_declared_capacity_error(
+                    row.hydro_id.0,
+                    row.stage_id,
+                    row.block_id,
+                    column,
+                    declared_value,
+                    value,
+                    ctx,
+                );
+            }
+        }
+    }
+}
+
+/// Emits one `InvalidValue` for a `hydro_bounds` row that raises `column`
+/// above the plant's declared value.
+fn emit_raises_declared_capacity_error(
+    entity_id: i32,
+    stage_id: i32,
+    block_id: Option<i32>,
+    column: &'static str,
+    declared: f64,
+    value: f64,
+    ctx: &mut ValidationContext,
+) {
+    let family = HYDRO.family;
+    let row_label = HYDRO.row_label;
+    let entity_label = HYDRO.entity_label;
+    let entity_str = format!("{entity_label}={entity_id}, stage_id={stage_id}");
+    let block_str = match block_id {
+        Some(b) => format!(", block_id={b}"),
+        None => String::new(),
+    };
+    ctx.add_error(
+        ErrorKind::InvalidValue,
+        HYDRO.file,
+        Some(entity_str),
+        format!(
+            "{family} {entity_id}: {row_label} row at stage_id={stage_id}{block_str} sets \
+             {column}={value}, raising it above the plant's declared {column} ({declared}) in \
+             system/hydros.json; declare the plant at its final (post-uprate) {column} instead \
+             and add hydro_bounds rows tightening the earlier stages down to their true value"
+        ),
+    );
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -468,7 +552,7 @@ mod tests {
     use std::collections::HashSet;
 
     use cobre_core::temporal::{PolicyGraph, PolicyGraphType};
-    use cobre_core::{AnticipatedCommitmentHistory, AnticipatedConfig, EntityId, Thermal};
+    use cobre_core::{AnticipatedCommitmentHistory, AnticipatedConfig, EntityId, Hydro, Thermal};
 
     use super::super::test_support::*;
     use super::super::validate_semantic_hydro_thermal;
@@ -500,6 +584,27 @@ mod tests {
                 season_map: None,
             },
         }
+    }
+
+    /// Two hydros whose declared `max_turbined_m3s`/`max_generation_mw` differ
+    /// from each other and from every hydro/stage id: hydro 1 (600/400) is the
+    /// entity under test; hydro 2 (1000/700) exists so a positional
+    /// `data.hydros[id]` lookup (ids are 1-based, positions 0-based) would
+    /// compare a hydro-1 row against hydro 2's higher declared value instead
+    /// and miss a violation.
+    fn two_hydro_capacity_study() -> Vec<Hydro> {
+        vec![
+            Hydro {
+                max_turbined_m3s: 600.0,
+                max_generation_mw: 400.0,
+                ..make_hydro(1, None)
+            },
+            Hydro {
+                max_turbined_m3s: 1000.0,
+                max_generation_mw: 700.0,
+                ..make_hydro(2, None)
+            },
+        ]
     }
 
     fn thermal_row(id: i32, stage_id: i32, block_id: Option<i32>) -> ThermalBoundsRow {
@@ -581,6 +686,14 @@ mod tests {
 
     fn duplicate_errors(data: &ParsedData) -> Vec<ValidationEntry> {
         bound_errors_of_kind(data, ErrorKind::DuplicateId)
+    }
+
+    /// No other Layer 5a rule emits `InvalidValue` against one of the five
+    /// bound parquets, so this isolates `check_bound_raises_declared_capacity`
+    /// from the plant-level `InvalidValue` rules that target
+    /// `system/hydros.json` instead (e.g. rule 3's turbine-bound ordering).
+    fn capacity_raise_errors(data: &ParsedData) -> Vec<ValidationEntry> {
+        bound_errors_of_kind(data, ErrorKind::InvalidValue)
     }
 
     #[test]
@@ -1141,6 +1254,194 @@ mod tests {
         assert!(
             !errors.iter().any(|e| e.message.contains("Thermal 2")),
             "no error may name Thermal 2 (the plain thermal): {errors:?}"
+        );
+    }
+
+    // ── check_bound_raises_declared_capacity ─────────────────────────────────
+
+    #[test]
+    fn test_bounds_row_raising_max_turbined_is_rejected() {
+        let mut data = make_data(
+            two_hydro_capacity_study(),
+            vec![],
+            vec![],
+            two_stage_study_stages(),
+            vec![],
+            vec![],
+        );
+        data.hydro_bounds = vec![HydroBoundsRow {
+            max_turbined_m3s: Some(900.0),
+            max_generation_mw: Some(400.0),
+            ..hydro_row(1, 0, None)
+        }];
+
+        let errors = capacity_raise_errors(&data);
+        assert_eq!(
+            errors.len(),
+            1,
+            "expected exactly one error, got: {errors:?}"
+        );
+        let err = &errors[0];
+        assert_eq!(
+            err.file.to_string_lossy(),
+            "constraints/hydro_bounds.parquet"
+        );
+        assert!(err.message.contains("Hydro 1"), "message: {}", err.message);
+        assert!(
+            err.message.contains("stage_id=0"),
+            "message: {}",
+            err.message
+        );
+        assert!(err.message.contains("600"), "message: {}", err.message);
+        assert!(err.message.contains("900"), "message: {}", err.message);
+        assert!(
+            !err.message.contains("max_generation_mw"),
+            "no finding may name max_generation_mw (it is equal to its \
+             declared value): {}",
+            err.message
+        );
+    }
+
+    /// Extends [`test_bounds_row_raising_max_turbined_is_rejected`]'s study
+    /// with a lowering row, an exact-match row, and a stage-wide-plus-per-block
+    /// pair (200 then 500, both <= hydro 2's declared 1000) — the last pair is
+    /// what would trip an implementation comparing against the row-to-row
+    /// resolved bound instead of the plant's own declared value, since 500
+    /// exceeds the stage-wide override (200) while still not exceeding the
+    /// plant's declared capacity.
+    #[test]
+    fn test_bounds_row_lowering_or_matching_declared_capacity_is_accepted() {
+        let mut data = make_data(
+            two_hydro_capacity_study(),
+            vec![],
+            vec![],
+            two_stage_study_stages(),
+            vec![],
+            vec![],
+        );
+        data.hydro_bounds = vec![
+            HydroBoundsRow {
+                max_turbined_m3s: Some(100.0),
+                ..hydro_row(2, 1, None)
+            },
+            HydroBoundsRow {
+                max_turbined_m3s: Some(600.0),
+                ..hydro_row(1, 1, None)
+            },
+            HydroBoundsRow {
+                max_turbined_m3s: Some(200.0),
+                ..hydro_row(2, 0, None)
+            },
+            HydroBoundsRow {
+                max_turbined_m3s: Some(500.0),
+                ..hydro_row(2, 0, Some(1))
+            },
+        ];
+
+        let errors = capacity_raise_errors(&data);
+        assert!(
+            errors.is_empty(),
+            "lowering, exact-match, and a per-block row between a stage-wide \
+             override and the declared value must all be accepted: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_bounds_row_for_unknown_hydro_is_skipped_by_the_capacity_rule() {
+        let mut data = make_data(
+            two_hydro_capacity_study(),
+            vec![],
+            vec![],
+            two_stage_study_stages(),
+            vec![],
+            vec![],
+        );
+        data.hydro_bounds = vec![HydroBoundsRow {
+            max_turbined_m3s: Some(9999.0),
+            max_generation_mw: Some(9999.0),
+            ..hydro_row(99, 0, None)
+        }];
+
+        assert!(
+            capacity_raise_errors(&data).is_empty(),
+            "a row on an unknown hydro_id must produce no finding from this \
+             rule: {:?}",
+            capacity_raise_errors(&data)
+        );
+    }
+
+    /// The `max_generation_mw` counterpart of
+    /// [`test_bounds_row_raising_max_turbined_is_rejected`]: raises generation
+    /// only, turbined equal to declared — pins that deleting the
+    /// `max_generation_mw` arm would go undetected by the first test alone
+    /// (there, generation is already equal to its declared value).
+    #[test]
+    fn test_bounds_row_raising_max_generation_only_is_rejected() {
+        let mut data = make_data(
+            two_hydro_capacity_study(),
+            vec![],
+            vec![],
+            two_stage_study_stages(),
+            vec![],
+            vec![],
+        );
+        data.hydro_bounds = vec![HydroBoundsRow {
+            max_turbined_m3s: Some(600.0),
+            max_generation_mw: Some(900.0),
+            ..hydro_row(1, 0, None)
+        }];
+
+        let errors = capacity_raise_errors(&data);
+        assert_eq!(
+            errors.len(),
+            1,
+            "expected exactly one error, got: {errors:?}"
+        );
+        let msg = &errors[0].message;
+        assert!(msg.contains("Hydro 1"), "message: {msg}");
+        assert!(msg.contains("max_generation_mw"), "message: {msg}");
+        assert!(msg.contains("400"), "message: {msg}");
+        assert!(msg.contains("900"), "message: {msg}");
+        assert!(
+            !msg.contains("max_turbined_m3s"),
+            "no finding may name max_turbined_m3s (it is equal to its \
+             declared value): {msg}"
+        );
+    }
+
+    /// A second, later row for the same hydro is the one that violates —
+    /// pins that every row is checked, not only the first row seen per hydro.
+    #[test]
+    fn test_capacity_rule_checks_every_row_not_only_the_first_per_hydro() {
+        let mut data = make_data(
+            two_hydro_capacity_study(),
+            vec![],
+            vec![],
+            two_stage_study_stages(),
+            vec![],
+            vec![],
+        );
+        data.hydro_bounds = vec![
+            HydroBoundsRow {
+                max_turbined_m3s: Some(500.0),
+                ..hydro_row(1, 1, None)
+            },
+            HydroBoundsRow {
+                max_turbined_m3s: Some(900.0),
+                ..hydro_row(1, 0, None)
+            },
+        ];
+
+        let errors = capacity_raise_errors(&data);
+        assert_eq!(
+            errors.len(),
+            1,
+            "expected exactly one error (the second row), got: {errors:?}"
+        );
+        assert!(
+            errors[0].message.contains("stage_id=0"),
+            "message: {}",
+            errors[0].message
         );
     }
 }

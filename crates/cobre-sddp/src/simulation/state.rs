@@ -53,10 +53,8 @@ use crate::{
 
 /// Per-call argument bundle for [`SimulationState::run`].
 ///
-/// Groups all borrowed inputs that vary between calls: solver workspaces, stage
-/// context, future cost function, training context, simulation configuration,
-/// output spec, optional pre-frozen templates, stage bases, and the communicator.
-/// Owned scratch buffers (re-freeze intermediates) live on [`SimulationState`].
+/// Groups the borrowed inputs that vary between calls; owned scratch buffers
+/// (re-freeze intermediates) live on [`SimulationState`].
 pub(crate) struct SimulationInputs<'a, S: SolverInterface + Send, C> {
     /// Solver workspaces (one per rayon worker thread).
     pub workspaces: &'a mut [SolverWorkspace<S>],
@@ -146,13 +144,9 @@ pub(crate) struct SimWorkerParams<'w> {
 
 /// Owned scratch state for one simulation run.
 ///
-/// `SimulationState` is typically created immediately before calling
-/// [`SimulationState::run`] and discarded afterwards. The owned fields hold the
-/// re-freeze intermediates for the lazy re-freeze branch: an optional
-/// `Vec<StageTemplate>` built when the caller does not supply pre-frozen
-/// templates, and a [`RowBatch`] scratch used during that build.
-///
-/// If the caller always provides `frozen_templates`, neither buffer is populated.
+/// Typically created immediately before calling [`SimulationState::run`] and
+/// discarded afterwards. The re-freeze buffers stay empty when the caller
+/// always provides `frozen_templates`.
 pub(crate) struct SimulationState {
     /// Owned frozen templates built by the lazy re-freeze branch (when
     /// `frozen_templates` is `None`).
@@ -160,7 +154,7 @@ pub(crate) struct SimulationState {
     /// Row-batch scratch for the lazy re-freeze loop.
     freeze_batch: RowBatch,
     /// Reusable scratch for `freeze_rows_into_template`, reused across re-freeze stages.
-    freeze_scratch: cobre_solver::FreezeScratch,
+    freeze_scratch: FreezeScratch,
     /// Resolved simulation solver profile applied at [`Self::run`] entry.
     /// Defaults to `Phase::Simulation.profile()`; override with
     /// [`Self::set_profile`] before the first `run()` call.
@@ -288,9 +282,8 @@ impl SimulationState {
         // Apply the simulation solver profile before the parallel region. For CLP
         // this selects the primal simplex, which eliminates the dual simplex's
         // false-infeasibility on the warm-started, fully-frozen cut-laden LPs.
-        let simulation_profile = self.profile;
         for ws in inputs.workspaces.iter_mut() {
-            ws.solver.set_profile(&simulation_profile);
+            ws.solver.set_profile(&self.profile);
         }
 
         let params = SimWorkerParams {
@@ -404,6 +397,7 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
     let lookups = SimLookups::build(
         params.training_ctx.study_dims,
         params.ctx.geometry_per_stage,
+        params.output.hydro_cell_index,
         params.output.entity_counts.thermal_ids.len(),
         params.output.entity_counts.hydro_ids.len(),
     );
@@ -504,8 +498,7 @@ fn build_sim_sampler<'a>(
 ///
 /// No-op if `caller_frozen` is `Some`. Otherwise rebuilds `owned_frozen` from the
 /// FCF, context templates, and state layout, using `freeze_batch` as scratch (its
-/// post-call contents are unspecified). Cost `O(num_stages * num_active_cuts)` —
-/// a one-time setup amortised across the per-scenario LP solves.
+/// post-call contents are unspecified). Cost `O(num_stages * num_active_cuts)`.
 fn refreeze_templates_if_needed(
     fcf: &FutureCostFunction,
     ctx: &StageContext<'_>,
@@ -515,7 +508,7 @@ fn refreeze_templates_if_needed(
     caller_frozen: Option<&[StageTemplate]>,
     freeze_batch: &mut RowBatch,
     owned_frozen: &mut Option<Vec<StageTemplate>>,
-    freeze_scratch: &mut cobre_solver::FreezeScratch,
+    freeze_scratch: &mut FreezeScratch,
 ) {
     if caller_frozen.is_some() {
         *owned_frozen = None;

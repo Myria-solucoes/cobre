@@ -92,7 +92,6 @@ fn fill_parallel_water_rows(
     for h_idx in 0..layout.n_h {
         let row = layout.rows.water_balance.start + h_idx;
         if super::entries::is_prefilling(ctx, stage, h_idx) {
-            // Frozen identity: RHS 0 (the base inflow rides the routed `z_h` column).
             row_lower[row] = 0.0;
             row_upper[row] = 0.0;
             continue;
@@ -216,12 +215,12 @@ fn fill_transit_bucket_definition_rows(
     row_lower: &mut [f64],
     row_upper: &mut [f64],
 ) {
-    let row_start = layout.rows.transit_bucket_definition.start;
-    for pos in layout.rows.transit_bucket_row_pos.iter().flatten() {
-        let row = row_start + pos;
-        row_lower[row] = 0.0;
-        row_upper[row] = 0.0;
-    }
+    fill_zero_equality_rows(
+        layout.rows.transit_bucket_definition.start,
+        &layout.rows.transit_bucket_row_pos,
+        row_lower,
+        row_upper,
+    );
 }
 
 /// Fill the soft filling-target row bounds (`v_h + σ_fill ≥ V_target[t]`, in hm³):
@@ -342,10 +341,11 @@ fn fill_load_balance_rows(
     }
 }
 
-/// Fill FPHA hyperplane row bounds: `row_lower = -INF`, `row_upper = gamma_0` (the
-/// pre-scaled `intercept`). The `v`/`v_in`/`q`/`s` contributions live in the matrix
-/// entries ([`super::entries::fill_fpha_entries`]), so the upper bound carries only
-/// the intercept. Driven by [`for_each_fpha_plane`] so these bounds and the matrix
+/// Fill FPHA hyperplane row bounds: `row_lower = -INF`, `row_upper = σ_c * gamma_0`
+/// (the pre-scaled `intercept`, apportioned by the cell's turbine-capacity share —
+/// see [`super::entries::fill_fpha_entries`]). The `v`/`v_in`/`q`/`s` contributions
+/// live in the matrix entries, so the upper bound carries only the apportioned
+/// intercept. Driven by [`for_each_fpha_plane`] so these bounds and the matrix
 /// coefficients share one row cursor.
 fn fill_fpha_rows(
     ctx: &TemplateBuildCtx<'_>,
@@ -354,15 +354,11 @@ fn fill_fpha_rows(
     row_lower: &mut [f64],
     row_upper: &mut [f64],
 ) {
-    for_each_fpha_plane(
-        ctx,
-        stage_idx,
-        layout,
-        |_local_idx, _h_idx, _blk, _p_idx, plane, row| {
-            row_lower[row] = f64::NEG_INFINITY;
-            row_upper[row] = plane.intercept;
-        },
-    );
+    for_each_fpha_plane(ctx, stage_idx, layout, |visit, plane| {
+        let sigma_c = ctx.hydro_cell_index.share_of(visit.cell);
+        row_lower[visit.row] = f64::NEG_INFINITY;
+        row_upper[visit.row] = sigma_c * plane.intercept;
+    });
 }
 
 /// Fill evaporation row bounds: equality `row_lower == row_upper == intercept_m3s`,
@@ -448,8 +444,7 @@ pub(super) fn fill_operational_violation_rows(
 ) {
     // Each family writes its own computed row index, so the visit order does not
     // affect the result; the descriptor order is nonetheless pinned to the canonical
-    // row-region order (min-outflow, max-outflow, min-turbine, min-generation) so the
-    // write order stays auditable against the layout.
+    // row-region order so the write order stays auditable against the layout.
     let grid = layout.block_grid();
     for h_idx in 0..layout.n_h {
         for blk in 0..layout.n_blks {
@@ -496,19 +491,12 @@ pub(super) fn fill_anticipated_fishing_rows(
     row_lower: &mut [f64],
     row_upper: &mut [f64],
 ) {
-    let row_start = layout.anticipated.row_anticipated_fishing_start;
-    let mut n_active = 0_usize;
-    for pos in layout
-        .anticipated
-        .anticipated_fishing_row_pos
-        .iter()
-        .flatten()
-    {
-        let row = row_start + pos;
-        row_lower[row] = 0.0;
-        row_upper[row] = 0.0;
-        n_active += 1;
-    }
+    let n_active = fill_zero_equality_rows(
+        layout.anticipated.row_anticipated_fishing_start,
+        &layout.anticipated.anticipated_fishing_row_pos,
+        row_lower,
+        row_upper,
+    );
     debug_assert_eq!(
         n_active, layout.anticipated.n_anticipated_fishing_rows,
         "fill_anticipated_fishing_rows: active count mismatch"
@@ -526,19 +514,12 @@ pub(super) fn fill_anticipated_state_out_def_rows(
     row_lower: &mut [f64],
     row_upper: &mut [f64],
 ) {
-    let row_start = layout.anticipated.row_anticipated_state_out_def_start;
-    let mut n_active = 0_usize;
-    for pos in layout
-        .anticipated
-        .anticipated_decision_row_pos
-        .iter()
-        .flatten()
-    {
-        let row = row_start + pos;
-        row_lower[row] = 0.0;
-        row_upper[row] = 0.0;
-        n_active += 1;
-    }
+    let n_active = fill_zero_equality_rows(
+        layout.anticipated.row_anticipated_state_out_def_start,
+        &layout.anticipated.anticipated_decision_row_pos,
+        row_lower,
+        row_upper,
+    );
     debug_assert_eq!(
         n_active, layout.anticipated.n_anticipated_state_out_def_rows,
         "fill_anticipated_state_out_def_rows: active count mismatch"
@@ -556,10 +537,27 @@ fn fill_anticipated_slot_definition_rows(
     row_lower: &mut [f64],
     row_upper: &mut [f64],
 ) {
-    let row_start = layout.anticipated.row_anticipated_slot_definition_start;
-    for pos in layout.anticipated.anticipated_slot_row_pos.iter().flatten() {
+    fill_zero_equality_rows(
+        layout.anticipated.row_anticipated_slot_definition_start,
+        &layout.anticipated.anticipated_slot_row_pos,
+        row_lower,
+        row_upper,
+    );
+}
+
+/// Write `0 == 0` bounds at each present position of a sparse row-position table.
+fn fill_zero_equality_rows(
+    row_start: usize,
+    row_pos: &[Option<usize>],
+    row_lower: &mut [f64],
+    row_upper: &mut [f64],
+) -> usize {
+    let mut n_active = 0_usize;
+    for pos in row_pos.iter().flatten() {
         let row = row_start + pos;
         row_lower[row] = 0.0;
         row_upper[row] = 0.0;
+        n_active += 1;
     }
+    n_active
 }

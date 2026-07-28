@@ -33,7 +33,7 @@ use crate::{
     FutureCostFunction, SddpError,
     context::{StageContext, TrainingContext},
     dcs::{DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
-    indexer::StateSpace,
+    indexer::{HydroCellIndex, StateSpace},
     simulation::{
         config::SimulationConfig,
         error::SimulationError,
@@ -115,6 +115,10 @@ pub struct SimulationOutputSpec<'a> {
     /// `StageLayout`. A single global stage-0 geometry carries `n_blks`-striped
     /// bases that misread any stage with a differing block count.
     pub geometry_per_stage: &'a [StageGeometry],
+
+    /// Study-scope hydro-cell partition, threaded into every stage's
+    /// `StageExtractionSpec` the same way `geometry_per_stage` is.
+    pub hydro_cell_index: &'a HydroCellIndex,
 
     /// Per-station pumping power-consumption rate \[MW/(m³/s)\], ID-sorted
     /// parallel to `entity_counts.pumping_station_ids` and indexed by the SYSTEM
@@ -280,12 +284,17 @@ impl SimLookups {
     pub(crate) fn build(
         study_dims: &StudyDimensions,
         geometry_per_stage: &[StageGeometry],
+        hydro_cell_index: &HydroCellIndex,
         n_thermals: usize,
         n_hydros: usize,
     ) -> Self {
         Self {
             thermal: ThermalReverseLookup::build(study_dims, n_thermals),
-            hydro_per_stage: HydroReverseLookup::build_per_stage(geometry_per_stage, n_hydros),
+            hydro_per_stage: HydroReverseLookup::build_per_stage(
+                geometry_per_stage,
+                hydro_cell_index,
+                n_hydros,
+            ),
         }
     }
 }
@@ -391,8 +400,8 @@ fn solve_simulation_stage<S: SolverInterface>(
     let mut unscaled_primal: Vec<f64> = std::mem::take(&mut ws.scratch.unscaled_primal);
     let mut unscaled_dual: Vec<f64> = std::mem::take(&mut ws.scratch.unscaled_dual);
 
-    let col_scale = &ctx.templates[ids.t].col_scale;
-    let row_scale = &ctx.templates[ids.t].row_scale;
+    let col_scale = &ctx.templates[t].col_scale;
+    let row_scale = &ctx.templates[t].row_scale;
 
     let view_objective: f64 = if let Some(params) = dcs {
         // Simulation has no iteration counter; seed with `current_iteration = 0`.
@@ -435,7 +444,6 @@ fn solve_simulation_stage<S: SolverInterface>(
         // template_num_rows` check — that holds on the frozen path but NOT here, and
         // would drop the structural duals the reader needs.
         fill_unscaled_dual(&mut unscaled_dual, view.dual, row_scale);
-        let _ = view;
         objective
     } else {
         let inputs = StageInputs {
@@ -452,7 +460,6 @@ fn solve_simulation_stage<S: SolverInterface>(
         let objective = view.objective;
         fill_unscaled(&mut unscaled_primal, view.primal, col_scale);
         fill_unscaled_dual(&mut unscaled_dual, view.dual, row_scale);
-        let _ = view;
         objective
     };
 
@@ -491,7 +498,7 @@ fn solve_simulation_stage<S: SolverInterface>(
 
     let stage_lag = ctx
         .stage_lag_transitions
-        .get(ids.t)
+        .get(t)
         .copied()
         .unwrap_or(StageLagTransition {
             accumulate_weight: 1.0,
@@ -667,6 +674,7 @@ fn extract_sim_stage_result(
     } else {
         hydro_lookup_default = HydroReverseLookup::build(
             &StageGeometry::default(),
+            output.hydro_cell_index,
             output.entity_counts.hydro_ids.len(),
         );
         &hydro_lookup_default
@@ -684,6 +692,7 @@ fn extract_sim_stage_result(
             study_dims,
             n_blks: stage_n_blks,
             geometry,
+            hydro_cell_index: output.hydro_cell_index,
             entity_counts: output.entity_counts,
             inflow_m3s_per_hydro: inflow_m3s_buf,
             block_hours: blk_hrs,

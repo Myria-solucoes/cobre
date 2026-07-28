@@ -135,7 +135,6 @@ struct MockSolver {
     solve_count: usize,
     solve_with_basis_count: usize,
     recorded_basis: Option<Basis>,
-    reconstruction_counter: u32,
 }
 
 impl MockSolver {
@@ -155,7 +154,6 @@ impl MockSolver {
             solve_count: 0,
             solve_with_basis_count: 0,
             recorded_basis: None,
-            reconstruction_counter: 0,
         }
     }
 
@@ -175,7 +173,6 @@ impl MockSolver {
             solve_count: 0,
             solve_with_basis_count: 0,
             recorded_basis: None,
-            reconstruction_counter: 0,
         }
     }
 
@@ -230,9 +227,7 @@ impl SolverInterface for MockSolver {
     fn get_basis(&mut self, out: &mut Basis) {
         cobre_sddp::test_support::fill_consistent_basis(out);
     }
-    fn record_reconstruction_stats(&mut self) {
-        self.reconstruction_counter += 1;
-    }
+    fn record_reconstruction_stats(&mut self) {}
     fn statistics(&self) -> SolverStatistics {
         SolverStatistics::default()
     }
@@ -598,6 +593,7 @@ fn simulate_single_rank_4_scenarios_produces_4_results() {
         SimulationOutputSpec {
             result_tx: &tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &cobre_sddp::test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -667,7 +663,6 @@ fn simulate_infeasible_returns_lp_infeasible_error() {
     let initial_state = vec![50.0_f64];
 
     let solution = fixed_solution(100.0, 30.0);
-    // Call 5 = scenario_id=2 (0-indexed), stage=1 (0-indexed)
     let solver = MockSolver::infeasible_on(solution, 5);
     let comm = StubComm { rank: 0, size: 1 };
     let entity_counts = entity_counts_1_hydro();
@@ -729,6 +724,7 @@ fn simulate_infeasible_returns_lp_infeasible_error() {
         SimulationOutputSpec {
             result_tx: &tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &cobre_sddp::test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -789,7 +785,6 @@ fn simulate_infeasible_at_scenario2_stage3() {
     let initial_state = vec![50.0_f64];
 
     let solution = fixed_solution(100.0, 30.0);
-    // Call 11 = scenario 2 (0-based), stage 3 (0-based): 2*4 + 3 = 11.
     let solver = MockSolver::infeasible_on(solution, 11);
     let comm = StubComm { rank: 0, size: 1 };
     let entity_counts = entity_counts_1_hydro();
@@ -851,6 +846,7 @@ fn simulate_infeasible_at_scenario2_stage3() {
         SimulationOutputSpec {
             result_tx: &tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &cobre_sddp::test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -971,6 +967,7 @@ fn simulate_channel_closed_returns_error() {
         SimulationOutputSpec {
             result_tx: &tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &cobre_sddp::test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -1026,10 +1023,9 @@ fn simulate_total_cost_equals_sum_of_stage_costs() {
 
     let objective = 100.0_f64;
     let theta_val = 30.0_f64;
-    // stage_cost = (objective - theta) * COST_SCALE_FACTOR = 70 * 1_000_000 = 70_000_000
-    let expected_stage_cost = (objective - theta_val) * 1_000_000.0; // 70_000_000.0
+    let expected_stage_cost = (objective - theta_val) * 1_000_000.0;
     #[allow(clippy::cast_precision_loss)]
-    let expected_total_cost = expected_stage_cost * n_stages as f64; // 210_000_000.0
+    let expected_total_cost = expected_stage_cost * n_stages as f64;
 
     let solution = fixed_solution(objective, theta_val);
     let solver = MockSolver::always_ok(solution);
@@ -1093,6 +1089,7 @@ fn simulate_total_cost_equals_sum_of_stage_costs() {
         SimulationOutputSpec {
             result_tx: &tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &cobre_sddp::test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -1151,7 +1148,6 @@ fn simulate_cost_buffer_scenario_ids_match_assigned_range() {
 
     let solution = fixed_solution(50.0, 10.0);
     let solver = MockSolver::always_ok(solution);
-    // rank=0 of 2: assign_scenarios(6, 0, 2) = 0..3
     let comm = StubComm { rank: 0, size: 2 };
     let entity_counts = entity_counts_1_hydro();
 
@@ -1212,6 +1208,7 @@ fn simulate_cost_buffer_scenario_ids_match_assigned_range() {
         SimulationOutputSpec {
             result_tx: &tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &cobre_sddp::test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -1331,6 +1328,7 @@ fn simulate_channel_receives_results_in_scenario_order() {
         SimulationOutputSpec {
             result_tx: &tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &cobre_sddp::test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -1446,6 +1444,7 @@ fn test_simulation_parallel_cost_determinism() {
         SimulationOutputSpec {
             result_tx: &tx1,
             zeta_per_stage: &[],
+            hydro_cell_index: &cobre_sddp::test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -1538,6 +1537,7 @@ fn test_simulation_parallel_cost_determinism() {
         SimulationOutputSpec {
             result_tx: &tx4,
             zeta_per_stage: &[],
+            hydro_cell_index: &cobre_sddp::test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -1682,6 +1682,7 @@ fn simulate_emits_progress_events() {
         SimulationOutputSpec {
             result_tx: &result_tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &cobre_sddp::test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -1822,6 +1823,7 @@ fn simulate_no_events_when_sender_is_none() {
         SimulationOutputSpec {
             result_tx: &result_tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &cobre_sddp::test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -1947,6 +1949,7 @@ fn simulate_progress_events_received_before_return() {
         SimulationOutputSpec {
             result_tx: &result_tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &cobre_sddp::test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -2083,6 +2086,7 @@ fn simulate_progress_scenario_cost_equals_total_cost() {
         SimulationOutputSpec {
             result_tx: &result_tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &cobre_sddp::test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -2217,6 +2221,7 @@ fn simulate_emits_simulation_finished_as_last_event() {
         SimulationOutputSpec {
             result_tx: &result_tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &cobre_sddp::test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -2299,7 +2304,6 @@ fn simulate_progress_scenario_cost_is_finite() {
     };
     let initial_state = vec![50.0_f64];
 
-    // All scenarios have cost = objective - theta = 100 - 30 = 70.
     let solution = fixed_solution(100.0, 30.0);
     let solver = MockSolver::always_ok(solution);
     let comm = StubComm { rank: 0, size: 1 };
@@ -2363,6 +2367,7 @@ fn simulate_progress_scenario_cost_is_finite() {
         SimulationOutputSpec {
             result_tx: &result_tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &cobre_sddp::test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -2492,6 +2497,7 @@ fn simulate_frozen_path_issues_zero_add_rows() {
         SimulationOutputSpec {
             result_tx: &tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &cobre_sddp::test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -2614,6 +2620,7 @@ fn simulate_fallback_path_issues_expected_add_rows() {
         SimulationOutputSpec {
             result_tx: &tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &cobre_sddp::test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -2632,7 +2639,6 @@ fn simulate_fallback_path_issues_expected_add_rows() {
             hydro_min_storage_hm3: &[0.0],
             event_sender: None,
         },
-        // fallback path
         None,
         &[],
         &comm,
@@ -2739,6 +2745,7 @@ fn simulate_frozen_length_mismatch_returns_error() {
         SimulationOutputSpec {
             result_tx: &tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &cobre_sddp::test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -2900,6 +2907,7 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
         SimulationOutputSpec {
             result_tx: &tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &cobre_sddp::test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -3063,6 +3071,7 @@ fn simulate_with_empty_stage_bases_cold_starts() {
         SimulationOutputSpec {
             result_tx: &tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &cobre_sddp::test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -3082,7 +3091,6 @@ fn simulate_with_empty_stage_bases_cold_starts() {
             event_sender: None,
         },
         None,
-        // empty stage_bases → cold-start for every stage
         &[],
         &comm,
     );

@@ -17,9 +17,9 @@ use super::{
     contract_family_slot, resolve_variable_ref, variable_ref_is_block_independent,
 };
 use crate::hydro_models::{FphaPlane, ProductionModelSet, ResolvedProductionModel};
-use crate::indexer::{Boundary, StateSpace, StorageBoundaryGrid};
+use crate::indexer::{Boundary, HydroCellIndex, StateSpace, StorageBoundaryGrid};
 use crate::lp_builder::StageGeometry;
-use crate::test_support::{GeometryDims, geometry};
+use crate::test_support::{GeometryDims, geometry, identity_hydro_cell_index};
 
 // ── Test helpers ──────────────────────────────────────────────────────────
 
@@ -70,15 +70,33 @@ fn make_geom_with_contracts<'a>(
     // Leak the reconstructed reverse map so the borrowed `GenericResolverGeom`
     // field has a `'a`-compatible referent without threading an owner through
     // every call site.
-    let reverse: std::collections::HashMap<usize, usize> = anticipated_thermal_indices
+    let reverse: HashMap<usize, usize> = anticipated_thermal_indices
         .iter()
         .enumerate()
         .map(|(local, &sys_pos)| (sys_pos, local))
         .collect();
-    let reverse: &'a std::collections::HashMap<usize, usize> = Box::leak(Box::new(reverse));
+    let reverse: &'a HashMap<usize, usize> = Box::leak(Box::new(reverse));
+    let hydro_cell_index: &'a HydroCellIndex =
+        Box::leak(Box::new(identity_hydro_cell_index(state.hydro_count)));
+    // Derived from `hydro_cell_index` rather than written as the identity
+    // `[0, 1, 2, ...]` this fixture currently produces, so a future multi-cell
+    // fixture here cannot silently disagree with `StageLayout`'s own prefix sum.
+    let fpha_cell_local_start: &'a [usize] = Box::leak(
+        indexer
+            .fpha_hydro_indices
+            .iter()
+            .scan(0, |acc, &h| {
+                let start = *acc;
+                *acc += hydro_cell_index.cells_of(h).len();
+                Some(start)
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    );
     GenericResolverGeom {
         state,
         storage_boundary_grid: indexer.storage_boundary_grid,
+        hydro_cell_index,
         turbine: &indexer.turbine,
         spillage: &indexer.spillage,
         diversion: &indexer.diversion,
@@ -89,6 +107,7 @@ fn make_geom_with_contracts<'a>(
         contract_import,
         contract_export,
         generation: &indexer.generation,
+        fpha_cell_local_start,
         deficit: &indexer.deficit,
         max_deficit_segments,
         n_blks: indexer.n_blks,
@@ -121,7 +140,7 @@ fn make_hydro(id: i32, downstream_id: Option<i32>) -> Hydro {
         evaporation_violation_neg_cost: 0.0,
         inflow_nonnegativity_cost: 1000.0,
     };
-    Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: EntityId(id),
         name: String::new(),
@@ -149,7 +168,9 @@ fn make_hydro(id: i32, downstream_id: Option<i32>) -> Hydro {
         diversion: None,
         filling: None,
         penalties: zero_penalties,
-    }
+    };
+    hydro.normalize_unit_groups();
+    hydro
 }
 
 fn empty_cascade() -> CascadeTopology {
@@ -644,7 +665,6 @@ fn hydro_generation_constant_productivity_maps_to_turbine() {
         &lpos,
     );
 
-    // hydro pos=1, turbine.start=13, n_blks=3, block=0, productivity=2.5
     assert_eq!(result, vec![(13 + 1 * 3 + 0, 2.5)]);
 }
 
@@ -675,7 +695,6 @@ fn hydro_generation_fpha_maps_to_generation_column() {
         &lpos,
     );
 
-    // FPHA local index 0, generation.start=79, n_blks=3, block=0
     assert_eq!(result, vec![(79 + 0 * 3 + 0, 1.0)]);
 }
 
@@ -706,7 +725,6 @@ fn hydro_generation_fpha_second_hydro_block_2() {
         &lpos,
     );
 
-    // FPHA local index 1, generation.start=79, n_blks=3, block=2
     assert_eq!(result, vec![(79 + 1 * 3 + 2, 1.0)]);
 }
 
@@ -1244,7 +1262,6 @@ fn contract_import_resolves_to_column_with_unit_coefficient() {
         &contract_pos,
     );
 
-    // import base 200, per-family slot 1, n_blks 3, block 0 → 200 + 1*3 + 0
     assert_eq!(result, vec![(203, 1.0)]);
 }
 
@@ -1282,7 +1299,6 @@ fn contract_export_resolves_to_column_with_unit_coefficient() {
         &contract_pos,
     );
 
-    // export base 206, per-family slot 0, n_blks 3, block 2 → 206 + 0*3 + 2
     assert_eq!(result, vec![(208, 1.0)]);
 }
 

@@ -1,20 +1,53 @@
 use crate::hydro_models::{FphaPlane, ResolvedProductionModel};
-use crate::indexer::{BlockIdx, FphaLocal, HydroSys};
+use crate::indexer::{BlockIdx, FphaCellLocal, FphaLocal, HydroCell, HydroSys};
 
 use super::layout::{StageLayout, TemplateBuildCtx};
 
+/// One `(plant, cell, block, plane)` visit emitted by [`for_each_fpha_plane`],
+/// bundled into a `Copy` struct rather than passed as separate closure
+/// arguments — the cell dimension pushes the argument count past the
+/// per-function budget.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct FphaVisit {
+    /// The plant this cell belongs to; owns the plant-level storage/spillage columns.
+    pub(super) plant: HydroSys,
+    /// The plant's position among FPHA plants (`fpha_hydro_indices`).
+    // Rationale: rounds out the visit's identity; the current two consumers
+    // (`fill_fpha_entries`, `fill_fpha_rows`) resolve everything through
+    // `cell`/`cell_local`/`row` instead.
+    #[allow(dead_code)]
+    pub(super) local_idx: FphaLocal,
+    /// The visited cell, in [`crate::indexer::HydroCellIndex`]'s own indexing.
+    pub(super) cell: HydroCell,
+    /// The cell's FPHA-cell-local index; resolves its own generation column.
+    pub(super) cell_local: FphaCellLocal,
+    pub(super) blk: BlockIdx,
+    /// Position within this plant's plane list at this stage.
+    // Rationale: rounds out the visit's identity; the current two consumers key
+    // off `row` directly rather than the plane position within it.
+    #[allow(dead_code)]
+    pub(super) plane_idx: usize,
+    /// LP row for this `(cell, block, plane)` triple.
+    pub(super) row: usize,
+}
+
 /// Walk every FPHA hyperplane row of the stage, invoking `visit` once per
-/// `(FPHA hydro, block, plane)` triple with the resolved plane and its LP row.
+/// `(FPHA plant, cell, block, plane)` quadruple with the resolved plane and its
+/// LP row, in plant -> cell -> block -> plane nesting order.
 ///
 /// The single owner of the FPHA row-cursor arithmetic: both the bounds fill
 /// ([`super::rows::fill_fpha_rows`]) and the coefficient fill
 /// ([`super::entries::fill_fpha_entries`]) drive off this walker, so a one-sided
 /// edit that lands the bounds and the coefficients on different rows is impossible.
 ///
-/// The per-hydro block start advances by the cumulative `n_blks * n_planes` prefix
-/// sum over preceding FPHA hydros — REQUIRED because plane counts vary per hydro: a
-/// uniform `local_idx * n_blks * n_planes` stride would overlap a later,
-/// fewer-plane hydro onto an earlier hydro's rows. Matches `FphaRowRange::start`.
+/// The row-block base advances once per CELL, not once per plant: each cell owns
+/// its own contiguous `n_blks * n_planes` row block. This nesting is load-bearing
+/// for CSC row-sortedness: the plant-level storage/spillage columns
+/// ([`super::entries::fill_fpha_entries`]) get one push per cell, and stay
+/// row-ascending only because cells are visited in ascending order with
+/// `blk`/plane innermost. Nesting `blk` outside `cell` would revisit an earlier
+/// cell's row range after a later cell's, tripping `assemble_csc`'s
+/// row-sortedness assertion. Matches `FphaRowRange::start`.
 ///
 /// The closure is a monomorphised `FnMut` borrowing its target buffer (no
 /// `Box<dyn>`, no intermediate `Vec`), so the build allocates nothing and the
@@ -25,7 +58,7 @@ pub(super) fn for_each_fpha_plane<F>(
     layout: &StageLayout,
     mut visit: F,
 ) where
-    F: FnMut(FphaLocal, HydroSys, BlockIdx, usize, &FphaPlane, usize),
+    F: FnMut(FphaVisit, &FphaPlane),
 {
     let n_blks = layout.n_blks;
     let grid = layout.block_grid();
@@ -49,15 +82,32 @@ pub(super) fn for_each_fpha_plane<F>(
             "plane count mismatch for FPHA hydro {} at stage {stage_idx}",
             h.get()
         );
-        for blk in (0..n_blks).map(BlockIdx::new) {
-            for (p_idx, plane) in planes.iter().enumerate() {
-                // Block OUTER (stride n_planes), plane INNER — the opposite nesting
-                // of the flat shape; the distinct `fpha_plane` method prevents a
-                // silent transpose of the two.
-                let row = grid.fpha_plane(fpha_block_start, blk, p_idx, n_planes);
-                visit(FphaLocal::new(local_idx), h, blk, p_idx, plane, row);
+        let local_idx = FphaLocal::new(local_idx);
+        let cell_base = layout.fpha_cell_local_start[local_idx.get()];
+        for (offset, c) in ctx.hydro_cell_index.cells_of(h).enumerate() {
+            let cell = HydroCell::new(c);
+            let cell_local = FphaCellLocal::new(cell_base + offset);
+            for blk in (0..n_blks).map(BlockIdx::new) {
+                for (p_idx, plane) in planes.iter().enumerate() {
+                    // Block OUTER (stride n_planes), plane INNER — the opposite nesting
+                    // of the flat shape; the distinct `fpha_plane` method prevents a
+                    // silent transpose of the two.
+                    let row = grid.fpha_plane(fpha_block_start, blk, p_idx, n_planes);
+                    visit(
+                        FphaVisit {
+                            plant: h,
+                            local_idx,
+                            cell,
+                            cell_local,
+                            blk,
+                            plane_idx: p_idx,
+                            row,
+                        },
+                        plane,
+                    );
+                }
             }
+            fpha_block_start = grid.advance_fpha_base(fpha_block_start, n_planes);
         }
-        fpha_block_start = grid.advance_fpha_base(fpha_block_start, n_planes);
     }
 }

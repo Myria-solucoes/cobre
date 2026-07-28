@@ -860,6 +860,7 @@ fn simulation_load_patches_applied() {
         SimulationOutputSpec {
             result_tx: &tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -1025,6 +1026,7 @@ fn simulation_no_load_buses_unchanged() {
         SimulationOutputSpec {
             result_tx: &tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -1161,6 +1163,7 @@ fn simulation_state_set_profile_reaches_current_profile_after_run() {
         SimulationOutputSpec {
             result_tx: &tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -1309,6 +1312,7 @@ fn simulation_inflow_extraction_unaffected() {
         SimulationOutputSpec {
             result_tx: &tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -1583,7 +1587,7 @@ fn single_workspace_with_hydros(
     }]
 }
 
-/// AC: truncation clamps negative inflow noise in the simulation pipeline.
+/// Truncation clamps negative inflow noise in the simulation pipeline.
 ///
 /// Set `mean_m3s = -1000.0` and `std_m3s = 1.0` so that the deterministic
 /// PAR base alone would produce a hugely negative inflow for any sample.
@@ -1684,6 +1688,7 @@ fn simulation_truncation_clamps_negative_inflow_noise() {
         SimulationOutputSpec {
             result_tx: &tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -1721,7 +1726,7 @@ fn simulation_truncation_clamps_negative_inflow_noise() {
     );
 }
 
-/// AC: `InflowNonNegativityMethod::None` in the simulation pipeline produces
+/// `InflowNonNegativityMethod::None` in the simulation pipeline produces
 /// raw (potentially negative) noise values.
 ///
 /// With `mean_m3s = -1000.0` and `std_m3s = 1.0`, the PAR inflow is always
@@ -1816,6 +1821,7 @@ fn simulation_none_method_produces_raw_negative_noise() {
         SimulationOutputSpec {
             result_tx: &tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -2127,6 +2133,7 @@ mod dcs_simulation {
         let output = SimulationOutputSpec {
             result_tx: &tx,
             zeta_per_stage: &[1.0],
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[vec![1.0]],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -2154,9 +2161,15 @@ mod dcs_simulation {
             frozen_template: frozen,
             warm_basis: None,
         };
-        let lookups = SimLookups::build(&test_support::study_dims(), &[], 0, 1);
+        let lookups = SimLookups::build(
+            &test_support::study_dims(),
+            &[],
+            &test_support::identity_hydro_cell_index(256),
+            0,
+            1,
+        );
 
-        let (immediate, result) = solve_simulation_stage(
+        solve_simulation_stage(
             &mut ws,
             &ctx,
             &fcf,
@@ -2167,8 +2180,7 @@ mod dcs_simulation {
             &lookups,
             &[0.0],
         )
-        .expect("simulation stage solve must succeed");
-        (immediate, result)
+        .expect("simulation stage solve must succeed")
     }
 
     /// The stage-level cost record (block 0) carrying total/immediate/future.
@@ -2179,7 +2191,7 @@ mod dcs_simulation {
             .expect("simulation stage result must carry a cost record")
     }
 
-    /// AC1: the DCS branch (binding cut omitted from the seed) yields the
+    /// The DCS branch (binding cut omitted from the seed) yields the
     /// same immediate cost and primal-derived fields as the frozen all-cuts
     /// path within 1e-9.
     #[test]
@@ -2220,7 +2232,7 @@ mod dcs_simulation {
         );
     }
 
-    /// AC2: a frozen template embedding a DOMINATING cut (floor 10, NOT in the
+    /// A frozen template embedding a DOMINATING cut (floor 10, NOT in the
     /// pool) must NOT change the DCS result — proving the cut-free
     /// `ctx.templates[t]` is loaded, not `load_spec.frozen_template`. A wrong
     /// load surfaces as `future_cost` reflecting `theta = 10`.
@@ -2551,6 +2563,7 @@ mod anticipated_ring_matches_forward_propagation {
         let output = SimulationOutputSpec {
             result_tx: &tx,
             zeta_per_stage: &[1.0, 1.0, 1.0],
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[vec![1.0], vec![1.0], vec![1.0]],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -2569,7 +2582,13 @@ mod anticipated_ring_matches_forward_propagation {
             hydro_min_storage_hm3: &[],
             event_sender: None,
         };
-        let lookups = SimLookups::build(training_ctx.study_dims, &[], 0, 0);
+        let lookups = SimLookups::build(
+            training_ctx.study_dims,
+            &[],
+            &test_support::identity_hydro_cell_index(256),
+            0,
+            0,
+        );
 
         let mut trajectory = Vec::with_capacity(N_STAGES);
         for (t, template) in templates.iter().enumerate() {

@@ -30,13 +30,18 @@ use cobre_sddp::{
 use cobre_solver::{ActiveSolver, SolverInterface};
 
 mod common;
-use common::StubComm;
-use common::build_setup_for_case;
-use common::fresh_setup_with;
+use common::{StubComm, build_setup_for_case, fresh_setup_with};
 
-/// Train a case (`StubComm`, seed 42, 1 thread) and return the result plus the
-/// live solver, so callers can inspect `solver.statistics()` after training.
-fn run_deterministic_with_solver(case_dir: &Path) -> (cobre_sddp::TrainingResult, ActiveSolver) {
+/// Train a case (`StubComm`, `ActiveSolver`, seed 42, 1 thread) and return the
+/// setup, the canonicalized system, the training result, and the live solver.
+fn train_deterministic_case(
+    case_dir: &Path,
+) -> (
+    StudySetup,
+    cobre_core::System,
+    cobre_sddp::TrainingResult,
+    ActiveSolver,
+) {
     let config_path = case_dir.join("config.json");
     let config = cobre_io::parse_config(&config_path).expect("config must parse");
 
@@ -60,39 +65,24 @@ fn run_deterministic_with_solver(case_dir: &Path) -> (cobre_sddp::TrainingResult
         .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
         .expect("train must return Ok");
     assert!(outcome.error.is_none(), "expected no training error");
-    (outcome.result, solver)
+    (setup, system, outcome.result, solver)
 }
 
-/// Train a case (`StubComm`, `ActiveSolver`, seed 42, 1 thread) and return the
-/// setup (for post-train state introspection via `stage_state()`, or driving
-/// a subsequent simulation), the canonicalized system, and the training result.
+/// Train a case and return the result plus the live solver, so callers can
+/// inspect `solver.statistics()` after training.
+fn run_deterministic_with_solver(case_dir: &Path) -> (cobre_sddp::TrainingResult, ActiveSolver) {
+    let (_setup, _system, result, solver) = train_deterministic_case(case_dir);
+    (result, solver)
+}
+
+/// Train a case and return the setup (for post-train state introspection via
+/// `stage_state()`, or driving a subsequent simulation), the canonicalized
+/// system, and the training result.
 fn run_deterministic_with_setup(
     case_dir: &Path,
 ) -> (StudySetup, cobre_core::System, cobre_sddp::TrainingResult) {
-    let config_path = case_dir.join("config.json");
-    let config = cobre_io::parse_config(&config_path).expect("config must parse");
-
-    let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
-
-    let prepare_result =
-        prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-            .expect("prepare_stochastic must succeed");
-    let system = prepare_result.system;
-    let stochastic = prepare_result.stochastic;
-
-    let hydro_models =
-        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
-
-    let mut setup = build_setup_for_case(case_dir, &config, &system, stochastic, hydro_models);
-
-    let comm = StubComm;
-    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
-
-    let outcome = setup
-        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
-        .expect("train must return Ok");
-    assert!(outcome.error.is_none(), "expected no training error");
-    (setup, system, outcome.result)
+    let (setup, system, result, _solver) = train_deterministic_case(case_dir);
+    (setup, system, result)
 }
 
 /// Train a case (`StubComm`, `ActiveSolver`, seed 42, 1 thread) and return the result.
@@ -2186,18 +2176,16 @@ fn d20_operational_violations() {
     let scenario = &scenario_results[0];
     assert_eq!(scenario.stages.len(), 2);
 
-    let mut found_outflow_below = false;
-    let mut found_turbine_below = false;
-    for stage_result in &scenario.stages {
-        for hydro_result in &stage_result.hydros {
-            if hydro_result.outflow_slack_below_m3s > 1e-10 {
-                found_outflow_below = true;
-            }
-            if hydro_result.turbined_slack_m3s > 1e-10 {
-                found_turbine_below = true;
-            }
-        }
-    }
+    let found_outflow_below = scenario
+        .stages
+        .iter()
+        .flat_map(|s| &s.hydros)
+        .any(|h| h.outflow_slack_below_m3s > 1e-10);
+    let found_turbine_below = scenario
+        .stages
+        .iter()
+        .flat_map(|s| &s.hydros)
+        .any(|h| h.turbined_slack_m3s > 1e-10);
     assert!(
         found_outflow_below,
         "D20: expected non-zero outflow_slack_below_m3s"
@@ -3352,8 +3340,6 @@ fn d30_multi_resolution_loads_and_trains() {
     );
 }
 
-// ── integration test ──────────────────────────────────────────────
-
 /// The frozen-template simulation path must produce bit-for-bit identical
 /// per-scenario costs to the legacy fallback path (rel error == 0.0, within
 /// 1e-12), confirming `freeze_rows_into_template` builds a mathematically
@@ -3579,6 +3565,44 @@ fn test_observation_free_case_bit_exact_pre_epic() {
         result.final_lb.to_bits(),
         0x4166_3c9e_e81a_835au64,
         "D43 final_lb must reproduce its pre-windowing value bit-for-bit: got {} ({:#018x})",
+        result.final_lb,
+        result.final_lb.to_bits()
+    );
+}
+
+/// D06 is the variable-head FPHA case carrying the "FPHA uses average storage"
+/// contract (`-gammaV/2` on BOTH storage columns) — the FPHA plane rows are
+/// where the per-cell apportionment concentrates, so a no-drift pin here covers
+/// the partitioned production-row path the synthetic `cell_partition_gates`
+/// fixtures cannot: a real fitted hyperplane set on a real single-bus case. The
+/// `to_bits` golden is HiGHS-only (`#[cfg]`-gated): bit-exactness is
+/// backend-specific — CLP's simplex reaches a different-but-valid vertex — so
+/// removing the gate breaks the CLP suite. `d06_fpha_variable_head` above
+/// tolerance-pins the same value for both backends; this adds the bit-for-bit
+/// no-drift gate on the golden HiGHS path.
+#[cfg(feature = "highs")]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+#[test]
+fn test_fpha_variable_head_case_bit_exact() {
+    let case_dir = Path::new("../../examples/deterministic/d06-fpha-variable-head");
+
+    // rho_eq is irrelevant to D06 economics (see d06_fpha_variable_head above);
+    // pinned to the same neutral value so this golden's setup matches exactly.
+    write_energy_productivity_override(
+        &case_dir.join("system/hydro_energy_productivity.parquet"),
+        0,
+        1.0,
+    );
+
+    let result = run_deterministic(case_dir);
+
+    assert_eq!(
+        result.final_lb.to_bits(),
+        0x4148_da6e_907f_6e5cu64,
+        "D06 final_lb must reproduce bit-for-bit: got {} ({:#018x})",
         result.final_lb,
         result.final_lb.to_bits()
     );
@@ -5141,8 +5165,7 @@ mod chronological_telescoping {
     };
     use cobre_solver::ActiveSolver;
 
-    use cobre_io::PolicyCheckpoint;
-    use cobre_io::output::policy::read_policy_checkpoint;
+    use cobre_io::{PolicyCheckpoint, read_policy_checkpoint};
     use cobre_sddp::FutureCostFunction;
     use cobre_sddp::orchestration::{CheckpointParams, write_checkpoint};
     use cobre_sddp::policy_export::build_stage_cut_records;
@@ -5408,7 +5431,6 @@ mod chronological_telescoping {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::None,
                 },
-
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
@@ -5960,7 +5982,6 @@ mod chronological_attribution {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::None,
                 },
-
                 cost_scale_factor: None,
             },
             training: TrainingConfig {

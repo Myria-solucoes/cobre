@@ -28,7 +28,8 @@ use cobre_core::{
 
 use crate::hydro_models::{ProductionModelSet, ResolvedProductionModel};
 use crate::indexer::{
-    BlockGrid, BlockIdx, Boundary, EvaporationIndices, HydroSys, StateSpace, StorageBoundaryGrid,
+    BlockGrid, BlockIdx, Boundary, EvaporationIndices, HydroCellIndex, HydroSys, StateSpace,
+    StorageBoundaryGrid,
 };
 
 /// Borrowed LP-column geometry the generic-constraint resolver reads — the
@@ -49,7 +50,12 @@ pub(crate) struct GenericResolverGeom<'a> {
     /// Role-(a)-adjacent: storage-boundary address primitive, feeding
     /// [`Self::block_storage_col`].
     pub storage_boundary_grid: StorageBoundaryGrid,
-    /// Turbine column range (one per hydro per block).
+    /// Study-scope hydro-cell partition, needed because the `Turbine` and FPHA
+    /// `generation` families are sized and addressed by cell: a plant-level
+    /// `VariableRef` (no group selector) resolves to the sum over the plant's
+    /// cells, one `(col, coefficient)` pair per cell.
+    pub hydro_cell_index: &'a HydroCellIndex,
+    /// Turbine column range (one per cell per block).
     pub turbine: &'a Range<usize>,
     /// Spillage column range.
     pub spillage: &'a Range<usize>,
@@ -69,6 +75,12 @@ pub(crate) struct GenericResolverGeom<'a> {
     pub contract_export: &'a Range<usize>,
     /// FPHA generation column range.
     pub generation: &'a Range<usize>,
+    /// Borrowed from `StageLayout`, which owns this prefix sum: FPHA-local plant
+    /// index → that plant's first cell's FPHA-cell-local index. Borrowed rather
+    /// than recomputed here because `resolver_geom` is a `StageLayout` method, so
+    /// the owner is in scope; the independent copy in `HydroReverseLookup` exists
+    /// only because extraction has no `StageLayout`.
+    pub fpha_cell_local_start: &'a [usize],
     /// Bus-deficit column range.
     pub deficit: &'a Range<usize>,
     /// Deficit-stride constant (`S`).
@@ -225,15 +237,9 @@ pub(crate) fn resolve_variable_ref(
             cascade_refs,
         ),
 
-        VariableRef::HydroTurbined { hydro_id, block_id } => resolve_block_variable(
-            *hydro_id,
-            *block_id,
-            block_idx,
-            grid,
-            block_col_range(geom, ElementKind::Turbine).start,
-            hydro_pos,
-            1.0,
-        ),
+        VariableRef::HydroTurbined { hydro_id, block_id } => {
+            resolve_turbine_cells(*hydro_id, *block_id, block_idx, grid, geom, hydro_pos, 1.0)
+        }
 
         VariableRef::HydroSpillage { hydro_id, block_id } => resolve_block_variable(
             *hydro_id,
@@ -242,7 +248,6 @@ pub(crate) fn resolve_variable_ref(
             grid,
             block_col_range(geom, ElementKind::Spillage).start,
             hydro_pos,
-            1.0,
         ),
 
         VariableRef::HydroOutflow { hydro_id, block_id } => {
@@ -270,7 +275,6 @@ pub(crate) fn resolve_variable_ref(
             grid,
             block_col_range(geom, ElementKind::Thermal).start,
             thermal_pos,
-            1.0,
         ),
 
         VariableRef::LineDirect { line_id, block_id } => resolve_block_variable(
@@ -280,7 +284,6 @@ pub(crate) fn resolve_variable_ref(
             grid,
             block_col_range(geom, ElementKind::LineFwd).start,
             line_pos,
-            1.0,
         ),
 
         VariableRef::LineReverse { line_id, block_id } => resolve_block_variable(
@@ -290,7 +293,6 @@ pub(crate) fn resolve_variable_ref(
             grid,
             block_col_range(geom, ElementKind::LineRev).start,
             line_pos,
-            1.0,
         ),
 
         VariableRef::LineExchange { line_id, block_id } => {
@@ -308,7 +310,6 @@ pub(crate) fn resolve_variable_ref(
             grid,
             block_col_range(geom, ElementKind::Excess).start,
             bus_pos,
-            1.0,
         ),
 
         VariableRef::HydroDiversion { hydro_id, block_id } => resolve_block_variable(
@@ -318,7 +319,6 @@ pub(crate) fn resolve_variable_ref(
             grid,
             block_col_range(geom, ElementKind::Diversion).start,
             hydro_pos,
-            1.0,
         ),
 
         VariableRef::AnticipatedDecision { thermal_id } => {
@@ -445,6 +445,37 @@ pub(crate) fn expression_is_block_independent(expression: &ConstraintExpression)
         .all(|term| variable_ref_is_block_independent(&term.variable))
 }
 
+/// One `(column, multiplier)` pair per cell of the plant addressed by
+/// `hydro_id` in the `Turbine` family — the correct plant-level resolution now
+/// that the family is sized by cell, not by plant: a `VariableRef` with no
+/// group selector means the whole plant, i.e. every cell's column. Under the
+/// identity that is exactly today's single pair. Returns an empty vec on a
+/// `hydro_pos` miss (mirrors every other resolver's guard).
+fn resolve_turbine_cells(
+    hydro_id: EntityId,
+    block_id: Option<usize>,
+    block_idx: usize,
+    grid: BlockGrid,
+    geom: &GenericResolverGeom<'_>,
+    hydro_pos: &BTreeMap<EntityId, usize>,
+    multiplier: f64,
+) -> Vec<(usize, f64)> {
+    let Some(&pos) = hydro_pos.get(&hydro_id) else {
+        return vec![];
+    };
+    let effective_blk = block_id.unwrap_or(block_idx);
+    let turbine_start = block_col_range(geom, ElementKind::Turbine).start;
+    geom.hydro_cell_index
+        .cells_of(HydroSys::new(pos))
+        .map(|c| {
+            (
+                grid.flat(turbine_start, c, BlockIdx::new(effective_blk)),
+                multiplier,
+            )
+        })
+        .collect()
+}
+
 /// Resolve `HydroStorage` to its stage-level outgoing storage column.
 ///
 /// Role (a): the storage column is `state.storage.start + h`, read through the
@@ -533,16 +564,16 @@ fn resolve_hydro_inflow(
     result.push((geom.state.z_inflow.start + pos_h, 1.0));
 
     // Upstream releases (turbine + spillage): same column set as the storage-balance
-    // inflow side but coefficient +1.0 (rate), not −τ (volume).
+    // inflow side but coefficient +1.0 (rate), not −τ (volume). Turbine sums every
+    // one of the upstream plant's cells; spillage stays plant-keyed (unsplit).
     let turbine = block_col_range(geom, ElementKind::Turbine);
     let spillage = block_col_range(geom, ElementKind::Spillage);
     if !turbine.is_empty() && !spillage.is_empty() {
         for &up_id in upstream {
             if let Some(&pos_up) = hydro_pos.get(&up_id) {
-                result.push((
-                    grid.flat(turbine.start, pos_up, BlockIdx::new(eff_blk)),
-                    1.0,
-                ));
+                for cell in geom.hydro_cell_index.cells_of(HydroSys::new(pos_up)) {
+                    result.push((grid.flat(turbine.start, cell, BlockIdx::new(eff_blk)), 1.0));
+                }
                 result.push((
                     grid.flat(spillage.start, pos_up, BlockIdx::new(eff_blk)),
                     1.0,
@@ -600,9 +631,9 @@ fn resolve_hydro_evaporation(
     vec![(geom.evap_indices[base + blk].evaporation_flow_col, 1.0)]
 }
 
-/// Resolve `HydroOutflow` to two block-level columns (turbine before spillage). A
-/// single `hydro_pos` miss returns an empty vec for the whole pair, never a partial
-/// single column.
+/// Resolve `HydroOutflow` to turbine (every cell of the plant, summed) plus
+/// spillage (one plant-keyed column). A `hydro_pos` miss returns an empty vec,
+/// never a partial reading.
 fn resolve_hydro_outflow(
     hydro_id: EntityId,
     block_id: Option<usize>,
@@ -615,17 +646,15 @@ fn resolve_hydro_outflow(
         return vec![];
     };
     let effective_blk = block_id.unwrap_or(block_idx);
-    let turbine_col = grid.flat(
-        block_col_range(geom, ElementKind::Turbine).start,
-        pos,
-        BlockIdx::new(effective_blk),
-    );
+    let mut result =
+        resolve_turbine_cells(hydro_id, block_id, block_idx, grid, geom, hydro_pos, 1.0);
     let spillage_col = grid.flat(
         block_col_range(geom, ElementKind::Spillage).start,
         pos,
         BlockIdx::new(effective_blk),
     );
-    vec![(turbine_col, 1.0), (spillage_col, 1.0)]
+    result.push((spillage_col, 1.0));
+    result
 }
 
 /// Resolve `HydroGeneration` by dispatching on the production model.
@@ -650,30 +679,39 @@ fn resolve_hydro_generation(
         ResolvedProductionModel::Fpha { .. } => {
             // Linear scan: cold template-build path over a handful of FPHA hydros, so
             // an O(1) reverse map is not warranted (see `resolve_hydro_evaporation`).
-            if let Some(fpha_local_idx) = geom
+            let Some(fpha_local_idx) = geom
                 .fpha_hydro_indices
                 .iter()
                 .position(|&p| p.get() == sys_pos)
-            {
-                let effective_blk = block_id.unwrap_or(block_idx);
-                let col = grid.flat(
-                    geom.generation.start,
-                    fpha_local_idx,
-                    BlockIdx::new(effective_blk),
-                );
-                vec![(col, 1.0)]
-            } else {
-                vec![]
-            }
+            else {
+                return vec![];
+            };
+            let fpha_cell_start = geom.fpha_cell_local_start[fpha_local_idx];
+            let n_cells = geom.hydro_cell_index.cells_of(HydroSys::new(sys_pos)).len();
+            let effective_blk = block_id.unwrap_or(block_idx);
+            (0..n_cells)
+                .map(|i| {
+                    (
+                        grid.flat(
+                            geom.generation.start,
+                            fpha_cell_start + i,
+                            BlockIdx::new(effective_blk),
+                        ),
+                        1.0,
+                    )
+                })
+                .collect()
         }
         ResolvedProductionModel::ConstantProductivity { productivity } => {
-            // generation = productivity * turbined → turbine column scaled by productivity.
-            resolve_block_variable(
+            // generation = productivity * turbined → turbine cells scaled by
+            // productivity — one plant, one productivity, so scaling the
+            // per-cell sum is equivalent to scaling each cell individually.
+            resolve_turbine_cells(
                 hydro_id,
                 block_id,
                 block_idx,
                 grid,
-                block_col_range(geom, ElementKind::Turbine).start,
+                geom,
                 hydro_pos,
                 *productivity,
             )
@@ -721,8 +759,7 @@ fn resolve_bus_deficit(
 ) -> Vec<(usize, f64)> {
     if let Some(&b_pos) = bus_pos.get(&bus_id) {
         let effective_blk = block_id.unwrap_or(block_idx);
-        let s = geom.max_deficit_segments;
-        (0..s)
+        (0..geom.max_deficit_segments)
             .map(|seg| {
                 (
                     grid.deficit(geom.deficit.start, b_pos, seg, BlockIdx::new(effective_blk)),
@@ -855,7 +892,7 @@ fn resolve_contract_column(
     vec![(col, 1.0)]
 }
 
-/// Resolve a block-level LP variable to a `(column_index, multiplier)` pair via the
+/// Resolve a block-level LP variable to its `(column_index, 1.0)` pair via the
 /// single-owner [`BlockGrid::flat`] address (`eff_blk = ref_block_id.unwrap_or(...)`);
 /// empty vec on a `pos_map` miss.
 fn resolve_block_variable(
@@ -865,14 +902,10 @@ fn resolve_block_variable(
     grid: BlockGrid,
     col_start: usize,
     pos_map: &BTreeMap<EntityId, usize>,
-    multiplier: f64,
 ) -> Vec<(usize, f64)> {
     if let Some(&pos) = pos_map.get(&entity_id) {
         let effective_blk = ref_block_id.unwrap_or(current_block_idx);
-        vec![(
-            grid.flat(col_start, pos, BlockIdx::new(effective_blk)),
-            multiplier,
-        )]
+        vec![(grid.flat(col_start, pos, BlockIdx::new(effective_blk)), 1.0)]
     } else {
         vec![]
     }

@@ -90,7 +90,7 @@ use crate::{
     error::SddpError,
     horizon_mode::HorizonMode,
     hydro_models::PrepareHydroModelsResult,
-    indexer::{CutStateProjection, StateSpace, StudyDimensions},
+    indexer::{CutStateProjection, HydroCellIndex, StateSpace, StudyDimensions},
     lead_time::{AnticipatedResolution, LeadTime, PointResolution, SpreadResolution},
     lp_builder::build_stage_templates,
     risk_measure::RiskMeasure,
@@ -246,7 +246,7 @@ pub struct StudySetup {
     /// resolved arc tables (stage-clock weights, chronological spread,
     /// arrival density) — the single derivation site for all of them. Empty
     /// (`n_buckets == 0`) when the system declares no travel-time arc.
-    // Voice 4: every field is consumed via the constructor's threaded LOCAL
+    // Every field is consumed via the constructor's threaded LOCAL
     // (state-layout sizing, the LP builder's arc-table threading, the bucket
     // IC seed) before this STORED field is set below; no post-construction
     // reader exists yet. `#[allow(dead_code)]` refires once one lands.
@@ -410,6 +410,11 @@ impl StudySetup {
             ),
         };
 
+        // Built here, before the stage templates: `TemplateBuildCtx` reads it during
+        // `StageLayout::new`, and the SAME value (never rebuilt or cloned) is stored
+        // on `StageData` below.
+        let hydro_cell_index = HydroCellIndex::build(system.hydros());
+
         let EnergyAndTemplates {
             energy_conversion,
             stage_templates,
@@ -426,6 +431,7 @@ impl StudySetup {
             &transit_bucket_topology.arc_stage_weights,
             &transit_bucket_topology.arc_spread_chrono,
             &transit_bucket_topology.arc_arrival_density,
+            &hydro_cell_index,
         )?;
 
         let study_dims = build_study_dimensions(
@@ -537,6 +543,7 @@ impl StudySetup {
                 stage_templates,
                 state: state_layout,
                 study_dims,
+                hydro_cell_index,
                 cut_state_layouts,
                 stages,
                 entity_counts,
@@ -694,9 +701,8 @@ struct EnergyAndTemplates {
 /// The energy-conversion set and resolved parameter table are built before the
 /// LP templates so the builder can resolve `CoefficientRef::Parameter` values.
 /// The resolved parameter table is consumed only by `build_stage_templates`, so
-/// it is not returned. The stage-to-season mapping uses `season_id.unwrap_or(0)`
-/// so stages without a season collapse to season 0, consistent with every other
-/// season-indexed lookup.
+/// it is not returned. Seasonless stages collapse to season 0, consistent with
+/// every other season-indexed lookup.
 ///
 /// # Errors
 ///
@@ -721,6 +727,7 @@ fn build_energy_and_templates(
     arc_stage_weights: &HashMap<usize, Vec<Vec<f64>>>,
     arc_spread_chrono: &HashMap<usize, Vec<Option<SpreadResolution>>>,
     arc_arrival_density: &HashMap<usize, Vec<Option<Vec<f64>>>>,
+    hydro_cell_index: &HydroCellIndex,
 ) -> Result<EnergyAndTemplates, SddpError> {
     let study_stage_ids: Vec<StageId> = system
         .stages()
@@ -778,6 +785,7 @@ fn build_energy_and_templates(
         arc_stage_weights,
         arc_spread_chrono,
         arc_arrival_density,
+        hydro_cell_index,
     )?;
 
     let scaling_report = template_postprocess::postprocess_templates(
@@ -1114,7 +1122,7 @@ fn leadstages_decision_sets_are_singletons(
 /// differently-scoped boundary manifest and the local layout is out of scope
 /// here.)
 fn build_cut_state_layouts(
-    system: &cobre_core::System,
+    system: &System,
     state_layout: &StateSpace,
     n_stages: usize,
 ) -> Vec<CutStateProjection> {
@@ -1395,7 +1403,6 @@ fn build_risk_measures(system: &System) -> Vec<RiskMeasure> {
         .collect()
 }
 
-/// Build [`EntityCounts`] from the loaded system.
 fn build_entity_counts(system: &System) -> EntityCounts {
     EntityCounts {
         hydro_ids: system.hydros().iter().map(|h| h.id.0).collect(),

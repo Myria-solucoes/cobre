@@ -3,7 +3,7 @@
 use cobre_core::{Stage, temporal::StageLagTransition};
 
 use crate::{
-    indexer::{CutStateProjection, StateSpace, StudyDimensions},
+    indexer::{CutStateProjection, HydroCellIndex, StateSpace, StudyDimensions},
     lp_builder::StageTemplates,
     scaling_report::ScalingReport,
     simulation::EntityCounts,
@@ -27,6 +27,12 @@ pub struct StageData {
     /// identity list. State-defining dims live on [`Self::state`], per-stage
     /// `n_blks` on the per-stage geometry.
     pub(crate) study_dims: StudyDimensions,
+
+    /// Single owner of each plant's `unit_groups` partition into `bus_id`
+    /// cells, built once from `System::hydros` and stage-invariant like
+    /// [`Self::study_dims`]. `is_identity()` holds for every study without
+    /// multi-bus groups.
+    pub(crate) hydro_cell_index: HydroCellIndex,
 
     /// Per-pool cut-state projection, indexed by stage (pool) `t`, paired 1:1
     /// with [`crate::FutureCostFunction::pools`] (`pool t` sized by

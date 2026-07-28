@@ -611,7 +611,7 @@ mod tests {
     /// A constant-productivity hydro with optional filling at `start_stage_id = 2`,
     /// `entry_stage_id = 4`. With `filling = true` a stage id `< 2` is PreFilling.
     fn noise_hydro(id: i32, filling: bool) -> Hydro {
-        Hydro {
+        let mut hydro = Hydro {
             unit_groups: Vec::new(),
             id: EntityId(id),
             name: format!("H{id}"),
@@ -642,7 +642,9 @@ mod tests {
                 filling_min_rate_m3s: 0.0,
             }),
             penalties: zero_hydro_penalties(),
-        }
+        };
+        hydro.normalize_unit_groups();
+        hydro
     }
 
     fn one_block_stage(id: i32) -> Stage {

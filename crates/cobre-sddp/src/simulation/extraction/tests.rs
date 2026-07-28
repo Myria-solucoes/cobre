@@ -16,7 +16,8 @@ use cobre_core::BlockMode;
 
 use crate::energy_conversion::EnergyConversionSet;
 use crate::indexer::{
-    FillingTargetLocal, FloorLocal, FphaLocal, HydroSys, StateSpace, StudyDimensions,
+    FillingTargetLocal, FloorLocal, FphaLocal, HydroCellIndex, HydroSys, StateSpace,
+    StudyDimensions,
 };
 use crate::lead_time::{AnticipatedResolution, PointResolution};
 use crate::lp_builder::StageGeometry;
@@ -48,8 +49,10 @@ fn build_per_stage_resolves_stage_varying_fpha_membership() {
         ..StageGeometry::default()
     };
     let geometry_per_stage = vec![geom_stage0, geom_stage1];
+    let hydro_cell_index = test_support::identity_hydro_cell_index(256);
 
-    let hydro_per_stage = HydroReverseLookup::build_per_stage(&geometry_per_stage, n_hydros);
+    let hydro_per_stage =
+        HydroReverseLookup::build_per_stage(&geometry_per_stage, &hydro_cell_index, n_hydros);
     assert_eq!(hydro_per_stage.len(), 2);
 
     // Hydro 1 is absent from stage 0's FPHA list and present at FPHA-local slot
@@ -93,7 +96,8 @@ fn filling_reverse_lookup_resolves_sparse_membership() {
         ..StageGeometry::default()
     };
 
-    let lookup = HydroReverseLookup::build(&geom, n_hydros);
+    let hydro_cell_index = test_support::identity_hydro_cell_index(256);
+    let lookup = HydroReverseLookup::build(&geom, &hydro_cell_index, n_hydros);
 
     // σ_fill: only hydro 2, at slot 0 ⇒ column 500. Others absent.
     assert_eq!(lookup.filling_target[2], Some(FillingTargetLocal::new(0)));
@@ -184,6 +188,7 @@ fn extract_reads_binding_filling_target_slack_no_turbine_branch() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &geom,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: geom.n_blks,
             entity_counts: &make_entity_counts_2_hydros(),
@@ -274,6 +279,7 @@ fn extract_reads_binding_filled_min_storage_floor_slack_per_block_branch() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &geom,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: 1,
             entity_counts: &make_entity_counts_2_hydros(),
@@ -472,6 +478,7 @@ fn extract_costs_has_one_entry_matching_stage_id() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &make_entity_counts_2_hydros(),
@@ -532,6 +539,7 @@ fn extract_cost_splits_objective_correctly() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &make_entity_counts_2_hydros(),
@@ -592,6 +600,7 @@ fn extract_hydro_storage_values_from_primal() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &make_entity_counts_2_hydros(),
@@ -654,6 +663,7 @@ fn extract_inflow_lag_values_from_primal() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &make_entity_counts_2_hydros(),
@@ -728,6 +738,7 @@ fn extract_no_lags_when_max_par_order_zero() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &counts,
@@ -784,6 +795,7 @@ fn extract_stage_id_propagates_to_all_results() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &make_entity_counts_2_hydros(),
@@ -844,6 +856,7 @@ fn extract_equipment_zero_when_indexer_has_no_equipment_ranges() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &make_entity_counts_2_hydros(),
@@ -911,7 +924,6 @@ fn extract_equipment_zero_when_indexer_has_no_equipment_ranges() {
 /// ```
 #[test]
 fn extract_equipment_reads_primal_when_with_equipment() {
-    // N=2, L=1, T=1, Ln=1, B=1, K=1
     let eq_counts = test_support::GeometryDims {
         hydro_count: 2,
         max_par_order: 1,
@@ -1010,6 +1022,7 @@ fn extract_equipment_reads_primal_when_with_equipment() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &counts,
@@ -1162,6 +1175,7 @@ fn extract_thermals_marks_anticipated_thermals_when_indices_nonempty() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &counts,
@@ -1268,6 +1282,7 @@ fn extract_thermals_marks_no_thermals_anticipated_when_indices_empty() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &counts,
@@ -1385,6 +1400,7 @@ fn extract_thermals_reads_anticipated_decision_when_in_horizon() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &counts,
@@ -1462,6 +1478,7 @@ fn extract_thermals_emits_none_at_horizon_boundary() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &counts,
@@ -1537,6 +1554,7 @@ fn extract_thermals_emits_none_one_past_horizon_boundary() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &counts,
@@ -1630,6 +1648,7 @@ fn extract_thermals_emits_none_for_non_anticipated_thermals() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &counts,
@@ -1723,6 +1742,7 @@ fn extract_thermals_anticipated_decision_is_per_block_invariant() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &counts,
@@ -1836,6 +1856,7 @@ fn extract_thermals_decision_uses_attached_resolution_delivery_stage() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &counts,
@@ -1915,7 +1936,7 @@ fn make_anticipated_committed_indexer_k2_3blks() -> StageGeometry {
     )
 }
 
-/// AC-2: Per-block branch, K=2, `stage_index=2` (delivery stage).
+/// Per-block branch, K=2, `stage_index=2` (delivery stage).
 ///
 /// The committed value is the slot-0 entry of the `anticipated_state` ring
 /// buffer (per-plant, per-stage scalar), NOT the per-block thermal
@@ -1956,6 +1977,7 @@ fn extract_thermals_per_block_committed_at_delivery_stage() {
     let spec = StageExtractionSpec {
         study_dims: &study_dims,
         geometry: &indexer,
+        hydro_cell_index: &test_support::identity_hydro_cell_index(256),
         state: &state,
         n_blks: indexer.n_blks,
         entity_counts: &EntityCounts {
@@ -2007,58 +2029,7 @@ fn extract_thermals_per_block_committed_at_delivery_stage() {
         "helper: expected slot-0 value 42.0, NOT a per-block thermal value"
     );
 
-    let counts = EntityCounts {
-        hydro_ids: vec![],
-        hydro_productivities: vec![],
-        thermal_ids: vec![10],
-        line_ids: vec![],
-        bus_ids: vec![],
-        pumping_station_ids: vec![],
-        contract_ids: vec![],
-        non_controllable_ids: vec![],
-    };
-    let ec = zero_energy_conversion(0, 3);
-    let result = extract_stage_result(
-        &SolutionView {
-            primal: &primal,
-            dual: &[],
-            objective: 0.0,
-            objective_coeffs: &obj,
-            row_lower: &[],
-        },
-        &StageExtractionSpec {
-            study_dims: &study_dims,
-            geometry: &indexer,
-            state: &state,
-            n_blks: indexer.n_blks,
-            entity_counts: &counts,
-            inflow_m3s_per_hydro: &[],
-            block_hours: &[1.0, 1.0, 1.0],
-            generic_constraint_entries: &[],
-            ncs_col_start: 0,
-            n_ncs: 0,
-            ncs_entity_ids: &[],
-            ncs_col_upper: &[],
-            pumping_col_start: 0,
-            n_pumping: 0,
-            pumping_consumption_mw_per_m3s: &[],
-            contract_prices: &[],
-            contract_is_import: &[],
-            diversion_upstream: &HashMap::new(),
-            hydro_productivities: &[],
-            col_scale: &[],
-            row_scale: &[],
-            cumulative_discount_factor: 1.0,
-            cost_scale_factor: 1_000_000.0,
-            energy_conversion: &ec,
-            hydro_min_storage_hm3: &[],
-            stage_index: 2,
-            n_stages: 3,
-            anticipated_windows: &[(None, None)],
-            study_stage_ids: &[0, 1, 2, 3, 4, 5],
-        },
-        0,
-    );
+    let result = extract_stage_result(&view, &spec, 0);
 
     assert_eq!(result.thermals.len(), 3);
     for (blk, rec) in result.thermals.iter().enumerate() {
@@ -2075,7 +2046,7 @@ fn extract_thermals_per_block_committed_at_delivery_stage() {
     }
 }
 
-/// AC-3: Per-block branch, K=2, `stage_index=1` (pre-delivery under
+/// Per-block branch, K=2, `stage_index=1` (pre-delivery under
 /// a maturity gate, but the always-active fishing predicate reads
 /// slot 0 of `anticipated_state` regardless of `K_i` vs `stage_index`).
 /// With a zero-initialised `primal[anticipated_state.start + 0]`,
@@ -2087,9 +2058,9 @@ fn extract_thermals_per_block_committed_slot0_when_seed_zero() {
     let state = test_support::state_layout_full(0, 0, 1, 2, vec![2]);
     let n_cols = indexer.anticipated_decision.end.max(indexer.thermal.end);
     let mut primal = vec![0.0_f64; n_cols];
-    primal[3] = 50.0; // thermal 10, block 0
-    primal[4] = 60.0; // thermal 10, block 1
-    primal[5] = 70.0; // thermal 10, block 2
+    primal[3] = 50.0;
+    primal[4] = 60.0;
+    primal[5] = 70.0;
     let obj = vec![0.0_f64; n_cols];
 
     let counts = EntityCounts {
@@ -2114,6 +2085,7 @@ fn extract_thermals_per_block_committed_slot0_when_seed_zero() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &counts,
@@ -2155,7 +2127,7 @@ fn extract_thermals_per_block_committed_slot0_when_seed_zero() {
     }
 }
 
-/// AC-4: Per-block branch, K=2, `stage_index=2` (boundary: `k_i == stage_index`).
+/// Per-block branch, K=2, `stage_index=2` (boundary: `k_i == stage_index`).
 /// Expects every block to have `anticipated_committed_mw == Some(_)`.
 #[test]
 fn extract_thermals_per_block_committed_at_first_delivery_boundary() {
@@ -2191,6 +2163,7 @@ fn extract_thermals_per_block_committed_at_first_delivery_boundary() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &counts,
@@ -2231,7 +2204,7 @@ fn extract_thermals_per_block_committed_at_first_delivery_boundary() {
     }
 }
 
-/// AC-5: Two thermals, only thermal at global index 1 is anticipated.
+/// Two thermals, only thermal at global index 1 is anticipated.
 /// Thermal at global index 0 must have `anticipated_committed_mw == None` for every block.
 #[test]
 fn extract_thermals_per_block_committed_none_for_non_anticipated() {
@@ -2287,6 +2260,7 @@ fn extract_thermals_per_block_committed_none_for_non_anticipated() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &counts,
@@ -2336,7 +2310,7 @@ fn extract_thermals_per_block_committed_none_for_non_anticipated() {
     }
 }
 
-/// AC-6: No-block branch, K=1, `stage_index=1`, `n_stages=2` (delivery).
+/// No-block branch, K=1, `stage_index=1`, `n_stages=2` (delivery).
 /// Expects `anticipated_committed_mw == Some(0.0)`.
 #[test]
 fn extract_thermals_no_block_committed_at_delivery_is_zero() {
@@ -2366,6 +2340,7 @@ fn extract_thermals_no_block_committed_at_delivery_is_zero() {
     let spec_delivery = StageExtractionSpec {
         study_dims: &study_dims,
         geometry: &indexer,
+        hydro_cell_index: &test_support::identity_hydro_cell_index(256),
         state: &state,
         n_blks: indexer.n_blks,
         entity_counts: &EntityCounts {
@@ -2405,12 +2380,12 @@ fn extract_thermals_no_block_committed_at_delivery_is_zero() {
     };
     // No-block branch: the fishing-constraint LHS sum vanishes and the anticipated
     // patch pins slot 0 to incoming (0.0 here), so the helper returns Some(0.0).
-    let n_cols_helper = indexer.anticipated_decision.end.max(1);
-    let primal_helper = vec![0.0_f64; n_cols_helper];
-    let dual_helper: Vec<f64> = vec![];
+    let n_cols = indexer.anticipated_decision.end.max(1);
+    let primal = vec![0.0_f64; n_cols];
+    let obj = vec![0.0_f64; n_cols];
     let view_helper = SolutionView {
-        primal: &primal_helper,
-        dual: &dual_helper,
+        primal: &primal,
+        dual: &[],
         objective: 0.0,
         objective_coeffs: &[],
         row_lower: &[],
@@ -2421,21 +2396,6 @@ fn extract_thermals_no_block_committed_at_delivery_is_zero() {
         "consolidated helper: expected Some(0.0) at delivery stage (slot-0 = incoming = 0.0)"
     );
 
-    let n_cols = indexer.anticipated_decision.end.max(1);
-    let primal = vec![0.0_f64; n_cols];
-    let obj = vec![0.0_f64; n_cols];
-
-    let counts = EntityCounts {
-        hydro_ids: vec![],
-        hydro_productivities: vec![],
-        thermal_ids: vec![10],
-        line_ids: vec![],
-        bus_ids: vec![],
-        pumping_station_ids: vec![],
-        contract_ids: vec![],
-        non_controllable_ids: vec![],
-    };
-    let ec = zero_energy_conversion(0, 2);
     let result = extract_stage_result(
         &SolutionView {
             primal: &primal,
@@ -2444,37 +2404,7 @@ fn extract_thermals_no_block_committed_at_delivery_is_zero() {
             objective_coeffs: &obj,
             row_lower: &[],
         },
-        &StageExtractionSpec {
-            study_dims: &study_dims,
-            geometry: &indexer,
-            state: &state,
-            n_blks: indexer.n_blks,
-            entity_counts: &counts,
-            inflow_m3s_per_hydro: &[],
-            block_hours: &[],
-            generic_constraint_entries: &[],
-            ncs_col_start: 0,
-            n_ncs: 0,
-            ncs_entity_ids: &[],
-            ncs_col_upper: &[],
-            pumping_col_start: 0,
-            n_pumping: 0,
-            pumping_consumption_mw_per_m3s: &[],
-            contract_prices: &[],
-            contract_is_import: &[],
-            diversion_upstream: &HashMap::new(),
-            hydro_productivities: &[],
-            col_scale: &[],
-            row_scale: &[],
-            cumulative_discount_factor: 1.0,
-            cost_scale_factor: 1_000_000.0,
-            energy_conversion: &ec,
-            hydro_min_storage_hm3: &[],
-            stage_index: 1, // delivery stage
-            n_stages: 2,
-            anticipated_windows: &[(None, None)],
-            study_stage_ids: &[0, 1, 2, 3, 4, 5],
-        },
+        &spec_delivery,
         0,
     );
 
@@ -2486,7 +2416,7 @@ fn extract_thermals_no_block_committed_at_delivery_is_zero() {
     );
 }
 
-/// AC-7: No-block branch, K=1, `stage_index=0`, `n_stages=2`. Pre-delivery
+/// No-block branch, K=1, `stage_index=0`, `n_stages=2`. Pre-delivery
 /// under a maturity gate, but the always-active fishing predicate
 /// reads slot 0 of `anticipated_state` regardless. Expects `Some(0.0)`
 /// (zero-initialised slot 0).
@@ -2535,6 +2465,7 @@ fn extract_thermals_no_block_committed_reads_slot0_when_seed_zero() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &counts,
@@ -2637,6 +2568,7 @@ fn extract_stage_result_prebuilt_lookup_matches_standard_path() {
     let spec = StageExtractionSpec {
         study_dims: &study_dims,
         geometry: &indexer,
+        hydro_cell_index: &test_support::identity_hydro_cell_index(256),
         state: &state,
         n_blks: indexer.n_blks,
         entity_counts: &counts,
@@ -2669,7 +2601,8 @@ fn extract_stage_result_prebuilt_lookup_matches_standard_path() {
     let result_standard = extract_stage_result(&view, &spec, 2);
 
     let thermal_lookup = ThermalReverseLookup::build(&study_dims, counts.thermal_ids.len());
-    let hydro_lookup = HydroReverseLookup::build(spec.geometry, counts.hydro_ids.len());
+    let hydro_lookup =
+        HydroReverseLookup::build(spec.geometry, spec.hydro_cell_index, counts.hydro_ids.len());
     let result_prebuilt =
         extract_stage_result_with_lookups(&view, &spec, 2, &hydro_lookup, &thermal_lookup);
 
@@ -2735,6 +2668,7 @@ fn extract_optional_entity_types_are_empty_when_absent() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &counts,
@@ -3016,6 +2950,7 @@ fn test_slack_extraction_with_penalty_active() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &counts,
@@ -3119,6 +3054,7 @@ fn test_slack_extraction_without_penalty_is_zero() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &counts,
@@ -3233,6 +3169,7 @@ fn test_slack_extraction_fallback_path_with_penalty() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &counts,
@@ -3358,6 +3295,7 @@ fn fpha_generation_read_from_lp_column() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &counts,
@@ -3446,6 +3384,7 @@ fn fpha_productivity_placeholder_zero() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &counts,
@@ -3564,6 +3503,7 @@ fn evaporation_read_from_lp_column() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &counts,
@@ -3653,6 +3593,7 @@ fn evaporation_violation_is_sum_of_slacks() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &counts,
@@ -3748,6 +3689,7 @@ fn turbined_cost_in_compute_cost_result() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &counts,
@@ -3837,6 +3779,7 @@ fn cost_breakdown_sums_to_immediate_identity_scale() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &counts,
@@ -3952,6 +3895,7 @@ fn contract_cost_active_import_equals_price_power_hours_via_cost_result() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &geometry,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: geometry.n_blks,
             entity_counts: &counts,
@@ -4047,6 +3991,7 @@ fn cost_breakdown_sums_to_immediate_with_active_export_contract_via_cost_result(
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &geometry,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: geometry.n_blks,
             entity_counts: &counts,
@@ -4155,6 +4100,7 @@ fn cost_unscaled_by_col_scale() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &counts,
@@ -4284,6 +4230,7 @@ fn hydro_violation_cost_decomposition() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &counts,
@@ -4423,6 +4370,7 @@ fn stored_energy_initial_uses_v_min_offset() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &make_entity_counts_1_hydro(),
@@ -4497,6 +4445,7 @@ fn incremental_inflow_energy_uses_rho_acum() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &make_entity_counts_1_hydro(),
@@ -4560,6 +4509,7 @@ fn stage_path_propagates_productivity_values() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &indexer,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: indexer.n_blks,
             entity_counts: &make_entity_counts_1_hydro(),
@@ -4640,9 +4590,14 @@ fn pumping_only_spec<'a>(
     ec: &'a EnergyConversionSet,
     diversion: &'a HashMap<cobre_core::EntityId, Vec<usize>>,
 ) -> StageExtractionSpec<'a> {
+    // Leaked so the borrow outlives this function call, matching the caller's own
+    // `'a` — every call site here is single-bus, so an identity index is exact.
+    let hydro_cell_index: &'a HydroCellIndex =
+        Box::leak(Box::new(test_support::identity_hydro_cell_index(256)));
     StageExtractionSpec {
         study_dims,
         geometry,
+        hydro_cell_index,
         state,
         n_blks: geometry.n_blks,
         entity_counts,
@@ -4673,7 +4628,7 @@ fn pumping_only_spec<'a>(
     }
 }
 
-/// AC-1: one station, two blocks, distinct flow primals
+/// One station, two blocks, distinct flow primals
 /// (`[7.0, 3.0]`) and a non-unit `consumption_mw_per_m3s = 0.5`.
 ///
 /// The pumping columns are placed at `pumping_col_start = 4` in the primal,
@@ -4736,7 +4691,7 @@ fn extract_pumping_two_blocks_reads_per_block_flow_and_power() {
     assert_eq!(rows[1].pumping_station_id, 42);
 }
 
-/// AC-2: zero pumping stations yields an empty `Vec` (the block loop never
+/// Zero pumping stations yields an empty `Vec` (the block loop never
 /// runs), independent of `n_blks`.
 #[test]
 fn extract_pumping_zero_stations_is_empty() {
@@ -4850,9 +4805,14 @@ fn contract_only_spec<'a>(
     ec: &'a EnergyConversionSet,
     diversion: &'a HashMap<cobre_core::EntityId, Vec<usize>>,
 ) -> StageExtractionSpec<'a> {
+    // Leaked so the borrow outlives this function call, matching the caller's own
+    // `'a` — every call site here is single-bus, so an identity index is exact.
+    let hydro_cell_index: &'a HydroCellIndex =
+        Box::leak(Box::new(test_support::identity_hydro_cell_index(256)));
     StageExtractionSpec {
         study_dims,
         geometry,
+        hydro_cell_index,
         state,
         n_blks: geometry.n_blks,
         entity_counts,
@@ -4883,7 +4843,7 @@ fn contract_only_spec<'a>(
     }
 }
 
-/// AC: an import contract column holding `40.0` with `block_hours = 730` and
+/// An import contract column holding `40.0` with `block_hours = 730` and
 /// resolved price `200` yields `power_mw == 40.0`,
 /// `total_cost == 200 * 40 * 730`, and `operative_state_code == 1`.
 #[test]
@@ -4937,7 +4897,7 @@ fn extract_contract_import_reads_primal_and_cost() {
     assert_eq!(rows[0].operative_state_code, 1);
 }
 
-/// AC: an export contract column holding `30.0` with resolved price `-150` and
+/// An export contract column holding `30.0` with resolved price `-150` and
 /// `block_hours = 730` yields a negative `total_cost` (export revenue), addressed
 /// from the export family base.
 #[test]
@@ -4989,7 +4949,7 @@ fn extract_contract_export_yields_negative_cost() {
     assert_eq!(rows[0].operative_state_code, 1);
 }
 
-/// AC: a dormant contract whose column is pinned to `0.0` yields `power_mw == 0.0`,
+/// A dormant contract whose column is pinned to `0.0` yields `power_mw == 0.0`,
 /// `total_cost == 0.0`, and still `operative_state_code == 1` (never a
 /// commissioning flag).
 #[test]
@@ -5039,7 +4999,7 @@ fn extract_contract_dormant_zero_row_keeps_state_code_1() {
     assert_eq!(rows[0].operative_state_code, 1);
 }
 
-/// AC: two import contracts on a three-block stage; contract 7's block 1
+/// Two import contracts on a three-block stage; contract 7's block 1
 /// carries an overridden `120.0` price over its stage-wide `80.0`, while
 /// contract 8's three blocks stay `80.0` — pins that the per-block price read
 /// is indexed `c * n_blks + blk`, not `c` alone (which would misalign every
@@ -5112,7 +5072,7 @@ fn test_contract_extraction_uses_per_block_price() {
     assert_eq!(c8[2].total_cost, 80.0 * 60.0 * 730.0);
 }
 
-/// AC: a `contract_prices` slice whose length is not `n_contracts * n_blks`
+/// A `contract_prices` slice whose length is not `n_contracts * n_blks`
 /// panics via the stride `debug_assert!`, naming both lengths.
 /// `debug_assert!` compiles out in release, so this is gated on
 /// `debug_assertions`.
@@ -5160,7 +5120,7 @@ fn test_contract_price_stride_mismatch_asserts() {
     let _ = extract_contracts(&view, &spec, 0);
 }
 
-/// AC: a contract-free system yields an empty contracts vector from
+/// A contract-free system yields an empty contracts vector from
 /// `extract_stub_collections`.
 #[test]
 fn extract_stub_collections_contract_free_is_empty() {
@@ -5286,6 +5246,7 @@ fn extract_chronological_per_block_storage() {
     let spec = StageExtractionSpec {
         study_dims: &study_dims,
         geometry: &geom,
+        hydro_cell_index: &test_support::identity_hydro_cell_index(256),
         state: &state,
         n_blks: k,
         entity_counts: &entity_counts_1_hydro(),
@@ -5370,6 +5331,7 @@ fn extract_parallel_per_block_storage_byte_identical() {
     let spec = StageExtractionSpec {
         study_dims: &study_dims,
         geometry: &geom,
+        hydro_cell_index: &test_support::identity_hydro_cell_index(256),
         state: &state,
         n_blks: k,
         entity_counts: &entity_counts_1_hydro(),
@@ -5450,6 +5412,7 @@ fn extract_chronological_per_block_stored_energy() {
     let spec = StageExtractionSpec {
         study_dims: &study_dims,
         geometry: &geom,
+        hydro_cell_index: &test_support::identity_hydro_cell_index(256),
         state: &state,
         n_blks: k,
         entity_counts: &entity_counts_1_hydro(),
@@ -5527,6 +5490,7 @@ fn extract_chronological_per_block_evaporation() {
     let spec = StageExtractionSpec {
         study_dims: &study_dims,
         geometry: &geom,
+        hydro_cell_index: &test_support::identity_hydro_cell_index(256),
         state: &state,
         n_blks: k,
         entity_counts: &entity_counts_1_hydro(),
@@ -5603,6 +5567,7 @@ fn extract_parallel_per_block_evaporation_byte_identical() {
     let spec = StageExtractionSpec {
         study_dims: &study_dims,
         geometry: &geom,
+        hydro_cell_index: &test_support::identity_hydro_cell_index(256),
         state: &state,
         n_blks: k,
         entity_counts: &entity_counts_1_hydro(),
@@ -5712,6 +5677,7 @@ fn extract_transit_buckets_shape_canonical_order_and_delayed_arrival() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &geometry,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: geometry.n_blks,
             entity_counts: &make_entity_counts_2_hydros(),
@@ -5781,6 +5747,7 @@ fn extract_transit_buckets_absent_when_n_buckets_zero() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &geometry,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: geometry.n_blks,
             entity_counts: &make_entity_counts_2_hydros(),
@@ -5849,6 +5816,7 @@ fn extract_transit_buckets_rows_follow_canonical_column_order() {
         &StageExtractionSpec {
             study_dims: &study_dims,
             geometry: &geometry,
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             state: &state,
             n_blks: geometry.n_blks,
             entity_counts: &make_entity_counts_2_hydros(),
@@ -5891,4 +5859,153 @@ fn extract_transit_buckets_rows_follow_canonical_column_order() {
     assert_eq!(result.transit_buckets[1].delayed_arrival_hm3, 0.0);
     assert_eq!(result.transit_buckets[2].delayed_arrival_hm3, 9.0);
     assert_eq!(result.transit_buckets[2].in_transit_volume_hm3, 33.0);
+}
+
+// -------------------------------------------------------------------------
+// turbined/generation are sums over a plant's cells
+// -------------------------------------------------------------------------
+
+/// Plant 0 is single-bus (one cell); plant 1 splits across two buses (two
+/// cells, `bus_id` 10 then 11 — ascending, so cell 1 is the bus-10 group and
+/// cell 2 the bus-11 group) and is the sole FPHA plant. `n_cells = 3`,
+/// `n_fpha_cells = 2`. Column layout (equipment starts at `theta + 1 = 7` for
+/// `state_layout(2, 0)`): `turbine` = cell-major `[7, 13)` (3 cells x 2 blks),
+/// `spillage` = plant-major `[13, 17)` (2 hydros x 2 blks — spillage stays
+/// plant-keyed), `generation` = FPHA-cell-major `[17, 21)` (2 cells x 2 blks).
+fn split_plant_multi_bus_extraction_fixture() -> (StateSpace, StageGeometry, HydroCellIndex) {
+    let state = test_support::state_layout(2, 0);
+    let hydro_cell_index = HydroCellIndex::build(&[
+        test_support::geometry_hydro(0),
+        test_support::geometry_hydro_with_groups(
+            1,
+            vec![
+                test_support::make_unit_group(
+                    cobre_core::EntityId(110),
+                    cobre_core::EntityId(10),
+                    0.0,
+                    10.0,
+                    0.0,
+                    10.0,
+                ),
+                test_support::make_unit_group(
+                    cobre_core::EntityId(111),
+                    cobre_core::EntityId(11),
+                    0.0,
+                    10.0,
+                    0.0,
+                    10.0,
+                ),
+            ],
+            cobre_core::HydroGenerationModel::Fpha,
+        ),
+    ]);
+    assert_eq!(hydro_cell_index.n_cells(), 3);
+    assert_eq!(hydro_cell_index.cells_of(HydroSys::new(0)), 0..1);
+    assert_eq!(hydro_cell_index.cells_of(HydroSys::new(1)), 1..3);
+    let geometry = StageGeometry {
+        turbine: 7..13,
+        spillage: 13..17,
+        generation: 17..21,
+        fpha_hydro_indices: vec![HydroSys::new(1)],
+        n_blks: 2,
+        ..StageGeometry::default()
+    };
+    (state, geometry, hydro_cell_index)
+}
+
+/// A split plant's reported `turbined_m3s` and `generation_mw` are the SUM
+/// over its cells, not a single-cell read — exact because every cell of a
+/// plant shares that plant's one production model and objective coefficients
+/// (no group- or cell-level production field exists to price them apart).
+/// Cells carry deliberately UNEQUAL flows (100/101 vs 5/7, and 50/51 vs 3/4)
+/// so a first-cell-only regression is visible; an even split would be
+/// absorbed by construction.
+#[test]
+fn extract_hydro_turbined_and_generation_sum_over_a_split_plants_cells() {
+    let (state, geometry, hydro_cell_index) = split_plant_multi_bus_extraction_fixture();
+    let study_dims = test_support::study_dims();
+    let ec = zero_energy_conversion(2, 1);
+
+    let mut primal = vec![0.0_f64; 7]; // state region [0, 7), unused by this test
+    primal.extend_from_slice(&[
+        10.0, 11.0, // turbine[cell 0] (plant 0, blk 0/1)
+        100.0, 101.0, // turbine[cell 1] (plant 1's bus-10 group, blk 0/1)
+        5.0, 7.0, // turbine[cell 2] (plant 1's bus-11 group, blk 0/1)
+        0.0, 0.0, // spillage[hydro 0] (plant-keyed, not per cell)
+        0.0, 0.0, // spillage[hydro 1]
+        50.0, 51.0, // generation[fpha-cell-local 0 = cell 1], blk 0/1
+        3.0, 4.0, // generation[fpha-cell-local 1 = cell 2], blk 0/1
+    ]);
+    let dual = vec![0.0; 2];
+    let objective_coeffs = vec![0.0; primal.len()];
+
+    let result = extract_stage_result(
+        &SolutionView {
+            primal: &primal,
+            dual: &dual,
+            objective: 0.0,
+            objective_coeffs: &objective_coeffs,
+            row_lower: &[],
+        },
+        &StageExtractionSpec {
+            study_dims: &study_dims,
+            geometry: &geometry,
+            hydro_cell_index: &hydro_cell_index,
+            state: &state,
+            n_blks: geometry.n_blks,
+            entity_counts: &EntityCounts {
+                hydro_ids: vec![100, 200],
+                hydro_productivities: vec![0.0; 2],
+                thermal_ids: vec![],
+                line_ids: vec![],
+                bus_ids: vec![],
+                pumping_station_ids: vec![],
+                contract_ids: vec![],
+                non_controllable_ids: vec![],
+            },
+            inflow_m3s_per_hydro: &[0.0, 0.0],
+            block_hours: &[100.0, 100.0],
+            generic_constraint_entries: &[],
+            ncs_col_start: 0,
+            n_ncs: 0,
+            ncs_entity_ids: &[],
+            ncs_col_upper: &[],
+            pumping_col_start: 0,
+            n_pumping: 0,
+            pumping_consumption_mw_per_m3s: &[],
+            contract_prices: &[],
+            contract_is_import: &[],
+            diversion_upstream: &HashMap::new(),
+            hydro_productivities: &[2.0, 0.0], // plant 0 constant-productivity; plant 1 is FPHA
+            col_scale: &[],
+            row_scale: &[],
+            cumulative_discount_factor: 1.0,
+            cost_scale_factor: 1_000_000.0,
+            energy_conversion: &ec,
+            hydro_min_storage_hm3: &[0.0; 2],
+            stage_index: 0,
+            n_stages: 1,
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+        },
+        0,
+    );
+
+    assert_eq!(result.hydros.len(), 4, "2 hydros x 2 blocks");
+    let plant0: Vec<_> = result.hydros.iter().filter(|h| h.hydro_id == 100).collect();
+    let plant1: Vec<_> = result.hydros.iter().filter(|h| h.hydro_id == 200).collect();
+
+    // Plant 0 (single cell): turbined passes through; generation is the
+    // constant-productivity product (turbined * 2.0), not a cell sum.
+    assert_eq!(plant0[0].turbined_m3s, 10.0);
+    assert_eq!(plant0[1].turbined_m3s, 11.0);
+    assert_eq!(plant0[0].generation_mw, 20.0);
+    assert_eq!(plant0[1].generation_mw, 22.0);
+
+    // Plant 1 (two cells): both turbined_m3s and generation_mw are the SUM
+    // over cells 1 and 2, ascending — 100+5=105 / 101+7=108, 50+3=53 / 51+4=55.
+    assert_eq!(plant1[0].turbined_m3s, 105.0);
+    assert_eq!(plant1[1].turbined_m3s, 108.0);
+    assert_eq!(plant1[0].generation_mw, 53.0);
+    assert_eq!(plant1[1].generation_mw, 55.0);
 }

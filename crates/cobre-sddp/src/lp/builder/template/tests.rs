@@ -27,8 +27,8 @@ use cobre_stochastic::par::precompute::PrecomputedPar;
 
 use crate::hydro_models::PrepareHydroModelsResult;
 use crate::indexer::{
-    AnticipatedLocal, BlockIdx, Boundary, HydroSys, StateSpace, ThermalSys,
-    anticipated_resolution_for,
+    AnticipatedLocal, BlockIdx, Boundary, HydroCell, HydroCellIndex, HydroSys, StateSpace,
+    ThermalSys, anticipated_resolution_for,
 };
 use crate::inflow_method::InflowNonNegativityMethod;
 use crate::lead_time::AnticipatedResolution;
@@ -232,7 +232,7 @@ fn hydro_penalties_zero() -> HydroPenalties {
 
 /// Minimal independent (no-downstream) hydro for pumping-station refs.
 fn fixture_hydro(id: i32) -> Hydro {
-    Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: EntityId(id),
         name: format!("H{id}"),
@@ -260,7 +260,9 @@ fn fixture_hydro(id: i32) -> Hydro {
         diversion: None,
         filling: None,
         penalties: hydro_penalties_zero(),
-    }
+    };
+    hydro.normalize_unit_groups();
+    hydro
 }
 
 /// Build a one-bus, two-hydro system with the supplied pumping stations.
@@ -418,6 +420,7 @@ fn build_template_build_ctx_pumping_stations_id_sorted_and_pos_mapped() {
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -432,6 +435,7 @@ fn build_template_build_ctx_pumping_stations_id_sorted_and_pos_mapped() {
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
 
     let ids: Vec<i32> = ctx.pumping_stations.iter().map(|p| p.id.0).collect();
@@ -478,6 +482,7 @@ fn build_template_build_ctx_n_pumping_matches_slice_and_bounds() {
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -492,6 +497,7 @@ fn build_template_build_ctx_n_pumping_matches_slice_and_bounds() {
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
 
     assert_eq!(
@@ -559,6 +565,7 @@ fn build_stage_templates_records_layout_pumping_col_start_per_stage() {
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -573,6 +580,7 @@ fn build_stage_templates_records_layout_pumping_col_start_per_stage() {
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
     let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
 
@@ -747,6 +755,7 @@ fn build_template_build_ctx_contracts_counted_and_pos_mapped() {
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -761,6 +770,7 @@ fn build_template_build_ctx_contracts_counted_and_pos_mapped() {
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
 
     assert_eq!(ctx.contracts.len(), 2);
@@ -806,6 +816,7 @@ fn stage_layout_geometry_populates_contract_ranges() {
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -820,6 +831,7 @@ fn stage_layout_geometry_populates_contract_ranges() {
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
     let stage = system
         .stages()
@@ -861,6 +873,7 @@ fn stage_layout_geometry_empty_contracts_are_pumping_end_anchored() {
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -875,6 +888,7 @@ fn stage_layout_geometry_empty_contracts_are_pumping_end_anchored() {
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
     let stage = system
         .stages()
@@ -1005,6 +1019,7 @@ fn build_template_build_ctx_contract_count_divergence_panics() {
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let _ = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -1019,12 +1034,11 @@ fn build_template_build_ctx_contract_count_divergence_panics() {
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
 }
 
-// ── AC-1 ─────────────────────────────────────────────────────────────────
-
-/// AC-1: `build_template_build_ctx` populates anticipated metadata for a
+/// `build_template_build_ctx` populates anticipated metadata for a
 /// system with `T_a`(K=2), `T_b`(no anticipated), `T_c`(K=3).
 ///
 /// Expected: `n_anticipated`=2, `k_max`=3, `anticipated_lead_stages`=[2,3],
@@ -1083,6 +1097,7 @@ fn build_template_build_ctx_populates_anticipated_metadata() {
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -1097,6 +1112,7 @@ fn build_template_build_ctx_populates_anticipated_metadata() {
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
 
     assert_eq!(ctx.n_anticipated, 2, "n_anticipated");
@@ -1113,9 +1129,7 @@ fn build_template_build_ctx_populates_anticipated_metadata() {
     );
 }
 
-// ── AC-2 ─────────────────────────────────────────────────────────────────
-
-/// AC-2: `build_template_build_ctx` returns zeroed metadata when no
+/// `build_template_build_ctx` returns zeroed metadata when no
 /// thermal has `anticipated_config`.
 #[test]
 fn build_template_build_ctx_zero_anticipated_when_none() {
@@ -1159,6 +1173,7 @@ fn build_template_build_ctx_zero_anticipated_when_none() {
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -1173,6 +1188,7 @@ fn build_template_build_ctx_zero_anticipated_when_none() {
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
 
     assert_eq!(ctx.n_anticipated, 0, "n_anticipated");
@@ -1563,6 +1579,7 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx_a, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -1577,6 +1594,7 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
 
     assert_eq!(ctx_a.n_anticipated, 2);
@@ -1596,6 +1614,7 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
         buses: ctx_a.buses,
         load_models: ctx_a.load_models,
         cascade: ctx_a.cascade,
+        hydro_cell_index: ctx_a.hydro_cell_index,
         resolved: super::super::layout::ResolvedTables {
             bounds: ctx_a.resolved.bounds,
             penalties: ctx_a.resolved.penalties,
@@ -1915,6 +1934,7 @@ fn postprocessed_stage_templates_carry_discounted_factors() {
     let topology = build_transit_bucket_topology(&system);
     let (state_layout, _, _) = resolve_state_layout(&system, &par_lp, &topology)
         .expect("resolve_state_layout: valid test fixture");
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
 
     let mut templates = super::build_stage_templates(
         &system,
@@ -1929,6 +1949,7 @@ fn postprocessed_stage_templates_carry_discounted_factors() {
         &topology.arc_stage_weights,
         &topology.arc_spread_chrono,
         &topology.arc_arrival_density,
+        &hydro_cell_index,
     )
     .expect("build_stage_templates: valid system");
 
@@ -1977,7 +1998,7 @@ fn one_hydro_active_violations(n_stages: usize) -> System {
 
     let bus = fixture_bus();
 
-    let hydro = Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: EntityId(2),
         name: "H1".to_string(),
@@ -2023,6 +2044,7 @@ fn one_hydro_active_violations(n_stages: usize) -> System {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.normalize_unit_groups();
 
     let stages: Vec<Stage> = (0..n_stages)
         .map(|i| Stage {
@@ -2209,11 +2231,7 @@ fn build_active_violations_layout_and_template() -> (StageLayout<'static>, Stage
     let hydro_models = Box::leak(Box::new(PrepareHydroModelsResult::default_from_system(
         system,
     )));
-    let resolved_params = Box::leak(Box::new(ResolvedParameters {
-        per_param: vec![],
-        id_to_slot: vec![],
-        cost_scale_factor: 1_000_000.0,
-    }));
+    let resolved_params = Box::leak(Box::new(empty_resolved_params()));
 
     let (
         anticipated_resolution,
@@ -2224,6 +2242,7 @@ fn build_active_violations_layout_and_template() -> (StageLayout<'static>, Stage
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(system, par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         system,
         InflowNonNegativityMethod::None,
@@ -2238,6 +2257,7 @@ fn build_active_violations_layout_and_template() -> (StageLayout<'static>, Stage
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
     let ctx = Box::leak(Box::new(ctx));
     let state = Box::leak(Box::new(state_layout_for(ctx)));
@@ -2598,7 +2618,7 @@ use std::collections::BTreeMap as VTargetMap;
 /// (`start_stage_id`/`entry_stage_id`), used by the `build_filling_v_target`
 /// fold tests. All other fields are inert.
 fn vtarget_filling_hydro(id: i32, start: i32, entry: i32) -> Hydro {
-    Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: EntityId(id),
         name: format!("H{id}"),
@@ -2629,7 +2649,9 @@ fn vtarget_filling_hydro(id: i32, start: i32, entry: i32) -> Hydro {
             filling_min_rate_m3s: 0.0,
         }),
         penalties: hydro_penalties_zero(),
-    }
+    };
+    hydro.normalize_unit_groups();
+    hydro
 }
 
 /// A `ResolvedBounds` table for one hydro across `n_stages` stages, with every
@@ -2680,7 +2702,7 @@ fn vtarget_id_map(n_stages: usize) -> VTargetMap<i32, usize> {
     (0..n_stages).map(|i| (i as i32, i)).collect()
 }
 
-/// The AC: `start = 2`, `entry = 4`, `min_storage = 60`, per-stage ζ = 2.592
+/// The fixture: `start = 2`, `entry = 4`, `min_storage = 60`, per-stage ζ = 2.592
 /// (`total_hours = 720`, `M3S_TO_HM3 = 0.0036`), `rate = 5`. The backward fold
 /// pins `V_target[3] = 60` (the dead-volume anchor at L = entry − 1) and
 /// `V_target[2] = 60 − 2.592·5 = 47.04` (one stage of minimum accumulation
@@ -2980,6 +3002,7 @@ fn block_template(block_mode: BlockMode, n_blks: usize) -> StageTemplate {
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -2994,6 +3017,7 @@ fn block_template(block_mode: BlockMode, n_blks: usize) -> StageTemplate {
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
     let state = state_layout_for(&ctx);
     let stage = &system.stages()[0];
@@ -3003,7 +3027,7 @@ fn block_template(block_mode: BlockMode, n_blks: usize) -> StageTemplate {
 /// `K = 1` chronological build collapses to the parallel LP: the
 /// `storage_internal` interior-column family is empty, there is one water row,
 /// and FPHA rides the single incoming/outgoing storage pair — so the two
-/// templates are byte-identical (§9 contract). This anchors the layout half of
+/// templates are byte-identical. This anchors the layout half of
 /// the chronological feature against any regression that perturbs the `K = 1`
 /// column/row/value layout.
 #[test]
@@ -3016,7 +3040,7 @@ fn chronological_k1_byte_identical_to_parallel() {
 /// `theta` and `n_state` are pure functions of `(N, L, A, k_max)` and are
 /// `n_blks`-free by construction (`StateSpace::new` never sees `block_mode` or
 /// `n_blks`): per-block storage lives strictly in the control region, never in
-/// the state region (§2). Building a chronological `K ≥ 2` stage therefore
+/// the state region. Building a chronological `K ≥ 2` stage therefore
 /// changes neither — only the control-region column count grows, by exactly
 /// `n_h * (n_blks − 1)` interior storage columns.
 #[test]
@@ -3081,11 +3105,7 @@ fn block_layout_and_template(
     let hydro_models = Box::leak(Box::new(PrepareHydroModelsResult::default_from_system(
         system,
     )));
-    let resolved_params = Box::leak(Box::new(ResolvedParameters {
-        per_param: vec![],
-        id_to_slot: vec![],
-        cost_scale_factor: 1_000_000.0,
-    }));
+    let resolved_params = Box::leak(Box::new(empty_resolved_params()));
 
     let (
         anticipated_resolution,
@@ -3096,6 +3116,7 @@ fn block_layout_and_template(
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(system, par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         system,
         InflowNonNegativityMethod::None,
@@ -3110,6 +3131,7 @@ fn block_layout_and_template(
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
     let ctx = Box::leak(Box::new(ctx));
     let state = Box::leak(Box::new(state_layout_for(ctx)));
@@ -3161,7 +3183,10 @@ fn chronological_water_balance_chained_rows() {
         -1.0
     );
     assert_eq!(
-        entry(layout.turbine_col(HydroSys::new(h), BlockIdx::new(0)), row0),
+        entry(
+            layout.turbine_col(HydroCell::new(h), BlockIdx::new(0)),
+            row0
+        ),
         tau[0]
     );
 
@@ -3180,7 +3205,10 @@ fn chronological_water_balance_chained_rows() {
         -1.0
     );
     assert_eq!(
-        entry(layout.turbine_col(HydroSys::new(h), BlockIdx::new(1)), row1),
+        entry(
+            layout.turbine_col(HydroCell::new(h), BlockIdx::new(1)),
+            row1
+        ),
         tau[1]
     );
 }
@@ -3233,8 +3261,8 @@ fn chronological_water_balance_telescopes_to_parallel() {
     // block's τ_k sum reproduces the parallel ζ-scaled flow coefficient.
     for blk in 0..n_blks {
         assert_telescopes(
-            par_layout.turbine_col(HydroSys::new(h), BlockIdx::new(blk)),
-            chr_layout.turbine_col(HydroSys::new(h), BlockIdx::new(blk)),
+            par_layout.turbine_col(HydroCell::new(h), BlockIdx::new(blk)),
+            chr_layout.turbine_col(HydroCell::new(h), BlockIdx::new(blk)),
             "turbine",
         );
         assert_telescopes(
@@ -3462,7 +3490,7 @@ fn system_with_contracts_filling_and_anticipated() -> cobre_core::System {
 
     let bus = fixture_bus();
 
-    let hydro = Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: EntityId(1),
         name: "H1".to_string(),
@@ -3494,6 +3522,7 @@ fn system_with_contracts_filling_and_anticipated() -> cobre_core::System {
         }),
         penalties: hydro_penalties_zero(),
     };
+    hydro.normalize_unit_groups();
 
     let thermal = Thermal {
         id: EntityId(2),
@@ -3634,6 +3663,7 @@ fn stage_geometry_rerouted_ranges_match_layout_source_at_every_stage() {
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -3648,6 +3678,7 @@ fn stage_geometry_rerouted_ranges_match_layout_source_at_every_stage() {
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
     let state = state_layout_for(&ctx);
 
@@ -3769,7 +3800,7 @@ fn chronological_k1_water_row_byte_identical() {
     );
 }
 
-/// §9 contract "D06 preserved per block": at `K ≥ 2` each per-block FPHA plane row
+/// D06 preserved per block: at `K ≥ 2` each per-block FPHA plane row
 /// carries `−γᵥ/2` on BOTH block-local storage columns `block_storage_col(h, k−1)`
 /// (`Sᵏ⁻¹`) and `block_storage_col(h, k)` (`Sᵏ`) — the FPHA average-storage rule
 /// applied to the block's own `(Sᵏ⁻¹, Sᵏ)` pair. Placing it on the outgoing column
@@ -3809,7 +3840,7 @@ fn chronological_d06_gamma_v_on_both_block_columns() {
     }
 }
 
-/// §5 cross-mode cut-row byte-comparability invariant: for a chronological `K ≥ 2`
+/// Cross-mode cut-row byte-comparability invariant: for a chronological `K ≥ 2`
 /// FPHA study, the matrix-derived column scale at an interior `block_storage_col(h,
 /// k)` equals the endpoint storage-column scale. Identical state-column scaling
 /// across the storage family is what keeps rendered cut rows (`−coeff·col_scale[col]`)
@@ -3823,15 +3854,13 @@ fn chronological_interior_storage_scale_matches_endpoint() {
 
     let col_scale = super::super::compute_col_scale(t.num_cols, &t.col_starts, &t.values);
 
-    // The outgoing endpoint Sᴷ (`block_storage_col(h, K)`) is the reference storage
-    // column whose scale every interior boundary must match.
     let endpoint_scale = col_scale[layout.block_storage_col(HydroSys::new(h), Boundary::Outgoing)];
     for k in 1..n_blks {
         let interior_col = layout.block_storage_col(HydroSys::new(h), Boundary::Interior(k));
         assert_eq!(
             col_scale[interior_col].to_bits(),
             endpoint_scale.to_bits(),
-            "interior boundary S{k} scale must equal the endpoint Sᴷ scale (§5 \
+            "interior boundary S{k} scale must equal the endpoint Sᴷ scale (cut-row \
              byte-comparability); divergence signals FPHA/evap coefficients differ \
              between interior and endpoint storage columns"
         );
@@ -3859,37 +3888,41 @@ fn filling_block_system(block_mode: BlockMode, n_blks: usize) -> System {
 
     let bus = fixture_bus();
 
-    let filling_hydro = |id: i32, downstream: Option<i32>, start: i32| Hydro {
-        unit_groups: Vec::new(),
-        id: EntityId(id),
-        name: format!("H{id}"),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
-        downstream_id: downstream.map(EntityId),
-        travel_time_hours: None,
-        entry_stage_id: Some(FILL_ENTRY_ID),
-        exit_stage_id: None,
-        min_storage_hm3: FILL_MIN_STORAGE_HM3,
-        max_storage_hm3: 200.0,
-        min_outflow_m3s: 0.0,
-        max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity,
-        min_turbined_m3s: 0.0,
-        max_turbined_m3s: 100.0,
-        specific_productivity_mw_per_m3s_per_m: None,
-        min_generation_mw: 0.0,
-        max_generation_mw: 250.0,
-        tailrace: None,
-        hydraulic_losses: None,
-        efficiency: None,
-        evaporation_coefficients_mm: None,
-        evaporation_reference_volumes_hm3: None,
-        diversion: None,
-        filling: Some(FillingConfig {
-            start_stage_id: start,
-            filling_min_rate_m3s: FILL_RATE_M3S,
-        }),
-        penalties: hydro_penalties_zero(),
+    let filling_hydro = |id: i32, downstream: Option<i32>, start: i32| {
+        let mut hydro = Hydro {
+            unit_groups: Vec::new(),
+            id: EntityId(id),
+            name: format!("H{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: EntityId(1),
+            downstream_id: downstream.map(EntityId),
+            travel_time_hours: None,
+            entry_stage_id: Some(FILL_ENTRY_ID),
+            exit_stage_id: None,
+            min_storage_hm3: FILL_MIN_STORAGE_HM3,
+            max_storage_hm3: 200.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 250.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: Some(FillingConfig {
+                start_stage_id: start,
+                filling_min_rate_m3s: FILL_RATE_M3S,
+            }),
+            penalties: hydro_penalties_zero(),
+        };
+        hydro.normalize_unit_groups();
+        hydro
     };
 
     let hydros = vec![
@@ -4064,11 +4097,7 @@ fn filling_block_layout_and_template(
     let hydro_models = Box::leak(Box::new(PrepareHydroModelsResult::default_from_system(
         system,
     )));
-    let resolved_params = Box::leak(Box::new(ResolvedParameters {
-        per_param: vec![],
-        id_to_slot: vec![],
-        cost_scale_factor: 1_000_000.0,
-    }));
+    let resolved_params = Box::leak(Box::new(empty_resolved_params()));
 
     let (
         anticipated_resolution,
@@ -4079,6 +4108,7 @@ fn filling_block_layout_and_template(
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(system, par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         system,
         InflowNonNegativityMethod::None,
@@ -4093,6 +4123,7 @@ fn filling_block_layout_and_template(
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
     let ctx = Box::leak(Box::new(ctx));
     let state = Box::leak(Box::new(state_layout_for(ctx)));
@@ -4103,7 +4134,7 @@ fn filling_block_layout_and_template(
     (layout, template, ctx.filling_v_target.clone())
 }
 
-/// §9 contract "D38–D42 preserved per block": at `K ≥ 2` a `PreFilling` hydro's `K`
+/// D38–D42 preserved per block: at `K ≥ 2` a `PreFilling` hydro's `K`
 /// water rows are frozen identities (`Sᵏ − Sᵏ⁻¹ = 0`) and its spillage AND turbine
 /// columns are frozen `[0, 0]` on every block (no dam, no machinery). A `Filling`
 /// hydro at the same stage keeps its per-block spillage FREE (the D40 over-dam relief
@@ -4155,7 +4186,7 @@ fn chronological_prefilling_d38_d42_per_block() {
             (0.0, 0.0),
             "PreFilling block {k}: spillage frozen [0,0] (no dam to spill from, D38/D39/D42)"
         );
-        let turb_pre = layout.turbine_col(HydroSys::new(h_pre), BlockIdx::new(blk));
+        let turb_pre = layout.turbine_col(HydroCell::new(h_pre), BlockIdx::new(blk));
         assert_eq!(
             (t.col_lower[turb_pre], t.col_upper[turb_pre]),
             (0.0, 0.0),
@@ -4176,7 +4207,7 @@ fn chronological_prefilling_d38_d42_per_block() {
     }
 }
 
-/// §9 contract "Filling-phase target on `Sᴷ`": at `K ≥ 2` a `Filling`-phase hydro's
+/// Filling-phase target on `Sᴷ`: at `K ≥ 2` a `Filling`-phase hydro's
 /// `σ_fill` row references the stage-final storage `block_storage_col(h, K)` (= `Sᴷ`,
 /// which aliases the outgoing endpoint `h`), its `V_target` fold value is UNCHANGED
 /// from the parallel build (`build_filling_v_target` is keyed `(hydro, stage)` and
@@ -4198,9 +4229,6 @@ fn chronological_filling_target_on_final_storage() {
         "exactly the Filling hydro H3 emits a σ_fill target at stage 0"
     );
 
-    // The σ_fill row places +1 on the OUTGOING storage column, which in chronological
-    // mode is the stage-final Sᴷ (block_storage_col aliases the outgoing endpoint to
-    // the dense hydro index h_fill).
     let sk_col = chr_layout.block_storage_col(HydroSys::new(h_fill), Boundary::Outgoing);
     assert_eq!(
         sk_col, h_fill,
@@ -4237,7 +4265,6 @@ fn chronological_filling_target_on_final_storage() {
         "σ_fill row RHS (≥ lower) equals the V_target fold value"
     );
 
-    // Per-block spillage stays the free D40 relief valve, not frozen.
     for blk in 0..n_blks {
         let spill = chr_layout.spillage_col(HydroSys::new(h_fill), BlockIdx::new(blk));
         assert_eq!(
@@ -4376,7 +4403,7 @@ fn anticipated_lead_config_system(
         .expect("anticipated_lead_config_system: valid system")
 }
 
-/// AC1/AC2: on a uniform 3×744h calendar, a `LeadTime(744.0)` plant resolves
+/// On a uniform 3×744h calendar, a `LeadTime(744.0)` plant resolves
 /// `c(m) = [None, Some(0), Some(1)]` (hand-derived: `resolve_decider_physical`
 /// against boundaries `[0, 744, 1488, 2232]`, target `= boundaries[m+1] - 744`
 /// lands one boundary before `m` at every `m > 0`), giving `depth = [1, 1,
@@ -4403,6 +4430,7 @@ fn template_anticipated_resolution_matches_setup_lead_time() {
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -4417,6 +4445,7 @@ fn template_anticipated_resolution_matches_setup_lead_time() {
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
     assert_eq!(ctx.k_max, 1, "ctx.k_max");
     assert_eq!(
@@ -4451,14 +4480,14 @@ fn template_anticipated_resolution_matches_setup_lead_time() {
     );
 }
 
-/// AC2 mutation companion: reproduces the PRE-FIX `StateSpace` template.rs
-/// used to build for a `LeadTime` plant — `anticipated_lead_stages` derived
-/// via `cfg.lead_stages().unwrap_or(0)` (`0` for `LeadTime`, the pre-fix bug)
-/// and no [`crate::indexer::StateSpace::set_anticipated_resolution`]
-/// attach — and shows its decider differs from the fixed layout's: the
-/// resulting `Stages(0)` fallback resolves every delivery stage as
-/// self-delivered (`decider[m] == m` for all `m`), never the calendar-derived
-/// `[None, Some(0), Some(1)]` the fixed resolution produces for the same
+/// Mutation companion: builds the WRONG-BUT-COMPILING `StateSpace` for a
+/// `LeadTime` plant — `anticipated_lead_stages` from
+/// `cfg.lead_stages().unwrap_or(0)` (which is `0` for `LeadTime`) and no
+/// [`crate::indexer::StateSpace::set_anticipated_resolution`] attach — and
+/// shows its decider differs from the correct layout's: the resulting
+/// `Stages(0)` fallback resolves every delivery stage as self-delivered
+/// (`decider[m] == m` for all `m`), never the calendar-derived
+/// `[None, Some(0), Some(1)]` the correct resolution produces for the same
 /// system (`template_anticipated_resolution_matches_setup_lead_time`).
 #[test]
 fn pre_fix_template_state_layout_yields_differing_all_self_delivered_decider() {
@@ -4478,7 +4507,7 @@ fn pre_fix_template_state_layout_yields_differing_all_self_delivered_decider() {
     );
 }
 
-/// AC3: a `LeadStages(1)` plant on the same calendar keeps the fallback
+/// A `LeadStages(1)` plant on the same calendar keeps the fallback
 /// byte-identical to the threaded resolution — the LeadStages behaviour must
 /// stay unchanged (d34/d37 parity).
 #[test]
@@ -4498,6 +4527,7 @@ fn template_leadstages_byte_identical_to_setup_and_fallback() {
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -4512,6 +4542,7 @@ fn template_leadstages_byte_identical_to_setup_and_fallback() {
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
     assert_eq!(ctx.anticipated_lead_stages, vec![1]);
 
@@ -4615,6 +4646,7 @@ fn build_stage_templates_never_emits_k0_advisory_itself() {
     let (state_layout, _, _) = resolve_state_layout(&system, &par_lp, &topology)
         .expect("resolve_state_layout: valid test fixture");
     let per_stage_mask = topology.per_stage_mask;
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
 
     let (subscriber, messages) = WarnRecorder::new();
     tracing::subscriber::with_default(subscriber, || {
@@ -4631,6 +4663,7 @@ fn build_stage_templates_never_emits_k0_advisory_itself() {
             &topology.arc_stage_weights,
             &topology.arc_spread_chrono,
             &topology.arc_arrival_density,
+            &hydro_cell_index,
         )
         .expect("valid system");
     });
