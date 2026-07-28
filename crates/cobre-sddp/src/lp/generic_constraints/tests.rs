@@ -169,7 +169,7 @@ fn make_hydro(id: i32, downstream_id: Option<i32>) -> Hydro {
         filling: None,
         penalties: zero_penalties,
     };
-    hydro.normalize_unit_groups();
+    hydro.declare_mirror_unit_group();
     hydro
 }
 

@@ -3137,7 +3137,7 @@ mod pumping_water_tests {
             filling: None,
             penalties: zero_hydro_penalties(),
         };
-        hydro.normalize_unit_groups();
+        hydro.declare_mirror_unit_group();
         hydro
     }
 
@@ -4777,7 +4777,7 @@ mod pumping_water_tests {
                 25.0,
             ),
         ];
-        hydro.normalize_unit_groups();
+        hydro.declare_mirror_unit_group();
         hydro
     }
 
@@ -5256,7 +5256,7 @@ mod pumping_water_tests {
             0.0,
             50.0,
         )];
-        decoy.normalize_unit_groups();
+        decoy.declare_mirror_unit_group();
 
         let mut split = fixture_hydro_ds(11, None);
         // Vestigial: the plant's own `bus_id` must NOT be read by the per-cell
@@ -5268,7 +5268,7 @@ mod pumping_water_tests {
             make_unit_group(EntityId(20), bus_cell_a, 0.0, 45.0, 0.0, 9000.0),
             make_unit_group(EntityId(21), bus_cell_b, 0.0, 45.0, 0.0, 3000.0),
         ];
-        split.normalize_unit_groups();
+        split.declare_mirror_unit_group();
 
         let buses = vec![
             fixture_bus(bus_pad.0),
@@ -5600,7 +5600,7 @@ mod pumping_water_tests {
 
         let mut hydro = fixture_hydro_ds(10, None);
         hydro.unit_groups = unit_groups;
-        hydro.normalize_unit_groups();
+        hydro.declare_mirror_unit_group();
         let buses: Vec<Bus> = hydro
             .unit_groups
             .iter()
@@ -7022,7 +7022,7 @@ mod pumping_water_tests {
             }),
             penalties: zero_hydro_penalties(),
         };
-        hydro.normalize_unit_groups();
+        hydro.declare_mirror_unit_group();
         hydro
     }
 

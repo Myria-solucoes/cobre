@@ -248,10 +248,14 @@ fn fixture_hydro(id: i32) -> Hydro {
         max_outflow_m3s: None,
         generation_model: HydroGenerationModel::ConstantProductivity,
         min_turbined_m3s: 0.0,
-        max_turbined_m3s: 50.0,
+        // Deliberately non-binding, not an install capacity: the mirror group
+        // copies this value and every cell column bound sums against it, so a
+        // realistic number caps the cells below what this module's
+        // `default_hydro_bounds()` resolves to.
+        max_turbined_m3s: 1_000_000.0,
         specific_productivity_mw_per_m3s_per_m: None,
         min_generation_mw: 0.0,
-        max_generation_mw: 45.0,
+        max_generation_mw: 1_000_000.0,
         tailrace: None,
         hydraulic_losses: None,
         efficiency: None,
@@ -261,7 +265,7 @@ fn fixture_hydro(id: i32) -> Hydro {
         filling: None,
         penalties: hydro_penalties_zero(),
     };
-    hydro.normalize_unit_groups();
+    hydro.declare_mirror_unit_group();
     hydro
 }
 
@@ -2044,7 +2048,7 @@ fn one_hydro_active_violations(n_stages: usize) -> System {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
-    hydro.normalize_unit_groups();
+    hydro.declare_mirror_unit_group();
 
     let stages: Vec<Stage> = (0..n_stages)
         .map(|i| Stage {
@@ -2634,10 +2638,14 @@ fn vtarget_filling_hydro(id: i32, start: i32, entry: i32) -> Hydro {
         max_outflow_m3s: None,
         generation_model: HydroGenerationModel::ConstantProductivity,
         min_turbined_m3s: 0.0,
-        max_turbined_m3s: 50.0,
+        // Deliberately non-binding, not an install capacity: the mirror group
+        // copies this value and every cell column bound sums against it, so a
+        // realistic number caps the cells below what `vtarget_bounds()` resolves
+        // to via `default_hydro_bounds()`.
+        max_turbined_m3s: 1_000_000.0,
         specific_productivity_mw_per_m3s_per_m: None,
         min_generation_mw: 0.0,
-        max_generation_mw: 45.0,
+        max_generation_mw: 1_000_000.0,
         tailrace: None,
         hydraulic_losses: None,
         efficiency: None,
@@ -2650,7 +2658,7 @@ fn vtarget_filling_hydro(id: i32, start: i32, entry: i32) -> Hydro {
         }),
         penalties: hydro_penalties_zero(),
     };
-    hydro.normalize_unit_groups();
+    hydro.declare_mirror_unit_group();
     hydro
 }
 
@@ -3506,10 +3514,14 @@ fn system_with_contracts_filling_and_anticipated() -> cobre_core::System {
         max_outflow_m3s: None,
         generation_model: HydroGenerationModel::ConstantProductivity,
         min_turbined_m3s: 0.0,
-        max_turbined_m3s: 50.0,
+        // Deliberately non-binding, not an install capacity: the mirror group
+        // copies this value and every cell column bound sums against it, so a
+        // realistic number caps the cells below what this function's own
+        // `default_hydro_bounds()`-backed `ResolvedBounds` resolves to.
+        max_turbined_m3s: 1_000_000.0,
         specific_productivity_mw_per_m3s_per_m: None,
         min_generation_mw: 0.0,
-        max_generation_mw: 45.0,
+        max_generation_mw: 1_000_000.0,
         tailrace: None,
         hydraulic_losses: None,
         efficiency: None,
@@ -3522,7 +3534,7 @@ fn system_with_contracts_filling_and_anticipated() -> cobre_core::System {
         }),
         penalties: hydro_penalties_zero(),
     };
-    hydro.normalize_unit_groups();
+    hydro.declare_mirror_unit_group();
 
     let thermal = Thermal {
         id: EntityId(2),
@@ -3921,7 +3933,7 @@ fn filling_block_system(block_mode: BlockMode, n_blks: usize) -> System {
             }),
             penalties: hydro_penalties_zero(),
         };
-        hydro.normalize_unit_groups();
+        hydro.declare_mirror_unit_group();
         hydro
     };
 

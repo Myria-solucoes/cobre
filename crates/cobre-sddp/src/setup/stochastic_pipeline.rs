@@ -626,7 +626,7 @@ mod tests {
             }],
             excess_cost: 0.0,
         };
-        let hydro = Hydro {
+        let mut hydro = Hydro {
             unit_groups: Vec::new(),
             id: hydro_id,
             name: "H1".to_string(),
@@ -672,6 +672,7 @@ mod tests {
                 inflow_nonnegativity_cost: 1000.0,
             },
         };
+        hydro.declare_mirror_unit_group();
 
         let bounds = ResolvedBounds::new(
             &BoundsCountsSpec {

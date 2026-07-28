@@ -643,7 +643,7 @@ mod tests {
             }),
             penalties: zero_hydro_penalties(),
         };
-        hydro.normalize_unit_groups();
+        hydro.declare_mirror_unit_group();
         hydro
     }
 

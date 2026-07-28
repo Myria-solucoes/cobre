@@ -274,8 +274,8 @@ mod tests {
         }
     }
 
-    /// Three plants: plant 0 declares no groups (materializes to one implicit
-    /// group on normalize); plant 1 declares three groups all on bus 5, with
+    /// Three plants: plant 0 declares no groups, so the mirror helper gives it a
+    /// single group; plant 1 declares three groups all on bus 5, with
     /// deliberately differing bounds (pinning that the partition key is
     /// `bus_id` alone — same-bus groups merge regardless of how their bounds
     /// differ, the precondition a later per-cell bound-summing pass rests on);
@@ -314,6 +314,7 @@ mod tests {
 
         let mut hydros = vec![plant0, plant1, plant2];
         for h in &mut hydros {
+            h.declare_mirror_unit_group();
             h.normalize_unit_groups();
         }
         hydros
@@ -412,7 +413,7 @@ mod tests {
         );
         let mut hydros = vec![plant_a, plant_b];
         for h in &mut hydros {
-            h.normalize_unit_groups();
+            h.declare_mirror_unit_group();
         }
         let index = HydroCellIndex::build(&hydros);
 

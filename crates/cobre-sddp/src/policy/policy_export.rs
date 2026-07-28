@@ -539,7 +539,7 @@ mod tests {
     }
 
     fn make_hydro(id: i32, entry: Option<i32>, exit: Option<i32>) -> Hydro {
-        Hydro {
+        let mut hydro = Hydro {
             unit_groups: Vec::new(),
             id: EntityId(id),
             name: format!("Hydro{id}"),
@@ -567,7 +567,9 @@ mod tests {
             diversion: None,
             filling: None,
             penalties: penalties_zero(),
-        }
+        };
+        hydro.declare_mirror_unit_group();
+        hydro
     }
 
     fn anticipated_thermal(id: i32, lead_stages: u32) -> Thermal {

@@ -1128,7 +1128,7 @@ mod interior_storage_bound_tests {
             filling: None,
             penalties: super::super::test_support::zero_hydro_penalties(),
         };
-        hydro.normalize_unit_groups();
+        hydro.declare_mirror_unit_group();
         hydro
     }
 
@@ -1647,7 +1647,7 @@ mod diversion_bound_tests {
             filling: None,
             penalties: zero_hydro_penalties(),
         };
-        hydro.normalize_unit_groups();
+        hydro.declare_mirror_unit_group();
         hydro
     }
 
@@ -2018,7 +2018,7 @@ mod filling_phase_gating_tests {
             filling,
             penalties: zero_hydro_penalties(),
         };
-        hydro.normalize_unit_groups();
+        hydro.declare_mirror_unit_group();
         hydro
     }
 
@@ -3606,7 +3606,7 @@ mod block_family_slack_tests {
             filling: None,
             penalties: zero_hydro_penalties(),
         };
-        hydro.normalize_unit_groups();
+        hydro.declare_mirror_unit_group();
         hydro
     }
 
@@ -3996,7 +3996,7 @@ mod evaporation_slack_objective_tests {
             filling: None,
             penalties: zero_hydro_penalties(),
         };
-        hydro.normalize_unit_groups();
+        hydro.declare_mirror_unit_group();
         hydro
     }
 
@@ -5905,7 +5905,7 @@ mod hydro_block_bound_tests {
             filling: None,
             penalties: zero_hydro_penalties(),
         };
-        hydro.normalize_unit_groups();
+        hydro.declare_mirror_unit_group();
         hydro
     }
 
@@ -6882,7 +6882,7 @@ mod cell_column_bound_tests {
             filling: None,
             penalties: zero_hydro_penalties(),
         };
-        hydro.normalize_unit_groups();
+        hydro.declare_mirror_unit_group();
         hydro
     }
 
@@ -6925,7 +6925,7 @@ mod cell_column_bound_tests {
             filling,
             penalties: zero_hydro_penalties(),
         };
-        hydro.normalize_unit_groups();
+        hydro.declare_mirror_unit_group();
         hydro
     }
 
@@ -6970,7 +6970,7 @@ mod cell_column_bound_tests {
             filling: None,
             penalties: zero_hydro_penalties(),
         };
-        hydro.normalize_unit_groups();
+        hydro.declare_mirror_unit_group();
         hydro
     }
 

@@ -65,7 +65,7 @@ fn minimal_system(n_stages: usize) -> cobre_core::System {
         exit_stage_id: None,
     };
 
-    let hydro = Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: EntityId(3),
         name: "H1".to_string(),
@@ -111,6 +111,7 @@ fn minimal_system(n_stages: usize) -> cobre_core::System {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.declare_mirror_unit_group();
 
     let stages: Vec<Stage> = (0..n_stages)
         .map(|i| Stage {
@@ -296,7 +297,7 @@ fn minimal_fpha_misconfigured_system(n_stages: usize) -> cobre_core::System {
         exit_stage_id: None,
     };
 
-    let hydro = Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: EntityId(3),
         name: "H_FPHA_BAD".to_string(),
@@ -342,6 +343,7 @@ fn minimal_fpha_misconfigured_system(n_stages: usize) -> cobre_core::System {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.declare_mirror_unit_group();
 
     let stages: Vec<Stage> = (0..n_stages)
         .map(|i| Stage {
@@ -1546,7 +1548,7 @@ fn test_prepare_stochastic_historical_residuals_noise_method() {
         entry_stage_id: None,
         exit_stage_id: None,
     };
-    let hydro = Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: EntityId(3),
         name: "H1".to_string(),
@@ -1592,6 +1594,7 @@ fn test_prepare_stochastic_historical_residuals_noise_method() {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.declare_mirror_unit_group();
 
     // branching_factor=2 → each stage selects 2 historical windows as openings.
     let stages: Vec<Stage> = (0..n_stages)
@@ -1979,51 +1982,55 @@ fn minimal_system_2_hydros_with_history(
         excess_cost: 0.0,
     };
 
-    let make_hydro = |id: i32, name: &str| Hydro {
-        unit_groups: Vec::new(),
-        id: EntityId(id),
-        name: name.to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
-        downstream_id: None,
-        travel_time_hours: None,
-        entry_stage_id: None,
-        exit_stage_id: None,
-        min_storage_hm3: 0.0,
-        max_storage_hm3: 200.0,
-        min_outflow_m3s: 0.0,
-        max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity,
-        min_turbined_m3s: 0.0,
-        max_turbined_m3s: 100.0,
-        specific_productivity_mw_per_m3s_per_m: None,
-        min_generation_mw: 0.0,
-        max_generation_mw: 250.0,
-        tailrace: None,
-        hydraulic_losses: None,
-        efficiency: None,
-        evaporation_coefficients_mm: None,
-        evaporation_reference_volumes_hm3: None,
-        diversion: None,
-        filling: None,
-        penalties: HydroPenalties {
-            spillage_cost: 0.01,
-            diversion_cost: 0.0,
-            turbined_cost: 0.0,
-            storage_violation_below_cost: 0.0,
-            filling_target_violation_cost: 0.0,
-            turbined_violation_below_cost: 0.0,
-            outflow_violation_below_cost: 0.0,
-            outflow_violation_above_cost: 0.0,
-            generation_violation_below_cost: 0.0,
-            evaporation_violation_cost: 0.0,
-            water_withdrawal_violation_cost: 0.0,
-            water_withdrawal_violation_pos_cost: 0.0,
-            water_withdrawal_violation_neg_cost: 0.0,
-            evaporation_violation_pos_cost: 0.0,
-            evaporation_violation_neg_cost: 0.0,
-            inflow_nonnegativity_cost: 1000.0,
-        },
+    let make_hydro = |id: i32, name: &str| {
+        let mut hydro = Hydro {
+            unit_groups: Vec::new(),
+            id: EntityId(id),
+            name: name.to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: EntityId(1),
+            downstream_id: None,
+            travel_time_hours: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 200.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 250.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: HydroPenalties {
+                spillage_cost: 0.01,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 0.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+        };
+        hydro.declare_mirror_unit_group();
+        hydro
     };
 
     let n_st = n_stages.max(1);
@@ -2409,51 +2416,55 @@ fn staggered_dates_system_2_hydros(
         excess_cost: 0.0,
     };
 
-    let make_hydro = |id: i32, name: &str, start: NaiveDate| Hydro {
-        unit_groups: Vec::new(),
-        id: EntityId(id),
-        name: name.to_string(),
-        operational_start_date: start,
-        bus_id: EntityId(1),
-        downstream_id: None,
-        travel_time_hours: None,
-        entry_stage_id: None,
-        exit_stage_id: None,
-        min_storage_hm3: 0.0,
-        max_storage_hm3: 200.0,
-        min_outflow_m3s: 0.0,
-        max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity,
-        min_turbined_m3s: 0.0,
-        max_turbined_m3s: 100.0,
-        specific_productivity_mw_per_m3s_per_m: None,
-        min_generation_mw: 0.0,
-        max_generation_mw: 250.0,
-        tailrace: None,
-        hydraulic_losses: None,
-        efficiency: None,
-        evaporation_coefficients_mm: None,
-        evaporation_reference_volumes_hm3: None,
-        diversion: None,
-        filling: None,
-        penalties: HydroPenalties {
-            spillage_cost: 0.01,
-            diversion_cost: 0.0,
-            turbined_cost: 0.0,
-            storage_violation_below_cost: 0.0,
-            filling_target_violation_cost: 0.0,
-            turbined_violation_below_cost: 0.0,
-            outflow_violation_below_cost: 0.0,
-            outflow_violation_above_cost: 0.0,
-            generation_violation_below_cost: 0.0,
-            evaporation_violation_cost: 0.0,
-            water_withdrawal_violation_cost: 0.0,
-            water_withdrawal_violation_pos_cost: 0.0,
-            water_withdrawal_violation_neg_cost: 0.0,
-            evaporation_violation_pos_cost: 0.0,
-            evaporation_violation_neg_cost: 0.0,
-            inflow_nonnegativity_cost: 1000.0,
-        },
+    let make_hydro = |id: i32, name: &str, start: NaiveDate| {
+        let mut hydro = Hydro {
+            unit_groups: Vec::new(),
+            id: EntityId(id),
+            name: name.to_string(),
+            operational_start_date: start,
+            bus_id: EntityId(1),
+            downstream_id: None,
+            travel_time_hours: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 200.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 250.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: HydroPenalties {
+                spillage_cost: 0.01,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 0.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+        };
+        hydro.declare_mirror_unit_group();
+        hydro
     };
 
     let earlier = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
@@ -2743,54 +2754,58 @@ fn filling_system_2_hydros(
         excess_cost: 0.0,
     };
 
-    let make_hydro = |id: i32, name: &str, filling: Option<cobre_core::FillingConfig>| Hydro {
-        unit_groups: Vec::new(),
-        id: EntityId(id),
-        name: name.to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
-        downstream_id: None,
-        travel_time_hours: None,
-        // A filling hydro requires `entry_stage_id` (the operating-handoff
-        // stage) to be `Some`; the system builder rejects `filling` without
-        // it. Operating hydros leave it `None`.
-        entry_stage_id: filling.as_ref().map(|f| f.start_stage_id + 1),
-        exit_stage_id: None,
-        min_storage_hm3: 0.0,
-        max_storage_hm3: 200.0,
-        min_outflow_m3s: 0.0,
-        max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity,
-        min_turbined_m3s: 0.0,
-        max_turbined_m3s: 100.0,
-        specific_productivity_mw_per_m3s_per_m: None,
-        min_generation_mw: 0.0,
-        max_generation_mw: 250.0,
-        tailrace: None,
-        hydraulic_losses: None,
-        efficiency: None,
-        evaporation_coefficients_mm: None,
-        evaporation_reference_volumes_hm3: None,
-        diversion: None,
-        filling,
-        penalties: HydroPenalties {
-            spillage_cost: 0.01,
-            diversion_cost: 0.0,
-            turbined_cost: 0.0,
-            storage_violation_below_cost: 0.0,
-            filling_target_violation_cost: 0.0,
-            turbined_violation_below_cost: 0.0,
-            outflow_violation_below_cost: 0.0,
-            outflow_violation_above_cost: 0.0,
-            generation_violation_below_cost: 0.0,
-            evaporation_violation_cost: 0.0,
-            water_withdrawal_violation_cost: 0.0,
-            water_withdrawal_violation_pos_cost: 0.0,
-            water_withdrawal_violation_neg_cost: 0.0,
-            evaporation_violation_pos_cost: 0.0,
-            evaporation_violation_neg_cost: 0.0,
-            inflow_nonnegativity_cost: 1000.0,
-        },
+    let make_hydro = |id: i32, name: &str, filling: Option<cobre_core::FillingConfig>| {
+        let mut hydro = Hydro {
+            unit_groups: Vec::new(),
+            id: EntityId(id),
+            name: name.to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            bus_id: EntityId(1),
+            downstream_id: None,
+            travel_time_hours: None,
+            // A filling hydro requires `entry_stage_id` (the operating-handoff
+            // stage) to be `Some`; the system builder rejects `filling` without
+            // it. Operating hydros leave it `None`.
+            entry_stage_id: filling.as_ref().map(|f| f.start_stage_id + 1),
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 200.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 250.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling,
+            penalties: HydroPenalties {
+                spillage_cost: 0.01,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 0.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+        };
+        hydro.declare_mirror_unit_group();
+        hydro
     };
 
     let n_st = n_stages.max(1);
@@ -3299,7 +3314,7 @@ fn system_with_anticipated_thermals(
         })
         .collect();
 
-    let hydro = Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: EntityId(3),
         name: "H1".to_string(),
@@ -3345,6 +3360,7 @@ fn system_with_anticipated_thermals(
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.declare_mirror_unit_group();
 
     let n_stages = 2_usize;
     let stages: Vec<Stage> = (0..n_stages)
@@ -3563,7 +3579,7 @@ fn system_with_two_anticipated_thermals_staggered_dates(
         },
     ];
 
-    let hydro = Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: EntityId(3),
         name: "H1".to_string(),
@@ -3609,6 +3625,7 @@ fn system_with_two_anticipated_thermals_staggered_dates(
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.declare_mirror_unit_group();
 
     let n_stages = 2_usize;
     let stages: Vec<Stage> = (0..n_stages)
@@ -4240,7 +4257,7 @@ fn system_with_historical_inflow(n_stages: usize) -> cobre_core::System {
         exit_stage_id: None,
     };
 
-    let hydro = Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: EntityId(3),
         name: "H1".to_string(),
@@ -4286,6 +4303,7 @@ fn system_with_historical_inflow(n_stages: usize) -> cobre_core::System {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.declare_mirror_unit_group();
 
     let stages: Vec<Stage> = (0..n_stages)
         .map(|i| Stage {
@@ -4509,7 +4527,7 @@ fn external_inflow_library_built_when_scheme_is_external() {
         entry_stage_id: None,
         exit_stage_id: None,
     };
-    let hydro = Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: EntityId(3),
         name: "H1".to_string(),
@@ -4555,6 +4573,7 @@ fn external_inflow_library_built_when_scheme_is_external() {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.declare_mirror_unit_group();
     let stages: Vec<Stage> = (0..2usize)
         .map(|i| Stage {
             index: i,
@@ -4767,7 +4786,7 @@ fn external_load_library_built_when_scheme_is_external() {
         entry_stage_id: None,
         exit_stage_id: None,
     };
-    let hydro = Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: EntityId(3),
         name: "H1".to_string(),
@@ -4813,6 +4832,7 @@ fn external_load_library_built_when_scheme_is_external() {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.declare_mirror_unit_group();
 
     let stages: Vec<Stage> = (0..2usize)
         .map(|i| Stage {
@@ -5041,7 +5061,7 @@ fn external_ncs_library_built_when_scheme_is_external() {
         entry_stage_id: None,
         exit_stage_id: None,
     };
-    let hydro = Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: EntityId(3),
         name: "H1".to_string(),
@@ -5087,6 +5107,7 @@ fn external_ncs_library_built_when_scheme_is_external() {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.declare_mirror_unit_group();
 
     let ncs_id = EntityId(4);
     let ncs_source = NonControllableSource {
@@ -5336,7 +5357,7 @@ fn historical_library_fails_when_no_valid_windows() {
         entry_stage_id: None,
         exit_stage_id: None,
     };
-    let hydro = Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: EntityId(3),
         name: "H1".to_string(),
@@ -5382,6 +5403,7 @@ fn historical_library_fails_when_no_valid_windows() {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.declare_mirror_unit_group();
 
     let stages: Vec<Stage> = (0..2usize)
         .map(|i| Stage {
@@ -5695,7 +5717,7 @@ fn minimal_system_with_anticipated(
         exit_stage_id: None,
     };
 
-    let hydro = Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: EntityId(3),
         name: "H1".to_string(),
@@ -5741,6 +5763,7 @@ fn minimal_system_with_anticipated(
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.declare_mirror_unit_group();
 
     let stages: Vec<Stage> = (0..n_stages)
         .map(|i| Stage {
@@ -6169,51 +6192,55 @@ fn system_with_travel_time_arc(n_stages: usize) -> cobre_core::System {
     };
 
     let make_hydro =
-        |id: i32, name: &str, downstream_id: Option<i32>, travel_time_hours: Option<f64>| Hydro {
-            unit_groups: Vec::new(),
-            id: EntityId(id),
-            name: name.to_string(),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(1),
-            downstream_id: downstream_id.map(EntityId),
-            travel_time_hours,
-            entry_stage_id: None,
-            exit_stage_id: None,
-            min_storage_hm3: 0.0,
-            max_storage_hm3: 200.0,
-            min_outflow_m3s: 0.0,
-            max_outflow_m3s: None,
-            generation_model: HydroGenerationModel::ConstantProductivity,
-            min_turbined_m3s: 0.0,
-            max_turbined_m3s: 100.0,
-            specific_productivity_mw_per_m3s_per_m: None,
-            min_generation_mw: 0.0,
-            max_generation_mw: 250.0,
-            tailrace: None,
-            hydraulic_losses: None,
-            efficiency: None,
-            evaporation_coefficients_mm: None,
-            evaporation_reference_volumes_hm3: None,
-            diversion: None,
-            filling: None,
-            penalties: HydroPenalties {
-                spillage_cost: 0.01,
-                diversion_cost: 0.0,
-                turbined_cost: 0.0,
-                storage_violation_below_cost: 0.0,
-                filling_target_violation_cost: 0.0,
-                turbined_violation_below_cost: 0.0,
-                outflow_violation_below_cost: 0.0,
-                outflow_violation_above_cost: 0.0,
-                generation_violation_below_cost: 0.0,
-                evaporation_violation_cost: 0.0,
-                water_withdrawal_violation_cost: 0.0,
-                water_withdrawal_violation_pos_cost: 0.0,
-                water_withdrawal_violation_neg_cost: 0.0,
-                evaporation_violation_pos_cost: 0.0,
-                evaporation_violation_neg_cost: 0.0,
-                inflow_nonnegativity_cost: 1000.0,
-            },
+        |id: i32, name: &str, downstream_id: Option<i32>, travel_time_hours: Option<f64>| {
+            let mut hydro = Hydro {
+                unit_groups: Vec::new(),
+                id: EntityId(id),
+                name: name.to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                bus_id: EntityId(1),
+                downstream_id: downstream_id.map(EntityId),
+                travel_time_hours,
+                entry_stage_id: None,
+                exit_stage_id: None,
+                min_storage_hm3: 0.0,
+                max_storage_hm3: 200.0,
+                min_outflow_m3s: 0.0,
+                max_outflow_m3s: None,
+                generation_model: HydroGenerationModel::ConstantProductivity,
+                min_turbined_m3s: 0.0,
+                max_turbined_m3s: 100.0,
+                specific_productivity_mw_per_m3s_per_m: None,
+                min_generation_mw: 0.0,
+                max_generation_mw: 250.0,
+                tailrace: None,
+                hydraulic_losses: None,
+                efficiency: None,
+                evaporation_coefficients_mm: None,
+                evaporation_reference_volumes_hm3: None,
+                diversion: None,
+                filling: None,
+                penalties: HydroPenalties {
+                    spillage_cost: 0.01,
+                    diversion_cost: 0.0,
+                    turbined_cost: 0.0,
+                    storage_violation_below_cost: 0.0,
+                    filling_target_violation_cost: 0.0,
+                    turbined_violation_below_cost: 0.0,
+                    outflow_violation_below_cost: 0.0,
+                    outflow_violation_above_cost: 0.0,
+                    generation_violation_below_cost: 0.0,
+                    evaporation_violation_cost: 0.0,
+                    water_withdrawal_violation_cost: 0.0,
+                    water_withdrawal_violation_pos_cost: 0.0,
+                    water_withdrawal_violation_neg_cost: 0.0,
+                    evaporation_violation_pos_cost: 0.0,
+                    evaporation_violation_neg_cost: 0.0,
+                    inflow_nonnegativity_cost: 1000.0,
+                },
+            };
+            hydro.declare_mirror_unit_group();
+            hydro
         };
 
     let stages: Vec<Stage> = (0..n_stages)
@@ -6677,7 +6704,7 @@ fn par2_system_with_state_configs(state_configs: &[StageStateConfig]) -> cobre_c
         exit_stage_id: None,
     };
 
-    let hydro = Hydro {
+    let mut hydro = Hydro {
         unit_groups: Vec::new(),
         id: hydro_id,
         name: "H1".to_string(),
@@ -6723,6 +6750,7 @@ fn par2_system_with_state_configs(state_configs: &[StageStateConfig]) -> cobre_c
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.declare_mirror_unit_group();
 
     let n_stages = state_configs.len();
     let stages: Vec<Stage> = state_configs

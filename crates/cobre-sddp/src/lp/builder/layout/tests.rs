@@ -263,7 +263,7 @@ fn membership_hydro(
         filling,
         penalties: zero_hydro_penalties(),
     };
-    hydro.normalize_unit_groups();
+    hydro.declare_mirror_unit_group();
     hydro
 }
 
@@ -2598,7 +2598,7 @@ impl TwoHydroMultiBusFixtures {
             make_unit_group(EntityId(10), bus_a, 0.0, 10.0, 0.0, 10.0),
             make_unit_group(EntityId(11), bus_b, 0.0, 10.0, 0.0, 10.0),
         ];
-        plant1.normalize_unit_groups();
+        plant1.declare_mirror_unit_group();
         let hydros = vec![plant0, plant1];
         let cascade = CascadeTopology::build(&hydros);
         let hydro_cell_index = HydroCellIndex::build(&hydros);
@@ -2846,7 +2846,7 @@ impl FphaMultiBusFixtures {
             make_unit_group(EntityId(20), EntityId(60), 0.0, 10.0, 0.0, 10.0),
             make_unit_group(EntityId(21), EntityId(61), 0.0, 10.0, 0.0, 10.0),
         ];
-        plant2.normalize_unit_groups();
+        plant2.declare_mirror_unit_group();
 
         let hydros = vec![plant0, plant1, plant2];
         let cascade = CascadeTopology::build(&hydros);
