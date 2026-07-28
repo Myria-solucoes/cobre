@@ -850,8 +850,8 @@ mod cell_partition_gates {
     const HYDRO_FPHA_ID: EntityId = EntityId(20);
 
     /// `H_FPHA`'s own declared bounds — every variant's `unit_groups` sums to
-    /// exactly these (mirroring what `Hydro::normalize_unit_groups` gives the
-    /// no-groups variant), so the resolved-bounds plant term
+    /// exactly these (the single-mirror-group variant declares one group
+    /// carrying them directly), so the resolved-bounds plant term
     /// (`cell_max_turbined`/`cell_max_generation`'s `hb` clamp, set far larger
     /// below) never binds and the group term is what a test observes.
     const PLANT_MAX_TURBINED_M3S: f64 = 750.0;
@@ -918,23 +918,29 @@ mod cell_partition_gates {
         )
     }
 
-    /// No declared groups: `Hydro::normalize_unit_groups` (run by
-    /// `SystemBuilder::build`, exactly as production does) materializes one
-    /// implicit group mirroring `H_FPHA`'s own top-level bounds — 1 cell.
-    fn groups_none() -> Vec<HydroUnitGroup> {
-        Vec::new()
+    /// A single group carrying the plant's own bus and four bounds — the
+    /// mirror group a plant now declares explicitly, since an empty
+    /// `unit_groups` is rejected — 1 cell.
+    fn groups_single_mirror() -> Vec<HydroUnitGroup> {
+        vec![make_unit_group(
+            EntityId(0),
+            BUS_PLANT_OWN,
+            0.0,
+            PLANT_MAX_GENERATION_MW,
+            0.0,
+            PLANT_MAX_TURBINED_M3S,
+        )]
     }
 
     /// Three groups, all on `BUS_PLANT_OWN` — the plant's own declared
-    /// `bus_id`, so the collapsed cell lands on the SAME bus the no-groups
-    /// variant's implicit group would (`normalize_unit_groups` sets the
-    /// implicit group's `bus_id` to the plant's own). A same-bus group on
-    /// any OTHER bus would collapse to a different cell than the implicit
-    /// group's, comparing two different physical configurations rather than
-    /// testing collapse. Deliberately UNEQUAL thirds summing exactly to the
-    /// plant's declared totals: equal thirds would make a first-group,
-    /// largest-group, or mean implementation indistinguishable from the sum,
-    /// which is the entire content of the collapse claim.
+    /// `bus_id`, so the collapsed cell lands on the SAME bus the single-
+    /// mirror-group variant's group does. A same-bus group on any OTHER bus
+    /// would collapse to a different cell than the mirror group's, comparing
+    /// two different physical configurations rather than testing collapse.
+    /// Deliberately UNEQUAL thirds summing exactly to the plant's declared
+    /// totals: equal thirds would make a first-group, largest-group, or mean
+    /// implementation indistinguishable from the sum, which is the entire
+    /// content of the collapse claim.
     fn groups_three_same_bus() -> Vec<HydroUnitGroup> {
         vec![
             make_unit_group(EntityId(101), BUS_PLANT_OWN, 0.0, 1_000.0, 0.0, 100.0),
@@ -1278,11 +1284,9 @@ mod cell_partition_gates {
     /// byte-identical `StageTemplate` — identity of the generated LP and its
     /// index-addressed positions, not of the `HydroCellIndex` object itself
     /// (`groups_of(cell)` necessarily differs between the variants, which is
-    /// expected, not a gap) — to the same plant declaring none, its bounds
-    /// summed then clamped to the plant's own resolved bound. Variant B is
-    /// built through the identical `SystemBuilder` normalization path as
-    /// variant A — never a shortcut that skips `normalize_unit_groups` — so
-    /// the comparison is collapse, not normalized-vs-unnormalized.
+    /// expected, not a gap) — to the same plant declaring a single mirror
+    /// group, its bounds summed then clamped to the plant's own resolved
+    /// bound.
     ///
     /// This equality holds only under three hypotheses, satisfied here but
     /// not in general: (H1) capacity conservation is EXACT
@@ -1295,26 +1299,26 @@ mod cell_partition_gates {
     /// H2 is the non-obvious one and is VACUOUS for this fixture, not
     /// generally true: `cell_max_turbined`/`cell_max_generation` fold each
     /// group's own bound pair before summing
-    /// (`min(q̄_g, p̄_g/ρ)` for `ConstantProductivity`), while the no-groups
-    /// path folds once over the plant's own totals. `min` is concave, so
-    /// `Σ_g min(a_g, b_g) ≤ min(Σa_g, Σb_g)`, equality iff every group binds
-    /// on the SAME side. `H_FPHA`'s production model makes the fold the
-    /// identity (`_ => turbined` in `cell_max_turbined`'s `fold` closure), so
-    /// H2 holds trivially here regardless of binding side — this gate proves
-    /// collapse for fold-identity production models, not in general. A
-    /// `ConstantProductivity` plant with MIXED-binding-side same-bus groups
-    /// does NOT collapse under exact arithmetic, and that is correct
-    /// behaviour (per-group limits are the more faithful model) — pinned as
-    /// a documented negative by
+    /// (`min(q̄_g, p̄_g/ρ)` for `ConstantProductivity`), while the single-
+    /// mirror-group path folds once over the plant's own totals. `min` is
+    /// concave, so `Σ_g min(a_g, b_g) ≤ min(Σa_g, Σb_g)`, equality iff every
+    /// group binds on the SAME side. `H_FPHA`'s production model makes the
+    /// fold the identity (`_ => turbined` in `cell_max_turbined`'s `fold`
+    /// closure), so H2 holds trivially here regardless of binding side — this
+    /// gate proves collapse for fold-identity production models, not in
+    /// general. A `ConstantProductivity` plant with MIXED-binding-side
+    /// same-bus groups does NOT collapse under exact arithmetic, and that is
+    /// correct behaviour (per-group limits are the more faithful model) —
+    /// pinned as a documented negative by
     /// `test_mixed_binding_same_bus_groups_do_not_collapse`.
     #[test]
-    fn test_three_same_bus_groups_collapse_to_the_no_groups_template() {
+    fn test_three_same_bus_groups_collapse_to_a_single_mirror_group() {
         let variant_a = build_template(groups_three_same_bus());
-        let variant_b = build_template(groups_none());
+        let variant_b = build_template(groups_single_mirror());
         assert_templates_byte_identical(
             &variant_a,
             &variant_b,
-            "three-same-bus-groups vs no-groups",
+            "three-same-bus-groups vs single-mirror-group",
         );
     }
 
@@ -1503,7 +1507,7 @@ mod cell_partition_gates {
     #[test]
     fn test_declaring_groups_does_not_move_the_state_space() {
         let tmpl_a = build_template(groups_three_same_bus());
-        let tmpl_b = build_template(groups_none());
+        let tmpl_b = build_template(groups_single_mirror());
         let tmpl_c = build_template(groups_two_buses());
 
         for (label, t) in [("A", &tmpl_a), ("B", &tmpl_b), ("C", &tmpl_c)] {
@@ -1550,7 +1554,7 @@ mod cell_partition_gates {
     fn test_two_bus_plant_credits_each_bus_and_still_balances_water() {
         let tau_h = BLOCK_HOURS * M3S_TO_HM3;
 
-        let tmpl_b = build_template(groups_none());
+        let tmpl_b = build_template(groups_single_mirror());
         let tmpl_c = build_template(groups_two_buses());
 
         assert_eq!(
@@ -1816,7 +1820,7 @@ mod cell_partition_gates {
         // ~40 out of ~442 -- a ~9% relative error).
         const REL_TOL: f64 = 1e-9;
 
-        let tmpl_1 = build_template(groups_none());
+        let tmpl_1 = build_template(groups_single_mirror());
         let tmpl_2 = build_template(groups_two_buses());
         let tmpl_3 = build_template(groups_three_buses());
 

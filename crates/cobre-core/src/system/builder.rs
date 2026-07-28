@@ -307,6 +307,7 @@ impl SystemBuilder {
     /// # Errors
     ///
     /// Returns `Err(Vec<ValidationError>)` if:
+    /// - Any hydro declares no unit groups.
     /// - Duplicate IDs are detected in any entity collection or in the stage collection.
     /// - Any cross-reference field refers to an entity ID that does not exist.
     /// - The hydro cascade graph contains a cycle.
@@ -320,6 +321,17 @@ impl SystemBuilder {
         sort_canonical(&mut self.buses, |b| b.operational_start_date, |b| b.id.0);
         sort_canonical(&mut self.lines, |l| l.operational_start_date, |l| l.id.0);
         sort_canonical(&mut self.hydros, |h| h.operational_start_date, |h| h.id.0);
+
+        let missing_unit_groups: Vec<ValidationError> = self
+            .hydros
+            .iter()
+            .filter(|h| h.unit_groups.is_empty())
+            .map(|h| ValidationError::MissingUnitGroups { hydro_id: h.id })
+            .collect();
+        if !missing_unit_groups.is_empty() {
+            return Err(missing_unit_groups);
+        }
+
         for hydro in &mut self.hydros {
             hydro.normalize_unit_groups();
         }
@@ -546,67 +558,52 @@ mod tests {
         }
     }
 
-    /// Given two hydros with no declared `unit_groups`, differing `bus_id` and
-    /// pairwise-distinct bound values, `build()` materializes for each an implicit
-    /// group carrying its OWN plant's bus, name, and bounds — never the other
-    /// plant's and never a fixed template.
+    /// Given two hydros with no declared `unit_groups`, `build()` returns `Err`
+    /// with exactly one `MissingUnitGroups` per offending hydro, naming both ids —
+    /// proving errors are collected rather than short-circuited on the first.
     #[test]
-    fn test_builder_materializes_implicit_unit_group() {
+    fn test_builder_rejects_hydro_with_no_unit_groups() {
         let alpha = hydro_without_groups(1, "AlphaPlant", 10, 10.0, 90.0, 5.0, 200.0);
         let beta = hydro_without_groups(2, "BetaPlant", 20, 25.0, 150.0, 15.0, 300.0);
 
-        let system = SystemBuilder::new()
+        let result = SystemBuilder::new()
             .buses(vec![bus(10), bus(20)])
             .hydros(vec![alpha, beta])
-            .build()
-            .expect("valid system");
+            .build();
 
-        let hydros = system.hydros();
-        assert_eq!(hydros.len(), 2);
+        let errors = result.expect_err("hydros with no unit groups must be rejected");
+        let missing_ids: Vec<EntityId> = errors
+            .iter()
+            .map(|e| match e {
+                ValidationError::MissingUnitGroups { hydro_id } => *hydro_id,
+                other => panic!("expected MissingUnitGroups, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(missing_ids, vec![EntityId(1), EntityId(2)]);
+    }
 
-        let a = &hydros[0];
-        assert_eq!(a.unit_groups.len(), 1);
-        assert_eq!(a.unit_groups[0].id, EntityId(0));
-        assert_eq!(a.unit_groups[0].name, "AlphaPlant");
-        assert_eq!(a.unit_groups[0].bus_id, EntityId(10));
-        assert_eq!(
-            a.unit_groups[0].min_generation_mw.to_bits(),
-            10.0_f64.to_bits()
-        );
-        assert_eq!(
-            a.unit_groups[0].max_generation_mw.to_bits(),
-            90.0_f64.to_bits()
-        );
-        assert_eq!(
-            a.unit_groups[0].min_turbined_m3s.to_bits(),
-            5.0_f64.to_bits()
-        );
-        assert_eq!(
-            a.unit_groups[0].max_turbined_m3s.to_bits(),
-            200.0_f64.to_bits()
-        );
+    /// Given the same builder with only the first hydro's groups declared,
+    /// `build()` reports exactly the hydro that omitted its group — proving the
+    /// filter discriminates rather than rejecting every hydro unconditionally.
+    #[test]
+    fn test_builder_reports_only_the_hydro_missing_unit_groups() {
+        let mut alpha = hydro_without_groups(1, "AlphaPlant", 10, 10.0, 90.0, 5.0, 200.0);
+        alpha.declare_mirror_unit_group();
+        let beta = hydro_without_groups(2, "BetaPlant", 20, 25.0, 150.0, 15.0, 300.0);
 
-        let b = &hydros[1];
-        assert_eq!(b.unit_groups.len(), 1);
-        assert_eq!(b.unit_groups[0].id, EntityId(0));
-        assert_eq!(b.unit_groups[0].name, "BetaPlant");
-        assert_eq!(b.unit_groups[0].bus_id, EntityId(20));
-        assert_eq!(
-            b.unit_groups[0].min_generation_mw.to_bits(),
-            25.0_f64.to_bits()
-        );
-        assert_eq!(
-            b.unit_groups[0].max_generation_mw.to_bits(),
-            150.0_f64.to_bits()
-        );
-        assert_eq!(
-            b.unit_groups[0].min_turbined_m3s.to_bits(),
-            15.0_f64.to_bits()
-        );
-        assert_eq!(
-            b.unit_groups[0].max_turbined_m3s.to_bits(),
-            300.0_f64.to_bits()
-        );
+        let result = SystemBuilder::new()
+            .buses(vec![bus(10), bus(20)])
+            .hydros(vec![alpha, beta])
+            .build();
+
+        let errors = result.expect_err("hydro missing groups must be rejected");
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(
+            errors[0],
+            ValidationError::MissingUnitGroups {
+                hydro_id: EntityId(2)
+            }
+        ));
     }
 }
 
