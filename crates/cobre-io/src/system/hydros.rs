@@ -14,7 +14,11 @@
 //!     "entry_stage_id": null, "exit_stage_id": null,
 //!     "filling": null,
 //!     "diversion": null,
-//!     "unit_groups": null,
+//!     "unit_groups": [
+//!       { "id": 0, "name": "FURNAS", "bus_id": 0,
+//!         "min_generation_mw": 0.0, "max_generation_mw": 1312.0,
+//!         "min_turbined_m3s": 0.0, "max_turbined_m3s": 1692.0 }
+//!     ],
 //!     "reservoir": { "min_storage_hm3": 5733.0, "max_storage_hm3": 22950.0 },
 //!     "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
 //!     "generation": {
@@ -41,9 +45,8 @@
 //! 4. `min_turbined_m3s >= 0`, `max_turbined_m3s >= 0`, `min_turbined_m3s <= max_turbined_m3s`.
 //! 5. `min_generation_mw <= max_generation_mw`.
 //! 6. Evaporation array, if present, must have exactly 12 elements.
-//! 7. `unit_groups`, if declared, must contain at least one group — an empty
-//!    array is rejected. Omitting the key materializes one implicit group at
-//!    the plant's own bus and bounds instead.
+//! 7. `unit_groups` is required and must contain at least one group — an
+//!    absent key, an explicit `null`, and an empty array are all rejected.
 //! 8. Each declared group's `min_turbined_m3s >= 0` and `max_turbined_m3s >= 0`
 //!    (mirrors rule 4 at the plant level).
 //!
@@ -131,10 +134,11 @@ pub(crate) struct RawHydro {
     /// Reservoir filling configuration. Absent or null = no filling operation.
     #[serde(default)]
     filling: Option<RawFillingConfig>,
-    /// Turbine groups partitioning this plant's generation envelope. Absent =
-    /// one implicit group is materialized at the plant's own bus and bounds;
-    /// an explicitly declared empty array is rejected.
-    #[serde(default)]
+    /// Turbine groups partitioning this plant's generation envelope. Required:
+    /// every hydro declares at least one group, each with its own `id`, `name`,
+    /// `bus_id`, and generation/turbined bounds; an absent or empty array is
+    /// rejected.
+    #[cfg_attr(feature = "schema", schemars(required))]
     unit_groups: Option<Vec<RawUnitGroup>>,
     /// Specific productivity `ρ_esp` \[MW / ((m³/s) · m)\].
     ///
@@ -457,7 +461,7 @@ pub(crate) struct RawHydroPenaltyOverrides {
 /// | `max_turbined_m3s < min_turbined_m3s`              | [`LoadError::SchemaError`] |
 /// | `max_generation_mw < min_generation_mw`            | [`LoadError::SchemaError`] |
 /// | Evaporation array not exactly 12 elements          | [`LoadError::SchemaError`] |
-/// | `unit_groups` declared as an empty array           | [`LoadError::SchemaError`] |
+/// | `unit_groups` absent, null, or an empty array      | [`LoadError::SchemaError`] |
 /// | A declared group's `min_turbined_m3s < 0` or `max_turbined_m3s < 0` | [`LoadError::SchemaError`] |
 ///
 /// # Examples
@@ -520,21 +524,19 @@ fn validate_raw_hydros(raw: &RawHydroFile, path: &Path) -> Result<(), LoadError>
     Ok(())
 }
 
-/// `[]` is rejected rather than treated as absent, so a deck bug does not
-/// silently fall back to the implicit-group default. Per-group bound signs
-/// mirror `validate_generation`'s plant-level rule 4 — a negative group
-/// maximum would otherwise cancel a sibling group's excess in the rule-41
-/// envelope sum (see `check_hydro_unit_groups`).
+/// Per-group bound signs mirror `validate_generation`'s plant-level rule 4 — a
+/// negative group maximum would otherwise cancel a sibling group's excess in
+/// the rule-41 envelope sum (see `check_hydro_unit_groups`).
 fn validate_unit_groups(
     unit_groups: Option<&[RawUnitGroup]>,
     hydro_index: usize,
     path: &Path,
 ) -> Result<(), LoadError> {
-    if unit_groups.is_some_and(<[RawUnitGroup]>::is_empty) {
+    if unit_groups.is_none_or(<[RawUnitGroup]>::is_empty) {
         return Err(LoadError::SchemaError {
             path: path.to_path_buf(),
             field: format!("hydros[{hydro_index}].unit_groups"),
-            message: "unit_groups, when declared, must contain at least one group; omit the key entirely to materialize one implicit group instead".to_string(),
+            message: "unit_groups is required: declare at least one group with id, name, bus_id, min/max_generation_mw and min/max_turbined_m3s".to_string(),
         });
     }
     if let Some(groups) = unit_groups {
@@ -1056,7 +1058,12 @@ mod tests {
         "max_turbined_m3s": 1000.0,
         "min_generation_mw": 0.0,
         "max_generation_mw": 750.0
-      }
+      },
+      "unit_groups": [
+        { "id": 0, "name": "Minimal", "bus_id": 0,
+          "min_generation_mw": 0.0, "max_generation_mw": 750.0,
+          "min_turbined_m3s": 0.0, "max_turbined_m3s": 1000.0 }
+      ]
     }"#;
 
     /// Full hydro entry (all optional fields populated, polynomial tailrace).
@@ -1083,7 +1090,12 @@ mod tests {
       "evaporation": { "coefficients_mm": [150, 130, 120, 90, 60, 40, 30, 40, 70, 100, 130, 150] },
       "diversion": { "downstream_id": 3, "max_flow_m3s": 200.0 },
       "filling": { "start_stage_id": 48, "filling_min_rate_m3s": 100.0 },
-      "penalties": { "spillage_cost": 0.05 }
+      "penalties": { "spillage_cost": 0.05 },
+      "unit_groups": [
+        { "id": 0, "name": "FURNAS", "bus_id": 0,
+          "min_generation_mw": 0.0, "max_generation_mw": 1312.0,
+          "min_turbined_m3s": 0.0, "max_turbined_m3s": 1692.0 }
+      ]
     }"#;
 
     // ── AC: parse valid hydros — full and minimal ──────────────────────────────
@@ -1183,7 +1195,12 @@ mod tests {
               "max_turbined_m3s": 2000.0,
               "min_generation_mw": 0.0,
               "max_generation_mw": 8000.0
-            }
+            },
+            "unit_groups": [
+              { "id": 0, "name": "FPHA Plant", "bus_id": 0,
+                "min_generation_mw": 0.0, "max_generation_mw": 8000.0,
+                "min_turbined_m3s": 0.0, "max_turbined_m3s": 2000.0 }
+            ]
           }]
         }"#;
         let f = write_json(json);
@@ -1214,7 +1231,12 @@ mod tests {
               "max_turbined_m3s": 3000.0,
               "min_generation_mw": 0.0,
               "max_generation_mw": 1950.0
-            }
+            },
+            "unit_groups": [
+              { "id": 0, "name": "LH Plant", "bus_id": 0,
+                "min_generation_mw": 0.0, "max_generation_mw": 1950.0,
+                "min_turbined_m3s": 100.0, "max_turbined_m3s": 3000.0 }
+            ]
           }]
         }"#;
         let f = write_json(json);
@@ -1256,7 +1278,12 @@ mod tests {
                 { "outflow_m3s": 0.0, "height_m": 3.0 },
                 { "outflow_m3s": 5000.0, "height_m": 4.5 }
               ]
-            }
+            },
+            "unit_groups": [
+              { "id": 0, "name": "Piecewise", "bus_id": 0,
+                "min_generation_mw": 0.0, "max_generation_mw": 250.0,
+                "min_turbined_m3s": 0.0, "max_turbined_m3s": 500.0 }
+            ]
           }]
         }"#;
         let f = write_json(json);
@@ -1291,7 +1318,12 @@ mod tests {
               "min_generation_mw": 0.0,
               "max_generation_mw": 250.0
             },
-            "hydraulic_losses": { "type": "constant", "value_m": 2.5 }
+            "hydraulic_losses": { "type": "constant", "value_m": 2.5 },
+            "unit_groups": [
+              { "id": 0, "name": "ConstantLoss", "bus_id": 0,
+                "min_generation_mw": 0.0, "max_generation_mw": 250.0,
+                "min_turbined_m3s": 0.0, "max_turbined_m3s": 500.0 }
+            ]
           }]
         }"#;
         let f = write_json(json);
@@ -1327,7 +1359,12 @@ mod tests {
               "min_generation_mw": 0.0,
               "max_generation_mw": 250.0
             },
-            "penalties": { "spillage_cost": 0.05 }
+            "penalties": { "spillage_cost": 0.05 },
+            "unit_groups": [
+              { "id": 0, "name": "Override", "bus_id": 0,
+                "min_generation_mw": 0.0, "max_generation_mw": 250.0,
+                "min_turbined_m3s": 0.0, "max_turbined_m3s": 500.0 }
+            ]
           }]
         }"#;
         let f = write_json(json);
@@ -1366,7 +1403,12 @@ mod tests {
               "max_turbined_m3s": 500.0,
               "min_generation_mw": 0.0,
               "max_generation_mw": 250.0
-            }
+            },
+            "unit_groups": [
+              { "id": 0, "name": "NoOverride", "bus_id": 0,
+                "min_generation_mw": 0.0, "max_generation_mw": 250.0,
+                "min_turbined_m3s": 0.0, "max_turbined_m3s": 500.0 }
+            ]
           }]
         }"#;
         let f = write_json(json);
@@ -1425,7 +1467,12 @@ mod tests {
               "min_generation_mw": 0.0,
               "max_generation_mw": 250.0
             },
-            "filling": { "start_stage_id": 10 }
+            "filling": { "start_stage_id": 10 },
+            "unit_groups": [
+              { "id": 0, "name": "Fill", "bus_id": 0,
+                "min_generation_mw": 0.0, "max_generation_mw": 250.0,
+                "min_turbined_m3s": 0.0, "max_turbined_m3s": 500.0 }
+            ]
           }]
         }"#;
         let f = write_json(json);
@@ -1742,7 +1789,12 @@ mod tests {
               "model": "constant_productivity",
               "min_turbined_m3s": 0.0, "max_turbined_m3s": 500.0,
               "min_generation_mw": 0.0, "max_generation_mw": 250.0
-            }
+            },
+            "unit_groups": [
+              { "id": 0, "name": "Upstream", "bus_id": 0,
+                "min_generation_mw": 0.0, "max_generation_mw": 250.0,
+                "min_turbined_m3s": 0.0, "max_turbined_m3s": 500.0 }
+            ]
           }]
         }"#;
         let f = write_json(json);
@@ -1780,7 +1832,12 @@ mod tests {
             "model": "constant_productivity",
             "min_turbined_m3s": 0.0, "max_turbined_m3s": 500.0,
             "min_generation_mw": 0.0, "max_generation_mw": 250.0
-          }
+          },
+          "unit_groups": [
+            { "id": 0, "name": "Alpha", "bus_id": 0,
+              "min_generation_mw": 0.0, "max_generation_mw": 250.0,
+              "min_turbined_m3s": 0.0, "max_turbined_m3s": 500.0 }
+          ]
         }"#;
         let entry_b = r#"{
           "id": 1, "name": "Beta", "bus_id": 0,
@@ -1792,7 +1849,12 @@ mod tests {
             "model": "constant_productivity",
             "min_turbined_m3s": 0.0, "max_turbined_m3s": 1000.0,
             "min_generation_mw": 0.0, "max_generation_mw": 800.0
-          }
+          },
+          "unit_groups": [
+            { "id": 0, "name": "Beta", "bus_id": 0,
+              "min_generation_mw": 0.0, "max_generation_mw": 800.0,
+              "min_turbined_m3s": 0.0, "max_turbined_m3s": 1000.0 }
+          ]
         }"#;
 
         let json_forward = format!(r#"{{ "hydros": [{entry_a}, {entry_b}] }}"#);
@@ -1868,7 +1930,12 @@ mod tests {
               "model": "constant_productivity",
               "min_turbined_m3s": 0.0, "max_turbined_m3s": 500.0,
               "min_generation_mw": 0.0, "max_generation_mw": 250.0
-            }
+            },
+            "unit_groups": [
+              { "id": 0, "name": "Deg", "bus_id": 0,
+                "min_generation_mw": 0.0, "max_generation_mw": 250.0,
+                "min_turbined_m3s": 0.0, "max_turbined_m3s": 500.0 }
+            ]
           }]
         }"#;
         let f = write_json(json);
@@ -1895,7 +1962,12 @@ mod tests {
         "max_turbined_m3s": 1000.0,
         "min_generation_mw": 0.0,
         "max_generation_mw": 750.0
-      }
+      },
+      "unit_groups": [
+        { "id": 0, "name": "ReservoirEvap", "bus_id": 0,
+          "min_generation_mw": 0.0, "max_generation_mw": 750.0,
+          "min_turbined_m3s": 0.0, "max_turbined_m3s": 1000.0 }
+      ]
     }"#;
 
     /// Given a `hydros.json` with `evaporation.reference_volumes_hm3` containing 12
@@ -1920,7 +1992,12 @@ mod tests {
             "evaporation": {
               "coefficients_mm": [150, 130, 120, 90, 60, 40, 30, 40, 70, 100, 130, 150],
               "reference_volumes_hm3": [15000, 12000, 10000, 8000, 6000, 5000, 5500, 7000, 9000, 11000, 13000, 14500]
-            }
+            },
+            "unit_groups": [
+              { "id": 0, "name": "ReservoirEvap", "bus_id": 0,
+                "min_generation_mw": 0.0, "max_generation_mw": 750.0,
+                "min_turbined_m3s": 0.0, "max_turbined_m3s": 1000.0 }
+            ]
           }]
         }"#;
         let f = write_json(json);
@@ -1955,7 +2032,12 @@ mod tests {
               "min_generation_mw": 0.0,
               "max_generation_mw": 750.0
             },
-            "evaporation": { "coefficients_mm": [150, 130, 120, 90, 60, 40, 30, 40, 70, 100, 130, 150] }
+            "evaporation": { "coefficients_mm": [150, 130, 120, 90, 60, 40, 30, 40, 70, 100, 130, 150] },
+            "unit_groups": [
+              { "id": 0, "name": "ReservoirEvap", "bus_id": 0,
+                "min_generation_mw": 0.0, "max_generation_mw": 750.0,
+                "min_turbined_m3s": 0.0, "max_turbined_m3s": 1000.0 }
+            ]
           }]
         }"#;
         let f = write_json(json);
@@ -2195,7 +2277,12 @@ mod tests {
               "model": "constant_productivity",
               "min_turbined_m3s": 0.0, "max_turbined_m3s": 100.0,
               "min_generation_mw": 0.0, "max_generation_mw": 50.0
-            }
+            },
+            "unit_groups": [
+              { "id": 0, "name": "H", "bus_id": 0,
+                "min_generation_mw": 0.0, "max_generation_mw": 50.0,
+                "min_turbined_m3s": 0.0, "max_turbined_m3s": 100.0 }
+            ]
           }]
         }"#;
         let f = write_json(json);
@@ -2207,13 +2294,12 @@ mod tests {
         );
     }
 
-    // ── AC: unit_groups — absent, declared, and empty-array rejection ─────────
+    // ── AC: unit_groups — absent, null, empty-array rejection ─────────────────
 
-    /// Given two hydros declaring no `unit_groups`, with different `bus_id`s and
-    /// pairwise-distinct bound values, each `Hydro` materializes exactly one
-    /// implicit group at its OWN plant's bus, name, and bounds (id `EntityId(0)`).
+    /// Given two hydros declaring no `unit_groups` key, `parse_hydros` rejects
+    /// the first one with a `SchemaError` naming `hydros[0].unit_groups`.
     #[test]
-    fn test_absent_unit_groups_materializes_implicit_group() {
+    fn test_absent_unit_groups_is_rejected() {
         let hydro_a = r#"{
           "id": 1, "name": "AlphaPlant", "bus_id": 10,
           "operational_start_date": "2024-01-01",
@@ -2241,61 +2327,57 @@ mod tests {
         let json = format!(r#"{{ "hydros": [{hydro_a}, {hydro_b}] }}"#);
         let f = write_json(&json);
         let global = make_global();
-        let hydros = parse_hydros(f.path(), &global).unwrap();
+        let err = parse_hydros(f.path(), &global).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert_eq!(field, "hydros[0].unit_groups");
+                assert!(
+                    message.contains("unit_groups is required"),
+                    "message should state the declare-or-reject rule, got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
 
-        assert_eq!(hydros.len(), 2);
-
-        let a = &hydros[0];
-        assert_eq!(a.id, EntityId(1));
-        assert_eq!(a.unit_groups.len(), 1);
-        assert_eq!(a.unit_groups[0].id, EntityId(0));
-        assert_eq!(a.unit_groups[0].name, "AlphaPlant");
-        assert_eq!(a.unit_groups[0].bus_id, EntityId(10));
-        assert_eq!(
-            a.unit_groups[0].min_generation_mw.to_bits(),
-            10.0_f64.to_bits()
-        );
-        assert_eq!(
-            a.unit_groups[0].max_generation_mw.to_bits(),
-            90.0_f64.to_bits()
-        );
-        assert_eq!(
-            a.unit_groups[0].min_turbined_m3s.to_bits(),
-            5.0_f64.to_bits()
-        );
-        assert_eq!(
-            a.unit_groups[0].max_turbined_m3s.to_bits(),
-            200.0_f64.to_bits()
-        );
-
-        let b = &hydros[1];
-        assert_eq!(b.id, EntityId(2));
-        assert_eq!(b.unit_groups.len(), 1);
-        assert_eq!(b.unit_groups[0].id, EntityId(0));
-        assert_eq!(b.unit_groups[0].name, "BetaPlant");
-        assert_eq!(b.unit_groups[0].bus_id, EntityId(20));
-        assert_eq!(
-            b.unit_groups[0].min_generation_mw.to_bits(),
-            25.0_f64.to_bits()
-        );
-        assert_eq!(
-            b.unit_groups[0].max_generation_mw.to_bits(),
-            150.0_f64.to_bits()
-        );
-        assert_eq!(
-            b.unit_groups[0].min_turbined_m3s.to_bits(),
-            15.0_f64.to_bits()
-        );
-        assert_eq!(
-            b.unit_groups[0].max_turbined_m3s.to_bits(),
-            300.0_f64.to_bits()
-        );
+    /// Given a hydro with `"unit_groups": null`, `parse_hydros` returns the same
+    /// `SchemaError` as the absent case, not a serde type error.
+    #[test]
+    fn test_null_unit_groups_is_rejected() {
+        let json = r#"{
+          "hydros": [{
+            "id": 0, "name": "NullGroups", "bus_id": 0,
+            "operational_start_date": "2024-01-01",
+            "downstream_id": null,
+            "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
+            "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
+            "generation": {
+              "model": "constant_productivity",
+              "min_turbined_m3s": 0.0, "max_turbined_m3s": 500.0,
+              "min_generation_mw": 0.0, "max_generation_mw": 250.0
+            },
+            "unit_groups": null
+          }]
+        }"#;
+        let f = write_json(json);
+        let global = make_global();
+        let err = parse_hydros(f.path(), &global).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert_eq!(field, "hydros[0].unit_groups");
+                assert!(
+                    message.contains("unit_groups is required"),
+                    "message should state the declare-or-reject rule, got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
     }
 
     /// Given a hydro declaring three groups in file order `id = [7, 3, 5]` (groups
     /// 7 and 3 sharing one bus, group 5 on a different bus, all bound values
     /// pairwise distinct), `parse_hydros` returns them sorted ascending by `id`
-    /// with no implicit group added.
+    /// with no group carrying the plant-mirror id.
     #[test]
     fn test_declared_unit_groups_are_parsed_and_sorted_by_id() {
         let json = r#"{
@@ -2357,7 +2439,7 @@ mod tests {
 
         assert!(
             groups.iter().all(|g| g.id != EntityId(0)),
-            "no declared group should carry the implicit-group id 0"
+            "no declared group should carry the plant-mirror group's id 0"
         );
     }
 

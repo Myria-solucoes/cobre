@@ -414,14 +414,11 @@
           ]
         },
         "unit_groups": {
-          "description": "Turbine groups partitioning this plant's generation envelope. Absent =\none implicit group is materialized at the plant's own bus and bounds;\nan explicitly declared empty array is rejected.",
+          "description": "Turbine groups partitioning this plant's generation envelope. Required:\nevery hydro declares at least one group, each with its own `id`, `name`,\n`bus_id`, and generation/turbined bounds; an absent or empty array is\nrejected.",
           "items": {
             "$ref": "#/$defs/RawUnitGroup"
           },
-          "type": [
-            "array",
-            "null"
-          ]
+          "type": "array"
         }
       },
       "required": [
@@ -431,7 +428,8 @@
         "bus_id",
         "reservoir",
         "outflow",
-        "generation"
+        "generation",
+        "unit_groups"
       ],
       "type": "object"
     },
