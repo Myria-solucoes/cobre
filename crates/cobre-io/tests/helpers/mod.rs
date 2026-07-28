@@ -213,7 +213,18 @@ pub fn make_multi_entity_case(dir: &TempDir) {
                 "max_turbined_m3s": 200.0,
                 "min_generation_mw": 0.0,
                 "max_generation_mw": 200.0
-            }
+            },
+            "unit_groups": [
+                {
+                    "id": 0,
+                    "name": "HYDRO_1",
+                    "bus_id": 1,
+                    "min_generation_mw": 0.0,
+                    "max_generation_mw": 200.0,
+                    "min_turbined_m3s": 0.0,
+                    "max_turbined_m3s": 200.0
+                }
+            ]
         }
     ]
 }"#,
@@ -284,7 +295,18 @@ pub fn make_referential_violation_case(dir: &TempDir) {
                 "max_turbined_m3s": 200.0,
                 "min_generation_mw": 0.0,
                 "max_generation_mw": 200.0
-            }
+            },
+            "unit_groups": [
+                {
+                    "id": 0,
+                    "name": "HYDRO_1",
+                    "bus_id": 999,
+                    "min_generation_mw": 0.0,
+                    "max_generation_mw": 200.0,
+                    "min_turbined_m3s": 0.0,
+                    "max_turbined_m3s": 200.0
+                }
+            ]
         }
     ]
 }"#,

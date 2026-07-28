@@ -22,7 +22,18 @@
         "max_turbined_m3s": 30.0,
         "min_generation_mw": 0.0,
         "max_generation_mw": 30.0
-      }
+      },
+      "unit_groups": [
+        {
+          "id": 0,
+          "name": "H0",
+          "bus_id": 0,
+          "min_generation_mw": 0.0,
+          "max_generation_mw": 30.0,
+          "min_turbined_m3s": 0.0,
+          "max_turbined_m3s": 30.0
+        }
+      ]
     },
     {
       "id": 1,
@@ -44,7 +55,18 @@
         "max_turbined_m3s": 40.0,
         "min_generation_mw": 0.0,
         "max_generation_mw": 40.0
-      }
+      },
+      "unit_groups": [
+        {
+          "id": 0,
+          "name": "H1",
+          "bus_id": 0,
+          "min_generation_mw": 0.0,
+          "max_generation_mw": 40.0,
+          "min_turbined_m3s": 0.0,
+          "max_turbined_m3s": 40.0
+        }
+      ]
     }
   ]
 }
