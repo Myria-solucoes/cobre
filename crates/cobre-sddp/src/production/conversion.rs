@@ -2,16 +2,17 @@
 
 use cobre_io::output::simulation_writer::{
     BusWriteRecord, ContractWriteRecord, CostWriteRecord, ExchangeWriteRecord,
-    GenericViolationWriteRecord, HydroWriteRecord, InflowLagWriteRecord,
+    GenericViolationWriteRecord, HydroBusWriteRecord, HydroWriteRecord, InflowLagWriteRecord,
     NonControllableWriteRecord, PumpingWriteRecord, ScenarioWritePayload, StageWritePayload,
     ThermalWriteRecord, TransitBucketWriteRecord,
 };
 
 use crate::simulation::types::{
     SimulationBusResult, SimulationContractResult, SimulationCostResult, SimulationExchangeResult,
-    SimulationGenericViolationResult, SimulationHydroResult, SimulationInflowLagResult,
-    SimulationNonControllableResult, SimulationPumpingResult, SimulationScenarioResult,
-    SimulationStageResult, SimulationThermalResult, SimulationTransitBucketResult,
+    SimulationGenericViolationResult, SimulationHydroBusResult, SimulationHydroResult,
+    SimulationInflowLagResult, SimulationNonControllableResult, SimulationPumpingResult,
+    SimulationScenarioResult, SimulationStageResult, SimulationThermalResult,
+    SimulationTransitBucketResult,
 };
 
 impl From<SimulationCostResult> for CostWriteRecord {
@@ -84,6 +85,19 @@ impl From<SimulationHydroResult> for HydroWriteRecord {
             inflow_nonnegativity_slack_m3s: s.inflow_nonnegativity_slack_m3s,
             water_withdrawal_violation_pos_m3s: s.water_withdrawal_violation_pos_m3s,
             water_withdrawal_violation_neg_m3s: s.water_withdrawal_violation_neg_m3s,
+        }
+    }
+}
+
+impl From<SimulationHydroBusResult> for HydroBusWriteRecord {
+    fn from(s: SimulationHydroBusResult) -> Self {
+        Self {
+            stage_id: s.stage_id,
+            block_id: s.block_id,
+            hydro_id: s.hydro_id,
+            bus_id: s.bus_id,
+            turbined_m3s: s.turbined_m3s,
+            generation_mw: s.generation_mw,
         }
     }
 }
@@ -216,6 +230,11 @@ impl From<SimulationStageResult> for StageWritePayload {
             stage_id: src.stage_id,
             costs: src.costs.into_iter().map(Into::into).collect(),
             hydros: src.hydros.into_iter().map(Into::into).collect(),
+            hydro_bus_generation: src
+                .hydro_bus_generation
+                .into_iter()
+                .map(Into::into)
+                .collect(),
             thermals: src.thermals.into_iter().map(Into::into).collect(),
             exchanges: src.exchanges.into_iter().map(Into::into).collect(),
             buses: src.buses.into_iter().map(Into::into).collect(),
@@ -311,6 +330,17 @@ mod tests {
             inflow_nonnegativity_slack_m3s: 0.0,
             water_withdrawal_violation_pos_m3s: 0.0,
             water_withdrawal_violation_neg_m3s: 0.0,
+        }
+    }
+
+    fn make_hydro_bus(stage_id: u32, block_id: u32) -> SimulationHydroBusResult {
+        SimulationHydroBusResult {
+            stage_id,
+            block_id: Some(block_id),
+            hydro_id: 1,
+            bus_id: 9,
+            turbined_m3s: 40.0,
+            generation_mw: 80.0,
         }
     }
 
@@ -423,6 +453,7 @@ mod tests {
             stage_id,
             costs: vec![make_cost(stage_id, 0)],
             hydros: vec![make_hydro(stage_id, 0)],
+            hydro_bus_generation: vec![make_hydro_bus(stage_id, 0)],
             thermals: vec![make_thermal(stage_id, 0)],
             exchanges: vec![make_exchange(stage_id, 0)],
             buses: vec![make_bus(stage_id, 0)],
@@ -468,6 +499,8 @@ mod tests {
         assert_eq!(stage0.costs[0].discount_factor, 0.95);
         assert_eq!(stage0.hydros[0].turbined_m3s, 100.0);
         assert_eq!(stage0.hydros[0].storage_initial_hm3, 500.0);
+        assert_eq!(stage0.hydro_bus_generation[0].bus_id, 9);
+        assert_eq!(stage0.hydro_bus_generation[0].turbined_m3s, 40.0);
         assert_eq!(stage0.thermals[0].generation_mw, 150.0);
         assert_eq!(stage0.exchanges[0].direct_flow_mw, 50.0);
         assert_eq!(stage0.buses[0].spot_price, 75.0);
@@ -494,6 +527,10 @@ mod tests {
         assert_eq!(payload.stage_id, 3);
         assert!(!payload.costs.is_empty(), "costs must be non-empty");
         assert!(!payload.hydros.is_empty(), "hydros must be non-empty");
+        assert!(
+            !payload.hydro_bus_generation.is_empty(),
+            "hydro_bus_generation must be non-empty"
+        );
         assert!(!payload.thermals.is_empty(), "thermals must be non-empty");
         assert!(!payload.exchanges.is_empty(), "exchanges must be non-empty");
         assert!(!payload.buses.is_empty(), "buses must be non-empty");
@@ -521,6 +558,8 @@ mod tests {
 
         assert_eq!(payload.costs[0].stage_id, 3);
         assert_eq!(payload.hydros[0].hydro_id, 1);
+        assert_eq!(payload.hydro_bus_generation[0].hydro_id, 1);
+        assert_eq!(payload.hydro_bus_generation[0].generation_mw, 80.0);
         assert_eq!(payload.thermals[0].thermal_id, 1);
         assert_eq!(payload.exchanges[0].line_id, 1);
         assert_eq!(payload.buses[0].bus_id, 1);

@@ -50,8 +50,8 @@
 //! |32 | A `recent_observations` conditioning window extends past the study start, into the solved study itself | `initial_conditions.json` | `InvalidValue` |
 //! |33 | The in-progress period `[period_start, study_start)` is covered strictly between 0 and 1 | `scenarios/inflow_history.parquet` | `ModelQuality` (warning) |
 //! |34 | The first study stage's season is unresolvable (no `season_map`, no `season_id`, or an unmatched id) while PAR seeding is active | `initial_conditions.json` | `ModelQuality` (warning) |
-//! |35 | Bound-override row `block_id` within `[0, n_blocks)` for its stage, across all five bound families (thermal, hydro, line, pumping, contract) | `constraints/*_bounds.parquet` | `BusinessRuleViolation` |
-//! |36 | Bound-override row uniqueness per `(entity_id, stage_id, block_id, column)`, across all five bound families (thermal, hydro, line, pumping, contract); a `None` `block_id` is a distinct key from `Some(b)` | `constraints/*_bounds.parquet` | `DuplicateId` |
+//! |35 | Bound-override row `block_id` within `[0, n_blocks)` for its stage, across all six bound families (thermal, hydro, line, pumping, contract, hydro unit group) | `constraints/*_bounds.parquet` | `BusinessRuleViolation` |
+//! |36 | Bound-override row uniqueness per `(entity_id, stage_id, block_id, column)` — widened to `(hydro_id, hydro_unit_group_id, stage_id, block_id, column)` for the hydro unit group family — across all six bound families (thermal, hydro, line, pumping, contract, hydro unit group); a `None` `block_id` is a distinct key from `Some(b)` | `constraints/*_bounds.parquet` | `DuplicateId` |
 //! |37 | `block_id` on a hydro/thermal bound column with no per-block LP variable (hydro storage/filling-rate/withdrawal, thermal cost) | `constraints/{hydro,thermal}_bounds.parquet` | `BusinessRuleViolation` |
 //! |38 | `block_id` on a `thermal_bounds` row targeting an anticipated thermal (commitment decision is stage-level; delivery-stage reconciliation compares per-block bounds) | `constraints/thermal_bounds.parquet` | `BusinessRuleViolation` |
 //! |39 | Hydro unit group `id` unique within its own plant (ids are plant-scoped, not global) | `system/hydros.json` | `DuplicateId` |
@@ -60,9 +60,10 @@
 //! |42 | Hydro unit group turbined-bound sign: `min_turbined_m3s >= 0` and `max_turbined_m3s >= 0` (mirrors rule 4 at the plant level; `min_generation_mw`/`max_generation_mw` are unguarded for sign at both plant and group level, inherited, not introduced here) | `system/hydros.json` | `InvalidValue` |
 //! |43 | `hydro_bounds` row `max_turbined_m3s`/`max_generation_mw` must not exceed the hydro's own declared value (checked independently); scope is these two columns only — lowering, `min_*`/storage/filling/withdrawal, and the other four bound families are untouched, each a separate decision with its own back-compat surface | `constraints/hydro_bounds.parquet` | `InvalidValue` |
 //!
-//! A hydro unit group bounds row referencing a non-existent unit group id is not
-//! yet checked here: the per-stage bound overlay for the group axis does not exist
-//! yet, so that reference check is deferred until it does.
+//! A hydro unit group bounds row's `block_id` range and duplicate-row keying
+//! are covered by rules 35 and 36 above; a row referencing a non-existent
+//! unit group id is still checked by `check_bounds_references` (Layer 3), not
+//! here.
 //!
 //! ## Layer 5b rules (stages, penalties, and scenario domain) — `validate_semantic_stages_penalties_scenarios`
 //!

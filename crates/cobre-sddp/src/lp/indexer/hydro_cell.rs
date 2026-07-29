@@ -198,6 +198,16 @@ impl HydroCellIndex {
         &self.cell_group_pos[self.cell_group_start[c.get()]..self.cell_group_start[c.get() + 1]]
     }
 
+    /// Plant `h`'s cell whose unit groups sit on bus `bus_id`, or `None` when no
+    /// group of `h` carries it — a scan over `cells_of(h)` (already ascending by
+    /// `bus_id`), never a `HashMap`.
+    #[must_use]
+    pub fn cell_of_bus(&self, h: HydroSys, bus_id: EntityId) -> Option<HydroCell> {
+        self.cells_of(h)
+            .map(HydroCell::new)
+            .find(|&c| self.bus_of(c) == bus_id)
+    }
+
     /// Whether every plant maps to exactly one cell, in plant order —
     /// `n_cells() == n_hydros` and `cells_of(h) == h..h + 1` for every `h`.
     #[must_use]
@@ -353,6 +363,28 @@ mod tests {
         assert_eq!(index.bus_of(HydroCell::new(3)), EntityId(9));
         assert_eq!(index.plant_of(HydroCell::new(2)), HydroSys::new(2));
         assert!(!index.is_identity());
+    }
+
+    /// `cell_of_bus` resolves each of plant 2's own two buses to that bus's
+    /// cell, and misses on a bus no group of plant 2 carries — including bus 5,
+    /// which plant 1's groups DO carry, pinning that the scan is confined to
+    /// `cells_of(h)` and never the whole index.
+    #[test]
+    fn cell_of_bus_resolves_each_bus_and_misses_a_foreign_one() {
+        let hydros = three_plant_fixture(false);
+        let index = HydroCellIndex::build(&hydros);
+        let plant2 = HydroSys::new(2);
+
+        assert_eq!(
+            index.cell_of_bus(plant2, EntityId(3)),
+            Some(HydroCell::new(2))
+        );
+        assert_eq!(
+            index.cell_of_bus(plant2, EntityId(9)),
+            Some(HydroCell::new(3))
+        );
+        assert_eq!(index.cell_of_bus(plant2, EntityId(5)), None);
+        assert_eq!(index.cell_of_bus(plant2, EntityId(12345)), None);
     }
 
     #[test]

@@ -25,6 +25,7 @@
 pub mod bounds;
 pub mod generic;
 pub mod generic_bounds;
+pub mod hydro_unit_group_bounds;
 pub mod ncs_bounds;
 pub mod penalty_overrides;
 
@@ -35,6 +36,7 @@ pub use bounds::{
 };
 pub use generic::parse_generic_constraints;
 pub use generic_bounds::{GenericConstraintBoundsRow, parse_generic_constraint_bounds};
+pub use hydro_unit_group_bounds::{HydroUnitGroupBoundsRow, parse_hydro_unit_group_bounds};
 pub use ncs_bounds::{NcsBoundsRow, parse_ncs_bounds};
 pub use penalty_overrides::{
     BusPenaltyOverrideRow, HydroPenaltyOverrideRow, LinePenaltyOverrideRow, NcsPenaltyOverrideRow,
@@ -329,5 +331,29 @@ pub fn load_ncs_bounds(path: Option<&Path>) -> Result<Vec<NcsBoundsRow>, LoadErr
     match path {
         None => Ok(Vec::new()),
         Some(p) => parse_ncs_bounds(p),
+    }
+}
+
+/// Load `constraints/hydro_unit_group_bounds.parquet` when the path is known, or
+/// return an empty `Vec` when the file is absent (optional file).
+///
+/// # Errors
+///
+/// Propagates [`LoadError`] from [`parse_hydro_unit_group_bounds`] when `path` is `Some`.
+///
+/// # Examples
+///
+/// ```
+/// use cobre_io::constraints::load_hydro_unit_group_bounds;
+///
+/// let rows = load_hydro_unit_group_bounds(None).expect("no file is fine");
+/// assert!(rows.is_empty());
+/// ```
+pub fn load_hydro_unit_group_bounds(
+    path: Option<&Path>,
+) -> Result<Vec<HydroUnitGroupBoundsRow>, LoadError> {
+    match path {
+        None => Ok(Vec::new()),
+        Some(p) => parse_hydro_unit_group_bounds(p),
     }
 }

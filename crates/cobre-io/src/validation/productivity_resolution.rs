@@ -395,6 +395,7 @@ mod tests {
             penalty_overrides_hydro: vec![],
             penalty_overrides_ncs: vec![],
             ncs_bounds: vec![],
+            hydro_unit_group_bounds: vec![],
         }
     }
 

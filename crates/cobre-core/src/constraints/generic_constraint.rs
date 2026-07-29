@@ -21,6 +21,14 @@
 //! fixed column; [`VariableRef::HydroEvaporation`] with `None` resolves to block 0
 //! (the stage evaporation in parallel mode). No variant sums over blocks.
 //!
+//! [`VariableRef::HydroTurbined`] and [`VariableRef::HydroGeneration`] additionally
+//! carry `bus_id: Option<EntityId>`, selecting one cell of a plant split across
+//! several buses: the LP holds one turbine/generation column per `(hydro, bus)`
+//! cell, so the addressable unit is a bus, not a unit group — two same-bus groups
+//! share one column, and a group-level selector would resolve ambiguously to it.
+//! `None` sums over the plant's cells, preserving the plant-level meaning every
+//! other variant carries. No other variant accepts a bus selector.
+//!
 //! # Examples
 //!
 //! ```
@@ -35,10 +43,12 @@
 //!         LinearTerm::literal(1.0, VariableRef::HydroGeneration {
 //!             hydro_id: EntityId(10),
 //!             block_id: None,
+//!             bus_id: None,
 //!         }),
 //!         LinearTerm::literal(1.0, VariableRef::HydroGeneration {
 //!             hydro_id: EntityId(11),
 //!             block_id: None,
+//!             bus_id: None,
 //!         }),
 //!     ],
 //! };
@@ -63,7 +73,9 @@ use crate::EntityId;
 /// Reference to a single LP variable in a generic constraint expression.
 ///
 /// See the module header for the `block_id = None` block-independent vs
-/// block-dependent row-materialization contract.
+/// block-dependent row-materialization contract, and for why
+/// [`VariableRef::HydroTurbined`]/[`VariableRef::HydroGeneration`]'s `bus_id`
+/// selector names a bus rather than a unit group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum VariableRef {
@@ -78,6 +90,9 @@ pub enum VariableRef {
         hydro_id: EntityId,
         /// Block selector.
         block_id: Option<usize>,
+        /// Bus selector: `None` sums over the plant's cells; `Some(b)` selects
+        /// the single cell whose unit groups sit on bus `b`.
+        bus_id: Option<EntityId>,
     },
     /// Spillage flow for a hydro plant (m³/s).
     HydroSpillage {
@@ -107,6 +122,9 @@ pub enum VariableRef {
         hydro_id: EntityId,
         /// Block selector.
         block_id: Option<usize>,
+        /// Bus selector: `None` sums over the plant's cells; `Some(b)` selects
+        /// the single cell whose unit groups sit on bus `b`.
+        bus_id: Option<EntityId>,
     },
     /// Signed evaporation flow from a hydro reservoir (m³/s). Positive values
     /// represent net evaporative outflow; negative values represent net rainfall
@@ -392,6 +410,7 @@ mod tests {
                 VariableRef::HydroTurbined {
                     hydro_id: EntityId(0),
                     block_id: None,
+                    bus_id: None,
                 },
             ),
             (
@@ -420,6 +439,7 @@ mod tests {
                 VariableRef::HydroGeneration {
                     hydro_id: EntityId(0),
                     block_id: Some(0),
+                    bus_id: None,
                 },
             ),
             (
@@ -622,6 +642,7 @@ mod tests {
                     VariableRef::HydroGeneration {
                         hydro_id: EntityId(10),
                         block_id: None,
+                        bus_id: None,
                     },
                 ),
                 LinearTerm::literal(
@@ -629,6 +650,7 @@ mod tests {
                     VariableRef::HydroGeneration {
                         hydro_id: EntityId(11),
                         block_id: None,
+                        bus_id: None,
                     },
                 ),
             ],
@@ -730,10 +752,12 @@ mod tests {
         let all_blocks = VariableRef::HydroTurbined {
             hydro_id: EntityId(3),
             block_id: None,
+            bus_id: None,
         };
         let specific_block = VariableRef::HydroTurbined {
             hydro_id: EntityId(3),
             block_id: Some(0),
+            bus_id: None,
         };
         assert_ne!(all_blocks, specific_block);
     }
@@ -810,6 +834,31 @@ mod tests {
         );
     }
 
+    /// A `Some(b)` bus selector round-trips through postcard on both
+    /// bus-selectable variants — a field addition to an existing variant, not a
+    /// new variant, so it carries no discriminant of its own to pin.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn variable_ref_bus_selector_postcard_roundtrip() {
+        let turbined = VariableRef::HydroTurbined {
+            hydro_id: EntityId(7),
+            block_id: Some(1),
+            bus_id: Some(EntityId(3)),
+        };
+        let bytes = postcard::to_allocvec(&turbined).expect("serialize");
+        let recovered: VariableRef = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(turbined, recovered);
+
+        let generation = VariableRef::HydroGeneration {
+            hydro_id: EntityId(7),
+            block_id: None,
+            bus_id: Some(EntityId(3)),
+        };
+        let bytes = postcard::to_allocvec(&generation).expect("serialize");
+        let recovered: VariableRef = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(generation, recovered);
+    }
+
     #[cfg(feature = "serde")]
     #[test]
     fn test_generic_constraint_serde_roundtrip() {
@@ -824,6 +873,7 @@ mod tests {
                         VariableRef::HydroGeneration {
                             hydro_id: EntityId(10),
                             block_id: None,
+                            bus_id: None,
                         },
                     ),
                     LinearTerm::literal(
@@ -831,6 +881,7 @@ mod tests {
                         VariableRef::HydroGeneration {
                             hydro_id: EntityId(11),
                             block_id: None,
+                            bus_id: None,
                         },
                     ),
                 ],

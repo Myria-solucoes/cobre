@@ -107,7 +107,10 @@ makes sum-then-fold's overstatement vary stage-to-stage instead of vanishing.
 
 Live: `cell_max_turbined` (`fill_turbine_columns`, `lp/builder/columns.rs`)
 resolves this bound per CELL, folding each of the cell's own member groups
-before summing them, exactly as this sub-contract requires.
+before summing them, exactly as this sub-contract requires — each group's
+`q̄_g`/`p̄_g` is its RESOLVED per-block value (the override when the study
+supplies one, the declaration otherwise, via `GroupBoundLookup`), never the
+bare declared value.
 
 Read: `crates/cobre-sddp/src/lp/builder/columns.rs` (`cell_max_turbined`).
 Pinned by `test_same_bus_groups_sum_into_one_cell_box`, mutation-verified

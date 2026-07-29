@@ -134,8 +134,10 @@ pub(crate) struct RawHydro {
     /// Reservoir filling configuration. Absent or null = no filling operation.
     #[serde(default)]
     filling: Option<RawFillingConfig>,
-    /// Turbine groups partitioning this plant's generation envelope; an absent or
-    /// empty array is rejected.
+    /// Turbine groups partitioning this plant's generation envelope. Required:
+    /// every hydro declares at least one group, each with its own `id`, `name`,
+    /// `bus_id`, and generation/turbined bounds; an absent or empty array is
+    /// rejected.
     #[cfg_attr(feature = "schema", schemars(required))]
     unit_groups: Option<Vec<RawUnitGroup>>,
     /// Specific productivity `ρ_esp` \[MW / ((m³/s) · m)\].

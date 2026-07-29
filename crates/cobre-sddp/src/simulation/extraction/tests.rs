@@ -6009,3 +6009,624 @@ fn extract_hydro_turbined_and_generation_sum_over_a_split_plants_cells() {
     assert_eq!(plant1[0].generation_mw, 53.0);
     assert_eq!(plant1[1].generation_mw, 55.0);
 }
+
+// -------------------------------------------------------------------------
+// hydro_bus_generation: one row per (hydro, block, cell)
+// -------------------------------------------------------------------------
+
+/// Three plants: position 0 (bus 41, one cell) and position 2 (bus 53, one
+/// cell) bracket the split plant at position 1 (buses 31 then 37, two
+/// cells) — a non-zero position preceded by a plant with a different cell
+/// count. Bus ids are far from every hydro-system-position/cell-index/block
+/// value so a mutation confusing any two of them is visible.
+fn split_middle_plant_fixture() -> (StateSpace, StageGeometry, HydroCellIndex, Vec<f64>) {
+    let state = test_support::state_layout(3, 0);
+    let hydro_cell_index = HydroCellIndex::build(&[
+        test_support::geometry_hydro_with_groups(
+            0,
+            vec![test_support::make_unit_group(
+                cobre_core::EntityId(1),
+                cobre_core::EntityId(41),
+                0.0,
+                10.0,
+                0.0,
+                10.0,
+            )],
+            cobre_core::HydroGenerationModel::ConstantProductivity,
+        ),
+        test_support::geometry_hydro_with_groups(
+            1,
+            vec![
+                test_support::make_unit_group(
+                    cobre_core::EntityId(2),
+                    cobre_core::EntityId(31),
+                    0.0,
+                    10.0,
+                    0.0,
+                    10.0,
+                ),
+                test_support::make_unit_group(
+                    cobre_core::EntityId(3),
+                    cobre_core::EntityId(37),
+                    0.0,
+                    10.0,
+                    0.0,
+                    10.0,
+                ),
+            ],
+            cobre_core::HydroGenerationModel::ConstantProductivity,
+        ),
+        test_support::geometry_hydro_with_groups(
+            2,
+            vec![test_support::make_unit_group(
+                cobre_core::EntityId(4),
+                cobre_core::EntityId(53),
+                0.0,
+                10.0,
+                0.0,
+                10.0,
+            )],
+            cobre_core::HydroGenerationModel::ConstantProductivity,
+        ),
+    ]);
+    assert_eq!(hydro_cell_index.n_cells(), 4, "1 + 2 + 1 cells");
+    assert_eq!(hydro_cell_index.cells_of(HydroSys::new(0)), 0..1);
+    assert_eq!(hydro_cell_index.cells_of(HydroSys::new(1)), 1..3);
+    assert_eq!(hydro_cell_index.cells_of(HydroSys::new(2)), 3..4);
+
+    let geometry = StageGeometry {
+        turbine: 10..18,
+        spillage: 18..24,
+        n_blks: 2,
+        ..StageGeometry::default()
+    };
+    // theta = 3*(3+0) = 9, equipment starts at 10 (state_layout(3, 0)).
+    let mut primal = vec![0.0_f64; 24];
+    let turbine_values: [(usize, f64, f64); 4] = [
+        (0, 10.0, 11.0),
+        (1, 100.0, 101.0),
+        (2, 200.0, 201.0),
+        (3, 300.0, 301.0),
+    ];
+    for (c, v0, v1) in turbine_values {
+        primal[10 + c * 2] = v0;
+        primal[10 + c * 2 + 1] = v1;
+    }
+    (state, geometry, hydro_cell_index, primal)
+}
+
+/// One row per `(hydro, block, cell)`, ordered hydro-major/block-middle/
+/// cell-minor. Row index 3 (`hydro_id` 200, block 0, cell 2, bus 37) is the
+/// asserted row where hydro-system-position (1), cell index (2), bus id (37)
+/// and block index (0) are mutually distinct, so a turbine read indexed by
+/// `h` instead of `c` is visible there even though plant 1's OWN system
+/// position (1) coincides with its first cell's index (1).
+#[test]
+fn extract_hydro_bus_generation_emits_one_row_per_cell_per_block() {
+    let (state, geometry, hydro_cell_index, primal) = split_middle_plant_fixture();
+    let study_dims = test_support::study_dims();
+    let ec = zero_energy_conversion(3, 1);
+    let dual: Vec<f64> = vec![];
+    let objective_coeffs = vec![0.0; primal.len()];
+
+    let result = extract_stage_result(
+        &SolutionView {
+            primal: &primal,
+            dual: &dual,
+            objective: 0.0,
+            objective_coeffs: &objective_coeffs,
+            row_lower: &[],
+        },
+        &StageExtractionSpec {
+            study_dims: &study_dims,
+            geometry: &geometry,
+            hydro_cell_index: &hydro_cell_index,
+            state: &state,
+            n_blks: geometry.n_blks,
+            entity_counts: &EntityCounts {
+                hydro_ids: vec![100, 200, 300],
+                hydro_productivities: vec![0.0; 3],
+                thermal_ids: vec![],
+                line_ids: vec![],
+                bus_ids: vec![],
+                pumping_station_ids: vec![],
+                contract_ids: vec![],
+                non_controllable_ids: vec![],
+            },
+            inflow_m3s_per_hydro: &[0.0, 0.0, 0.0],
+            block_hours: &[100.0, 100.0],
+            generic_constraint_entries: &[],
+            ncs_col_start: 0,
+            n_ncs: 0,
+            ncs_entity_ids: &[],
+            ncs_col_upper: &[],
+            pumping_col_start: 0,
+            n_pumping: 0,
+            pumping_consumption_mw_per_m3s: &[],
+            contract_prices: &[],
+            contract_is_import: &[],
+            diversion_upstream: &HashMap::new(),
+            hydro_productivities: &[2.0, 3.0, 5.0],
+            col_scale: &[],
+            row_scale: &[],
+            cumulative_discount_factor: 1.0,
+            cost_scale_factor: 1_000_000.0,
+            energy_conversion: &ec,
+            hydro_min_storage_hm3: &[0.0; 3],
+            stage_index: 0,
+            n_stages: 1,
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+        },
+        0,
+    );
+
+    let rows = &result.hydro_bus_generation;
+    assert_eq!(rows.len(), 8, "4 cells x 2 blocks");
+
+    let seq: Vec<(i32, Option<u32>, i32, f64)> = rows
+        .iter()
+        .map(|r| (r.hydro_id, r.block_id, r.bus_id, r.turbined_m3s))
+        .collect();
+    assert_eq!(
+        seq,
+        vec![
+            (100, Some(0), 41, 10.0),
+            (100, Some(1), 41, 11.0),
+            (200, Some(0), 31, 100.0),
+            (200, Some(0), 37, 200.0),
+            (200, Some(1), 31, 101.0),
+            (200, Some(1), 37, 201.0),
+            (300, Some(0), 53, 300.0),
+            (300, Some(1), 53, 301.0),
+        ],
+        "hydro-major, block-middle, cell-minor order"
+    );
+
+    // Plant 1 (hydro_id 200) at block 1: its two cells' bus ids in ascending order.
+    assert_eq!(rows[4].bus_id, 31);
+    assert_eq!(rows[5].bus_id, 37);
+
+    // hydro system position 1, cell index 2, bus 37, block 0 — mutually distinct.
+    assert_eq!(rows[3].hydro_id, 200);
+    assert_eq!(rows[3].bus_id, 37);
+    assert_eq!(rows[3].block_id, Some(0));
+    assert_eq!(rows[3].turbined_m3s, 200.0);
+}
+
+/// Every plant in [`split_middle_plant_fixture`] is `ConstantProductivity`
+/// (`geometry.fpha_hydro_indices` is empty, so `lookup.fpha[h]` is `None`
+/// everywhere): each row's `generation_mw` must be its OWN cell's
+/// `turbined_m3s * hydro_productivities[h]`, never a different hydro's
+/// productivity. `[2.0, 3.0, 5.0]` are mutually distinct so a read from the
+/// wrong hydro index is visible, and no productivity is `999.0` so a wrong
+/// multiplier is visible on every row.
+#[test]
+fn extract_hydro_bus_generation_constant_productivity_uses_own_hydro_productivity() {
+    let (state, geometry, hydro_cell_index, primal) = split_middle_plant_fixture();
+    let study_dims = test_support::study_dims();
+    let ec = zero_energy_conversion(3, 1);
+    let dual: Vec<f64> = vec![];
+    let objective_coeffs = vec![0.0; primal.len()];
+
+    let result = extract_stage_result(
+        &SolutionView {
+            primal: &primal,
+            dual: &dual,
+            objective: 0.0,
+            objective_coeffs: &objective_coeffs,
+            row_lower: &[],
+        },
+        &StageExtractionSpec {
+            study_dims: &study_dims,
+            geometry: &geometry,
+            hydro_cell_index: &hydro_cell_index,
+            state: &state,
+            n_blks: geometry.n_blks,
+            entity_counts: &EntityCounts {
+                hydro_ids: vec![100, 200, 300],
+                hydro_productivities: vec![0.0; 3],
+                thermal_ids: vec![],
+                line_ids: vec![],
+                bus_ids: vec![],
+                pumping_station_ids: vec![],
+                contract_ids: vec![],
+                non_controllable_ids: vec![],
+            },
+            inflow_m3s_per_hydro: &[0.0, 0.0, 0.0],
+            block_hours: &[100.0, 100.0],
+            generic_constraint_entries: &[],
+            ncs_col_start: 0,
+            n_ncs: 0,
+            ncs_entity_ids: &[],
+            ncs_col_upper: &[],
+            pumping_col_start: 0,
+            n_pumping: 0,
+            pumping_consumption_mw_per_m3s: &[],
+            contract_prices: &[],
+            contract_is_import: &[],
+            diversion_upstream: &HashMap::new(),
+            hydro_productivities: &[2.0, 3.0, 5.0],
+            col_scale: &[],
+            row_scale: &[],
+            cumulative_discount_factor: 1.0,
+            cost_scale_factor: 1_000_000.0,
+            energy_conversion: &ec,
+            hydro_min_storage_hm3: &[0.0; 3],
+            stage_index: 0,
+            n_stages: 1,
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+        },
+        0,
+    );
+
+    let productivity_of = |hydro_id: i32| match hydro_id {
+        100 => 2.0,
+        200 => 3.0,
+        300 => 5.0,
+        other => panic!("unexpected hydro_id {other} in split_middle_plant_fixture"),
+    };
+
+    let rows = &result.hydro_bus_generation;
+    assert_eq!(rows.len(), 8, "4 cells x 2 blocks");
+    for row in rows {
+        let expected = row.turbined_m3s * productivity_of(row.hydro_id);
+        assert_eq!(
+            row.generation_mw.to_bits(),
+            expected.to_bits(),
+            "hydro {} bus {} block {:?}: generation_mw {} must equal turbined_m3s \
+             ({}) * hydro_productivities[h] ({})",
+            row.hydro_id,
+            row.bus_id,
+            row.block_id,
+            row.generation_mw,
+            row.turbined_m3s,
+            productivity_of(row.hydro_id),
+        );
+    }
+}
+
+/// Plant 0 (bus 9, one cell) precedes the 3-cell split plant 1 (buses 5/6/7)
+/// — different cell counts, as the fixture-discipline rule requires. Turbine
+/// values `[1e16, 1.0, 1.0]` in ascending-cell order are order-sensitive at
+/// the bit level: summing ascending (`(0.0 + 1e16) + 1.0) + 1.0`) ties to
+/// even and rounds each `+1.0` away, while summing descending
+/// (`(0.0 + 1.0) + 1.0) + 1e16`) computes the exact `2.0 + 1e16` (`2.0` is a
+/// multiple of the ULP at that magnitude) — the two differ, which is exactly
+/// what pins the row-emission order.
+fn order_sensitive_split_plant_fixture() -> (StateSpace, StageGeometry, HydroCellIndex, Vec<f64>) {
+    let state = test_support::state_layout(2, 0);
+    let hydro_cell_index = HydroCellIndex::build(&[
+        test_support::geometry_hydro_with_groups(
+            0,
+            vec![test_support::make_unit_group(
+                cobre_core::EntityId(1),
+                cobre_core::EntityId(9),
+                0.0,
+                10.0,
+                0.0,
+                10.0,
+            )],
+            cobre_core::HydroGenerationModel::ConstantProductivity,
+        ),
+        test_support::geometry_hydro_with_groups(
+            1,
+            vec![
+                test_support::make_unit_group(
+                    cobre_core::EntityId(2),
+                    cobre_core::EntityId(5),
+                    0.0,
+                    10.0,
+                    0.0,
+                    10.0,
+                ),
+                test_support::make_unit_group(
+                    cobre_core::EntityId(3),
+                    cobre_core::EntityId(6),
+                    0.0,
+                    10.0,
+                    0.0,
+                    10.0,
+                ),
+                test_support::make_unit_group(
+                    cobre_core::EntityId(4),
+                    cobre_core::EntityId(7),
+                    0.0,
+                    10.0,
+                    0.0,
+                    10.0,
+                ),
+            ],
+            cobre_core::HydroGenerationModel::ConstantProductivity,
+        ),
+    ]);
+    assert_eq!(hydro_cell_index.n_cells(), 4, "1 + 3 cells");
+
+    let geometry = StageGeometry {
+        turbine: 7..11,
+        spillage: 11..13,
+        n_blks: 1,
+        ..StageGeometry::default()
+    };
+    // theta = 2*(3+0) = 6, equipment starts at 7 (state_layout(2, 0)).
+    let mut primal = vec![0.0_f64; 13];
+    primal[7] = 42.0; // cell 0 (plant 0)
+    primal[8] = 1.0e16; // cell 1 (plant 1, bus 5)
+    primal[9] = 1.0; // cell 2 (plant 1, bus 6)
+    primal[10] = 1.0; // cell 3 (plant 1, bus 7)
+    (state, geometry, hydro_cell_index, primal)
+}
+
+/// Summing the split plant's `hydro_bus_generation` rows in ROW order equals
+/// its own `hydros` row's `turbined_m3s` bit-for-bit — the same ascending-cell
+/// fold `extract_hydro_per_block`'s `.sum()` already performs.
+#[test]
+fn hydro_bus_rows_sum_bit_exactly_to_the_plant_turbined_row() {
+    let (state, geometry, hydro_cell_index, primal) = order_sensitive_split_plant_fixture();
+    let study_dims = test_support::study_dims();
+    let ec = zero_energy_conversion(2, 1);
+    let dual: Vec<f64> = vec![];
+    let objective_coeffs = vec![0.0; primal.len()];
+
+    let result = extract_stage_result(
+        &SolutionView {
+            primal: &primal,
+            dual: &dual,
+            objective: 0.0,
+            objective_coeffs: &objective_coeffs,
+            row_lower: &[],
+        },
+        &StageExtractionSpec {
+            study_dims: &study_dims,
+            geometry: &geometry,
+            hydro_cell_index: &hydro_cell_index,
+            state: &state,
+            n_blks: geometry.n_blks,
+            entity_counts: &EntityCounts {
+                hydro_ids: vec![100, 200],
+                hydro_productivities: vec![0.0; 2],
+                thermal_ids: vec![],
+                line_ids: vec![],
+                bus_ids: vec![],
+                pumping_station_ids: vec![],
+                contract_ids: vec![],
+                non_controllable_ids: vec![],
+            },
+            inflow_m3s_per_hydro: &[0.0, 0.0],
+            block_hours: &[100.0],
+            generic_constraint_entries: &[],
+            ncs_col_start: 0,
+            n_ncs: 0,
+            ncs_entity_ids: &[],
+            ncs_col_upper: &[],
+            pumping_col_start: 0,
+            n_pumping: 0,
+            pumping_consumption_mw_per_m3s: &[],
+            contract_prices: &[],
+            contract_is_import: &[],
+            diversion_upstream: &HashMap::new(),
+            hydro_productivities: &[1.0, 1.0],
+            col_scale: &[],
+            row_scale: &[],
+            cumulative_discount_factor: 1.0,
+            cost_scale_factor: 1_000_000.0,
+            energy_conversion: &ec,
+            hydro_min_storage_hm3: &[0.0; 2],
+            stage_index: 0,
+            n_stages: 1,
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+        },
+        0,
+    );
+
+    let plant1_bus_sum: f64 = result
+        .hydro_bus_generation
+        .iter()
+        .filter(|r| r.hydro_id == 200 && r.block_id == Some(0))
+        .map(|r| r.turbined_m3s)
+        .sum();
+    let plant1_row = result
+        .hydros
+        .iter()
+        .find(|h| h.hydro_id == 200 && h.block_id == Some(0))
+        .expect("plant 1 must have a block-0 hydros row");
+
+    assert_eq!(
+        plant1_bus_sum.to_bits(),
+        plant1_row.turbined_m3s.to_bits(),
+        "bus-row sum ({plant1_bus_sum}) must equal the plant's own turbined_m3s \
+         ({}) bit-for-bit",
+        plant1_row.turbined_m3s
+    );
+}
+
+/// Plant 0 (position 0, one cell) is NOT FPHA, so `fpha_cell_local_start` is a
+/// prefix sum over plant 1 alone — using the ABSOLUTE cell index instead of the
+/// plant-relative offset would alias plant 0's cell (index 0) into plant 1's
+/// generation read. Reuses `split_plant_multi_bus_extraction_fixture`, whose
+/// plant 1 is FPHA with two cells (bus 10 then bus 11).
+#[test]
+fn extract_hydro_bus_generation_maps_fpha_cells_by_plant_relative_offset() {
+    let (state, geometry, hydro_cell_index) = split_plant_multi_bus_extraction_fixture();
+    let study_dims = test_support::study_dims();
+    let ec = zero_energy_conversion(2, 1);
+
+    let mut primal = vec![0.0_f64; 7]; // state region [0, 7), unused by this test
+    primal.extend_from_slice(&[
+        10.0, 11.0, // turbine[cell 0] (plant 0, blk 0/1)
+        100.0, 101.0, // turbine[cell 1] (plant 1's bus-10 group, blk 0/1)
+        5.0, 7.0, // turbine[cell 2] (plant 1's bus-11 group, blk 0/1)
+        0.0, 0.0, // spillage[hydro 0]
+        0.0, 0.0, // spillage[hydro 1]
+        50.0, 51.0, // generation[fpha-cell-local 0 = cell 1], blk 0/1
+        3.0, 4.0, // generation[fpha-cell-local 1 = cell 2], blk 0/1
+    ]);
+    let dual = vec![0.0; 2];
+    let objective_coeffs = vec![0.0; primal.len()];
+
+    let result = extract_stage_result(
+        &SolutionView {
+            primal: &primal,
+            dual: &dual,
+            objective: 0.0,
+            objective_coeffs: &objective_coeffs,
+            row_lower: &[],
+        },
+        &StageExtractionSpec {
+            study_dims: &study_dims,
+            geometry: &geometry,
+            hydro_cell_index: &hydro_cell_index,
+            state: &state,
+            n_blks: geometry.n_blks,
+            entity_counts: &EntityCounts {
+                hydro_ids: vec![100, 200],
+                hydro_productivities: vec![0.0; 2],
+                thermal_ids: vec![],
+                line_ids: vec![],
+                bus_ids: vec![],
+                pumping_station_ids: vec![],
+                contract_ids: vec![],
+                non_controllable_ids: vec![],
+            },
+            inflow_m3s_per_hydro: &[0.0, 0.0],
+            block_hours: &[100.0, 100.0],
+            generic_constraint_entries: &[],
+            ncs_col_start: 0,
+            n_ncs: 0,
+            ncs_entity_ids: &[],
+            ncs_col_upper: &[],
+            pumping_col_start: 0,
+            n_pumping: 0,
+            pumping_consumption_mw_per_m3s: &[],
+            contract_prices: &[],
+            contract_is_import: &[],
+            diversion_upstream: &HashMap::new(),
+            hydro_productivities: &[2.0, 0.0],
+            col_scale: &[],
+            row_scale: &[],
+            cumulative_discount_factor: 1.0,
+            cost_scale_factor: 1_000_000.0,
+            energy_conversion: &ec,
+            hydro_min_storage_hm3: &[0.0; 2],
+            stage_index: 0,
+            n_stages: 1,
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+        },
+        0,
+    );
+
+    let plant1_rows: Vec<_> = result
+        .hydro_bus_generation
+        .iter()
+        .filter(|r| r.hydro_id == 200)
+        .collect();
+    assert_eq!(plant1_rows.len(), 4, "2 cells x 2 blocks");
+
+    // Block 0: bus 10 (cell 1, fpha-local 0) then bus 11 (cell 2, fpha-local 1).
+    assert_eq!(plant1_rows[0].bus_id, 10);
+    assert_eq!(plant1_rows[0].generation_mw, 50.0);
+    assert_eq!(plant1_rows[1].bus_id, 11);
+    assert_eq!(plant1_rows[1].generation_mw, 3.0);
+    // Block 1.
+    assert_eq!(plant1_rows[2].generation_mw, 51.0);
+    assert_eq!(plant1_rows[3].generation_mw, 4.0);
+
+    let sum_blk0 = plant1_rows[0].generation_mw + plant1_rows[1].generation_mw;
+    let sum_blk1 = plant1_rows[2].generation_mw + plant1_rows[3].generation_mw;
+    let plant1_hydros: Vec<_> = result.hydros.iter().filter(|h| h.hydro_id == 200).collect();
+    assert_eq!(sum_blk0.to_bits(), plant1_hydros[0].generation_mw.to_bits());
+    assert_eq!(sum_blk1.to_bits(), plant1_hydros[1].generation_mw.to_bits());
+}
+
+/// The no-turbine branch emits one row per CELL (not per hydro): reuses
+/// `split_plant_multi_bus_extraction_fixture`'s 3-cell `HydroCellIndex` (1 +
+/// 2) with a fresh empty-`turbine` geometry, so `hydro_cell_index.n_cells()`
+/// (3) and `entity_counts.hydro_ids.len()` (2) genuinely differ.
+#[test]
+fn extract_hydro_bus_generation_no_turbine_branch_emits_zero_rows_per_cell() {
+    let (state, _geometry_with_turbine, hydro_cell_index) =
+        split_plant_multi_bus_extraction_fixture();
+    let study_dims = test_support::study_dims();
+    let ec = zero_energy_conversion(2, 1);
+    assert_eq!(hydro_cell_index.n_cells(), 3);
+
+    let geometry = StageGeometry {
+        n_blks: 2,
+        ..StageGeometry::default()
+    };
+    assert!(
+        geometry.turbine.is_empty(),
+        "fixture must take the no-turbine branch"
+    );
+
+    let primal = vec![0.0_f64; 7]; // state region only, unused otherwise
+    let dual: Vec<f64> = vec![];
+    let objective_coeffs = vec![0.0; primal.len()];
+
+    let result = extract_stage_result(
+        &SolutionView {
+            primal: &primal,
+            dual: &dual,
+            objective: 0.0,
+            objective_coeffs: &objective_coeffs,
+            row_lower: &[],
+        },
+        &StageExtractionSpec {
+            study_dims: &study_dims,
+            geometry: &geometry,
+            hydro_cell_index: &hydro_cell_index,
+            state: &state,
+            n_blks: geometry.n_blks,
+            entity_counts: &EntityCounts {
+                hydro_ids: vec![100, 200],
+                hydro_productivities: vec![0.0; 2],
+                thermal_ids: vec![],
+                line_ids: vec![],
+                bus_ids: vec![],
+                pumping_station_ids: vec![],
+                contract_ids: vec![],
+                non_controllable_ids: vec![],
+            },
+            inflow_m3s_per_hydro: &[0.0, 0.0],
+            block_hours: &[],
+            generic_constraint_entries: &[],
+            ncs_col_start: 0,
+            n_ncs: 0,
+            ncs_entity_ids: &[],
+            ncs_col_upper: &[],
+            pumping_col_start: 0,
+            n_pumping: 0,
+            pumping_consumption_mw_per_m3s: &[],
+            contract_prices: &[],
+            contract_is_import: &[],
+            diversion_upstream: &HashMap::new(),
+            hydro_productivities: &[2.0, 0.0],
+            col_scale: &[],
+            row_scale: &[],
+            cumulative_discount_factor: 1.0,
+            cost_scale_factor: 1_000_000.0,
+            energy_conversion: &ec,
+            hydro_min_storage_hm3: &[0.0; 2],
+            stage_index: 0,
+            n_stages: 1,
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+        },
+        0,
+    );
+
+    assert_eq!(
+        result.hydro_bus_generation.len(),
+        hydro_cell_index.n_cells(),
+        "one row per cell, not per hydro"
+    );
+    assert_eq!(result.hydro_bus_generation.len(), 3);
+    for row in &result.hydro_bus_generation {
+        assert_eq!(row.block_id, None);
+        assert_eq!(row.turbined_m3s, 0.0);
+        assert_eq!(row.generation_mw, 0.0);
+    }
+}

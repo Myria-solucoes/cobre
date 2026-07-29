@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use chrono::NaiveDate;
 use cobre_core::{System, SystemBuilder};
 
 use crate::{
@@ -15,8 +16,8 @@ use crate::{
     report::{ValidationReport, generate_report},
     resolution::{
         BoundsEntitySlices, BoundsOverrides, PenaltiesEntitySlices, PenaltiesOverrides,
-        resolve_bounds, resolve_generic_constraint_bounds, resolve_load_factors,
-        resolve_ncs_bounds, resolve_ncs_factors, resolve_penalties,
+        resolve_bounds, resolve_generic_constraint_bounds, resolve_hydro_unit_group_bounds,
+        resolve_load_factors, resolve_ncs_bounds, resolve_ncs_factors, resolve_penalties,
     },
     scenarios::assembly::{assemble_inflow_models, assemble_load_models},
     scenarios::residual_derivation::{populate_derived_residual_ratios, resolve_stage_seasons},
@@ -76,7 +77,7 @@ pub(crate) fn run_pipeline_with_artifacts(
 
     let manifest = validate_structure(path, &mut ctx);
 
-    let Some(data) = validate_schema(path, &manifest, &mut ctx) else {
+    let Some(mut data) = validate_schema(path, &manifest, &mut ctx) else {
         return ctx.into_result().and(Err(LoadError::ConstraintError {
             description: "schema validation failed but no errors were collected".to_string(),
         }));
@@ -96,6 +97,30 @@ pub(crate) fn run_pipeline_with_artifacts(
 
     let report = generate_report(&ctx);
     ctx.into_result()?;
+
+    // Every resolver below indexes its output table by position in these slices
+    // (`entity_idx`), which must already equal the position `SystemBuilder::build`'s
+    // `sort_canonical` assigns; sorting only after validation keeps validation's
+    // error order on the parsed (id) order, unaffected by this resort.
+    sort_into_canonical_order(&mut data.buses, |b| b.operational_start_date, |b| b.id.0);
+    sort_into_canonical_order(&mut data.lines, |l| l.operational_start_date, |l| l.id.0);
+    sort_into_canonical_order(&mut data.hydros, |h| h.operational_start_date, |h| h.id.0);
+    sort_into_canonical_order(&mut data.thermals, |t| t.operational_start_date, |t| t.id.0);
+    sort_into_canonical_order(
+        &mut data.pumping_stations,
+        |p| p.operational_start_date,
+        |p| p.id.0,
+    );
+    sort_into_canonical_order(
+        &mut data.energy_contracts,
+        |c| c.operational_start_date,
+        |c| c.id.0,
+    );
+    sort_into_canonical_order(
+        &mut data.non_controllable_sources,
+        |n| n.operational_start_date,
+        |n| n.id.0,
+    );
 
     let stage_index: HashMap<i32, usize> = study_stages
         .iter()
@@ -136,7 +161,7 @@ pub(crate) fn run_pipeline_with_artifacts(
         .max()
         .unwrap_or(0);
     let blocks_per_stage: Vec<usize> = study_stages.iter().map(|s| s.blocks.len()).collect();
-    let bounds = resolve_bounds(
+    let mut bounds = resolve_bounds(
         &BoundsEntitySlices {
             hydros: &data.hydros,
             thermals: &data.thermals,
@@ -156,6 +181,13 @@ pub(crate) fn run_pipeline_with_artifacts(
         },
         &blocks_per_stage,
     );
+    bounds.set_group_overlay(resolve_hydro_unit_group_bounds(
+        &data.hydros,
+        n_stages,
+        &stage_index,
+        &data.hydro_unit_group_bounds,
+        &blocks_per_stage,
+    ));
 
     let resolved_generic_bounds = resolve_generic_constraint_bounds(
         &data.generic_constraints,
@@ -246,4 +278,15 @@ pub(crate) fn run_pipeline_with_artifacts(
         })?;
 
     Ok((LoadedCase { system, artifacts }, report))
+}
+
+/// Sorts `entities` into the same `(operational_start_date, id)` order as
+/// `SystemBuilder::build`'s `sort_canonical` — not `(id, date)` or `id` alone —
+/// so a resolver's `entity_idx` matches the position `System` will expose it at.
+fn sort_into_canonical_order<T>(
+    entities: &mut [T],
+    date: impl Fn(&T) -> NaiveDate,
+    id: impl Fn(&T) -> i32,
+) {
+    entities.sort_by_key(|e| (date(e), id(e)));
 }

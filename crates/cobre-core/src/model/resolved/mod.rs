@@ -14,6 +14,7 @@ mod block_bounds;
 mod bounds;
 mod factors;
 mod generic;
+mod group_bounds;
 mod penalties;
 
 pub use block_bounds::{
@@ -26,6 +27,9 @@ pub use bounds::{
 };
 pub use factors::{ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors};
 pub use generic::ResolvedGenericConstraintBounds;
+pub use group_bounds::{
+    HydroUnitGroupBoundsCountsSpec, HydroUnitGroupOverride, ResolvedHydroUnitGroupBounds,
+};
 pub use penalties::{
     BusStagePenalties, HydroStagePenalties, LineStagePenalties, NcsStagePenalties,
     PenaltiesCountsSpec, PenaltiesDefaults, ResolvedPenalties,

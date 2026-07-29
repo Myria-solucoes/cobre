@@ -125,6 +125,8 @@ pub struct FileManifest {
     pub constraints_penalty_overrides_ncs_parquet: bool,
     /// `constraints/ncs_bounds.parquet` — optional
     pub constraints_ncs_bounds_parquet: bool,
+    /// `constraints/hydro_unit_group_bounds.parquet` — optional
+    pub constraints_hydro_unit_group_bounds_parquet: bool,
 }
 
 // ── validate_structure ────────────────────────────────────────────────────────
@@ -312,6 +314,10 @@ const FILE_ENTRIES: &[FileEntry] = &[
         relative: "constraints/ncs_bounds.parquet",
         required: false,
     },
+    FileEntry {
+        relative: "constraints/hydro_unit_group_bounds.parquet",
+        required: false,
+    },
 ];
 
 /// Describes an input file no longer read; `replacement` names its migration
@@ -380,7 +386,7 @@ pub fn validate_structure(case_root: &Path, ctx: &mut ValidationContext) -> File
 /// Returns mutable references to every `bool` field of [`FileManifest`] in the
 /// same order as [`FILE_ENTRIES`] — `validate_structure` zips the two positionally,
 /// so a divergence here silently misassigns presence flags.
-fn manifest_fields_mut(m: &mut FileManifest) -> [&mut bool; 42] {
+fn manifest_fields_mut(m: &mut FileManifest) -> [&mut bool; 43] {
     [
         // Root
         &mut m.config_json,
@@ -429,6 +435,7 @@ fn manifest_fields_mut(m: &mut FileManifest) -> [&mut bool; 42] {
         &mut m.constraints_penalty_overrides_hydro_parquet,
         &mut m.constraints_penalty_overrides_ncs_parquet,
         &mut m.constraints_ncs_bounds_parquet,
+        &mut m.constraints_hydro_unit_group_bounds_parquet,
     ]
 }
 
@@ -595,19 +602,14 @@ mod tests {
 
     #[test]
     fn test_structural_manifest_fields_count() {
-        // Verify FILE_ENTRIES and manifest_fields_mut stay positionally consistent.
-        assert_eq!(
-            FILE_ENTRIES.len(),
-            42,
-            "FILE_ENTRIES should have exactly 42 entries"
-        );
-
+        // validate_structure zips FILE_ENTRIES with manifest_fields_mut positionally;
+        // the invariant is that the two stay the same length, not any specific count.
         let mut manifest = FileManifest::default();
         let fields = manifest_fields_mut(&mut manifest);
         assert_eq!(
+            FILE_ENTRIES.len(),
             fields.len(),
-            42,
-            "manifest_fields_mut should return exactly 42 fields"
+            "FILE_ENTRIES and manifest_fields_mut must return the same length"
         );
     }
 
@@ -832,6 +834,44 @@ mod tests {
         );
     }
 
+    /// AC: `constraints/hydro_unit_group_bounds.parquet` present -> manifest flag
+    /// `true`; absent (a separate case directory) -> `false`, no error either way.
+    #[test]
+    fn test_manifest_hydro_unit_group_bounds() {
+        let dir = TempDir::new().unwrap();
+        make_case_with_required(&dir);
+        let constraints_dir = dir.path().join("constraints");
+        fs::create_dir_all(&constraints_dir).unwrap();
+        fs::write(constraints_dir.join("hydro_unit_group_bounds.parquet"), b"").unwrap();
+
+        let mut ctx = ValidationContext::new();
+        let manifest = validate_structure(dir.path(), &mut ctx);
+
+        assert!(
+            !ctx.has_errors(),
+            "present optional file should not produce errors"
+        );
+        assert!(
+            manifest.constraints_hydro_unit_group_bounds_parquet,
+            "constraints_hydro_unit_group_bounds_parquet should be true when file is present"
+        );
+
+        let absent_dir = TempDir::new().unwrap();
+        make_case_with_required(&absent_dir);
+
+        let mut absent_ctx = ValidationContext::new();
+        let absent_manifest = validate_structure(absent_dir.path(), &mut absent_ctx);
+
+        assert!(
+            !absent_ctx.has_errors(),
+            "absent optional file should not produce errors"
+        );
+        assert!(
+            !absent_manifest.constraints_hydro_unit_group_bounds_parquet,
+            "constraints_hydro_unit_group_bounds_parquet should be false when file is absent"
+        );
+    }
+
     #[test]
     fn removed_exchange_factors_file_is_rejected() {
         let dir = TempDir::new().unwrap();
@@ -955,6 +995,7 @@ mod tests {
         assert!(!manifest.constraints_penalty_overrides_hydro_parquet);
         assert!(!manifest.constraints_penalty_overrides_ncs_parquet);
         assert!(!manifest.constraints_ncs_bounds_parquet);
+        assert!(!manifest.constraints_hydro_unit_group_bounds_parquet);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Layer 5a — block-axis validation for the five bound-override Parquet families.
+//! Layer 5a — block-axis validation for the six bound-override Parquet families.
 //!
 //! [`resolve_bounds`](crate::resolution::resolve_bounds) resolves each family's
 //! `block_id` through the four-layer bound-precedence law described alongside
@@ -61,9 +61,36 @@ const CONTRACT: FamilyMeta = FamilyMeta {
     file: "constraints/contract_bounds.parquet",
 };
 
+const HYDRO_UNIT_GROUP: FamilyMeta = FamilyMeta {
+    family: "Hydro unit group",
+    entity_label: "hydro_id",
+    row_label: "hydro_unit_group_bounds",
+    file: "constraints/hydro_unit_group_bounds.parquet",
+};
+
+/// `", hydro_unit_group_id={g}"` for `Some(g)`, else empty — the extra key
+/// axis a group row's `entity` field carries that the five plant-level
+/// families never set.
+fn group_id_entity_clause(group_id: Option<i32>) -> String {
+    match group_id {
+        Some(g) => format!(", hydro_unit_group_id={g}"),
+        None => String::new(),
+    }
+}
+
+/// `", unit group {g}"` for `Some(g)`, else empty — the prose counterpart of
+/// [`group_id_entity_clause`] for rejection messages.
+fn group_id_message_clause(group_id: Option<i32>) -> String {
+    match group_id {
+        Some(g) => format!(", unit group {g}"),
+        None => String::new(),
+    }
+}
+
 /// Rejects a bound-override row whose `block_id` is negative or outside
-/// `[0, n_blocks)` for the stage it names, across all five block-eligible
-/// bound families in the fixed order thermal, hydro, line, pumping, contract.
+/// `[0, n_blocks)` for the stage it names, across all six block-eligible
+/// bound families in the fixed order thermal, hydro, line, pumping, contract,
+/// hydro unit group.
 ///
 /// A row whose `stage_id` is not a study stage is skipped without a finding —
 /// that is a stage-axis defect this rule does not own.
@@ -80,6 +107,7 @@ pub(super) fn check_bound_block_id_range(data: &ParsedData, ctx: &mut Validation
         check_row(
             &THERMAL,
             row.thermal_id.0,
+            None,
             row.stage_id,
             row.block_id,
             &stage_block_counts,
@@ -90,6 +118,7 @@ pub(super) fn check_bound_block_id_range(data: &ParsedData, ctx: &mut Validation
         check_row(
             &HYDRO,
             row.hydro_id.0,
+            None,
             row.stage_id,
             row.block_id,
             &stage_block_counts,
@@ -100,6 +129,7 @@ pub(super) fn check_bound_block_id_range(data: &ParsedData, ctx: &mut Validation
         check_row(
             &LINE,
             row.line_id.0,
+            None,
             row.stage_id,
             row.block_id,
             &stage_block_counts,
@@ -110,6 +140,7 @@ pub(super) fn check_bound_block_id_range(data: &ParsedData, ctx: &mut Validation
         check_row(
             &PUMPING,
             row.station_id.0,
+            None,
             row.stage_id,
             row.block_id,
             &stage_block_counts,
@@ -120,6 +151,18 @@ pub(super) fn check_bound_block_id_range(data: &ParsedData, ctx: &mut Validation
         check_row(
             &CONTRACT,
             row.contract_id.0,
+            None,
+            row.stage_id,
+            row.block_id,
+            &stage_block_counts,
+            ctx,
+        );
+    }
+    for row in &data.hydro_unit_group_bounds {
+        check_row(
+            &HYDRO_UNIT_GROUP,
+            row.hydro_id.0,
+            Some(row.hydro_unit_group_id.0),
             row.stage_id,
             row.block_id,
             &stage_block_counts,
@@ -131,6 +174,7 @@ pub(super) fn check_bound_block_id_range(data: &ParsedData, ctx: &mut Validation
 fn check_row(
     meta: &FamilyMeta,
     entity_id: i32,
+    group_id: Option<i32>,
     stage_id: i32,
     block_id: Option<i32>,
     counts: &HashMap<i32, usize>,
@@ -147,13 +191,15 @@ fn check_row(
         let family = meta.family;
         let entity_label = meta.entity_label;
         let row_label = meta.row_label;
-        let entity_str = format!("{entity_label}={entity_id}, stage_id={stage_id}");
+        let group_entity = group_id_entity_clause(group_id);
+        let group_message = group_id_message_clause(group_id);
+        let entity_str = format!("{entity_label}={entity_id}{group_entity}, stage_id={stage_id}");
         ctx.add_error(
             ErrorKind::BusinessRuleViolation,
             meta.file,
             Some(entity_str),
             format!(
-                "{family} {entity_id}: {row_label} row at stage_id={stage_id} has \
+                "{family} {entity_id}{group_message}: {row_label} row at stage_id={stage_id} has \
                  block_id={b} but stage {stage_id} declares only {k} block(s) \
                  (valid range: 0..{k})"
             ),
@@ -178,6 +224,7 @@ pub(super) fn check_duplicate_bound_rows(data: &ParsedData, ctx: &mut Validation
         check_row_columns(
             &THERMAL,
             row.thermal_id.0,
+            None,
             row.stage_id,
             row.block_id,
             &[
@@ -195,6 +242,7 @@ pub(super) fn check_duplicate_bound_rows(data: &ParsedData, ctx: &mut Validation
         check_row_columns(
             &HYDRO,
             row.hydro_id.0,
+            None,
             row.stage_id,
             row.block_id,
             &[
@@ -220,6 +268,7 @@ pub(super) fn check_duplicate_bound_rows(data: &ParsedData, ctx: &mut Validation
         check_row_columns(
             &LINE,
             row.line_id.0,
+            None,
             row.stage_id,
             row.block_id,
             &[("direct_mw", row.direct_mw), ("reverse_mw", row.reverse_mw)],
@@ -233,6 +282,7 @@ pub(super) fn check_duplicate_bound_rows(data: &ParsedData, ctx: &mut Validation
         check_row_columns(
             &PUMPING,
             row.station_id.0,
+            None,
             row.stage_id,
             row.block_id,
             &[("min_m3s", row.min_m3s), ("max_m3s", row.max_m3s)],
@@ -246,6 +296,7 @@ pub(super) fn check_duplicate_bound_rows(data: &ParsedData, ctx: &mut Validation
         check_row_columns(
             &CONTRACT,
             row.contract_id.0,
+            None,
             row.stage_id,
             row.block_id,
             &[
@@ -257,27 +308,54 @@ pub(super) fn check_duplicate_bound_rows(data: &ParsedData, ctx: &mut Validation
             ctx,
         );
     }
+
+    let mut hydro_unit_group_seen = HashSet::new();
+    for row in &data.hydro_unit_group_bounds {
+        check_row_columns(
+            &HYDRO_UNIT_GROUP,
+            row.hydro_id.0,
+            Some(row.hydro_unit_group_id.0),
+            row.stage_id,
+            row.block_id,
+            &[
+                ("min_turbined_m3s", row.min_turbined_m3s),
+                ("max_turbined_m3s", row.max_turbined_m3s),
+                ("min_generation_mw", row.min_generation_mw),
+                ("max_generation_mw", row.max_generation_mw),
+            ],
+            &mut hydro_unit_group_seen,
+            ctx,
+        );
+    }
 }
+
+/// `(entity_id, group_id, stage_id, block_id, column)` — `group_id` is `None`
+/// for the five plant-level families, `Some(g)` for the hydro unit group
+/// family, so two groups of one plant never collide on this key.
+type DuplicateRowKey = (i32, Option<i32>, i32, Option<i32>, &'static str);
 
 fn check_row_columns(
     meta: &FamilyMeta,
     entity_id: i32,
+    group_id: Option<i32>,
     stage_id: i32,
     block_id: Option<i32>,
     columns: &[(&'static str, Option<f64>)],
-    seen: &mut HashSet<(i32, i32, Option<i32>, &'static str)>,
+    seen: &mut HashSet<DuplicateRowKey>,
     ctx: &mut ValidationContext,
 ) {
     for &(column, value) in columns {
         if value.is_none() {
             continue;
         }
-        if seen.insert((entity_id, stage_id, block_id, column)) {
+        if seen.insert((entity_id, group_id, stage_id, block_id, column)) {
             continue;
         }
         let family = meta.family;
         let entity_label = meta.entity_label;
         let row_label = meta.row_label;
+        let group_entity = group_id_entity_clause(group_id);
+        let group_message = group_id_message_clause(group_id);
         let block_str = match block_id {
             Some(b) => format!("block_id={b}"),
             None => "stage-wide".to_string(),
@@ -285,9 +363,11 @@ fn check_row_columns(
         ctx.add_error(
             ErrorKind::DuplicateId,
             meta.file,
-            Some(format!("{entity_label}={entity_id}, stage_id={stage_id}")),
+            Some(format!(
+                "{entity_label}={entity_id}{group_entity}, stage_id={stage_id}"
+            )),
             format!(
-                "{family} {entity_id}: {row_label} sets {column} twice for \
+                "{family} {entity_id}{group_message}: {row_label} sets {column} twice for \
                  stage_id={stage_id}, {block_str}"
             ),
         );
@@ -558,7 +638,8 @@ mod tests {
     use super::super::validate_semantic_hydro_thermal;
     use crate::ValidationEntry;
     use crate::constraints::{
-        ContractBoundsRow, HydroBoundsRow, LineBoundsRow, PumpingBoundsRow, ThermalBoundsRow,
+        ContractBoundsRow, HydroBoundsRow, HydroUnitGroupBoundsRow, LineBoundsRow,
+        PumpingBoundsRow, ThermalBoundsRow,
     };
     use crate::stages::StagesData;
     use crate::validation::schema::ParsedData;
@@ -666,6 +747,41 @@ mod tests {
             price_per_mwh: None,
             block_id,
         }
+    }
+
+    fn group_bounds_row(
+        hydro_id: i32,
+        group_id: i32,
+        stage_id: i32,
+        block_id: Option<i32>,
+    ) -> HydroUnitGroupBoundsRow {
+        HydroUnitGroupBoundsRow {
+            hydro_id: EntityId::from(hydro_id),
+            hydro_unit_group_id: EntityId::from(group_id),
+            stage_id,
+            min_turbined_m3s: None,
+            max_turbined_m3s: None,
+            min_generation_mw: None,
+            max_generation_mw: None,
+            block_id,
+        }
+    }
+
+    /// Runs the full Layer 5a dispatch and returns only the findings of `kind`
+    /// raised against `constraints/hydro_unit_group_bounds.parquet` — the
+    /// group family sits outside [`BOUND_FILES`], so [`bound_errors_of_kind`]
+    /// cannot see it.
+    fn group_bound_errors_of_kind(data: &ParsedData, kind: ErrorKind) -> Vec<ValidationEntry> {
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(data, &mut ctx);
+        ctx.errors()
+            .iter()
+            .filter(|e| {
+                e.kind == kind
+                    && e.file == std::path::Path::new("constraints/hydro_unit_group_bounds.parquet")
+            })
+            .map(|e| (*e).clone())
+            .collect()
     }
 
     /// Runs the full Layer 5a dispatch and returns only the findings of `kind`
@@ -990,6 +1106,114 @@ mod tests {
         assert!(
             errors.is_empty(),
             "a key discriminating entity, stage, and block must not false-report: {errors:?}"
+        );
+    }
+
+    // ── group family (hydro_unit_group_bounds) ───────────────────────────────
+
+    #[test]
+    fn test_group_bounds_block_id_out_of_range() {
+        let mut data = make_data(
+            vec![],
+            vec![],
+            vec![],
+            StagesData {
+                stages: vec![make_stage_with_blocks(0, 2)],
+                policy_graph: PolicyGraph {
+                    graph_type: PolicyGraphType::FiniteHorizon,
+                    annual_discount_rate: 0.06,
+                    transitions: vec![],
+                    season_map: None,
+                },
+            },
+            vec![],
+            vec![],
+        );
+        data.hydro_unit_group_bounds = vec![group_bounds_row(7, 3, 0, Some(5))];
+
+        let errors = group_bound_errors_of_kind(&data, ErrorKind::BusinessRuleViolation);
+        assert_eq!(
+            errors.len(),
+            1,
+            "expected exactly one error, got: {errors:?}"
+        );
+        let msg = &errors[0].message;
+        assert!(msg.contains("block_id=5"), "message: {msg}");
+        assert!(msg.contains("2 block(s)"), "message: {msg}");
+        assert!(msg.contains("unit group 3"), "message: {msg}");
+    }
+
+    /// Pins the whole point of the widened duplicate key: two DIFFERENT
+    /// groups of one plant overriding the same column at the same
+    /// `(stage_id, block_id)` is the file's designed usage, not a collision.
+    #[test]
+    fn test_group_bounds_two_groups_one_plant_is_not_a_duplicate() {
+        let mut data = make_data(
+            vec![],
+            vec![],
+            vec![],
+            two_stage_study_stages(),
+            vec![],
+            vec![],
+        );
+        data.hydro_unit_group_bounds = vec![
+            HydroUnitGroupBoundsRow {
+                max_turbined_m3s: Some(10.0),
+                ..group_bounds_row(1, 2, 0, Some(1))
+            },
+            HydroUnitGroupBoundsRow {
+                max_turbined_m3s: Some(20.0),
+                ..group_bounds_row(1, 5, 0, Some(1))
+            },
+        ];
+
+        let errors = group_bound_errors_of_kind(&data, ErrorKind::DuplicateId);
+        assert!(
+            errors.is_empty(),
+            "two different groups of one plant setting the same column at the \
+             same stage/block must not collide: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_group_bounds_duplicate_column_rejected_disjoint_columns_allowed() {
+        let mut data = make_data(
+            vec![],
+            vec![],
+            vec![],
+            two_stage_study_stages(),
+            vec![],
+            vec![],
+        );
+        // Two rows on the same (hydro, group, stage, block) both set
+        // min_generation_mw (must collide exactly once); a third row on that
+        // same key sets only the disjoint max_generation_mw (must not add a
+        // second finding).
+        data.hydro_unit_group_bounds = vec![
+            HydroUnitGroupBoundsRow {
+                min_generation_mw: Some(1.0),
+                ..group_bounds_row(1, 2, 0, Some(1))
+            },
+            HydroUnitGroupBoundsRow {
+                min_generation_mw: Some(2.0),
+                ..group_bounds_row(1, 2, 0, Some(1))
+            },
+            HydroUnitGroupBoundsRow {
+                max_generation_mw: Some(3.0),
+                ..group_bounds_row(1, 2, 0, Some(1))
+            },
+        ];
+
+        let errors = group_bound_errors_of_kind(&data, ErrorKind::DuplicateId);
+        assert_eq!(
+            errors.len(),
+            1,
+            "expected exactly one error, got: {errors:?}"
+        );
+        assert!(
+            errors[0].message.contains("min_generation_mw"),
+            "message: {}",
+            errors[0].message
         );
     }
 

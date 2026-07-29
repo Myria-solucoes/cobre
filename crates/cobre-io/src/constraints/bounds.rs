@@ -378,17 +378,17 @@ pub struct ContractBoundsRow {
 // ── Parsers ───────────────────────────────────────────────────────────────────
 
 /// Row `i` of an optional `Float64` column; absent column or null cell yields `None`.
-fn optional_f64(col: Option<&Float64Array>, i: usize) -> Option<f64> {
+pub(super) fn optional_f64(col: Option<&Float64Array>, i: usize) -> Option<f64> {
     col.filter(|c| !c.is_null(i)).map(|c| c.value(i))
 }
 
 /// Row `i` of an optional `Int32` column; absent column or null cell yields `None`.
-fn optional_i32(col: Option<&Int32Array>, i: usize) -> Option<i32> {
+pub(super) fn optional_i32(col: Option<&Int32Array>, i: usize) -> Option<i32> {
     col.filter(|c| !c.is_null(i)).map(|c| c.value(i))
 }
 
 /// Validate that a present (non-null) optional float value is finite.
-fn validate_optional_finite(
+pub(super) fn validate_optional_finite(
     value: Option<f64>,
     file_label: &str,
     row_idx: usize,

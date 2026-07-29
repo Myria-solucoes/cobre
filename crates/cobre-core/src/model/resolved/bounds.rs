@@ -5,7 +5,7 @@
 //! Populated by `cobre-io` after base bounds are overlaid with stage-specific
 //! overrides; never modified after construction.
 
-use super::ResolvedBlockBounds;
+use super::{ResolvedBlockBounds, ResolvedHydroUnitGroupBounds};
 
 /// All hydro bound values for a given (hydro, stage) pair.
 ///
@@ -218,6 +218,7 @@ pub struct ResolvedBounds {
     pumping: Vec<PumpingStageBounds>,
     contract: Vec<ContractStageBounds>,
     block: ResolvedBlockBounds,
+    group: ResolvedHydroUnitGroupBounds,
 }
 
 /// Deserialization shadow for [`ResolvedBounds`].
@@ -237,6 +238,8 @@ struct ResolvedBoundsWire {
     contract: Vec<ContractStageBounds>,
     #[serde(default)]
     block: ResolvedBlockBounds,
+    #[serde(default)]
+    group: ResolvedHydroUnitGroupBounds,
 }
 
 #[cfg(feature = "serde")]
@@ -260,6 +263,7 @@ impl TryFrom<ResolvedBoundsWire> for ResolvedBounds {
             pumping: wire.pumping,
             contract: wire.contract,
             block: wire.block,
+            group: wire.group,
         })
     }
 }
@@ -323,6 +327,7 @@ impl ResolvedBounds {
             pumping: Vec::new(),
             contract: Vec::new(),
             block: ResolvedBlockBounds::empty(),
+            group: ResolvedHydroUnitGroupBounds::empty(),
         }
     }
 
@@ -345,6 +350,7 @@ impl ResolvedBounds {
             pumping: vec![defaults.pumping; counts.n_pumping * counts.n_stages],
             contract: vec![defaults.contract; counts.n_contracts * counts.n_stages],
             block: ResolvedBlockBounds::empty(),
+            group: ResolvedHydroUnitGroupBounds::empty(),
         }
     }
 
@@ -472,6 +478,29 @@ impl ResolvedBounds {
     #[inline]
     pub fn block_overlay_mut(&mut self) -> &mut ResolvedBlockBounds {
         &mut self.block
+    }
+
+    /// Install the hydro unit group override overlay (bound-precedence layers
+    /// 1 and 2 on the group axis).
+    ///
+    /// The overlay stays [`ResolvedHydroUnitGroupBounds::empty`] until this is
+    /// called; no reader here consults it — the group axis has no consumer on
+    /// [`ResolvedBounds`] itself.
+    pub fn set_group_overlay(&mut self, group: ResolvedHydroUnitGroupBounds) {
+        self.group = group;
+    }
+
+    /// Return the installed hydro unit group override overlay.
+    #[inline]
+    #[must_use]
+    pub fn group_overlay(&self) -> &ResolvedHydroUnitGroupBounds {
+        &self.group
+    }
+
+    /// Return a mutable handle to the hydro unit group override overlay.
+    #[inline]
+    pub fn group_overlay_mut(&mut self) -> &mut ResolvedHydroUnitGroupBounds {
+        &mut self.group
     }
 
     /// Return the resolved hydro bounds for `(hydro_index, stage_index, block_index)`,
@@ -652,10 +681,11 @@ impl ResolvedBounds {
 
 #[cfg(test)]
 mod tests {
-    use super::super::BlockBoundsCountsSpec;
+    use super::super::{BlockBoundsCountsSpec, HydroUnitGroupBoundsCountsSpec};
     use super::{
         BoundsCountsSpec, BoundsDefaults, ContractStageBounds, HydroStageBounds, LineStageBounds,
-        PumpingStageBounds, ResolvedBlockBounds, ResolvedBounds, ThermalStageBounds,
+        PumpingStageBounds, ResolvedBlockBounds, ResolvedBounds, ResolvedHydroUnitGroupBounds,
+        ThermalStageBounds,
     };
 
     fn make_hydro_bounds() -> HydroStageBounds {
@@ -1673,5 +1703,72 @@ mod tests {
         }"#;
         let restored: ResolvedBounds = serde_json::from_str(json).expect("deserialize");
         assert!(restored.block_overlay().is_empty());
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn resolved_bounds_group_overlay_round_trips_and_defaults() {
+        let mut original = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: 2,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: make_hydro_bounds(),
+                ..zero_defaults()
+            },
+        );
+
+        let mut group = ResolvedHydroUnitGroupBounds::new(&HydroUnitGroupBoundsCountsSpec {
+            groups_per_plant: &[2],
+            n_stages: 2,
+            max_blocks: 2,
+        });
+        group
+            .stage_override_mut(0, 1, 1)
+            .expect("in-range stage cell")
+            .max_turbined_m3s = Some(40.0);
+        group
+            .block_override_mut(0, 1, 1, 0)
+            .expect("in-range block cell")
+            .max_turbined_m3s = Some(12.0);
+        original.set_group_overlay(group);
+
+        let json = serde_json::to_string(&original).expect("serialize");
+        let restored: ResolvedBounds = serde_json::from_str(&json).expect("deserialize");
+
+        for (hydro_idx, group_pos, stage_idx, block_idx) in
+            [(0, 0, 0, 0), (0, 1, 1, 0), (0, 1, 1, 1), (0, 1, 0, 0)]
+        {
+            let original_over = original
+                .group_overlay()
+                .override_at_block(hydro_idx, group_pos, stage_idx, block_idx);
+            let restored_over = restored
+                .group_overlay()
+                .override_at_block(hydro_idx, group_pos, stage_idx, block_idx);
+            assert_eq!(
+                original_over.max_turbined_m3s.map(f64::to_bits),
+                restored_over.max_turbined_m3s.map(f64::to_bits),
+                "mismatch at (h={hydro_idx}, g={group_pos}, t={stage_idx}, b={block_idx})"
+            );
+        }
+
+        let absent_group_json = r#"{
+            "n_stages": 1,
+            "thermal_stage_axis_len": 1,
+            "hydro": [],
+            "thermal": [],
+            "line": [],
+            "pumping": [],
+            "contract": []
+        }"#;
+        let restored_without_group: ResolvedBounds =
+            serde_json::from_str(absent_group_json).expect("deserialize without group field");
+        assert!(restored_without_group.group_overlay().is_empty());
     }
 }

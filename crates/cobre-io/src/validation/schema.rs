@@ -24,12 +24,12 @@ use crate::{
     config::{Config, parse_config},
     constraints::{
         BusPenaltyOverrideRow, ContractBoundsRow, GenericConstraintBoundsRow, HydroBoundsRow,
-        HydroPenaltyOverrideRow, LineBoundsRow, LinePenaltyOverrideRow, NcsBoundsRow,
-        NcsPenaltyOverrideRow, PumpingBoundsRow, ThermalBoundsRow, load_contract_bounds,
-        load_generic_constraint_bounds, load_generic_constraints, load_hydro_bounds,
-        load_line_bounds, load_ncs_bounds, load_penalty_overrides_bus,
-        load_penalty_overrides_hydro, load_penalty_overrides_line, load_penalty_overrides_ncs,
-        load_pumping_bounds, load_thermal_bounds,
+        HydroPenaltyOverrideRow, HydroUnitGroupBoundsRow, LineBoundsRow, LinePenaltyOverrideRow,
+        NcsBoundsRow, NcsPenaltyOverrideRow, PumpingBoundsRow, ThermalBoundsRow,
+        load_contract_bounds, load_generic_constraint_bounds, load_generic_constraints,
+        load_hydro_bounds, load_hydro_unit_group_bounds, load_line_bounds, load_ncs_bounds,
+        load_penalty_overrides_bus, load_penalty_overrides_hydro, load_penalty_overrides_line,
+        load_penalty_overrides_ncs, load_pumping_bounds, load_thermal_bounds,
     },
     extensions::{
         FphaHyperplaneRow, HydroEnergyProductivityRow, HydroGeometryRow, PlaneReductionConfig,
@@ -158,6 +158,8 @@ pub(crate) struct ParsedData {
     pub(crate) penalty_overrides_ncs: Vec<NcsPenaltyOverrideRow>,
     /// `constraints/ncs_bounds.parquet`.
     pub(crate) ncs_bounds: Vec<NcsBoundsRow>,
+    /// `constraints/hydro_unit_group_bounds.parquet`.
+    pub(crate) hydro_unit_group_bounds: Vec<HydroUnitGroupBoundsRow>,
 }
 
 // ── Error mapping helper ──────────────────────────────────────────────────────
@@ -620,6 +622,18 @@ pub(crate) fn validate_schema(
         ctx,
     );
 
+    let hydro_unit_group_bounds = optional_or_error(
+        manifest.constraints_hydro_unit_group_bounds_parquet,
+        || {
+            load_hydro_unit_group_bounds(Some(
+                &case_root.join("constraints/hydro_unit_group_bounds.parquet"),
+            ))
+        },
+        Vec::new,
+        "constraints/hydro_unit_group_bounds.parquet",
+        ctx,
+    );
+
     if ctx.error_count() > error_count_before {
         return None;
     }
@@ -677,6 +691,7 @@ pub(crate) fn validate_schema(
         penalty_overrides_hydro,
         penalty_overrides_ncs,
         ncs_bounds,
+        hydro_unit_group_bounds,
     })
 }
 

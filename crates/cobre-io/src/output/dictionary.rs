@@ -19,10 +19,10 @@ use crate::output::error::OutputError;
 use crate::output::parquet_config::ParquetWriterConfig;
 use crate::output::schemas::{
     buses_schema, contracts_schema, convergence_schema, costs_schema, exchanges_schema,
-    generic_violations_schema, hydro_energy_productivity_schema, hydros_schema, in_transit_schema,
-    inflow_lags_schema, iteration_timing_schema, non_controllables_schema, pumping_stations_schema,
-    rank_timing_schema, retry_histogram_schema, row_selection_schema, solver_iterations_schema,
-    thermals_schema,
+    generic_violations_schema, hydro_bus_generation_schema, hydro_energy_productivity_schema,
+    hydros_schema, in_transit_schema, inflow_lags_schema, iteration_timing_schema,
+    non_controllables_schema, pumping_stations_schema, rank_timing_schema, retry_histogram_schema,
+    row_selection_schema, solver_iterations_schema, thermals_schema,
 };
 
 // ─── Entity type codes (SS3) ─────────────────────────────────────────────────
@@ -34,6 +34,8 @@ const ENTITY_TYPE_LINE: i8 = 3;
 const ENTITY_TYPE_PUMPING_STATION: i8 = 4;
 const ENTITY_TYPE_CONTRACT: i8 = 5;
 const ENTITY_TYPE_NON_CONTROLLABLE: i8 = 7;
+const ENTITY_TYPE_HYDRO_UNIT_GROUP: i8 = 8;
+// 9 is reserved for a future thermal unit group; do not reuse it.
 
 // ─── Bound type codes (SS3) ──────────────────────────────────────────────────
 
@@ -107,7 +109,8 @@ fn write_codes_json(path: &Path) -> Result<(), OutputError> {
             "3": "line",
             "4": "pumping_station",
             "5": "contract",
-            "7": "non_controllable"
+            "7": "non_controllable",
+            "8": "hydro_unit_group"
         },
         "bound_type": {
             "0": "storage_min",
@@ -135,7 +138,10 @@ fn write_codes_json(path: &Path) -> Result<(), OutputError> {
 // ─── entities.csv ────────────────────────────────────────────────────────────
 
 /// Write `entities.csv`, one row per entity, ordered by `entity_type_code`
-/// ascending then by entity ID (canonical accessor order).
+/// ascending then by entity ID (canonical accessor order). The
+/// `entity_type_code` 8 block breaks that second axis: a group's `entity_id`
+/// is plant-scoped, so it orders plant-major (canonical `System::hydros()`
+/// order) then group-minor (each plant's own id-sorted `unit_groups` order).
 fn write_entities_csv(path: &Path, system: &System) -> Result<(), OutputError> {
     let file_path = path.join("entities.csv");
     let mut wtr = csv::Writer::from_path(&file_path)
@@ -150,82 +156,55 @@ fn write_entities_csv(path: &Path, system: &System) -> Result<(), OutputError> {
     ])
     .map_err(|e| OutputError::io(&file_path, std::io::Error::other(e)))?;
 
-    for h in system.hydros() {
-        wtr.write_record(&[
-            ENTITY_TYPE_HYDRO.to_string(),
-            h.id.0.to_string(),
-            h.name.clone(),
-            h.bus_id.0.to_string(),
+    let mut write_row = |entity_type: i8, id: i32, name: &str, bus_id: i32| {
+        wtr.write_record([
+            entity_type.to_string(),
+            id.to_string(),
+            name.to_string(),
+            bus_id.to_string(),
             "0".to_string(),
         ])
-        .map_err(|e| OutputError::io(&file_path, std::io::Error::other(e)))?;
+        .map_err(|e| OutputError::io(&file_path, std::io::Error::other(e)))
+    };
+
+    for h in system.hydros() {
+        write_row(ENTITY_TYPE_HYDRO, h.id.0, &h.name, h.bus_id.0)?;
     }
 
     for t in system.thermals() {
-        wtr.write_record(&[
-            ENTITY_TYPE_THERMAL.to_string(),
-            t.id.0.to_string(),
-            t.name.clone(),
-            t.bus_id.0.to_string(),
-            "0".to_string(),
-        ])
-        .map_err(|e| OutputError::io(&file_path, std::io::Error::other(e)))?;
+        write_row(ENTITY_TYPE_THERMAL, t.id.0, &t.name, t.bus_id.0)?;
     }
 
     for b in system.buses() {
-        wtr.write_record(&[
-            ENTITY_TYPE_BUS.to_string(),
-            b.id.0.to_string(),
-            b.name.clone(),
-            b.id.0.to_string(),
-            "0".to_string(),
-        ])
-        .map_err(|e| OutputError::io(&file_path, std::io::Error::other(e)))?;
+        write_row(ENTITY_TYPE_BUS, b.id.0, &b.name, b.id.0)?;
     }
 
-    // bus_id is -1: a line connects two buses, so it has no single owning bus.
     for l in system.lines() {
-        wtr.write_record(&[
-            ENTITY_TYPE_LINE.to_string(),
-            l.id.0.to_string(),
-            l.name.clone(),
-            (-1_i32).to_string(),
-            "0".to_string(),
-        ])
-        .map_err(|e| OutputError::io(&file_path, std::io::Error::other(e)))?;
+        // A line connects two buses, so it has no single owning bus.
+        write_row(ENTITY_TYPE_LINE, l.id.0, &l.name, -1)?;
     }
 
     for p in system.pumping_stations() {
-        wtr.write_record(&[
-            ENTITY_TYPE_PUMPING_STATION.to_string(),
-            p.id.0.to_string(),
-            p.name.clone(),
-            p.bus_id.0.to_string(),
-            "0".to_string(),
-        ])
-        .map_err(|e| OutputError::io(&file_path, std::io::Error::other(e)))?;
+        write_row(ENTITY_TYPE_PUMPING_STATION, p.id.0, &p.name, p.bus_id.0)?;
     }
 
     for c in system.contracts() {
-        wtr.write_record(&[
-            ENTITY_TYPE_CONTRACT.to_string(),
-            c.id.0.to_string(),
-            c.name.clone(),
-            c.bus_id.0.to_string(),
-            "0".to_string(),
-        ])
-        .map_err(|e| OutputError::io(&file_path, std::io::Error::other(e)))?;
+        write_row(ENTITY_TYPE_CONTRACT, c.id.0, &c.name, c.bus_id.0)?;
     }
 
     for n in system.non_controllable_sources() {
-        wtr.write_record(&[
-            ENTITY_TYPE_NON_CONTROLLABLE.to_string(),
-            n.id.0.to_string(),
-            n.name.clone(),
-            n.bus_id.0.to_string(),
-            "0".to_string(),
-        ])
-        .map_err(|e| OutputError::io(&file_path, std::io::Error::other(e)))?;
+        write_row(ENTITY_TYPE_NON_CONTROLLABLE, n.id.0, &n.name, n.bus_id.0)?;
+    }
+
+    for h in system.hydros() {
+        for g in &h.unit_groups {
+            write_row(
+                ENTITY_TYPE_HYDRO_UNIT_GROUP,
+                g.id.0,
+                &format!("{}/{}", h.id.0, g.name),
+                g.bus_id.0,
+            )?;
+        }
     }
 
     wtr.flush().map_err(|e| OutputError::io(&file_path, e))?;
@@ -248,6 +227,7 @@ fn write_variables_csv(path: &Path) -> Result<(), OutputError> {
     let schemas: &[(&str, arrow::datatypes::Schema)] = &[
         ("costs", costs_schema()),
         ("hydros", hydros_schema()),
+        ("hydro_bus_generation", hydro_bus_generation_schema()),
         ("thermals", thermals_schema()),
         ("exchanges", exchanges_schema()),
         ("buses", buses_schema()),
@@ -524,6 +504,13 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("hydros", "inflow_nonnegativity_slack_m3s") => "Inflow non-negativity slack",
         ("hydros", "water_withdrawal_violation_pos_m3s") => "Over-withdrawal constraint violation",
         ("hydros", "water_withdrawal_violation_neg_m3s") => "Under-withdrawal constraint violation",
+        ("hydro_bus_generation", "stage_id") => "Stage index",
+        ("hydro_bus_generation", "block_id") => "Block index within stage (nullable)",
+        ("hydro_bus_generation", "hydro_id") => "Hydro plant identifier",
+        ("hydro_bus_generation", "bus_id") => "Bus identifier",
+        ("hydro_bus_generation", "turbined_m3s") => "Turbined flow",
+        ("hydro_bus_generation", "generation_mw") => "Hydro generation",
+        ("hydro_bus_generation", "generation_mwh") => "Hydro energy generated",
         ("thermals", "stage_id") => "Stage index",
         ("thermals", "block_id") => "Block index within stage (nullable)",
         ("thermals", "thermal_id") => "Thermal plant identifier",
@@ -1162,7 +1149,7 @@ mod tests {
     use chrono::NaiveDate;
     use cobre_core::{
         Block, BlockMode, Bus, ContractType, DeficitSegment, EnergyContract, EntityId, Hydro,
-        HydroGenerationModel, HydroPenalties, Line, NoiseMethod, PumpingStation,
+        HydroGenerationModel, HydroPenalties, HydroUnitGroup, Line, NoiseMethod, PumpingStation,
         ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig, SystemBuilder, Thermal,
         resolved::{
             BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, ContractStageBounds,
@@ -1710,6 +1697,15 @@ mod tests {
             "entity_type[\"0\"] must equal \"hydro\""
         );
         assert_eq!(
+            val["entity_type"]["8"],
+            serde_json::json!("hydro_unit_group"),
+            "entity_type[\"8\"] must equal \"hydro_unit_group\""
+        );
+        assert!(
+            val["entity_type"].get("9").is_none(),
+            "entity_type must have no \"9\" key: no study can emit code 9"
+        );
+        assert_eq!(
             val["bound_type"]["0"],
             serde_json::json!("storage_min"),
             "bound_type[\"0\"] must equal \"storage_min\""
@@ -1736,6 +1732,24 @@ mod tests {
         let content = std::fs::read_to_string(tmp.path().join("entities.csv")).unwrap();
         let mut rdr = csv::Reader::from_reader(content.as_bytes());
 
+        let headers: Vec<String> = rdr
+            .headers()
+            .unwrap()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            headers,
+            vec![
+                "entity_type_code",
+                "entity_id",
+                "name",
+                "bus_id",
+                "system_id"
+            ],
+            "header row must stay exactly entity_type_code,entity_id,name,bus_id,system_id"
+        );
+
         let rows: Vec<Vec<String>> = rdr
             .records()
             .map(|r| r.unwrap().iter().map(ToString::to_string).collect())
@@ -1743,8 +1757,8 @@ mod tests {
 
         assert_eq!(
             rows.len(),
-            4,
-            "expected 4 data rows (2 hydros + 1 thermal + 1 bus)"
+            6,
+            "expected 6 data rows (2 hydros + 1 thermal + 1 bus + 2 hydro-unit-group rows)"
         );
 
         assert_eq!(rows[0][0], "0", "row 0: entity_type_code must be 0 (hydro)");
@@ -1761,6 +1775,233 @@ mod tests {
         );
         assert_eq!(rows[2][1], "1", "row 2: entity_id must be 1");
         assert_eq!(rows[2][2], "Thermal1", "row 2: name must be Thermal1");
+
+        assert_eq!(
+            rows[4][0], "8",
+            "row 4: entity_type_code must be 8 (hydro_unit_group)"
+        );
+        assert_eq!(
+            rows[4][1], "0",
+            "row 4: entity_id must be the group's own id"
+        );
+        assert_eq!(rows[4][3], "1", "row 4: bus_id must equal Hydro1's own bus");
+        assert_eq!(rows[4][4], "0", "row 4: system_id must be 0");
+
+        assert_eq!(
+            rows[5][0], "8",
+            "row 5: entity_type_code must be 8 (hydro_unit_group)"
+        );
+        assert_eq!(
+            rows[5][1], "0",
+            "row 5: entity_id must be the group's own id"
+        );
+        assert_eq!(rows[5][3], "1", "row 5: bus_id must equal Hydro2's own bus");
+        assert_eq!(rows[5][4], "0", "row 5: system_id must be 0");
+    }
+
+    /// Build a 2-hydro system where both plants declare a unit group sharing
+    /// the same plant-local id and the same group name, so a rendering that
+    /// dropped the plant-numeric prefix would collide.
+    fn make_system_2h_same_group_id_and_name() -> System {
+        let mut h1 = make_hydro(1, "PlantA", 1);
+        h1.unit_groups = vec![HydroUnitGroup {
+            id: EntityId(0),
+            name: "GroupX".to_string(),
+            bus_id: EntityId(1),
+            min_generation_mw: 0.0,
+            max_generation_mw: 45.0,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 50.0,
+        }];
+        let mut h2 = make_hydro(2, "PlantB", 1);
+        h2.unit_groups = vec![HydroUnitGroup {
+            id: EntityId(0),
+            name: "GroupX".to_string(),
+            bus_id: EntityId(1),
+            min_generation_mw: 0.0,
+            max_generation_mw: 45.0,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 50.0,
+        }];
+
+        let bus = make_bus(1);
+        let stage = make_stage(0);
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 2,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: 1,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: hydro_stage_bounds(0.0, 100.0),
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 100.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 500.0,
+                    reverse_mw: 500.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(vec![h1, h2])
+            .stages(vec![stage])
+            .bounds(bounds)
+            .build()
+            .expect("valid system")
+    }
+
+    #[test]
+    fn entities_csv_group_rows_are_plant_qualified() {
+        let system = make_system_2h_same_group_id_and_name();
+        let tmp = tempfile::tempdir().unwrap();
+        write_entities_csv(tmp.path(), &system).expect("write_entities_csv must succeed");
+
+        let content = std::fs::read_to_string(tmp.path().join("entities.csv")).unwrap();
+        let mut rdr = csv::Reader::from_reader(content.as_bytes());
+        let rows: Vec<Vec<String>> = rdr
+            .records()
+            .map(|r| r.unwrap().iter().map(ToString::to_string).collect())
+            .collect();
+
+        let group_rows: Vec<&Vec<String>> = rows.iter().filter(|r| r[0] == "8").collect();
+        assert_eq!(group_rows.len(), 2, "expected 2 hydro-unit-group rows");
+
+        assert_eq!(
+            group_rows[0][2], "1/GroupX",
+            "Hydro 1's group row must be prefixed with its own hydro_id"
+        );
+        assert_eq!(
+            group_rows[1][2], "2/GroupX",
+            "Hydro 2's group row must be prefixed with its own hydro_id"
+        );
+        assert_ne!(
+            group_rows[0][2], group_rows[1][2],
+            "two plants sharing a group id and group name must still differ by numeric prefix"
+        );
+    }
+
+    #[test]
+    fn entities_csv_group_row_carries_the_groups_own_bus() {
+        let mut h1 = make_hydro(1, "Plant1", 1);
+        h1.unit_groups = vec![
+            HydroUnitGroup {
+                id: EntityId(5),
+                name: "GroupHigh".to_string(),
+                bus_id: EntityId(3),
+                min_generation_mw: 0.0,
+                max_generation_mw: 20.0,
+                min_turbined_m3s: 0.0,
+                max_turbined_m3s: 25.0,
+            },
+            HydroUnitGroup {
+                id: EntityId(2),
+                name: "GroupLow".to_string(),
+                bus_id: EntityId(2),
+                min_generation_mw: 0.0,
+                max_generation_mw: 25.0,
+                min_turbined_m3s: 0.0,
+                max_turbined_m3s: 25.0,
+            },
+        ];
+
+        let bus1 = make_bus(1);
+        let bus2 = make_bus(2);
+        let bus3 = make_bus(3);
+        let stage = make_stage(0);
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: 1,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: hydro_stage_bounds(0.0, 100.0),
+                thermal: ThermalStageBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 100.0,
+                    cost_per_mwh: 0.0,
+                },
+                line: LineStageBounds {
+                    direct_mw: 500.0,
+                    reverse_mw: 500.0,
+                },
+                pumping: PumpingStageBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract: ContractStageBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+
+        let system = SystemBuilder::new()
+            .buses(vec![bus1, bus2, bus3])
+            .hydros(vec![h1])
+            .stages(vec![stage])
+            .bounds(bounds)
+            .build()
+            .expect("valid system");
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_entities_csv(tmp.path(), &system).expect("write_entities_csv must succeed");
+
+        let content = std::fs::read_to_string(tmp.path().join("entities.csv")).unwrap();
+        let mut rdr = csv::Reader::from_reader(content.as_bytes());
+        let rows: Vec<Vec<String>> = rdr
+            .records()
+            .map(|r| r.unwrap().iter().map(ToString::to_string).collect())
+            .collect();
+
+        let group_rows: Vec<&Vec<String>> = rows.iter().filter(|r| r[0] == "8").collect();
+        assert_eq!(group_rows.len(), 2, "expected 2 hydro-unit-group rows");
+
+        assert_eq!(
+            group_rows[0][1], "2",
+            "first group row must be the lower group id (ascending group-id order)"
+        );
+        assert_eq!(
+            group_rows[0][3], "2",
+            "first group row's bus_id must be its own group's bus, not the plant's"
+        );
+
+        assert_eq!(
+            group_rows[1][1], "5",
+            "second group row must be the higher group id"
+        );
+        assert_eq!(
+            group_rows[1][3], "3",
+            "second group row's bus_id must be its own group's bus, not the plant's"
+        );
+
+        assert!(
+            group_rows.iter().all(|r| r[3] != "1"),
+            "neither group row may carry the plant's own bus_id"
+        );
     }
 
     #[test]
@@ -1814,8 +2055,8 @@ mod tests {
 
         let row_count = rdr.records().count();
         assert_eq!(
-            row_count, 214,
-            "variables.csv must have exactly 214 data rows (one per column across all schemas)"
+            row_count, 221,
+            "variables.csv must have exactly 221 data rows (one per column across all schemas)"
         );
     }
 
@@ -2400,6 +2641,19 @@ mod tests {
             assert!(
                 !desc.is_empty(),
                 "hydros column '{}' has no description in description_for",
+                field.name()
+            );
+        }
+    }
+
+    #[test]
+    fn every_hydro_bus_generation_schema_column_has_description() {
+        let schema = hydro_bus_generation_schema();
+        for field in schema.fields() {
+            let desc = description_for("hydro_bus_generation", field.name());
+            assert!(
+                !desc.is_empty(),
+                "hydro_bus_generation column '{}' has no description in description_for",
                 field.name()
             );
         }

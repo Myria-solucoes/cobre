@@ -26,15 +26,16 @@ use cobre_core::EntityId;
 use crate::energy_conversion::EnergyConversionSet;
 use crate::indexer::{
     AnticipatedLocal, BlockGrid, BlockIdx, Boundary, EvapLocal, FillingTargetLocal, FloorLocal,
-    FphaLocal, HydroCellIndex, HydroSys, StateSpace, StudyDimensions, anticipated_resolution_for,
-    is_anticipated_decision_active_for_delivery,
+    FphaLocal, HydroCell, HydroCellIndex, HydroSys, StateSpace, StudyDimensions,
+    anticipated_resolution_for, is_anticipated_decision_active_for_delivery,
 };
 use crate::lp_builder::{GenericConstraintRowEntry, StageGeometry};
 use crate::simulation::types::{
     ScenarioCategoryCosts, SimulationBusResult, SimulationContractResult, SimulationCostResult,
-    SimulationExchangeResult, SimulationGenericViolationResult, SimulationHydroResult,
-    SimulationInflowLagResult, SimulationNonControllableResult, SimulationPumpingResult,
-    SimulationStageResult, SimulationThermalResult, SimulationTransitBucketResult,
+    SimulationExchangeResult, SimulationGenericViolationResult, SimulationHydroBusResult,
+    SimulationHydroResult, SimulationInflowLagResult, SimulationNonControllableResult,
+    SimulationPumpingResult, SimulationStageResult, SimulationThermalResult,
+    SimulationTransitBucketResult,
 };
 
 /// Reverse lookups from system hydro index to local FPHA/evaporation/filling-slack
@@ -968,6 +969,70 @@ fn extract_hydros(
     }
 }
 
+/// Extract one row per `(hydro, block, cell)`, hydro-major/block-middle/
+/// cell-minor. `cells_of` is iterated in the SAME ascending order
+/// `extract_hydro_per_block`'s per-hydro `.sum()` consumes, so summing one
+/// `(hydro, block)`'s `turbined_m3s` rows reproduces that plant's `hydros` row
+/// bit-for-bit.
+fn extract_hydro_bus_generation(
+    view: &SolutionView<'_>,
+    spec: &StageExtractionSpec<'_>,
+    stage_id: u32,
+    lookup: &HydroReverseLookup,
+) -> Vec<SimulationHydroBusResult> {
+    let n_cells = spec.hydro_cell_index.n_cells();
+    if spec.geometry.turbine.is_empty() || spec.n_blks == 0 {
+        let mut results = Vec::with_capacity(n_cells);
+        for (h, &hydro_id) in spec.entity_counts.hydro_ids.iter().enumerate() {
+            for c in spec.hydro_cell_index.cells_of(HydroSys::new(h)) {
+                results.push(SimulationHydroBusResult {
+                    stage_id,
+                    block_id: None,
+                    hydro_id,
+                    bus_id: i32::from(spec.hydro_cell_index.bus_of(HydroCell::new(c))),
+                    turbined_m3s: 0.0,
+                    generation_mw: 0.0,
+                });
+            }
+        }
+        results
+    } else {
+        let grid = spec.block_grid();
+        let n_blks = spec.n_blks;
+        let mut results = Vec::with_capacity(n_cells * n_blks);
+        for (h, &hydro_id) in spec.entity_counts.hydro_ids.iter().enumerate() {
+            let cells = spec.hydro_cell_index.cells_of(HydroSys::new(h));
+            let fpha_local = lookup.fpha[h];
+            for b in 0..n_blks {
+                for c in cells.clone() {
+                    let turbined_m3s =
+                        view.primal[grid.flat(spec.geometry.turbine.start, c, BlockIdx::new(b))];
+                    let generation_mw = if let Some(local) = fpha_local {
+                        let cell_start = lookup.fpha_cell_local_start[local.get()];
+                        view.primal[grid.flat(
+                            spec.geometry.generation.start,
+                            cell_start + (c - cells.start),
+                            BlockIdx::new(b),
+                        )]
+                    } else {
+                        turbined_m3s * spec.hydro_productivities[h]
+                    };
+                    #[allow(clippy::cast_possible_truncation)]
+                    results.push(SimulationHydroBusResult {
+                        stage_id,
+                        block_id: Some(b as u32),
+                        hydro_id,
+                        bus_id: i32::from(spec.hydro_cell_index.bus_of(HydroCell::new(c))),
+                        turbined_m3s,
+                        generation_mw,
+                    });
+                }
+            }
+        }
+        results
+    }
+}
+
 /// Extract thermal results from a raw LP solution view.
 fn extract_thermals(
     view: &SolutionView<'_>,
@@ -1271,6 +1336,7 @@ pub(crate) fn extract_stage_result_with_lookups(
         stage_id,
         costs,
         hydros: extract_hydros(view, spec, stage_id, hydro_lookup),
+        hydro_bus_generation: extract_hydro_bus_generation(view, spec, stage_id, hydro_lookup),
         thermals: extract_thermals(view, spec, stage_id, thermal_lookup),
         exchanges: extract_exchanges(view, spec, stage_id),
         buses: extract_buses(view, spec, stage_id),

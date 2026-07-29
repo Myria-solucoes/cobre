@@ -80,9 +80,10 @@ pub use model::penalty::{
 pub use model::resolved::{
     BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
     ContractBlockOverride, ContractStageBounds, HydroBlockOverride, HydroStageBounds,
-    HydroStagePenalties, LineBlockOverride, LineStageBounds, LineStagePenalties, NcsStagePenalties,
-    PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockOverride, PumpingStageBounds,
-    ResolvedBlockBounds, ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
+    HydroStagePenalties, HydroUnitGroupBoundsCountsSpec, HydroUnitGroupOverride, LineBlockOverride,
+    LineStageBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
+    PumpingBlockOverride, PumpingStageBounds, ResolvedBlockBounds, ResolvedBounds,
+    ResolvedGenericConstraintBounds, ResolvedHydroUnitGroupBounds, ResolvedLoadFactors,
     ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, ThermalBlockOverride,
     ThermalStageBounds,
 };

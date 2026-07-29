@@ -809,6 +809,7 @@ fn generic_constraint_two_hydros_sum_csc_entries() {
                     VariableRef::HydroGeneration {
                         hydro_id: h1_id,
                         block_id: None,
+                        bus_id: None,
                     },
                 ),
                 LinearTerm::literal(
@@ -816,6 +817,7 @@ fn generic_constraint_two_hydros_sum_csc_entries() {
                     VariableRef::HydroGeneration {
                         hydro_id: h2_id,
                         block_id: None,
+                        bus_id: None,
                     },
                 ),
             ],

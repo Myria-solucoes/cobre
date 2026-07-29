@@ -2002,6 +2002,7 @@ mod tests {
                     VariableRef::HydroGeneration {
                         hydro_id: EntityId(1),
                         block_id: None,
+                        bus_id: None,
                     },
                 )],
             },

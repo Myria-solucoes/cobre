@@ -28,7 +28,7 @@
 //!              | '@' name '*' variable
 //!              | coefficient '*' variable
 //!              | variable
-//! variable   ::= var_name '(' entity_id (',' block_id)? ')'
+//! variable   ::= var_name '(' entity_id (',' block_id)? (',' 'bus' '=' bus_id)? ')'
 //! ```
 //!
 //! `@name` references are looked up in `name_to_id` supplied by the caller.
@@ -43,6 +43,12 @@
 //! `anticipated_decision`) must not have a block argument. Use
 //! `anticipated_decision(thermal_id)` to reference the per-stage commitment column of an
 //! anticipated thermal unit (no block index accepted).
+//!
+//! `hydro_turbined` and `hydro_generation` additionally accept a named `bus=`
+//! argument selecting one cell of a plant split across several buses; no other
+//! variable accepts it. All four forms parse: `f(e)`, `f(e, b)`, `f(e, bus=n)`,
+//! `f(e, b, bus=n)` — the named argument may follow a positional block but never
+//! precede one.
 //!
 //! ## Validation
 //!
@@ -101,6 +107,8 @@ struct RawConstraint {
 
     /// Expression string to be parsed. E.g. `"2.5 * thermal_generation(5) - hydro_generation(3)"`.
     /// To constrain an anticipated thermal's commitment, use `"anticipated_decision(5)"` (stage-level scalar, no block index).
+    /// To constrain one bus of a plant split across several buses, use `"hydro_turbined(5, bus=2)"`
+    /// or `"hydro_generation(5, bus=2)"` — the only two variables accepting a `bus=` selector.
     expression: String,
 
     /// Comparison sense: `">="`, `"<="`, or `"=="`.
@@ -339,6 +347,8 @@ enum Token {
     RParen,
     /// Separator between `entity_id` and `block_id`.
     Comma,
+    /// The `=` in a named `bus=` argument.
+    Equals,
     /// A non-negative literal — the tokenizer never emits a sign.
     Number(f64),
     Ident(String),
@@ -383,6 +393,10 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
             }
             ',' => {
                 tokens.push(Token::Comma);
+                i += 1;
+            }
+            '=' => {
+                tokens.push(Token::Equals);
                 i += 1;
             }
             c if c.is_ascii_digit() || c == '.' => {
@@ -466,7 +480,8 @@ fn parse_terms(
             | Token::Star
             | Token::LParen
             | Token::RParen
-            | Token::Comma => {}
+            | Token::Comma
+            | Token::Equals => {}
         }
     }
 
@@ -623,7 +638,9 @@ fn token_f64_to_usize(v: f64) -> Option<usize> {
     Some(v as usize)
 }
 
-/// Parse a variable reference `var_name '(' entity_id (',' block_id)? ')'` from `tokens[pos]`.
+/// Parse a variable reference
+/// `var_name '(' entity_id (',' block_id)? (',' 'bus' '=' bus_id)? ')'` from
+/// `tokens[pos]`.
 ///
 /// Returns the [`VariableRef`] and the position of the next unconsumed token.
 fn parse_variable_ref(tokens: &[Token], pos: usize) -> Result<(VariableRef, usize), String> {
@@ -667,61 +684,108 @@ fn parse_variable_ref(tokens: &[Token], pos: usize) -> Result<(VariableRef, usiz
     };
 
     let mut cursor = pos + 3;
-    let block_id: Option<usize> = match tokens.get(cursor) {
-        Some(Token::Comma) => {
-            cursor += 1;
-            match tokens.get(cursor) {
-                Some(Token::Number(b)) => {
-                    let b_usize = token_f64_to_usize(*b).ok_or_else(|| {
-                        format!(
-                            "block_id must be a non-negative integer, got {b} in variable \"{var_name}\""
-                        )
-                    })?;
-                    cursor += 1;
-                    Some(b_usize)
-                }
-                Some(other) => {
-                    return Err(format!(
-                        "expected integer block_id after comma in variable \"{var_name}\", got {other:?} at position {cursor}"
-                    ));
-                }
-                None => {
-                    return Err(format!(
-                        "unexpected end of expression: expected block_id in variable \"{var_name}\""
-                    ));
+    let mut block_id: Option<usize> = None;
+    let mut bus_id: Option<EntityId> = None;
+    let mut seen_bus = false;
+
+    loop {
+        match tokens.get(cursor) {
+            Some(Token::RParen) => break,
+            Some(Token::Comma) => {
+                cursor += 1;
+                match tokens.get(cursor) {
+                    Some(Token::Number(b)) => {
+                        if seen_bus {
+                            return Err(format!(
+                                "positional block argument must precede the named \"bus=\" argument in variable \"{var_name}\""
+                            ));
+                        }
+                        let b_usize = token_f64_to_usize(*b).ok_or_else(|| {
+                            format!(
+                                "block_id must be a non-negative integer, got {b} in variable \"{var_name}\""
+                            )
+                        })?;
+                        block_id = Some(b_usize);
+                        cursor += 1;
+                    }
+                    Some(Token::Ident(name)) if name == "bus" => {
+                        if seen_bus {
+                            return Err(format!(
+                                "repeated \"bus=\" argument in variable \"{var_name}\""
+                            ));
+                        }
+                        seen_bus = true;
+                        cursor += 1;
+                        if tokens.get(cursor) != Some(&Token::Equals) {
+                            return Err(format!(
+                                "expected '=' after \"bus\" in variable \"{var_name}\""
+                            ));
+                        }
+                        cursor += 1;
+                        match tokens.get(cursor) {
+                            Some(Token::Number(b)) => {
+                                let b_i32 = token_f64_to_i32(*b).ok_or_else(|| {
+                                    format!(
+                                        "bus_id must be a non-negative integer, got {b} in variable \"{var_name}\""
+                                    )
+                                })?;
+                                bus_id = Some(EntityId::from(b_i32));
+                                cursor += 1;
+                            }
+                            Some(other) => {
+                                return Err(format!(
+                                    "expected integer bus_id after \"bus=\" in variable \"{var_name}\", got {other:?} at position {cursor}"
+                                ));
+                            }
+                            None => {
+                                return Err(format!(
+                                    "unexpected end of expression: expected bus_id after \"bus=\" in variable \"{var_name}\""
+                                ));
+                            }
+                        }
+                    }
+                    Some(Token::Ident(name)) => {
+                        return Err(format!(
+                            "unknown named argument \"{name}\" in variable \"{var_name}\": only \"bus\" is supported"
+                        ));
+                    }
+                    Some(other) => {
+                        return Err(format!(
+                            "expected block_id, \"bus=\", or ')' in variable \"{var_name}\" argument list, got {other:?} at position {cursor}"
+                        ));
+                    }
+                    None => {
+                        return Err(format!(
+                            "unexpected end of expression: expected an argument after ',' in variable \"{var_name}\""
+                        ));
+                    }
                 }
             }
+            Some(other) => {
+                return Err(format!(
+                    "expected ',' or ')' in variable \"{var_name}\" argument list, got {other:?} at position {cursor}"
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "unexpected end of expression: expected ')' to close variable \"{var_name}\""
+                ));
+            }
         }
-        Some(Token::RParen) => None,
-        Some(other) => {
-            return Err(format!(
-                "expected ',' or ')' in variable \"{var_name}\" argument list, got {other:?} at position {cursor}"
-            ));
-        }
-        None => {
-            return Err(format!(
-                "unexpected end of expression: expected ')' after entity_id in variable \"{var_name}\""
-            ));
-        }
-    };
-
-    if tokens.get(cursor) != Some(&Token::RParen) {
-        return Err(format!(
-            "expected ')' to close variable \"{var_name}\", got {:?} at position {cursor}",
-            tokens.get(cursor)
-        ));
     }
     cursor += 1;
 
-    let variable = build_variable_ref(&var_name, entity_id, block_id)?;
+    let variable = build_variable_ref(&var_name, entity_id, block_id, bus_id)?;
 
     Ok((variable, cursor))
 }
 
-/// Build a [`VariableRef`] from the parsed variable name, entity ID, and optional block ID.
+/// Build a [`VariableRef`] from the parsed variable name, entity ID, optional block
+/// ID, and optional bus selector.
 ///
-/// Returns `Err(String)` if the variable name is not one of the 24 known names, or
-/// if a block argument is provided for a stage-only variable (no block argument expected).
+/// Returns `Err(String)` if the variable name is not one of the 24 known names, if a
+/// block argument is provided for a stage-only variable, or if a `bus=` selector is
+/// provided for any variable other than `hydro_turbined`/`hydro_generation`.
 // Rationale: one exhaustive match over the 24 variable names; splitting would scatter the
 // canonical catalog and drop the compile-time exhaustiveness check.
 #[allow(clippy::too_many_lines)]
@@ -729,8 +793,9 @@ fn build_variable_ref(
     name: &str,
     entity_id: EntityId,
     block_id: Option<usize>,
+    bus_id: Option<EntityId>,
 ) -> Result<VariableRef, String> {
-    match name {
+    let variable = match name {
         // Stage-only variables (block_id must be None).
         "hydro_storage" => {
             if block_id.is_some() {
@@ -772,6 +837,7 @@ fn build_variable_ref(
         "hydro_turbined" => Ok(VariableRef::HydroTurbined {
             hydro_id: entity_id,
             block_id,
+            bus_id,
         }),
         "hydro_spillage" => Ok(VariableRef::HydroSpillage {
             hydro_id: entity_id,
@@ -788,6 +854,7 @@ fn build_variable_ref(
         "hydro_generation" => Ok(VariableRef::HydroGeneration {
             hydro_id: entity_id,
             block_id,
+            bus_id,
         }),
         "thermal_generation" => Ok(VariableRef::ThermalGeneration {
             thermal_id: entity_id,
@@ -853,7 +920,20 @@ fn build_variable_ref(
         other => Err(format!(
             "unknown variable name \"{other}\": not one of the 24 supported LP variable types"
         )),
+    }?;
+
+    if bus_id.is_some()
+        && !matches!(
+            variable,
+            VariableRef::HydroTurbined { .. } | VariableRef::HydroGeneration { .. }
+        )
+    {
+        return Err(format!(
+            "variable \"{name}\" does not accept a bus selector; only \"hydro_turbined\" and \"hydro_generation\" accept a \"bus=\" argument"
+        ));
     }
+
+    Ok(variable)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -933,6 +1013,7 @@ mod tests {
             VariableRef::HydroGeneration {
                 hydro_id: EntityId(10),
                 block_id: None,
+                bus_id: None,
             }
         );
     }
@@ -952,6 +1033,7 @@ mod tests {
             VariableRef::HydroGeneration {
                 hydro_id: EntityId(10),
                 block_id: None,
+                bus_id: None,
             }
         );
         assert!((lit(&expr.terms[1]) - 1.0).abs() < f64::EPSILON);
@@ -960,6 +1042,7 @@ mod tests {
             VariableRef::HydroGeneration {
                 hydro_id: EntityId(11),
                 block_id: None,
+                bus_id: None,
             }
         );
     }
@@ -987,6 +1070,7 @@ mod tests {
             VariableRef::HydroGeneration {
                 hydro_id: EntityId(3),
                 block_id: None,
+                bus_id: None,
             }
         );
     }
@@ -1014,6 +1098,7 @@ mod tests {
             VariableRef::HydroTurbined {
                 hydro_id: EntityId(5),
                 block_id: Some(0),
+                bus_id: None,
             }
         );
     }
@@ -1058,7 +1143,7 @@ mod tests {
     /// `hydro_inflow` is block-capable: a bare entity id parses with `block_id: None`.
     #[test]
     fn test_build_hydro_inflow_no_block() {
-        let var = build_variable_ref("hydro_inflow", EntityId(3), None).unwrap();
+        let var = build_variable_ref("hydro_inflow", EntityId(3), None, None).unwrap();
         assert_eq!(
             var,
             VariableRef::HydroInflow {
@@ -1072,7 +1157,7 @@ mod tests {
     /// so `hydro_inflow(h, k)` threads `block_id: Some(k)` through.
     #[test]
     fn test_build_hydro_inflow_with_block() {
-        let var = build_variable_ref("hydro_inflow", EntityId(3), Some(0)).unwrap();
+        let var = build_variable_ref("hydro_inflow", EntityId(3), Some(0), None).unwrap();
         assert_eq!(
             var,
             VariableRef::HydroInflow {
@@ -1086,7 +1171,7 @@ mod tests {
     /// `block_id: None`, and a block argument threads `block_id: Some(k)`.
     #[test]
     fn test_build_hydro_storage_initial_block_none_and_some() {
-        let none = build_variable_ref("hydro_storage_initial", EntityId(4), None).unwrap();
+        let none = build_variable_ref("hydro_storage_initial", EntityId(4), None, None).unwrap();
         assert_eq!(
             none,
             VariableRef::HydroStorageInitial {
@@ -1094,7 +1179,7 @@ mod tests {
                 block_id: None,
             }
         );
-        let some = build_variable_ref("hydro_storage_initial", EntityId(4), Some(2)).unwrap();
+        let some = build_variable_ref("hydro_storage_initial", EntityId(4), Some(2), None).unwrap();
         assert_eq!(
             some,
             VariableRef::HydroStorageInitial {
@@ -1108,7 +1193,7 @@ mod tests {
     /// `block_id: None`, and a block argument threads `block_id: Some(k)`.
     #[test]
     fn test_build_hydro_storage_final_block_none_and_some() {
-        let none = build_variable_ref("hydro_storage_final", EntityId(4), None).unwrap();
+        let none = build_variable_ref("hydro_storage_final", EntityId(4), None, None).unwrap();
         assert_eq!(
             none,
             VariableRef::HydroStorageFinal {
@@ -1116,7 +1201,7 @@ mod tests {
                 block_id: None,
             }
         );
-        let some = build_variable_ref("hydro_storage_final", EntityId(4), Some(1)).unwrap();
+        let some = build_variable_ref("hydro_storage_final", EntityId(4), Some(1), None).unwrap();
         assert_eq!(
             some,
             VariableRef::HydroStorageFinal {
@@ -1201,6 +1286,7 @@ mod tests {
                 VariableRef::HydroTurbined {
                     hydro_id: EntityId(0),
                     block_id: None,
+                    bus_id: None,
                 },
             ),
             (
@@ -1229,6 +1315,7 @@ mod tests {
                 VariableRef::HydroGeneration {
                     hydro_id: EntityId(0),
                     block_id: None,
+                    bus_id: None,
                 },
             ),
             (
@@ -1350,6 +1437,83 @@ mod tests {
         }
     }
 
+    // ── Bus selector unit tests ────────────────────────────────────────────────
+
+    /// All four argument forms parse: bare, positional block only, named `bus=`
+    /// only, and both together — `bus=` is the grammar's first named argument, so
+    /// a bare positional third slot (rejected by design) must fail to parse.
+    #[test]
+    fn parse_bus_selector_all_four_forms() {
+        let cases: &[(&str, Option<usize>, Option<i32>)] = &[
+            ("hydro_turbined(5)", None, None),
+            ("hydro_turbined(5, 0)", Some(0), None),
+            ("hydro_turbined(5, bus=2)", None, Some(2)),
+            ("hydro_turbined(5, 0, bus=2)", Some(0), Some(2)),
+        ];
+
+        for (input, expected_block, expected_bus) in cases {
+            let expr = parse_expression(input, &HashMap::new())
+                .unwrap_or_else(|e| panic!("parse failed for \"{input}\": {e}"));
+            assert_eq!(expr.terms.len(), 1, "single term for \"{input}\"");
+            match &expr.terms[0].variable {
+                VariableRef::HydroTurbined {
+                    hydro_id,
+                    block_id,
+                    bus_id,
+                } => {
+                    assert_eq!(*hydro_id, EntityId(5), "hydro_id for \"{input}\"");
+                    assert_eq!(block_id, expected_block, "block_id for \"{input}\"");
+                    assert_eq!(bus_id.map(|b| b.0), *expected_bus, "bus_id for \"{input}\"");
+                }
+                other => panic!("expected HydroTurbined for \"{input}\", got {other:?}"),
+            }
+        }
+    }
+
+    /// `bus=` is accepted only by `hydro_turbined`/`hydro_generation`; every
+    /// malformed named-argument shape is rejected; and an unknown variable name
+    /// reports itself, not the bus selector — the post-match guard runs AFTER
+    /// the 24-arm name match, never before it.
+    #[test]
+    fn parse_bus_selector_rejections() {
+        for expr in [
+            "hydro_storage(5, bus=2)",
+            "hydro_spillage(5, bus=2)",
+            "hydro_outflow(5, bus=2)",
+        ] {
+            let err = parse_expression(expr, &HashMap::new()).unwrap_err();
+            assert!(
+                err.contains("hydro_turbined") && err.contains("hydro_generation"),
+                "expected message naming hydro_turbined/hydro_generation for \"{expr}\", got: {err}"
+            );
+        }
+
+        for expr in [
+            "hydro_turbined(5, foo=2)",
+            "hydro_turbined(5, bus=2, bus=3)",
+            "hydro_turbined(5, bus=2, 0)",
+            "hydro_turbined(5, bus=)",
+            "hydro_turbined(5, bus 2)",
+            "hydro_turbined(5, bus=2.5)",
+            "hydro_turbined(5, bus=-1)",
+        ] {
+            assert!(
+                parse_expression(expr, &HashMap::new()).is_err(),
+                "expected Err for \"{expr}\""
+            );
+        }
+
+        let err = parse_expression("not_a_variable(5, bus=2)", &HashMap::new()).unwrap_err();
+        assert!(
+            err.contains("not_a_variable"),
+            "expected the unknown variable name in the message, got: {err}"
+        );
+        assert!(
+            !err.contains("bus selector"),
+            "an unknown variable must not be reported as a bus-selector error, got: {err}"
+        );
+    }
+
     // ── @name parameter reference unit tests ─────────────────────────────────
 
     /// AC-1: `@rho_eq * hydro_generation(0)` with implicit scale 1.0.
@@ -1365,6 +1529,7 @@ mod tests {
             VariableRef::HydroGeneration {
                 hydro_id: EntityId(0),
                 block_id: None,
+                bus_id: None,
             }
         );
     }
@@ -1421,6 +1586,7 @@ mod tests {
             VariableRef::HydroGeneration {
                 hydro_id: EntityId(3),
                 block_id: None,
+                bus_id: None,
             }
         );
     }
@@ -1470,6 +1636,7 @@ mod tests {
             VariableRef::HydroGeneration {
                 hydro_id: EntityId(10),
                 block_id: None,
+                bus_id: None,
             }
         );
         assert_eq!(
@@ -1477,6 +1644,7 @@ mod tests {
             VariableRef::HydroGeneration {
                 hydro_id: EntityId(11),
                 block_id: None,
+                bus_id: None,
             }
         );
         assert_eq!(min_hydro.sense, ConstraintSense::GreaterEqual);
@@ -1507,6 +1675,7 @@ mod tests {
             VariableRef::HydroGeneration {
                 hydro_id: EntityId(3),
                 block_id: None,
+                bus_id: None,
             }
         );
         assert_eq!(max_thermal.sense, ConstraintSense::LessEqual);
@@ -1542,6 +1711,7 @@ mod tests {
             VariableRef::HydroGeneration {
                 hydro_id: EntityId(3),
                 block_id: None,
+                bus_id: None,
             }
         );
     }

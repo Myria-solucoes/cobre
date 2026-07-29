@@ -7,7 +7,7 @@
 //!
 //! The primary entry point is `validate_referential_integrity`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::{ErrorKind, ValidationContext, schema::ParsedData};
 
@@ -39,6 +39,16 @@ pub(crate) fn validate_referential_integrity(data: &ParsedData, ctx: &mut Valida
             .map(|n| n.id.0)
             .collect(),
         generic_constraint: data.generic_constraints.iter().map(|g| g.id.0).collect(),
+        hydro_unit_group: data
+            .hydros
+            .iter()
+            .map(|h| (h.id.0, h.unit_groups.iter().map(|g| g.id.0).collect()))
+            .collect(),
+        hydro_group_bus: data
+            .hydros
+            .iter()
+            .map(|h| (h.id.0, h.unit_groups.iter().map(|g| g.bus_id.0).collect()))
+            .collect(),
     };
 
     check_line_references(data, ctx, &ids.bus);
@@ -67,6 +77,14 @@ struct LookupSets {
     contract: HashSet<i32>,
     ncs: HashSet<i32>,
     generic_constraint: HashSet<i32>,
+    // Plant id -> its own group ids; group ids are plant-scoped, not global, so
+    // this stays keyed by plant rather than flattened into one set.
+    hydro_unit_group: HashMap<i32, HashSet<i32>>,
+    // Plant id -> the bus ids its unit groups sit on. A bus selector names a
+    // cell, which is plant-scoped, even though a bus is a global entity — the
+    // global `bus` set would wrongly accept a bus that exists but that this
+    // plant has no group on, so membership is checked per plant here instead.
+    hydro_group_bus: HashMap<i32, HashSet<i32>>,
 }
 
 // ── Per-entity-group helper functions ─────────────────────────────────────────
@@ -547,6 +565,36 @@ fn check_bounds_references(data: &ParsedData, ctx: &mut ValidationContext, ids: 
         }
     }
 
+    for (i, row) in data.hydro_unit_group_bounds.iter().enumerate() {
+        // An unknown hydro_id makes the group check unanswerable, so it is an
+        // else-if, not two independent ifs — one finding per row, never both.
+        if !ids.hydro.contains(&row.hydro_id.0) {
+            ctx.add_error(
+                ErrorKind::InvalidReference,
+                "constraints/hydro_unit_group_bounds.parquet",
+                Some(format!("HydroUnitGroupBoundsRow[{i}]")),
+                format!(
+                    "HydroUnitGroupBoundsRow[{i}] references non-existent Hydro {} via field 'hydro_id'",
+                    row.hydro_id.0
+                ),
+            );
+        } else if !ids
+            .hydro_unit_group
+            .get(&row.hydro_id.0)
+            .is_some_and(|groups| groups.contains(&row.hydro_unit_group_id.0))
+        {
+            ctx.add_error(
+                ErrorKind::InvalidReference,
+                "constraints/hydro_unit_group_bounds.parquet",
+                Some(format!("HydroUnitGroupBoundsRow[{i}]")),
+                format!(
+                    "HydroUnitGroupBoundsRow[{i}] references non-existent unit group {} of Hydro {} via field 'hydro_unit_group_id'; unit group ids are unique within a plant, not globally",
+                    row.hydro_unit_group_id.0, row.hydro_id.0
+                ),
+            );
+        }
+    }
+
     for (i, row) in data.line_bounds.iter().enumerate() {
         if !ids.line.contains(&row.line_id.0) {
             ctx.add_error(
@@ -879,11 +927,9 @@ fn validate_variable_ref_entity(
         VariableRef::HydroStorage { hydro_id, .. }
         | VariableRef::HydroEvaporation { hydro_id, .. }
         | VariableRef::HydroWithdrawal { hydro_id, .. }
-        | VariableRef::HydroTurbined { hydro_id, .. }
         | VariableRef::HydroSpillage { hydro_id, .. }
         | VariableRef::HydroDiversion { hydro_id, .. }
         | VariableRef::HydroOutflow { hydro_id, .. }
-        | VariableRef::HydroGeneration { hydro_id, .. }
         | VariableRef::HydroInflow { hydro_id, .. }
         | VariableRef::HydroStorageInitial { hydro_id, .. }
         | VariableRef::HydroStorageFinal { hydro_id, .. } => {
@@ -893,6 +939,36 @@ fn validate_variable_ref_entity(
                     file,
                     Some(label.to_string()),
                     format!("{label} references non-existent Hydro {}", hydro_id.0),
+                );
+            }
+        }
+        VariableRef::HydroTurbined {
+            hydro_id, bus_id, ..
+        }
+        | VariableRef::HydroGeneration {
+            hydro_id, bus_id, ..
+        } => {
+            if !ids.hydro.contains(&hydro_id.0) {
+                ctx.add_error(
+                    ErrorKind::InvalidReference,
+                    file,
+                    Some(label.to_string()),
+                    format!("{label} references non-existent Hydro {}", hydro_id.0),
+                );
+            } else if let Some(b) = bus_id
+                && !ids
+                    .hydro_group_bus
+                    .get(&hydro_id.0)
+                    .is_some_and(|buses| buses.contains(&b.0))
+            {
+                ctx.add_error(
+                    ErrorKind::InvalidReference,
+                    file,
+                    Some(label.to_string()),
+                    format!(
+                        "{label} references bus {}, on which Hydro {} has no unit group, via field 'bus_id'; a bus selector names one side of a split plant, not any bus in the system",
+                        b.0, hydro_id.0
+                    ),
                 );
             }
         }
@@ -1001,8 +1077,9 @@ mod tests {
 
     use crate::{
         constraints::{
-            BusPenaltyOverrideRow, GenericConstraintBoundsRow, HydroBoundsRow, LineBoundsRow,
-            NcsBoundsRow, NcsPenaltyOverrideRow, ThermalBoundsRow,
+            BusPenaltyOverrideRow, GenericConstraintBoundsRow, HydroBoundsRow,
+            HydroUnitGroupBoundsRow, LineBoundsRow, NcsBoundsRow, NcsPenaltyOverrideRow,
+            ThermalBoundsRow,
         },
         extensions::HydroGeometryRow,
         scenarios::{
@@ -1219,6 +1296,25 @@ mod tests {
             consumption_mw_per_m3s: 0.5,
             min_flow_m3s: 0.0,
             max_flow_m3s: 100.0,
+        }
+    }
+
+    fn make_unit_group(
+        id: i32,
+        bus_id: i32,
+        min_generation_mw: f64,
+        max_generation_mw: f64,
+        min_turbined_m3s: f64,
+        max_turbined_m3s: f64,
+    ) -> HydroUnitGroup {
+        HydroUnitGroup {
+            id: EntityId::from(id),
+            name: format!("Group {id}"),
+            bus_id: EntityId::from(bus_id),
+            min_generation_mw,
+            max_generation_mw,
+            min_turbined_m3s,
+            max_turbined_m3s,
         }
     }
 
@@ -1820,6 +1916,161 @@ mod tests {
         assert_eq!(inv.len(), 1);
         assert!(inv[0].message.contains("555"));
         assert!(inv[0].message.contains("hydro_id"));
+    }
+
+    /// A `hydro_unit_group_bounds` row naming unit group 4 on Hydro 7 (which
+    /// declares groups `{0, 3}`) is rejected even though group 4 exists on a
+    /// different plant (Hydro 2) — group ids are plant-scoped, not global.
+    #[test]
+    fn test_hydro_unit_group_bounds_unknown_group_ref() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        let mut hydro7 = make_hydro(7, 1);
+        hydro7.unit_groups = vec![
+            make_unit_group(0, 1, 0.0, 100.0, 0.0, 100.0),
+            make_unit_group(3, 1, 0.0, 100.0, 0.0, 100.0),
+        ];
+        let mut hydro2 = make_hydro(2, 1);
+        hydro2.unit_groups = vec![make_unit_group(4, 1, 0.0, 100.0, 0.0, 100.0)];
+        data.hydros = vec![hydro7, hydro2];
+
+        data.hydro_unit_group_bounds = vec![HydroUnitGroupBoundsRow {
+            hydro_id: EntityId::from(7),
+            hydro_unit_group_id: EntityId::from(4),
+            stage_id: 9,
+            min_turbined_m3s: None,
+            max_turbined_m3s: None,
+            min_generation_mw: None,
+            max_generation_mw: Some(50.0),
+            block_id: Some(1),
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidReference)
+            .collect();
+        assert_eq!(
+            inv.len(),
+            1,
+            "expected exactly 1 InvalidReference, got: {:?}",
+            inv.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        assert!(inv[0].file == std::path::Path::new("constraints/hydro_unit_group_bounds.parquet"));
+        assert!(inv[0].message.contains("unit group 4"));
+        assert!(inv[0].message.contains("Hydro 7"));
+    }
+
+    /// A `hydro_unit_group_bounds` row with `hydro_id = 99` (no such plant)
+    /// emits exactly one finding — the dangling `hydro_id` — and no
+    /// `hydro_unit_group_id` finding, even though group 4 does not exist on
+    /// plant 99 either: the plant reference is unanswerable first.
+    #[test]
+    fn test_hydro_unit_group_bounds_unknown_hydro_ref_emits_one_finding() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        let mut hydro7 = make_hydro(7, 1);
+        hydro7.unit_groups = vec![
+            make_unit_group(0, 1, 0.0, 100.0, 0.0, 100.0),
+            make_unit_group(3, 1, 0.0, 100.0, 0.0, 100.0),
+        ];
+        data.hydros = vec![hydro7];
+
+        data.hydro_unit_group_bounds = vec![HydroUnitGroupBoundsRow {
+            hydro_id: EntityId::from(99),
+            hydro_unit_group_id: EntityId::from(4),
+            stage_id: 9,
+            min_turbined_m3s: None,
+            max_turbined_m3s: None,
+            min_generation_mw: None,
+            max_generation_mw: Some(50.0),
+            block_id: Some(1),
+        }];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidReference)
+            .collect();
+        assert_eq!(
+            inv.len(),
+            1,
+            "expected exactly 1 InvalidReference (hydro_id only), got: {:?}",
+            inv.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        assert!(inv[0].message.contains("Hydro 99"));
+        assert!(inv[0].message.contains("hydro_id"));
+        assert!(!inv[0].message.contains("hydro_unit_group_id"));
+    }
+
+    /// Every `hydro_unit_group_bounds` row names a declared `(plant, group)`
+    /// pair on plants whose group ids are neither `0` nor equal to their own
+    /// position in `unit_groups` — no finding is produced against
+    /// `constraints/hydro_unit_group_bounds.parquet`.
+    #[test]
+    fn test_hydro_unit_group_bounds_valid_refs_no_error() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        let mut hydro5 = make_hydro(5, 1);
+        hydro5.unit_groups = vec![
+            make_unit_group(7, 1, 0.0, 100.0, 0.0, 100.0),
+            make_unit_group(2, 1, 0.0, 100.0, 0.0, 100.0),
+        ];
+        let mut hydro6 = make_hydro(6, 1);
+        hydro6.unit_groups = vec![
+            make_unit_group(10, 1, 0.0, 100.0, 0.0, 100.0),
+            make_unit_group(20, 1, 0.0, 100.0, 0.0, 100.0),
+        ];
+        data.hydros = vec![hydro5, hydro6];
+
+        data.hydro_unit_group_bounds = vec![
+            HydroUnitGroupBoundsRow {
+                hydro_id: EntityId::from(5),
+                hydro_unit_group_id: EntityId::from(2),
+                stage_id: 8,
+                min_turbined_m3s: None,
+                max_turbined_m3s: None,
+                min_generation_mw: None,
+                max_generation_mw: Some(50.0),
+                block_id: Some(3),
+            },
+            HydroUnitGroupBoundsRow {
+                hydro_id: EntityId::from(6),
+                hydro_unit_group_id: EntityId::from(10),
+                stage_id: 4,
+                min_turbined_m3s: Some(1.0),
+                max_turbined_m3s: None,
+                min_generation_mw: None,
+                max_generation_mw: None,
+                block_id: None,
+            },
+        ];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidReference)
+            .filter(|e| {
+                e.file == std::path::Path::new("constraints/hydro_unit_group_bounds.parquet")
+            })
+            .collect();
+        assert!(
+            inv.is_empty(),
+            "expected no hydro_unit_group_bounds errors, got: {:?}",
+            inv.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
     }
 
     /// `LineBoundsRow` referencing a non-existent line produces 1 error.
@@ -2446,6 +2697,311 @@ mod tests {
         assert!(
             inv[0].message.contains("non-existent Hydro 99"),
             "error message must name non-existent Hydro 99, got: {}",
+            inv[0].message
+        );
+    }
+
+    // ── `bus_id` selector referential validation ───────────────────────
+
+    /// Hydro 7's two unit groups (ids 20, 21 at positions 0, 1) sit on buses 1
+    /// and 4; Hydro 8 has one group (id 30) on bus 9. Buses 1, 4, and 9 are all
+    /// declared; bus 777 is declared nowhere. Group ids, positions, and bus ids
+    /// are mutually disjoint so a group-id or position lookup cannot pass as a
+    /// bus lookup.
+    fn make_split_plant_bus_selector_fixture(dir: &TempDir) -> ParsedData {
+        let mut data = parse_case(dir);
+        data.buses.push(Bus {
+            id: EntityId::from(4),
+            name: "BUS_4".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            deficit_segments: vec![],
+            excess_cost: 100.0,
+        });
+        data.buses.push(Bus {
+            id: EntityId::from(9),
+            name: "BUS_9".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            deficit_segments: vec![],
+            excess_cost: 100.0,
+        });
+
+        let mut hydro7 = make_hydro(7, 1);
+        hydro7.unit_groups = vec![
+            make_unit_group(20, 1, 0.0, 100.0, 0.0, 100.0),
+            make_unit_group(21, 4, 0.0, 100.0, 0.0, 100.0),
+        ];
+
+        let mut hydro8 = make_hydro(8, 9);
+        hydro8.unit_groups = vec![make_unit_group(30, 9, 0.0, 100.0, 0.0, 100.0)];
+
+        data.hydros = vec![hydro7, hydro8];
+        data
+    }
+
+    /// A `hydro_turbined(7, bus=9)` term names bus 9, which genuinely exists in
+    /// the system (Hydro 8 has a group there) but on which Hydro 7 has no unit
+    /// group. The per-plant check rejects it even though bus 9 is a declared bus.
+    #[test]
+    fn test_generic_constraint_unknown_bus_selector_rejected() {
+        use cobre_core::{
+            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
+            VariableRef,
+        };
+
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = make_split_plant_bus_selector_fixture(&dir);
+
+        let gc = GenericConstraint {
+            id: EntityId::from(1),
+            name: "test_constraint".to_string(),
+            description: None,
+            expression: ConstraintExpression {
+                terms: vec![LinearTerm::literal(
+                    1.0,
+                    VariableRef::HydroTurbined {
+                        hydro_id: EntityId::from(7),
+                        block_id: None,
+                        bus_id: Some(EntityId::from(9)),
+                    },
+                )],
+            },
+            sense: ConstraintSense::LessEqual,
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+        };
+        data.generic_constraints = vec![gc];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidReference)
+            .filter(|e| e.file == std::path::Path::new("system/generic_constraints.json"))
+            .collect();
+        assert_eq!(
+            inv.len(),
+            1,
+            "expected exactly 1 InvalidReference, got: {:?}",
+            inv.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        assert!(
+            inv[0].message.contains("bus 9"),
+            "message must name bus 9, got: {}",
+            inv[0].message
+        );
+        assert!(
+            inv[0].message.contains("Hydro 7"),
+            "message must name Hydro 7, got: {}",
+            inv[0].message
+        );
+        assert!(
+            inv[0].message.contains("GenericConstraint 1 term[0]"),
+            "message must name the constraint's term label, got: {}",
+            inv[0].message
+        );
+    }
+
+    /// The same fixture with the term's `bus_id` changed to `Some(EntityId(4))`
+    /// (a real bus of Hydro 7's second group) and a second constraint whose
+    /// `HydroGeneration` term carries `bus_id: None` (the plant-wide reference)
+    /// produce no finding: `None` stays silent, and resolving membership by
+    /// bus rather than group id accepts the valid selector.
+    #[test]
+    fn test_generic_constraint_valid_bus_selector_and_none_accepted() {
+        use cobre_core::{
+            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
+            VariableRef,
+        };
+
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = make_split_plant_bus_selector_fixture(&dir);
+
+        let gc_turbined = GenericConstraint {
+            id: EntityId::from(1),
+            name: "test_constraint_turbined".to_string(),
+            description: None,
+            expression: ConstraintExpression {
+                terms: vec![LinearTerm::literal(
+                    1.0,
+                    VariableRef::HydroTurbined {
+                        hydro_id: EntityId::from(7),
+                        block_id: None,
+                        bus_id: Some(EntityId::from(4)),
+                    },
+                )],
+            },
+            sense: ConstraintSense::LessEqual,
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+        };
+        let gc_generation = GenericConstraint {
+            id: EntityId::from(2),
+            name: "test_constraint_generation".to_string(),
+            description: None,
+            expression: ConstraintExpression {
+                terms: vec![LinearTerm::literal(
+                    1.0,
+                    VariableRef::HydroGeneration {
+                        hydro_id: EntityId::from(7),
+                        block_id: None,
+                        bus_id: None,
+                    },
+                )],
+            },
+            sense: ConstraintSense::LessEqual,
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+        };
+        data.generic_constraints = vec![gc_turbined, gc_generation];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidReference)
+            .filter(|e| e.file == std::path::Path::new("system/generic_constraints.json"))
+            .collect();
+        assert!(
+            inv.is_empty(),
+            "expected no InvalidReference against generic_constraints.json, got: {:?}",
+            inv.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+    }
+
+    /// A `hydro_generation(99, bus=1)` term where Hydro 99 does not exist emits
+    /// only the `hydro_id` finding — the bus half is unanswerable without a
+    /// plant and must not also fire.
+    #[test]
+    fn test_generic_constraint_unknown_hydro_with_selector_emits_one_finding() {
+        use cobre_core::{
+            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
+            VariableRef,
+        };
+
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+
+        let gc = GenericConstraint {
+            id: EntityId::from(1),
+            name: "test_constraint".to_string(),
+            description: None,
+            expression: ConstraintExpression {
+                terms: vec![LinearTerm::literal(
+                    1.0,
+                    VariableRef::HydroGeneration {
+                        hydro_id: EntityId::from(99),
+                        block_id: None,
+                        bus_id: Some(EntityId::from(1)),
+                    },
+                )],
+            },
+            sense: ConstraintSense::LessEqual,
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+        };
+        data.generic_constraints = vec![gc];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidReference)
+            .filter(|e| e.file == std::path::Path::new("system/generic_constraints.json"))
+            .collect();
+        assert_eq!(
+            inv.len(),
+            1,
+            "expected exactly 1 InvalidReference, got: {:?}",
+            inv.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        assert!(
+            inv[0].message.contains("Hydro 99"),
+            "message must name Hydro 99, got: {}",
+            inv[0].message
+        );
+        assert!(
+            !inv[0].message.contains("bus"),
+            "message must not carry a bus finding, got: {}",
+            inv[0].message
+        );
+    }
+
+    /// A bus that exists in no plant's group set and is not a declared bus at
+    /// all is rejected with exactly one finding: the per-plant check subsumes
+    /// the "bus does not exist" case, so no second finding is added.
+    #[test]
+    fn test_generic_constraint_nonexistent_bus_selector_emits_one_finding() {
+        use cobre_core::{
+            ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig,
+            VariableRef,
+        };
+
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = make_split_plant_bus_selector_fixture(&dir);
+
+        let gc = GenericConstraint {
+            id: EntityId::from(1),
+            name: "test_constraint".to_string(),
+            description: None,
+            expression: ConstraintExpression {
+                terms: vec![LinearTerm::literal(
+                    1.0,
+                    VariableRef::HydroTurbined {
+                        hydro_id: EntityId::from(7),
+                        block_id: None,
+                        bus_id: Some(EntityId::from(777)),
+                    },
+                )],
+            },
+            sense: ConstraintSense::LessEqual,
+            slack: SlackConfig {
+                enabled: false,
+                penalty: None,
+            },
+        };
+        data.generic_constraints = vec![gc];
+
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidReference)
+            .filter(|e| e.file == std::path::Path::new("system/generic_constraints.json"))
+            .collect();
+        assert_eq!(
+            inv.len(),
+            1,
+            "expected exactly 1 InvalidReference, got: {:?}",
+            inv.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        assert!(
+            inv[0].message.contains("bus 777"),
+            "message must name bus 777, got: {}",
+            inv[0].message
+        );
+        assert!(
+            inv[0].message.contains("Hydro 7"),
+            "message must name Hydro 7, got: {}",
             inv[0].message
         );
     }

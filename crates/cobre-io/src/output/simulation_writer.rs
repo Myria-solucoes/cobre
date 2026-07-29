@@ -8,6 +8,7 @@
 //! simulation/
 //!   costs/scenario_id=0000/data.parquet
 //!   hydros/scenario_id=0000/data.parquet
+//!   hydro_bus_generation/scenario_id=0000/data.parquet
 //!   thermals/scenario_id=0000/data.parquet
 //!   exchanges/scenario_id=0000/data.parquet
 //!   buses/scenario_id=0000/data.parquet
@@ -43,8 +44,8 @@ use crate::output::error::OutputError;
 use crate::output::parquet_config::ParquetWriterConfig;
 use crate::output::schemas::{
     buses_schema, contracts_schema, costs_schema, exchanges_schema, generic_violations_schema,
-    hydros_schema, in_transit_schema, inflow_lags_schema, non_controllables_schema,
-    pumping_stations_schema, thermals_schema,
+    hydro_bus_generation_schema, hydros_schema, in_transit_schema, inflow_lags_schema,
+    non_controllables_schema, pumping_stations_schema, thermals_schema,
 };
 
 // Payload types (mirrors solver simulation result types)
@@ -333,6 +334,24 @@ pub struct TransitBucketWriteRecord {
     pub delayed_arrival_hm3: f64,
 }
 
+/// Per-cell hydro dispatch result for one (stage, block, hydro, bus) tuple —
+/// one LP cell.
+#[derive(Debug)]
+pub struct HydroBusWriteRecord {
+    /// Stage index (0-based).
+    pub stage_id: u32,
+    /// Block index, or `None` for stage-level rows.
+    pub block_id: Option<u32>,
+    /// Hydro plant entity ID.
+    pub hydro_id: i32,
+    /// Bus entity ID owning this cell.
+    pub bus_id: i32,
+    /// Turbined flow in m³/s.
+    pub turbined_m3s: f64,
+    /// Active power generation in MW.
+    pub generation_mw: f64,
+}
+
 /// Generic constraint violation for one (stage, block, constraint) tuple.
 #[derive(Debug)]
 pub struct GenericViolationWriteRecord {
@@ -357,6 +376,8 @@ pub struct StageWritePayload {
     pub costs: Vec<CostWriteRecord>,
     /// Hydro plant records for this stage.
     pub hydros: Vec<HydroWriteRecord>,
+    /// Per-cell hydro dispatch records for this stage.
+    pub hydro_bus_generation: Vec<HydroBusWriteRecord>,
     /// Thermal unit records for this stage.
     pub thermals: Vec<ThermalWriteRecord>,
     /// Exchange records for this stage.
@@ -472,6 +493,10 @@ impl SimulationParquetWriter {
             // inflow_lags is gated on hydro count, not its own.
             std::fs::create_dir_all(sim_dir.join("inflow_lags"))
                 .map_err(|e| OutputError::io(sim_dir.join("inflow_lags"), e))?;
+            // Gated on hydro count, not a multi-bus predicate: every hydro
+            // study emits this file, single-bus systems included.
+            std::fs::create_dir_all(sim_dir.join("hydro_bus_generation"))
+                .map_err(|e| OutputError::io(sim_dir.join("hydro_bus_generation"), e))?;
         }
         if system.n_thermals() > 0 {
             std::fs::create_dir_all(sim_dir.join("thermals"))
@@ -565,6 +590,33 @@ impl SimulationParquetWriter {
             write_parquet_atomic(&file_path, &batch, &self.config)?;
             self.partitions_written
                 .push(format!("simulation/hydros/{partition_suffix}/data.parquet"));
+        }
+
+        if result
+            .stages
+            .iter()
+            .any(|s| !s.hydro_bus_generation.is_empty())
+        {
+            let part_dir = sim_dir.join("hydro_bus_generation").join(&partition_suffix);
+            std::fs::create_dir_all(&part_dir).map_err(|e| OutputError::io(&part_dir, e))?;
+            let n: usize = result
+                .stages
+                .iter()
+                .map(|s| s.hydro_bus_generation.len())
+                .sum();
+            let batch = build_hydro_bus_generation_batch(
+                result
+                    .stages
+                    .iter()
+                    .flat_map(|s| s.hydro_bus_generation.iter()),
+                &self.block_durations,
+                n,
+            )?;
+            let file_path = part_dir.join("data.parquet");
+            write_parquet_atomic(&file_path, &batch, &self.config)?;
+            self.partitions_written.push(format!(
+                "simulation/hydro_bus_generation/{partition_suffix}/data.parquet"
+            ));
         }
 
         if result.stages.iter().any(|s| !s.thermals.is_empty()) {
@@ -1073,6 +1125,50 @@ fn build_hydros_batch<'a>(
         ],
     )
     .map_err(|e| OutputError::serialization("hydros", e.to_string()))
+}
+
+/// Build the `hydro_bus_generation` `RecordBatch`. Derived column:
+/// - `generation_mwh = generation_mw * block_duration_hours`
+#[allow(clippy::cast_possible_wrap)]
+fn build_hydro_bus_generation_batch<'a>(
+    records: impl IntoIterator<Item = &'a HydroBusWriteRecord>,
+    block_durations: &[Vec<f64>],
+    n: usize,
+) -> Result<RecordBatch, OutputError> {
+    let schema = Arc::new(hydro_bus_generation_schema());
+
+    let mut stage_id = Int32Builder::with_capacity(n);
+    let mut block_id = Int32Builder::with_capacity(n);
+    let mut hydro_id = Int32Builder::with_capacity(n);
+    let mut bus_id = Int32Builder::with_capacity(n);
+    let mut turbined_m3s = Float64Builder::with_capacity(n);
+    let mut generation_mw = Float64Builder::with_capacity(n);
+    let mut generation_mwh = Float64Builder::with_capacity(n);
+
+    for r in records {
+        let dur = block_duration(block_durations, r.stage_id, r.block_id);
+        stage_id.append_value(r.stage_id as i32);
+        block_id.append_option(r.block_id.map(|b| b as i32));
+        hydro_id.append_value(r.hydro_id);
+        bus_id.append_value(r.bus_id);
+        turbined_m3s.append_value(r.turbined_m3s);
+        generation_mw.append_value(r.generation_mw);
+        generation_mwh.append_value(r.generation_mw * dur);
+    }
+
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(stage_id.finish()),
+            Arc::new(block_id.finish()),
+            Arc::new(hydro_id.finish()),
+            Arc::new(bus_id.finish()),
+            Arc::new(turbined_m3s.finish()),
+            Arc::new(generation_mw.finish()),
+            Arc::new(generation_mwh.finish()),
+        ],
+    )
+    .map_err(|e| OutputError::serialization("hydro_bus_generation", e.to_string()))
 }
 
 /// Build the thermals `RecordBatch`. Derived column:
@@ -1831,6 +1927,7 @@ mod tests {
                     make_hydro_record(s, Some(0), 1),
                     make_hydro_record(s, Some(0), 2),
                 ],
+                hydro_bus_generation: vec![],
                 thermals: vec![],
                 exchanges: vec![],
                 buses: vec![],
@@ -2181,6 +2278,7 @@ mod tests {
             stage_id: 0,
             costs: vec![],
             hydros: vec![],
+            hydro_bus_generation: vec![],
             thermals: vec![],
             exchanges: vec![],
             buses: vec![],
@@ -2696,6 +2794,7 @@ mod tests {
             stage_id: 0,
             costs: vec![],
             hydros: vec![],
+            hydro_bus_generation: vec![],
             thermals: vec![],
             exchanges: vec![],
             buses: vec![],
@@ -2742,6 +2841,7 @@ mod tests {
             stage_id: 0,
             costs: vec![],
             hydros: vec![],
+            hydro_bus_generation: vec![],
             thermals: vec![],
             exchanges: vec![],
             buses: vec![],
@@ -2820,5 +2920,280 @@ mod tests {
         assert_eq!((i32_col("hydro_id", 1), i32_col("lag", 1)), (1, 2));
         assert_eq!(f64_col("in_transit_volume_hm3", 1), 22.0);
         assert_eq!(f64_col("delayed_arrival_hm3", 1), 0.0);
+    }
+
+    #[test]
+    fn no_hydro_bus_generation_partition_when_records_are_empty() {
+        let tmp = tempfile::tempdir().expect("tempdir must succeed");
+        std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
+
+        let system = make_test_system();
+        let config = ParquetWriterConfig::default();
+        let mut writer =
+            SimulationParquetWriter::new(tmp.path(), &system, &config).expect("new must succeed");
+
+        writer
+            .write_scenario(make_scenario_payload(0, 2))
+            .expect("write_scenario must succeed");
+
+        assert!(
+            !tmp.path()
+                .join("simulation/hydro_bus_generation/scenario_id=0000")
+                .exists(),
+            "no empty hydro_bus_generation per-scenario partition must ship when \
+             a scenario's stages carry no cell records"
+        );
+
+        let output = writer.finalize(0);
+        assert!(
+            !output
+                .partitions_written
+                .iter()
+                .any(|p| p.contains("hydro_bus_generation")),
+            "partitions_written must contain no hydro_bus_generation entry"
+        );
+    }
+
+    #[test]
+    fn hydro_bus_generation_directory_created_for_a_hydro_system() {
+        use arrow::array::Array;
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        let tmp = tempfile::tempdir().expect("tempdir must succeed");
+        std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
+
+        let system = make_test_system();
+        assert!(
+            system.n_hydros() > 0,
+            "fixture must have a hydro so the directory gate fires"
+        );
+        let config = ParquetWriterConfig::default();
+        let mut writer =
+            SimulationParquetWriter::new(tmp.path(), &system, &config).expect("new must succeed");
+
+        assert!(
+            tmp.path().join("simulation/hydro_bus_generation").is_dir(),
+            "simulation/hydro_bus_generation must exist as a directory for a hydro system"
+        );
+
+        // Single-bus end-to-end run: one cell per plant (the identity
+        // partition), so hydro_bus_generation's row count matches hydros'.
+        let stage0 = StageWritePayload {
+            stage_id: 0,
+            costs: vec![],
+            hydros: vec![
+                make_hydro_record(0, Some(0), 1),
+                make_hydro_record(0, Some(0), 2),
+            ],
+            hydro_bus_generation: vec![
+                HydroBusWriteRecord {
+                    stage_id: 0,
+                    block_id: Some(0),
+                    hydro_id: 1,
+                    bus_id: 1,
+                    turbined_m3s: 80.0,
+                    generation_mw: 50.0,
+                },
+                HydroBusWriteRecord {
+                    stage_id: 0,
+                    block_id: Some(0),
+                    hydro_id: 2,
+                    bus_id: 1,
+                    turbined_m3s: 80.0,
+                    generation_mw: 50.0,
+                },
+            ],
+            thermals: vec![],
+            exchanges: vec![],
+            buses: vec![],
+            pumping_stations: vec![],
+            contracts: vec![],
+            non_controllables: vec![],
+            inflow_lags: vec![],
+            transit_buckets: vec![],
+            generic_violations: vec![],
+        };
+        writer
+            .write_scenario(ScenarioWritePayload {
+                scenario_id: 0,
+                stages: vec![stage0],
+            })
+            .expect("write_scenario must succeed");
+
+        let read_batch = |path: &std::path::Path| {
+            let file =
+                std::fs::File::open(path).unwrap_or_else(|e| panic!("{path:?} must open: {e}"));
+            ParquetRecordBatchReaderBuilder::try_new(file)
+                .expect("reader builder must succeed")
+                .build()
+                .expect("reader must build")
+                .next()
+                .expect("must have rows")
+                .expect("batch must be Ok")
+        };
+
+        let hydros_batch = read_batch(
+            &tmp.path()
+                .join("simulation/hydros/scenario_id=0000/data.parquet"),
+        );
+        let bus_path = tmp
+            .path()
+            .join("simulation/hydro_bus_generation/scenario_id=0000/data.parquet");
+        assert!(bus_path.exists(), "hydro_bus_generation parquet must exist");
+        let bus_batch = read_batch(&bus_path);
+
+        assert_eq!(
+            bus_batch.num_rows(),
+            hydros_batch.num_rows(),
+            "hydro_bus_generation row count must equal the hydros row count \
+             under the identity partition"
+        );
+
+        let bus_id_col = bus_batch
+            .column_by_name("bus_id")
+            .expect("bus_id column must exist");
+        assert_eq!(
+            bus_id_col.null_count(),
+            0,
+            "every hydro_bus_generation row's bus_id must be non-null"
+        );
+    }
+
+    #[test]
+    fn write_scenario_writes_hydro_bus_generation_partition_round_trip() {
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        let tmp = tempfile::tempdir().expect("tempdir must succeed");
+        std::fs::create_dir_all(tmp.path().join("simulation")).unwrap();
+
+        // Stage 0 (block 0, duration 720h): same hydro_id (7) on two distinct
+        // bus_ids (11, 22). Stage 1 (block 0, duration 744h): a row whose
+        // stage_id/block_id/hydro_id/bus_id are mutually distinct (1, 0, 5, 9).
+        let system = make_test_system();
+        let config = ParquetWriterConfig::default();
+        let mut writer =
+            SimulationParquetWriter::new(tmp.path(), &system, &config).expect("new must succeed");
+
+        let stage0 = StageWritePayload {
+            stage_id: 0,
+            costs: vec![],
+            hydros: vec![],
+            hydro_bus_generation: vec![
+                HydroBusWriteRecord {
+                    stage_id: 0,
+                    block_id: Some(0),
+                    hydro_id: 7,
+                    bus_id: 11,
+                    turbined_m3s: 30.0,
+                    generation_mw: 12.0,
+                },
+                HydroBusWriteRecord {
+                    stage_id: 0,
+                    block_id: Some(0),
+                    hydro_id: 7,
+                    bus_id: 22,
+                    turbined_m3s: 45.0,
+                    generation_mw: 18.0,
+                },
+            ],
+            thermals: vec![],
+            exchanges: vec![],
+            buses: vec![],
+            pumping_stations: vec![],
+            contracts: vec![],
+            non_controllables: vec![],
+            inflow_lags: vec![],
+            transit_buckets: vec![],
+            generic_violations: vec![],
+        };
+        let stage1 = StageWritePayload {
+            stage_id: 1,
+            costs: vec![],
+            hydros: vec![],
+            hydro_bus_generation: vec![HydroBusWriteRecord {
+                stage_id: 1,
+                block_id: Some(0),
+                hydro_id: 5,
+                bus_id: 9,
+                turbined_m3s: 13.0,
+                generation_mw: 1.0,
+            }],
+            thermals: vec![],
+            exchanges: vec![],
+            buses: vec![],
+            pumping_stations: vec![],
+            contracts: vec![],
+            non_controllables: vec![],
+            inflow_lags: vec![],
+            transit_buckets: vec![],
+            generic_violations: vec![],
+        };
+        writer
+            .write_scenario(ScenarioWritePayload {
+                scenario_id: 0,
+                stages: vec![stage0, stage1],
+            })
+            .expect("write_scenario must succeed");
+
+        let path = tmp
+            .path()
+            .join("simulation/hydro_bus_generation/scenario_id=0000/data.parquet");
+        assert!(path.exists(), "hydro_bus_generation parquet must exist");
+
+        let file = std::fs::File::open(&path).expect("hydro_bus_generation parquet must open");
+        let batch = ParquetRecordBatchReaderBuilder::try_new(file)
+            .expect("reader builder must succeed")
+            .build()
+            .expect("reader must build")
+            .next()
+            .expect("must have rows")
+            .expect("batch must be Ok");
+
+        assert_eq!(
+            batch.schema().fields(),
+            hydro_bus_generation_schema().fields(),
+            "written schema must match hydro_bus_generation_schema()"
+        );
+        assert_eq!(batch.num_rows(), 3, "one row per declared cell");
+
+        let i32_col = |name: &str, row: usize| {
+            batch
+                .column_by_name(name)
+                .unwrap_or_else(|| panic!("{name} column must exist"))
+                .as_any()
+                .downcast_ref::<arrow::array::Int32Array>()
+                .unwrap_or_else(|| panic!("{name} must be Int32Array"))
+                .value(row)
+        };
+        let f64_col = |name: &str, row: usize| {
+            batch
+                .column_by_name(name)
+                .unwrap_or_else(|| panic!("{name} column must exist"))
+                .as_any()
+                .downcast_ref::<arrow::array::Float64Array>()
+                .unwrap_or_else(|| panic!("{name} must be Float64Array"))
+                .value(row)
+        };
+
+        assert_eq!(
+            (i32_col("bus_id", 0), i32_col("bus_id", 1)),
+            (11, 22),
+            "the two stage-0 rows must carry their two distinct bus_id values"
+        );
+        assert_eq!(
+            f64_col("generation_mwh", 0),
+            12.0 * 720.0,
+            "row 0 generation_mwh must equal generation_mw * this row's stage duration"
+        );
+        assert_eq!(
+            f64_col("generation_mwh", 1),
+            18.0 * 720.0,
+            "row 1 generation_mwh must equal generation_mw * this row's stage duration"
+        );
+        assert_eq!(
+            f64_col("generation_mwh", 2),
+            1.0 * 744.0,
+            "row 2 generation_mwh must equal generation_mw * its OWN (stage 1) duration"
+        );
     }
 }
