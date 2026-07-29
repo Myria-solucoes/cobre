@@ -99,7 +99,6 @@ fn make_id_date_misaligned_case(dir: &TempDir) {
             "id": 1,
             "name": "HYDRO_1_LATE",
             "operational_start_date": "2030-01-01",
-            "bus_id": 1,
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -126,7 +125,6 @@ fn make_id_date_misaligned_case(dir: &TempDir) {
             "id": 2,
             "name": "HYDRO_2_EARLY",
             "operational_start_date": "2020-01-01",
-            "bus_id": 1,
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 500.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -672,7 +670,6 @@ const TWO_ANCHOR_HYDROS_JSON: &str = r#"{
             "id": 10,
             "name": "HYDRO_SRC",
             "operational_start_date": "2024-01-01",
-            "bus_id": 1,
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 100.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -699,7 +696,6 @@ const TWO_ANCHOR_HYDROS_JSON: &str = r#"{
             "id": 20,
             "name": "HYDRO_DST",
             "operational_start_date": "2024-01-01",
-            "bus_id": 1,
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 100.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1128,7 +1124,7 @@ fn ncs_bound_override_follows_declared_id_through_canonical_resort() {
 
 /// Two hydros whose `operational_start_date` order is the REVERSE of their id
 /// order (hydro 1 dated 2030, hydro 2 dated 2020), each declaring exactly one
-/// hydro unit group (mandatory since epic-09), plus a
+/// hydro unit group (declaration is mandatory), plus a
 /// `constraints/hydro_unit_group_bounds.parquet` override declared only for
 /// hydro 1's group at stage 0 (`max_turbined_m3s=12345.0`). Exercises
 /// `resolve_hydro_unit_group_bounds` -- the group axis, for the
@@ -1162,7 +1158,6 @@ fn make_hydro_unit_group_id_date_misaligned_case(dir: &TempDir) {
             "id": 1,
             "name": "HYDRO_1_LATE",
             "operational_start_date": "2030-01-01",
-            "bus_id": 1,
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1189,7 +1184,6 @@ fn make_hydro_unit_group_id_date_misaligned_case(dir: &TempDir) {
             "id": 2,
             "name": "HYDRO_2_EARLY",
             "operational_start_date": "2020-01-01",
-            "bus_id": 1,
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 500.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1374,7 +1368,6 @@ fn make_three_hydro_key_duality_case(dir: &TempDir) {
             "id": 1,
             "name": "HYDRO_A",
             "operational_start_date": "2020-06-15",
-            "bus_id": 1,
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 100.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1401,7 +1394,6 @@ fn make_three_hydro_key_duality_case(dir: &TempDir) {
             "id": 2,
             "name": "HYDRO_B",
             "operational_start_date": "2010-01-01",
-            "bus_id": 1,
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 100.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1428,7 +1420,6 @@ fn make_three_hydro_key_duality_case(dir: &TempDir) {
             "id": 3,
             "name": "HYDRO_C",
             "operational_start_date": "2015-03-01",
-            "bus_id": 1,
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 100.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1606,7 +1597,6 @@ fn make_hydro_referential_error_case(dir: &TempDir) {
             "id": 1,
             "name": "HYDRO_1_LATE",
             "operational_start_date": "2030-01-01",
-            "bus_id": 999,
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1621,7 +1611,7 @@ fn make_hydro_referential_error_case(dir: &TempDir) {
                 {
                     "id": 0,
                     "name": "HYDRO_1_LATE",
-                    "bus_id": 1,
+                    "bus_id": 999,
                     "min_generation_mw": 0.0,
                     "max_generation_mw": 20000.0,
                     "min_turbined_m3s": 0.0,
@@ -1633,7 +1623,6 @@ fn make_hydro_referential_error_case(dir: &TempDir) {
             "id": 2,
             "name": "HYDRO_2_EARLY",
             "operational_start_date": "2020-01-01",
-            "bus_id": 999,
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 500.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -1648,7 +1637,7 @@ fn make_hydro_referential_error_case(dir: &TempDir) {
                 {
                     "id": 0,
                     "name": "HYDRO_2_EARLY",
-                    "bus_id": 1,
+                    "bus_id": 999,
                     "min_generation_mw": 0.0,
                     "max_generation_mw": 300.0,
                     "min_turbined_m3s": 0.0,
@@ -1702,10 +1691,10 @@ fn referential_error_order_survives_the_post_validation_sort() {
     };
 
     let pos_h1 = description
-        .find("Hydro 1 references non-existent Bus 999")
+        .find("Hydro 1 unit group 0 references non-existent Bus 999")
         .expect("description must mention Hydro 1's bad bus reference");
     let pos_h2 = description
-        .find("Hydro 2 references non-existent Bus 999")
+        .find("Hydro 2 unit group 0 references non-existent Bus 999")
         .expect("description must mention Hydro 2's bad bus reference");
 
     assert!(

@@ -5,7 +5,6 @@
       "id": 0,
       "name": "D_down",
       "operational_start_date": "2020-01-01",
-      "bus_id": 0,
       "downstream_id": 2,
       "entry_stage_id": 4,
       "filling": { "start_stage_id": 1, "filling_min_rate_m3s": 10.0 },
@@ -40,7 +39,6 @@
       "id": 1,
       "name": "U_up",
       "operational_start_date": "2020-01-02",
-      "bus_id": 0,
       "downstream_id": 0,
       "entry_stage_id": 5,
       "filling": { "start_stage_id": 3, "filling_min_rate_m3s": 10.0 },
@@ -75,7 +73,6 @@
       "id": 2,
       "name": "H3_sink",
       "operational_start_date": "2020-01-03",
-      "bus_id": 0,
       "downstream_id": null,
       "reservoir": {
         "min_storage_hm3": 0.0,
@@ -108,7 +105,6 @@
       "id": 3,
       "name": "H4_control",
       "operational_start_date": "2020-01-04",
-      "bus_id": 0,
       "downstream_id": null,
       "reservoir": {
         "min_storage_hm3": 0.0,

@@ -120,7 +120,7 @@ fn check_line_references(data: &ParsedData, ctx: &mut ValidationContext, bus_ids
     }
 }
 
-/// Hydro -> bus, downstream hydro, diversion, and unit group bus references.
+/// Hydro -> downstream hydro, diversion, and unit group bus references.
 fn check_hydro_references(
     data: &ParsedData,
     ctx: &mut ValidationContext,
@@ -129,18 +129,6 @@ fn check_hydro_references(
 ) {
     for hydro in &data.hydros {
         let entity_str = format!("Hydro {}", hydro.id.0);
-
-        if !bus_ids.contains(&hydro.bus_id.0) {
-            ctx.add_error(
-                ErrorKind::InvalidReference,
-                "system/hydros.json",
-                Some(&entity_str),
-                format!(
-                    "{entity_str} references non-existent Bus {} via field 'bus_id'",
-                    hydro.bus_id.0
-                ),
-            );
-        }
 
         if let Some(downstream_id) = hydro.downstream_id
             && !hydro_ids.contains(&downstream_id.0)
@@ -171,7 +159,7 @@ fn check_hydro_references(
         }
 
         for group in &hydro.unit_groups {
-            if group.bus_id != hydro.bus_id && !bus_ids.contains(&group.bus_id.0) {
+            if !bus_ids.contains(&group.bus_id.0) {
                 let group_str = format!("{entity_str} unit group {}", group.id.0);
                 ctx.add_error(
                     ErrorKind::InvalidReference,
@@ -1219,13 +1207,12 @@ mod tests {
         }
     }
 
-    fn make_hydro(id: i32, bus_id: i32) -> Hydro {
+    fn make_hydro(id: i32) -> Hydro {
         let mut hydro = Hydro {
             unit_groups: Vec::new(),
             id: EntityId::from(id),
             name: format!("Hydro_{id}"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId::from(bus_id),
             downstream_id: None,
             travel_time_hours: None,
             entry_stage_id: None,
@@ -1376,7 +1363,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
-        let mut hydro = make_hydro(3, 1);
+        let mut hydro = make_hydro(3);
         hydro.downstream_id = Some(EntityId::from(100)); // hydro 100 does not exist
         data.hydros = vec![hydro];
         let mut ctx = ValidationContext::new();
@@ -1473,37 +1460,58 @@ mod tests {
         );
     }
 
-    /// Hydro with a valid bus_id produces no error.
+    /// A hydro with no declared unit groups produces no referential error —
+    /// the group-bus check has nothing to iterate.
     #[test]
     fn test_hydro_valid_bus_ref() {
         let dir = TempDir::new().unwrap();
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
-        data.hydros = vec![make_hydro(10, 1)]; // bus 1 exists
+        data.hydros = vec![make_hydro(10)];
         let mut ctx = ValidationContext::new();
         validate_referential_integrity(&data, &mut ctx);
         assert!(!ctx.has_errors());
     }
 
-    /// Hydro with a missing bus_id produces one `InvalidReference` error.
+    /// A hydro whose plant `bus_id` names a nonexistent bus is no longer
+    /// checked at plant level: with a group on a valid bus, Layer 3 reports
+    /// no error at all.
     #[test]
-    fn test_hydro_invalid_bus_ref() {
+    fn test_hydro_invalid_plant_bus_with_valid_group_bus_produces_no_error() {
         let dir = TempDir::new().unwrap();
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
-        data.hydros = vec![make_hydro(10, 42)]; // bus 42 does not exist
+        let mut hydro = make_hydro(10);
+        hydro.unit_groups = vec![make_unit_group(0, 1, 0.0, 100.0, 0.0, 100.0)]; // group bus 1 exists
+        data.hydros = vec![hydro];
         let mut ctx = ValidationContext::new();
         validate_referential_integrity(&data, &mut ctx);
-        assert!(ctx.has_errors());
-        let errors = ctx.errors();
-        let inv_ref: Vec<_> = errors
-            .iter()
+        assert!(!ctx.has_errors());
+    }
+
+    /// A hydro whose unit group's `bus_id` equals its own (also nonexistent)
+    /// plant `bus_id` is rejected — the distinctness clause that used to
+    /// suppress this case is gone. Exactly one `InvalidReference` is
+    /// reported and it names the unit group, not the plant.
+    #[test]
+    fn test_hydro_group_bus_equals_invalid_plant_bus_is_rejected() {
+        let dir = TempDir::new().unwrap();
+        make_minimal_case(&dir);
+        let mut data = parse_case(&dir);
+        let mut hydro = make_hydro(10);
+        hydro.unit_groups = vec![make_unit_group(0, 999, 0.0, 100.0, 0.0, 100.0)]; // group bus also 999
+        data.hydros = vec![hydro];
+        let mut ctx = ValidationContext::new();
+        validate_referential_integrity(&data, &mut ctx);
+        let inv: Vec<_> = ctx
+            .errors()
+            .into_iter()
             .filter(|e| e.kind == ErrorKind::InvalidReference)
             .collect();
-        assert_eq!(inv_ref.len(), 1);
-        assert!(inv_ref[0].message.contains("Hydro 10"));
-        assert!(inv_ref[0].message.contains("42"));
-        assert!(inv_ref[0].message.contains("bus_id"));
+        assert_eq!(inv.len(), 1);
+        assert!(inv[0].message.contains("Hydro 10 unit group 0"));
+        assert!(!inv[0].message.contains("Hydro 10 references"));
+        assert!(inv[0].message.contains("Bus 999"));
     }
 
     /// Hydro with `downstream_id = None` must not produce any error.
@@ -1512,7 +1520,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
-        let mut hydro = make_hydro(10, 1);
+        let mut hydro = make_hydro(10);
         hydro.downstream_id = None;
         data.hydros = vec![hydro];
         let mut ctx = ValidationContext::new();
@@ -1529,7 +1537,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
-        let mut hydro = make_hydro(10, 1);
+        let mut hydro = make_hydro(10);
         hydro.diversion = None;
         data.hydros = vec![hydro];
         let mut ctx = ValidationContext::new();
@@ -1546,7 +1554,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
-        let mut hydro = make_hydro(10, 1);
+        let mut hydro = make_hydro(10);
         hydro.diversion = Some(DiversionChannel {
             downstream_id: EntityId::from(999), // does not exist
             max_flow_m3s: 100.0,
@@ -1583,7 +1591,7 @@ mod tests {
             excess_cost: 100.0,
         });
 
-        let mut hydro1 = make_hydro(1, 1);
+        let mut hydro1 = make_hydro(1);
         hydro1.unit_groups = vec![HydroUnitGroup {
             id: EntityId::from(4),
             name: "Group A".to_string(),
@@ -1594,7 +1602,7 @@ mod tests {
             max_turbined_m3s: 100.0,
         }];
 
-        let mut hydro2 = make_hydro(2, 1);
+        let mut hydro2 = make_hydro(2);
         hydro2.unit_groups = vec![HydroUnitGroup {
             id: EntityId::from(7),
             name: "Group B".to_string(),
@@ -1640,7 +1648,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
-        data.hydros = vec![make_hydro(10, 1)];
+        data.hydros = vec![make_hydro(10)];
         data.pumping_stations = vec![make_pumping(1, 1, 10, 10)]; // bus 1, hydros 10,10 all exist
         let mut ctx = ValidationContext::new();
         validate_referential_integrity(&data, &mut ctx);
@@ -1653,7 +1661,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
-        data.hydros = vec![make_hydro(10, 1)];
+        data.hydros = vec![make_hydro(10)];
         // source hydro 999 missing, destination hydro 10 exists
         data.pumping_stations = vec![make_pumping(1, 1, 999, 10)];
         let mut ctx = ValidationContext::new();
@@ -1675,7 +1683,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
-        data.hydros = vec![make_hydro(10, 1)];
+        data.hydros = vec![make_hydro(10)];
         // bus 777 missing; source/destination hydro 10 exists
         data.pumping_stations = vec![make_pumping(1, 777, 10, 10)];
         let mut ctx = ValidationContext::new();
@@ -1697,7 +1705,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
-        data.hydros = vec![make_hydro(10, 1)];
+        data.hydros = vec![make_hydro(10)];
         // source hydro 10 exists; destination hydro 999 missing
         data.pumping_stations = vec![make_pumping(1, 1, 10, 999)];
         let mut ctx = ValidationContext::new();
@@ -1825,7 +1833,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
-        data.hydros = vec![make_hydro(10, 1)];
+        data.hydros = vec![make_hydro(10)];
         let mut profiles = BTreeMap::new();
         profiles.insert(
             "profile1".to_string(),
@@ -1927,12 +1935,12 @@ mod tests {
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
 
-        let mut hydro7 = make_hydro(7, 1);
+        let mut hydro7 = make_hydro(7);
         hydro7.unit_groups = vec![
             make_unit_group(0, 1, 0.0, 100.0, 0.0, 100.0),
             make_unit_group(3, 1, 0.0, 100.0, 0.0, 100.0),
         ];
-        let mut hydro2 = make_hydro(2, 1);
+        let mut hydro2 = make_hydro(2);
         hydro2.unit_groups = vec![make_unit_group(4, 1, 0.0, 100.0, 0.0, 100.0)];
         data.hydros = vec![hydro7, hydro2];
 
@@ -1975,7 +1983,7 @@ mod tests {
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
 
-        let mut hydro7 = make_hydro(7, 1);
+        let mut hydro7 = make_hydro(7);
         hydro7.unit_groups = vec![
             make_unit_group(0, 1, 0.0, 100.0, 0.0, 100.0),
             make_unit_group(3, 1, 0.0, 100.0, 0.0, 100.0),
@@ -2021,12 +2029,12 @@ mod tests {
         make_minimal_case(&dir);
         let mut data = parse_case(&dir);
 
-        let mut hydro5 = make_hydro(5, 1);
+        let mut hydro5 = make_hydro(5);
         hydro5.unit_groups = vec![
             make_unit_group(7, 1, 0.0, 100.0, 0.0, 100.0),
             make_unit_group(2, 1, 0.0, 100.0, 0.0, 100.0),
         ];
-        let mut hydro6 = make_hydro(6, 1);
+        let mut hydro6 = make_hydro(6);
         hydro6.unit_groups = vec![
             make_unit_group(10, 1, 0.0, 100.0, 0.0, 100.0),
             make_unit_group(20, 1, 0.0, 100.0, 0.0, 100.0),
@@ -2725,13 +2733,13 @@ mod tests {
             excess_cost: 100.0,
         });
 
-        let mut hydro7 = make_hydro(7, 1);
+        let mut hydro7 = make_hydro(7);
         hydro7.unit_groups = vec![
             make_unit_group(20, 1, 0.0, 100.0, 0.0, 100.0),
             make_unit_group(21, 4, 0.0, 100.0, 0.0, 100.0),
         ];
 
-        let mut hydro8 = make_hydro(8, 9);
+        let mut hydro8 = make_hydro(8);
         hydro8.unit_groups = vec![make_unit_group(30, 9, 0.0, 100.0, 0.0, 100.0)];
 
         data.hydros = vec![hydro7, hydro8];

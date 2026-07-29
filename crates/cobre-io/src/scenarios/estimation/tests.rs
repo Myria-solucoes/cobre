@@ -445,7 +445,6 @@ fn build_system_with_user_stats(n_years: usize) -> System {
         id: hydro_id,
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(10),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -486,7 +485,7 @@ fn build_system_with_user_stats(n_years: usize) -> System {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(EntityId(10));
 
     SystemBuilder::new()
         .buses(vec![bus])
@@ -1288,7 +1287,6 @@ fn build_system_empty_models(n_years: usize) -> System {
         id: hydro_id,
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(10),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -1329,7 +1327,7 @@ fn build_system_empty_models(n_years: usize) -> System {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(EntityId(10));
 
     SystemBuilder::new()
         .buses(vec![bus])
@@ -1528,7 +1526,6 @@ fn make_hydro(hydro_id: EntityId, bus_id: EntityId) -> Hydro {
         id: hydro_id,
         name: format!("H{}", hydro_id.0),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id,
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -1569,7 +1566,7 @@ fn make_hydro(hydro_id: EntityId, bus_id: EntityId) -> Hydro {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(bus_id);
     hydro
 }
 

@@ -150,7 +150,6 @@ fn make_hydro(id: i32, downstream_id: Option<i32>) -> Hydro {
         id: EntityId(id),
         name: String::new(),
         operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(0),
         downstream_id: downstream_id.map(EntityId),
         travel_time_hours: None,
         entry_stage_id: None,
@@ -174,7 +173,7 @@ fn make_hydro(id: i32, downstream_id: Option<i32>) -> Hydro {
         filling: None,
         penalties: zero_penalties,
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(EntityId(0));
     hydro
 }
 
@@ -740,12 +739,11 @@ fn hydro_generation_fpha_second_hydro_block_2() {
 
 /// A padding plant (1 cell, global index 0) plus a two-bus split plant (cells
 /// 1 and 2) whose group ids (78, 77) differ from their `unit_groups`
-/// positions and whose own `Hydro::bus_id` (999) is neither group's bus (10,
-/// 20) — the fixture shape both bus-selector resolver tests need to
-/// discriminate a cell-bus lookup from a plant-bus or first-cell shortcut.
+/// positions — the fixture shape both bus-selector resolver tests need to
+/// discriminate a cell-bus lookup from a first-cell shortcut.
 fn bus_selector_hydros(generation_model: HydroGenerationModel) -> Vec<Hydro> {
     let padding = geometry_hydro(0);
-    let mut split = geometry_hydro_with_groups(
+    let split = geometry_hydro_with_groups(
         1,
         vec![
             make_unit_group(EntityId(78), EntityId(10), 0.0, 100.0, 0.0, 50.0),
@@ -753,7 +751,6 @@ fn bus_selector_hydros(generation_model: HydroGenerationModel) -> Vec<Hydro> {
         ],
         generation_model,
     );
-    split.bus_id = EntityId(999);
     vec![padding, split]
 }
 

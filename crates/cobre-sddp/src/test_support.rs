@@ -222,7 +222,6 @@ pub(crate) fn geometry_hydro(idx: usize) -> Hydro {
         id,
         name: String::new(),
         operational_start_date: NaiveDate::default(),
-        bus_id: id,
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -246,7 +245,7 @@ pub(crate) fn geometry_hydro(idx: usize) -> Hydro {
         filling: None,
         penalties: geometry_zero_penalties(),
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(id);
     hydro
 }
 
@@ -262,7 +261,7 @@ pub fn geometry_hydro_with_groups(
     let mut hydro = geometry_hydro(idx);
     hydro.unit_groups = unit_groups;
     hydro.generation_model = generation_model;
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(EntityId(i32::try_from(idx).unwrap_or(i32::MAX)));
     // Both calls earn their place: the declare covers a caller passing an empty
     // vec, and the sort supplies the id-ascending `unit_groups` that
     // `HydroCellIndex::build` documents as its precondition for keeping

@@ -56,7 +56,6 @@ fn make_stochastic_context() -> StochasticContext {
         id: EntityId(1),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(0),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -97,7 +96,7 @@ fn make_stochastic_context() -> StochasticContext {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(EntityId(0));
 
     let stage = Stage {
         index: 0,

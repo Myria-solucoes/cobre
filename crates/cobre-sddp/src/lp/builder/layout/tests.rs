@@ -235,7 +235,6 @@ fn membership_hydro(
         id: EntityId(id),
         name: format!("H{id}"),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: entry,
@@ -263,7 +262,7 @@ fn membership_hydro(
         filling,
         penalties: zero_hydro_penalties(),
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(EntityId(1));
     hydro
 }
 
@@ -2598,7 +2597,6 @@ impl TwoHydroMultiBusFixtures {
             make_unit_group(EntityId(10), bus_a, 0.0, 10.0, 0.0, 10.0),
             make_unit_group(EntityId(11), bus_b, 0.0, 10.0, 0.0, 10.0),
         ];
-        plant1.declare_mirror_unit_group();
         let hydros = vec![plant0, plant1];
         let cascade = CascadeTopology::build(&hydros);
         let hydro_cell_index = HydroCellIndex::build(&hydros);
@@ -2846,7 +2844,6 @@ impl FphaMultiBusFixtures {
             make_unit_group(EntityId(20), EntityId(60), 0.0, 10.0, 0.0, 10.0),
             make_unit_group(EntityId(21), EntityId(61), 0.0, 10.0, 0.0, 10.0),
         ];
-        plant2.declare_mirror_unit_group();
 
         let hydros = vec![plant0, plant1, plant2];
         let cascade = CascadeTopology::build(&hydros);

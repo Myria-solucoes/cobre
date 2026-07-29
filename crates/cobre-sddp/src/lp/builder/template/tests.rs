@@ -243,7 +243,6 @@ fn fixture_hydro(id: i32) -> Hydro {
         id: EntityId(id),
         name: format!("H{id}"),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -267,7 +266,7 @@ fn fixture_hydro(id: i32) -> Hydro {
         filling: None,
         penalties: hydro_penalties_zero(),
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(EntityId(1));
     hydro
 }
 
@@ -2009,7 +2008,6 @@ fn one_hydro_active_violations(n_stages: usize) -> System {
         id: EntityId(2),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -2050,7 +2048,7 @@ fn one_hydro_active_violations(n_stages: usize) -> System {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(EntityId(1));
 
     let stages: Vec<Stage> = (0..n_stages)
         .map(|i| Stage {
@@ -2629,7 +2627,6 @@ fn vtarget_filling_hydro(id: i32, start: i32, entry: i32) -> Hydro {
         id: EntityId(id),
         name: format!("H{id}"),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: Some(entry),
@@ -2656,7 +2653,7 @@ fn vtarget_filling_hydro(id: i32, start: i32, entry: i32) -> Hydro {
         }),
         penalties: hydro_penalties_zero(),
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(EntityId(1));
     hydro
 }
 
@@ -3501,7 +3498,6 @@ fn system_with_contracts_filling_and_anticipated() -> cobre_core::System {
         id: EntityId(1),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: Some(3),
@@ -3528,7 +3524,7 @@ fn system_with_contracts_filling_and_anticipated() -> cobre_core::System {
         }),
         penalties: hydro_penalties_zero(),
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(EntityId(1));
 
     let thermal = Thermal {
         id: EntityId(2),
@@ -3900,7 +3896,6 @@ fn filling_block_system(block_mode: BlockMode, n_blks: usize) -> System {
             id: EntityId(id),
             name: format!("H{id}"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(1),
             downstream_id: downstream.map(EntityId),
             travel_time_hours: None,
             entry_stage_id: Some(FILL_ENTRY_ID),
@@ -3927,7 +3922,7 @@ fn filling_block_system(block_mode: BlockMode, n_blks: usize) -> System {
             }),
             penalties: hydro_penalties_zero(),
         };
-        hydro.declare_mirror_unit_group();
+        hydro.declare_mirror_unit_group(EntityId(1));
         hydro
     };
 

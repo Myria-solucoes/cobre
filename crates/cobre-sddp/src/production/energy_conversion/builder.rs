@@ -293,7 +293,6 @@ mod tests {
             id: EntityId::from(id),
             name: format!("Hydro {id}"),
             operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId::from(1),
             downstream_id: downstream.map(EntityId::from),
             travel_time_hours: None,
             entry_stage_id: None,
@@ -317,7 +316,7 @@ mod tests {
             filling: None,
             penalties: penalties_zero(),
         };
-        hydro.declare_mirror_unit_group();
+        hydro.declare_mirror_unit_group(EntityId::from(1));
         hydro
     }
 
@@ -404,7 +403,7 @@ mod tests {
         // Re-declare against the post-mutation q_max — make_hydro()'s group already
         // mirrors the pre-mutation 50.0 and would otherwise go stale.
         h.unit_groups.clear();
-        h.declare_mirror_unit_group();
+        h.declare_mirror_unit_group(EntityId::from(1));
         h
     }
 

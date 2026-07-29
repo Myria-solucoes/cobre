@@ -1167,7 +1167,6 @@ mod interior_storage_bound_tests {
             id: EntityId(1),
             name: "H1".to_string(),
             operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(1),
             downstream_id: None,
             travel_time_hours: None,
             entry_stage_id: None,
@@ -1191,7 +1190,7 @@ mod interior_storage_bound_tests {
             filling: None,
             penalties: super::super::test_support::zero_hydro_penalties(),
         };
-        hydro.declare_mirror_unit_group();
+        hydro.declare_mirror_unit_group(EntityId(1));
         hydro
     }
 
@@ -1683,7 +1682,6 @@ mod diversion_bound_tests {
             id: EntityId(1),
             name: "H1".to_string(),
             operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(1),
             downstream_id: None,
             travel_time_hours: None,
             entry_stage_id: None,
@@ -1710,7 +1708,7 @@ mod diversion_bound_tests {
             filling: None,
             penalties: zero_hydro_penalties(),
         };
-        hydro.declare_mirror_unit_group();
+        hydro.declare_mirror_unit_group(EntityId(1));
         hydro
     }
 
@@ -2053,7 +2051,6 @@ mod filling_phase_gating_tests {
             id: EntityId(1),
             name: "H1".to_string(),
             operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(1),
             downstream_id: None,
             travel_time_hours: None,
             entry_stage_id: entry,
@@ -2081,7 +2078,7 @@ mod filling_phase_gating_tests {
             filling,
             penalties: zero_hydro_penalties(),
         };
-        hydro.declare_mirror_unit_group();
+        hydro.declare_mirror_unit_group(EntityId(1));
         hydro
     }
 
@@ -3645,7 +3642,6 @@ mod block_family_slack_tests {
             id: EntityId(id),
             name: format!("H{id}"),
             operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(1),
             downstream_id: None,
             travel_time_hours: None,
             entry_stage_id: None,
@@ -3669,7 +3665,7 @@ mod block_family_slack_tests {
             filling: None,
             penalties: zero_hydro_penalties(),
         };
-        hydro.declare_mirror_unit_group();
+        hydro.declare_mirror_unit_group(EntityId(1));
         hydro
     }
 
@@ -4035,7 +4031,6 @@ mod evaporation_slack_objective_tests {
             id: EntityId(1),
             name: "H1".to_string(),
             operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(1),
             downstream_id: None,
             travel_time_hours: None,
             entry_stage_id: None,
@@ -4059,7 +4054,7 @@ mod evaporation_slack_objective_tests {
             filling: None,
             penalties: zero_hydro_penalties(),
         };
-        hydro.declare_mirror_unit_group();
+        hydro.declare_mirror_unit_group(EntityId(1));
         hydro
     }
 
@@ -5938,7 +5933,6 @@ mod hydro_block_bound_tests {
             id: EntityId(id),
             name: format!("H{id}"),
             operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(1),
             downstream_id: None,
             travel_time_hours: None,
             entry_stage_id,
@@ -5969,7 +5963,7 @@ mod hydro_block_bound_tests {
             filling: None,
             penalties: zero_hydro_penalties(),
         };
-        hydro.declare_mirror_unit_group();
+        hydro.declare_mirror_unit_group(EntityId(1));
         hydro
     }
 
@@ -6924,7 +6918,6 @@ mod cell_column_bound_tests {
             id: EntityId(1),
             name: "H1".to_string(),
             operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(40),
             downstream_id: None,
             travel_time_hours: None,
             entry_stage_id: None,
@@ -6948,7 +6941,7 @@ mod cell_column_bound_tests {
             filling: None,
             penalties: zero_hydro_penalties(),
         };
-        hydro.declare_mirror_unit_group();
+        hydro.declare_mirror_unit_group(EntityId(40));
         hydro
     }
 
@@ -6967,7 +6960,6 @@ mod cell_column_bound_tests {
             id: EntityId(2),
             name: "H2".to_string(),
             operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(99),
             downstream_id: None,
             travel_time_hours: None,
             entry_stage_id: entry,
@@ -6991,7 +6983,7 @@ mod cell_column_bound_tests {
             filling,
             penalties: zero_hydro_penalties(),
         };
-        hydro.declare_mirror_unit_group();
+        hydro.declare_mirror_unit_group(EntityId(99));
         hydro
     }
 
@@ -7012,7 +7004,6 @@ mod cell_column_bound_tests {
             id: EntityId(id),
             name: format!("H{id}"),
             operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id,
             downstream_id: None,
             travel_time_hours: None,
             entry_stage_id: None,
@@ -7036,7 +7027,7 @@ mod cell_column_bound_tests {
             filling: None,
             penalties: zero_hydro_penalties(),
         };
-        hydro.declare_mirror_unit_group();
+        hydro.declare_mirror_unit_group(bus_id);
         hydro
     }
 

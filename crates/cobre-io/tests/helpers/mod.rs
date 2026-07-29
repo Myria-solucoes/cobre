@@ -203,7 +203,6 @@ pub fn make_multi_entity_case(dir: &TempDir) {
             "id": 1,
             "name": "HYDRO_1",
             "operational_start_date": "2024-01-01",
-            "bus_id": 1,
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -271,8 +270,8 @@ pub fn make_multi_entity_case(dir: &TempDir) {
 
 // ── make_referential_violation_case ───────────────────────────────────────────
 
-/// `make_multi_entity_case` with the hydro's `bus_id` set to a non-existent 999,
-/// so `load_case` must reject it for referential integrity.
+/// `make_multi_entity_case` with the hydro's unit group `bus_id` set to a
+/// non-existent 999, so `load_case` must reject it for referential integrity.
 pub fn make_referential_violation_case(dir: &TempDir) {
     make_multi_entity_case(dir);
 
@@ -285,7 +284,6 @@ pub fn make_referential_violation_case(dir: &TempDir) {
             "id": 1,
             "name": "HYDRO_1",
             "operational_start_date": "2024-01-01",
-            "bus_id": 999,
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },

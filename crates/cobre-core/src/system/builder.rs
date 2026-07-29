@@ -521,7 +521,6 @@ mod tests {
     fn hydro_without_groups(
         id: i32,
         name: &str,
-        bus_id: i32,
         min_generation_mw: f64,
         max_generation_mw: f64,
         min_turbined_m3s: f64,
@@ -531,7 +530,6 @@ mod tests {
             id: EntityId(id),
             name: name.to_string(),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
-            bus_id: EntityId(bus_id),
             downstream_id: None,
             travel_time_hours: None,
             entry_stage_id: None,
@@ -563,8 +561,8 @@ mod tests {
     /// proving errors are collected rather than short-circuited on the first.
     #[test]
     fn test_builder_rejects_hydro_with_no_unit_groups() {
-        let alpha = hydro_without_groups(1, "AlphaPlant", 10, 10.0, 90.0, 5.0, 200.0);
-        let beta = hydro_without_groups(2, "BetaPlant", 20, 25.0, 150.0, 15.0, 300.0);
+        let alpha = hydro_without_groups(1, "AlphaPlant", 10.0, 90.0, 5.0, 200.0);
+        let beta = hydro_without_groups(2, "BetaPlant", 25.0, 150.0, 15.0, 300.0);
 
         let result = SystemBuilder::new()
             .buses(vec![bus(10), bus(20)])
@@ -587,9 +585,9 @@ mod tests {
     /// filter discriminates rather than rejecting every hydro unconditionally.
     #[test]
     fn test_builder_reports_only_the_hydro_missing_unit_groups() {
-        let mut alpha = hydro_without_groups(1, "AlphaPlant", 10, 10.0, 90.0, 5.0, 200.0);
-        alpha.declare_mirror_unit_group();
-        let beta = hydro_without_groups(2, "BetaPlant", 20, 25.0, 150.0, 15.0, 300.0);
+        let mut alpha = hydro_without_groups(1, "AlphaPlant", 10.0, 90.0, 5.0, 200.0);
+        alpha.declare_mirror_unit_group(EntityId(10));
+        let beta = hydro_without_groups(2, "BetaPlant", 25.0, 150.0, 15.0, 300.0);
 
         let result = SystemBuilder::new()
             .buses(vec![bus(10), bus(20)])
@@ -660,7 +658,6 @@ mod proptests {
             id: EntityId(id),
             name: name.to_string(),
             operational_start_date: date,
-            bus_id: EntityId(bus_id),
             downstream_id: None,
             travel_time_hours: None,
             entry_stage_id: None,
@@ -684,7 +681,7 @@ mod proptests {
             filling: None,
             penalties: super::tests::zero_penalties(),
         };
-        hydro.declare_mirror_unit_group();
+        hydro.declare_mirror_unit_group(EntityId(bus_id));
         hydro
     }
 

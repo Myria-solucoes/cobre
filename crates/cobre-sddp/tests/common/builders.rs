@@ -256,7 +256,6 @@ pub fn make_hydro(
         id,
         name,
         operational_start_date,
-        bus_id,
         downstream_id,
         travel_time_hours,
         entry_stage_id,
@@ -281,7 +280,7 @@ pub fn make_hydro(
         filling,
         penalties,
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(bus_id);
     hydro
 }
 

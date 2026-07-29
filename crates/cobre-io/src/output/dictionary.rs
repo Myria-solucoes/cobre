@@ -168,7 +168,9 @@ fn write_entities_csv(path: &Path, system: &System) -> Result<(), OutputError> {
     };
 
     for h in system.hydros() {
-        write_row(ENTITY_TYPE_HYDRO, h.id.0, &h.name, h.bus_id.0)?;
+        // The plant's hydro_unit_group rows own the bus association; a split
+        // plant has no single owning bus.
+        write_row(ENTITY_TYPE_HYDRO, h.id.0, &h.name, -1)?;
     }
 
     for t in system.thermals() {
@@ -1187,7 +1189,6 @@ mod tests {
             id: EntityId(id),
             name: name.to_string(),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(bus_id),
             downstream_id: None,
             travel_time_hours: None,
             entry_stage_id: None,
@@ -1211,7 +1212,7 @@ mod tests {
             filling: None,
             penalties: hydro_penalties_zero(),
         };
-        hydro.declare_mirror_unit_group();
+        hydro.declare_mirror_unit_group(EntityId(bus_id));
         hydro
     }
 
@@ -1764,10 +1765,18 @@ mod tests {
         assert_eq!(rows[0][0], "0", "row 0: entity_type_code must be 0 (hydro)");
         assert_eq!(rows[0][1], "1", "row 0: entity_id must be 1");
         assert_eq!(rows[0][2], "Hydro1", "row 0: name must be Hydro1");
+        assert_eq!(
+            rows[0][3], "-1",
+            "row 0: bus_id must be the -1 sentinel; the group rows own the association"
+        );
 
         assert_eq!(rows[1][0], "0", "row 1: entity_type_code must be 0 (hydro)");
         assert_eq!(rows[1][1], "2", "row 1: entity_id must be 2");
         assert_eq!(rows[1][2], "Hydro2", "row 1: name must be Hydro2");
+        assert_eq!(
+            rows[1][3], "-1",
+            "row 1: bus_id must be the -1 sentinel; the group rows own the association"
+        );
 
         assert_eq!(
             rows[2][0], "1",
@@ -1775,6 +1784,10 @@ mod tests {
         );
         assert_eq!(rows[2][1], "1", "row 2: entity_id must be 1");
         assert_eq!(rows[2][2], "Thermal1", "row 2: name must be Thermal1");
+        assert_eq!(
+            rows[2][3], "1",
+            "row 2: bus_id must still be the thermal's own bus, unlike the hydro rows"
+        );
 
         assert_eq!(
             rows[4][0], "8",

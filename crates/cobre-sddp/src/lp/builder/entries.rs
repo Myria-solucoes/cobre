@@ -957,9 +957,10 @@ pub(super) fn fill_pumping_water_entries(
 }
 
 /// Fill load-balance entries for hydro/thermal generation, line flows, pumping power,
-/// and deficit/excess slacks. Each hydro CELL credits its own bus (`HydroCellIndex::bus_of`,
-/// not the plant's `hydro.bus_id`): FPHA cells enter with `g_c` at `+1.0`;
-/// constant-productivity cells with `rho * turbine_col(cell)`, the plant's shared `rho`.
+/// and deficit/excess slacks. Each hydro CELL credits its own bus
+/// (`HydroCellIndex::bus_of`) — `Hydro` carries no bus of its own, only its unit
+/// groups do: FPHA cells enter with `g_c` at `+1.0`; constant-productivity cells
+/// with `rho * turbine_col(cell)`, the plant's shared `rho`.
 ///
 /// Pumping power is a negative injection: the `pumping_flow` column enters with
 /// `−consumption_mw_per_m3s` (no separate power column). A positive coefficient would
@@ -3113,7 +3114,6 @@ mod pumping_water_tests {
             id: EntityId(id),
             name: format!("H{id}"),
             operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(1),
             downstream_id: downstream_id.map(EntityId),
             travel_time_hours: None,
             entry_stage_id: None,
@@ -3137,7 +3137,7 @@ mod pumping_water_tests {
             filling: None,
             penalties: zero_hydro_penalties(),
         };
-        hydro.declare_mirror_unit_group();
+        hydro.declare_mirror_unit_group(EntityId(1));
         hydro
     }
 
@@ -4777,7 +4777,6 @@ mod pumping_water_tests {
                 25.0,
             ),
         ];
-        hydro.declare_mirror_unit_group();
         hydro
     }
 
@@ -5221,10 +5220,7 @@ mod pumping_water_tests {
     /// Split-plant fixture for the per-cell bus-crediting and production-row
     /// apportionment tests. Buses, ascending id: `bus_pad` (1, unreferenced by
     /// any entity — pushes every referenced bus's `bus_pos` position up by one),
-    /// `bus_cell_a` (2), `bus_decoy` (3, the decoy plant's bus AND the split
-    /// plant's own now-vestigial `bus_id` field — distinct from both group
-    /// buses, so a bus-crediting implementation that still reads `hydro.bus_id`
-    /// is caught), `bus_cell_b` (4).
+    /// `bus_cell_a` (2), `bus_decoy` (3, the decoy plant's bus), `bus_cell_b` (4).
     ///
     /// Plant 0 (id 10, decoy) is single-bus/single-cell — cell 0. Plant 1 (id
     /// 11, split) declares two groups: `max_turbined_m3s` 9000.0 on
@@ -5247,7 +5243,6 @@ mod pumping_water_tests {
         let bus_cell_b = EntityId(4);
 
         let mut decoy = fixture_hydro_ds(10, None);
-        decoy.bus_id = bus_decoy;
         decoy.unit_groups = vec![make_unit_group(
             EntityId(30),
             bus_decoy,
@@ -5256,19 +5251,14 @@ mod pumping_water_tests {
             0.0,
             50.0,
         )];
-        decoy.declare_mirror_unit_group();
+        decoy.declare_mirror_unit_group(bus_decoy);
 
         let mut split = fixture_hydro_ds(11, None);
-        // Vestigial: the plant's own `bus_id` must NOT be read by the per-cell
-        // credit. Deliberately equal to the decoy's bus (a real, distinct-from-
-        // both-groups bus), so a hydro.bus_id-reading implementation credits a
-        // visibly wrong row rather than silently no-op.
-        split.bus_id = bus_decoy;
         split.unit_groups = vec![
             make_unit_group(EntityId(20), bus_cell_a, 0.0, 45.0, 0.0, 9000.0),
             make_unit_group(EntityId(21), bus_cell_b, 0.0, 45.0, 0.0, 3000.0),
         ];
-        split.declare_mirror_unit_group();
+        split.declare_mirror_unit_group(bus_decoy);
 
         let buses = vec![
             fixture_bus(bus_pad.0),
@@ -5306,9 +5296,9 @@ mod pumping_water_tests {
         )
     }
 
-    /// Requirement 1: the FPHA branch credits each cell to its OWN bus (not the
-    /// plant's `hydro.bus_id`), and neither cell's generation column appears on
-    /// the other cell's — or the plant's vestigial `bus_id` — row.
+    /// Requirement 1: the FPHA branch credits each cell to its OWN bus, and
+    /// neither cell's generation column appears on the other cell's — or the
+    /// decoy plant's — row.
     #[test]
     fn test_fpha_cell_generation_is_credited_to_its_own_bus() {
         let plane = FphaPlane {
@@ -5386,7 +5376,7 @@ mod pumping_water_tests {
             assert_eq!(
                 entry_count_at(&col_entries, col_a, row_decoy),
                 0,
-                "blk {blk_idx}: cell A must not credit the plant's own vestigial bus_id"
+                "blk {blk_idx}: cell A must not credit the decoy bus"
             );
 
             assert_eq!(
@@ -5403,7 +5393,7 @@ mod pumping_water_tests {
             assert_eq!(
                 entry_count_at(&col_entries, col_b, row_decoy),
                 0,
-                "blk {blk_idx}: cell B must not credit the plant's own vestigial bus_id"
+                "blk {blk_idx}: cell B must not credit the decoy bus"
             );
         }
     }
@@ -5600,7 +5590,6 @@ mod pumping_water_tests {
 
         let mut hydro = fixture_hydro_ds(10, None);
         hydro.unit_groups = unit_groups;
-        hydro.declare_mirror_unit_group();
         let buses: Vec<Bus> = hydro
             .unit_groups
             .iter()
@@ -6995,7 +6984,6 @@ mod pumping_water_tests {
             id: EntityId(id),
             name: format!("H{id}"),
             operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(1),
             downstream_id: downstream.map(EntityId),
             travel_time_hours: None,
             entry_stage_id: entry,
@@ -7022,7 +7010,7 @@ mod pumping_water_tests {
             }),
             penalties: zero_hydro_penalties(),
         };
-        hydro.declare_mirror_unit_group();
+        hydro.declare_mirror_unit_group(EntityId(1));
         hydro
     }
 

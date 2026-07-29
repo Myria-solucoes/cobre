@@ -600,7 +600,6 @@ mod tests {
             id: EntityId(id),
             name: format!("hydro-{id}"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(bus_id),
             downstream_id: None,
             travel_time_hours: None,
             entry_stage_id: None,
@@ -625,7 +624,7 @@ mod tests {
             filling: None,
             penalties: zero_penalties,
         };
-        hydro.declare_mirror_unit_group();
+        hydro.declare_mirror_unit_group(EntityId(bus_id));
         hydro
     }
 
@@ -963,28 +962,6 @@ mod tests {
     }
 
     // ---- Cross-reference validation tests -----------------------------------
-
-    #[test]
-    fn test_invalid_bus_reference_hydro() {
-        let hydro = make_hydro_on_bus(1, 99);
-        let result = SystemBuilder::new().hydros(vec![hydro]).build();
-
-        assert!(result.is_err(), "expected Err for missing bus reference");
-        let errors = result.unwrap_err();
-        assert!(
-            errors.iter().any(|e| matches!(
-                e,
-                ValidationError::InvalidReference {
-                    source_entity_type: "Hydro",
-                    source_id: EntityId(1),
-                    field_name: "bus_id",
-                    referenced_id: EntityId(99),
-                    expected_type: "Bus",
-                }
-            )),
-            "expected InvalidReference for Hydro bus_id=99, got: {errors:?}"
-        );
-    }
 
     #[test]
     fn test_invalid_downstream_reference() {

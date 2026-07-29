@@ -247,17 +247,17 @@ mod tests {
         }
     }
 
-    /// A minimal constant-productivity hydro at `id`/`bus_id`/`unit_groups`
-    /// the caller chooses; every other field is an inert default.
-    /// `unit_groups` passes through unmodified — a caller needing canonical
-    /// id order calls `Hydro::sort_unit_groups` itself.
-    fn base_hydro(id: i32, bus_id: EntityId, unit_groups: Vec<HydroUnitGroup>) -> Hydro {
+    /// A minimal constant-productivity hydro at `id`/`unit_groups` the caller
+    /// chooses; every other field is an inert default. `unit_groups` passes
+    /// through unmodified — a caller needing a mirror group or canonical id
+    /// order calls `Hydro::declare_mirror_unit_group`/`Hydro::sort_unit_groups`
+    /// itself.
+    fn base_hydro(id: i32, unit_groups: Vec<HydroUnitGroup>) -> Hydro {
         Hydro {
             unit_groups,
             id: EntityId(id),
             name: format!("H{id}"),
             operational_start_date: NaiveDate::default(),
-            bus_id,
             downstream_id: None,
             travel_time_hours: None,
             entry_stage_id: None,
@@ -284,22 +284,20 @@ mod tests {
     }
 
     /// Three plants: plant 0 declares no groups, so the mirror helper gives it a
-    /// single group; plant 1 declares three groups all on bus 5, with
+    /// single group on bus 100; plant 1 declares three groups all on bus 5, with
     /// deliberately differing bounds (pinning that the partition key is
     /// `bus_id` alone — same-bus groups merge regardless of how their bounds
     /// differ, the precondition a later per-cell bound-summing pass rests on);
     /// plant 2 declares two groups, on bus 9 and bus 3, whose declaration order and
-    /// group ids the `swap_plant2` axis reverses together. Plant 2's own
-    /// `bus_id` (102) is deliberately neither 3 nor 9 (the plant-bus-vs-
-    /// group-bus alternative-implementation check), and its group ids (20/21)
+    /// group ids the `swap_plant2` axis reverses together. Its group ids (20/21)
     /// are deliberately neither 2 nor 3 (the plant/cell/group/bus
     /// index-coincidence check) — every fixture axis varies independently.
     fn three_plant_fixture(swap_plant2: bool) -> Vec<Hydro> {
-        let plant0 = base_hydro(0, EntityId(100), Vec::new());
+        let mut plant0 = base_hydro(0, Vec::new());
+        plant0.declare_mirror_unit_group(EntityId(100));
 
         let plant1 = base_hydro(
             1,
-            EntityId(101),
             vec![
                 make_unit_group(EntityId(10), EntityId(5), 0.0, 10.0, 0.0, 10.0),
                 make_unit_group(EntityId(11), EntityId(5), 2.0, 15.0, 1.0, 12.0),
@@ -319,13 +317,9 @@ mod tests {
         } else {
             vec![bus9_group, bus3_group]
         };
-        let plant2 = base_hydro(2, EntityId(102), plant2_groups);
+        let plant2 = base_hydro(2, plant2_groups);
 
-        let mut hydros = vec![plant0, plant1, plant2];
-        for h in &mut hydros {
-            h.declare_mirror_unit_group();
-        }
-        hydros
+        vec![plant0, plant1, plant2]
     }
 
     #[test]
@@ -337,8 +331,9 @@ mod tests {
         assert!(index.is_identity());
         for (i, hydro) in hydros.iter().enumerate() {
             assert_eq!(index.cells_of(HydroSys::new(i)), i..i + 1);
-            // Pins declare_mirror_unit_group() sitting at geometry_hydro's return,
-            // after bus_id is finalized — a call placed earlier would mirror a stale bus.
+            // Pins geometry_hydro's declare_mirror_unit_group(id) call passing the
+            // SAME id as the plant's own `id` field — a mismatched argument
+            // would mirror the wrong bus.
             assert_eq!(hydro.unit_groups.len(), 1);
             assert_eq!(
                 hydro.unit_groups[0].bus_id,
@@ -411,7 +406,7 @@ mod tests {
     /// constructed.
     #[test]
     fn test_build_yields_no_cells_for_an_unnormalized_plant() {
-        let unnormalized = base_hydro(0, EntityId(1), Vec::new());
+        let unnormalized = base_hydro(0, Vec::new());
         let index = HydroCellIndex::build(&[unnormalized]);
 
         assert!(index.cells_of(HydroSys::new(0)).is_empty());
@@ -429,7 +424,6 @@ mod tests {
     fn test_cell_share_sums_to_one_and_is_zero_for_a_zero_capacity_plant() {
         let plant_a = base_hydro(
             0,
-            EntityId(200),
             vec![
                 make_unit_group(EntityId(10), EntityId(5), 0.0, 100.0, 0.0, 9000.0),
                 make_unit_group(EntityId(11), EntityId(6), 0.0, 100.0, 0.0, 3000.0),
@@ -437,7 +431,6 @@ mod tests {
         );
         let plant_b = base_hydro(
             1,
-            EntityId(201),
             vec![make_unit_group(
                 EntityId(20),
                 EntityId(7),
@@ -447,10 +440,7 @@ mod tests {
                 0.0,
             )],
         );
-        let mut hydros = vec![plant_a, plant_b];
-        for h in &mut hydros {
-            h.declare_mirror_unit_group();
-        }
+        let hydros = vec![plant_a, plant_b];
         let index = HydroCellIndex::build(&hydros);
 
         assert_eq!(index.n_cells(), 3);

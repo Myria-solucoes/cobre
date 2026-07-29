@@ -5,7 +5,6 @@
       "id": 0,
       "name": "1",
       "operational_start_date": "2020-01-01",
-      "bus_id": 0,
       "downstream_id": null,
       "reservoir": {
         "min_storage_hm3": 0.0,
@@ -38,7 +37,6 @@
       "id": 1,
       "name": "2",
       "operational_start_date": "2020-01-02",
-      "bus_id": 1,
       "downstream_id": null,
       "reservoir": {
         "min_storage_hm3": 0.0,
@@ -71,7 +69,6 @@
       "id": 2,
       "name": "3",
       "operational_start_date": "2020-01-03",
-      "bus_id": 2,
       "downstream_id": null,
       "reservoir": {
         "min_storage_hm3": 0.0,
@@ -104,7 +101,6 @@
       "id": 3,
       "name": "4",
       "operational_start_date": "2020-01-04",
-      "bus_id": 3,
       "downstream_id": null,
       "reservoir": {
         "min_storage_hm3": 0.0,

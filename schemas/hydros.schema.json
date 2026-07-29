@@ -262,11 +262,6 @@
       "additionalProperties": false,
       "description": "Intermediate type for a single hydro plant entry.",
       "properties": {
-        "bus_id": {
-          "description": "Bus to which this plant's generation is injected.",
-          "format": "int32",
-          "type": "integer"
-        },
         "diversion": {
           "anyOf": [
             {
@@ -425,7 +420,6 @@
         "id",
         "name",
         "operational_start_date",
-        "bus_id",
         "reservoir",
         "outflow",
         "generation",

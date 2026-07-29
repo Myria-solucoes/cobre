@@ -88,7 +88,6 @@ pub(super) fn make_hydro(id: i32, downstream_id: Option<i32>) -> Hydro {
         id: EntityId::from(id),
         name: format!("Hydro {id}"),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId::from(1),
         downstream_id: downstream_id.map(EntityId::from),
         travel_time_hours: None,
         entry_stage_id: None,

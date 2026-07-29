@@ -593,7 +593,6 @@ fn make_hydro(min_storage_hm3: f64, max_storage_hm3: f64) -> Hydro {
         id: EntityId::from(1),
         name: "TestHydro".to_owned(),
         operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId::from(10),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -617,7 +616,7 @@ fn make_hydro(min_storage_hm3: f64, max_storage_hm3: f64) -> Hydro {
         filling: None,
         penalties: zero_penalties,
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(EntityId::from(10));
     hydro
 }
 
@@ -1315,7 +1314,6 @@ fn make_sobradinho_hydro() -> Hydro {
         id: EntityId::from(1),
         name: "Sobradinho".to_owned(),
         operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId::from(10),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -1341,7 +1339,7 @@ fn make_sobradinho_hydro() -> Hydro {
         filling: None,
         penalties: zero_penalties,
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(EntityId::from(10));
     hydro
 }
 
@@ -1618,7 +1616,6 @@ fn fit_fpha_planes_linear_function_produces_one_plane() {
         id: EntityId::from(1),
         name: "FlatHydro".to_owned(),
         operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId::from(10),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -1642,7 +1639,7 @@ fn fit_fpha_planes_linear_function_produces_one_plane() {
         filling: None,
         penalties: zero_penalties,
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(EntityId::from(10));
     let config = FphaColumnLayout {
         source: "computed".to_owned(),
         volume_discretization_points: None,

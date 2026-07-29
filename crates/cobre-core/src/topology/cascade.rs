@@ -165,7 +165,6 @@ mod tests {
             id: EntityId(id),
             name: String::new(),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(0),
             downstream_id: downstream_id.map(EntityId),
             travel_time_hours: None,
             entry_stage_id: None,
@@ -189,7 +188,7 @@ mod tests {
             filling: None,
             penalties: zero_penalties,
         };
-        hydro.declare_mirror_unit_group();
+        hydro.declare_mirror_unit_group(EntityId(0));
         hydro
     }
 

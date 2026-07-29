@@ -574,7 +574,6 @@ mod tests {
             id: EntityId(id),
             name: format!("h{id}"),
             operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(1),
             downstream_id: None,
             travel_time_hours: None,
             entry_stage_id: None,
@@ -615,7 +614,7 @@ mod tests {
                 inflow_nonnegativity_cost: 1000.0,
             },
         };
-        hydro.declare_mirror_unit_group();
+        hydro.declare_mirror_unit_group(EntityId(1));
         hydro
     }
 

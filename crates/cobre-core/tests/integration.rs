@@ -72,7 +72,6 @@ fn make_hydro(id: i32, bus_id: i32, downstream_id: Option<i32>) -> Hydro {
         id: EntityId(id),
         name: format!("hydro-{id}").to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(bus_id),
         downstream_id: downstream_id.map(EntityId),
         travel_time_hours: None,
         entry_stage_id: None,
@@ -96,7 +95,7 @@ fn make_hydro(id: i32, bus_id: i32, downstream_id: Option<i32>) -> Hydro {
         filling: None,
         penalties: zero_hydro_penalties(),
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(EntityId(bus_id));
     hydro
 }
 
@@ -406,31 +405,20 @@ fn test_hydro_with_same_bus_groups_appears_once() {
 }
 
 #[test]
-fn test_invalid_cross_reference_rejected() {
-    let bad_hydro = make_hydro(1, 999, None);
+fn test_hydro_on_unknown_bus_is_accepted_groups_own_the_bus() {
+    let mut hydro = make_hydro(1, 999, None);
+    hydro.unit_groups = vec![make_group(0, 1)];
 
     let result = SystemBuilder::new()
         .buses(vec![make_bus(1)])
-        .hydros(vec![bad_hydro])
+        .hydros(vec![hydro])
         .build();
 
     assert!(
-        result.is_err(),
-        "system with bad bus_id must fail validation"
-    );
-
-    let errors = result.unwrap_err();
-    assert!(
-        errors.iter().any(|e| matches!(
-            e,
-            ValidationError::InvalidReference {
-                source_entity_type: "Hydro",
-                field_name: "bus_id",
-                referenced_id: EntityId(999),
-                ..
-            }
-        )),
-        "expected InvalidReference for Hydro.bus_id -> Bus 999; got: {errors:?}"
+        result.is_ok(),
+        "a plant's own bus argument naming a nonexistent bus must not fail \
+         validation — only its groups' own buses are validated; got: {:?}",
+        result.err()
     );
 }
 

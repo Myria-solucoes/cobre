@@ -352,7 +352,6 @@ fn make_stochastic_context(n_stages: usize) -> StochasticContext {
         id: EntityId(1),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(0),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -393,7 +392,7 @@ fn make_stochastic_context(n_stages: usize) -> StochasticContext {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(EntityId(0));
     let make_stage = |idx: usize, id: i32| Stage {
         index: idx,
         id,
@@ -641,7 +640,6 @@ fn make_stochastic_context_1_hydro_1_load_bus_sim(mean_mw: f64, std_mw: f64) -> 
         id: EntityId(10),
         name: "H10".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(0),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -682,7 +680,7 @@ fn make_stochastic_context_1_hydro_1_load_bus_sim(mean_mw: f64, std_mw: f64) -> 
             inflow_nonnegativity_cost: 1000.0,
         },
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(EntityId(0));
     let stage = Stage {
         index: 0,
         id: 0,
@@ -1395,7 +1393,6 @@ fn make_stochastic_1h_1s(mean_m3s: f64, std_m3s: f64) -> StochasticContext {
         id: EntityId(1),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(0),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -1436,7 +1433,7 @@ fn make_stochastic_1h_1s(mean_m3s: f64, std_m3s: f64) -> StochasticContext {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(EntityId(0));
     let stage = Stage {
         index: 0,
         id: 0,

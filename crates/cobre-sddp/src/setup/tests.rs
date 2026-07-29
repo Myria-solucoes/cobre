@@ -70,7 +70,6 @@ fn minimal_system(n_stages: usize) -> cobre_core::System {
         id: EntityId(3),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -111,7 +110,7 @@ fn minimal_system(n_stages: usize) -> cobre_core::System {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(EntityId(1));
 
     let stages: Vec<Stage> = (0..n_stages)
         .map(|i| Stage {
@@ -302,7 +301,6 @@ fn minimal_fpha_misconfigured_system(n_stages: usize) -> cobre_core::System {
         id: EntityId(3),
         name: "H_FPHA_BAD".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -343,7 +341,7 @@ fn minimal_fpha_misconfigured_system(n_stages: usize) -> cobre_core::System {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(EntityId(1));
 
     let stages: Vec<Stage> = (0..n_stages)
         .map(|i| Stage {
@@ -1553,7 +1551,6 @@ fn test_prepare_stochastic_historical_residuals_noise_method() {
         id: EntityId(3),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -1594,7 +1591,7 @@ fn test_prepare_stochastic_historical_residuals_noise_method() {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(EntityId(1));
 
     // branching_factor=2 → each stage selects 2 historical windows as openings.
     let stages: Vec<Stage> = (0..n_stages)
@@ -1988,7 +1985,6 @@ fn minimal_system_2_hydros_with_history(
             id: EntityId(id),
             name: name.to_string(),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(1),
             downstream_id: None,
             travel_time_hours: None,
             entry_stage_id: None,
@@ -2029,7 +2025,7 @@ fn minimal_system_2_hydros_with_history(
                 inflow_nonnegativity_cost: 1000.0,
             },
         };
-        hydro.declare_mirror_unit_group();
+        hydro.declare_mirror_unit_group(EntityId(1));
         hydro
     };
 
@@ -2422,7 +2418,6 @@ fn staggered_dates_system_2_hydros(
             id: EntityId(id),
             name: name.to_string(),
             operational_start_date: start,
-            bus_id: EntityId(1),
             downstream_id: None,
             travel_time_hours: None,
             entry_stage_id: None,
@@ -2463,7 +2458,7 @@ fn staggered_dates_system_2_hydros(
                 inflow_nonnegativity_cost: 1000.0,
             },
         };
-        hydro.declare_mirror_unit_group();
+        hydro.declare_mirror_unit_group(EntityId(1));
         hydro
     };
 
@@ -2760,7 +2755,6 @@ fn filling_system_2_hydros(
             id: EntityId(id),
             name: name.to_string(),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(1),
             downstream_id: None,
             travel_time_hours: None,
             // A filling hydro requires `entry_stage_id` (the operating-handoff
@@ -2804,7 +2798,7 @@ fn filling_system_2_hydros(
                 inflow_nonnegativity_cost: 1000.0,
             },
         };
-        hydro.declare_mirror_unit_group();
+        hydro.declare_mirror_unit_group(EntityId(1));
         hydro
     };
 
@@ -3319,7 +3313,6 @@ fn system_with_anticipated_thermals(
         id: EntityId(3),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -3360,7 +3353,7 @@ fn system_with_anticipated_thermals(
             inflow_nonnegativity_cost: 1000.0,
         },
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(EntityId(1));
 
     let n_stages = 2_usize;
     let stages: Vec<Stage> = (0..n_stages)
@@ -3584,7 +3577,6 @@ fn system_with_two_anticipated_thermals_staggered_dates(
         id: EntityId(3),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -3625,7 +3617,7 @@ fn system_with_two_anticipated_thermals_staggered_dates(
             inflow_nonnegativity_cost: 1000.0,
         },
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(EntityId(1));
 
     let n_stages = 2_usize;
     let stages: Vec<Stage> = (0..n_stages)
@@ -4262,7 +4254,6 @@ fn system_with_historical_inflow(n_stages: usize) -> cobre_core::System {
         id: EntityId(3),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -4303,7 +4294,7 @@ fn system_with_historical_inflow(n_stages: usize) -> cobre_core::System {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(EntityId(1));
 
     let stages: Vec<Stage> = (0..n_stages)
         .map(|i| Stage {
@@ -4532,7 +4523,6 @@ fn external_inflow_library_built_when_scheme_is_external() {
         id: EntityId(3),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -4573,7 +4563,7 @@ fn external_inflow_library_built_when_scheme_is_external() {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(EntityId(1));
     let stages: Vec<Stage> = (0..2usize)
         .map(|i| Stage {
             index: i,
@@ -4791,7 +4781,6 @@ fn external_load_library_built_when_scheme_is_external() {
         id: EntityId(3),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -4832,7 +4821,7 @@ fn external_load_library_built_when_scheme_is_external() {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(EntityId(1));
 
     let stages: Vec<Stage> = (0..2usize)
         .map(|i| Stage {
@@ -5066,7 +5055,6 @@ fn external_ncs_library_built_when_scheme_is_external() {
         id: EntityId(3),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -5107,7 +5095,7 @@ fn external_ncs_library_built_when_scheme_is_external() {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(EntityId(1));
 
     let ncs_id = EntityId(4);
     let ncs_source = NonControllableSource {
@@ -5362,7 +5350,6 @@ fn historical_library_fails_when_no_valid_windows() {
         id: EntityId(3),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -5403,7 +5390,7 @@ fn historical_library_fails_when_no_valid_windows() {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(EntityId(1));
 
     let stages: Vec<Stage> = (0..2usize)
         .map(|i| Stage {
@@ -5722,7 +5709,6 @@ fn minimal_system_with_anticipated(
         id: EntityId(3),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -5763,7 +5749,7 @@ fn minimal_system_with_anticipated(
             inflow_nonnegativity_cost: 1000.0,
         },
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(EntityId(1));
 
     let stages: Vec<Stage> = (0..n_stages)
         .map(|i| Stage {
@@ -6198,7 +6184,6 @@ fn system_with_travel_time_arc(n_stages: usize) -> cobre_core::System {
                 id: EntityId(id),
                 name: name.to_string(),
                 operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                bus_id: EntityId(1),
                 downstream_id: downstream_id.map(EntityId),
                 travel_time_hours,
                 entry_stage_id: None,
@@ -6239,7 +6224,7 @@ fn system_with_travel_time_arc(n_stages: usize) -> cobre_core::System {
                     inflow_nonnegativity_cost: 1000.0,
                 },
             };
-            hydro.declare_mirror_unit_group();
+            hydro.declare_mirror_unit_group(EntityId(1));
             hydro
         };
 
@@ -6709,7 +6694,6 @@ fn par2_system_with_state_configs(state_configs: &[StageStateConfig]) -> cobre_c
         id: hydro_id,
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -6750,7 +6734,7 @@ fn par2_system_with_state_configs(state_configs: &[StageStateConfig]) -> cobre_c
             inflow_nonnegativity_cost: 1000.0,
         },
     };
-    hydro.declare_mirror_unit_group();
+    hydro.declare_mirror_unit_group(EntityId(1));
 
     let n_stages = state_configs.len();
     let stages: Vec<Stage> = state_configs
