@@ -55,11 +55,11 @@ slow-tests = []
 test-support = ["cobre-core/test-support"]
 
 [dependencies]
-cobre-core = { version = "0.12.0", path = "../cobre-core" }
-cobre-solver = { version = "0.12.0", path = "../cobre-solver", default-features = false }
-cobre-comm = { version = "0.12.0", path = "../cobre-comm" }
-cobre-stochastic = { version = "0.12.0", path = "../cobre-stochastic" }
-cobre-io = { version = "0.12.0", path = "../cobre-io" }
+cobre-core = { version = "0.13.0", path = "../cobre-core" }
+cobre-solver = { version = "0.13.0", path = "../cobre-solver", default-features = false }
+cobre-comm = { version = "0.13.0", path = "../cobre-comm" }
+cobre-stochastic = { version = "0.13.0", path = "../cobre-stochastic" }
+cobre-io = { version = "0.13.0", path = "../cobre-io" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 dhat = { version = "0.3", optional = true }
 matrixmultiply = { workspace = true }

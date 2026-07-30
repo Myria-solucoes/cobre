@@ -9,17 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- **Resolved bound, penalty, and factor overrides could be applied to the
-  wrong entity when a system's commissioning dates ordered its buses, lines,
-  hydros, thermals, pumping stations, energy contracts, or non-controllable
-  sources differently from their declared IDs.** An override declared for a
-  given entity now always resolves onto that same entity. Every case shipped
-  or referenced by this project already orders entities identically under
-  both the ID and the commissioning-date order, so no existing output changes.
-
-## [0.13.0]
+## [0.13.0] - 2026-07-30
 
 ### Added
 
@@ -122,6 +112,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remains the only way to express that quantity's block split.
 
 ### Fixed
+
+- **Resolved bound, penalty, and factor overrides could be applied to the
+  wrong entity when a system's commissioning dates ordered its buses, lines,
+  hydros, thermals, pumping stations, energy contracts, or non-controllable
+  sources differently from their declared IDs.** An override declared for a
+  given entity now always resolves onto that same entity. Every case shipped
+  or referenced by this project already orders entities identically under
+  both the ID and the commissioning-date order, so no existing output changes.
 
 - **A user-supplied `scenarios/noise_openings.parquet` no longer panics a
   study that has non-controllable sources.** The reader sized the opening
