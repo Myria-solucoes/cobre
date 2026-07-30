@@ -141,15 +141,6 @@ pub(crate) fn build_external_inflow_library(
         "inflow",
         per_stage_scenarios,
     );
-    validate_external_library(
-        &library,
-        hydro_ids,
-        &row_entity_ids,
-        &rows_per_stage,
-        n_stages,
-        forward_passes,
-    )
-    .map_err(SddpError::Stochastic)?;
     standardize_external_inflow(
         &mut library,
         external_rows,
@@ -163,6 +154,15 @@ pub(crate) fn build_external_inflow_library(
         stage_lag_transitions,
         downstream_par_order,
     );
+    validate_external_library(
+        &library,
+        hydro_ids,
+        &row_entity_ids,
+        &rows_per_stage,
+        n_stages,
+        forward_passes,
+    )
+    .map_err(SddpError::Stochastic)?;
     pad_library_to_uniform(&mut library);
     Ok(library)
 }
@@ -212,6 +212,7 @@ pub(crate) fn build_external_load_library(
         "load",
         per_stage_scenarios,
     );
+    standardize_external_load(&mut library, external_rows, &bus_ids, load_models, n_stages);
     validate_external_library(
         &library,
         &bus_ids,
@@ -221,7 +222,6 @@ pub(crate) fn build_external_load_library(
         forward_passes,
     )
     .map_err(SddpError::Stochastic)?;
-    standardize_external_load(&mut library, external_rows, &bus_ids, load_models, n_stages);
     pad_library_to_uniform(&mut library);
     Ok(library)
 }
@@ -262,6 +262,7 @@ pub(crate) fn build_external_ncs_library(
     let n_scenarios_ext = per_stage_scenarios.iter().copied().max().unwrap_or(0);
     let mut library =
         ExternalScenarioLibrary::new(n_stages, n_scenarios_ext, n_ncs, "ncs", per_stage_scenarios);
+    standardize_external_ncs(&mut library, external_rows, &ncs_ids, ncs_models, n_stages);
     validate_external_library(
         &library,
         &ncs_ids,
@@ -271,7 +272,161 @@ pub(crate) fn build_external_ncs_library(
         forward_passes,
     )
     .map_err(SddpError::Stochastic)?;
-    standardize_external_ncs(&mut library, external_rows, &ncs_ids, ncs_models, n_stages);
     pad_library_to_uniform(&mut library);
     Ok(library)
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::NaiveDate;
+    use cobre_core::{
+        Block, BlockMode, InflowModel, NoiseMethod, ScenarioSourceConfig, StageRiskConfig,
+        StageStateConfig,
+    };
+    use cobre_stochastic::StochasticError;
+
+    use super::{
+        EntityId, ExternalScenarioRow, PrecomputedPar, SddpError, Stage, StageLagTransition,
+        build_external_inflow_library,
+    };
+
+    fn single_stage(id: i32) -> Stage {
+        Stage {
+            index: 0,
+            id,
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            season_id: Some(0),
+            blocks: vec![Block {
+                index: 0,
+                name: "SINGLE".to_string(),
+                duration_hours: 744.0,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: true,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        }
+    }
+
+    fn finalizing_transition() -> StageLagTransition {
+        StageLagTransition {
+            accumulate_weight: 1.0,
+            spillover_weight: 0.0,
+            finalize_period: true,
+            accumulate_downstream: false,
+            downstream_accumulate_weight: 0.0,
+            downstream_spillover_weight: 0.0,
+            downstream_finalize: false,
+            rebuild_from_downstream: false,
+        }
+    }
+
+    /// A `sigma=0` hydro (deterministic PAR) whose external row does not match
+    /// the deterministic value trips `solve_par_noise`'s `NEG_INFINITY`
+    /// sentinel. `build_external_inflow_library` must surface it as a V3.7
+    /// rejection through the real `standardize`-then-`validate` wiring, not
+    /// silently accept it (the wiring previously ran `validate` against the
+    /// still-zero-filled buffer, before `standardize_external_inflow` ever
+    /// wrote eta, so V3.7 could never fire).
+    #[test]
+    fn external_inflow_sigma_zero_mismatch_rejected_by_v3_7() {
+        let hydro_id = EntityId(1);
+        let hydro_ids = vec![hydro_id];
+        let stages = vec![single_stage(0)];
+
+        let models = vec![InflowModel {
+            hydro_id,
+            stage_id: 0,
+            mean_m3s: 100.0,
+            std_m3s: 0.0,
+            ar_coefficients: vec![],
+            residual_std_ratio: 1.0,
+            annual: None,
+        }];
+        let par = PrecomputedPar::build(&models, &stages, &hydro_ids, None).unwrap();
+
+        let rows = vec![ExternalScenarioRow {
+            stage_id: 0,
+            scenario_id: 0,
+            hydro_id,
+            value_m3s: 999.0,
+        }];
+        let transitions = vec![finalizing_transition()];
+
+        let result = build_external_inflow_library(
+            &rows,
+            &hydro_ids,
+            &stages,
+            &par,
+            &[],
+            0,
+            &[],
+            &[],
+            &transitions,
+            1,
+            0,
+        );
+
+        match result {
+            Err(SddpError::Stochastic(StochasticError::InsufficientData { context })) => {
+                assert!(
+                    context.contains("V3.7"),
+                    "expected a V3.7 rejection, got: {context}"
+                );
+            }
+            other => panic!("expected a V3.7 rejection, got: {other:?}"),
+        }
+    }
+
+    /// Negative control for the test above: when the external row matches the
+    /// deterministic value exactly, `solve_par_noise` returns `0.0` (not the
+    /// `NEG_INFINITY` sentinel) and the library builds successfully.
+    #[test]
+    fn external_inflow_sigma_zero_match_accepted() {
+        let hydro_id = EntityId(1);
+        let hydro_ids = vec![hydro_id];
+        let stages = vec![single_stage(0)];
+
+        let models = vec![InflowModel {
+            hydro_id,
+            stage_id: 0,
+            mean_m3s: 100.0,
+            std_m3s: 0.0,
+            ar_coefficients: vec![],
+            residual_std_ratio: 1.0,
+            annual: None,
+        }];
+        let par = PrecomputedPar::build(&models, &stages, &hydro_ids, None).unwrap();
+
+        let rows = vec![ExternalScenarioRow {
+            stage_id: 0,
+            scenario_id: 0,
+            hydro_id,
+            value_m3s: 100.0,
+        }];
+        let transitions = vec![finalizing_transition()];
+
+        let result = build_external_inflow_library(
+            &rows,
+            &hydro_ids,
+            &stages,
+            &par,
+            &[],
+            0,
+            &[],
+            &[],
+            &transitions,
+            1,
+            0,
+        );
+
+        assert!(result.is_ok(), "expected Ok(()), got: {result:?}");
+    }
 }

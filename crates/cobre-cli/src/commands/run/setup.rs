@@ -699,13 +699,21 @@ fn run_root_exports(
     })?;
 
     if let Some(path) = root_estimation_path {
-        let provenance = build_provenance_report(
+        let mut provenance = build_provenance_report(
             path,
             root_estimation_report,
             setup.stochastic.provenance(),
             system.hydros().len(),
             &setup.hydro_models.provenance,
         );
+        // Fingerprint the derived lag seed (training-side library only) so
+        // stale-library detection can compare against a fresh digest on later runs.
+        provenance.inflow.historical_library_seed_digest = setup
+            .scenario_libraries
+            .training
+            .historical
+            .as_ref()
+            .map(HistoricalScenarioLibrary::seed_digest);
         if !ctx.quiet {
             print_provenance_summary(&ctx.stderr, &provenance);
         }
