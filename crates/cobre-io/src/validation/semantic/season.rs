@@ -147,17 +147,21 @@ pub(super) fn check_observation_season_alignment(data: &ParsedData, ctx: &mut Va
 
     let mut counts: HashMap<(i32, usize, i32), usize> = HashMap::new();
     for row in &data.inflow_history {
-        let pos = stage_index.partition_point(|(start, _, _)| *start <= row.date);
+        let pos = stage_index.partition_point(|(start, _, _)| *start <= row.start_date);
         let season_id = if pos > 0 {
             let (_, end_date, sid) = stage_index[pos - 1];
-            if row.date < end_date { Some(sid) } else { None }
+            if row.start_date < end_date {
+                Some(sid)
+            } else {
+                None
+            }
         } else {
             None
         }
-        .or_else(|| season_map.season_for_date(row.date));
+        .or_else(|| season_map.season_for_date(row.start_date));
 
         if let Some(sid) = season_id {
-            let year = row.date.year();
+            let year = row.start_date.year();
             *counts.entry((row.hydro_id.0, sid, year)).or_insert(0) += 1;
         }
     }
@@ -266,10 +270,14 @@ pub(super) fn check_season_observation_coverage(
 
     let mut season_obs_count: HashMap<usize, usize> = HashMap::new();
     for row in &data.inflow_history {
-        let pos = stage_index.partition_point(|(start, _, _)| *start <= row.date);
+        let pos = stage_index.partition_point(|(start, _, _)| *start <= row.start_date);
         let season_id = if pos > 0 {
             let (_, end_date, sid) = stage_index[pos - 1];
-            if row.date < end_date { Some(sid) } else { None }
+            if row.start_date < end_date {
+                Some(sid)
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -356,6 +364,22 @@ mod tests {
     };
 
     // ── Local helpers ─────────────────────────────────────────────────────────
+
+    /// Build a windowed `InflowHistoryRow` covering `[date, date + 1 day)`.
+    /// These fixtures bucket by `start_date` alone, so the window width itself
+    /// is arbitrary; a one-day window keeps the shape minimal.
+    fn history_row(
+        hydro_id: EntityId,
+        date: chrono::NaiveDate,
+        value_m3s: f64,
+    ) -> InflowHistoryRow {
+        InflowHistoryRow {
+            hydro_id,
+            start_date: date,
+            end_date: date.succ_opt().unwrap(),
+            value_m3s,
+        }
+    }
 
     /// Build a `StagesData` for Rule 29 tests.  Each `Stage` is given an
     /// explicit `start_date`, `end_date`, and `season_id`.  The `SeasonMap`
@@ -502,7 +526,6 @@ mod tests {
     #[test]
     fn test_season_id_range_coverage_undefined_season() {
         let mut stages = make_stages_with_explicit_season_map(12, 12);
-        // Overwrite stage 5's season_id with an invalid value.
         stages.stages[5].season_id = Some(15);
 
         let data = make_data_5b(
@@ -573,7 +596,6 @@ mod tests {
     #[test]
     fn test_season_id_range_coverage_multiple_violations() {
         let mut stages = make_stages_with_explicit_season_map(12, 12);
-        // Stages 3 and 7 both reference invalid season IDs.
         stages.stages[3].season_id = Some(20);
         stages.stages[7].season_id = Some(55);
 
@@ -1133,11 +1155,11 @@ mod tests {
             }
             let year = 2000 + (i / 12) as i32;
             let month = month_index as u32 + 1;
-            history.push(InflowHistoryRow {
-                hydro_id: EntityId::from(1),
-                date: chrono::NaiveDate::from_ymd_opt(year, month, 15).unwrap(),
-                value_m3s: 100.0,
-            });
+            history.push(history_row(
+                EntityId::from(1),
+                chrono::NaiveDate::from_ymd_opt(year, month, 15).unwrap(),
+                100.0,
+            ));
         }
         // config defaults to InSample (minimal_config has no scenario_source).
         let data = make_data_estimation(vec![make_hydro(1, None)], stages, history);
@@ -1179,14 +1201,13 @@ mod tests {
             }
             let year = 2000 + (i / 12) as i32;
             let month = month_index as u32 + 1;
-            history.push(InflowHistoryRow {
-                hydro_id: EntityId::from(1),
-                date: chrono::NaiveDate::from_ymd_opt(year, month, 15).unwrap(),
-                value_m3s: 100.0,
-            });
+            history.push(history_row(
+                EntityId::from(1),
+                chrono::NaiveDate::from_ymd_opt(year, month, 15).unwrap(),
+                100.0,
+            ));
         }
         let mut data = make_data_estimation(vec![make_hydro(1, None)], stages, history);
-        // Override config to use External inflow scheme.
         data.config = config_with_training_external_inflow();
 
         let mut ctx = ValidationContext::new();
@@ -1370,24 +1391,24 @@ mod tests {
     fn test_observation_alignment_duplicate_obs() {
         // Season 0 (January 2020) has two observations — finer-than-season.
         let mut history = vec![
-            InflowHistoryRow {
-                hydro_id: EntityId::from(1),
-                date: chrono::NaiveDate::from_ymd_opt(2020, 1, 5).unwrap(),
-                value_m3s: 100.0,
-            },
-            InflowHistoryRow {
-                hydro_id: EntityId::from(1),
-                date: chrono::NaiveDate::from_ymd_opt(2020, 1, 20).unwrap(),
-                value_m3s: 200.0,
-            },
+            history_row(
+                EntityId::from(1),
+                chrono::NaiveDate::from_ymd_opt(2020, 1, 5).unwrap(),
+                100.0,
+            ),
+            history_row(
+                EntityId::from(1),
+                chrono::NaiveDate::from_ymd_opt(2020, 1, 20).unwrap(),
+                200.0,
+            ),
         ];
         // Add one observation per month for February–December 2020.
         for month in 2u32..=12 {
-            history.push(InflowHistoryRow {
-                hydro_id: EntityId::from(1),
-                date: chrono::NaiveDate::from_ymd_opt(2020, month, 15).unwrap(),
-                value_m3s: f64::from(month) * 10.0,
-            });
+            history.push(history_row(
+                EntityId::from(1),
+                chrono::NaiveDate::from_ymd_opt(2020, month, 15).unwrap(),
+                f64::from(month) * 10.0,
+            ));
         }
         // Build 12 stages covering January 2020 – December 2020, season_map present.
         let mut stages_2020 = make_stages_with_seasons(12, /*with_season_map=*/ true);
@@ -1480,38 +1501,38 @@ mod tests {
         // History spans 2018-2020 so that 2019 is an interior year.
         let history = vec![
             // Boundary year 2018 — one observation, not checked.
-            InflowHistoryRow {
-                hydro_id: EntityId::from(1),
-                date: chrono::NaiveDate::from_ymd_opt(2018, 1, 15).unwrap(),
-                value_m3s: 50.0,
-            },
+            history_row(
+                EntityId::from(1),
+                chrono::NaiveDate::from_ymd_opt(2018, 1, 15).unwrap(),
+                50.0,
+            ),
             // Interior year 2019 — quarterly (coarse), should trigger error.
-            InflowHistoryRow {
-                hydro_id: EntityId::from(1),
-                date: chrono::NaiveDate::from_ymd_opt(2019, 2, 15).unwrap(),
-                value_m3s: 100.0,
-            },
-            InflowHistoryRow {
-                hydro_id: EntityId::from(1),
-                date: chrono::NaiveDate::from_ymd_opt(2019, 5, 15).unwrap(),
-                value_m3s: 200.0,
-            },
-            InflowHistoryRow {
-                hydro_id: EntityId::from(1),
-                date: chrono::NaiveDate::from_ymd_opt(2019, 8, 15).unwrap(),
-                value_m3s: 300.0,
-            },
-            InflowHistoryRow {
-                hydro_id: EntityId::from(1),
-                date: chrono::NaiveDate::from_ymd_opt(2019, 11, 15).unwrap(),
-                value_m3s: 400.0,
-            },
+            history_row(
+                EntityId::from(1),
+                chrono::NaiveDate::from_ymd_opt(2019, 2, 15).unwrap(),
+                100.0,
+            ),
+            history_row(
+                EntityId::from(1),
+                chrono::NaiveDate::from_ymd_opt(2019, 5, 15).unwrap(),
+                200.0,
+            ),
+            history_row(
+                EntityId::from(1),
+                chrono::NaiveDate::from_ymd_opt(2019, 8, 15).unwrap(),
+                300.0,
+            ),
+            history_row(
+                EntityId::from(1),
+                chrono::NaiveDate::from_ymd_opt(2019, 11, 15).unwrap(),
+                400.0,
+            ),
             // Boundary year 2020 — one observation, not checked.
-            InflowHistoryRow {
-                hydro_id: EntityId::from(1),
-                date: chrono::NaiveDate::from_ymd_opt(2020, 1, 15).unwrap(),
-                value_m3s: 50.0,
-            },
+            history_row(
+                EntityId::from(1),
+                chrono::NaiveDate::from_ymd_opt(2020, 1, 15).unwrap(),
+                50.0,
+            ),
         ];
         let data = make_data_estimation(vec![make_hydro(1, None)], stages_2020, history);
 
@@ -1604,29 +1625,29 @@ mod tests {
 
         // Partial first year: April–December 1990.
         for month in 4u32..=12 {
-            history.push(InflowHistoryRow {
-                hydro_id: EntityId::from(1),
-                date: chrono::NaiveDate::from_ymd_opt(1990, month, 15).unwrap(),
-                value_m3s: 100.0,
-            });
+            history.push(history_row(
+                EntityId::from(1),
+                chrono::NaiveDate::from_ymd_opt(1990, month, 15).unwrap(),
+                100.0,
+            ));
         }
         // Complete interior years: 1991 through 2019.
         for year in 1991i32..=2019 {
             for month in 1u32..=12 {
-                history.push(InflowHistoryRow {
-                    hydro_id: EntityId::from(1),
-                    date: chrono::NaiveDate::from_ymd_opt(year, month, 15).unwrap(),
-                    value_m3s: 100.0,
-                });
+                history.push(history_row(
+                    EntityId::from(1),
+                    chrono::NaiveDate::from_ymd_opt(year, month, 15).unwrap(),
+                    100.0,
+                ));
             }
         }
         // Partial last year: January–September 2020.
         for month in 1u32..=9 {
-            history.push(InflowHistoryRow {
-                hydro_id: EntityId::from(1),
-                date: chrono::NaiveDate::from_ymd_opt(2020, month, 15).unwrap(),
-                value_m3s: 100.0,
-            });
+            history.push(history_row(
+                EntityId::from(1),
+                chrono::NaiveDate::from_ymd_opt(2020, month, 15).unwrap(),
+                100.0,
+            ));
         }
 
         let data = make_data_estimation(vec![make_hydro(1, None)], stages, history);
@@ -1665,11 +1686,11 @@ mod tests {
                 if year == 2005 && month == 7 {
                     continue;
                 }
-                history.push(InflowHistoryRow {
-                    hydro_id: EntityId::from(1),
-                    date: chrono::NaiveDate::from_ymd_opt(year, month, 15).unwrap(),
-                    value_m3s: 100.0,
-                });
+                history.push(history_row(
+                    EntityId::from(1),
+                    chrono::NaiveDate::from_ymd_opt(year, month, 15).unwrap(),
+                    100.0,
+                ));
             }
         }
 

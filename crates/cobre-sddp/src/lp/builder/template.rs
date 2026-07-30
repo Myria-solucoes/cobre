@@ -17,12 +17,10 @@ use crate::setup::template_postprocess::{
 
 use super::layout::{ResolvedTables, StageLayout, TemplateBuildCtx};
 use super::{GenericConstraintRowEntry, M3S_TO_HM3, columns, entries, rows, scaling};
-use crate::indexer::Boundary;
-use crate::indexer::EvaporationIndices;
-use crate::indexer::HydroSys;
-use crate::indexer::StateSpace;
-use crate::indexer::StorageBoundaryGrid;
-use crate::indexer::ThermalSys;
+use crate::indexer::{
+    Boundary, EvaporationIndices, HydroCellIndex, HydroSys, StateSpace, StorageBoundaryGrid,
+    ThermalSys,
+};
 #[cfg(any(test, feature = "test-support"))]
 use crate::setup::bucket_topology::build_transit_bucket_topology;
 #[cfg(any(test, feature = "test-support"))]
@@ -266,9 +264,9 @@ pub struct StageGeometry {
     pub outflow_below_slack: Range<usize>,
     /// Outflow-above-maximum slack column range (one per hydro per block).
     pub outflow_above_slack: Range<usize>,
-    /// Turbine-below-minimum slack column range (one per hydro per block).
+    /// Turbine-below-minimum slack column range (one per hydro CELL per block).
     pub turbine_below_slack: Range<usize>,
-    /// Generation-below-minimum slack column range (one per hydro per block).
+    /// Generation-below-minimum slack column range (one per hydro CELL per block).
     pub generation_below_slack: Range<usize>,
     /// Import-contract column range (one per import contract per block); empty
     /// `start..start` (not `0..0`) at the pumping-end column when there are none.
@@ -289,10 +287,9 @@ pub struct StageGeometry {
     pub fpha: Range<usize>,
     /// Per-stage `σ_fill`-target row range (one row per Filling-phase hydro); empty
     /// `start..start` (not `0..0`) at every non-Filling stage.
-    // Voice 4: no read site consumes this yet — it is the per-stage carrier that
-    // keeps `StageGeometry` a faithful mirror of the row shape, the seam the sibling
-    // `σ^{v-}` family extends. The `#[allow(dead_code)]` refires if the seam is
-    // removed before a reader lands.
+    // Rationale (dead_code): no read site consumes this yet — the per-stage carrier
+    // that keeps `StageGeometry` a faithful mirror of the row shape, the seam the
+    // sibling `σ^{v-}` family extends.
     #[allow(dead_code)]
     pub filling_target: Range<usize>,
     /// Per-stage `σ_fill`-target slack column range (one column per Filling-phase
@@ -302,9 +299,8 @@ pub struct StageGeometry {
     pub filling_target_col: Range<usize>,
     /// Soft `σ^{v-}` operating-floor row range (one row per Operating-phase filling
     /// hydro); empty `start..start` (not `0..0`) at every non-operating stage.
-    // Voice 4: no read site consumes this yet — the per-stage row-shape carrier
-    // mirroring the `filling_target` seam. The `#[allow(dead_code)]` refires if the
-    // seam is removed before a reader lands.
+    // Rationale (dead_code): no read site consumes this yet — the per-stage row-shape
+    // carrier mirroring the `filling_target` seam.
     #[allow(dead_code)]
     pub filled_min_storage_floor: Range<usize>,
     /// Soft `σ^{v-}` operating-floor slack column range (one column per
@@ -484,11 +480,9 @@ pub(super) fn build_single_stage_template(
     }
 }
 
-/// Collect the bus-slice positions of stochastic load buses.
-///
-/// Returns bus-position indices (into the buses slice) for every bus that has
-/// `std_mw > 0` in any load model, sorted by `EntityId` for declaration-order
-/// invariance.  Buses with duplicate IDs across stages are deduplicated.
+/// Bus-slice positions of every bus with `std_mw > 0` in any load model, sorted by
+/// `EntityId` for declaration-order invariance; IDs repeated across stages are
+/// deduplicated.
 fn collect_load_bus_indices(system: &System, bus_pos: &BTreeMap<EntityId, usize>) -> Vec<usize> {
     let mut ids: Vec<EntityId> = system
         .load_models()
@@ -597,7 +591,7 @@ fn collect_load_bus_indices(system: &System, bus_pos: &BTreeMap<EntityId, usize>
 /// use cobre_core::{Bus, DeficitSegment, EntityId, SystemBuilder};
 /// use cobre_sddp::InflowNonNegativityMethod;
 /// use cobre_sddp::hydro_models::PrepareHydroModelsResult;
-/// use cobre_sddp::indexer::StateSpace;
+/// use cobre_sddp::indexer::{HydroCellIndex, StateSpace};
 /// use cobre_sddp::lp_builder::build_stage_templates;
 /// use cobre_sddp::resolved_parameters::ResolvedParameters;
 /// use cobre_stochastic::par::precompute::PrecomputedPar;
@@ -617,12 +611,14 @@ fn collect_load_bus_indices(system: &System, bus_pos: &BTreeMap<EntityId, usize>
 /// let resolved_parameters = ResolvedParameters::default();
 /// // No stages, so the state layout is empty too.
 /// let state_layout = StateSpace::new(0, 0, 0, Vec::new(), 0, 0, Vec::new(), &[]);
+/// let hydro_cell_index = HydroCellIndex::build(system.hydros());
 /// let result = build_stage_templates(&system, method, &par_lp, &normal_lp,
 ///                                    &hydro_models.production, &hydro_models.evaporation,
 ///                                    &resolved_parameters, &state_layout, &[],
 ///                                    &std::collections::HashMap::new(),
 ///                                    &std::collections::HashMap::new(),
-///                                    &std::collections::HashMap::new())
+///                                    &std::collections::HashMap::new(),
+///                                    &hydro_cell_index)
 ///     .expect("empty system ok");
 /// assert!(result.templates.is_empty());
 /// ```
@@ -646,6 +642,7 @@ pub fn build_stage_templates(
     arc_stage_weights: &HashMap<usize, Vec<Vec<f64>>>,
     arc_spread_chrono: &HashMap<usize, Vec<Option<SpreadResolution>>>,
     arc_arrival_density: &HashMap<usize, Vec<Option<Vec<f64>>>>,
+    hydro_cell_index: &HydroCellIndex,
 ) -> Result<StageTemplates, SddpError> {
     let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
     let n_hydros = system.hydros().len();
@@ -671,6 +668,7 @@ pub fn build_stage_templates(
         arc_spread_chrono.clone(),
         arc_arrival_density.clone(),
         state_layout.max_par_order,
+        hydro_cell_index,
     );
     let n_load_buses = load_bus_indices.len();
     debug_assert!(
@@ -750,6 +748,7 @@ pub fn build_stage_templates_resolving_layout(
 ) -> Result<StageTemplates, SddpError> {
     let topology = build_transit_bucket_topology(system);
     let (state_layout, _, _) = resolve_state_layout(system, par_lp, &topology)?;
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     build_stage_templates(
         system,
         inflow_method,
@@ -763,6 +762,7 @@ pub fn build_stage_templates_resolving_layout(
         &topology.arc_stage_weights,
         &topology.arc_spread_chrono,
         &topology.arc_arrival_density,
+        &hydro_cell_index,
     )
 }
 
@@ -803,7 +803,7 @@ pub(super) fn build_filling_v_target(
             continue;
         };
         let start = filling.start_stage_id;
-        let last = entry - 1; // L: the last Filling stage id.
+        let last = entry - 1;
         // Guard a hypothetical inverted config (`start < entry` is validated
         // upstream) into an empty trajectory rather than a malformed loop.
         if last < start {
@@ -866,6 +866,7 @@ fn build_template_build_ctx<'a>(
     arc_spread_chrono: HashMap<usize, Vec<Option<SpreadResolution>>>,
     arc_arrival_density: HashMap<usize, Vec<Option<Vec<f64>>>>,
     max_par_order: usize,
+    hydro_cell_index: &'a HydroCellIndex,
 ) -> (
     TemplateBuildCtx<'a>,
     Vec<usize>,
@@ -959,8 +960,8 @@ fn build_template_build_ctx<'a>(
         .k_max
         .max(anticipated_lead_stages.iter().copied().max().unwrap_or(0));
 
-    // Target hydro ID -> source hydro indices that divert to it. Cloned so the map
-    // serves both LP construction (ctx) and the simulation extraction output.
+    // Cloned so the map serves both LP construction (ctx) and the simulation
+    // extraction output.
     let mut diversion_upstream: HashMap<EntityId, Vec<usize>> = HashMap::new();
     for (h_idx, hydro) in hydros.iter().enumerate() {
         if let Some(ref div) = hydro.diversion {
@@ -974,7 +975,7 @@ fn build_template_build_ctx<'a>(
 
     // Computed before the per-stage loop so `fill_anticipated_columns` can read the
     // discount factors and stage hours from the ctx at LP build time (before
-    // postprocess runs). Both arrays have length `n_study_stages`.
+    // postprocess runs).
     let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
     let per_stage_discount =
         compute_per_stage_discount_factors(&study_stages, system.policy_graph());
@@ -1022,12 +1023,12 @@ fn build_template_build_ctx<'a>(
         buses,
         load_models: system.load_models(),
         cascade: system.cascade(),
+        hydro_cell_index,
         resolved: ResolvedTables {
             bounds: system.bounds(),
             penalties: system.penalties(),
             resolved_generic_bounds: system.resolved_generic_bounds(),
             resolved_load_factors: system.resolved_load_factors(),
-            resolved_exchange_factors: system.resolved_exchange_factors(),
             resolved_ncs_bounds: system.resolved_ncs_bounds(),
             resolved_ncs_factors: system.resolved_ncs_factors(),
             resolved_parameters,
@@ -1085,7 +1086,7 @@ fn assemble_stage_templates_output(
     stage_outputs: Vec<StageBuildOutput>,
     load_bus_indices: Vec<usize>,
     diversion_upstream_output: HashMap<EntityId, Vec<usize>>,
-    study_stages: &[&cobre_core::Stage],
+    study_stages: &[&Stage],
     ctx: &TemplateBuildCtx<'_>,
     par_lp: &PrecomputedPar,
     n_hydros: usize,
@@ -1162,7 +1163,6 @@ fn assemble_stage_templates_output(
         geometry_per_stage,
         diversion_upstream: diversion_upstream_output,
         hydro_productivities_per_stage,
-        // 1.0-placeholders until `StageTemplates::set_discount_factors`.
         discount_factors: vec![1.0; n_study],
         cumulative_discount_factors: vec![1.0; n_study],
     }

@@ -10,9 +10,8 @@ use crate::{
     Bus, CascadeTopology, CorrelationModel, EnergyContract, EntityId, ExternalLoadRow,
     ExternalNcsRow, ExternalScenarioRow, GenericConstraint, Hydro, InflowHistoryRow, InflowModel,
     InitialConditions, Line, LoadModel, NcsModel, NetworkTopology, NonControllableSource,
-    PolicyGraph, PumpingStation, ResolvedBounds, ResolvedExchangeFactors,
-    ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
-    ResolvedPenalties, Stage, Thermal,
+    PolicyGraph, PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds,
+    ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, Stage, Thermal,
 };
 
 mod builder;
@@ -102,8 +101,6 @@ pub struct System {
     resolved_generic_bounds: ResolvedGenericConstraintBounds,
     /// Pre-resolved per-block load scaling factors.
     resolved_load_factors: ResolvedLoadFactors,
-    /// Pre-resolved per-block exchange capacity factors.
-    resolved_exchange_factors: ResolvedExchangeFactors,
     /// Pre-resolved per-stage NCS available generation bounds.
     resolved_ncs_bounds: ResolvedNcsBounds,
     /// Pre-resolved per-block NCS generation scaling factors.
@@ -123,7 +120,7 @@ pub struct System {
     /// User-defined generic linear constraints, sorted by `id`.
     generic_constraints: Vec<GenericConstraint>,
 
-    /// Raw historical inflow observations, sorted by `(hydro_id, date)` ascending.
+    /// Raw historical inflow observations, sorted by `(hydro_id, start_date)` ascending.
     inflow_history: Vec<InflowHistoryRow>,
     /// Raw external inflow scenario rows, sorted by `(stage_id, scenario_id, hydro_id)` ascending.
     external_scenarios: Vec<ExternalScenarioRow>,
@@ -135,10 +132,7 @@ pub struct System {
 
 const _: () = {
     const fn assert_send_sync<T: Send + Sync>() {}
-    const fn check() {
-        assert_send_sync::<System>();
-    }
-    let _ = check;
+    assert_send_sync::<System>();
 };
 
 /// Deserialize-only mirror of [`System`] without the derived indices. Field
@@ -162,7 +156,6 @@ struct SystemRepr {
     bounds: ResolvedBounds,
     resolved_generic_bounds: ResolvedGenericConstraintBounds,
     resolved_load_factors: ResolvedLoadFactors,
-    resolved_exchange_factors: ResolvedExchangeFactors,
     resolved_ncs_bounds: ResolvedNcsBounds,
     resolved_ncs_factors: ResolvedNcsFactors,
     inflow_models: Vec<InflowModel>,
@@ -204,7 +197,6 @@ impl From<SystemRepr> for System {
             bounds: repr.bounds,
             resolved_generic_bounds: repr.resolved_generic_bounds,
             resolved_load_factors: repr.resolved_load_factors,
-            resolved_exchange_factors: repr.resolved_exchange_factors,
             resolved_ncs_bounds: repr.resolved_ncs_bounds,
             resolved_ncs_factors: repr.resolved_ncs_factors,
             inflow_models: repr.inflow_models,
@@ -417,12 +409,6 @@ impl System {
         &self.resolved_load_factors
     }
 
-    /// Returns a reference to the pre-resolved per-block exchange capacity factors.
-    #[must_use]
-    pub fn resolved_exchange_factors(&self) -> &ResolvedExchangeFactors {
-        &self.resolved_exchange_factors
-    }
-
     /// Returns a reference to the pre-resolved per-stage NCS available generation bounds.
     #[must_use]
     pub fn resolved_ncs_bounds(&self) -> &ResolvedNcsBounds {
@@ -471,7 +457,7 @@ impl System {
         &self.generic_constraints
     }
 
-    /// Returns the raw historical inflow observations, sorted by `(hydro_id, date)`.
+    /// Returns the raw historical inflow observations, sorted by `(hydro_id, start_date)`.
     ///
     /// Returns an empty slice when `scenarios/inflow_history.parquet` was absent
     /// at case-load time.
@@ -560,7 +546,9 @@ impl System {
 mod tests {
     use super::*;
     use crate::ValidationError;
-    use crate::entities::{ContractType, HydroGenerationModel, HydroPenalties};
+    #[cfg(feature = "serde")]
+    use crate::entities::HydroUnitGroup;
+    use crate::entities::{ContractType, FillingConfig, HydroGenerationModel, HydroPenalties};
     use chrono::NaiveDate;
 
     fn make_bus(id: i32) -> Bus {
@@ -574,7 +562,7 @@ mod tests {
     }
 
     fn make_line(id: i32, source_bus_id: i32, target_bus_id: i32) -> Line {
-        crate::Line {
+        Line {
             id: EntityId(id),
             name: format!("line-{id}"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -608,11 +596,10 @@ mod tests {
             evaporation_violation_neg_cost: 0.0,
             inflow_nonnegativity_cost: 1000.0,
         };
-        Hydro {
+        let mut hydro = Hydro {
             id: EntityId(id),
             name: format!("hydro-{id}"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(bus_id),
             downstream_id: None,
             travel_time_hours: None,
             entry_stage_id: None,
@@ -627,6 +614,7 @@ mod tests {
             specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 1.0,
+            unit_groups: Vec::new(),
             tailrace: None,
             hydraulic_losses: None,
             efficiency: None,
@@ -635,7 +623,9 @@ mod tests {
             diversion: None,
             filling: None,
             penalties: zero_penalties,
-        }
+        };
+        hydro.declare_mirror_unit_group(EntityId(bus_id));
+        hydro
     }
 
     /// Creates a hydro on bus 0. Caller must supply `make_bus(0)`.
@@ -753,7 +743,6 @@ mod tests {
 
     #[test]
     fn test_lookup_by_id() {
-        // Hydros reference bus id=0; supply it so cross-reference validation passes.
         let system = SystemBuilder::new()
             .buses(vec![make_bus(0)])
             .hydros(vec![make_hydro(10), make_hydro(5), make_hydro(20)])
@@ -767,7 +756,6 @@ mod tests {
 
     #[test]
     fn test_lookup_missing_id() {
-        // Hydros reference bus id=0; supply it so cross-reference validation passes.
         let system = SystemBuilder::new()
             .buses(vec![make_bus(0)])
             .hydros(vec![make_hydro(1), make_hydro(2)])
@@ -891,7 +879,6 @@ mod tests {
 
     #[test]
     fn test_cascade_accessible() {
-        // Hydros reference bus id=0; supply it so cross-reference validation passes.
         let mut h0 = make_hydro_on_bus(0, 0);
         h0.downstream_id = Some(EntityId(1));
         let mut h1 = make_hydro_on_bus(1, 0);
@@ -975,28 +962,6 @@ mod tests {
     }
 
     // ---- Cross-reference validation tests -----------------------------------
-
-    #[test]
-    fn test_invalid_bus_reference_hydro() {
-        let hydro = make_hydro_on_bus(1, 99);
-        let result = SystemBuilder::new().hydros(vec![hydro]).build();
-
-        assert!(result.is_err(), "expected Err for missing bus reference");
-        let errors = result.unwrap_err();
-        assert!(
-            errors.iter().any(|e| matches!(
-                e,
-                ValidationError::InvalidReference {
-                    source_entity_type: "Hydro",
-                    source_id: EntityId(1),
-                    field_name: "bus_id",
-                    referenced_id: EntityId(99),
-                    expected_type: "Bus",
-                }
-            )),
-            "expected InvalidReference for Hydro bus_id=99, got: {errors:?}"
-        );
-    }
 
     #[test]
     fn test_invalid_downstream_reference() {
@@ -1245,7 +1210,6 @@ mod tests {
 
     #[test]
     fn test_filling_without_entry_stage() {
-        use crate::entities::FillingConfig;
         let bus = make_bus(0);
         let mut hydro = make_hydro(1);
         hydro.entry_stage_id = None;
@@ -1279,7 +1243,6 @@ mod tests {
     #[test]
     fn test_filling_negative_rate() {
         // Only a negative rate is rejected; zero is valid (test_filling_zero_rate_accepted).
-        use crate::entities::FillingConfig;
         let bus = make_bus(0);
         let mut hydro = make_hydro(1);
         hydro.entry_stage_id = Some(10);
@@ -1314,7 +1277,6 @@ mod tests {
     #[test]
     fn test_filling_zero_rate_accepted() {
         // A zero rate is valid: no minimum accumulation is required this stage.
-        use crate::entities::FillingConfig;
         let bus = make_bus(0);
         let mut hydro = make_hydro(1);
         hydro.entry_stage_id = Some(10);
@@ -1337,7 +1299,6 @@ mod tests {
 
     #[test]
     fn test_valid_filling_config_passes() {
-        use crate::entities::FillingConfig;
         let bus = make_bus(0);
         let mut hydro = make_hydro(1);
         hydro.entry_stage_id = Some(10);
@@ -1362,7 +1323,6 @@ mod tests {
     fn test_filling_start_not_before_entry_rejected() {
         // SystemBuilder rejects start_stage_id >= entry_stage_id even when cobre-io
         // is bypassed; an inverted ordering otherwise mis-phases the reservoir.
-        use crate::entities::FillingConfig;
         let bus = make_bus(0);
         let mut hydro = make_hydro(1);
         hydro.entry_stage_id = Some(5);
@@ -1395,7 +1355,6 @@ mod tests {
 
     #[test]
     fn test_cascade_cycle_and_invalid_filling_both_reported() {
-        use crate::entities::FillingConfig;
         let bus = make_bus(0);
 
         let mut h0 = make_hydro(0);
@@ -1478,7 +1437,6 @@ mod tests {
         use crate::temporal::{
             Block, BlockMode, NoiseMethod, ScenarioSourceConfig, StageRiskConfig, StageStateConfig,
         };
-        use chrono::NaiveDate;
         Stage {
             index: usize::try_from(id.max(0)).unwrap_or(0),
             id,
@@ -1527,10 +1485,7 @@ mod tests {
 
     #[test]
     fn test_system_resolved_generic_bounds_accessor() {
-        use crate::resolved::ResolvedGenericConstraintBounds;
-        use std::collections::HashMap as StdHashMap;
-
-        let id_map: StdHashMap<i32, usize> = [(0, 0), (1, 1)].into_iter().collect();
+        let id_map: HashMap<i32, usize> = [(0, 0), (1, 1)].into_iter().collect();
         let rows = vec![(0i32, 0i32, None::<i32>, 100.0f64)];
         let table = ResolvedGenericConstraintBounds::new(&id_map, rows.into_iter());
 
@@ -1590,7 +1545,6 @@ mod tests {
                 value_hm3: 15_000.0,
             }],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
@@ -1675,15 +1629,68 @@ mod tests {
 
     #[cfg(feature = "serde")]
     #[test]
+    fn test_system_postcard_roundtrip_preserves_unit_groups() {
+        let bus0 = make_bus(0);
+        let bus4 = make_bus(4);
+        let bus9 = make_bus(9);
+
+        let no_groups_hydro = make_hydro_on_bus(1, 0);
+        let mut two_groups_hydro = make_hydro_on_bus(2, 0);
+        two_groups_hydro.unit_groups = vec![
+            HydroUnitGroup {
+                id: EntityId(3),
+                name: "Group A".to_string(),
+                bus_id: EntityId(4),
+                min_generation_mw: 10.0,
+                max_generation_mw: 20.0,
+                min_turbined_m3s: 30.0,
+                max_turbined_m3s: 40.0,
+            },
+            HydroUnitGroup {
+                id: EntityId(7),
+                name: "Group B".to_string(),
+                bus_id: EntityId(9),
+                min_generation_mw: 50.0,
+                max_generation_mw: 60.0,
+                min_turbined_m3s: 70.0,
+                max_turbined_m3s: 80.0,
+            },
+        ];
+
+        let system = SystemBuilder::new()
+            .buses(vec![bus0, bus4, bus9])
+            .hydros(vec![no_groups_hydro, two_groups_hydro.clone()])
+            .build()
+            .expect("valid system");
+
+        let bytes = postcard::to_allocvec(&system).unwrap();
+        let deserialized: System = postcard::from_bytes(&bytes).unwrap();
+
+        let decoded_no_groups = deserialized
+            .hydro(EntityId(1))
+            .expect("hydro 1 must round-trip");
+        assert_eq!(decoded_no_groups.unit_groups.len(), 1);
+        assert_eq!(decoded_no_groups.unit_groups[0].id, EntityId(0));
+        assert_eq!(decoded_no_groups.unit_groups[0].bus_id, EntityId(0));
+
+        let decoded_two_groups = deserialized
+            .hydro(EntityId(2))
+            .expect("hydro 2 must round-trip");
+        assert_eq!(decoded_two_groups.unit_groups, two_groups_hydro.unit_groups);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
     fn fully_populated_system_survives_postcard_roundtrip_intact() {
         use crate::{
             AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
-            ConstraintExpression, ConstraintSense, ContractStageBounds, CorrelationEntity,
+            ConstraintExpression, ConstraintSense, ContractBlockBounds, CorrelationEntity,
             CorrelationGroup, CorrelationProfile, CorrelationScheduleEntry, DeficitSegment,
-            HydroPastDefluence, HydroPastInflows, HydroStageBounds, HydroStagePenalties,
-            HydroStorage, LineStageBounds, LineStagePenalties, LinearTerm, NcsStagePenalties,
-            PenaltiesCountsSpec, PenaltiesDefaults, PolicyGraphType, PumpingStageBounds,
-            RecentObservation, SlackConfig, ThermalStageBounds, Transition, VariableRef,
+            HydroBlockBounds, HydroPastDefluence, HydroStageBounds, HydroStagePenalties,
+            HydroStorage, LineBlockBounds, LineStagePenalties, LinearTerm, NcsStagePenalties,
+            PenaltiesCountsSpec, PenaltiesDefaults, PolicyGraphType, PumpingBlockBounds,
+            RecentObservation, SlackConfig, ThermalBlockBounds, ThermalStageBounds, Transition,
+            VariableRef,
         };
 
         let bus1 = {
@@ -1709,6 +1716,26 @@ mod tests {
         hydro1.downstream_id = Some(EntityId(2));
         hydro1.travel_time_hours = Some(6.0);
         hydro1.entry_stage_id = Some(0);
+        hydro1.unit_groups = vec![
+            HydroUnitGroup {
+                id: EntityId(10),
+                name: "Group A".to_string(),
+                bus_id: EntityId(1),
+                min_generation_mw: 0.0,
+                max_generation_mw: 0.4,
+                min_turbined_m3s: 0.0,
+                max_turbined_m3s: 0.4,
+            },
+            HydroUnitGroup {
+                id: EntityId(20),
+                name: "Group B".to_string(),
+                bus_id: EntityId(2),
+                min_generation_mw: 0.0,
+                max_generation_mw: 0.6,
+                min_turbined_m3s: 0.0,
+                max_turbined_m3s: 0.6,
+            },
+        ];
         let hydro2 = make_hydro_on_bus(2, 2);
 
         let thermal1 = make_thermal_on_bus(1, 1);
@@ -1791,6 +1818,10 @@ mod tests {
                 hydro: HydroStageBounds {
                     min_storage_hm3: 10.0,
                     max_storage_hm3: 500.0,
+                    filling_min_rate_m3s: 3.0,
+                    water_withdrawal_m3s: 1.5,
+                },
+                hydro_block: HydroBlockBounds {
                     min_turbined_m3s: 1.0,
                     max_turbined_m3s: 300.0,
                     min_outflow_m3s: 2.0,
@@ -1798,23 +1829,21 @@ mod tests {
                     min_generation_mw: 5.0,
                     max_generation_mw: 200.0,
                     max_diversion_m3s: Some(20.0),
-                    filling_min_rate_m3s: 3.0,
-                    water_withdrawal_m3s: 1.5,
                 },
-                thermal: ThermalStageBounds {
+                thermal: ThermalStageBounds { cost_per_mwh: 85.0 },
+                thermal_block: ThermalBlockBounds {
                     min_generation_mw: 10.0,
                     max_generation_mw: 150.0,
-                    cost_per_mwh: 85.0,
                 },
-                line: LineStageBounds {
+                line_block: LineBlockBounds {
                     direct_mw: 300.0,
                     reverse_mw: 250.0,
                 },
-                pumping: PumpingStageBounds {
+                pumping_block: PumpingBlockBounds {
                     min_flow_m3s: 0.5,
                     max_flow_m3s: 40.0,
                 },
-                contract: ContractStageBounds {
+                contract_block: ContractBlockBounds {
                     min_mw: 0.0,
                     max_mw: 90.0,
                     price_per_mwh: 95.0,
@@ -1830,9 +1859,6 @@ mod tests {
         let mut resolved_load_factors = ResolvedLoadFactors::new(2, 2, 1);
         resolved_load_factors.set(0, 0, 0, 0.92);
         resolved_load_factors.set(1, 1, 0, 1.08);
-
-        let mut resolved_exchange_factors = ResolvedExchangeFactors::new(1, 2, 1);
-        resolved_exchange_factors.set(0, 0, 0, 0.95, 0.9);
 
         let resolved_ncs_bounds = ResolvedNcsBounds::new(1, 2, &[45.0]);
 
@@ -1928,11 +1954,6 @@ mod tests {
                 hydro_id: EntityId(1),
                 value_hm3: 50.0,
             }],
-            past_inflows: vec![HydroPastInflows {
-                hydro_id: EntityId(1),
-                values_m3s: vec![600.0, 500.0],
-                season_ids: None,
-            }],
             past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
                 thermal_id: EntityId(1),
                 values_mw: vec![100.0, 200.0],
@@ -1961,6 +1982,7 @@ mod tests {
                     VariableRef::HydroGeneration {
                         hydro_id: EntityId(1),
                         block_id: None,
+                        bus_id: None,
                     },
                 )],
             },
@@ -1974,12 +1996,14 @@ mod tests {
         let inflow_history = vec![
             InflowHistoryRow {
                 hydro_id: EntityId(1),
-                date: NaiveDate::from_ymd_opt(2000, 1, 1).unwrap(),
+                start_date: NaiveDate::from_ymd_opt(2000, 1, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2000, 2, 1).unwrap(),
                 value_m3s: 500.0,
             },
             InflowHistoryRow {
                 hydro_id: EntityId(2),
-                date: NaiveDate::from_ymd_opt(2000, 2, 1).unwrap(),
+                start_date: NaiveDate::from_ymd_opt(2000, 2, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2000, 3, 1).unwrap(),
                 value_m3s: 420.0,
             },
         ];
@@ -2019,7 +2043,6 @@ mod tests {
             .bounds(bounds)
             .resolved_generic_bounds(resolved_generic_bounds)
             .resolved_load_factors(resolved_load_factors)
-            .resolved_exchange_factors(resolved_exchange_factors)
             .resolved_ncs_bounds(resolved_ncs_bounds)
             .resolved_ncs_factors(resolved_ncs_factors)
             .inflow_models(inflow_models)
@@ -2055,17 +2078,16 @@ mod tests {
 
     #[test]
     fn test_system_inflow_history_stores_rows() {
-        use crate::scenario::InflowHistoryRow;
-        use chrono::NaiveDate;
-
         let row1 = InflowHistoryRow {
             hydro_id: EntityId(1),
-            date: NaiveDate::from_ymd_opt(2000, 1, 1).expect("valid date"),
+            start_date: NaiveDate::from_ymd_opt(2000, 1, 1).expect("valid date"),
+            end_date: NaiveDate::from_ymd_opt(2000, 2, 1).expect("valid date"),
             value_m3s: 500.0,
         };
         let row2 = InflowHistoryRow {
             hydro_id: EntityId(1),
-            date: NaiveDate::from_ymd_opt(2000, 2, 1).expect("valid date"),
+            start_date: NaiveDate::from_ymd_opt(2000, 2, 1).expect("valid date"),
+            end_date: NaiveDate::from_ymd_opt(2000, 3, 1).expect("valid date"),
             value_m3s: 420.0,
         };
 
@@ -2090,8 +2112,6 @@ mod tests {
 
     #[test]
     fn test_system_external_scenarios_stores_rows() {
-        use crate::scenario::ExternalScenarioRow;
-
         let row = ExternalScenarioRow {
             stage_id: 0,
             scenario_id: 2,

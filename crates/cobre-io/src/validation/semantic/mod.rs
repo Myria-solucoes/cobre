@@ -4,6 +4,12 @@
 //! ensured schema correctness, referential integrity, and dimensional
 //! consistency.
 //!
+//! ## Bound-precedence law
+//!
+//! Every block-eligible bound column resolves via a four-layer precedence
+//! law. See [`resolve_bounds`](crate::resolution::resolve_bounds) for the full
+//! law and [the per-column applicability table](crate::constraints::bounds).
+//!
 //! ## Layer 5a rules (hydro and thermal domain) — `validate_semantic_hydro_thermal`
 //!
 //! | # | Rule                                              | Source file                           | `ErrorKind`            |
@@ -34,11 +40,35 @@
 //! |22 | `travel_time_hours == 0.0` — treated as undeclared, no arc created     | `system/hydros.json`                  | `ModelQuality` (warning) |
 //! |23 | Declared arc: `max_t(t_v/h_t)` below a smallness threshold             | `system/hydros.json`                  | `ModelQuality` (warning) |
 //! |24 | Declared arc: `t_v` exceeds the remaining study horizon at some stage  | `system/hydros.json`                  | `ModelQuality` (warning) |
-//! |25 | Declared arc: `past_defluences` history shorter than the required pre-study depth (derived-from-`past_inflows` fallback logs a caveat instead) | `initial_conditions.json` | `BusinessRuleViolation` (or `ModelQuality` warning) |
+//! |25 | Declared arc: `past_defluences` windows do not cover the arc's required pre-study depth | `initial_conditions.json` | `BusinessRuleViolation` (or `ModelQuality` warning) |
 //! |26 | 2+ declared arcs into one downstream plant with differing `travel_time_hours`, while any study stage is `Chronological` | `system/hydros.json` | `NotImplemented` |
-//! |27 | `recent_observations` present but the season cycle is not `Monthly` — mid-period PAR lag seeding silently skipped | `initial_conditions.json` | `ModelQuality` (warning) |
+//! |27 | *(retired — number never reused)* | — | — |
 //! |28 | `lead_stages` anticipated active window spans a stage-cadence transition (adjacent unequal stage durations); `lead_time` is the physically-anchored alternative | `system/thermals.json` | `ModelQuality` (warning) |
 //! |29 | Study supplies an inflow annual component (`inflow_annual_components` non-empty) while `season_map.cycle_type` is not `Monthly` — PAR(p)-A is monthly-exclusive by design | `scenarios/inflow_annual_component.parquet` | `BusinessRuleViolation` |
+//! |30 | PAR lag slots `1..=max_AR_order` (read by the PAR equation at every stage) must have full record/conditioning coverage (`coverage == 1.0`) | `scenarios/inflow_history.parquet` | `BusinessRuleViolation` |
+//! |31 | PAR lag slots `max_AR_order < s <= L_state − n_fin` require the same full coverage (still terminal-reachable); slots `s > L_state − n_fin` are provably never read, so a gap there is advisory only | `scenarios/inflow_history.parquet` | `BusinessRuleViolation` / `ModelQuality` (warning) |
+//! |32 | A `recent_observations` conditioning window extends past the study start, into the solved study itself | `initial_conditions.json` | `InvalidValue` |
+//! |33 | The in-progress period `[period_start, study_start)` is covered strictly between 0 and 1 | `scenarios/inflow_history.parquet` | `ModelQuality` (warning) |
+//! |34 | The first study stage's season is unresolvable (no `season_map`, no `season_id`, or an unmatched id) while PAR seeding is active | `initial_conditions.json` | `ModelQuality` (warning) |
+//! |35 | Bound-override row `block_id` within `[0, n_blocks)` for its stage, across all six bound families (thermal, hydro, line, pumping, contract, hydro unit group) | `constraints/*_bounds.parquet` | `BusinessRuleViolation` |
+//! |36 | Bound-override row uniqueness per `(entity_id, stage_id, block_id, column)` — widened to `(hydro_id, hydro_unit_group_id, stage_id, block_id, column)` for the hydro unit group family — across all six bound families (thermal, hydro, line, pumping, contract, hydro unit group); a `None` `block_id` is a distinct key from `Some(b)` | `constraints/*_bounds.parquet` | `DuplicateId` |
+//! |37 | `block_id` on a hydro/thermal bound column with no per-block LP variable (hydro storage/filling-rate/withdrawal, thermal cost) | `constraints/{hydro,thermal}_bounds.parquet` | `BusinessRuleViolation` |
+//! |38 | `block_id` on a `thermal_bounds` row targeting an anticipated thermal (commitment decision is stage-level; delivery-stage reconciliation compares per-block bounds) | `constraints/thermal_bounds.parquet` | `BusinessRuleViolation` |
+//! |39 | Hydro unit group `id` unique within its own plant (ids are plant-scoped, not global) | `system/hydros.json` | `DuplicateId` |
+//! |40 | Hydro unit group bounds internally consistent: `min_turbined_m3s <= max_turbined_m3s` and `min_generation_mw <= max_generation_mw`, checked independently | `system/hydros.json` | `InvalidValue` |
+//! |41 | Sum of unit group maxima (`max_turbined_m3s`, `max_generation_mw`, checked independently) must not exceed the plant's own value; checked against the entity declaration only, never against per-stage resolved bounds | `system/hydros.json` | `InvalidValue` |
+//! |42 | *(retired — turbined-bound sign is a parse-layer check, not semantic; see note below)* | — | — |
+//! |43 | `hydro_bounds` row `max_turbined_m3s`/`max_generation_mw` must not exceed the hydro's own declared value (checked independently); scope is these two columns only — lowering, `min_*`/storage/filling/withdrawal, and the other four bound families are untouched, each a separate decision with its own back-compat surface | `constraints/hydro_bounds.parquet` | `InvalidValue` |
+//! |44 | Sum of unit group minima (`min_turbined_m3s`, `min_generation_mw`, checked independently) must reach the plant's own declared value — the flipped direction of rule 41: rule 41 caps `Σ group max ≤ plant max`, this floors `Σ group min ≥ plant min`; checked against the entity declaration only, never against per-stage resolved bounds | `system/hydros.json` | `InvalidValue` |
+//! |45 | `hydro_unit_group_bounds` row `max_turbined_m3s`/`max_generation_mw` must not exceed that GROUP's own declared value (checked independently) — the group-axis mirror of rule 43, which checks the plant's own declared value instead | `constraints/hydro_unit_group_bounds.parquet` | `InvalidValue` |
+//!
+//! A hydro unit group bounds row's `block_id` range and duplicate-row keying
+//! are covered by rules 35 and 36 above; a row referencing a non-existent
+//! unit group id is still checked by `check_bounds_references` (Layer 3), not
+//! here. Hydro unit group turbined-bound sign (`min_turbined_m3s >= 0` and
+//! `max_turbined_m3s >= 0`, retired rule 42's slot) is validated at the PARSE
+//! layer (`system/hydros.rs`'s `validate_unit_groups`, `LoadError::SchemaError`),
+//! not the semantic layer.
 //!
 //! ## Layer 5b rules (stages, penalties, and scenario domain) — `validate_semantic_stages_penalties_scenarios`
 //!
@@ -61,13 +91,13 @@
 //! |15  | Correlation matrix diagonal entries equal 1.0 (±1e-9)                  | `scenarios/correlation.json`                   | `BusinessRuleViolation`  |
 //! |16  | Correlation off-diagonal entries in [-1.0, 1.0]                        | `scenarios/correlation.json`                   | `BusinessRuleViolation`  |
 //! |17  | Each `block_factors[j].block_id` matches a `Block.index` in its stage  | `scenarios/load_factors.json`                  | `BusinessRuleViolation`  |
-//! |18  | Load-factors entry for `(bus_id, stage_id)` with `std_mw == 0.0`       | `scenarios/load_factors.json`                  | `ModelQuality` (warning) |
+//! |18  | *(retired — number never reused)* | — | — |
 //! |19  | `season_definitions` required in `stages.json` when estimating          | `scenarios/inflow_history.parquet`             | `BusinessRuleViolation`  |
 //! |20  | Minimum observations per `(hydro, season)` group for estimation         | `scenarios/inflow_history.parquet`             | `ModelQuality` (warning) |
 //! |21  | All hydros in `hydros.json` must have observations in history           | `scenarios/inflow_history.parquet`             | `BusinessRuleViolation`  |
-//! |22  | `inflow_lags: true` with PAR order > 0 requires non-empty `past_inflows` | `initial_conditions.json`                      | `BusinessRuleViolation`  |
-//! |23  | Each hydro with PAR order `p` must have a `past_inflows` entry with `values_m3s.len() >= p` | `initial_conditions.json` | `BusinessRuleViolation`  |
-//! |24  | All hydro IDs in `past_inflows` must exist in the hydro registry        | `initial_conditions.json`                      | `BusinessRuleViolation`  |
+//! |22  | *(retired — number never reused)* | — | — |
+//! |23  | *(retired — number never reused)* | — | — |
+//! |24  | *(retired — number never reused)* | — | — |
 //! |25  | Sobol stages: `branching_factor` should be a power of 2                 | `stages.json`                                  | `ModelQuality` (warning) |
 //! |26  | `simulation.sampling_scheme.type` must be a known scheme string          | `config.json`                                  | `InvalidValue`           |
 //! |27  | Every stage `season_id` must reference a season defined in `season_definitions` | `stages.json`                        | `BusinessRuleViolation`  |
@@ -75,16 +105,18 @@
 //! |29  | All stages sharing a `season_id` must have compatible durations (within 7d) | `stages.json`                        | `BusinessRuleViolation`  |
 //! |30  | Season defined in `season_definitions` but not referenced by any stage   | `stages.json`                                  | `ModelQuality` (warning) |
 //! |31  | Observation resolution must not be finer than season resolution          | `scenarios/inflow_history.parquet`             | `BusinessRuleViolation`  |
-//! |32  | Each `season_id` in `past_inflows[i].season_ids` must exist in `SeasonMap` | `initial_conditions.json`                    | `BusinessRuleViolation`  |
+//! |32  | *(retired — number never reused)* | — | — |
 //! |33  | Filling schedule reaches the dead volume: `Σ ζ_s·rate_s >= min_storage − seed` | `system/hydros.json`               | `BusinessRuleViolation`  |
 //! |34  | PAR order > 0 but every study stage has `inflow_lags == false` (inflow-lag state omitted) | `stages.json`        | `ModelQuality` (warning) |
 //! |35  | User-supplied `inflow_ar_coefficients.parquet` must pass the periodic-ACF closure stationarity gate (external-input path only; annual-aware; season resolved via `resolve_stage_seasons`'s `season_map`-or-fallback) | `scenarios/inflow_ar_coefficients.parquet` | `InvalidValue` (or `BusinessRuleViolation` when a stage's season is genuinely unresolvable) |
 
 use super::{ValidationContext, schema::ParsedData};
 
+mod block_bounds;
 mod constraints;
 mod correlation;
 mod hydro;
+mod inflow_seeding;
 mod pumping;
 mod scenarios;
 mod season;
@@ -106,6 +138,7 @@ pub(crate) fn validate_semantic_hydro_thermal(data: &ParsedData, ctx: &mut Valid
     hydro::check_geometry_monotonicity(data, ctx);
     hydro::check_evaporation_geometry_coverage(data, ctx);
     hydro::check_fpha_constraints(data, ctx);
+    hydro::check_hydro_unit_groups(data, ctx);
     thermal::check_thermal_generation_bounds(data, ctx);
     thermal::check_anticipated_thermals(data, ctx);
     thermal::check_anticipated_cadence_transition(data, ctx);
@@ -113,23 +146,19 @@ pub(crate) fn validate_semantic_hydro_thermal(data: &ParsedData, ctx: &mut Valid
     thermal::check_anticipated_decision_target_is_anticipated(data, ctx);
     thermal::warn_thermal_generation_on_anticipated_thermal(data, ctx);
     constraints::check_per_block_storage_interior_reference(data, ctx);
+    block_bounds::check_bound_block_id_range(data, ctx);
+    block_bounds::check_duplicate_bound_rows(data, ctx);
+    block_bounds::check_block_id_on_ineligible_column(data, ctx);
+    block_bounds::check_block_id_on_anticipated_thermal(data, ctx);
+    block_bounds::check_bound_raises_declared_capacity(data, ctx);
+    block_bounds::check_group_bound_raises_declared_capacity(data, ctx);
     pumping::check_pumping_semantics(data, ctx);
     travel_time::validate_travel_time(data, ctx);
-    travel_time::check_recent_observations_non_monthly_seed_gap(data, ctx);
-    travel_time::check_annual_component_monthly_only(data, ctx);
+    inflow_seeding::validate_inflow_seeding(data, ctx);
 }
 
-// ── validate_semantic_stages_penalties_scenarios ──────────────────────────────
-
-/// Performs Layer 5b semantic validation: stage structure, penalty ordering,
-/// and scenario model rules. Every violation is collected into `ctx` before
-/// returning — no rule short-circuits another.
-///
-/// # Conditional checks
-///
-/// Rule 12 is only checked when `data.inflow_seasonal_stats` is non-empty.
-/// Rules 14-16 are only checked when `data.correlation` is `Some`.
-/// Rules 17-18 are only checked when `data.load_factors` is non-empty.
+/// Layer 5b. Every violation is collected into `ctx` before returning — no rule
+/// short-circuits another.
 pub(crate) fn validate_semantic_stages_penalties_scenarios(
     data: &ParsedData,
     ctx: &mut ValidationContext,
@@ -147,8 +176,6 @@ pub(crate) fn validate_semantic_stages_penalties_scenarios(
     scenarios::check_external_scheme_has_files(data, ctx);
     scenarios::check_load_factor_consistency(data, ctx);
     scenarios::check_estimation_prerequisites(data, ctx);
-    scenarios::check_past_inflows_coverage(data, ctx);
-    scenarios::check_past_inflows_season_ids(data, ctx);
     season::check_season_id_consistency(data, ctx);
     season::check_observation_season_alignment(data, ctx);
 }
@@ -158,3 +185,8 @@ pub(crate) fn validate_semantic_stages_penalties_scenarios(
 const PROB_TOLERANCE: f64 = 1e-6;
 
 const CORR_TOLERANCE: f64 = 1e-9;
+
+/// Absorbs binary rounding when declared group maxima sum to the plant's value in
+/// decimal but not in binary (0.1 + 0.2 > 0.3); a plant declaring no groups is
+/// already exact and is admitted by the strict `>` in `check_hydro_unit_groups`.
+const ENVELOPE_TOLERANCE: f64 = 1e-9;

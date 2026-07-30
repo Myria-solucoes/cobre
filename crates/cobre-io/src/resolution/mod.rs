@@ -4,16 +4,16 @@
 //! produces a fully pre-resolved [`cobre_core::resolved`] table for O(1) lookup.
 
 pub mod bounds;
-pub mod exchange_factors;
 pub mod generic_bounds;
+pub mod group_bounds;
 pub mod load_factors;
 pub mod ncs_bounds;
 pub mod ncs_factors;
 pub mod penalties;
 
 pub use bounds::{BoundsEntitySlices, BoundsOverrides, resolve_bounds};
-pub use exchange_factors::resolve_exchange_factors;
 pub use generic_bounds::resolve_generic_constraint_bounds;
+pub use group_bounds::resolve_hydro_unit_group_bounds;
 pub use load_factors::resolve_load_factors;
 pub use ncs_bounds::resolve_ncs_bounds;
 pub use ncs_factors::resolve_ncs_factors;

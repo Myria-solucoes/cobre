@@ -3,7 +3,7 @@
 use cobre_core::{Stage, temporal::StageLagTransition};
 
 use crate::{
-    indexer::{CutStateProjection, StateSpace, StudyDimensions},
+    indexer::{CutStateProjection, HydroCellIndex, StateSpace, StudyDimensions},
     lp_builder::StageTemplates,
     scaling_report::ScalingReport,
     simulation::EntityCounts,
@@ -28,6 +28,12 @@ pub struct StageData {
     /// `n_blks` on the per-stage geometry.
     pub(crate) study_dims: StudyDimensions,
 
+    /// Single owner of each plant's `unit_groups` partition into `bus_id`
+    /// cells, built once from `System::hydros` and stage-invariant like
+    /// [`Self::study_dims`]. The partition is the identity map for every
+    /// study without multi-bus groups (see [`HydroCellIndex`] module docs).
+    pub(crate) hydro_cell_index: HydroCellIndex,
+
     /// Per-pool cut-state projection, indexed by stage (pool) `t`, paired 1:1
     /// with [`crate::FutureCostFunction::pools`] (`pool t` sized by
     /// `cut_state_layouts[t].n_slots()`) — the single owner of each pool's
@@ -45,8 +51,9 @@ pub struct StageData {
     pub(crate) pumping_consumption_mw_per_m3s: Vec<f64>,
 
     /// Per-stage RESOLVED contract price \[$/`MWh`\]: one inner `Vec` per study
-    /// stage, ID-sorted to match `entity_counts.contract_ids`. The resolved,
-    /// possibly stage-overridden `contract_bounds(c, t).price_per_mwh`.
+    /// stage, flat with the per-stage stride `block_counts_per_stage[t]` — index
+    /// `c * n_blks + blk`, `c` ID-sorted to match `entity_counts.contract_ids`. The
+    /// resolved, possibly block-overridden `contract_bounds_at_block(c, t, blk).price_per_mwh`.
     pub(crate) contract_prices_per_stage: Vec<Vec<f64>>,
 
     /// Direction per contract, ID-sorted to match `entity_counts.contract_ids`

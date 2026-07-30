@@ -44,8 +44,10 @@ use cobre_sddp::{
 use cobre_solver::active_solver_name;
 use cobre_solver::active_solver_version;
 use cobre_stochastic::ClassSchemes;
+use cobre_stochastic::DerivedInflowSeeds;
 use cobre_stochastic::HistoricalScenarioLibrary;
 use cobre_stochastic::PrecomputedPar;
+use cobre_stochastic::derive_inflow_seeds;
 use cobre_stochastic::discover_historical_windows;
 use cobre_stochastic::normal::precompute::BlockFactorPair;
 use cobre_stochastic::normal::precompute::EntityFactorEntry;
@@ -513,9 +515,11 @@ fn rebuild_historical_library_non_root(
             max_order,
             window_years.clone(),
         );
-        // past_inflows seeds the η-inversion chain from the same x₀ as the
-        // forward pass. Compute stage_lag_transitions via the production helper,
-        // not the in-function uniform-monthly fallback, which silently misroutes
+        // The derived lag seed seeds the η-inversion chain from the same x₀ as
+        // the forward pass — rank-invariant because it is a pure function of
+        // the broadcast `system`, derived with the identical arguments rank 0
+        // uses. Compute stage_lag_transitions via the production helper, not
+        // the in-function uniform-monthly fallback, which silently misroutes
         // non-monthly study grids.
         let noop_season_map;
         let season_map_for_transitions: &SeasonMap =
@@ -528,12 +532,27 @@ fn rebuild_historical_library_non_root(
                 };
                 &noop_season_map
             };
-        let downstream_par_order = derive_downstream_par_order(&study_stages, max_order);
+        let downstream_par_order = derive_downstream_par_order(
+            &study_stages,
+            max_order,
+            system.policy_graph().season_map.as_ref(),
+        );
         let stage_lag_transitions = precompute_stage_lag_transitions(
             &study_stages,
             season_map_for_transitions,
             downstream_par_order,
         );
+        let derived_inflow_seeds = match study_stages.first() {
+            None => DerivedInflowSeeds::zero(hydro_ids.len(), max_order),
+            Some(first_stage) => derive_inflow_seeds(
+                system.inflow_history(),
+                &system.initial_conditions().recent_observations,
+                system.hydros(),
+                first_stage,
+                season_map_for_transitions,
+                max_order,
+            ),
+        };
         standardize_historical_windows(
             &mut lib,
             system.inflow_history(),
@@ -542,7 +561,10 @@ fn rebuild_historical_library_non_root(
             &par,
             &window_years,
             system.policy_graph().season_map.as_ref(),
-            &system.initial_conditions().past_inflows,
+            &derived_inflow_seeds.lag_values,
+            max_order,
+            &derived_inflow_seeds.accum,
+            &derived_inflow_seeds.weight,
             &stage_lag_transitions,
             downstream_par_order,
         );
@@ -677,13 +699,21 @@ fn run_root_exports(
     })?;
 
     if let Some(path) = root_estimation_path {
-        let provenance = build_provenance_report(
+        let mut provenance = build_provenance_report(
             path,
             root_estimation_report,
             setup.stochastic.provenance(),
             system.hydros().len(),
             &setup.hydro_models.provenance,
         );
+        // Fingerprint the derived lag seed (training-side library only) so
+        // stale-library detection can compare against a fresh digest on later runs.
+        provenance.inflow.historical_library_seed_digest = setup
+            .scenario_libraries
+            .training
+            .historical
+            .as_ref()
+            .map(HistoricalScenarioLibrary::seed_digest);
         if !ctx.quiet {
             print_provenance_summary(&ctx.stderr, &provenance);
         }
@@ -734,17 +764,18 @@ mod tests {
     };
     use crate::commands::run::{CommBackendArg, RunArgs};
 
-    fn d19_case_dir() -> PathBuf {
+    fn d29_case_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../examples/deterministic/d19-multi-hydro-par")
+            .join("../../examples/deterministic/d29-weekly-par-noise-sharing")
     }
 
-    /// D19's study stages share one `season_id`, so `study_stage_noise_group_ids`
-    /// groups them into a single shared noise group — the sharing case a monthly
-    /// (all-unique-groups) fixture cannot exercise.
+    /// D29's 4 weekly study stages all declare `season_id=0`, so
+    /// `study_stage_noise_group_ids` groups them into a single shared noise
+    /// group — the sharing case a monthly (all-unique-groups) fixture cannot
+    /// exercise.
     #[test]
     fn non_root_opening_tree_matches_rank_0_under_shared_noise_groups() {
-        let case_dir = d19_case_dir();
+        let case_dir = d29_case_dir();
         let args = RunArgs {
             case_dir: case_dir.clone(),
             output: None,
@@ -754,12 +785,12 @@ mod tests {
         };
         let (prepared, _hydro_models, bcast, _config, _scalars, _timings) =
             load_case_and_config(&args, true, &Term::stderr())
-                .expect("D19 must load and prepare stochastic context on rank 0");
+                .expect("D29 must load and prepare stochastic context on rank 0");
 
         let ids = study_stage_noise_group_ids(&prepared.system);
         assert!(
             ids.windows(2).any(|w| w[0] == w[1]),
-            "D19 fixture must exercise shared noise groups; got {ids:?}",
+            "D29 fixture must exercise shared noise groups; got {ids:?}",
         );
 
         let rank0_tree = prepared.stochastic.opening_tree();
@@ -771,7 +802,7 @@ mod tests {
             bcast.seed,
             &case_dir,
         )
-        .expect("non-root reconstruction must succeed for D19");
+        .expect("non-root reconstruction must succeed for D29");
         let non_root_tree = non_root.opening_tree();
 
         assert_eq!(

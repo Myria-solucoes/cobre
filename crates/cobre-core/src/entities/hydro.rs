@@ -159,6 +159,30 @@ pub enum EfficiencyModel {
     },
 }
 
+/// A turbine group within a hydro plant: the plant owns the water (storage,
+/// inflow, spillage, cascade topology), each group owns a share of the power
+/// (its own bus and its own generation/turbining envelope).
+///
+/// The four bound fields mirror `Hydro`'s own four bound fields, both required.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct HydroUnitGroup {
+    /// Identifier, unique within the owning plant (not globally).
+    pub id: EntityId,
+    /// Human-readable group name.
+    pub name: String,
+    /// Bus to which this group's generation is injected.
+    pub bus_id: EntityId,
+    /// Minimum electrical generation \[MW\].
+    pub min_generation_mw: f64,
+    /// Maximum electrical generation \[MW\].
+    pub max_generation_mw: f64,
+    /// Minimum turbined flow \[m³/s\].
+    pub min_turbined_m3s: f64,
+    /// Maximum turbined flow \[m³/s\].
+    pub max_turbined_m3s: f64,
+}
+
 /// Hydroelectric power plant with reservoir storage and cascade topology.
 ///
 /// Plants form a cascade via `downstream_id`: water released (turbined + spilled)
@@ -174,8 +198,6 @@ pub struct Hydro {
     pub name: String,
     /// Date the entity enters service (ISO 8601).
     pub operational_start_date: NaiveDate,
-    /// Bus to which this plant's generation is injected.
-    pub bus_id: EntityId,
     /// Identifier of the downstream hydro plant in the cascade.
     /// None = run-of-river (outflow leaves the system) or final plant.
     pub downstream_id: Option<EntityId>,
@@ -212,6 +234,9 @@ pub struct Hydro {
     pub min_generation_mw: f64,
     /// Maximum electrical generation (installed capacity) \[MW\].
     pub max_generation_mw: f64,
+    /// Turbine groups partitioning this plant's generation envelope, each with
+    /// its own bus and bounds.
+    pub unit_groups: Vec<HydroUnitGroup>,
     /// Tailrace elevation model. None = constant zero tailrace height.
     pub tailrace: Option<TailraceModel>,
     /// Penstock hydraulic loss model. None = lossless penstock.
@@ -233,6 +258,35 @@ pub struct Hydro {
     /// Entity-level penalty costs, resolved from the global → entity cascade.
     /// Always populated — falls back to global defaults when no entity override exists.
     pub penalties: HydroPenalties,
+}
+
+impl Hydro {
+    /// Puts `unit_groups` in canonical id order so results do not depend on
+    /// declaration order.
+    pub fn sort_unit_groups(&mut self) {
+        self.unit_groups.sort_by_key(|g| g.id.0);
+    }
+
+    /// Test-only fixture helper: mirrors this plant into a single unit group
+    /// when none is declared, matching the construction production code no
+    /// longer performs — a production caller is a contract violation, not a
+    /// convenience. The caller supplies `bus_id`: a hydro's bus association is
+    /// owned by its unit groups, not the plant, so the mirror group's bus is a
+    /// caller decision rather than a copy of a plant field.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn declare_mirror_unit_group(&mut self, bus_id: EntityId) {
+        if self.unit_groups.is_empty() {
+            self.unit_groups.push(HydroUnitGroup {
+                id: EntityId(0),
+                name: self.name.clone(),
+                bus_id,
+                min_generation_mw: self.min_generation_mw,
+                max_generation_mw: self.max_generation_mw,
+                min_turbined_m3s: self.min_turbined_m3s,
+                max_turbined_m3s: self.max_turbined_m3s,
+            });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -260,11 +314,10 @@ mod tests {
         }
     }
     fn minimal_hydro(model: HydroGenerationModel) -> Hydro {
-        Hydro {
+        let mut hydro = Hydro {
             id: EntityId::from(1),
             name: String::from("Itaipu"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId::from(10),
             downstream_id: None,
             travel_time_hours: None,
             entry_stage_id: None,
@@ -279,6 +332,7 @@ mod tests {
             specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 14_000.0,
+            unit_groups: Vec::new(),
             tailrace: None,
             hydraulic_losses: None,
             efficiency: None,
@@ -287,7 +341,9 @@ mod tests {
             diversion: None,
             filling: None,
             penalties: penalties_all(0.0),
-        }
+        };
+        hydro.declare_mirror_unit_group(EntityId::from(10));
+        hydro
     }
 
     #[test]
@@ -325,11 +381,10 @@ mod tests {
 
     #[test]
     fn test_hydro_optional_fields_some() {
-        let hydro = Hydro {
+        let mut hydro = Hydro {
             id: EntityId::from(2),
             name: String::from("Tucuruí"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId::from(20),
             downstream_id: Some(EntityId::from(3)),
             travel_time_hours: Some(360.0),
             entry_stage_id: Some(1),
@@ -344,6 +399,7 @@ mod tests {
             specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 8370.0,
+            unit_groups: Vec::new(),
             tailrace: Some(TailraceModel::Polynomial {
                 coefficients: vec![5.0, 0.001],
             }),
@@ -366,6 +422,7 @@ mod tests {
             }),
             penalties: penalties_all(1.0),
         };
+        hydro.declare_mirror_unit_group(EntityId::from(20));
 
         assert_eq!(hydro.downstream_id, Some(EntityId::from(3)));
         assert_eq!(hydro.travel_time_hours, Some(360.0));
@@ -498,11 +555,10 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn test_hydro_serde_roundtrip() {
-        let hydro = Hydro {
+        let mut hydro = Hydro {
             id: EntityId::from(2),
             name: "Tucuruí".to_string(),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId::from(20),
             downstream_id: Some(EntityId::from(3)),
             travel_time_hours: Some(360.0),
             entry_stage_id: Some(1),
@@ -517,6 +573,7 @@ mod tests {
             specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 8370.0,
+            unit_groups: Vec::new(),
             tailrace: Some(TailraceModel::Polynomial {
                 coefficients: vec![5.0, 0.001],
             }),
@@ -556,6 +613,7 @@ mod tests {
                 inflow_nonnegativity_cost: 1000.0,
             },
         };
+        hydro.declare_mirror_unit_group(EntityId::from(20));
         let json = serde_json::to_string(&hydro).unwrap();
         let deserialized: Hydro = serde_json::from_str(&json).unwrap();
         assert_eq!(hydro, deserialized);
@@ -577,7 +635,6 @@ mod tests {
             hydro.evaporation_reference_volumes_hm3.map(|a| a.len()),
             Some(12)
         );
-        // Index 0 = January, index 5 = June.
         assert!(
             (hydro.evaporation_reference_volumes_hm3.unwrap()[0] - 12_000.0).abs() < f64::EPSILON
         );
@@ -672,5 +729,230 @@ mod tests {
         let fpha_rt: HydroGenerationModel =
             serde_json::from_str(&fpha_json).expect("deserialize fpha");
         assert_eq!(fpha_rt, HydroGenerationModel::Fpha);
+    }
+
+    #[cfg(feature = "serde")]
+    fn hydro_with_two_unit_groups() -> Hydro {
+        let mut hydro = minimal_hydro(HydroGenerationModel::ConstantProductivity);
+        hydro.unit_groups = vec![
+            HydroUnitGroup {
+                id: EntityId::from(3),
+                name: "Group A".to_string(),
+                bus_id: EntityId::from(4),
+                min_generation_mw: 10.0,
+                max_generation_mw: 20.0,
+                min_turbined_m3s: 30.0,
+                max_turbined_m3s: 40.0,
+            },
+            HydroUnitGroup {
+                id: EntityId::from(7),
+                name: "Group B".to_string(),
+                bus_id: EntityId::from(9),
+                min_generation_mw: 50.0,
+                max_generation_mw: 60.0,
+                min_turbined_m3s: 70.0,
+                max_turbined_m3s: 80.0,
+            },
+        ];
+        hydro
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_hydro_unit_groups_survive_json_roundtrip() {
+        let hydro = hydro_with_two_unit_groups();
+
+        let json = serde_json::to_string(&hydro).expect("serialize");
+        let deserialized: Hydro = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(hydro, deserialized);
+        assert_eq!(deserialized.unit_groups.len(), 2);
+        for (original, round_tripped) in hydro.unit_groups.iter().zip(&deserialized.unit_groups) {
+            assert_eq!(original.id, round_tripped.id);
+            assert_eq!(original.name, round_tripped.name);
+            assert_eq!(original.bus_id, round_tripped.bus_id);
+            assert_eq!(
+                original.min_generation_mw.to_bits(),
+                round_tripped.min_generation_mw.to_bits()
+            );
+            assert_eq!(
+                original.max_generation_mw.to_bits(),
+                round_tripped.max_generation_mw.to_bits()
+            );
+            assert_eq!(
+                original.min_turbined_m3s.to_bits(),
+                round_tripped.min_turbined_m3s.to_bits()
+            );
+            assert_eq!(
+                original.max_turbined_m3s.to_bits(),
+                round_tripped.max_turbined_m3s.to_bits()
+            );
+        }
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_hydro_unit_groups_key_is_required() {
+        let hydro = hydro_with_two_unit_groups();
+        let json = serde_json::to_string(&hydro).expect("serialize");
+
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("parse json value");
+        value
+            .as_object_mut()
+            .expect("hydro json must be an object")
+            .remove("unit_groups");
+        let json_without_key = serde_json::to_string(&value).expect("reserialize json");
+
+        let err = serde_json::from_str::<Hydro>(&json_without_key)
+            .expect_err("missing unit_groups key must fail to deserialize");
+        assert!(
+            err.to_string().contains("unit_groups"),
+            "error message must mention unit_groups, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_declare_mirror_unit_group_copies_plant_bus_name_and_bounds() {
+        let mut hydro = Hydro {
+            id: EntityId::from(1),
+            name: "AlphaPlant".to_string(),
+            min_generation_mw: 10.0,
+            max_generation_mw: 90.0,
+            min_turbined_m3s: 5.0,
+            max_turbined_m3s: 200.0,
+            unit_groups: Vec::new(),
+            ..minimal_hydro(HydroGenerationModel::ConstantProductivity)
+        };
+
+        hydro.declare_mirror_unit_group(EntityId::from(10));
+
+        assert_eq!(hydro.unit_groups.len(), 1);
+        let group = &hydro.unit_groups[0];
+        assert_eq!(group.id, EntityId(0));
+        assert_eq!(group.name, "AlphaPlant");
+        assert_eq!(group.bus_id, EntityId::from(10));
+        assert_eq!(group.min_generation_mw.to_bits(), 10.0_f64.to_bits());
+        assert_eq!(group.max_generation_mw.to_bits(), 90.0_f64.to_bits());
+        assert_eq!(group.min_turbined_m3s.to_bits(), 5.0_f64.to_bits());
+        assert_eq!(group.max_turbined_m3s.to_bits(), 200.0_f64.to_bits());
+    }
+
+    #[test]
+    fn test_declare_mirror_unit_group_argument_wins_over_plant_bus_field() {
+        let mut hydro = Hydro {
+            id: EntityId::from(1),
+            name: "AlphaPlant".to_string(),
+            min_generation_mw: 10.0,
+            max_generation_mw: 90.0,
+            min_turbined_m3s: 5.0,
+            max_turbined_m3s: 200.0,
+            unit_groups: Vec::new(),
+            ..minimal_hydro(HydroGenerationModel::ConstantProductivity)
+        };
+
+        hydro.declare_mirror_unit_group(EntityId::from(77));
+
+        assert_eq!(hydro.unit_groups.len(), 1);
+        let group = &hydro.unit_groups[0];
+        assert_eq!(group.bus_id, EntityId::from(77));
+        assert_ne!(group.bus_id, EntityId::from(10));
+    }
+
+    #[test]
+    fn test_declare_mirror_unit_group_is_a_noop_when_a_group_exists() {
+        let mut hydro = minimal_hydro(HydroGenerationModel::ConstantProductivity);
+        hydro.unit_groups = vec![HydroUnitGroup {
+            id: EntityId::from(7),
+            name: "ExistingGroup".to_string(),
+            bus_id: EntityId::from(20),
+            min_generation_mw: 1.0,
+            max_generation_mw: 2.0,
+            min_turbined_m3s: 3.0,
+            max_turbined_m3s: 4.0,
+        }];
+
+        hydro.declare_mirror_unit_group(EntityId::from(10));
+
+        assert_eq!(hydro.unit_groups.len(), 1);
+        assert_eq!(hydro.unit_groups[0].id, EntityId::from(7));
+    }
+
+    #[test]
+    fn test_declare_mirror_unit_group_does_not_sort() {
+        let mut hydro = minimal_hydro(HydroGenerationModel::ConstantProductivity);
+        hydro.unit_groups = vec![
+            HydroUnitGroup {
+                id: EntityId::from(5),
+                name: "GroupFive".to_string(),
+                bus_id: EntityId::from(20),
+                min_generation_mw: 1.0,
+                max_generation_mw: 2.0,
+                min_turbined_m3s: 3.0,
+                max_turbined_m3s: 4.0,
+            },
+            HydroUnitGroup {
+                id: EntityId::from(2),
+                name: "GroupTwo".to_string(),
+                bus_id: EntityId::from(21),
+                min_generation_mw: 5.0,
+                max_generation_mw: 6.0,
+                min_turbined_m3s: 7.0,
+                max_turbined_m3s: 8.0,
+            },
+        ];
+
+        hydro.declare_mirror_unit_group(EntityId::from(10));
+
+        assert_eq!(hydro.unit_groups[0].id, EntityId::from(5));
+        assert_eq!(hydro.unit_groups[1].id, EntityId::from(2));
+    }
+
+    #[test]
+    fn test_sort_unit_groups_leaves_empty_groups_empty() {
+        let mut hydro = minimal_hydro(HydroGenerationModel::ConstantProductivity);
+        hydro.unit_groups = Vec::new();
+
+        hydro.sort_unit_groups();
+
+        assert!(hydro.unit_groups.is_empty());
+    }
+
+    #[test]
+    fn test_sort_unit_groups_orders_by_id_ascending() {
+        let mut hydro = minimal_hydro(HydroGenerationModel::ConstantProductivity);
+        hydro.unit_groups = vec![
+            HydroUnitGroup {
+                id: EntityId::from(5),
+                name: "GroupFive".to_string(),
+                bus_id: EntityId::from(20),
+                min_generation_mw: 1.0,
+                max_generation_mw: 2.0,
+                min_turbined_m3s: 3.0,
+                max_turbined_m3s: 4.0,
+            },
+            HydroUnitGroup {
+                id: EntityId::from(2),
+                name: "GroupTwo".to_string(),
+                bus_id: EntityId::from(21),
+                min_generation_mw: 5.0,
+                max_generation_mw: 6.0,
+                min_turbined_m3s: 7.0,
+                max_turbined_m3s: 8.0,
+            },
+            HydroUnitGroup {
+                id: EntityId::from(9),
+                name: "GroupNine".to_string(),
+                bus_id: EntityId::from(22),
+                min_generation_mw: 9.0,
+                max_generation_mw: 10.0,
+                min_turbined_m3s: 11.0,
+                max_turbined_m3s: 12.0,
+            },
+        ];
+
+        hydro.sort_unit_groups();
+
+        let ids: Vec<i32> = hydro.unit_groups.iter().map(|g| g.id.0).collect();
+        assert_eq!(ids, vec![2, 5, 9]);
     }
 }

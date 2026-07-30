@@ -423,10 +423,10 @@ pub struct NcsModel {
 
 /// A single row from `scenarios/inflow_history.parquet`.
 ///
-/// Carries one historical inflow observation for a (hydro, date) pair.
-/// These rows constitute the raw historical record used by PAR(p) fitting
-/// routines in `cobre-stochastic` and by the historical scenario library
-/// constructed during solver setup.
+/// Carries one historical inflow observation window for a hydro: the mean
+/// inflow measured over `[start_date, end_date)`. These rows constitute the
+/// raw historical record used by PAR(p) fitting routines in `cobre-stochastic`
+/// and by the historical scenario library constructed during solver setup.
 ///
 /// # Examples
 ///
@@ -436,7 +436,8 @@ pub struct NcsModel {
 ///
 /// let row = InflowHistoryRow {
 ///     hydro_id: EntityId::from(1),
-///     date: NaiveDate::from_ymd_opt(2000, 1, 1).unwrap(),
+///     start_date: NaiveDate::from_ymd_opt(2000, 1, 1).unwrap(),
+///     end_date: NaiveDate::from_ymd_opt(2000, 2, 1).unwrap(),
 ///     value_m3s: 500.0,
 /// };
 /// assert_eq!(row.hydro_id, EntityId::from(1));
@@ -447,9 +448,11 @@ pub struct NcsModel {
 pub struct InflowHistoryRow {
     /// Hydro plant this observation belongs to.
     pub hydro_id: EntityId,
-    /// Date of the observation (timezone-free calendar date).
-    pub date: NaiveDate,
-    /// Mean inflow for this observation period in m³/s. Must be finite.
+    /// Start of the observation window (inclusive, timezone-free calendar date).
+    pub start_date: NaiveDate,
+    /// End of the observation window (exclusive; must be after `start_date`).
+    pub end_date: NaiveDate,
+    /// Mean inflow over `[start_date, end_date)` in m³/s. Must be finite and non-negative.
     pub value_m3s: f64,
 }
 

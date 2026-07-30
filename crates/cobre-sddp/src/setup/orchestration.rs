@@ -188,8 +188,8 @@ impl StudySetup {
             external_inflow_library: tr.external_inflow.as_ref(),
             external_load_library: tr.external_load.as_ref(),
             external_ncs_library: tr.external_ncs.as_ref(),
-            recent_accum_seed: &self.recent_observation_seed.accum_seed,
-            recent_weight_seed: self.recent_observation_seed.weight_seed,
+            lag_accum_seed: &self.derived_inflow_seeds.accum,
+            lag_weight_seed: &self.derived_inflow_seeds.weight,
             dcs: self
                 .cut_management
                 .cut_selection
@@ -252,6 +252,7 @@ impl StudySetup {
             pumping_col_starts: &self.stage_data.stage_templates.pumping_col_starts,
             n_pumping: self.stage_data.stage_templates.n_pumping,
             geometry_per_stage: &self.stage_data.stage_templates.geometry_per_stage,
+            hydro_cell_index: &self.stage_data.hydro_cell_index,
             pumping_consumption_mw_per_m3s: &self.stage_data.pumping_consumption_mw_per_m3s,
             contract_prices_per_stage: &self.stage_data.contract_prices_per_stage,
             contract_is_import: &self.stage_data.contract_is_import,
@@ -335,22 +336,9 @@ impl StudySetup {
         )?;
         // Always pre-size scratch bases — basis reconstruction runs
         // unconditionally on every forward/backward apply with a stored basis.
-        let max_cols = self
-            .stage_data
-            .stage_templates
-            .templates
-            .iter()
-            .map(|t| t.num_cols)
-            .max()
-            .unwrap_or(0);
-        let max_rows = self
-            .stage_data
-            .stage_templates
-            .templates
-            .iter()
-            .map(|t| t.num_rows)
-            .max()
-            .unwrap_or(0);
+        let templates = &self.stage_data.stage_templates.templates;
+        let max_cols = templates.iter().map(|t| t.num_cols).max().unwrap_or(0);
+        let max_rows = templates.iter().map(|t| t.num_rows).max().unwrap_or(0);
         pool.resize_scratch_bases(max_cols, max_rows);
         Ok(pool)
     }

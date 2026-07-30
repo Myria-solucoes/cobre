@@ -34,8 +34,8 @@ use cobre_core::temporal::StageStateConfig;
 use cobre_io::Config;
 use cobre_io::config::BackwardScheduler;
 use cobre_solver::ActiveProfile;
-use cobre_stochastic::par::RecentObservationSeed;
-use cobre_stochastic::par::lag_transition::compute_recent_observation_seed;
+use cobre_stochastic::DerivedInflowSeeds;
+use cobre_stochastic::derive_inflow_seeds;
 use cobre_stochastic::par::lag_transition::derive_downstream_par_order;
 use cobre_stochastic::par::lag_transition::precompute_noise_groups;
 use cobre_stochastic::par::lag_transition::precompute_stage_lag_transitions;
@@ -90,7 +90,7 @@ use crate::{
     error::SddpError,
     horizon_mode::HorizonMode,
     hydro_models::PrepareHydroModelsResult,
-    indexer::{CutStateProjection, StateSpace, StudyDimensions},
+    indexer::{CutStateProjection, HydroCellIndex, StateSpace, StudyDimensions},
     lead_time::{AnticipatedResolution, LeadTime, PointResolution, SpreadResolution},
     lp_builder::build_stage_templates,
     risk_measure::RiskMeasure,
@@ -220,11 +220,11 @@ pub struct StudySetup {
     /// Stochastic numerical methodology parameters (`horizon`, `inflow_method`).
     pub(crate) methodology: methodology_config::MethodologyConfig,
 
-    /// Lag accumulator seed from `initial_conditions.recent_observations`, applied
-    /// at every trajectory start in the forward pass and simulation pipeline instead
-    /// of zero-filling. All-zero (a plain zero reset) when `recent_observations` is
-    /// empty.
-    pub(crate) recent_observation_seed: RecentObservationSeed,
+    /// Derived per-hydro PAR lag-slot and accumulator seeds ([`derive_inflow_seeds`]),
+    /// applied to the stage-0 lag block and to every trajectory start in the
+    /// forward pass and simulation pipeline instead of zero-filling. All-zero
+    /// when the derivation has no resolvable data.
+    pub(crate) derived_inflow_seeds: DerivedInflowSeeds,
 
     /// PAR order of the downstream (coarser) resolution model. Non-zero only when
     /// the study includes stages with `season_id >= 12` (a monthly-to-quarterly
@@ -246,7 +246,7 @@ pub struct StudySetup {
     /// resolved arc tables (stage-clock weights, chronological spread,
     /// arrival density) — the single derivation site for all of them. Empty
     /// (`n_buckets == 0`) when the system declares no travel-time arc.
-    // Voice 4: every field is consumed via the constructor's threaded LOCAL
+    // Every field is consumed via the constructor's threaded LOCAL
     // (state-layout sizing, the LP builder's arc-table threading, the bucket
     // IC seed) before this STORED field is set below; no post-construction
     // reader exists yet. `#[allow(dead_code)]` refires once one lands.
@@ -383,6 +383,38 @@ impl StudySetup {
         let (state_layout, hydro_count, anticipated_thermal_indices) =
             resolve_state_layout(system, stochastic.par(), &transit_bucket_topology)?;
 
+        // The sole `derive_inflow_seeds` call site: every consumer (the lag block
+        // below, `StudySetup::derived_inflow_seeds`) reads this one value — do not
+        // add a second call. Computed locally on every rank from the already-
+        // broadcast `system` rather than carried over the wire: the derivation is
+        // a pure function of `system`, so every rank derives a bit-identical seed
+        // with no extra broadcast.
+        let noop_season_map = SeasonMap {
+            cycle_type: Monthly,
+            seasons: Vec::new(),
+        };
+        let season_map_ref = system
+            .policy_graph()
+            .season_map
+            .as_ref()
+            .unwrap_or(&noop_season_map);
+        let derived_inflow_seeds = match system.stages().iter().find(|s| s.id >= 0) {
+            None => DerivedInflowSeeds::zero(system.hydros().len(), state_layout.max_par_order),
+            Some(first_stage) => derive_inflow_seeds(
+                system.inflow_history(),
+                &system.initial_conditions().recent_observations,
+                system.hydros(),
+                first_stage,
+                season_map_ref,
+                state_layout.max_par_order,
+            ),
+        };
+
+        // Built here, before the stage templates: `TemplateBuildCtx` reads it during
+        // `StageLayout::new`, and the SAME value (never rebuilt or cloned) is stored
+        // on `StageData` below.
+        let hydro_cell_index = HydroCellIndex::build(system.hydros());
+
         let EnergyAndTemplates {
             energy_conversion,
             stage_templates,
@@ -399,6 +431,7 @@ impl StudySetup {
             &transit_bucket_topology.arc_stage_weights,
             &transit_bucket_topology.arc_spread_chrono,
             &transit_bucket_topology.arc_arrival_density,
+            &hydro_cell_index,
         )?;
 
         let study_dims = build_study_dimensions(
@@ -409,7 +442,12 @@ impl StudySetup {
             anticipated_thermal_indices,
         );
 
-        let mut initial_state = build_initial_state(system, &study_dims, &state_layout);
+        let mut initial_state = build_initial_state(
+            system,
+            &study_dims,
+            &state_layout,
+            &derived_inflow_seeds.lag_values,
+        );
         splice_transit_bucket_seed(
             &mut initial_state,
             &state_layout,
@@ -452,16 +490,17 @@ impl StudySetup {
             ncs_max_gen,
             ncs_allow_curtailment,
         } = build_ncs_entity_data(system, &stage_templates, &stochastic)?;
-        let pumping_consumption_mw_per_m3s = build_pumping_consumption(system);
-        let contract_prices_per_stage = build_contract_prices_per_stage(system, n_stages);
-        let contract_is_import = build_contract_is_import(system);
-
         let block_counts_per_stage: Vec<usize> = stage_templates
             .block_hours_per_stage
             .iter()
             .map(Vec::len)
             .collect();
         let max_blocks = block_counts_per_stage.iter().copied().max().unwrap_or(0);
+
+        let pumping_consumption_mw_per_m3s = build_pumping_consumption(system);
+        let contract_prices_per_stage =
+            build_contract_prices_per_stage(system, n_stages, &block_counts_per_stage);
+        let contract_is_import = build_contract_is_import(system);
 
         let stages: Vec<Stage> = system
             .stages()
@@ -475,9 +514,8 @@ impl StudySetup {
         let LagData {
             stage_lag_transitions,
             noise_group_ids,
-            recent_observation_seed,
             downstream_par_order,
-        } = precompute_lag_data(system, &stages, &stochastic);
+        } = precompute_lag_data(system, &stages, &stochastic, season_map_ref);
 
         let hydro_ids: Vec<EntityId> = system.hydros().iter().map(|h| h.id).collect();
 
@@ -491,6 +529,10 @@ impl StudySetup {
             simulation_source,
             forward_passes,
             downstream_par_order,
+            &derived_inflow_seeds.lag_values,
+            state_layout.max_par_order,
+            &derived_inflow_seeds.accum,
+            &derived_inflow_seeds.weight,
         )?;
 
         let hydro_min_storage_hm3: Vec<f64> =
@@ -501,6 +543,7 @@ impl StudySetup {
                 stage_templates,
                 state: state_layout,
                 study_dims,
+                hydro_cell_index,
                 cut_state_layouts,
                 stages,
                 entity_counts,
@@ -554,7 +597,7 @@ impl StudySetup {
                 horizon,
                 inflow_method,
             },
-            recent_observation_seed,
+            derived_inflow_seeds,
             downstream_par_order,
             energy_conversion,
             hydro_min_storage_hm3,
@@ -614,24 +657,21 @@ fn build_ncs_entity_data(
     let mut ncs_max_gen: Vec<f64> = Vec::with_capacity(stoch_ncs_ids.len());
     let mut ncs_allow_curtailment: Vec<bool> = Vec::with_capacity(stoch_ncs_ids.len());
     for slot_id in stoch_ncs_ids {
+        let not_found = || {
+            SddpError::Validation(format!(
+                "stochastic NCS entity {slot_id:?} not found in system non_controllable_sources"
+            ))
+        };
         let dense_col = entity_counts
             .non_controllable_ids
             .iter()
             .position(|&id| id == slot_id.0)
-            .ok_or_else(|| {
-                SddpError::Validation(format!(
-                    "stochastic NCS entity {slot_id:?} not found in system non_controllable_sources"
-                ))
-            })?;
+            .ok_or_else(not_found)?;
         let ncs = system
             .non_controllable_sources()
             .iter()
             .find(|n| n.id == *slot_id)
-            .ok_or_else(|| {
-                SddpError::Validation(format!(
-                    "stochastic NCS entity {slot_id:?} not found in system non_controllable_sources"
-                ))
-            })?;
+            .ok_or_else(not_found)?;
         ncs_stochastic_dense_col.push(dense_col);
         ncs_stochastic_windows.push((ncs.entry_stage_id, ncs.exit_stage_id));
         ncs_max_gen.push(ncs.max_generation_mw);
@@ -661,9 +701,8 @@ struct EnergyAndTemplates {
 /// The energy-conversion set and resolved parameter table are built before the
 /// LP templates so the builder can resolve `CoefficientRef::Parameter` values.
 /// The resolved parameter table is consumed only by `build_stage_templates`, so
-/// it is not returned. The stage-to-season mapping uses `season_id.unwrap_or(0)`
-/// so stages without a season collapse to season 0, consistent with every other
-/// season-indexed lookup.
+/// it is not returned. Seasonless stages collapse to season 0, consistent with
+/// every other season-indexed lookup.
 ///
 /// # Errors
 ///
@@ -688,6 +727,7 @@ fn build_energy_and_templates(
     arc_stage_weights: &HashMap<usize, Vec<Vec<f64>>>,
     arc_spread_chrono: &HashMap<usize, Vec<Option<SpreadResolution>>>,
     arc_arrival_density: &HashMap<usize, Vec<Option<Vec<f64>>>>,
+    hydro_cell_index: &HydroCellIndex,
 ) -> Result<EnergyAndTemplates, SddpError> {
     let study_stage_ids: Vec<StageId> = system
         .stages()
@@ -745,6 +785,7 @@ fn build_energy_and_templates(
         arc_stage_weights,
         arc_spread_chrono,
         arc_arrival_density,
+        hydro_cell_index,
     )?;
 
     let scaling_report = template_postprocess::postprocess_templates(
@@ -817,7 +858,7 @@ pub(crate) fn resolve_state_layout(
             "anticipated thermal {}: LeadTime fan-out (a coarse decision stage anchoring \
              several delivery stages) — per-delivery-stage fan-out simulation output is \
              not yet supported",
-            plant_id.map_or(EntityId(-1), |id| id)
+            plant_id.unwrap_or(EntityId(-1))
         )));
     }
 
@@ -1081,7 +1122,7 @@ fn leadstages_decision_sets_are_singletons(
 /// differently-scoped boundary manifest and the local layout is out of scope
 /// here.)
 fn build_cut_state_layouts(
-    system: &cobre_core::System,
+    system: &System,
     state_layout: &StateSpace,
     n_stages: usize,
 ) -> Vec<CutStateProjection> {
@@ -1108,31 +1149,25 @@ const FULL_STATE_CONFIG: StageStateConfig = StageStateConfig {
 struct LagData {
     stage_lag_transitions: Vec<StageLagTransition>,
     noise_group_ids: Vec<u32>,
-    recent_observation_seed: RecentObservationSeed,
     downstream_par_order: usize,
 }
 
-/// Precompute per-stage lag accumulation weights, noise-group ids, the
-/// recent-observation seed, and the downstream PAR order.
+/// Precompute per-stage lag accumulation weights, noise-group ids, and the
+/// downstream PAR order. `season_map_ref` is the caller's already-resolved
+/// no-op-fallback season map (see the `from_broadcast_params` hoist).
 fn precompute_lag_data(
     system: &System,
     stages: &[Stage],
     stochastic: &StochasticContext,
+    season_map_ref: &SeasonMap,
 ) -> LagData {
-    let noop_season_map;
-    let season_map_ref = if let Some(sm) = system.policy_graph().season_map.as_ref() {
-        sm
-    } else {
-        // No season map: all stages produce zero-weight no-op transitions.
-        noop_season_map = SeasonMap {
-            cycle_type: Monthly,
-            seasons: Vec::new(),
-        };
-        &noop_season_map
-    };
     // Proxy: the global `max_par_order` stands in for the quarterly PAR order until a
     // separate quarterly stochastic context exists.
-    let downstream_par_order = derive_downstream_par_order(stages, stochastic.par().max_order());
+    let downstream_par_order = derive_downstream_par_order(
+        stages,
+        stochastic.par().max_order(),
+        system.policy_graph().season_map.as_ref(),
+    );
     let stage_lag_transitions =
         precompute_stage_lag_transitions(stages, season_map_ref, downstream_par_order);
     // Both outputs derive from `stages`, so they cannot disagree about which
@@ -1140,21 +1175,9 @@ fn precompute_lag_data(
     // from `System` and is for callers that have no filtered slice.
     let noise_group_ids = precompute_noise_groups(stages);
 
-    let recent_observation_seed = if stages.is_empty() {
-        RecentObservationSeed::zero(system.hydros().len())
-    } else {
-        compute_recent_observation_seed(
-            &system.initial_conditions().recent_observations,
-            &stages[0],
-            season_map_ref,
-            system.hydros(),
-        )
-    };
-
     LagData {
         stage_lag_transitions,
         noise_group_ids,
-        recent_observation_seed,
         downstream_par_order,
     }
 }
@@ -1172,6 +1195,9 @@ fn precompute_lag_data(
 ///
 /// Propagates [`SddpError`] from the individual library builders on validation
 /// or padding failure.
+// Rationale: mirrors build_historical_inflow_library/build_external_inflow_library's
+// own arity; a context struct would just relocate the arity, not reduce it.
+#[allow(clippy::too_many_arguments)]
 fn build_scenario_libraries(
     system: &System,
     stages: &[Stage],
@@ -1182,6 +1208,10 @@ fn build_scenario_libraries(
     simulation_source: &ScenarioSource,
     forward_passes: u32,
     downstream_par_order: usize,
+    derived_lag_values: &[f64],
+    l_state: usize,
+    derived_accum: &[f64],
+    derived_weight: &[f64],
 ) -> Result<ScenarioLibraries, SddpError> {
     let inflow_scheme = training_source.inflow_scheme;
     let load_scheme = training_source.load_scheme;
@@ -1198,7 +1228,10 @@ fn build_scenario_libraries(
                 stages,
                 stochastic.par(),
                 system.policy_graph().season_map.as_ref(),
-                &system.initial_conditions().past_inflows,
+                derived_lag_values,
+                l_state,
+                derived_accum,
+                derived_weight,
                 stage_lag_transitions,
                 training_source.historical_years.as_ref(),
                 forward_passes,
@@ -1215,7 +1248,10 @@ fn build_scenario_libraries(
                 hydro_ids,
                 stages,
                 stochastic.par(),
-                &system.initial_conditions().past_inflows,
+                derived_lag_values,
+                l_state,
+                derived_accum,
+                derived_weight,
                 stage_lag_transitions,
                 forward_passes,
                 downstream_par_order,
@@ -1256,7 +1292,10 @@ fn build_scenario_libraries(
                 stages,
                 stochastic.par(),
                 system.policy_graph().season_map.as_ref(),
-                &system.initial_conditions().past_inflows,
+                derived_lag_values,
+                l_state,
+                derived_accum,
+                derived_weight,
                 stage_lag_transitions,
                 simulation_source.historical_years.as_ref(),
                 forward_passes,
@@ -1273,7 +1312,10 @@ fn build_scenario_libraries(
                 hydro_ids,
                 stages,
                 stochastic.par(),
-                &system.initial_conditions().past_inflows,
+                derived_lag_values,
+                l_state,
+                derived_accum,
+                derived_weight,
                 stage_lag_transitions,
                 forward_passes,
                 downstream_par_order,
@@ -1361,7 +1403,6 @@ fn build_risk_measures(system: &System) -> Vec<RiskMeasure> {
         .collect()
 }
 
-/// Build [`EntityCounts`] from the loaded system.
 fn build_entity_counts(system: &System) -> EntityCounts {
     EntityCounts {
         hydro_ids: system.hydros().iter().map(|h| h.id.0).collect(),
@@ -1392,20 +1433,30 @@ fn build_pumping_consumption(system: &System) -> Vec<f64> {
         .collect()
 }
 
-/// Build the per-stage RESOLVED contract prices \[$/`MWh`\].
+/// Build the per-stage RESOLVED contract prices \[$/`MWh`\], per block.
 ///
-/// Outer index is the study-stage index `t` (0-based, matching the
-/// `contract_bounds` stage axis); each inner `Vec` is ID-sorted parallel to
-/// `system.contracts()` — the same order `EntityCounts::contract_ids` is built in —
-/// carrying `contract_bounds(c, t).price_per_mwh`. Empty inner `Vec`s for a
-/// contract-free system.
-fn build_contract_prices_per_stage(system: &System, n_stages: usize) -> Vec<Vec<f64>> {
+/// Outer index is the study-stage index `t` (0-based, matching
+/// [`ResolvedBounds`](cobre_core::ResolvedBounds)'s contract stage axis); each
+/// inner slice is flat with the per-stage stride `block_counts_per_stage[t]` —
+/// index `c * n_blks + blk`, `c` ID-sorted parallel to `system.contracts()`
+/// (the same order `EntityCounts::contract_ids` is built in) — carrying
+/// `contract_bounds_at_block(c, t, blk).price_per_mwh`. Empty inner slices for
+/// a contract-free system or a zero-block stage.
+fn build_contract_prices_per_stage(
+    system: &System,
+    n_stages: usize,
+    block_counts_per_stage: &[usize],
+) -> Vec<Vec<f64>> {
     let bounds = system.bounds();
     let n_contracts = system.contracts().len();
     (0..n_stages)
         .map(|t| {
+            let n_blks = block_counts_per_stage[t];
             (0..n_contracts)
-                .map(|c| bounds.contract_bounds(c, t).price_per_mwh)
+                .flat_map(|c| {
+                    (0..n_blks)
+                        .map(move |blk| bounds.contract_bounds_at_block(c, t, blk).price_per_mwh)
+                })
                 .collect()
         })
         .collect()
@@ -1462,13 +1513,16 @@ fn id_to_position<T>(entities: &[T], id_of: impl Fn(&T) -> i32) -> HashMap<i32, 
 ///
 /// Layout `[storage(0..N), lags(N..N*(1+L))]` (N hydros, L = max PAR order),
 /// storage indexed by each hydro's position in `system.hydros()`'s canonical
-/// order. Lag slots come from `initial_conditions.past_inflows`:
-/// `values_m3s[l]` with index 0 = lag 1 (most recent), index L-1 = lag L
-/// (oldest). Storage-only when `max_par_order == 0`.
+/// order. Lag slots come from `derived_lag_values` (entity-major,
+/// `derived_lag_values[pos * L + lag]`, lag 0 = most recent) — already
+/// pre-ordered by canonical hydro position at its single derivation site
+/// ([`derive_inflow_seeds`]), so `pos` here needs no id lookup. Storage-only
+/// when `max_par_order == 0`.
 fn build_initial_state(
     system: &System,
     study_dims: &StudyDimensions,
     layout: &StateSpace,
+    derived_lag_values: &[f64],
 ) -> Vec<f64> {
     let mut state = vec![0.0_f64; layout.n_state];
     let hydros = system.hydros();
@@ -1493,13 +1547,11 @@ fn build_initial_state(
 
     if layout.max_par_order > 0 {
         let n_h = layout.hydro_count;
-        for pi in &ic.past_inflows {
-            if let Some(&idx) = hydro_positions.get(&pi.hydro_id.0) {
-                let n_lags = pi.values_m3s.len().min(layout.max_par_order);
-                for lag in 0..n_lags {
-                    let slot = layout.inflow_lags.start + lag * n_h + idx;
-                    state[slot] = pi.values_m3s[lag];
-                }
+        let l = layout.max_par_order;
+        for idx in 0..n_h {
+            for lag in 0..l {
+                let slot = layout.inflow_lags.start + lag * n_h + idx;
+                state[slot] = derived_lag_values[idx * l + lag];
             }
         }
     }
@@ -1524,7 +1576,7 @@ fn build_initial_state(
         for history in &ic.past_anticipated_commitments {
             let Some(&global_idx) = thermal_positions.get(&history.thermal_id.0) else {
                 // Defense-in-depth — the cobre-io validator rejects an unknown ID in
-                // production; matches the existing `past_inflows` skip behavior.
+                // production.
                 continue;
             };
             // O(n) over the small `n_anticipated` list, not a map.

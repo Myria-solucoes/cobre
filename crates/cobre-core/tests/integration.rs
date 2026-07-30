@@ -12,8 +12,8 @@
 use chrono::NaiveDate;
 use cobre_core::{
     ContractType, DeficitSegment, DiversionChannel, EnergyContract, EntityId, FillingConfig, Hydro,
-    HydroGenerationModel, HydroPenalties, Line, NonControllableSource, PumpingStation,
-    SystemBuilder, Thermal, ValidationError,
+    HydroGenerationModel, HydroPenalties, HydroUnitGroup, Line, NonControllableSource,
+    PumpingStation, SystemBuilder, Thermal, ValidationError,
 };
 
 fn zero_hydro_penalties() -> HydroPenalties {
@@ -67,11 +67,11 @@ fn make_line(id: i32, source_bus_id: i32, target_bus_id: i32) -> Line {
 }
 
 fn make_hydro(id: i32, bus_id: i32, downstream_id: Option<i32>) -> Hydro {
-    Hydro {
+    let mut hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(id),
         name: format!("hydro-{id}").to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(bus_id),
         downstream_id: downstream_id.map(EntityId),
         travel_time_hours: None,
         entry_stage_id: None,
@@ -94,6 +94,20 @@ fn make_hydro(id: i32, bus_id: i32, downstream_id: Option<i32>) -> Hydro {
         diversion: None,
         filling: None,
         penalties: zero_hydro_penalties(),
+    };
+    hydro.declare_mirror_unit_group(EntityId(bus_id));
+    hydro
+}
+
+fn make_group(id: i32, bus_id: i32) -> HydroUnitGroup {
+    HydroUnitGroup {
+        id: EntityId(id),
+        name: format!("group-{id}"),
+        bus_id: EntityId(bus_id),
+        min_generation_mw: 0.0,
+        max_generation_mw: 450.0,
+        min_turbined_m3s: 0.0,
+        max_turbined_m3s: 500.0,
     }
 }
 
@@ -351,31 +365,60 @@ fn test_realistic_multi_entity_system() {
 }
 
 #[test]
-fn test_invalid_cross_reference_rejected() {
-    let bad_hydro = make_hydro(1, 999, None);
+fn test_hydro_with_groups_on_multiple_buses_lists_under_each() {
+    let mut hydro = make_hydro(10, 1, None);
+    hydro.unit_groups = vec![make_group(0, 1), make_group(1, 2)];
+
+    let system = SystemBuilder::new()
+        .buses(vec![make_bus(1), make_bus(2)])
+        .hydros(vec![hydro])
+        .build()
+        .expect("hydro with groups on two buses must be valid");
+
+    let network = system.network();
+    assert_eq!(
+        network.bus_generators(EntityId(1)).hydro_ids,
+        vec![EntityId(10)]
+    );
+    assert_eq!(
+        network.bus_generators(EntityId(2)).hydro_ids,
+        vec![EntityId(10)]
+    );
+}
+
+#[test]
+fn test_hydro_with_same_bus_groups_appears_once() {
+    let mut hydro = make_hydro(10, 1, None);
+    hydro.unit_groups = vec![make_group(0, 1), make_group(1, 1), make_group(2, 1)];
+
+    let system = SystemBuilder::new()
+        .buses(vec![make_bus(1)])
+        .hydros(vec![hydro])
+        .build()
+        .expect("hydro with three same-bus groups must be valid");
+
+    let network = system.network();
+    assert_eq!(
+        network.bus_generators(EntityId(1)).hydro_ids,
+        vec![EntityId(10)]
+    );
+}
+
+#[test]
+fn test_hydro_on_unknown_bus_is_accepted_groups_own_the_bus() {
+    let mut hydro = make_hydro(1, 999, None);
+    hydro.unit_groups = vec![make_group(0, 1)];
 
     let result = SystemBuilder::new()
         .buses(vec![make_bus(1)])
-        .hydros(vec![bad_hydro])
+        .hydros(vec![hydro])
         .build();
 
     assert!(
-        result.is_err(),
-        "system with bad bus_id must fail validation"
-    );
-
-    let errors = result.unwrap_err();
-    assert!(
-        errors.iter().any(|e| matches!(
-            e,
-            ValidationError::InvalidReference {
-                source_entity_type: "Hydro",
-                field_name: "bus_id",
-                referenced_id: EntityId(999),
-                ..
-            }
-        )),
-        "expected InvalidReference for Hydro.bus_id -> Bus 999; got: {errors:?}"
+        result.is_ok(),
+        "a plant's own bus argument naming a nonexistent bus must not fail \
+         validation — only its groups' own buses are validated; got: {:?}",
+        result.err()
     );
 }
 

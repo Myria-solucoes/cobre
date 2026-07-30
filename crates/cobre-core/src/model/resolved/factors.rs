@@ -1,6 +1,6 @@
 //! Pre-resolved per-block factor and NCS-availability lookup tables, consumed on
 //! the LP-building hot path. Absent factor entries return the no-scaling identity
-//! (`1.0`, or `(1.0, 1.0)` for exchange); absent NCS availability returns `0.0`.
+//! `1.0`; absent NCS availability returns `0.0`.
 //! Populated by `cobre-io`; never modified after construction.
 
 /// Pre-resolved per-block load scaling factors.
@@ -90,98 +90,6 @@ impl ResolvedLoadFactors {
     }
 }
 
-/// Pre-resolved per-block exchange capacity factors.
-///
-/// O(1) lookup by `(line_index, stage_index, block_index)` returning
-/// `(direct_factor, reverse_factor)`; `(1.0, 1.0)` for absent entries.
-///
-/// # Examples
-///
-/// ```
-/// use cobre_core::resolved::ResolvedExchangeFactors;
-///
-/// let empty = ResolvedExchangeFactors::empty();
-/// assert_eq!(empty.factors(0, 0, 0), (1.0, 1.0));
-/// ```
-#[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct ResolvedExchangeFactors {
-    /// Flat 3D array of `(direct_factor, reverse_factor)` indexed
-    /// `(line_idx * n_stages + stage_idx) * max_blocks + block_idx`.
-    data: Vec<(f64, f64)>,
-    n_stages: usize,
-    max_blocks: usize,
-}
-
-impl ResolvedExchangeFactors {
-    /// Create an empty exchange factors table; all lookups return `(1.0, 1.0)`.
-    ///
-    /// The default when no `exchange_factors.json` exists.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use cobre_core::resolved::ResolvedExchangeFactors;
-    ///
-    /// let t = ResolvedExchangeFactors::empty();
-    /// assert_eq!(t.factors(5, 3, 2), (1.0, 1.0));
-    /// ```
-    #[must_use]
-    pub fn empty() -> Self {
-        Self {
-            data: Vec::new(),
-            n_stages: 0,
-            max_blocks: 0,
-        }
-    }
-
-    /// Create a new exchange factors table with the given dimensions.
-    ///
-    /// All entries are initialized to `(1.0, 1.0)` (no scaling). Use [`set`]
-    /// to populate individual entries.
-    ///
-    /// [`set`]: Self::set
-    #[must_use]
-    pub fn new(n_lines: usize, n_stages: usize, max_blocks: usize) -> Self {
-        Self {
-            data: vec![(1.0, 1.0); n_lines * n_stages * max_blocks],
-            n_stages,
-            max_blocks,
-        }
-    }
-
-    /// Set the exchange factors for a specific `(line_idx, stage_idx, block_idx)` triple.
-    ///
-    /// # Panics
-    ///
-    /// Panics if any index is out of bounds.
-    pub fn set(
-        &mut self,
-        line_idx: usize,
-        stage_idx: usize,
-        block_idx: usize,
-        direct_factor: f64,
-        reverse_factor: f64,
-    ) {
-        let idx = (line_idx * self.n_stages + stage_idx) * self.max_blocks + block_idx;
-        self.data[idx] = (direct_factor, reverse_factor);
-    }
-
-    /// Look up the exchange factors for a `(line_idx, stage_idx, block_idx)` triple.
-    /// Returns `(1.0, 1.0)` when the table is empty or the flat index lands past
-    /// `Vec::len`; an in-range per-dimension overflow aliases a neighbouring cell
-    /// (see [`ResolvedLoadFactors::factor`]).
-    #[inline]
-    #[must_use]
-    pub fn factors(&self, line_idx: usize, stage_idx: usize, block_idx: usize) -> (f64, f64) {
-        if self.data.is_empty() {
-            return (1.0, 1.0);
-        }
-        let idx = (line_idx * self.n_stages + stage_idx) * self.max_blocks + block_idx;
-        self.data.get(idx).copied().unwrap_or((1.0, 1.0))
-    }
-}
-
 /// Pre-resolved per-stage NCS available generation bounds.
 ///
 /// O(1) lookup of `available_generation_mw` by `(ncs_index, stage_index)` into
@@ -245,9 +153,7 @@ impl ResolvedNcsBounds {
         );
         let mut data = vec![0.0; n_ncs * n_stages];
         for (ncs_idx, &mw) in default_mw.iter().enumerate() {
-            for stage_idx in 0..n_stages {
-                data[ncs_idx * n_stages + stage_idx] = mw;
-            }
+            data[ncs_idx * n_stages..(ncs_idx + 1) * n_stages].fill(mw);
         }
         Self { data, n_stages }
     }
@@ -403,47 +309,14 @@ mod tests {
         assert!((t.factor(0, 0, 0) - 0.85).abs() < 1e-10);
         assert!((t.factor(0, 0, 1) - 1.15).abs() < 1e-10);
         assert!((t.factor(0, 0, 2) - 1.0).abs() < f64::EPSILON);
-        // Bus 1 untouched.
         assert!((t.factor(1, 0, 0) - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]
     fn test_load_factors_out_of_bounds_returns_one() {
         let t = ResolvedLoadFactors::new(1, 1, 2);
-        // Out of bounds on bus index.
         assert!((t.factor(5, 0, 0) - 1.0).abs() < f64::EPSILON);
-        // Out of bounds on block index.
         assert!((t.factor(0, 0, 99) - 1.0).abs() < f64::EPSILON);
-    }
-
-    // ─── ResolvedExchangeFactors tests ─────────────────────────────────────────
-
-    #[test]
-    fn test_exchange_factors_empty_returns_one_one() {
-        let t = ResolvedExchangeFactors::empty();
-        assert_eq!(t.factors(0, 0, 0), (1.0, 1.0));
-        assert_eq!(t.factors(5, 3, 2), (1.0, 1.0));
-    }
-
-    #[test]
-    fn test_exchange_factors_new_default_is_one_one() {
-        let t = ResolvedExchangeFactors::new(1, 1, 2);
-        assert_eq!(t.factors(0, 0, 0), (1.0, 1.0));
-        assert_eq!(t.factors(0, 0, 1), (1.0, 1.0));
-    }
-
-    #[test]
-    fn test_exchange_factors_set_and_get() {
-        let mut t = ResolvedExchangeFactors::new(1, 1, 2);
-        t.set(0, 0, 0, 0.9, 0.85);
-        assert_eq!(t.factors(0, 0, 0), (0.9, 0.85));
-        assert_eq!(t.factors(0, 0, 1), (1.0, 1.0));
-    }
-
-    #[test]
-    fn test_exchange_factors_out_of_bounds_returns_default() {
-        let t = ResolvedExchangeFactors::new(1, 1, 1);
-        assert_eq!(t.factors(5, 0, 0), (1.0, 1.0));
     }
 
     // ─── ResolvedNcsBounds tests ──────────────────────────────────────────────
@@ -470,7 +343,6 @@ mod tests {
         let mut t = ResolvedNcsBounds::new(2, 3, &[100.0, 200.0]);
         t.set(0, 1, 50.0);
         assert!((t.available_generation(0, 1) - 50.0).abs() < f64::EPSILON);
-        // Other entries unchanged.
         assert!((t.available_generation(0, 0) - 100.0).abs() < f64::EPSILON);
         assert!((t.available_generation(1, 0) - 200.0).abs() < f64::EPSILON);
     }

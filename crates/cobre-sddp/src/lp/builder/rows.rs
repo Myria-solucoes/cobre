@@ -1,8 +1,9 @@
 use cobre_core::{BlockMode, Stage};
 
 use crate::hydro_models::EvaporationModel;
-use crate::indexer::BlockIdx;
+use crate::indexer::{BlockIdx, HydroCell, HydroSys};
 
+use super::columns::{GroupBoundLookup, cell_min_generation, cell_min_turbined};
 use super::fpha_cursor::for_each_fpha_plane;
 use super::layout::{StageLayout, TemplateBuildCtx};
 
@@ -92,7 +93,6 @@ fn fill_parallel_water_rows(
     for h_idx in 0..layout.n_h {
         let row = layout.rows.water_balance.start + h_idx;
         if super::entries::is_prefilling(ctx, stage, h_idx) {
-            // Frozen identity: RHS 0 (the base inflow rides the routed `z_h` column).
             row_lower[row] = 0.0;
             row_upper[row] = 0.0;
             continue;
@@ -156,8 +156,8 @@ fn fill_chronological_water_rows(
     let has_par = ctx.par_lp.n_stages() > 0 && ctx.par_lp.n_hydros() == layout.n_h;
     for h_idx in 0..layout.n_h {
         if super::entries::is_prefilling(ctx, stage, h_idx) {
-            for k in 1..=n_blks {
-                let row = layout.rows.water_balance.start + h_idx * n_blks + (k - 1);
+            for blk in 0..n_blks {
+                let row = layout.rows.water_balance.start + h_idx * n_blks + blk;
                 row_lower[row] = 0.0;
                 row_upper[row] = 0.0;
             }
@@ -173,8 +173,7 @@ fn fill_chronological_water_rows(
             .bounds
             .hydro_bounds(h_idx, stage_idx)
             .water_withdrawal_m3s;
-        for k in 1..=n_blks {
-            let blk = k - 1;
+        for blk in 0..n_blks {
             let row = layout.rows.water_balance.start + h_idx * n_blks + blk;
             let tau_k = stage.blocks[blk].duration_hours * super::M3S_TO_HM3;
             let rhs = tau_k * (base - withdrawal);
@@ -195,12 +194,12 @@ fn fill_chronological_water_rows(
             .bounds
             .hydro_bounds(h_idx, stage_idx)
             .water_withdrawal_m3s;
-        for k in 1..=n_blks {
-            let blk = k - 1;
+        for blk in 0..n_blks {
             let tau_k = stage.blocks[blk].duration_hours * super::M3S_TO_HM3;
             let row_d = layout.rows.water_balance.start + d_idx * n_blks + blk;
-            row_lower[row_d] -= tau_k * withdrawal_h;
-            row_upper[row_d] -= tau_k * withdrawal_h;
+            let delta = tau_k * withdrawal_h;
+            row_lower[row_d] -= delta;
+            row_upper[row_d] -= delta;
         }
     }
 }
@@ -217,12 +216,12 @@ fn fill_transit_bucket_definition_rows(
     row_lower: &mut [f64],
     row_upper: &mut [f64],
 ) {
-    let row_start = layout.rows.transit_bucket_definition.start;
-    for pos in layout.rows.transit_bucket_row_pos.iter().flatten() {
-        let row = row_start + pos;
-        row_lower[row] = 0.0;
-        row_upper[row] = 0.0;
-    }
+    fill_zero_equality_rows(
+        layout.rows.transit_bucket_definition.start,
+        &layout.rows.transit_bucket_row_pos,
+        row_lower,
+        row_upper,
+    );
 }
 
 /// Fill the soft filling-target row bounds (`v_h + σ_fill ≥ V_target[t]`, in hm³):
@@ -343,10 +342,11 @@ fn fill_load_balance_rows(
     }
 }
 
-/// Fill FPHA hyperplane row bounds: `row_lower = -INF`, `row_upper = gamma_0` (the
-/// pre-scaled `intercept`). The `v`/`v_in`/`q`/`s` contributions live in the matrix
-/// entries ([`super::entries::fill_fpha_entries`]), so the upper bound carries only
-/// the intercept. Driven by [`for_each_fpha_plane`] so these bounds and the matrix
+/// Fill FPHA hyperplane row bounds: `row_lower = -INF`, `row_upper = σ_c * gamma_0`
+/// (the pre-scaled `intercept`, apportioned by the cell's turbine-capacity share —
+/// see [`super::entries::fill_fpha_entries`]). The `v`/`v_in`/`q`/`s` contributions
+/// live in the matrix entries, so the upper bound carries only the apportioned
+/// intercept. Driven by [`for_each_fpha_plane`] so these bounds and the matrix
 /// coefficients share one row cursor.
 fn fill_fpha_rows(
     ctx: &TemplateBuildCtx<'_>,
@@ -355,15 +355,11 @@ fn fill_fpha_rows(
     row_lower: &mut [f64],
     row_upper: &mut [f64],
 ) {
-    for_each_fpha_plane(
-        ctx,
-        stage_idx,
-        layout,
-        |_local_idx, _h_idx, _blk, _p_idx, plane, row| {
-            row_lower[row] = f64::NEG_INFINITY;
-            row_upper[row] = plane.intercept;
-        },
-    );
+    for_each_fpha_plane(ctx, stage_idx, layout, |visit, plane| {
+        let sigma_c = ctx.hydro_cell_index.share_of(visit.cell);
+        row_lower[visit.row] = f64::NEG_INFINITY;
+        row_upper[visit.row] = sigma_c * plane.intercept;
+    });
 }
 
 /// Fill evaporation row bounds: equality `row_lower == row_upper == intercept_m3s`,
@@ -417,9 +413,10 @@ fn fill_z_inflow_rows(
     row_lower: &mut [f64],
     row_upper: &mut [f64],
 ) {
+    let has_par = ctx.par_lp.n_stages() > 0 && ctx.par_lp.n_hydros() == layout.n_h;
     for h_idx in 0..layout.n_h {
         let row = layout.rows.z_inflow_row_start + h_idx;
-        let base = if ctx.par_lp.n_stages() > 0 && ctx.par_lp.n_hydros() == layout.n_h {
+        let base = if has_par {
             ctx.par_lp.deterministic_base(stage_idx, h_idx)
         } else {
             0.0
@@ -431,15 +428,19 @@ fn fill_z_inflow_rows(
 
 /// Fill row bounds for the 4 operational violation constraint families.
 ///
-/// Per-block formulation: one row per hydro per block. RHS is in rate units
-/// (m3/s for flow families, MW for generation).
+/// The two flow families are per-hydro per-block; RHS is in rate units
+/// (m3/s). The two power families (min-turbine, min-generation) are per-hydro
+/// CELL per-block: each cell's RHS is the PLAIN SUM of its own member groups'
+/// resolved minimum (`cell_min_turbined`/`cell_min_generation`), never the
+/// plant's declared `min_turbined_m3s`/`min_generation_mw` — see the
+/// min-floor contract in `.claude/rules/sddp.md`.
 ///
 /// - **Min outflow** (`>=`): `row_lower = min_outflow_m3s`, `row_upper = +INF`.
 /// - **Max outflow** (`<=`): `row_lower = -INF`, `row_upper = max_outflow_m3s`
 ///   (or `+INF` when the bound is absent, making the row non-binding).
-/// - **Min turbine** (`>=`): `row_lower = min_turbined_m3s`, `row_upper = +INF`.
-/// - **Min generation** (`>=`): `row_lower = min_generation_mw`, `row_upper = +INF`.
-fn fill_operational_violation_rows(
+/// - **Min turbine** (`>=`, per cell): `row_lower = cell_min_turbined`, `row_upper = +INF`.
+/// - **Min generation** (`>=`, per cell): `row_lower = cell_min_generation`, `row_upper = +INF`.
+pub(super) fn fill_operational_violation_rows(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
     layout: &StageLayout,
@@ -448,38 +449,56 @@ fn fill_operational_violation_rows(
 ) {
     // Each family writes its own computed row index, so the visit order does not
     // affect the result; the descriptor order is nonetheless pinned to the canonical
-    // row-region order (min-outflow, max-outflow, min-turbine, min-generation) so the
-    // write order stays auditable against the layout.
+    // row-region order so the write order stays auditable against the layout.
     let grid = layout.block_grid();
     for h_idx in 0..layout.n_h {
-        let hb = ctx.resolved.bounds.hydro_bounds(h_idx, stage_idx);
-        let families = [
-            (
-                layout.slack.oper_violation.min_outflow_rows.start,
-                hb.min_outflow_m3s,
-                f64::INFINITY,
-            ),
-            (
-                layout.slack.oper_violation.max_outflow_rows.start,
-                f64::NEG_INFINITY,
-                hb.max_outflow_m3s.unwrap_or(f64::INFINITY),
-            ),
-            (
-                layout.slack.oper_violation.min_turbine_rows.start,
-                hb.min_turbined_m3s,
-                f64::INFINITY,
-            ),
-            (
-                layout.slack.oper_violation.min_generation_rows.start,
-                hb.min_generation_mw,
-                f64::INFINITY,
-            ),
-        ];
-        for (row_start, lower, upper) in families {
-            for blk in 0..layout.n_blks {
+        for blk in 0..layout.n_blks {
+            let hb = ctx
+                .resolved
+                .bounds
+                .hydro_bounds_at_block(h_idx, stage_idx, blk);
+            let families = [
+                (
+                    layout.slack.oper_violation.min_outflow_rows.start,
+                    hb.min_outflow_m3s,
+                    f64::INFINITY,
+                ),
+                (
+                    layout.slack.oper_violation.max_outflow_rows.start,
+                    f64::NEG_INFINITY,
+                    hb.max_outflow_m3s.unwrap_or(f64::INFINITY),
+                ),
+            ];
+            for (row_start, lower, upper) in families {
                 let row = grid.flat(row_start, h_idx, BlockIdx::new(blk));
                 row_lower[row] = lower;
                 row_upper[row] = upper;
+            }
+        }
+
+        let hydro = &ctx.hydros[h_idx];
+        for blk in 0..layout.n_blks {
+            let lookup =
+                GroupBoundLookup::new(ctx.resolved.bounds.group_overlay(), h_idx, stage_idx, blk);
+            for cell_idx in ctx.hydro_cell_index.cells_of(HydroSys::new(h_idx)) {
+                let cell = HydroCell::new(cell_idx);
+                let positions = ctx.hydro_cell_index.groups_of(cell);
+
+                let row_t = grid.flat(
+                    layout.slack.oper_violation.min_turbine_rows.start,
+                    cell_idx,
+                    BlockIdx::new(blk),
+                );
+                row_lower[row_t] = cell_min_turbined(&hydro.unit_groups, positions, lookup);
+                row_upper[row_t] = f64::INFINITY;
+
+                let row_g = grid.flat(
+                    layout.slack.oper_violation.min_generation_rows.start,
+                    cell_idx,
+                    BlockIdx::new(blk),
+                );
+                row_lower[row_g] = cell_min_generation(&hydro.unit_groups, positions, lookup);
+                row_upper[row_g] = f64::INFINITY;
             }
         }
     }
@@ -493,19 +512,12 @@ pub(super) fn fill_anticipated_fishing_rows(
     row_lower: &mut [f64],
     row_upper: &mut [f64],
 ) {
-    let row_start = layout.anticipated.row_anticipated_fishing_start;
-    let mut n_active = 0_usize;
-    for pos in layout
-        .anticipated
-        .anticipated_fishing_row_pos
-        .iter()
-        .flatten()
-    {
-        let row = row_start + pos;
-        row_lower[row] = 0.0;
-        row_upper[row] = 0.0;
-        n_active += 1;
-    }
+    let n_active = fill_zero_equality_rows(
+        layout.anticipated.row_anticipated_fishing_start,
+        &layout.anticipated.anticipated_fishing_row_pos,
+        row_lower,
+        row_upper,
+    );
     debug_assert_eq!(
         n_active, layout.anticipated.n_anticipated_fishing_rows,
         "fill_anticipated_fishing_rows: active count mismatch"
@@ -523,19 +535,12 @@ pub(super) fn fill_anticipated_state_out_def_rows(
     row_lower: &mut [f64],
     row_upper: &mut [f64],
 ) {
-    let row_start = layout.anticipated.row_anticipated_state_out_def_start;
-    let mut n_active = 0_usize;
-    for pos in layout
-        .anticipated
-        .anticipated_decision_row_pos
-        .iter()
-        .flatten()
-    {
-        let row = row_start + pos;
-        row_lower[row] = 0.0;
-        row_upper[row] = 0.0;
-        n_active += 1;
-    }
+    let n_active = fill_zero_equality_rows(
+        layout.anticipated.row_anticipated_state_out_def_start,
+        &layout.anticipated.anticipated_decision_row_pos,
+        row_lower,
+        row_upper,
+    );
     debug_assert_eq!(
         n_active, layout.anticipated.n_anticipated_state_out_def_rows,
         "fill_anticipated_state_out_def_rows: active count mismatch"
@@ -553,10 +558,27 @@ fn fill_anticipated_slot_definition_rows(
     row_lower: &mut [f64],
     row_upper: &mut [f64],
 ) {
-    let row_start = layout.anticipated.row_anticipated_slot_definition_start;
-    for pos in layout.anticipated.anticipated_slot_row_pos.iter().flatten() {
+    fill_zero_equality_rows(
+        layout.anticipated.row_anticipated_slot_definition_start,
+        &layout.anticipated.anticipated_slot_row_pos,
+        row_lower,
+        row_upper,
+    );
+}
+
+/// Write `0 == 0` bounds at each present position of a sparse row-position table.
+fn fill_zero_equality_rows(
+    row_start: usize,
+    row_pos: &[Option<usize>],
+    row_lower: &mut [f64],
+    row_upper: &mut [f64],
+) -> usize {
+    let mut n_active = 0_usize;
+    for pos in row_pos.iter().flatten() {
         let row = row_start + pos;
         row_lower[row] = 0.0;
         row_upper[row] = 0.0;
+        n_active += 1;
     }
+    n_active
 }

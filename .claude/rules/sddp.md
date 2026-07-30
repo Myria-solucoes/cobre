@@ -25,10 +25,9 @@ applies the negation.
 
 ## State pinning uses column bounds, not equality rows
 
-Incoming state is pinned with `set_col_bounds` on the incoming-state LP column.
-There is no state-fixing row range in the LP; incoming state is pinned entirely
-via column bounds. Always resolve the LP
-column — for both pinning and dual extraction — via
+Incoming state is pinned with `set_col_bounds` on the incoming-state LP column;
+there is no state-fixing row range in the LP. Always resolve the LP column —
+for both pinning and dual extraction — via
 `StateSpace::state_to_lp_incoming_column`; never assume a fixing-row index.
 Read: `lp/indexer/state_space.rs`.
 
@@ -41,6 +40,228 @@ alone. (Discovered during deterministic case D06.)
 Read: `lp/builder/entries.rs` (`fill_fpha_entries` — pushes `−γᵥ/2` onto both the
 incoming- and outgoing-storage columns), `lp/builder/rows.rs` (`fill_fpha_rows`),
 and `lp/builder/template.rs`.
+
+## Hydro-cell aggregation assumes one production map per cell
+
+`HydroCellIndex` partitions a plant's `unit_groups` into `bus_id`-equivalence
+cells; a same-bus group pair's bounds sum exactly into one cell's LP columns
+only because every group sharing a cell also shares the plant's production
+map and objective coefficients. `HydroGenerationModel` is a field on `Hydro`,
+never on `HydroUnitGroup`, and the resolved coefficients
+(`ResolvedProductionModel`, `FphaPlane`'s `gamma_v`/`gamma_q`/`gamma_s`) are
+keyed `[hydro][stage]` (`ProductionModelSet::model`) — there is no group or
+cell axis to key on, and `HydroUnitGroup` itself carries no productivity,
+efficiency, or cost field. That is what makes a same-bus group pair a
+segment (one shared production ray) rather than a 2-D zonotope, so summing
+member bounds is exact for the turbined-flow and generation-MW box
+constraints considered independently — see the fold-order sub-contract below
+for the one place that independence breaks down.
+
+A per-group productivity `ρ_g` would break this: pricing the cell at
+`ρ_cell = max_g ρ_g` lets the LP draw the efficient unit's MW from the
+inefficient unit's water, understating cost — an invalid lower bound that
+still converges and still looks plausible. The fix, if a per-group
+production field is ever introduced, is to widen the cell partition key to
+`(bus_id, production-coefficient signature)`; partitioning by `bus_id` alone
+would then silently misprice any mixed-productivity cell.
+
+Read: `crates/cobre-sddp/src/production/hydro_models/types.rs`
+(`ProductionModelSet::model`), `crates/cobre-core/src/entities/hydro.rs`
+(`HydroGenerationModel` on `Hydro`, absent from `HydroUnitGroup`),
+`crates/cobre-sddp/src/lp/indexer/hydro_cell.rs` (`HydroCellIndex::build`).
+Pinned by `production_model_set_model_returns_correct_variant` (the
+`(hydro, stage)` lookup has no group or cell dimension to key on) and
+`test_multi_bus_plant_splits_into_bus_ordered_cells` (partitioning depends on
+`bus_id` alone, blind to differing group bounds).
+
+### ConstantProductivity's bound fold must run per group, then sum the cell
+
+A `ConstantProductivity` plant has no separate generation column: its MW cap
+folds into the turbine bound as
+`min(max_turbined_m3s, max_generation_mw / ρ)` (`fill_turbine_columns`,
+`lp/builder/columns.rs`). That fold is exact for a single-group cell; once it
+resolves per cell instead of per plant, the fold ORDER becomes load-bearing
+the moment a cell holds more than one group. The correct cell bound is
+**fold-then-sum** — each group's own `min(q̄_g, p̄_g / ρ)` computed first, then
+summed over the cell's groups — because each group is independently limited
+by whichever of its own two caps binds first. **Sum-then-fold**
+(`min(Σ_g q̄_g, (Σ_g p̄_g) / ρ)`) is the wrong-but-compiling alternative: `min`
+does not distribute over a sum of independent terms
+(`min(Σa, Σb) ≥ Σ min(a, b)`, strict whenever the binding side — flow-limited
+or MW-limited — differs across the cell's groups), so it silently overstates
+the cell's true capacity, producing an invalid, too-loose bound that still
+converges: with `ρ = 1` and groups `(q̄=100, p̄=50)` and `(q̄=10, p̄=100)`,
+fold-then-sum gives `50 + 10 = 60` while sum-then-fold gives
+`min(110, 150) = 110` — with one shared `ρ` and no per-group productivity at
+all.
+
+A bound multiplier applied to BOTH `q̄_g` and `p̄_g` identically (a shared
+availability derate, a per-unit nominal-capability scalar) commutes with the
+per-group fold (`min(k·q̄_g, k·p̄_g/ρ) = k·min(q̄_g, p̄_g/ρ)` for `k > 0`), so
+fold-then-sum stays exact under any number of such multipliers. A multiplier
+on only one side of the pair (an MW-only forced-outage derate against a
+fixed mechanical flow limit) does not commute the same way: it can flip
+which side binds for a group at a given stage — harmless under
+fold-then-sum, which re-folds independently per group regardless, but it
+makes sum-then-fold's overstatement vary stage-to-stage instead of vanishing.
+
+Live: `cell_max_turbined` (`fill_turbine_columns`, `lp/builder/columns.rs`)
+resolves this bound per CELL, folding each of the cell's own member groups
+before summing them, exactly as this sub-contract requires — each group's
+`q̄_g`/`p̄_g` is its RESOLVED per-block value (the override when the study
+supplies one, the declaration otherwise, via `GroupBoundLookup`), never the
+bare declared value.
+
+Read: `crates/cobre-sddp/src/lp/builder/columns.rs` (`cell_max_turbined`).
+Pinned by `test_same_bus_groups_sum_into_one_cell_box`, mutation-verified
+against sum-then-fold on a two-group fixture whose groups bind on opposite
+sides.
+
+### Both terms of the cell bound's closing `min` are load-bearing
+
+`cell_max_turbined`/`cell_max_generation` close with `sum.min(hb...)`: `sum`
+folds/sums the cell's OWN member groups; `hb...` is the plant's resolved
+bound. Neither term is a redundant guard over the other — each dominates a
+disjoint regime, and dropping either one compiles and passes today's
+single-group fixtures.
+
+Drop the plant term (`min` degenerates to `sum`) and every lowering
+`hydro_bounds` override in a study is silently discarded: a mid-horizon
+capacity cut, declared exactly the way the no-raising rule's own rejection
+message prescribes (declare the plant at final capacity, tighten the earlier
+stages with override rows), stops reaching the LP the moment the plant
+declares more than one group.
+
+Drop the group term (`min` degenerates to `hb...`) and a multi-cell plant can
+turbine or generate past its own declared capacity, because
+`cell_max_turbined`/`cell_max_generation` are the ONLY consumers of
+`hb.max_turbined_m3s`/`hb.max_generation_mw` in the hydro LP path — no
+plant-level aggregate-max row exists to catch the overshoot. Three
+independent, fully-valid-input mechanisms reach the group term, the third
+strictly inside a single cell:
+
+- **Cell subsetting.** A two-bus plant's cell sums only its own bus's groups,
+  necessarily less than the plant total whenever the other bus's groups are
+  nonzero.
+- **Rule 41 slack.** The declaring-plant sum check is `Σ_g g.max_* ≤
+declared`, not `=` — groups summing to less than the declared value satisfy
+  it.
+- **Fold-then-sum vs. raw-sum, on a SINGLE cell.** Rule 41 checks the RAW
+  group sum; `cell_max_turbined` checks the FOLD-then-sum. These can diverge
+  even at rule-41 EQUALITY with no override at all, because "one cell" is not
+  "one group": with ρ = 1, a plant declaring `(110, 150)` and two SAME-BUS
+  groups `(q̄ 100, p̄ 50)` and `(q̄ 10, p̄ 100)` satisfies rule 41 exactly on
+  both columns (100+10=110, 50+100=150), yet the folded group side is
+  `min(100,50) + min(10,100) = 60` against the plant's own
+  `min(110, 150) = 110`. The group term binds by 50 m³/s with no override, no
+  cell split, and no rule-41 slack — the same non-distributivity that
+  motivates fold-then-sum over sum-then-fold, surfacing on the OTHER side of
+  the `min`.
+
+The plant term collapses to a no-op only for a plant with **no declared
+groups** (the implicit single group mirrors the plant's declared value
+exactly, and the fold is monotone in both its inputs) — never merely "one
+cell", which a same-bus multi-group plant also has while still hitting the
+third mechanism above. This is inert on TODAY'S fixtures, not provably inert:
+rule 41 and the no-raising rule both admit `value ≤ declared +
+ENVELOPE_TOLERANCE`, so even a no-declared-groups plant's resolved value may
+sit up to that tolerance above declared — the plant term could tighten by
+that same margin. No shipped fixture exercises this; do not round it up to
+"provably inert."
+
+Read: `crates/cobre-sddp/src/lp/builder/columns.rs` (`cell_max_turbined`,
+`cell_max_generation`), `crates/cobre-io/src/validation/semantic/block_bounds.rs`
+(`check_bound_raises_declared_capacity`, the no-raising rule),
+`crates/cobre-io/src/validation/semantic/hydro.rs` (rule 41). Pinned by
+`test_same_bus_groups_sum_into_one_cell_box`'s third plant (a same-bus pair at
+rule-41 equality, no override), which pins the group term binding, and by
+`test_cell_columns_take_their_own_group_box`'s block-2 override, which pins
+the plant term binding.
+
+### The per-cell floor is a plain sum, never a fold or a plant clamp
+
+`cell_min_turbined`/`cell_min_generation` (`lp/builder/columns.rs`) are the
+MIN-side mirror of `cell_max_turbined`/`cell_max_generation` above, and
+deliberately do NOT mirror their shape: a cell's min-turbine/min-generation
+floor is `Σ_{g∈cell} resolved_min_*(g)` — the cell's OWN member groups' resolved
+minima, summed, with no fold and no closing `.min(plant)` term at all. This is
+the correct shape because the floor bounds a SUM of variables: the cell's
+member groups all feed one shared aggregate column (one turbine column, one
+FPHA-generation column, or the same column read at ρ for
+`ConstantProductivity`), so each group's own mandatory minimum adds to the
+others' — it is not one quantity two caps compete to bound tighter, which is
+what licenses a `min` fold on the MAX side.
+
+Four wrong-but-compiling alternatives, each of which has a close MAX-side
+cousin that makes it easy to copy over by habit:
+
+- **`.min(plant)` clamp** — closing the sum with `.min(hydro.min_turbined_m3s /
+min_generation_mw)`, copying `cell_max_turbined`'s closing term verbatim.
+  Wrong: the plant's declared minimum has no role in the per-cell floor at
+  all (validation rule 44 checks it can be REACHED by the groups' sum, but the
+  LP itself never reads it here). A `.min(plant)` clamp silently loosens the
+  floor whenever the plant's own declared minimum is lower than a cell's
+  group-sum, and clamps to that plant value uniformly on every cell —
+  understating the true floor without invalidating it that the group data
+  independently supports.
+- **`max`-fold over a cell's own groups** — `max_{g∈cell} min_*(g)` instead of
+  `Σ_{g∈cell} min_*(g)`. Wrong for the reason above: each group's own mandatory
+  floor adds to the cell's aggregate minimum, so `max` understates a
+  multi-group cell's true floor by every group's contribution except the
+  largest.
+- **ρ-folding the generation floor** — computing `cell_min_generation` by
+  folding each group's turbined-derived floor through `ConstantProductivity`'s
+  ρ (mirroring the MAX-side fold that combines two independent caps into one
+  tighter one) instead of summing `group.min_generation_mw` directly. The
+  min-generation row's LHS already carries `ρ * q_c` for a
+  `ConstantProductivity` cell (`fill_operational_violation_entries`); folding
+  ρ into the RHS too double-prices the productivity and produces a floor with
+  no physical meaning.
+- **`1/|cells|` price or RHS apportionment** — dividing the penalty
+  (`turbined_violation_below_cost`/`generation_violation_below_cost`, both
+  plant-level `HydroPenalties`) or the RHS by the plant's cell count before
+  applying it per cell. The penalty is priced at FULL magnitude on every one
+  of the plant's cells (mirroring how an arc's `k_d` release-weight replicates
+  onto every cell's turbine column, never apportioned — see the water
+  travel-time section below); apportioning it discounts the true cost of a
+  multi-cell plant's violation by `|cells|`, and apportioning the RHS instead
+  of summing it produces a floor with no basis in either the cell's own
+  groups or the plant's declared value.
+
+Two per-cell soft rows exist per the same design that governs the MAX-side
+columns — never folded into one: `min_turbine_rows` couples the cell's own
+turbine column (`+1`) to the cell's own `turbine_below_slack` (`+1`);
+`min_generation_rows` couples the cell's own generation column — the cell's
+FPHA-generation column (`+1`) or the cell's turbine column at `ρ` for
+`ConstantProductivity` — to the cell's own `generation_below_slack` (`+1`).
+Both families are sized `n_cells * n_blks` (`OperViolationRanges::new`'s
+`n_op_cell` parameter), never `n_h * n_blks` — the two flow families
+(min/max-outflow) stay hydro-keyed at `n_op_hydro`, since outflow has no
+per-cell column to attribute to.
+
+Output stays plant-keyed: `simulation/hydros/**.parquet`'s
+`turbined_slack_m3s`/`generation_slack_mw` columns are unchanged in shape —
+extraction sums a plant's own cells' slack columns into the existing
+plant-level field (`sum_cell_slack` in `simulation/extraction.rs`), the same
+pattern `turbined_m3s`/`generation_mw` already use for the max-side columns.
+This differs from the same-bus generation-split problem the output-axis
+decision (§7.10 of the blocks-and-units design) rules out: that problem is
+genuinely UNDETERMINED (several same-bus groups sharing one column have no
+basis to split by), while a per-cell floor VIOLATION is DETERMINED — each
+cell owns its own row and its own slack column, so there is exactly one
+correct per-cell slack value to sum, never a manufactured one.
+
+Read: `crates/cobre-sddp/src/lp/builder/columns.rs` (`cell_min_turbined`,
+`cell_min_generation`, `fill_cell_block_family`), `crates/cobre-sddp/src/lp/builder/rows.rs`
+(`fill_operational_violation_rows`), `crates/cobre-sddp/src/lp/builder/entries.rs`
+(`fill_operational_violation_entries`), `crates/cobre-sddp/src/lp/builder/layout.rs`
+(`OperViolationRanges`), `crates/cobre-sddp/src/simulation/extraction.rs`
+(`sum_cell_slack`, `hydro_operational_slacks`), `crates/cobre-io/src/validation/semantic/hydro.rs`
+(rule 44). Pinned by the per-cell analytical row/coefficient test in
+`crates/cobre-sddp/src/lp/builder/entries.rs` (mutation-verified against the
+`.min(plant)` clamp, the `max`-fold, the ρ-fold, and `1/|cells|`
+apportionment), the d53 binding fixture, and the group-declaration-order
+determinism regression.
 
 ## Cut pool is append-only; basis matches by slot identity
 
@@ -218,16 +439,21 @@ plants — the entire point of `operational_start_date`) breaks that
 coincidence, so `binary_search_by_key` over the canonical slice — which
 requires id-ascending order — silently returns `Err` (or the wrong index) for
 an out-of-id-order entity, dropping its seed to the default `0.0`. Every
-id-keyed initial-condition lookup (`storage`, `filling_storage`,
-`past_inflows`, thermal `past_anticipated_commitments`, the recent-observation
-lag seed) resolves through an `id -> position` map built once from the
-canonical slice, never a `binary_search_by_key` call. The map is built from
-the canonical order, but every write still iterates the IC record list (not
-the map) — a map iteration order is unspecified and would violate
+id-keyed initial-condition lookup (`storage`, `filling_storage`, thermal
+`past_anticipated_commitments`) resolves through an `id -> position` map built
+once from the canonical slice, never a `binary_search_by_key` call. The map is
+built from the canonical order, but every write still iterates the IC record
+list (not the map) — a map iteration order is unspecified and would violate
 declaration-order invariance if used to drive writes.
+
+The derived inflow lag seed (`derive_inflow_seeds`) satisfies the same
+invariant a different way: it carries no id->position map at all — it
+iterates `hydros` directly, so the loop index IS the canonical position, then
+filters each hydro's own historical windows by id. `build_initial_state`'s lag
+block trusts this pre-ordering and does a plain positional read, with no id
+lookup of its own.
 Read: `setup/mod.rs` (`id_to_position`, `build_initial_state`),
-`crates/cobre-stochastic/src/par/lag_transition.rs`
-(`compute_recent_observation_seed`). Pinned by
+`crates/cobre-stochastic/src/seeds.rs` (`derive_inflow_seeds`). Pinned by
 `test_initial_state_seeds_correctly_under_staggered_commissioning_dates`,
 `build_initial_state_anticipated_seed_correct_under_staggered_commissioning_dates`,
 and `test_seed_correct_under_staggered_commissioning_dates`, each using a
@@ -333,6 +559,26 @@ non-uniform calendars; a mixed-calendar end-to-end regression extends the pin
 to delivered-plus-horizon-drop equalling released, per arc, to floating-point
 tolerance.
 
+A plant's turbined flow is `Σ_c q_c` over its `HydroCellIndex` cells — a
+disjoint CSR partition, not a duplicate representation — so an arc's `k_d`
+prices the plant's TOTAL release and is REPLICATED onto every cell's turbine
+column at the same magnitude, never apportioned (divided) across them:
+apportioning by `1/|C|` discards `(1 − 1/|C|)` of the released mass, an
+under-delivery no less wrong than the ceiling-depth bug above. Conservation
+holds PER CELL, not merely in the aggregate — every cell of a plant feeds the
+same arc at the same travel time, so `stage_weights` is cell-invariant by
+construction and the `Σ_d k_d = 1` debug_assert stays exactly where it is
+(once per arc per stage), never moved inside a per-cell loop. This holds only
+while travel time is an ARC (plant) attribute; if a cell ever acquires its own
+`t_v`, each cell needs its own weight vector (each still summing to 1) and the
+assertion moves inside the per-cell loop — still never apportioned even then.
+Read: `lp/builder/entries.rs` (`fill_arc_release_block_entries`,
+`fill_arc_release_chrono_block_entries`). Pinned by
+`test_cascade_release_sums_the_upstream_plants_cells` (same-magnitude,
+not-divided per cell) and `test_plant_total_release_is_invariant_to_cell_partition`
+(a solved-LP objective/dual comparison between a one-cell and an evenly-split
+two-cell plant releasing the same total).
+
 ### Canonical bucket ordering
 
 Bucket columns sort by the downstream plant's canonical
@@ -362,10 +608,10 @@ windows; the seed must `filter` over every window with a matching `hydro_id`
 and deposit each one independently
 (`volume = width · M3S_TO_HM3 · value_m3s`, `seed[start+d] += k[d] · volume`)
 — a `.find()` would silently keep only the first window and drop the rest,
-understating the seed with no error. There is no `past_inflows` fallback:
-`cobre-io`'s `validate_travel_time` row-5 gate guarantees every declared
-arc's windows cover `[start_0 − t_v, start_0)` before setup ever runs this
-seed.
+understating the seed with no error. There is no fallback for incomplete
+coverage: `cobre-io`'s `validate_travel_time` row-5 gate guarantees every
+declared arc's windows cover `[start_0 − t_v, start_0)` before setup ever
+runs this seed.
 Read: `setup/bucket_seed.rs` (`build_initial_transit_bucket_state`),
 `setup/bucket_topology.rs` (`ic_anchor_k`). Pinned by the single-window
 unroll regression (the `k`-weighted deposit matches the closed-form
@@ -465,8 +711,8 @@ depend on it), and hard-rejects any length mismatch as a
 `BusinessRuleViolation`. A `len == lead_stages` gate is a plausible-looking
 alternative that silently mis-covers a `LeadTime`-configured plant on a
 non-uniform calendar, since the required count is calendar-derived, not a
-constant stage count; there is no fallback comparable to the
-(already-rejected) `past_inflows` fallback for `past_defluences`.
+constant stage count; there is no fallback comparable to the one already
+rejected for `past_defluences` coverage above.
 Read: `crates/cobre-io/src/validation/semantic/thermal.rs`
 (`required_anticipated_commitment_count`, `check_anticipated_thermals`).
 Pinned by `test_anticipated_lead_time_coverage_pmo_calendar` and
@@ -630,8 +876,12 @@ panic, after confirming the fixture genuinely fans out).
 Every anticipated plant's decision column is bounded, costed, and
 commissioning-gated at ITS OWN delivery stage `m` (its
 `genuine_decisions_at(t)` target, when one exists), never the decision stage
-`t`. `fill_anticipated_columns` reads `thermal_bounds(thermal_idx,
-delivery_stage)` for the column's `[min, max]` bounds,
+`t`. `fill_anticipated_columns` reads `thermal_block_base(thermal_idx,
+delivery_stage)` for the column's `[min, max]` bounds (the overlay-ignoring
+base is safe here only because a load-time rule rejects a `block_id` bound row
+on an anticipated thermal — see `cobre-io`'s
+`check_block_id_on_anticipated_thermal`),
+`thermal_bounds(thermal_idx, delivery_stage).cost_per_mwh` for its cost,
 `total_hours_per_stage[delivery_stage]` and
 `cumulative_discount_factors[delivery_stage]` for its present-value objective,
 and `is_anticipated_decision_active_for_delivery` (the plant's window at
@@ -640,15 +890,15 @@ stage, never at `stage_idx`. The delivered commitment is a hard equality with
 no slack (the fishing coupling pins the plant's delivery-stage generation to
 the committed value), so relatively-complete recourse requires the committed
 value always lie within the delivery stage's own generation bounds. A
-DECISION-anchored read (`thermal_bounds(thermal_idx, stage_idx)`) is the
+DECISION-anchored read (`thermal_block_base(thermal_idx, stage_idx)`) is the
 forbidden alternative: it
 reintroduces the capacity-drop infeasibility — a commitment placed under the
 decision stage's larger capacity that no scenario can deliver under the delivery
 stage's smaller one, stranded with no feasibility cut to absorb it — and still
 compiles, since constant-across-lead bounds make the two reads indistinguishable.
 
-Residual audit complete: no mechanism other than `thermal_bounds` can strand a
-delivered commitment. The only generic-constraint handle on an anticipated plant,
+Residual audit complete: no mechanism other than `thermal_block_base` can
+strand a delivered commitment. The only generic-constraint handle on an anticipated plant,
 `VariableRef::AnticipatedDecision` (`resolve_anticipated_decision`), binds the
 fresh decision column at its own decision stage (the recourse variable, already
 delivery-anchored here), never an in-flight matured commitment (no `VariableRef`
@@ -663,7 +913,10 @@ Read: `lp/builder/columns.rs` (`fill_anticipated_columns`),
 `lp/indexer/anticipated_gate.rs` (`is_anticipated_decision_active_for_delivery`),
 `lp/generic_constraints.rs` (`resolve_anticipated_decision`),
 `cobre-io` `validation/semantic/thermal.rs`
-(`warn_thermal_generation_on_anticipated_thermal`). Pinned by
+(`warn_thermal_generation_on_anticipated_thermal`), `cobre-io`
+`validation/semantic/block_bounds.rs`
+(`check_block_id_on_anticipated_thermal`, the rule the base read's safety
+depends on). Pinned by
 `test_anticipated_decision_delivery_anchored_bounds` (stage-varying delivery
 bounds/cost, mutation-verified against the decision-anchored read), the
 end-to-end

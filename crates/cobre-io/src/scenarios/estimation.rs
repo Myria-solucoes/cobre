@@ -67,6 +67,9 @@ use cobre_stochastic::{
         estimate_ar_coefficients_with_selection, estimate_correlation_with_season_map,
         estimate_seasonal_stats_with_season_map,
     },
+    season_cast::{
+        RealizedWindow, SeasonPeriodWindow, cast, next_season_period_window, season_period_window,
+    },
 };
 
 use crate::LoadError::ConstraintError;
@@ -74,7 +77,7 @@ use crate::{
     Config, FileManifest, LoadError, OrderSelectionMethod, ValidationContext,
     parse_inflow_ar_coefficients, parse_inflow_history,
     scenarios::{
-        InflowAnnualComponentRow, InflowArCoefficientRow, InflowSeasonalStatsRow,
+        InflowAnnualComponentRow, InflowArCoefficientRow, InflowHistoryRow, InflowSeasonalStatsRow,
         assemble_inflow_models, populate_derived_residual_ratios, resolve_stage_seasons,
     },
     validate_structure,
@@ -213,14 +216,6 @@ fn run_estimation(
     config: &Config,
     manifest: &FileManifest,
 ) -> Result<(System, EstimationReport), EstimationError> {
-    let history_path = case_dir.join("scenarios/inflow_history.parquet");
-    let history = parse_inflow_history(&history_path)?;
-
-    let observations: Vec<(EntityId, NaiveDate, f64)> = history
-        .iter()
-        .map(|row| (row.hydro_id, row.date, row.value_m3s))
-        .collect();
-
     let hydro_ids: Vec<EntityId> = system.hydros().iter().map(|h| h.id).collect();
 
     // Use the system's stages, avoiding a re-parse of stages.json.
@@ -238,13 +233,7 @@ fn run_estimation(
         .collect();
     let stages = stages.as_slice();
 
-    // Aggregate against study_stages, not stages: the synthetic pre-study stages
-    // would not change any observation's resolved season.
-    let observations = if let Some(sm) = season_map {
-        aggregate_observations_to_season(&observations, study_stages, sm)?
-    } else {
-        observations
-    };
+    let observations = load_and_aggregate_observations(case_dir, study_stages, season_map)?;
 
     let seasonal_stats =
         estimate_seasonal_stats_with_season_map(&observations, stages, &hydro_ids, season_map)?;
@@ -395,8 +384,13 @@ fn run_partial_estimation(
     ))
 }
 
-/// Load inflow history from the case directory and aggregate observations to
-/// season resolution when a season map is present.
+/// Load inflow history from the case directory, gate each hydro's season
+/// occurrences on full record coverage, and aggregate
+/// the resulting samples to season resolution when a season map is present.
+///
+/// See [`resolve_coverage_gated_observations`] for the coverage gate itself
+/// (record windows only — the initial-conditions conditioning layer is never
+/// read here).
 fn load_and_aggregate_observations(
     case_dir: &Path,
     stages: &[Stage],
@@ -405,16 +399,187 @@ fn load_and_aggregate_observations(
     let history_path = case_dir.join("scenarios/inflow_history.parquet");
     let history = parse_inflow_history(&history_path)?;
 
-    let observations: Vec<(EntityId, NaiveDate, f64)> = history
-        .iter()
-        .map(|row| (row.hydro_id, row.date, row.value_m3s))
-        .collect();
+    let (observations, skipped_partial) =
+        resolve_coverage_gated_observations(&history, season_map, stages.first());
+    log_skipped_partial_occurrences(&skipped_partial);
 
     if let Some(sm) = season_map {
         Ok(aggregate_observations_to_season(&observations, stages, sm)?)
     } else {
         Ok(observations)
     }
+}
+
+/// Return type of [`resolve_coverage_gated_observations`]:
+/// `(observations, skipped_partial)`.
+type CoverageGatedObservations = (Vec<(EntityId, NaiveDate, f64)>, BTreeMap<EntityId, usize>);
+
+/// Coverage-gated occurrence resolution for one case's windowed inflow
+/// history, over the **record layer only** — the
+/// initial-conditions conditioning layer and its layered-merge helper are
+/// never read here (owner gate: a conditioning window must change no fitted
+/// PAR statistic).
+///
+/// For each hydro, record windows are grouped by season occurrence via
+/// [`cast`]: an occurrence with `coverage == 1.0` contributes one sample
+/// (`cast(...).value`, keyed at the occurrence's own start date); a partial
+/// occurrence (`0.0 < coverage < 1.0`) is skipped and counted per hydro; a
+/// zero-coverage occurrence is never enumerated (no window touches it, so it
+/// never becomes a candidate).
+///
+/// When `season_map` or `stage_template` is unavailable, there is no season
+/// occurrence to project onto: every row passes through unchanged.
+// `coverage == 1.0` is an exact gate, not a tolerance shortcut: both
+// `overlap` and `period.hours` are built from whole-day counts times 24.0, so
+// a fully-covered occurrence's ratio is bit-exact 1.0 — see `cast`'s doc.
+#[allow(clippy::float_cmp)]
+fn resolve_coverage_gated_observations(
+    history: &[InflowHistoryRow],
+    season_map: Option<&SeasonMap>,
+    stage_template: Option<&Stage>,
+) -> CoverageGatedObservations {
+    let (Some(season_map), Some(stage_template)) = (season_map, stage_template) else {
+        let observations = history
+            .iter()
+            .map(|row| (row.hydro_id, row.start_date, row.value_m3s))
+            .collect();
+        return (observations, BTreeMap::new());
+    };
+
+    let mut windows_by_hydro: BTreeMap<EntityId, Vec<RealizedWindow>> = BTreeMap::new();
+    for row in history {
+        windows_by_hydro
+            .entry(row.hydro_id)
+            .or_default()
+            .push(RealizedWindow {
+                start_date: row.start_date,
+                end_date: row.end_date,
+                value_m3s: row.value_m3s,
+            });
+    }
+
+    let mut observations = Vec::new();
+    let mut skipped_partial = BTreeMap::new();
+
+    for (&hydro_id, windows) in &windows_by_hydro {
+        let occurrences = discover_hydro_occurrences(season_map, stage_template, windows);
+        let mut skip_count = 0usize;
+
+        for occurrence in &occurrences {
+            let overlapping: Vec<RealizedWindow> = windows
+                .iter()
+                .filter(|w| w.start_date < occurrence.end && w.end_date > occurrence.start)
+                .map(|w| RealizedWindow {
+                    start_date: w.start_date,
+                    end_date: w.end_date,
+                    value_m3s: w.value_m3s,
+                })
+                .collect();
+
+            let projection = cast(&overlapping, occurrence);
+
+            if projection.coverage == 1.0 {
+                observations.push((hydro_id, occurrence.start, projection.value));
+            } else if projection.coverage > 0.0 {
+                skip_count += 1;
+            }
+        }
+
+        if skip_count > 0 {
+            skipped_partial.insert(hydro_id, skip_count);
+        }
+    }
+
+    observations.sort_by_key(|(id, date, _)| (id.0, *date));
+
+    (observations, skipped_partial)
+}
+
+/// Every season-period occurrence overlapped by any of `windows`, deduplicated
+/// by occurrence start date. Walks forward from each window's own occurrence
+/// via [`next_season_period_window`] so a window straddling more than one
+/// occurrence contributes every occurrence it touches, not just the first.
+fn discover_hydro_occurrences(
+    season_map: &SeasonMap,
+    stage_template: &Stage,
+    windows: &[RealizedWindow],
+) -> Vec<SeasonPeriodWindow> {
+    let mut discovered: BTreeMap<NaiveDate, SeasonPeriodWindow> = BTreeMap::new();
+
+    for window in windows {
+        let Some(mut occurrence) = occurrence_containing(season_map, stage_template, window) else {
+            continue;
+        };
+
+        while occurrence.start < window.end_date {
+            let key = occurrence.start;
+            discovered.entry(key).or_insert_with(|| SeasonPeriodWindow {
+                start: occurrence.start,
+                end: occurrence.end,
+                hours: occurrence.hours,
+            });
+
+            let Some(season_id) = season_map.season_for_date(occurrence.start) else {
+                break;
+            };
+            let Some(season_def) = season_map.seasons.iter().find(|s| s.id == season_id) else {
+                break;
+            };
+            let Some(next) = next_season_period_window(season_map, season_def, &occurrence) else {
+                break;
+            };
+            occurrence = next;
+        }
+    }
+
+    discovered.into_values().collect()
+}
+
+/// The season-period occurrence containing `window.start_date`, anchored on
+/// `window`'s own `[start_date, end_date)` span — the natural stage analogue
+/// [`season_period_window`] expects for disambiguating a cycle-crossing
+/// candidate year. `stage_template` donates every field `season_period_window`
+/// does not read (only `start_date`/`end_date` are read); any real `Stage`
+/// works as the donor.
+fn occurrence_containing(
+    season_map: &SeasonMap,
+    stage_template: &Stage,
+    window: &RealizedWindow,
+) -> Option<SeasonPeriodWindow> {
+    let season_id = season_map.season_for_date(window.start_date)?;
+    let season_def = season_map.seasons.iter().find(|s| s.id == season_id)?;
+
+    let mut probe = stage_template.clone();
+    probe.start_date = window.start_date;
+    probe.end_date = window.end_date;
+
+    Some(season_period_window(season_map, season_def, &probe))
+}
+
+/// Emit one aggregate info-level diagnostic summarizing partial-coverage
+/// occurrences skipped during estimation observation loading; a
+/// no-op when nothing was skipped. Estimation's `run_*` pipelines carry no
+/// `ValidationContext` (that lives only in [`estimate_from_history`]'s
+/// structural pre-check), so `tracing::info!` is the channel already used for
+/// this file's other estimation-time diagnostics (see
+/// [`validate_partial_estimation_coverage`]'s `tracing::warn!`).
+fn log_skipped_partial_occurrences(skipped_partial: &BTreeMap<EntityId, usize>) {
+    if skipped_partial.is_empty() {
+        return;
+    }
+
+    let total: usize = skipped_partial.values().sum();
+    let per_hydro: Vec<String> = skipped_partial
+        .iter()
+        .map(|(hydro_id, count)| format!("hydro {hydro_id}: {count}"))
+        .collect();
+
+    tracing::info!(
+        "estimation observation loading skipped {total} partial-coverage season \
+         occurrence(s) across {} hydro(s) ({})",
+        skipped_partial.len(),
+        per_hydro.join(", ")
+    );
 }
 
 /// Return type of [`validate_partial_estimation_coverage`]:
@@ -490,14 +655,6 @@ fn run_user_ar_estimation(
     config: &Config,
     manifest: &FileManifest,
 ) -> Result<(System, EstimationReport), EstimationError> {
-    let history_path = case_dir.join("scenarios/inflow_history.parquet");
-    let history = parse_inflow_history(&history_path)?;
-
-    let observations: Vec<(EntityId, NaiveDate, f64)> = history
-        .iter()
-        .map(|row| (row.hydro_id, row.date, row.value_m3s))
-        .collect();
-
     let hydro_ids: Vec<EntityId> = system.hydros().iter().map(|h| h.id).collect();
     let stages = system.stages();
     let season_map = system.policy_graph().season_map.as_ref();
@@ -513,13 +670,7 @@ fn run_user_ar_estimation(
         .collect();
     let extended = extended.as_slice();
 
-    // Aggregate against stages, not extended: the synthetic pre-study stages
-    // would not change any observation's resolved season.
-    let observations = if let Some(sm) = season_map {
-        aggregate_observations_to_season(&observations, stages, sm)?
-    } else {
-        observations
-    };
+    let observations = load_and_aggregate_observations(case_dir, stages, season_map)?;
 
     let seasonal_stats =
         estimate_seasonal_stats_with_season_map(&observations, extended, &hydro_ids, season_map)?;

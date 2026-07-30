@@ -5,21 +5,24 @@
 #![allow(
     clippy::unwrap_used,
     clippy::panic,
-    clippy::too_many_lines,
     clippy::doc_markdown,
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
-    clippy::cast_sign_loss
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
 )]
 
 use chrono::NaiveDate;
 use cobre_core::{
     CorrelationGroup, CorrelationModel, EntityId, SeasonMap,
-    entities::{Bus, Hydro, HydroGenerationModel, HydroPenalties, Line, Thermal},
+    entities::{
+        Bus, DeficitSegment, Hydro, HydroGenerationModel, HydroPenalties, HydroUnitGroup, Line,
+        Thermal,
+    },
     initial_conditions::InitialConditions,
     penalty::GlobalPenaltyDefaults,
     temporal::{
-        BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig, Stage,
+        Block, BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig, Stage,
         StageRiskConfig, StageStateConfig,
     },
 };
@@ -30,12 +33,13 @@ use crate::{
     extensions::{FphaHyperplaneRow, HydroGeometryRow},
     parse_config,
     stages::StagesData,
-    validation::{ValidationContext, schema::ParsedData},
+    validation::schema::ParsedData,
 };
 
 // ── Penalty helpers ───────────────────────────────────────────────────────────
 
-/// Build a minimal valid `HydroPenalties` with all fields set to `v`.
+/// Build `HydroPenalties` with every field set to `v` except
+/// `inflow_nonnegativity_cost`.
 pub(super) fn penalties_all(v: f64) -> HydroPenalties {
     HydroPenalties {
         spillage_cost: v,
@@ -59,7 +63,6 @@ pub(super) fn penalties_all(v: f64) -> HydroPenalties {
 
 /// Minimal `GlobalPenaltyDefaults` required to fill `ParsedData`.
 pub(super) fn minimal_global_penalties() -> GlobalPenaltyDefaults {
-    use cobre_core::entities::DeficitSegment;
     GlobalPenaltyDefaults {
         bus_deficit_segments: vec![DeficitSegment {
             depth_mw: None,
@@ -67,37 +70,24 @@ pub(super) fn minimal_global_penalties() -> GlobalPenaltyDefaults {
         }],
         bus_excess_cost: 1.0,
         line_exchange_cost: 1.0,
-        hydro: HydroPenalties {
-            spillage_cost: 1.0,
-            turbined_cost: 1.0,
-            diversion_cost: 1.0,
-            storage_violation_below_cost: 1.0,
-            filling_target_violation_cost: 1.0,
-            turbined_violation_below_cost: 1.0,
-            outflow_violation_below_cost: 1.0,
-            outflow_violation_above_cost: 1.0,
-            generation_violation_below_cost: 1.0,
-            evaporation_violation_cost: 1.0,
-            water_withdrawal_violation_cost: 1.0,
-            water_withdrawal_violation_pos_cost: 1.0,
-            water_withdrawal_violation_neg_cost: 1.0,
-            evaporation_violation_pos_cost: 1.0,
-            evaporation_violation_neg_cost: 1.0,
-            inflow_nonnegativity_cost: 1000.0,
-        },
+        hydro: penalties_all(1.0),
         ncs_curtailment_cost: 1.0,
     }
 }
 
 // ── Entity builders ───────────────────────────────────────────────────────────
 
-/// Build a minimal valid `Hydro` using default sensible values.
+/// Build a minimal valid `Hydro` using default sensible values, with an empty
+/// `unit_groups` — callers that need groups declare them directly, or route
+/// through [`make_data`] / [`make_data_5b`] / [`make_data_estimation`], which
+/// sort at the same boundary `convert_hydros` and `SystemBuilder::build` do
+/// (after the hydros' own field values are final).
 pub(super) fn make_hydro(id: i32, downstream_id: Option<i32>) -> Hydro {
     Hydro {
+        unit_groups: Vec::new(),
         id: EntityId::from(id),
         name: format!("Hydro {id}"),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId::from(1),
         downstream_id: downstream_id.map(EntityId::from),
         travel_time_hours: None,
         entry_stage_id: None,
@@ -123,6 +113,26 @@ pub(super) fn make_hydro(id: i32, downstream_id: Option<i32>) -> Hydro {
     }
 }
 
+/// Build a `HydroUnitGroup` with the given id, bus, and four bounds.
+pub(super) fn make_unit_group(
+    id: i32,
+    bus_id: i32,
+    min_generation_mw: f64,
+    max_generation_mw: f64,
+    min_turbined_m3s: f64,
+    max_turbined_m3s: f64,
+) -> HydroUnitGroup {
+    HydroUnitGroup {
+        id: EntityId::from(id),
+        name: format!("Group {id}"),
+        bus_id: EntityId::from(bus_id),
+        min_generation_mw,
+        max_generation_mw,
+        min_turbined_m3s,
+        max_turbined_m3s,
+    }
+}
+
 /// Build a minimal valid `Thermal`.
 pub(super) fn make_thermal(id: i32, min_mw: f64, max_mw: f64) -> Thermal {
     Thermal {
@@ -144,8 +154,8 @@ pub(super) fn make_stage(id: i32) -> Stage {
     Stage {
         id,
         index: 0,
-        start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        end_date: chrono::NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
         season_id: None,
         blocks: vec![],
         block_mode: BlockMode::Parallel,
@@ -159,6 +169,20 @@ pub(super) fn make_stage(id: i32) -> Stage {
             noise_method: NoiseMethod::Saa,
         },
     }
+}
+
+/// Build a stage with `id` and `n` blocks of equal duration, reusing
+/// [`make_stage`] for every other field so the two builders cannot drift.
+pub(super) fn make_stage_with_blocks(id: i32, n: usize) -> Stage {
+    let mut stage = make_stage(id);
+    stage.blocks = (0..n)
+        .map(|index| Block {
+            index,
+            name: format!("B{index}"),
+            duration_hours: 720.0 / n as f64,
+        })
+        .collect();
+    stage
 }
 
 /// Build a minimal valid `StagesData` with the given stage IDs.
@@ -176,17 +200,8 @@ pub(super) fn make_stages(ids: Vec<i32>) -> StagesData {
 
 // ── Layer 5a data builder (hydro + thermal) ───────────────────────────────────
 
-/// Build a minimal `ParsedData` with the provided hydros, thermals, stages,
-/// geometry, and FPHA rows.  All other fields are empty/minimal.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn make_data(
-    hydros: Vec<Hydro>,
-    thermals: Vec<Thermal>,
-    lines: Vec<Line>,
-    stages: StagesData,
-    hydro_geometry: Vec<HydroGeometryRow>,
-    fpha_hyperplanes: Vec<FphaHyperplaneRow>,
-) -> ParsedData {
+/// `ParsedData` skeleton: one `BUS_1` bus, every other field empty or `None`.
+fn base_parsed_data(stages: StagesData) -> ParsedData {
     ParsedData {
         config: minimal_config(),
         penalties: minimal_global_penalties(),
@@ -194,7 +209,6 @@ pub(super) fn make_data(
         initial_conditions: InitialConditions {
             storage: vec![],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
@@ -206,17 +220,17 @@ pub(super) fn make_data(
             deficit_segments: vec![],
             excess_cost: 100.0,
         }],
-        thermals,
-        hydros,
-        lines,
+        thermals: vec![],
+        hydros: vec![],
+        lines: vec![],
         non_controllable_sources: vec![],
         pumping_stations: vec![],
         energy_contracts: vec![],
-        hydro_geometry,
+        hydro_geometry: vec![],
         production_models: vec![],
         plane_reduction: None,
         hydro_energy_productivity_rows: vec![],
-        fpha_hyperplanes,
+        fpha_hyperplanes: vec![],
         scalar_parameters: vec![],
         inflow_history: vec![],
         inflow_seasonal_stats: vec![],
@@ -235,7 +249,6 @@ pub(super) fn make_data(
         line_bounds: vec![],
         pumping_bounds: vec![],
         contract_bounds: vec![],
-        exchange_factors: vec![],
         generic_constraints: vec![],
         generic_constraint_bounds: vec![],
         penalty_overrides_bus: vec![],
@@ -243,6 +256,36 @@ pub(super) fn make_data(
         penalty_overrides_hydro: vec![],
         penalty_overrides_ncs: vec![],
         ncs_bounds: vec![],
+        hydro_unit_group_bounds: vec![],
+    }
+}
+
+/// Build a minimal `ParsedData` with the provided hydros, thermals, stages,
+/// geometry, and FPHA rows.  All other fields are empty/minimal.
+///
+/// Sorts each hydro's `unit_groups` here, at the boundary — mirroring where
+/// `convert_hydros` and `SystemBuilder::build` sort in production, after the
+/// hydros' own field values are final. Sorting inside `make_hydro` instead
+/// would snapshot a stale group order for any caller that mutates
+/// `unit_groups` afterward.
+pub(super) fn make_data(
+    mut hydros: Vec<Hydro>,
+    thermals: Vec<Thermal>,
+    lines: Vec<Line>,
+    stages: StagesData,
+    hydro_geometry: Vec<HydroGeometryRow>,
+    fpha_hyperplanes: Vec<FphaHyperplaneRow>,
+) -> ParsedData {
+    for hydro in &mut hydros {
+        hydro.sort_unit_groups();
+    }
+    ParsedData {
+        thermals,
+        hydros,
+        lines,
+        hydro_geometry,
+        fpha_hyperplanes,
+        ..base_parsed_data(stages)
     }
 }
 
@@ -250,69 +293,31 @@ pub(super) fn make_data(
 
 /// Build a minimal valid `ParsedData` for Layer 5b tests.
 /// All hydro penalties satisfy the ordering hierarchy by default.
+///
+/// Sorts `hydros` here, at the boundary — see [`make_data`]'s doc for why
+/// this must not happen inside `make_hydro`.
 pub(super) fn make_data_5b(
-    hydros: Vec<Hydro>,
+    mut hydros: Vec<Hydro>,
     stages: StagesData,
     buses: Vec<Bus>,
     inflow_stats: Vec<InflowSeasonalStatsRow>,
     inflow_ar: Vec<InflowArCoefficientRow>,
     correlation: Option<CorrelationModel>,
 ) -> ParsedData {
+    for hydro in &mut hydros {
+        hydro.sort_unit_groups();
+    }
     ParsedData {
-        config: minimal_config(),
-        penalties: minimal_global_penalties(),
-        stages,
-        initial_conditions: InitialConditions {
-            storage: vec![],
-            filling_storage: vec![],
-            past_inflows: vec![],
-            past_anticipated_commitments: vec![],
-            recent_observations: vec![],
-            past_defluences: vec![],
-        },
         buses,
-        thermals: vec![],
         hydros,
-        lines: vec![],
-        non_controllable_sources: vec![],
-        pumping_stations: vec![],
-        energy_contracts: vec![],
-        hydro_geometry: vec![],
-        production_models: vec![],
-        plane_reduction: None,
-        hydro_energy_productivity_rows: vec![],
-        fpha_hyperplanes: vec![],
-        scalar_parameters: vec![],
-        inflow_history: vec![],
         inflow_seasonal_stats: inflow_stats,
         inflow_ar_coefficients: inflow_ar,
-        inflow_annual_components: vec![],
-        external_scenarios: vec![],
-        external_load_scenarios: vec![],
-        external_ncs_scenarios: vec![],
-        load_seasonal_stats: vec![],
-        load_factors: vec![],
         correlation,
-        non_controllable_factors: vec![],
-        ncs_models: vec![],
-        thermal_bounds: vec![],
-        hydro_bounds: vec![],
-        line_bounds: vec![],
-        pumping_bounds: vec![],
-        contract_bounds: vec![],
-        exchange_factors: vec![],
-        generic_constraints: vec![],
-        generic_constraint_bounds: vec![],
-        penalty_overrides_bus: vec![],
-        penalty_overrides_line: vec![],
-        penalty_overrides_hydro: vec![],
-        penalty_overrides_ncs: vec![],
-        ncs_bounds: vec![],
+        ..base_parsed_data(stages)
     }
 }
 
 /// Build a hydro with penalties satisfying the ordering hierarchy.
-/// filling (1000) > storage_viol (500) > constraint_viol (50) > resource (1)
 pub(super) fn make_hydro_ordered_penalties(id: i32) -> Hydro {
     let mut h = make_hydro(id, None);
     h.penalties = HydroPenalties {
@@ -336,23 +341,12 @@ pub(super) fn make_hydro_ordered_penalties(id: i32) -> Hydro {
     h
 }
 
-/// Build a minimal valid `StagesData` with the given stage IDs and a
-/// `FiniteHorizon` policy graph with valid transitions.
 pub(super) fn make_stages_5b(ids: Vec<i32>) -> StagesData {
-    StagesData {
-        stages: ids.into_iter().map(make_stage).collect(),
-        policy_graph: PolicyGraph {
-            graph_type: PolicyGraphType::FiniteHorizon,
-            annual_discount_rate: 0.06,
-            transitions: vec![],
-            season_map: None,
-        },
-    }
+    make_stages(ids)
 }
 
 /// Build a bus with a single deficit segment at the given cost.
 pub(super) fn make_bus_with_deficit(id: i32, cost_per_mwh: f64) -> Bus {
-    use cobre_core::entities::DeficitSegment;
     Bus {
         id: EntityId::from(id),
         name: format!("Bus {id}"),
@@ -504,7 +498,7 @@ pub(super) fn config_with_simulation_external_load() -> Config {
 
 /// Build a monthly `SeasonMap` with 12 seasons (January=0 .. December=11).
 pub(super) fn make_monthly_season_map() -> SeasonMap {
-    use cobre_core::temporal::{SeasonCycleType, SeasonDefinition, SeasonMap};
+    use cobre_core::temporal::{SeasonCycleType, SeasonDefinition};
     let seasons = (0..12u32)
         .map(|m| SeasonDefinition {
             id: m as usize,
@@ -528,10 +522,11 @@ pub(super) fn make_history_rows(hydro_id: i32, n_obs: usize) -> Vec<InflowHistor
     for i in 0..n_obs {
         let year = 2000 + (i / 12) as i32;
         let month = (i % 12) as u32 + 1;
-        let date = chrono::NaiveDate::from_ymd_opt(year, month, 15).unwrap();
+        let start_date = NaiveDate::from_ymd_opt(year, month, 15).unwrap();
         rows.push(InflowHistoryRow {
             hydro_id: EntityId::from(hydro_id),
-            date,
+            start_date,
+            end_date: start_date.succ_opt().unwrap(),
             value_m3s: 100.0,
         });
     }
@@ -546,45 +541,25 @@ pub(super) fn make_stages_with_seasons(n_months: usize, with_season_map: bool) -
     for i in 0..n_months {
         let year = 2000 + (i / 12) as i32;
         let month = (i % 12) as u32 + 1;
-        let start_date = chrono::NaiveDate::from_ymd_opt(year, month, 1).unwrap();
         let (end_year, end_month) = if month == 12 {
             (year + 1, 1u32)
         } else {
             (year, month + 1)
         };
-        let end_date = chrono::NaiveDate::from_ymd_opt(end_year, end_month, 1).unwrap();
-        let season_id = i % 12;
-        stages.push(Stage {
-            index: i,
-            id: i as i32,
-            start_date,
-            end_date,
-            season_id: Some(season_id),
-            blocks: vec![],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
-        });
+        let mut stage = make_stage(i as i32);
+        stage.index = i;
+        stage.start_date = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+        stage.end_date = NaiveDate::from_ymd_opt(end_year, end_month, 1).unwrap();
+        stage.season_id = Some(i % 12);
+        stages.push(stage);
     }
-    let season_map = if with_season_map {
-        Some(make_monthly_season_map())
-    } else {
-        None
-    };
     StagesData {
         stages,
         policy_graph: PolicyGraph {
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.06,
             transitions: vec![],
-            season_map,
+            season_map: with_season_map.then(make_monthly_season_map),
         },
     }
 }
@@ -593,67 +568,20 @@ pub(super) fn make_stages_with_seasons(n_months: usize, with_season_map: bool) -
 ///
 /// `inflow_history` rows are provided directly; `inflow_seasonal_stats` is
 /// empty (triggering the estimation path when history is non-empty).
+/// Sorts `hydros` here, at the boundary — see [`make_data`]'s doc for why
+/// this must not happen inside `make_hydro`.
 pub(super) fn make_data_estimation(
-    hydros: Vec<Hydro>,
+    mut hydros: Vec<Hydro>,
     stages: StagesData,
     inflow_history: Vec<InflowHistoryRow>,
 ) -> ParsedData {
+    for hydro in &mut hydros {
+        hydro.sort_unit_groups();
+    }
     ParsedData {
-        config: minimal_config(),
-        penalties: minimal_global_penalties(),
-        stages,
-        initial_conditions: InitialConditions {
-            storage: vec![],
-            filling_storage: vec![],
-            past_inflows: vec![],
-            past_anticipated_commitments: vec![],
-            recent_observations: vec![],
-            past_defluences: vec![],
-        },
-        buses: vec![Bus {
-            id: EntityId::from(1),
-            name: "BUS_1".to_string(),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            deficit_segments: vec![],
-            excess_cost: 100.0,
-        }],
-        thermals: vec![],
         hydros,
-        lines: vec![],
-        non_controllable_sources: vec![],
-        pumping_stations: vec![],
-        energy_contracts: vec![],
-        hydro_geometry: vec![],
-        production_models: vec![],
-        plane_reduction: None,
-        hydro_energy_productivity_rows: vec![],
-        fpha_hyperplanes: vec![],
         inflow_history,
-        inflow_seasonal_stats: vec![], // empty → estimation path active
-        inflow_ar_coefficients: vec![],
-        inflow_annual_components: vec![],
-        external_scenarios: vec![],
-        external_load_scenarios: vec![],
-        external_ncs_scenarios: vec![],
-        load_seasonal_stats: vec![],
-        load_factors: vec![],
-        correlation: None,
-        non_controllable_factors: vec![],
-        ncs_models: vec![],
-        thermal_bounds: vec![],
-        hydro_bounds: vec![],
-        line_bounds: vec![],
-        pumping_bounds: vec![],
-        contract_bounds: vec![],
-        exchange_factors: vec![],
-        generic_constraints: vec![],
-        generic_constraint_bounds: vec![],
-        penalty_overrides_bus: vec![],
-        penalty_overrides_line: vec![],
-        penalty_overrides_hydro: vec![],
-        penalty_overrides_ncs: vec![],
-        ncs_bounds: vec![],
-        scalar_parameters: vec![],
+        ..base_parsed_data(stages)
     }
 }
 
@@ -666,144 +594,3 @@ pub(super) fn make_ar_row(hydro_id: i32, stage_id: i32, lag: i32) -> InflowArCoe
         coefficient: 0.5,
     }
 }
-
-/// Build a `ParsedData` suitable for rules 22-24 (past-inflows coverage) tests.
-///
-/// `inflow_lags_enabled` controls `state_config.inflow_lags` on stage 0.
-/// `past_inflows` is placed directly in `initial_conditions`.
-pub(super) fn make_data_past_inflows(
-    hydros: Vec<Hydro>,
-    inflow_lags_enabled: bool,
-    past_inflows: Vec<cobre_core::HydroPastInflows>,
-    inflow_ar_coefficients: Vec<InflowArCoefficientRow>,
-) -> ParsedData {
-    use cobre_core::EntityId as EId;
-    let stage_0_start = chrono::NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
-    let stage_0 = Stage {
-        id: 0,
-        index: 0,
-        start_date: stage_0_start,
-        end_date: stage_0_start
-            .checked_add_months(chrono::Months::new(1))
-            .unwrap_or(stage_0_start),
-        season_id: None,
-        blocks: vec![],
-        block_mode: BlockMode::Parallel,
-        state_config: StageStateConfig {
-            storage: true,
-            inflow_lags: inflow_lags_enabled,
-        },
-        risk_config: StageRiskConfig::Expectation,
-        scenario_config: ScenarioSourceConfig {
-            branching_factor: 1,
-            noise_method: NoiseMethod::Saa,
-        },
-    };
-    ParsedData {
-        config: minimal_config(),
-        penalties: minimal_global_penalties(),
-        stages: StagesData {
-            stages: vec![stage_0],
-            policy_graph: PolicyGraph {
-                graph_type: PolicyGraphType::FiniteHorizon,
-                annual_discount_rate: 0.06,
-                transitions: vec![],
-                season_map: None,
-            },
-        },
-        initial_conditions: cobre_core::InitialConditions {
-            storage: vec![],
-            filling_storage: vec![],
-            past_inflows,
-            past_anticipated_commitments: vec![],
-            recent_observations: vec![],
-            past_defluences: vec![],
-        },
-        buses: vec![Bus {
-            id: EId::from(1),
-            name: "BUS_1".to_string(),
-            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            deficit_segments: vec![],
-            excess_cost: 100.0,
-        }],
-        thermals: vec![],
-        hydros,
-        lines: vec![],
-        non_controllable_sources: vec![],
-        pumping_stations: vec![],
-        energy_contracts: vec![],
-        hydro_geometry: vec![],
-        production_models: vec![],
-        plane_reduction: None,
-        hydro_energy_productivity_rows: vec![],
-        fpha_hyperplanes: vec![],
-        inflow_history: vec![],
-        // Populate a sentinel entry so the estimation path (rules 19-21) is
-        // inactive. Rules 22-24 are independent of the estimation path.
-        inflow_seasonal_stats: vec![InflowSeasonalStatsRow {
-            hydro_id: EId::from(1),
-            stage_id: 0,
-            mean_m3s: 500.0,
-            std_m3s: 50.0,
-        }],
-        inflow_ar_coefficients,
-        inflow_annual_components: vec![],
-        external_scenarios: vec![],
-        external_load_scenarios: vec![],
-        external_ncs_scenarios: vec![],
-        load_seasonal_stats: vec![],
-        load_factors: vec![],
-        correlation: None,
-        non_controllable_factors: vec![],
-        ncs_models: vec![],
-        thermal_bounds: vec![],
-        hydro_bounds: vec![],
-        line_bounds: vec![],
-        pumping_bounds: vec![],
-        contract_bounds: vec![],
-        exchange_factors: vec![],
-        generic_constraints: vec![],
-        generic_constraint_bounds: vec![],
-        penalty_overrides_bus: vec![],
-        penalty_overrides_line: vec![],
-        penalty_overrides_hydro: vec![],
-        penalty_overrides_ncs: vec![],
-        ncs_bounds: vec![],
-        scalar_parameters: vec![],
-    }
-}
-
-/// Build a `ParsedData` like `make_data_past_inflows` but with a `SeasonMap`
-/// containing seasons with IDs `0..num_seasons`.
-pub(super) fn make_data_past_inflows_with_season_map(
-    hydros: Vec<Hydro>,
-    past_inflows: Vec<cobre_core::HydroPastInflows>,
-    inflow_ar_coefficients: Vec<InflowArCoefficientRow>,
-    num_seasons: usize,
-) -> ParsedData {
-    use cobre_core::temporal::{SeasonCycleType, SeasonDefinition, SeasonMap};
-
-    let seasons = (0..num_seasons)
-        .map(|i| SeasonDefinition {
-            id: i,
-            label: format!("Season{i}"),
-            month_start: (i % 12 + 1) as u32,
-            day_start: None,
-            month_end: None,
-            day_end: None,
-        })
-        .collect();
-    let season_map = SeasonMap {
-        cycle_type: SeasonCycleType::Monthly,
-        seasons,
-    };
-
-    let mut data = make_data_past_inflows(hydros, true, past_inflows, inflow_ar_coefficients);
-    data.stages.policy_graph.season_map = Some(season_map);
-    data
-}
-
-// dead_code: a helper may be unused by some sibling modules but is kept here for
-// discoverability rather than scattered per-module.
-#[allow(dead_code)]
-pub(super) fn _assert_helpers_present(_ctx: &mut ValidationContext) {}

@@ -178,6 +178,27 @@ pub struct SimulationHydroResult {
     pub water_withdrawal_violation_neg_m3s: f64,
 }
 
+/// Per-cell hydro dispatch result for one (stage, block, hydro, bus) tuple —
+/// one LP cell.
+///
+/// Corresponds to one row in the `hydro_bus_generation` output schema. Field
+/// for field the mirror of `HydroBusWriteRecord`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct SimulationHydroBusResult {
+    /// Stage index (0-based).
+    pub stage_id: u32,
+    /// Block index within the stage, or [`None`] for stage-level aggregates.
+    pub block_id: Option<u32>,
+    /// Hydro plant entity ID.
+    pub hydro_id: i32,
+    /// Bus entity ID owning this cell.
+    pub bus_id: i32,
+    /// Turbined flow in m³/s.
+    pub turbined_m3s: f64,
+    /// Active power generation in MW.
+    pub generation_mw: f64,
+}
+
 /// Thermal unit result for one (stage, block, thermal) tuple.
 ///
 /// Corresponds to one row in the thermals output schema
@@ -401,6 +422,8 @@ pub struct SimulationStageResult {
     pub costs: Vec<SimulationCostResult>,
     /// Hydro plant results for this stage.
     pub hydros: Vec<SimulationHydroResult>,
+    /// Per-cell hydro dispatch results for this stage.
+    pub hydro_bus_generation: Vec<SimulationHydroBusResult>,
     /// Thermal unit results for this stage.
     pub thermals: Vec<SimulationThermalResult>,
     /// Transmission line (exchange) results for this stage.
@@ -549,9 +572,10 @@ mod tests {
     use super::{
         CategoryCostStats, ScenarioCategoryCosts, SimulationBusResult, SimulationContractResult,
         SimulationCostResult, SimulationExchangeResult, SimulationGenericViolationResult,
-        SimulationHydroResult, SimulationInflowLagResult, SimulationNonControllableResult,
-        SimulationPumpingResult, SimulationScenarioResult, SimulationStageResult,
-        SimulationSummary, SimulationThermalResult, SimulationTransitBucketResult,
+        SimulationHydroBusResult, SimulationHydroResult, SimulationInflowLagResult,
+        SimulationNonControllableResult, SimulationPumpingResult, SimulationScenarioResult,
+        SimulationStageResult, SimulationSummary, SimulationThermalResult,
+        SimulationTransitBucketResult,
     };
 
     #[test]
@@ -935,11 +959,31 @@ mod tests {
     }
 
     #[test]
+    fn hydro_bus_result_construction() {
+        let r = SimulationHydroBusResult {
+            stage_id: 0,
+            block_id: Some(1),
+            hydro_id: 5,
+            bus_id: 12,
+            turbined_m3s: 30.0,
+            generation_mw: 15.0,
+        };
+
+        assert_eq!(r.stage_id, 0);
+        assert_eq!(r.block_id, Some(1));
+        assert_eq!(r.hydro_id, 5);
+        assert_eq!(r.bus_id, 12);
+        assert_eq!(r.turbined_m3s, 30.0);
+        assert_eq!(r.generation_mw, 15.0);
+    }
+
+    #[test]
     fn stage_result_empty_optional_vecs() {
         let stage = SimulationStageResult {
             stage_id: 0,
             costs: vec![],
             hydros: vec![],
+            hydro_bus_generation: vec![],
             thermals: vec![],
             exchanges: vec![],
             buses: vec![],
@@ -972,6 +1016,7 @@ mod tests {
                 stage_id: i,
                 costs: vec![],
                 hydros: vec![],
+                hydro_bus_generation: vec![],
                 thermals: vec![],
                 exchanges: vec![],
                 buses: vec![],

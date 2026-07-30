@@ -60,7 +60,8 @@ const BUS_ID: i32 = 10;
 fn inflow_history_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("hydro_id", DataType::Int32, false),
-        Field::new("date", DataType::Date32, false),
+        Field::new("start_date", DataType::Date32, false),
+        Field::new("end_date", DataType::Date32, false),
         Field::new("value_m3s", DataType::Float64, false),
     ]))
 }
@@ -71,10 +72,13 @@ fn date_to_date32(date: NaiveDate) -> i32 {
     i32::try_from((date - epoch).num_days()).expect("date in Date32 range")
 }
 
-/// Write a Parquet file of synthetic inflow history: `N_YEARS * N_SEASONS` monthly
-/// observations for one hydro, each dated the 15th so it falls inside the stage's
-/// `[1st, 1st-of-next-month)` window. Values use a seasonal sine-wave pattern to
-/// give non-trivial autocorrelation structure for PAR(p) fitting.
+/// Write a Parquet file of synthetic inflow history: `N_YEARS * N_SEASONS`
+/// monthly observations for one hydro, each a full-coverage `[1st,
+/// 1st-of-next-month)` window so it counts as a complete occurrence under any
+/// real `SeasonMap` (the exact-coverage gate in `cobre-io`'s estimation
+/// reader) as well as falling inside the stage's own window. Values use a
+/// seasonal sine-wave pattern to give non-trivial autocorrelation structure
+/// for PAR(p) fitting.
 fn write_inflow_history(path: &Path) {
     write_inflow_history_n_years(path, N_YEARS);
 }
@@ -86,14 +90,20 @@ fn write_inflow_history_n_years(path: &Path, n_years: usize) {
     let schema = inflow_history_schema();
 
     let mut hydro_ids: Vec<i32> = Vec::new();
-    let mut dates: Vec<i32> = Vec::new();
+    let mut start_dates: Vec<i32> = Vec::new();
+    let mut end_dates: Vec<i32> = Vec::new();
     let mut values: Vec<f64> = Vec::new();
 
     for year in 0..n_years {
         for month in 0..N_SEASONS {
             let cal_year = START_YEAR + year as i32;
             let cal_month = (month as u32) + 1;
-            let date = NaiveDate::from_ymd_opt(cal_year, cal_month, 15).unwrap();
+            let month_start = NaiveDate::from_ymd_opt(cal_year, cal_month, 1).unwrap();
+            let month_end = if cal_month == 12 {
+                NaiveDate::from_ymd_opt(cal_year + 1, 1, 1).unwrap()
+            } else {
+                NaiveDate::from_ymd_opt(cal_year, cal_month + 1, 1).unwrap()
+            };
 
             // Deterministic perturbation so values differ across years.
             let phase = std::f64::consts::TAU * (month as f64) / (N_SEASONS as f64);
@@ -102,7 +112,8 @@ fn write_inflow_history_n_years(path: &Path, n_years: usize) {
             let value = 500.0 + 200.0 * phase.sin() + noise;
 
             hydro_ids.push(HYDRO_ID);
-            dates.push(date_to_date32(date));
+            start_dates.push(date_to_date32(month_start));
+            end_dates.push(date_to_date32(month_end));
             values.push(value.max(1.0));
         }
     }
@@ -111,7 +122,8 @@ fn write_inflow_history_n_years(path: &Path, n_years: usize) {
         schema.clone(),
         vec![
             Arc::new(Int32Array::from(hydro_ids)),
-            Arc::new(Date32Array::from(dates)),
+            Arc::new(Date32Array::from(start_dates)),
+            Arc::new(Date32Array::from(end_dates)),
             Arc::new(Float64Array::from(values)),
         ],
     )
@@ -481,7 +493,8 @@ fn write_par1_inflow_history(path: &Path, n_hydros: usize) {
     let schema = inflow_history_schema();
 
     let mut hydro_ids: Vec<i32> = Vec::new();
-    let mut dates: Vec<i32> = Vec::new();
+    let mut start_dates: Vec<i32> = Vec::new();
+    let mut end_dates: Vec<i32> = Vec::new();
     let mut values: Vec<f64> = Vec::new();
 
     for h in 0..n_hydros {
@@ -497,7 +510,8 @@ fn write_par1_inflow_history(path: &Path, n_hydros: usize) {
             let month = if i % 2 == 0 { 1u32 } else { 2u32 };
             let date = chrono::NaiveDate::from_ymd_opt(year, month, 15).unwrap();
             hydro_ids.push(hydro_id);
-            dates.push(date_to_date32(date));
+            start_dates.push(date_to_date32(date));
+            end_dates.push(date_to_date32(date.succ_opt().expect("valid next date")));
             values.push(v);
         }
     }
@@ -506,7 +520,8 @@ fn write_par1_inflow_history(path: &Path, n_hydros: usize) {
         schema.clone(),
         vec![
             Arc::new(Int32Array::from(hydro_ids)),
-            Arc::new(Date32Array::from(dates)),
+            Arc::new(Date32Array::from(start_dates)),
+            Arc::new(Date32Array::from(end_dates)),
             Arc::new(Float64Array::from(values)),
         ],
     )

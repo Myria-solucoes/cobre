@@ -809,6 +809,7 @@ fn generic_constraint_two_hydros_sum_csc_entries() {
                     VariableRef::HydroGeneration {
                         hydro_id: h1_id,
                         block_id: None,
+                        bus_id: None,
                     },
                 ),
                 LinearTerm::literal(
@@ -816,6 +817,7 @@ fn generic_constraint_two_hydros_sum_csc_entries() {
                     VariableRef::HydroGeneration {
                         hydro_id: h2_id,
                         block_id: None,
+                        bus_id: None,
                     },
                 ),
             ],
@@ -843,20 +845,21 @@ fn generic_constraint_two_hydros_sum_csc_entries() {
         },
         &BoundsDefaults {
             hydro: default_hydro_bounds(),
-            thermal: ThermalStageBounds {
+            hydro_block: default_hydro_block_bounds(),
+            thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+            thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
                 max_generation_mw: 0.0,
-                cost_per_mwh: 0.0,
             },
-            line: LineStageBounds {
+            line_block: LineBlockBounds {
                 direct_mw: 0.0,
                 reverse_mw: 0.0,
             },
-            pumping: PumpingStageBounds {
+            pumping_block: PumpingBlockBounds {
                 min_flow_m3s: 0.0,
                 max_flow_m3s: 0.0,
             },
-            contract: ContractStageBounds {
+            contract_block: ContractBlockBounds {
                 min_mw: 0.0,
                 max_mw: 0.0,
                 price_per_mwh: 0.0,
@@ -1047,20 +1050,21 @@ fn one_hydro_system(
         },
         &BoundsDefaults {
             hydro: default_hydro_bounds(),
-            thermal: ThermalStageBounds {
+            hydro_block: default_hydro_block_bounds(),
+            thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+            thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
                 max_generation_mw: 0.0,
-                cost_per_mwh: 0.0,
             },
-            line: LineStageBounds {
+            line_block: LineBlockBounds {
                 direct_mw: 0.0,
                 reverse_mw: 0.0,
             },
-            pumping: PumpingStageBounds {
+            pumping_block: PumpingBlockBounds {
                 min_flow_m3s: 0.0,
                 max_flow_m3s: 0.0,
             },
-            contract: ContractStageBounds {
+            contract_block: ContractBlockBounds {
                 min_mw: 0.0,
                 max_mw: 0.0,
                 price_per_mwh: 0.0,

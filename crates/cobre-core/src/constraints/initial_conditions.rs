@@ -11,10 +11,7 @@
 //! # Examples
 //!
 //! ```
-//! use cobre_core::{
-//!     AnticipatedCommitmentHistory, EntityId, HydroPastInflows, HydroStorage,
-//!     InitialConditions,
-//! };
+//! use cobre_core::{AnticipatedCommitmentHistory, EntityId, HydroStorage, InitialConditions};
 //!
 //! let ic = InitialConditions {
 //!     storage: vec![
@@ -23,9 +20,6 @@
 //!     ],
 //!     filling_storage: vec![
 //!         HydroStorage { hydro_id: EntityId(10), value_hm3: 200.0 },
-//!     ],
-//!     past_inflows: vec![
-//!         HydroPastInflows { hydro_id: EntityId(0), values_m3s: vec![600.0, 500.0], season_ids: None },
 //!     ],
 //!     past_anticipated_commitments: vec![
 //!         AnticipatedCommitmentHistory { thermal_id: EntityId(20), values_mw: vec![100.0, 200.0] },
@@ -36,7 +30,6 @@
 //!
 //! assert_eq!(ic.storage.len(), 2);
 //! assert_eq!(ic.filling_storage.len(), 1);
-//! assert_eq!(ic.past_inflows.len(), 1);
 //! assert_eq!(ic.past_anticipated_commitments.len(), 1);
 //! assert_eq!(ic.recent_observations.len(), 0);
 //! assert_eq!(ic.past_defluences.len(), 0);
@@ -61,26 +54,6 @@ pub struct HydroStorage {
     pub hydro_id: EntityId,
     /// Reservoir volume at the start of the study, in hm³.
     pub value_hm3: f64,
-}
-
-/// Past inflow values for PAR(p) lag initialization for a single hydro plant.
-///
-/// Each entry provides the most-recent inflow history for one hydro plant,
-/// ordered from most recent (lag 1) to oldest (lag p). The length of
-/// `values_m3s` must be >= the hydro's PAR order.
-#[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct HydroPastInflows {
-    /// Hydro plant identifier. Must reference a hydro entity in the system.
-    pub hydro_id: EntityId,
-    /// Past inflow values in m³/s, ordered from most recent (index 0 = lag 1)
-    /// to oldest (index p-1 = lag p).
-    pub values_m3s: Vec<f64>,
-    /// Optional season ID per lag entry. When present, `season_ids.len()` must
-    /// equal `values_m3s.len()`; when absent, lag entries get no temporal
-    /// validation.
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub season_ids: Option<Vec<u32>>,
 }
 
 /// Past defluence (release) for the arc fed by a single upstream hydro over a
@@ -162,8 +135,8 @@ pub struct RecentObservation {
     pub start_date: NaiveDate,
     /// End of the observation period (exclusive). Must be after `start_date`.
     pub end_date: NaiveDate,
-    /// Average inflow observed during the period, in m³/s. Must be finite and
-    /// non-negative.
+    /// Average inflow observed during the period, in m³/s. Must be finite;
+    /// negative values are accepted (the quantity is incremental inflow).
     pub value_m3s: f64,
 }
 
@@ -191,13 +164,6 @@ pub struct InitialConditions {
     /// `[0, min_storage_hm3)`; `> 0` means `0` (empty pit), frozen through the
     /// `PreFilling` phase until Filling begins.
     pub filling_storage: Vec<HydroStorage>,
-    /// Past inflow values for PAR(p) lag initialization, in m³/s per hydro.
-    /// Absent when no lag init is needed (no PAR models or `inflow_lags: false`).
-    ///
-    /// Always emitted on output even when empty — omitting it would break the
-    /// postcard round-trip used by MPI broadcast.
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub past_inflows: Vec<HydroPastInflows>,
     /// Past externally-decided anticipated commitments per anticipated thermal
     /// plant; empty without any. See [`AnticipatedCommitmentHistory`] for the
     /// per-entry contract and sunk-cost semantics.
@@ -245,11 +211,6 @@ mod tests {
                 hydro_id: EntityId(10),
                 value_hm3: 200.0,
             }],
-            past_inflows: vec![HydroPastInflows {
-                hydro_id: EntityId(0),
-                values_m3s: vec![600.0, 500.0],
-                season_ids: None,
-            }],
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
@@ -257,14 +218,11 @@ mod tests {
 
         assert_eq!(ic.storage.len(), 2);
         assert_eq!(ic.filling_storage.len(), 1);
-        assert_eq!(ic.past_inflows.len(), 1);
         assert_eq!(ic.storage[0].hydro_id, EntityId(0));
         assert_eq!(ic.storage[0].value_hm3, 15_000.0);
         assert_eq!(ic.storage[1].hydro_id, EntityId(1));
         assert_eq!(ic.filling_storage[0].hydro_id, EntityId(10));
         assert_eq!(ic.filling_storage[0].value_hm3, 200.0);
-        assert_eq!(ic.past_inflows[0].hydro_id, EntityId(0));
-        assert_eq!(ic.past_inflows[0].values_m3s, vec![600.0, 500.0]);
         assert!(ic.recent_observations.is_empty());
     }
 
@@ -273,7 +231,6 @@ mod tests {
         let ic = InitialConditions::default();
         assert!(ic.storage.is_empty());
         assert!(ic.filling_storage.is_empty());
-        assert!(ic.past_inflows.is_empty());
         assert!(ic.recent_observations.is_empty());
     }
 
@@ -285,17 +242,6 @@ mod tests {
         };
         let cloned = hs.clone();
         assert_eq!(hs, cloned);
-    }
-
-    #[test]
-    fn test_hydro_past_inflows_clone() {
-        let hpi = HydroPastInflows {
-            hydro_id: EntityId(3),
-            values_m3s: vec![300.0, 200.0, 100.0],
-            season_ids: None,
-        };
-        let cloned = hpi.clone();
-        assert_eq!(hpi, cloned);
     }
 
     #[cfg(feature = "serde")]
@@ -316,11 +262,6 @@ mod tests {
                 hydro_id: EntityId(10),
                 value_hm3: 200.0,
             }],
-            past_inflows: vec![HydroPastInflows {
-                hydro_id: EntityId(0),
-                values_m3s: vec![600.0, 500.0],
-                season_ids: None,
-            }],
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
@@ -329,27 +270,6 @@ mod tests {
         let json = serde_json::to_string(&ic).unwrap();
         let deserialized: InitialConditions = serde_json::from_str(&json).unwrap();
         assert_eq!(ic, deserialized);
-    }
-
-    #[cfg(feature = "serde")]
-    #[test]
-    fn test_initial_conditions_serde_roundtrip_empty_past_inflows() {
-        let ic = InitialConditions {
-            storage: vec![HydroStorage {
-                hydro_id: EntityId(0),
-                value_hm3: 1_000.0,
-            }],
-            filling_storage: vec![],
-            past_inflows: vec![],
-            past_anticipated_commitments: vec![],
-            recent_observations: vec![],
-            past_defluences: vec![],
-        };
-
-        let json = serde_json::to_string(&ic).unwrap();
-        let deserialized: InitialConditions = serde_json::from_str(&json).unwrap();
-        assert_eq!(ic, deserialized);
-        assert_eq!(deserialized.past_inflows.len(), 0);
     }
 
     #[test]
@@ -374,7 +294,6 @@ mod tests {
                 value_hm3: 1_000.0,
             }],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![],
             recent_observations: vec![RecentObservation {
                 hydro_id: EntityId(0),
@@ -400,7 +319,6 @@ mod tests {
                 value_hm3: 1_000.0,
             }],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![],
             recent_observations: vec![
                 RecentObservation {
@@ -436,44 +354,6 @@ mod tests {
         assert!(ic.recent_observations.is_empty());
     }
 
-    #[test]
-    fn test_hydro_past_inflows_with_season_ids() {
-        let hpi = HydroPastInflows {
-            hydro_id: EntityId(5),
-            values_m3s: vec![600.0, 500.0],
-            season_ids: Some(vec![3, 2]),
-        };
-        assert_eq!(hpi.hydro_id, EntityId(5));
-        assert_eq!(hpi.values_m3s, vec![600.0, 500.0]);
-        assert_eq!(hpi.season_ids, Some(vec![3, 2]));
-        let cloned = hpi.clone();
-        assert_eq!(cloned, hpi);
-    }
-
-    #[cfg(feature = "serde")]
-    #[test]
-    fn test_hydro_past_inflows_serde_roundtrip_with_season_ids() {
-        let hpi = HydroPastInflows {
-            hydro_id: EntityId(5),
-            values_m3s: vec![600.0, 500.0],
-            season_ids: Some(vec![3, 2]),
-        };
-        let json = serde_json::to_string(&hpi).unwrap();
-        let deserialized: HydroPastInflows = serde_json::from_str(&json).unwrap();
-        assert_eq!(hpi, deserialized);
-        assert_eq!(deserialized.season_ids, Some(vec![3, 2]));
-    }
-
-    #[cfg(feature = "serde")]
-    #[test]
-    fn test_hydro_past_inflows_serde_default_season_ids_absent() {
-        let json = r#"{"hydro_id":0,"values_m3s":[600.0,500.0]}"#;
-        let hpi: HydroPastInflows = serde_json::from_str(json).unwrap();
-        assert_eq!(hpi.hydro_id, EntityId(0));
-        assert_eq!(hpi.values_m3s, vec![600.0, 500.0]);
-        assert_eq!(hpi.season_ids, None);
-    }
-
     // --- AnticipatedCommitmentHistory tests ---
 
     #[test]
@@ -503,7 +383,6 @@ mod tests {
         let ic = InitialConditions {
             storage: vec![],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![
                 AnticipatedCommitmentHistory {
                     thermal_id: EntityId(3),
@@ -582,7 +461,6 @@ mod tests {
                 value_hm3: 1_000.0,
             }],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![
@@ -621,11 +499,6 @@ mod tests {
                 value_hm3: 1_000.0,
             }],
             filling_storage: vec![],
-            past_inflows: vec![HydroPastInflows {
-                hydro_id: EntityId(0),
-                values_m3s: vec![600.0],
-                season_ids: None,
-            }],
             past_anticipated_commitments: vec![],
             recent_observations: vec![RecentObservation {
                 hydro_id: EntityId(0),

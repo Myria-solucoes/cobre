@@ -27,7 +27,6 @@ class Thermal:
 class Hydro:
     id: Any
     name: str
-    bus_id: Any
     downstream_id: Any
     min_storage_hm3: Any
     max_storage_hm3: Any

@@ -1,7 +1,8 @@
 //! Bound resolution from base entity values plus stage-varying overrides.
 //!
 //! [`resolve_bounds`] produces a [`ResolvedBounds`] table for O(1) lookup by
-//! `(entity_index, stage_index)` during LP construction.
+//! `(entity_index, stage_index, block_index)` during LP construction; see its
+//! own doc for the four-layer bound-precedence law it populates.
 
 use std::collections::HashMap;
 
@@ -9,7 +10,9 @@ use cobre_core::{
     EntityId,
     entities::{EnergyContract, Hydro, Line, PumpingStation, Thermal},
     resolved::{
-        ContractStageBounds, HydroStageBounds, LineStageBounds, PumpingStageBounds, ResolvedBounds,
+        ContractBlockBounds, ContractBlockOverride, HydroBlockBounds, HydroBlockOverride,
+        HydroStageBounds, LineBlockBounds, LineBlockOverride, PumpingBlockBounds,
+        PumpingBlockOverride, ResolvedBounds, ThermalBlockBounds, ThermalBlockOverride,
         ThermalStageBounds,
     },
 };
@@ -49,14 +52,44 @@ pub struct BoundsOverrides<'a> {
 
 /// Pre-compute the full bound table from entity base values and stage-varying overrides.
 ///
-/// Override rows referencing unknown entity IDs or out-of-range stage IDs are silently
-/// skipped (referential integrity is deferred to validation).
+/// Resolves every block-eligible bound column via a four-layer precedence law,
+/// most specific first:
+///
+/// 1. per-block override — an override row with `block_id = Some(b)`; replaces
+///    layer 2 for block `b` only, never merges with it
+/// 2. stage-wide override — an override row with `block_id = None`
+/// 3. base value — the entity's own field
+/// 4. *(reserved, not yet implemented)* a computed capability derived from unit
+///    nominals
+///
+/// Both override layers are sparse: an absent row falls through to the next
+/// layer, never zero. The law is uniform across all five entity families —
+/// no per-family exception.
+///
+/// This function only **populates** the two storages the law reads from — a
+/// dense per-`(entity, stage)` table (layers 2/3, pre-merged: base values fill
+/// first, then stage-wide overrides patch the columns a row supplies) and,
+/// once any row carries a `block_id`, a sparse per-`(entity, stage, block)`
+/// overlay (layer 1). It does not itself enforce the law: the two passes
+/// write disjoint storage, so their relative order here is immaterial to the
+/// result. Precedence is enforced at **read time** by the `*_bounds_at_block`
+/// accessors (e.g. [`ResolvedBounds::thermal_bounds_at_block`]):
+/// `over.<field>.unwrap_or(cell.<field>)` — the block overlay wins when
+/// present, else the pre-merged stage cell. Reversing that fallback, or
+/// returning the stage cell without consulting the overlay at all, still
+/// type-checks and silently discards every block-specific override.
+///
+/// Override rows referencing unknown entity IDs, out-of-range stage IDs, or an
+/// out-of-range `block_id` are silently skipped (referential integrity is
+/// deferred to validation).
 ///
 /// # Arguments
 ///
 /// * `k_max` — maximum lead-stages across anticipated thermals; extends the
 ///   thermal stage axis to `n_stages + k_max`. Pass `0` when no anticipated
 ///   thermals are present (the padded region is then empty)
+/// * `blocks_per_stage` — per-stage block count, study-stage-ordered; sizes the
+///   per-block overlay's block axis and bounds `block_id` validity
 ///
 /// # Examples
 ///
@@ -93,7 +126,6 @@ pub struct BoundsOverrides<'a> {
 ///     id: EntityId::from(0),
 ///     name: "H0".to_string(),
 ///     operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-///     bus_id: EntityId::from(1),
 ///     downstream_id: None,
 ///     travel_time_hours: None,
 ///     entry_stage_id: None,
@@ -108,6 +140,7 @@ pub struct BoundsOverrides<'a> {
 ///     max_turbined_m3s: 50.0,
 ///     min_generation_mw: 0.0,
 ///     max_generation_mw: 50.0,
+///     unit_groups: Vec::new(),
 ///     tailrace: None,
 ///     hydraulic_losses: None,
 ///     efficiency: None,
@@ -132,6 +165,7 @@ pub struct BoundsOverrides<'a> {
 ///     max_diversion_m3s: None,
 ///     filling_min_rate_m3s: None,
 ///     water_withdrawal_m3s: None,
+///     block_id: None,
 /// };
 ///
 /// let stage_index: std::collections::HashMap<i32, usize> =
@@ -154,6 +188,7 @@ pub struct BoundsOverrides<'a> {
 ///         pumping: &[],
 ///         contract: &[],
 ///     },
+///     &[1, 1, 1],
 /// );
 ///
 /// // Stage 0: base value.
@@ -178,6 +213,7 @@ pub fn resolve_bounds(
     k_max: usize,
     stage_index: &HashMap<i32, usize>,
     overrides: &BoundsOverrides<'_>,
+    blocks_per_stage: &[usize],
 ) -> ResolvedBounds {
     let hydro_overrides = overrides.hydro;
     let thermal_overrides = overrides.thermal;
@@ -221,46 +257,57 @@ pub fn resolve_bounds(
     let hydro_default = entities
         .hydros
         .first()
-        .map_or(zero_hydro_stage_bounds(), hydro_base_bounds);
-    let thermal_default = entities.thermals.first().map_or(
-        ThermalStageBounds {
+        .map_or(zero_hydro_stage_bounds(), hydro_base_stage_bounds);
+    let hydro_block_default = entities
+        .hydros
+        .first()
+        .map_or(zero_hydro_block_bounds(), hydro_base_block_bounds);
+    let thermal_default =
+        entities
+            .thermals
+            .first()
+            .map_or(ThermalStageBounds { cost_per_mwh: 0.0 }, |t| {
+                ThermalStageBounds {
+                    cost_per_mwh: t.cost_per_mwh,
+                }
+            });
+    let thermal_block_default = entities.thermals.first().map_or(
+        ThermalBlockBounds {
             min_generation_mw: 0.0,
             max_generation_mw: 0.0,
-            cost_per_mwh: 0.0,
         },
-        |t| ThermalStageBounds {
+        |t| ThermalBlockBounds {
             min_generation_mw: t.min_generation_mw,
             max_generation_mw: t.max_generation_mw,
-            cost_per_mwh: t.cost_per_mwh,
         },
     );
     let line_default = entities.lines.first().map_or(
-        LineStageBounds {
+        LineBlockBounds {
             direct_mw: 0.0,
             reverse_mw: 0.0,
         },
-        |l| LineStageBounds {
+        |l| LineBlockBounds {
             direct_mw: l.direct_capacity_mw,
             reverse_mw: l.reverse_capacity_mw,
         },
     );
     let pumping_default = entities.pumping_stations.first().map_or(
-        PumpingStageBounds {
+        PumpingBlockBounds {
             min_flow_m3s: 0.0,
             max_flow_m3s: 0.0,
         },
-        |p| PumpingStageBounds {
+        |p| PumpingBlockBounds {
             min_flow_m3s: p.min_flow_m3s,
             max_flow_m3s: p.max_flow_m3s,
         },
     );
     let contract_default = entities.contracts.first().map_or(
-        ContractStageBounds {
+        ContractBlockBounds {
             min_mw: 0.0,
             max_mw: 0.0,
             price_per_mwh: 0.0,
         },
-        |c| ContractStageBounds {
+        |c| ContractBlockBounds {
             min_mw: c.min_mw,
             max_mw: c.max_mw,
             price_per_mwh: c.price_per_mwh,
@@ -269,7 +316,7 @@ pub fn resolve_bounds(
 
     // n_stages == 0: allocate with 1 (the API needs a non-zero stride) then return
     // the empty table without filling.
-    let alloc_stages = if n_stages == 0 { 1 } else { n_stages };
+    let alloc_stages = n_stages.max(1);
 
     let mut table = ResolvedBounds::new(
         &cobre_core::BoundsCountsSpec {
@@ -283,10 +330,12 @@ pub fn resolve_bounds(
         },
         &cobre_core::BoundsDefaults {
             hydro: hydro_default,
+            hydro_block: hydro_block_default,
             thermal: thermal_default,
-            line: line_default,
-            pumping: pumping_default,
-            contract: contract_default,
+            thermal_block: thermal_block_default,
+            line_block: line_default,
+            pumping_block: pumping_default,
+            contract_block: contract_default,
         },
     );
 
@@ -295,9 +344,11 @@ pub fn resolve_bounds(
     }
 
     for (entity_idx, hydro) in entities.hydros.iter().enumerate() {
-        let base = hydro_base_bounds(hydro);
+        let base_stage = hydro_base_stage_bounds(hydro);
+        let base_block = hydro_base_block_bounds(hydro);
         for stage_idx in 0..n_stages {
-            *table.hydro_bounds_mut(entity_idx, stage_idx) = base;
+            *table.hydro_bounds_mut(entity_idx, stage_idx) = base_stage;
+            *table.hydro_block_base_mut(entity_idx, stage_idx) = base_block;
         }
     }
 
@@ -305,18 +356,21 @@ pub fn resolve_bounds(
     // so LP lookups at delivery stage t + K_i (anticipated thermals) stay in range.
     let thermal_axis = n_stages + k_max;
     for (entity_idx, thermal) in entities.thermals.iter().enumerate() {
-        let base = ThermalStageBounds {
-            min_generation_mw: thermal.min_generation_mw,
-            max_generation_mw: thermal.max_generation_mw,
+        let base_stage = ThermalStageBounds {
             cost_per_mwh: thermal.cost_per_mwh,
         };
+        let base_block = ThermalBlockBounds {
+            min_generation_mw: thermal.min_generation_mw,
+            max_generation_mw: thermal.max_generation_mw,
+        };
         for stage_idx in 0..thermal_axis {
-            *table.thermal_bounds_mut(entity_idx, stage_idx) = base;
+            *table.thermal_bounds_mut(entity_idx, stage_idx) = base_stage;
+            *table.thermal_block_base_mut(entity_idx, stage_idx) = base_block;
         }
     }
 
     for (entity_idx, line) in entities.lines.iter().enumerate() {
-        let base = LineStageBounds {
+        let base = LineBlockBounds {
             direct_mw: line.direct_capacity_mw,
             reverse_mw: line.reverse_capacity_mw,
         };
@@ -326,7 +380,7 @@ pub fn resolve_bounds(
     }
 
     for (entity_idx, pumping) in entities.pumping_stations.iter().enumerate() {
-        let base = PumpingStageBounds {
+        let base = PumpingBlockBounds {
             min_flow_m3s: pumping.min_flow_m3s,
             max_flow_m3s: pumping.max_flow_m3s,
         };
@@ -336,7 +390,7 @@ pub fn resolve_bounds(
     }
 
     for (entity_idx, contract) in entities.contracts.iter().enumerate() {
-        let base = ContractStageBounds {
+        let base = ContractBlockBounds {
             min_mw: contract.min_mw,
             max_mw: contract.max_mw,
             price_per_mwh: contract.price_per_mwh,
@@ -346,7 +400,25 @@ pub fn resolve_bounds(
         }
     }
 
-    for row in hydro_overrides {
+    let max_blocks = blocks_per_stage.iter().copied().max().unwrap_or(0);
+    let any_block_row = thermal_overrides.iter().any(|row| row.block_id.is_some())
+        || hydro_overrides.iter().any(|row| row.block_id.is_some())
+        || line_overrides.iter().any(|row| row.block_id.is_some())
+        || pumping_overrides.iter().any(|row| row.block_id.is_some())
+        || contract_overrides.iter().any(|row| row.block_id.is_some());
+    let mut block_overlay = (any_block_row && max_blocks > 0).then(|| {
+        cobre_core::ResolvedBlockBounds::new(&cobre_core::BlockBoundsCountsSpec {
+            n_hydros: entities.hydros.len(),
+            n_thermals: entities.thermals.len(),
+            n_lines: entities.lines.len(),
+            n_pumping: entities.pumping_stations.len(),
+            n_contracts: entities.contracts.len(),
+            n_stages,
+            max_blocks,
+        })
+    });
+
+    for row in hydro_overrides.iter().filter(|row| row.block_id.is_none()) {
         let Some(&entity_idx) = hydro_index.get(&row.hydro_id) else {
             continue;
         };
@@ -360,59 +432,101 @@ pub fn resolve_bounds(
         if let Some(v) = row.max_storage_hm3 {
             cell.max_storage_hm3 = v;
         }
-        if let Some(v) = row.min_turbined_m3s {
-            cell.min_turbined_m3s = v;
-        }
-        if let Some(v) = row.max_turbined_m3s {
-            cell.max_turbined_m3s = v;
-        }
-        if let Some(v) = row.min_outflow_m3s {
-            cell.min_outflow_m3s = v;
-        }
-        if let Some(v) = row.max_outflow_m3s {
-            cell.max_outflow_m3s = Some(v);
-        }
-        if let Some(v) = row.min_generation_mw {
-            cell.min_generation_mw = v;
-        }
-        if let Some(v) = row.max_generation_mw {
-            cell.max_generation_mw = v;
-        }
-        if let Some(v) = row.max_diversion_m3s {
-            cell.max_diversion_m3s = Some(v);
-        }
         if let Some(v) = row.filling_min_rate_m3s {
             cell.filling_min_rate_m3s = v;
         }
         if let Some(v) = row.water_withdrawal_m3s {
             cell.water_withdrawal_m3s = v;
         }
+
+        let block_cell = table.hydro_block_base_mut(entity_idx, stage_idx);
+        if let Some(v) = row.min_turbined_m3s {
+            block_cell.min_turbined_m3s = v;
+        }
+        if let Some(v) = row.max_turbined_m3s {
+            block_cell.max_turbined_m3s = v;
+        }
+        if let Some(v) = row.min_outflow_m3s {
+            block_cell.min_outflow_m3s = v;
+        }
+        if let Some(v) = row.max_outflow_m3s {
+            block_cell.max_outflow_m3s = Some(v);
+        }
+        if let Some(v) = row.min_generation_mw {
+            block_cell.min_generation_mw = v;
+        }
+        if let Some(v) = row.max_generation_mw {
+            block_cell.max_generation_mw = v;
+        }
+        if let Some(v) = row.max_diversion_m3s {
+            block_cell.max_diversion_m3s = Some(v);
+        }
     }
 
-    for row in thermal_overrides {
-        // Non-null block_id is reserved for future per-block cost support; ignore here.
-        if row.block_id.is_some() {
-            continue;
+    if let Some(overlay) = block_overlay.as_mut() {
+        for row in hydro_overrides {
+            let Some((entity_idx, stage_idx, block_idx)) = block_slot(
+                row.block_id,
+                row.hydro_id,
+                row.stage_id,
+                &hydro_index,
+                stage_index,
+                blocks_per_stage,
+            ) else {
+                continue;
+            };
+            let Some(cell) = overlay.hydro_override_mut(entity_idx, stage_idx, block_idx) else {
+                continue;
+            };
+            apply_hydro_block_row(row, cell);
         }
+    }
+
+    for row in thermal_overrides
+        .iter()
+        .filter(|row| row.block_id.is_none())
+    {
         let Some(&entity_idx) = thermal_index.get(&row.thermal_id) else {
             continue;
         };
         let Some(&stage_idx) = stage_index.get(&row.stage_id) else {
             continue;
         };
-        let cell = table.thermal_bounds_mut(entity_idx, stage_idx);
+        if let Some(v) = row.cost_per_mwh {
+            table.thermal_bounds_mut(entity_idx, stage_idx).cost_per_mwh = v;
+        }
         if let Some(v) = row.min_generation_mw {
-            cell.min_generation_mw = v;
+            table
+                .thermal_block_base_mut(entity_idx, stage_idx)
+                .min_generation_mw = v;
         }
         if let Some(v) = row.max_generation_mw {
-            cell.max_generation_mw = v;
-        }
-        if let Some(v) = row.cost_per_mwh {
-            cell.cost_per_mwh = v;
+            table
+                .thermal_block_base_mut(entity_idx, stage_idx)
+                .max_generation_mw = v;
         }
     }
 
-    for row in line_overrides {
+    if let Some(overlay) = block_overlay.as_mut() {
+        for row in thermal_overrides {
+            let Some((entity_idx, stage_idx, block_idx)) = block_slot(
+                row.block_id,
+                row.thermal_id,
+                row.stage_id,
+                &thermal_index,
+                stage_index,
+                blocks_per_stage,
+            ) else {
+                continue;
+            };
+            let Some(cell) = overlay.thermal_override_mut(entity_idx, stage_idx, block_idx) else {
+                continue;
+            };
+            apply_thermal_block_row(row, cell);
+        }
+    }
+
+    for row in line_overrides.iter().filter(|row| row.block_id.is_none()) {
         let Some(&entity_idx) = line_index.get(&row.line_id) else {
             continue;
         };
@@ -428,7 +542,29 @@ pub fn resolve_bounds(
         }
     }
 
-    for row in pumping_overrides {
+    if let Some(overlay) = block_overlay.as_mut() {
+        for row in line_overrides {
+            let Some((entity_idx, stage_idx, block_idx)) = block_slot(
+                row.block_id,
+                row.line_id,
+                row.stage_id,
+                &line_index,
+                stage_index,
+                blocks_per_stage,
+            ) else {
+                continue;
+            };
+            let Some(cell) = overlay.line_override_mut(entity_idx, stage_idx, block_idx) else {
+                continue;
+            };
+            apply_line_block_row(row, cell);
+        }
+    }
+
+    for row in pumping_overrides
+        .iter()
+        .filter(|row| row.block_id.is_none())
+    {
         let Some(&entity_idx) = pumping_index.get(&row.station_id) else {
             continue;
         };
@@ -444,7 +580,29 @@ pub fn resolve_bounds(
         }
     }
 
-    for row in contract_overrides {
+    if let Some(overlay) = block_overlay.as_mut() {
+        for row in pumping_overrides {
+            let Some((entity_idx, stage_idx, block_idx)) = block_slot(
+                row.block_id,
+                row.station_id,
+                row.stage_id,
+                &pumping_index,
+                stage_index,
+                blocks_per_stage,
+            ) else {
+                continue;
+            };
+            let Some(cell) = overlay.pumping_override_mut(entity_idx, stage_idx, block_idx) else {
+                continue;
+            };
+            apply_pumping_block_row(row, cell);
+        }
+    }
+
+    for row in contract_overrides
+        .iter()
+        .filter(|row| row.block_id.is_none())
+    {
         let Some(&entity_idx) = contract_index.get(&row.contract_id) else {
             continue;
         };
@@ -463,19 +621,142 @@ pub fn resolve_bounds(
         }
     }
 
+    if let Some(overlay) = block_overlay.as_mut() {
+        for row in contract_overrides {
+            let Some((entity_idx, stage_idx, block_idx)) = block_slot(
+                row.block_id,
+                row.contract_id,
+                row.stage_id,
+                &contract_index,
+                stage_index,
+                blocks_per_stage,
+            ) else {
+                continue;
+            };
+            let Some(cell) = overlay.contract_override_mut(entity_idx, stage_idx, block_idx) else {
+                continue;
+            };
+            apply_contract_block_row(row, cell);
+        }
+    }
+
+    if let Some(overlay) = block_overlay {
+        table.set_block_overlay(overlay);
+    }
+
     table
 }
 
-/// Derive the base [`HydroStageBounds`] from a `Hydro` entity's fields.
+/// Resolve an override row's `(entity_idx, stage_idx, block_idx)` overlay slot;
+/// `None` skips the row (no `block_id`, unknown entity or stage, or a `block_id`
+/// outside the stage's block count).
+fn block_slot(
+    block_id: Option<i32>,
+    entity_id: EntityId,
+    stage_id: i32,
+    entity_index: &HashMap<EntityId, usize>,
+    stage_index: &HashMap<i32, usize>,
+    blocks_per_stage: &[usize],
+) -> Option<(usize, usize, usize)> {
+    let block_id = block_id?;
+    let &entity_idx = entity_index.get(&entity_id)?;
+    let &stage_idx = stage_index.get(&stage_id)?;
+    let block_idx = usize::try_from(block_id).ok()?;
+    if block_idx >= *blocks_per_stage.get(stage_idx)? {
+        return None;
+    }
+    Some((entity_idx, stage_idx, block_idx))
+}
+
+/// Write a hydro block row's present columns into a per-block overlay cell.
+/// Only the seven block-eligible columns are read from `row` — the four
+/// stage-level columns (`min`/`max_storage_hm3`, `filling_min_rate_m3s`,
+/// `water_withdrawal_m3s`) have no field on [`HydroBlockOverride`] and are
+/// never written here.
+fn apply_hydro_block_row(row: &HydroBoundsRow, over: &mut HydroBlockOverride) {
+    if let Some(v) = row.min_turbined_m3s {
+        over.min_turbined_m3s = Some(v);
+    }
+    if let Some(v) = row.max_turbined_m3s {
+        over.max_turbined_m3s = Some(v);
+    }
+    if let Some(v) = row.min_outflow_m3s {
+        over.min_outflow_m3s = Some(v);
+    }
+    if let Some(v) = row.max_outflow_m3s {
+        over.max_outflow_m3s = Some(v);
+    }
+    if let Some(v) = row.min_generation_mw {
+        over.min_generation_mw = Some(v);
+    }
+    if let Some(v) = row.max_generation_mw {
+        over.max_generation_mw = Some(v);
+    }
+    if let Some(v) = row.max_diversion_m3s {
+        over.max_diversion_m3s = Some(v);
+    }
+}
+
+fn apply_thermal_block_row(row: &ThermalBoundsRow, over: &mut ThermalBlockOverride) {
+    if let Some(v) = row.min_generation_mw {
+        over.min_generation_mw = Some(v);
+    }
+    if let Some(v) = row.max_generation_mw {
+        over.max_generation_mw = Some(v);
+    }
+}
+
+fn apply_line_block_row(row: &LineBoundsRow, over: &mut LineBlockOverride) {
+    if let Some(v) = row.direct_mw {
+        over.direct_mw = Some(v);
+    }
+    if let Some(v) = row.reverse_mw {
+        over.reverse_mw = Some(v);
+    }
+}
+
+fn apply_pumping_block_row(row: &PumpingBoundsRow, over: &mut PumpingBlockOverride) {
+    if let Some(v) = row.min_m3s {
+        over.min_flow_m3s = Some(v);
+    }
+    if let Some(v) = row.max_m3s {
+        over.max_flow_m3s = Some(v);
+    }
+}
+
+/// `price_per_mwh` is block-eligible here, asymmetric with
+/// `ThermalBoundsRow.cost_per_mwh`, which stays stage-level.
+fn apply_contract_block_row(row: &ContractBoundsRow, over: &mut ContractBlockOverride) {
+    if let Some(v) = row.min_mw {
+        over.min_mw = Some(v);
+    }
+    if let Some(v) = row.max_mw {
+        over.max_mw = Some(v);
+    }
+    if let Some(v) = row.price_per_mwh {
+        over.price_per_mwh = Some(v);
+    }
+}
+
+/// Derive the base stage-level [`HydroStageBounds`] from a `Hydro` entity's fields.
 ///
-/// `max_diversion_m3s` is `None` without a diversion channel; `filling_min_rate_m3s`
-/// is `0.0` without a filling config; `water_withdrawal_m3s` has no entity default
-/// (`0.0`, set only via overrides).
+/// `filling_min_rate_m3s` is `0.0` without a filling config; `water_withdrawal_m3s`
+/// has no entity default (`0.0`, set only via overrides).
 #[inline]
-fn hydro_base_bounds(hydro: &Hydro) -> HydroStageBounds {
+fn hydro_base_stage_bounds(hydro: &Hydro) -> HydroStageBounds {
     HydroStageBounds {
         min_storage_hm3: hydro.min_storage_hm3,
         max_storage_hm3: hydro.max_storage_hm3,
+        filling_min_rate_m3s: hydro.filling.map_or(0.0, |f| f.filling_min_rate_m3s),
+        water_withdrawal_m3s: 0.0,
+    }
+}
+
+/// Derive the base block-eligible [`HydroBlockBounds`] from a `Hydro` entity's
+/// fields. `max_diversion_m3s` is `None` without a diversion channel.
+#[inline]
+fn hydro_base_block_bounds(hydro: &Hydro) -> HydroBlockBounds {
+    HydroBlockBounds {
         min_turbined_m3s: hydro.min_turbined_m3s,
         max_turbined_m3s: hydro.max_turbined_m3s,
         min_outflow_m3s: hydro.min_outflow_m3s,
@@ -483,8 +764,6 @@ fn hydro_base_bounds(hydro: &Hydro) -> HydroStageBounds {
         min_generation_mw: hydro.min_generation_mw,
         max_generation_mw: hydro.max_generation_mw,
         max_diversion_m3s: hydro.diversion.as_ref().map(|d| d.max_flow_m3s),
-        filling_min_rate_m3s: hydro.filling.map_or(0.0, |f| f.filling_min_rate_m3s),
-        water_withdrawal_m3s: 0.0,
     }
 }
 
@@ -494,6 +773,15 @@ fn zero_hydro_stage_bounds() -> HydroStageBounds {
     HydroStageBounds {
         min_storage_hm3: 0.0,
         max_storage_hm3: 0.0,
+        filling_min_rate_m3s: 0.0,
+        water_withdrawal_m3s: 0.0,
+    }
+}
+
+/// Return a zero-valued [`HydroBlockBounds`] sentinel used when no hydro entities exist.
+#[inline]
+fn zero_hydro_block_bounds() -> HydroBlockBounds {
+    HydroBlockBounds {
         min_turbined_m3s: 0.0,
         max_turbined_m3s: 0.0,
         min_outflow_m3s: 0.0,
@@ -501,8 +789,6 @@ fn zero_hydro_stage_bounds() -> HydroStageBounds {
         min_generation_mw: 0.0,
         max_generation_mw: 0.0,
         max_diversion_m3s: None,
-        filling_min_rate_m3s: 0.0,
-        water_withdrawal_m3s: 0.0,
     }
 }
 
@@ -538,8 +824,7 @@ mod tests {
     }
 
     /// Test wrapper that passes a 0-based consecutive `stage_index` to
-    /// [`super::resolve_bounds`]. Shadows the import so existing test calls
-    /// work without modification.
+    /// [`super::resolve_bounds`].
     #[allow(clippy::too_many_arguments)]
     fn resolve_bounds(
         hydros: &[Hydro],
@@ -554,6 +839,7 @@ mod tests {
         line_overrides: &[LineBoundsRow],
         pumping_overrides: &[PumpingBoundsRow],
         contract_overrides: &[ContractBoundsRow],
+        blocks_per_stage: &[usize],
     ) -> ResolvedBounds {
         super::resolve_bounds(
             &super::BoundsEntitySlices {
@@ -573,6 +859,7 @@ mod tests {
                 pumping: pumping_overrides,
                 contract: contract_overrides,
             },
+            blocks_per_stage,
         )
     }
 
@@ -608,10 +895,10 @@ mod tests {
         filling: Option<FillingConfig>,
     ) -> Hydro {
         Hydro {
+            unit_groups: Vec::new(),
             id: EntityId::from(id),
             name: format!("Hydro {id}"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId::from(1),
             downstream_id: None,
             travel_time_hours: None,
             entry_stage_id: None,
@@ -714,6 +1001,7 @@ mod tests {
             max_diversion_m3s: None,
             filling_min_rate_m3s: None,
             water_withdrawal_m3s: None,
+            block_id: None,
         }
     }
 
@@ -745,6 +1033,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         );
 
         for stage in 0..3 {
@@ -765,35 +1054,37 @@ mod tests {
                 "hydro 1 stage {stage}: expected max_storage_hm3=200.0"
             );
             assert!(
-                (result.thermal_bounds(0, stage).max_generation_mw - 400.0).abs() < f64::EPSILON,
+                (result.thermal_block_base(0, stage).max_generation_mw - 400.0).abs()
+                    < f64::EPSILON,
                 "thermal 0 stage {stage}: expected max_generation_mw=400.0"
             );
             assert!(
-                (result.thermal_bounds(1, stage).min_generation_mw - 50.0).abs() < f64::EPSILON,
+                (result.thermal_block_base(1, stage).min_generation_mw - 50.0).abs() < f64::EPSILON,
                 "thermal 1 stage {stage}: expected min_generation_mw=50.0"
             );
             assert!(
-                (result.thermal_bounds(1, stage).max_generation_mw - 600.0).abs() < f64::EPSILON,
+                (result.thermal_block_base(1, stage).max_generation_mw - 600.0).abs()
+                    < f64::EPSILON,
                 "thermal 1 stage {stage}: expected max_generation_mw=600.0"
             );
             assert!(
-                (result.line_bounds(0, stage).direct_mw - 1000.0).abs() < f64::EPSILON,
+                (result.line_block_base(0, stage).direct_mw - 1000.0).abs() < f64::EPSILON,
                 "line 0 stage {stage}: expected direct_mw=1000.0"
             );
             assert!(
-                (result.line_bounds(0, stage).reverse_mw - 800.0).abs() < f64::EPSILON,
+                (result.line_block_base(0, stage).reverse_mw - 800.0).abs() < f64::EPSILON,
                 "line 0 stage {stage}: expected reverse_mw=800.0"
             );
             assert!(
-                (result.pumping_bounds(0, stage).max_flow_m3s - 50.0).abs() < f64::EPSILON,
+                (result.pumping_block_base(0, stage).max_flow_m3s - 50.0).abs() < f64::EPSILON,
                 "pumping 0 stage {stage}: expected max_flow_m3s=50.0"
             );
             assert!(
-                (result.contract_bounds(0, stage).max_mw - 200.0).abs() < f64::EPSILON,
+                (result.contract_block_base(0, stage).max_mw - 200.0).abs() < f64::EPSILON,
                 "contract 0 stage {stage}: expected max_mw=200.0"
             );
             assert!(
-                (result.contract_bounds(0, stage).price_per_mwh - 80.0).abs() < f64::EPSILON,
+                (result.contract_block_base(0, stage).price_per_mwh - 80.0).abs() < f64::EPSILON,
                 "contract 0 stage {stage}: expected price_per_mwh=80.0"
             );
         }
@@ -820,6 +1111,7 @@ mod tests {
             3,
             0,
             &[override_row],
+            &[],
             &[],
             &[],
             &[],
@@ -857,10 +1149,24 @@ mod tests {
             Some(filling),
         )];
 
-        let result = resolve_bounds(&hydros, &[], &[], &[], &[], 2, 0, &[], &[], &[], &[], &[]);
+        let result = resolve_bounds(
+            &hydros,
+            &[],
+            &[],
+            &[],
+            &[],
+            2,
+            0,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
 
         let b = result.hydro_bounds(0, 0);
-        assert_eq!(b.max_diversion_m3s, Some(50.0));
+        assert_eq!(result.hydro_block_base(0, 0).max_diversion_m3s, Some(50.0));
         assert!((b.filling_min_rate_m3s - 30.0).abs() < f64::EPSILON);
         assert!((b.water_withdrawal_m3s - 0.0).abs() < f64::EPSILON);
     }
@@ -873,10 +1179,24 @@ mod tests {
     fn test_hydro_without_diversion() {
         let hydros = vec![make_hydro(0, 10.0, 100.0, None, None, None)];
 
-        let result = resolve_bounds(&hydros, &[], &[], &[], &[], 2, 0, &[], &[], &[], &[], &[]);
+        let result = resolve_bounds(
+            &hydros,
+            &[],
+            &[],
+            &[],
+            &[],
+            2,
+            0,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
 
         let b = result.hydro_bounds(0, 0);
-        assert!(b.max_diversion_m3s.is_none());
+        assert!(result.hydro_block_base(0, 0).max_diversion_m3s.is_none());
         assert!((b.filling_min_rate_m3s - 0.0).abs() < f64::EPSILON);
         assert!((b.water_withdrawal_m3s - 0.0).abs() < f64::EPSILON);
     }
@@ -911,11 +1231,12 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         );
 
-        assert!((result.thermal_bounds(1, 0).max_generation_mw - 500.0).abs() < f64::EPSILON);
-        assert!((result.thermal_bounds(0, 0).max_generation_mw - 400.0).abs() < f64::EPSILON);
-        assert!((result.thermal_bounds(1, 1).max_generation_mw - 600.0).abs() < f64::EPSILON);
+        assert!((result.thermal_block_base(1, 0).max_generation_mw - 500.0).abs() < f64::EPSILON);
+        assert!((result.thermal_block_base(0, 0).max_generation_mw - 400.0).abs() < f64::EPSILON);
+        assert!((result.thermal_block_base(1, 1).max_generation_mw - 600.0).abs() < f64::EPSILON);
     }
 
     // ── Test: line override ────────────────────────────────────────────────────
@@ -929,6 +1250,7 @@ mod tests {
             stage_id: 1,
             direct_mw: Some(750.0),
             reverse_mw: None,
+            block_id: None,
         };
 
         let result = resolve_bounds(
@@ -944,13 +1266,14 @@ mod tests {
             &[override_row],
             &[],
             &[],
+            &[],
         );
 
-        assert!((result.line_bounds(0, 0).direct_mw - 1000.0).abs() < f64::EPSILON);
-        assert!((result.line_bounds(0, 1).direct_mw - 750.0).abs() < f64::EPSILON);
-        assert!((result.line_bounds(0, 2).direct_mw - 1000.0).abs() < f64::EPSILON);
+        assert!((result.line_block_base(0, 0).direct_mw - 1000.0).abs() < f64::EPSILON);
+        assert!((result.line_block_base(0, 1).direct_mw - 750.0).abs() < f64::EPSILON);
+        assert!((result.line_block_base(0, 2).direct_mw - 1000.0).abs() < f64::EPSILON);
         for stage in 0..3 {
-            assert!((result.line_bounds(0, stage).reverse_mw - 800.0).abs() < f64::EPSILON);
+            assert!((result.line_block_base(0, stage).reverse_mw - 800.0).abs() < f64::EPSILON);
         }
     }
 
@@ -958,7 +1281,7 @@ mod tests {
 
     /// Given 1 pumping station, 2 stages, override max_m3s (→ max_flow_m3s) at stage=0.
     /// Note: PumpingBoundsRow uses min_m3s / max_m3s column names which map to
-    /// PumpingStageBounds.min_flow_m3s / max_flow_m3s respectively.
+    /// PumpingBlockBounds.min_flow_m3s / max_flow_m3s respectively.
     #[test]
     fn test_pumping_override() {
         let pumpings = vec![make_pumping(0, 0.0, 50.0)];
@@ -967,6 +1290,7 @@ mod tests {
             stage_id: 0,
             min_m3s: None,
             max_m3s: Some(100.0),
+            block_id: None,
         };
 
         let result = resolve_bounds(
@@ -982,12 +1306,13 @@ mod tests {
             &[],
             &[override_row],
             &[],
+            &[],
         );
 
-        assert!((result.pumping_bounds(0, 0).max_flow_m3s - 100.0).abs() < f64::EPSILON);
-        assert!((result.pumping_bounds(0, 1).max_flow_m3s - 50.0).abs() < f64::EPSILON);
+        assert!((result.pumping_block_base(0, 0).max_flow_m3s - 100.0).abs() < f64::EPSILON);
+        assert!((result.pumping_block_base(0, 1).max_flow_m3s - 50.0).abs() < f64::EPSILON);
         for stage in 0..2 {
-            assert!((result.pumping_bounds(0, stage).min_flow_m3s - 0.0).abs() < f64::EPSILON);
+            assert!((result.pumping_block_base(0, stage).min_flow_m3s - 0.0).abs() < f64::EPSILON);
         }
     }
 
@@ -1003,6 +1328,7 @@ mod tests {
             min_mw: None,
             max_mw: None,
             price_per_mwh: Some(90.0),
+            block_id: None,
         };
 
         let result = resolve_bounds(
@@ -1018,14 +1344,15 @@ mod tests {
             &[],
             &[],
             &[override_row],
+            &[],
         );
 
-        assert!((result.contract_bounds(0, 0).price_per_mwh - 80.0).abs() < f64::EPSILON);
-        assert!((result.contract_bounds(0, 1).price_per_mwh - 90.0).abs() < f64::EPSILON);
-        assert!((result.contract_bounds(0, 2).price_per_mwh - 80.0).abs() < f64::EPSILON);
+        assert!((result.contract_block_base(0, 0).price_per_mwh - 80.0).abs() < f64::EPSILON);
+        assert!((result.contract_block_base(0, 1).price_per_mwh - 90.0).abs() < f64::EPSILON);
+        assert!((result.contract_block_base(0, 2).price_per_mwh - 80.0).abs() < f64::EPSILON);
         for stage in 0..3 {
-            assert!((result.contract_bounds(0, stage).min_mw - 0.0).abs() < f64::EPSILON);
-            assert!((result.contract_bounds(0, stage).max_mw - 200.0).abs() < f64::EPSILON);
+            assert!((result.contract_block_base(0, stage).min_mw - 0.0).abs() < f64::EPSILON);
+            assert!((result.contract_block_base(0, stage).max_mw - 200.0).abs() < f64::EPSILON);
         }
     }
 
@@ -1051,6 +1378,7 @@ mod tests {
             2,
             0,
             &[override_row],
+            &[],
             &[],
             &[],
             &[],
@@ -1092,6 +1420,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         );
 
         assert_eq!(result.n_stages(), 3);
@@ -1122,6 +1451,7 @@ mod tests {
             3,
             0,
             &[override_row],
+            &[],
             &[],
             &[],
             &[],
@@ -1165,10 +1495,11 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         );
 
-        assert!((result.thermal_bounds(1, 0).max_generation_mw - 500.0).abs() < f64::EPSILON);
-        assert!((result.thermal_bounds(0, 0).max_generation_mw - 400.0).abs() < f64::EPSILON);
+        assert!((result.thermal_block_base(1, 0).max_generation_mw - 500.0).abs() < f64::EPSILON);
+        assert!((result.thermal_block_base(0, 0).max_generation_mw - 400.0).abs() < f64::EPSILON);
     }
 
     // ── Test: acceptance criterion — AC3: hydro with diversion no filling ──────
@@ -1182,10 +1513,24 @@ mod tests {
         };
         let hydros = vec![make_hydro(0, 10.0, 100.0, None, Some(diversion), None)];
 
-        let result = resolve_bounds(&hydros, &[], &[], &[], &[], 1, 0, &[], &[], &[], &[], &[]);
+        let result = resolve_bounds(
+            &hydros,
+            &[],
+            &[],
+            &[],
+            &[],
+            1,
+            0,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
 
         let b = result.hydro_bounds(0, 0);
-        assert_eq!(b.max_diversion_m3s, Some(50.0));
+        assert_eq!(result.hydro_block_base(0, 0).max_diversion_m3s, Some(50.0));
         assert!((b.filling_min_rate_m3s - 0.0).abs() < f64::EPSILON);
         assert!((b.water_withdrawal_m3s - 0.0).abs() < f64::EPSILON);
     }
@@ -1214,21 +1559,25 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         );
 
         for stage in 0..2 {
             assert!((result.hydro_bounds(0, stage).min_storage_hm3 - 5.0).abs() < f64::EPSILON);
             assert!((result.hydro_bounds(0, stage).max_storage_hm3 - 50.0).abs() < f64::EPSILON);
             assert!(
-                (result.thermal_bounds(0, stage).min_generation_mw - 10.0).abs() < f64::EPSILON
+                (result.thermal_block_base(0, stage).min_generation_mw - 10.0).abs() < f64::EPSILON
             );
             assert!(
-                (result.thermal_bounds(0, stage).max_generation_mw - 200.0).abs() < f64::EPSILON
+                (result.thermal_block_base(0, stage).max_generation_mw - 200.0).abs()
+                    < f64::EPSILON
             );
-            assert!((result.line_bounds(0, stage).direct_mw - 500.0).abs() < f64::EPSILON);
-            assert!((result.line_bounds(0, stage).reverse_mw - 300.0).abs() < f64::EPSILON);
-            assert!((result.pumping_bounds(0, stage).max_flow_m3s - 75.0).abs() < f64::EPSILON);
-            assert!((result.contract_bounds(0, stage).price_per_mwh - 60.0).abs() < f64::EPSILON);
+            assert!((result.line_block_base(0, stage).direct_mw - 500.0).abs() < f64::EPSILON);
+            assert!((result.line_block_base(0, stage).reverse_mw - 300.0).abs() < f64::EPSILON);
+            assert!((result.pumping_block_base(0, stage).max_flow_m3s - 75.0).abs() < f64::EPSILON);
+            assert!(
+                (result.contract_block_base(0, stage).price_per_mwh - 60.0).abs() < f64::EPSILON
+            );
         }
     }
 
@@ -1244,6 +1593,7 @@ mod tests {
             min_mw: None,
             max_mw: None,
             price_per_mwh: Some(90.0),
+            block_id: None,
         };
 
         let result = resolve_bounds(
@@ -1259,10 +1609,11 @@ mod tests {
             &[],
             &[],
             &[override_row],
+            &[],
         );
 
-        assert!((result.contract_bounds(0, 1).price_per_mwh - 90.0).abs() < f64::EPSILON);
-        assert!((result.contract_bounds(0, 0).price_per_mwh - 80.0).abs() < f64::EPSILON);
+        assert!((result.contract_block_base(0, 1).price_per_mwh - 90.0).abs() < f64::EPSILON);
+        assert!((result.contract_block_base(0, 0).price_per_mwh - 80.0).abs() < f64::EPSILON);
     }
 
     // ── Test: water_withdrawal_m3s override can be negative ───────────────────
@@ -1286,6 +1637,7 @@ mod tests {
             2,
             0,
             &[override_row],
+            &[],
             &[],
             &[],
             &[],
@@ -1335,6 +1687,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         );
 
         assert!(
@@ -1355,7 +1708,21 @@ mod tests {
         // make_thermal uses cost_per_mwh: 50.0 in the helper.
         let thermals = vec![make_thermal(0, 0.0, 400.0)];
 
-        let result = resolve_bounds(&[], &thermals, &[], &[], &[], 3, 0, &[], &[], &[], &[], &[]);
+        let result = resolve_bounds(
+            &[],
+            &thermals,
+            &[],
+            &[],
+            &[],
+            3,
+            0,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
 
         for stage in 0..3 {
             assert!(
@@ -1365,10 +1732,11 @@ mod tests {
         }
     }
 
-    /// Row with non-null block_id is silently ignored — no effect on bounds.
+    /// A block row's `cost_per_mwh` is never applied — `ThermalBlockOverride`
+    /// carries no cost field (per-block cost is out of scope); `min`/`max_generation_mw`
+    /// on a block row ARE applied (see `test_thermal_block_id_is_no_longer_skipped`).
     #[test]
     fn test_thermal_cost_block_id_row_ignored() {
-        // make_thermal uses cost_per_mwh: 50.0; override with block_id=1 must be ignored.
         let thermals = vec![make_thermal(0, 0.0, 400.0)];
         let override_row = ThermalBoundsRow {
             thermal_id: EntityId::from(0),
@@ -1392,12 +1760,12 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         );
 
-        // Cost must remain at the entity base value (50.0), not 999.0.
         assert!(
             (result.thermal_bounds(0, 0).cost_per_mwh - 50.0).abs() < f64::EPSILON,
-            "row with non-null block_id must be ignored; expected 50.0, got {}",
+            "a block row's cost_per_mwh must remain ignored; expected 50.0, got {}",
             result.thermal_bounds(0, 0).cost_per_mwh
         );
     }
@@ -1418,7 +1786,21 @@ mod tests {
             anticipated_config: None,
         }];
 
-        let result = resolve_bounds(&[], &thermals, &[], &[], &[], 2, 0, &[], &[], &[], &[], &[]);
+        let result = resolve_bounds(
+            &[],
+            &thermals,
+            &[],
+            &[],
+            &[],
+            2,
+            0,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
 
         for stage in 0..2 {
             assert!(
@@ -1442,30 +1824,44 @@ mod tests {
         t1.cost_per_mwh = 80.0;
         let thermals = vec![t0, t1];
 
-        let result = resolve_bounds(&[], &thermals, &[], &[], &[], 3, 2, &[], &[], &[], &[], &[]);
+        let result = resolve_bounds(
+            &[],
+            &thermals,
+            &[],
+            &[],
+            &[],
+            3,
+            2,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
 
         // Study-horizon cells [0, 3): each thermal's own base values.
         for stage in 0..3 {
-            let b0 = result.thermal_bounds(0, stage);
+            let b0 = result.thermal_block_base(0, stage);
             assert!((b0.min_generation_mw - 0.0).abs() < f64::EPSILON);
             assert!((b0.max_generation_mw - 100.0).abs() < f64::EPSILON);
-            assert!((b0.cost_per_mwh - 50.0).abs() < f64::EPSILON);
-            let b1 = result.thermal_bounds(1, stage);
+            assert!((result.thermal_bounds(0, stage).cost_per_mwh - 50.0).abs() < f64::EPSILON);
+            let b1 = result.thermal_block_base(1, stage);
             assert!((b1.min_generation_mw - 10.0).abs() < f64::EPSILON);
             assert!((b1.max_generation_mw - 200.0).abs() < f64::EPSILON);
-            assert!((b1.cost_per_mwh - 80.0).abs() < f64::EPSILON);
+            assert!((result.thermal_bounds(1, stage).cost_per_mwh - 80.0).abs() < f64::EPSILON);
         }
 
         // Padded cells [3, 5): each thermal still carries its own base values.
         for stage in 3..5 {
-            let b0 = result.thermal_bounds(0, stage);
+            let b0 = result.thermal_block_base(0, stage);
             assert!((b0.min_generation_mw - 0.0).abs() < f64::EPSILON);
             assert!((b0.max_generation_mw - 100.0).abs() < f64::EPSILON);
-            assert!((b0.cost_per_mwh - 50.0).abs() < f64::EPSILON);
-            let b1 = result.thermal_bounds(1, stage);
+            assert!((result.thermal_bounds(0, stage).cost_per_mwh - 50.0).abs() < f64::EPSILON);
+            let b1 = result.thermal_block_base(1, stage);
             assert!((b1.min_generation_mw - 10.0).abs() < f64::EPSILON);
             assert!((b1.max_generation_mw - 200.0).abs() < f64::EPSILON);
-            assert!((b1.cost_per_mwh - 80.0).abs() < f64::EPSILON);
+            assert!((result.thermal_bounds(1, stage).cost_per_mwh - 80.0).abs() < f64::EPSILON);
         }
     }
 
@@ -1478,13 +1874,27 @@ mod tests {
         t0.cost_per_mwh = 50.0;
         let thermals = vec![t0];
 
-        let result = resolve_bounds(&[], &thermals, &[], &[], &[], 3, 0, &[], &[], &[], &[], &[]);
+        let result = resolve_bounds(
+            &[],
+            &thermals,
+            &[],
+            &[],
+            &[],
+            3,
+            0,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
 
         for stage in 0..3 {
-            let b = result.thermal_bounds(0, stage);
+            let b = result.thermal_block_base(0, stage);
             assert!((b.min_generation_mw - 0.0).abs() < f64::EPSILON);
             assert!((b.max_generation_mw - 100.0).abs() < f64::EPSILON);
-            assert!((b.cost_per_mwh - 50.0).abs() < f64::EPSILON);
+            assert!((result.thermal_bounds(0, stage).cost_per_mwh - 50.0).abs() < f64::EPSILON);
         }
     }
 
@@ -1492,7 +1902,7 @@ mod tests {
     /// and the thermal stage axis is `n_stages + k_max`.
     #[test]
     fn test_padded_region_with_zero_thermals() {
-        let result = resolve_bounds(&[], &[], &[], &[], &[], 4, 3, &[], &[], &[], &[], &[]);
+        let result = resolve_bounds(&[], &[], &[], &[], &[], 4, 3, &[], &[], &[], &[], &[], &[]);
         assert_eq!(result.thermal_stage_axis_len(), 4 + 3);
     }
 
@@ -1501,8 +1911,8 @@ mod tests {
     // These tests pin down the per-thermal base-fill semantics of the resolver
     // at the four boundary stage indices that LP-template consumers exercise.
     // The accessor-only invariants (uniform-default fill, `n_stages()`
-    // unchanged, `thermal_stage_axis_len()` extended) live in
-    // `crates/cobre-core/src/resolved.rs::tests`.
+    // unchanged, `thermal_stage_axis_len()` extended) live in `cobre-core`'s
+    // `ResolvedBounds` tests.
 
     /// Two thermals with distinct `(min, max, cost)` bases, `n_stages = 4`,
     /// `k_max = 2`, no overrides. The last study stage and both padded stages
@@ -1517,34 +1927,48 @@ mod tests {
         t1.cost_per_mwh = 80.0;
         let thermals = vec![t0, t1];
 
-        let result = resolve_bounds(&[], &thermals, &[], &[], &[], 4, 2, &[], &[], &[], &[], &[]);
+        let result = resolve_bounds(
+            &[],
+            &thermals,
+            &[],
+            &[],
+            &[],
+            4,
+            2,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
 
         // Last study stage (T - 1 == 3): no override → thermal 0 base.
-        let b0_last_study = result.thermal_bounds(0, 3);
+        let b0_last_study = result.thermal_block_base(0, 3);
         assert!((b0_last_study.min_generation_mw - 0.0).abs() < f64::EPSILON);
         assert!((b0_last_study.max_generation_mw - 100.0).abs() < f64::EPSILON);
-        assert!((b0_last_study.cost_per_mwh - 50.0).abs() < f64::EPSILON);
+        assert!((result.thermal_bounds(0, 3).cost_per_mwh - 50.0).abs() < f64::EPSILON);
 
         // First padded stage (T == 4): thermal 0 base.
-        let b0_first_pad = result.thermal_bounds(0, 4);
+        let b0_first_pad = result.thermal_block_base(0, 4);
         assert!((b0_first_pad.min_generation_mw - 0.0).abs() < f64::EPSILON);
         assert!((b0_first_pad.max_generation_mw - 100.0).abs() < f64::EPSILON);
-        assert!((b0_first_pad.cost_per_mwh - 50.0).abs() < f64::EPSILON);
+        assert!((result.thermal_bounds(0, 4).cost_per_mwh - 50.0).abs() < f64::EPSILON);
 
         // Last padded stage (T + K - 1 == 5): thermal 0 base.
-        let b0_last_pad = result.thermal_bounds(0, 5);
+        let b0_last_pad = result.thermal_block_base(0, 5);
         assert!((b0_last_pad.min_generation_mw - 0.0).abs() < f64::EPSILON);
         assert!((b0_last_pad.max_generation_mw - 100.0).abs() < f64::EPSILON);
-        assert!((b0_last_pad.cost_per_mwh - 50.0).abs() < f64::EPSILON);
+        assert!((result.thermal_bounds(0, 5).cost_per_mwh - 50.0).abs() < f64::EPSILON);
 
         // First padded stage for thermal 1 must NOT pick up thermal 0's base.
-        let b1_first_pad = result.thermal_bounds(1, 4);
+        let b1_first_pad = result.thermal_block_base(1, 4);
         assert!(
             (b1_first_pad.min_generation_mw - 10.0).abs() < f64::EPSILON,
             "thermal 1 padded min must be 10.0, not 0.0 (thermal 0) or 0.0 (uniform default)"
         );
         assert!((b1_first_pad.max_generation_mw - 200.0).abs() < f64::EPSILON);
-        assert!((b1_first_pad.cost_per_mwh - 80.0).abs() < f64::EPSILON);
+        assert!((result.thermal_bounds(1, 4).cost_per_mwh - 80.0).abs() < f64::EPSILON);
     }
 
     /// One thermal, `n_stages = 4`, `k_max = 2`, override row at the *last*
@@ -1576,20 +2000,21 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         );
 
         // Override applies at T - 1 == 3.
         assert!(
-            (result.thermal_bounds(0, 3).max_generation_mw - 999.0).abs() < f64::EPSILON,
+            (result.thermal_block_base(0, 3).max_generation_mw - 999.0).abs() < f64::EPSILON,
             "override at stage_id=3 must be applied"
         );
         // Padded cells at T == 4 and T + 1 == 5 carry the entity base value.
         assert!(
-            (result.thermal_bounds(0, 4).max_generation_mw - 100.0).abs() < f64::EPSILON,
+            (result.thermal_block_base(0, 4).max_generation_mw - 100.0).abs() < f64::EPSILON,
             "override must NOT leak into first padded stage (T == 4)"
         );
         assert!(
-            (result.thermal_bounds(0, 5).max_generation_mw - 100.0).abs() < f64::EPSILON,
+            (result.thermal_block_base(0, 5).max_generation_mw - 100.0).abs() < f64::EPSILON,
             "override must NOT leak into last padded stage (T + 1 == 5)"
         );
     }
@@ -1601,7 +2026,21 @@ mod tests {
     #[test]
     fn test_resolve_bounds_k_max_zero_no_padded_cells() {
         let thermals = vec![make_thermal(0, 0.0, 100.0)];
-        let result = resolve_bounds(&[], &thermals, &[], &[], &[], 3, 0, &[], &[], &[], &[], &[]);
+        let result = resolve_bounds(
+            &[],
+            &thermals,
+            &[],
+            &[],
+            &[],
+            3,
+            0,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
 
         assert_eq!(result.thermal_stage_axis_len(), 3);
 
@@ -1615,5 +2054,480 @@ mod tests {
                 "thermal_bounds(0, 3) must panic in debug builds when n_stages=3, k_max=0"
             );
         }
+    }
+
+    // ── Tests: hydro per-block overlay activation ─────────────────────────────
+
+    /// Precedence: block (layer 1) beats stage-wide (layer 2) beats base (layer 3).
+    /// Hydro base `max_turbined_m3s = 500.0`, a stage-wide row sets `400.0`, and a
+    /// block-1 row (of 3 blocks) sets `100.0`.
+    #[test]
+    fn test_hydro_precedence_block_over_stage_over_base() {
+        let mut hydro = make_hydro(0, 10.0, 200.0, None, None, None);
+        hydro.max_turbined_m3s = 500.0;
+        let hydros = vec![hydro];
+        let stage_wide_row = HydroBoundsRow {
+            max_turbined_m3s: Some(400.0),
+            ..all_none_hydro_row(0, 0)
+        };
+        let block_row = HydroBoundsRow {
+            max_turbined_m3s: Some(100.0),
+            block_id: Some(1),
+            ..all_none_hydro_row(0, 0)
+        };
+
+        let result = resolve_bounds(
+            &hydros,
+            &[],
+            &[],
+            &[],
+            &[],
+            1,
+            0,
+            &[stage_wide_row, block_row],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[3],
+        );
+
+        assert!(
+            (result.hydro_bounds_at_block(0, 0, 0).max_turbined_m3s - 400.0).abs() < f64::EPSILON,
+            "block 0 has no block override: falls through to the stage-wide value"
+        );
+        assert!(
+            (result.hydro_bounds_at_block(0, 0, 1).max_turbined_m3s - 100.0).abs() < f64::EPSILON,
+            "block 1 carries the block override"
+        );
+        assert!(
+            (result.hydro_bounds_at_block(0, 0, 2).max_turbined_m3s - 400.0).abs() < f64::EPSILON,
+            "block 2 has no block override: falls through to the stage-wide value"
+        );
+    }
+
+    /// A block row that sets only `max_storage_hm3` and `water_withdrawal_m3s`
+    /// (both stage-level, not block-eligible — `HydroBlockOverride` has no
+    /// field for them) leaves every field of `hydro_bounds_at_block` identical
+    /// to `hydro_block_base` — the row's stage-level values do not leak into
+    /// the stage-wide cell either.
+    #[test]
+    fn test_hydro_block_row_cannot_override_stage_level_columns() {
+        let hydros = vec![make_hydro(0, 10.0, 200.0, None, None, None)];
+        let block_row = HydroBoundsRow {
+            max_storage_hm3: Some(999.0),
+            water_withdrawal_m3s: Some(42.0),
+            block_id: Some(1),
+            ..all_none_hydro_row(0, 0)
+        };
+
+        let result = resolve_bounds(
+            &hydros,
+            &[],
+            &[],
+            &[],
+            &[],
+            1,
+            0,
+            &[block_row],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[3],
+        );
+
+        let stage_wide = *result.hydro_bounds(0, 0);
+        let block_base = result.hydro_block_base(0, 0);
+        let at_block = result.hydro_bounds_at_block(0, 0, 1);
+
+        assert!((stage_wide.max_storage_hm3 - 200.0).abs() < f64::EPSILON);
+        assert!((stage_wide.water_withdrawal_m3s - 0.0).abs() < f64::EPSILON);
+
+        assert!((at_block.min_turbined_m3s - block_base.min_turbined_m3s).abs() < f64::EPSILON);
+        assert!((at_block.max_turbined_m3s - block_base.max_turbined_m3s).abs() < f64::EPSILON);
+        assert!((at_block.min_outflow_m3s - block_base.min_outflow_m3s).abs() < f64::EPSILON);
+        assert_eq!(at_block.max_outflow_m3s, block_base.max_outflow_m3s);
+        assert!((at_block.min_generation_mw - block_base.min_generation_mw).abs() < f64::EPSILON);
+        assert!((at_block.max_generation_mw - block_base.max_generation_mw).abs() < f64::EPSILON);
+        assert_eq!(at_block.max_diversion_m3s, block_base.max_diversion_m3s);
+    }
+
+    /// A block row that sets only `max_turbined_m3s` leaves `min_turbined_m3s` at
+    /// the stage-wide (here: base, since no stage-wide override is present) value —
+    /// a layer-1 row replaces only the columns it names.
+    #[test]
+    fn test_hydro_block_row_is_sparse_per_column() {
+        let mut hydro = make_hydro(0, 10.0, 200.0, None, None, None);
+        hydro.min_turbined_m3s = 5.0;
+        let hydros = vec![hydro];
+        let block_row = HydroBoundsRow {
+            max_turbined_m3s: Some(999.0),
+            block_id: Some(1),
+            ..all_none_hydro_row(0, 0)
+        };
+
+        let result = resolve_bounds(
+            &hydros,
+            &[],
+            &[],
+            &[],
+            &[],
+            1,
+            0,
+            &[block_row],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[2],
+        );
+
+        let b = result.hydro_bounds_at_block(0, 0, 1);
+        assert!((b.max_turbined_m3s - 999.0).abs() < f64::EPSILON);
+        assert!((b.min_turbined_m3s - 5.0).abs() < f64::EPSILON);
+    }
+
+    // ── Tests: thermal per-block overlay activation ───────────────────────────
+
+    /// A thermal row with `block_id = Some(1)` and `max_generation_mw = Some(100.0)`
+    /// is no longer skipped: the value reaches the per-block overlay.
+    #[test]
+    fn test_thermal_block_id_is_no_longer_skipped() {
+        let thermals = vec![make_thermal(0, 0.0, 400.0)];
+        let override_row = ThermalBoundsRow {
+            thermal_id: EntityId::from(0),
+            stage_id: 0,
+            min_generation_mw: None,
+            max_generation_mw: Some(100.0),
+            cost_per_mwh: None,
+            block_id: Some(1),
+        };
+
+        let result = resolve_bounds(
+            &[],
+            &thermals,
+            &[],
+            &[],
+            &[],
+            1,
+            0,
+            &[],
+            &[override_row],
+            &[],
+            &[],
+            &[],
+            &[2],
+        );
+
+        assert!(
+            (result.thermal_bounds_at_block(0, 0, 1).max_generation_mw - 100.0).abs()
+                < f64::EPSILON
+        );
+    }
+
+    /// Precedence: block (layer 1) beats stage-wide (layer 2) beats base (layer 3).
+    /// Thermal base `max_generation_mw = 500.0`, a stage-wide row sets `400.0`, and
+    /// a block-1 row (of 3 blocks) sets `100.0`.
+    #[test]
+    fn test_thermal_precedence_block_over_stage_over_base() {
+        let thermals = vec![make_thermal(0, 0.0, 500.0)];
+        let stage_wide_row = ThermalBoundsRow {
+            thermal_id: EntityId::from(0),
+            stage_id: 0,
+            min_generation_mw: None,
+            max_generation_mw: Some(400.0),
+            cost_per_mwh: None,
+            block_id: None,
+        };
+        let block_row = ThermalBoundsRow {
+            thermal_id: EntityId::from(0),
+            stage_id: 0,
+            min_generation_mw: None,
+            max_generation_mw: Some(100.0),
+            cost_per_mwh: None,
+            block_id: Some(1),
+        };
+
+        let result = resolve_bounds(
+            &[],
+            &thermals,
+            &[],
+            &[],
+            &[],
+            1,
+            0,
+            &[],
+            &[stage_wide_row, block_row],
+            &[],
+            &[],
+            &[],
+            &[3],
+        );
+
+        assert!(
+            (result.thermal_bounds_at_block(0, 0, 0).max_generation_mw - 400.0).abs()
+                < f64::EPSILON,
+            "block 0 has no block override: falls through to the stage-wide value"
+        );
+        assert!(
+            (result.thermal_bounds_at_block(0, 0, 1).max_generation_mw - 100.0).abs()
+                < f64::EPSILON,
+            "block 1 carries the block override"
+        );
+        assert!(
+            (result.thermal_bounds_at_block(0, 0, 2).max_generation_mw - 400.0).abs()
+                < f64::EPSILON,
+            "block 2 has no block override: falls through to the stage-wide value"
+        );
+    }
+
+    /// A block row that sets only `max_generation_mw` leaves `min_generation_mw`
+    /// and `cost_per_mwh` at the stage-wide (here: base, since no stage-wide
+    /// override is present) value — a layer-1 row replaces only the columns it names.
+    #[test]
+    fn test_thermal_block_row_is_sparse_per_column() {
+        let thermals = vec![make_thermal(0, 10.0, 400.0)];
+        let block_row = ThermalBoundsRow {
+            thermal_id: EntityId::from(0),
+            stage_id: 0,
+            min_generation_mw: None,
+            max_generation_mw: Some(999.0),
+            cost_per_mwh: None,
+            block_id: Some(1),
+        };
+
+        let result = resolve_bounds(
+            &[],
+            &thermals,
+            &[],
+            &[],
+            &[],
+            1,
+            0,
+            &[],
+            &[block_row],
+            &[],
+            &[],
+            &[],
+            &[2],
+        );
+
+        let b = result.thermal_bounds_at_block(0, 0, 1);
+        assert!((b.max_generation_mw - 999.0).abs() < f64::EPSILON);
+        assert!((b.min_generation_mw - 10.0).abs() < f64::EPSILON);
+        assert!((result.thermal_bounds(0, 0).cost_per_mwh - 50.0).abs() < f64::EPSILON);
+    }
+
+    /// A `block_id` of `7` on a stage declaring 3 blocks, and separately a
+    /// `block_id` of `-1`, are both skipped: no resolved value changes and
+    /// `resolve_bounds` returns normally (no panic).
+    #[test]
+    fn test_out_of_range_thermal_block_id_is_skipped_not_panicked() {
+        let thermals = vec![make_thermal(0, 0.0, 400.0)];
+        let too_large_row = ThermalBoundsRow {
+            thermal_id: EntityId::from(0),
+            stage_id: 0,
+            min_generation_mw: None,
+            max_generation_mw: Some(999.0),
+            cost_per_mwh: None,
+            block_id: Some(7),
+        };
+        let negative_row = ThermalBoundsRow {
+            thermal_id: EntityId::from(0),
+            stage_id: 0,
+            min_generation_mw: None,
+            max_generation_mw: Some(888.0),
+            cost_per_mwh: None,
+            block_id: Some(-1),
+        };
+
+        let result = resolve_bounds(
+            &[],
+            &thermals,
+            &[],
+            &[],
+            &[],
+            1,
+            0,
+            &[],
+            &[too_large_row, negative_row],
+            &[],
+            &[],
+            &[],
+            &[3],
+        );
+
+        for block_idx in 0..3 {
+            assert!(
+                (result
+                    .thermal_bounds_at_block(0, 0, block_idx)
+                    .max_generation_mw
+                    - 400.0)
+                    .abs()
+                    < f64::EPSILON,
+                "block {block_idx}: out-of-range and negative block_id rows must not apply"
+            );
+        }
+    }
+
+    /// With no `block_id` rows in any family, the overlay stays empty — it is
+    /// never allocated unconditionally.
+    #[test]
+    fn test_no_block_rows_leaves_overlay_empty() {
+        let thermals = vec![make_thermal(0, 0.0, 400.0)];
+        let stage_wide_row = ThermalBoundsRow {
+            thermal_id: EntityId::from(0),
+            stage_id: 0,
+            min_generation_mw: None,
+            max_generation_mw: Some(300.0),
+            cost_per_mwh: None,
+            block_id: None,
+        };
+
+        let result = resolve_bounds(
+            &[],
+            &thermals,
+            &[],
+            &[],
+            &[],
+            1,
+            0,
+            &[],
+            &[stage_wide_row],
+            &[],
+            &[],
+            &[],
+            &[3],
+        );
+
+        assert!(result.block_overlay().is_empty());
+    }
+
+    // ── Tests: line/contract/pumping per-block overlay activation ────────────
+
+    /// A line `direct_mw` block-2 override, a contract `max_mw` block-0 override,
+    /// and a pumping `max_flow_m3s` block-1 override each apply at their own block
+    /// only; every other block on the 3-block stage falls through to the
+    /// stage-wide (here: base, since no stage-wide override row is present) value.
+    #[test]
+    fn test_line_contract_pumping_block_precedence() {
+        let lines = vec![make_line(0, 1000.0, 800.0)];
+        let contracts = vec![make_contract(0, 0.0, 200.0, 80.0)];
+        let pumpings = vec![make_pumping(0, 0.0, 100.0)];
+
+        let line_block_row = LineBoundsRow {
+            line_id: EntityId::from(0),
+            stage_id: 0,
+            direct_mw: Some(800.0),
+            reverse_mw: None,
+            block_id: Some(2),
+        };
+        let contract_block_row = ContractBoundsRow {
+            contract_id: EntityId::from(0),
+            stage_id: 0,
+            min_mw: None,
+            max_mw: Some(50.0),
+            price_per_mwh: None,
+            block_id: Some(0),
+        };
+        let pumping_block_row = PumpingBoundsRow {
+            station_id: EntityId::from(0),
+            stage_id: 0,
+            min_m3s: None,
+            max_m3s: Some(20.0),
+            block_id: Some(1),
+        };
+
+        let result = resolve_bounds(
+            &[],
+            &[],
+            &lines,
+            &pumpings,
+            &contracts,
+            1,
+            0,
+            &[],
+            &[],
+            &[line_block_row],
+            &[pumping_block_row],
+            &[contract_block_row],
+            &[3],
+        );
+
+        assert!((result.line_bounds_at_block(0, 0, 0).direct_mw - 1000.0).abs() < f64::EPSILON);
+        assert!((result.line_bounds_at_block(0, 0, 1).direct_mw - 1000.0).abs() < f64::EPSILON);
+        assert!(
+            (result.line_bounds_at_block(0, 0, 2).direct_mw - 800.0).abs() < f64::EPSILON,
+            "block 2 carries the line block override"
+        );
+
+        assert!(
+            (result.contract_bounds_at_block(0, 0, 0).max_mw - 50.0).abs() < f64::EPSILON,
+            "block 0 carries the contract block override"
+        );
+        assert!((result.contract_bounds_at_block(0, 0, 1).max_mw - 200.0).abs() < f64::EPSILON);
+        assert!((result.contract_bounds_at_block(0, 0, 2).max_mw - 200.0).abs() < f64::EPSILON);
+
+        assert!(
+            (result.pumping_bounds_at_block(0, 0, 0).max_flow_m3s - 100.0).abs() < f64::EPSILON
+        );
+        assert!(
+            (result.pumping_bounds_at_block(0, 0, 1).max_flow_m3s - 20.0).abs() < f64::EPSILON,
+            "block 1 carries the pumping block override"
+        );
+        assert!(
+            (result.pumping_bounds_at_block(0, 0, 2).max_flow_m3s - 100.0).abs() < f64::EPSILON
+        );
+    }
+
+    /// A contract block row that sets only `price_per_mwh` overrides price at its
+    /// own block while `min_mw`/`max_mw` at that same block fall through to the
+    /// stage-wide value — `price_per_mwh` is block-eligible on its own, independent
+    /// of the other two columns.
+    #[test]
+    fn test_contract_block_row_overrides_price_per_block() {
+        let contracts = vec![make_contract(0, 0.0, 200.0, 80.0)];
+        let block_row = ContractBoundsRow {
+            contract_id: EntityId::from(0),
+            stage_id: 0,
+            min_mw: None,
+            max_mw: None,
+            price_per_mwh: Some(120.0),
+            block_id: Some(1),
+        };
+
+        let result = resolve_bounds(
+            &[],
+            &[],
+            &[],
+            &[],
+            &contracts,
+            1,
+            0,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[block_row],
+            &[3],
+        );
+
+        assert!(
+            (result.contract_bounds_at_block(0, 0, 1).price_per_mwh - 120.0).abs() < f64::EPSILON,
+            "block 1 carries the price override"
+        );
+        assert!(
+            (result.contract_bounds_at_block(0, 0, 0).price_per_mwh - 80.0).abs() < f64::EPSILON,
+            "block 0 falls through to the stage-wide price"
+        );
+        assert!(
+            (result.contract_bounds_at_block(0, 0, 2).price_per_mwh - 80.0).abs() < f64::EPSILON,
+            "block 2 falls through to the stage-wide price"
+        );
+
+        let at_block = result.contract_bounds_at_block(0, 0, 1);
+        assert!((at_block.min_mw - 0.0).abs() < f64::EPSILON);
+        assert!((at_block.max_mw - 200.0).abs() < f64::EPSILON);
     }
 }

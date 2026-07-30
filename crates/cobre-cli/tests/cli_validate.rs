@@ -287,7 +287,6 @@ fn fpha_hydro_without_production_models_json_fails_validate() {
                 "id": 1,
                 "name": "UHE_FPHA",
                 "operational_start_date": "2024-01-01",
-                "bus_id": 1,
                 "downstream_id": null,
                 "reservoir": {
                     "min_storage_hm3": 0.0,
@@ -303,7 +302,18 @@ fn fpha_hydro_without_production_models_json_fails_validate() {
                     "max_turbined_m3s": 100.0,
                     "min_generation_mw": 0.0,
                     "max_generation_mw": 300.0
-                }
+                },
+                "unit_groups": [
+                    {
+                        "id": 0,
+                        "name": "UHE_FPHA",
+                        "bus_id": 1,
+                        "min_generation_mw": 0.0,
+                        "max_generation_mw": 300.0,
+                        "min_turbined_m3s": 0.0,
+                        "max_turbined_m3s": 100.0
+                    }
+                ]
             }
         ]
     }"#;
@@ -338,7 +348,6 @@ fn fpha_hydro_without_production_models_json_stdout_mentions_file() {
                 "id": 1,
                 "name": "UHE_FPHA",
                 "operational_start_date": "2024-01-01",
-                "bus_id": 1,
                 "downstream_id": null,
                 "reservoir": {
                     "min_storage_hm3": 0.0,
@@ -354,7 +363,18 @@ fn fpha_hydro_without_production_models_json_stdout_mentions_file() {
                     "max_turbined_m3s": 100.0,
                     "min_generation_mw": 0.0,
                     "max_generation_mw": 300.0
-                }
+                },
+                "unit_groups": [
+                    {
+                        "id": 0,
+                        "name": "UHE_FPHA",
+                        "bus_id": 1,
+                        "min_generation_mw": 0.0,
+                        "max_generation_mw": 300.0,
+                        "min_turbined_m3s": 0.0,
+                        "max_turbined_m3s": 100.0
+                    }
+                ]
             }
         ]
     }"#;

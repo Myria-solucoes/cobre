@@ -24,8 +24,6 @@
 //!
 //! See the [repository](https://github.com/cobre-rs/cobre) for the current status.
 
-// Relax strict production lints for test builds. These lints (unwrap_used,
-// expect_used, etc.) guard library code but are normal in tests.
 #![cfg_attr(
     test,
     allow(
@@ -47,20 +45,18 @@ pub mod stats;
 pub mod system;
 pub mod topology;
 
-// Re-export as crate-root module aliases so `cobre_core::<module>::Symbol` paths
-// resolve for external consumers; canonical source is the `model::` submodules.
+// Crate-root module aliases so `cobre_core::<module>::Symbol` paths resolve for
+// external consumers.
 pub use model::{parameters, penalty, resolved, scenario, temporal};
 
-// Re-export as crate-root module aliases; canonical source is the `constraints::`
-// submodules.
 pub use constraints::{generic_constraint, initial_conditions, training_event};
 
 pub use constraints::generic_constraint::{
     ConstraintExpression, ConstraintSense, GenericConstraint, LinearTerm, SlackConfig, VariableRef,
 };
 pub use constraints::initial_conditions::{
-    AnticipatedCommitmentHistory, HydroPastDefluence, HydroPastInflows, HydroStorage,
-    InitialConditions, RecentObservation,
+    AnticipatedCommitmentHistory, HydroPastDefluence, HydroStorage, InitialConditions,
+    RecentObservation,
 };
 pub use constraints::training_event::{
     StageRowSelectionRecord, StoppingRuleResult, TrainingEvent, WORKER_TIMING_SLOT_BWD_SETUP,
@@ -70,8 +66,8 @@ pub use constraints::training_event::{
 pub use entities::{
     AnticipatedConfig, Bus, ContractType, DeficitSegment, DiversionChannel, EfficiencyModel,
     EnergyContract, FillingConfig, HydraulicLossesModel, Hydro, HydroGenerationModel,
-    HydroPenalties, Line, NonControllableSource, PumpingStation, TailraceModel, TailracePoint,
-    Thermal,
+    HydroPenalties, HydroUnitGroup, Line, NonControllableSource, PumpingStation, TailraceModel,
+    TailracePoint, Thermal,
 };
 pub use entity_id::EntityId;
 pub use error::ValidationError;
@@ -82,11 +78,14 @@ pub use model::penalty::{
     resolve_ncs_curtailment_cost,
 };
 pub use model::resolved::{
-    BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, HydroStageBounds,
-    HydroStagePenalties, LineStageBounds, LineStagePenalties, NcsStagePenalties,
-    PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
-    ResolvedExchangeFactors, ResolvedGenericConstraintBounds, ResolvedLoadFactors,
-    ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, ThermalStageBounds,
+    BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
+    ContractBlockBounds, ContractBlockOverride, HydroBlockBounds, HydroBlockOverride,
+    HydroStageBounds, HydroStagePenalties, HydroUnitGroupBoundsCountsSpec, HydroUnitGroupOverride,
+    LineBlockBounds, LineBlockOverride, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
+    PenaltiesDefaults, PumpingBlockBounds, PumpingBlockOverride, ResolvedBlockBounds,
+    ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedHydroUnitGroupBounds,
+    ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties,
+    ThermalBlockBounds, ThermalBlockOverride, ThermalStageBounds,
 };
 pub use model::scenario::{
     CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile,

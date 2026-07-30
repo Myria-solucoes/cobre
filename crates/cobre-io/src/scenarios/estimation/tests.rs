@@ -348,24 +348,30 @@ fn write_unit_test_inflow_history(path: &std::path::Path, hydro_id: i32, n_years
     let (obs_s0, obs_s1) = simulate_two_season_par2(0.7, 0.15, n_years, 99);
 
     let mut ids: Vec<i32> = Vec::with_capacity(n_years * 2);
-    let mut dates: Vec<i32> = Vec::with_capacity(n_years * 2);
+    let mut start_dates: Vec<i32> = Vec::with_capacity(n_years * 2);
+    let mut end_dates: Vec<i32> = Vec::with_capacity(n_years * 2);
     let mut values: Vec<f64> = Vec::with_capacity(n_years * 2);
 
     for y in 0..n_years {
         let year = (1970 + y) as i32;
+        let start_s0 = NaiveDate::from_ymd_opt(year, 1, 15).unwrap();
         ids.push(hydro_id);
-        dates.push(date_to_days(NaiveDate::from_ymd_opt(year, 1, 15).unwrap()));
+        start_dates.push(date_to_days(start_s0));
+        end_dates.push(date_to_days(start_s0.succ_opt().unwrap()));
         // +300 shifts the ~0-mean series positive; inflows must be physically plausible.
         values.push(obs_s0[y] + 300.0);
 
+        let start_s1 = NaiveDate::from_ymd_opt(year, 7, 15).unwrap();
         ids.push(hydro_id);
-        dates.push(date_to_days(NaiveDate::from_ymd_opt(year, 7, 15).unwrap()));
+        start_dates.push(date_to_days(start_s1));
+        end_dates.push(date_to_days(start_s1.succ_opt().unwrap()));
         values.push(obs_s1[y] + 300.0);
     }
 
     let schema = Arc::new(Schema::new(vec![
         Field::new("hydro_id", DataType::Int32, false),
-        Field::new("date", DataType::Date32, false),
+        Field::new("start_date", DataType::Date32, false),
+        Field::new("end_date", DataType::Date32, false),
         Field::new("value_m3s", DataType::Float64, false),
     ]));
 
@@ -373,7 +379,8 @@ fn write_unit_test_inflow_history(path: &std::path::Path, hydro_id: i32, n_years
         schema.clone(),
         vec![
             Arc::new(Int32Array::from(ids)),
-            Arc::new(Date32Array::from(dates)),
+            Arc::new(Date32Array::from(start_dates)),
+            Arc::new(Date32Array::from(end_dates)),
             Arc::new(Float64Array::from(values)),
         ],
     )
@@ -433,11 +440,11 @@ fn build_system_with_user_stats(n_years: usize) -> System {
         })
         .collect();
 
-    let hydro = Hydro {
+    let mut hydro = Hydro {
+        unit_groups: Vec::new(),
         id: hydro_id,
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(10),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -478,6 +485,7 @@ fn build_system_with_user_stats(n_years: usize) -> System {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.declare_mirror_unit_group(EntityId(10));
 
     SystemBuilder::new()
         .buses(vec![bus])
@@ -1274,11 +1282,11 @@ fn build_system_empty_models(n_years: usize) -> System {
         ));
     }
 
-    let hydro = Hydro {
+    let mut hydro = Hydro {
+        unit_groups: Vec::new(),
         id: hydro_id,
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(10),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -1319,6 +1327,7 @@ fn build_system_empty_models(n_years: usize) -> System {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.declare_mirror_unit_group(EntityId(10));
 
     SystemBuilder::new()
         .buses(vec![bus])
@@ -1512,11 +1521,11 @@ fn test_user_ar_estimation_returns_user_provided_report() {
 
 fn make_hydro(hydro_id: EntityId, bus_id: EntityId) -> Hydro {
     use cobre_core::entities::hydro::HydroGenerationModel;
-    Hydro {
+    let mut hydro = Hydro {
+        unit_groups: Vec::new(),
         id: hydro_id,
         name: format!("H{}", hydro_id.0),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id,
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -1556,7 +1565,9 @@ fn make_hydro(hydro_id: EntityId, bus_id: EntityId) -> Hydro {
             evaporation_violation_neg_cost: 0.0,
             inflow_nonnegativity_cost: 1000.0,
         },
-    }
+    };
+    hydro.declare_mirror_unit_group(bus_id);
+    hydro
 }
 
 /// Two-hydro system; inflow_models (user stats) are built only for
@@ -1643,25 +1654,31 @@ fn write_history_for_hydros(path: &std::path::Path, hydro_ids: &[i32], n_years: 
     let (obs_s0, obs_s1) = simulate_two_season_par2(0.7, 0.15, n_years, 99);
 
     let mut ids: Vec<i32> = Vec::new();
-    let mut dates: Vec<i32> = Vec::new();
+    let mut start_dates: Vec<i32> = Vec::new();
+    let mut end_dates: Vec<i32> = Vec::new();
     let mut values: Vec<f64> = Vec::new();
 
     for &hid in hydro_ids {
         for y in 0..n_years {
             let year = (1970 + y) as i32;
+            let start_s0 = NaiveDate::from_ymd_opt(year, 1, 15).unwrap();
             ids.push(hid);
-            dates.push(date_to_days(NaiveDate::from_ymd_opt(year, 1, 15).unwrap()));
+            start_dates.push(date_to_days(start_s0));
+            end_dates.push(date_to_days(start_s0.succ_opt().unwrap()));
             values.push(obs_s0[y] + 300.0);
 
+            let start_s1 = NaiveDate::from_ymd_opt(year, 7, 15).unwrap();
             ids.push(hid);
-            dates.push(date_to_days(NaiveDate::from_ymd_opt(year, 7, 15).unwrap()));
+            start_dates.push(date_to_days(start_s1));
+            end_dates.push(date_to_days(start_s1.succ_opt().unwrap()));
             values.push(obs_s1[y] + 300.0);
         }
     }
 
     let schema = Arc::new(Schema::new(vec![
         Field::new("hydro_id", DataType::Int32, false),
-        Field::new("date", DataType::Date32, false),
+        Field::new("start_date", DataType::Date32, false),
+        Field::new("end_date", DataType::Date32, false),
         Field::new("value_m3s", DataType::Float64, false),
     ]));
 
@@ -1669,7 +1686,8 @@ fn write_history_for_hydros(path: &std::path::Path, hydro_ids: &[i32], n_years: 
         schema.clone(),
         vec![
             Arc::new(Int32Array::from(ids)),
-            Arc::new(Date32Array::from(dates)),
+            Arc::new(Date32Array::from(start_dates)),
+            Arc::new(Date32Array::from(end_dates)),
             Arc::new(Float64Array::from(values)),
         ],
     )
@@ -1913,7 +1931,6 @@ fn test_std_ratio_divergence_fires_when_ratios_diverge() {
         !warnings.is_empty(),
         "expected at least one StdRatioDivergence when ratio diverges by 5x"
     );
-    // The (0→1) pair must be in the warnings.
     let pair_0_1 = warnings.iter().find(|w| w.season_a == 0 && w.season_b == 1);
     assert!(
         pair_0_1.is_some(),
@@ -2087,25 +2104,29 @@ fn write_monthly_inflow_history_two_hydros(path: &std::path::Path, n_years: usiz
     let obs_h2 = synthetic_monthly_obs(h2, n_years, 200.0, 3.0, 0.5);
 
     let mut ids: Vec<i32> = Vec::new();
-    let mut dates: Vec<i32> = Vec::new();
+    let mut start_dates: Vec<i32> = Vec::new();
+    let mut end_dates: Vec<i32> = Vec::new();
     let mut values: Vec<f64> = Vec::new();
 
     for &(eid, date, value) in obs_h1.iter().chain(obs_h2.iter()) {
         ids.push(eid.0);
-        dates.push(date_to_days(date));
+        start_dates.push(date_to_days(date));
+        end_dates.push(date_to_days(date.succ_opt().unwrap()));
         values.push(value);
     }
 
     let schema = Arc::new(Schema::new(vec![
         Field::new("hydro_id", DataType::Int32, false),
-        Field::new("date", DataType::Date32, false),
+        Field::new("start_date", DataType::Date32, false),
+        Field::new("end_date", DataType::Date32, false),
         Field::new("value_m3s", DataType::Float64, false),
     ]));
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
             Arc::new(Int32Array::from(ids)),
-            Arc::new(Date32Array::from(dates)),
+            Arc::new(Date32Array::from(start_dates)),
+            Arc::new(Date32Array::from(end_dates)),
             Arc::new(Float64Array::from(values)),
         ],
     )
@@ -2414,4 +2435,322 @@ fn partial_year_par2_synthesizes_prestudy_lag_models() {
         psi0.iter().any(|&p| p.abs() > 1e-9),
         "first study stage psi must be non-zero for pre-study lags, got {psi0:?}"
     );
+}
+
+// ── coverage-gated occurrence resolution ──────────────────────
+
+/// Build one full-coverage monthly `InflowHistoryRow` window for `hydro_id`
+/// covering the whole calendar month `(year, month)`.
+fn full_month_row(hydro_id: EntityId, year: i32, month: u32, value: f64) -> InflowHistoryRow {
+    let start_date = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+    let end_date = if month == 12 {
+        NaiveDate::from_ymd_opt(year + 1, 1, 1).unwrap()
+    } else {
+        NaiveDate::from_ymd_opt(year, month + 1, 1).unwrap()
+    };
+    InflowHistoryRow {
+        hydro_id,
+        start_date,
+        end_date,
+        value_m3s: value,
+    }
+}
+
+/// 12 full-coverage monthly occurrences for one hydro must produce exactly 12
+/// samples and no skipped-partial diagnostic.
+#[test]
+fn test_estimation_full_coverage_one_sample_per_occurrence() {
+    let season_map = monthly_season_map();
+    let template = partial_year_stages(0, 1, 2000).remove(0);
+    let hydro_id = EntityId(1);
+
+    let history: Vec<InflowHistoryRow> = (1..=12u32)
+        .map(|month| full_month_row(hydro_id, 2000, month, 100.0 + f64::from(month)))
+        .collect();
+
+    let (observations, skipped_partial) =
+        resolve_coverage_gated_observations(&history, Some(&season_map), Some(&template));
+
+    assert_eq!(
+        observations.len(),
+        12,
+        "12 full-coverage monthly occurrences must produce 12 samples, got {}",
+        observations.len()
+    );
+    assert!(
+        skipped_partial.is_empty(),
+        "full-coverage-only data must not report any skipped-partial occurrence, got {skipped_partial:?}"
+    );
+}
+
+/// A partial-coverage occurrence (15 of April's 30 days) contributes no
+/// sample and is counted exactly once in `skipped_partial`; the 11 remaining
+/// full-coverage occurrences still produce samples.
+#[test]
+fn test_estimation_partial_occurrence_skipped_and_counted() {
+    let season_map = monthly_season_map();
+    let template = partial_year_stages(0, 1, 2000).remove(0);
+    let hydro_id = EntityId(1);
+
+    let mut history: Vec<InflowHistoryRow> = (1..=12u32)
+        .filter(|&month| month != 4)
+        .map(|month| full_month_row(hydro_id, 2000, month, 100.0 + f64::from(month)))
+        .collect();
+
+    // April (30 days): only the first 15 days are present.
+    history.push(InflowHistoryRow {
+        hydro_id,
+        start_date: NaiveDate::from_ymd_opt(2000, 4, 1).unwrap(),
+        end_date: NaiveDate::from_ymd_opt(2000, 4, 16).unwrap(),
+        value_m3s: 999.0,
+    });
+
+    let (observations, skipped_partial) =
+        resolve_coverage_gated_observations(&history, Some(&season_map), Some(&template));
+
+    assert_eq!(
+        observations.len(),
+        11,
+        "11 full occurrences must produce 11 samples (April's partial window excluded), got {}",
+        observations.len()
+    );
+    assert_eq!(
+        skipped_partial.get(&hydro_id).copied(),
+        Some(1),
+        "April's 15/30-day window must be counted as exactly 1 skipped partial \
+         occurrence for hydro {hydro_id}, got {skipped_partial:?}"
+    );
+}
+
+/// A partial occurrence's outlier value must not reach
+/// `estimate_seasonal_stats_with_season_map`: the fitted std for January must
+/// equal the population std of the two full-coverage January samples alone,
+/// not a value skewed by the excluded third (partial) occurrence.
+#[test]
+fn test_estimation_partial_does_not_affect_sigma() {
+    let season_map = monthly_season_map();
+    let template = partial_year_stages(0, 1, 2000).remove(0);
+    let hydro_id = EntityId(1);
+
+    let history = vec![
+        full_month_row(hydro_id, 2000, 1, 100.0),
+        full_month_row(hydro_id, 2001, 1, 200.0),
+        // Partial (half-month) January with a wildly different value: must be
+        // excluded, not blended into the mean/std below.
+        InflowHistoryRow {
+            hydro_id,
+            start_date: NaiveDate::from_ymd_opt(2002, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2002, 1, 16).unwrap(),
+            value_m3s: 1.0e6,
+        },
+    ];
+
+    let (observations, skipped_partial) =
+        resolve_coverage_gated_observations(&history, Some(&season_map), Some(&template));
+
+    assert_eq!(skipped_partial.get(&hydro_id).copied(), Some(1));
+
+    let seasonal_stats = estimate_seasonal_stats_with_season_map(
+        &observations,
+        std::slice::from_ref(&template),
+        &[hydro_id],
+        Some(&season_map),
+    )
+    .expect("seasonal stats must fit from the two full-coverage samples");
+
+    assert_eq!(
+        seasonal_stats.len(),
+        1,
+        "exactly one (hydro, season) group must be fitted"
+    );
+    let stats = &seasonal_stats[0];
+    assert_eq!(stats.mean, 150.0, "mean must come only from [100.0, 200.0]");
+    assert_eq!(
+        stats.std, 50.0,
+        "population std of [100.0, 200.0] is exactly 50.0 -- the excluded \
+         partial occurrence's 1.0e6 value must not shift it"
+    );
+}
+
+/// Build a 12-season monthly `System` (real `SeasonMap`) with configurable
+/// `recent_observations`, for the record-only owner-gate test below.
+fn build_monthly_system_with_conditioning(
+    n_years: usize,
+    recent_observations: Vec<cobre_core::RecentObservation>,
+) -> System {
+    use cobre_core::{
+        Bus, DeficitSegment, InitialConditions, PolicyGraph, PolicyGraphType, SystemBuilder,
+    };
+
+    let bus_id = EntityId(10);
+    let bus = Bus {
+        id: bus_id,
+        name: "B1".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        deficit_segments: vec![DeficitSegment {
+            depth_mw: Some(f64::INFINITY),
+            cost_per_mwh: 3000.0,
+        }],
+        excess_cost: 0.0,
+    };
+    let h1 = EntityId(1);
+    let stages = make_monthly_stages_for_annual(n_years);
+    let policy_graph = PolicyGraph {
+        graph_type: PolicyGraphType::FiniteHorizon,
+        annual_discount_rate: 0.0,
+        transitions: vec![],
+        season_map: Some(monthly_season_map()),
+    };
+    let initial_conditions = InitialConditions {
+        recent_observations,
+        ..Default::default()
+    };
+
+    SystemBuilder::new()
+        .buses(vec![bus])
+        .hydros(vec![make_hydro(h1, bus_id)])
+        .stages(stages)
+        .policy_graph(policy_graph)
+        .initial_conditions(initial_conditions)
+        .build()
+        .expect("valid monthly system with conditioning")
+}
+
+/// Writes `inflow_history.parquet` with full-coverage MONTHLY windows
+/// (`[month_start, next_month_start)`) for one hydro.
+fn write_full_month_history_one_hydro(path: &std::path::Path, hydro_id: EntityId, n_years: usize) {
+    use arrow::array::{Date32Array, Float64Array, Int32Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
+    use std::sync::Arc;
+
+    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+    let date_to_days = |d: NaiveDate| -> i32 { i32::try_from((d - epoch).num_days()).unwrap() };
+
+    let mut ids: Vec<i32> = Vec::new();
+    let mut start_dates: Vec<i32> = Vec::new();
+    let mut end_dates: Vec<i32> = Vec::new();
+    let mut values: Vec<f64> = Vec::new();
+
+    for year in 0..n_years {
+        for month in 1..=12u32 {
+            let y = 2000 + i32::try_from(year).unwrap();
+            let start = NaiveDate::from_ymd_opt(y, month, 1).unwrap();
+            let end = if month == 12 {
+                NaiveDate::from_ymd_opt(y + 1, 1, 1).unwrap()
+            } else {
+                NaiveDate::from_ymd_opt(y, month + 1, 1).unwrap()
+            };
+            let value = 100.0 + f64::from(month) * 5.0 + f64::from(u32::try_from(year).unwrap());
+            ids.push(hydro_id.0);
+            start_dates.push(date_to_days(start));
+            end_dates.push(date_to_days(end));
+            values.push(value);
+        }
+    }
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("hydro_id", DataType::Int32, false),
+        Field::new("start_date", DataType::Date32, false),
+        Field::new("end_date", DataType::Date32, false),
+        Field::new("value_m3s", DataType::Float64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(Int32Array::from(ids)),
+            Arc::new(Date32Array::from(start_dates)),
+            Arc::new(Date32Array::from(end_dates)),
+            Arc::new(Float64Array::from(values)),
+        ],
+    )
+    .expect("valid batch");
+
+    let file = std::fs::File::create(path).expect("create parquet file");
+    let mut writer = ArrowWriter::try_new(file, schema, None).expect("ArrowWriter");
+    writer.write(&batch).expect("write batch");
+    writer.close().expect("close writer");
+}
+
+/// OWNER GATE (record-only): adding a `recent_observations` conditioning
+/// window changes no fitted seasonal mean/std or AR coefficient. Estimation
+/// reads only `inflow_history.parquet`'s record windows; `recent_observations`
+/// is never consulted (grep-verified: `estimation.rs` contains no reference
+/// to it).
+#[test]
+fn test_conditioning_window_does_not_change_fitted_statistics() {
+    use tempfile::TempDir;
+
+    const N_YEARS: usize = 30;
+    let h1 = EntityId(1);
+
+    let dir_a = TempDir::new().unwrap();
+    let case_dir_a = dir_a.path();
+    create_required_files(case_dir_a);
+    let scenarios_a = case_dir_a.join("scenarios");
+    std::fs::create_dir_all(&scenarios_a).unwrap();
+    write_full_month_history_one_hydro(&scenarios_a.join("inflow_history.parquet"), h1, N_YEARS);
+
+    let dir_b = TempDir::new().unwrap();
+    let case_dir_b = dir_b.path();
+    create_required_files(case_dir_b);
+    let scenarios_b = case_dir_b.join("scenarios");
+    std::fs::create_dir_all(&scenarios_b).unwrap();
+    write_full_month_history_one_hydro(&scenarios_b.join("inflow_history.parquet"), h1, N_YEARS);
+
+    let system_without_conditioning = build_monthly_system_with_conditioning(N_YEARS, vec![]);
+
+    // Wildly different from the record series: if it leaked into estimation,
+    // it would obviously shift the fitted mean/std for whichever season it
+    // resolves to.
+    let conditioning = vec![cobre_core::RecentObservation {
+        hydro_id: h1,
+        start_date: NaiveDate::from_ymd_opt(2000, 1, 1).unwrap(),
+        end_date: NaiveDate::from_ymd_opt(2000, 2, 1).unwrap(),
+        value_m3s: 1.0e6,
+    }];
+    let system_with_conditioning = build_monthly_system_with_conditioning(N_YEARS, conditioning);
+
+    let config = default_config();
+
+    let (updated_without, _report_a, path_a) =
+        estimate_from_history(system_without_conditioning, case_dir_a, &config)
+            .expect("estimation without conditioning must succeed");
+    let (updated_with, _report_b, path_b) =
+        estimate_from_history(system_with_conditioning, case_dir_b, &config)
+            .expect("estimation with conditioning must succeed");
+
+    assert_eq!(path_a, EstimationPath::FullEstimation);
+    assert_eq!(path_b, EstimationPath::FullEstimation);
+
+    let mut models_without = updated_without.inflow_models().to_vec();
+    let mut models_with = updated_with.inflow_models().to_vec();
+    models_without.sort_by_key(|m| (m.hydro_id.0, m.stage_id));
+    models_with.sort_by_key(|m| (m.hydro_id.0, m.stage_id));
+
+    assert_eq!(
+        models_without.len(),
+        models_with.len(),
+        "conditioning must not change the number of fitted models"
+    );
+    for (a, b) in models_without.iter().zip(models_with.iter()) {
+        assert_eq!(a.hydro_id, b.hydro_id);
+        assert_eq!(a.stage_id, b.stage_id);
+        assert_eq!(
+            a.mean_m3s, b.mean_m3s,
+            "fitted mean must be bit-identical regardless of a recent_observations \
+             conditioning window"
+        );
+        assert_eq!(
+            a.std_m3s, b.std_m3s,
+            "fitted std must be bit-identical regardless of a recent_observations \
+             conditioning window"
+        );
+        assert_eq!(
+            a.ar_coefficients, b.ar_coefficients,
+            "fitted AR coefficients must be bit-identical regardless of a \
+             recent_observations conditioning window"
+        );
+    }
 }

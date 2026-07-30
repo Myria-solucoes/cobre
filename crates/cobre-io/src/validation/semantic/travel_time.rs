@@ -15,11 +15,10 @@
 //! | 6 | Chronological confluence: 2+ declared arcs into one downstream plant with differing `travel_time_hours`, while any study stage is chronological | `NotImplemented` |
 //! | 11 | A declared arc's downstream `exit_stage_id` falls inside the arrival window of a release whose own stage is still Operating | `ModelQuality` (warning) |
 //! | 12 | A declared arc releases at a stage where its downstream has not yet reached Operating status (`PreFilling`/`Filling`, or before `entry_stage_id`) | `BusinessRuleViolation` |
-//! | 13 | `recent_observations` present but the season cycle is not `Monthly` (`Weekly`/`Custom`, a `None` first-stage `season_id`, or no `season_map`) — mid-period PAR lag seeding is silently skipped | `ModelQuality` (warning) |
-//! | 14 | Study supplies an inflow annual component (`inflow_annual_components` non-empty) while `season_map.cycle_type` is not `Monthly` — PAR(p)-A is monthly-exclusive by design | `BusinessRuleViolation` |
+//! | 13 | *(retired — number never reused)* | |
 
 use chrono::NaiveDate;
-use cobre_core::{BlockMode, EntityId, Hydro, SeasonCycleType, window_period_overlaps};
+use cobre_core::{BlockMode, EntityId, Hydro, window_period_overlaps};
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 
@@ -70,83 +69,6 @@ pub(super) fn validate_travel_time(data: &ParsedData, ctx: &mut ValidationContex
     check_chronological_confluence_heterogeneous_travel_time(data, ctx);
     check_recourse_downstream_not_operating(data, &study_durations, ctx);
     check_recourse_downstream_exit_within_window(data, &study_durations, ctx);
-}
-
-/// Row 13: warn when `recent_observations` cannot seed the PAR lag accumulator
-/// because the season cycle is not `Monthly` — the solver-side
-/// `compute_recent_observation_seed` implements only `Monthly`, so any other
-/// cycle silently zeroes the mid-period seed. Warning, never an error: a
-/// non-`Monthly` study is valid; only its lag seeding is limited (the deferred
-/// `historical-replay-non-monthly` work closes the gap).
-pub(super) fn check_recent_observations_non_monthly_seed_gap(
-    data: &ParsedData,
-    ctx: &mut ValidationContext,
-) {
-    if data.initial_conditions.recent_observations.is_empty() {
-        return;
-    }
-
-    let first_season_id = data
-        .stages
-        .stages
-        .iter()
-        .filter(|s| s.id >= 0)
-        .min_by_key(|s| s.id)
-        .and_then(|s| s.season_id);
-
-    let cycle: &str = match data.stages.policy_graph.season_map.as_ref() {
-        None => "undefined (no season_map is declared)",
-        Some(season_map) => match season_map.cycle_type {
-            SeasonCycleType::Weekly => "Weekly",
-            SeasonCycleType::Custom => "Custom",
-            SeasonCycleType::Monthly if first_season_id.is_none() => {
-                "Monthly, but the first study stage carries no season_id"
-            }
-            SeasonCycleType::Monthly => return,
-        },
-    };
-
-    ctx.add_warning(
-        ErrorKind::ModelQuality,
-        "initial_conditions.json",
-        None::<String>,
-        format!(
-            "recent_observations is non-empty but the season cycle is {cycle}; \
-             recent_observations mid-period lag seeding is implemented only for the \
-             Monthly cycle, so it is silently skipped and the mid-period lag seed is zero"
-        ),
-    );
-}
-
-/// Row 14: rejects a study supplying an inflow annual component
-/// (`inflow_annual_components` non-empty) under a non-`Monthly` season cycle.
-/// PAR(p)-A is monthly-exclusive by design — a permanent restriction.
-pub(super) fn check_annual_component_monthly_only(data: &ParsedData, ctx: &mut ValidationContext) {
-    if data.inflow_annual_components.is_empty() {
-        return;
-    }
-
-    let Some(season_map) = data.stages.policy_graph.season_map.as_ref() else {
-        return;
-    };
-
-    let cycle = match season_map.cycle_type {
-        SeasonCycleType::Weekly => "Weekly",
-        SeasonCycleType::Custom => "Custom",
-        SeasonCycleType::Monthly => return,
-    };
-
-    ctx.add_error(
-        ErrorKind::BusinessRuleViolation,
-        "scenarios/inflow_annual_component.parquet",
-        None::<String>,
-        format!(
-            "the study supplies {} inflow annual component row(s) under a {cycle} season \
-             cycle; PAR(p)-A (the annual/long-memory extension) is monthly-exclusive by design \
-             — declare a Monthly season cycle or remove the annual component",
-            data.inflow_annual_components.len()
-        ),
-    );
 }
 
 /// Whether `hydro` has not reached full commissioning at `stage_id` for a
@@ -529,11 +451,10 @@ fn check_defluence_coverage(
 mod tests {
     use super::super::test_support::*;
     use super::*;
-    use crate::scenarios::InflowAnnualComponentRow;
     use crate::stages::StagesData;
     use cobre_core::entities::Hydro;
     use cobre_core::temporal::{Block, PolicyGraph, PolicyGraphType, Stage};
-    use cobre_core::{EntityId, HydroPastDefluence, RecentObservation, SeasonMap};
+    use cobre_core::{EntityId, HydroPastDefluence};
 
     fn make_hydro_with_travel_time(id: i32, downstream_id: i32, t: Option<f64>) -> Hydro {
         let mut h = make_hydro(id, Some(downstream_id));
@@ -1092,196 +1013,6 @@ mod tests {
                 .any(|w| w.message.contains("exit_stage_id")),
             "no exit_stage_id must never emit a row-11 advisory, got: {:?}",
             ctx.warnings()
-        );
-    }
-
-    // ── Row 13: recent_observations non-Monthly seed-gap advisory ────────────
-
-    fn season_map_with_cycle(cycle: SeasonCycleType) -> SeasonMap {
-        use cobre_core::temporal::{SeasonDefinition, SeasonMap};
-        SeasonMap {
-            cycle_type: cycle,
-            seasons: vec![SeasonDefinition {
-                id: 0,
-                label: "S0".to_string(),
-                month_start: 1,
-                day_start: None,
-                month_end: None,
-                day_end: None,
-            }],
-        }
-    }
-
-    fn recent_obs(hydro_id: i32) -> RecentObservation {
-        RecentObservation {
-            hydro_id: EntityId::from(hydro_id),
-            start_date: chrono::NaiveDate::from_ymd_opt(2023, 12, 1).unwrap(),
-            end_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            value_m3s: 500.0,
-        }
-    }
-
-    /// A `ParsedData` with one hydro, three stages (`season_id = Some(0)` on the
-    /// first), and the given `season_map`. `inflow_ar_coefficients` is left empty
-    /// — callers set it via [`make_ar_row`] to declare PAR usage.
-    fn par_cycle_data(season_map: SeasonMap) -> ParsedData {
-        let mut data = make_data(
-            vec![make_hydro(1, None)],
-            vec![],
-            vec![],
-            make_stages(vec![0, 1, 2]),
-            vec![],
-            vec![],
-        );
-        data.stages.stages[0].season_id = Some(0);
-        data.stages.policy_graph.season_map = Some(season_map);
-        data
-    }
-
-    #[test]
-    fn test_weekly_cycle_with_recent_observations_warns() {
-        let mut data = make_data(
-            vec![make_hydro(1, None)],
-            vec![],
-            vec![],
-            make_stages(vec![0, 1, 2]),
-            vec![],
-            vec![],
-        );
-        data.stages.stages[0].season_id = Some(0);
-        data.stages.policy_graph.season_map = Some(season_map_with_cycle(SeasonCycleType::Weekly));
-        data.initial_conditions.recent_observations = vec![recent_obs(1)];
-
-        let mut ctx = ValidationContext::new();
-        check_recent_observations_non_monthly_seed_gap(&data, &mut ctx);
-
-        assert!(
-            !ctx.has_errors(),
-            "a Weekly-cycle study is valid, not an error"
-        );
-        assert_eq!(
-            ctx.warnings().len(),
-            1,
-            "exactly one advisory, got: {:?}",
-            ctx.warnings()
-        );
-        assert!(
-            ctx.warnings()
-                .iter()
-                .any(|w| w.kind == ErrorKind::ModelQuality
-                    && w.message.contains("Weekly")
-                    && w.message.contains("recent_observations")),
-            "expected a Weekly seed-gap advisory naming the cycle, got: {:?}",
-            ctx.warnings()
-        );
-    }
-
-    #[test]
-    fn test_monthly_cycle_no_seed_gap_warning() {
-        let mut data = make_data(
-            vec![make_hydro(1, None)],
-            vec![],
-            vec![],
-            make_stages(vec![0, 1, 2]),
-            vec![],
-            vec![],
-        );
-        data.stages.stages[0].season_id = Some(0);
-        data.stages.policy_graph.season_map = Some(make_monthly_season_map());
-        data.initial_conditions.recent_observations = vec![recent_obs(1)];
-
-        let mut ctx = ValidationContext::new();
-        check_recent_observations_non_monthly_seed_gap(&data, &mut ctx);
-
-        assert!(
-            ctx.warnings().is_empty(),
-            "Monthly cycle seeds recent_observations; no seed-gap advisory, got: {:?}",
-            ctx.warnings()
-        );
-    }
-
-    #[test]
-    fn test_empty_recent_observations_no_warning() {
-        let mut data = make_data(
-            vec![make_hydro(1, None)],
-            vec![],
-            vec![],
-            make_stages(vec![0, 1, 2]),
-            vec![],
-            vec![],
-        );
-        data.stages.stages[0].season_id = Some(0);
-        data.stages.policy_graph.season_map = Some(season_map_with_cycle(SeasonCycleType::Weekly));
-        // recent_observations left empty — the early return dominates the Weekly cycle.
-
-        let mut ctx = ValidationContext::new();
-        check_recent_observations_non_monthly_seed_gap(&data, &mut ctx);
-
-        assert!(
-            ctx.warnings().is_empty(),
-            "empty recent_observations must be silent even under a Weekly cycle, got: {:?}",
-            ctx.warnings()
-        );
-    }
-
-    // ── Row 14: non-monthly annual component reject ──────────────────────────
-
-    fn annual_component_row(hydro_id: i32) -> InflowAnnualComponentRow {
-        InflowAnnualComponentRow {
-            hydro_id: EntityId::from(hydro_id),
-            stage_id: 0,
-            annual_coefficient: -0.25,
-            annual_mean_m3s: 1500.0,
-            annual_std_m3s: 300.0,
-        }
-    }
-
-    #[test]
-    fn test_weekly_cycle_with_annual_component_rejects_naming_monthly_exclusive() {
-        let mut data = par_cycle_data(season_map_with_cycle(SeasonCycleType::Weekly));
-        data.inflow_annual_components = vec![annual_component_row(1)];
-
-        let mut ctx = ValidationContext::new();
-        check_annual_component_monthly_only(&data, &mut ctx);
-
-        let errors = ctx.errors();
-        assert_eq!(errors.len(), 1, "exactly one reject, got: {errors:?}");
-        assert!(
-            errors
-                .iter()
-                .any(|e| e.kind == ErrorKind::BusinessRuleViolation
-                    && e.message.contains("Weekly")
-                    && e.message.contains("monthly-exclusive")),
-            "expected a Weekly PAR(p)-A monthly-exclusive reject, got: {errors:?}"
-        );
-    }
-
-    #[test]
-    fn test_monthly_cycle_with_annual_component_no_reject() {
-        let mut data = par_cycle_data(make_monthly_season_map());
-        data.inflow_annual_components = vec![annual_component_row(1)];
-
-        let mut ctx = ValidationContext::new();
-        check_annual_component_monthly_only(&data, &mut ctx);
-
-        assert!(
-            !ctx.has_errors(),
-            "a Monthly-cycle study with an annual component must not reject, got: {:?}",
-            ctx.errors()
-        );
-    }
-
-    #[test]
-    fn test_weekly_cycle_without_annual_component_no_reject() {
-        let data = par_cycle_data(season_map_with_cycle(SeasonCycleType::Weekly));
-
-        let mut ctx = ValidationContext::new();
-        check_annual_component_monthly_only(&data, &mut ctx);
-
-        assert!(
-            !ctx.has_errors(),
-            "a Weekly-cycle study with no annual component must not reject, got: {:?}",
-            ctx.errors()
         );
     }
 }

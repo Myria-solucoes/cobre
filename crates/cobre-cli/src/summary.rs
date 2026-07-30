@@ -2076,7 +2076,7 @@ mod tests {
                 ar_method: Some("PACF".to_string()),
                 ar_max_order: Some(6),
                 white_noise_fallbacks: vec![],
-                historical_library_past_inflows_digest: None,
+                historical_library_seed_digest: None,
             },
             hydro_production: HydroProductionProvenance::default(),
         }
@@ -2094,7 +2094,7 @@ mod tests {
                 ar_method: None,
                 ar_max_order: None,
                 white_noise_fallbacks: vec![],
-                historical_library_past_inflows_digest: None,
+                historical_library_seed_digest: None,
             },
             hydro_production: HydroProductionProvenance::default(),
         }
@@ -2187,7 +2187,7 @@ mod tests {
                 ar_method: None,
                 ar_max_order: None,
                 white_noise_fallbacks: vec![],
-                historical_library_past_inflows_digest: None,
+                historical_library_seed_digest: None,
             },
             hydro_production: HydroProductionProvenance::default(),
         };
@@ -2216,7 +2216,7 @@ mod tests {
                 ar_method: Some("PACF".to_string()),
                 ar_max_order: Some(6),
                 white_noise_fallbacks: vec![],
-                historical_library_past_inflows_digest: None,
+                historical_library_seed_digest: None,
             },
             hydro_production,
         }

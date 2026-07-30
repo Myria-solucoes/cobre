@@ -175,11 +175,11 @@ mod tests {
     }
 
     fn minimal_hydro(id: i32) -> Hydro {
-        Hydro {
+        let mut hydro = Hydro {
+            unit_groups: Vec::new(),
             id: EntityId(id),
             name: format!("Hydro {id}"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(1),
             downstream_id: None,
             travel_time_hours: None,
             entry_stage_id: None,
@@ -202,7 +202,9 @@ mod tests {
             diversion: None,
             filling: None,
             penalties: zero_hydro_penalties(),
-        }
+        };
+        hydro.declare_mirror_unit_group(EntityId(1));
+        hydro
     }
 
     fn zero_hydro_penalties() -> HydroPenalties {

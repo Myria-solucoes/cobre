@@ -16,17 +16,15 @@ use std::collections::HashSet;
 use std::hash::BuildHasher;
 
 use cobre_core::{
-    EntityId, HydroPastInflows,
+    EntityId,
     scenario::{ExternalLoadRow, ExternalNcsRow, ExternalScenarioRow, LoadModel, NcsModel},
     temporal::{Stage, StageLagTransition},
 };
 
 use crate::StochasticError;
+use crate::par::precompute::PrecomputedPar;
 
-use crate::par::{
-    DownstreamLagAccum, EntityMajor, PrimaryLagAccum, advance_lag_chain, evaluate::solve_par_noise,
-    precompute::PrecomputedPar,
-};
+use super::eta_inversion::run_eta_inversion;
 
 // ---------------------------------------------------------------------------
 // ExternalScenarioLibrary
@@ -196,11 +194,12 @@ impl ExternalScenarioLibrary {
 /// Populate `library` with standardized eta values from external inflow rows.
 ///
 /// For each (stage, scenario, hydro), inverts the PAR(p) model via
-/// [`solve_par_noise`] to produce the noise `η` that the forward PAR pass would
-/// turn back into the raw external value, using a lag chain seeded from
-/// `past_inflows` and advanced by the `stage_lag_transitions`
-/// accumulate/finalize pattern (lags frozen within a period; shifted with the
-/// period's weighted-average raw value at each `finalize_period` boundary).
+/// [`solve_par_noise`](crate::par::evaluate::solve_par_noise) to produce the
+/// noise `η` that the forward PAR pass would turn back into the raw external
+/// value, using a lag chain seeded from `derived_lag_values` and advanced by
+/// the `stage_lag_transitions` accumulate/finalize pattern (lags frozen
+/// within a period; shifted with the period's weighted-average raw value at
+/// each `finalize_period` boundary).
 ///
 /// A `f64::NEG_INFINITY` from `solve_par_noise` (sigma=0, non-matching target)
 /// is stored as-is; V3.7 in [`validate_external_library`] rejects it.
@@ -210,7 +209,16 @@ impl ExternalScenarioLibrary {
 /// - `library` — destination, must have `n_entities() == hydro_ids.len()`
 /// - `external_rows` — raw rows sorted by `(stage_id, scenario_id, hydro_id)`
 /// - `hydro_ids` — canonical-order hydro entity IDs
-/// - `past_inflows` — pre-study history sorted by `hydro_id`; seeds the stage-0 lag chain
+/// - `derived_lag_values` — entity-major stage-0 lag seed
+///   (`derived_lag_values[pos * l_state + lag]`, lag `0` = most recent),
+///   pre-ordered by canonical hydro position so `hydro_ids`' position `pos` is
+///   used directly with no id lookup
+/// - `l_state` — per-hydro stride of `derived_lag_values`
+/// - `derived_accum` / `derived_weight` — per-hydro mid-period accumulator seed
+///   (length `n_hydros`, same canonical position as `derived_lag_values`),
+///   copied into the per-scenario accumulator/weight-accumulator at reset;
+///   empty means "no seed" — the accumulator resets to zero, matching a
+///   period-boundary start
 /// - `stage_lag_transitions` — one per stage, same length as `stages`
 /// - `downstream_par_order` — PAR order of the downstream (coarser) resolution;
 ///   `0` for uniform-resolution studies. Reuse the same value the forward pass
@@ -220,17 +228,20 @@ impl ExternalScenarioLibrary {
 /// # Panics
 ///
 /// Panics in debug builds if dimension mismatches are detected.
-// Rationale: the lag-state and accumulator buffers thread through the
-// (scenario × stage × entity) loop in strict sequence; extracting helpers would
-// pass them by mutable ref across several call boundaries.
-#[allow(clippy::too_many_lines)]
+// Rationale: the accumulator seed pair joins the lag-values seed pair; no
+// natural sub-grouping exists that would not just relocate the arity into a
+// literal struct.
+#[allow(clippy::too_many_arguments)]
 pub fn standardize_external_inflow(
     library: &mut ExternalScenarioLibrary,
     external_rows: &[ExternalScenarioRow],
     hydro_ids: &[EntityId],
     stages: &[Stage],
     par: &PrecomputedPar,
-    past_inflows: &[HydroPastInflows],
+    derived_lag_values: &[f64],
+    l_state: usize,
+    derived_accum: &[f64],
+    derived_weight: &[f64],
     stage_lag_transitions: &[StageLagTransition],
     downstream_par_order: usize,
 ) {
@@ -300,100 +311,21 @@ pub fn standardize_external_inflow(
         }
     }
 
-    // past_lag_buf[h_idx * safe_max_order + lag]
-    let safe_max_order = max_order.max(1);
-    let mut past_lag_buf = vec![0.0_f64; n_hydros * safe_max_order];
-    for pi in past_inflows {
-        if let Some(&h_idx) = hydro_index.get(&pi.hydro_id) {
-            // Fill up to `max_order` slots so PAR(p)-A annual contributions
-            // (widened across the `psi` slice) see real lag values, not zeros.
-            for (lag, &value) in pi.values_m3s.iter().enumerate().take(max_order) {
-                past_lag_buf[h_idx * safe_max_order + lag] = value;
-            }
-        }
-    }
-
-    // lag_state[h * safe_max_order + l] = lag-l value for hydro h.
-    let mut lag_state = vec![0.0_f64; n_hydros * safe_max_order];
-    let mut lag_buf = vec![0.0_f64; safe_max_order];
-    let mut lag_accum = vec![0.0_f64; n_hydros];
-    // Per-stage raw rate, one entry per hydro; read by both the eta-solve and
-    // the accumulate/spillover steps below so the lag-state advancement
-    // mirrors the forward pass's accumulation of `z_inflow`.
-    let mut raw_rate_buf = vec![0.0_f64; n_hydros];
-    // advance_lag_chain (D1) reads the pre-shift lag values from a buffer
-    // separate from the one it writes; this scenario-scratch snapshot fills
-    // that role since `lag_state` is shifted in place.
-    let mut incoming_scratch = vec![0.0_f64; n_hydros * safe_max_order];
-    let mut downstream_accumulator = if downstream_par_order > 0 {
-        vec![0.0_f64; n_hydros]
-    } else {
-        Vec::new()
-    };
-    let mut downstream_completed_lags = if downstream_par_order > 0 {
-        vec![0.0_f64; n_hydros * downstream_par_order]
-    } else {
-        Vec::new()
-    };
-
-    for scenario in 0..n_scenarios {
-        // Each scenario starts from the same past_inflows-seeded lag state.
-        lag_state.copy_from_slice(&past_lag_buf);
-        lag_accum.fill(0.0);
-        let mut lag_weight_accum = 0.0_f64;
-        downstream_accumulator.fill(0.0);
-        downstream_completed_lags.fill(0.0);
-        let mut downstream_weight_accum = 0.0_f64;
-        let mut downstream_n_completed = 0_usize;
-
-        for t in 0..n_stages {
-            let stage_lag = &stage_lag_transitions[t];
-
-            for h in 0..n_hydros {
-                let raw_target = raw_values[t * n_scenarios * n_hydros + scenario * n_hydros + h];
-                raw_rate_buf[h] = raw_target;
-
-                // Full-length lag_buf so PAR(p)-A annual contributions (widened
-                // across the `psi` slice) participate in the η inversion.
-                for (l, slot) in lag_buf.iter_mut().enumerate() {
-                    *slot = lag_state[h * safe_max_order + l];
-                }
-
-                let det_base = par.deterministic_base(t, h);
-                let psi = par.psi_slice(t, h);
-                let sigma = par.sigma(t, h);
-
-                let eta = solve_par_noise(det_base, psi, &lag_buf, sigma, raw_target);
-
-                library.eta_slice_mut(t, scenario)[h] = eta;
-            }
-
-            incoming_scratch.copy_from_slice(&lag_state);
-            let mut primary = PrimaryLagAccum {
-                accumulator: &mut lag_accum,
-                weight_accum: &mut lag_weight_accum,
-            };
-            let mut downstream = DownstreamLagAccum {
-                accumulator: &mut downstream_accumulator,
-                weight_accum: &mut downstream_weight_accum,
-                completed_lags: &mut downstream_completed_lags,
-                n_completed: &mut downstream_n_completed,
-                par_order: downstream_par_order,
-            };
-            advance_lag_chain(
-                EntityMajor {
-                    entity_count: n_hydros,
-                    max_order: safe_max_order,
-                },
-                &mut lag_state,
-                &incoming_scratch,
-                &raw_rate_buf[..n_hydros],
-                stage_lag,
-                &mut primary,
-                &mut downstream,
-            );
-        }
-    }
+    run_eta_inversion(
+        n_stages,
+        n_scenarios,
+        n_hydros,
+        max_order,
+        par,
+        derived_lag_values,
+        l_state,
+        derived_accum,
+        derived_weight,
+        stage_lag_transitions,
+        downstream_par_order,
+        |t, scenario, h| raw_values[t * n_scenarios * n_hydros + scenario * n_hydros + h],
+        |t, scenario, h, eta| library.eta_slice_mut(t, scenario)[h] = eta,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -791,13 +723,14 @@ pub fn pad_library_to_uniform(library: &mut ExternalScenarioLibrary) {
 mod tests {
     use chrono::NaiveDate;
     use cobre_core::{
-        EntityId, HydroPastInflows,
+        EntityId, Hydro, HydroGenerationModel, HydroPenalties, InflowHistoryRow, RecentObservation,
         scenario::{
-            ExternalLoadRow, ExternalNcsRow, ExternalScenarioRow, InflowModel, LoadModel, NcsModel,
+            AnnualComponent, ExternalLoadRow, ExternalNcsRow, ExternalScenarioRow, InflowModel,
+            LoadModel, NcsModel,
         },
         temporal::{
-            Block, BlockMode, NoiseMethod, ScenarioSourceConfig, Stage, StageLagTransition,
-            StageRiskConfig, StageStateConfig,
+            Block, BlockMode, NoiseMethod, ScenarioSourceConfig, SeasonCycleType, SeasonDefinition,
+            SeasonMap, Stage, StageLagTransition, StageRiskConfig, StageStateConfig,
         },
     };
 
@@ -805,7 +738,13 @@ mod tests {
         ExternalScenarioLibrary, standardize_external_inflow, standardize_external_load,
         standardize_external_ncs,
     };
-    use crate::par::{evaluate::evaluate_par, precompute::PrecomputedPar};
+    use crate::derive_inflow_seeds;
+    use crate::par::{
+        DownstreamLagAccum, EntityMajor, PrimaryLagAccum, advance_lag_chain,
+        evaluate::{evaluate_par, solve_par_noise},
+        precompute::PrecomputedPar,
+        precompute_stage_lag_transitions,
+    };
 
     /// Build `n_stages` uniform-monthly transitions: each stage finalizes its own
     /// period with full weight and no spillover (the simple per-stage path).
@@ -911,7 +850,7 @@ mod tests {
                 value_m3s: 90.0,
             },
         ];
-        // AR(0) has no lags; past_inflows is irrelevant but must be provided.
+        // AR(0) has no lags; the derived seed is irrelevant but must be provided.
         let transitions = uniform_monthly_transitions(stages.len());
         standardize_external_inflow(
             &mut lib,
@@ -919,6 +858,9 @@ mod tests {
             &hydro_ids,
             &stages,
             &par,
+            &[],
+            0,
+            &[],
             &[],
             &transitions,
             0,
@@ -937,11 +879,10 @@ mod tests {
         );
     }
 
-    /// AR(1): stage 0 must use `past_inflows` (110.0) as lag-1,
+    /// AR(1): stage 0 must use the derived lag seed (110.0) as lag-1,
     /// stage 1 must use the raw external value from stage 0 (130.0) as lag-1.
     ///
-    /// Parameters: base=80, psi=[0.5], sigma=25.
-    /// `past_inflows`: `values_m3s`=[110.0] for hydro 1.
+    /// Parameters: base=80, psi=[0.5], sigma=25. Derived lag seed: `[110.0]`.
     #[test]
     fn test_inflow_ar1_uses_external_lags() {
         let hydro_id = EntityId(1);
@@ -978,12 +919,8 @@ mod tests {
             },
         ];
 
-        // past_inflows provides lag-1 = 110.0 for stage 0.
-        let past_inflows = vec![HydroPastInflows {
-            hydro_id,
-            values_m3s: vec![110.0],
-            season_ids: None,
-        }];
+        // Derived lag seed provides lag-1 = 110.0 for stage 0.
+        let derived_lag_values = [110.0];
         let transitions = uniform_monthly_transitions(stages.len());
         standardize_external_inflow(
             &mut lib,
@@ -991,12 +928,15 @@ mod tests {
             &hydro_ids,
             &stages,
             &par,
-            &past_inflows,
+            &derived_lag_values,
+            1,
+            &[],
+            &[],
             &transitions,
             0,
         );
 
-        // Stage 0: lag-1 = 110.0 (from past_inflows).
+        // Stage 0: lag-1 = 110.0 (from the derived seed).
         // eta_0 = (130.0 - 80.0 - 0.5 * 110.0) / 25.0 = (130 - 80 - 55) / 25 = -5/25 = -0.2
         let det_base_0 = par.deterministic_base(0, 0);
         let psi_0 = par.psi_slice(0, 0)[0];
@@ -1026,10 +966,9 @@ mod tests {
     ///   stage 1: `accumulate_weight`=0.4, `finalize_period`=false
     ///   stage 2: `accumulate_weight`=0.2, `finalize_period`=true
     ///
-    /// Parameters: base=80, psi=\[0.5\], sigma=25.
-    /// `past_inflows` provides lag-1 = 110.0.
+    /// Parameters: base=80, psi=\[0.5\], sigma=25. Derived lag seed provides lag-1 = 110.0.
     ///
-    /// Stages 0 and 1 must use the frozen `past_inflows` lag (110.0), NOT the
+    /// Stages 0 and 1 must use the frozen derived-seed lag (110.0), NOT the
     /// previous stage's raw value. Stage 2 also uses 110.0 (still frozen during
     /// that stage's `solve_par_noise` call, since the shift happens after). The
     /// weighted average computed at finalize is: (200*0.4 + 160*0.4 + 120*0.2) = 168.0.
@@ -1112,12 +1051,8 @@ mod tests {
             },
         ];
 
-        // past_inflows lag-1 = 110.0 for hydro 1.
-        let past_inflows = vec![HydroPastInflows {
-            hydro_id,
-            values_m3s: vec![110.0],
-            season_ids: None,
-        }];
+        // Derived lag seed: lag-1 = 110.0 for hydro 1.
+        let derived_lag_values = [110.0];
 
         standardize_external_inflow(
             &mut lib,
@@ -1125,7 +1060,10 @@ mod tests {
             &hydro_ids,
             &stages,
             &par,
-            &past_inflows,
+            &derived_lag_values,
+            1,
+            &[],
+            &[],
             &transitions,
             0,
         );
@@ -1134,7 +1072,7 @@ mod tests {
         let psi = par.psi_slice(0, 0)[0];
         let sigma = par.sigma(0, 0);
 
-        // All three stages use the frozen lag-1 = 110.0 (from past_inflows).
+        // All three stages use the frozen lag-1 = 110.0 (from the derived seed).
         // The lag state is NOT shifted until stage 2 finalizes the period —
         // and even at stage 2 the shift happens AFTER solve_par_noise.
         let frozen_lag = 110.0_f64;
@@ -1173,11 +1111,11 @@ mod tests {
     /// stage 0: `accumulate_weight`=0.7, `spillover_weight`=0.3, `finalize_period`=true
     /// stage 1: `accumulate_weight`=1.0, `spillover_weight`=0.0, `finalize_period`=true
     ///
-    /// Parameters: base=80, psi=\[0.5\], sigma=25. `past_inflows` lag-1 = 110.0.
+    /// Parameters: base=80, psi=\[0.5\], sigma=25. Derived lag seed: lag-1 = 110.0.
     /// raw values: stage 0 = 150.0, stage 1 = 130.0.
     ///
     /// Stage 0 computation:
-    ///   lag for `solve_par_noise` = 110.0 (frozen from `past_inflows`)
+    ///   lag for `solve_par_noise` = 110.0 (frozen from the derived seed)
     ///   accumulate: `lag_accum[0]` = 150.0 * 0.7 = 105.0, `lag_weight` = 0.7
     ///   finalize: avg = 105.0 / 0.7 = 150.0; `lag_state[0]` shifts to 150.0
     ///   spillover seed: `lag_accum[0]` = 150.0 * 0.3 = 45.0, `lag_weight` = 0.3
@@ -1238,11 +1176,7 @@ mod tests {
             },
         ];
 
-        let past_inflows = vec![HydroPastInflows {
-            hydro_id,
-            values_m3s: vec![110.0],
-            season_ids: None,
-        }];
+        let derived_lag_values = [110.0];
 
         standardize_external_inflow(
             &mut lib,
@@ -1250,7 +1184,10 @@ mod tests {
             &hydro_ids,
             &stages,
             &par,
-            &past_inflows,
+            &derived_lag_values,
+            1,
+            &[],
+            &[],
             &transitions,
             0,
         );
@@ -1259,7 +1196,7 @@ mod tests {
         let psi = par.psi_slice(0, 0)[0];
         let sigma = par.sigma(0, 0);
 
-        // Stage 0: lag-1 = 110.0 (frozen from past_inflows before any finalize).
+        // Stage 0: lag-1 = 110.0 (frozen from the derived seed before any finalize).
         let expected_eta_0 = (150.0 - det_base - psi * 110.0) / sigma;
         let eta_0 = lib.eta_slice(0, 0)[0];
         assert!(
@@ -1363,6 +1300,9 @@ mod tests {
             &hydro_ids,
             &stages,
             &par,
+            &[],
+            0,
+            &[],
             &[],
             &transitions,
             1, // downstream_par_order: one completed quarter needed to rebuild
@@ -2044,11 +1984,7 @@ mod tests {
             }
         }
 
-        let past_inflows = vec![HydroPastInflows {
-            hydro_id,
-            values_m3s: vec![past_lag],
-            season_ids: None,
-        }];
+        let derived_lag_values = [past_lag];
 
         let raw = vec![n_scenarios; n_stages];
         let mut lib = ExternalScenarioLibrary::new(n_stages, n_scenarios, 1, "inflow", raw);
@@ -2058,7 +1994,10 @@ mod tests {
             &hydro_ids,
             &stages,
             &par,
-            &past_inflows,
+            &derived_lag_values,
+            1,
+            &[],
+            &[],
             &stage_lag_transitions,
             0,
         );
@@ -2067,7 +2006,7 @@ mod tests {
         // `standardize_external_inflow` and assert that `evaluate_par` reproduces
         // the original target within 1e-10 at every (stage, scenario).
         for (scenario, scenario_targets) in targets.iter().enumerate() {
-            let mut lag_buf = vec![past_lag]; // lag-1 initialized from past_inflows
+            let mut lag_buf = vec![past_lag]; // lag-1 initialized from the derived seed
             let mut accum = 0.0_f64;
             let mut weight_accum = 0.0_f64;
 
@@ -2279,6 +2218,597 @@ mod tests {
                     "stage {s} scenario {k} must be unchanged",
                 );
             }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Derived-seed replay: the replay seeds from the same derived lag state as
+    // the forward pass, so z == v.
+    // -----------------------------------------------------------------------
+
+    fn d(y: i32, m: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    fn monthly_season_map() -> SeasonMap {
+        let seasons: Vec<SeasonDefinition> = (0..12u32)
+            .map(|i| SeasonDefinition {
+                id: i as usize,
+                label: format!("Month{}", i + 1),
+                month_start: i + 1,
+                day_start: None,
+                month_end: None,
+                day_end: None,
+            })
+            .collect();
+        SeasonMap {
+            cycle_type: SeasonCycleType::Monthly,
+            seasons,
+        }
+    }
+
+    fn dated_stage(
+        index: usize,
+        id: i32,
+        start: NaiveDate,
+        end: NaiveDate,
+        season_id: usize,
+    ) -> Stage {
+        Stage {
+            index,
+            id,
+            start_date: start,
+            end_date: end,
+            season_id: Some(season_id),
+            blocks: vec![Block {
+                index: 0,
+                name: "SINGLE".to_string(),
+                duration_hours: 744.0,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: true,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        }
+    }
+
+    fn make_hydro(id: i32) -> Hydro {
+        Hydro {
+            unit_groups: Vec::new(),
+            id: EntityId(id),
+            name: format!("H{id}"),
+            operational_start_date: d(2020, 1, 1),
+            downstream_id: None,
+            travel_time_hours: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 100.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 100.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: HydroPenalties {
+                spillage_cost: 0.0,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 0.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+        }
+    }
+
+    /// With no conditioning, the derived lag seed carries exactly the same
+    /// values a pre-windowing literal seed would have held, so threading it
+    /// through the per-(stage, hydro) `solve_par_noise` calls reproduces the
+    /// eta a hard-coded seed of those values would have produced. Covers 2
+    /// hydros and a 2-lag stride so a transposed `(hydro, lag)` index in the
+    /// fill loop would be caught.
+    #[test]
+    fn standardize_external_eta_matches_positional_seed() {
+        let h1 = EntityId(1);
+        let h2 = EntityId(2);
+        let hydro_ids = vec![h1, h2];
+        let hydros = vec![make_hydro(1), make_hydro(2)];
+        let season_map = monthly_season_map();
+
+        let stages = vec![dated_stage(0, 0, d(2024, 1, 1), d(2024, 2, 1), 0)];
+        let first_stage = stages[0].clone();
+
+        let models = vec![
+            make_inflow_model(1, 0, 300.0, 40.0, vec![0.3, 0.1]),
+            make_inflow_model(2, 0, 500.0, 60.0, vec![0.2, 0.05]),
+        ];
+        let par = PrecomputedPar::build(&models, &stages, &hydro_ids, None).unwrap();
+        let l_state = par.max_order();
+        assert_eq!(l_state, 2);
+
+        let record = vec![
+            InflowHistoryRow {
+                hydro_id: h1,
+                start_date: d(2023, 12, 1),
+                end_date: d(2024, 1, 1),
+                value_m3s: 110.0,
+            },
+            InflowHistoryRow {
+                hydro_id: h1,
+                start_date: d(2023, 11, 1),
+                end_date: d(2023, 12, 1),
+                value_m3s: 120.0,
+            },
+            InflowHistoryRow {
+                hydro_id: h2,
+                start_date: d(2023, 12, 1),
+                end_date: d(2024, 1, 1),
+                value_m3s: 210.0,
+            },
+            InflowHistoryRow {
+                hydro_id: h2,
+                start_date: d(2023, 11, 1),
+                end_date: d(2023, 12, 1),
+                value_m3s: 220.0,
+            },
+        ];
+        let derived =
+            derive_inflow_seeds(&record, &[], &hydros, &first_stage, &season_map, l_state);
+        assert_eq!(derived.lag_values, vec![110.0, 120.0, 210.0, 220.0]);
+
+        let rows = vec![
+            ExternalScenarioRow {
+                stage_id: 0,
+                scenario_id: 0,
+                hydro_id: h1,
+                value_m3s: 250.0,
+            },
+            ExternalScenarioRow {
+                stage_id: 0,
+                scenario_id: 0,
+                hydro_id: h2,
+                value_m3s: 300.0,
+            },
+        ];
+        let transitions = uniform_monthly_transitions(1);
+
+        let mut lib = ExternalScenarioLibrary::new(1, 1, 2, "inflow", vec![1]);
+        standardize_external_inflow(
+            &mut lib,
+            &rows,
+            &hydro_ids,
+            &stages,
+            &par,
+            &derived.lag_values,
+            l_state,
+            &[],
+            &[],
+            &transitions,
+            0,
+        );
+
+        let expected_h1 = solve_par_noise(
+            par.deterministic_base(0, 0),
+            par.psi_slice(0, 0),
+            &[110.0, 120.0],
+            par.sigma(0, 0),
+            250.0,
+        );
+        let expected_h2 = solve_par_noise(
+            par.deterministic_base(0, 1),
+            par.psi_slice(0, 1),
+            &[210.0, 220.0],
+            par.sigma(0, 1),
+            300.0,
+        );
+
+        let eta = lib.eta_slice(0, 0);
+        assert_eq!(
+            eta[0], expected_h1,
+            "hydro 1 eta must match the positional-seed formula"
+        );
+        assert_eq!(
+            eta[1], expected_h2,
+            "hydro 2 eta must match the positional-seed formula"
+        );
+    }
+
+    /// External replay seeds from the same derived lag state as the forward
+    /// pass, so the inverted noise reconstructs the raw value exactly even
+    /// with PAR(p)-A annual coupling, a mid-year study start (April, not
+    /// January), and a conditioning window shadowing the most recent pre-study
+    /// history.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn external_eta_round_trip_exact_under_conditioning() {
+        let hydro_id = EntityId(1);
+        let hydro_ids = vec![hydro_id];
+        let hydros = vec![make_hydro(1)];
+        let season_map = monthly_season_map();
+
+        let stages = vec![
+            dated_stage(0, 0, d(2026, 4, 1), d(2026, 5, 1), 3),
+            dated_stage(1, 1, d(2026, 5, 1), d(2026, 6, 1), 4),
+            dated_stage(2, 2, d(2026, 6, 1), d(2026, 7, 1), 5),
+            dated_stage(3, 3, d(2026, 7, 1), d(2026, 8, 1), 6),
+        ];
+        let first_stage = stages[0].clone();
+
+        let annual = AnnualComponent {
+            coefficient: -0.18,
+            mean_m3s: 95.0,
+            std_m3s: 22.0,
+        };
+        let mut all_models: Vec<InflowModel> = (-12_i32..0)
+            .map(|sid| InflowModel {
+                hydro_id,
+                stage_id: sid,
+                mean_m3s: 90.0,
+                std_m3s: 20.0,
+                ar_coefficients: vec![0.4],
+                residual_std_ratio: 0.85,
+                annual: Some(annual.clone()),
+            })
+            .collect();
+        all_models.extend((0_i32..4).map(|sid| InflowModel {
+            hydro_id,
+            stage_id: sid,
+            mean_m3s: 100.0 + f64::from(sid) * 5.0,
+            std_m3s: 25.0 + f64::from(sid),
+            ar_coefficients: vec![0.4],
+            residual_std_ratio: 0.85,
+            annual: Some(annual.clone()),
+        }));
+        let par = PrecomputedPar::build(&all_models, &stages, &hydro_ids, None).unwrap();
+        let l_state = par.max_order();
+        assert_eq!(
+            l_state, 12,
+            "PAR-A annual coupling must widen max_order to 12"
+        );
+
+        // 12 months of inflow_history immediately preceding the study (April
+        // 2025 through March 2026).
+        let record_months = [
+            (2025, 4),
+            (2025, 5),
+            (2025, 6),
+            (2025, 7),
+            (2025, 8),
+            (2025, 9),
+            (2025, 10),
+            (2025, 11),
+            (2025, 12),
+            (2026, 1),
+            (2026, 2),
+            (2026, 3),
+        ];
+        let record: Vec<InflowHistoryRow> = record_months
+            .iter()
+            .enumerate()
+            .map(|(i, &(year, month))| {
+                let start = d(year, month, 1);
+                let end = if month == 12 {
+                    d(year + 1, 1, 1)
+                } else {
+                    d(year, month + 1, 1)
+                };
+                InflowHistoryRow {
+                    hydro_id,
+                    start_date: start,
+                    end_date: end,
+                    value_m3s: 100.0 + f64::from(i32::try_from(i).unwrap()) * 3.0,
+                }
+            })
+            .collect();
+
+        // The conditioning window shadows the two most recent pre-study
+        // months (Feb and March 2026) with distinct, more-recent observations
+        // — the scenario a plain historical read would miss.
+        let conditioning = vec![
+            RecentObservation {
+                hydro_id,
+                start_date: d(2026, 2, 1),
+                end_date: d(2026, 3, 1),
+                value_m3s: 555.0,
+            },
+            RecentObservation {
+                hydro_id,
+                start_date: d(2026, 3, 1),
+                end_date: d(2026, 4, 1),
+                value_m3s: 777.0,
+            },
+        ];
+
+        let derived = derive_inflow_seeds(
+            &record,
+            &conditioning,
+            &hydros,
+            &first_stage,
+            &season_map,
+            l_state,
+        );
+        assert_eq!(derived.lag_values.len(), l_state);
+        // The conditioning window must actually have shadowed the two most
+        // recent record months, or this scenario would not exercise
+        // conditioning at all.
+        assert_eq!(derived.lag_values[0], 777.0);
+        assert_eq!(derived.lag_values[1], 555.0);
+
+        // Forward-generate raw external targets from the derived seed with an
+        // arbitrary noise sequence, advancing the lag chain the same way the
+        // uniform-monthly transitions below do.
+        let stage_lag_transitions = uniform_monthly_transitions(stages.len());
+        let eta_sequence = [0.35_f64, -0.6, 0.9, -0.2];
+        let mut lag_state = derived.lag_values.clone();
+        let mut targets = Vec::with_capacity(stages.len());
+        for (t, &eta) in eta_sequence.iter().enumerate() {
+            let det_base = par.deterministic_base(t, 0);
+            let psi = par.psi_slice(t, 0);
+            let sigma = par.sigma(t, 0);
+            let value = evaluate_par(det_base, psi, &lag_state, sigma, eta);
+            targets.push(value);
+            for l in (1..lag_state.len()).rev() {
+                lag_state[l] = lag_state[l - 1];
+            }
+            lag_state[0] = value;
+        }
+
+        let rows: Vec<ExternalScenarioRow> = targets
+            .iter()
+            .enumerate()
+            .map(|(t, &value_m3s)| ExternalScenarioRow {
+                stage_id: i32::try_from(t).unwrap(),
+                scenario_id: 0,
+                hydro_id,
+                value_m3s,
+            })
+            .collect();
+
+        let mut lib =
+            ExternalScenarioLibrary::new(stages.len(), 1, 1, "inflow", vec![1; stages.len()]);
+        standardize_external_inflow(
+            &mut lib,
+            &rows,
+            &hydro_ids,
+            &stages,
+            &par,
+            &derived.lag_values,
+            l_state,
+            &derived.accum,
+            &derived.weight,
+            &stage_lag_transitions,
+            0,
+        );
+
+        // Replay from the same derived seed: inverting the stored eta must
+        // reconstruct each forward-generated target exactly (z == v).
+        let mut replay_lag_state = derived.lag_values.clone();
+        for (t, &target) in targets.iter().enumerate() {
+            let eta = lib.eta_slice(t, 0)[0];
+            let det_base = par.deterministic_base(t, 0);
+            let psi = par.psi_slice(t, 0);
+            let sigma = par.sigma(t, 0);
+            let reconstructed = evaluate_par(det_base, psi, &replay_lag_state, sigma, eta);
+            assert!(
+                (reconstructed - target).abs() < 1e-9,
+                "stage {t}: replay reconstructed {reconstructed:.12} != forward target {target:.12}",
+            );
+            for l in (1..replay_lag_state.len()).rev() {
+                replay_lag_state[l] = replay_lag_state[l - 1];
+            }
+            replay_lag_state[0] = target;
+        }
+    }
+
+    /// A study whose stage 0 starts mid-coarse-period, with pre-study record
+    /// coverage seeding a genuine partial `accum`/`weight`, exercises a
+    /// divergence no monthly-boundary fixture above can reach (every one of
+    /// those starts exactly on the 1st, making the in-progress seed inert).
+    /// Forward generation and `standardize_external_inflow`'s replay reset
+    /// both advance the lag chain from the same `derived.accum`/`derived.weight`
+    /// seed, so `z == v`.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn external_eta_round_trip_exact_mid_coarse_period() {
+        let hydro_id = EntityId(1);
+        let hydro_ids = vec![hydro_id];
+        let hydros = vec![make_hydro(1)];
+        let season_map = monthly_season_map();
+
+        // Stage 0 starts April 11: the in-progress occurrence [April 1,
+        // April 11) is non-empty, and the remaining 20 of April's 30 days
+        // still finalize within stage 0.
+        let stages = vec![
+            dated_stage(0, 0, d(2026, 4, 11), d(2026, 5, 1), 3),
+            dated_stage(1, 1, d(2026, 5, 1), d(2026, 6, 1), 4),
+        ];
+        let first_stage = stages[0].clone();
+
+        let models = vec![
+            make_inflow_model(1, 0, 160.0, 25.0, vec![0.5]),
+            make_inflow_model(1, 1, 160.0, 25.0, vec![0.5]),
+        ];
+        let par = PrecomputedPar::build(&models, &stages, &hydro_ids, None).unwrap();
+        let l_state = par.max_order();
+        assert_eq!(l_state, 1, "AR(1) with no annual coupling stays order 1");
+
+        let record = vec![
+            InflowHistoryRow {
+                hydro_id,
+                start_date: d(2026, 3, 1),
+                end_date: d(2026, 4, 1),
+                value_m3s: 300.0,
+            },
+            InflowHistoryRow {
+                hydro_id,
+                start_date: d(2026, 4, 1),
+                end_date: d(2026, 4, 11),
+                value_m3s: 200.0,
+            },
+        ];
+
+        let derived =
+            derive_inflow_seeds(&record, &[], &hydros, &first_stage, &season_map, l_state);
+        assert_eq!(derived.lag_values.len(), l_state);
+        assert_eq!(derived.lag_values[0], 300.0);
+        assert!(
+            derived.weight[0] > 0.0 && derived.weight[0] < 1.0,
+            "the accumulator seed must be a genuine partial-coverage fraction \
+             in (0, 1), or this test is a tautology (every monthly-boundary \
+             fixture misses the bug this way); got weight={}",
+            derived.weight[0]
+        );
+
+        let stage_lag_transitions = precompute_stage_lag_transitions(&stages, &season_map, 0);
+        assert!(
+            stage_lag_transitions[0].finalize_period && stage_lag_transitions[1].finalize_period,
+            "both stages must finalize their own period for this fixture to \
+             exercise a mid-period accumulate/finalize transition"
+        );
+
+        // Forward-generate targets by advancing the SEEDED lag chain exactly
+        // as the training/simulation forward pass does: the accumulator
+        // starts from `derived.accum`/`derived.weight`, not zero.
+        let eta_sequence = [0.35_f64, -0.6];
+        let mut lag_state = derived.lag_values.clone();
+        let mut accum = derived.accum.clone();
+        let mut weight = derived.weight.clone();
+        let mut incoming_scratch = vec![0.0_f64; l_state];
+        let mut downstream_accumulator: Vec<f64> = Vec::new();
+        let mut downstream_weight_accum = 0.0_f64;
+        let mut downstream_completed_lags: Vec<f64> = Vec::new();
+        let mut downstream_n_completed = 0_usize;
+        let mut targets = Vec::with_capacity(stages.len());
+        for (t, &eta) in eta_sequence.iter().enumerate() {
+            let det_base = par.deterministic_base(t, 0);
+            let psi = par.psi_slice(t, 0);
+            let sigma = par.sigma(t, 0);
+            let value = evaluate_par(det_base, psi, &lag_state, sigma, eta);
+            targets.push(value);
+
+            incoming_scratch.copy_from_slice(&lag_state);
+            let mut primary = PrimaryLagAccum {
+                accumulator: &mut accum,
+                weight_accum: &mut weight,
+            };
+            let mut downstream = DownstreamLagAccum {
+                accumulator: &mut downstream_accumulator,
+                weight_accum: &mut downstream_weight_accum,
+                completed_lags: &mut downstream_completed_lags,
+                n_completed: &mut downstream_n_completed,
+                par_order: 0,
+            };
+            advance_lag_chain(
+                EntityMajor {
+                    entity_count: 1,
+                    max_order: l_state,
+                },
+                &mut lag_state,
+                &incoming_scratch,
+                &[value],
+                &stage_lag_transitions[t],
+                &mut primary,
+                &mut downstream,
+            );
+        }
+
+        let rows: Vec<ExternalScenarioRow> = targets
+            .iter()
+            .enumerate()
+            .map(|(t, &value_m3s)| ExternalScenarioRow {
+                stage_id: i32::try_from(t).unwrap(),
+                scenario_id: 0,
+                hydro_id,
+                value_m3s,
+            })
+            .collect();
+
+        let mut lib =
+            ExternalScenarioLibrary::new(stages.len(), 1, 1, "inflow", vec![1; stages.len()]);
+        standardize_external_inflow(
+            &mut lib,
+            &rows,
+            &hydro_ids,
+            &stages,
+            &par,
+            &derived.lag_values,
+            l_state,
+            &derived.accum,
+            &derived.weight,
+            &stage_lag_transitions,
+            0,
+        );
+
+        // Replay from the SAME seeded lag chain the production forward pass
+        // would carry, inverting the stored eta; z must equal v.
+        let mut replay_lag_state = derived.lag_values.clone();
+        let mut replay_accum = derived.accum.clone();
+        let mut replay_weight = derived.weight.clone();
+        let mut replay_downstream_accumulator: Vec<f64> = Vec::new();
+        let mut replay_downstream_weight_accum = 0.0_f64;
+        let mut replay_downstream_completed_lags: Vec<f64> = Vec::new();
+        let mut replay_downstream_n_completed = 0_usize;
+        for (t, &target) in targets.iter().enumerate() {
+            let eta = lib.eta_slice(t, 0)[0];
+            let det_base = par.deterministic_base(t, 0);
+            let psi = par.psi_slice(t, 0);
+            let sigma = par.sigma(t, 0);
+            let reconstructed = evaluate_par(det_base, psi, &replay_lag_state, sigma, eta);
+            assert!(
+                (reconstructed - target).abs() < 1e-9,
+                "stage {t}: mid-period replay reconstructed {reconstructed:.12} \
+                 (z) != forward target {target:.12} (v)",
+            );
+
+            incoming_scratch.copy_from_slice(&replay_lag_state);
+            let mut primary = PrimaryLagAccum {
+                accumulator: &mut replay_accum,
+                weight_accum: &mut replay_weight,
+            };
+            let mut downstream = DownstreamLagAccum {
+                accumulator: &mut replay_downstream_accumulator,
+                weight_accum: &mut replay_downstream_weight_accum,
+                completed_lags: &mut replay_downstream_completed_lags,
+                n_completed: &mut replay_downstream_n_completed,
+                par_order: 0,
+            };
+            advance_lag_chain(
+                EntityMajor {
+                    entity_count: 1,
+                    max_order: l_state,
+                },
+                &mut replay_lag_state,
+                &incoming_scratch,
+                &[target],
+                &stage_lag_transitions[t],
+                &mut primary,
+                &mut downstream,
+            );
         }
     }
 }

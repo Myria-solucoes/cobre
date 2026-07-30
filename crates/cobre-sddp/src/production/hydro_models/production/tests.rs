@@ -78,11 +78,11 @@ fn zero_penalties() -> HydroPenalties {
 }
 
 fn make_hydro(id: i32, model: HydroGenerationModel) -> Hydro {
-    Hydro {
+    let mut hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId::from(id),
         name: format!("Hydro{id}"),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId::from(10),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -105,7 +105,9 @@ fn make_hydro(id: i32, model: HydroGenerationModel) -> Hydro {
         diversion: None,
         filling: None,
         penalties: zero_penalties(),
-    }
+    };
+    hydro.declare_mirror_unit_group(EntityId::from(10));
+    hydro
 }
 
 fn valid_row(hydro_id: i32, stage_id: Option<i32>, plane_id: i32) -> FphaHyperplaneRow {
@@ -1873,9 +1875,11 @@ fn coverage_gap_returns_validation_error() {
 // ── long-term mean inflow for the lateral secant ────────────────────
 
 fn inflow_row(hydro_id: i32, day: u32, value_m3s: f64) -> InflowHistoryRow {
+    let start_date = NaiveDate::from_ymd_opt(2000, 1, day).unwrap();
     InflowHistoryRow {
         hydro_id: EntityId::from(hydro_id),
-        date: NaiveDate::from_ymd_opt(2000, 1, day).unwrap(),
+        start_date,
+        end_date: start_date.succ_opt().unwrap(),
         value_m3s,
     }
 }

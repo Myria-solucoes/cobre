@@ -8,9 +8,21 @@
 
 mod helpers;
 
+use std::collections::HashSet;
+use std::path::Path;
+
+use arrow::array::{Array, Int32Array};
+use arrow::record_batch::RecordBatch;
 use cobre_core::AnticipatedConfig;
 use cobre_core::EntityId;
-use cobre_io::{deserialize_system, load_case, serialize_system};
+use cobre_core::System;
+use cobre_io::constraints::ThermalBoundsRow;
+use cobre_io::output::simulation_writer::{
+    HydroBusWriteRecord, HydroWriteRecord, ScenarioWritePayload, SimulationParquetWriter,
+    StageWritePayload,
+};
+use cobre_io::{ParquetWriterConfig, deserialize_system, load_case, serialize_system};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use tempfile::TempDir;
 
 // ── test_minimal_valid_case ────────────────────────────────────────────────────
@@ -259,24 +271,39 @@ fn test_inflow_history_wired_into_system() {
     std::fs::write(
         dir.path().join("system/hydros.json"),
         r#"{ "hydros": [
-            { "id": 1, "name": "H1", "operational_start_date": "2024-01-01", "bus_id": 1, "downstream_id": null,
+            { "id": 1, "name": "H1", "operational_start_date": "2024-01-01", "downstream_id": null,
               "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
               "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
               "generation": { "model": "constant_productivity",
                 "min_turbined_m3s": 0.0, "max_turbined_m3s": 200.0,
-                "min_generation_mw": 0.0, "max_generation_mw": 200.0 } },
-            { "id": 2, "name": "H2", "operational_start_date": "2024-01-01", "bus_id": 1, "downstream_id": null,
+                "min_generation_mw": 0.0, "max_generation_mw": 200.0 },
+              "unit_groups": [
+                { "id": 0, "name": "H1", "bus_id": 1,
+                  "min_generation_mw": 0.0, "max_generation_mw": 200.0,
+                  "min_turbined_m3s": 0.0, "max_turbined_m3s": 200.0 }
+              ] },
+            { "id": 2, "name": "H2", "operational_start_date": "2024-01-01", "downstream_id": null,
               "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 500.0 },
               "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
               "generation": { "model": "constant_productivity",
                 "min_turbined_m3s": 0.0, "max_turbined_m3s": 100.0,
-                "min_generation_mw": 0.0, "max_generation_mw": 100.0 } },
-            { "id": 3, "name": "H3", "operational_start_date": "2024-01-01", "bus_id": 1, "downstream_id": null,
+                "min_generation_mw": 0.0, "max_generation_mw": 100.0 },
+              "unit_groups": [
+                { "id": 0, "name": "H2", "bus_id": 1,
+                  "min_generation_mw": 0.0, "max_generation_mw": 100.0,
+                  "min_turbined_m3s": 0.0, "max_turbined_m3s": 100.0 }
+              ] },
+            { "id": 3, "name": "H3", "operational_start_date": "2024-01-01", "downstream_id": null,
               "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 300.0 },
               "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
               "generation": { "model": "constant_productivity",
                 "min_turbined_m3s": 0.0, "max_turbined_m3s": 80.0,
-                "min_generation_mw": 0.0, "max_generation_mw": 80.0 } }
+                "min_generation_mw": 0.0, "max_generation_mw": 80.0 },
+              "unit_groups": [
+                { "id": 0, "name": "H3", "bus_id": 1,
+                  "min_generation_mw": 0.0, "max_generation_mw": 80.0,
+                  "min_turbined_m3s": 0.0, "max_turbined_m3s": 80.0 }
+              ] }
         ] }"#,
     )
     .unwrap();
@@ -339,17 +366,19 @@ fn test_inflow_history_wired_into_system() {
     }
 
     let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-    let mut hydro_ids: Vec<i32> = Vec::with_capacity(360);
-    let mut dates: Vec<i32> = Vec::with_capacity(360);
-    let mut values: Vec<f64> = Vec::with_capacity(360);
+    let mut hydro_ids: Vec<i32> = Vec::with_capacity(864);
+    let mut start_dates: Vec<i32> = Vec::with_capacity(864);
+    let mut end_dates: Vec<i32> = Vec::with_capacity(864);
+    let mut values: Vec<f64> = Vec::with_capacity(864);
 
     for hid in 1_i32..=3 {
-        for year in 2000_i32..=2009 {
+        for year in 2000_i32..=2023 {
             for month in 1_u32..=12 {
-                let date = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
-                let days = i32::try_from((date - epoch).num_days()).unwrap();
+                let start = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+                let end = start.checked_add_months(chrono::Months::new(1)).unwrap();
                 hydro_ids.push(hid);
-                dates.push(days);
+                start_dates.push(i32::try_from((start - epoch).num_days()).unwrap());
+                end_dates.push(i32::try_from((end - epoch).num_days()).unwrap());
                 values.push(f64::from(hid) * 100.0 + f64::from(month));
             }
         }
@@ -357,14 +386,16 @@ fn test_inflow_history_wired_into_system() {
 
     let history_schema = Arc::new(Schema::new(vec![
         Field::new("hydro_id", DataType::Int32, false),
-        Field::new("date", DataType::Date32, false),
+        Field::new("start_date", DataType::Date32, false),
+        Field::new("end_date", DataType::Date32, false),
         Field::new("value_m3s", DataType::Float64, false),
     ]));
     let history_batch = RecordBatch::try_new(
         Arc::clone(&history_schema),
         vec![
             Arc::new(Int32Array::from(hydro_ids)),
-            Arc::new(Date32Array::from(dates)),
+            Arc::new(Date32Array::from(start_dates)),
+            Arc::new(Date32Array::from(end_dates)),
             Arc::new(Float64Array::from(values)),
         ],
     )
@@ -379,8 +410,8 @@ fn test_inflow_history_wired_into_system() {
 
     assert_eq!(
         system.inflow_history().len(),
-        360,
-        "system.inflow_history() must have 360 rows (3 hydros × 10 years × 12 months)"
+        864,
+        "system.inflow_history() must have 864 rows (3 hydros × 24 years × 12 months)"
     );
     for row in system.inflow_history() {
         assert!(
@@ -422,24 +453,39 @@ fn test_external_scenarios_wired_into_system() {
     std::fs::write(
         dir.path().join("system/hydros.json"),
         r#"{ "hydros": [
-            { "id": 1, "name": "H1", "operational_start_date": "2024-01-01", "bus_id": 1, "downstream_id": null,
+            { "id": 1, "name": "H1", "operational_start_date": "2024-01-01", "downstream_id": null,
               "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
               "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
               "generation": { "model": "constant_productivity",
                 "min_turbined_m3s": 0.0, "max_turbined_m3s": 200.0,
-                "min_generation_mw": 0.0, "max_generation_mw": 200.0 } },
-            { "id": 2, "name": "H2", "operational_start_date": "2024-01-01", "bus_id": 1, "downstream_id": null,
+                "min_generation_mw": 0.0, "max_generation_mw": 200.0 },
+              "unit_groups": [
+                { "id": 0, "name": "H1", "bus_id": 1,
+                  "min_generation_mw": 0.0, "max_generation_mw": 200.0,
+                  "min_turbined_m3s": 0.0, "max_turbined_m3s": 200.0 }
+              ] },
+            { "id": 2, "name": "H2", "operational_start_date": "2024-01-01", "downstream_id": null,
               "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 500.0 },
               "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
               "generation": { "model": "constant_productivity",
                 "min_turbined_m3s": 0.0, "max_turbined_m3s": 100.0,
-                "min_generation_mw": 0.0, "max_generation_mw": 100.0 } },
-            { "id": 3, "name": "H3", "operational_start_date": "2024-01-01", "bus_id": 1, "downstream_id": null,
+                "min_generation_mw": 0.0, "max_generation_mw": 100.0 },
+              "unit_groups": [
+                { "id": 0, "name": "H2", "bus_id": 1,
+                  "min_generation_mw": 0.0, "max_generation_mw": 100.0,
+                  "min_turbined_m3s": 0.0, "max_turbined_m3s": 100.0 }
+              ] },
+            { "id": 3, "name": "H3", "operational_start_date": "2024-01-01", "downstream_id": null,
               "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 300.0 },
               "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
               "generation": { "model": "constant_productivity",
                 "min_turbined_m3s": 0.0, "max_turbined_m3s": 80.0,
-                "min_generation_mw": 0.0, "max_generation_mw": 80.0 } }
+                "min_generation_mw": 0.0, "max_generation_mw": 80.0 },
+              "unit_groups": [
+                { "id": 0, "name": "H3", "bus_id": 1,
+                  "min_generation_mw": 0.0, "max_generation_mw": 80.0,
+                  "min_turbined_m3s": 0.0, "max_turbined_m3s": 80.0 }
+              ] }
         ] }"#,
     )
     .unwrap();
@@ -808,15 +854,16 @@ fn test_lead_time_single_decider_on_disk_load() {
     // ever reads.
     for stage in 0..system.n_stages() {
         let b = system.bounds().thermal_bounds(THERMAL_IDX_ANT, stage);
+        let bb = system.bounds().thermal_block_base(THERMAL_IDX_ANT, stage);
         assert!(
-            (b.min_generation_mw - 0.0).abs() < f64::EPSILON,
+            (bb.min_generation_mw - 0.0).abs() < f64::EPSILON,
             "stage {stage}: min_generation_mw mismatch, got {}",
-            b.min_generation_mw
+            bb.min_generation_mw
         );
         assert!(
-            (b.max_generation_mw - 100.0).abs() < f64::EPSILON,
+            (bb.max_generation_mw - 100.0).abs() < f64::EPSILON,
             "stage {stage}: max_generation_mw mismatch, got {}",
-            b.max_generation_mw
+            bb.max_generation_mw
         );
         assert!(
             (b.cost_per_mwh - 10.0).abs() < f64::EPSILON,
@@ -874,4 +921,498 @@ fn test_postcard_round_trip() {
         original.n_stages(),
         "stage count must match after round-trip"
     );
+}
+
+// ── hydro_bus_generation output shape (item 8) ────────────────────────────────
+
+/// Every non-essential column at a plausible value; only the caller-chosen
+/// `turbined_m3s`/`generation_mw` are load-bearing for the shape assertions
+/// these tests make.
+fn make_hydro_write_record(
+    stage_id: u32,
+    block_id: Option<u32>,
+    hydro_id: i32,
+    turbined_m3s: f64,
+    generation_mw: f64,
+) -> HydroWriteRecord {
+    HydroWriteRecord {
+        stage_id,
+        block_id,
+        hydro_id,
+        turbined_m3s,
+        spillage_m3s: 0.0,
+        evaporation_m3s: None,
+        diverted_inflow_m3s: None,
+        diverted_outflow_m3s: None,
+        incremental_inflow_m3s: 0.0,
+        inflow_m3s: 0.0,
+        storage_initial_hm3: 0.0,
+        storage_final_hm3: 0.0,
+        generation_mw,
+        equivalent_productivity_mw_per_m3s: 0.0,
+        accumulated_productivity_mw_per_m3s: 0.0,
+        incremental_inflow_energy_mw: 0.0,
+        stored_energy_initial_mwh: 0.0,
+        stored_energy_final_mwh: 0.0,
+        spillage_cost: 0.0,
+        water_value_per_hm3: 0.0,
+        storage_binding_code: 0,
+        operative_state_code: 0,
+        turbined_slack_m3s: 0.0,
+        outflow_slack_below_m3s: 0.0,
+        outflow_slack_above_m3s: 0.0,
+        generation_slack_mw: 0.0,
+        storage_violation_below_hm3: 0.0,
+        filling_target_violation_hm3: 0.0,
+        evaporation_violation_pos_m3s: 0.0,
+        evaporation_violation_neg_m3s: 0.0,
+        inflow_nonnegativity_slack_m3s: 0.0,
+        water_withdrawal_violation_pos_m3s: 0.0,
+        water_withdrawal_violation_neg_m3s: 0.0,
+    }
+}
+
+fn empty_stage_write_payload(
+    stage_id: u32,
+    hydros: Vec<HydroWriteRecord>,
+    hydro_bus_generation: Vec<HydroBusWriteRecord>,
+) -> StageWritePayload {
+    StageWritePayload {
+        stage_id,
+        costs: vec![],
+        hydros,
+        hydro_bus_generation,
+        thermals: vec![],
+        exchanges: vec![],
+        buses: vec![],
+        pumping_stations: vec![],
+        contracts: vec![],
+        non_controllables: vec![],
+        inflow_lags: vec![],
+        transit_buckets: vec![],
+        generic_violations: vec![],
+    }
+}
+
+fn read_single_batch(path: &Path) -> RecordBatch {
+    let file =
+        std::fs::File::open(path).unwrap_or_else(|e| panic!("{} must open: {e}", path.display()));
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .unwrap_or_else(|e| panic!("reader builder must succeed: {e}"));
+    let mut reader = builder
+        .build()
+        .unwrap_or_else(|e| panic!("reader must build: {e}"));
+    let batch = reader
+        .next()
+        .unwrap_or_else(|| panic!("batch must have rows"));
+    batch.unwrap_or_else(|e| panic!("batch must be Ok: {e}"))
+}
+
+/// Writes `stages` through a fresh [`SimulationParquetWriter`] and reads back
+/// the written `hydros`/`hydro_bus_generation` batches for scenario 0 —
+/// shared by the split-plant and single-bus output-shape tests below.
+fn write_and_read_hydro_batches(
+    system: &System,
+    stages: Vec<StageWritePayload>,
+) -> (RecordBatch, RecordBatch) {
+    let tmp = TempDir::new().unwrap();
+    let config = ParquetWriterConfig::default();
+    let mut writer = SimulationParquetWriter::new(tmp.path(), system, &config)
+        .unwrap_or_else(|e| panic!("SimulationParquetWriter::new must succeed: {e}"));
+    writer
+        .write_scenario(ScenarioWritePayload {
+            scenario_id: 0,
+            stages,
+        })
+        .unwrap_or_else(|e| panic!("write_scenario must succeed: {e}"));
+
+    let hydros_batch = read_single_batch(
+        &tmp.path()
+            .join("simulation/hydros/scenario_id=0000/data.parquet"),
+    );
+    let bus_batch = read_single_batch(
+        &tmp.path()
+            .join("simulation/hydro_bus_generation/scenario_id=0000/data.parquet"),
+    );
+    (hydros_batch, bus_batch)
+}
+
+fn i32_column<'a>(batch: &'a RecordBatch, name: &str) -> &'a Int32Array {
+    batch
+        .column_by_name(name)
+        .unwrap_or_else(|| panic!("column {name} must exist"))
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap_or_else(|| panic!("column {name} must be Int32Array"))
+}
+
+/// `(stage_id, block_id, hydro_id)` key set of a `hydros`- or
+/// `hydro_bus_generation`-shaped batch — deduplicating over `bus_id` when
+/// applied to the latter is exactly what lets the two be compared directly.
+fn hydro_key_set(batch: &RecordBatch) -> HashSet<(i32, Option<i32>, i32)> {
+    let stage = i32_column(batch, "stage_id");
+    let block = i32_column(batch, "block_id");
+    let hydro = i32_column(batch, "hydro_id");
+    (0..batch.num_rows())
+        .map(|i| {
+            let block_id = if block.is_null(i) {
+                None
+            } else {
+                Some(block.value(i))
+            };
+            (stage.value(i), block_id, hydro.value(i))
+        })
+        .collect()
+}
+
+/// `(stage_id, block_id, hydro_id, bus_id)` key set of a
+/// `hydro_bus_generation`-shaped batch.
+fn hydro_bus_key_set(batch: &RecordBatch) -> HashSet<(i32, Option<i32>, i32, i32)> {
+    let stage = i32_column(batch, "stage_id");
+    let block = i32_column(batch, "block_id");
+    let hydro = i32_column(batch, "hydro_id");
+    let bus = i32_column(batch, "bus_id");
+    (0..batch.num_rows())
+        .map(|i| {
+            let block_id = if block.is_null(i) {
+                None
+            } else {
+                Some(block.value(i))
+            };
+            (stage.value(i), block_id, hydro.value(i), bus.value(i))
+        })
+        .collect()
+}
+
+/// End-to-end output shape: the split plant's
+/// `hydro_bus_generation` rows have a non-null `bus_id` on every row, exactly
+/// one row per `(stage, block, hydro, bus)`, `bus_id` in `{0, 1}` (the
+/// fixture's two declared buses), and their `(stage, block, hydro)` key set
+/// matches the plant's own rows in `simulation/hydros/`.
+#[test]
+fn test_split_plant_hydro_bus_generation_output_shape() {
+    let case_dir = Path::new("../../examples/deterministic/d51-split-plant-two-bus");
+    let system = load_case(case_dir).unwrap_or_else(|e| panic!("d51 load_case must succeed: {e}"));
+    assert_eq!(system.n_hydros(), 1, "d51 declares exactly 1 hydro plant");
+
+    // d51's own topology: stage 0 has 2 blocks, stage 1 has 1 block; H0 (id 0)
+    // splits across bus 0 and bus 1.
+    let stage_block_counts = [(0_u32, 2_u32), (1_u32, 1_u32)];
+    let mut stages = Vec::new();
+    for (stage_id, n_blks) in stage_block_counts {
+        let mut hydros = Vec::new();
+        let mut hydro_bus_generation = Vec::new();
+        for block_id in 0..n_blks {
+            hydros.push(make_hydro_write_record(
+                stage_id,
+                Some(block_id),
+                0,
+                70.0,
+                40.0,
+            ));
+            hydro_bus_generation.push(HydroBusWriteRecord {
+                stage_id,
+                block_id: Some(block_id),
+                hydro_id: 0,
+                bus_id: 0,
+                turbined_m3s: 42.0,
+                generation_mw: 25.0,
+            });
+            hydro_bus_generation.push(HydroBusWriteRecord {
+                stage_id,
+                block_id: Some(block_id),
+                hydro_id: 0,
+                bus_id: 1,
+                turbined_m3s: 28.0,
+                generation_mw: 15.0,
+            });
+        }
+        stages.push(empty_stage_write_payload(
+            stage_id,
+            hydros,
+            hydro_bus_generation,
+        ));
+    }
+    let (hydros_batch, bus_batch) = write_and_read_hydro_batches(&system, stages);
+
+    let bus_id_col = i32_column(&bus_batch, "bus_id");
+    assert_eq!(
+        bus_id_col.null_count(),
+        0,
+        "every hydro_bus_generation row's bus_id must be non-null"
+    );
+    let bus_ids: HashSet<i32> = (0..bus_batch.num_rows())
+        .map(|i| bus_id_col.value(i))
+        .collect();
+    assert_eq!(
+        bus_ids,
+        HashSet::from([0, 1]),
+        "bus_id must range over exactly the fixture's two declared buses"
+    );
+
+    assert_eq!(
+        bus_batch.num_rows(),
+        2 * hydros_batch.num_rows(),
+        "exactly one hydro_bus_generation row per (stage, block, hydro, bus) -- \
+         2 buses per plant row, no more, no fewer"
+    );
+    let full_keys = hydro_bus_key_set(&bus_batch);
+    assert_eq!(
+        full_keys.len(),
+        bus_batch.num_rows(),
+        "no duplicate (stage, block, hydro, bus) row"
+    );
+
+    let hydros_keys = hydro_key_set(&hydros_batch);
+    let bus_plant_keys = hydro_key_set(&bus_batch);
+    assert_eq!(
+        bus_plant_keys, hydros_keys,
+        "hydro_bus_generation's (stage, block, hydro) key set must match hydros'"
+    );
+}
+
+/// Single-bus control (recruiting `d02-single-hydro` rather than
+/// authoring a new case): a single-group plant's `hydro_bus_generation`
+/// still emits exactly one row per `(stage, block, hydro)`, with a non-null
+/// `bus_id` equal to that plant's one declared bus -- proving the output
+/// shape is uniform, not a split-plant special case.
+#[test]
+fn test_single_bus_hydro_bus_generation_output_shape() {
+    let case_dir = Path::new("../../examples/deterministic/d02-single-hydro");
+    let system = load_case(case_dir).unwrap_or_else(|e| panic!("d02 load_case must succeed: {e}"));
+    assert_eq!(system.n_hydros(), 1, "d02 declares exactly 1 hydro plant");
+    assert_eq!(system.n_buses(), 1, "d02 declares exactly 1 bus");
+
+    // d02's own topology: 2 stages, 1 block each, H0 (id 0) on bus 0.
+    let mut stages = Vec::new();
+    for stage_id in 0_u32..2 {
+        let hydros = vec![make_hydro_write_record(stage_id, Some(0), 0, 40.0, 20.0)];
+        let hydro_bus_generation = vec![HydroBusWriteRecord {
+            stage_id,
+            block_id: Some(0),
+            hydro_id: 0,
+            bus_id: 0,
+            turbined_m3s: 40.0,
+            generation_mw: 20.0,
+        }];
+        stages.push(empty_stage_write_payload(
+            stage_id,
+            hydros,
+            hydro_bus_generation,
+        ));
+    }
+    let (hydros_batch, bus_batch) = write_and_read_hydro_batches(&system, stages);
+
+    assert_eq!(
+        bus_batch.num_rows(),
+        hydros_batch.num_rows(),
+        "single-bus plant: exactly 1 hydro_bus_generation row per hydros row"
+    );
+
+    let bus_id_col = i32_column(&bus_batch, "bus_id");
+    assert_eq!(
+        bus_id_col.null_count(),
+        0,
+        "every hydro_bus_generation row's bus_id must be non-null"
+    );
+    let bus_ids: HashSet<i32> = (0..bus_batch.num_rows())
+        .map(|i| bus_id_col.value(i))
+        .collect();
+    assert_eq!(
+        bus_ids,
+        HashSet::from([0]),
+        "the single-group plant's cell must be pinned to its one declared bus"
+    );
+
+    assert_eq!(
+        hydro_key_set(&bus_batch),
+        hydro_key_set(&hydros_batch),
+        "hydro_bus_generation's (stage, block, hydro) key set must match hydros'"
+    );
+}
+
+// ── block-axis bound-row validation message shape (item 7, block axis) ──────
+
+/// Writes `constraints/thermal_bounds.parquet` at `dir` from explicit rows —
+/// shared by the three block-axis rejection tests below.
+fn write_thermal_bounds_parquet(dir: &Path, rows: &[ThermalBoundsRow]) {
+    use arrow::array::Float64Array;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use parquet::arrow::ArrowWriter;
+    use std::sync::Arc;
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("thermal_id", DataType::Int32, false),
+        Field::new("stage_id", DataType::Int32, false),
+        Field::new("min_generation_mw", DataType::Float64, true),
+        Field::new("max_generation_mw", DataType::Float64, true),
+        Field::new("cost_per_mwh", DataType::Float64, true),
+        Field::new("block_id", DataType::Int32, true),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int32Array::from(
+                rows.iter().map(|r| r.thermal_id.0).collect::<Vec<_>>(),
+            )),
+            Arc::new(Int32Array::from(
+                rows.iter().map(|r| r.stage_id).collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter().map(|r| r.min_generation_mw).collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter().map(|r| r.max_generation_mw).collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter().map(|r| r.cost_per_mwh).collect::<Vec<_>>(),
+            )),
+            Arc::new(Int32Array::from(
+                rows.iter().map(|r| r.block_id).collect::<Vec<_>>(),
+            )),
+        ],
+    )
+    .unwrap();
+
+    std::fs::create_dir_all(dir.join("constraints")).unwrap();
+    let file = std::fs::File::create(dir.join("constraints/thermal_bounds.parquet")).unwrap();
+    let mut writer = ArrowWriter::try_new(file, batch.schema(), None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+}
+
+/// A `block_id` outside the stage's declared block range fails `load_case`
+/// naming the entity, the stage, and the offending `block_id`.
+/// `make_multi_entity_case`'s stage 0 declares exactly 1 block (id 0), so
+/// `block_id=5` is out of range.
+#[test]
+fn test_thermal_bounds_block_id_out_of_range_rejected_by_load_case() {
+    let dir = TempDir::new().unwrap();
+    helpers::make_multi_entity_case(&dir);
+
+    write_thermal_bounds_parquet(
+        dir.path(),
+        &[ThermalBoundsRow {
+            thermal_id: EntityId::from(1),
+            stage_id: 0,
+            min_generation_mw: None,
+            max_generation_mw: Some(100.0),
+            cost_per_mwh: None,
+            block_id: Some(5),
+        }],
+    );
+
+    match load_case(dir.path()) {
+        Err(err) => {
+            let display = err.to_string();
+            assert!(
+                display.contains("thermal_id=1"),
+                "message must name the entity: {display}"
+            );
+            assert!(
+                display.contains("stage_id=0"),
+                "message must name the stage: {display}"
+            );
+            assert!(
+                display.contains("block_id=5"),
+                "message must name the offending block_id: {display}"
+            );
+        }
+        Ok(_) => panic!("expected Err for an out-of-range thermal_bounds block_id, got Ok"),
+    }
+}
+
+/// A duplicate `(entity, stage, block, column)` bound row fails `load_case`
+/// naming the entity, the stage, and the colliding column. Two stage-wide
+/// (`block_id = NULL`) rows both set `max_generation_mw` for the same
+/// `(thermal_id, stage_id)`.
+#[test]
+fn test_thermal_bounds_duplicate_row_rejected_by_load_case() {
+    let dir = TempDir::new().unwrap();
+    helpers::make_multi_entity_case(&dir);
+
+    write_thermal_bounds_parquet(
+        dir.path(),
+        &[
+            ThermalBoundsRow {
+                thermal_id: EntityId::from(1),
+                stage_id: 0,
+                min_generation_mw: None,
+                max_generation_mw: Some(100.0),
+                cost_per_mwh: None,
+                block_id: None,
+            },
+            ThermalBoundsRow {
+                thermal_id: EntityId::from(1),
+                stage_id: 0,
+                min_generation_mw: None,
+                max_generation_mw: Some(200.0),
+                cost_per_mwh: None,
+                block_id: None,
+            },
+        ],
+    );
+
+    match load_case(dir.path()) {
+        Err(err) => {
+            let display = err.to_string();
+            assert!(
+                display.contains("thermal_id=1"),
+                "message must name the entity: {display}"
+            );
+            assert!(
+                display.contains("stage_id=0"),
+                "message must name the stage: {display}"
+            );
+            assert!(
+                display.contains("max_generation_mw"),
+                "message must name the colliding column: {display}"
+            );
+        }
+        Ok(_) => panic!("expected Err for a duplicate thermal_bounds row, got Ok"),
+    }
+}
+
+/// A `block_id` on a stage-level-only column fails `load_case` naming the
+/// entity, the stage, and the offending column. Thermal `cost_per_mwh` has
+/// no per-block LP variable (contract `price_per_mwh` is the block-eligible
+/// counterpart, deliberately asymmetric with this one).
+#[test]
+fn test_thermal_bounds_block_id_on_stage_level_cost_column_rejected_by_load_case() {
+    let dir = TempDir::new().unwrap();
+    helpers::make_multi_entity_case(&dir);
+
+    write_thermal_bounds_parquet(
+        dir.path(),
+        &[ThermalBoundsRow {
+            thermal_id: EntityId::from(1),
+            stage_id: 0,
+            min_generation_mw: None,
+            max_generation_mw: None,
+            cost_per_mwh: Some(999.0),
+            block_id: Some(0),
+        }],
+    );
+
+    match load_case(dir.path()) {
+        Err(err) => {
+            let display = err.to_string();
+            assert!(
+                display.contains("thermal_id=1"),
+                "message must name the entity: {display}"
+            );
+            assert!(
+                display.contains("stage_id=0"),
+                "message must name the stage: {display}"
+            );
+            assert!(
+                display.contains("cost_per_mwh"),
+                "message must name the offending stage-level-only column: {display}"
+            );
+        }
+        Ok(_) => panic!(
+            "expected Err for a block_id on the stage-level-only cost_per_mwh column, got Ok"
+        ),
+    }
 }

@@ -166,15 +166,15 @@ pub struct TrainingContext<'a> {
     pub external_load_library: Option<&'a ExternalScenarioLibrary>,
     /// Pre-standardized external NCS scenario library.
     pub external_ncs_library: Option<&'a ExternalScenarioLibrary>,
-    /// Per-hydro accumulated `value_m3s * hours` seed from pre-study
-    /// `RecentObservation` data, copied into `ws.scratch.lag_accumulator` at
-    /// every trajectory start. Empty slice when there are no observations (the
-    /// zero-fill path is taken instead).
-    pub recent_accum_seed: &'a [f64],
-    /// Fraction of the lag period covered by pre-study observations, set into
-    /// `ws.scratch.lag_weight_accum` at every trajectory start. `0.0` when there
-    /// are no observations.
-    pub recent_weight_seed: f64,
+    /// Per-hydro derived in-progress accumulator seed
+    /// (`DerivedInflowSeeds::accum`), copied into `ws.scratch.lag_accumulator`
+    /// at every trajectory start. Empty slice when the derivation has no data
+    /// (the zero-fill path is taken instead).
+    pub lag_accum_seed: &'a [f64],
+    /// Per-hydro coverage-fraction seed (`DerivedInflowSeeds::weight`),
+    /// copied into `ws.scratch.lag_weight_accum` at every trajectory start;
+    /// length matches [`Self::lag_accum_seed`].
+    pub lag_weight_seed: &'a [f64],
     /// Dynamic Cut Selection hyperparameters, `Some` only when the dynamic
     /// cut-selection method is configured. When `Some` and the iteration is at or
     /// past `start_iteration`, the backward pass solves each stage LP lazily;

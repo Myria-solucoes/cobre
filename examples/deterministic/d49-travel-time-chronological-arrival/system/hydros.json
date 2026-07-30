@@ -5,7 +5,6 @@
       "id": 0,
       "name": "U",
       "operational_start_date": "2020-01-01",
-      "bus_id": 0,
       "downstream_id": 1,
       "travel_time_hours": 200.0,
       "reservoir": {
@@ -22,13 +21,23 @@
         "max_turbined_m3s": 100.0,
         "min_generation_mw": 0.0,
         "max_generation_mw": 10.0
-      }
+      },
+      "unit_groups": [
+        {
+          "id": 0,
+          "name": "U",
+          "bus_id": 0,
+          "min_generation_mw": 0.0,
+          "max_generation_mw": 10.0,
+          "min_turbined_m3s": 0.0,
+          "max_turbined_m3s": 100.0
+        }
+      ]
     },
     {
       "id": 1,
       "name": "J",
       "operational_start_date": "2020-01-02",
-      "bus_id": 0,
       "downstream_id": null,
       "reservoir": {
         "min_storage_hm3": 0.0,
@@ -44,7 +53,18 @@
         "max_turbined_m3s": 500.0,
         "min_generation_mw": 0.0,
         "max_generation_mw": 100.0
-      }
+      },
+      "unit_groups": [
+        {
+          "id": 0,
+          "name": "J",
+          "bus_id": 0,
+          "min_generation_mw": 0.0,
+          "max_generation_mw": 100.0,
+          "min_turbined_m3s": 0.0,
+          "max_turbined_m3s": 500.0
+        }
+      ]
     }
   ]
 }

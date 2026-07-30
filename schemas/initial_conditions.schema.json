@@ -55,43 +55,6 @@
       ],
       "type": "object"
     },
-    "RawHydroPastInflows": {
-      "additionalProperties": false,
-      "description": "Past inflow values for PAR(p) lag initialization for one hydro plant.",
-      "properties": {
-        "hydro_id": {
-          "description": "Hydro plant identifier. Must be unique within `past_inflows`.",
-          "format": "int32",
-          "type": "integer"
-        },
-        "season_ids": {
-          "default": null,
-          "description": "Optional season IDs corresponding to each lag entry in `values_m3s`,\none per entry. When present, length must equal `values_m3s.length`.\nEach value must reference a season ID defined in `season_definitions`.\nAbsent from legacy JSON files (backward compatible).",
-          "items": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "values_m3s": {
-          "description": "Past inflow values [m³/s], ordered from most recent (lag 1, index 0) to\noldest (lag p, index p-1). Must have length >= the hydro's PAR order.",
-          "items": {
-            "format": "double",
-            "type": "number"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "hydro_id",
-        "values_m3s"
-      ],
-      "type": "object"
-    },
     "RawHydroStorage": {
       "additionalProperties": false,
       "description": "Initial reservoir volume for one hydro plant, in hm³.",
@@ -131,7 +94,7 @@
           "type": "string"
         },
         "value_m3s": {
-          "description": "Average inflow observed during the period [m³/s]. Must be finite and\nnon-negative.",
+          "description": "Average inflow observed during the period [m³/s]. Must be finite;\nnegative values are accepted (the quantity is incremental inflow).",
           "format": "double",
           "type": "number"
         }
@@ -174,13 +137,6 @@
       "description": "Past defluence (release) windows per arc [m³/s per date range], keyed by\nthe upstream hydro whose release feeds the arc. Each entry is a\nself-describing `[start_date, end_date)` window on the pre-study calendar.\nWindows for the same hydro must not overlap; adjacent ranges\n(start == previous end) are accepted. Optional; defaults to empty.",
       "items": {
         "$ref": "#/$defs/RawHydroPastDefluence"
-      },
-      "type": "array"
-    },
-    "past_inflows": {
-      "description": "Past inflow values for PAR(p) lag initialization [m³/s], one entry per\nhydro. For each hydro, `values_m3s[0]` is the most recent past inflow\n(lag 1) and `values_m3s[p-1]` is the oldest (lag p). Required when\n`inflow_lags` is enabled and the PAR order is > 0. Optional; defaults\nto empty.",
-      "items": {
-        "$ref": "#/$defs/RawHydroPastInflows"
       },
       "type": "array"
     },

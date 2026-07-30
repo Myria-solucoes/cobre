@@ -204,11 +204,11 @@ fn make_bus(id: i32) -> Bus {
 }
 
 fn make_hydro(id: i32) -> Hydro {
-    Hydro {
+    let mut hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(id),
         name: format!("H{id}"),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(0),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -248,7 +248,9 @@ fn make_hydro(id: i32) -> Hydro {
             evaporation_violation_neg_cost: 0.0,
             inflow_nonnegativity_cost: 1000.0,
         },
-    }
+    };
+    hydro.declare_mirror_unit_group(EntityId(0));
+    hydro
 }
 
 fn make_inflow_model(hydro_id: i32, stage_id: i32) -> InflowModel {

@@ -20,10 +20,13 @@ use cobre_io::scenarios::validate_noise_openings;
 use cobre_io::validate_structure;
 use cobre_stochastic::BlockFactorPair;
 use cobre_stochastic::ClassSchemes;
+use cobre_stochastic::DerivedInflowSeeds;
 use cobre_stochastic::HistoricalScenarioLibrary;
 use cobre_stochastic::PrecomputedPar;
 use cobre_stochastic::build_stochastic_context;
+use cobre_stochastic::derive_inflow_seeds;
 use cobre_stochastic::discover_historical_windows;
+use cobre_stochastic::noise_entity_order;
 use cobre_stochastic::normal::precompute::EntityFactorEntry;
 use cobre_stochastic::par::lag_transition::derive_downstream_par_order;
 use cobre_stochastic::par::lag_transition::precompute_noise_groups;
@@ -69,17 +72,7 @@ fn load_user_opening_tree_inner(
 
     let rows = load_noise_openings(Some(&path))?;
 
-    let n_hydros = system.hydros().len();
-    let mut load_bus_ids: Vec<EntityId> = system
-        .load_models()
-        .iter()
-        .filter(|m| m.std_mw > 0.0)
-        .map(|m| m.bus_id)
-        .collect();
-    load_bus_ids.sort_unstable_by_key(|id| id.0);
-    load_bus_ids.dedup();
-    let n_load_buses = load_bus_ids.len();
-    let expected_dim = n_hydros + n_load_buses;
+    let expected_dim = noise_entity_order(system).dim();
 
     let expected_stages = system.stages().iter().filter(|s| s.id >= 0).count();
     let mut openings_by_stage: BTreeMap<i32, BTreeSet<u32>> = BTreeMap::new();
@@ -180,7 +173,7 @@ pub fn load_load_factors_for_stochastic(
 fn build_opening_tree_library(
     system: &System,
     training_source: &ScenarioSource,
-) -> Result<Option<cobre_stochastic::HistoricalScenarioLibrary>, SddpError> {
+) -> Result<Option<HistoricalScenarioLibrary>, SddpError> {
     use cobre_core::temporal::NoiseMethod;
     let needs_historical_tree = system
         .stages()
@@ -229,9 +222,21 @@ fn build_opening_tree_library(
         seasons: Vec::new(),
     };
     let effective_season_map: &SeasonMap = season_map_ref.unwrap_or(&noop_season_map);
-    let downstream_par_order = derive_downstream_par_order(&study_stages, max_order);
+    let downstream_par_order =
+        derive_downstream_par_order(&study_stages, max_order, season_map_ref);
     let stage_lag_transitions =
         precompute_stage_lag_transitions(&study_stages, effective_season_map, downstream_par_order);
+    let derived_inflow_seeds = match study_stages.first() {
+        None => DerivedInflowSeeds::zero(hydro_ids.len(), max_order),
+        Some(first_stage) => derive_inflow_seeds(
+            system.inflow_history(),
+            &system.initial_conditions().recent_observations,
+            system.hydros(),
+            first_stage,
+            effective_season_map,
+            max_order,
+        ),
+    };
     standardize_historical_windows(
         &mut lib,
         system.inflow_history(),
@@ -240,7 +245,10 @@ fn build_opening_tree_library(
         &par,
         &window_years,
         season_map_ref,
-        &system.initial_conditions().past_inflows,
+        &derived_inflow_seeds.lag_values,
+        max_order,
+        &derived_inflow_seeds.accum,
+        &derived_inflow_seeds.weight,
         &stage_lag_transitions,
         downstream_par_order,
     );
@@ -257,18 +265,13 @@ fn compute_external_scenario_counts(
     system: &System,
     training_source: &ScenarioSource,
 ) -> Option<Vec<usize>> {
-    let study_stages: Vec<_> = system
-        .stages()
-        .iter()
-        .filter(|s| s.id >= 0)
-        .cloned()
-        .collect();
-    let n_stages = study_stages.len();
+    let n_stages = system.stages().iter().filter(|s| s.id >= 0).count();
+    let noise_order = noise_entity_order(system);
 
     let inflow_counts: Option<Vec<usize>> =
         if training_source.inflow_scheme == SamplingScheme::External && n_stages > 0 {
             let external_rows = system.external_scenarios();
-            let n_hydros = system.hydros().len();
+            let n_hydros = noise_order.hydro_ids.len();
             let mut rows_per_stage = vec![0usize; n_stages];
             #[allow(clippy::cast_sign_loss)]
             for row in external_rows {
@@ -289,15 +292,7 @@ fn compute_external_scenario_counts(
     let load_counts: Option<Vec<usize>> =
         if training_source.load_scheme == SamplingScheme::External && n_stages > 0 {
             let external_rows = system.external_load_scenarios();
-            let mut bus_ids: Vec<EntityId> = system
-                .load_models()
-                .iter()
-                .filter(|m| m.std_mw > 0.0)
-                .map(|m| m.bus_id)
-                .collect();
-            bus_ids.sort_unstable_by_key(|id| id.0);
-            bus_ids.dedup();
-            let n_buses = bus_ids.len();
+            let n_buses = noise_order.load_bus_ids.len();
             let mut rows_per_stage = vec![0usize; n_stages];
             #[allow(clippy::cast_sign_loss)]
             for row in external_rows {
@@ -318,10 +313,7 @@ fn compute_external_scenario_counts(
     let ncs_counts: Option<Vec<usize>> =
         if training_source.ncs_scheme == SamplingScheme::External && n_stages > 0 {
             let external_rows = system.external_ncs_scenarios();
-            let mut ncs_ids: Vec<EntityId> = system.ncs_models().iter().map(|m| m.ncs_id).collect();
-            ncs_ids.sort_unstable_by_key(|id| id.0);
-            ncs_ids.dedup();
-            let n_ncs = ncs_ids.len();
+            let n_ncs = noise_order.ncs_entity_ids.len();
             let mut rows_per_stage = vec![0usize; n_stages];
             #[allow(clippy::cast_sign_loss)]
             for row in external_rows {
@@ -436,10 +428,11 @@ mod tests {
     use super::*;
     use chrono::NaiveDate;
     use cobre_core::{
-        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, HydroPastInflows,
-        HydroStageBounds, HydroStagePenalties, InitialConditions, LineStageBounds,
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, HydroBlockBounds,
+        HydroStageBounds, HydroStagePenalties, InitialConditions, LineBlockBounds,
         LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
-        PumpingStageBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalStageBounds,
+        PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds,
+        ThermalStageBounds,
         entities::{
             bus::{Bus, DeficitSegment},
             hydro::{Hydro, HydroGenerationModel, HydroPenalties},
@@ -498,7 +491,7 @@ mod tests {
 
     // Rationale: one flat literal `System` fixture (bus, hydro, 5 stages,
     // inflow models, bounds, penalties) mirroring `setup/tests.rs`'s
-    // `minimal_system_2_hydros_with_past_inflows`; splitting it fragments a
+    // `minimal_system_2_hydros_with_history`; splitting it fragments a
     // single-purpose, single-call fixture across artificial sub-functions.
     #[allow(clippy::too_many_lines)]
     fn build_ring_fixture() -> RingFixture {
@@ -597,7 +590,8 @@ mod tests {
             .enumerate()
             .map(|(t, stage)| InflowHistoryRow {
                 hydro_id,
-                date: stage.start_date,
+                start_date: stage.start_date,
+                end_date: stage.end_date,
                 value_m3s: raw[t],
             })
             .collect();
@@ -606,9 +600,11 @@ mod tests {
         // before the first study season). Its value is never read by
         // `standardize_historical_windows`, which only consumes the 5
         // study-stage entries above.
+        let lag_start = NaiveDate::from_ymd_opt(2025, 7, 15).unwrap();
         inflow_history.push(InflowHistoryRow {
             hydro_id,
-            date: NaiveDate::from_ymd_opt(2025, 7, 15).unwrap(),
+            start_date: lag_start,
+            end_date: lag_start.succ_opt().unwrap(),
             value_m3s: 999.0,
         });
 
@@ -631,11 +627,11 @@ mod tests {
             }],
             excess_cost: 0.0,
         };
-        let hydro = Hydro {
+        let mut hydro = Hydro {
+            unit_groups: Vec::new(),
             id: hydro_id,
             name: "H1".to_string(),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id,
             downstream_id: None,
             travel_time_hours: None,
             entry_stage_id: None,
@@ -676,6 +672,7 @@ mod tests {
                 inflow_nonnegativity_cost: 1000.0,
             },
         };
+        hydro.declare_mirror_unit_group(bus_id);
 
         let bounds = ResolvedBounds::new(
             &BoundsCountsSpec {
@@ -691,6 +688,10 @@ mod tests {
                 hydro: HydroStageBounds {
                     min_storage_hm3: 0.0,
                     max_storage_hm3: 200.0,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                hydro_block: HydroBlockBounds {
                     min_turbined_m3s: 0.0,
                     max_turbined_m3s: 100.0,
                     min_outflow_m3s: 0.0,
@@ -698,23 +699,21 @@ mod tests {
                     min_generation_mw: 0.0,
                     max_generation_mw: 250.0,
                     max_diversion_m3s: None,
-                    filling_min_rate_m3s: 0.0,
-                    water_withdrawal_m3s: 0.0,
                 },
-                thermal: ThermalStageBounds {
+                thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+                thermal_block: ThermalBlockBounds {
                     min_generation_mw: 0.0,
                     max_generation_mw: 0.0,
-                    cost_per_mwh: 0.0,
                 },
-                line: LineStageBounds {
+                line_block: LineBlockBounds {
                     direct_mw: 0.0,
                     reverse_mw: 0.0,
                 },
-                pumping: PumpingStageBounds {
+                pumping_block: PumpingBlockBounds {
                     min_flow_m3s: 0.0,
                     max_flow_m3s: 0.0,
                 },
-                contract: ContractStageBounds {
+                contract_block: ContractBlockBounds {
                     min_mw: 0.0,
                     max_mw: 0.0,
                     price_per_mwh: 0.0,
@@ -776,11 +775,6 @@ mod tests {
             .initial_conditions(InitialConditions {
                 storage: vec![],
                 filling_storage: vec![],
-                past_inflows: vec![HydroPastInflows {
-                    hydro_id,
-                    values_m3s: vec![past_inflow_seed],
-                    season_ids: None,
-                }],
                 past_anticipated_commitments: vec![],
                 recent_observations: vec![],
                 past_defluences: vec![],
@@ -815,7 +809,7 @@ mod tests {
         let mut lag_state = vec![fx.past_inflow_seed];
         let mut incoming = vec![0.0];
         let mut primary_acc = vec![0.0];
-        let mut primary_w = 0.0_f64;
+        let mut primary_w = vec![0.0];
         let mut ds_acc = if downstream_par_order > 0 {
             vec![0.0]
         } else {
@@ -885,7 +879,11 @@ mod tests {
                 .expect("oracle PrecomputedPar must build");
         assert_eq!(par.max_order(), 1);
 
-        let derived = derive_downstream_par_order(&fx.stages, par.max_order());
+        let derived = derive_downstream_par_order(
+            &fx.stages,
+            par.max_order(),
+            fx.system.policy_graph().season_map.as_ref(),
+        );
         assert_eq!(
             derived,
             par.max_order(),

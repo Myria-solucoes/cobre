@@ -25,10 +25,11 @@ use std::sync::mpsc;
 
 use chrono::NaiveDate;
 use cobre_core::{
-    BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, DeficitSegment,
-    EntityId, HydroStageBounds, HydroStagePenalties, LineStageBounds, LineStagePenalties,
-    NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
-    ResolvedPenalties, SystemBuilder, ThermalStageBounds,
+    BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
+    EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties, LineBlockBounds,
+    LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
+    PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds,
+    ThermalStageBounds,
     scenario::{
         CorrelationEntity, CorrelationGroup, CorrelationModel, CorrelationProfile, SamplingScheme,
     },
@@ -222,7 +223,6 @@ fn build_system() -> cobre_core::System {
         })
         .collect();
 
-    // PAR(0) with mean=0.0, std=30.0 → large chance of negative inflow.
     let inflow_models: Vec<InflowModel> = (0..N_STAGES)
         .flat_map(|stage_idx| {
             [EntityId(1), EntityId(2)]
@@ -268,6 +268,10 @@ fn build_system() -> cobre_core::System {
     let hydro_bounds_default = HydroStageBounds {
         min_storage_hm3: 0.0,
         max_storage_hm3: 50.0,
+        filling_min_rate_m3s: 0.0,
+        water_withdrawal_m3s: 0.0,
+    };
+    let hydro_bounds_default_block = HydroBlockBounds {
         min_turbined_m3s: 0.0,
         max_turbined_m3s: 50.0,
         min_outflow_m3s: 0.0,
@@ -275,8 +279,6 @@ fn build_system() -> cobre_core::System {
         min_generation_mw: 0.0,
         max_generation_mw: 50.0,
         max_diversion_m3s: None,
-        filling_min_rate_m3s: 0.0,
-        water_withdrawal_m3s: 0.0,
     };
     let resolved_bounds = ResolvedBounds::new(
         &BoundsCountsSpec {
@@ -290,20 +292,21 @@ fn build_system() -> cobre_core::System {
         },
         &BoundsDefaults {
             hydro: hydro_bounds_default,
-            thermal: ThermalStageBounds {
+            hydro_block: hydro_bounds_default_block,
+            thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+            thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
                 max_generation_mw: 0.0,
-                cost_per_mwh: 0.0,
             },
-            line: LineStageBounds {
+            line_block: LineBlockBounds {
                 direct_mw: 0.0,
                 reverse_mw: 0.0,
             },
-            pumping: PumpingStageBounds {
+            pumping_block: PumpingBlockBounds {
                 min_flow_m3s: 0.0,
                 max_flow_m3s: 0.0,
             },
-            contract: ContractStageBounds {
+            contract_block: ContractBlockBounds {
                 min_mw: 0.0,
                 max_mw: 0.0,
                 price_per_mwh: 0.0,
@@ -483,6 +486,34 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
 // Shared test helpers
 // ===========================================================================
 
+fn base_stage_context<'a>(fx: &'a Fixture, block_counts: &'a [usize]) -> StageContext<'a> {
+    StageContext {
+        geometry_per_stage: &[],
+        templates: &fx.stage_templates.templates,
+        base_rows: &fx.stage_templates.base_rows,
+        noise_scale: &fx.stage_templates.noise_scale,
+        n_hydros: fx.stage_templates.n_hydros,
+        cost_scale_factor: 1_000_000.0,
+        n_load_buses: fx.stage_templates.n_load_buses,
+        load_balance_row_starts: &fx.stage_templates.load_balance_row_starts,
+        load_bus_indices: &fx.stage_templates.load_bus_indices,
+        block_counts_per_stage: block_counts,
+        ncs_col_starts: &[],
+        n_ncs: 0,
+        ncs_stochastic_dense_col: &[],
+        ncs_stochastic_windows: &[],
+        anticipated_windows: &[],
+        study_stage_ids: &[],
+        ncs_max_gen: &[],
+        ncs_allow_curtailment: &[],
+        discount_factors: &[],
+        cumulative_discount_factors: &[],
+        stage_lag_transitions: &[],
+        noise_group_ids: &[],
+        downstream_par_order: 0,
+    }
+}
+
 fn train_fixture(
     fx: &Fixture,
     iterations: u64,
@@ -500,31 +531,7 @@ fn train_fixture(
         .collect();
     let max_blocks = block_counts.iter().copied().max().unwrap_or(1);
 
-    let stage_ctx = StageContext {
-        geometry_per_stage: &[],
-        templates: &fx.stage_templates.templates,
-        base_rows: &fx.stage_templates.base_rows,
-        noise_scale: &fx.stage_templates.noise_scale,
-        n_hydros: fx.stage_templates.n_hydros,
-        cost_scale_factor: 1_000_000.0,
-        n_load_buses: fx.stage_templates.n_load_buses,
-        load_balance_row_starts: &fx.stage_templates.load_balance_row_starts,
-        load_bus_indices: &fx.stage_templates.load_bus_indices,
-        block_counts_per_stage: &block_counts,
-        ncs_col_starts: &[],
-        n_ncs: 0,
-        ncs_stochastic_dense_col: &[],
-        ncs_stochastic_windows: &[],
-        anticipated_windows: &[],
-        study_stage_ids: &[],
-        ncs_max_gen: &[],
-        ncs_allow_curtailment: &[],
-        discount_factors: &[],
-        cumulative_discount_factors: &[],
-        stage_lag_transitions: &[],
-        noise_group_ids: &[],
-        downstream_par_order: 0,
-    };
+    let stage_ctx = base_stage_context(fx, &block_counts);
     train(
         &mut solver,
         TrainingConfig {
@@ -571,8 +578,8 @@ fn train_fixture(
             external_load_library: None,
             external_ncs_library: None,
             stages: &[],
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         },
         &comm,
@@ -634,31 +641,7 @@ fn simulate_fixture(
 
     simulate(
         &mut sim_workspaces,
-        &StageContext {
-            geometry_per_stage: &[],
-            templates: &fx.stage_templates.templates,
-            base_rows: &fx.stage_templates.base_rows,
-            noise_scale: &fx.stage_templates.noise_scale,
-            n_hydros: fx.stage_templates.n_hydros,
-            cost_scale_factor: 1_000_000.0,
-            n_load_buses: fx.stage_templates.n_load_buses,
-            load_balance_row_starts: &fx.stage_templates.load_balance_row_starts,
-            load_bus_indices: &fx.stage_templates.load_bus_indices,
-            block_counts_per_stage: &block_counts_sim,
-            ncs_col_starts: &[],
-            n_ncs: 0,
-            ncs_stochastic_dense_col: &[],
-            ncs_stochastic_windows: &[],
-            anticipated_windows: &[],
-            study_stage_ids: &[],
-            ncs_max_gen: &[],
-            ncs_allow_curtailment: &[],
-            discount_factors: &[],
-            cumulative_discount_factors: &[],
-            stage_lag_transitions: &[],
-            noise_group_ids: &[],
-            downstream_par_order: 0,
-        },
+        &base_stage_context(fx, &block_counts_sim),
         fcf,
         &TrainingContext {
             horizon: &fx.horizon,
@@ -679,8 +662,8 @@ fn simulate_fixture(
             external_load_library: None,
             external_ncs_library: None,
             stages: &[],
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         },
         &SimulationConfig {
@@ -691,6 +674,7 @@ fn simulate_fixture(
         SimulationOutputSpec {
             result_tx: &result_tx,
             zeta_per_stage: &fx.stage_templates.zeta_per_stage,
+            hydro_cell_index: &cobre_sddp::test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &fx.stage_templates.block_hours_per_stage,
             entity_counts: &fx.entity_counts,
             generic_constraint_row_entries: &[],
@@ -718,6 +702,17 @@ fn simulate_fixture(
     Ok(collector_thread
         .join()
         .expect("collector thread must not panic"))
+}
+
+fn has_nonzero_slack(scenario_results: &[cobre_sddp::SimulationScenarioResult]) -> bool {
+    scenario_results.iter().any(|scenario| {
+        scenario.stages.iter().any(|stage| {
+            stage
+                .hydros
+                .iter()
+                .any(|h| h.inflow_nonnegativity_slack_m3s > 0.0)
+        })
+    })
 }
 
 // ===========================================================================
@@ -751,14 +746,7 @@ fn test_penalty_slack_value_matches_negative_inflow() {
     train_fixture(&fx, 3).expect("training must succeed before simulation");
     let scenario_results = simulate_fixture(&fx, &fcf).expect("simulate must succeed");
 
-    let found_nonzero_slack = scenario_results.iter().any(|scenario| {
-        scenario.stages.iter().any(|stage| {
-            stage
-                .hydros
-                .iter()
-                .any(|h| h.inflow_nonnegativity_slack_m3s > 0.0)
-        })
-    });
+    let found_nonzero_slack = has_nonzero_slack(&scenario_results);
 
     assert!(
         found_nonzero_slack,
@@ -789,14 +777,7 @@ fn test_simulation_slack_output_populated() {
         scenario_results.len()
     );
 
-    let any_nonzero = scenario_results.iter().any(|scenario| {
-        scenario.stages.iter().any(|stage| {
-            stage
-                .hydros
-                .iter()
-                .any(|h| h.inflow_nonnegativity_slack_m3s > 0.0)
-        })
-    });
+    let any_nonzero = has_nonzero_slack(&scenario_results);
 
     assert!(
         any_nonzero,
@@ -838,10 +819,6 @@ fn truncation_with_penalty_training_completes() {
 /// `100 * block_hours`, H2's `5000 * block_hours` (justifies the magic asserts).
 #[test]
 fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
-    use cobre_core::resolved::{
-        HydroStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, ResolvedPenalties,
-    };
-
     let hydro_penalties_default = HydroStagePenalties {
         spillage_cost: 0.0,
         diversion_cost: 0.0,
@@ -926,8 +903,8 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
     let geometry = &templates.geometry_per_stage[0];
 
     assert_eq!(geometry.inflow_slack.len(), N_HYDROS);
-    let h1_col = geometry.inflow_slack.start; // H1 (index 0)
-    let h2_col = geometry.inflow_slack.start + 1; // H2 (index 1)
+    let h1_col = geometry.inflow_slack.start;
+    let h2_col = geometry.inflow_slack.start + 1;
 
     let h1_obj = tmpl0.objective[h1_col];
     let h2_obj = tmpl0.objective[h2_col];

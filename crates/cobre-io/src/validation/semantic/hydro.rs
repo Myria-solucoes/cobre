@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
+use super::ENVELOPE_TOLERANCE;
 
 pub(super) fn check_cascade_acyclic(data: &ParsedData, ctx: &mut ValidationContext) {
     if data.hydros.is_empty() {
@@ -127,53 +128,61 @@ pub(super) fn check_hydro_bounds(data: &ParsedData, ctx: &mut ValidationContext)
     }
 }
 
+fn check_entry_precedes_exit(
+    file: &str,
+    entity_kind: &str,
+    id: i32,
+    entry: Option<i32>,
+    exit: Option<i32>,
+    ctx: &mut ValidationContext,
+) {
+    if let (Some(entry), Some(exit)) = (entry, exit)
+        && entry >= exit
+    {
+        let entity_str = format!("{entity_kind} {id}");
+        ctx.add_error(
+            ErrorKind::InvalidValue,
+            file,
+            Some(&entity_str),
+            format!(
+                "{entity_str}: entry_stage_id ({entry}) >= exit_stage_id ({exit}); entry must precede exit"
+            ),
+        );
+    }
+}
+
 pub(super) fn check_lifecycle_consistency(data: &ParsedData, ctx: &mut ValidationContext) {
     for hydro in &data.hydros {
-        if let (Some(entry), Some(exit)) = (hydro.entry_stage_id, hydro.exit_stage_id)
-            && entry >= exit
-        {
-            let entity_str = format!("Hydro {}", hydro.id.0);
-            ctx.add_error(
-                    ErrorKind::InvalidValue,
-                    "system/hydros.json",
-                    Some(&entity_str),
-                    format!(
-                        "{entity_str}: entry_stage_id ({entry}) >= exit_stage_id ({exit}); entry must precede exit"
-                    ),
-                );
-        }
+        check_entry_precedes_exit(
+            "system/hydros.json",
+            "Hydro",
+            hydro.id.0,
+            hydro.entry_stage_id,
+            hydro.exit_stage_id,
+            ctx,
+        );
     }
 
     for line in &data.lines {
-        if let (Some(entry), Some(exit)) = (line.entry_stage_id, line.exit_stage_id)
-            && entry >= exit
-        {
-            let entity_str = format!("Line {}", line.id.0);
-            ctx.add_error(
-                    ErrorKind::InvalidValue,
-                    "system/lines.json",
-                    Some(&entity_str),
-                    format!(
-                        "{entity_str}: entry_stage_id ({entry}) >= exit_stage_id ({exit}); entry must precede exit"
-                    ),
-                );
-        }
+        check_entry_precedes_exit(
+            "system/lines.json",
+            "Line",
+            line.id.0,
+            line.entry_stage_id,
+            line.exit_stage_id,
+            ctx,
+        );
     }
 
     for thermal in &data.thermals {
-        if let (Some(entry), Some(exit)) = (thermal.entry_stage_id, thermal.exit_stage_id)
-            && entry >= exit
-        {
-            let entity_str = format!("Thermal {}", thermal.id.0);
-            ctx.add_error(
-                    ErrorKind::InvalidValue,
-                    "system/thermals.json",
-                    Some(&entity_str),
-                    format!(
-                        "{entity_str}: entry_stage_id ({entry}) >= exit_stage_id ({exit}); entry must precede exit"
-                    ),
-                );
-        }
+        check_entry_precedes_exit(
+            "system/thermals.json",
+            "Thermal",
+            thermal.id.0,
+            thermal.entry_stage_id,
+            thermal.exit_stage_id,
+            ctx,
+        );
     }
 }
 
@@ -186,51 +195,36 @@ pub(super) fn check_lifecycle_consistency_remaining(
     ctx: &mut ValidationContext,
 ) {
     for station in &data.pumping_stations {
-        if let (Some(entry), Some(exit)) = (station.entry_stage_id, station.exit_stage_id)
-            && entry >= exit
-        {
-            let entity_str = format!("PumpingStation {}", station.id.0);
-            ctx.add_error(
-                    ErrorKind::InvalidValue,
-                    "system/pumping_stations.json",
-                    Some(&entity_str),
-                    format!(
-                        "{entity_str}: entry_stage_id ({entry}) >= exit_stage_id ({exit}); entry must precede exit"
-                    ),
-                );
-        }
+        check_entry_precedes_exit(
+            "system/pumping_stations.json",
+            "PumpingStation",
+            station.id.0,
+            station.entry_stage_id,
+            station.exit_stage_id,
+            ctx,
+        );
     }
 
     for source in &data.non_controllable_sources {
-        if let (Some(entry), Some(exit)) = (source.entry_stage_id, source.exit_stage_id)
-            && entry >= exit
-        {
-            let entity_str = format!("NonControllableSource {}", source.id.0);
-            ctx.add_error(
-                    ErrorKind::InvalidValue,
-                    "system/non_controllable_sources.json",
-                    Some(&entity_str),
-                    format!(
-                        "{entity_str}: entry_stage_id ({entry}) >= exit_stage_id ({exit}); entry must precede exit"
-                    ),
-                );
-        }
+        check_entry_precedes_exit(
+            "system/non_controllable_sources.json",
+            "NonControllableSource",
+            source.id.0,
+            source.entry_stage_id,
+            source.exit_stage_id,
+            ctx,
+        );
     }
 
     for contract in &data.energy_contracts {
-        if let (Some(entry), Some(exit)) = (contract.entry_stage_id, contract.exit_stage_id)
-            && entry >= exit
-        {
-            let entity_str = format!("EnergyContract {}", contract.id.0);
-            ctx.add_error(
-                    ErrorKind::InvalidValue,
-                    "system/energy_contracts.json",
-                    Some(&entity_str),
-                    format!(
-                        "{entity_str}: entry_stage_id ({entry}) >= exit_stage_id ({exit}); entry must precede exit"
-                    ),
-                );
-        }
+        check_entry_precedes_exit(
+            "system/energy_contracts.json",
+            "EnergyContract",
+            contract.id.0,
+            contract.entry_stage_id,
+            contract.exit_stage_id,
+            ctx,
+        );
     }
 }
 
@@ -307,6 +301,12 @@ pub(super) fn check_filling_guards(data: &ParsedData, ctx: &mut ValidationContex
         }
 
         if let Some(filling) = &hydro.filling {
+            let seed = data
+                .initial_conditions
+                .filling_storage
+                .iter()
+                .find(|s| s.hydro_id == hydro.id);
+
             if let Some(entry) = hydro.entry_stage_id
                 && filling.start_stage_id >= entry
             {
@@ -337,11 +337,7 @@ pub(super) fn check_filling_guards(data: &ParsedData, ctx: &mut ValidationContex
                 );
             }
 
-            if let Some(seed) = data
-                .initial_conditions
-                .filling_storage
-                .iter()
-                .find(|s| s.hydro_id == hydro.id)
+            if let Some(seed) = seed
                 && !(seed.value_hm3 >= 0.0 && seed.value_hm3 < hydro.min_storage_hm3)
             {
                 ctx.add_error(
@@ -371,11 +367,7 @@ pub(super) fn check_filling_guards(data: &ParsedData, ctx: &mut ValidationContex
             }
 
             if filling.start_stage_id > 0
-                && let Some(seed) = data
-                    .initial_conditions
-                    .filling_storage
-                    .iter()
-                    .find(|s| s.hydro_id == hydro.id)
+                && let Some(seed) = seed
                 && seed.value_hm3 != 0.0
             {
                 ctx.add_error(
@@ -411,11 +403,11 @@ pub(super) fn check_geometry_monotonicity(data: &ParsedData, ctx: &mut Validatio
             i += 1;
         }
         let group = &rows[group_start..i];
+        let entity_str = format!("Hydro {current_hydro_id}");
 
         for pair in group.windows(2) {
             let prev = &pair[0];
             let curr = &pair[1];
-            let entity_str = format!("Hydro {current_hydro_id}");
 
             if curr.volume_hm3 <= prev.volume_hm3 {
                 ctx.add_error(
@@ -545,6 +537,150 @@ pub(super) fn check_fpha_constraints(data: &ParsedData, ctx: &mut ValidationCont
                 format!(
                     "{entity_str} (stage={stage_label}): no FPHA planes defined; \
                      at least 1 plane is required"
+                ),
+            );
+        }
+    }
+}
+
+/// Rules 39-41, 44: unit group `id` uniqueness within its own plant (rule 39,
+/// ids are plant-scoped — a `HashSet` rebuilt per hydro, never hoisted above
+/// the loop); per-group turbined/generation bound consistency (rule 40); the
+/// sum of group maxima against the plant's own declared value (rule 41,
+/// entity declaration only — a per-stage `hydro_bounds` override is not
+/// checked here); and, in the OPPOSITE direction, the sum of group minima
+/// against the plant's own declared value (rule 44 — the plant's declared
+/// floor must be reachable by summing its groups' own floors, `Σ ≥ declared`,
+/// never `Σ ≤ declared` as rule 41 checks for the ceiling). Per-group
+/// turbined bound sign is rejected earlier, at parse time, by
+/// `hydros.rs::validate_unit_groups` — `validate_schema` aborts
+/// all-or-nothing before a negative value ever reaches this Layer-5 check, so
+/// it is not re-checked here. Mirrors the plant's turbined-only sign guard:
+/// `min_generation_mw`/`max_generation_mw` are unchecked for sign at both
+/// plant and group level, inherited, not introduced here. A group's `bus_id`
+/// reference is Layer 3's `referential::check_hydro_references`, not this
+/// function — duplicating it here would split the hydro bus check across two
+/// message shapes.
+pub(super) fn check_hydro_unit_groups(data: &ParsedData, ctx: &mut ValidationContext) {
+    for hydro in &data.hydros {
+        let entity_str = format!("Hydro {}", hydro.id.0);
+
+        let mut seen_group_ids: HashSet<i32> = HashSet::new();
+        for group in &hydro.unit_groups {
+            if !seen_group_ids.insert(group.id.0) {
+                ctx.add_error(
+                    ErrorKind::DuplicateId,
+                    "system/hydros.json",
+                    Some(&entity_str),
+                    format!(
+                        "{entity_str}: unit group id {} is declared more than once; unit \
+                         group ids must be unique within a plant",
+                        group.id.0
+                    ),
+                );
+            }
+        }
+
+        for group in &hydro.unit_groups {
+            let group_str = format!("{entity_str} unit group {}", group.id.0);
+
+            if group.min_turbined_m3s > group.max_turbined_m3s {
+                ctx.add_error(
+                    ErrorKind::InvalidValue,
+                    "system/hydros.json",
+                    Some(&group_str),
+                    format!(
+                        "{group_str}: min_turbined_m3s ({}) > max_turbined_m3s ({}); unit \
+                         group turbine bounds are inconsistent",
+                        group.min_turbined_m3s, group.max_turbined_m3s
+                    ),
+                );
+            }
+
+            if group.min_generation_mw > group.max_generation_mw {
+                ctx.add_error(
+                    ErrorKind::InvalidValue,
+                    "system/hydros.json",
+                    Some(&group_str),
+                    format!(
+                        "{group_str}: min_generation_mw ({}) > max_generation_mw ({}); unit \
+                         group generation bounds are inconsistent",
+                        group.min_generation_mw, group.max_generation_mw
+                    ),
+                );
+            }
+        }
+
+        let turbined_sum: f64 = hydro.unit_groups.iter().map(|g| g.max_turbined_m3s).sum();
+        let turbined_tolerance = ENVELOPE_TOLERANCE * hydro.max_turbined_m3s.abs().max(1.0);
+        if turbined_sum > hydro.max_turbined_m3s + turbined_tolerance {
+            ctx.add_error(
+                ErrorKind::InvalidValue,
+                "system/hydros.json",
+                Some(&entity_str),
+                format!(
+                    "{entity_str}: unit group max_turbined_m3s sums to {turbined_sum} across \
+                     {} unit groups, exceeding the plant's own max_turbined_m3s ({}); the \
+                     plant value is the envelope, so declaring unit groups cannot increase a \
+                     plant's capacity",
+                    hydro.unit_groups.len(),
+                    hydro.max_turbined_m3s
+                ),
+            );
+        }
+
+        let generation_sum: f64 = hydro.unit_groups.iter().map(|g| g.max_generation_mw).sum();
+        let generation_tolerance = ENVELOPE_TOLERANCE * hydro.max_generation_mw.abs().max(1.0);
+        if generation_sum > hydro.max_generation_mw + generation_tolerance {
+            ctx.add_error(
+                ErrorKind::InvalidValue,
+                "system/hydros.json",
+                Some(&entity_str),
+                format!(
+                    "{entity_str}: unit group max_generation_mw sums to {generation_sum} \
+                     across {} unit groups, exceeding the plant's own max_generation_mw ({}); \
+                     the plant value is the envelope, so declaring unit groups cannot increase \
+                     a plant's capacity",
+                    hydro.unit_groups.len(),
+                    hydro.max_generation_mw
+                ),
+            );
+        }
+
+        // Rule 44 (flipped direction vs rule 41 above): the plant's declared
+        // MINIMUM is a floor its unit groups must be able to reach, `Σ ≥
+        // declared`, so the violation condition is `sum < declared - tolerance`
+        // — the mirror of rule 41's `sum > declared + tolerance` ceiling check.
+        let min_turbined_sum: f64 = hydro.unit_groups.iter().map(|g| g.min_turbined_m3s).sum();
+        let min_turbined_tolerance = ENVELOPE_TOLERANCE * hydro.min_turbined_m3s.abs().max(1.0);
+        if min_turbined_sum < hydro.min_turbined_m3s - min_turbined_tolerance {
+            ctx.add_error(
+                ErrorKind::InvalidValue,
+                "system/hydros.json",
+                Some(&entity_str),
+                format!(
+                    "{entity_str}: unit group min_turbined_m3s sums to {min_turbined_sum} \
+                     across {} unit groups, below the plant's own min_turbined_m3s ({}); the \
+                     plant's declared minimum is a floor its unit groups must be able to cover",
+                    hydro.unit_groups.len(),
+                    hydro.min_turbined_m3s
+                ),
+            );
+        }
+
+        let min_generation_sum: f64 = hydro.unit_groups.iter().map(|g| g.min_generation_mw).sum();
+        let min_generation_tolerance = ENVELOPE_TOLERANCE * hydro.min_generation_mw.abs().max(1.0);
+        if min_generation_sum < hydro.min_generation_mw - min_generation_tolerance {
+            ctx.add_error(
+                ErrorKind::InvalidValue,
+                "system/hydros.json",
+                Some(&entity_str),
+                format!(
+                    "{entity_str}: unit group min_generation_mw sums to {min_generation_sum} \
+                     across {} unit groups, below the plant's own min_generation_mw ({}); the \
+                     plant's declared minimum is a floor its unit groups must be able to cover",
+                    hydro.unit_groups.len(),
+                    hydro.min_generation_mw
                 ),
             );
         }
@@ -683,12 +819,22 @@ mod tests {
 
     // ── Hydro turbine bounds tests ────────────────────────────────────────────
 
-    /// min_turbined > max_turbined produces one InvalidValue error.
+    /// min_turbined > max_turbined produces exactly one PLANT-LEVEL InvalidValue
+    /// error. Declares an explicit unit group with bounds that satisfy rules
+    /// 40/41 on their own and carries no `hydro_unit_group_bounds` override row,
+    /// so rule 45 (the only rule that checks the GROUP's own bounds against an
+    /// override) has nothing to inspect and does not fire. Rule 44 (Σ group min
+    /// ≥ plant min) still fires as a mathematical consequence, not a fixture
+    /// bug: rule 41 caps the group's own max at the plant's max (100), rule 40
+    /// caps the group's own min at its own max, so the group's min can never
+    /// reach the plant's inconsistent min (500) — both findings are
+    /// legitimately true of this deliberately-broken plant.
     #[test]
     fn test_hydro_turbine_min_greater_than_max() {
         let mut hydro = make_hydro(2, None);
         hydro.min_turbined_m3s = 500.0;
         hydro.max_turbined_m3s = 100.0;
+        hydro.unit_groups = vec![make_unit_group(1, 1, 0.0, 1000.0, 0.0, 100.0)];
         let data = make_data(
             vec![hydro],
             vec![],
@@ -705,7 +851,43 @@ mod tests {
             .into_iter()
             .filter(|e| e.kind == ErrorKind::InvalidValue)
             .collect();
-        assert!(!turbine_errors.is_empty());
+        let plant_level: Vec<_> = turbine_errors
+            .iter()
+            .filter(|e| !e.message.contains("unit group"))
+            .collect();
+        assert_eq!(
+            plant_level.len(),
+            1,
+            "expected exactly 1 plant-level InvalidValue error, got: {:?}",
+            turbine_errors
+                .iter()
+                .map(|e| &e.message)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            plant_level[0].message.contains("Hydro 2"),
+            "message should contain 'Hydro 2', got: {}",
+            plant_level[0].message
+        );
+        let group_level: Vec<_> = turbine_errors
+            .iter()
+            .filter(|e| e.message.contains("unit group"))
+            .collect();
+        assert_eq!(
+            group_level.len(),
+            1,
+            "rule 44 must also fire — the group's own bounds provably cannot \
+             reach the plant's inconsistent minimum, got: {:?}",
+            turbine_errors
+                .iter()
+                .map(|e| &e.message)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            group_level[0].message.contains("min_turbined_m3s"),
+            "the companion group-level finding must be the turbined floor, got: {}",
+            group_level[0].message
+        );
     }
 
     // ── Hydro outflow bounds tests ────────────────────────────────────────────
@@ -2009,6 +2191,287 @@ mod tests {
         assert!(
             !ctx.has_errors(),
             "empty geometry and FPHA should produce no errors, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    // ── Unit group rules (39-42) ──────────────────────────────────────────────
+
+    /// Rule 39: hydro 1 declares unit group ids `[4, 4]` (a duplicate) and hydro
+    /// 2 declares `[4, 9]` (reusing hydro 1's id 4, but locally unique). Exactly
+    /// one `DuplicateId` is emitted, naming Hydro 1 and group id 4; no finding
+    /// names Hydro 2 — a per-plant `HashSet` accepts the same id recurring on a
+    /// different plant, which a global set would wrongly reject.
+    #[test]
+    fn test_duplicate_unit_group_id_is_rejected_per_plant() {
+        let mut hydro1 = make_hydro(1, None);
+        hydro1.unit_groups = vec![
+            make_unit_group(4, 1, 0.0, 400.0, 0.0, 400.0),
+            make_unit_group(4, 1, 0.0, 400.0, 0.0, 400.0),
+        ];
+
+        let mut hydro2 = make_hydro(2, None);
+        hydro2.unit_groups = vec![
+            make_unit_group(4, 1, 0.0, 400.0, 0.0, 400.0),
+            make_unit_group(9, 1, 0.0, 400.0, 0.0, 400.0),
+        ];
+
+        let data = make_data(
+            vec![hydro1, hydro2],
+            vec![],
+            vec![],
+            make_stages(vec![0]),
+            vec![],
+            vec![],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+
+        let duplicates: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::DuplicateId)
+            .collect();
+        assert_eq!(
+            duplicates.len(),
+            1,
+            "expected exactly 1 DuplicateId, got: {:?}",
+            duplicates.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+        assert!(
+            duplicates[0].message.contains("Hydro 1"),
+            "message should name Hydro 1, got: {}",
+            duplicates[0].message
+        );
+        assert!(
+            duplicates[0].message.contains('4'),
+            "message should name group id 4, got: {}",
+            duplicates[0].message
+        );
+        assert!(
+            !ctx.errors().iter().any(|e| e.message.contains("Hydro 2")),
+            "hydro 2 reusing hydro 1's group id must produce no finding, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Rule 40: one hydro declares three unit groups — group 3 violates only
+    /// `min_turbined_m3s <= max_turbined_m3s`, group 5 violates only
+    /// `min_generation_mw <= max_generation_mw`, group 13 is consistent on both
+    /// columns. Exactly 2 `InvalidValue` findings are emitted (each column
+    /// checked independently), naming groups 3 and 5 respectively, and none
+    /// names group 13.
+    #[test]
+    fn test_unit_group_min_exceeds_max_is_rejected_per_column() {
+        let mut hydro = make_hydro(7, None);
+        hydro.max_turbined_m3s = 1300.0; // == sum of group maxima below
+        hydro.max_generation_mw = 900.0; // == sum of group maxima below
+        hydro.unit_groups = vec![
+            make_unit_group(3, 1, 0.0, 400.0, 900.0, 600.0), // turbined min > max only
+            make_unit_group(5, 1, 900.0, 200.0, 0.0, 400.0), // generation min > max only
+            make_unit_group(13, 1, 0.0, 300.0, 0.0, 300.0),  // consistent
+        ];
+
+        let data = make_data(
+            vec![hydro],
+            vec![],
+            vec![],
+            make_stages(vec![0]),
+            vec![],
+            vec![],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+
+        let invalid_values: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidValue)
+            .collect();
+        assert_eq!(
+            invalid_values.len(),
+            2,
+            "expected exactly 2 InvalidValue findings, got: {:?}",
+            invalid_values
+                .iter()
+                .map(|e| &e.message)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            invalid_values
+                .iter()
+                .any(|e| e.message.contains("unit group 3")
+                    && e.message.contains("min_turbined_m3s")),
+            "expected a min_turbined_m3s violation naming group 3, got: {:?}",
+            invalid_values
+                .iter()
+                .map(|e| &e.message)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            invalid_values
+                .iter()
+                .any(|e| e.message.contains("unit group 5")
+                    && e.message.contains("min_generation_mw")),
+            "expected a min_generation_mw violation naming group 5, got: {:?}",
+            invalid_values
+                .iter()
+                .map(|e| &e.message)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !invalid_values
+                .iter()
+                .any(|e| e.message.contains("unit group 13")),
+            "the consistent group 13 must produce no finding, got: {:?}",
+            invalid_values
+                .iter()
+                .map(|e| &e.message)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Rule 41: hydro 9 (`max_generation_mw = 7000`, `max_turbined_m3s = 5250`)
+    /// declares two groups whose `max_generation_mw` sums to 8000 (exceeds) and
+    /// whose `max_turbined_m3s` sums to exactly 5250 (equals — must be
+    /// accepted, since containment is "must not exceed"). Hydro 11 declares no
+    /// groups at all, so the empty-group sum is `0.0` on both columns — never
+    /// exceeding the plant's own maxima — the positive-path pin every plant
+    /// with no declared groups exercises.
+    #[test]
+    fn test_envelope_containment_rejects_excess_and_accepts_equality() {
+        let mut excess_hydro = make_hydro(9, None);
+        excess_hydro.max_generation_mw = 7000.0;
+        excess_hydro.max_turbined_m3s = 5250.0;
+        excess_hydro.unit_groups = vec![
+            make_unit_group(3, 1, 0.0, 3000.0, 0.0, 2000.0),
+            make_unit_group(5, 1, 0.0, 5000.0, 0.0, 3250.0),
+        ];
+
+        let no_groups_hydro = make_hydro(11, None);
+
+        let data = make_data(
+            vec![excess_hydro, no_groups_hydro],
+            vec![],
+            vec![],
+            make_stages(vec![0]),
+            vec![],
+            vec![],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+
+        let invalid_values: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidValue)
+            .collect();
+        assert_eq!(
+            invalid_values.len(),
+            1,
+            "expected exactly 1 InvalidValue (generation envelope only), got: {:?}",
+            invalid_values
+                .iter()
+                .map(|e| &e.message)
+                .collect::<Vec<_>>()
+        );
+        let msg = &invalid_values[0].message;
+        assert!(
+            msg.contains("Hydro 9"),
+            "message should name Hydro 9, got: {msg}"
+        );
+        assert!(
+            msg.contains("max_generation_mw"),
+            "message should name max_generation_mw, got: {msg}"
+        );
+        assert!(
+            msg.contains("8000"),
+            "message should name the sum 8000, got: {msg}"
+        );
+        assert!(
+            msg.contains("7000"),
+            "message should name the plant value 7000, got: {msg}"
+        );
+        assert!(
+            !msg.contains("max_turbined_m3s"),
+            "the exactly-equal turbined column must not be named, got: {msg}"
+        );
+        assert!(
+            !ctx.errors().iter().any(|e| e.message.contains("Hydro 11")),
+            "the no-declared-groups plant must produce zero findings, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Rule 44 (the flipped-inequality mirror of rule 41 above): hydro 9
+    /// (`min_generation_mw = 100`, `min_turbined_m3s = 50`) declares two groups
+    /// whose `min_generation_mw` sums to 80 (below — rejected, the floor is
+    /// unreachable) and whose `min_turbined_m3s` sums to exactly 50 (equals —
+    /// must be accepted, since containment here is "must reach", not "must
+    /// exceed"). Hydro 11 declares no groups at all, so its declared minima
+    /// stay at `make_hydro`'s default `0.0`, never falling short of themselves
+    /// — the positive-path pin every plant with no declared groups exercises.
+    #[test]
+    fn test_min_envelope_containment_rejects_shortfall_and_accepts_equality() {
+        let mut shortfall_hydro = make_hydro(9, None);
+        shortfall_hydro.min_generation_mw = 100.0;
+        shortfall_hydro.min_turbined_m3s = 50.0;
+        shortfall_hydro.unit_groups = vec![
+            make_unit_group(3, 1, 30.0, 500.0, 20.0, 500.0),
+            make_unit_group(5, 1, 50.0, 500.0, 30.0, 500.0),
+        ];
+
+        let no_groups_hydro = make_hydro(11, None);
+
+        let data = make_data(
+            vec![shortfall_hydro, no_groups_hydro],
+            vec![],
+            vec![],
+            make_stages(vec![0]),
+            vec![],
+            vec![],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+
+        let invalid_values: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidValue)
+            .collect();
+        assert_eq!(
+            invalid_values.len(),
+            1,
+            "expected exactly 1 InvalidValue (generation floor only), got: {:?}",
+            invalid_values
+                .iter()
+                .map(|e| &e.message)
+                .collect::<Vec<_>>()
+        );
+        let msg = &invalid_values[0].message;
+        assert!(
+            msg.contains("Hydro 9"),
+            "message should name Hydro 9, got: {msg}"
+        );
+        assert!(
+            msg.contains("min_generation_mw"),
+            "message should name min_generation_mw, got: {msg}"
+        );
+        assert!(
+            msg.contains("80"),
+            "message should name the sum 80, got: {msg}"
+        );
+        assert!(
+            msg.contains("100"),
+            "message should name the plant value 100, got: {msg}"
+        );
+        assert!(
+            !msg.contains("min_turbined_m3s"),
+            "the exactly-equal turbined column must not be named, got: {msg}"
+        );
+        assert!(
+            !ctx.errors().iter().any(|e| e.message.contains("Hydro 11")),
+            "the no-declared-groups plant must produce zero findings, got: {:?}",
             ctx.errors()
         );
     }

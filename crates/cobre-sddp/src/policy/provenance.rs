@@ -70,13 +70,13 @@ pub struct InflowProvenance {
     /// `residual_std_ratio = 1.0`). Populated only by
     /// [`EstimationPath::PartialEstimation`]; empty otherwise.
     pub white_noise_fallbacks: Vec<i32>,
-    /// SipHash-1-3 fingerprint of the `initial_conditions.past_inflows` that
-    /// seeded the historical library's rolling η-inversion chain; `None` when no
-    /// `HistoricalScenarioLibrary` was built. A mismatch against the current
-    /// `past_inflows` means η was inverted against a different x₀, so replay is
-    /// no longer exact.
+    /// SipHash-1-3 fingerprint of the derived inflow lag seed
+    /// (`DerivedInflowSeeds::lag_values`) that seeded the historical library's
+    /// rolling η-inversion chain; `None` when no `HistoricalScenarioLibrary`
+    /// was built. A mismatch against a freshly-derived seed means η was
+    /// inverted against a different x₀, so replay is no longer exact.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub historical_library_past_inflows_digest: Option<u64>,
+    pub historical_library_seed_digest: Option<u64>,
 }
 
 /// Provenance of the **hydro-production** model's data sources (FPHA and
@@ -115,7 +115,7 @@ pub struct HydroProductionProvenance {
 ///         ar_method: Some("AIC".to_string()),
 ///         ar_max_order: Some(2),
 ///         white_noise_fallbacks: vec![],
-///         historical_library_past_inflows_digest: None,
+///         historical_library_seed_digest: None,
 ///     },
 ///     hydro_production: HydroProductionProvenance::default(),
 /// };
@@ -247,7 +247,7 @@ pub fn build_provenance_report(
             ar_method,
             ar_max_order,
             white_noise_fallbacks,
-            historical_library_past_inflows_digest: None,
+            historical_library_seed_digest: None,
         },
         hydro_production: aggregate_hydro_production(hydro_provenance),
     }
@@ -395,11 +395,8 @@ mod tests {
             &empty_hydro_provenance(2),
         );
         assert!(
-            report
-                .inflow
-                .historical_library_past_inflows_digest
-                .is_none(),
-            "builder must leave historical_library_past_inflows_digest unset; \
+            report.inflow.historical_library_seed_digest.is_none(),
+            "builder must leave historical_library_seed_digest unset; \
              callers populate it from setup.scenario_libraries.training.historical \
              when the historical scheme is active"
         );
@@ -415,10 +412,10 @@ mod tests {
             &empty_hydro_provenance(1),
         );
         let digest: u64 = 0xDEAD_BEEF_CAFE_F00D;
-        report.inflow.historical_library_past_inflows_digest = Some(digest);
+        report.inflow.historical_library_seed_digest = Some(digest);
         let json = serde_json::to_string(&report).unwrap();
         assert!(
-            json.contains("historical_library_past_inflows_digest"),
+            json.contains("historical_library_seed_digest"),
             "JSON must surface the digest field when populated: {json}"
         );
         assert!(
@@ -438,7 +435,7 @@ mod tests {
         );
         let json = serde_json::to_string(&report).unwrap();
         assert!(
-            !json.contains("historical_library_past_inflows_digest"),
+            !json.contains("historical_library_seed_digest"),
             "JSON must NOT include digest field when None (Option::is_none skip): {json}"
         );
     }

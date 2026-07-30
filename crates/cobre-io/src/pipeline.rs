@@ -5,16 +5,18 @@
 //! during validation (e.g., the `validate` CLI subcommand).
 
 use std::collections::HashMap;
+use std::path::Path;
 
-use cobre_core::SystemBuilder;
+use chrono::NaiveDate;
+use cobre_core::{System, SystemBuilder};
 
 use crate::{
-    LoadError,
+    CaseArtifacts, LoadError, LoadedCase,
     extensions::load_tailrace_curves,
     report::{ValidationReport, generate_report},
     resolution::{
         BoundsEntitySlices, BoundsOverrides, PenaltiesEntitySlices, PenaltiesOverrides,
-        resolve_bounds, resolve_exchange_factors, resolve_generic_constraint_bounds,
+        resolve_bounds, resolve_generic_constraint_bounds, resolve_hydro_unit_group_bounds,
         resolve_load_factors, resolve_ncs_bounds, resolve_ncs_factors, resolve_penalties,
     },
     scenarios::assembly::{assemble_inflow_models, assemble_load_models},
@@ -30,10 +32,6 @@ use crate::{
         structural::validate_structure,
     },
 };
-
-use crate::{CaseArtifacts, LoadedCase};
-use cobre_core::System;
-use std::path::Path;
 
 /// Run the complete loading pipeline for a case directory, discarding warnings.
 ///
@@ -79,9 +77,7 @@ pub(crate) fn run_pipeline_with_artifacts(
 
     let manifest = validate_structure(path, &mut ctx);
 
-    let data = validate_schema(path, &manifest, &mut ctx);
-
-    let Some(data) = data else {
+    let Some(mut data) = validate_schema(path, &manifest, &mut ctx) else {
         return ctx.into_result().and(Err(LoadError::ConstraintError {
             description: "schema validation failed but no errors were collected".to_string(),
         }));
@@ -93,23 +89,39 @@ pub(crate) fn run_pipeline_with_artifacts(
     validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
 
     validate_productivity_resolution(&data, &mut ctx);
-    // n_stages counts study stages (id >= 0) only — must match what
+    // Pre-study stages have negative IDs; this study-stage count must match what
     // `build_resolved_parameters` consumes downstream.
-    let n_study_stages = data.stages.stages.iter().filter(|s| s.id >= 0).count();
-    validate_scalar_parameters(
-        &data.scalar_parameters,
-        &data.hydros,
-        n_study_stages,
-        &mut ctx,
-    );
+    let study_stages: Vec<_> = data.stages.stages.iter().filter(|s| s.id >= 0).collect();
+    let n_stages = study_stages.len();
+    validate_scalar_parameters(&data.scalar_parameters, &data.hydros, n_stages, &mut ctx);
 
     let report = generate_report(&ctx);
     ctx.into_result()?;
 
-    // Study stages only (pre-study stages have negative IDs); stage_index maps
-    // domain-level stage_id to a positional 0-based index.
-    let study_stages: Vec<_> = data.stages.stages.iter().filter(|s| s.id >= 0).collect();
-    let n_stages = study_stages.len();
+    // Every resolver below indexes its output table by position in these slices
+    // (`entity_idx`), which must already equal the position `SystemBuilder::build`'s
+    // `sort_canonical` assigns; sorting only after validation keeps validation's
+    // error order on the parsed (id) order, unaffected by this resort.
+    sort_into_canonical_order(&mut data.buses, |b| b.operational_start_date, |b| b.id.0);
+    sort_into_canonical_order(&mut data.lines, |l| l.operational_start_date, |l| l.id.0);
+    sort_into_canonical_order(&mut data.hydros, |h| h.operational_start_date, |h| h.id.0);
+    sort_into_canonical_order(&mut data.thermals, |t| t.operational_start_date, |t| t.id.0);
+    sort_into_canonical_order(
+        &mut data.pumping_stations,
+        |p| p.operational_start_date,
+        |p| p.id.0,
+    );
+    sort_into_canonical_order(
+        &mut data.energy_contracts,
+        |c| c.operational_start_date,
+        |c| c.id.0,
+    );
+    sort_into_canonical_order(
+        &mut data.non_controllable_sources,
+        |n| n.operational_start_date,
+        |n| n.id.0,
+    );
+
     let stage_index: HashMap<i32, usize> = study_stages
         .iter()
         .enumerate()
@@ -148,7 +160,8 @@ pub(crate) fn run_pipeline_with_artifacts(
         })
         .max()
         .unwrap_or(0);
-    let bounds = resolve_bounds(
+    let blocks_per_stage: Vec<usize> = study_stages.iter().map(|s| s.blocks.len()).collect();
+    let mut bounds = resolve_bounds(
         &BoundsEntitySlices {
             hydros: &data.hydros,
             thermals: &data.thermals,
@@ -166,7 +179,15 @@ pub(crate) fn run_pipeline_with_artifacts(
             pumping: &data.pumping_bounds,
             contract: &data.contract_bounds,
         },
+        &blocks_per_stage,
     );
+    bounds.set_group_overlay(resolve_hydro_unit_group_bounds(
+        &data.hydros,
+        n_stages,
+        &stage_index,
+        &data.hydro_unit_group_bounds,
+        &blocks_per_stage,
+    ));
 
     let resolved_generic_bounds = resolve_generic_constraint_bounds(
         &data.generic_constraints,
@@ -175,8 +196,6 @@ pub(crate) fn run_pipeline_with_artifacts(
 
     let resolved_load_factors =
         resolve_load_factors(&data.load_factors, &data.buses, &data.stages.stages);
-    let resolved_exchange_factors =
-        resolve_exchange_factors(&data.exchange_factors, &data.lines, &data.stages.stages);
 
     let resolved_ncs_bounds = resolve_ncs_bounds(
         &data.ncs_bounds,
@@ -203,9 +222,8 @@ pub(crate) fn run_pipeline_with_artifacts(
     populate_derived_residual_ratios(&mut inflow_models, &stage_to_season, n_seasons)?;
     let load_models = assemble_load_models(data.load_seasonal_stats);
 
-    // Load tailrace curves only when the manifest detected the file: without
-    // them the fit collapses to the constant entity tailrace, which zeroes γ_S
-    // and emits sub-ULP LP coefficients.
+    // Without tailrace curves the fit collapses to the constant entity tailrace,
+    // which zeroes γ_S and emits sub-ULP LP coefficients.
     let tailrace_curves = if manifest.system_tailrace_curves_parquet {
         let tailrace_path = path.join("system").join("tailrace_curves.parquet");
         load_tailrace_curves(Some(tailrace_path.as_path()))?
@@ -238,7 +256,6 @@ pub(crate) fn run_pipeline_with_artifacts(
         .bounds(bounds)
         .resolved_generic_bounds(resolved_generic_bounds)
         .resolved_load_factors(resolved_load_factors)
-        .resolved_exchange_factors(resolved_exchange_factors)
         .resolved_ncs_bounds(resolved_ncs_bounds)
         .resolved_ncs_factors(resolved_ncs_factors)
         .inflow_models(inflow_models)
@@ -261,4 +278,15 @@ pub(crate) fn run_pipeline_with_artifacts(
         })?;
 
     Ok((LoadedCase { system, artifacts }, report))
+}
+
+/// Sorts `entities` into the same `(operational_start_date, id)` order as
+/// `SystemBuilder::build`'s `sort_canonical` — not `(id, date)` or `id` alone —
+/// so a resolver's `entity_idx` matches the position `System` will expose it at.
+fn sort_into_canonical_order<T>(
+    entities: &mut [T],
+    date: impl Fn(&T) -> NaiveDate,
+    id: impl Fn(&T) -> i32,
+) {
+    entities.sort_by_key(|e| (date(e), id(e)));
 }

@@ -419,7 +419,7 @@ fn parameter_coefficient_persists_across_stage_template_uses() {
 }
 
 /// When `t + K_i < n_stages`, the anticipated-decision column takes bounds from
-/// `thermal_bounds(thermal_idx, t + K_i)`. With `n_stages = 4`, `K_i = 2`,
+/// `thermal_block_base(thermal_idx, t + K_i)`. With `n_stages = 4`, `K_i = 2`,
 /// min/max = 10.0/100.0, stage `t = 0` (delivery 2, active) → col bounds [10, 100].
 #[test]
 fn test_anticipated_decision_bounds_at_active_stage() {

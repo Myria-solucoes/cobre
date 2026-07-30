@@ -134,15 +134,23 @@ impl ClassSampler<'_> {
         (hash as usize) % n_windows
     }
 
+    /// Deterministic external-scenario index from `(iteration, scenario)`.
+    #[allow(clippy::cast_possible_truncation)]
+    fn select_external_scenario(req: &ClassSampleRequest, n_scenarios: usize) -> usize {
+        let hash =
+            derive_forward_seed(EXTERNAL_SELECTION_BASE_SEED, req.iteration, req.scenario, 0);
+        (hash as usize) % n_scenarios
+    }
+
     /// No-op for every variant — reserved for future per-class initial-state
     /// injection.
     ///
     /// `Historical` deliberately does NOT inject window-preceding lags: initial
-    /// inflow lags come from `initial_conditions.past_inflows` for every scenario
-    /// regardless of the replayed window, so forward, backward, and lower-bound
-    /// evaluators all consume the same `x_0` (a window-dependent lag would make the
-    /// reported convergence gap meaningless). The window contributes only
-    /// standardized noise residuals via [`ClassSampler::fill`].
+    /// inflow lags come from the derived inflow seed (`DerivedInflowSeeds`) for
+    /// every scenario regardless of the replayed window, so forward, backward, and
+    /// lower-bound evaluators all consume the same `x_0` (a window-dependent lag
+    /// would make the reported convergence gap meaningless). The window
+    /// contributes only standardized noise residuals via [`ClassSampler::fill`].
     pub fn apply_initial_state(
         &self,
         _req: &ClassSampleRequest,
@@ -237,17 +245,9 @@ impl ClassSampler<'_> {
             }
 
             ClassSampler::External { library } => {
-                let n_scenarios = library.n_scenarios();
                 // Stage is excluded from the selection hash so one scenario serves
                 // every stage of a trajectory.
-                let hash = derive_forward_seed(
-                    EXTERNAL_SELECTION_BASE_SEED,
-                    req.iteration,
-                    req.scenario,
-                    0,
-                );
-                #[allow(clippy::cast_possible_truncation)]
-                let scenario_idx = (hash as usize) % n_scenarios;
+                let scenario_idx = Self::select_external_scenario(req, library.n_scenarios());
                 output.copy_from_slice(library.eta_slice(req.stage_idx, scenario_idx));
                 Ok(())
             }
@@ -270,7 +270,7 @@ mod tests {
     use cobre_core::temporal::NoiseMethod;
 
     use crate::{
-        StochasticError, derive_forward_seed, sample_forward,
+        StochasticError, sample_forward,
         sampling::{ExternalScenarioLibrary, HistoricalScenarioLibrary},
         tree::opening_tree::OpeningTree,
     };
@@ -575,20 +575,43 @@ mod tests {
 
         sampler.fill(&req, &mut output, &mut perm).unwrap();
 
-        let hash = derive_forward_seed(
-            super::EXTERNAL_SELECTION_BASE_SEED,
-            req.iteration,
-            req.scenario,
-            0,
-        );
-        #[allow(clippy::cast_possible_truncation)]
-        let scenario_idx = (hash as usize) % 50;
+        let scenario_idx = ClassSampler::select_external_scenario(&req, lib.n_scenarios());
         let expected = lib.eta_slice(req.stage_idx, scenario_idx);
 
         assert_eq!(
             &output, expected,
             "External::fill must match library.eta_slice(stage_idx, scenario_idx)"
         );
+    }
+
+    #[test]
+    fn test_external_fill_scenario_selection_still_deterministic() {
+        // fill()'s scenario selection is independent of apply_initial_state,
+        // mirroring test_historical_fill_window_selection_still_deterministic.
+        let lib = make_external_library();
+        let sampler = ClassSampler::External { library: &lib };
+        let mut perm = vec![0usize; 10];
+
+        for scenario in 0..20_u32 {
+            let req = ClassSampleRequest {
+                iteration: 3,
+                scenario,
+                stage: 0,
+                stage_idx: 0,
+                total_scenarios: 20,
+                noise_group_id: 0,
+            };
+            let scenario_via_helper =
+                ClassSampler::select_external_scenario(&req, lib.n_scenarios());
+
+            let mut output = vec![0.0f64; 3];
+            sampler.fill(&req, &mut output, &mut perm).unwrap();
+            let expected_eta = lib.eta_slice(req.stage_idx, scenario_via_helper);
+            assert_eq!(
+                &output, expected_eta,
+                "fill() must use select_external_scenario for scenario={scenario}"
+            );
+        }
     }
 
     #[test]

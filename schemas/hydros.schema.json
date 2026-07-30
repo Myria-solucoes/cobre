@@ -262,11 +262,6 @@
       "additionalProperties": false,
       "description": "Intermediate type for a single hydro plant entry.",
       "properties": {
-        "bus_id": {
-          "description": "Bus to which this plant's generation is injected.",
-          "format": "int32",
-          "type": "integer"
-        },
         "diversion": {
           "anyOf": [
             {
@@ -412,16 +407,23 @@
             "number",
             "null"
           ]
+        },
+        "unit_groups": {
+          "description": "Turbine groups partitioning this plant's generation envelope. Required:\nevery hydro declares at least one group, each with its own `id`, `name`,\n`bus_id`, and generation/turbined bounds; an absent or empty array is\nrejected.",
+          "items": {
+            "$ref": "#/$defs/RawUnitGroup"
+          },
+          "type": "array"
         }
       },
       "required": [
         "id",
         "name",
         "operational_start_date",
-        "bus_id",
         "reservoir",
         "outflow",
-        "generation"
+        "generation",
+        "unit_groups"
       ],
       "type": "object"
     },
@@ -638,6 +640,56 @@
       "required": [
         "outflow_m3s",
         "height_m"
+      ],
+      "type": "object"
+    },
+    "RawUnitGroup": {
+      "additionalProperties": false,
+      "description": "Intermediate type for a single declared entry in the `unit_groups` array.",
+      "properties": {
+        "bus_id": {
+          "description": "Bus to which this group's generation is injected.",
+          "format": "int32",
+          "type": "integer"
+        },
+        "id": {
+          "description": "Identifier, unique within the owning plant (not globally).",
+          "format": "int32",
+          "type": "integer"
+        },
+        "max_generation_mw": {
+          "description": "Maximum electrical generation [MW].",
+          "format": "double",
+          "type": "number"
+        },
+        "max_turbined_m3s": {
+          "description": "Maximum turbined flow [m³/s].",
+          "format": "double",
+          "type": "number"
+        },
+        "min_generation_mw": {
+          "description": "Minimum electrical generation [MW].",
+          "format": "double",
+          "type": "number"
+        },
+        "min_turbined_m3s": {
+          "description": "Minimum turbined flow [m³/s].",
+          "format": "double",
+          "type": "number"
+        },
+        "name": {
+          "description": "Human-readable group name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "bus_id",
+        "min_generation_mw",
+        "max_generation_mw",
+        "min_turbined_m3s",
+        "max_turbined_m3s"
       ],
       "type": "object"
     }

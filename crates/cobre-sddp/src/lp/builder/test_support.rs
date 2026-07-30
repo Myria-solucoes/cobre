@@ -120,6 +120,27 @@ pub(super) fn zero_hydro_penalties() -> HydroPenalties {
     }
 }
 
+/// Block-hour durations shared by every [`three_block_stage`] caller.
+pub(super) const BLOCK_HOURS: [f64; 3] = [200.0, 300.0, 244.0];
+
+/// Block count matching [`BLOCK_HOURS`].
+pub(super) const N_BLKS: usize = 3;
+
+/// Three-block `Stage` at `index`, durations [`BLOCK_HOURS`].
+pub(super) fn three_block_stage(index: usize) -> Stage {
+    let mut stage = two_block_stage(index, [BLOCK_HOURS[0], BLOCK_HOURS[1]]);
+    stage.blocks = BLOCK_HOURS
+        .iter()
+        .enumerate()
+        .map(|(i, &h)| Block {
+            index: i,
+            name: format!("BLK{i}"),
+            duration_hours: h,
+        })
+        .collect();
+    stage
+}
+
 /// Two-block `Stage` at `index` with per-block `durations`.
 ///
 /// The two durations are passed by the caller rather than fixed because several

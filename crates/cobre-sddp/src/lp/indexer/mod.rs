@@ -3,10 +3,8 @@
 //! The state-vector column layout is owned by [`StateSpace`]; the per-stage
 //! equipment column/row geometry is owned by
 //! [`StageLayout`](crate::lp_builder)/[`StageGeometry`](crate::lp_builder::StageGeometry);
-//! the non-state study shape is owned by [`StudyDimensions`]. Together they
-//! eliminate magic index numbers throughout the forward pass, backward pass, and
-//! LP construction code. Each column/row region's ownership is summarized below;
-//! the authoritative ranges live on the owning types.
+//! the non-state study shape is owned by [`StudyDimensions`]. The authoritative
+//! ranges live on the owning types.
 //!
 //! ## Column layout (Solver Abstraction SS2.1)
 //!
@@ -19,8 +17,7 @@
 //! The equipment, slack, generic-constraint, and filling-phase column and row
 //! ranges that follow `theta` — allocated in that equipment -> slack ->
 //! generic -> filling family order — are owned entirely by
-//! [`StageLayout`](crate::lp_builder); see its own module doc and field docs
-//! for the authoritative ranges.
+//! [`StageLayout`](crate::lp_builder).
 //!
 //! The `anticipated_decision` block is stage-level (one column per anticipated
 //! plant, NOT per-block) and has length `A = n_anticipated`. The block collapses
@@ -70,7 +67,7 @@
 //! - `storage_boundary_grid` — the [`StorageBoundaryGrid`] typed
 //!   storage-boundary address primitive ([`StorageBoundaryGrid::col`]), the
 //!   single owner of `block_storage_col`'s endpoint/interior split.
-//! - `state_space` — the [`StateSpace`] type, the sole owner of the role-(a)
+//! - `state_space` — the [`StateSpace`] type, the sole owner of the
 //!   state-vector concern: the stage-invariant state-vector column ranges, the
 //!   two layout-derived caches, and the resolver / mask methods
 //!   ([`StateSpace::state_to_lp_column`],
@@ -86,9 +83,12 @@
 //!   delegating each column to [`StateSpace::state_to_lp_incoming_column`].
 //! - `entity_index` — the entity system/local index vocabulary
 //!   ([`HydroSys`]/[`ThermalSys`]/[`LineSys`], [`FphaLocal`]/[`EvapLocal`]/
-//!   [`FillingTargetLocal`]/[`FloorLocal`]/[`AnticipatedLocal`]), distinguishing
-//!   an entity's canonical system position from its position within a
-//!   per-stage local identity list.
+//!   [`FillingTargetLocal`]/[`FloorLocal`]/[`AnticipatedLocal`],
+//!   [`HydroCell`]/[`FphaCellLocal`]), distinguishing an entity's canonical
+//!   system position from its position within a per-stage local identity list
+//!   or within the study-scope hydro-cell partition.
+//! - `hydro_cell` — the [`HydroCellIndex`] study-scope partition of each hydro
+//!   plant's unit groups into `bus_id`-equivalence-class cells ([`HydroCell`]).
 //!
 //! Every public symbol is re-exported here so the `cobre_sddp::indexer::Symbol`
 //! and `crate::indexer::Symbol` module paths resolve to the same item regardless
@@ -98,6 +98,7 @@ mod anticipated_gate;
 mod block_grid;
 mod cut_state_projection;
 mod entity_index;
+mod hydro_cell;
 mod index;
 mod layout;
 mod range_cursor;
@@ -111,9 +112,10 @@ pub(crate) use anticipated_gate::{
 pub use block_grid::BlockGrid;
 pub use cut_state_projection::CutStateProjection;
 pub use entity_index::{
-    AnticipatedLocal, EvapLocal, FillingTargetLocal, FloorLocal, FphaLocal, HydroSys, LineSys,
-    ThermalSys,
+    AnticipatedLocal, EvapLocal, FillingTargetLocal, FloorLocal, FphaCellLocal, FphaLocal,
+    HydroCell, HydroSys, LineSys, ThermalSys,
 };
+pub use hydro_cell::HydroCellIndex;
 pub use index::{BlockIdx, Boundary, Col, CutSlot, InCol, OutCol, Row, StateDim};
 pub use layout::{EvaporationIndices, FphaRowRange};
 pub(crate) use range_cursor::RangeCursor;

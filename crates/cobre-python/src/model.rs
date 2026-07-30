@@ -238,11 +238,6 @@ impl PyHydro {
     }
 
     #[getter]
-    fn bus_id(&self) -> i32 {
-        self.inner.bus_id.0
-    }
-
-    #[getter]
     fn downstream_id(&self) -> Option<i32> {
         self.inner.downstream_id.map(|id| id.0)
     }
@@ -283,10 +278,7 @@ impl PyHydro {
     }
 
     fn __repr__(&self) -> String {
-        format!(
-            "Hydro(id={}, name='{}', bus_id={})",
-            self.inner.id.0, self.inner.name, self.inner.bus_id.0
-        )
+        format!("Hydro(id={}, name='{}')", self.inner.id.0, self.inner.name)
     }
 }
 

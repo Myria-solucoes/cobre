@@ -4,8 +4,9 @@
 //! entity is absorbed by editing only this module — add the field to the
 //! matching `<Entity>Spec` (with a neutral `Default`) and map it in
 //! `make_<entity>`. Call sites that spread `..Default::default()` recompile
-//! unchanged. Each `make_<entity>` entity literal omits `..`, so the compiler
-//! rejects a `Spec` that fails to mirror every non-identity field.
+//! unchanged, overriding every field they depend on. Each `make_<entity>` entity
+//! literal omits `..`, so the compiler rejects a `Spec` that fails to mirror
+//! every non-identity field.
 
 #![allow(
     clippy::cast_possible_truncation,
@@ -18,7 +19,7 @@ use cobre_core::EntityId;
 use cobre_core::entities::bus::{Bus, DeficitSegment};
 use cobre_core::entities::hydro::{
     DiversionChannel, EfficiencyModel, FillingConfig, HydraulicLossesModel, Hydro,
-    HydroGenerationModel, HydroPenalties, TailraceModel,
+    HydroGenerationModel, HydroPenalties, HydroUnitGroup, TailraceModel,
 };
 use cobre_core::entities::thermal::{AnticipatedConfig, Thermal};
 use cobre_core::temporal::{
@@ -30,7 +31,7 @@ fn neutral_date() -> NaiveDate {
 }
 
 /// Non-identity fields of [`Stage`]; `index`/`id` are supplied positionally to
-/// [`make_stage`]. Defaults are neutral; migration sites override every set field.
+/// [`make_stage`].
 #[derive(Clone)]
 pub struct StageSpec {
     /// Stage start date (inclusive).
@@ -108,7 +109,7 @@ pub fn make_stage(
 }
 
 /// Non-identity fields of [`Hydro`]; `id` is supplied positionally to
-/// [`make_hydro`]. Defaults are neutral; migration sites override every set field.
+/// [`make_hydro`].
 #[derive(Clone)]
 pub struct HydroSpec {
     /// Human-readable plant name.
@@ -145,6 +146,8 @@ pub struct HydroSpec {
     pub min_generation_mw: f64,
     /// Maximum electrical generation (MW).
     pub max_generation_mw: f64,
+    /// Turbine groups partitioning the plant's generation envelope.
+    pub unit_groups: Vec<HydroUnitGroup>,
     /// Tailrace elevation model; None = constant zero tailrace.
     pub tailrace: Option<TailraceModel>,
     /// Penstock hydraulic-loss model; None = lossless.
@@ -183,6 +186,7 @@ impl Default for HydroSpec {
             specific_productivity_mw_per_m3s_per_m: None,
             min_generation_mw: 0.0,
             max_generation_mw: 0.0,
+            unit_groups: Vec::new(),
             tailrace: None,
             hydraulic_losses: None,
             efficiency: None,
@@ -237,6 +241,7 @@ pub fn make_hydro(
         specific_productivity_mw_per_m3s_per_m,
         min_generation_mw,
         max_generation_mw,
+        unit_groups,
         tailrace,
         hydraulic_losses,
         efficiency,
@@ -247,11 +252,10 @@ pub fn make_hydro(
         penalties,
     }: HydroSpec,
 ) -> Hydro {
-    Hydro {
+    let mut hydro = Hydro {
         id,
         name,
         operational_start_date,
-        bus_id,
         downstream_id,
         travel_time_hours,
         entry_stage_id,
@@ -266,6 +270,7 @@ pub fn make_hydro(
         specific_productivity_mw_per_m3s_per_m,
         min_generation_mw,
         max_generation_mw,
+        unit_groups,
         tailrace,
         hydraulic_losses,
         efficiency,
@@ -274,11 +279,13 @@ pub fn make_hydro(
         diversion,
         filling,
         penalties,
-    }
+    };
+    hydro.declare_mirror_unit_group(bus_id);
+    hydro
 }
 
 /// Non-identity fields of [`Bus`]; `id` is supplied positionally to
-/// [`make_bus`]. Defaults are neutral; migration sites override every set field.
+/// [`make_bus`].
 #[derive(Clone)]
 pub struct BusSpec {
     /// Human-readable bus name.
@@ -325,7 +332,7 @@ pub fn make_bus(
 }
 
 /// Non-identity fields of [`Thermal`]; `id` is supplied positionally to
-/// [`make_thermal`]. Defaults are neutral; migration sites override every set field.
+/// [`make_thermal`].
 #[derive(Clone)]
 pub struct ThermalSpec {
     /// Human-readable plant name.

@@ -51,11 +51,11 @@ fn make_stochastic_context() -> StochasticContext {
         }],
         excess_cost: 0.0,
     };
-    let hydro = Hydro {
+    let mut hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(1),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(0),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -96,6 +96,7 @@ fn make_stochastic_context() -> StochasticContext {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.declare_mirror_unit_group(EntityId(0));
 
     let stage = Stage {
         index: 0,
@@ -321,8 +322,8 @@ fn run_matches_open_coded_forward_block_for_minimal_fixture() {
         external_inflow_library: None,
         external_load_library: None,
         external_ncs_library: None,
-        recent_accum_seed: &[],
-        recent_weight_seed: 0.0,
+        lag_accum_seed: &[],
+        lag_weight_seed: &[],
         dcs: None,
     };
 
@@ -597,8 +598,8 @@ fn run_wires_ncs_patch_matching_pre_collapse_inline_pattern() {
         external_inflow_library: None,
         external_load_library: None,
         external_ncs_library: None,
-        recent_accum_seed: &[],
-        recent_weight_seed: 0.0,
+        lag_accum_seed: &[],
+        lag_weight_seed: &[],
         dcs: None,
     };
 
@@ -753,8 +754,8 @@ fn run_skips_load_and_inflow_transform_under_absent_and_prebuilt() {
         external_inflow_library: None,
         external_load_library: None,
         external_ncs_library: None,
-        recent_accum_seed: &[],
-        recent_weight_seed: 0.0,
+        lag_accum_seed: &[],
+        lag_weight_seed: &[],
         dcs: None,
     };
 

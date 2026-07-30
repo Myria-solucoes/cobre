@@ -27,7 +27,9 @@ pub struct BusLineConnection {
 #[derive(Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BusGenerators {
-    /// Hydro plant IDs.
+    /// IDs of hydros with at least one unit group at this bus. A plant with
+    /// groups on several buses is listed under each; a plant with several
+    /// groups on this bus is listed once.
     pub hydro_ids: Vec<EntityId>,
     /// Thermal plant IDs.
     pub thermal_ids: Vec<EntityId>,
@@ -109,11 +111,19 @@ impl NetworkTopology {
         }
 
         for hydro in hydros {
-            bus_generators
-                .entry(hydro.bus_id)
-                .or_default()
-                .hydro_ids
-                .push(hydro.id);
+            for (i, group) in hydro.unit_groups.iter().enumerate() {
+                if hydro.unit_groups[..i]
+                    .iter()
+                    .any(|g| g.bus_id == group.bus_id)
+                {
+                    continue;
+                }
+                bus_generators
+                    .entry(group.bus_id)
+                    .or_default()
+                    .hydro_ids
+                    .push(hydro.id);
+            }
         }
 
         for thermal in thermals {
@@ -192,7 +202,7 @@ impl NetworkTopology {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::{ContractType, HydroGenerationModel, HydroPenalties};
+    use crate::entities::{ContractType, HydroGenerationModel, HydroPenalties, HydroUnitGroup};
     use chrono::NaiveDate;
 
     fn make_bus(id: i32) -> Bus {
@@ -240,11 +250,11 @@ mod tests {
             evaporation_violation_neg_cost: 0.0,
             inflow_nonnegativity_cost: 1000.0,
         };
-        Hydro {
+        let mut hydro = Hydro {
+            unit_groups: Vec::new(),
             id: EntityId(id),
             name: String::new(),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(bus_id),
             downstream_id: None,
             travel_time_hours: None,
             entry_stage_id: None,
@@ -267,7 +277,9 @@ mod tests {
             diversion: None,
             filling: None,
             penalties: zero_penalties,
-        }
+        };
+        hydro.declare_mirror_unit_group(EntityId(bus_id));
+        hydro
     }
 
     fn make_thermal(id: i32, bus_id: i32) -> Thermal {
@@ -311,6 +323,18 @@ mod tests {
             price_per_mwh: 0.0,
             min_mw: 0.0,
             max_mw: 100.0,
+        }
+    }
+
+    fn make_group(id: i32, bus_id: i32) -> HydroUnitGroup {
+        HydroUnitGroup {
+            id: EntityId(id),
+            name: String::new(),
+            bus_id: EntityId(bus_id),
+            min_generation_mw: 0.0,
+            max_generation_mw: 1.0,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 1.0,
         }
     }
 
@@ -451,6 +475,49 @@ mod tests {
         let loads = topo.bus_loads(EntityId(0));
         // Contract IDs must be sorted ascending: 7, 10.
         assert_eq!(loads.contract_ids, vec![EntityId(7), EntityId(10)]);
+    }
+
+    #[test]
+    fn test_bus_generators_same_bus_groups_collapse_to_one_hydro_id() {
+        let buses = vec![make_bus(0)];
+        let mut hydro = make_hydro(10, 0);
+        hydro.unit_groups = vec![make_group(0, 0), make_group(1, 0), make_group(2, 0)];
+        let topo = NetworkTopology::build(&buses, &[], &[hydro], &[], &[], &[], &[]);
+
+        assert_eq!(
+            topo.bus_generators(EntityId(0)).hydro_ids,
+            vec![EntityId(10)]
+        );
+    }
+
+    #[test]
+    fn test_bus_generators_group_bus_listing_is_declaration_order_invariant() {
+        let buses = vec![make_bus(1), make_bus(2)];
+
+        let mut hydro_fwd = make_hydro(10, 1);
+        hydro_fwd.unit_groups = vec![make_group(2, 1), make_group(5, 2)];
+        let topo_fwd = NetworkTopology::build(&buses, &[], &[hydro_fwd], &[], &[], &[], &[]);
+
+        let mut hydro_rev = make_hydro(10, 1);
+        hydro_rev.unit_groups = vec![make_group(5, 2), make_group(2, 1)];
+        let topo_rev = NetworkTopology::build(&buses, &[], &[hydro_rev], &[], &[], &[], &[]);
+
+        assert_eq!(
+            topo_fwd.bus_generators(EntityId(1)),
+            topo_rev.bus_generators(EntityId(1))
+        );
+        assert_eq!(
+            topo_fwd.bus_generators(EntityId(2)),
+            topo_rev.bus_generators(EntityId(2))
+        );
+        assert_eq!(
+            topo_fwd.bus_generators(EntityId(1)).hydro_ids,
+            vec![EntityId(10)]
+        );
+        assert_eq!(
+            topo_fwd.bus_generators(EntityId(2)).hydro_ids,
+            vec![EntityId(10)]
+        );
     }
 
     #[cfg(feature = "serde")]

@@ -9,8 +9,8 @@
 //! untouched. The classification is an explicit `(case-relative path,
 //! top-level keys)` map — never auto-discovery — because a case directory
 //! legitimately contains order-bearing arrays (an ordinal per-lag vector
-//! nested inside a shuffled record, e.g. `past_inflows[i].values_m3s`)
-//! alongside the id-keyed registries this axis permutes; walking every array
+//! nested inside a shuffled record) alongside the id-keyed registries this
+//! axis permutes; walking every array
 //! indiscriminately would silently corrupt the former. Any top-level JSON
 //! array that is neither whitelisted for shuffle nor marked keep-ordered
 //! panics ("unclassified array") so a future registry cannot silently escape
@@ -44,7 +44,6 @@ const SHUFFLE_WHITELIST: &[(&str, &[&str])] = &[
         &[
             "storage",
             "filling_storage",
-            "past_inflows",
             "past_anticipated_commitments",
             "recent_observations",
             "past_defluences",

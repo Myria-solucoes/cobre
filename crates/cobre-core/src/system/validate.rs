@@ -121,7 +121,7 @@ pub(crate) fn validate_cross_references(
     errors: &mut Vec<ValidationError>,
 ) {
     validate_line_refs(entities.lines, bus_index, errors);
-    validate_hydro_refs(entities.hydros, bus_index, hydro_index, errors);
+    validate_hydro_refs(entities.hydros, hydro_index, errors);
     validate_thermal_refs(entities.thermals, bus_index, errors);
     validate_pumping_station_refs(entities.pumping_stations, bus_index, hydro_index, errors);
     validate_contract_refs(entities.contracts, bus_index, errors);
@@ -157,20 +157,10 @@ fn validate_line_refs(
 
 fn validate_hydro_refs(
     hydros: &[Hydro],
-    bus_index: &HashMap<EntityId, usize>,
     hydro_index: &HashMap<EntityId, usize>,
     errors: &mut Vec<ValidationError>,
 ) {
     for hydro in hydros {
-        if !bus_index.contains_key(&hydro.bus_id) {
-            errors.push(ValidationError::InvalidReference {
-                source_entity_type: "Hydro",
-                source_id: hydro.id,
-                field_name: "bus_id",
-                referenced_id: hydro.bus_id,
-                expected_type: "Bus",
-            });
-        }
         if let Some(downstream_id) = hydro.downstream_id
             && !hydro_index.contains_key(&downstream_id)
         {

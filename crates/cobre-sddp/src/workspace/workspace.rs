@@ -619,7 +619,7 @@ pub struct ScratchBuffers {
     pub(crate) unscaled_primal: Vec<f64>,
     pub(crate) unscaled_dual: Vec<f64>,
     pub(crate) lag_accumulator: Vec<f64>,
-    pub(crate) lag_weight_accum: f64,
+    pub(crate) lag_weight_accum: Vec<f64>,
     pub(crate) downstream_accumulator: Vec<f64>,
     pub(crate) downstream_weight_accum: f64,
     // Slot-major `[slot * hydro_count + hydro]`; slot 0 = oldest completed
@@ -768,7 +768,7 @@ impl ScratchBuffers {
             unscaled_primal: Vec::new(),
             unscaled_dual: Vec::new(),
             lag_accumulator: vec![0.0_f64; hydro_count],
-            lag_weight_accum: 0.0,
+            lag_weight_accum: vec![0.0_f64; hydro_count],
             downstream_accumulator: if downstream_par_order > 0 {
                 vec![0.0_f64; hydro_count]
             } else {

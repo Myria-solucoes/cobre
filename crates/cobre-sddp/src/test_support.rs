@@ -14,9 +14,9 @@ use std::collections::{BTreeMap, HashMap};
 use chrono::NaiveDate;
 use cobre_core::{
     Block, BlockMode, Bus, CascadeTopology, DeficitSegment, EntityId, Hydro, HydroGenerationModel,
-    HydroPenalties, NoiseMethod, ResolvedBounds, ResolvedExchangeFactors,
-    ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
-    ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig,
+    HydroPenalties, HydroUnitGroup, NoiseMethod, ResolvedBounds, ResolvedGenericConstraintBounds,
+    ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties,
+    ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig,
 };
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -26,7 +26,7 @@ use crate::error::SddpError;
 use crate::hydro_models::{
     EvaporationModel, EvaporationModelSet, FphaPlane, ProductionModelSet, ResolvedProductionModel,
 };
-use crate::indexer::{CutStateProjection, StateSpace, StudyDimensions, ThermalSys};
+use crate::indexer::{CutStateProjection, HydroCellIndex, StateSpace, StudyDimensions, ThermalSys};
 use crate::lead_time::AnticipatedResolution;
 use crate::lp_builder::{ResolvedTables, StageGeometry, StageLayout, TemplateBuildCtx};
 use crate::policy::policy_load::{
@@ -108,8 +108,8 @@ pub fn fill_consistent_basis(out: &mut Basis) {
     out.row_status[..num_row - basic_cols].fill(BasisStatus::Basic);
 }
 
-/// Build [`GeometryDims`] with the seven scalar entity counts set and no
-/// anticipated thermals.
+/// Build [`GeometryDims`] with the scalar entity counts set and no anticipated
+/// thermals.
 #[must_use]
 pub fn eq(
     hydro_count: usize,
@@ -185,17 +185,43 @@ fn geometry_zero_penalties() -> HydroPenalties {
     }
 }
 
+/// Build a [`HydroUnitGroup`] with the given `id`, `bus_id`, and four bounds —
+/// the shared multi-bus fixture helper (`unit_groups` cannot otherwise be
+/// populated from outside `cobre-io`'s `pub(super)` validation-module helper).
+#[must_use]
+pub fn make_unit_group(
+    id: EntityId,
+    bus_id: EntityId,
+    min_generation_mw: f64,
+    max_generation_mw: f64,
+    min_turbined_m3s: f64,
+    max_turbined_m3s: f64,
+) -> HydroUnitGroup {
+    HydroUnitGroup {
+        id,
+        name: format!("G{id}"),
+        bus_id,
+        min_generation_mw,
+        max_generation_mw,
+        min_turbined_m3s,
+        max_turbined_m3s,
+    }
+}
+
 /// Fixture hydro at system position `idx`: always `Operating` (`filling`,
 /// `entry_stage_id`, `exit_stage_id` all `None`), so `StageLayout::new`'s FPHA/
 /// evaporation membership filters never drop a caller-requested index regardless
-/// of `stage.id`.
-fn geometry_hydro(idx: usize) -> Hydro {
+/// of `stage.id`. Declares its mirror unit group before return — `geometry` never
+/// mutates the collected `Vec`, so the return is the finalization boundary — and
+/// stays `pub(crate)` for `indexer::hydro_cell`'s identity test, which needs these
+/// exact hydros.
+pub(crate) fn geometry_hydro(idx: usize) -> Hydro {
     let id = EntityId(i32::try_from(idx).unwrap_or(i32::MAX));
-    Hydro {
+    let mut hydro = Hydro {
+        unit_groups: Vec::new(),
         id,
         name: String::new(),
         operational_start_date: NaiveDate::default(),
-        bus_id: id,
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -218,7 +244,41 @@ fn geometry_hydro(idx: usize) -> Hydro {
         diversion: None,
         filling: None,
         penalties: geometry_zero_penalties(),
-    }
+    };
+    hydro.declare_mirror_unit_group(id);
+    hydro
+}
+
+/// `geometry_hydro` with caller-chosen `unit_groups` and `generation_model`,
+/// for multi-bus [`HydroCellIndex`] fixtures — every other field matches
+/// `geometry_hydro` exactly, so a single-group caller gets the identical hydro.
+#[must_use]
+pub fn geometry_hydro_with_groups(
+    idx: usize,
+    unit_groups: Vec<HydroUnitGroup>,
+    generation_model: HydroGenerationModel,
+) -> Hydro {
+    let mut hydro = geometry_hydro(idx);
+    hydro.unit_groups = unit_groups;
+    hydro.generation_model = generation_model;
+    hydro.declare_mirror_unit_group(EntityId(i32::try_from(idx).unwrap_or(i32::MAX)));
+    // Both calls earn their place: the declare covers a caller passing an empty
+    // vec, and the sort supplies the id-ascending `unit_groups` that
+    // `HydroCellIndex::build` documents as its precondition for keeping
+    // `cell_group_pos` ascending within a cell.
+    hydro.sort_unit_groups();
+    hydro
+}
+
+/// Identity [`HydroCellIndex`] for `n_hydros` single-bus hydros
+/// (`cells_of(h) == h..h+1` for every `h`) — the single shared builder for every
+/// fixture in the crate that needs a `HydroCellIndex` but is not itself testing
+/// the multi-bus partition. Safe to over-size: a caller passing more than its
+/// fixture's actual hydro count still gets a correct `cells_of` for every hydro
+/// it actually queries.
+#[must_use]
+pub fn identity_hydro_cell_index(n_hydros: usize) -> HydroCellIndex {
+    HydroCellIndex::build(&(0..n_hydros).map(geometry_hydro).collect::<Vec<_>>())
 }
 
 /// Fixture bus at system position `idx` carrying exactly `max_deficit_segments`
@@ -344,7 +404,7 @@ fn geometry_stage(n_blks: usize) -> Stage {
 /// single owner of the offset arithmetic.
 #[must_use]
 // Rationale: `fpha_hydro_indices`/`evap_hydro_indices` stay owned `Vec<usize>` —
-// the signature is a stability contract its ~30 call sites depend on — even
+// the signature is a stability contract its call sites depend on — even
 // though the body only borrows them (`StageLayout::new` re-derives the
 // authoritative membership from `ctx.hydros`/`production_models`/
 // `evaporation_models`, not from the caller's raw list).
@@ -361,6 +421,7 @@ pub fn geometry(
     evap_hydro_indices: Vec<usize>,
 ) -> StageGeometry {
     let hydros: Vec<Hydro> = (0..dims.hydro_count).map(geometry_hydro).collect();
+    let hydro_cell_index = HydroCellIndex::build(&hydros);
     let buses: Vec<Bus> = (0..dims.n_buses)
         .map(|idx| geometry_bus(idx, dims.max_deficit_segments))
         .collect();
@@ -372,7 +433,6 @@ pub fn geometry(
     let penalties = ResolvedPenalties::empty();
     let resolved_generic_bounds = ResolvedGenericConstraintBounds::empty();
     let resolved_load_factors = ResolvedLoadFactors::empty();
-    let resolved_exchange_factors = ResolvedExchangeFactors::empty();
     let resolved_ncs_bounds = ResolvedNcsBounds::empty();
     let resolved_ncs_factors = ResolvedNcsFactors::empty();
     let resolved_parameters = ResolvedParameters {
@@ -391,12 +451,12 @@ pub fn geometry(
         buses: &buses,
         load_models: &[],
         cascade: &cascade,
+        hydro_cell_index: &hydro_cell_index,
         resolved: ResolvedTables {
             bounds: &bounds,
             penalties: &penalties,
             resolved_generic_bounds: &resolved_generic_bounds,
             resolved_load_factors: &resolved_load_factors,
-            resolved_exchange_factors: &resolved_exchange_factors,
             resolved_ncs_bounds: &resolved_ncs_bounds,
             resolved_ncs_factors: &resolved_ncs_factors,
             resolved_parameters: &resolved_parameters,
@@ -470,17 +530,7 @@ pub fn geom(_hydro_count: usize, _max_par_order: usize) -> StageGeometry {
 /// `crate::setup::resolve_state_layout` finalizes with no per-hydro AR truncation.
 #[must_use]
 pub fn state_layout(hydro_count: usize, max_par_order: usize) -> StateSpace {
-    let effective_lag_count = vec![max_par_order; hydro_count];
-    StateSpace::new(
-        hydro_count,
-        max_par_order,
-        0,
-        Vec::new(),
-        0,
-        0,
-        vec![],
-        &effective_lag_count,
-    )
+    state_layout_full(hydro_count, max_par_order, 0, 0, Vec::new())
 }
 
 /// Build a finalized [`StateSpace`] from explicit state-vector dimensions,
@@ -496,8 +546,7 @@ pub fn state_layout_full(
     k_max: usize,
     anticipated_lead_stages: Vec<usize>,
 ) -> StateSpace {
-    let effective_lag_count = vec![max_par_order; hydro_count];
-    StateSpace::new(
+    state_layout_with_transit_buckets(
         hydro_count,
         max_par_order,
         0,
@@ -505,7 +554,6 @@ pub fn state_layout_full(
         n_anticipated,
         k_max,
         anticipated_lead_stages,
-        &effective_lag_count,
     )
 }
 

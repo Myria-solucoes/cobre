@@ -15,20 +15,20 @@
 use chrono::NaiveDate;
 use cobre_core::{
     AnticipatedConfig, Block, BlockMode, BoundsCountsSpec, BoundsDefaults, Bus, BusStagePenalties,
-    ContractStageBounds, ContractType, DeficitSegment, EnergyContract, EntityId, Hydro,
-    HydroGenerationModel, HydroPenalties, HydroStageBounds, HydroStagePenalties, LineStageBounds,
-    LineStagePenalties, LoadModel, NcsStagePenalties, NoiseMethod, PenaltiesCountsSpec,
-    PenaltiesDefaults, PumpingStageBounds, PumpingStation, ResolvedBounds, ResolvedPenalties,
-    ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig, SystemBuilder, Thermal,
-    ThermalStageBounds,
+    ContractBlockBounds, ContractType, DeficitSegment, EnergyContract, EntityId, Hydro,
+    HydroBlockBounds, HydroGenerationModel, HydroPenalties, HydroStageBounds, HydroStagePenalties,
+    LineBlockBounds, LineStagePenalties, LoadModel, NcsStagePenalties, NoiseMethod,
+    PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, PumpingStation, ResolvedBounds,
+    ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig,
+    SystemBuilder, Thermal, ThermalBlockBounds, ThermalStageBounds,
 };
 use cobre_stochastic::PrecomputedNormal;
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
 use crate::hydro_models::PrepareHydroModelsResult;
 use crate::indexer::{
-    AnticipatedLocal, BlockIdx, Boundary, HydroSys, StateSpace, ThermalSys,
-    anticipated_resolution_for,
+    AnticipatedLocal, BlockIdx, Boundary, HydroCell, HydroCellIndex, HydroSys, StateSpace,
+    ThermalSys, anticipated_resolution_for,
 };
 use crate::inflow_method::InflowNonNegativityMethod;
 use crate::lead_time::AnticipatedResolution;
@@ -46,6 +46,13 @@ fn default_hydro_bounds() -> HydroStageBounds {
     HydroStageBounds {
         min_storage_hm3: 0.0,
         max_storage_hm3: 200.0,
+        filling_min_rate_m3s: 0.0,
+        water_withdrawal_m3s: 0.0,
+    }
+}
+
+fn default_hydro_block_bounds() -> HydroBlockBounds {
+    HydroBlockBounds {
         min_turbined_m3s: 0.0,
         max_turbined_m3s: 100.0,
         min_outflow_m3s: 0.0,
@@ -53,8 +60,6 @@ fn default_hydro_bounds() -> HydroStageBounds {
         min_generation_mw: 0.0,
         max_generation_mw: 250.0,
         max_diversion_m3s: None,
-        filling_min_rate_m3s: 0.0,
-        water_withdrawal_m3s: 0.0,
     }
 }
 
@@ -79,14 +84,8 @@ fn default_hydro_penalties() -> HydroStagePenalties {
     }
 }
 
-/// Build a one-bus system with exactly the thermals provided.
-///
-/// Uses one study stage with a single block of 744 hours and no hydros.
-fn system_with_thermals(thermals: Vec<Thermal>) -> cobre_core::System {
-    let n_thermals = thermals.len();
-    let n_stages = 1_usize;
-
-    let bus = Bus {
+fn fixture_bus() -> Bus {
+    Bus {
         id: EntityId(1),
         name: "B1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
@@ -95,7 +94,17 @@ fn system_with_thermals(thermals: Vec<Thermal>) -> cobre_core::System {
             cost_per_mwh: 500.0,
         }],
         excess_cost: 0.0,
-    };
+    }
+}
+
+/// Build a one-bus system with exactly the thermals provided.
+///
+/// Uses one study stage with a single block of 744 hours and no hydros.
+fn system_with_thermals(thermals: Vec<Thermal>) -> cobre_core::System {
+    let n_thermals = thermals.len();
+    let n_stages = 1_usize;
+
+    let bus = fixture_bus();
 
     let stages: Vec<Stage> = vec![Stage {
         index: 0,
@@ -146,20 +155,21 @@ fn system_with_thermals(thermals: Vec<Thermal>) -> cobre_core::System {
         },
         &BoundsDefaults {
             hydro: default_hydro_bounds(),
-            thermal: ThermalStageBounds {
+            hydro_block: default_hydro_block_bounds(),
+            thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+            thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
                 max_generation_mw: 100.0,
-                cost_per_mwh: 0.0,
             },
-            line: LineStageBounds {
+            line_block: LineBlockBounds {
                 direct_mw: 0.0,
                 reverse_mw: 0.0,
             },
-            pumping: PumpingStageBounds {
+            pumping_block: PumpingBlockBounds {
                 min_flow_m3s: 0.0,
                 max_flow_m3s: 0.0,
             },
-            contract: ContractStageBounds {
+            contract_block: ContractBlockBounds {
                 min_mw: 0.0,
                 max_mw: 0.0,
                 price_per_mwh: 0.0,
@@ -226,13 +236,19 @@ fn hydro_penalties_zero() -> HydroPenalties {
     }
 }
 
+// Deliberately non-binding, not an install capacity: the mirror group copies
+// this value and every cell column bound sums against it, so a realistic
+// number caps the cells below what `default_hydro_bounds()`-derived resolved
+// bounds resolve to.
+const FIXTURE_NONBINDING_MAX_TURBINED_M3S: f64 = 1_000_000.0;
+
 /// Minimal independent (no-downstream) hydro for pumping-station refs.
 fn fixture_hydro(id: i32) -> Hydro {
-    Hydro {
+    let mut hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(id),
         name: format!("H{id}"),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -243,10 +259,10 @@ fn fixture_hydro(id: i32) -> Hydro {
         max_outflow_m3s: None,
         generation_model: HydroGenerationModel::ConstantProductivity,
         min_turbined_m3s: 0.0,
-        max_turbined_m3s: 50.0,
+        max_turbined_m3s: FIXTURE_NONBINDING_MAX_TURBINED_M3S,
         specific_productivity_mw_per_m3s_per_m: None,
         min_generation_mw: 0.0,
-        max_generation_mw: 45.0,
+        max_generation_mw: 1_000_000.0,
         tailrace: None,
         hydraulic_losses: None,
         efficiency: None,
@@ -255,7 +271,9 @@ fn fixture_hydro(id: i32) -> Hydro {
         diversion: None,
         filling: None,
         penalties: hydro_penalties_zero(),
-    }
+    };
+    hydro.declare_mirror_unit_group(EntityId(1));
+    hydro
 }
 
 /// Build a one-bus, two-hydro system with the supplied pumping stations.
@@ -270,16 +288,7 @@ fn system_with_pumping_stations(stations: Vec<PumpingStation>) -> cobre_core::Sy
     let n_hydros = 2_usize;
     let n_stages = 1_usize;
 
-    let bus = Bus {
-        id: EntityId(1),
-        name: "B1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 500.0,
-        }],
-        excess_cost: 0.0,
-    };
+    let bus = fixture_bus();
 
     let hydros = vec![fixture_hydro(1), fixture_hydro(2)];
 
@@ -325,20 +334,21 @@ fn system_with_pumping_stations(stations: Vec<PumpingStation>) -> cobre_core::Sy
         },
         &BoundsDefaults {
             hydro: default_hydro_bounds(),
-            thermal: ThermalStageBounds {
+            hydro_block: default_hydro_block_bounds(),
+            thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+            thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
                 max_generation_mw: 100.0,
-                cost_per_mwh: 0.0,
             },
-            line: LineStageBounds {
+            line_block: LineBlockBounds {
                 direct_mw: 0.0,
                 reverse_mw: 0.0,
             },
-            pumping: PumpingStageBounds {
+            pumping_block: PumpingBlockBounds {
                 min_flow_m3s: 0.0,
                 max_flow_m3s: 100.0,
             },
-            contract: ContractStageBounds {
+            contract_block: ContractBlockBounds {
                 min_mw: 0.0,
                 max_mw: 0.0,
                 price_per_mwh: 0.0,
@@ -422,6 +432,7 @@ fn build_template_build_ctx_pumping_stations_id_sorted_and_pos_mapped() {
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -436,6 +447,7 @@ fn build_template_build_ctx_pumping_stations_id_sorted_and_pos_mapped() {
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
 
     let ids: Vec<i32> = ctx.pumping_stations.iter().map(|p| p.id.0).collect();
@@ -482,6 +494,7 @@ fn build_template_build_ctx_n_pumping_matches_slice_and_bounds() {
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -496,6 +509,7 @@ fn build_template_build_ctx_n_pumping_matches_slice_and_bounds() {
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
 
     assert_eq!(
@@ -563,6 +577,7 @@ fn build_stage_templates_records_layout_pumping_col_start_per_stage() {
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -577,6 +592,7 @@ fn build_stage_templates_records_layout_pumping_col_start_per_stage() {
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
     let study_stages: Vec<_> = system.stages().iter().filter(|s| s.id >= 0).collect();
 
@@ -628,16 +644,7 @@ fn system_with_contracts(contracts: Vec<EnergyContract>, n_blks: usize) -> cobre
     let n_hydros = 2_usize;
     let n_stages = 1_usize;
 
-    let bus = Bus {
-        id: EntityId(1),
-        name: "B1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 500.0,
-        }],
-        excess_cost: 0.0,
-    };
+    let bus = fixture_bus();
 
     let hydros = vec![fixture_hydro(1), fixture_hydro(2)];
 
@@ -687,20 +694,21 @@ fn system_with_contracts(contracts: Vec<EnergyContract>, n_blks: usize) -> cobre
         },
         &BoundsDefaults {
             hydro: default_hydro_bounds(),
-            thermal: ThermalStageBounds {
+            hydro_block: default_hydro_block_bounds(),
+            thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+            thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
                 max_generation_mw: 100.0,
-                cost_per_mwh: 0.0,
             },
-            line: LineStageBounds {
+            line_block: LineBlockBounds {
                 direct_mw: 0.0,
                 reverse_mw: 0.0,
             },
-            pumping: PumpingStageBounds {
+            pumping_block: PumpingBlockBounds {
                 min_flow_m3s: 0.0,
                 max_flow_m3s: 0.0,
             },
-            contract: ContractStageBounds {
+            contract_block: ContractBlockBounds {
                 min_mw: 0.0,
                 max_mw: 500.0,
                 price_per_mwh: 100.0,
@@ -760,6 +768,7 @@ fn build_template_build_ctx_contracts_counted_and_pos_mapped() {
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -774,6 +783,7 @@ fn build_template_build_ctx_contracts_counted_and_pos_mapped() {
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
 
     assert_eq!(ctx.contracts.len(), 2);
@@ -819,6 +829,7 @@ fn stage_layout_geometry_populates_contract_ranges() {
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -833,6 +844,7 @@ fn stage_layout_geometry_populates_contract_ranges() {
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
     let stage = system
         .stages()
@@ -874,6 +886,7 @@ fn stage_layout_geometry_empty_contracts_are_pumping_end_anchored() {
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -888,6 +901,7 @@ fn stage_layout_geometry_empty_contracts_are_pumping_end_anchored() {
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
     let stage = system
         .stages()
@@ -918,16 +932,7 @@ fn stage_layout_geometry_empty_contracts_are_pumping_end_anchored() {
 #[test]
 #[should_panic(expected = "resolved-bounds")]
 fn build_template_build_ctx_contract_count_divergence_panics() {
-    let bus = Bus {
-        id: EntityId(1),
-        name: "B1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 500.0,
-        }],
-        excess_cost: 0.0,
-    };
+    let bus = fixture_bus();
     let stages: Vec<Stage> = vec![Stage {
         index: 0,
         id: 0,
@@ -968,20 +973,21 @@ fn build_template_build_ctx_contract_count_divergence_panics() {
         },
         &BoundsDefaults {
             hydro: default_hydro_bounds(),
-            thermal: ThermalStageBounds {
+            hydro_block: default_hydro_block_bounds(),
+            thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+            thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
                 max_generation_mw: 100.0,
-                cost_per_mwh: 0.0,
             },
-            line: LineStageBounds {
+            line_block: LineBlockBounds {
                 direct_mw: 0.0,
                 reverse_mw: 0.0,
             },
-            pumping: PumpingStageBounds {
+            pumping_block: PumpingBlockBounds {
                 min_flow_m3s: 0.0,
                 max_flow_m3s: 0.0,
             },
-            contract: ContractStageBounds {
+            contract_block: ContractBlockBounds {
                 min_mw: 0.0,
                 max_mw: 0.0,
                 price_per_mwh: 0.0,
@@ -1027,6 +1033,7 @@ fn build_template_build_ctx_contract_count_divergence_panics() {
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let _ = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -1041,12 +1048,11 @@ fn build_template_build_ctx_contract_count_divergence_panics() {
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
 }
 
-// ── AC-1 ─────────────────────────────────────────────────────────────────
-
-/// AC-1: `build_template_build_ctx` populates anticipated metadata for a
+/// `build_template_build_ctx` populates anticipated metadata for a
 /// system with `T_a`(K=2), `T_b`(no anticipated), `T_c`(K=3).
 ///
 /// Expected: `n_anticipated`=2, `k_max`=3, `anticipated_lead_stages`=[2,3],
@@ -1105,6 +1111,7 @@ fn build_template_build_ctx_populates_anticipated_metadata() {
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -1119,6 +1126,7 @@ fn build_template_build_ctx_populates_anticipated_metadata() {
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
 
     assert_eq!(ctx.n_anticipated, 2, "n_anticipated");
@@ -1135,9 +1143,7 @@ fn build_template_build_ctx_populates_anticipated_metadata() {
     );
 }
 
-// ── AC-2 ─────────────────────────────────────────────────────────────────
-
-/// AC-2: `build_template_build_ctx` returns zeroed metadata when no
+/// `build_template_build_ctx` returns zeroed metadata when no
 /// thermal has `anticipated_config`.
 #[test]
 fn build_template_build_ctx_zero_anticipated_when_none() {
@@ -1181,6 +1187,7 @@ fn build_template_build_ctx_zero_anticipated_when_none() {
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -1195,6 +1202,7 @@ fn build_template_build_ctx_zero_anticipated_when_none() {
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
 
     assert_eq!(ctx.n_anticipated, 0, "n_anticipated");
@@ -1327,20 +1335,21 @@ fn anticipated_invariance_system() -> cobre_core::System {
         },
         &BoundsDefaults {
             hydro: default_hydro_bounds(),
-            thermal: ThermalStageBounds {
+            hydro_block: default_hydro_block_bounds(),
+            thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+            thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
                 max_generation_mw: 100.0,
-                cost_per_mwh: 0.0,
             },
-            line: LineStageBounds {
+            line_block: LineBlockBounds {
                 direct_mw: 0.0,
                 reverse_mw: 0.0,
             },
-            pumping: PumpingStageBounds {
+            pumping_block: PumpingBlockBounds {
                 min_flow_m3s: 0.0,
                 max_flow_m3s: 0.0,
             },
-            contract: ContractStageBounds {
+            contract_block: ContractBlockBounds {
                 min_mw: 0.0,
                 max_mw: 0.0,
                 price_per_mwh: 0.0,
@@ -1353,22 +1362,18 @@ fn anticipated_invariance_system() -> cobre_core::System {
     let stage_axis_len = resolved_bounds.thermal_stage_axis_len();
     for t_idx in 0..n_thermals {
         for s_idx in 0..stage_axis_len {
-            let tb = resolved_bounds.thermal_bounds_mut(t_idx, s_idx);
-            match t_idx {
-                0 => {
-                    tb.max_generation_mw = 120.0;
-                    tb.cost_per_mwh = 50.0;
-                }
-                1 => {
-                    tb.max_generation_mw = 80.0;
-                    tb.cost_per_mwh = 40.0;
-                }
-                2 => {
-                    tb.max_generation_mw = 200.0;
-                    tb.cost_per_mwh = 500.0;
-                }
+            let (max_generation_mw, cost_per_mwh) = match t_idx {
+                0 => (120.0, 50.0),
+                1 => (80.0, 40.0),
+                2 => (200.0, 500.0),
                 _ => unreachable!("only 3 thermals"),
-            }
+            };
+            resolved_bounds
+                .thermal_block_base_mut(t_idx, s_idx)
+                .max_generation_mw = max_generation_mw;
+            resolved_bounds
+                .thermal_bounds_mut(t_idx, s_idx)
+                .cost_per_mwh = cost_per_mwh;
         }
     }
 
@@ -1585,6 +1590,7 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx_a, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -1599,6 +1605,7 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
 
     assert_eq!(ctx_a.n_anticipated, 2);
@@ -1618,12 +1625,12 @@ fn lp_template_invariant_under_anticipated_index_permutation() {
         buses: ctx_a.buses,
         load_models: ctx_a.load_models,
         cascade: ctx_a.cascade,
+        hydro_cell_index: ctx_a.hydro_cell_index,
         resolved: super::super::layout::ResolvedTables {
             bounds: ctx_a.resolved.bounds,
             penalties: ctx_a.resolved.penalties,
             resolved_generic_bounds: ctx_a.resolved.resolved_generic_bounds,
             resolved_load_factors: ctx_a.resolved.resolved_load_factors,
-            resolved_exchange_factors: ctx_a.resolved.resolved_exchange_factors,
             resolved_ncs_bounds: ctx_a.resolved.resolved_ncs_bounds,
             resolved_ncs_factors: ctx_a.resolved.resolved_ncs_factors,
             resolved_parameters: ctx_a.resolved.resolved_parameters,
@@ -1820,16 +1827,7 @@ fn discounted_multi_stage_system() -> cobre_core::System {
     }];
     let n_thermals = thermals.len();
 
-    let bus = Bus {
-        id: EntityId(1),
-        name: "B1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 500.0,
-        }],
-        excess_cost: 0.0,
-    };
+    let bus = fixture_bus();
 
     let stages: Vec<Stage> = (0..n_stages)
         .map(|i| Stage {
@@ -1877,20 +1875,21 @@ fn discounted_multi_stage_system() -> cobre_core::System {
         },
         &BoundsDefaults {
             hydro: default_hydro_bounds(),
-            thermal: ThermalStageBounds {
+            hydro_block: default_hydro_block_bounds(),
+            thermal: ThermalStageBounds { cost_per_mwh: 10.0 },
+            thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
                 max_generation_mw: 100.0,
-                cost_per_mwh: 10.0,
             },
-            line: LineStageBounds {
+            line_block: LineBlockBounds {
                 direct_mw: 0.0,
                 reverse_mw: 0.0,
             },
-            pumping: PumpingStageBounds {
+            pumping_block: PumpingBlockBounds {
                 min_flow_m3s: 0.0,
                 max_flow_m3s: 0.0,
             },
-            contract: ContractStageBounds {
+            contract_block: ContractBlockBounds {
                 min_mw: 0.0,
                 max_mw: 0.0,
                 price_per_mwh: 0.0,
@@ -1947,6 +1946,7 @@ fn postprocessed_stage_templates_carry_discounted_factors() {
     let topology = build_transit_bucket_topology(&system);
     let (state_layout, _, _) = resolve_state_layout(&system, &par_lp, &topology)
         .expect("resolve_state_layout: valid test fixture");
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
 
     let mut templates = super::build_stage_templates(
         &system,
@@ -1961,6 +1961,7 @@ fn postprocessed_stage_templates_carry_discounted_factors() {
         &topology.arc_stage_weights,
         &topology.arc_spread_chrono,
         &topology.arc_arrival_density,
+        &hydro_cell_index,
     )
     .expect("build_stage_templates: valid system");
 
@@ -2005,24 +2006,15 @@ use cobre_solver::StageTemplate;
 /// `1000.0` violation penalties — the fixture the operational-violation
 /// builder tests exercise.
 fn one_hydro_active_violations(n_stages: usize) -> System {
-    use cobre_core::scenario::{InflowModel, LoadModel};
+    use cobre_core::scenario::InflowModel;
 
-    let bus = Bus {
-        id: EntityId(1),
-        name: "B1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 500.0,
-        }],
-        excess_cost: 0.0,
-    };
+    let bus = fixture_bus();
 
-    let hydro = Hydro {
+    let mut hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(2),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -2063,6 +2055,7 @@ fn one_hydro_active_violations(n_stages: usize) -> System {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.declare_mirror_unit_group(EntityId(1));
 
     let stages: Vec<Stage> = (0..n_stages)
         .map(|i| Stage {
@@ -2132,6 +2125,10 @@ fn one_hydro_active_violations(n_stages: usize) -> System {
             hydro: HydroStageBounds {
                 min_storage_hm3: 0.0,
                 max_storage_hm3: 200.0,
+                filling_min_rate_m3s: 0.0,
+                water_withdrawal_m3s: 0.0,
+            },
+            hydro_block: HydroBlockBounds {
                 min_turbined_m3s: 10.0,
                 max_turbined_m3s: 100.0,
                 min_outflow_m3s: 50.0,
@@ -2139,23 +2136,21 @@ fn one_hydro_active_violations(n_stages: usize) -> System {
                 min_generation_mw: 5.0,
                 max_generation_mw: 250.0,
                 max_diversion_m3s: None,
-                filling_min_rate_m3s: 0.0,
-                water_withdrawal_m3s: 0.0,
             },
-            thermal: ThermalStageBounds {
+            thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+            thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
                 max_generation_mw: 0.0,
-                cost_per_mwh: 0.0,
             },
-            line: LineStageBounds {
+            line_block: LineBlockBounds {
                 direct_mw: 0.0,
                 reverse_mw: 0.0,
             },
-            pumping: PumpingStageBounds {
+            pumping_block: PumpingBlockBounds {
                 min_flow_m3s: 0.0,
                 max_flow_m3s: 0.0,
             },
-            contract: ContractStageBounds {
+            contract_block: ContractBlockBounds {
                 min_mw: 0.0,
                 max_mw: 0.0,
                 price_per_mwh: 0.0,
@@ -2219,6 +2214,15 @@ fn csc_entries_for_col(t: &StageTemplate, col: usize) -> Vec<(usize, f64)> {
         .collect()
 }
 
+/// Sum of column `col`'s CSC entries that land on row `row`.
+fn csc_entry_sum(t: &StageTemplate, col: usize, row: usize) -> f64 {
+    csc_entries_for_col(t, col)
+        .iter()
+        .filter(|(r, _)| *r == row)
+        .map(|(_, v)| *v)
+        .sum()
+}
+
 /// Build the active-violations stage-0 `StageLayout` (the owner of the
 /// op-violation row/column ranges) and the matching `StageTemplate` (RHS,
 /// bounds, objective, CSC) from one shared `TemplateBuildCtx`, so the row
@@ -2240,11 +2244,7 @@ fn build_active_violations_layout_and_template() -> (StageLayout<'static>, Stage
     let hydro_models = Box::leak(Box::new(PrepareHydroModelsResult::default_from_system(
         system,
     )));
-    let resolved_params = Box::leak(Box::new(ResolvedParameters {
-        per_param: vec![],
-        id_to_slot: vec![],
-        cost_scale_factor: 1_000_000.0,
-    }));
+    let resolved_params = Box::leak(Box::new(empty_resolved_params()));
 
     let (
         anticipated_resolution,
@@ -2255,6 +2255,7 @@ fn build_active_violations_layout_and_template() -> (StageLayout<'static>, Stage
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(system, par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         system,
         InflowNonNegativityMethod::None,
@@ -2269,14 +2270,12 @@ fn build_active_violations_layout_and_template() -> (StageLayout<'static>, Stage
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
     let ctx = Box::leak(Box::new(ctx));
     let state = Box::leak(Box::new(state_layout_for(ctx)));
     let stage = &system.stages()[0];
 
-    // `build_single_stage_template` and `StageLayout::new` are deterministic
-    // functions of the same `(ctx, state, stage, 0)`, so the template and the
-    // layout agree on every row/column offset.
     let template = super::build_single_stage_template(ctx, state, stage, 0).template;
     let layout = StageLayout::new(ctx, state, stage, 0);
     (layout, template)
@@ -2632,11 +2631,11 @@ use std::collections::BTreeMap as VTargetMap;
 /// (`start_stage_id`/`entry_stage_id`), used by the `build_filling_v_target`
 /// fold tests. All other fields are inert.
 fn vtarget_filling_hydro(id: i32, start: i32, entry: i32) -> Hydro {
-    Hydro {
+    let mut hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(id),
         name: format!("H{id}"),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: Some(entry),
@@ -2647,10 +2646,10 @@ fn vtarget_filling_hydro(id: i32, start: i32, entry: i32) -> Hydro {
         max_outflow_m3s: None,
         generation_model: HydroGenerationModel::ConstantProductivity,
         min_turbined_m3s: 0.0,
-        max_turbined_m3s: 50.0,
+        max_turbined_m3s: FIXTURE_NONBINDING_MAX_TURBINED_M3S,
         specific_productivity_mw_per_m3s_per_m: None,
         min_generation_mw: 0.0,
-        max_generation_mw: 45.0,
+        max_generation_mw: 1_000_000.0,
         tailrace: None,
         hydraulic_losses: None,
         efficiency: None,
@@ -2662,7 +2661,9 @@ fn vtarget_filling_hydro(id: i32, start: i32, entry: i32) -> Hydro {
             filling_min_rate_m3s: 0.0,
         }),
         penalties: hydro_penalties_zero(),
-    }
+    };
+    hydro.declare_mirror_unit_group(EntityId(1));
+    hydro
 }
 
 /// A `ResolvedBounds` table for one hydro across `n_stages` stages, with every
@@ -2680,20 +2681,21 @@ fn vtarget_bounds(n_stages: usize, min_storage: f64, rate: f64) -> ResolvedBound
         },
         &BoundsDefaults {
             hydro: default_hydro_bounds(),
-            thermal: ThermalStageBounds {
+            hydro_block: default_hydro_block_bounds(),
+            thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+            thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
                 max_generation_mw: 0.0,
-                cost_per_mwh: 0.0,
             },
-            line: LineStageBounds {
+            line_block: LineBlockBounds {
                 direct_mw: 0.0,
                 reverse_mw: 0.0,
             },
-            pumping: PumpingStageBounds {
+            pumping_block: PumpingBlockBounds {
                 min_flow_m3s: 0.0,
                 max_flow_m3s: 0.0,
             },
-            contract: ContractStageBounds {
+            contract_block: ContractBlockBounds {
                 min_mw: 0.0,
                 max_mw: 0.0,
                 price_per_mwh: 0.0,
@@ -2713,7 +2715,7 @@ fn vtarget_id_map(n_stages: usize) -> VTargetMap<i32, usize> {
     (0..n_stages).map(|i| (i as i32, i)).collect()
 }
 
-/// The AC: `start = 2`, `entry = 4`, `min_storage = 60`, per-stage ζ = 2.592
+/// The fixture: `start = 2`, `entry = 4`, `min_storage = 60`, per-stage ζ = 2.592
 /// (`total_hours = 720`, `M3S_TO_HM3 = 0.0036`), `rate = 5`. The backward fold
 /// pins `V_target[3] = 60` (the dead-volume anchor at L = entry − 1) and
 /// `V_target[2] = 60 − 2.592·5 = 47.04` (one stage of minimum accumulation
@@ -2869,18 +2871,9 @@ fn assert_templates_byte_identical(tpl_a: &StageTemplate, tpl_b: &StageTemplate)
 /// coefficient on both the incoming and outgoing storage columns, so the
 /// byte-identity check actually exercises the storage-bearing rows.
 fn one_hydro_block_system(block_mode: BlockMode, n_blks: usize) -> System {
-    use cobre_core::scenario::{InflowModel, LoadModel};
+    use cobre_core::scenario::InflowModel;
 
-    let bus = Bus {
-        id: EntityId(1),
-        name: "B1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 500.0,
-        }],
-        excess_cost: 0.0,
-    };
+    let bus = fixture_bus();
 
     let hydro = fixture_hydro(2);
 
@@ -2940,20 +2933,21 @@ fn one_hydro_block_system(block_mode: BlockMode, n_blks: usize) -> System {
         },
         &BoundsDefaults {
             hydro: default_hydro_bounds(),
-            thermal: ThermalStageBounds {
+            hydro_block: default_hydro_block_bounds(),
+            thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+            thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
                 max_generation_mw: 0.0,
-                cost_per_mwh: 0.0,
             },
-            line: LineStageBounds {
+            line_block: LineBlockBounds {
                 direct_mw: 0.0,
                 reverse_mw: 0.0,
             },
-            pumping: PumpingStageBounds {
+            pumping_block: PumpingBlockBounds {
                 min_flow_m3s: 0.0,
                 max_flow_m3s: 0.0,
             },
-            contract: ContractStageBounds {
+            contract_block: ContractBlockBounds {
                 min_mw: 0.0,
                 max_mw: 0.0,
                 price_per_mwh: 0.0,
@@ -3022,6 +3016,7 @@ fn block_template(block_mode: BlockMode, n_blks: usize) -> StageTemplate {
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -3036,6 +3031,7 @@ fn block_template(block_mode: BlockMode, n_blks: usize) -> StageTemplate {
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
     let state = state_layout_for(&ctx);
     let stage = &system.stages()[0];
@@ -3045,7 +3041,7 @@ fn block_template(block_mode: BlockMode, n_blks: usize) -> StageTemplate {
 /// `K = 1` chronological build collapses to the parallel LP: the
 /// `storage_internal` interior-column family is empty, there is one water row,
 /// and FPHA rides the single incoming/outgoing storage pair — so the two
-/// templates are byte-identical (§9 contract). This anchors the layout half of
+/// templates are byte-identical. This anchors the layout half of
 /// the chronological feature against any regression that perturbs the `K = 1`
 /// column/row/value layout.
 #[test]
@@ -3058,7 +3054,7 @@ fn chronological_k1_byte_identical_to_parallel() {
 /// `theta` and `n_state` are pure functions of `(N, L, A, k_max)` and are
 /// `n_blks`-free by construction (`StateSpace::new` never sees `block_mode` or
 /// `n_blks`): per-block storage lives strictly in the control region, never in
-/// the state region (§2). Building a chronological `K ≥ 2` stage therefore
+/// the state region. Building a chronological `K ≥ 2` stage therefore
 /// changes neither — only the control-region column count grows, by exactly
 /// `n_h * (n_blks − 1)` interior storage columns.
 #[test]
@@ -3123,11 +3119,7 @@ fn block_layout_and_template(
     let hydro_models = Box::leak(Box::new(PrepareHydroModelsResult::default_from_system(
         system,
     )));
-    let resolved_params = Box::leak(Box::new(ResolvedParameters {
-        per_param: vec![],
-        id_to_slot: vec![],
-        cost_scale_factor: 1_000_000.0,
-    }));
+    let resolved_params = Box::leak(Box::new(empty_resolved_params()));
 
     let (
         anticipated_resolution,
@@ -3138,6 +3130,7 @@ fn block_layout_and_template(
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(system, par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         system,
         InflowNonNegativityMethod::None,
@@ -3152,6 +3145,7 @@ fn block_layout_and_template(
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
     let ctx = Box::leak(Box::new(ctx));
     let state = Box::leak(Box::new(state_layout_for(ctx)));
@@ -3203,7 +3197,10 @@ fn chronological_water_balance_chained_rows() {
         -1.0
     );
     assert_eq!(
-        entry(layout.turbine_col(HydroSys::new(h), BlockIdx::new(0)), row0),
+        entry(
+            layout.turbine_col(HydroCell::new(h), BlockIdx::new(0)),
+            row0
+        ),
         tau[0]
     );
 
@@ -3222,7 +3219,10 @@ fn chronological_water_balance_chained_rows() {
         -1.0
     );
     assert_eq!(
-        entry(layout.turbine_col(HydroSys::new(h), BlockIdx::new(1)), row1),
+        entry(
+            layout.turbine_col(HydroCell::new(h), BlockIdx::new(1)),
+            row1
+        ),
         tau[1]
     );
 }
@@ -3275,8 +3275,8 @@ fn chronological_water_balance_telescopes_to_parallel() {
     // block's τ_k sum reproduces the parallel ζ-scaled flow coefficient.
     for blk in 0..n_blks {
         assert_telescopes(
-            par_layout.turbine_col(HydroSys::new(h), BlockIdx::new(blk)),
-            chr_layout.turbine_col(HydroSys::new(h), BlockIdx::new(blk)),
+            par_layout.turbine_col(HydroCell::new(h), BlockIdx::new(blk)),
+            chr_layout.turbine_col(HydroCell::new(h), BlockIdx::new(blk)),
             "turbine",
         );
         assert_telescopes(
@@ -3502,22 +3502,13 @@ fn stage_layout_geometry_field_equals_layout_source_at_k3() {
 fn system_with_contracts_filling_and_anticipated() -> cobre_core::System {
     let n_stages = 4_usize;
 
-    let bus = Bus {
-        id: EntityId(1),
-        name: "B1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 500.0,
-        }],
-        excess_cost: 0.0,
-    };
+    let bus = fixture_bus();
 
-    let hydro = Hydro {
+    let mut hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(1),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: Some(3),
@@ -3528,10 +3519,10 @@ fn system_with_contracts_filling_and_anticipated() -> cobre_core::System {
         max_outflow_m3s: None,
         generation_model: HydroGenerationModel::ConstantProductivity,
         min_turbined_m3s: 0.0,
-        max_turbined_m3s: 50.0,
+        max_turbined_m3s: FIXTURE_NONBINDING_MAX_TURBINED_M3S,
         specific_productivity_mw_per_m3s_per_m: None,
         min_generation_mw: 0.0,
-        max_generation_mw: 45.0,
+        max_generation_mw: 1_000_000.0,
         tailrace: None,
         hydraulic_losses: None,
         efficiency: None,
@@ -3544,6 +3535,7 @@ fn system_with_contracts_filling_and_anticipated() -> cobre_core::System {
         }),
         penalties: hydro_penalties_zero(),
     };
+    hydro.declare_mirror_unit_group(EntityId(1));
 
     let thermal = Thermal {
         id: EntityId(2),
@@ -3609,20 +3601,21 @@ fn system_with_contracts_filling_and_anticipated() -> cobre_core::System {
         },
         &BoundsDefaults {
             hydro: default_hydro_bounds(),
-            thermal: ThermalStageBounds {
+            hydro_block: default_hydro_block_bounds(),
+            thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+            thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
                 max_generation_mw: 100.0,
-                cost_per_mwh: 0.0,
             },
-            line: LineStageBounds {
+            line_block: LineBlockBounds {
                 direct_mw: 0.0,
                 reverse_mw: 0.0,
             },
-            pumping: PumpingStageBounds {
+            pumping_block: PumpingBlockBounds {
                 min_flow_m3s: 0.0,
                 max_flow_m3s: 0.0,
             },
-            contract: ContractStageBounds {
+            contract_block: ContractBlockBounds {
                 min_mw: 0.0,
                 max_mw: 500.0,
                 price_per_mwh: 100.0,
@@ -3684,6 +3677,7 @@ fn stage_geometry_rerouted_ranges_match_layout_source_at_every_stage() {
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -3698,6 +3692,7 @@ fn stage_geometry_rerouted_ranges_match_layout_source_at_every_stage() {
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
     let state = state_layout_for(&ctx);
 
@@ -3819,7 +3814,7 @@ fn chronological_k1_water_row_byte_identical() {
     );
 }
 
-/// §9 contract "D06 preserved per block": at `K ≥ 2` each per-block FPHA plane row
+/// D06 preserved per block: at `K ≥ 2` each per-block FPHA plane row
 /// carries `−γᵥ/2` on BOTH block-local storage columns `block_storage_col(h, k−1)`
 /// (`Sᵏ⁻¹`) and `block_storage_col(h, k)` (`Sᵏ`) — the FPHA average-storage rule
 /// applied to the block's own `(Sᵏ⁻¹, Sᵏ)` pair. Placing it on the outgoing column
@@ -3835,13 +3830,7 @@ fn chronological_d06_gamma_v_on_both_block_columns() {
     // matrix fill (matrix values are not cost-scaled).
     let half_gamma_v = -0.2 / 2.0;
 
-    let entry = |col: usize, row: usize| -> f64 {
-        csc_entries_for_col(&t, col)
-            .iter()
-            .filter(|(r, _)| *r == row)
-            .map(|(_, v)| *v)
-            .sum()
-    };
+    let entry = |col: usize, row: usize| csc_entry_sum(&t, col, row);
 
     for k in 1..=n_blks {
         let blk = k - 1;
@@ -3865,7 +3854,7 @@ fn chronological_d06_gamma_v_on_both_block_columns() {
     }
 }
 
-/// §5 cross-mode cut-row byte-comparability invariant: for a chronological `K ≥ 2`
+/// Cross-mode cut-row byte-comparability invariant: for a chronological `K ≥ 2`
 /// FPHA study, the matrix-derived column scale at an interior `block_storage_col(h,
 /// k)` equals the endpoint storage-column scale. Identical state-column scaling
 /// across the storage family is what keeps rendered cut rows (`−coeff·col_scale[col]`)
@@ -3879,15 +3868,13 @@ fn chronological_interior_storage_scale_matches_endpoint() {
 
     let col_scale = super::super::compute_col_scale(t.num_cols, &t.col_starts, &t.values);
 
-    // The outgoing endpoint Sᴷ (`block_storage_col(h, K)`) is the reference storage
-    // column whose scale every interior boundary must match.
     let endpoint_scale = col_scale[layout.block_storage_col(HydroSys::new(h), Boundary::Outgoing)];
     for k in 1..n_blks {
         let interior_col = layout.block_storage_col(HydroSys::new(h), Boundary::Interior(k));
         assert_eq!(
             col_scale[interior_col].to_bits(),
             endpoint_scale.to_bits(),
-            "interior boundary S{k} scale must equal the endpoint Sᴷ scale (§5 \
+            "interior boundary S{k} scale must equal the endpoint Sᴷ scale (cut-row \
              byte-comparability); divergence signals FPHA/evap coefficients differ \
              between interior and endpoint storage columns"
         );
@@ -3911,49 +3898,44 @@ const FILL_FILL_HYDRO_ID: i32 = 3;
 /// id 0 it is `Filling`. Both share `entry = FILL_ENTRY_ID`. A backup thermal and a
 /// bus deficit segment keep the LP feasible regardless of the frozen filling storage.
 fn filling_block_system(block_mode: BlockMode, n_blks: usize) -> System {
-    use cobre_core::scenario::{InflowModel, LoadModel};
+    use cobre_core::scenario::InflowModel;
 
-    let bus = Bus {
-        id: EntityId(1),
-        name: "B1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 500.0,
-        }],
-        excess_cost: 0.0,
-    };
+    let bus = fixture_bus();
 
-    let filling_hydro = |id: i32, downstream: Option<i32>, start: i32| Hydro {
-        id: EntityId(id),
-        name: format!("H{id}"),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(1),
-        downstream_id: downstream.map(EntityId),
-        travel_time_hours: None,
-        entry_stage_id: Some(FILL_ENTRY_ID),
-        exit_stage_id: None,
-        min_storage_hm3: FILL_MIN_STORAGE_HM3,
-        max_storage_hm3: 200.0,
-        min_outflow_m3s: 0.0,
-        max_outflow_m3s: None,
-        generation_model: HydroGenerationModel::ConstantProductivity,
-        min_turbined_m3s: 0.0,
-        max_turbined_m3s: 100.0,
-        specific_productivity_mw_per_m3s_per_m: None,
-        min_generation_mw: 0.0,
-        max_generation_mw: 250.0,
-        tailrace: None,
-        hydraulic_losses: None,
-        efficiency: None,
-        evaporation_coefficients_mm: None,
-        evaporation_reference_volumes_hm3: None,
-        diversion: None,
-        filling: Some(FillingConfig {
-            start_stage_id: start,
-            filling_min_rate_m3s: FILL_RATE_M3S,
-        }),
-        penalties: hydro_penalties_zero(),
+    let filling_hydro = |id: i32, downstream: Option<i32>, start: i32| {
+        let mut hydro = Hydro {
+            unit_groups: Vec::new(),
+            id: EntityId(id),
+            name: format!("H{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            downstream_id: downstream.map(EntityId),
+            travel_time_hours: None,
+            entry_stage_id: Some(FILL_ENTRY_ID),
+            exit_stage_id: None,
+            min_storage_hm3: FILL_MIN_STORAGE_HM3,
+            max_storage_hm3: 200.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 250.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: Some(FillingConfig {
+                start_stage_id: start,
+                filling_min_rate_m3s: FILL_RATE_M3S,
+            }),
+            penalties: hydro_penalties_zero(),
+        };
+        hydro.declare_mirror_unit_group(EntityId(1));
+        hydro
     };
 
     let hydros = vec![
@@ -4031,6 +4013,10 @@ fn filling_block_system(block_mode: BlockMode, n_blks: usize) -> System {
             hydro: HydroStageBounds {
                 min_storage_hm3: FILL_MIN_STORAGE_HM3,
                 max_storage_hm3: 200.0,
+                filling_min_rate_m3s: FILL_RATE_M3S,
+                water_withdrawal_m3s: 0.0,
+            },
+            hydro_block: HydroBlockBounds {
                 min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
                 min_outflow_m3s: 0.0,
@@ -4038,23 +4024,21 @@ fn filling_block_system(block_mode: BlockMode, n_blks: usize) -> System {
                 min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
                 max_diversion_m3s: None,
-                filling_min_rate_m3s: FILL_RATE_M3S,
-                water_withdrawal_m3s: 0.0,
             },
-            thermal: ThermalStageBounds {
+            thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+            thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
                 max_generation_mw: 0.0,
-                cost_per_mwh: 0.0,
             },
-            line: LineStageBounds {
+            line_block: LineBlockBounds {
                 direct_mw: 0.0,
                 reverse_mw: 0.0,
             },
-            pumping: PumpingStageBounds {
+            pumping_block: PumpingBlockBounds {
                 min_flow_m3s: 0.0,
                 max_flow_m3s: 0.0,
             },
-            contract: ContractStageBounds {
+            contract_block: ContractBlockBounds {
                 min_mw: 0.0,
                 max_mw: 0.0,
                 price_per_mwh: 0.0,
@@ -4128,11 +4112,7 @@ fn filling_block_layout_and_template(
     let hydro_models = Box::leak(Box::new(PrepareHydroModelsResult::default_from_system(
         system,
     )));
-    let resolved_params = Box::leak(Box::new(ResolvedParameters {
-        per_param: vec![],
-        id_to_slot: vec![],
-        cost_scale_factor: 1_000_000.0,
-    }));
+    let resolved_params = Box::leak(Box::new(empty_resolved_params()));
 
     let (
         anticipated_resolution,
@@ -4143,6 +4123,7 @@ fn filling_block_layout_and_template(
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(system, par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         system,
         InflowNonNegativityMethod::None,
@@ -4157,6 +4138,7 @@ fn filling_block_layout_and_template(
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
     let ctx = Box::leak(Box::new(ctx));
     let state = Box::leak(Box::new(state_layout_for(ctx)));
@@ -4167,7 +4149,7 @@ fn filling_block_layout_and_template(
     (layout, template, ctx.filling_v_target.clone())
 }
 
-/// §9 contract "D38–D42 preserved per block": at `K ≥ 2` a `PreFilling` hydro's `K`
+/// D38–D42 preserved per block: at `K ≥ 2` a `PreFilling` hydro's `K`
 /// water rows are frozen identities (`Sᵏ − Sᵏ⁻¹ = 0`) and its spillage AND turbine
 /// columns are frozen `[0, 0]` on every block (no dam, no machinery). A `Filling`
 /// hydro at the same stage keeps its per-block spillage FREE (the D40 over-dam relief
@@ -4183,13 +4165,7 @@ fn chronological_prefilling_d38_d42_per_block() {
     let h_pre = 0_usize;
     let h_fill = 1_usize;
 
-    let entry = |col: usize, row: usize| -> f64 {
-        csc_entries_for_col(&t, col)
-            .iter()
-            .filter(|(r, _)| *r == row)
-            .map(|(_, v)| *v)
-            .sum()
-    };
+    let entry = |col: usize, row: usize| csc_entry_sum(&t, col, row);
 
     for k in 1..=n_blks {
         let blk = k - 1;
@@ -4225,7 +4201,7 @@ fn chronological_prefilling_d38_d42_per_block() {
             (0.0, 0.0),
             "PreFilling block {k}: spillage frozen [0,0] (no dam to spill from, D38/D39/D42)"
         );
-        let turb_pre = layout.turbine_col(HydroSys::new(h_pre), BlockIdx::new(blk));
+        let turb_pre = layout.turbine_col(HydroCell::new(h_pre), BlockIdx::new(blk));
         assert_eq!(
             (t.col_lower[turb_pre], t.col_upper[turb_pre]),
             (0.0, 0.0),
@@ -4246,7 +4222,7 @@ fn chronological_prefilling_d38_d42_per_block() {
     }
 }
 
-/// §9 contract "Filling-phase target on `Sᴷ`": at `K ≥ 2` a `Filling`-phase hydro's
+/// Filling-phase target on `Sᴷ`: at `K ≥ 2` a `Filling`-phase hydro's
 /// `σ_fill` row references the stage-final storage `block_storage_col(h, K)` (= `Sᴷ`,
 /// which aliases the outgoing endpoint `h`), its `V_target` fold value is UNCHANGED
 /// from the parallel build (`build_filling_v_target` is keyed `(hydro, stage)` and
@@ -4268,22 +4244,13 @@ fn chronological_filling_target_on_final_storage() {
         "exactly the Filling hydro H3 emits a σ_fill target at stage 0"
     );
 
-    // The σ_fill row places +1 on the OUTGOING storage column, which in chronological
-    // mode is the stage-final Sᴷ (block_storage_col aliases the outgoing endpoint to
-    // the dense hydro index h_fill).
     let sk_col = chr_layout.block_storage_col(HydroSys::new(h_fill), Boundary::Outgoing);
     assert_eq!(
         sk_col, h_fill,
         "block_storage_col(h, K) aliases the outgoing endpoint (= dense hydro index)"
     );
     let row = chr_layout.filling.row_filling_target_start;
-    let entry = |col: usize| -> f64 {
-        csc_entries_for_col(&chr_t, col)
-            .iter()
-            .filter(|(r, _)| *r == row)
-            .map(|(_, v)| *v)
-            .sum()
-    };
+    let entry = |col: usize| csc_entry_sum(&chr_t, col, row);
     assert_eq!(
         entry(sk_col),
         1.0,
@@ -4313,7 +4280,6 @@ fn chronological_filling_target_on_final_storage() {
         "σ_fill row RHS (≥ lower) equals the V_target fold value"
     );
 
-    // Per-block spillage stays the free D40 relief valve, not frozen.
     for blk in 0..n_blks {
         let spill = chr_layout.spillage_col(HydroSys::new(h_fill), BlockIdx::new(blk));
         assert_eq!(
@@ -4342,16 +4308,7 @@ fn anticipated_lead_config_system(
     anticipated_config: AnticipatedConfig,
     k_max_bounds: usize,
 ) -> cobre_core::System {
-    let bus = Bus {
-        id: EntityId(1),
-        name: "B1".to_string(),
-        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        deficit_segments: vec![DeficitSegment {
-            depth_mw: None,
-            cost_per_mwh: 500.0,
-        }],
-        excess_cost: 0.0,
-    };
+    let bus = fixture_bus();
 
     let thermal = Thermal {
         id: EntityId(1),
@@ -4412,20 +4369,21 @@ fn anticipated_lead_config_system(
         },
         &BoundsDefaults {
             hydro: default_hydro_bounds(),
-            thermal: ThermalStageBounds {
+            hydro_block: default_hydro_block_bounds(),
+            thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+            thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
                 max_generation_mw: 100.0,
-                cost_per_mwh: 0.0,
             },
-            line: LineStageBounds {
+            line_block: LineBlockBounds {
                 direct_mw: 0.0,
                 reverse_mw: 0.0,
             },
-            pumping: PumpingStageBounds {
+            pumping_block: PumpingBlockBounds {
                 min_flow_m3s: 0.0,
                 max_flow_m3s: 0.0,
             },
-            contract: ContractStageBounds {
+            contract_block: ContractBlockBounds {
                 min_mw: 0.0,
                 max_mw: 0.0,
                 price_per_mwh: 0.0,
@@ -4461,7 +4419,7 @@ fn anticipated_lead_config_system(
         .expect("anticipated_lead_config_system: valid system")
 }
 
-/// AC1/AC2: on a uniform 3×744h calendar, a `LeadTime(744.0)` plant resolves
+/// On a uniform 3×744h calendar, a `LeadTime(744.0)` plant resolves
 /// `c(m) = [None, Some(0), Some(1)]` (hand-derived: `resolve_decider_physical`
 /// against boundaries `[0, 744, 1488, 2232]`, target `= boundaries[m+1] - 744`
 /// lands one boundary before `m` at every `m > 0`), giving `depth = [1, 1,
@@ -4488,6 +4446,7 @@ fn template_anticipated_resolution_matches_setup_lead_time() {
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -4502,6 +4461,7 @@ fn template_anticipated_resolution_matches_setup_lead_time() {
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
     assert_eq!(ctx.k_max, 1, "ctx.k_max");
     assert_eq!(
@@ -4536,14 +4496,14 @@ fn template_anticipated_resolution_matches_setup_lead_time() {
     );
 }
 
-/// AC2 mutation companion: reproduces the PRE-FIX `StateSpace` template.rs
-/// used to build for a `LeadTime` plant — `anticipated_lead_stages` derived
-/// via `cfg.lead_stages().unwrap_or(0)` (`0` for `LeadTime`, the pre-fix bug)
-/// and no [`crate::indexer::StateSpace::set_anticipated_resolution`]
-/// attach — and shows its decider differs from the fixed layout's: the
-/// resulting `Stages(0)` fallback resolves every delivery stage as
-/// self-delivered (`decider[m] == m` for all `m`), never the calendar-derived
-/// `[None, Some(0), Some(1)]` the fixed resolution produces for the same
+/// Mutation companion: builds the WRONG-BUT-COMPILING `StateSpace` for a
+/// `LeadTime` plant — `anticipated_lead_stages` from
+/// `cfg.lead_stages().unwrap_or(0)` (which is `0` for `LeadTime`) and no
+/// [`crate::indexer::StateSpace::set_anticipated_resolution`] attach — and
+/// shows its decider differs from the correct layout's: the resulting
+/// `Stages(0)` fallback resolves every delivery stage as self-delivered
+/// (`decider[m] == m` for all `m`), never the calendar-derived
+/// `[None, Some(0), Some(1)]` the correct resolution produces for the same
 /// system (`template_anticipated_resolution_matches_setup_lead_time`).
 #[test]
 fn pre_fix_template_state_layout_yields_differing_all_self_delivered_decider() {
@@ -4563,7 +4523,7 @@ fn pre_fix_template_state_layout_yields_differing_all_self_delivered_decider() {
     );
 }
 
-/// AC3: a `LeadStages(1)` plant on the same calendar keeps the fallback
+/// A `LeadStages(1)` plant on the same calendar keeps the fallback
 /// byte-identical to the threaded resolution — the LeadStages behaviour must
 /// stay unchanged (d34/d37 parity).
 #[test]
@@ -4583,6 +4543,7 @@ fn template_leadstages_byte_identical_to_setup_and_fallback() {
         arc_arrival_density,
         max_par_order,
     ) = ctx_anticipated_and_mask_inputs(&system, &par_lp);
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
     let (ctx, _, _) = super::build_template_build_ctx(
         &system,
         InflowNonNegativityMethod::None,
@@ -4597,6 +4558,7 @@ fn template_leadstages_byte_identical_to_setup_and_fallback() {
         arc_spread_chrono,
         arc_arrival_density,
         max_par_order,
+        &hydro_cell_index,
     );
     assert_eq!(ctx.anticipated_lead_stages, vec![1]);
 
@@ -4609,7 +4571,7 @@ fn template_leadstages_byte_identical_to_setup_and_fallback() {
     assert_eq!(setup_lead_stages, ctx.anticipated_lead_stages);
     assert_eq!(setup_resolution.per_plant[0].decider, template_decider);
 
-    let fallback_state = super::super::test_support::state_layout_for(&ctx);
+    let fallback_state = state_layout_for(&ctx);
     let fallback_decider = anticipated_resolution_for(&fallback_state, AnticipatedLocal::new(0), 3)
         .decider
         .clone();
@@ -4700,6 +4662,7 @@ fn build_stage_templates_never_emits_k0_advisory_itself() {
     let (state_layout, _, _) = resolve_state_layout(&system, &par_lp, &topology)
         .expect("resolve_state_layout: valid test fixture");
     let per_stage_mask = topology.per_stage_mask;
+    let hydro_cell_index = HydroCellIndex::build(system.hydros());
 
     let (subscriber, messages) = WarnRecorder::new();
     tracing::subscriber::with_default(subscriber, || {
@@ -4716,6 +4679,7 @@ fn build_stage_templates_never_emits_k0_advisory_itself() {
             &topology.arc_stage_weights,
             &topology.arc_spread_chrono,
             &topology.arc_arrival_density,
+            &hydro_cell_index,
         )
         .expect("valid system");
     });

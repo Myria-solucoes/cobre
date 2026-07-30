@@ -8,15 +8,15 @@
 //! The [`standardize_historical_windows`] function populates the library by
 //! inverting the PAR(p) model: for every valid window and study stage it
 //! computes `η = (obs - deterministic_base - Σ ψ[ℓ]·lag[ℓ]) / σ` using a
-//! **rolling lag chain seeded from `initial_conditions.past_inflows`** (not
-//! the window's own pre-study observations). This guarantees that, starting
-//! from `past_inflows` at stage 0, the PAR forward pass exactly reconstructs
-//! the raw historical target at every stage of the replay.
+//! **rolling lag chain seeded from the derived lag seed** (not the window's
+//! own pre-study observations). This guarantees that, starting from the same
+//! seed the forward pass uses at stage 0, the PAR forward pass exactly
+//! reconstructs the raw historical target at every stage of the replay.
 //!
 //! ## Replay correctness
 //!
-//! With `x₀ = past_inflows` the lag state at stage 0, the η stored for window
-//! `w` at stage `t` satisfies
+//! With `x₀` the derived lag seed at stage 0, the η stored for window `w` at
+//! stage `t` satisfies
 //!
 //! ```text
 //! η(w, t) = (target(w, t) - b(t) - Σ ψ(t)[ℓ] · lag(w, t)[ℓ]) / σ(t)
@@ -24,9 +24,9 @@
 //!
 //! where `lag(w, t)` advances `x₀` through window `w`'s raw historical targets
 //! at stages `0..t` — exactly what the forward accumulator produces from `x₀`.
-//! Replay is therefore exact only if the forward pass starts from `past_inflows`
-//! verbatim; `ClassSampler::Historical::apply_initial_state` is a no-op, so that
-//! is the caller's responsibility, not this module's.
+//! Replay is therefore exact only if the forward pass starts from the same
+//! seed `x₀` verbatim; `ClassSampler::Historical::apply_initial_state` is a
+//! no-op, so that is the caller's responsibility, not this module's.
 //!
 //! The `eta` buffer uses **window-major** layout
 //! (`eta[window * n_stages * n_hydros + stage * n_hydros + hydro]`), matching
@@ -34,15 +34,14 @@
 //! [`PrecomputedPar`]).
 //!
 //! Initial inflow lags are **NOT** stored on the library nor injected into the
-//! solver state vector. Per the hydrological-tendency convention they come from
-//! `initial_conditions.past_inflows` for every scenario regardless of the window
-//! replayed; η inversion uses that `past_inflows`-seeded rolling chain.
+//! solver state vector. They come from the derived lag seed for every scenario
+//! regardless of the window replayed; η inversion uses that seeded rolling chain.
 //!
 //! [`PrecomputedPar`]: crate::par::precompute::PrecomputedPar
 
 use chrono::{Datelike, NaiveDate};
 use cobre_core::{
-    EntityId, HydroPastInflows,
+    EntityId,
     scenario::{HistoricalYears, InflowHistoryRow},
     temporal::{SeasonMap, Stage, StageLagTransition},
 };
@@ -51,11 +50,10 @@ use std::hash::Hasher as _;
 
 use crate::{
     StochasticError,
-    par::{
-        DownstreamLagAccum, EntityMajor, PrimaryLagAccum, advance_lag_chain,
-        evaluate::solve_par_noise, fitting::find_season_for_date, precompute::PrecomputedPar,
-    },
+    par::{fitting::find_season_for_date, precompute::PrecomputedPar},
 };
+
+use super::eta_inversion::run_eta_inversion;
 
 // ---------------------------------------------------------------------------
 // HistoricalScenarioLibrary
@@ -98,10 +96,10 @@ pub struct HistoricalScenarioLibrary {
     n_stages: usize,
     n_hydros: usize,
     max_order: usize,
-    /// SipHash-1-3 fingerprint of the seeding `past_inflows`; `0` until
+    /// SipHash-1-3 fingerprint of the seeding derived lag values; `0` until
     /// [`standardize_historical_windows`] writes it. A mismatch against a fresh
     /// digest means the library is stale and must be re-standardised.
-    past_inflows_digest: u64,
+    seed_digest: u64,
 }
 
 impl HistoricalScenarioLibrary {
@@ -137,7 +135,7 @@ impl HistoricalScenarioLibrary {
             n_stages,
             n_hydros,
             max_order,
-            past_inflows_digest: 0,
+            seed_digest: 0,
         }
     }
 
@@ -173,12 +171,12 @@ impl HistoricalScenarioLibrary {
         self.max_order
     }
 
-    /// Returns the SipHash-1-3 fingerprint of the seeding `past_inflows`, or `0`
-    /// before [`standardize_historical_windows`] has run.
+    /// Returns the SipHash-1-3 fingerprint of the seeding derived lag values,
+    /// or `0` before [`standardize_historical_windows`] has run.
     #[must_use]
     #[inline]
-    pub fn past_inflows_digest(&self) -> u64 {
-        self.past_inflows_digest
+    pub fn seed_digest(&self) -> u64 {
+        self.seed_digest
     }
 
     /// Returns the starting year label for window `window`.
@@ -249,19 +247,19 @@ impl HistoricalScenarioLibrary {
 // ---------------------------------------------------------------------------
 
 /// Populate a [`HistoricalScenarioLibrary`] with pre-standardized η values whose
-/// lag chain is seeded from `past_inflows` and advanced by the same
+/// lag chain is seeded from `derived_lag_values` and advanced by the same
 /// accumulate/finalize pattern as `standardize_external_inflow`.
 ///
-/// Replay is exact only if the forward pass starts from the same `past_inflows`;
+/// Replay is exact only if the forward pass starts from the same derived seed;
 /// see the module docs for the inductive argument.
 /// `ClassSampler::Historical::apply_initial_state` is a no-op, so that is the
-/// caller's responsibility. The η values depend on `past_inflows`; a change
-/// requires re-standardising, which `past_inflows_digest` lets callers detect.
+/// caller's responsibility. The η values depend on `derived_lag_values`; a
+/// change requires re-standardising, which `seed_digest` lets callers detect.
 ///
 /// The full accumulate/finalize/spillover/downstream-ring pattern is supported,
-/// via the same [`advance_lag_chain`] kernel the forward pass and
-/// `standardize_external_inflow` route through — including monthly→quarterly
-/// multi-resolution grids.
+/// via the same [`advance_lag_chain`](crate::par::advance_lag_chain) kernel the
+/// forward pass and `standardize_external_inflow` route through — including
+/// monthly→quarterly multi-resolution grids.
 ///
 /// # Inputs
 ///
@@ -271,8 +269,16 @@ impl HistoricalScenarioLibrary {
 ///   1. dates within a stage's `[start_date, end_date)` → that stage's season;
 ///   2. otherwise `season_map.season_for_date(date)` when `Some`;
 ///   3. when `None`, `month0()`. Unmappable observations are skipped.
-/// - `past_inflows` — pre-study history sorted by `hydro_id`, seeding the stage-0
-///   chain; absent hydros default to 0.0 for all lag slots.
+/// - `derived_lag_values` — entity-major stage-0 lag seed
+///   (`derived_lag_values[pos * l_state + lag]`, lag `0` = most recent),
+///   pre-ordered by canonical hydro position so `hydro_ids`' position `pos` is
+///   used directly with no id lookup; absent slots default to `0.0`.
+/// - `l_state` — per-hydro stride of `derived_lag_values`.
+/// - `derived_accum` / `derived_weight` — per-hydro mid-period accumulator seed
+///   (length `n_hydros`, same canonical position as `derived_lag_values`),
+///   copied into the per-window accumulator/weight-accumulator at reset;
+///   empty means "no seed" — the accumulator resets to zero, matching a
+///   period-boundary start.
 /// - `stage_lag_transitions` — one per stage, same length as `stages`.
 /// - `downstream_par_order` — PAR order of the downstream (coarser) resolution;
 ///   `0` for uniform-resolution studies. Reuse the same value the forward pass
@@ -283,10 +289,6 @@ impl HistoricalScenarioLibrary {
 ///
 /// Panics in debug builds if dimension mismatches between `library`, `par`,
 /// `stages`, or `stage_lag_transitions` are detected.
-// Rationale: the lag-state and accumulator buffers, the observation table, and the
-// digest computation thread through the (window × stage × entity) pass in
-// sequence; extracting helpers would pass several mutable buffers across boundaries.
-#[allow(clippy::too_many_lines)]
 // Rationale: mirrors standardize_external_inflow's inputs plus the season map
 // and window years this scheme also needs; no natural sub-grouping exists that
 // would not just relocate the arity into a literal.
@@ -299,24 +301,13 @@ pub fn standardize_historical_windows(
     par: &PrecomputedPar,
     window_years: &[i32],
     season_map: Option<&SeasonMap>,
-    past_inflows: &[HydroPastInflows],
+    derived_lag_values: &[f64],
+    l_state: usize,
+    derived_accum: &[f64],
+    derived_weight: &[f64],
     stage_lag_transitions: &[StageLagTransition],
     downstream_par_order: usize,
 ) {
-    // Fallback for an empty `stage_lag_transitions` or a per-stage noop
-    // (accumulate_weight≈0, finalize_period=false) — what an empty SeasonMap
-    // emits for monthly stages.
-    const UNIFORM_MONTHLY: StageLagTransition = StageLagTransition {
-        accumulate_weight: 1.0,
-        spillover_weight: 0.0,
-        finalize_period: true,
-        accumulate_downstream: false,
-        downstream_accumulate_weight: 0.0,
-        downstream_spillover_weight: 0.0,
-        downstream_finalize: false,
-        rebuild_from_downstream: false,
-    };
-
     debug_assert_eq!(
         library.n_windows(),
         window_years.len(),
@@ -373,8 +364,8 @@ pub fn standardize_historical_windows(
         .collect();
 
     let (Some(min_year), Some(max_year)) = (
-        inflow_history.iter().map(|r| r.date.year()).min(),
-        inflow_history.iter().map(|r| r.date.year()).max(),
+        inflow_history.iter().map(|r| r.start_date.year()).min(),
+        inflow_history.iter().map(|r| r.start_date.year()).max(),
     ) else {
         return;
     };
@@ -400,12 +391,12 @@ pub fn standardize_historical_windows(
     stage_index.sort_unstable_by_key(|(start, _, _, _)| *start);
 
     for r in inflow_history {
-        let season_id = find_season_for_date(&stage_index, r.date)
-            .or_else(|| season_map.and_then(|sm| sm.season_for_date(r.date)))
-            .or_else(|| season_map.is_none().then(|| r.date.month0() as usize));
+        let season_id = find_season_for_date(&stage_index, r.start_date)
+            .or_else(|| season_map.and_then(|sm| sm.season_for_date(r.start_date)))
+            .or_else(|| season_map.is_none().then(|| r.start_date.month0() as usize));
         if let Some(sid) = season_id
             && let Some(&h) = hydro_id_to_idx.get(&r.hydro_id)
-            && let Some(idx) = table_idx(h, r.date.year(), sid)
+            && let Some(idx) = table_idx(h, r.start_date.year(), sid)
         {
             obs_table[idx] = r.value_m3s;
         }
@@ -421,136 +412,46 @@ pub fn standardize_historical_windows(
     let full_sequence: Vec<(i32, usize)> =
         super::build_observation_sequence(stages, max_order, n_seasons);
 
-    let safe_max_order = max_order.max(1);
-    let mut past_lag_buf = vec![0.0_f64; n_hydros * safe_max_order];
-    for pi in past_inflows {
-        if let Some(&h_idx) = hydro_id_to_idx.get(&pi.hydro_id) {
-            // Fill up to `max_order` slots so PAR(p)-A annual contributions
-            // (widened across the `psi` slice) see real lag values.
-            for (lag, &value) in pi.values_m3s.iter().enumerate().take(max_order) {
-                past_lag_buf[h_idx * safe_max_order + lag] = value;
-            }
-        }
-    }
-
     // Digest over little-endian f64 bytes so it is reproducible across runs.
     {
         let mut hasher = SipHasher13::new();
-        for pi in past_inflows {
-            for &v in &pi.values_m3s {
-                hasher.write(&v.to_le_bytes());
-            }
+        for &v in derived_lag_values {
+            hasher.write(&v.to_le_bytes());
         }
-        library.past_inflows_digest = hasher.finish();
+        library.seed_digest = hasher.finish();
     }
 
-    let mut lag_state = vec![0.0_f64; n_hydros * safe_max_order];
-    let mut lag_buf = vec![0.0_f64; safe_max_order];
-    let mut lag_accum = vec![0.0_f64; n_hydros];
-    // Per-stage raw rate, one entry per hydro; mirrors
-    // `standardize_external_inflow`'s `raw_rate_buf`.
-    let mut raw_rate_buf = vec![0.0_f64; n_hydros];
-    // advance_lag_chain (D1) reads the pre-shift lag values from a buffer
-    // separate from the one it writes; this window-scratch snapshot fills that
-    // role since `lag_state` is shifted in place.
-    let mut incoming_scratch = vec![0.0_f64; n_hydros * safe_max_order];
-    let mut downstream_accumulator = if downstream_par_order > 0 {
-        vec![0.0_f64; n_hydros]
-    } else {
-        Vec::new()
-    };
-    let mut downstream_completed_lags = if downstream_par_order > 0 {
-        vec![0.0_f64; n_hydros * downstream_par_order]
-    } else {
-        Vec::new()
-    };
-
-    for (w, &window_year) in window_years.iter().enumerate() {
-        // Each window starts from the same past_inflows-seeded lag state.
-        lag_state.copy_from_slice(&past_lag_buf);
-        lag_accum.fill(0.0);
-        let mut lag_weight_accum = 0.0_f64;
-        downstream_accumulator.fill(0.0);
-        downstream_completed_lags.fill(0.0);
-        let mut downstream_weight_accum = 0.0_f64;
-        let mut downstream_n_completed = 0_usize;
-
-        for t in 0..n_stages {
+    run_eta_inversion(
+        n_stages,
+        window_years.len(),
+        n_hydros,
+        max_order,
+        par,
+        derived_lag_values,
+        l_state,
+        derived_accum,
+        derived_weight,
+        stage_lag_transitions,
+        downstream_par_order,
+        |t, w, h| {
             let (year_offset, season_id) = full_sequence[max_order + t];
-            let obs_year = window_year + year_offset;
+            let obs_year = window_years[w] + year_offset;
             debug_assert!(
                 table_idx(0, obs_year, season_id).is_some(),
                 "missing study observation for year={obs_year}, season={season_id}; \
                  window discovery should have excluded this window",
             );
-
-            let eta_slice = library.eta_slice_mut(w, t);
-            for h in 0..n_hydros {
-                debug_assert!(
-                    max_order == 0
-                        || table_idx(h, obs_year, season_id)
-                            .is_some_and(|i| !obs_table[i].is_nan()),
-                    "missing study observation for hydro={}, year={obs_year}, \
-                     season={season_id}; window discovery should have excluded this window",
-                    hydro_ids[h].0,
-                );
-                let raw_target = lookup(h, obs_year, season_id);
-                raw_rate_buf[h] = raw_target;
-
-                // lag_state is h-major: lag_state[h * safe_max_order + l]. Fill
-                // every slot so PAR(p)-A annual contributions (widened across the
-                // `psi` slice) participate in the η inversion.
-                for (l, slot) in lag_buf.iter_mut().enumerate() {
-                    *slot = lag_state[h * safe_max_order + l];
-                }
-
-                let det_base = par.deterministic_base(t, h);
-                let psi = par.psi_slice(t, h);
-                let sigma = par.sigma(t, h);
-
-                let eta = solve_par_noise(det_base, psi, &lag_buf, sigma, raw_target);
-                eta_slice[h] = eta;
-            }
-
-            // Advance the lag chain, mirroring standardize_external_inflow.
-            let stage_lag = if stage_lag_transitions.is_empty() {
-                &UNIFORM_MONTHLY
-            } else {
-                let t_lag = &stage_lag_transitions[t];
-                // A noop (empty-SeasonMap) entry is treated as uniform-monthly.
-                if t_lag.accumulate_weight.abs() < 1e-9 && !t_lag.finalize_period {
-                    &UNIFORM_MONTHLY
-                } else {
-                    t_lag
-                }
-            };
-
-            incoming_scratch.copy_from_slice(&lag_state);
-            let mut primary = PrimaryLagAccum {
-                accumulator: &mut lag_accum,
-                weight_accum: &mut lag_weight_accum,
-            };
-            let mut downstream = DownstreamLagAccum {
-                accumulator: &mut downstream_accumulator,
-                weight_accum: &mut downstream_weight_accum,
-                completed_lags: &mut downstream_completed_lags,
-                n_completed: &mut downstream_n_completed,
-                par_order: downstream_par_order,
-            };
-            advance_lag_chain(
-                EntityMajor {
-                    entity_count: n_hydros,
-                    max_order: safe_max_order,
-                },
-                &mut lag_state,
-                &incoming_scratch,
-                &raw_rate_buf[..n_hydros],
-                stage_lag,
-                &mut primary,
-                &mut downstream,
+            debug_assert!(
+                max_order == 0
+                    || table_idx(h, obs_year, season_id).is_some_and(|i| !obs_table[i].is_nan()),
+                "missing study observation for hydro={}, year={obs_year}, \
+                 season={season_id}; window discovery should have excluded this window",
+                hydro_ids[h].0,
             );
-        }
-    }
+            lookup(h, obs_year, season_id)
+        },
+        |t, w, h, eta| library.eta_slice_mut(w, t)[h] = eta,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -773,9 +674,9 @@ mod tests {
     // Helpers for standardize_historical_windows tests
     // -----------------------------------------------------------------------
 
-    use chrono::{Datelike, NaiveDate};
+    use chrono::{Datelike, Months, NaiveDate};
     use cobre_core::{
-        EntityId, HydroPastInflows,
+        EntityId, Hydro, HydroGenerationModel, HydroPenalties,
         scenario::{InflowHistoryRow, InflowModel},
         temporal::{
             Block, BlockMode, NoiseMethod, ScenarioSourceConfig, SeasonCycleType, SeasonDefinition,
@@ -784,7 +685,13 @@ mod tests {
     };
 
     use super::{Stage, standardize_historical_windows};
-    use crate::par::precompute::PrecomputedPar;
+    use crate::derive_inflow_seeds;
+    use crate::par::{
+        DownstreamLagAccum, EntityMajor, PrimaryLagAccum, advance_lag_chain,
+        evaluate::{evaluate_par, solve_par_noise},
+        precompute::PrecomputedPar,
+        precompute_stage_lag_transitions,
+    };
 
     /// Build a monthly stage with the given array index and 0-based `season_id` (0=Jan..11=Dec).
     ///
@@ -819,12 +726,14 @@ mod tests {
 
     /// Build a row keyed by `month0` (0-based month: 0=Jan, 11=Dec).
     ///
-    /// The lookup in `standardize_historical_windows` uses `date.month0()` as
-    /// the `season_id`. This helper makes that mapping explicit.
+    /// The lookup in `standardize_historical_windows` uses `start_date.month0()`
+    /// as the `season_id`. This helper makes that mapping explicit.
     fn make_row(hydro_id: EntityId, year: i32, month0: u32, value: f64) -> InflowHistoryRow {
+        let start_date = NaiveDate::from_ymd_opt(year, month0 + 1, 1).unwrap();
         InflowHistoryRow {
             hydro_id,
-            date: NaiveDate::from_ymd_opt(year, month0 + 1, 1).unwrap(),
+            start_date,
+            end_date: start_date.checked_add_months(Months::new(1)).unwrap(),
             value_m3s: value,
         }
     }
@@ -895,6 +804,9 @@ mod tests {
             &par,
             &[1990],
             None,
+            &[],
+            0,
+            &[],
             &[],
             &[],
             0,
@@ -986,15 +898,11 @@ mod tests {
             history.push(make_row(hydro, 1990, m, 100.0));
         }
 
-        // past_inflows: provide lag-1 = Dec 1989 = 110.0 so the rolling chain
-        // starts from the same value as the window's own pre-study observation.
-        // This keeps all existing eta assertions numerically unchanged while
-        // exercising the new past_inflows-seeded chain.
-        let past = vec![HydroPastInflows {
-            hydro_id: hydro,
-            values_m3s: vec![110.0], // lag-1 = Dec 1989
-            season_ids: None,
-        }];
+        // Derived lag seed: provide lag-1 = Dec 1989 = 110.0 so the rolling
+        // chain starts from the same value as the window's own pre-study
+        // observation. This keeps all existing eta assertions numerically
+        // unchanged while exercising the derived-seed chain.
+        let derived_lag_values = [110.0]; // lag-1 = Dec 1989
 
         let mut lib = HistoricalScenarioLibrary::new(1, 12, 1, 1, vec![1990]);
         standardize_historical_windows(
@@ -1005,12 +913,15 @@ mod tests {
             &par,
             &[1990],
             None,
-            &past,
+            &derived_lag_values,
+            1,
+            &[],
+            &[],
             &[],
             0,
         );
 
-        // Stage 0: lag_state seeded from past_inflows → lag = 110.0.
+        // Stage 0: lag_state seeded from the derived seed → lag = 110.0.
         // eta = (130 - 80 - 0.5*110) / 25 = -5/25 = -0.2
         let eta_0 = lib.eta_slice(0, 0)[0];
         let expected_0 = (130.0 - 80.0 - 0.5 * 110.0) / 25.0;
@@ -1110,6 +1021,9 @@ mod tests {
             &[1990, 1991],
             None,
             &[],
+            0,
+            &[],
+            &[],
             &[],
             0,
         );
@@ -1173,6 +1087,9 @@ mod tests {
             &par,
             &[2000],
             None,
+            &[],
+            0,
+            &[],
             &[],
             &[],
             0,
@@ -1424,6 +1341,9 @@ mod tests {
             &[2000],
             None,
             &[],
+            0,
+            &[],
+            &[],
             &[],
             0,
         );
@@ -1438,6 +1358,9 @@ mod tests {
             &par,
             &[2000],
             Some(&sm),
+            &[],
+            0,
+            &[],
             &[],
             &[],
             0,
@@ -1554,22 +1477,26 @@ mod tests {
         let history = vec![
             InflowHistoryRow {
                 hydro_id: hydro,
-                date: NaiveDate::from_ymd_opt(2000, 1, 1).unwrap(),
+                start_date: NaiveDate::from_ymd_opt(2000, 1, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2000, 4, 1).unwrap(),
                 value_m3s: 120.0,
             },
             InflowHistoryRow {
                 hydro_id: hydro,
-                date: NaiveDate::from_ymd_opt(2000, 4, 1).unwrap(),
+                start_date: NaiveDate::from_ymd_opt(2000, 4, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2000, 7, 1).unwrap(),
                 value_m3s: 130.0,
             },
             InflowHistoryRow {
                 hydro_id: hydro,
-                date: NaiveDate::from_ymd_opt(2000, 7, 1).unwrap(),
+                start_date: NaiveDate::from_ymd_opt(2000, 7, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2000, 10, 1).unwrap(),
                 value_m3s: 140.0,
             },
             InflowHistoryRow {
                 hydro_id: hydro,
-                date: NaiveDate::from_ymd_opt(2000, 10, 1).unwrap(),
+                start_date: NaiveDate::from_ymd_opt(2000, 10, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2001, 1, 1).unwrap(),
                 value_m3s: 150.0,
             },
         ];
@@ -1583,6 +1510,9 @@ mod tests {
             &par,
             &[2000],
             Some(&sm),
+            &[],
+            0,
+            &[],
             &[],
             &[],
             0,
@@ -1659,11 +1589,7 @@ mod tests {
                 make_row(hydro, window_year, u32::try_from(month0).unwrap(), value)
             })
             .collect();
-        let past_inflows = vec![HydroPastInflows {
-            hydro_id: hydro,
-            values_m3s: vec![0.0],
-            season_ids: None,
-        }];
+        let derived_lag_values = [0.0];
 
         let downstream_transition = |downstream_finalize: bool| StageLagTransition {
             accumulate_weight: 1.0,
@@ -1710,7 +1636,10 @@ mod tests {
             &par,
             &[window_year],
             None,
-            &past_inflows,
+            &derived_lag_values,
+            1,
+            &[],
+            &[],
             &transitions,
             1, // downstream_par_order: one completed quarter needed to rebuild
         );
@@ -1755,10 +1684,14 @@ mod tests {
         let quarter_months = [1u32, 4, 7, 10];
         (from_year..=to_year)
             .flat_map(|y| {
-                quarter_months.iter().map(move |&m| InflowHistoryRow {
-                    hydro_id,
-                    date: NaiveDate::from_ymd_opt(y, m, 1).unwrap(),
-                    value_m3s: 100.0,
+                quarter_months.iter().map(move |&m| {
+                    let start_date = NaiveDate::from_ymd_opt(y, m, 1).unwrap();
+                    InflowHistoryRow {
+                        hydro_id,
+                        start_date,
+                        end_date: start_date.checked_add_months(Months::new(3)).unwrap(),
+                        value_m3s: 100.0,
+                    }
                 })
             })
             .collect()
@@ -1800,6 +1733,9 @@ mod tests {
             &par,
             &[1995],
             None,
+            &[],
+            0,
+            &[],
             &[],
             &[],
             0,
@@ -1890,11 +1826,11 @@ mod tests {
 
         // Overwrite the 2000 observations for h1 and h2 with the test values.
         for row in &mut history {
-            if row.date.year() == 2000 {
+            if row.start_date.year() == 2000 {
                 let q = quarter_months
                     .iter()
-                    .position(|&m| m == row.date.month())
-                    .expect("date month must be a quarter month");
+                    .position(|&m| m == row.start_date.month())
+                    .expect("start_date month must be a quarter month");
                 if row.hydro_id == h1 {
                     row.value_m3s = h1_obs_2000[q];
                 } else if row.hydro_id == h2 {
@@ -1918,6 +1854,9 @@ mod tests {
             &par,
             &window_years,
             Some(&sm),
+            &[],
+            0,
+            &[],
             &[],
             &[],
             0,
@@ -1948,5 +1887,531 @@ mod tests {
                 eta[1]
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Derived-seed replay: the replay seeds from the same derived lag state as
+    // the forward pass, so z == v.
+    // -----------------------------------------------------------------------
+
+    fn make_hydro(id: i32) -> Hydro {
+        Hydro {
+            unit_groups: Vec::new(),
+            id: EntityId(id),
+            name: format!("H{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
+            downstream_id: None,
+            travel_time_hours: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 100.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 100.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: HydroPenalties {
+                spillage_cost: 0.0,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 0.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+        }
+    }
+
+    /// With no conditioning, the derived lag seed carries exactly the same
+    /// values a pre-epic literal seed would have held, so threading it
+    /// through the per-(stage, hydro) `solve_par_noise` calls reproduces the
+    /// eta a hard-coded seed of those values would have produced. Covers 2
+    /// hydros and a 2-lag stride so a transposed `(hydro, lag)` index in the
+    /// fill loop would be caught.
+    #[test]
+    fn standardize_historical_eta_matches_positional_seed() {
+        let h1 = EntityId(1);
+        let h2 = EntityId(2);
+        let hydro_ids = vec![h1, h2];
+        let hydros = vec![make_hydro(1), make_hydro(2)];
+        let season_map = monthly_season_map();
+
+        // Two monthly study stages (Jan, Feb) so lag lookups resolve through
+        // the ordinary multi-season path rather than the single-season
+        // annual-cycle fallback.
+        let stages = vec![make_monthly_stage(0, 0), make_monthly_stage(1, 1)];
+        let first_stage = stages[0].clone();
+
+        let models = vec![
+            InflowModel {
+                hydro_id: h1,
+                stage_id: 0,
+                mean_m3s: 300.0,
+                std_m3s: 40.0,
+                ar_coefficients: vec![0.3, 0.1],
+                residual_std_ratio: 1.0,
+                annual: None,
+            },
+            InflowModel {
+                hydro_id: h1,
+                stage_id: 1,
+                mean_m3s: 300.0,
+                std_m3s: 40.0,
+                ar_coefficients: vec![0.3, 0.1],
+                residual_std_ratio: 1.0,
+                annual: None,
+            },
+            InflowModel {
+                hydro_id: h2,
+                stage_id: 0,
+                mean_m3s: 500.0,
+                std_m3s: 60.0,
+                ar_coefficients: vec![0.2, 0.05],
+                residual_std_ratio: 1.0,
+                annual: None,
+            },
+            InflowModel {
+                hydro_id: h2,
+                stage_id: 1,
+                mean_m3s: 500.0,
+                std_m3s: 60.0,
+                ar_coefficients: vec![0.2, 0.05],
+                residual_std_ratio: 1.0,
+                annual: None,
+            },
+        ];
+        let par = PrecomputedPar::build(&models, &stages, &hydro_ids, None).unwrap();
+        let l_state = par.max_order();
+        assert_eq!(l_state, 2);
+
+        let record = vec![
+            InflowHistoryRow {
+                hydro_id: h1,
+                start_date: NaiveDate::from_ymd_opt(2023, 12, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                value_m3s: 110.0,
+            },
+            InflowHistoryRow {
+                hydro_id: h1,
+                start_date: NaiveDate::from_ymd_opt(2023, 11, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2023, 12, 1).unwrap(),
+                value_m3s: 120.0,
+            },
+            InflowHistoryRow {
+                hydro_id: h2,
+                start_date: NaiveDate::from_ymd_opt(2023, 12, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                value_m3s: 210.0,
+            },
+            InflowHistoryRow {
+                hydro_id: h2,
+                start_date: NaiveDate::from_ymd_opt(2023, 11, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2023, 12, 1).unwrap(),
+                value_m3s: 220.0,
+            },
+        ];
+        let derived =
+            derive_inflow_seeds(&record, &[], &hydros, &first_stage, &season_map, l_state);
+        assert_eq!(derived.lag_values, vec![110.0, 120.0, 210.0, 220.0]);
+
+        // Study-window observations for both stages/hydros; only stage 0's
+        // eta is asserted below.
+        let inflow_history = vec![
+            make_row(h1, 2024, 0, 250.0),
+            make_row(h1, 2024, 1, 999.0),
+            make_row(h2, 2024, 0, 300.0),
+            make_row(h2, 2024, 1, 999.0),
+        ];
+
+        let mut lib = HistoricalScenarioLibrary::new(1, 2, 2, l_state, vec![2024]);
+        standardize_historical_windows(
+            &mut lib,
+            &inflow_history,
+            &hydro_ids,
+            &stages,
+            &par,
+            &[2024],
+            Some(&season_map),
+            &derived.lag_values,
+            l_state,
+            &[],
+            &[],
+            &[],
+            0,
+        );
+
+        let expected_h1 = solve_par_noise(
+            par.deterministic_base(0, 0),
+            par.psi_slice(0, 0),
+            &[110.0, 120.0],
+            par.sigma(0, 0),
+            250.0,
+        );
+        let expected_h2 = solve_par_noise(
+            par.deterministic_base(0, 1),
+            par.psi_slice(0, 1),
+            &[210.0, 220.0],
+            par.sigma(0, 1),
+            300.0,
+        );
+
+        let eta = lib.eta_slice(0, 0);
+        assert_eq!(
+            eta[0], expected_h1,
+            "hydro 1 eta must match the positional-seed formula"
+        );
+        assert_eq!(
+            eta[1], expected_h2,
+            "hydro 2 eta must match the positional-seed formula"
+        );
+    }
+
+    /// Build a stage with an arbitrary (non-1st-of-month) `start_date`.
+    fn dated_stage(
+        index: usize,
+        id: i32,
+        start: NaiveDate,
+        end: NaiveDate,
+        season_id: usize,
+    ) -> Stage {
+        Stage {
+            index,
+            id,
+            start_date: start,
+            end_date: end,
+            season_id: Some(season_id),
+            blocks: vec![Block {
+                index: 0,
+                name: "SINGLE".to_string(),
+                duration_hours: 744.0,
+            }],
+            block_mode: BlockMode::Parallel,
+            state_config: StageStateConfig {
+                storage: true,
+                inflow_lags: false,
+            },
+            risk_config: StageRiskConfig::Expectation,
+            scenario_config: ScenarioSourceConfig {
+                branching_factor: 1,
+                noise_method: NoiseMethod::Saa,
+            },
+        }
+    }
+
+    /// The historical-replay analogue of `external_eta_round_trip_exact_mid_coarse_period`
+    /// (`external.rs`): a study whose stage 0 starts mid-coarse-period, with
+    /// pre-study record coverage seeding a genuine partial `accum`/`weight`,
+    /// exercises a divergence no monthly-boundary fixture above can reach.
+    /// Forward generation and `standardize_historical_windows`'s replay reset
+    /// both advance the lag chain from the same `derived.accum`/`derived.weight`
+    /// seed, so `z == v`.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn historical_replay_round_trip_exact_mid_coarse_period() {
+        let hydro_id = EntityId(1);
+        let hydro_ids = vec![hydro_id];
+        let hydros = vec![make_hydro(1)];
+        let season_map = monthly_season_map();
+
+        // Stage 0 starts April 11: the in-progress occurrence [April 1,
+        // April 11) is non-empty, and the remaining 20 of April's 30 days
+        // still finalize within stage 0.
+        let stages = vec![
+            dated_stage(
+                0,
+                0,
+                NaiveDate::from_ymd_opt(2026, 4, 11).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 5, 1).unwrap(),
+                3,
+            ),
+            dated_stage(
+                1,
+                1,
+                NaiveDate::from_ymd_opt(2026, 5, 1).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
+                4,
+            ),
+        ];
+        let first_stage = stages[0].clone();
+
+        let models = vec![
+            InflowModel {
+                hydro_id,
+                stage_id: 0,
+                mean_m3s: 160.0,
+                std_m3s: 25.0,
+                ar_coefficients: vec![0.5],
+                residual_std_ratio: 1.0,
+                annual: None,
+            },
+            InflowModel {
+                hydro_id,
+                stage_id: 1,
+                mean_m3s: 160.0,
+                std_m3s: 25.0,
+                ar_coefficients: vec![0.5],
+                residual_std_ratio: 1.0,
+                annual: None,
+            },
+        ];
+        let par = PrecomputedPar::build(&models, &stages, &hydro_ids, None).unwrap();
+        let l_state = par.max_order();
+        assert_eq!(l_state, 1, "AR(1) with no annual coupling stays order 1");
+
+        let record = vec![
+            InflowHistoryRow {
+                hydro_id,
+                start_date: NaiveDate::from_ymd_opt(2026, 3, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2026, 4, 1).unwrap(),
+                value_m3s: 300.0,
+            },
+            InflowHistoryRow {
+                hydro_id,
+                start_date: NaiveDate::from_ymd_opt(2026, 4, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2026, 4, 11).unwrap(),
+                value_m3s: 200.0,
+            },
+        ];
+
+        let derived =
+            derive_inflow_seeds(&record, &[], &hydros, &first_stage, &season_map, l_state);
+        assert_eq!(derived.lag_values.len(), l_state);
+        assert_eq!(derived.lag_values[0], 300.0);
+        assert!(
+            derived.weight[0] > 0.0 && derived.weight[0] < 1.0,
+            "the accumulator seed must be a genuine partial-coverage fraction \
+             in (0, 1), or this test is a tautology (every monthly-boundary \
+             fixture misses the bug this way); got weight={}",
+            derived.weight[0]
+        );
+
+        let stage_lag_transitions = precompute_stage_lag_transitions(&stages, &season_map, 0);
+        assert!(
+            stage_lag_transitions[0].finalize_period && stage_lag_transitions[1].finalize_period,
+            "both stages must finalize their own period for this fixture to \
+             exercise a mid-period accumulate/finalize transition"
+        );
+
+        // Forward-generate the window's realized values by advancing the
+        // SEEDED lag chain exactly as the training/simulation forward pass
+        // does: the accumulator starts from `derived.accum`/`derived.weight`,
+        // not zero.
+        let eta_sequence = [0.35_f64, -0.6];
+        let mut lag_state = derived.lag_values.clone();
+        let mut accum = derived.accum.clone();
+        let mut weight = derived.weight.clone();
+        let mut incoming_scratch = vec![0.0_f64; l_state];
+        let mut downstream_accumulator: Vec<f64> = Vec::new();
+        let mut downstream_weight_accum = 0.0_f64;
+        let mut downstream_completed_lags: Vec<f64> = Vec::new();
+        let mut downstream_n_completed = 0_usize;
+        let mut targets = Vec::with_capacity(stages.len());
+        for (t, &eta) in eta_sequence.iter().enumerate() {
+            let det_base = par.deterministic_base(t, 0);
+            let psi = par.psi_slice(t, 0);
+            let sigma = par.sigma(t, 0);
+            let value = evaluate_par(det_base, psi, &lag_state, sigma, eta);
+            targets.push(value);
+
+            incoming_scratch.copy_from_slice(&lag_state);
+            let mut primary = PrimaryLagAccum {
+                accumulator: &mut accum,
+                weight_accum: &mut weight,
+            };
+            let mut downstream = DownstreamLagAccum {
+                accumulator: &mut downstream_accumulator,
+                weight_accum: &mut downstream_weight_accum,
+                completed_lags: &mut downstream_completed_lags,
+                n_completed: &mut downstream_n_completed,
+                par_order: 0,
+            };
+            advance_lag_chain(
+                EntityMajor {
+                    entity_count: 1,
+                    max_order: l_state,
+                },
+                &mut lag_state,
+                &incoming_scratch,
+                &[value],
+                &stage_lag_transitions[t],
+                &mut primary,
+                &mut downstream,
+            );
+        }
+
+        // The window's realized observations: season 3 (April) and 4 (May) of
+        // `window_year`, holding the forward-generated targets.
+        let window_year = 2026;
+        let inflow_history = vec![
+            make_row(hydro_id, window_year, 3, targets[0]),
+            make_row(hydro_id, window_year, 4, targets[1]),
+        ];
+
+        let mut lib =
+            HistoricalScenarioLibrary::new(1, stages.len(), 1, l_state, vec![window_year]);
+        standardize_historical_windows(
+            &mut lib,
+            &inflow_history,
+            &hydro_ids,
+            &stages,
+            &par,
+            &[window_year],
+            Some(&season_map),
+            &derived.lag_values,
+            l_state,
+            &derived.accum,
+            &derived.weight,
+            &stage_lag_transitions,
+            0,
+        );
+
+        // Replay from the SAME seeded lag chain the production forward pass
+        // would carry, inverting the stored eta; z must equal v.
+        let mut replay_lag_state = derived.lag_values.clone();
+        let mut replay_accum = derived.accum.clone();
+        let mut replay_weight = derived.weight.clone();
+        let mut replay_downstream_accumulator: Vec<f64> = Vec::new();
+        let mut replay_downstream_weight_accum = 0.0_f64;
+        let mut replay_downstream_completed_lags: Vec<f64> = Vec::new();
+        let mut replay_downstream_n_completed = 0_usize;
+        for (t, &target) in targets.iter().enumerate() {
+            let eta = lib.eta_slice(0, t)[0];
+            let det_base = par.deterministic_base(t, 0);
+            let psi = par.psi_slice(t, 0);
+            let sigma = par.sigma(t, 0);
+            let reconstructed = evaluate_par(det_base, psi, &replay_lag_state, sigma, eta);
+            assert!(
+                (reconstructed - target).abs() < 1e-9,
+                "stage {t}: mid-period replay reconstructed {reconstructed:.12} \
+                 (z) != forward target {target:.12} (v)",
+            );
+
+            incoming_scratch.copy_from_slice(&replay_lag_state);
+            let mut primary = PrimaryLagAccum {
+                accumulator: &mut replay_accum,
+                weight_accum: &mut replay_weight,
+            };
+            let mut downstream = DownstreamLagAccum {
+                accumulator: &mut replay_downstream_accumulator,
+                weight_accum: &mut replay_downstream_weight_accum,
+                completed_lags: &mut replay_downstream_completed_lags,
+                n_completed: &mut replay_downstream_n_completed,
+                par_order: 0,
+            };
+            advance_lag_chain(
+                EntityMajor {
+                    entity_count: 1,
+                    max_order: l_state,
+                },
+                &mut replay_lag_state,
+                &incoming_scratch,
+                &[target],
+                &stage_lag_transitions[t],
+                &mut primary,
+                &mut downstream,
+            );
+        }
+    }
+
+    /// Two derived seeds differing in a single value must produce different
+    /// `seed_digest`s — the cache-staleness signal a caller relies on to
+    /// detect that the library needs re-standardising.
+    #[test]
+    fn historical_seed_digest_tracks_derived_seed() {
+        let hydro = EntityId(1);
+        let stages = vec![make_monthly_stage(0, 0), make_monthly_stage(1, 1)];
+        let models = vec![
+            InflowModel {
+                hydro_id: hydro,
+                stage_id: 0,
+                mean_m3s: 100.0,
+                std_m3s: 20.0,
+                ar_coefficients: vec![0.4],
+                residual_std_ratio: 1.0,
+                annual: None,
+            },
+            InflowModel {
+                hydro_id: hydro,
+                stage_id: 1,
+                mean_m3s: 100.0,
+                std_m3s: 20.0,
+                ar_coefficients: vec![0.4],
+                residual_std_ratio: 1.0,
+                annual: None,
+            },
+        ];
+        let par = PrecomputedPar::build(&models, &stages, &[hydro], None).unwrap();
+        let history = vec![
+            make_row(hydro, 2024, 0, 150.0),
+            make_row(hydro, 2024, 1, 160.0),
+        ];
+
+        let seed_a = [100.0_f64];
+        let seed_b = [999.0_f64];
+
+        let mut lib_a = HistoricalScenarioLibrary::new(1, 2, 1, 1, vec![2024]);
+        standardize_historical_windows(
+            &mut lib_a,
+            &history,
+            &[hydro],
+            &stages,
+            &par,
+            &[2024],
+            None,
+            &seed_a,
+            1,
+            &[],
+            &[],
+            &[],
+            0,
+        );
+
+        let mut lib_b = HistoricalScenarioLibrary::new(1, 2, 1, 1, vec![2024]);
+        standardize_historical_windows(
+            &mut lib_b,
+            &history,
+            &[hydro],
+            &stages,
+            &par,
+            &[2024],
+            None,
+            &seed_b,
+            1,
+            &[],
+            &[],
+            &[],
+            0,
+        );
+
+        assert_ne!(
+            lib_a.seed_digest(),
+            lib_b.seed_digest(),
+            "seeds differing in one lag value must fingerprint differently"
+        );
+        assert_ne!(
+            lib_a.seed_digest(),
+            0,
+            "standardize_historical_windows must write a non-sentinel digest"
+        );
     }
 }

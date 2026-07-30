@@ -382,11 +382,11 @@ mod tests {
     }
 
     fn minimal_hydro(id: i32, bus_id: i32) -> Hydro {
-        Hydro {
+        let mut hydro = Hydro {
+            unit_groups: Vec::new(),
             id: EntityId(id),
             name: format!("Hydro {id}"),
             operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId(bus_id),
             downstream_id: None,
             travel_time_hours: None,
             entry_stage_id: None,
@@ -409,7 +409,9 @@ mod tests {
             diversion: None,
             filling: None,
             penalties: zero_hydro_penalties(),
-        }
+        };
+        hydro.declare_mirror_unit_group(EntityId(bus_id));
+        hydro
     }
 
     #[test]
@@ -596,7 +598,6 @@ mod tests {
         let original = InitialConditions {
             storage: vec![],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![
                 AnticipatedCommitmentHistory {
                     thermal_id: EntityId(1),
@@ -643,7 +644,6 @@ mod tests {
         let original = InitialConditions {
             storage: vec![],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],

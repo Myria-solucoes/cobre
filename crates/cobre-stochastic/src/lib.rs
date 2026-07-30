@@ -27,9 +27,14 @@ pub mod normal;
 pub mod par;
 pub mod provenance;
 pub mod sampling;
+pub mod season_cast;
+pub mod seeds;
 pub mod tree;
 
-pub use context::{ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context};
+pub use context::{
+    ClassSchemes, NoiseEntityOrder, OpeningTreeInputs, StochasticContext, build_stochastic_context,
+    noise_entity_order,
+};
 pub use correlation::{DecomposedCorrelation, GroupFactor, SpectralFactor};
 pub use error::StochasticError;
 pub use noise::quantile::norm_quantile;
@@ -52,6 +57,7 @@ pub use sampling::{
     standardize_external_load, standardize_external_ncs, standardize_historical_windows,
     validate_external_library, validate_historical_library,
 };
+pub use seeds::{DerivedInflowSeeds, derive_inflow_seeds};
 pub use tree::{
     ClassDimensions, OpeningTree, OpeningTreeView, SweepDirection, generate_opening_tree,
 };

@@ -13,9 +13,9 @@ use crate::{
     Bus, CascadeTopology, CorrelationModel, EnergyContract, EntityId, ExternalLoadRow,
     ExternalNcsRow, ExternalScenarioRow, GenericConstraint, Hydro, InflowHistoryRow, InflowModel,
     InitialConditions, Line, LoadModel, NcsModel, NetworkTopology, NonControllableSource,
-    PolicyGraph, PumpingStation, ResolvedBounds, ResolvedExchangeFactors,
-    ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
-    ResolvedPenalties, Stage, Thermal, ValidationError,
+    PolicyGraph, PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds,
+    ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, Stage, Thermal,
+    ValidationError,
 };
 
 /// Builder for constructing a validated, immutable [`System`].
@@ -41,9 +41,9 @@ use crate::{
 ///
 /// // Canonical ordering: by operational_start_date, then by id; never by name.
 /// // The two early-date buses order by id (2 then 3), not by name (which would be A then Z).
-/// assert_eq!(system.buses()[0].id, EntityId(2)); // early date, smaller id (name "Z")
-/// assert_eq!(system.buses()[1].id, EntityId(3)); // early date, larger id (name "A")
-/// assert_eq!(system.buses()[2].id, EntityId(1)); // later date
+/// assert_eq!(system.buses()[0].id, EntityId(2));
+/// assert_eq!(system.buses()[1].id, EntityId(3));
+/// assert_eq!(system.buses()[2].id, EntityId(1));
 /// ```
 pub struct SystemBuilder {
     buses: Vec<Bus>,
@@ -59,7 +59,6 @@ pub struct SystemBuilder {
     bounds: ResolvedBounds,
     resolved_generic_bounds: ResolvedGenericConstraintBounds,
     resolved_load_factors: ResolvedLoadFactors,
-    resolved_exchange_factors: ResolvedExchangeFactors,
     resolved_ncs_bounds: ResolvedNcsBounds,
     resolved_ncs_factors: ResolvedNcsFactors,
     inflow_models: Vec<InflowModel>,
@@ -98,7 +97,6 @@ impl SystemBuilder {
             bounds: ResolvedBounds::empty(),
             resolved_generic_bounds: ResolvedGenericConstraintBounds::empty(),
             resolved_load_factors: ResolvedLoadFactors::empty(),
-            resolved_exchange_factors: ResolvedExchangeFactors::empty(),
             resolved_ncs_bounds: ResolvedNcsBounds::empty(),
             resolved_ncs_factors: ResolvedNcsFactors::empty(),
             inflow_models: Vec::new(),
@@ -210,16 +208,6 @@ impl SystemBuilder {
         self
     }
 
-    /// Set the pre-resolved per-block exchange capacity factors.
-    #[must_use]
-    pub fn resolved_exchange_factors(
-        mut self,
-        resolved_exchange_factors: ResolvedExchangeFactors,
-    ) -> Self {
-        self.resolved_exchange_factors = resolved_exchange_factors;
-        self
-    }
-
     /// Set the pre-resolved per-stage NCS available generation bounds.
     #[must_use]
     pub fn resolved_ncs_bounds(mut self, resolved_ncs_bounds: ResolvedNcsBounds) -> Self {
@@ -279,7 +267,7 @@ impl SystemBuilder {
     }
 
     /// Set the raw historical inflow observations; rows must be sorted by
-    /// `(hydro_id, date)` ascending.
+    /// `(hydro_id, start_date)` ascending.
     #[must_use]
     pub fn inflow_history(mut self, rows: Vec<InflowHistoryRow>) -> Self {
         self.inflow_history = rows;
@@ -319,6 +307,7 @@ impl SystemBuilder {
     /// # Errors
     ///
     /// Returns `Err(Vec<ValidationError>)` if:
+    /// - Any hydro declares no unit groups.
     /// - Duplicate IDs are detected in any entity collection or in the stage collection.
     /// - Any cross-reference field refers to an entity ID that does not exist.
     /// - The hydro cascade graph contains a cycle.
@@ -332,6 +321,20 @@ impl SystemBuilder {
         sort_canonical(&mut self.buses, |b| b.operational_start_date, |b| b.id.0);
         sort_canonical(&mut self.lines, |l| l.operational_start_date, |l| l.id.0);
         sort_canonical(&mut self.hydros, |h| h.operational_start_date, |h| h.id.0);
+
+        let missing_unit_groups: Vec<ValidationError> = self
+            .hydros
+            .iter()
+            .filter(|h| h.unit_groups.is_empty())
+            .map(|h| ValidationError::MissingUnitGroups { hydro_id: h.id })
+            .collect();
+        if !missing_unit_groups.is_empty() {
+            return Err(missing_unit_groups);
+        }
+
+        for hydro in &mut self.hydros {
+            hydro.sort_unit_groups();
+        }
         sort_canonical(&mut self.thermals, |t| t.operational_start_date, |t| t.id.0);
         sort_canonical(
             &mut self.pumping_stations,
@@ -451,7 +454,6 @@ impl SystemBuilder {
             bounds: self.bounds,
             resolved_generic_bounds: self.resolved_generic_bounds,
             resolved_load_factors: self.resolved_load_factors,
-            resolved_exchange_factors: self.resolved_exchange_factors,
             resolved_ncs_bounds: self.resolved_ncs_bounds,
             resolved_ncs_factors: self.resolved_ncs_factors,
             inflow_models: self.inflow_models,
@@ -472,30 +474,30 @@ impl SystemBuilder {
 /// within an entity type (duplicates are rejected), so this is a total order and
 /// upholds the declaration-order hard rule without relying on input order. The
 /// secondary key is the id, not the name, because names are user-chosen and vary
-/// between authors of the same system, whereas the id is the stable canonical key.
+/// between authors of the same system.
 fn sort_canonical<T>(entities: &mut [T], date: impl Fn(&T) -> NaiveDate, id: impl Fn(&T) -> i32) {
-    entities.sort_by(|a, b| date(a).cmp(&date(b)).then_with(|| id(a).cmp(&id(b))));
+    entities.sort_by_key(|e| (date(e), id(e)));
 }
 
 #[cfg(test)]
-mod proptests {
+mod tests {
     use super::*;
-    use crate::{
-        Block, BlockMode, ConstraintExpression, ConstraintSense, ContractType, DeficitSegment,
-        HydroGenerationModel, HydroPenalties, NoiseMethod, ScenarioSourceConfig, SlackConfig,
-        StageRiskConfig, StageStateConfig,
-    };
-    use proptest::prelude::*;
+    use crate::{DeficitSegment, HydroGenerationModel, HydroPenalties};
 
-    fn date_early() -> NaiveDate {
-        NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date")
+    fn bus(id: i32) -> Bus {
+        Bus {
+            id: EntityId(id),
+            name: format!("bus-{id}"),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 5000.0,
+            }],
+            excess_cost: 0.0,
+        }
     }
 
-    fn date_late() -> NaiveDate {
-        NaiveDate::from_ymd_opt(2024, 2, 1).expect("valid date")
-    }
-
-    fn zero_penalties() -> HydroPenalties {
+    pub(super) fn zero_penalties() -> HydroPenalties {
         HydroPenalties {
             spillage_cost: 0.0,
             diversion_cost: 0.0,
@@ -514,6 +516,111 @@ mod proptests {
             evaporation_violation_neg_cost: 0.0,
             inflow_nonnegativity_cost: 0.0,
         }
+    }
+
+    fn hydro_without_groups(
+        id: i32,
+        name: &str,
+        min_generation_mw: f64,
+        max_generation_mw: f64,
+        min_turbined_m3s: f64,
+        max_turbined_m3s: f64,
+    ) -> Hydro {
+        Hydro {
+            id: EntityId(id),
+            name: name.to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+            downstream_id: None,
+            travel_time_hours: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 1000.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s,
+            max_turbined_m3s,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw,
+            max_generation_mw,
+            unit_groups: Vec::new(),
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: zero_penalties(),
+        }
+    }
+
+    /// Given two hydros with no declared `unit_groups`, `build()` returns `Err`
+    /// with exactly one `MissingUnitGroups` per offending hydro, naming both ids —
+    /// proving errors are collected rather than short-circuited on the first.
+    #[test]
+    fn test_builder_rejects_hydro_with_no_unit_groups() {
+        let alpha = hydro_without_groups(1, "AlphaPlant", 10.0, 90.0, 5.0, 200.0);
+        let beta = hydro_without_groups(2, "BetaPlant", 25.0, 150.0, 15.0, 300.0);
+
+        let result = SystemBuilder::new()
+            .buses(vec![bus(10), bus(20)])
+            .hydros(vec![alpha, beta])
+            .build();
+
+        let errors = result.expect_err("hydros with no unit groups must be rejected");
+        let missing_ids: Vec<EntityId> = errors
+            .iter()
+            .map(|e| match e {
+                ValidationError::MissingUnitGroups { hydro_id } => *hydro_id,
+                other => panic!("expected MissingUnitGroups, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(missing_ids, vec![EntityId(1), EntityId(2)]);
+    }
+
+    /// Given the same builder with only the first hydro's groups declared,
+    /// `build()` reports exactly the hydro that omitted its group — proving the
+    /// filter discriminates rather than rejecting every hydro unconditionally.
+    #[test]
+    fn test_builder_reports_only_the_hydro_missing_unit_groups() {
+        let mut alpha = hydro_without_groups(1, "AlphaPlant", 10.0, 90.0, 5.0, 200.0);
+        alpha.declare_mirror_unit_group(EntityId(10));
+        let beta = hydro_without_groups(2, "BetaPlant", 25.0, 150.0, 15.0, 300.0);
+
+        let result = SystemBuilder::new()
+            .buses(vec![bus(10), bus(20)])
+            .hydros(vec![alpha, beta])
+            .build();
+
+        let errors = result.expect_err("hydro missing groups must be rejected");
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(
+            errors[0],
+            ValidationError::MissingUnitGroups {
+                hydro_id: EntityId(2)
+            }
+        ));
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::{
+        Block, BlockMode, ConstraintExpression, ConstraintSense, ContractType, DeficitSegment,
+        HydroGenerationModel, NoiseMethod, ScenarioSourceConfig, SlackConfig, StageRiskConfig,
+        StageStateConfig,
+    };
+    use proptest::prelude::*;
+
+    fn date_early() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date")
+    }
+
+    fn date_late() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2024, 2, 1).expect("valid date")
     }
 
     fn bus(id: i32, name: &str, date: NaiveDate) -> Bus {
@@ -546,11 +653,11 @@ mod proptests {
     }
 
     fn hydro(id: i32, name: &str, date: NaiveDate, bus_id: i32) -> Hydro {
-        Hydro {
+        let mut hydro = Hydro {
+            unit_groups: Vec::new(),
             id: EntityId(id),
             name: name.to_string(),
             operational_start_date: date,
-            bus_id: EntityId(bus_id),
             downstream_id: None,
             travel_time_hours: None,
             entry_stage_id: None,
@@ -572,8 +679,10 @@ mod proptests {
             evaporation_reference_volumes_hm3: None,
             diversion: None,
             filling: None,
-            penalties: zero_penalties(),
-        }
+            penalties: super::tests::zero_penalties(),
+        };
+        hydro.declare_mirror_unit_group(EntityId(bus_id));
+        hydro
     }
 
     fn thermal(id: i32, name: &str, date: NaiveDate, bus_id: i32) -> Thermal {
@@ -690,7 +799,7 @@ mod proptests {
 
     // Each operational collection mixes two distinct dates so the primary date key
     // is exercised; the bus set additionally carries a same-date pair ("Z"/"A") so
-    // the name tiebreak is exercised. Declaration order is non-canonical so a
+    // the id-not-name tiebreak is exercised. Declaration order is non-canonical so a
     // permutation that happens to be canonical is not the only case the property
     // sees. Cross-references resolve: bus ids {1,2,3}, hydro ids {1,2}.
     fn reference_buses() -> Vec<Bus> {
@@ -809,10 +918,6 @@ mod proptests {
         g.iter().map(|c| c.id.0).collect()
     }
 
-    fn is_sorted<T: PartialOrd>(seq: &[T]) -> bool {
-        seq.windows(2).all(|w| w[0] <= w[1])
-    }
-
     proptest! {
         /// Declaration-order invariance guard: `SystemBuilder::build()` canonicalizes
         /// every collection identically regardless of input order. Each parameter is
@@ -855,15 +960,15 @@ mod proptests {
 
             // Sortedness: the precomputed expectation is itself non-decreasing under
             // the canonical key, so a mistake in the expectation cannot mask a sort bug.
-            prop_assert!(is_sorted(&expected_buses));
-            prop_assert!(is_sorted(&expected_lines));
-            prop_assert!(is_sorted(&expected_hydros));
-            prop_assert!(is_sorted(&expected_thermals));
-            prop_assert!(is_sorted(&expected_pumping));
-            prop_assert!(is_sorted(&expected_contracts));
-            prop_assert!(is_sorted(&expected_ncs));
-            prop_assert!(is_sorted(&expected_stages));
-            prop_assert!(is_sorted(&expected_gcs));
+            prop_assert!(expected_buses.is_sorted());
+            prop_assert!(expected_lines.is_sorted());
+            prop_assert!(expected_hydros.is_sorted());
+            prop_assert!(expected_thermals.is_sorted());
+            prop_assert!(expected_pumping.is_sorted());
+            prop_assert!(expected_contracts.is_sorted());
+            prop_assert!(expected_ncs.is_sorted());
+            prop_assert!(expected_stages.is_sorted());
+            prop_assert!(expected_gcs.is_sorted());
 
             prop_assert_eq!(project_op(system.buses()), expected_buses);
             prop_assert_eq!(project_op(system.lines()), expected_lines);

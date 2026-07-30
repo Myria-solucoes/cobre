@@ -614,6 +614,39 @@ mod tests {
         );
     }
 
+    /// A deterministic load (`std_mw == 0.0`) with block factors `{1.2, 1.0,
+    /// 0.8}` still applies the factors to the realized per-block value:
+    /// `mean_mw * factor[b]` exactly, since `factors_arr` (block factors) is
+    /// populated independent of `std_arr` (see the module docs' noise model).
+    #[test]
+    fn test_block_factors_applied_at_zero_sigma() {
+        let stage = make_stage(0, 0);
+        let entity_ids = [EntityId(1)];
+        let mean_mw = 100.0;
+        let model = make_model(1, 0, mean_mw, 0.0);
+
+        let block_factors: &[BlockFactorPair] = &[(0, 1.2), (1, 1.0), (2, 0.8)];
+        let factors: &[EntityFactorEntry<'_>] = &[(EntityId(1), 0, block_factors)];
+
+        let lp = PrecomputedNormal::build(&[model], factors, &[stage], &entity_ids, 3).unwrap();
+
+        assert!(
+            (lp.std(0, 0)).abs() < f64::EPSILON,
+            "std_mw == 0.0 (deterministic load)"
+        );
+
+        for (block, &(_, factor)) in block_factors.iter().enumerate() {
+            let eta = 0.0;
+            let realization = (lp.mean(0, 0) + lp.std(0, 0) * eta).max(0.0);
+            let per_block_value = realization * lp.block_factor(0, 0, block);
+            let expected = mean_mw * factor;
+            assert!(
+                (per_block_value - expected).abs() < 1e-10,
+                "block {block}: expected mean_mw * factor = {expected}, got {per_block_value}"
+            );
+        }
+    }
+
     // debug-only: release lets native Vec indexing panic with a different message
     // that would fail #[should_panic].
     #[cfg(debug_assertions)]

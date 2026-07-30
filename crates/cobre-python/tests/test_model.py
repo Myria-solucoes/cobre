@@ -46,7 +46,6 @@ def test_hydro_properties() -> None:
     hydro = hydros[0]
     assert isinstance(hydro.id, int)
     assert isinstance(hydro.name, str)
-    assert isinstance(hydro.bus_id, int)
 
 
 def test_thermal_properties() -> None:

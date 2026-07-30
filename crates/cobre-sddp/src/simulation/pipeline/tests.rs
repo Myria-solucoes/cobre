@@ -347,11 +347,11 @@ fn make_stochastic_context(n_stages: usize) -> StochasticContext {
         }],
         excess_cost: 0.0,
     };
-    let hydro = Hydro {
+    let mut hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(1),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(0),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -392,6 +392,7 @@ fn make_stochastic_context(n_stages: usize) -> StochasticContext {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.declare_mirror_unit_group(EntityId(0));
     let make_stage = |idx: usize, id: i32| Stage {
         index: idx,
         id,
@@ -529,7 +530,7 @@ fn single_workspace_with_load_buses(
             unscaled_primal: Vec::new(),
             unscaled_dual: Vec::new(),
             lag_accumulator: vec![],
-            lag_weight_accum: 0.0,
+            lag_weight_accum: vec![],
             downstream_accumulator: Vec::new(),
             downstream_weight_accum: 0.0,
             downstream_completed_lags: Vec::new(),
@@ -577,7 +578,7 @@ fn single_workspace(solver: MockSolver) -> Vec<SolverWorkspace<MockSolver>> {
             unscaled_primal: Vec::new(),
             unscaled_dual: Vec::new(),
             lag_accumulator: vec![],
-            lag_weight_accum: 0.0,
+            lag_weight_accum: vec![],
             downstream_accumulator: Vec::new(),
             downstream_weight_accum: 0.0,
             downstream_completed_lags: Vec::new(),
@@ -634,11 +635,11 @@ fn make_stochastic_context_1_hydro_1_load_bus_sim(mean_mw: f64, std_mw: f64) -> 
         }],
         excess_cost: 0.0,
     };
-    let hydro = Hydro {
+    let mut hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(10),
         name: "H10".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(0),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -679,6 +680,7 @@ fn make_stochastic_context_1_hydro_1_load_bus_sim(mean_mw: f64, std_mw: f64) -> 
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.declare_mirror_unit_group(EntityId(0));
     let stage = Stage {
         index: 0,
         id: 0,
@@ -850,14 +852,15 @@ fn simulation_load_patches_applied() {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         },
         &config,
         SimulationOutputSpec {
             result_tx: &tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -1015,14 +1018,15 @@ fn simulation_no_load_buses_unchanged() {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         },
         &config,
         SimulationOutputSpec {
             result_tx: &tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -1151,14 +1155,15 @@ fn simulation_state_set_profile_reaches_current_profile_after_run() {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         },
         &config,
         SimulationOutputSpec {
             result_tx: &tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -1299,14 +1304,15 @@ fn simulation_inflow_extraction_unaffected() {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         },
         &config,
         SimulationOutputSpec {
             result_tx: &tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -1382,11 +1388,11 @@ fn make_stochastic_1h_1s(mean_m3s: f64, std_m3s: f64) -> StochasticContext {
         }],
         excess_cost: 0.0,
     };
-    let hydro = Hydro {
+    let mut hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(1),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(0),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -1427,6 +1433,7 @@ fn make_stochastic_1h_1s(mean_m3s: f64, std_m3s: f64) -> StochasticContext {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.declare_mirror_unit_group(EntityId(0));
     let stage = Stage {
         index: 0,
         id: 0,
@@ -1564,7 +1571,7 @@ fn single_workspace_with_hydros(
             unscaled_primal: Vec::new(),
             unscaled_dual: Vec::new(),
             lag_accumulator: vec![],
-            lag_weight_accum: 0.0,
+            lag_weight_accum: vec![],
             downstream_accumulator: Vec::new(),
             downstream_weight_accum: 0.0,
             downstream_completed_lags: Vec::new(),
@@ -1580,7 +1587,7 @@ fn single_workspace_with_hydros(
     }]
 }
 
-/// AC: truncation clamps negative inflow noise in the simulation pipeline.
+/// Truncation clamps negative inflow noise in the simulation pipeline.
 ///
 /// Set `mean_m3s = -1000.0` and `std_m3s = 1.0` so that the deterministic
 /// PAR base alone would produce a hugely negative inflow for any sample.
@@ -1673,14 +1680,15 @@ fn simulation_truncation_clamps_negative_inflow_noise() {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         },
         &config,
         SimulationOutputSpec {
             result_tx: &tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -1718,7 +1726,7 @@ fn simulation_truncation_clamps_negative_inflow_noise() {
     );
 }
 
-/// AC: `InflowNonNegativityMethod::None` in the simulation pipeline produces
+/// `InflowNonNegativityMethod::None` in the simulation pipeline produces
 /// raw (potentially negative) noise values.
 ///
 /// With `mean_m3s = -1000.0` and `std_m3s = 1.0`, the PAR inflow is always
@@ -1805,14 +1813,15 @@ fn simulation_none_method_produces_raw_negative_noise() {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         },
         &config,
         SimulationOutputSpec {
             result_tx: &tx,
             zeta_per_stage: &[],
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -2114,8 +2123,8 @@ mod dcs_simulation {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs,
         };
 
@@ -2124,6 +2133,7 @@ mod dcs_simulation {
         let output = SimulationOutputSpec {
             result_tx: &tx,
             zeta_per_stage: &[1.0],
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[vec![1.0]],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -2151,9 +2161,15 @@ mod dcs_simulation {
             frozen_template: frozen,
             warm_basis: None,
         };
-        let lookups = SimLookups::build(&test_support::study_dims(), &[], 0, 1);
+        let lookups = SimLookups::build(
+            &test_support::study_dims(),
+            &[],
+            &test_support::identity_hydro_cell_index(256),
+            0,
+            1,
+        );
 
-        let (immediate, result) = solve_simulation_stage(
+        solve_simulation_stage(
             &mut ws,
             &ctx,
             &fcf,
@@ -2164,8 +2180,7 @@ mod dcs_simulation {
             &lookups,
             &[0.0],
         )
-        .expect("simulation stage solve must succeed");
-        (immediate, result)
+        .expect("simulation stage solve must succeed")
     }
 
     /// The stage-level cost record (block 0) carrying total/immediate/future.
@@ -2176,7 +2191,7 @@ mod dcs_simulation {
             .expect("simulation stage result must carry a cost record")
     }
 
-    /// AC1: the DCS branch (binding cut omitted from the seed) yields the
+    /// The DCS branch (binding cut omitted from the seed) yields the
     /// same immediate cost and primal-derived fields as the frozen all-cuts
     /// path within 1e-9.
     #[test]
@@ -2217,7 +2232,7 @@ mod dcs_simulation {
         );
     }
 
-    /// AC2: a frozen template embedding a DOMINATING cut (floor 10, NOT in the
+    /// A frozen template embedding a DOMINATING cut (floor 10, NOT in the
     /// pool) must NOT change the DCS result — proving the cut-free
     /// `ctx.templates[t]` is loaded, not `load_spec.frozen_template`. A wrong
     /// load surfaces as `future_cost` reflecting `theta = 10`.
@@ -2548,6 +2563,7 @@ mod anticipated_ring_matches_forward_propagation {
         let output = SimulationOutputSpec {
             result_tx: &tx,
             zeta_per_stage: &[1.0, 1.0, 1.0],
+            hydro_cell_index: &test_support::identity_hydro_cell_index(256),
             block_hours_per_stage: &[vec![1.0], vec![1.0], vec![1.0]],
             entity_counts: &entity_counts,
             generic_constraint_row_entries: &[],
@@ -2566,7 +2582,13 @@ mod anticipated_ring_matches_forward_propagation {
             hydro_min_storage_hm3: &[],
             event_sender: None,
         };
-        let lookups = SimLookups::build(training_ctx.study_dims, &[], 0, 0);
+        let lookups = SimLookups::build(
+            training_ctx.study_dims,
+            &[],
+            &test_support::identity_hydro_cell_index(256),
+            0,
+            0,
+        );
 
         let mut trajectory = Vec::with_capacity(N_STAGES);
         for (t, template) in templates.iter().enumerate() {
@@ -2656,8 +2678,8 @@ mod anticipated_ring_matches_forward_propagation {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         };
 

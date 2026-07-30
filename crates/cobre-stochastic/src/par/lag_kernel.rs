@@ -81,8 +81,9 @@ impl LagIndex for EntityMajor {
 pub struct PrimaryLagAccum<'a> {
     /// Weighted-sum accumulator for the current lag period; length `>= entity_count`.
     pub accumulator: &'a mut [f64],
-    /// Total weight accumulated so far in the current lag period.
-    pub weight_accum: &'a mut f64,
+    /// Total weight accumulated so far in the current lag period, per entity;
+    /// finalize divides each entity by its own entry, length `>= entity_count`.
+    pub weight_accum: &'a mut [f64],
 }
 
 /// Downstream (coarser-resolution) lag-accumulation buffers for
@@ -95,7 +96,9 @@ pub struct DownstreamLagAccum<'a> {
     /// Weighted-sum accumulator for the current downstream period; empty for
     /// uniform-resolution studies.
     pub accumulator: &'a mut [f64],
-    /// Total weight accumulated so far in the current downstream period.
+    /// Total weight accumulated so far in the current downstream period. Stays
+    /// scalar: no seed path reaches the downstream ring, so its per-stage
+    /// weight is uniform across entities by construction.
     pub weight_accum: &'a mut f64,
     /// Slot-major ring buffer (`completed_lags[slot * entity_count +
     /// entity]`), length `entity_count * par_order` or empty.
@@ -122,7 +125,8 @@ pub struct DownstreamLagAccum<'a> {
 /// # Panics (debug only)
 ///
 /// Panics in debug builds if `primary.accumulator.len() < layout.entity_count()`,
-/// or if `downstream.par_order != 0` and `downstream.completed_lags.len() <
+/// if `primary.weight_accum.len() < layout.entity_count()`, or if
+/// `downstream.par_order != 0` and `downstream.completed_lags.len() <
 /// layout.entity_count() * downstream.par_order`.
 pub fn advance_lag_chain<L: LagIndex>(
     layout: L,
@@ -144,12 +148,17 @@ pub fn advance_lag_chain<L: LagIndex>(
         "primary accumulator too short: {} < {entity_count}",
         primary.accumulator.len()
     );
+    debug_assert!(
+        primary.weight_accum.len() >= entity_count,
+        "primary weight_accum too short: {} < {entity_count}",
+        primary.weight_accum.len()
+    );
 
     let w = stage_lag.accumulate_weight;
-    for (acc, r) in primary.accumulator[..entity_count].iter_mut().zip(realized) {
-        *acc += r * w;
+    for (entity, &r) in realized.iter().enumerate().take(entity_count) {
+        primary.accumulator[entity] += r * w;
+        primary.weight_accum[entity] += w;
     }
-    *primary.weight_accum += w;
 
     if !downstream.accumulator.is_empty() && stage_lag.accumulate_downstream {
         debug_assert!(
@@ -219,10 +228,12 @@ pub fn advance_lag_chain<L: LagIndex>(
         return;
     }
 
-    if stage_lag.finalize_period && *primary.weight_accum > 0.0 {
-        let inv = 1.0 / *primary.weight_accum;
-        for v in &mut primary.accumulator[..entity_count] {
-            *v *= inv;
+    if stage_lag.finalize_period {
+        for entity in 0..entity_count {
+            if primary.weight_accum[entity] > 0.0 {
+                let inv = 1.0 / primary.weight_accum[entity];
+                primary.accumulator[entity] *= inv;
+            }
         }
 
         for entity in 0..entity_count {
@@ -235,13 +246,13 @@ pub fn advance_lag_chain<L: LagIndex>(
         // Spillover seeds the NEXT period with RAW realized value, not the averaged one.
         if stage_lag.spillover_weight > 0.0 {
             let sw = stage_lag.spillover_weight;
-            for (acc, r) in primary.accumulator[..entity_count].iter_mut().zip(realized) {
-                *acc = r * sw;
+            for (entity, &r) in realized.iter().enumerate().take(entity_count) {
+                primary.accumulator[entity] = r * sw;
+                primary.weight_accum[entity] = sw;
             }
-            *primary.weight_accum = sw;
         } else {
             primary.accumulator[..entity_count].fill(0.0);
-            *primary.weight_accum = 0.0;
+            primary.weight_accum[..entity_count].fill(0.0);
         }
     }
 }
@@ -388,7 +399,7 @@ mod tests {
         let stage_lag = primary_transition(1.0, 0.0, true);
 
         let mut accumulator = vec![0.0; 3];
-        let mut weight_accum = 0.0;
+        let mut weight_accum = vec![0.0; 3];
         let mut primary = PrimaryLagAccum {
             accumulator: &mut accumulator,
             weight_accum: &mut weight_accum,
@@ -417,7 +428,7 @@ mod tests {
 
         assert_eq!(lag_state, vec![7.0; 3]);
         assert_eq!(accumulator, vec![0.0; 3]);
-        assert_eq!(weight_accum, 0.0);
+        assert_eq!(weight_accum, vec![0.0; 3]);
     }
 
     #[test]
@@ -448,7 +459,7 @@ mod tests {
 
         let stage_lag = primary_transition(1.0, 0.0, true);
         let mut accumulator = vec![0.0; entity_count];
-        let mut weight_accum = 0.0;
+        let mut weight_accum = vec![0.0; entity_count];
         let mut primary = PrimaryLagAccum {
             accumulator: &mut accumulator,
             weight_accum: &mut weight_accum,
@@ -506,7 +517,7 @@ mod tests {
 
         let stage_lag = primary_transition(1.0, 0.0, true);
         let mut accumulator = vec![0.0; entity_count];
-        let mut weight_accum = 0.0;
+        let mut weight_accum = vec![0.0; entity_count];
         let mut primary = PrimaryLagAccum {
             accumulator: &mut accumulator,
             weight_accum: &mut weight_accum,
@@ -551,7 +562,7 @@ mod tests {
 
         let mut lag_state = vec![0.0; entity_count];
         let mut accumulator = vec![0.0; entity_count];
-        let mut weight_accum = 0.0;
+        let mut weight_accum = vec![0.0; entity_count];
         let mut downstream_accumulator: Vec<f64> = Vec::new();
         let mut downstream_weight_accum = 0.0;
         let mut completed_lags: Vec<f64> = Vec::new();
@@ -599,6 +610,74 @@ mod tests {
         }
     }
 
+    /// A seeded accumulator (mirroring `derive_inflow_seeds`'s `accum = rate *
+    /// coverage`, `crates/cobre-stochastic/src/seeds.rs`) for a 3-day
+    /// conditioning window at 500 m3/s out of a 30-day month, carried through
+    /// the finalize where the remaining 27 days complete at 480 m3/s — the
+    /// seed-unit-bug killer: an accumulator seeded in raw hours (or days) but
+    /// divided by the wrong denominator would miss this exact average.
+    #[test]
+    fn test_finalized_lag1_mixes_conditioning_and_completing_month_exactly() {
+        let entity_count = 1;
+        let max_order = 1;
+        let layout = LagMajor {
+            entity_count,
+            max_order,
+        };
+
+        let conditioning_rate = 500.0_f64;
+        let conditioning_hours = 3.0 * 24.0;
+        let completing_rate = 480.0_f64;
+        let completing_hours = 27.0 * 24.0;
+        let month_hours = 30.0 * 24.0;
+
+        let conditioning_weight = conditioning_hours / month_hours;
+        let completing_weight = completing_hours / month_hours;
+
+        let incoming_lags = vec![0.0; entity_count];
+        let realized = [completing_rate];
+
+        let mut lag_state = vec![0.0; entity_count];
+        let mut accumulator = vec![conditioning_rate * conditioning_weight];
+        let mut weight_accum = vec![conditioning_weight];
+        let mut downstream_accumulator: Vec<f64> = Vec::new();
+        let mut downstream_weight_accum = 0.0;
+        let mut completed_lags: Vec<f64> = Vec::new();
+        let mut n_completed = 0;
+
+        let stage_lag = primary_transition(completing_weight, 0.0, true);
+        let mut primary = PrimaryLagAccum {
+            accumulator: &mut accumulator,
+            weight_accum: &mut weight_accum,
+        };
+        let mut downstream = DownstreamLagAccum {
+            accumulator: &mut downstream_accumulator,
+            weight_accum: &mut downstream_weight_accum,
+            completed_lags: &mut completed_lags,
+            n_completed: &mut n_completed,
+            par_order: 0,
+        };
+        advance_lag_chain(
+            layout,
+            &mut lag_state,
+            &incoming_lags,
+            &realized,
+            &stage_lag,
+            &mut primary,
+            &mut downstream,
+        );
+
+        let expected = (conditioning_rate * conditioning_hours
+            + completing_rate * completing_hours)
+            / month_hours;
+        assert_eq!(
+            lag_state[0], expected,
+            "finalized lag-1 must mix the conditioning seed and the completing \
+             month exactly: got {}, expected {expected}",
+            lag_state[0]
+        );
+    }
+
     #[test]
     fn advance_lag_chain_spillover_seeds_next_period_with_raw_value() {
         let entity_count = 2;
@@ -614,7 +693,7 @@ mod tests {
 
         let mut lag_state = vec![0.0; entity_count];
         let mut accumulator = vec![0.0; entity_count];
-        let mut weight_accum = 0.0;
+        let mut weight_accum = vec![0.0; entity_count];
         let mut downstream_accumulator: Vec<f64> = Vec::new();
         let mut downstream_weight_accum = 0.0;
         let mut completed_lags: Vec<f64> = Vec::new();
@@ -650,7 +729,7 @@ mod tests {
                 realized[1] * spillover_weight
             ]
         );
-        assert_eq!(weight_accum, spillover_weight);
+        assert_eq!(weight_accum, vec![spillover_weight; entity_count]);
     }
 
     #[test]
@@ -669,7 +748,7 @@ mod tests {
 
         let mut lag_state = vec![0.0; entity_count * max_order];
         let mut accumulator = vec![0.0; entity_count];
-        let mut weight_accum = 0.0;
+        let mut weight_accum = vec![0.0; entity_count];
         let mut downstream_accumulator = vec![0.0; entity_count];
         let mut downstream_weight_accum = 0.0;
         let mut completed_lags = vec![0.0; entity_count * par_order];
@@ -752,5 +831,222 @@ mod tests {
         assert_eq!(lag_state, expected);
         assert_eq!(n_completed, 0);
         assert_eq!(completed_lags, vec![0.0; entity_count * par_order]);
+    }
+
+    #[test]
+    fn advance_lag_chain_per_entity_weight_divides_independently() {
+        let entity_count = 2;
+        let max_order = 1;
+        let layout = LagMajor {
+            entity_count,
+            max_order,
+        };
+
+        let incoming_lags = vec![0.0; entity_count];
+        let realized = [0.0, 0.0];
+
+        let mut lag_state = vec![0.0; entity_count];
+        let mut accumulator = vec![10.0, 10.0];
+        // Entity 0 has accumulated total weight 1.0; entity 1 only 0.5.
+        let mut weight_accum = vec![1.0, 0.5];
+        let mut downstream_accumulator: Vec<f64> = Vec::new();
+        let mut downstream_weight_accum = 0.0;
+        let mut completed_lags: Vec<f64> = Vec::new();
+        let mut n_completed = 0;
+        let mut primary = PrimaryLagAccum {
+            accumulator: &mut accumulator,
+            weight_accum: &mut weight_accum,
+        };
+        let mut downstream = DownstreamLagAccum {
+            accumulator: &mut downstream_accumulator,
+            weight_accum: &mut downstream_weight_accum,
+            completed_lags: &mut completed_lags,
+            n_completed: &mut n_completed,
+            par_order: 0,
+        };
+
+        let stage_lag = primary_transition(0.0, 0.0, true);
+        advance_lag_chain(
+            layout,
+            &mut lag_state,
+            &incoming_lags,
+            &realized,
+            &stage_lag,
+            &mut primary,
+            &mut downstream,
+        );
+
+        // Hand-computed: entity 0 divides its 10.0 sum by its own weight 1.0
+        // (-> 10.0); entity 1 divides the same 10.0 sum by its own weight 0.5
+        // (-> 20.0). A shared scalar weight (e.g. the combined total 1.5)
+        // would instead divide both entities by the same denominator,
+        // producing neither entity's per-entity result.
+        assert_eq!(lag_state, vec![10.0, 20.0]);
+        let shared_scalar_result = 10.0 / (1.0 + 0.5);
+        assert_ne!(lag_state[0], shared_scalar_result);
+        assert_ne!(lag_state[1], shared_scalar_result);
+    }
+
+    /// Independent reimplementation of the pre-widening scalar-weight
+    /// accumulate-then-finalize arithmetic (one shared weight divides every
+    /// entity), used to pin the per-entity kernel's output bit-for-bit under
+    /// uniform per-stage coverage.
+    fn oracle_scalar_weight_finalize(
+        accumulator: &mut [f64],
+        weight: &mut f64,
+        realized_per_stage: &[[f64; 2]],
+        weights: &[f64],
+    ) {
+        for (&w, r) in weights.iter().zip(realized_per_stage) {
+            for (acc, &rv) in accumulator.iter_mut().zip(r) {
+                *acc += rv * w;
+            }
+            *weight += w;
+        }
+        if *weight > 0.0 {
+            let inv = 1.0 / *weight;
+            for acc in accumulator.iter_mut() {
+                *acc *= inv;
+            }
+        }
+    }
+
+    #[test]
+    fn advance_lag_chain_uniform_weight_matches_scalar_result() {
+        let entity_count = 2;
+        let max_order = 1;
+        let layout = LagMajor {
+            entity_count,
+            max_order,
+        };
+
+        let incoming_lags = vec![0.0; entity_count];
+        let weights = [1.0, 2.0, 3.0];
+        let realized_per_stage = [[10.0, 100.0], [20.0, 200.0], [30.0, 300.0]];
+
+        let mut oracle_accumulator = vec![0.0; entity_count];
+        let mut oracle_weight = 0.0_f64;
+        oracle_scalar_weight_finalize(
+            &mut oracle_accumulator,
+            &mut oracle_weight,
+            &realized_per_stage,
+            &weights,
+        );
+
+        let mut lag_state = vec![0.0; entity_count];
+        let mut accumulator = vec![0.0; entity_count];
+        let mut weight_accum = vec![0.0; entity_count];
+        let mut downstream_accumulator: Vec<f64> = Vec::new();
+        let mut downstream_weight_accum = 0.0;
+        let mut completed_lags: Vec<f64> = Vec::new();
+        let mut n_completed = 0;
+
+        for (stage, &w) in weights.iter().enumerate() {
+            let finalize = stage == weights.len() - 1;
+            let stage_lag = primary_transition(w, 0.0, finalize);
+            let realized = realized_per_stage[stage];
+            let mut primary = PrimaryLagAccum {
+                accumulator: &mut accumulator,
+                weight_accum: &mut weight_accum,
+            };
+            let mut downstream = DownstreamLagAccum {
+                accumulator: &mut downstream_accumulator,
+                weight_accum: &mut downstream_weight_accum,
+                completed_lags: &mut completed_lags,
+                n_completed: &mut n_completed,
+                par_order: 0,
+            };
+            advance_lag_chain(
+                layout,
+                &mut lag_state,
+                &incoming_lags,
+                &realized,
+                &stage_lag,
+                &mut primary,
+                &mut downstream,
+            );
+        }
+
+        assert_eq!(
+            lag_state, oracle_accumulator,
+            "uniform per-entity weight broadcast must match the shared-scalar-weight result bit-for-bit"
+        );
+    }
+
+    /// Per-hydro uneven coverage from a hand-built `DerivedInflowSeeds`:
+    /// entity 0 (hydro A) carries a pre-study seed (`accum`/`weight` from a
+    /// partial in-progress window); entity 1 (hydro B) has no windows at all
+    /// (`accum = weight = 0.0`). Both finalize over the same two in-study
+    /// stages. Hydro B's zero seed weight must not make its finalize divide
+    /// by zero or fall back to a zero-inflow imputation — the
+    /// `weight_accum[entity] > 0.0` finalize gate must still fire once the
+    /// in-study stages contribute weight, averaging hydro B's own realized
+    /// values.
+    #[test]
+    fn test_no_window_hydro_finalizes_to_in_study_average() {
+        let entity_count = 2;
+        let max_order = 1;
+        let layout = LagMajor {
+            entity_count,
+            max_order,
+        };
+
+        let derived = crate::seeds::DerivedInflowSeeds {
+            lag_values: vec![0.0; entity_count],
+            accum: vec![100.0, 0.0],
+            weight: vec![0.4, 0.0],
+        };
+
+        let incoming_lags = vec![0.0; entity_count];
+        let mut lag_state = vec![0.0; entity_count];
+        let mut accumulator = derived.accum.clone();
+        let mut weight_accum = derived.weight.clone();
+        let mut downstream_accumulator: Vec<f64> = Vec::new();
+        let mut downstream_weight_accum = 0.0;
+        let mut completed_lags: Vec<f64> = Vec::new();
+        let mut n_completed = 0;
+
+        // Two in-study stages of the same finalizing period: hydro A reaches
+        // full coverage (seed 0.4 + 0.3 + 0.3 = 1.0); hydro B, with no seed,
+        // reaches only the in-study weight (0.3 + 0.3 = 0.6).
+        let weights = [0.3, 0.3];
+        let realized_per_stage = [[300.0, 150.0], [340.0, 170.0]];
+        for (stage, &w) in weights.iter().enumerate() {
+            let finalize = stage == weights.len() - 1;
+            let stage_lag = primary_transition(w, 0.0, finalize);
+            let realized = realized_per_stage[stage];
+            let mut primary = PrimaryLagAccum {
+                accumulator: &mut accumulator,
+                weight_accum: &mut weight_accum,
+            };
+            let mut downstream = DownstreamLagAccum {
+                accumulator: &mut downstream_accumulator,
+                weight_accum: &mut downstream_weight_accum,
+                completed_lags: &mut completed_lags,
+                n_completed: &mut n_completed,
+                par_order: 0,
+            };
+            advance_lag_chain(
+                layout,
+                &mut lag_state,
+                &incoming_lags,
+                &realized,
+                &stage_lag,
+                &mut primary,
+                &mut downstream,
+            );
+        }
+
+        assert_eq!(
+            lag_state[0], 292.0,
+            "hydro A finalizes to its own coverage-weighted value, mixing the \
+             pre-study seed with the in-study accumulation"
+        );
+        assert_eq!(
+            lag_state[1],
+            f64::midpoint(150.0, 170.0),
+            "the no-window hydro must finalize to the in-study average of its \
+             own realized values, not a zero-inflow imputation"
+        );
     }
 }

@@ -7,10 +7,18 @@
     }
   ],
   "filling_storage": [],
-  "past_inflows": [
+  "recent_observations": [
     {
       "hydro_id": 0,
-      "values_m3s": [180.0, 200.0]
+      "start_date": "2023-12-01",
+      "end_date": "2024-01-01",
+      "value_m3s": 180.0
+    },
+    {
+      "hydro_id": 0,
+      "start_date": "2023-11-01",
+      "end_date": "2023-12-01",
+      "value_m3s": 200.0
     }
   ]
 }

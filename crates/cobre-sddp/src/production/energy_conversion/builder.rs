@@ -288,11 +288,11 @@ mod tests {
     }
 
     fn make_hydro(id: i32, downstream: Option<i32>) -> Hydro {
-        Hydro {
+        let mut hydro = Hydro {
+            unit_groups: Vec::new(),
             id: EntityId::from(id),
             name: format!("Hydro {id}"),
             operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            bus_id: EntityId::from(1),
             downstream_id: downstream.map(EntityId::from),
             travel_time_hours: None,
             entry_stage_id: None,
@@ -315,7 +315,9 @@ mod tests {
             diversion: None,
             filling: None,
             penalties: penalties_zero(),
-        }
+        };
+        hydro.declare_mirror_unit_group(EntityId::from(1));
+        hydro
     }
 
     /// Resolver returning, for every `(hydro, stage)`, the absolute hm³ for the
@@ -398,6 +400,10 @@ mod tests {
         h.max_storage_hm3 = v_max;
         h.max_turbined_m3s = q_max;
         h.specific_productivity_mw_per_m3s_per_m = specific;
+        // Re-declare against the post-mutation q_max — make_hydro()'s group already
+        // mirrors the pre-mutation 50.0 and would otherwise go stale.
+        h.unit_groups.clear();
+        h.declare_mirror_unit_group(EntityId::from(1));
         h
     }
 

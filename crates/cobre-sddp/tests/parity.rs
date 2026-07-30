@@ -1286,8 +1286,8 @@ mod determinism {
                         external_load_library: None,
                         external_ncs_library: None,
                         stages: &[],
-                        recent_accum_seed: &[],
-                        recent_weight_seed: 0.0,
+                        lag_accum_seed: &[],
+                        lag_weight_seed: &[],
                         dcs: None,
                     },
                     &comm,
@@ -1419,14 +1419,15 @@ mod determinism {
                         external_load_library: None,
                         external_ncs_library: None,
                         stages: &[],
-                        recent_accum_seed: &[],
-                        recent_weight_seed: 0.0,
+                        lag_accum_seed: &[],
+                        lag_weight_seed: &[],
                         dcs: None,
                     },
                     &sim_config,
                     SimulationOutputSpec {
                         result_tx: &result_tx,
                         zeta_per_stage: &[],
+                        hydro_cell_index: &cobre_sddp::test_support::identity_hydro_cell_index(256),
                         block_hours_per_stage: &[],
                         entity_counts: &entity_counts,
                         generic_constraint_row_entries: &[],
@@ -1827,7 +1828,6 @@ mod determinism {
             .set_solve_order(&keys, SweepDirection::Descending)
             .expect("solve-order key dims match the tree");
 
-        // Train with the non-identity solve order to produce the policy under test.
         let (_training_result, fcf) = run_training(1, &fx, N_ITERATIONS);
 
         let costs_1 = run_simulation(1, &fx, &fcf, N_SCENARIOS);
@@ -1900,11 +1900,11 @@ mod water_travel_time_no_arc_byte_identity {
     use cobre_core::scenario::{InflowModel, LoadModel};
     use cobre_core::temporal::{BlockMode, Stage};
     use cobre_core::{
-        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, DeficitSegment,
-        EntityId, HydroGenerationModel, HydroPenalties, HydroStageBounds, HydroStagePenalties,
-        HydroStorage, InitialConditions, LineStageBounds, LineStagePenalties, NcsStagePenalties,
-        PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
-        ResolvedPenalties, SystemBuilder, ThermalStageBounds,
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
+        EntityId, HydroBlockBounds, HydroGenerationModel, HydroPenalties, HydroStageBounds,
+        HydroStagePenalties, HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties,
+        NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds,
+        ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
     };
     use cobre_sddp::{
         StudySetup,
@@ -2041,6 +2041,10 @@ mod water_travel_time_no_arc_byte_identity {
         let default_hydro_bounds = || HydroStageBounds {
             min_storage_hm3: 0.0,
             max_storage_hm3: 500.0,
+            filling_min_rate_m3s: 0.0,
+            water_withdrawal_m3s: 0.0,
+        };
+        let default_hydro_bounds_block = || HydroBlockBounds {
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
             min_outflow_m3s: 0.0,
@@ -2048,8 +2052,6 @@ mod water_travel_time_no_arc_byte_identity {
             min_generation_mw: 0.0,
             max_generation_mw: 250.0,
             max_diversion_m3s: None,
-            filling_min_rate_m3s: 0.0,
-            water_withdrawal_m3s: 0.0,
         };
 
         let bounds = ResolvedBounds::new(
@@ -2064,20 +2066,23 @@ mod water_travel_time_no_arc_byte_identity {
             },
             &BoundsDefaults {
                 hydro: default_hydro_bounds(),
+                hydro_block: default_hydro_bounds_block(),
                 thermal: ThermalStageBounds {
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 400.0,
                     cost_per_mwh: 100.0,
                 },
-                line: LineStageBounds {
+                thermal_block: ThermalBlockBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 400.0,
+                },
+                line_block: LineBlockBounds {
                     direct_mw: 0.0,
                     reverse_mw: 0.0,
                 },
-                pumping: PumpingStageBounds {
+                pumping_block: PumpingBlockBounds {
                     min_flow_m3s: 0.0,
                     max_flow_m3s: 0.0,
                 },
-                contract: ContractStageBounds {
+                contract_block: ContractBlockBounds {
                     min_mw: 0.0,
                     max_mw: 0.0,
                     price_per_mwh: 0.0,
@@ -2109,7 +2114,6 @@ mod water_travel_time_no_arc_byte_identity {
                 value_hm3: 200.0,
             }],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],

@@ -54,6 +54,11 @@ pub enum ValidationError {
         /// Why the configuration is invalid.
         reason: String,
     },
+    /// A hydro declares no unit groups; at least one is required.
+    MissingUnitGroups {
+        /// Hydro declaring no unit groups.
+        hydro_id: EntityId,
+    },
     /// A bus has no connections (no lines, generators, or loads).
     ///
     /// Emitted by `cobre-io` validation.
@@ -105,6 +110,12 @@ impl fmt::Display for ValidationError {
                 write!(
                     f,
                     "hydro {hydro_id} has invalid filling configuration: {reason}"
+                )
+            }
+            Self::MissingUnitGroups { hydro_id } => {
+                write!(
+                    f,
+                    "hydro {hydro_id} declares no unit groups: at least one unit group is required"
                 )
             }
             Self::DisconnectedBus { bus_id } => {
@@ -168,6 +179,16 @@ mod tests {
         assert!(msg.contains('1'), "missing id 1: {msg}");
         assert!(msg.contains('2'), "missing id 2: {msg}");
         assert!(msg.contains('3'), "missing id 3: {msg}");
+    }
+
+    #[test]
+    fn test_display_missing_unit_groups() {
+        let err = ValidationError::MissingUnitGroups {
+            hydro_id: EntityId(4),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains('4'), "missing hydro id: {msg}");
+        assert!(msg.contains("unit group"), "missing mention: {msg}");
     }
 
     #[test]

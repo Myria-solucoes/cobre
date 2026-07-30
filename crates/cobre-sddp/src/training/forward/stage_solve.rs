@@ -3,8 +3,8 @@
 //! All scratch is owned by the workspace and reused across scenarios; no
 //! allocation occurs on this hot path.
 
-use cobre_core::temporal::StageLagTransition;
 use cobre_solver::SolverInterface;
+use cobre_stochastic::par::resolve_stage_lag_transition;
 
 use crate::{
     context::{StageContext, TrainingContext},
@@ -183,20 +183,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     ws.current_state.clear();
     ws.current_state
         .extend_from_slice(&unscaled_primal[..state.n_state]);
-    let stage_lag = ctx
-        .stage_lag_transitions
-        .get(t)
-        .copied()
-        .unwrap_or(StageLagTransition {
-            accumulate_weight: 1.0,
-            spillover_weight: 0.0,
-            finalize_period: true,
-            accumulate_downstream: false,
-            downstream_accumulate_weight: 0.0,
-            downstream_spillover_weight: 0.0,
-            downstream_finalize: false,
-            rebuild_from_downstream: false,
-        });
+    let stage_lag = resolve_stage_lag_transition(ctx.stage_lag_transitions, t);
     let downstream_par_order = ws
         .scratch
         .downstream_completed_lags

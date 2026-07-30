@@ -437,11 +437,11 @@ mod tests {
     }
 
     fn hydro(id: i32, downstream_id: Option<i32>, travel_time_hours: Option<f64>) -> Hydro {
-        Hydro {
+        let mut hydro = Hydro {
+            unit_groups: Vec::new(),
             id: EntityId(id),
             name: format!("H{id}"),
             operational_start_date: date(2024, 1, 1),
-            bus_id: EntityId(1),
             downstream_id: downstream_id.map(EntityId),
             travel_time_hours,
             entry_stage_id: None,
@@ -464,7 +464,9 @@ mod tests {
             diversion: None,
             filling: None,
             penalties: zero_penalties(),
-        }
+        };
+        hydro.declare_mirror_unit_group(EntityId(1));
+        hydro
     }
 
     fn stage_with_durations(id: i32, block_hours: &[f64]) -> Stage {

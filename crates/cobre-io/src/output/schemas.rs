@@ -97,6 +97,21 @@ pub(crate) fn hydros_schema() -> Schema {
     ])
 }
 
+/// Schema for `simulation/hydro_bus_generation/` — per-cell hydro dispatch results.
+///
+/// One row per (stage, block, hydro, bus) — one LP cell.
+pub(crate) fn hydro_bus_generation_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("stage_id", DataType::Int32, false),
+        Field::new("block_id", DataType::Int32, true),
+        Field::new("hydro_id", DataType::Int32, false),
+        Field::new("bus_id", DataType::Int32, false),
+        Field::new("turbined_m3s", DataType::Float64, false),
+        Field::new("generation_mw", DataType::Float64, false),
+        Field::new("generation_mwh", DataType::Float64, false),
+    ])
+}
+
 /// Schema for `simulation/thermals/` — thermal unit dispatch results.
 ///
 /// See output-schemas.md SS5.3.
@@ -635,6 +650,52 @@ mod tests {
     }
 
     #[test]
+    fn hydro_bus_generation_schema_field_count_and_names() {
+        let schema = hydro_bus_generation_schema();
+        assert_eq!(
+            schema.fields().len(),
+            7,
+            "hydro_bus_generation schema must have 7 fields"
+        );
+        let names = field_names(&schema);
+        assert_eq!(
+            names,
+            vec![
+                "stage_id",
+                "block_id",
+                "hydro_id",
+                "bus_id",
+                "turbined_m3s",
+                "generation_mw",
+                "generation_mwh",
+            ]
+        );
+        assert!(
+            is_nullable(&schema, "block_id"),
+            "block_id must be nullable"
+        );
+        for col in &[
+            "stage_id",
+            "hydro_id",
+            "bus_id",
+            "turbined_m3s",
+            "generation_mw",
+            "generation_mwh",
+        ] {
+            assert!(
+                !is_nullable(&schema, col),
+                "column {col} must not be nullable"
+            );
+        }
+        for col in &["stage_id", "block_id", "hydro_id", "bus_id"] {
+            assert_eq!(field_type(&schema, col), DataType::Int32);
+        }
+        for col in &["turbined_m3s", "generation_mw", "generation_mwh"] {
+            assert_eq!(field_type(&schema, col), DataType::Float64);
+        }
+    }
+
+    #[test]
     fn thermals_schema_field_count() {
         let schema = thermals_schema();
         assert_eq!(
@@ -938,6 +999,7 @@ mod tests {
         let schemas: Vec<(Schema, &str)> = vec![
             (costs_schema(), "costs"),
             (hydros_schema(), "hydros"),
+            (hydro_bus_generation_schema(), "hydro_bus_generation"),
             (thermals_schema(), "thermals"),
             (exchanges_schema(), "exchanges"),
             (buses_schema(), "buses"),
@@ -967,6 +1029,7 @@ mod tests {
         let expected: &[(&str, usize)] = &[
             ("costs", 27),
             ("hydros", 35),
+            ("hydro_bus_generation", 7),
             ("thermals", 10),
             ("exchanges", 11),
             ("buses", 10),

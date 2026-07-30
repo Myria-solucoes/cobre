@@ -151,23 +151,26 @@ def simulate_par1(
     return inflows
 
 
-def build_dates(n_years: int, start_year: int) -> list[int]:
-    """Return a list of ``date32`` day-offsets from the Unix epoch.
+def build_windows(n_years: int, start_year: int) -> tuple[list[int], list[int]]:
+    """Return `(start_offsets, end_offsets)` as ``date32`` day-offsets.
 
-    One entry per month, from ``start_year-01-01`` through
-    ``(start_year + n_years - 1)-12-01``.
+    One full-coverage monthly window `[month start, next month start)` per
+    entry, from ``start_year-01-01`` through ``(start_year + n_years - 1)-12-01``.
     """
     epoch = date(1970, 1, 1)
-    offsets: list[int] = []
+    start_offsets: list[int] = []
+    end_offsets: list[int] = []
     year = start_year
     month = 1
     for _ in range(n_years * 12):
-        offsets.append((date(year, month, 1) - epoch).days)
+        start_offsets.append((date(year, month, 1) - epoch).days)
+        end_year, end_month = (year + 1, 1) if month == 12 else (year, month + 1)
+        end_offsets.append((date(end_year, end_month, 1) - epoch).days)
         month += 1
         if month > 12:
             month = 1
             year += 1
-    return offsets
+    return start_offsets, end_offsets
 
 
 def main() -> None:
@@ -176,7 +179,7 @@ def main() -> None:
     out_path = script_dir / "scenarios" / "inflow_history.parquet"
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    date_offsets = build_dates(N_YEARS, START_YEAR)
+    start_offsets, end_offsets = build_windows(N_YEARS, START_YEAR)
 
     # Each hydro uses an independent RNG stream derived from the global seed so
     # that hydro-0 and hydro-1 inflows are independent realisations.
@@ -184,7 +187,8 @@ def main() -> None:
     seeds = rng_root.integers(0, 2**31, size=len(HYDRO_IDS)).tolist()
 
     rows_hydro_id: list[int] = []
-    rows_date: list[int] = []
+    rows_start_date: list[int] = []
+    rows_end_date: list[int] = []
     rows_value: list[float] = []
 
     means_by_hydro = [SEASONAL_MEANS_H0, SEASONAL_MEANS_H1]
@@ -198,13 +202,15 @@ def main() -> None:
             stds_by_hydro[hydro_idx],
         )
         rows_hydro_id.extend([hydro_id] * len(inflows))
-        rows_date.extend(date_offsets)
+        rows_start_date.extend(start_offsets)
+        rows_end_date.extend(end_offsets)
         rows_value.extend(inflows.tolist())
 
     table = pa.table(
         {
             "hydro_id": pa.array(rows_hydro_id, type=pa.int32()),
-            "date": pa.array(rows_date, type=pa.date32()),
+            "start_date": pa.array(rows_start_date, type=pa.date32()),
+            "end_date": pa.array(rows_end_date, type=pa.date32()),
             "value_m3s": pa.array(rows_value, type=pa.float64()),
         }
     )

@@ -238,11 +238,11 @@ fn make_stochastic_context_1_hydro_3_stages() -> StochasticContext {
         }],
         excess_cost: 0.0,
     };
-    let hydro = Hydro {
+    let mut hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(1),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(0),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -283,6 +283,7 @@ fn make_stochastic_context_1_hydro_3_stages() -> StochasticContext {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.declare_mirror_unit_group(EntityId(0));
     let make_stage = |idx: usize, id: i32| Stage {
         index: idx,
         id,
@@ -572,7 +573,7 @@ fn single_workspace(solver: MockSolver, state: &StateSpace) -> SolverWorkspace<M
             unscaled_primal: Vec::new(),
             unscaled_dual: Vec::new(),
             lag_accumulator: vec![],
-            lag_weight_accum: 0.0,
+            lag_weight_accum: vec![],
             downstream_accumulator: Vec::new(),
             downstream_weight_accum: 0.0,
             downstream_completed_lags: Vec::new(),
@@ -721,8 +722,8 @@ fn ac_two_scenarios_three_stages_fixed_solution() {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         },
         &ForwardPassBatch {
@@ -852,8 +853,8 @@ fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         },
         &ForwardPassBatch {
@@ -987,8 +988,8 @@ fn cost_statistics_accumulated_correctly() {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         },
         &ForwardPassBatch {
@@ -1047,7 +1048,7 @@ fn sync_result_clone_and_debug() {
 
 // ── Unit tests: UB statistics computation ───────────────────────────────
 
-/// AC: 4 scenarios with costs [60, 70, 80, 90].
+/// 4 scenarios with costs [60, 70, 80, 90].
 ///
 /// `cost_sum` = 300, `cost_sum_sq` = 60²+70²+80²+90² = 23000, count = 4.
 /// mean = 75.0
@@ -1086,7 +1087,7 @@ fn ub_statistics_four_scenarios_correct_mean_and_std() {
     );
 }
 
-/// AC: 4 scenarios, costs [60,70,80,90].
+/// 4 scenarios, costs [60,70,80,90].
 ///
 /// Matches the exact acceptance criterion values: `global_ub_mean` = 75.0,
 /// `global_ub_std` > 0.
@@ -1427,8 +1428,8 @@ fn run_one_iteration(
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         },
         &ForwardPassBatch {
@@ -1514,7 +1515,7 @@ fn basis_invalidated_on_solver_error() {
 
 // ── New test: parallel cost agreement ────────────────────────────────────
 
-/// AC: with 1-workspace and 4-workspace pools producing the same `cost_sum`.
+/// With 1-workspace and 4-workspace pools producing the same `cost_sum`.
 ///
 /// Given the same input data, `run_forward_pass` with a single workspace
 /// must produce identical `cost_sum` and `cost_sum_sq` values compared to
@@ -1592,8 +1593,8 @@ fn test_forward_pass_parallel_cost_agreement() {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         },
         &ForwardPassBatch {
@@ -1637,8 +1638,8 @@ fn test_forward_pass_parallel_cost_agreement() {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         },
         &ForwardPassBatch {
@@ -1750,8 +1751,8 @@ fn test_forward_pass_work_distribution() {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         },
         &ForwardPassBatch {
@@ -1833,11 +1834,11 @@ fn make_stochastic_1h_1s(mean_m3s: f64, std_m3s: f64) -> StochasticContext {
         }],
         excess_cost: 0.0,
     };
-    let hydro = Hydro {
+    let mut hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(1),
         name: "H1".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(0),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -1878,6 +1879,7 @@ fn make_stochastic_1h_1s(mean_m3s: f64, std_m3s: f64) -> StochasticContext {
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.declare_mirror_unit_group(EntityId(0));
     let stage = Stage {
         index: 0,
         id: 0,
@@ -2078,8 +2080,8 @@ fn run_single_stage_forward(
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         },
         &ForwardPassBatch {
@@ -2127,7 +2129,7 @@ fn truncation_clamps_negative_inflow_noise() {
     );
 }
 
-/// AC: truncation does not clamp when inflow is positive.
+/// Truncation does not clamp when inflow is positive.
 ///
 /// With a very large positive mean (`mean_m3s = 1000.0`) and small sigma,
 /// the PAR inflow is always positive for any sampled noise. The noise buffer
@@ -2263,8 +2265,8 @@ fn none_method_unchanged_with_truncation_code_present() {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         },
         &ForwardPassBatch {
@@ -2318,11 +2320,11 @@ fn make_stochastic_context_1_hydro_1_load_bus(mean_mw: f64, std_mw: f64) -> Stoc
         }],
         excess_cost: 0.0,
     };
-    let hydro = Hydro {
+    let mut hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(10),
         name: "H10".to_string(),
         operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(0),
         downstream_id: None,
         travel_time_hours: None,
         entry_stage_id: None,
@@ -2363,6 +2365,7 @@ fn make_stochastic_context_1_hydro_1_load_bus(mean_mw: f64, std_mw: f64) -> Stoc
             inflow_nonnegativity_cost: 1000.0,
         },
     };
+    hydro.declare_mirror_unit_group(EntityId(0));
     let stage = Stage {
         index: 0,
         id: 0,
@@ -2518,8 +2521,8 @@ fn test_forward_pass_parallel_infeasibility() {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         },
         &ForwardPassBatch {
@@ -2608,7 +2611,7 @@ fn forward_pass_load_noise_positive_realization() {
             unscaled_primal: Vec::new(),
             unscaled_dual: Vec::new(),
             lag_accumulator: vec![],
-            lag_weight_accum: 0.0,
+            lag_weight_accum: vec![],
             downstream_accumulator: Vec::new(),
             downstream_weight_accum: 0.0,
             downstream_completed_lags: Vec::new(),
@@ -2684,8 +2687,8 @@ fn forward_pass_load_noise_positive_realization() {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         },
         &ForwardPassBatch {
@@ -2769,7 +2772,7 @@ fn forward_pass_load_noise_clamped_to_zero() {
             unscaled_primal: Vec::new(),
             unscaled_dual: Vec::new(),
             lag_accumulator: vec![],
-            lag_weight_accum: 0.0,
+            lag_weight_accum: vec![],
             downstream_accumulator: Vec::new(),
             downstream_weight_accum: 0.0,
             downstream_completed_lags: Vec::new(),
@@ -2845,8 +2848,8 @@ fn forward_pass_load_noise_clamped_to_zero() {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         },
         &ForwardPassBatch {
@@ -2952,8 +2955,8 @@ fn forward_pass_no_load_buses_unchanged() {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         },
         &ForwardPassBatch {
@@ -3611,8 +3614,8 @@ mod dcs_forward {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs,
         };
 
@@ -3657,7 +3660,7 @@ mod dcs_forward {
         (stage_cost, records[0].state.clone(), scoring_time_seconds)
     }
 
-    /// AC1: DCS branch (binding cut omitted from the seed) yields the same
+    /// DCS branch (binding cut omitted from the seed) yields the same
     /// stage cost and advanced state as the frozen all-cuts path within 1e-9.
     #[test]
     fn forward_dcs_exact_matches_all_cuts() {
@@ -3694,7 +3697,7 @@ mod dcs_forward {
         assert!((dcs_state[0] - X_HAT).abs() < 1e-9);
     }
 
-    /// AC2: a frozen template with a DOMINATING embedded cut (floor 10,
+    /// A frozen template with a DOMINATING embedded cut (floor 10,
     /// gradient 5, NOT in the pool) must NOT change the DCS result — proving
     /// the cut-free `ctx.templates[t]` is loaded, not `params.frozen[t]`. If
     /// the DCS path erroneously loaded the dominating frozen template, the
@@ -3722,7 +3725,7 @@ mod dcs_forward {
         }
     }
 
-    /// AC3: the `run_forward_worker` `is_active` filter actually suppresses
+    /// The `run_forward_worker` `is_active` filter actually suppresses
     /// DCS before `start_iteration` and lets it through at/after it.
     ///
     /// This is a real witness, not a coincidence: the suppression is observed
@@ -3959,8 +3962,8 @@ mod transit_bucket_copy_gap {
             external_inflow_library: None,
             external_load_library: None,
             external_ncs_library: None,
-            recent_accum_seed: &[],
-            recent_weight_seed: 0.0,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
             dcs: None,
         };
 

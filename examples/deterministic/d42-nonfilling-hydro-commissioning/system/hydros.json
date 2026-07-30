@@ -5,7 +5,6 @@
       "id": 0,
       "name": "H_new",
       "operational_start_date": "2020-01-01",
-      "bus_id": 0,
       "downstream_id": 1,
       "entry_stage_id": 2,
       "reservoir": {
@@ -22,13 +21,23 @@
         "max_turbined_m3s": 80.0,
         "min_generation_mw": 0.0,
         "max_generation_mw": 80.0
-      }
+      },
+      "unit_groups": [
+        {
+          "id": 0,
+          "name": "H_new",
+          "bus_id": 0,
+          "min_generation_mw": 0.0,
+          "max_generation_mw": 80.0,
+          "min_turbined_m3s": 0.0,
+          "max_turbined_m3s": 80.0
+        }
+      ]
     },
     {
       "id": 1,
       "name": "H_down",
       "operational_start_date": "2020-01-02",
-      "bus_id": 0,
       "downstream_id": null,
       "reservoir": {
         "min_storage_hm3": 0.0,
@@ -44,13 +53,23 @@
         "max_turbined_m3s": 120.0,
         "min_generation_mw": 0.0,
         "max_generation_mw": 120.0
-      }
+      },
+      "unit_groups": [
+        {
+          "id": 0,
+          "name": "H_down",
+          "bus_id": 0,
+          "min_generation_mw": 0.0,
+          "max_generation_mw": 120.0,
+          "min_turbined_m3s": 0.0,
+          "max_turbined_m3s": 120.0
+        }
+      ]
     },
     {
       "id": 2,
       "name": "H_tail",
       "operational_start_date": "2020-01-03",
-      "bus_id": 0,
       "downstream_id": null,
       "entry_stage_id": 2,
       "reservoir": {
@@ -67,7 +86,18 @@
         "max_turbined_m3s": 60.0,
         "min_generation_mw": 0.0,
         "max_generation_mw": 60.0
-      }
+      },
+      "unit_groups": [
+        {
+          "id": 0,
+          "name": "H_tail",
+          "bus_id": 0,
+          "min_generation_mw": 0.0,
+          "max_generation_mw": 60.0,
+          "min_turbined_m3s": 0.0,
+          "max_turbined_m3s": 60.0
+        }
+      ]
     }
   ]
 }

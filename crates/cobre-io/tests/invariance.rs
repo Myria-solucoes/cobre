@@ -103,7 +103,6 @@ fn make_shuffled_multi_entity_case(dir: &TempDir) {
             "id": 1,
             "name": "HYDRO_1",
             "operational_start_date": "2024-01-01",
-            "bus_id": 1,
             "downstream_id": null,
             "reservoir": { "min_storage_hm3": 0.0, "max_storage_hm3": 1000.0 },
             "outflow": { "min_outflow_m3s": 0.0, "max_outflow_m3s": null },
@@ -113,7 +112,18 @@ fn make_shuffled_multi_entity_case(dir: &TempDir) {
                 "max_turbined_m3s": 200.0,
                 "min_generation_mw": 0.0,
                 "max_generation_mw": 200.0
-            }
+            },
+            "unit_groups": [
+                {
+                    "id": 0,
+                    "name": "HYDRO_1",
+                    "bus_id": 1,
+                    "min_generation_mw": 0.0,
+                    "max_generation_mw": 200.0,
+                    "min_turbined_m3s": 0.0,
+                    "max_turbined_m3s": 200.0
+                }
+            ]
         }
     ]
 }"#,

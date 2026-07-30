@@ -6,6 +6,7 @@ use cobre_core::Hydro;
 use cobre_stochastic::par::{
     AnnualParams, ClosureRejection, check_stationarity, check_stationarity_annual,
 };
+use cobre_stochastic::season_cast::{RealizedWindow, SeasonPeriodWindow, cast};
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 
@@ -480,18 +481,19 @@ pub(super) fn check_external_scheme_has_files(data: &ParsedData, ctx: &mut Valid
     }
 }
 
-// ── Rules 17-18: Load factor consistency ─────────────────────────────────────
+// ── Rule 17: Load factor consistency ──────────────────────────────────────────
+//
+// Rule 18 is retired; the number is never reused — rule 19 is referenced by
+// number elsewhere in this module and in the crate-level rule catalogue
+// (`validation/semantic/mod.rs`). Its claim that block factors have no effect
+// at `std_mw == 0.0` was false: `PrecomputedNormal::build` applies factors
+// unconditionally, independent of `std`.
 
 /// Validates cross-file consistency between `load_factors.json` and
 /// `load_seasonal_stats.parquet`.
 ///
 /// Rule 17: For every `LoadFactorEntry`, each `block_factors[j].block_id` must
 /// match a `Block.index` in the corresponding stage's `blocks` array.
-///
-/// Rule 18: A `LoadFactorEntry` for a `(bus_id, stage_id)` pair where
-/// `load_seasonal_stats` has `std_mw == 0.0` (deterministic load) produces a
-/// `ModelQuality` warning because block factors have no effect on deterministic
-/// loads.
 ///
 /// Silently skips when `data.load_factors` is empty.
 pub(super) fn check_load_factor_consistency(data: &ParsedData, ctx: &mut ValidationContext) {
@@ -510,55 +512,43 @@ pub(super) fn check_load_factor_consistency(data: &ParsedData, ctx: &mut Validat
         })
         .collect();
 
-    let load_std: HashMap<(i32, i32), f64> = data
-        .load_seasonal_stats
-        .iter()
-        .map(|row| ((row.bus_id.0, row.stage_id), row.std_mw))
-        .collect();
-
     for (i, entry) in data.load_factors.iter().enumerate() {
-        if let Some(valid_indices) = stage_block_indices.get(&entry.stage_id) {
-            for bf in &entry.block_factors {
-                let block_idx = usize::try_from(bf.block_id).unwrap_or(usize::MAX);
-                if !valid_indices.contains(&block_idx) {
-                    let sorted: Vec<usize> = {
-                        let mut v: Vec<usize> = valid_indices.iter().copied().collect();
-                        v.sort_unstable();
-                        v
-                    };
-                    ctx.add_error(
-                        ErrorKind::BusinessRuleViolation,
-                        "scenarios/load_factors.json",
-                        Some(format!("LoadFactorEntry[{i}]")),
-                        format!(
-                            "LoadFactorEntry[{i}] has block_id {} which is not in the block set \
-                             {sorted:?} for stage {}",
-                            bf.block_id, entry.stage_id
-                        ),
-                    );
-                }
+        let Some(valid_indices) = stage_block_indices.get(&entry.stage_id) else {
+            continue;
+        };
+        for bf in &entry.block_factors {
+            let block_idx = usize::try_from(bf.block_id).unwrap_or(usize::MAX);
+            if !valid_indices.contains(&block_idx) {
+                let sorted: Vec<usize> = {
+                    let mut v: Vec<usize> = valid_indices.iter().copied().collect();
+                    v.sort_unstable();
+                    v
+                };
+                ctx.add_error(
+                    ErrorKind::BusinessRuleViolation,
+                    "scenarios/load_factors.json",
+                    Some(format!("LoadFactorEntry[{i}]")),
+                    format!(
+                        "LoadFactorEntry[{i}] has block_id {} which is not in the block set \
+                         {sorted:?} for stage {}",
+                        bf.block_id, entry.stage_id
+                    ),
+                );
             }
-        }
-
-        let key = (entry.bus_id.0, entry.stage_id);
-        if let Some(&std_mw) = load_std.get(&key)
-            && std_mw == 0.0
-        {
-            ctx.add_warning(
-                ErrorKind::ModelQuality,
-                "scenarios/load_factors.json",
-                Some(format!("LoadFactorEntry[{i}]")),
-                format!(
-                    "LoadFactorEntry[{i}] (bus {}, stage {}) references a deterministic load \
-                         (std_mw == 0.0); block factors have no effect on deterministic loads",
-                    entry.bus_id.0, entry.stage_id
-                ),
-            );
         }
     }
 }
 
 // ── Rules 19-21: Estimation prerequisites ─────────────────────────────────────
+
+/// Total hours in `[start, end)`, for constructing a [`SeasonPeriodWindow`]
+/// directly from a study stage's own dates (the stage's dates already are its
+/// occurrence bounds, so no `season_cast` calendar disambiguation is needed).
+fn window_hours(start: chrono::NaiveDate, end: chrono::NaiveDate) -> f64 {
+    let days = u32::try_from((end - start).num_days().max(0))
+        .unwrap_or_else(|_| unreachable!("a study stage's day count always fits in u32"));
+    f64::from(days) * 24.0
+}
 
 /// Validates prerequisites for the history-based PAR(p) estimation path.
 ///
@@ -630,18 +620,45 @@ pub(super) fn check_estimation_prerequisites(data: &ParsedData, ctx: &mut Valida
             .filter_map(|s| s.season_id.map(|sid| (s.start_date, s.end_date, sid)))
             .collect();
 
-        let mut counts: HashMap<(i32, usize), usize> = HashMap::new();
+        // Bucket rows by the study-stage occurrence they fall within, keyed by
+        // (hydro_id, stage_index position): a stage's rows may be split across
+        // several partial windows, and only their combined coverage decides
+        // whether the occurrence counts toward the minimum — a
+        // partial occurrence must not count.
+        let mut rows_by_occurrence: HashMap<(i32, usize), Vec<RealizedWindow>> = HashMap::new();
         for row in &data.inflow_history {
-            let pos = stage_index.partition_point(|(start, _, _)| *start <= row.date);
-            let season_id = if pos > 0 {
-                let (_, end_date, sid) = stage_index[pos - 1];
-                if row.date < end_date { Some(sid) } else { None }
-            } else {
-                None
-            };
+            let pos = stage_index.partition_point(|(start, _, _)| *start <= row.start_date);
+            if pos == 0 {
+                continue;
+            }
+            let (_, end_date, _) = stage_index[pos - 1];
+            if row.start_date >= end_date {
+                continue;
+            }
+            rows_by_occurrence
+                .entry((row.hydro_id.0, pos - 1))
+                .or_default()
+                .push(RealizedWindow {
+                    start_date: row.start_date,
+                    end_date: row.end_date,
+                    value_m3s: row.value_m3s,
+                });
+        }
 
-            if let Some(sid) = season_id {
-                *counts.entry((row.hydro_id.0, sid)).or_insert(0) += 1;
+        let mut counts: HashMap<(i32, usize), usize> = HashMap::new();
+        for (&(hydro_id, stage_pos), rows) in &rows_by_occurrence {
+            let (start_date, end_date, season_id) = stage_index[stage_pos];
+            let period = SeasonPeriodWindow {
+                start: start_date,
+                end: end_date,
+                hours: window_hours(start_date, end_date),
+            };
+            // Exact gate, not a tolerance shortcut: see `resolve_coverage_gated_observations`
+            // in `scenarios/estimation.rs` for why a full-coverage ratio is bit-exact 1.0.
+            #[allow(clippy::float_cmp)]
+            let is_full_coverage = cast(rows, &period).coverage == 1.0;
+            if is_full_coverage {
+                *counts.entry((hydro_id, season_id)).or_insert(0) += 1;
             }
         }
 
@@ -663,181 +680,6 @@ pub(super) fn check_estimation_prerequisites(data: &ParsedData, ctx: &mut Valida
                      insufficient with so few observations"
                 ),
             );
-        }
-    }
-}
-
-// ── Rules 22-24: Past inflows coverage ────────────────────────────────────────
-
-/// Validates that `initial_conditions.json` provides sufficient `past_inflows`
-/// entries for lag initialization when `inflow_lags: true` and PAR order > 0.
-///
-/// Runs only when at least one study stage has `state_config.inflow_lags: true`
-/// AND `inflow_ar_coefficients` is non-empty with maximum PAR order > 0.
-///
-/// Rule 22: `past_inflows` must be non-empty when lag initialization is needed.
-///
-/// Rule 23: For each hydro with per-hydro PAR order `p` (max lag across all its
-/// `(hydro_id, stage_id)` groups), `past_inflows` must contain an entry for that
-/// hydro with `values_m3s.len() >= p`.
-///
-/// Rule 24: Every hydro ID present in `past_inflows` must exist in the hydro
-/// registry.
-pub(super) fn check_past_inflows_coverage(data: &ParsedData, ctx: &mut ValidationContext) {
-    let lags_enabled = data
-        .stages
-        .stages
-        .iter()
-        .filter(|s| s.id >= 0)
-        .any(|s| s.state_config.inflow_lags);
-    if !lags_enabled {
-        return;
-    }
-
-    // Lags are 1-based, so the max `lag` value is the PAR order p.
-    let max_order_overall: i32 = data
-        .inflow_ar_coefficients
-        .iter()
-        .map(|c| c.lag)
-        .max()
-        .unwrap_or(0);
-    if max_order_overall == 0 {
-        return;
-    }
-
-    let past_inflows = &data.initial_conditions.past_inflows;
-
-    if past_inflows.is_empty() {
-        ctx.add_error(
-            ErrorKind::BusinessRuleViolation,
-            "initial_conditions.json",
-            None::<&str>,
-            "inflow_lags is enabled with PAR order > 0 but              initial_conditions.json has no past_inflows entries;              lag initialization requires past inflow values",
-        );
-        return; // rules 23-24 require non-empty past_inflows
-    }
-
-    let mut max_order_per_hydro: HashMap<i32, i32> = HashMap::new();
-    for row in &data.inflow_ar_coefficients {
-        let entry = max_order_per_hydro.entry(row.hydro_id.0).or_insert(0);
-        if row.lag > *entry {
-            *entry = row.lag;
-        }
-    }
-
-    let past_inflows_len: HashMap<i32, usize> = past_inflows
-        .iter()
-        .map(|pi| (pi.hydro_id.0, pi.values_m3s.len()))
-        .collect();
-
-    {
-        let mut coverage_violations: Vec<(i32, i32, usize)> = Vec::new(); // (hydro_id, order, provided)
-        for (&hydro_id, &order) in &max_order_per_hydro {
-            if order == 0 {
-                continue;
-            }
-            let required = usize::try_from(order).unwrap_or(usize::MAX);
-            let provided = past_inflows_len.get(&hydro_id).copied().unwrap_or(0);
-            if provided < required {
-                coverage_violations.push((hydro_id, order, provided));
-            }
-        }
-
-        // Sort for deterministic output order.
-        coverage_violations.sort_unstable_by_key(|&(hid, _, _)| hid);
-        for (hydro_id, order, provided) in coverage_violations {
-            let entity_str = format!("Hydro {hydro_id}");
-            ctx.add_error(
-                ErrorKind::BusinessRuleViolation,
-                "initial_conditions.json",
-                Some(&entity_str),
-                format!(
-                    "Hydro {hydro_id}: insufficient past_inflows for lag initialization; \
-                     PAR order is {order} but initial_conditions.json provides only \
-                     {provided} value(s) in past_inflows (need at least {order})"
-                ),
-            );
-        }
-    }
-
-    {
-        let hydro_registry: HashSet<i32> = data.hydros.iter().map(|h| h.id.0).collect();
-        let past_inflow_ids: HashSet<i32> = past_inflows.iter().map(|pi| pi.hydro_id.0).collect();
-        let mut unknown_ids: Vec<i32> = past_inflow_ids
-            .difference(&hydro_registry)
-            .copied()
-            .collect();
-        unknown_ids.sort_unstable();
-        for id in unknown_ids {
-            let entity_str = format!("Hydro {id}");
-            ctx.add_error(
-                ErrorKind::BusinessRuleViolation,
-                "initial_conditions.json",
-                Some(&entity_str),
-                format!(
-                    "Hydro {id} appears in past_inflows but does not exist \
-                     in the hydro registry (system/hydros.json); \
-                     remove the unknown hydro or add it to the registry"
-                ),
-            );
-        }
-    }
-}
-
-// ── Rule 32: past_inflows season_ids against SeasonMap ───────────────────────
-
-/// Rule 32: when `past_inflows[i].season_ids` is `Some` and the hydro has
-/// PAR order > 0, each `season_id` value must exist in the `SeasonMap`.
-///
-/// Skips the check when `season_map` is `None` — the semantic layer cannot
-/// validate season IDs without a `SeasonMap`. Schema-layer length validation
-/// (matching `season_ids.len() == values_m3s.len()`) is handled in
-/// `cobre-io/src/initial_conditions.rs`.
-pub(super) fn check_past_inflows_season_ids(data: &ParsedData, ctx: &mut ValidationContext) {
-    let Some(season_map) = &data.stages.policy_graph.season_map else {
-        return;
-    };
-
-    let mut max_order_per_hydro: HashMap<i32, i32> = HashMap::new();
-    for row in &data.inflow_ar_coefficients {
-        let entry = max_order_per_hydro.entry(row.hydro_id.0).or_insert(0);
-        if row.lag > *entry {
-            *entry = row.lag;
-        }
-    }
-
-    let valid_ids: HashSet<usize> = season_map.seasons.iter().map(|s| s.id).collect();
-    let mut sorted_valid_ids: Vec<usize> = valid_ids.iter().copied().collect();
-    sorted_valid_ids.sort_unstable();
-
-    for pi in &data.initial_conditions.past_inflows {
-        let par_order = max_order_per_hydro
-            .get(&pi.hydro_id.0)
-            .copied()
-            .unwrap_or(0);
-        if par_order == 0 {
-            continue;
-        }
-
-        let Some(season_ids) = &pi.season_ids else {
-            continue;
-        };
-
-        for &sid in season_ids {
-            let sid_usize = sid as usize;
-            if !valid_ids.contains(&sid_usize) {
-                let entity_str = format!("Hydro {}", pi.hydro_id.0);
-                ctx.add_error(
-                    ErrorKind::BusinessRuleViolation,
-                    "initial_conditions.json",
-                    Some(&entity_str),
-                    format!(
-                        "Hydro {}: past_inflows.season_ids contains season_id {} which is \
-                         not defined in season_definitions; valid season IDs are {:?}",
-                        pi.hydro_id.0, sid, sorted_valid_ids,
-                    ),
-                );
-            }
         }
     }
 }
@@ -945,7 +787,6 @@ pub(super) fn check_filling_sufficiency(data: &ParsedData, ctx: &mut ValidationC
 mod tests {
     use super::super::test_support::*;
     use super::super::validate_semantic_stages_penalties_scenarios;
-    use super::*;
     use crate::{
         scenarios::{
             BlockFactor, InflowAnnualComponentRow, InflowArCoefficientRow, InflowHistoryRow,
@@ -1476,7 +1317,7 @@ mod tests {
     }
 
     /// Bare per-stage `season_id`s with no `season_map` resolve via
-    /// `resolve_stage_seasons`'s fallback (amended 2026-07-14): no
+    /// `resolve_stage_seasons`'s fallback: no
     /// missing-season-context error is added, and the stationarity check
     /// actually runs -- proven here by an explosive AR(1) still being
     /// rejected on this path, not merely "no error".
@@ -1584,12 +1425,12 @@ mod tests {
         );
     }
 
-    // ── Rules 17-18: Load factor consistency ─────────────────────────────────
+    // ── Rule 17: Load factor consistency ──────────────────────────────────────
 
     /// `LoadFactorEntry` with a `block_id` not present in the stage's blocks
-    /// produces 1 `BusinessRuleViolation` error.
+    /// still produces 1 rule-17 `BusinessRuleViolation` error.
     #[test]
-    fn test_5b_load_factors_invalid_block_id() {
+    fn test_rule17_invalid_block_id_still_errors() {
         let mut data = make_data_5b(
             vec![],
             make_stages_with_block(0),
@@ -1630,10 +1471,13 @@ mod tests {
         );
     }
 
-    /// `LoadFactorEntry` for a `(bus_id, stage_id)` where `load_seasonal_stats`
-    /// has `std_mw == 0.0` produces 1 `ModelQuality` warning.
+    /// A deterministic load (`std_mw == 0.0`) with defined block factors
+    /// produces zero ModelQuality warnings mentioning "deterministic" or "no
+    /// effect" — block factors are applied at σ = 0 (see
+    /// `test_block_factors_applied_at_zero_sigma` in `cobre-stochastic`), so
+    /// the retired rule-18 claim does not resurface.
     #[test]
-    fn test_5b_load_factors_deterministic_bus_warning() {
+    fn test_deterministic_load_emits_no_factor_warning() {
         let mut data = make_data_5b(
             vec![],
             make_stages_with_block(0),
@@ -1642,7 +1486,6 @@ mod tests {
             vec![],
             None,
         );
-        // Bus 1, stage 0 with std_mw == 0.0 (deterministic load).
         data.load_seasonal_stats = vec![LoadSeasonalStatsRow {
             bus_id: EntityId::from(1),
             stage_id: 0,
@@ -1661,19 +1504,22 @@ mod tests {
         validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
         assert!(
             !ctx.has_errors(),
-            "deterministic load warning should not produce an error, got: {:?}",
+            "deterministic load should not produce an error, got: {:?}",
             ctx.errors()
         );
         let warnings = ctx.warnings();
         let relevant: Vec<_> = warnings
             .iter()
             .filter(|w| w.kind == ErrorKind::ModelQuality)
-            .filter(|w| w.file.to_string_lossy().contains("load_factors"))
+            .filter(|w| {
+                let msg = w.message.to_lowercase();
+                msg.contains("deterministic") || msg.contains("no effect")
+            })
             .collect();
-        assert_eq!(
-            relevant.len(),
-            1,
-            "expected 1 ModelQuality warning for load_factors.json, got: {warnings:?}"
+        assert!(
+            relevant.is_empty(),
+            "expected zero ModelQuality warnings mentioning \"deterministic\"/\"no effect\", \
+             got: {relevant:?}"
         );
     }
 
@@ -1741,12 +1587,20 @@ mod tests {
     /// validation produces a `ModelQuality` warning containing "has 3 observations".
     #[test]
     fn test_estimation_warns_low_observations() {
-        // 3 observations for hydro 1: one per January (season 0) over 3 years.
+        // 3 full-coverage observations for hydro 1: one per January (season 0)
+        // over 3 years — full-month windows so each counts under the
+        // coverage gate, matching `make_stages_with_seasons`'s
+        // own [1st, next-1st) January stage bounds exactly.
         let history: Vec<InflowHistoryRow> = (0..3)
-            .map(|y| InflowHistoryRow {
-                hydro_id: EntityId::from(1),
-                date: chrono::NaiveDate::from_ymd_opt(2000 + y, 1, 15).unwrap(),
-                value_m3s: 100.0,
+            .map(|y| {
+                let start_date = chrono::NaiveDate::from_ymd_opt(2000 + y, 1, 1).unwrap();
+                let end_date = chrono::NaiveDate::from_ymd_opt(2000 + y, 2, 1).unwrap();
+                InflowHistoryRow {
+                    hydro_id: EntityId::from(1),
+                    start_date,
+                    end_date,
+                    value_m3s: 100.0,
+                }
             })
             .collect();
 
@@ -1878,294 +1732,7 @@ mod tests {
         );
     }
 
-    // ── Rules 22-24: Past inflows coverage ───────────────────────────────────
-
-    /// Rule 22: inflow_lags true, PAR order 3, empty past_inflows → one
-    /// `BusinessRuleViolation` mentioning "inflow_lags is enabled" and
-    /// "initial_conditions.json".
-    #[test]
-    fn test_rule22_lags_enabled_no_past_inflows_errors() {
-        let ar_rows = vec![
-            make_ar_row(1, 0, 1),
-            make_ar_row(1, 0, 2),
-            make_ar_row(1, 0, 3),
-        ];
-        let data = make_data_past_inflows(
-            vec![make_hydro(1, None)],
-            true,
-            vec![], // empty past_inflows
-            ar_rows,
-        );
-        let mut ctx = ValidationContext::new();
-        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
-
-        let matching: Vec<_> = ctx
-            .errors()
-            .into_iter()
-            .filter(|e| {
-                e.kind == ErrorKind::BusinessRuleViolation
-                    && e.message.contains("inflow_lags is enabled")
-            })
-            .collect();
-        assert_eq!(
-            matching.len(),
-            1,
-            "expected exactly one rule-22 BusinessRuleViolation, got: {:?}",
-            ctx.errors()
-        );
-        assert!(
-            matching[0]
-                .file
-                .to_string_lossy()
-                .contains("initial_conditions.json"),
-            "error file should reference initial_conditions.json"
-        );
-    }
-
-    /// Rule 23: inflow_lags true, hydro 1 PAR order 3, past_inflows has 3 values
-    /// → no rule-22/23/24 violations.
-    #[test]
-    fn test_rule23_sufficient_past_inflows_no_error() {
-        let ar_rows = vec![
-            make_ar_row(1, 0, 1),
-            make_ar_row(1, 0, 2),
-            make_ar_row(1, 0, 3),
-        ];
-        let past = vec![cobre_core::HydroPastInflows {
-            hydro_id: EntityId::from(1),
-            values_m3s: vec![300.0, 200.0, 100.0], // 3 values >= PAR order 3
-            season_ids: None,
-        }];
-        let data = make_data_past_inflows(vec![make_hydro(1, None)], true, past, ar_rows);
-        let mut ctx = ValidationContext::new();
-        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
-
-        let lag_errors: Vec<_> = ctx
-            .errors()
-            .into_iter()
-            .filter(|e| {
-                e.kind == ErrorKind::BusinessRuleViolation
-                    && e.file.to_string_lossy().contains("initial_conditions.json")
-            })
-            .collect();
-        assert!(
-            lag_errors.is_empty(),
-            "sufficient past_inflows should produce no errors, got: {lag_errors:?}"
-        );
-    }
-
-    /// Rule 23: inflow_lags true, hydro 1 PAR order 3, past_inflows has only 2
-    /// values → one `BusinessRuleViolation` for hydro 1 mentioning
-    /// "insufficient past_inflows".
-    #[test]
-    fn test_rule23_insufficient_past_inflows_errors() {
-        let ar_rows = vec![
-            make_ar_row(1, 0, 1),
-            make_ar_row(1, 0, 2),
-            make_ar_row(1, 0, 3),
-        ];
-        let past = vec![cobre_core::HydroPastInflows {
-            hydro_id: EntityId::from(1),
-            values_m3s: vec![200.0, 100.0], // only 2 values, need 3
-            season_ids: None,
-        }];
-        let data = make_data_past_inflows(vec![make_hydro(1, None)], true, past, ar_rows);
-        let mut ctx = ValidationContext::new();
-        validate_semantic_stages_penalties_scenarios(&data, &mut ctx);
-
-        let coverage_errors: Vec<_> = ctx
-            .errors()
-            .into_iter()
-            .filter(|e| {
-                e.kind == ErrorKind::BusinessRuleViolation
-                    && e.message.contains("Hydro 1")
-                    && e.message.contains("insufficient past_inflows")
-            })
-            .collect();
-        assert!(
-            !coverage_errors.is_empty(),
-            "insufficient past_inflows should produce a BusinessRuleViolation for Hydro 1; \
-             got errors: {:?}",
-            ctx.errors()
-        );
-    }
-
-    /// Rules 22-24 are skipped when no stage has `inflow_lags: true`.
-    #[test]
-    fn test_rules_skip_when_lags_disabled() {
-        let ar_rows = vec![make_ar_row(1, 0, 1), make_ar_row(1, 0, 2)];
-        let data = make_data_past_inflows(
-            vec![make_hydro(1, None)],
-            false,  // lags disabled
-            vec![], // empty past_inflows — would trigger rule 22 if lags enabled
-            ar_rows,
-        );
-        let mut ctx = ValidationContext::new();
-        check_past_inflows_coverage(&data, &mut ctx);
-
-        assert!(
-            !ctx.has_errors(),
-            "lags disabled should produce no rule-22/23/24 errors; got: {:?}",
-            ctx.errors()
-        );
-    }
-
-    /// Rules 22-24 are skipped when `inflow_ar_coefficients` is empty.
-    #[test]
-    fn test_rules_skip_when_par_order_zero() {
-        let data = make_data_past_inflows(
-            vec![make_hydro(1, None)],
-            true,   // lags enabled
-            vec![], // empty past_inflows — would trigger rule 22 if AR coefficients present
-            vec![], // no AR coefficients -> max_order == 0, early return
-        );
-        let mut ctx = ValidationContext::new();
-        check_past_inflows_coverage(&data, &mut ctx);
-
-        assert!(
-            !ctx.has_errors(),
-            "no AR coefficients should produce no rule-22/23/24 errors; got: {:?}",
-            ctx.errors()
-        );
-    }
-
-    /// Rule 24: hydro ID in past_inflows that does not exist in the hydro registry
-    /// produces a `BusinessRuleViolation` mentioning the unknown hydro ID.
-    #[test]
-    fn test_rule24_unknown_hydro_in_past_inflows_errors() {
-        // past_inflows contains hydro 99, which is not in the registry.
-        let past = vec![
-            cobre_core::HydroPastInflows {
-                hydro_id: EntityId::from(1),
-                values_m3s: vec![100.0],
-                season_ids: None,
-            },
-            cobre_core::HydroPastInflows {
-                hydro_id: EntityId::from(99), // unknown
-                values_m3s: vec![50.0],
-                season_ids: None,
-            },
-        ];
-        // Provide enough AR rows so rule 22 and 23 are satisfied for hydro 1.
-        let ar_rows = vec![make_ar_row(1, 0, 1)];
-        let data = make_data_past_inflows(
-            vec![make_hydro(1, None)], // only hydro 1 in registry
-            true,
-            past,
-            ar_rows,
-        );
-        let mut ctx = ValidationContext::new();
-        check_past_inflows_coverage(&data, &mut ctx);
-
-        let rule24_errors: Vec<_> = ctx
-            .errors()
-            .into_iter()
-            .filter(|e| {
-                e.kind == ErrorKind::BusinessRuleViolation && e.message.contains("Hydro 99")
-            })
-            .collect();
-        assert!(
-            !rule24_errors.is_empty(),
-            "unknown hydro 99 in past_inflows should produce a BusinessRuleViolation; \
-             got errors: {:?}",
-            ctx.errors()
-        );
-    }
-
-    // ── Rule 32: past_inflows season_ids against SeasonMap ───────────────────
-
-    /// Rule 32: `past_inflows[i].season_ids` contains an ID not in the `SeasonMap`
-    /// → `BusinessRuleViolation` mentioning the invalid season ID.
-    #[test]
-    fn test_past_inflows_season_ids_invalid_season() {
-        let past = vec![cobre_core::HydroPastInflows {
-            hydro_id: EntityId::from(1),
-            values_m3s: vec![300.0, 200.0],
-            season_ids: Some(vec![0, 99]), // season_id 99 is invalid (only 0..4 exist)
-        }];
-        let ar_rows = vec![make_ar_row(1, 0, 1), make_ar_row(1, 0, 2)];
-        let data = make_data_past_inflows_with_season_map(
-            vec![make_hydro(1, None)],
-            past,
-            ar_rows,
-            5, // seasons 0..4 exist
-        );
-        let mut ctx = ValidationContext::new();
-        check_past_inflows_season_ids(&data, &mut ctx);
-
-        let rule32_errors: Vec<_> = ctx
-            .errors()
-            .into_iter()
-            .filter(|e| {
-                e.kind == ErrorKind::BusinessRuleViolation
-                    && e.message.contains("season_id")
-                    && e.message.contains("99")
-            })
-            .collect();
-        assert!(
-            !rule32_errors.is_empty(),
-            "invalid season_id 99 should produce a BusinessRuleViolation; \
-             got errors: {:?}",
-            ctx.errors()
-        );
-    }
-
-    /// Rule 32: all `season_ids` are valid → no `BusinessRuleViolation`.
-    #[test]
-    fn test_past_inflows_season_ids_valid() {
-        let past = vec![cobre_core::HydroPastInflows {
-            hydro_id: EntityId::from(1),
-            values_m3s: vec![300.0, 200.0],
-            season_ids: Some(vec![3, 2]), // both exist in seasons 0..4
-        }];
-        let ar_rows = vec![make_ar_row(1, 0, 1), make_ar_row(1, 0, 2)];
-        let data = make_data_past_inflows_with_season_map(
-            vec![make_hydro(1, None)],
-            past,
-            ar_rows,
-            5, // seasons 0..4 exist
-        );
-        let mut ctx = ValidationContext::new();
-        check_past_inflows_season_ids(&data, &mut ctx);
-
-        let rule32_errors: Vec<_> = ctx
-            .errors()
-            .into_iter()
-            .filter(|e| {
-                e.kind == ErrorKind::BusinessRuleViolation
-                    && e.file.to_string_lossy().contains("initial_conditions.json")
-                    && e.message.contains("season_id")
-            })
-            .collect();
-        assert!(
-            rule32_errors.is_empty(),
-            "valid season_ids should produce no rule-32 errors; got: {:?}",
-            ctx.errors()
-        );
-    }
-
-    /// Rule 32 is skipped when `season_map` is `None`.
-    #[test]
-    fn test_past_inflows_season_ids_no_season_map_skipped() {
-        let past = vec![cobre_core::HydroPastInflows {
-            hydro_id: EntityId::from(1),
-            values_m3s: vec![300.0],
-            season_ids: Some(vec![999]), // would be invalid if season_map were present
-        }];
-        let ar_rows = vec![make_ar_row(1, 0, 1)];
-        // make_data_past_inflows uses season_map: None
-        let data = make_data_past_inflows(vec![make_hydro(1, None)], true, past, ar_rows);
-        let mut ctx = ValidationContext::new();
-        check_past_inflows_season_ids(&data, &mut ctx);
-
-        assert!(
-            !ctx.has_errors(),
-            "no season_map means rule 32 should be skipped; got: {:?}",
-            ctx.errors()
-        );
-    }
-
-    // ── F2-002: External scheme requires external scenario files ──────────────
+    // ── External scheme requires external scenario files ──────────────
 
     /// `config.training.scenario_source.inflow.scheme = "external"` with no
     /// `external_scenarios` data produces an error referencing `"config.json"` and

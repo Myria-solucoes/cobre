@@ -17,9 +17,14 @@ use super::{
     contract_family_slot, resolve_variable_ref, variable_ref_is_block_independent,
 };
 use crate::hydro_models::{FphaPlane, ProductionModelSet, ResolvedProductionModel};
-use crate::indexer::{Boundary, StateSpace, StorageBoundaryGrid};
+use crate::indexer::{
+    Boundary, HydroCell, HydroCellIndex, HydroSys, StateSpace, StorageBoundaryGrid,
+};
 use crate::lp_builder::StageGeometry;
-use crate::test_support::{GeometryDims, geometry};
+use crate::test_support::{
+    GeometryDims, geometry, geometry_hydro, geometry_hydro_with_groups, identity_hydro_cell_index,
+    make_unit_group,
+};
 
 // ── Test helpers ──────────────────────────────────────────────────────────
 
@@ -70,15 +75,33 @@ fn make_geom_with_contracts<'a>(
     // Leak the reconstructed reverse map so the borrowed `GenericResolverGeom`
     // field has a `'a`-compatible referent without threading an owner through
     // every call site.
-    let reverse: std::collections::HashMap<usize, usize> = anticipated_thermal_indices
+    let reverse: HashMap<usize, usize> = anticipated_thermal_indices
         .iter()
         .enumerate()
         .map(|(local, &sys_pos)| (sys_pos, local))
         .collect();
-    let reverse: &'a std::collections::HashMap<usize, usize> = Box::leak(Box::new(reverse));
+    let reverse: &'a HashMap<usize, usize> = Box::leak(Box::new(reverse));
+    let hydro_cell_index: &'a HydroCellIndex =
+        Box::leak(Box::new(identity_hydro_cell_index(state.hydro_count)));
+    // Derived from `hydro_cell_index` rather than written as the identity
+    // `[0, 1, 2, ...]` this fixture currently produces, so a future multi-cell
+    // fixture here cannot silently disagree with `StageLayout`'s own prefix sum.
+    let fpha_cell_local_start: &'a [usize] = Box::leak(
+        indexer
+            .fpha_hydro_indices
+            .iter()
+            .scan(0, |acc, &h| {
+                let start = *acc;
+                *acc += hydro_cell_index.cells_of(h).len();
+                Some(start)
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    );
     GenericResolverGeom {
         state,
         storage_boundary_grid: indexer.storage_boundary_grid,
+        hydro_cell_index,
         turbine: &indexer.turbine,
         spillage: &indexer.spillage,
         diversion: &indexer.diversion,
@@ -89,6 +112,7 @@ fn make_geom_with_contracts<'a>(
         contract_import,
         contract_export,
         generation: &indexer.generation,
+        fpha_cell_local_start,
         deficit: &indexer.deficit,
         max_deficit_segments,
         n_blks: indexer.n_blks,
@@ -121,11 +145,11 @@ fn make_hydro(id: i32, downstream_id: Option<i32>) -> Hydro {
         evaporation_violation_neg_cost: 0.0,
         inflow_nonnegativity_cost: 1000.0,
     };
-    Hydro {
+    let mut hydro = Hydro {
+        unit_groups: Vec::new(),
         id: EntityId(id),
         name: String::new(),
         operational_start_date: chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-        bus_id: EntityId(0),
         downstream_id: downstream_id.map(EntityId),
         travel_time_hours: None,
         entry_stage_id: None,
@@ -148,7 +172,9 @@ fn make_hydro(id: i32, downstream_id: Option<i32>) -> Hydro {
         diversion: None,
         filling: None,
         penalties: zero_penalties,
-    }
+    };
+    hydro.declare_mirror_unit_group(EntityId(0));
+    hydro
 }
 
 fn empty_cascade() -> CascadeTopology {
@@ -633,6 +659,7 @@ fn hydro_generation_constant_productivity_maps_to_turbine() {
         VariableRef::HydroGeneration {
             hydro_id: EntityId(20),
             block_id: None,
+            bus_id: None,
         },
         0,
         &geom,
@@ -643,7 +670,6 @@ fn hydro_generation_constant_productivity_maps_to_turbine() {
         &lpos,
     );
 
-    // hydro pos=1, turbine.start=13, n_blks=3, block=0, productivity=2.5
     assert_eq!(result, vec![(13 + 1 * 3 + 0, 2.5)]);
 }
 
@@ -664,6 +690,7 @@ fn hydro_generation_fpha_maps_to_generation_column() {
         VariableRef::HydroGeneration {
             hydro_id: EntityId(10),
             block_id: None,
+            bus_id: None,
         },
         0,
         &geom,
@@ -674,7 +701,6 @@ fn hydro_generation_fpha_maps_to_generation_column() {
         &lpos,
     );
 
-    // FPHA local index 0, generation.start=79, n_blks=3, block=0
     assert_eq!(result, vec![(79 + 0 * 3 + 0, 1.0)]);
 }
 
@@ -695,6 +721,7 @@ fn hydro_generation_fpha_second_hydro_block_2() {
         VariableRef::HydroGeneration {
             hydro_id: EntityId(30),
             block_id: None,
+            bus_id: None,
         },
         2,
         &geom,
@@ -705,8 +732,345 @@ fn hydro_generation_fpha_second_hydro_block_2() {
         &lpos,
     );
 
-    // FPHA local index 1, generation.start=79, n_blks=3, block=2
     assert_eq!(result, vec![(79 + 1 * 3 + 2, 1.0)]);
+}
+
+// ── Bus-selector tests ────────────────────────────────────────────────────
+
+/// A padding plant (1 cell, global index 0) plus a two-bus split plant (cells
+/// 1 and 2) whose group ids (78, 77) differ from their `unit_groups`
+/// positions — the fixture shape both bus-selector resolver tests need to
+/// discriminate a cell-bus lookup from a first-cell shortcut.
+fn bus_selector_hydros(generation_model: HydroGenerationModel) -> Vec<Hydro> {
+    let padding = geometry_hydro(0);
+    let split = geometry_hydro_with_groups(
+        1,
+        vec![
+            make_unit_group(EntityId(78), EntityId(10), 0.0, 100.0, 0.0, 50.0),
+            make_unit_group(EntityId(77), EntityId(20), 0.0, 200.0, 0.0, 80.0),
+        ],
+        generation_model,
+    );
+    vec![padding, split]
+}
+
+/// Shared fixture for the two `ConstantProductivity` bus-selector tests below
+/// ([`resolve_turbine_bus_selector_picks_one_cell`],
+/// [`resolve_generation_bus_selector_on_constant_productivity_picks_one_cell`]):
+/// 3 cells (1 padding + 2 split), n_blks=5, turbine columns starting at 100.
+struct TurbineBusSelectorFixture {
+    hydros: Vec<Hydro>,
+    hydro_cell_index: HydroCellIndex,
+    state: StateSpace,
+    turbine: std::ops::Range<usize>,
+    empty: std::ops::Range<usize>,
+    no_fpha: Vec<HydroSys>,
+    no_fpha_start: Vec<usize>,
+    reverse: HashMap<usize, usize>,
+}
+
+impl TurbineBusSelectorFixture {
+    const N_BLKS: usize = 5;
+    const TURBINE_START: usize = 100;
+
+    fn new() -> Self {
+        let hydros = bus_selector_hydros(HydroGenerationModel::ConstantProductivity);
+        let hydro_cell_index = HydroCellIndex::build(&hydros);
+        assert_eq!(hydro_cell_index.n_cells(), 3);
+        assert_eq!(hydro_cell_index.cells_of(HydroSys::new(1)), 1..3);
+        assert_eq!(hydro_cell_index.bus_of(HydroCell::new(1)), EntityId(10));
+        assert_eq!(
+            hydro_cell_index.bus_of(HydroCell::new(2)),
+            EntityId(20),
+            "cell 2 (ascending bus order) is the SECOND cell under test"
+        );
+        let turbine =
+            Self::TURBINE_START..(Self::TURBINE_START + hydro_cell_index.n_cells() * Self::N_BLKS);
+        let state = StateSpace::new(hydros.len(), 0, 0, Vec::new(), 0, 0, vec![], &[0, 0]);
+        Self {
+            hydros,
+            hydro_cell_index,
+            state,
+            turbine,
+            empty: 0..0,
+            no_fpha: Vec::new(),
+            no_fpha_start: Vec::new(),
+            reverse: HashMap::new(),
+        }
+    }
+
+    fn geom(&self) -> GenericResolverGeom<'_> {
+        GenericResolverGeom {
+            state: &self.state,
+            storage_boundary_grid: StorageBoundaryGrid::new(0, 0, 0, Self::N_BLKS),
+            hydro_cell_index: &self.hydro_cell_index,
+            turbine: &self.turbine,
+            spillage: &self.empty,
+            diversion: &self.empty,
+            thermal: &self.empty,
+            line_fwd: &self.empty,
+            line_rev: &self.empty,
+            excess: &self.empty,
+            contract_import: &self.empty,
+            contract_export: &self.empty,
+            generation: &self.empty,
+            fpha_cell_local_start: &self.no_fpha_start,
+            deficit: &self.empty,
+            max_deficit_segments: 0,
+            n_blks: Self::N_BLKS,
+            evap_indices: &[],
+            evap_hydro_indices: &[],
+            fpha_hydro_indices: &self.no_fpha,
+            anticipated_decision_start: 0,
+            anticipated_local_by_sys_pos: &self.reverse,
+        }
+    }
+
+    fn hydro_pos(&self) -> BTreeMap<EntityId, usize> {
+        self.hydros
+            .iter()
+            .enumerate()
+            .map(|(i, h)| (h.id, i))
+            .collect()
+    }
+}
+
+/// `HydroTurbined{bus_id: Some(b)}` resolves to exactly the requested cell's
+/// own turbine column — never the plant's other cell, never both — and
+/// `bus_id: None` stays the unchanged one-pair-per-cell sum. The split
+/// plant's `Hydro::bus_id` (999) equals neither group's bus (10, 20):
+/// resolving against it (instead of `HydroCellIndex::bus_of`) misses and
+/// returns empty for `bus_id: Some(20)`; resolving via `first_cell_of`
+/// instead of `cell_of_bus` returns the FIRST cell's column instead.
+#[test]
+fn resolve_turbine_bus_selector_picks_one_cell() {
+    let fx = TurbineBusSelectorFixture::new();
+    let geom = fx.geom();
+    let n_blks = TurbineBusSelectorFixture::N_BLKS;
+    let turbine_start = TurbineBusSelectorFixture::TURBINE_START;
+
+    let prod = ProductionModelSet::new(
+        vec![
+            vec![ResolvedProductionModel::ConstantProductivity { productivity: 1.0 }];
+            fx.hydros.len()
+        ],
+        fx.hydros.len(),
+        1,
+    );
+    let hpos = fx.hydro_pos();
+    let empty_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
+
+    let picked = call(
+        VariableRef::HydroTurbined {
+            hydro_id: fx.hydros[1].id,
+            block_id: Some(3),
+            bus_id: Some(EntityId(20)),
+        },
+        0,
+        &geom,
+        &prod,
+        &hpos,
+        &empty_pos,
+        &empty_pos,
+        &empty_pos,
+    );
+    assert_eq!(picked, vec![(turbine_start + 2 * n_blks + 3, 1.0)]);
+
+    let summed = call(
+        VariableRef::HydroTurbined {
+            hydro_id: fx.hydros[1].id,
+            block_id: Some(3),
+            bus_id: None,
+        },
+        0,
+        &geom,
+        &prod,
+        &hpos,
+        &empty_pos,
+        &empty_pos,
+        &empty_pos,
+    );
+    assert_eq!(
+        summed,
+        vec![
+            (turbine_start + 1 * n_blks + 3, 1.0),
+            (turbine_start + 2 * n_blks + 3, 1.0),
+        ]
+    );
+}
+
+/// `HydroGeneration{bus_id: Some(b)}` on a `ConstantProductivity` plant
+/// resolves to exactly the requested cell's own turbine column scaled by the
+/// plant's `ρ` — never the plant's first cell, and never the sum over cells.
+/// Same fixture as [`resolve_turbine_bus_selector_picks_one_cell`] (the split
+/// plant's `Hydro::bus_id` (999) equals neither group's bus (10, 20)), but
+/// resolved through `resolve_hydro_generation`'s `ConstantProductivity` arm —
+/// the combination neither that test (`HydroTurbined`) nor
+/// [`resolve_generation_bus_selector_maps_to_the_cells_fpha_column`]
+/// (`HydroGeneration` × FPHA) reaches. `productivity != 1.0` distinguishes the
+/// scaled result from the raw turbine coefficient.
+#[test]
+fn resolve_generation_bus_selector_on_constant_productivity_picks_one_cell() {
+    let fx = TurbineBusSelectorFixture::new();
+    let geom = fx.geom();
+    let n_blks = TurbineBusSelectorFixture::N_BLKS;
+    let turbine_start = TurbineBusSelectorFixture::TURBINE_START;
+
+    let productivity = 2.5;
+    let prod = ProductionModelSet::new(
+        vec![
+            vec![ResolvedProductionModel::ConstantProductivity { productivity: 1.0 }],
+            vec![ResolvedProductionModel::ConstantProductivity { productivity }],
+        ],
+        fx.hydros.len(),
+        1,
+    );
+    let hpos = fx.hydro_pos();
+    let empty_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
+
+    let picked = call(
+        VariableRef::HydroGeneration {
+            hydro_id: fx.hydros[1].id,
+            block_id: Some(3),
+            bus_id: Some(EntityId(20)),
+        },
+        0,
+        &geom,
+        &prod,
+        &hpos,
+        &empty_pos,
+        &empty_pos,
+        &empty_pos,
+    );
+    assert_eq!(picked, vec![(turbine_start + 2 * n_blks + 3, productivity)]);
+
+    let summed = call(
+        VariableRef::HydroGeneration {
+            hydro_id: fx.hydros[1].id,
+            block_id: Some(3),
+            bus_id: None,
+        },
+        0,
+        &geom,
+        &prod,
+        &hpos,
+        &empty_pos,
+        &empty_pos,
+        &empty_pos,
+    );
+    assert_eq!(
+        summed,
+        vec![
+            (turbine_start + 1 * n_blks + 3, productivity),
+            (turbine_start + 2 * n_blks + 3, productivity),
+        ]
+    );
+}
+
+/// `HydroGeneration{bus_id: Some(b)}` on an FPHA plant maps the selected cell
+/// to its OFFSET within the plant's own cell range
+/// (`fpha_cell_local_start[fpha_local] + (cell.get() - cells_of(h).start)`),
+/// never the cell's absolute index — the leading non-FPHA padding plant makes
+/// the two diverge (`cells_of(h).start == 1` while `fpha_cell_local_start[0]
+/// == 0`, since the FPHA-local prefix sums only over FPHA plants).
+/// `bus_id: None` stays the unchanged one-pair-per-cell resolution.
+#[test]
+fn resolve_generation_bus_selector_maps_to_the_cells_fpha_column() {
+    let hydros = bus_selector_hydros(HydroGenerationModel::Fpha);
+    let hydro_cell_index = HydroCellIndex::build(&hydros);
+    assert_eq!(hydro_cell_index.cells_of(HydroSys::new(1)), 1..3);
+    assert_eq!(hydro_cell_index.bus_of(HydroCell::new(2)), EntityId(20));
+
+    let n_blks = 4;
+    let generation_start = 500;
+    let generation = generation_start..(generation_start + 2 * n_blks);
+    let empty = 0..0;
+    let state = StateSpace::new(hydros.len(), 0, 0, Vec::new(), 0, 0, vec![], &[0, 0]);
+    let fpha_hydro_indices = vec![HydroSys::new(1)];
+    let fpha_cell_local_start = vec![0_usize];
+    let reverse: HashMap<usize, usize> = HashMap::new();
+
+    let geom = GenericResolverGeom {
+        state: &state,
+        storage_boundary_grid: StorageBoundaryGrid::new(0, 0, 0, n_blks),
+        hydro_cell_index: &hydro_cell_index,
+        turbine: &empty,
+        spillage: &empty,
+        diversion: &empty,
+        thermal: &empty,
+        line_fwd: &empty,
+        line_rev: &empty,
+        excess: &empty,
+        contract_import: &empty,
+        contract_export: &empty,
+        generation: &generation,
+        fpha_cell_local_start: &fpha_cell_local_start,
+        deficit: &empty,
+        max_deficit_segments: 0,
+        n_blks,
+        evap_indices: &[],
+        evap_hydro_indices: &[],
+        fpha_hydro_indices: &fpha_hydro_indices,
+        anticipated_decision_start: 0,
+        anticipated_local_by_sys_pos: &reverse,
+    };
+
+    let prod = ProductionModelSet::new(
+        vec![
+            vec![ResolvedProductionModel::ConstantProductivity { productivity: 1.0 }],
+            vec![ResolvedProductionModel::Fpha {
+                planes: vec![FphaPlane {
+                    intercept: 0.0,
+                    gamma_v: 0.0,
+                    gamma_q: 0.0,
+                    gamma_s: 0.0,
+                }],
+            }],
+        ],
+        hydros.len(),
+        1,
+    );
+    let hpos: BTreeMap<EntityId, usize> =
+        hydros.iter().enumerate().map(|(i, h)| (h.id, i)).collect();
+    let empty_pos: BTreeMap<EntityId, usize> = BTreeMap::new();
+
+    let picked = call(
+        VariableRef::HydroGeneration {
+            hydro_id: hydros[1].id,
+            block_id: Some(3),
+            bus_id: Some(EntityId(20)),
+        },
+        0,
+        &geom,
+        &prod,
+        &hpos,
+        &empty_pos,
+        &empty_pos,
+        &empty_pos,
+    );
+    assert_eq!(picked, vec![(generation_start + 1 * n_blks + 3, 1.0)]);
+
+    let summed = call(
+        VariableRef::HydroGeneration {
+            hydro_id: hydros[1].id,
+            block_id: Some(3),
+            bus_id: None,
+        },
+        0,
+        &geom,
+        &prod,
+        &hpos,
+        &empty_pos,
+        &empty_pos,
+        &empty_pos,
+    );
+    assert_eq!(
+        summed,
+        vec![
+            (generation_start + 0 * n_blks + 3, 1.0),
+            (generation_start + 1 * n_blks + 3, 1.0),
+        ]
+    );
 }
 
 // ── HydroEvaporation tests ────────────────────────────────────────────────
@@ -1243,7 +1607,6 @@ fn contract_import_resolves_to_column_with_unit_coefficient() {
         &contract_pos,
     );
 
-    // import base 200, per-family slot 1, n_blks 3, block 0 → 200 + 1*3 + 0
     assert_eq!(result, vec![(203, 1.0)]);
 }
 
@@ -1281,7 +1644,6 @@ fn contract_export_resolves_to_column_with_unit_coefficient() {
         &contract_pos,
     );
 
-    // export base 206, per-family slot 0, n_blks 3, block 2 → 206 + 0*3 + 2
     assert_eq!(result, vec![(208, 1.0)]);
 }
 
@@ -1937,6 +2299,7 @@ fn hydro_turbined_maps_to_turbine_column() {
         VariableRef::HydroTurbined {
             hydro_id: EntityId(20),
             block_id: None,
+            bus_id: None,
         },
         2,
         &geom,

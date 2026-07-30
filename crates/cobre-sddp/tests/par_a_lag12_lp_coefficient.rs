@@ -37,10 +37,11 @@
 
 use chrono::NaiveDate;
 use cobre_core::{
-    BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, DeficitSegment,
-    EntityId, HydroStageBounds, HydroStagePenalties, LineStageBounds, LineStagePenalties,
-    NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
-    ResolvedPenalties, SystemBuilder, ThermalStageBounds,
+    BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
+    EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties, LineBlockBounds,
+    LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
+    PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds,
+    ThermalStageBounds,
     entities::hydro::{Hydro, HydroGenerationModel, HydroPenalties},
     scenario::{AnnualComponent, InflowModel, LoadModel},
     temporal::{
@@ -253,6 +254,10 @@ fn build_par_a_fixture() -> (cobre_core::System, PrecomputedPar) {
     let hydro_bounds_default = HydroStageBounds {
         min_storage_hm3: 0.0,
         max_storage_hm3: 500.0,
+        filling_min_rate_m3s: 0.0,
+        water_withdrawal_m3s: 0.0,
+    };
+    let hydro_bounds_default_block = HydroBlockBounds {
         min_turbined_m3s: 0.0,
         max_turbined_m3s: 200.0,
         min_outflow_m3s: 0.0,
@@ -260,8 +265,6 @@ fn build_par_a_fixture() -> (cobre_core::System, PrecomputedPar) {
         min_generation_mw: 0.0,
         max_generation_mw: 200.0,
         max_diversion_m3s: None,
-        filling_min_rate_m3s: 0.0,
-        water_withdrawal_m3s: 0.0,
     };
     let bounds = ResolvedBounds::new(
         &BoundsCountsSpec {
@@ -275,20 +278,21 @@ fn build_par_a_fixture() -> (cobre_core::System, PrecomputedPar) {
         },
         &BoundsDefaults {
             hydro: hydro_bounds_default,
-            thermal: ThermalStageBounds {
+            hydro_block: hydro_bounds_default_block,
+            thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+            thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
                 max_generation_mw: 0.0,
-                cost_per_mwh: 0.0,
             },
-            line: LineStageBounds {
+            line_block: LineBlockBounds {
                 direct_mw: 0.0,
                 reverse_mw: 0.0,
             },
-            pumping: PumpingStageBounds {
+            pumping_block: PumpingBlockBounds {
                 min_flow_m3s: 0.0,
                 max_flow_m3s: 0.0,
             },
-            contract: ContractStageBounds {
+            contract_block: ContractBlockBounds {
                 min_mw: 0.0,
                 max_mw: 0.0,
                 price_per_mwh: 0.0,
@@ -494,6 +498,10 @@ fn build_classical_fixture() -> (cobre_core::System, PrecomputedPar) {
     let hydro_bounds_default = HydroStageBounds {
         min_storage_hm3: 0.0,
         max_storage_hm3: 500.0,
+        filling_min_rate_m3s: 0.0,
+        water_withdrawal_m3s: 0.0,
+    };
+    let hydro_bounds_default_block = HydroBlockBounds {
         min_turbined_m3s: 0.0,
         max_turbined_m3s: 200.0,
         min_outflow_m3s: 0.0,
@@ -501,8 +509,6 @@ fn build_classical_fixture() -> (cobre_core::System, PrecomputedPar) {
         min_generation_mw: 0.0,
         max_generation_mw: 200.0,
         max_diversion_m3s: None,
-        filling_min_rate_m3s: 0.0,
-        water_withdrawal_m3s: 0.0,
     };
     let bounds = ResolvedBounds::new(
         &BoundsCountsSpec {
@@ -516,20 +522,21 @@ fn build_classical_fixture() -> (cobre_core::System, PrecomputedPar) {
         },
         &BoundsDefaults {
             hydro: hydro_bounds_default,
-            thermal: ThermalStageBounds {
+            hydro_block: hydro_bounds_default_block,
+            thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+            thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
                 max_generation_mw: 0.0,
-                cost_per_mwh: 0.0,
             },
-            line: LineStageBounds {
+            line_block: LineBlockBounds {
                 direct_mw: 0.0,
                 reverse_mw: 0.0,
             },
-            pumping: PumpingStageBounds {
+            pumping_block: PumpingBlockBounds {
                 min_flow_m3s: 0.0,
                 max_flow_m3s: 0.0,
             },
-            contract: ContractStageBounds {
+            contract_block: ContractBlockBounds {
                 min_mw: 0.0,
                 max_mw: 0.0,
                 price_per_mwh: 0.0,

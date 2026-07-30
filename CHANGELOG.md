@@ -9,6 +9,164 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-07-30
+
+### Added
+
+- **A hydro plant can declare more than one turbine group, each on its own
+  bus.** Every entry in `unit_groups` carries its own `id`, `name`, `bus_id`,
+  and generation/turbined envelope, so one plant's units can span several
+  electrical buses. `constraints/hydro_unit_group_bounds.parquet` overlays
+  stage-varying, optionally per-block overrides on a group's four declared
+  bounds (`min_turbined_m3s`, `max_turbined_m3s`, `min_generation_mw`,
+  `max_generation_mw`); a group with no override reads its declared value.
+
+- **`thermal_bounds.parquet`, `hydro_bounds.parquet`, `line_bounds.parquet`,
+  `pumping_bounds.parquet`, and `contract_bounds.parquet` gain a per-block
+  axis.** An optional `block_id` column selects one block within a stage for
+  the row's override, including the per-block `contract_bounds.price_per_mwh`
+  a study's simulation cost path now honors. A study with no per-block rows
+  produces byte-identical resolved bounds and output, so this is not a
+  breaking change. Thermal `cost_per_mwh` is deliberately not block-eligible
+  — a per-block value is rejected at validation — unlike contract
+  `price_per_mwh`, which is: commitment is a stage-level decision, so a
+  per-block dispatch cost has nothing to attach to.
+
+- **A generic constraint can address one bus of a hydro plant split across
+  several unit groups.** The `hydro_turbined` and `hydro_generation`
+  variable references accept a named `bus=` selector, e.g.
+  `hydro_turbined(5, bus=2)` — an optional positional block argument, when
+  present, precedes it — resolving to the LP column for that `(hydro, bus)`
+  cell.
+
+- **Simulation output gains a `simulation/hydro_bus_generation/` partition,
+  reporting turbined flow and generation per `(hydro, bus)` cell.**
+  `simulation/hydros/` is unchanged and keeps reporting each plant's total: a
+  plant split across buses has no per-group quantity to report, since every
+  split of a shared cell's flow across its same-bus groups is an equally
+  optimal solution with no dual to distinguish them. The new partition
+  reports at the bus-cell granularity the LP itself solves.
+
+### Changed
+
+- **A negative realized inflow is accepted again, in both
+  `scenarios/inflow_history.parquet` and `initial_conditions.json`'s
+  `recent_observations`.** Both parsers reject only non-finite values;
+  `value_m3s < 0.0` loads. The quantity is _incremental_ inflow — a plant's
+  natural flow minus its upstream plants' — so a negative window is real
+  hydrology (a reach that loses water over the window), and the LP already
+  prices it through the inflow non-negativity slack. Semantic validation
+  reports one warning per file naming the negative count and the most
+  negative value with its hydro, so a genuinely sign-flipped series still
+  stands out. Any file that loaded before still loads.
+
+- **BREAKING — `scenarios/inflow_history.parquet` is now windowed, and the
+  legacy point-dated layout is rejected outright.** Every row carries
+  `hydro_id`, `start_date` (inclusive), `end_date` (exclusive), and
+  `value_m3s` — the mean inflow observed over that window — replacing the
+  previous single-`date`-per-row layout; windowed `inflow_history` is the
+  sole record layout the loader accepts. A file still carrying the legacy
+  `date` column is rejected at load, with no inference or conversion path
+  back to the windowed form — every case must re-emit its history as dated
+  windows before it will load.
+
+- **BREAKING — `unit_groups` is now mandatory on every hydro.** A
+  `hydros.json` entry with an absent, `null`, or empty `unit_groups` array is
+  rejected at load; every hydro must declare at least one group with its own
+  `id`, `name`, `bus_id`, and generation/turbined bounds. The exported
+  schema marks the key required, matching the loader.
+
+- **BREAKING — the top-level `hydro.bus_id` field is removed.** A hydro's
+  bus association now lives exclusively on `unit_groups[].bus_id`; the plant
+  itself no longer carries one. A deck still carrying the top-level field is
+  rejected by `hydros.json`'s deny-unknown-fields contract.
+
+### Removed
+
+- **BREAKING — `past_inflows` is gone from `initial_conditions.json`.** The
+  positional `past_inflows` array — backed by the `HydroPastInflows` type,
+  which paired a raw per-lag value list with a parallel `season_ids` array —
+  is removed entirely, along with its dedicated coverage and season-id
+  validation rules. An `initial_conditions.json` still carrying `past_inflows`
+  is rejected at load: the file's existing deny-unknown-field contract turns
+  the field into a named parse error rather than a silent partial load.
+  Seeding the PAR lag chain and the mid-period accumulator from history no
+  longer reads a positional array at all — it derives from the windowed
+  `inflow_history` record above, shadowed day-wise by `recent_observations`
+  wherever the two overlap.
+
+- **BREAKING — `constraints/exchange_factors.json` is removed.** Per-block
+  transmission-line capacity is now declared as absolute MW directly on
+  `constraints/line_bounds.parquet`, via `direct_mw`/`reverse_mw` rows
+  carrying a `block_id`: `direct_mw = base_capacity × direct_factor` (and
+  the reverse equivalent) reproduces the multiplicative form's effect per
+  `(line, stage, block)`. A study still carrying the file is rejected at
+  load, naming the replacement. Absolute capacity also expresses
+  `direct_mw = 0.0` — a line fully closed in one block — which the previous
+  factor, constrained strictly positive, could never represent.
+  `scenarios/load_factors.json` and `scenarios/non_controllable_factors.json`
+  are unaffected: a factor scaling an authored stage quantity is redundant
+  once its bounds carry a block axis, as line capacity's now do, while a
+  factor scaling a generated quantity — load and non-controllable-source
+  availability are sampled and occupy their own noise-vector dimensions —
+  remains the only way to express that quantity's block split.
+
+### Fixed
+
+- **Resolved bound, penalty, and factor overrides could be applied to the
+  wrong entity when a system's commissioning dates ordered its buses, lines,
+  hydros, thermals, pumping stations, energy contracts, or non-controllable
+  sources differently from their declared IDs.** An override declared for a
+  given entity now always resolves onto that same entity. Every case shipped
+  or referenced by this project already orders entities identically under
+  both the ID and the commissioning-date order, so no existing output changes.
+
+- **A user-supplied `scenarios/noise_openings.parquet` no longer panics a
+  study that has non-controllable sources.** The reader sized the opening
+  tree at `n_hydros + n_load_buses`, omitting the NCS block, while the
+  samplers slice that same tree at the NCS class offset — so any case with
+  NCS entities indexed past the end of a row and aborted with a slice-range
+  panic instead of a diagnostic, and padding the file to its true width was
+  rejected by the same short dimension. The noise-vector layout now has a
+  single owner (`cobre_stochastic::noise_entity_order`) that the reader and
+  the context builder share, so a full-width openings file loads and a
+  genuinely mis-sized one is reported as a dimension mismatch. A study with
+  no NCS entities is unaffected.
+
+- **The PAR lag-slot and mid-period accumulator seed derivation is
+  corrected, and any case that supplied `recent_observations` now trains
+  against different — and correct — seed values.** The previous derivation
+  mixed an inflow value scaled by raw observation hours against a stage
+  weight scaled by the _fraction_ of the period observed — an hours-scale
+  numerator against a fraction-scale weight — inflating the seeded share of
+  the most-recent lag by a factor on the order of the observation period's
+  own hour count, and averaged one scalar weight across every hydro instead
+  of weighting each hydro by its own observed coverage. The derivation now
+  casts the layered `inflow_history` record and `recent_observations`
+  conditioning through one coverage-normalized, day-weighted operator per
+  hydro, and an under-covered lag slot or a partially-covered mid-period
+  window is now flagged or rejected at load instead of silently seeding a
+  wrong value. A case with no `recent_observations` reproduces its pre-fix
+  training trace bit-exactly; a case that supplied it gets corrected seed
+  values and can therefore retrain to a different trajectory. No released
+  version of the conversion tooling ever emitted `recent_observations`, so
+  this is a bug fix, not a compatibility break — no input migration is
+  owed.
+
+- **A `thermal_bounds.parquet` row carrying a `block_id` is no longer
+  silently dropped.** The per-block override on `min_generation_mw` /
+  `max_generation_mw` was parsed and discarded, so a deck declaring
+  per-block thermal capacity loaded cleanly while every stage was folded to
+  one hours-weighted value, misallocating must-run energy and over-allowing
+  capacity. The block-scoped override now reaches the LP.
+
+- **`training/dictionaries/bounds.parquet` no longer reports an
+  unconditionally-null `block_id`.** The column existed, but every row wrote
+  `null` regardless of whether the resolved bound was block-scoped,
+  under-reporting the resolved model for any study using the block axis. It
+  now emits a row per resolved per-block override; a study with none
+  produces a byte-identical file.
+
 ## [0.12.0] - 2026-07-21
 
 ### Added

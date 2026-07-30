@@ -30,13 +30,18 @@ use cobre_sddp::{
 use cobre_solver::{ActiveSolver, SolverInterface};
 
 mod common;
-use common::StubComm;
-use common::build_setup_for_case;
-use common::fresh_setup_with;
+use common::{StubComm, build_setup_for_case, fresh_setup_with};
 
-/// Train a case (`StubComm`, seed 42, 1 thread) and return the result plus the
-/// live solver, so callers can inspect `solver.statistics()` after training.
-fn run_deterministic_with_solver(case_dir: &Path) -> (cobre_sddp::TrainingResult, ActiveSolver) {
+/// Train a case (`StubComm`, `ActiveSolver`, seed 42, 1 thread) and return the
+/// setup, the canonicalized system, the training result, and the live solver.
+fn train_deterministic_case(
+    case_dir: &Path,
+) -> (
+    StudySetup,
+    cobre_core::System,
+    cobre_sddp::TrainingResult,
+    ActiveSolver,
+) {
     let config_path = case_dir.join("config.json");
     let config = cobre_io::parse_config(&config_path).expect("config must parse");
 
@@ -60,39 +65,24 @@ fn run_deterministic_with_solver(case_dir: &Path) -> (cobre_sddp::TrainingResult
         .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
         .expect("train must return Ok");
     assert!(outcome.error.is_none(), "expected no training error");
-    (outcome.result, solver)
+    (setup, system, outcome.result, solver)
 }
 
-/// Train a case (`StubComm`, `ActiveSolver`, seed 42, 1 thread) and return the
-/// setup (for post-train state introspection via `stage_state()`, or driving
-/// a subsequent simulation), the canonicalized system, and the training result.
+/// Train a case and return the result plus the live solver, so callers can
+/// inspect `solver.statistics()` after training.
+fn run_deterministic_with_solver(case_dir: &Path) -> (cobre_sddp::TrainingResult, ActiveSolver) {
+    let (_setup, _system, result, solver) = train_deterministic_case(case_dir);
+    (result, solver)
+}
+
+/// Train a case and return the setup (for post-train state introspection via
+/// `stage_state()`, or driving a subsequent simulation), the canonicalized
+/// system, and the training result.
 fn run_deterministic_with_setup(
     case_dir: &Path,
 ) -> (StudySetup, cobre_core::System, cobre_sddp::TrainingResult) {
-    let config_path = case_dir.join("config.json");
-    let config = cobre_io::parse_config(&config_path).expect("config must parse");
-
-    let system = cobre_io::load_case(case_dir).expect("load_case must succeed");
-
-    let prepare_result =
-        prepare_stochastic(system, case_dir, &config, 42, &ScenarioSource::default())
-            .expect("prepare_stochastic must succeed");
-    let system = prepare_result.system;
-    let stochastic = prepare_result.stochastic;
-
-    let hydro_models =
-        prepare_hydro_models(&system, case_dir, false).expect("prepare_hydro_models must succeed");
-
-    let mut setup = build_setup_for_case(case_dir, &config, &system, stochastic, hydro_models);
-
-    let comm = StubComm;
-    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
-
-    let outcome = setup
-        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
-        .expect("train must return Ok");
-    assert!(outcome.error.is_none(), "expected no training error");
-    (setup, system, outcome.result)
+    let (setup, system, result, _solver) = train_deterministic_case(case_dir);
+    (setup, system, result)
 }
 
 /// Train a case (`StubComm`, `ActiveSolver`, seed 42, 1 thread) and return the result.
@@ -226,6 +216,72 @@ fn write_energy_productivity_override(
     .expect("valid RecordBatch for hydro_energy_productivity override");
 
     let file = std::fs::File::create(dest).expect("create hydro_energy_productivity.parquet");
+    let mut writer = ArrowWriter::try_new(file, schema, None).expect("ArrowWriter for override");
+    writer.write(&batch).expect("write override batch");
+    writer.close().expect("close override writer");
+}
+
+/// Recursively copies `src` into a fresh [`tempfile::TempDir`], skipping the
+/// gitignored `output/` subtree. Materializes an alternate bound-file
+/// configuration of a committed case without mutating the tracked fixture.
+fn copy_case_dir(src: &Path) -> tempfile::TempDir {
+    fn copy_recursive(src: &Path, dst: &Path) {
+        std::fs::create_dir_all(dst).expect("create_dir_all for case copy");
+        for entry in std::fs::read_dir(src).expect("read_dir for case copy") {
+            let entry = entry.expect("dir entry for case copy");
+            let file_type = entry.file_type().expect("file_type for case copy");
+            let src_path = entry.path();
+            if file_type.is_dir() {
+                if entry.file_name() == "output" {
+                    continue;
+                }
+                copy_recursive(&src_path, &dst.join(entry.file_name()));
+            } else {
+                std::fs::copy(&src_path, dst.join(entry.file_name()))
+                    .expect("copy file for case copy");
+            }
+        }
+    }
+    let tmp = tempfile::tempdir().expect("tempdir must succeed");
+    copy_recursive(src, tmp.path());
+    tmp
+}
+
+/// Writes `constraints/thermal_bounds.parquet` at `dest` with a single
+/// stage-wide (`block_id = NULL`) row overriding `max_generation_mw` for
+/// `thermal_id` at `stage_id` — the hours-weighted-fold configuration (one
+/// value applied to every block of the stage), as opposed to a per-block row.
+fn write_stage_wide_thermal_bound(
+    dest: &Path,
+    thermal_id: i32,
+    stage_id: i32,
+    max_generation_mw: f64,
+) {
+    use arrow::array::{Float64Array, Int32Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
+    use std::sync::Arc;
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("thermal_id", DataType::Int32, false),
+        Field::new("stage_id", DataType::Int32, false),
+        Field::new("max_generation_mw", DataType::Float64, true),
+        Field::new("block_id", DataType::Int32, true),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int32Array::from(vec![thermal_id])),
+            Arc::new(Int32Array::from(vec![stage_id])),
+            Arc::new(Float64Array::from(vec![max_generation_mw])),
+            Arc::new(Int32Array::from(vec![None::<i32>])),
+        ],
+    )
+    .expect("valid RecordBatch for stage-wide thermal bound override");
+
+    let file = std::fs::File::create(dest).expect("create thermal_bounds.parquet override");
     let mut writer = ArrowWriter::try_new(file, schema, None).expect("ArrowWriter for override");
     writer.write(&batch).expect("write override batch");
     writer.close().expect("close override writer");
@@ -1945,7 +2001,7 @@ fn d18_ncs_commissioning_window() {
 /// ## PAR(1) model
 ///
 /// psi = 0.5 at all stages, mean = 100 m3/s, std ~ 0 (deterministic).
-/// Initial lag (past_inflows) = 200 m3/s.
+/// Initial lag seed = 200 m3/s.
 ///
 /// ## Expected inflows with correct lag shift
 ///
@@ -2094,7 +2150,8 @@ fn incremental_lb_reduces_load_model_count() {
 ///     storage 0–150 hm3, PAR(2) with psi = [0.4, 0.2], mean = 25 m3/s
 /// - Deterministic load: 100 MW per stage
 /// - Initial storage: H0 = 100 hm3, H1 = 75 hm3
-/// - Past inflows: H0 = [50, 45] m3/s, H1 = [30, 28] m3/s
+/// - Pre-study lag seed (Nov/Dec 2023 `recent_observations`): H0 = [50, 45] m3/s,
+///   H1 = [30, 28] m3/s
 /// - 3 stages × 730 h, `inflow_non_negativity: {method: "truncation"}`
 ///
 /// ## What this tests
@@ -2129,27 +2186,13 @@ fn d19_multi_hydro_par_truncation() {
 
 /// Expected lower bound for D19 (2-hydro PAR(2) with truncation, 3 stages).
 ///
-/// Empirical, not hand-computable (2-hydro × 2-lag state space). D19's 3 study
-/// stages all carry `season_id=0` in 2024, so `precompute_noise_groups` assigns
-/// one group ID and `generate_opening_tree` makes stages 1 and 2 share stage 0's
-/// correlated noise draws — a different but still deterministic optimal cost.
-///
-/// A lag-major/hydro-major indexing regression reads the wrong lag for each
-/// hydro in PAR evaluation, producing a different cost.
-///
-/// Re-blessed when `residual_std_ratio` became closure-derived: D19 supplies
-/// its AR(2) coefficients directly (both hydros share the single `season_id=0`
-/// used by every stage, so there is no per-season order heterogeneity —
-/// structurally uniform, not mixed), with a stored `residual_std_ratio` of
-/// `1.0` for both hydros that was never fit against ψ = `[0.5, 0.3]` (hydro 0)
-/// / `[0.4, 0.2]` (hydro 1). The closure-derived values (`0.667618...` /
-/// `0.848528...`) differ from that stored literal far outside the mixed-order
-/// `~1e-4` band — the same stored-value-inconsistency class as `D30` (see
-/// `common::parity_hash::case_dir`'s doc), not a closure defect. The resulting
-/// cost shift here is small only because `std_m3s = 0.001` keeps the absolute
-/// noise scale (`σ = s·r`) tiny regardless of `r`. Determinism (same input ->
-/// same output; declaration-order / rank invariance) is unaffected.
-pub const D19_EXPECTED_COST: f64 = 1_334_681.498_530_595;
+/// Empirical, not hand-computable (2-hydro × 2-lag state space). D19 is a
+/// 2-hydro AR(2) windowed case whose stage-0 lags reference the pre-study
+/// Nov/Dec 2023 seasons (`stage_id = -1, -2`); the seed `[50, 45, 30, 28]`
+/// (hydro 0 then hydro 1, most-recent-lag-first) produces this cost, while a
+/// zero seed or a wrong-hydro-major seed produces a materially different one
+/// — the hydro-major/lag-major lag-indexing regression guard.
+pub const D19_EXPECTED_COST: f64 = 1_334_568.013_586_834_3;
 
 /// Operational violation slacks: 1 hydro with active min_outflow, max_outflow,
 /// min_turbined, and min_generation bounds.
@@ -2199,18 +2242,16 @@ fn d20_operational_violations() {
     let scenario = &scenario_results[0];
     assert_eq!(scenario.stages.len(), 2);
 
-    let mut found_outflow_below = false;
-    let mut found_turbine_below = false;
-    for stage_result in &scenario.stages {
-        for hydro_result in &stage_result.hydros {
-            if hydro_result.outflow_slack_below_m3s > 1e-10 {
-                found_outflow_below = true;
-            }
-            if hydro_result.turbined_slack_m3s > 1e-10 {
-                found_turbine_below = true;
-            }
-        }
-    }
+    let found_outflow_below = scenario
+        .stages
+        .iter()
+        .flat_map(|s| &s.hydros)
+        .any(|h| h.outflow_slack_below_m3s > 1e-10);
+    let found_turbine_below = scenario
+        .stages
+        .iter()
+        .flat_map(|s| &s.hydros)
+        .any(|h| h.turbined_slack_m3s > 1e-10);
     assert!(
         found_outflow_below,
         "D20: expected non-zero outflow_slack_below_m3s"
@@ -3365,8 +3406,6 @@ fn d30_multi_resolution_loads_and_trains() {
     );
 }
 
-// ── integration test ──────────────────────────────────────────────
-
 /// The frozen-template simulation path must produce bit-for-bit identical
 /// per-scenario costs to the legacy fallback path (rel error == 0.0, within
 /// 1e-12), confirming `freeze_rows_into_template` builds a mathematically
@@ -3568,6 +3607,71 @@ fn d43_storage_only_cut_converges() {
             "D43: stored cut at pool-1 slot {slot} must have reduced length N={n_hydros}",
         );
     }
+}
+
+/// D43's stage 0 starts exactly on a month boundary, so the windowed accumulator
+/// seed is inert (`accum = weight = 0.0`, per `derive_inflow_seeds`) and the
+/// windowed cast collapses to the pre-windowing month lookup — an observation-free
+/// case that must reproduce its pre-windowing `final_lb` bit-for-bit. The `to_bits`
+/// golden is HiGHS-only (`#[cfg]`-gated): bit-exactness is backend-specific — CLP's
+/// simplex reaches a different-but-valid vertex — so removing the gate breaks the
+/// CLP suite. D43's `assert_cost` above tolerance-pins the same value for both
+/// backends; this adds the bit-for-bit no-drift gate on the golden HiGHS path.
+#[cfg(feature = "highs")]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+#[test]
+fn test_observation_free_case_bit_exact_pre_epic() {
+    let case_dir = Path::new("../../examples/deterministic/d43-storage-only-cut");
+    let result = run_deterministic(case_dir);
+
+    assert_eq!(
+        result.final_lb.to_bits(),
+        0x4166_3c9e_e81a_835au64,
+        "D43 final_lb must reproduce its pre-windowing value bit-for-bit: got {} ({:#018x})",
+        result.final_lb,
+        result.final_lb.to_bits()
+    );
+}
+
+/// D06 is the variable-head FPHA case carrying the "FPHA uses average storage"
+/// contract (`-gammaV/2` on BOTH storage columns) — the FPHA plane rows are
+/// where the per-cell apportionment concentrates, so a no-drift pin here covers
+/// the partitioned production-row path the synthetic `cell_partition_gates`
+/// fixtures cannot: a real fitted hyperplane set on a real single-bus case. The
+/// `to_bits` golden is HiGHS-only (`#[cfg]`-gated): bit-exactness is
+/// backend-specific — CLP's simplex reaches a different-but-valid vertex — so
+/// removing the gate breaks the CLP suite. `d06_fpha_variable_head` above
+/// tolerance-pins the same value for both backends; this adds the bit-for-bit
+/// no-drift gate on the golden HiGHS path.
+#[cfg(feature = "highs")]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow: run with --features slow-tests"
+)]
+#[test]
+fn test_fpha_variable_head_case_bit_exact() {
+    let case_dir = Path::new("../../examples/deterministic/d06-fpha-variable-head");
+
+    // rho_eq is irrelevant to D06 economics (see d06_fpha_variable_head above);
+    // pinned to the same neutral value so this golden's setup matches exactly.
+    write_energy_productivity_override(
+        &case_dir.join("system/hydro_energy_productivity.parquet"),
+        0,
+        1.0,
+    );
+
+    let result = run_deterministic(case_dir);
+
+    assert_eq!(
+        result.final_lb.to_bits(),
+        0x4148_da6e_907f_6e5cu64,
+        "D06 final_lb must reproduce bit-for-bit: got {} ({:#018x})",
+        result.final_lb,
+        result.final_lb.to_bits()
+    );
 }
 
 /// D44: sub-stage-delay bucket dual and per-stage thermal split.
@@ -5097,6 +5201,477 @@ fn d33_converges_to_known_optimum() {
     assert_cost(result.final_lb, 553.333_333_333_3, 1e-2, "D33");
 }
 
+/// D51: split-plant two-bus fixture — the repo's first multi-cell hydro plant.
+///
+/// One FPHA hydro (H0) declares two unit groups on two different buses (B0,
+/// B1), so `HydroCellIndex` partitions it into two cells (one per bus). Both
+/// groups keep their own declared envelope at every stage (H0-B0: 30.0 MW /
+/// 42.0 m3/s; H0-B1: 20.0 MW / 28.0 m3/s — declared sum 50.0 MW / 70.0 m3/s,
+/// strictly below the plant's own declared 60.0 MW / 80.0 m3/s, satisfying
+/// rule 41 with slack). A single plant-axis `hydro_bounds.parquet` row LOWERS
+/// the plant's resolved envelope at stage 0 to 28.0 MW / 32.0 m3/s — strictly
+/// between the two groups' declared values — so the per-cell `min(group box,
+/// plant envelope)` resolution (spec section 1.3) binds on the PLANT term for
+/// H0-B0's cell and on the GROUP term for H0-B1's cell at that stage; rule 43
+/// permits this because it only ever lowers, never raises, the plant's own
+/// declared value. A connecting line (absolute `capacity.direct_mw`/
+/// `reverse_mw`, no `exchange_factors.json`) carries B1's hydro surplus to
+/// B0, which cannot meet its own 45 MW load from its local cell alone; a
+/// thermal at B0 has a per-block override in `thermal_bounds.parquet` (stage
+/// 0's PEAK block caps at 8.0 MW, OFFPEAK at 25.0 MW) covering the residual
+/// at stage 1.
+///
+/// This case is not hand-derived symbolically (the FPHA plane's storage term
+/// couples the two stages); instead it is pinned at its observed converged
+/// value, matching the established pattern for other structurally complex
+/// fixtures in this suite (e.g. D31, D40, D42). `final_lb == final_ub`
+/// bit-for-bit on HiGHS; CLP reproduces it to ~5e-10 (both well inside the
+/// tolerance below). Deliberately NOT gated behind `slow-tests` — the
+/// 2-stage horizon converges in a fraction of a second.
+#[test]
+fn d51_split_plant_two_bus_converges_to_known_optimum() {
+    let case_dir = Path::new("../../examples/deterministic/d51-split-plant-two-bus");
+    let result = run_deterministic(case_dir);
+    assert!(
+        result.final_gap.abs() < 1e-6,
+        "D51: gap={:.2e}",
+        result.final_gap
+    );
+    assert!(
+        result.iterations <= 10,
+        "D51: iterations={}",
+        result.iterations
+    );
+    assert_cost(result.final_lb, 2_277_012.200_056_066_3, 1.0, "D51");
+}
+
+/// D51: per-`(stage, block)` bit-exact sum of the split plant's
+/// `hydro_bus_generation` rows against its own `hydros` row.
+///
+/// `extract_hydro_bus_generation` sums each cell's LP column in the SAME
+/// ascending-cell order `extract_hydro_per_block`'s own `.sum()` consumes, so
+/// summing the per-bus rows in the writer's own row order reproduces the
+/// plant row bit-for-bit for both `turbined_m3s` and `generation_mw`. The
+/// `generation_mw` equality is an FPHA/single-cell property — each cell reads
+/// its OWN independent LP column, with no multiply-then-sum reordering — and
+/// is deliberately NOT claimed for a `ConstantProductivity` multi-cell plant,
+/// where `generation_mw` is `turbined_m3s * productivity` per cell and
+/// `(Σq)·ρ != Σ(q·ρ)` in floating point (spec section 7.10).
+#[test]
+fn d51_hydro_bus_generation_sums_bit_exactly_to_plant_rows() {
+    let case_dir = Path::new("../../examples/deterministic/d51-split-plant-two-bus");
+    let (_result, scenario_results, _summary) = run_with_simulation(case_dir);
+
+    assert_eq!(
+        scenario_results.len(),
+        1,
+        "D51: exactly 1 simulated scenario"
+    );
+    let scenario = &scenario_results[0];
+    assert_eq!(scenario.stages.len(), 2, "D51: exactly 2 stages");
+
+    let mut checked_blocks = 0_usize;
+    for stage in &scenario.stages {
+        assert_eq!(
+            stage.hydro_bus_generation.len(),
+            2 * stage.hydros.len(),
+            "D51 stage {}: 2 bus rows per plant row (one per cell)",
+            stage.stage_id
+        );
+        for plant_row in &stage.hydros {
+            let bus_sum_turbined: f64 = stage
+                .hydro_bus_generation
+                .iter()
+                .filter(|r| r.hydro_id == plant_row.hydro_id && r.block_id == plant_row.block_id)
+                .map(|r| r.turbined_m3s)
+                .sum();
+            let bus_sum_generation: f64 = stage
+                .hydro_bus_generation
+                .iter()
+                .filter(|r| r.hydro_id == plant_row.hydro_id && r.block_id == plant_row.block_id)
+                .map(|r| r.generation_mw)
+                .sum();
+
+            assert_eq!(
+                bus_sum_turbined.to_bits(),
+                plant_row.turbined_m3s.to_bits(),
+                "D51 stage {} block {:?}: bus-row turbined_m3s sum ({bus_sum_turbined}) must \
+                 equal the plant row's turbined_m3s ({}) bit-for-bit",
+                stage.stage_id,
+                plant_row.block_id,
+                plant_row.turbined_m3s
+            );
+            assert_eq!(
+                bus_sum_generation.to_bits(),
+                plant_row.generation_mw.to_bits(),
+                "D51 stage {} block {:?}: bus-row generation_mw sum ({bus_sum_generation}) must \
+                 equal the plant row's generation_mw ({}) bit-for-bit (FPHA/single-cell \
+                 property, see this test's doc comment)",
+                stage.stage_id,
+                plant_row.block_id,
+                plant_row.generation_mw
+            );
+            checked_blocks += 1;
+        }
+    }
+    assert_eq!(
+        checked_blocks, 3,
+        "D51: 2 blocks at stage 0 + 1 at stage 1 = 3 (stage, block) pairs"
+    );
+}
+
+/// D52: per-block `max_generation_mw` cap binds in the block it targets, not
+/// a neighbouring one.
+///
+/// T-CHEAP (thermal 0, cost 0.0 $/MWh) carries a per-block override at stage 0:
+/// PEAK (block 0) caps it at 100.0 MW, OFFPEAK (block 1) at 500.0 MW. The
+/// deterministic bus load is 150.0 MW in every block. In PEAK the cap sits
+/// strictly below load, so T-CHEAP dispatches at exactly its own cap and the
+/// substitute source T-SUB (cost 300.0 $/MWh) covers the 50.0 MW shortfall;
+/// in OFFPEAK (cap 500.0 MW, above load) T-CHEAP alone covers the full
+/// 150.0 MW and T-SUB stays at zero. A resolver reading a single stage-level
+/// bound, or OFFPEAK's override instead of PEAK's, would let T-CHEAP
+/// dispatch at 150.0 MW (load) or 500.0 MW (the other block's cap) in PEAK.
+#[test]
+fn d52_per_block_cap_binds_in_peak_block() {
+    let case_dir = Path::new("../../examples/deterministic/d52-per-block-thermal-fold");
+    let (_result, scenario_results, _summary) = run_with_simulation(case_dir);
+
+    assert_eq!(
+        scenario_results.len(),
+        1,
+        "D52: exactly 1 simulated scenario"
+    );
+    let stage0 = &scenario_results[0].stages[0];
+    assert_eq!(stage0.stage_id, 0, "D52: first stage result is stage 0");
+
+    let peak_cheap = stage0
+        .thermals
+        .iter()
+        .find(|t| t.thermal_id == 0 && t.block_id == Some(0))
+        .expect("D52: T-CHEAP row at (stage 0, block 0 = PEAK) must exist");
+    assert!(
+        (peak_cheap.generation_mw - 100.0).abs() < 1e-6,
+        "D52: PEAK-block T-CHEAP generation must equal its own block's cap \
+         (100.0 MW), got {} — a stage-level or off-peak bound would read \
+         150.0 (load) or 500.0 (the other block's cap)",
+        peak_cheap.generation_mw
+    );
+
+    let offpeak_cheap = stage0
+        .thermals
+        .iter()
+        .find(|t| t.thermal_id == 0 && t.block_id == Some(1))
+        .expect("D52: T-CHEAP row at (stage 0, block 1 = OFFPEAK) must exist");
+    assert!(
+        (offpeak_cheap.generation_mw - 150.0).abs() < 1e-6,
+        "D52: OFFPEAK-block T-CHEAP generation must equal full load \
+         (150.0 MW, under its own 500.0 MW cap), got {}",
+        offpeak_cheap.generation_mw
+    );
+
+    let peak_sub = stage0
+        .thermals
+        .iter()
+        .find(|t| t.thermal_id == 1 && t.block_id == Some(0))
+        .expect("D52: T-SUB row at (stage 0, block 0 = PEAK) must exist");
+    assert!(
+        (peak_sub.generation_mw - 50.0).abs() < 1e-6,
+        "D52: T-SUB must cover the 50.0 MW PEAK-block shortfall \
+         (load 150.0 - cap 100.0), got {}",
+        peak_sub.generation_mw
+    );
+}
+
+/// D52's own deck inputs, named once so the fold-delta derivation below is a
+/// pure function of them rather than a re-typed literal.
+const D52_LOAD_MW: f64 = 150.0;
+const D52_PEAK_CAP_MW: f64 = 100.0;
+const D52_OFFPEAK_CAP_MW: f64 = 500.0;
+const D52_PEAK_HOURS: f64 = 100.0;
+const D52_OFFPEAK_HOURS: f64 = 300.0;
+const D52_CHEAP_COST_PER_MWH: f64 = 0.0;
+const D52_SUBSTITUTE_COST_PER_MWH: f64 = 300.0;
+
+/// D52: the objective difference between the committed per-block bound
+/// configuration and its hours-weighted fold to one stage value equals a
+/// closed-form expression of the deck's own inputs — never a value read off
+/// either run.
+///
+/// ## Derivation
+///
+/// The fold collapses stage 0's two per-block caps into one stage-wide value
+/// (the same average this suite's helper writes into the folded copy):
+/// `fold = (PEAK_HOURS·PEAK_CAP + OFFPEAK_HOURS·OFFPEAK_CAP) /
+/// (PEAK_HOURS + OFFPEAK_HOURS) = (100·100 + 300·500) / 400 = 400.0 MW`.
+/// Because `fold (400.0) >= LOAD_MW (150.0)`, the folded configuration lets
+/// T-CHEAP alone cover the full load in every block of stage 0 — including
+/// the former PEAK block — so T-SUB never dispatches there. The per-block
+/// configuration instead caps T-CHEAP at `PEAK_CAP_MW` in the PEAK block
+/// alone, forcing T-SUB to cover the `shortfall = LOAD_MW - PEAK_CAP_MW =
+/// 50.0` MW residual at `SUBSTITUTE_COST_PER_MWH`. OFFPEAK and stage 1 are
+/// unaffected by the fold (both configurations' caps there stay >= load), so
+/// the entire objective delta is confined to the PEAK block:
+///
+/// `delta = shortfall_MW × (SUBSTITUTE_COST_PER_MWH − CHEAP_COST_PER_MWH) ×
+/// PEAK_HOURS`
+///
+/// `CHEAP_COST_PER_MWH` is 0.0 by construction (T-CHEAP is the deck's
+/// zero-cost source), so this collapses to `shortfall_MW × substitute_cost ×
+/// peak_hours` — kept here in the general cost-difference form so the
+/// derivation stays correct if T-CHEAP's cost is ever changed off zero.
+#[test]
+fn d52_hours_weighted_fold_delta_matches_hand_derivation() {
+    let case_dir = Path::new("../../examples/deterministic/d52-per-block-thermal-fold");
+
+    let per_block_result = run_deterministic(case_dir);
+    assert!(
+        per_block_result.final_gap.abs() < 1e-6,
+        "D52 per-block: gap={:.2e}",
+        per_block_result.final_gap
+    );
+    assert!(
+        (per_block_result.final_lb - per_block_result.final_ub).abs() < 1e-6,
+        "D52 per-block: LB ({}) must equal UB ({}) to tolerance",
+        per_block_result.final_lb,
+        per_block_result.final_ub
+    );
+
+    let fold_cap_mw = (D52_PEAK_HOURS * D52_PEAK_CAP_MW + D52_OFFPEAK_HOURS * D52_OFFPEAK_CAP_MW)
+        / (D52_PEAK_HOURS + D52_OFFPEAK_HOURS);
+    assert!(
+        fold_cap_mw >= D52_LOAD_MW,
+        "D52: the fold ({fold_cap_mw} MW) must sit at or above load \
+         ({D52_LOAD_MW} MW), or the folded configuration would ALSO need \
+         T-SUB in the PEAK block, invalidating the single-term delta \
+         derivation below"
+    );
+
+    let folded_case = copy_case_dir(case_dir);
+    write_stage_wide_thermal_bound(
+        &folded_case
+            .path()
+            .join("constraints/thermal_bounds.parquet"),
+        0,
+        0,
+        fold_cap_mw,
+    );
+    let folded_result = run_deterministic(folded_case.path());
+    assert!(
+        folded_result.final_gap.abs() < 1e-6,
+        "D52 folded: gap={:.2e}",
+        folded_result.final_gap
+    );
+    assert!(
+        (folded_result.final_lb - folded_result.final_ub).abs() < 1e-6,
+        "D52 folded: LB ({}) must equal UB ({}) to tolerance",
+        folded_result.final_lb,
+        folded_result.final_ub
+    );
+
+    let shortfall_mw = D52_LOAD_MW - D52_PEAK_CAP_MW;
+    let expected_delta =
+        shortfall_mw * (D52_SUBSTITUTE_COST_PER_MWH - D52_CHEAP_COST_PER_MWH) * D52_PEAK_HOURS;
+
+    let actual_delta = per_block_result.final_lb - folded_result.final_lb;
+    assert!(
+        (actual_delta - expected_delta).abs() < 1e-6,
+        "D52: per-block cost ({}) minus folded cost ({}) = {actual_delta}, \
+         expected the hand-derived delta {expected_delta} (shortfall \
+         {shortfall_mw} MW x cost delta {} $/MWh x {} peak hours)",
+        per_block_result.final_lb,
+        folded_result.final_lb,
+        D52_SUBSTITUTE_COST_PER_MWH - D52_CHEAP_COST_PER_MWH,
+        D52_PEAK_HOURS
+    );
+}
+
+/// D53: a per-cell min-turbine floor genuinely BINDS under water starvation —
+/// the behavioral fixture for the per-cell min-floor reversal (spec §7.9,
+/// `.claude/rules/sddp.md`'s min-floor contract).
+///
+/// Same split-plant topology as D51 (one FPHA hydro, unit group 0 on bus 0 /
+/// cell A with no floor, unit group 1 on bus 1 / cell B with
+/// `min_turbined_m3s = 27.0`), but WITHOUT D51's max-side group-bounds
+/// overrides, and with deliberately low inflow (`3.0`/`2.0 m3/s` at stages
+/// 0/1) so the reservoir cannot sustain cell B's floor: total available
+/// water is `120.0 hm3` (initial storage) `+ (3.0 + 2.0) * 730 * 0.0036 hm3`
+/// (inflow) `= 133.14 hm3`, while cell B's floor alone demands
+/// `27.0 * 730 * 0.0036 * 2 = 141.9 hm3` over the two stages — a shortfall
+/// that cannot be closed even with cell A turbining nothing (cell A has no
+/// floor and is economically free to do so). This is genuine water
+/// starvation, not a structural cap: cell B's own `max_turbined_m3s` stays
+/// `28.0` at every stage, strictly above the `27.0` floor, so the shortfall
+/// below can only come from insufficient water, never an unreachable column
+/// bound.
+///
+/// `final_lb == final_ub` to within `1e-6` (both backends observed
+/// bit-identical); pinned at the observed converged value, matching the
+/// established pattern for structurally complex FPHA fixtures (D31, D40,
+/// D42, D51) — the FPHA plane's storage term couples the two stages, so this
+/// case is not hand-derived symbolically. What IS hand-derived and asserted
+/// directly is the min-floor contract itself: cell B's actual turbined flow
+/// plus its slack reaches EXACTLY the declared floor every block, storage is
+/// fully drained to `0.0` by the terminal stage (proving water scarcity, not
+/// a capacity artifact), and each stage's `turbined_violation_cost` equals
+/// `shortfall * turbined_violation_below_cost * block_hours` — "penalty =
+/// shortfall × plant price" — computed from the SAME observed slack the
+/// floor assertion above uses, read straight off `SimulationCostResult`
+/// rather than re-derived.
+#[test]
+fn d53_hydro_cell_min_floor_binds_under_water_starvation() {
+    const FLOOR_M3S: f64 = 27.0;
+    const TURBINED_VIOLATION_BELOW_COST: f64 = 10_000.0;
+    const PEAK_HOURS: f64 = 200.0;
+    const OFFPEAK_HOURS: f64 = 530.0;
+    const STAGE1_HOURS: f64 = 730.0;
+
+    let case_dir = Path::new("../../examples/deterministic/d53-hydro-cell-min-floor");
+    let (result, scenario_results, _summary) = run_with_simulation(case_dir);
+
+    assert!(
+        result.final_gap.abs() < 1e-6,
+        "D53: gap={:.2e}",
+        result.final_gap
+    );
+    assert!(
+        (result.final_lb - result.final_ub).abs() < 1e-6,
+        "D53: LB ({}) must equal UB ({}) to tolerance",
+        result.final_lb,
+        result.final_ub
+    );
+    assert!(
+        result.iterations <= 10,
+        "D53: iterations={}",
+        result.iterations
+    );
+    assert_cost(result.final_lb, 40_373_560.917_320_274, 1.0, "D53");
+
+    assert_eq!(
+        scenario_results.len(),
+        1,
+        "D53: exactly 1 simulated scenario"
+    );
+    let scenario = &scenario_results[0];
+    assert_eq!(scenario.stages.len(), 2, "D53: exactly 2 stages");
+
+    let mut checked_blocks = 0_usize;
+    for stage in &scenario.stages {
+        assert_eq!(
+            stage.costs.len(),
+            1,
+            "D53 stage {}: one stage-level cost aggregate",
+            stage.stage_id
+        );
+        let mut expected_turbined_violation_cost = 0.0_f64;
+
+        for h in &stage.hydros {
+            assert_eq!(h.hydro_id, 0, "D53: the only hydro is H0");
+            let hours = match (stage.stage_id, h.block_id) {
+                (0, Some(0)) => PEAK_HOURS,
+                (0, Some(1)) => OFFPEAK_HOURS,
+                (1, Some(0)) => STAGE1_HOURS,
+                other => panic!("D53: unexpected (stage, block) {other:?}"),
+            };
+
+            // The floor genuinely binds: actual turbined flow is strictly
+            // below the declared floor, and the slack picks up exactly the
+            // difference (the soft row's `q_c + slack_c >= floor` holds as an
+            // equality at the cost-minimizing optimum).
+            assert!(
+                h.turbined_m3s < FLOOR_M3S - 1e-6,
+                "D53 stage {} block {:?}: turbined ({}) must fall strictly below the \
+                 {FLOOR_M3S} m3/s floor — the fixture's whole point is that it starves",
+                stage.stage_id,
+                h.block_id,
+                h.turbined_m3s
+            );
+            assert!(
+                h.turbined_slack_m3s > 1e-6,
+                "D53 stage {} block {:?}: turbined_slack ({}) must be strictly positive \
+                 — the floor must be active, not merely declared",
+                stage.stage_id,
+                h.block_id,
+                h.turbined_slack_m3s
+            );
+            assert!(
+                (h.turbined_m3s + h.turbined_slack_m3s - FLOOR_M3S).abs() < 1e-6,
+                "D53 stage {} block {:?}: turbined ({}) + slack ({}) must reach the \
+                 {FLOOR_M3S} m3/s floor exactly",
+                stage.stage_id,
+                h.block_id,
+                h.turbined_m3s,
+                h.turbined_slack_m3s
+            );
+            assert_eq!(
+                h.generation_slack_mw, 0.0,
+                "D53 stage {} block {:?}: the generation floor is declared 0.0 and must \
+                 stay inert — only the turbined floor is exercised by this fixture",
+                stage.stage_id, h.block_id
+            );
+
+            expected_turbined_violation_cost +=
+                h.turbined_slack_m3s * TURBINED_VIOLATION_BELOW_COST * hours;
+            checked_blocks += 1;
+        }
+
+        // "Penalty = shortfall × plant price": the stage's reported
+        // turbined-violation cost equals the SAME slack values asserted
+        // above, priced at the plant's declared `turbined_violation_below_cost`
+        // (10000.0, `penalties.json`) for each block's own hours — never
+        // divided by the plant's cell count (there is only one floor-bearing
+        // cell here, so a `1/|cells|` apportionment bug would still show up
+        // as a factor-of-2 understatement against cell A's own zero floor
+        // contributing nothing).
+        assert!(
+            (stage.costs[0].turbined_violation_cost - expected_turbined_violation_cost).abs()
+                < 1e-3,
+            "D53 stage {}: reported turbined_violation_cost ({}) must equal shortfall * \
+             price * hours ({expected_turbined_violation_cost})",
+            stage.stage_id,
+            stage.costs[0].turbined_violation_cost
+        );
+        assert_eq!(
+            stage.costs[0].generation_violation_cost, 0.0,
+            "D53 stage {}: the generation floor is inert, so its violation cost must be 0.0",
+            stage.stage_id
+        );
+
+        // Storage is fully drained by the terminal stage: the shortfall above
+        // is genuine water starvation, not a structural cap set below the
+        // floor (cell B's own max_turbined_m3s stays 28.0 > 27.0 throughout).
+        if stage.stage_id == 1 {
+            for h in &stage.hydros {
+                assert_eq!(
+                    h.storage_final_hm3, 0.0,
+                    "D53: storage must be fully drained by the terminal stage, proving the \
+                     floor's shortfall comes from water scarcity, not an unreachable cap"
+                );
+            }
+        }
+
+        // Cell A (bus 0) carries no floor and is economically free to turbine
+        // nothing, ceding all available water to cell B (bus 1) — confirming
+        // the plant-level slack summed above is entirely cell B's own, never
+        // apportioned across the plant's two cells.
+        for hb in &stage.hydro_bus_generation {
+            if hb.bus_id == 0 {
+                assert!(
+                    hb.turbined_m3s.abs() < 1e-6,
+                    "D53 stage {} block {:?}: cell A (bus 0) must turbine ~0.0, got {}",
+                    stage.stage_id,
+                    hb.block_id,
+                    hb.turbined_m3s
+                );
+            }
+        }
+    }
+    assert_eq!(
+        checked_blocks, 3,
+        "D53: 2 blocks at stage 0 + 1 at stage 1 = 3 (stage, block) pairs"
+    );
+}
+
 /// Chronological-blocks telescoping ⇒ parallel bound-agreement anchor.
 ///
 /// Pins the "telescoping ⇒ parallel agreement when interiors are inert" contract
@@ -5113,11 +5688,11 @@ mod chronological_telescoping {
         StageStateConfig,
     };
     use cobre_core::{
-        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, DeficitSegment,
-        EntityId, HydroGenerationModel, HydroPenalties, HydroStageBounds, HydroStagePenalties,
-        HydroStorage, InitialConditions, LineStageBounds, LineStagePenalties, NcsStagePenalties,
-        PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
-        ResolvedPenalties, SystemBuilder, ThermalStageBounds,
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
+        EntityId, HydroBlockBounds, HydroGenerationModel, HydroPenalties, HydroStageBounds,
+        HydroStagePenalties, HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties,
+        NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds,
+        ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
     };
     use cobre_io::config::{
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
@@ -5127,8 +5702,7 @@ mod chronological_telescoping {
     };
     use cobre_solver::ActiveSolver;
 
-    use cobre_io::PolicyCheckpoint;
-    use cobre_io::output::policy::read_policy_checkpoint;
+    use cobre_io::{PolicyCheckpoint, read_policy_checkpoint};
     use cobre_sddp::FutureCostFunction;
     use cobre_sddp::orchestration::{CheckpointParams, write_checkpoint};
     use cobre_sddp::policy_export::build_stage_cut_records;
@@ -5267,6 +5841,10 @@ mod chronological_telescoping {
         let default_hydro_bounds = || HydroStageBounds {
             min_storage_hm3: 0.0,
             max_storage_hm3: 500.0,
+            filling_min_rate_m3s: 0.0,
+            water_withdrawal_m3s: 0.0,
+        };
+        let default_hydro_bounds_block = || HydroBlockBounds {
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
             min_outflow_m3s: 0.0,
@@ -5274,8 +5852,6 @@ mod chronological_telescoping {
             min_generation_mw: 0.0,
             max_generation_mw: 250.0,
             max_diversion_m3s: None,
-            filling_min_rate_m3s: 0.0,
-            water_withdrawal_m3s: 0.0,
         };
 
         let bounds = ResolvedBounds::new(
@@ -5290,20 +5866,23 @@ mod chronological_telescoping {
             },
             &BoundsDefaults {
                 hydro: default_hydro_bounds(),
+                hydro_block: default_hydro_bounds_block(),
                 thermal: ThermalStageBounds {
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 400.0,
                     cost_per_mwh: 100.0,
                 },
-                line: LineStageBounds {
+                thermal_block: ThermalBlockBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 400.0,
+                },
+                line_block: LineBlockBounds {
                     direct_mw: 0.0,
                     reverse_mw: 0.0,
                 },
-                pumping: PumpingStageBounds {
+                pumping_block: PumpingBlockBounds {
                     min_flow_m3s: 0.0,
                     max_flow_m3s: 0.0,
                 },
-                contract: ContractStageBounds {
+                contract_block: ContractBlockBounds {
                     min_mw: 0.0,
                     max_mw: 0.0,
                     price_per_mwh: 0.0,
@@ -5335,7 +5914,6 @@ mod chronological_telescoping {
                 value_hm3: 200.0,
             }],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             past_defluences: vec![],
@@ -5395,7 +5973,6 @@ mod chronological_telescoping {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::None,
                 },
-
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
@@ -5637,11 +6214,11 @@ mod chronological_attribution {
     use cobre_core::scenario::{InflowModel, LoadModel};
     use cobre_core::temporal::{Block, BlockMode, Stage};
     use cobre_core::{
-        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, DeficitSegment,
-        EntityId, HydroGenerationModel, HydroPenalties, HydroStageBounds, HydroStagePenalties,
-        HydroStorage, InitialConditions, LineStageBounds, LineStagePenalties, NcsStagePenalties,
-        PenaltiesCountsSpec, PenaltiesDefaults, PumpingStageBounds, ResolvedBounds,
-        ResolvedPenalties, SystemBuilder, ThermalStageBounds,
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
+        EntityId, HydroBlockBounds, HydroGenerationModel, HydroPenalties, HydroStageBounds,
+        HydroStagePenalties, HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties,
+        NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds,
+        ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
     };
     use cobre_io::config::{
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
@@ -5831,6 +6408,10 @@ mod chronological_attribution {
         let default_hydro_bounds = || HydroStageBounds {
             min_storage_hm3: 0.0,
             max_storage_hm3: 150.0,
+            filling_min_rate_m3s: 0.0,
+            water_withdrawal_m3s: 0.0,
+        };
+        let default_hydro_bounds_block = || HydroBlockBounds {
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
             min_outflow_m3s: 0.0,
@@ -5838,8 +6419,6 @@ mod chronological_attribution {
             min_generation_mw: 0.0,
             max_generation_mw: 10.0,
             max_diversion_m3s: None,
-            filling_min_rate_m3s: 0.0,
-            water_withdrawal_m3s: 0.0,
         };
 
         let bounds = ResolvedBounds::new(
@@ -5854,20 +6433,21 @@ mod chronological_attribution {
             },
             &BoundsDefaults {
                 hydro: default_hydro_bounds(),
-                thermal: ThermalStageBounds {
+                hydro_block: default_hydro_bounds_block(),
+                thermal: ThermalStageBounds { cost_per_mwh: 10.0 },
+                thermal_block: ThermalBlockBounds {
                     min_generation_mw: 0.0,
                     max_generation_mw: 100.0,
-                    cost_per_mwh: 10.0,
                 },
-                line: LineStageBounds {
+                line_block: LineBlockBounds {
                     direct_mw: 0.0,
                     reverse_mw: 0.0,
                 },
-                pumping: PumpingStageBounds {
+                pumping_block: PumpingBlockBounds {
                     min_flow_m3s: 0.0,
                     max_flow_m3s: 0.0,
                 },
-                contract: ContractStageBounds {
+                contract_block: ContractBlockBounds {
                     min_mw: 0.0,
                     max_mw: 0.0,
                     price_per_mwh: 0.0,
@@ -5905,7 +6485,6 @@ mod chronological_attribution {
                 },
             ],
             filling_storage: vec![],
-            past_inflows: vec![],
             past_anticipated_commitments: vec![],
             recent_observations: vec![],
             // Empty is safe: `build_initial_transit_bucket_state`'s history selection
@@ -5948,7 +6527,6 @@ mod chronological_attribution {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::None,
                 },
-
                 cost_scale_factor: None,
             },
             training: TrainingConfig {
