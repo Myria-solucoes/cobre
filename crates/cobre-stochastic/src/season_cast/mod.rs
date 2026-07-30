@@ -236,7 +236,7 @@ pub fn next_season_period_window(
 /// Resolve the period window immediately preceding `current`, the exact
 /// inverse of [`next_season_period_window`].
 #[must_use]
-pub fn previous_season_period_window(
+pub(crate) fn previous_season_period_window(
     season_map: &SeasonMap,
     season_def: &SeasonDefinition,
     current: &SeasonPeriodWindow,
@@ -290,7 +290,7 @@ pub fn previous_season_period_window(
     }
 }
 
-/// Walk [`previous_season_period_window`] `k` times from `anchor` (`k == 0` returns `anchor`).
+/// Walk `previous_season_period_window` `k` times from `anchor` (`k == 0` returns `anchor`).
 #[must_use]
 pub fn nth_previous_occurrence(
     season_map: &SeasonMap,
@@ -448,37 +448,11 @@ pub fn merge_layered_windows(
     merged
 }
 
-/// `[start, end)` day-spans where `conditioning` overrode `record` (both
-/// cover the day), coalesced into contiguous spans; empty when the two
-/// layers share no days.
-#[must_use]
-pub fn shadowed_spans(
-    record: &[RealizedWindow],
-    conditioning: &[RealizedWindow],
-) -> Vec<(NaiveDate, NaiveDate)> {
-    let cut_points = window_boundaries(record, conditioning);
-    let mut spans: Vec<(NaiveDate, NaiveDate)> = Vec::new();
-
-    for segment in cut_points.windows(2) {
-        let (segment_start, segment_end) = (segment[0], segment[1]);
-        let shadowed = covering_value(record, segment_start).is_some()
-            && covering_value(conditioning, segment_start).is_some();
-        if shadowed {
-            match spans.last_mut() {
-                Some(last) if last.1 == segment_start => last.1 = segment_end,
-                _ => spans.push((segment_start, segment_end)),
-            }
-        }
-    }
-
-    spans
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         RealizedWindow, SeasonCycleType, SeasonDefinition, SeasonMap, SeasonPeriodWindow, Stage,
-        cast, merge_layered_windows, nth_previous_occurrence, season_period_window, shadowed_spans,
+        cast, merge_layered_windows, nth_previous_occurrence, season_period_window,
     };
     use chrono::NaiveDate;
     use cobre_core::temporal::{
@@ -834,30 +808,6 @@ mod tests {
 
         assert_eq!(projection.value, (500.0 * 72.0 + 480.0 * 648.0) / 720.0);
         assert_eq!(projection.coverage, 1.0);
-    }
-
-    #[test]
-    fn test_shadowed_spans_reports_overlap() {
-        let record = [RealizedWindow {
-            start_date: NaiveDate::from_ymd_opt(2026, 4, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2026, 5, 1).unwrap(),
-            value_m3s: 480.0,
-        }];
-        let conditioning = [RealizedWindow {
-            start_date: NaiveDate::from_ymd_opt(2026, 4, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2026, 4, 4).unwrap(),
-            value_m3s: 500.0,
-        }];
-
-        let spans = shadowed_spans(&record, &conditioning);
-
-        assert_eq!(
-            spans,
-            vec![(
-                NaiveDate::from_ymd_opt(2026, 4, 1).unwrap(),
-                NaiveDate::from_ymd_opt(2026, 4, 4).unwrap()
-            )]
-        );
     }
 
     mod cast_proptests {

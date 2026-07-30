@@ -55,6 +55,40 @@ fn noop_transition() -> StageLagTransition {
     }
 }
 
+/// The full-weight, finalizing [`StageLagTransition`] — one stage folded
+/// entirely into one lag bucket. The out-of-bounds fallback for
+/// [`resolve_stage_lag_transition`], shared with the forward pass's own
+/// `unwrap_or` default.
+const UNIFORM_MONTHLY_TRANSITION: StageLagTransition = StageLagTransition {
+    accumulate_weight: 1.0,
+    spillover_weight: 0.0,
+    finalize_period: true,
+    accumulate_downstream: false,
+    downstream_accumulate_weight: 0.0,
+    downstream_spillover_weight: 0.0,
+    downstream_finalize: false,
+    rebuild_from_downstream: false,
+};
+
+/// Resolve stage `t`'s transition from `transitions`: a present entry —
+/// including a `noop_transition` one — is consumed as-is; the full-weight,
+/// finalizing identity transition is the fallback ONLY when `t` is out of
+/// bounds. Every η-inversion and forward-accumulation call site shares this
+/// one convention; swapping a present noop entry for the fallback would
+/// desync that site's lag chain from every other reader of the same
+/// `transitions` slice.
+#[must_use]
+#[inline]
+pub fn resolve_stage_lag_transition(
+    transitions: &[StageLagTransition],
+    t: usize,
+) -> StageLagTransition {
+    transitions
+        .get(t)
+        .copied()
+        .unwrap_or(UNIFORM_MONTHLY_TRANSITION)
+}
+
 /// Compute the [`StageLagTransition`] for a single stage from its resolved
 /// `season_def`'s period window — the day-weighted accumulate/spillover/
 /// finalize arithmetic generalized across `Monthly`/`Weekly`/`Custom` cycles.

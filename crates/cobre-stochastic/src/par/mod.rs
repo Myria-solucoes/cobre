@@ -46,6 +46,7 @@ pub use lag_kernel::{
 };
 pub use lag_transition::{
     derive_downstream_par_order, precompute_noise_groups, precompute_stage_lag_transitions,
+    resolve_stage_lag_transition,
 };
 pub use precompute::PrecomputedPar;
 pub use validation::{ParValidationReport, ParWarning, validate_par_parameters};

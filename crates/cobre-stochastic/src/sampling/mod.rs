@@ -15,6 +15,7 @@ use crate::context::ClassSchemes;
 
 use std::fmt;
 pub mod class_sampler;
+mod eta_inversion;
 pub mod external;
 pub mod historical;
 pub mod insample;

@@ -9,10 +9,10 @@ use std::sync::mpsc::{Sender, SyncSender};
 
 use cobre_comm::Communicator;
 use cobre_core::commissioning::commissioning_active;
-use cobre_core::temporal::StageLagTransition;
 use cobre_core::{EntityId, TrainingEvent};
 use cobre_solver::ActiveProfile;
 use cobre_solver::{SolverInterface, StageTemplate};
+use cobre_stochastic::par::resolve_stage_lag_transition;
 use cobre_stochastic::{ClassSampleRequest, ForwardSampler, SampleRequest};
 
 use crate::energy_conversion::EnergyConversionSet;
@@ -496,20 +496,7 @@ fn solve_simulation_stage<S: SolverInterface>(
     ws.current_state
         .extend_from_slice(&ws.scratch.unscaled_primal[..state.n_state]);
 
-    let stage_lag = ctx
-        .stage_lag_transitions
-        .get(t)
-        .copied()
-        .unwrap_or(StageLagTransition {
-            accumulate_weight: 1.0,
-            spillover_weight: 0.0,
-            finalize_period: true,
-            accumulate_downstream: false,
-            downstream_accumulate_weight: 0.0,
-            downstream_spillover_weight: 0.0,
-            downstream_finalize: false,
-            rebuild_from_downstream: false,
-        });
+    let stage_lag = resolve_stage_lag_transition(ctx.stage_lag_transitions, t);
     let downstream_par_order = ws
         .scratch
         .downstream_completed_lags

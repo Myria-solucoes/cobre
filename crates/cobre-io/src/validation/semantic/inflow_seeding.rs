@@ -31,6 +31,7 @@ pub(super) fn validate_inflow_seeding(data: &ParsedData, ctx: &mut ValidationCon
     check_inprogress_partial_coverage(data, ctx);
     check_slot_coverage(data, ctx);
     report_negative_realized_inflows(data, ctx);
+    check_annual_component_monthly_only(data, ctx);
 }
 
 /// Row 7: reports realized inflows below zero. One warning per file, naming the
@@ -81,7 +82,7 @@ fn report_negative_realized_inflows(data: &ParsedData, ctx: &mut ValidationConte
 /// Row 6: rejects a study supplying an inflow annual component
 /// (`inflow_annual_components` non-empty) under a non-`Monthly` season cycle.
 /// PAR(p)-A is monthly-exclusive by design — a permanent restriction.
-pub(super) fn check_annual_component_monthly_only(data: &ParsedData, ctx: &mut ValidationContext) {
+fn check_annual_component_monthly_only(data: &ParsedData, ctx: &mut ValidationContext) {
     if data.inflow_annual_components.is_empty() {
         return;
     }

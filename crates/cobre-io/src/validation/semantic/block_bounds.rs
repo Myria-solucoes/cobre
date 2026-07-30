@@ -1,4 +1,6 @@
-//! Layer 5a — block-axis validation for the six bound-override Parquet families.
+//! Layer 5a — bound-override-family validation: block-axis rules for the six
+//! Parquet families, plus block_id-agnostic stage-wide envelope rules (e.g.
+//! `check_bound_raises_declared_capacity`, rule 43).
 //!
 //! [`resolve_bounds`](crate::resolution::resolve_bounds) resolves each family's
 //! `block_id` through the four-layer bound-precedence law described alongside

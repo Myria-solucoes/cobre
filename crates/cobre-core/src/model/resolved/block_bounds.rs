@@ -112,10 +112,13 @@ pub struct BlockBoundsCountsSpec {
 /// entity family, across all stages and blocks.
 ///
 /// Every family `Vec` is indexed
-/// `(entity_idx * n_stages + stage_idx) * max_blocks + block_idx`. An empty
-/// table ([`ResolvedBlockBounds::empty`]) is the state for every study with no
-/// `block_id` bound row; every reader then returns the family default and
-/// every writer returns `None`.
+/// `(entity_idx * n_stages + stage_idx) * max_blocks + block_idx`, and is
+/// independently lazy: a family stays empty until a row actually resolves to
+/// a cell in that family (via its own `<family>_override_mut`), so a study
+/// with a block row in only one family never allocates the other four. An
+/// empty table ([`ResolvedBlockBounds::empty`]) is the state for every study
+/// with no `block_id` bound row at all; every reader then returns the family
+/// default and every writer returns `None`.
 ///
 /// # Examples
 ///
@@ -131,6 +134,11 @@ pub struct BlockBoundsCountsSpec {
 pub struct ResolvedBlockBounds {
     n_stages: usize,
     max_blocks: usize,
+    n_hydros: usize,
+    n_thermals: usize,
+    n_lines: usize,
+    n_pumping: usize,
+    n_contracts: usize,
     hydro: Vec<HydroBlockOverride>,
     thermal: Vec<ThermalBlockOverride>,
     line: Vec<LineBlockOverride>,
@@ -162,6 +170,11 @@ impl ResolvedBlockBounds {
         Self {
             n_stages: 0,
             max_blocks: 0,
+            n_hydros: 0,
+            n_thermals: 0,
+            n_lines: 0,
+            n_pumping: 0,
+            n_contracts: 0,
             hydro: Vec::new(),
             thermal: Vec::new(),
             line: Vec::new(),
@@ -170,19 +183,25 @@ impl ResolvedBlockBounds {
         }
     }
 
-    /// Allocate a new per-block override table with every cell defaulted to
-    /// "no override" (`Default::default()` for each family struct).
+    /// Store the table's dimensions; every family `Vec` starts empty —
+    /// `<family>_override_mut` grows its own family to full size on its first
+    /// successful write, so a family with zero applied rows stays empty (and
+    /// [`is_empty`](Self::is_empty) stays `true` while every family does).
     #[must_use]
     pub fn new(counts: &BlockBoundsCountsSpec) -> Self {
-        let cells_per_entity = counts.n_stages * counts.max_blocks;
         Self {
             n_stages: counts.n_stages,
             max_blocks: counts.max_blocks,
-            hydro: vec![HydroBlockOverride::default(); counts.n_hydros * cells_per_entity],
-            thermal: vec![ThermalBlockOverride::default(); counts.n_thermals * cells_per_entity],
-            line: vec![LineBlockOverride::default(); counts.n_lines * cells_per_entity],
-            pumping: vec![PumpingBlockOverride::default(); counts.n_pumping * cells_per_entity],
-            contract: vec![ContractBlockOverride::default(); counts.n_contracts * cells_per_entity],
+            n_hydros: counts.n_hydros,
+            n_thermals: counts.n_thermals,
+            n_lines: counts.n_lines,
+            n_pumping: counts.n_pumping,
+            n_contracts: counts.n_contracts,
+            hydro: Vec::new(),
+            thermal: Vec::new(),
+            line: Vec::new(),
+            pumping: Vec::new(),
+            contract: Vec::new(),
         }
     }
 
@@ -210,8 +229,9 @@ impl ResolvedBlockBounds {
             .unwrap_or_default()
     }
 
-    /// Return a mutable handle to the hydro per-block override cell, or
-    /// `None` when the table is empty or any index is out of range.
+    /// Return a mutable handle to the hydro per-block override cell, growing
+    /// this family to full size on its first call, or `None` when the table
+    /// is empty or any index is out of range.
     #[inline]
     pub fn hydro_override_mut(
         &mut self,
@@ -220,6 +240,12 @@ impl ResolvedBlockBounds {
         block_idx: usize,
     ) -> Option<&mut HydroBlockOverride> {
         let idx = self.flat_index(hydro_idx, stage_idx, block_idx)?;
+        if self.hydro.is_empty() {
+            self.hydro = vec![
+                HydroBlockOverride::default();
+                self.n_hydros * self.n_stages * self.max_blocks
+            ];
+        }
         self.hydro.get_mut(idx)
     }
 
@@ -240,8 +266,9 @@ impl ResolvedBlockBounds {
             .unwrap_or_default()
     }
 
-    /// Return a mutable handle to the thermal per-block override cell, or
-    /// `None` when the table is empty or any index is out of range.
+    /// Return a mutable handle to the thermal per-block override cell,
+    /// growing this family to full size on its first call, or `None` when
+    /// the table is empty or any index is out of range.
     #[inline]
     pub fn thermal_override_mut(
         &mut self,
@@ -250,6 +277,12 @@ impl ResolvedBlockBounds {
         block_idx: usize,
     ) -> Option<&mut ThermalBlockOverride> {
         let idx = self.flat_index(thermal_idx, stage_idx, block_idx)?;
+        if self.thermal.is_empty() {
+            self.thermal = vec![
+                ThermalBlockOverride::default();
+                self.n_thermals * self.n_stages * self.max_blocks
+            ];
+        }
         self.thermal.get_mut(idx)
     }
 
@@ -270,8 +303,9 @@ impl ResolvedBlockBounds {
             .unwrap_or_default()
     }
 
-    /// Return a mutable handle to the line per-block override cell, or `None`
-    /// when the table is empty or any index is out of range.
+    /// Return a mutable handle to the line per-block override cell, growing
+    /// this family to full size on its first call, or `None` when the table
+    /// is empty or any index is out of range.
     #[inline]
     pub fn line_override_mut(
         &mut self,
@@ -280,6 +314,10 @@ impl ResolvedBlockBounds {
         block_idx: usize,
     ) -> Option<&mut LineBlockOverride> {
         let idx = self.flat_index(line_idx, stage_idx, block_idx)?;
+        if self.line.is_empty() {
+            self.line =
+                vec![LineBlockOverride::default(); self.n_lines * self.n_stages * self.max_blocks];
+        }
         self.line.get_mut(idx)
     }
 
@@ -300,8 +338,9 @@ impl ResolvedBlockBounds {
             .unwrap_or_default()
     }
 
-    /// Return a mutable handle to the pumping per-block override cell, or
-    /// `None` when the table is empty or any index is out of range.
+    /// Return a mutable handle to the pumping per-block override cell,
+    /// growing this family to full size on its first call, or `None` when
+    /// the table is empty or any index is out of range.
     #[inline]
     pub fn pumping_override_mut(
         &mut self,
@@ -310,6 +349,12 @@ impl ResolvedBlockBounds {
         block_idx: usize,
     ) -> Option<&mut PumpingBlockOverride> {
         let idx = self.flat_index(pumping_idx, stage_idx, block_idx)?;
+        if self.pumping.is_empty() {
+            self.pumping = vec![
+                PumpingBlockOverride::default();
+                self.n_pumping * self.n_stages * self.max_blocks
+            ];
+        }
         self.pumping.get_mut(idx)
     }
 
@@ -330,8 +375,9 @@ impl ResolvedBlockBounds {
             .unwrap_or_default()
     }
 
-    /// Return a mutable handle to the contract per-block override cell, or
-    /// `None` when the table is empty or any index is out of range.
+    /// Return a mutable handle to the contract per-block override cell,
+    /// growing this family to full size on its first call, or `None` when
+    /// the table is empty or any index is out of range.
     #[inline]
     pub fn contract_override_mut(
         &mut self,
@@ -340,6 +386,12 @@ impl ResolvedBlockBounds {
         block_idx: usize,
     ) -> Option<&mut ContractBlockOverride> {
         let idx = self.flat_index(contract_idx, stage_idx, block_idx)?;
+        if self.contract.is_empty() {
+            self.contract = vec![
+                ContractBlockOverride::default();
+                self.n_contracts * self.n_stages * self.max_blocks
+            ];
+        }
         self.contract.get_mut(idx)
     }
 

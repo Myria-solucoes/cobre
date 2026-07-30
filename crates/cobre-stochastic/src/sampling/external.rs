@@ -22,11 +22,9 @@ use cobre_core::{
 };
 
 use crate::StochasticError;
+use crate::par::precompute::PrecomputedPar;
 
-use crate::par::{
-    DownstreamLagAccum, EntityMajor, PrimaryLagAccum, advance_lag_chain, evaluate::solve_par_noise,
-    precompute::PrecomputedPar,
-};
+use super::eta_inversion::run_eta_inversion;
 
 // ---------------------------------------------------------------------------
 // ExternalScenarioLibrary
@@ -196,11 +194,12 @@ impl ExternalScenarioLibrary {
 /// Populate `library` with standardized eta values from external inflow rows.
 ///
 /// For each (stage, scenario, hydro), inverts the PAR(p) model via
-/// [`solve_par_noise`] to produce the noise `η` that the forward PAR pass would
-/// turn back into the raw external value, using a lag chain seeded from
-/// `derived_lag_values` and advanced by the `stage_lag_transitions`
-/// accumulate/finalize pattern (lags frozen within a period; shifted with the
-/// period's weighted-average raw value at each `finalize_period` boundary).
+/// [`solve_par_noise`](crate::par::evaluate::solve_par_noise) to produce the
+/// noise `η` that the forward PAR pass would turn back into the raw external
+/// value, using a lag chain seeded from `derived_lag_values` and advanced by
+/// the `stage_lag_transitions` accumulate/finalize pattern (lags frozen
+/// within a period; shifted with the period's weighted-average raw value at
+/// each `finalize_period` boundary).
 ///
 /// A `f64::NEG_INFINITY` from `solve_par_noise` (sigma=0, non-matching target)
 /// is stored as-is; V3.7 in [`validate_external_library`] rejects it.
@@ -229,10 +228,6 @@ impl ExternalScenarioLibrary {
 /// # Panics
 ///
 /// Panics in debug builds if dimension mismatches are detected.
-// Rationale: the lag-state and accumulator buffers thread through the
-// (scenario × stage × entity) loop in strict sequence; extracting helpers would
-// pass them by mutable ref across several call boundaries.
-#[allow(clippy::too_many_lines)]
 // Rationale: the accumulator seed pair joins the lag-values seed pair; no
 // natural sub-grouping exists that would not just relocate the arity into a
 // literal struct.
@@ -316,104 +311,21 @@ pub fn standardize_external_inflow(
         }
     }
 
-    // past_lag_buf[h_idx * safe_max_order + lag]
-    let safe_max_order = max_order.max(1);
-    let mut past_lag_buf = vec![0.0_f64; n_hydros * safe_max_order];
-    for h in 0..n_hydros {
-        // Fill up to `max_order` slots so PAR(p)-A annual contributions
-        // (widened across the `psi` slice) see real lag values, not zeros.
-        for lag in 0..max_order.min(l_state) {
-            past_lag_buf[h * safe_max_order + lag] = derived_lag_values[h * l_state + lag];
-        }
-    }
-
-    // lag_state[h * safe_max_order + l] = lag-l value for hydro h.
-    let mut lag_state = vec![0.0_f64; n_hydros * safe_max_order];
-    let mut lag_buf = vec![0.0_f64; safe_max_order];
-    let mut lag_accum = vec![0.0_f64; n_hydros];
-    let mut lag_weight_accum = vec![0.0_f64; n_hydros];
-    // Per-stage raw rate, one entry per hydro; read by both the eta-solve and
-    // the accumulate/spillover steps below so the lag-state advancement
-    // mirrors the forward pass's accumulation of `z_inflow`.
-    let mut raw_rate_buf = vec![0.0_f64; n_hydros];
-    // advance_lag_chain (D1) reads the pre-shift lag values from a buffer
-    // separate from the one it writes; this scenario-scratch snapshot fills
-    // that role since `lag_state` is shifted in place.
-    let mut incoming_scratch = vec![0.0_f64; n_hydros * safe_max_order];
-    let mut downstream_accumulator = if downstream_par_order > 0 {
-        vec![0.0_f64; n_hydros]
-    } else {
-        Vec::new()
-    };
-    let mut downstream_completed_lags = if downstream_par_order > 0 {
-        vec![0.0_f64; n_hydros * downstream_par_order]
-    } else {
-        Vec::new()
-    };
-
-    for scenario in 0..n_scenarios {
-        // Each scenario starts from the same derived-seed lag state.
-        lag_state.copy_from_slice(&past_lag_buf);
-        if derived_accum.is_empty() {
-            lag_accum.fill(0.0);
-            lag_weight_accum.fill(0.0);
-        } else {
-            lag_accum[..derived_accum.len()].copy_from_slice(derived_accum);
-            lag_weight_accum[..derived_weight.len()].copy_from_slice(derived_weight);
-        }
-        downstream_accumulator.fill(0.0);
-        downstream_completed_lags.fill(0.0);
-        let mut downstream_weight_accum = 0.0_f64;
-        let mut downstream_n_completed = 0_usize;
-
-        for t in 0..n_stages {
-            let stage_lag = &stage_lag_transitions[t];
-
-            for h in 0..n_hydros {
-                let raw_target = raw_values[t * n_scenarios * n_hydros + scenario * n_hydros + h];
-                raw_rate_buf[h] = raw_target;
-
-                // Full-length lag_buf so PAR(p)-A annual contributions (widened
-                // across the `psi` slice) participate in the η inversion.
-                for (l, slot) in lag_buf.iter_mut().enumerate() {
-                    *slot = lag_state[h * safe_max_order + l];
-                }
-
-                let det_base = par.deterministic_base(t, h);
-                let psi = par.psi_slice(t, h);
-                let sigma = par.sigma(t, h);
-
-                let eta = solve_par_noise(det_base, psi, &lag_buf, sigma, raw_target);
-
-                library.eta_slice_mut(t, scenario)[h] = eta;
-            }
-
-            incoming_scratch.copy_from_slice(&lag_state);
-            let mut primary = PrimaryLagAccum {
-                accumulator: &mut lag_accum,
-                weight_accum: &mut lag_weight_accum,
-            };
-            let mut downstream = DownstreamLagAccum {
-                accumulator: &mut downstream_accumulator,
-                weight_accum: &mut downstream_weight_accum,
-                completed_lags: &mut downstream_completed_lags,
-                n_completed: &mut downstream_n_completed,
-                par_order: downstream_par_order,
-            };
-            advance_lag_chain(
-                EntityMajor {
-                    entity_count: n_hydros,
-                    max_order: safe_max_order,
-                },
-                &mut lag_state,
-                &incoming_scratch,
-                &raw_rate_buf[..n_hydros],
-                stage_lag,
-                &mut primary,
-                &mut downstream,
-            );
-        }
-    }
+    run_eta_inversion(
+        n_stages,
+        n_scenarios,
+        n_hydros,
+        max_order,
+        par,
+        derived_lag_values,
+        l_state,
+        derived_accum,
+        derived_weight,
+        stage_lag_transitions,
+        downstream_par_order,
+        |t, scenario, h| raw_values[t * n_scenarios * n_hydros + scenario * n_hydros + h],
+        |t, scenario, h, eta| library.eta_slice_mut(t, scenario)[h] = eta,
+    );
 }
 
 // ---------------------------------------------------------------------------

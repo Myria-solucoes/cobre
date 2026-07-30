@@ -50,11 +50,10 @@ use std::hash::Hasher as _;
 
 use crate::{
     StochasticError,
-    par::{
-        DownstreamLagAccum, EntityMajor, PrimaryLagAccum, advance_lag_chain,
-        evaluate::solve_par_noise, fitting::find_season_for_date, precompute::PrecomputedPar,
-    },
+    par::{fitting::find_season_for_date, precompute::PrecomputedPar},
 };
+
+use super::eta_inversion::run_eta_inversion;
 
 // ---------------------------------------------------------------------------
 // HistoricalScenarioLibrary
@@ -258,9 +257,9 @@ impl HistoricalScenarioLibrary {
 /// change requires re-standardising, which `seed_digest` lets callers detect.
 ///
 /// The full accumulate/finalize/spillover/downstream-ring pattern is supported,
-/// via the same [`advance_lag_chain`] kernel the forward pass and
-/// `standardize_external_inflow` route through — including monthly→quarterly
-/// multi-resolution grids.
+/// via the same [`advance_lag_chain`](crate::par::advance_lag_chain) kernel the
+/// forward pass and `standardize_external_inflow` route through — including
+/// monthly→quarterly multi-resolution grids.
 ///
 /// # Inputs
 ///
@@ -290,10 +289,6 @@ impl HistoricalScenarioLibrary {
 ///
 /// Panics in debug builds if dimension mismatches between `library`, `par`,
 /// `stages`, or `stage_lag_transitions` are detected.
-// Rationale: the lag-state and accumulator buffers, the observation table, and the
-// digest computation thread through the (window × stage × entity) pass in
-// sequence; extracting helpers would pass several mutable buffers across boundaries.
-#[allow(clippy::too_many_lines)]
 // Rationale: mirrors standardize_external_inflow's inputs plus the season map
 // and window years this scheme also needs; no natural sub-grouping exists that
 // would not just relocate the arity into a literal.
@@ -313,20 +308,6 @@ pub fn standardize_historical_windows(
     stage_lag_transitions: &[StageLagTransition],
     downstream_par_order: usize,
 ) {
-    // Fallback for an empty `stage_lag_transitions` or a per-stage noop
-    // (accumulate_weight≈0, finalize_period=false) — what an empty SeasonMap
-    // emits for monthly stages.
-    const UNIFORM_MONTHLY: StageLagTransition = StageLagTransition {
-        accumulate_weight: 1.0,
-        spillover_weight: 0.0,
-        finalize_period: true,
-        accumulate_downstream: false,
-        downstream_accumulate_weight: 0.0,
-        downstream_spillover_weight: 0.0,
-        downstream_finalize: false,
-        rebuild_from_downstream: false,
-    };
-
     debug_assert_eq!(
         library.n_windows(),
         window_years.len(),
@@ -431,16 +412,6 @@ pub fn standardize_historical_windows(
     let full_sequence: Vec<(i32, usize)> =
         super::build_observation_sequence(stages, max_order, n_seasons);
 
-    let safe_max_order = max_order.max(1);
-    let mut past_lag_buf = vec![0.0_f64; n_hydros * safe_max_order];
-    for h in 0..n_hydros {
-        // Fill up to `max_order` slots so PAR(p)-A annual contributions
-        // (widened across the `psi` slice) see real lag values.
-        for lag in 0..max_order.min(l_state) {
-            past_lag_buf[h * safe_max_order + lag] = derived_lag_values[h * l_state + lag];
-        }
-    }
-
     // Digest over little-endian f64 bytes so it is reproducible across runs.
     {
         let mut hasher = SipHasher13::new();
@@ -450,119 +421,37 @@ pub fn standardize_historical_windows(
         library.seed_digest = hasher.finish();
     }
 
-    let mut lag_state = vec![0.0_f64; n_hydros * safe_max_order];
-    let mut lag_buf = vec![0.0_f64; safe_max_order];
-    let mut lag_accum = vec![0.0_f64; n_hydros];
-    let mut lag_weight_accum = vec![0.0_f64; n_hydros];
-    // Per-stage raw rate, one entry per hydro; mirrors
-    // `standardize_external_inflow`'s `raw_rate_buf`.
-    let mut raw_rate_buf = vec![0.0_f64; n_hydros];
-    // advance_lag_chain (D1) reads the pre-shift lag values from a buffer
-    // separate from the one it writes; this window-scratch snapshot fills that
-    // role since `lag_state` is shifted in place.
-    let mut incoming_scratch = vec![0.0_f64; n_hydros * safe_max_order];
-    let mut downstream_accumulator = if downstream_par_order > 0 {
-        vec![0.0_f64; n_hydros]
-    } else {
-        Vec::new()
-    };
-    let mut downstream_completed_lags = if downstream_par_order > 0 {
-        vec![0.0_f64; n_hydros * downstream_par_order]
-    } else {
-        Vec::new()
-    };
-
-    for (w, &window_year) in window_years.iter().enumerate() {
-        // Each window starts from the same derived-seed lag state.
-        lag_state.copy_from_slice(&past_lag_buf);
-        if derived_accum.is_empty() {
-            lag_accum.fill(0.0);
-            lag_weight_accum.fill(0.0);
-        } else {
-            lag_accum[..derived_accum.len()].copy_from_slice(derived_accum);
-            lag_weight_accum[..derived_weight.len()].copy_from_slice(derived_weight);
-        }
-        downstream_accumulator.fill(0.0);
-        downstream_completed_lags.fill(0.0);
-        let mut downstream_weight_accum = 0.0_f64;
-        let mut downstream_n_completed = 0_usize;
-
-        for t in 0..n_stages {
+    run_eta_inversion(
+        n_stages,
+        window_years.len(),
+        n_hydros,
+        max_order,
+        par,
+        derived_lag_values,
+        l_state,
+        derived_accum,
+        derived_weight,
+        stage_lag_transitions,
+        downstream_par_order,
+        |t, w, h| {
             let (year_offset, season_id) = full_sequence[max_order + t];
-            let obs_year = window_year + year_offset;
+            let obs_year = window_years[w] + year_offset;
             debug_assert!(
                 table_idx(0, obs_year, season_id).is_some(),
                 "missing study observation for year={obs_year}, season={season_id}; \
                  window discovery should have excluded this window",
             );
-
-            let eta_slice = library.eta_slice_mut(w, t);
-            for h in 0..n_hydros {
-                debug_assert!(
-                    max_order == 0
-                        || table_idx(h, obs_year, season_id)
-                            .is_some_and(|i| !obs_table[i].is_nan()),
-                    "missing study observation for hydro={}, year={obs_year}, \
-                     season={season_id}; window discovery should have excluded this window",
-                    hydro_ids[h].0,
-                );
-                let raw_target = lookup(h, obs_year, season_id);
-                raw_rate_buf[h] = raw_target;
-
-                // lag_state is h-major: lag_state[h * safe_max_order + l]. Fill
-                // every slot so PAR(p)-A annual contributions (widened across the
-                // `psi` slice) participate in the η inversion.
-                for (l, slot) in lag_buf.iter_mut().enumerate() {
-                    *slot = lag_state[h * safe_max_order + l];
-                }
-
-                let det_base = par.deterministic_base(t, h);
-                let psi = par.psi_slice(t, h);
-                let sigma = par.sigma(t, h);
-
-                let eta = solve_par_noise(det_base, psi, &lag_buf, sigma, raw_target);
-                eta_slice[h] = eta;
-            }
-
-            // Advance the lag chain, mirroring standardize_external_inflow.
-            let stage_lag = if stage_lag_transitions.is_empty() {
-                &UNIFORM_MONTHLY
-            } else {
-                let t_lag = &stage_lag_transitions[t];
-                // A noop (empty-SeasonMap) entry is treated as uniform-monthly.
-                if t_lag.accumulate_weight.abs() < 1e-9 && !t_lag.finalize_period {
-                    &UNIFORM_MONTHLY
-                } else {
-                    t_lag
-                }
-            };
-
-            incoming_scratch.copy_from_slice(&lag_state);
-            let mut primary = PrimaryLagAccum {
-                accumulator: &mut lag_accum,
-                weight_accum: &mut lag_weight_accum,
-            };
-            let mut downstream = DownstreamLagAccum {
-                accumulator: &mut downstream_accumulator,
-                weight_accum: &mut downstream_weight_accum,
-                completed_lags: &mut downstream_completed_lags,
-                n_completed: &mut downstream_n_completed,
-                par_order: downstream_par_order,
-            };
-            advance_lag_chain(
-                EntityMajor {
-                    entity_count: n_hydros,
-                    max_order: safe_max_order,
-                },
-                &mut lag_state,
-                &incoming_scratch,
-                &raw_rate_buf[..n_hydros],
-                stage_lag,
-                &mut primary,
-                &mut downstream,
+            debug_assert!(
+                max_order == 0
+                    || table_idx(h, obs_year, season_id).is_some_and(|i| !obs_table[i].is_nan()),
+                "missing study observation for hydro={}, year={obs_year}, \
+                 season={season_id}; window discovery should have excluded this window",
+                hydro_ids[h].0,
             );
-        }
-    }
+            lookup(h, obs_year, season_id)
+        },
+        |t, w, h, eta| library.eta_slice_mut(w, t)[h] = eta,
+    );
 }
 
 // ---------------------------------------------------------------------------
