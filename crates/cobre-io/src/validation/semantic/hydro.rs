@@ -821,12 +821,14 @@ mod tests {
 
     /// min_turbined > max_turbined produces exactly one PLANT-LEVEL InvalidValue
     /// error. Declares an explicit unit group with bounds that satisfy rules
-    /// 40/41 on their own, so no group-level rule fires from the GROUP's own
-    /// bounds. Rule 44 (Σ group min ≥ plant min) still fires as a mathematical
-    /// consequence, not a fixture bug: rule 41 caps the group's own max at the
-    /// plant's max (100), rule 40 caps the group's own min at its own max, so
-    /// the group's min can never reach the plant's inconsistent min (500) —
-    /// both findings are legitimately true of this deliberately-broken plant.
+    /// 40/41 on their own and carries no `hydro_unit_group_bounds` override row,
+    /// so rule 45 (the only rule that checks the GROUP's own bounds against an
+    /// override) has nothing to inspect and does not fire. Rule 44 (Σ group min
+    /// ≥ plant min) still fires as a mathematical consequence, not a fixture
+    /// bug: rule 41 caps the group's own max at the plant's max (100), rule 40
+    /// caps the group's own min at its own max, so the group's min can never
+    /// reach the plant's inconsistent min (500) — both findings are
+    /// legitimately true of this deliberately-broken plant.
     #[test]
     fn test_hydro_turbine_min_greater_than_max() {
         let mut hydro = make_hydro(2, None);

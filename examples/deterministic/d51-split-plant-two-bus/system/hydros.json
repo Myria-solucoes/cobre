@@ -17,9 +17,9 @@
       "generation": {
         "model": "fpha",
         "min_turbined_m3s": 0.0,
-        "max_turbined_m3s": 70.0,
+        "max_turbined_m3s": 80.0,
         "min_generation_mw": 0.0,
-        "max_generation_mw": 50.0
+        "max_generation_mw": 60.0
       },
       "unit_groups": [
         {

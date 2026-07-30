@@ -3,8 +3,9 @@
 //! Pins spec section 5 item 4 (available generation capacity) against the
 //! `d51-split-plant-two-bus` fixture: the resolved per-cell FPHA-generation
 //! `col_upper` on the REAL loaded deck, read structurally (no solve), must
-//! equal the group-wise fold-then-sum from the deck's own overlay values and
-//! must never collapse to the fold-after-sum plant product.
+//! equal the group-wise fold-then-sum from the deck's own declared group
+//! values and plant-axis `hydro_bounds.parquet` override, and must never
+//! collapse to the fold-after-sum plant product.
 
 use std::path::Path;
 
@@ -98,16 +99,20 @@ fn cell_generation_bounds_at(
 
 /// Available capacity (structural check): the resolved per-cell column upper bound.
 ///
-/// `hydro_unit_group_bounds.parquet`'s stage-wide overlay gives H0's two
-/// groups `(40.0, 30.0)` MW at stage 0 and `(20.0, 15.0)` MW at stage 1 —
-/// both stage's cell sums sit below the plant's declared 50.0 MW envelope,
-/// so the resolved per-cell bound equals the group-wise value exactly, at
-/// every block of both stages.
+/// H0's two groups keep their own declared envelope at every stage (H0-B0:
+/// `30.0` MW; H0-B1: `20.0` MW) — no group-axis override exists in this deck.
+/// `hydro_bounds.parquet`'s single, plant-axis, LOWERING row drops the
+/// plant's resolved envelope to `28.0` MW at stage 0 only, strictly between
+/// the two groups' declared values: H0-B0's cell resolves to the PLANT term
+/// (`min(30.0, 28.0) == 28.0`), H0-B1's cell resolves to its own GROUP term
+/// (`min(20.0, 28.0) == 20.0`). Stage 1 carries no override, so the plant's
+/// resolved envelope falls back to its declared `60.0` MW — above both
+/// groups — and every cell resolves to its own group term.
 #[test]
 fn split_plant_ac1_resolved_cell_bound_matches_group_wise_overlay() {
     let (system, templates) = build_d51_templates();
 
-    let cases: [(usize, f64, f64); 2] = [(0, 40.0, 30.0), (1, 20.0, 15.0)];
+    let cases: [(usize, f64, f64); 2] = [(0, 28.0, 20.0), (1, 30.0, 20.0)];
 
     for (stage_idx, expected_cell0, expected_cell1) in cases {
         let n_blks = templates.block_hours_per_stage[stage_idx].len();
@@ -117,13 +122,13 @@ fn split_plant_ac1_resolved_cell_bound_matches_group_wise_overlay() {
                 bound0.to_bits(),
                 expected_cell0.to_bits(),
                 "stage {stage_idx} block {blk}: cell 0 (bus 0) col_upper = {bound0}, \
-                 expected {expected_cell0} (H0-B0's resolved overlay value)"
+                 expected {expected_cell0} (H0-B0's resolved bound)"
             );
             assert_eq!(
                 bound1.to_bits(),
                 expected_cell1.to_bits(),
                 "stage {stage_idx} block {blk}: cell 1 (bus 1) col_upper = {bound1}, \
-                 expected {expected_cell1} (H0-B1's resolved overlay value)"
+                 expected {expected_cell1} (H0-B1's resolved bound)"
             );
         }
     }
@@ -131,15 +136,17 @@ fn split_plant_ac1_resolved_cell_bound_matches_group_wise_overlay() {
 
 /// The plant-level product is unreachable (negative check).
 ///
-/// At stage 0 the group-wise fold-then-sum available capacity (`Σ_c
-/// min(group box_c, plant envelope)` = `40.0 + 30.0` = `70.0` MW) exceeds
-/// the plant's own declared envelope (`50.0` MW): every cell's resolved
-/// bound sits below 50.0 MW individually, yet their sum does not, because
-/// the closing `min` composes PER CELL against the plant's resolved bound,
-/// never once against the plant-wide raw group total. A resolver that
-/// summed the raw overlay values FIRST and folded once against the
-/// envelope — the fold-after-sum alternative — would report `70.0.min(50.0)
-/// == 50.0` instead: a different, and strictly smaller, number.
+/// At stage 0, H0-B0's cell resolves to the plant's lowered envelope
+/// (`28.0` MW, the PLANT term of its closing `min`) while H0-B1's cell
+/// resolves to its own declared value (`20.0` MW, the GROUP term) — available
+/// capacity is the group-wise fold-then-sum of these two PER-CELL resolutions
+/// (`28.0 + 20.0 == 48.0` MW), never a single plant-wide fold. A resolver
+/// that summed the two groups' raw DECLARED values first (`30.0 + 20.0 ==
+/// 50.0`) and folded once against the plant's resolved envelope — the
+/// fold-after-sum alternative — would report `50.0.min(28.0) == 28.0`
+/// instead: a different, and strictly smaller, number (it collapses to
+/// exactly the plant's own resolved envelope, discarding H0-B1's cell
+/// entirely).
 #[test]
 fn split_plant_ac2_available_capacity_is_not_the_fold_after_sum_plant_product() {
     let (system, templates) = build_d51_templates();
@@ -147,23 +154,23 @@ fn split_plant_ac2_available_capacity_is_not_the_fold_after_sum_plant_product() 
     let (cell0_bound, cell1_bound) = cell_generation_bounds_at(&system, &templates, 0, 0);
     let available_capacity = cell0_bound + cell1_bound;
 
-    // Hand-derived from the deck alone (generate_parquet.py's overlay rows and
-    // hydros.json's declared plant envelope) -- never routed through
+    // Hand-derived from the deck alone (generate_parquet.py's override row and
+    // hydros.json's declared group/plant envelopes) -- never routed through
     // `cell_max_generation` or any other cobre-sddp/-io function, so this is
     // an independent check on what a fold-after-sum implementation would give.
-    let raw_group_sum_stage0 = 40.0_f64 + 30.0;
-    let plant_envelope = 50.0_f64;
-    let fold_after_sum_plant_product = raw_group_sum_stage0.min(plant_envelope);
+    let raw_group_sum_stage0 = 30.0_f64 + 20.0;
+    let plant_resolved_envelope_stage0 = 28.0_f64;
+    let fold_after_sum_plant_product = raw_group_sum_stage0.min(plant_resolved_envelope_stage0);
 
     assert_eq!(
         available_capacity.to_bits(),
-        70.0_f64.to_bits(),
-        "available capacity must be the group-wise fold-then-sum, 70.0 MW"
+        48.0_f64.to_bits(),
+        "available capacity must be the group-wise fold-then-sum, 48.0 MW"
     );
     assert_eq!(
         fold_after_sum_plant_product.to_bits(),
-        50.0_f64.to_bits(),
-        "the fold-after-sum alternative must collapse to the plant envelope, 50.0 MW"
+        28.0_f64.to_bits(),
+        "the fold-after-sum alternative must collapse to the plant's resolved envelope, 28.0 MW"
     );
     assert_ne!(
         available_capacity.to_bits(),

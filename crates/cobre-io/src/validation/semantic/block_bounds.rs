@@ -1,6 +1,7 @@
 //! Layer 5a — bound-override-family validation: block-axis rules for the six
 //! Parquet families, plus block_id-agnostic stage-wide envelope rules (e.g.
-//! `check_bound_raises_declared_capacity`, rule 43).
+//! `check_bound_raises_declared_capacity`, rule 43, and its group-axis mirror
+//! `check_group_bound_raises_declared_capacity`, rule 45).
 //!
 //! [`resolve_bounds`](crate::resolution::resolve_bounds) resolves each family's
 //! `block_id` through the four-layer bound-precedence law described alongside
@@ -13,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use cobre_core::{EntityId, Hydro};
+use cobre_core::{EntityId, Hydro, HydroUnitGroup};
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 use super::ENVELOPE_TOLERANCE;
@@ -620,6 +621,95 @@ fn emit_raises_declared_capacity_error(
     );
 }
 
+/// Rejects a `hydro_unit_group_bounds` row that raises `max_turbined_m3s` or
+/// `max_generation_mw` above that GROUP's own declared value — not the
+/// plant's — each column checked independently; the group-axis mirror of
+/// [`check_bound_raises_declared_capacity`] (rule 43). A row on an unknown
+/// `(hydro_id, hydro_unit_group_id)` pair is skipped — Layer 3 referential
+/// validation already owns that rejection. The comparison is strict `>`, not
+/// `>=`: restating a group's declared maximum on an override row is legitimate.
+pub(super) fn check_group_bound_raises_declared_capacity(
+    data: &ParsedData,
+    ctx: &mut ValidationContext,
+) {
+    let declared: HashMap<(EntityId, EntityId), &HydroUnitGroup> = data
+        .hydros
+        .iter()
+        .flat_map(|h| h.unit_groups.iter().map(move |g| ((h.id, g.id), g)))
+        .collect();
+
+    for row in &data.hydro_unit_group_bounds {
+        let Some(&group) = declared.get(&(row.hydro_id, row.hydro_unit_group_id)) else {
+            continue;
+        };
+
+        let columns = [
+            (
+                "max_turbined_m3s",
+                row.max_turbined_m3s,
+                group.max_turbined_m3s,
+            ),
+            (
+                "max_generation_mw",
+                row.max_generation_mw,
+                group.max_generation_mw,
+            ),
+        ];
+
+        for (column, value, declared_value) in columns {
+            let Some(value) = value else { continue };
+            let tolerance = ENVELOPE_TOLERANCE * declared_value.abs().max(1.0);
+            if value > declared_value + tolerance {
+                emit_group_raises_declared_capacity_error(
+                    row.hydro_id.0,
+                    row.hydro_unit_group_id.0,
+                    row.stage_id,
+                    row.block_id,
+                    column,
+                    declared_value,
+                    value,
+                    ctx,
+                );
+            }
+        }
+    }
+}
+
+/// Emits one `InvalidValue` for a `hydro_unit_group_bounds` row that raises
+/// `column` above the group's own declared value.
+fn emit_group_raises_declared_capacity_error(
+    hydro_id: i32,
+    group_id: i32,
+    stage_id: i32,
+    block_id: Option<i32>,
+    column: &'static str,
+    declared: f64,
+    value: f64,
+    ctx: &mut ValidationContext,
+) {
+    let family = HYDRO_UNIT_GROUP.family;
+    let row_label = HYDRO_UNIT_GROUP.row_label;
+    let entity_label = HYDRO_UNIT_GROUP.entity_label;
+    let group_entity = group_id_entity_clause(Some(group_id));
+    let group_message = group_id_message_clause(Some(group_id));
+    let entity_str = format!("{entity_label}={hydro_id}{group_entity}, stage_id={stage_id}");
+    let block_str = match block_id {
+        Some(b) => format!(", block_id={b}"),
+        None => String::new(),
+    };
+    ctx.add_error(
+        ErrorKind::InvalidValue,
+        HYDRO_UNIT_GROUP.file,
+        Some(entity_str),
+        format!(
+            "{family} {hydro_id}{group_message}: {row_label} row at stage_id={stage_id}{block_str} \
+             sets {column}={value}, raising it above the group's declared {column} ({declared}) in \
+             system/hydros.json; declare the group at its final (post-uprate) {column} instead and \
+             add hydro_unit_group_bounds rows tightening the earlier stages down to their true value"
+        ),
+    );
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -812,6 +902,14 @@ mod tests {
     /// `system/hydros.json` instead (e.g. rule 3's turbine-bound ordering).
     fn capacity_raise_errors(data: &ParsedData) -> Vec<ValidationEntry> {
         bound_errors_of_kind(data, ErrorKind::InvalidValue)
+    }
+
+    /// The group-family counterpart of [`capacity_raise_errors`]: isolates
+    /// `check_group_bound_raises_declared_capacity` (rule 45) from the
+    /// `BusinessRuleViolation`/`DuplicateId` findings the other group-family
+    /// rules raise against the same file.
+    fn group_capacity_raise_errors(data: &ParsedData) -> Vec<ValidationEntry> {
+        group_bound_errors_of_kind(data, ErrorKind::InvalidValue)
     }
 
     #[test]
@@ -1659,6 +1757,277 @@ mod tests {
         ];
 
         let errors = capacity_raise_errors(&data);
+        assert_eq!(
+            errors.len(),
+            1,
+            "expected exactly one error (the second row), got: {errors:?}"
+        );
+        assert!(
+            errors[0].message.contains("stage_id=0"),
+            "message: {}",
+            errors[0].message
+        );
+    }
+
+    // ── check_group_bound_raises_declared_capacity (rule 45) ────────────────
+
+    /// Two hydros; hydro 1 carries two unit groups (2 and 5) whose declared
+    /// `max_turbined_m3s`/`max_generation_mw` differ from each other, from
+    /// hydro 1's own declared value, and from hydro 2's single group (3) —
+    /// a lookup bug comparing against the wrong group, the sibling group, or
+    /// the plant's own declared value instead of the target group's would
+    /// pass or fail these tests for the wrong reason. Each hydro's group
+    /// maxima sum to exactly its own declared value so rule 41 never fires
+    /// alongside rule 45 in these fixtures; each hydro's `min_*` is 0 and
+    /// matched by its groups' `min_*`, so rule 44 stays silent too.
+    fn two_group_capacity_study() -> Vec<Hydro> {
+        vec![
+            Hydro {
+                min_turbined_m3s: 0.0,
+                max_turbined_m3s: 900.0,
+                min_generation_mw: 0.0,
+                max_generation_mw: 700.0,
+                unit_groups: vec![
+                    make_unit_group(2, 1, 0.0, 400.0, 0.0, 600.0),
+                    make_unit_group(5, 1, 0.0, 300.0, 0.0, 300.0),
+                ],
+                ..make_hydro(1, None)
+            },
+            Hydro {
+                min_turbined_m3s: 0.0,
+                max_turbined_m3s: 1200.0,
+                min_generation_mw: 0.0,
+                max_generation_mw: 1000.0,
+                unit_groups: vec![make_unit_group(3, 2, 0.0, 1000.0, 0.0, 1200.0)],
+                ..make_hydro(2, None)
+            },
+        ]
+    }
+
+    #[test]
+    fn test_group_bounds_row_raising_max_turbined_is_rejected() {
+        let mut data = make_data(
+            two_group_capacity_study(),
+            vec![],
+            vec![],
+            two_stage_study_stages(),
+            vec![],
+            vec![],
+        );
+        data.hydro_unit_group_bounds = vec![HydroUnitGroupBoundsRow {
+            max_turbined_m3s: Some(850.0),
+            max_generation_mw: Some(400.0),
+            ..group_bounds_row(1, 2, 0, None)
+        }];
+
+        let errors = group_capacity_raise_errors(&data);
+        assert_eq!(
+            errors.len(),
+            1,
+            "expected exactly one error, got: {errors:?}"
+        );
+        let err = &errors[0];
+        assert_eq!(
+            err.file.to_string_lossy(),
+            "constraints/hydro_unit_group_bounds.parquet"
+        );
+        assert_eq!(
+            err.entity.as_deref(),
+            Some("hydro_id=1, hydro_unit_group_id=2, stage_id=0"),
+            "entity string mismatch: {:?}",
+            err.entity
+        );
+        assert!(
+            err.message.contains("unit group 2"),
+            "message: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("stage_id=0"),
+            "message: {}",
+            err.message
+        );
+        assert!(err.message.contains("600"), "message: {}", err.message);
+        assert!(err.message.contains("850"), "message: {}", err.message);
+        assert!(
+            !err.message.contains("max_generation_mw"),
+            "no finding may name max_generation_mw (it is equal to its \
+             declared value): {}",
+            err.message
+        );
+    }
+
+    /// The `max_generation_mw` counterpart: turbined equal to the group's
+    /// declared value, generation raised — pins that deleting the
+    /// `max_generation_mw` arm would go undetected by the turbined test alone.
+    #[test]
+    fn test_group_bounds_row_raising_max_generation_only_is_rejected() {
+        let mut data = make_data(
+            two_group_capacity_study(),
+            vec![],
+            vec![],
+            two_stage_study_stages(),
+            vec![],
+            vec![],
+        );
+        data.hydro_unit_group_bounds = vec![HydroUnitGroupBoundsRow {
+            max_turbined_m3s: Some(600.0),
+            max_generation_mw: Some(900.0),
+            ..group_bounds_row(1, 2, 0, None)
+        }];
+
+        let errors = group_capacity_raise_errors(&data);
+        assert_eq!(
+            errors.len(),
+            1,
+            "expected exactly one error, got: {errors:?}"
+        );
+        let err = &errors[0];
+        assert_eq!(
+            err.entity.as_deref(),
+            Some("hydro_id=1, hydro_unit_group_id=2, stage_id=0"),
+            "entity string mismatch: {:?}",
+            err.entity
+        );
+        let msg = &err.message;
+        assert!(msg.contains("unit group 2"), "message: {msg}");
+        assert!(msg.contains("max_generation_mw"), "message: {msg}");
+        assert!(msg.contains("400"), "message: {msg}");
+        assert!(msg.contains("900"), "message: {msg}");
+        assert!(
+            !msg.contains("max_turbined_m3s"),
+            "no finding may name max_turbined_m3s (it is equal to its \
+             declared value): {msg}"
+        );
+    }
+
+    /// Raises group 5's `max_turbined_m3s` above ITS OWN declared value (300)
+    /// while staying below group 2's declared value (600) and hydro 1's own
+    /// declared value (900) — the case that would slip through a bug that
+    /// compares against the sibling group or the plant instead of group 5.
+    #[test]
+    fn test_group_bounds_row_compares_against_its_own_group_not_a_sibling_or_the_plant() {
+        let mut data = make_data(
+            two_group_capacity_study(),
+            vec![],
+            vec![],
+            two_stage_study_stages(),
+            vec![],
+            vec![],
+        );
+        data.hydro_unit_group_bounds = vec![HydroUnitGroupBoundsRow {
+            max_turbined_m3s: Some(350.0),
+            ..group_bounds_row(1, 5, 0, None)
+        }];
+
+        let errors = group_capacity_raise_errors(&data);
+        assert_eq!(
+            errors.len(),
+            1,
+            "expected exactly one error, got: {errors:?}"
+        );
+        let msg = &errors[0].message;
+        assert!(msg.contains("unit group 5"), "message: {msg}");
+        assert!(msg.contains("300"), "message: {msg}");
+        assert!(msg.contains("350"), "message: {msg}");
+    }
+
+    /// Extends the turbined-raise fixture with a lowering row, an exact-match
+    /// row, and a stage-wide-plus-per-block pair (100 then 250, both <= group
+    /// 5's declared 300) on hydro 2's group 3 — the pair is what would trip an
+    /// implementation comparing against the resolved bound instead of the
+    /// group's own declared value.
+    #[test]
+    fn test_group_bounds_row_lowering_or_matching_declared_capacity_is_accepted() {
+        let mut data = make_data(
+            two_group_capacity_study(),
+            vec![],
+            vec![],
+            two_stage_study_stages(),
+            vec![],
+            vec![],
+        );
+        data.hydro_unit_group_bounds = vec![
+            HydroUnitGroupBoundsRow {
+                max_turbined_m3s: Some(600.0),
+                ..group_bounds_row(1, 2, 1, None)
+            },
+            HydroUnitGroupBoundsRow {
+                max_generation_mw: Some(250.0),
+                ..group_bounds_row(1, 5, 0, None)
+            },
+            HydroUnitGroupBoundsRow {
+                max_turbined_m3s: Some(100.0),
+                ..group_bounds_row(2, 3, 0, None)
+            },
+            HydroUnitGroupBoundsRow {
+                max_turbined_m3s: Some(250.0),
+                ..group_bounds_row(2, 3, 0, Some(1))
+            },
+        ];
+
+        let errors = group_capacity_raise_errors(&data);
+        assert!(
+            errors.is_empty(),
+            "lowering, exact-match, and a per-block row between a stage-wide \
+             override and the declared value must all be accepted: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_group_bounds_row_for_unknown_group_is_skipped_by_the_capacity_rule() {
+        let mut data = make_data(
+            two_group_capacity_study(),
+            vec![],
+            vec![],
+            two_stage_study_stages(),
+            vec![],
+            vec![],
+        );
+        data.hydro_unit_group_bounds = vec![
+            HydroUnitGroupBoundsRow {
+                max_turbined_m3s: Some(9999.0),
+                max_generation_mw: Some(9999.0),
+                ..group_bounds_row(1, 99, 0, None)
+            },
+            HydroUnitGroupBoundsRow {
+                max_turbined_m3s: Some(9999.0),
+                ..group_bounds_row(99, 2, 0, None)
+            },
+        ];
+
+        let errors = group_capacity_raise_errors(&data);
+        assert!(
+            errors.is_empty(),
+            "a row on an unknown (hydro_id, hydro_unit_group_id) pair must \
+             produce no finding from this rule: {errors:?}"
+        );
+    }
+
+    /// A second, later row for the same group is the one that violates —
+    /// pins that every row is checked, not only the first row seen per group.
+    #[test]
+    fn test_group_capacity_rule_checks_every_row_not_only_the_first_per_group() {
+        let mut data = make_data(
+            two_group_capacity_study(),
+            vec![],
+            vec![],
+            two_stage_study_stages(),
+            vec![],
+            vec![],
+        );
+        data.hydro_unit_group_bounds = vec![
+            HydroUnitGroupBoundsRow {
+                max_turbined_m3s: Some(500.0),
+                ..group_bounds_row(1, 2, 1, None)
+            },
+            HydroUnitGroupBoundsRow {
+                max_turbined_m3s: Some(850.0),
+                ..group_bounds_row(1, 2, 0, None)
+            },
+        ];
+
+        let errors = group_capacity_raise_errors(&data);
         assert_eq!(
             errors.len(),
             1,

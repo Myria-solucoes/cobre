@@ -5204,18 +5204,22 @@ fn d33_converges_to_known_optimum() {
 /// D51: split-plant two-bus fixture — the repo's first multi-cell hydro plant.
 ///
 /// One FPHA hydro (H0) declares two unit groups on two different buses (B0,
-/// B1), so `HydroCellIndex` partitions it into two cells (one per bus). Each
-/// group carries its own per-stage `hydro_unit_group_bounds.parquet` overlay:
-/// stage 0's group sum (40.0 + 30.0 = 70.0 MW) exceeds the plant's declared
-/// envelope (50.0 MW), stage 1's (20.0 + 15.0 = 35.0 MW) sits strictly below
-/// it — exercising both sides of the group-vs-plant-envelope `min` collapse
-/// (spec section 1.3) without ever raising a group above its own plant's
-/// declared value (rule 41 holds at declaration time: 30 + 20 = 50, 42 + 28 =
-/// 70). A connecting line (absolute `capacity.direct_mw`/`reverse_mw`, no
-/// `exchange_factors.json`) carries B1's hydro surplus to B0, which cannot
-/// meet its own 45 MW load from its local cell alone; a thermal at B0 has a
-/// per-block override in `thermal_bounds.parquet` (stage 0's PEAK block caps
-/// at 8.0 MW, OFFPEAK at 25.0 MW) covering the residual at stage 1.
+/// B1), so `HydroCellIndex` partitions it into two cells (one per bus). Both
+/// groups keep their own declared envelope at every stage (H0-B0: 30.0 MW /
+/// 42.0 m3/s; H0-B1: 20.0 MW / 28.0 m3/s — declared sum 50.0 MW / 70.0 m3/s,
+/// strictly below the plant's own declared 60.0 MW / 80.0 m3/s, satisfying
+/// rule 41 with slack). A single plant-axis `hydro_bounds.parquet` row LOWERS
+/// the plant's resolved envelope at stage 0 to 28.0 MW / 32.0 m3/s — strictly
+/// between the two groups' declared values — so the per-cell `min(group box,
+/// plant envelope)` resolution (spec section 1.3) binds on the PLANT term for
+/// H0-B0's cell and on the GROUP term for H0-B1's cell at that stage; rule 43
+/// permits this because it only ever lowers, never raises, the plant's own
+/// declared value. A connecting line (absolute `capacity.direct_mw`/
+/// `reverse_mw`, no `exchange_factors.json`) carries B1's hydro surplus to
+/// B0, which cannot meet its own 45 MW load from its local cell alone; a
+/// thermal at B0 has a per-block override in `thermal_bounds.parquet` (stage
+/// 0's PEAK block caps at 8.0 MW, OFFPEAK at 25.0 MW) covering the residual
+/// at stage 1.
 ///
 /// This case is not hand-derived symbolically (the FPHA plane's storage term
 /// couples the two stages); instead it is pinned at its observed converged
@@ -5238,7 +5242,7 @@ fn d51_split_plant_two_bus_converges_to_known_optimum() {
         "D51: iterations={}",
         result.iterations
     );
-    assert_cost(result.final_lb, 2_920_889.720_585_062, 1.0, "D51");
+    assert_cost(result.final_lb, 2_277_012.200_056_066_3, 1.0, "D51");
 }
 
 /// D51: per-`(stage, block)` bit-exact sum of the split plant's

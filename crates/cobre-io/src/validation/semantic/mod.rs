@@ -60,6 +60,7 @@
 //! |42 | *(retired — turbined-bound sign is a parse-layer check, not semantic; see note below)* | — | — |
 //! |43 | `hydro_bounds` row `max_turbined_m3s`/`max_generation_mw` must not exceed the hydro's own declared value (checked independently); scope is these two columns only — lowering, `min_*`/storage/filling/withdrawal, and the other four bound families are untouched, each a separate decision with its own back-compat surface | `constraints/hydro_bounds.parquet` | `InvalidValue` |
 //! |44 | Sum of unit group minima (`min_turbined_m3s`, `min_generation_mw`, checked independently) must reach the plant's own declared value — the flipped direction of rule 41: rule 41 caps `Σ group max ≤ plant max`, this floors `Σ group min ≥ plant min`; checked against the entity declaration only, never against per-stage resolved bounds | `system/hydros.json` | `InvalidValue` |
+//! |45 | `hydro_unit_group_bounds` row `max_turbined_m3s`/`max_generation_mw` must not exceed that GROUP's own declared value (checked independently) — the group-axis mirror of rule 43, which checks the plant's own declared value instead | `constraints/hydro_unit_group_bounds.parquet` | `InvalidValue` |
 //!
 //! A hydro unit group bounds row's `block_id` range and duplicate-row keying
 //! are covered by rules 35 and 36 above; a row referencing a non-existent
@@ -150,6 +151,7 @@ pub(crate) fn validate_semantic_hydro_thermal(data: &ParsedData, ctx: &mut Valid
     block_bounds::check_block_id_on_ineligible_column(data, ctx);
     block_bounds::check_block_id_on_anticipated_thermal(data, ctx);
     block_bounds::check_bound_raises_declared_capacity(data, ctx);
+    block_bounds::check_group_bound_raises_declared_capacity(data, ctx);
     pumping::check_pumping_semantics(data, ctx);
     travel_time::validate_travel_time(data, ctx);
     inflow_seeding::validate_inflow_seeding(data, ctx);

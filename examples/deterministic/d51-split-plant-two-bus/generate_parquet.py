@@ -8,7 +8,7 @@ Produces:
   - system/hydro_energy_productivity.parquet
   - scenarios/inflow_seasonal_stats.parquet
   - scenarios/load_seasonal_stats.parquet
-  - constraints/hydro_unit_group_bounds.parquet
+  - constraints/hydro_bounds.parquet
   - constraints/thermal_bounds.parquet
 
 Case: 1 FPHA hydro (H0) with two unit groups on two different buses (B0, B1),
@@ -16,12 +16,18 @@ one connecting line, one thermal at B0 with a per-block bound override, 2
 stages (stage 0 has 2 blocks: PEAK/OFFPEAK; stage 1 has 1 block).
 
 The FPHA hyperplanes (2 planes, stage_id=null => apply to every stage) are the
-same coefficients as d06-fpha-variable-head. The group overlay in
-hydro_unit_group_bounds.parquet gives each of H0's two unit groups its own
-per-stage max_generation_mw/max_turbined_m3s, chosen so the two groups' summed
-generation exceeds the plant's declared envelope (50.0 MW) at stage 0
-(70.0 MW) and sits strictly below it at stage 1 (35.0 MW) -- exercising both
-sides of the group-vs-plant-envelope `min` collapse under spec section 1.3.
+same coefficients as d06-fpha-variable-head. H0's two unit groups keep their
+own declared per-stage envelope (no per-group override): group H0-B0 stays at
+30.0 MW / 42.0 m3/s, group H0-B1 at 20.0 MW / 28.0 m3/s -- their declared sum
+(50.0 MW / 70.0 m3/s) sits strictly below the plant's own declared envelope
+(60.0 MW / 80.0 m3/s), satisfying the no-raising rule on the group axis with
+room to spare. hydro_bounds.parquet instead LOWERS the plant's own resolved
+envelope at stage 0 to 28.0 MW / 32.0 m3/s -- between the two groups' declared
+values -- so the per-cell `min(group box, plant envelope)` resolution
+(spec section 1.3) binds on the PLANT term for H0-B0's cell (28.0 < 30.0) and
+on the GROUP term for H0-B1's cell (20.0 < 28.0) at that stage, exercising both
+terms of the closing `min` while keeping every group-axis and plant-axis
+override within the no-raising rule (lowering only).
 """
 
 import os
@@ -161,37 +167,39 @@ load_table = pa.table(
 )
 write_table(load_table, "scenarios/load_seasonal_stats.parquet")
 
-# ── constraints/hydro_unit_group_bounds.parquet ────────────────────────────
+# ── constraints/hydro_bounds.parquet ───────────────────────────────────────
 #
-# Schema: hydro_id (INT32), hydro_unit_group_id (INT32), stage_id (INT32),
-#         max_generation_mw (FLOAT64), max_turbined_m3s (FLOAT64)
+# Schema: hydro_id (INT32), stage_id (INT32), max_generation_mw (FLOAT64),
+#         max_turbined_m3s (FLOAT64)
 #
-# Stage-wide overrides (no block_id column -> every row applies at the stage
-# level) for both of H0's unit groups. Group-wise sums:
-#   stage 0: 40.0 + 30.0 = 70.0 MW  > plant envelope 50.0 MW ("product" unreachable)
-#   stage 1: 20.0 + 15.0 = 35.0 MW  < plant envelope 50.0 MW (group term binds)
+# One stage-wide, plant-axis LOWERING row (no block_id column -> applies to
+# every block of stage 0): the resolved plant envelope drops from its declared
+# 60.0 MW / 80.0 m3/s to 28.0 MW / 32.0 m3/s, strictly between H0-B0's
+# declared 30.0 MW / 42.0 m3/s and H0-B1's declared 20.0 MW / 28.0 m3/s. Stage
+# 1 carries no override, so both cells fall back to their own declared value
+# there (the plant's declared 60.0/80.0 never binds). Lowering only -- legal
+# under the plant-axis no-raising rule (43) exactly as it would be illegal to
+# raise.
 
-group_bounds_schema = pa.schema(
+hydro_bounds_schema = pa.schema(
     [
         pa.field("hydro_id", pa.int32(), nullable=False),
-        pa.field("hydro_unit_group_id", pa.int32(), nullable=False),
         pa.field("stage_id", pa.int32(), nullable=False),
         pa.field("max_generation_mw", pa.float64(), nullable=True),
         pa.field("max_turbined_m3s", pa.float64(), nullable=True),
     ]
 )
 
-group_bounds_table = pa.table(
+hydro_bounds_table = pa.table(
     {
-        "hydro_id": pa.array([0, 0, 0, 0], type=pa.int32()),
-        "hydro_unit_group_id": pa.array([0, 1, 0, 1], type=pa.int32()),
-        "stage_id": pa.array([0, 0, 1, 1], type=pa.int32()),
-        "max_generation_mw": pa.array([40.0, 30.0, 20.0, 15.0], type=pa.float64()),
-        "max_turbined_m3s": pa.array([55.0, 40.0, 28.0, 21.0], type=pa.float64()),
+        "hydro_id": pa.array([0], type=pa.int32()),
+        "stage_id": pa.array([0], type=pa.int32()),
+        "max_generation_mw": pa.array([28.0], type=pa.float64()),
+        "max_turbined_m3s": pa.array([32.0], type=pa.float64()),
     },
-    schema=group_bounds_schema,
+    schema=hydro_bounds_schema,
 )
-write_table(group_bounds_table, "constraints/hydro_unit_group_bounds.parquet")
+write_table(hydro_bounds_table, "constraints/hydro_bounds.parquet")
 
 # ── constraints/thermal_bounds.parquet ─────────────────────────────────────
 #
