@@ -221,6 +221,72 @@ fn write_energy_productivity_override(
     writer.close().expect("close override writer");
 }
 
+/// Recursively copies `src` into a fresh [`tempfile::TempDir`], skipping the
+/// gitignored `output/` subtree. Materializes an alternate bound-file
+/// configuration of a committed case without mutating the tracked fixture.
+fn copy_case_dir(src: &Path) -> tempfile::TempDir {
+    fn copy_recursive(src: &Path, dst: &Path) {
+        std::fs::create_dir_all(dst).expect("create_dir_all for case copy");
+        for entry in std::fs::read_dir(src).expect("read_dir for case copy") {
+            let entry = entry.expect("dir entry for case copy");
+            let file_type = entry.file_type().expect("file_type for case copy");
+            let src_path = entry.path();
+            if file_type.is_dir() {
+                if entry.file_name() == "output" {
+                    continue;
+                }
+                copy_recursive(&src_path, &dst.join(entry.file_name()));
+            } else {
+                std::fs::copy(&src_path, dst.join(entry.file_name()))
+                    .expect("copy file for case copy");
+            }
+        }
+    }
+    let tmp = tempfile::tempdir().expect("tempdir must succeed");
+    copy_recursive(src, tmp.path());
+    tmp
+}
+
+/// Writes `constraints/thermal_bounds.parquet` at `dest` with a single
+/// stage-wide (`block_id = NULL`) row overriding `max_generation_mw` for
+/// `thermal_id` at `stage_id` — the hours-weighted-fold configuration (one
+/// value applied to every block of the stage), as opposed to a per-block row.
+fn write_stage_wide_thermal_bound(
+    dest: &Path,
+    thermal_id: i32,
+    stage_id: i32,
+    max_generation_mw: f64,
+) {
+    use arrow::array::{Float64Array, Int32Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
+    use std::sync::Arc;
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("thermal_id", DataType::Int32, false),
+        Field::new("stage_id", DataType::Int32, false),
+        Field::new("max_generation_mw", DataType::Float64, true),
+        Field::new("block_id", DataType::Int32, true),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int32Array::from(vec![thermal_id])),
+            Arc::new(Int32Array::from(vec![stage_id])),
+            Arc::new(Float64Array::from(vec![max_generation_mw])),
+            Arc::new(Int32Array::from(vec![None::<i32>])),
+        ],
+    )
+    .expect("valid RecordBatch for stage-wide thermal bound override");
+
+    let file = std::fs::File::create(dest).expect("create thermal_bounds.parquet override");
+    let mut writer = ArrowWriter::try_new(file, schema, None).expect("ArrowWriter for override");
+    writer.write(&batch).expect("write override batch");
+    writer.close().expect("close override writer");
+}
+
 /// Expected total cost for D02 (single hydro, 2 stages, deterministic inflows).
 /// Derivation: κ=2.628, S₀=100hm³, inflows=[40,10]m³/s, demand=80MW.
 /// Terminal stage turbines at 50m³/s capacity. Backward pass shows optimal
@@ -5133,6 +5199,287 @@ fn d33_converges_to_known_optimum() {
         result.final_gap
     );
     assert_cost(result.final_lb, 553.333_333_333_3, 1e-2, "D33");
+}
+
+/// D51: split-plant two-bus fixture — the repo's first multi-cell hydro plant.
+///
+/// One FPHA hydro (H0) declares two unit groups on two different buses (B0,
+/// B1), so `HydroCellIndex` partitions it into two cells (one per bus). Each
+/// group carries its own per-stage `hydro_unit_group_bounds.parquet` overlay:
+/// stage 0's group sum (40.0 + 30.0 = 70.0 MW) exceeds the plant's declared
+/// envelope (50.0 MW), stage 1's (20.0 + 15.0 = 35.0 MW) sits strictly below
+/// it — exercising both sides of the group-vs-plant-envelope `min` collapse
+/// (spec section 1.3) without ever raising a group above its own plant's
+/// declared value (rule 41 holds at declaration time: 30 + 20 = 50, 42 + 28 =
+/// 70). A connecting line (absolute `capacity.direct_mw`/`reverse_mw`, no
+/// `exchange_factors.json`) carries B1's hydro surplus to B0, which cannot
+/// meet its own 45 MW load from its local cell alone; a thermal at B0 has a
+/// per-block override in `thermal_bounds.parquet` (stage 0's PEAK block caps
+/// at 8.0 MW, OFFPEAK at 25.0 MW) covering the residual at stage 1.
+///
+/// This case is not hand-derived symbolically (the FPHA plane's storage term
+/// couples the two stages); instead it is pinned at its observed converged
+/// value, matching the established pattern for other structurally complex
+/// fixtures in this suite (e.g. D31, D40, D42). `final_lb == final_ub`
+/// bit-for-bit on HiGHS; CLP reproduces it to ~5e-10 (both well inside the
+/// tolerance below). Deliberately NOT gated behind `slow-tests` — the
+/// 2-stage horizon converges in a fraction of a second.
+#[test]
+fn d51_split_plant_two_bus_converges_to_known_optimum() {
+    let case_dir = Path::new("../../examples/deterministic/d51-split-plant-two-bus");
+    let result = run_deterministic(case_dir);
+    assert!(
+        result.final_gap.abs() < 1e-6,
+        "D51: gap={:.2e}",
+        result.final_gap
+    );
+    assert!(
+        result.iterations <= 10,
+        "D51: iterations={}",
+        result.iterations
+    );
+    assert_cost(result.final_lb, 2_920_889.720_585_062, 1.0, "D51");
+}
+
+/// D51: per-`(stage, block)` bit-exact sum of the split plant's
+/// `hydro_bus_generation` rows against its own `hydros` row.
+///
+/// `extract_hydro_bus_generation` sums each cell's LP column in the SAME
+/// ascending-cell order `extract_hydro_per_block`'s own `.sum()` consumes, so
+/// summing the per-bus rows in the writer's own row order reproduces the
+/// plant row bit-for-bit for both `turbined_m3s` and `generation_mw`. The
+/// `generation_mw` equality is an FPHA/single-cell property — each cell reads
+/// its OWN independent LP column, with no multiply-then-sum reordering — and
+/// is deliberately NOT claimed for a `ConstantProductivity` multi-cell plant,
+/// where `generation_mw` is `turbined_m3s * productivity` per cell and
+/// `(Σq)·ρ != Σ(q·ρ)` in floating point (spec section 7.10).
+#[test]
+fn d51_hydro_bus_generation_sums_bit_exactly_to_plant_rows() {
+    let case_dir = Path::new("../../examples/deterministic/d51-split-plant-two-bus");
+    let (_result, scenario_results, _summary) = run_with_simulation(case_dir);
+
+    assert_eq!(
+        scenario_results.len(),
+        1,
+        "D51: exactly 1 simulated scenario"
+    );
+    let scenario = &scenario_results[0];
+    assert_eq!(scenario.stages.len(), 2, "D51: exactly 2 stages");
+
+    let mut checked_blocks = 0_usize;
+    for stage in &scenario.stages {
+        assert_eq!(
+            stage.hydro_bus_generation.len(),
+            2 * stage.hydros.len(),
+            "D51 stage {}: 2 bus rows per plant row (one per cell)",
+            stage.stage_id
+        );
+        for plant_row in &stage.hydros {
+            let bus_sum_turbined: f64 = stage
+                .hydro_bus_generation
+                .iter()
+                .filter(|r| r.hydro_id == plant_row.hydro_id && r.block_id == plant_row.block_id)
+                .map(|r| r.turbined_m3s)
+                .sum();
+            let bus_sum_generation: f64 = stage
+                .hydro_bus_generation
+                .iter()
+                .filter(|r| r.hydro_id == plant_row.hydro_id && r.block_id == plant_row.block_id)
+                .map(|r| r.generation_mw)
+                .sum();
+
+            assert_eq!(
+                bus_sum_turbined.to_bits(),
+                plant_row.turbined_m3s.to_bits(),
+                "D51 stage {} block {:?}: bus-row turbined_m3s sum ({bus_sum_turbined}) must \
+                 equal the plant row's turbined_m3s ({}) bit-for-bit",
+                stage.stage_id,
+                plant_row.block_id,
+                plant_row.turbined_m3s
+            );
+            assert_eq!(
+                bus_sum_generation.to_bits(),
+                plant_row.generation_mw.to_bits(),
+                "D51 stage {} block {:?}: bus-row generation_mw sum ({bus_sum_generation}) must \
+                 equal the plant row's generation_mw ({}) bit-for-bit (FPHA/single-cell \
+                 property, see this test's doc comment)",
+                stage.stage_id,
+                plant_row.block_id,
+                plant_row.generation_mw
+            );
+            checked_blocks += 1;
+        }
+    }
+    assert_eq!(
+        checked_blocks, 3,
+        "D51: 2 blocks at stage 0 + 1 at stage 1 = 3 (stage, block) pairs"
+    );
+}
+
+/// D52: per-block `max_generation_mw` cap binds in the block it targets, not
+/// a neighbouring one.
+///
+/// T-CHEAP (thermal 0, cost 0.0 $/MWh) carries a per-block override at stage 0:
+/// PEAK (block 0) caps it at 100.0 MW, OFFPEAK (block 1) at 500.0 MW. The
+/// deterministic bus load is 150.0 MW in every block. In PEAK the cap sits
+/// strictly below load, so T-CHEAP dispatches at exactly its own cap and the
+/// substitute source T-SUB (cost 300.0 $/MWh) covers the 50.0 MW shortfall;
+/// in OFFPEAK (cap 500.0 MW, above load) T-CHEAP alone covers the full
+/// 150.0 MW and T-SUB stays at zero. A resolver reading a single stage-level
+/// bound, or OFFPEAK's override instead of PEAK's, would let T-CHEAP
+/// dispatch at 150.0 MW (load) or 500.0 MW (the other block's cap) in PEAK.
+#[test]
+fn d52_per_block_cap_binds_in_peak_block() {
+    let case_dir = Path::new("../../examples/deterministic/d52-per-block-thermal-fold");
+    let (_result, scenario_results, _summary) = run_with_simulation(case_dir);
+
+    assert_eq!(
+        scenario_results.len(),
+        1,
+        "D52: exactly 1 simulated scenario"
+    );
+    let stage0 = &scenario_results[0].stages[0];
+    assert_eq!(stage0.stage_id, 0, "D52: first stage result is stage 0");
+
+    let peak_cheap = stage0
+        .thermals
+        .iter()
+        .find(|t| t.thermal_id == 0 && t.block_id == Some(0))
+        .expect("D52: T-CHEAP row at (stage 0, block 0 = PEAK) must exist");
+    assert!(
+        (peak_cheap.generation_mw - 100.0).abs() < 1e-6,
+        "D52: PEAK-block T-CHEAP generation must equal its own block's cap \
+         (100.0 MW), got {} — a stage-level or off-peak bound would read \
+         150.0 (load) or 500.0 (the other block's cap)",
+        peak_cheap.generation_mw
+    );
+
+    let offpeak_cheap = stage0
+        .thermals
+        .iter()
+        .find(|t| t.thermal_id == 0 && t.block_id == Some(1))
+        .expect("D52: T-CHEAP row at (stage 0, block 1 = OFFPEAK) must exist");
+    assert!(
+        (offpeak_cheap.generation_mw - 150.0).abs() < 1e-6,
+        "D52: OFFPEAK-block T-CHEAP generation must equal full load \
+         (150.0 MW, under its own 500.0 MW cap), got {}",
+        offpeak_cheap.generation_mw
+    );
+
+    let peak_sub = stage0
+        .thermals
+        .iter()
+        .find(|t| t.thermal_id == 1 && t.block_id == Some(0))
+        .expect("D52: T-SUB row at (stage 0, block 0 = PEAK) must exist");
+    assert!(
+        (peak_sub.generation_mw - 50.0).abs() < 1e-6,
+        "D52: T-SUB must cover the 50.0 MW PEAK-block shortfall \
+         (load 150.0 - cap 100.0), got {}",
+        peak_sub.generation_mw
+    );
+}
+
+/// D52's own deck inputs, named once so the fold-delta derivation below is a
+/// pure function of them rather than a re-typed literal.
+const D52_LOAD_MW: f64 = 150.0;
+const D52_PEAK_CAP_MW: f64 = 100.0;
+const D52_OFFPEAK_CAP_MW: f64 = 500.0;
+const D52_PEAK_HOURS: f64 = 100.0;
+const D52_OFFPEAK_HOURS: f64 = 300.0;
+const D52_CHEAP_COST_PER_MWH: f64 = 0.0;
+const D52_SUBSTITUTE_COST_PER_MWH: f64 = 300.0;
+
+/// D52: the objective difference between the committed per-block bound
+/// configuration and its hours-weighted fold to one stage value equals a
+/// closed-form expression of the deck's own inputs — never a value read off
+/// either run.
+///
+/// ## Derivation
+///
+/// The fold collapses stage 0's two per-block caps into one stage-wide value
+/// (the same average this suite's helper writes into the folded copy):
+/// `fold = (PEAK_HOURS·PEAK_CAP + OFFPEAK_HOURS·OFFPEAK_CAP) /
+/// (PEAK_HOURS + OFFPEAK_HOURS) = (100·100 + 300·500) / 400 = 400.0 MW`.
+/// Because `fold (400.0) >= LOAD_MW (150.0)`, the folded configuration lets
+/// T-CHEAP alone cover the full load in every block of stage 0 — including
+/// the former PEAK block — so T-SUB never dispatches there. The per-block
+/// configuration instead caps T-CHEAP at `PEAK_CAP_MW` in the PEAK block
+/// alone, forcing T-SUB to cover the `shortfall = LOAD_MW - PEAK_CAP_MW =
+/// 50.0` MW residual at `SUBSTITUTE_COST_PER_MWH`. OFFPEAK and stage 1 are
+/// unaffected by the fold (both configurations' caps there stay >= load), so
+/// the entire objective delta is confined to the PEAK block:
+///
+/// `delta = shortfall_MW × (SUBSTITUTE_COST_PER_MWH − CHEAP_COST_PER_MWH) ×
+/// PEAK_HOURS`
+///
+/// `CHEAP_COST_PER_MWH` is 0.0 by construction (T-CHEAP is the deck's
+/// zero-cost source), so this collapses to `shortfall_MW × substitute_cost ×
+/// peak_hours` — kept here in the general cost-difference form so the
+/// derivation stays correct if T-CHEAP's cost is ever changed off zero.
+#[test]
+fn d52_hours_weighted_fold_delta_matches_hand_derivation() {
+    let case_dir = Path::new("../../examples/deterministic/d52-per-block-thermal-fold");
+
+    let per_block_result = run_deterministic(case_dir);
+    assert!(
+        per_block_result.final_gap.abs() < 1e-6,
+        "D52 per-block: gap={:.2e}",
+        per_block_result.final_gap
+    );
+    assert!(
+        (per_block_result.final_lb - per_block_result.final_ub).abs() < 1e-6,
+        "D52 per-block: LB ({}) must equal UB ({}) to tolerance",
+        per_block_result.final_lb,
+        per_block_result.final_ub
+    );
+
+    let fold_cap_mw = (D52_PEAK_HOURS * D52_PEAK_CAP_MW + D52_OFFPEAK_HOURS * D52_OFFPEAK_CAP_MW)
+        / (D52_PEAK_HOURS + D52_OFFPEAK_HOURS);
+    assert!(
+        fold_cap_mw >= D52_LOAD_MW,
+        "D52: the fold ({fold_cap_mw} MW) must sit at or above load \
+         ({D52_LOAD_MW} MW), or the folded configuration would ALSO need \
+         T-SUB in the PEAK block, invalidating the single-term delta \
+         derivation below"
+    );
+
+    let folded_case = copy_case_dir(case_dir);
+    write_stage_wide_thermal_bound(
+        &folded_case
+            .path()
+            .join("constraints/thermal_bounds.parquet"),
+        0,
+        0,
+        fold_cap_mw,
+    );
+    let folded_result = run_deterministic(folded_case.path());
+    assert!(
+        folded_result.final_gap.abs() < 1e-6,
+        "D52 folded: gap={:.2e}",
+        folded_result.final_gap
+    );
+    assert!(
+        (folded_result.final_lb - folded_result.final_ub).abs() < 1e-6,
+        "D52 folded: LB ({}) must equal UB ({}) to tolerance",
+        folded_result.final_lb,
+        folded_result.final_ub
+    );
+
+    let shortfall_mw = D52_LOAD_MW - D52_PEAK_CAP_MW;
+    let expected_delta =
+        shortfall_mw * (D52_SUBSTITUTE_COST_PER_MWH - D52_CHEAP_COST_PER_MWH) * D52_PEAK_HOURS;
+
+    let actual_delta = per_block_result.final_lb - folded_result.final_lb;
+    assert!(
+        (actual_delta - expected_delta).abs() < 1e-6,
+        "D52: per-block cost ({}) minus folded cost ({}) = {actual_delta}, \
+         expected the hand-derived delta {expected_delta} (shortfall \
+         {shortfall_mw} MW x cost delta {} $/MWh x {} peak hours)",
+        per_block_result.final_lb,
+        folded_result.final_lb,
+        D52_SUBSTITUTE_COST_PER_MWH - D52_CHEAP_COST_PER_MWH,
+        D52_PEAK_HOURS
+    );
 }
 
 /// Chronological-blocks telescoping ⇒ parallel bound-agreement anchor.

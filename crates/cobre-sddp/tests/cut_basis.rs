@@ -1832,3 +1832,291 @@ mod test_backward_cache_reduces_pivots {
         );
     }
 }
+
+mod group_state_invariance {
+    //! Declaring `unit_groups`, or splitting a plant across buses, must change
+    //! only the per-cell turbine/FPHA-generation column count. The recourse
+    //! state (one storage coordinate per reservoir), the cut coefficients
+    //! keyed off it, and the terminal entity manifest must stay identical.
+    //! Compared here as two live runs (no committed golden): the real
+    //! two-bus `d51-split-plant-two-bus` deck, an in-code single-mirror-group
+    //! equivalent of the same plant, and an in-code same-bus multi-group
+    //! variant.
+
+    use std::path::Path;
+
+    use cobre_core::scenario::ScenarioSource;
+    use cobre_core::{EntityId, HydroUnitGroup, System, SystemBuilder};
+    use cobre_sddp::indexer::{HydroCellIndex, HydroSys};
+    use cobre_sddp::policy_export::build_stage_cut_records;
+    use cobre_sddp::{StudySetup, hydro_models::prepare_hydro_models, setup::prepare_stochastic};
+    use cobre_solver::ActiveSolver;
+
+    use super::common::{StubComm, build_setup_for_case};
+
+    fn d51_case_dir() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/<crate> must have a parent")
+            .parent()
+            .expect("crates/ must have a parent (repo root)")
+            .join("examples/deterministic/d51-split-plant-two-bus")
+    }
+
+    /// Rebuilds `system` with hydro-position-0's `unit_groups` replaced by
+    /// `groups`, cloning every other resolved table verbatim. Safe because the
+    /// group-bound overlay addresses `(hydro_idx, group POSITION, stage,
+    /// block)`, never a group's own `id` -- changing which or how many groups
+    /// occupy that position only shifts the per-cell column bound the LP
+    /// resolves (deliberately not asserted in this module), never the state
+    /// layout, which depends only on hydro count and per-stage state config.
+    fn rebuild_with_hydro0_groups(system: &System, groups: Vec<HydroUnitGroup>) -> System {
+        let mut hydros = system.hydros().to_vec();
+        hydros[0].unit_groups = groups;
+        SystemBuilder::new()
+            .buses(system.buses().to_vec())
+            .lines(system.lines().to_vec())
+            .hydros(hydros)
+            .thermals(system.thermals().to_vec())
+            .pumping_stations(system.pumping_stations().to_vec())
+            .contracts(system.contracts().to_vec())
+            .non_controllable_sources(system.non_controllable_sources().to_vec())
+            .stages(system.stages().to_vec())
+            .policy_graph(system.policy_graph().clone())
+            .penalties(system.penalties().clone())
+            .bounds(system.bounds().clone())
+            .resolved_generic_bounds(system.resolved_generic_bounds().clone())
+            .resolved_load_factors(system.resolved_load_factors().clone())
+            .resolved_ncs_bounds(system.resolved_ncs_bounds().clone())
+            .resolved_ncs_factors(system.resolved_ncs_factors().clone())
+            .inflow_models(system.inflow_models().to_vec())
+            .load_models(system.load_models().to_vec())
+            .ncs_models(system.ncs_models().to_vec())
+            .correlation(system.correlation().clone())
+            .initial_conditions(system.initial_conditions().clone())
+            .generic_constraints(system.generic_constraints().to_vec())
+            .inflow_history(system.inflow_history().to_vec())
+            .external_scenarios(system.external_scenarios().to_vec())
+            .external_load_scenarios(system.external_load_scenarios().to_vec())
+            .external_ncs_scenarios(system.external_ncs_scenarios().to_vec())
+            .build()
+            .expect("mutated d51 system must still build")
+    }
+
+    /// One group mirroring H0's own declared envelope onto `bus_id`: every
+    /// hydro must declare at least one unit group, so this is the
+    /// single-group equivalent of a groupless deck.
+    fn single_mirror_group(system: &System, bus_id: i32) -> Vec<HydroUnitGroup> {
+        let mut h0 = system.hydros()[0].clone();
+        h0.unit_groups.clear();
+        h0.declare_mirror_unit_group(EntityId(bus_id));
+        h0.unit_groups
+    }
+
+    /// H0's own two declared groups, unmodified except both now share one
+    /// bus -- the same-bus collapse of two groups into one cell.
+    fn same_bus_groups(system: &System) -> Vec<HydroUnitGroup> {
+        let mut groups = system.hydros()[0].unit_groups.clone();
+        assert_eq!(
+            groups.len(),
+            2,
+            "d51's H0 must declare exactly 2 groups before the same-bus collapse"
+        );
+        let shared_bus = groups[0].bus_id;
+        groups[1].bus_id = shared_bus;
+        groups
+    }
+
+    /// Number of bus-partitioned cells H0 (hydro position 0) resolves into.
+    fn n_cells_h0(system: &System) -> usize {
+        HydroCellIndex::build(system.hydros())
+            .cells_of(HydroSys::new(0))
+            .len()
+    }
+
+    /// Trains a short run over `system`, returning the trained setup alongside
+    /// the stochastic-prepared system it was built against — needed for the
+    /// terminal-manifest and cell-count reads.
+    fn train_short_run(
+        system: System,
+        config: &cobre_io::Config,
+        case_dir: &Path,
+    ) -> (StudySetup, System) {
+        let prepare_result =
+            prepare_stochastic(system, case_dir, config, 42, &ScenarioSource::default())
+                .expect("prepare_stochastic must succeed");
+        let system = prepare_result.system;
+        let hydro_models = prepare_hydro_models(&system, case_dir, false)
+            .expect("prepare_hydro_models must succeed");
+        let mut setup = build_setup_for_case(
+            case_dir,
+            config,
+            &system,
+            prepare_result.stochastic,
+            hydro_models,
+        );
+
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("train must succeed");
+        assert!(
+            outcome.error.is_none(),
+            "training must not error: {:?}",
+            outcome.error
+        );
+        (setup, system)
+    }
+
+    /// State/cut/manifest-derived quantities this module's invariance claim
+    /// covers. Deliberately excludes column counts: those are cell-sized and
+    /// grow with cells, the additive change this module must not flatten into
+    /// an equality.
+    struct StateCutManifestSnapshot {
+        state_dimension: usize,
+        pool_state_dimensions: Vec<usize>,
+        populated_cut_coefficient_lengths: Vec<Option<usize>>,
+        terminal_slot_keys: Vec<(u8, i32, u32)>,
+    }
+
+    fn snapshot(setup: &StudySetup, system: &System) -> StateCutManifestSnapshot {
+        let pool_state_dimensions: Vec<usize> = setup
+            .fcf
+            .pools
+            .iter()
+            .map(|pool| pool.state_dimension)
+            .collect();
+
+        let stage_records = build_stage_cut_records(&setup.fcf);
+        let populated_cut_coefficient_lengths: Vec<Option<usize>> = stage_records
+            .iter()
+            .map(|records| records.first().map(|record| record.coefficients.len()))
+            .collect();
+
+        let terminal_manifest = setup.build_terminal_entity_manifest(system);
+        let terminal_slot_keys: Vec<(u8, i32, u32)> = terminal_manifest
+            .iter()
+            .map(|slot| (slot.entity_type, slot.entity_id, slot.subindex))
+            .collect();
+
+        StateCutManifestSnapshot {
+            state_dimension: setup.fcf.state_dimension,
+            pool_state_dimensions,
+            populated_cut_coefficient_lengths,
+            terminal_slot_keys,
+        }
+    }
+
+    fn assert_state_cut_manifest_identical(
+        a: &StateCutManifestSnapshot,
+        b: &StateCutManifestSnapshot,
+        label_a: &str,
+        label_b: &str,
+    ) {
+        assert_eq!(
+            a.state_dimension, b.state_dimension,
+            "{label_a} vs {label_b}: state dimension must be identical"
+        );
+        assert_eq!(
+            a.pool_state_dimensions, b.pool_state_dimensions,
+            "{label_a} vs {label_b}: per-stage cut-pool state dimension must be identical"
+        );
+        assert_eq!(
+            a.populated_cut_coefficient_lengths, b.populated_cut_coefficient_lengths,
+            "{label_a} vs {label_b}: per-stage cut-record coefficient-vector length must be identical"
+        );
+        assert_eq!(
+            a.terminal_slot_keys, b.terminal_slot_keys,
+            "{label_a} vs {label_b}: terminal manifest entity/subindex slot keys must be identical"
+        );
+    }
+
+    /// A two-bus, two-group, two-cell split and its single-mirror-group,
+    /// one-cell equivalent train to identical state dimension, cut-record
+    /// shape, and terminal manifest -- even though the cell count, and with
+    /// it the turbine/FPHA-generation column count, differs.
+    #[test]
+    fn two_bus_split_matches_single_mirror_group_state_cut_manifest() {
+        let case_dir = d51_case_dir();
+        let config =
+            cobre_io::parse_config(&case_dir.join("config.json")).expect("config must parse");
+
+        let two_bus_system = cobre_io::load_case(&case_dir).expect("load_case must succeed");
+        let mirror_groups = single_mirror_group(&two_bus_system, 0);
+        let mirror_system = rebuild_with_hydro0_groups(&two_bus_system, mirror_groups);
+
+        let (setup_two_bus, system_two_bus) = train_short_run(two_bus_system, &config, &case_dir);
+        let (setup_mirror, system_mirror) = train_short_run(mirror_system, &config, &case_dir);
+
+        let cells_two_bus = n_cells_h0(&system_two_bus);
+        let cells_mirror = n_cells_h0(&system_mirror);
+        assert_eq!(
+            cells_two_bus, 2,
+            "the real d51 fixture must partition H0 into 2 cells"
+        );
+        assert_eq!(
+            cells_mirror, 1,
+            "the single-mirror-group equivalent must partition H0 into 1 cell"
+        );
+        assert_ne!(
+            cells_two_bus, cells_mirror,
+            "the cell count, and with it the turbine/FPHA-generation column \
+             count, must differ between the two-bus split and its \
+             single-mirror-group equivalent, or this test stops exercising \
+             the additive change it is meant to pin"
+        );
+
+        let snapshot_two_bus = snapshot(&setup_two_bus, &system_two_bus);
+        let snapshot_mirror = snapshot(&setup_mirror, &system_mirror);
+        assert_state_cut_manifest_identical(
+            &snapshot_two_bus,
+            &snapshot_mirror,
+            "two-bus split",
+            "single-mirror-group equivalent",
+        );
+    }
+
+    /// A same-bus, two-group, one-cell collapse and its single-mirror-group,
+    /// one-cell equivalent train to identical state dimension, cut-record
+    /// shape, and terminal manifest: the collapse changes the resolved
+    /// per-cell bound (fold-then-sum of two groups versus one group's own
+    /// box), never the cell count or the state.
+    #[test]
+    fn same_bus_collapse_matches_single_mirror_group_state_cut_manifest() {
+        let case_dir = d51_case_dir();
+        let config =
+            cobre_io::parse_config(&case_dir.join("config.json")).expect("config must parse");
+
+        let base_system = cobre_io::load_case(&case_dir).expect("load_case must succeed");
+
+        let same_bus_groups_h0 = same_bus_groups(&base_system);
+        let same_bus_system = rebuild_with_hydro0_groups(&base_system, same_bus_groups_h0);
+        let (setup_same_bus, system_same_bus) =
+            train_short_run(same_bus_system, &config, &case_dir);
+
+        let mirror_groups = single_mirror_group(&base_system, 0);
+        let mirror_system = rebuild_with_hydro0_groups(&base_system, mirror_groups);
+        let (setup_mirror, system_mirror) = train_short_run(mirror_system, &config, &case_dir);
+
+        assert_eq!(
+            n_cells_h0(&system_same_bus),
+            1,
+            "two groups sharing one bus must still collapse to 1 cell"
+        );
+        assert_eq!(
+            n_cells_h0(&system_mirror),
+            1,
+            "the single-mirror-group equivalent must partition H0 into 1 cell"
+        );
+
+        let snapshot_same_bus = snapshot(&setup_same_bus, &system_same_bus);
+        let snapshot_mirror = snapshot(&setup_mirror, &system_mirror);
+        assert_state_cut_manifest_identical(
+            &snapshot_same_bus,
+            &snapshot_mirror,
+            "same-bus multi-group collapse",
+            "single-mirror-group equivalent",
+        );
+    }
+}

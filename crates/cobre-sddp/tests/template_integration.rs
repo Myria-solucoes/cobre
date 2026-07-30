@@ -4444,6 +4444,8 @@ mod generic_constraints;
 mod penalty;
 #[path = "template_integration/shape.rs"]
 mod shape;
+#[path = "template_integration/split_plant_bounds.rs"]
+mod split_plant_bounds;
 #[path = "template_integration/stochastic_load.rs"]
 mod stochastic_load;
 #[path = "template_integration/turbined_cost.rs"]
