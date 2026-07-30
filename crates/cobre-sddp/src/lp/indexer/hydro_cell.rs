@@ -167,13 +167,6 @@ impl HydroCellIndex {
         HydroCell::new(self.cells_of(h).start)
     }
 
-    /// The plant owning cell `c`.
-    #[inline]
-    #[must_use]
-    pub fn plant_of(&self, c: HydroCell) -> HydroSys {
-        self.cell_plant[c.get()]
-    }
-
     /// The `bus_id` of cell `c`.
     #[inline]
     #[must_use]
@@ -206,15 +199,6 @@ impl HydroCellIndex {
         self.cells_of(h)
             .map(HydroCell::new)
             .find(|&c| self.bus_of(c) == bus_id)
-    }
-
-    /// Whether every plant maps to exactly one cell, in plant order —
-    /// `n_cells() == n_hydros` and `cells_of(h) == h..h + 1` for every `h`.
-    #[must_use]
-    pub fn is_identity(&self) -> bool {
-        let n_hydros = self.plant_cell_start.len().saturating_sub(1);
-        self.n_cells() == n_hydros
-            && (0..n_hydros).all(|h| self.cells_of(HydroSys::new(h)) == (h..h + 1))
     }
 }
 
@@ -328,7 +312,6 @@ mod tests {
         let index = HydroCellIndex::build(&hydros);
 
         assert_eq!(index.n_cells(), 4);
-        assert!(index.is_identity());
         for (i, hydro) in hydros.iter().enumerate() {
             assert_eq!(index.cells_of(HydroSys::new(i)), i..i + 1);
             // Pins geometry_hydro's declare_mirror_unit_group(id) call passing the
@@ -356,8 +339,6 @@ mod tests {
         // `bus_id` order against a first-appearance implementation.
         assert_eq!(index.bus_of(HydroCell::new(2)), EntityId(3));
         assert_eq!(index.bus_of(HydroCell::new(3)), EntityId(9));
-        assert_eq!(index.plant_of(HydroCell::new(2)), HydroSys::new(2));
-        assert!(!index.is_identity());
     }
 
     /// `cell_of_bus` resolves each of plant 2's own two buses to that bus's

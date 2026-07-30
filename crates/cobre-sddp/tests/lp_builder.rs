@@ -762,8 +762,9 @@ mod cell_partition_gates {
     //! Turbine/generation columns are indexed, bounded, credited to buses, and
     //! related by FPHA production rows per cell — and every deterministic
     //! golden still reproduces byte-for-byte, because every shipped fixture
-    //! keeps `HydroCellIndex::is_identity() == true` (`cell_of(h) == h`). That
-    //! is a cost pin, not a structure pin: a wrong cell index and a right one
+    //! is single-bus, so its cell index is the identity map (each plant is
+    //! its own single cell, `cells_of(h) == h..h + 1`). That is a cost pin,
+    //! not a structure pin: a wrong cell index and a right one
     //! are numerically identical under identity staging. These tests are what
     //! actually distinguishes them, on a synthetic multi-cell fixture built
     //! in-process (no case directory).

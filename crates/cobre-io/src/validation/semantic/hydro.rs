@@ -543,19 +543,20 @@ pub(super) fn check_fpha_constraints(data: &ParsedData, ctx: &mut ValidationCont
     }
 }
 
-/// Rules 39-42: unit group `id` uniqueness within its own plant (rule 39, ids
+/// Rules 39-41: unit group `id` uniqueness within its own plant (rule 39, ids
 /// are plant-scoped — a `HashSet` rebuilt per hydro, never hoisted above the
-/// loop); per-group turbined/generation bound consistency (rule 40); the sum
-/// of group maxima against the plant's own declared value (rule 41, entity
-/// declaration only — a per-stage `hydro_bounds` override is not checked
-/// here); and per-group turbined bound sign (rule 42, mirrors the plant-level
-/// rule 4 in `hydros.rs::validate_generation` — a negative group maximum
-/// would otherwise cancel a sibling group's excess in the rule-41 sum).
-/// Mirrors the plant's turbined-only sign guard: `min_generation_mw`/
-/// `max_generation_mw` are unchecked for sign at both plant and group level,
-/// inherited, not introduced here. A group's `bus_id` reference is Layer 3's
-/// `referential::check_hydro_references`, not this function — duplicating it
-/// here would split the hydro bus check across two message shapes.
+/// loop); per-group turbined/generation bound consistency (rule 40); and the
+/// sum of group maxima against the plant's own declared value (rule 41,
+/// entity declaration only — a per-stage `hydro_bounds` override is not
+/// checked here). Per-group turbined bound sign is rejected earlier, at parse
+/// time, by `hydros.rs::validate_unit_groups` — `validate_schema` aborts
+/// all-or-nothing before a negative value ever reaches this Layer-5 check, so
+/// it is not re-checked here. Mirrors the plant's turbined-only sign guard:
+/// `min_generation_mw`/`max_generation_mw` are unchecked for sign at both
+/// plant and group level, inherited, not introduced here. A group's `bus_id`
+/// reference is Layer 3's `referential::check_hydro_references`, not this
+/// function — duplicating it here would split the hydro bus check across two
+/// message shapes.
 pub(super) fn check_hydro_unit_groups(data: &ParsedData, ctx: &mut ValidationContext) {
     for hydro in &data.hydros {
         let entity_str = format!("Hydro {}", hydro.id.0);
@@ -578,30 +579,6 @@ pub(super) fn check_hydro_unit_groups(data: &ParsedData, ctx: &mut ValidationCon
 
         for group in &hydro.unit_groups {
             let group_str = format!("{entity_str} unit group {}", group.id.0);
-
-            if group.min_turbined_m3s < 0.0 {
-                ctx.add_error(
-                    ErrorKind::InvalidValue,
-                    "system/hydros.json",
-                    Some(&group_str),
-                    format!(
-                        "{group_str}: min_turbined_m3s ({}) must be >= 0",
-                        group.min_turbined_m3s
-                    ),
-                );
-            }
-
-            if group.max_turbined_m3s < 0.0 {
-                ctx.add_error(
-                    ErrorKind::InvalidValue,
-                    "system/hydros.json",
-                    Some(&group_str),
-                    format!(
-                        "{group_str}: max_turbined_m3s ({}) must be >= 0",
-                        group.max_turbined_m3s
-                    ),
-                );
-            }
 
             if group.min_turbined_m3s > group.max_turbined_m3s {
                 ctx.add_error(
@@ -2356,94 +2333,6 @@ mod tests {
             !ctx.errors().iter().any(|e| e.message.contains("Hydro 11")),
             "the no-declared-groups plant must produce zero findings, got: {:?}",
             ctx.errors()
-        );
-    }
-
-    /// Rule 42 pins the hole rule 41 alone cannot close (the cancelling-groups
-    /// deck): plant `max_turbined_m3s = 200.0` with group A `{min 0.0, max
-    /// 300.0}` and group B `{min -200.0, max -100.0}` sums to exactly
-    /// `300 + (-100) = 200.0`, so rule 41's containment check alone accepts
-    /// it (equality, not excess) even though group A alone declares 300
-    /// against the plant's 200 envelope. Rule 42 rejects group B's negative
-    /// bounds directly, regardless of what the sum happens to equal.
-    #[test]
-    fn test_unit_group_negative_bound_defeats_envelope_check_is_rejected() {
-        let mut hydro = make_hydro(20, None);
-        hydro.max_turbined_m3s = 200.0;
-        hydro.unit_groups = vec![
-            make_unit_group(1, 1, 0.0, 400.0, 0.0, 300.0),
-            make_unit_group(2, 1, 0.0, 400.0, -200.0, -100.0),
-        ];
-
-        let data = make_data(
-            vec![hydro],
-            vec![],
-            vec![],
-            make_stages(vec![0]),
-            vec![],
-            vec![],
-        );
-        let mut ctx = ValidationContext::new();
-        validate_semantic_hydro_thermal(&data, &mut ctx);
-
-        let invalid_values: Vec<_> = ctx
-            .errors()
-            .into_iter()
-            .filter(|e| e.kind == ErrorKind::InvalidValue)
-            .collect();
-        assert_eq!(
-            invalid_values.len(),
-            2,
-            "expected exactly 2 sign-violation findings (group 2's min and max), got: {:?}",
-            invalid_values
-                .iter()
-                .map(|e| &e.message)
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            invalid_values
-                .iter()
-                .any(|e| e.message.contains("unit group 2")
-                    && e.message.contains("min_turbined_m3s")
-                    && e.message.contains("must be >= 0")),
-            "expected a min_turbined_m3s sign violation naming unit group 2, got: {:?}",
-            invalid_values
-                .iter()
-                .map(|e| &e.message)
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            invalid_values
-                .iter()
-                .any(|e| e.message.contains("unit group 2")
-                    && e.message.contains("max_turbined_m3s")
-                    && e.message.contains("must be >= 0")),
-            "expected a max_turbined_m3s sign violation naming unit group 2, got: {:?}",
-            invalid_values
-                .iter()
-                .map(|e| &e.message)
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            !invalid_values
-                .iter()
-                .any(|e| e.message.contains("unit group 1")),
-            "group 1's non-negative bounds must produce no finding, got: {:?}",
-            invalid_values
-                .iter()
-                .map(|e| &e.message)
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            !invalid_values
-                .iter()
-                .any(|e| e.message.contains("exceeding")),
-            "rule 41's containment check must NOT fire on this deck — the sum equals \
-             the plant's envelope exactly, which is the hole rule 42 closes, got: {:?}",
-            invalid_values
-                .iter()
-                .map(|e| &e.message)
-                .collect::<Vec<_>>()
         );
     }
 }

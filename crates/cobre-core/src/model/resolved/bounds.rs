@@ -1001,12 +1001,9 @@ impl ResolvedBounds {
     /// Return the block-eligible hydro columns at `(hydro_index, stage_index)`,
     /// ignoring the per-block overlay. This is **not** the value that applies at
     /// a block — see [`hydro_bounds_at_block`](Self::hydro_bounds_at_block) for
-    /// the block-resolved reader. `*_block_base` accessors exist for exactly two
-    /// sanctioned caller categories: the dictionary report path
-    /// (`write_bounds_parquet`'s null-`block_id` base row) and the
-    /// anticipated-commitment decision column (`fill_anticipated_columns`,
-    /// thermal only). Only the dictionary path calls this one; any other caller
-    /// is a design question, not an implementation detail.
+    /// the block-resolved reader. Only the dictionary path (`write_bounds_parquet`)
+    /// calls this one — see the module docs for the two-caller `*_block_base`
+    /// contract.
     #[inline]
     #[must_use]
     pub fn hydro_block_base(&self, hydro_index: usize, stage_index: usize) -> HydroBlockBounds {
@@ -1037,12 +1034,9 @@ impl ResolvedBounds {
     /// Return the block-eligible line columns at `(line_index, stage_index)`,
     /// ignoring the per-block overlay. This is **not** the value that applies at
     /// a block — see [`line_bounds_at_block`](Self::line_bounds_at_block) for the
-    /// block-resolved reader. `*_block_base` accessors exist for exactly two
-    /// sanctioned caller categories: the dictionary report path
-    /// (`write_bounds_parquet`'s null-`block_id` base row) and the
-    /// anticipated-commitment decision column (`fill_anticipated_columns`,
-    /// thermal only). Only the dictionary path calls this one; any other caller
-    /// is a design question, not an implementation detail.
+    /// block-resolved reader. Only the dictionary path (`write_bounds_parquet`)
+    /// calls this one — see the module docs for the two-caller `*_block_base`
+    /// contract.
     #[inline]
     #[must_use]
     pub fn line_block_base(&self, line_index: usize, stage_index: usize) -> LineBlockBounds {
@@ -1053,12 +1047,9 @@ impl ResolvedBounds {
     /// stage_index)`, ignoring the per-block overlay. This is **not** the value
     /// that applies at a block — see
     /// [`pumping_bounds_at_block`](Self::pumping_bounds_at_block) for the
-    /// block-resolved reader. `*_block_base` accessors exist for exactly two
-    /// sanctioned caller categories: the dictionary report path
-    /// (`write_bounds_parquet`'s null-`block_id` base row) and the
-    /// anticipated-commitment decision column (`fill_anticipated_columns`,
-    /// thermal only). Only the dictionary path calls this one; any other caller
-    /// is a design question, not an implementation detail.
+    /// block-resolved reader. Only the dictionary path (`write_bounds_parquet`)
+    /// calls this one — see the module docs for the two-caller `*_block_base`
+    /// contract.
     #[inline]
     #[must_use]
     pub fn pumping_block_base(
@@ -1073,12 +1064,9 @@ impl ResolvedBounds {
     /// stage_index)`, ignoring the per-block overlay. This is **not** the value
     /// that applies at a block — see
     /// [`contract_bounds_at_block`](Self::contract_bounds_at_block) for the
-    /// block-resolved reader. `*_block_base` accessors exist for exactly two
-    /// sanctioned caller categories: the dictionary report path
-    /// (`write_bounds_parquet`'s null-`block_id` base row) and the
-    /// anticipated-commitment decision column (`fill_anticipated_columns`,
-    /// thermal only). Only the dictionary path calls this one; any other caller
-    /// is a design question, not an implementation detail.
+    /// block-resolved reader. Only the dictionary path (`write_bounds_parquet`)
+    /// calls this one — see the module docs for the two-caller `*_block_base`
+    /// contract.
     #[inline]
     #[must_use]
     pub fn contract_block_base(

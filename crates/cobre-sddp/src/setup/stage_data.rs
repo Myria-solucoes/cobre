@@ -30,8 +30,8 @@ pub struct StageData {
 
     /// Single owner of each plant's `unit_groups` partition into `bus_id`
     /// cells, built once from `System::hydros` and stage-invariant like
-    /// [`Self::study_dims`]. `is_identity()` holds for every study without
-    /// multi-bus groups.
+    /// [`Self::study_dims`]. The partition is the identity map for every
+    /// study without multi-bus groups (see [`HydroCellIndex`] module docs).
     pub(crate) hydro_cell_index: HydroCellIndex,
 
     /// Per-pool cut-state projection, indexed by stage (pool) `t`, paired 1:1
