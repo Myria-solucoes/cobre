@@ -711,6 +711,10 @@ fn description_for(file: &str, column: &str) -> &'static str {
         ("retry_histogram", "stage") => "Stage index (-1 for non-per-stage phases)",
         ("retry_histogram", "retry_level") => "Retry escalation level (0-based)",
         ("retry_histogram", "count") => "Number of solves recovered at this level",
+        ("bounds", "hydro_id") => {
+            "Owning plant id for a hydro-unit-group row (entity_type_code 8). \
+             NULL for the five plant-level entity families."
+        }
         _ => "",
     }
 }
@@ -725,9 +729,21 @@ fn description_for(file: &str, column: &str) -> &'static str {
 /// `ContractBlockOverride::price_per_mwh`, and
 /// `HydroBlockOverride::max_diversion_m3s` resolve into the LP but have no
 /// `bound_type` code and are not emitted here.
-// Rationale: all five entity classes share the pre-allocated Arrow column
-// builders; per-entity helpers would force passing six builders through each or
-// rebuilding per class, losing the single pre-estimated capacity allocation.
+///
+/// `hydro_id` is populated only for a hydro-unit-group row
+/// (`entity_type_code == 8`, the owning plant's id) and `NULL` for the five
+/// plant-level families, since a group's `entity_id` is plant-scoped (two
+/// different plants may declare a group with the same id). A group's
+/// resolved turbined/generation bound follows the same block-precedence law
+/// as every other bound-override family: the group's own `stage_override`
+/// falling back to its declared value for the null-`block_id` row, then its
+/// raw `block_override` (no fallback) for each block a group-axis override
+/// resolved — the same two-row-class shape the five plant families already
+/// use, so the dictionary reports what the resolved bound actually is rather
+/// than a value no code path ever resolves.
+// Rationale: all six entity classes share the pre-allocated Arrow column
+// builders; per-entity helpers would force passing seven builders through each
+// or rebuilding per class, losing the single pre-estimated capacity allocation.
 #[allow(
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
@@ -741,16 +757,20 @@ fn write_bounds_parquet(
     let schema = Arc::new(bounds_schema());
     let n_stages = system.bounds().n_stages();
 
+    let n_groups: usize = system.hydros().iter().map(|h| h.unit_groups.len()).sum();
+
     // Over-estimate: the optional max-outflow bound may be skipped per hydro.
     let capacity = (system.n_hydros() * 8
         + system.n_thermals() * 2
         + system.n_lines() * 2
         + system.n_pumping_stations() * 2
-        + system.n_contracts() * 2)
+        + system.n_contracts() * 2
+        + n_groups * 4)
         * n_stages;
 
     let mut entity_type_codes = Int8Builder::with_capacity(capacity);
     let mut entity_ids = Int32Builder::with_capacity(capacity);
+    let mut hydro_ids = Int32Builder::with_capacity(capacity);
     let mut stage_ids = Int32Builder::with_capacity(capacity);
     let mut block_ids = Int32Builder::with_capacity(capacity);
     let mut bound_type_codes = Int8Builder::with_capacity(capacity);
@@ -760,6 +780,7 @@ fn write_bounds_parquet(
         ($entity_type:expr, $entity_id:expr, $stage_id:expr, $bound_type:expr, $value:expr) => {
             entity_type_codes.append_value($entity_type);
             entity_ids.append_value($entity_id);
+            hydro_ids.append_null();
             stage_ids.append_value($stage_id);
             block_ids.append_null();
             bound_type_codes.append_value($bound_type);
@@ -771,6 +792,31 @@ fn write_bounds_parquet(
         ($entity_type:expr, $entity_id:expr, $stage_id:expr, $block_id:expr, $bound_type:expr, $value:expr) => {
             entity_type_codes.append_value($entity_type);
             entity_ids.append_value($entity_id);
+            hydro_ids.append_null();
+            stage_ids.append_value($stage_id);
+            block_ids.append_value($block_id);
+            bound_type_codes.append_value($bound_type);
+            bound_values.append_value($value);
+        };
+    }
+
+    macro_rules! append_group_bound {
+        ($entity_id:expr, $hydro_id:expr, $stage_id:expr, $bound_type:expr, $value:expr) => {
+            entity_type_codes.append_value(ENTITY_TYPE_HYDRO_UNIT_GROUP);
+            entity_ids.append_value($entity_id);
+            hydro_ids.append_value($hydro_id);
+            stage_ids.append_value($stage_id);
+            block_ids.append_null();
+            bound_type_codes.append_value($bound_type);
+            bound_values.append_value($value);
+        };
+    }
+
+    macro_rules! append_group_block_bound {
+        ($entity_id:expr, $hydro_id:expr, $stage_id:expr, $block_id:expr, $bound_type:expr, $value:expr) => {
+            entity_type_codes.append_value(ENTITY_TYPE_HYDRO_UNIT_GROUP);
+            entity_ids.append_value($entity_id);
+            hydro_ids.append_value($hydro_id);
             stage_ids.append_value($stage_id);
             block_ids.append_value($block_id);
             bound_type_codes.append_value($bound_type);
@@ -1106,11 +1152,111 @@ fn write_bounds_parquet(
         }
     }
 
+    let group_overlay = system.bounds().group_overlay();
+    let has_group_overlay = !group_overlay.is_empty();
+
+    for (hydro_idx, hydro) in system.hydros().iter().enumerate() {
+        let plant_id = hydro.id.0;
+        for (group_pos, group) in hydro.unit_groups.iter().enumerate() {
+            let entity_id = group.id.0;
+            for stage_idx in 0..n_stages {
+                let stage_id = system.stages()[stage_idx].id;
+                let stage_override = group_overlay.stage_override(hydro_idx, group_pos, stage_idx);
+
+                append_group_bound!(
+                    entity_id,
+                    plant_id,
+                    stage_id,
+                    BOUND_TURBINED_MIN,
+                    stage_override
+                        .min_turbined_m3s
+                        .unwrap_or(group.min_turbined_m3s)
+                );
+                append_group_bound!(
+                    entity_id,
+                    plant_id,
+                    stage_id,
+                    BOUND_TURBINED_MAX,
+                    stage_override
+                        .max_turbined_m3s
+                        .unwrap_or(group.max_turbined_m3s)
+                );
+                append_group_bound!(
+                    entity_id,
+                    plant_id,
+                    stage_id,
+                    BOUND_GENERATION_MIN,
+                    stage_override
+                        .min_generation_mw
+                        .unwrap_or(group.min_generation_mw)
+                );
+                append_group_bound!(
+                    entity_id,
+                    plant_id,
+                    stage_id,
+                    BOUND_GENERATION_MAX,
+                    stage_override
+                        .max_generation_mw
+                        .unwrap_or(group.max_generation_mw)
+                );
+
+                if has_group_overlay {
+                    for blk in 0..system.stages()[stage_idx].blocks.len() {
+                        let block_id = blk as i32;
+                        let block_override =
+                            group_overlay.block_override(hydro_idx, group_pos, stage_idx, blk);
+                        if let Some(v) = block_override.min_turbined_m3s {
+                            append_group_block_bound!(
+                                entity_id,
+                                plant_id,
+                                stage_id,
+                                block_id,
+                                BOUND_TURBINED_MIN,
+                                v
+                            );
+                        }
+                        if let Some(v) = block_override.max_turbined_m3s {
+                            append_group_block_bound!(
+                                entity_id,
+                                plant_id,
+                                stage_id,
+                                block_id,
+                                BOUND_TURBINED_MAX,
+                                v
+                            );
+                        }
+                        if let Some(v) = block_override.min_generation_mw {
+                            append_group_block_bound!(
+                                entity_id,
+                                plant_id,
+                                stage_id,
+                                block_id,
+                                BOUND_GENERATION_MIN,
+                                v
+                            );
+                        }
+                        if let Some(v) = block_override.max_generation_mw {
+                            append_group_block_bound!(
+                                entity_id,
+                                plant_id,
+                                stage_id,
+                                block_id,
+                                BOUND_GENERATION_MAX,
+                                v
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let batch = RecordBatch::try_new(
         schema,
         vec![
             Arc::new(entity_type_codes.finish()),
             Arc::new(entity_ids.finish()),
+            Arc::new(hydro_ids.finish()),
             Arc::new(stage_ids.finish()),
             Arc::new(block_ids.finish()),
             Arc::new(bound_type_codes.finish()),
@@ -1128,6 +1274,7 @@ fn bounds_schema() -> Schema {
     Schema::new(vec![
         Field::new("entity_type_code", DataType::Int8, false),
         Field::new("entity_id", DataType::Int32, false),
+        Field::new("hydro_id", DataType::Int32, true),
         Field::new("stage_id", DataType::Int32, false),
         Field::new("block_id", DataType::Int32, true),
         Field::new("bound_type_code", DataType::Int8, false),
@@ -1156,8 +1303,9 @@ mod tests {
         ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig, SystemBuilder, Thermal,
         resolved::{
             BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, ContractBlockBounds,
-            HydroBlockBounds, HydroStageBounds, LineBlockBounds, PumpingBlockBounds,
-            ResolvedBlockBounds, ResolvedBounds, ThermalBlockBounds, ThermalStageBounds,
+            HydroBlockBounds, HydroStageBounds, HydroUnitGroupBoundsCountsSpec, LineBlockBounds,
+            PumpingBlockBounds, ResolvedBlockBounds, ResolvedBounds, ResolvedHydroUnitGroupBounds,
+            ThermalBlockBounds, ThermalStageBounds,
         },
     };
 
@@ -2174,11 +2322,13 @@ mod tests {
         let mut reader = builder.build().unwrap();
         let batch = reader.next().expect("must have rows").expect("batch Ok");
 
-        // 1 hydro, 2 stages, 7 bound types per stage (no max_outflow) = 14 rows
+        // 1 hydro, 2 stages, 7 bound types per stage (no max_outflow) = 14
+        // plant rows, plus `make_hydro`'s 1 mirror unit group × 2 stages × 4
+        // group bound types = 8 group rows -- 22 total.
         assert_eq!(
             batch.num_rows(),
-            14,
-            "1 hydro × 2 stages × 7 bounds = 14 rows"
+            22,
+            "1 hydro × 2 stages × 7 bounds + 1 group × 2 stages × 4 bounds = 22 rows"
         );
 
         let entity_type_col = batch
@@ -2256,8 +2406,9 @@ mod tests {
         let batch = reader.next().expect("must have rows").expect("batch Ok");
 
         // 2 hydros x 2 stages x 7 stage-level bounds (no max_outflow) = 28,
-        // plus 2 thermals x 2 stages x 2 stage-level bounds = 8.
-        let expected_rows = 2 * 2 * 7 + 2 * 2 * 2;
+        // plus 2 thermals x 2 stages x 2 stage-level bounds = 8, plus each
+        // hydro's 1 mirror unit group x 2 stages x 4 group bounds = 16.
+        let expected_rows = 2 * 2 * 7 + 2 * 2 * 2 + 2 * 2 * 4;
         assert_eq!(
             batch.num_rows(),
             expected_rows,
@@ -2609,6 +2760,324 @@ mod tests {
             bound_value_col.value(contract_max_row).to_bits(),
             50.0_f64.to_bits(),
             "contract max_mw value"
+        );
+    }
+
+    /// One hydro (id 7) declaring two unit groups with distinct declared
+    /// bounds -- group id 2 (`GroupLow`, bus 2) and group id 5 (`GroupHigh`,
+    /// bus 3) -- and `overlay` as the group-axis resolved override table.
+    /// `SystemBuilder::build` canonically id-sorts `unit_groups`, so group id
+    /// 2 always resolves to `group_pos` 0 and group id 5 to `group_pos` 1
+    /// regardless of declaration order here.
+    fn make_system_1h_2groups(overlay: ResolvedHydroUnitGroupBounds) -> System {
+        let bus2 = make_bus(2);
+        let bus3 = make_bus(3);
+        let mut h1 = make_hydro(7, "Plant7", 2);
+        h1.unit_groups = vec![
+            HydroUnitGroup {
+                id: EntityId(5),
+                name: "GroupHigh".to_string(),
+                bus_id: EntityId(3),
+                min_generation_mw: 1.0,
+                max_generation_mw: 20.0,
+                min_turbined_m3s: 2.0,
+                max_turbined_m3s: 25.0,
+            },
+            HydroUnitGroup {
+                id: EntityId(2),
+                name: "GroupLow".to_string(),
+                bus_id: EntityId(2),
+                min_generation_mw: 3.0,
+                max_generation_mw: 15.0,
+                min_turbined_m3s: 4.0,
+                max_turbined_m3s: 18.0,
+            },
+        ];
+        let stage0 = make_stage(0);
+
+        let mut bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: 1,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: hydro_stage_bounds(0.0, 100.0),
+                hydro_block: hydro_block_bounds_default(),
+                thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+                thermal_block: ThermalBlockBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 100.0,
+                },
+                line_block: LineBlockBounds {
+                    direct_mw: 500.0,
+                    reverse_mw: 500.0,
+                },
+                pumping_block: PumpingBlockBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract_block: ContractBlockBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        bounds.set_group_overlay(overlay);
+
+        SystemBuilder::new()
+            .buses(vec![bus2, bus3])
+            .hydros(vec![h1])
+            .stages(vec![stage0])
+            .bounds(bounds)
+            .build()
+            .expect("valid system")
+    }
+
+    /// Reads `bounds.parquet` and returns the columns this section's group
+    /// tests need, downcast once.
+    fn read_bounds_parquet_columns(
+        path: &std::path::Path,
+    ) -> (
+        arrow::array::RecordBatch,
+        arrow::array::Int8Array,
+        arrow::array::Int32Array,
+    ) {
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        let file = std::fs::File::open(path).unwrap();
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+        let mut reader = builder.build().unwrap();
+        let batch = reader.next().expect("must have rows").expect("batch Ok");
+
+        let entity_type_col = batch
+            .column_by_name("entity_type_code")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int8Array>()
+            .unwrap()
+            .clone();
+        let entity_id_col = batch
+            .column_by_name("entity_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap()
+            .clone();
+        (batch, entity_type_col, entity_id_col)
+    }
+
+    #[test]
+    fn bounds_parquet_group_rows_report_resolved_values_with_hydro_id() {
+        let system = make_system_1h_2groups(ResolvedHydroUnitGroupBounds::empty());
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ParquetWriterConfig::default();
+
+        write_bounds_parquet(tmp.path(), &system, &config)
+            .expect("write_bounds_parquet must succeed");
+
+        let (batch, entity_type_col, entity_id_col) =
+            read_bounds_parquet_columns(&tmp.path().join("bounds.parquet"));
+        let hydro_id_col = batch
+            .column_by_name("hydro_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap();
+        let bound_type_col = batch
+            .column_by_name("bound_type_code")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int8Array>()
+            .unwrap();
+        let bound_value_col = batch
+            .column_by_name("bound_value")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .unwrap();
+
+        let plant_id = system.hydros()[0].id.0;
+
+        for row in 0..batch.num_rows() {
+            if entity_type_col.value(row) == ENTITY_TYPE_HYDRO_UNIT_GROUP {
+                assert!(
+                    !hydro_id_col.is_null(row),
+                    "group row {row} must carry a non-null hydro_id"
+                );
+                assert_eq!(
+                    hydro_id_col.value(row),
+                    plant_id,
+                    "group row {row}'s hydro_id must be the owning plant's id"
+                );
+            } else {
+                assert!(
+                    hydro_id_col.is_null(row),
+                    "plant-family row {row} (entity_type_code {}) must carry a null hydro_id",
+                    entity_type_col.value(row)
+                );
+            }
+        }
+
+        let group_rows: Vec<usize> = (0..batch.num_rows())
+            .filter(|&i| entity_type_col.value(i) == ENTITY_TYPE_HYDRO_UNIT_GROUP)
+            .collect();
+        assert_eq!(
+            group_rows.len(),
+            8,
+            "2 groups x 1 stage x 4 group bound types = 8 rows"
+        );
+
+        let bound_of = |group_id: i32, bound_type: i8| -> f64 {
+            let row = group_rows
+                .iter()
+                .copied()
+                .find(|&i| {
+                    entity_id_col.value(i) == group_id && bound_type_col.value(i) == bound_type
+                })
+                .unwrap_or_else(|| panic!("missing group {group_id} bound_type {bound_type} row"));
+            bound_value_col.value(row)
+        };
+
+        // Group id 2 ("GroupLow") -- no override, so every value is declared.
+        assert_eq!(bound_of(2, BOUND_TURBINED_MIN).to_bits(), 4.0_f64.to_bits());
+        assert_eq!(
+            bound_of(2, BOUND_TURBINED_MAX).to_bits(),
+            18.0_f64.to_bits()
+        );
+        assert_eq!(
+            bound_of(2, BOUND_GENERATION_MIN).to_bits(),
+            3.0_f64.to_bits()
+        );
+        assert_eq!(
+            bound_of(2, BOUND_GENERATION_MAX).to_bits(),
+            15.0_f64.to_bits()
+        );
+
+        // Group id 5 ("GroupHigh") -- its own declared values, never group 2's
+        // or the plant's.
+        assert_eq!(bound_of(5, BOUND_TURBINED_MIN).to_bits(), 2.0_f64.to_bits());
+        assert_eq!(
+            bound_of(5, BOUND_TURBINED_MAX).to_bits(),
+            25.0_f64.to_bits()
+        );
+        assert_eq!(
+            bound_of(5, BOUND_GENERATION_MIN).to_bits(),
+            1.0_f64.to_bits()
+        );
+        assert_eq!(
+            bound_of(5, BOUND_GENERATION_MAX).to_bits(),
+            20.0_f64.to_bits()
+        );
+    }
+
+    #[test]
+    fn bounds_parquet_group_override_row_reports_resolved_not_declared_value() {
+        let mut overlay = ResolvedHydroUnitGroupBounds::new(&HydroUnitGroupBoundsCountsSpec {
+            groups_per_plant: &[2],
+            n_stages: 1,
+            max_blocks: 1,
+        });
+        // group_pos 0 is group id 2 (the lower id, canonical-sorted first);
+        // override only its max_generation_mw.
+        overlay
+            .stage_override_mut(0, 0, 0)
+            .expect("cell must exist for a fixture-sized overlay")
+            .max_generation_mw = Some(12.0);
+
+        let system = make_system_1h_2groups(overlay);
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ParquetWriterConfig::default();
+
+        write_bounds_parquet(tmp.path(), &system, &config)
+            .expect("write_bounds_parquet must succeed");
+
+        let (batch, entity_type_col, entity_id_col) =
+            read_bounds_parquet_columns(&tmp.path().join("bounds.parquet"));
+        let bound_type_col = batch
+            .column_by_name("bound_type_code")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int8Array>()
+            .unwrap();
+        let bound_value_col = batch
+            .column_by_name("bound_value")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .unwrap();
+        let block_id_col = batch.column_by_name("block_id").unwrap();
+
+        let group_rows: Vec<usize> = (0..batch.num_rows())
+            .filter(|&i| entity_type_col.value(i) == ENTITY_TYPE_HYDRO_UNIT_GROUP)
+            .collect();
+        assert_eq!(
+            group_rows.len(),
+            8,
+            "the override is stage-wide, so it still reports as a null-block_id row, \
+             not an additional block row -- still 8 group rows total"
+        );
+
+        let bound_of = |group_id: i32, bound_type: i8| -> f64 {
+            let row = group_rows
+                .iter()
+                .copied()
+                .find(|&i| {
+                    entity_id_col.value(i) == group_id && bound_type_col.value(i) == bound_type
+                })
+                .unwrap_or_else(|| panic!("missing group {group_id} bound_type {bound_type} row"));
+            assert!(
+                block_id_col.is_null(row),
+                "a stage-wide group override must still report at the null-block_id row"
+            );
+            bound_value_col.value(row)
+        };
+
+        // Group 2's overridden column reports the OVERRIDE, not the declared 15.0.
+        assert_eq!(
+            bound_of(2, BOUND_GENERATION_MAX).to_bits(),
+            12.0_f64.to_bits(),
+            "group 2's max_generation_mw must report the resolved override, not its \
+             declared value"
+        );
+        // Group 2's other three columns are untouched by the override (column
+        // independence).
+        assert_eq!(bound_of(2, BOUND_TURBINED_MIN).to_bits(), 4.0_f64.to_bits());
+        assert_eq!(
+            bound_of(2, BOUND_TURBINED_MAX).to_bits(),
+            18.0_f64.to_bits()
+        );
+        assert_eq!(
+            bound_of(2, BOUND_GENERATION_MIN).to_bits(),
+            3.0_f64.to_bits()
+        );
+        // Group 5 (a sibling group, never touched by group 2's override) keeps
+        // every declared value.
+        assert_eq!(bound_of(5, BOUND_TURBINED_MIN).to_bits(), 2.0_f64.to_bits());
+        assert_eq!(
+            bound_of(5, BOUND_TURBINED_MAX).to_bits(),
+            25.0_f64.to_bits()
+        );
+        assert_eq!(
+            bound_of(5, BOUND_GENERATION_MIN).to_bits(),
+            1.0_f64.to_bits()
+        );
+        assert_eq!(
+            bound_of(5, BOUND_GENERATION_MAX).to_bits(),
+            20.0_f64.to_bits()
+        );
+    }
+
+    #[test]
+    fn bounds_hydro_id_column_has_a_description() {
+        assert!(
+            !description_for("bounds", "hydro_id").is_empty(),
+            "hydro_id must have a description"
         );
     }
 
