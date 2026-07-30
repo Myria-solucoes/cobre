@@ -791,8 +791,12 @@ panic, after confirming the fixture genuinely fans out).
 Every anticipated plant's decision column is bounded, costed, and
 commissioning-gated at ITS OWN delivery stage `m` (its
 `genuine_decisions_at(t)` target, when one exists), never the decision stage
-`t`. `fill_anticipated_columns` reads `thermal_bounds(thermal_idx,
-delivery_stage)` for the column's `[min, max]` bounds,
+`t`. `fill_anticipated_columns` reads `thermal_block_base(thermal_idx,
+delivery_stage)` for the column's `[min, max]` bounds (the overlay-ignoring
+base is safe here only because a load-time rule rejects a `block_id` bound row
+on an anticipated thermal — see `cobre-io`'s
+`check_block_id_on_anticipated_thermal`),
+`thermal_bounds(thermal_idx, delivery_stage).cost_per_mwh` for its cost,
 `total_hours_per_stage[delivery_stage]` and
 `cumulative_discount_factors[delivery_stage]` for its present-value objective,
 and `is_anticipated_decision_active_for_delivery` (the plant's window at
@@ -801,15 +805,15 @@ stage, never at `stage_idx`. The delivered commitment is a hard equality with
 no slack (the fishing coupling pins the plant's delivery-stage generation to
 the committed value), so relatively-complete recourse requires the committed
 value always lie within the delivery stage's own generation bounds. A
-DECISION-anchored read (`thermal_bounds(thermal_idx, stage_idx)`) is the
+DECISION-anchored read (`thermal_block_base(thermal_idx, stage_idx)`) is the
 forbidden alternative: it
 reintroduces the capacity-drop infeasibility — a commitment placed under the
 decision stage's larger capacity that no scenario can deliver under the delivery
 stage's smaller one, stranded with no feasibility cut to absorb it — and still
 compiles, since constant-across-lead bounds make the two reads indistinguishable.
 
-Residual audit complete: no mechanism other than `thermal_bounds` can strand a
-delivered commitment. The only generic-constraint handle on an anticipated plant,
+Residual audit complete: no mechanism other than `thermal_block_base` can
+strand a delivered commitment. The only generic-constraint handle on an anticipated plant,
 `VariableRef::AnticipatedDecision` (`resolve_anticipated_decision`), binds the
 fresh decision column at its own decision stage (the recourse variable, already
 delivery-anchored here), never an in-flight matured commitment (no `VariableRef`
@@ -824,7 +828,10 @@ Read: `lp/builder/columns.rs` (`fill_anticipated_columns`),
 `lp/indexer/anticipated_gate.rs` (`is_anticipated_decision_active_for_delivery`),
 `lp/generic_constraints.rs` (`resolve_anticipated_decision`),
 `cobre-io` `validation/semantic/thermal.rs`
-(`warn_thermal_generation_on_anticipated_thermal`). Pinned by
+(`warn_thermal_generation_on_anticipated_thermal`), `cobre-io`
+`validation/semantic/block_bounds.rs`
+(`check_block_id_on_anticipated_thermal`, the rule the base read's safety
+depends on). Pinned by
 `test_anticipated_decision_delivery_anchored_bounds` (stage-varying delivery
 bounds/cost, mutation-verified against the decision-anchored read), the
 end-to-end

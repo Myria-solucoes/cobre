@@ -6,6 +6,12 @@
 //! overlay ([`ResolvedBlockBounds::empty`]) makes every per-block lookup fall
 //! back to exactly the stage-wide cell it would otherwise override. Populated
 //! by `cobre-io`; never modified after construction.
+//!
+//! Each `<Family>BlockOverride` struct is a full field-for-field mirror of its
+//! `<Family>BlockBounds` counterpart rather than an `Option<<Family>BlockBounds>`
+//! because optionality is per-**column**, not per-row: a layer-1 row may set
+//! one column and fall through to the base on the rest, which a single
+//! `Option` around the whole struct cannot express.
 
 /// Per-block override for a hydro plant's block-eligible bounds.
 ///

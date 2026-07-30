@@ -1291,11 +1291,11 @@ mod filling_cut_validity {
         StageStateConfig,
     };
     use cobre_core::{
-        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractStageBounds, EntityId,
-        HydroStageBounds, HydroStagePenalties, HydroStorage, InitialConditions, LineStageBounds,
-        LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
-        PumpingStageBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalStageBounds,
-        TrainingEvent,
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, EntityId,
+        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, HydroStorage, InitialConditions,
+        LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
+        PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder,
+        ThermalBlockBounds, ThermalStageBounds, TrainingEvent,
     };
     use cobre_io::config::{
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
@@ -1509,6 +1509,13 @@ mod filling_cut_validity {
             HydroStageBounds {
                 min_storage_hm3: 0.0,
                 max_storage_hm3: 200.0,
+                filling_min_rate_m3s: 0.0,
+                water_withdrawal_m3s: 0.0,
+            }
+        }
+
+        fn default_hydro_block_bounds() -> HydroBlockBounds {
+            HydroBlockBounds {
                 min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
                 min_outflow_m3s: 0.0,
@@ -1516,8 +1523,6 @@ mod filling_cut_validity {
                 min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
                 max_diversion_m3s: None,
-                filling_min_rate_m3s: 0.0,
-                water_withdrawal_m3s: 0.0,
             }
         }
 
@@ -1554,20 +1559,23 @@ mod filling_cut_validity {
             },
             &BoundsDefaults {
                 hydro: default_hydro_bounds(),
+                hydro_block: default_hydro_block_bounds(),
                 thermal: ThermalStageBounds {
-                    min_generation_mw: 0.0,
-                    max_generation_mw: 400.0,
                     cost_per_mwh: 500.0,
                 },
-                line: LineStageBounds {
+                thermal_block: ThermalBlockBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 400.0,
+                },
+                line_block: LineBlockBounds {
                     direct_mw: 0.0,
                     reverse_mw: 0.0,
                 },
-                pumping: PumpingStageBounds {
+                pumping_block: PumpingBlockBounds {
                     min_flow_m3s: 0.0,
                     max_flow_m3s: 0.0,
                 },
-                contract: ContractStageBounds {
+                contract_block: ContractBlockBounds {
                     min_mw: 0.0,
                     max_mw: 0.0,
                     price_per_mwh: 0.0,

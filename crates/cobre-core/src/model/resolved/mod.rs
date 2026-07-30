@@ -22,8 +22,8 @@ pub use block_bounds::{
     PumpingBlockOverride, ResolvedBlockBounds, ThermalBlockOverride,
 };
 pub use bounds::{
-    BoundsCountsSpec, BoundsDefaults, ContractStageBounds, HydroStageBounds, LineStageBounds,
-    PumpingStageBounds, ResolvedBounds, ThermalStageBounds,
+    BoundsCountsSpec, BoundsDefaults, ContractBlockBounds, HydroBlockBounds, HydroStageBounds,
+    LineBlockBounds, PumpingBlockBounds, ResolvedBounds, ThermalBlockBounds, ThermalStageBounds,
 };
 pub use factors::{ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors};
 pub use generic::ResolvedGenericConstraintBounds;

@@ -1633,12 +1633,12 @@ mod assemble_csc_tests {
 mod parameter_resolution_tests {
     use cobre_core::{
         BoundsCountsSpec, BoundsDefaults, Bus, BusStagePenalties, CoefficientRef,
-        ConstraintExpression, ConstraintSense, ContractStageBounds, DeficitSegment, EntityId,
-        GenericConstraint, HydroStageBounds, HydroStagePenalties, LineStageBounds,
-        LineStagePenalties, NcsStagePenalties, ParameterKind, PenaltiesCountsSpec,
-        PenaltiesDefaults, PumpingStageBounds, ResolvedBounds, ResolvedGenericConstraintBounds,
+        ConstraintExpression, ConstraintSense, ContractBlockBounds, DeficitSegment, EntityId,
+        GenericConstraint, HydroBlockBounds, HydroStageBounds, HydroStagePenalties,
+        LineBlockBounds, LineStagePenalties, NcsStagePenalties, ParameterKind, PenaltiesCountsSpec,
+        PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedGenericConstraintBounds,
         ResolvedPenalties, ScalarParameter, SlackConfig, StageId, SystemBuilder,
-        ThermalStageBounds,
+        ThermalBlockBounds, ThermalStageBounds,
     };
     use cobre_core::{LinearTerm, VariableRef};
     use cobre_stochastic::normal::precompute::PrecomputedNormal;
@@ -1674,6 +1674,13 @@ mod parameter_resolution_tests {
         HydroStageBounds {
             min_storage_hm3: 0.0,
             max_storage_hm3: 200.0,
+            filling_min_rate_m3s: 0.0,
+            water_withdrawal_m3s: 0.0,
+        }
+    }
+
+    fn default_hydro_block_bounds() -> HydroBlockBounds {
+        HydroBlockBounds {
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 100.0,
             min_outflow_m3s: 0.0,
@@ -1681,8 +1688,6 @@ mod parameter_resolution_tests {
             min_generation_mw: 0.0,
             max_generation_mw: 250.0,
             max_diversion_m3s: None,
-            filling_min_rate_m3s: 0.0,
-            water_withdrawal_m3s: 0.0,
         }
     }
 
@@ -1794,20 +1799,21 @@ mod parameter_resolution_tests {
             },
             &BoundsDefaults {
                 hydro: default_hydro_bounds(),
-                thermal: ThermalStageBounds {
+                hydro_block: default_hydro_block_bounds(),
+                thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+                thermal_block: ThermalBlockBounds {
                     min_generation_mw: 0.0,
                     max_generation_mw: 100.0,
-                    cost_per_mwh: 0.0,
                 },
-                line: LineStageBounds {
+                line_block: LineBlockBounds {
                     direct_mw: 0.0,
                     reverse_mw: 0.0,
                 },
-                pumping: PumpingStageBounds {
+                pumping_block: PumpingBlockBounds {
                     min_flow_m3s: 0.0,
                     max_flow_m3s: 0.0,
                 },
-                contract: ContractStageBounds {
+                contract_block: ContractBlockBounds {
                     min_mw: 0.0,
                     max_mw: 0.0,
                     price_per_mwh: 0.0,
@@ -2149,10 +2155,10 @@ mod zero_cost_tests {
     use std::collections::{BTreeMap, HashMap};
 
     use cobre_core::{
-        BoundsCountsSpec, BoundsDefaults, CascadeTopology, ContractStageBounds, HydroStageBounds,
-        LineStageBounds, PumpingStageBounds, ResolvedBounds, ResolvedGenericConstraintBounds,
-        ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, Stage,
-        ThermalStageBounds,
+        BoundsCountsSpec, BoundsDefaults, CascadeTopology, ContractBlockBounds, HydroBlockBounds,
+        HydroStageBounds, LineBlockBounds, PumpingBlockBounds, ResolvedBounds,
+        ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
+        ResolvedNcsFactors, ResolvedPenalties, Stage, ThermalBlockBounds, ThermalStageBounds,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -2220,6 +2226,10 @@ mod zero_cost_tests {
                     hydro: HydroStageBounds {
                         min_storage_hm3: 0.0,
                         max_storage_hm3: 0.0,
+                        filling_min_rate_m3s: 0.0,
+                        water_withdrawal_m3s: 0.0,
+                    },
+                    hydro_block: HydroBlockBounds {
                         min_turbined_m3s: 0.0,
                         max_turbined_m3s: 0.0,
                         min_outflow_m3s: 0.0,
@@ -2227,23 +2237,21 @@ mod zero_cost_tests {
                         min_generation_mw: 0.0,
                         max_generation_mw: 0.0,
                         max_diversion_m3s: None,
-                        filling_min_rate_m3s: 0.0,
-                        water_withdrawal_m3s: 0.0,
                     },
-                    thermal: ThermalStageBounds {
+                    thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+                    thermal_block: ThermalBlockBounds {
                         min_generation_mw: 0.0,
                         max_generation_mw: 0.0,
-                        cost_per_mwh: 0.0,
                     },
-                    line: LineStageBounds {
+                    line_block: LineBlockBounds {
                         direct_mw: 0.0,
                         reverse_mw: 0.0,
                     },
-                    pumping: PumpingStageBounds {
+                    pumping_block: PumpingBlockBounds {
                         min_flow_m3s: 0.0,
                         max_flow_m3s: 0.0,
                     },
-                    contract: ContractStageBounds {
+                    contract_block: ContractBlockBounds {
                         min_mw: 0.0,
                         max_mw: 0.0,
                         price_per_mwh: 0.0,
@@ -2402,12 +2410,12 @@ mod zero_cost_tests {
             fixtures.bounds.thermal_bounds_mut(0, stage).cost_per_mwh = ANT_COST;
             fixtures
                 .bounds
-                .thermal_bounds_mut(0, stage)
+                .thermal_block_base_mut(0, stage)
                 .max_generation_mw = 100.0;
             fixtures.bounds.thermal_bounds_mut(1, stage).cost_per_mwh = STD_COST;
             fixtures
                 .bounds
-                .thermal_bounds_mut(1, stage)
+                .thermal_block_base_mut(1, stage)
                 .max_generation_mw = 100.0;
         }
         let mut ctx = fixtures.make_ctx(
@@ -3063,13 +3071,14 @@ mod pumping_water_tests {
 
     use cobre_core::{
         BlockMode, BoundsCountsSpec, BoundsDefaults, Bus, BusStagePenalties, CascadeTopology,
-        CoefficientRef, ConstraintExpression, ConstraintSense, ContractStageBounds, ContractType,
-        DeficitSegment, EnergyContract, EntityId, GenericConstraint, Hydro, HydroGenerationModel,
-        HydroStageBounds, HydroStagePenalties, HydroUnitGroup, Line, LineStageBounds,
-        LineStagePenalties, LinearTerm, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
-        PumpingStageBounds, PumpingStation, ResolvedBounds, ResolvedGenericConstraintBounds,
-        ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties, SlackConfig,
-        Stage, Thermal, ThermalStageBounds, VariableRef,
+        CoefficientRef, ConstraintExpression, ConstraintSense, ContractBlockBounds, ContractType,
+        DeficitSegment, EnergyContract, EntityId, GenericConstraint, Hydro, HydroBlockBounds,
+        HydroGenerationModel, HydroStageBounds, HydroStagePenalties, HydroUnitGroup, Line,
+        LineBlockBounds, LineStagePenalties, LinearTerm, NcsStagePenalties, PenaltiesCountsSpec,
+        PenaltiesDefaults, PumpingBlockBounds, PumpingStation, ResolvedBounds,
+        ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds,
+        ResolvedNcsFactors, ResolvedPenalties, SlackConfig, Stage, Thermal, ThermalBlockBounds,
+        ThermalStageBounds, VariableRef,
     };
     use cobre_stochastic::par::precompute::PrecomputedPar;
 
@@ -3146,6 +3155,10 @@ mod pumping_water_tests {
             hydro: HydroStageBounds {
                 min_storage_hm3: 0.0,
                 max_storage_hm3: 100.0,
+                filling_min_rate_m3s: 0.0,
+                water_withdrawal_m3s: 0.0,
+            },
+            hydro_block: HydroBlockBounds {
                 min_turbined_m3s: 0.0,
                 max_turbined_m3s: 50.0,
                 min_outflow_m3s: 0.0,
@@ -3153,23 +3166,21 @@ mod pumping_water_tests {
                 min_generation_mw: 0.0,
                 max_generation_mw: 45.0,
                 max_diversion_m3s: None,
-                filling_min_rate_m3s: 0.0,
-                water_withdrawal_m3s: 0.0,
             },
-            thermal: ThermalStageBounds {
+            thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+            thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
                 max_generation_mw: 0.0,
-                cost_per_mwh: 0.0,
             },
-            line: LineStageBounds {
+            line_block: LineBlockBounds {
                 direct_mw: 0.0,
                 reverse_mw: 0.0,
             },
-            pumping: PumpingStageBounds {
+            pumping_block: PumpingBlockBounds {
                 min_flow_m3s: 0.0,
                 max_flow_m3s: 0.0,
             },
-            contract: ContractStageBounds {
+            contract_block: ContractBlockBounds {
                 min_mw: 0.0,
                 max_mw: 0.0,
                 price_per_mwh: 0.0,
@@ -3452,7 +3463,7 @@ mod pumping_water_tests {
             // mislabel under permutation is observable.
             for (c_idx, c) in contracts.iter().enumerate() {
                 for stage_idx in 0..N_STAGES {
-                    *bounds.contract_bounds_mut(c_idx, stage_idx) = ContractStageBounds {
+                    *bounds.contract_bounds_mut(c_idx, stage_idx) = ContractBlockBounds {
                         min_mw: c.min_mw,
                         max_mw: c.max_mw,
                         price_per_mwh: c.price_per_mwh,
@@ -3462,7 +3473,7 @@ mod pumping_water_tests {
             // Distinct per-station bounds so a column/bound mismatch is observable.
             for (p_idx, s) in stations.iter().enumerate() {
                 for stage_idx in 0..N_STAGES {
-                    *bounds.pumping_bounds_mut(p_idx, stage_idx) = PumpingStageBounds {
+                    *bounds.pumping_bounds_mut(p_idx, stage_idx) = PumpingBlockBounds {
                         min_flow_m3s: s.min_flow_m3s,
                         max_flow_m3s: s.max_flow_m3s,
                     };
@@ -3474,16 +3485,18 @@ mod pumping_water_tests {
             for (t_idx, t) in thermals.iter().enumerate() {
                 for stage_idx in 0..N_STAGES {
                     *bounds.thermal_bounds_mut(t_idx, stage_idx) = ThermalStageBounds {
+                        cost_per_mwh: t.cost_per_mwh,
+                    };
+                    *bounds.thermal_block_base_mut(t_idx, stage_idx) = ThermalBlockBounds {
                         min_generation_mw: t.min_generation_mw,
                         max_generation_mw: t.max_generation_mw,
-                        cost_per_mwh: t.cost_per_mwh,
                     };
                 }
             }
             // Distinct per-line capacities from the sorted slice, same rationale.
             for (l_idx, l) in lines.iter().enumerate() {
                 for stage_idx in 0..N_STAGES {
-                    *bounds.line_bounds_mut(l_idx, stage_idx) = LineStageBounds {
+                    *bounds.line_bounds_mut(l_idx, stage_idx) = LineBlockBounds {
                         direct_mw: l.direct_capacity_mw,
                         reverse_mw: l.reverse_capacity_mw,
                     };

@@ -842,15 +842,16 @@ fn test_lead_time_single_decider_on_disk_load() {
     // ever reads.
     for stage in 0..system.n_stages() {
         let b = system.bounds().thermal_bounds(THERMAL_IDX_ANT, stage);
+        let bb = system.bounds().thermal_block_base(THERMAL_IDX_ANT, stage);
         assert!(
-            (b.min_generation_mw - 0.0).abs() < f64::EPSILON,
+            (bb.min_generation_mw - 0.0).abs() < f64::EPSILON,
             "stage {stage}: min_generation_mw mismatch, got {}",
-            b.min_generation_mw
+            bb.min_generation_mw
         );
         assert!(
-            (b.max_generation_mw - 100.0).abs() < f64::EPSILON,
+            (bb.max_generation_mw - 100.0).abs() < f64::EPSILON,
             "stage {stage}: max_generation_mw mismatch, got {}",
-            b.max_generation_mw
+            bb.max_generation_mw
         );
         assert!(
             (b.cost_per_mwh - 10.0).abs() < f64::EPSILON,

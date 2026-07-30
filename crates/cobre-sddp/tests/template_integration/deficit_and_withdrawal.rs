@@ -107,20 +107,21 @@ fn test_multi_segment_deficit_column_count() {
         },
         &BoundsDefaults {
             hydro: default_hydro_bounds(),
-            thermal: ThermalStageBounds {
+            hydro_block: default_hydro_block_bounds(),
+            thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+            thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
                 max_generation_mw: 0.0,
-                cost_per_mwh: 0.0,
             },
-            line: LineStageBounds {
+            line_block: LineBlockBounds {
                 direct_mw: 0.0,
                 reverse_mw: 0.0,
             },
-            pumping: PumpingStageBounds {
+            pumping_block: PumpingBlockBounds {
                 min_flow_m3s: 0.0,
                 max_flow_m3s: 0.0,
             },
-            contract: ContractStageBounds {
+            contract_block: ContractBlockBounds {
                 min_mw: 0.0,
                 max_mw: 0.0,
                 price_per_mwh: 0.0,
@@ -695,6 +696,10 @@ fn two_hydro_withdrawal_slack_entries_per_hydro() {
     let hydro_bounds_default = HydroStageBounds {
         min_storage_hm3: 0.0,
         max_storage_hm3: 200.0,
+        filling_min_rate_m3s: 0.0,
+        water_withdrawal_m3s: 0.0,
+    };
+    let hydro_bounds_default_block = HydroBlockBounds {
         min_turbined_m3s: 0.0,
         max_turbined_m3s: 100.0,
         min_outflow_m3s: 0.0,
@@ -702,8 +707,6 @@ fn two_hydro_withdrawal_slack_entries_per_hydro() {
         min_generation_mw: 0.0,
         max_generation_mw: 250.0,
         max_diversion_m3s: None,
-        filling_min_rate_m3s: 0.0,
-        water_withdrawal_m3s: 0.0,
     };
     let mut bounds = ResolvedBounds::new(
         &BoundsCountsSpec {
@@ -717,20 +720,21 @@ fn two_hydro_withdrawal_slack_entries_per_hydro() {
         },
         &BoundsDefaults {
             hydro: hydro_bounds_default,
-            thermal: ThermalStageBounds {
+            hydro_block: hydro_bounds_default_block,
+            thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+            thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
                 max_generation_mw: 0.0,
-                cost_per_mwh: 0.0,
             },
-            line: LineStageBounds {
+            line_block: LineBlockBounds {
                 direct_mw: 0.0,
                 reverse_mw: 0.0,
             },
-            pumping: PumpingStageBounds {
+            pumping_block: PumpingBlockBounds {
                 min_flow_m3s: 0.0,
                 max_flow_m3s: 0.0,
             },
-            contract: ContractStageBounds {
+            contract_block: ContractBlockBounds {
                 min_mw: 0.0,
                 max_mw: 0.0,
                 price_per_mwh: 0.0,
@@ -1020,6 +1024,10 @@ fn three_hydro_num_cols_includes_three_withdrawal_slacks() {
             hydro: HydroStageBounds {
                 min_storage_hm3: 0.0,
                 max_storage_hm3: 200.0,
+                filling_min_rate_m3s: 0.0,
+                water_withdrawal_m3s: 5.0,
+            },
+            hydro_block: HydroBlockBounds {
                 min_turbined_m3s: 0.0,
                 max_turbined_m3s: 100.0,
                 min_outflow_m3s: 0.0,
@@ -1027,23 +1035,21 @@ fn three_hydro_num_cols_includes_three_withdrawal_slacks() {
                 min_generation_mw: 0.0,
                 max_generation_mw: 250.0,
                 max_diversion_m3s: None,
-                filling_min_rate_m3s: 0.0,
-                water_withdrawal_m3s: 5.0,
             },
-            thermal: ThermalStageBounds {
+            thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+            thermal_block: ThermalBlockBounds {
                 min_generation_mw: 0.0,
                 max_generation_mw: 0.0,
-                cost_per_mwh: 0.0,
             },
-            line: LineStageBounds {
+            line_block: LineBlockBounds {
                 direct_mw: 0.0,
                 reverse_mw: 0.0,
             },
-            pumping: PumpingStageBounds {
+            pumping_block: PumpingBlockBounds {
                 min_flow_m3s: 0.0,
                 max_flow_m3s: 0.0,
             },
-            contract: ContractStageBounds {
+            contract_block: ContractBlockBounds {
                 min_mw: 0.0,
                 max_mw: 0.0,
                 price_per_mwh: 0.0,

@@ -518,8 +518,8 @@ fn line_bound_override_follows_declared_id_through_canonical_resort() {
     );
 
     let bounds = system.bounds();
-    let l1 = bounds.line_bounds(pos_l1, 0);
-    let l2 = bounds.line_bounds(pos_l2, 0);
+    let l1 = bounds.line_block_base(pos_l1, 0);
+    let l2 = bounds.line_block_base(pos_l2, 0);
 
     assert!(
         (l1.direct_mw - 99999.0).abs() < f64::EPSILON,
@@ -643,8 +643,8 @@ fn thermal_bound_override_follows_declared_id_through_canonical_resort() {
     );
 
     let bounds = system.bounds();
-    let t1 = bounds.thermal_bounds(pos_t1, 0);
-    let t2 = bounds.thermal_bounds(pos_t2, 0);
+    let t1 = bounds.thermal_block_base(pos_t1, 0);
+    let t2 = bounds.thermal_block_base(pos_t2, 0);
 
     assert!(
         (t1.max_generation_mw - 99999.0).abs() < f64::EPSILON,
@@ -858,8 +858,8 @@ fn pumping_bound_override_follows_declared_id_through_canonical_resort() {
     );
 
     let bounds = system.bounds();
-    let p1 = bounds.pumping_bounds(pos_p1, 0);
-    let p2 = bounds.pumping_bounds(pos_p2, 0);
+    let p1 = bounds.pumping_block_base(pos_p1, 0);
+    let p2 = bounds.pumping_block_base(pos_p2, 0);
 
     assert!(
         (p1.max_flow_m3s - 99999.0).abs() < f64::EPSILON,
@@ -987,8 +987,8 @@ fn contract_bound_override_follows_declared_id_through_canonical_resort() {
     );
 
     let bounds = system.bounds();
-    let c1 = bounds.contract_bounds(pos_c1, 0);
-    let c2 = bounds.contract_bounds(pos_c2, 0);
+    let c1 = bounds.contract_block_base(pos_c1, 0);
+    let c2 = bounds.contract_block_base(pos_c2, 0);
 
     assert!(
         (c1.max_mw - 99999.0).abs() < f64::EPSILON,
@@ -1534,9 +1534,9 @@ fn hydro_bound_pipeline_presort_key_matches_builder_canonical_key() {
     assert_eq!(pos_a, 2, "HYDRO_A (latest date) must sort third");
 
     let bounds = system.bounds();
-    let a = bounds.hydro_bounds(pos_a, 0);
-    let b = bounds.hydro_bounds(pos_b, 0);
-    let c = bounds.hydro_bounds(pos_c, 0);
+    let a = bounds.hydro_block_base(pos_a, 0);
+    let b = bounds.hydro_block_base(pos_b, 0);
+    let c = bounds.hydro_block_base(pos_c, 0);
 
     assert!(
         (b.max_turbined_m3s - 99999.0).abs() < f64::EPSILON,

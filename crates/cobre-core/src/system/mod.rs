@@ -1684,12 +1684,13 @@ mod tests {
     fn fully_populated_system_survives_postcard_roundtrip_intact() {
         use crate::{
             AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
-            ConstraintExpression, ConstraintSense, ContractStageBounds, CorrelationEntity,
+            ConstraintExpression, ConstraintSense, ContractBlockBounds, CorrelationEntity,
             CorrelationGroup, CorrelationProfile, CorrelationScheduleEntry, DeficitSegment,
-            HydroPastDefluence, HydroStageBounds, HydroStagePenalties, HydroStorage,
-            LineStageBounds, LineStagePenalties, LinearTerm, NcsStagePenalties,
-            PenaltiesCountsSpec, PenaltiesDefaults, PolicyGraphType, PumpingStageBounds,
-            RecentObservation, SlackConfig, ThermalStageBounds, Transition, VariableRef,
+            HydroBlockBounds, HydroPastDefluence, HydroStageBounds, HydroStagePenalties,
+            HydroStorage, LineBlockBounds, LineStagePenalties, LinearTerm, NcsStagePenalties,
+            PenaltiesCountsSpec, PenaltiesDefaults, PolicyGraphType, PumpingBlockBounds,
+            RecentObservation, SlackConfig, ThermalBlockBounds, ThermalStageBounds, Transition,
+            VariableRef,
         };
 
         let bus1 = {
@@ -1817,6 +1818,10 @@ mod tests {
                 hydro: HydroStageBounds {
                     min_storage_hm3: 10.0,
                     max_storage_hm3: 500.0,
+                    filling_min_rate_m3s: 3.0,
+                    water_withdrawal_m3s: 1.5,
+                },
+                hydro_block: HydroBlockBounds {
                     min_turbined_m3s: 1.0,
                     max_turbined_m3s: 300.0,
                     min_outflow_m3s: 2.0,
@@ -1824,23 +1829,21 @@ mod tests {
                     min_generation_mw: 5.0,
                     max_generation_mw: 200.0,
                     max_diversion_m3s: Some(20.0),
-                    filling_min_rate_m3s: 3.0,
-                    water_withdrawal_m3s: 1.5,
                 },
-                thermal: ThermalStageBounds {
+                thermal: ThermalStageBounds { cost_per_mwh: 85.0 },
+                thermal_block: ThermalBlockBounds {
                     min_generation_mw: 10.0,
                     max_generation_mw: 150.0,
-                    cost_per_mwh: 85.0,
                 },
-                line: LineStageBounds {
+                line_block: LineBlockBounds {
                     direct_mw: 300.0,
                     reverse_mw: 250.0,
                 },
-                pumping: PumpingStageBounds {
+                pumping_block: PumpingBlockBounds {
                     min_flow_m3s: 0.5,
                     max_flow_m3s: 40.0,
                 },
-                contract: ContractStageBounds {
+                contract_block: ContractBlockBounds {
                     min_mw: 0.0,
                     max_mw: 90.0,
                     price_per_mwh: 95.0,

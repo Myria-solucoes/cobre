@@ -786,6 +786,7 @@ fn write_bounds_parquet(
         for stage_idx in 0..n_stages {
             let stage_id = system.stages()[stage_idx].id;
             let b = system.bounds().hydro_bounds(hydro_idx, stage_idx);
+            let bb = system.bounds().hydro_block_base(hydro_idx, stage_idx);
 
             append_bound!(
                 ENTITY_TYPE_HYDRO,
@@ -806,23 +807,23 @@ fn write_bounds_parquet(
                 entity_id,
                 stage_id,
                 BOUND_TURBINED_MIN,
-                b.min_turbined_m3s
+                bb.min_turbined_m3s
             );
             append_bound!(
                 ENTITY_TYPE_HYDRO,
                 entity_id,
                 stage_id,
                 BOUND_TURBINED_MAX,
-                b.max_turbined_m3s
+                bb.max_turbined_m3s
             );
             append_bound!(
                 ENTITY_TYPE_HYDRO,
                 entity_id,
                 stage_id,
                 BOUND_OUTFLOW_MIN,
-                b.min_outflow_m3s
+                bb.min_outflow_m3s
             );
-            if let Some(max_outflow) = b.max_outflow_m3s {
+            if let Some(max_outflow) = bb.max_outflow_m3s {
                 append_bound!(
                     ENTITY_TYPE_HYDRO,
                     entity_id,
@@ -836,14 +837,14 @@ fn write_bounds_parquet(
                 entity_id,
                 stage_id,
                 BOUND_GENERATION_MIN,
-                b.min_generation_mw
+                bb.min_generation_mw
             );
             append_bound!(
                 ENTITY_TYPE_HYDRO,
                 entity_id,
                 stage_id,
                 BOUND_GENERATION_MAX,
-                b.max_generation_mw
+                bb.max_generation_mw
             );
 
             if has_overlay {
@@ -919,7 +920,7 @@ fn write_bounds_parquet(
         let entity_id = thermal.id.0;
         for stage_idx in 0..n_stages {
             let stage_id = system.stages()[stage_idx].id;
-            let b = system.bounds().thermal_bounds(thermal_idx, stage_idx);
+            let b = system.bounds().thermal_block_base(thermal_idx, stage_idx);
 
             append_bound!(
                 ENTITY_TYPE_THERMAL,
@@ -969,7 +970,7 @@ fn write_bounds_parquet(
         let entity_id = line.id.0;
         for stage_idx in 0..n_stages {
             let stage_id = system.stages()[stage_idx].id;
-            let b = system.bounds().line_bounds(line_idx, stage_idx);
+            let b = system.bounds().line_block_base(line_idx, stage_idx);
 
             append_bound!(
                 ENTITY_TYPE_LINE,
@@ -1009,7 +1010,7 @@ fn write_bounds_parquet(
         let entity_id = pumping.id.0;
         for stage_idx in 0..n_stages {
             let stage_id = system.stages()[stage_idx].id;
-            let b = system.bounds().pumping_bounds(pumping_idx, stage_idx);
+            let b = system.bounds().pumping_block_base(pumping_idx, stage_idx);
 
             append_bound!(
                 ENTITY_TYPE_PUMPING_STATION,
@@ -1059,7 +1060,7 @@ fn write_bounds_parquet(
         let entity_id = contract.id.0;
         for stage_idx in 0..n_stages {
             let stage_id = system.stages()[stage_idx].id;
-            let b = system.bounds().contract_bounds(contract_idx, stage_idx);
+            let b = system.bounds().contract_block_base(contract_idx, stage_idx);
 
             append_bound!(
                 ENTITY_TYPE_CONTRACT,
@@ -1154,9 +1155,9 @@ mod tests {
         HydroGenerationModel, HydroPenalties, HydroUnitGroup, Line, NoiseMethod, PumpingStation,
         ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig, SystemBuilder, Thermal,
         resolved::{
-            BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, ContractStageBounds,
-            HydroStageBounds, LineStageBounds, PumpingStageBounds, ResolvedBlockBounds,
-            ResolvedBounds, ThermalStageBounds,
+            BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, ContractBlockBounds,
+            HydroBlockBounds, HydroStageBounds, LineBlockBounds, PumpingBlockBounds,
+            ResolvedBlockBounds, ResolvedBounds, ThermalBlockBounds, ThermalStageBounds,
         },
     };
 
@@ -1273,6 +1274,13 @@ mod tests {
         HydroStageBounds {
             min_storage_hm3,
             max_storage_hm3,
+            filling_min_rate_m3s: 0.0,
+            water_withdrawal_m3s: 0.0,
+        }
+    }
+
+    fn hydro_block_bounds_default() -> HydroBlockBounds {
+        HydroBlockBounds {
             min_turbined_m3s: 0.0,
             max_turbined_m3s: 50.0,
             min_outflow_m3s: 0.0,
@@ -1280,8 +1288,6 @@ mod tests {
             min_generation_mw: 0.0,
             max_generation_mw: 45.0,
             max_diversion_m3s: None,
-            filling_min_rate_m3s: 0.0,
-            water_withdrawal_m3s: 0.0,
         }
     }
 
@@ -1294,20 +1300,20 @@ mod tests {
         let stage = make_stage(0);
 
         let hydro_bounds_default = hydro_stage_bounds(0.0, 100.0);
-        let thermal_bounds_default = ThermalStageBounds {
+        let thermal_bounds_default = ThermalStageBounds { cost_per_mwh: 0.0 };
+        let thermal_block_default = ThermalBlockBounds {
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
-            cost_per_mwh: 0.0,
         };
-        let line_default = LineStageBounds {
+        let line_default = LineBlockBounds {
             direct_mw: 500.0,
             reverse_mw: 500.0,
         };
-        let pumping_default = PumpingStageBounds {
+        let pumping_default = PumpingBlockBounds {
             min_flow_m3s: 0.0,
             max_flow_m3s: 0.0,
         };
-        let contract_default = ContractStageBounds {
+        let contract_default = ContractBlockBounds {
             min_mw: 0.0,
             max_mw: 0.0,
             price_per_mwh: 0.0,
@@ -1324,10 +1330,12 @@ mod tests {
             },
             &BoundsDefaults {
                 hydro: hydro_bounds_default,
+                hydro_block: hydro_block_bounds_default(),
                 thermal: thermal_bounds_default,
-                line: line_default,
-                pumping: pumping_default,
-                contract: contract_default,
+                thermal_block: thermal_block_default,
+                line_block: line_default,
+                pumping_block: pumping_default,
+                contract_block: contract_default,
             },
         );
 
@@ -1349,20 +1357,20 @@ mod tests {
         let stage1 = make_stage(1);
 
         let hydro_bounds_default = hydro_stage_bounds(min_storage, max_storage);
-        let thermal_default = ThermalStageBounds {
+        let thermal_default = ThermalStageBounds { cost_per_mwh: 0.0 };
+        let thermal_block_default = ThermalBlockBounds {
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
-            cost_per_mwh: 0.0,
         };
-        let line_default = LineStageBounds {
+        let line_default = LineBlockBounds {
             direct_mw: 500.0,
             reverse_mw: 500.0,
         };
-        let pumping_default = PumpingStageBounds {
+        let pumping_default = PumpingBlockBounds {
             min_flow_m3s: 0.0,
             max_flow_m3s: 0.0,
         };
-        let contract_default = ContractStageBounds {
+        let contract_default = ContractBlockBounds {
             min_mw: 0.0,
             max_mw: 0.0,
             price_per_mwh: 0.0,
@@ -1379,10 +1387,12 @@ mod tests {
             },
             &BoundsDefaults {
                 hydro: hydro_bounds_default,
+                hydro_block: hydro_block_bounds_default(),
                 thermal: thermal_default,
-                line: line_default,
-                pumping: pumping_default,
-                contract: contract_default,
+                thermal_block: thermal_block_default,
+                line_block: line_default,
+                pumping_block: pumping_default,
+                contract_block: contract_default,
             },
         );
 
@@ -1435,20 +1445,20 @@ mod tests {
         let stage1 = make_stage_with_blocks(1, 2);
 
         let hydro_bounds_default = hydro_stage_bounds(0.0, 100.0);
-        let thermal_bounds_default = ThermalStageBounds {
+        let thermal_bounds_default = ThermalStageBounds { cost_per_mwh: 0.0 };
+        let thermal_block_default = ThermalBlockBounds {
             min_generation_mw: 0.0,
             max_generation_mw: 100.0,
-            cost_per_mwh: 0.0,
         };
-        let line_default = LineStageBounds {
+        let line_default = LineBlockBounds {
             direct_mw: 500.0,
             reverse_mw: 500.0,
         };
-        let pumping_default = PumpingStageBounds {
+        let pumping_default = PumpingBlockBounds {
             min_flow_m3s: 0.0,
             max_flow_m3s: 0.0,
         };
-        let contract_default = ContractStageBounds {
+        let contract_default = ContractBlockBounds {
             min_mw: 0.0,
             max_mw: 0.0,
             price_per_mwh: 0.0,
@@ -1465,10 +1475,12 @@ mod tests {
             },
             &BoundsDefaults {
                 hydro: hydro_bounds_default,
+                hydro_block: hydro_block_bounds_default(),
                 thermal: thermal_bounds_default,
-                line: line_default,
-                pumping: pumping_default,
-                contract: contract_default,
+                thermal_block: thermal_block_default,
+                line_block: line_default,
+                pumping_block: pumping_default,
+                contract_block: contract_default,
             },
         );
         bounds.set_block_overlay(overlay);
@@ -1583,20 +1595,20 @@ mod tests {
         let stage1 = make_stage_with_blocks(1, 2);
 
         let hydro_bounds_default = hydro_stage_bounds(0.0, 100.0);
-        let thermal_bounds_default = ThermalStageBounds {
+        let thermal_bounds_default = ThermalStageBounds { cost_per_mwh: 0.0 };
+        let thermal_block_default = ThermalBlockBounds {
             min_generation_mw: 0.0,
             max_generation_mw: 0.0,
-            cost_per_mwh: 0.0,
         };
-        let line_default = LineStageBounds {
+        let line_default = LineBlockBounds {
             direct_mw: 500.0,
             reverse_mw: 500.0,
         };
-        let pumping_default = PumpingStageBounds {
+        let pumping_default = PumpingBlockBounds {
             min_flow_m3s: 0.0,
             max_flow_m3s: 80.0,
         };
-        let contract_default = ContractStageBounds {
+        let contract_default = ContractBlockBounds {
             min_mw: 0.0,
             max_mw: 200.0,
             price_per_mwh: 50.0,
@@ -1613,10 +1625,12 @@ mod tests {
             },
             &BoundsDefaults {
                 hydro: hydro_bounds_default,
+                hydro_block: hydro_block_bounds_default(),
                 thermal: thermal_bounds_default,
-                line: line_default,
-                pumping: pumping_default,
-                contract: contract_default,
+                thermal_block: thermal_block_default,
+                line_block: line_default,
+                pumping_block: pumping_default,
+                contract_block: contract_default,
             },
         );
         bounds.set_block_overlay(overlay);
@@ -1851,20 +1865,21 @@ mod tests {
             },
             &BoundsDefaults {
                 hydro: hydro_stage_bounds(0.0, 100.0),
-                thermal: ThermalStageBounds {
+                hydro_block: hydro_block_bounds_default(),
+                thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+                thermal_block: ThermalBlockBounds {
                     min_generation_mw: 0.0,
                     max_generation_mw: 100.0,
-                    cost_per_mwh: 0.0,
                 },
-                line: LineStageBounds {
+                line_block: LineBlockBounds {
                     direct_mw: 500.0,
                     reverse_mw: 500.0,
                 },
-                pumping: PumpingStageBounds {
+                pumping_block: PumpingBlockBounds {
                     min_flow_m3s: 0.0,
                     max_flow_m3s: 0.0,
                 },
-                contract: ContractStageBounds {
+                contract_block: ContractBlockBounds {
                     min_mw: 0.0,
                     max_mw: 0.0,
                     price_per_mwh: 0.0,
@@ -1951,20 +1966,21 @@ mod tests {
             },
             &BoundsDefaults {
                 hydro: hydro_stage_bounds(0.0, 100.0),
-                thermal: ThermalStageBounds {
+                hydro_block: hydro_block_bounds_default(),
+                thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+                thermal_block: ThermalBlockBounds {
                     min_generation_mw: 0.0,
                     max_generation_mw: 100.0,
-                    cost_per_mwh: 0.0,
                 },
-                line: LineStageBounds {
+                line_block: LineBlockBounds {
                     direct_mw: 500.0,
                     reverse_mw: 500.0,
                 },
-                pumping: PumpingStageBounds {
+                pumping_block: PumpingBlockBounds {
                     min_flow_m3s: 0.0,
                     max_flow_m3s: 0.0,
                 },
-                contract: ContractStageBounds {
+                contract_block: ContractBlockBounds {
                     min_mw: 0.0,
                     max_mw: 0.0,
                     price_per_mwh: 0.0,

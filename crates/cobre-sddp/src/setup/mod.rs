@@ -1435,12 +1435,13 @@ fn build_pumping_consumption(system: &System) -> Vec<f64> {
 
 /// Build the per-stage RESOLVED contract prices \[$/`MWh`\], per block.
 ///
-/// Outer index is the study-stage index `t` (0-based, matching the
-/// `contract_bounds` stage axis); each inner slice is flat with the per-stage
-/// stride `block_counts_per_stage[t]` — index `c * n_blks + blk`, `c` ID-sorted
-/// parallel to `system.contracts()` (the same order `EntityCounts::contract_ids`
-/// is built in) — carrying `contract_bounds_at_block(c, t, blk).price_per_mwh`.
-/// Empty inner slices for a contract-free system or a zero-block stage.
+/// Outer index is the study-stage index `t` (0-based, matching
+/// [`ResolvedBounds`](cobre_core::ResolvedBounds)'s contract stage axis); each
+/// inner slice is flat with the per-stage stride `block_counts_per_stage[t]` —
+/// index `c * n_blks + blk`, `c` ID-sorted parallel to `system.contracts()`
+/// (the same order `EntityCounts::contract_ids` is built in) — carrying
+/// `contract_bounds_at_block(c, t, blk).price_per_mwh`. Empty inner slices for
+/// a contract-free system or a zero-block stage.
 fn build_contract_prices_per_stage(
     system: &System,
     n_stages: usize,
