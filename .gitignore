@@ -73,7 +73,3 @@ tests/slurm/staging/
 dhat-heap.json
 *.orig
 rust_out
-
-# Vendored client-side renderer for the design-doc HTML regenerator —
-# auto-downloaded by docs/design/generalizing/build_beyond_sddp_html.py, not tracked
-docs/design/generalizing/mermaid.min.js
