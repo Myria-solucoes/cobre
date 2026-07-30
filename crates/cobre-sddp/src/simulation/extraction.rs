@@ -440,9 +440,11 @@ pub struct StageExtractionSpec<'a> {
     /// Stage-correct equipment geometry, resolved per stage from `StageLayout`
     /// (via `StageTemplates::geometry_per_stage`).
     pub geometry: &'a StageGeometry,
-    /// Study-scope hydro-cell partition: a plant's reported `turbined_m3s` and
-    /// FPHA `generation_mw` are sums over [`HydroCellIndex::cells_of`], exact
-    /// because every cell of a plant shares that plant's one production model.
+    /// Study-scope hydro-cell partition: a plant's reported `turbined_m3s`,
+    /// FPHA `generation_mw`, `turbined_slack_m3s`, and `generation_slack_mw`
+    /// are each sums over [`HydroCellIndex::cells_of`] — exact because every
+    /// cell of a plant shares that plant's one production model, and, for the
+    /// two slacks, because each cell owns its own min-floor row and column.
     pub hydro_cell_index: &'a HydroCellIndex,
     /// Entity ID lists and productivities needed to build result records.
     pub entity_counts: &'a EntityCounts,
@@ -544,6 +546,62 @@ fn col_scale_factor_at(col_scale: &[f64], col: usize) -> f64 {
     }
 }
 
+/// Sum a CELL-keyed operational-violation slack family (`turbine_below_slack`/
+/// `generation_below_slack`) over plant `h`'s own cells at block `b`: the
+/// plant-level report for a per-cell-keyed LP family, mirroring the
+/// `turbined`/`generation_mw` cell-sum reads elsewhere in this module.
+fn sum_cell_slack(
+    view: &SolutionView<'_>,
+    spec: &StageExtractionSpec<'_>,
+    grid: BlockGrid,
+    family_start: usize,
+    h: usize,
+    b: usize,
+) -> f64 {
+    spec.hydro_cell_index
+        .cells_of(HydroSys::new(h))
+        .map(|c| view.primal[grid.flat(family_start, c, BlockIdx::new(b))])
+        .sum()
+}
+
+/// The four operational-violation slack values for plant `h` at block `b`:
+/// `(turbined_slack, outflow_slack_below, outflow_slack_above, generation_slack)`.
+/// All zero when the study carries no operational-violation penalty.
+/// `turbine_below_slack`/`generation_below_slack` are CELL-keyed, so those two
+/// sum `h`'s own cells via [`sum_cell_slack`]; the two outflow families stay
+/// hydro-keyed.
+fn hydro_operational_slacks(
+    view: &SolutionView<'_>,
+    spec: &StageExtractionSpec<'_>,
+    grid: BlockGrid,
+    h: usize,
+    b: usize,
+) -> (f64, f64, f64, f64) {
+    if !spec.study_dims.has_operational_violations {
+        return (0.0, 0.0, 0.0, 0.0);
+    }
+    (
+        sum_cell_slack(
+            view,
+            spec,
+            grid,
+            spec.geometry.turbine_below_slack.start,
+            h,
+            b,
+        ),
+        view.primal[grid.flat(spec.geometry.outflow_below_slack.start, h, BlockIdx::new(b))],
+        view.primal[grid.flat(spec.geometry.outflow_above_slack.start, h, BlockIdx::new(b))],
+        sum_cell_slack(
+            view,
+            spec,
+            grid,
+            spec.geometry.generation_below_slack.start,
+            h,
+            b,
+        ),
+    )
+}
+
 /// Extract one hydro result for the no-turbine (stage-level aggregate) branch.
 fn extract_hydro_no_turbine(
     view: &SolutionView<'_>,
@@ -567,26 +625,12 @@ fn extract_hydro_no_turbine(
             let total_hours: f64 = spec.block_hours.iter().sum();
             for blk in 0..n_blks {
                 let w = spec.block_hours[blk] / total_hours;
-                tb += view.primal[grid.flat(
-                    spec.geometry.turbine_below_slack.start,
-                    h,
-                    BlockIdx::new(blk),
-                )] * w;
-                ob += view.primal[grid.flat(
-                    spec.geometry.outflow_below_slack.start,
-                    h,
-                    BlockIdx::new(blk),
-                )] * w;
-                oa += view.primal[grid.flat(
-                    spec.geometry.outflow_above_slack.start,
-                    h,
-                    BlockIdx::new(blk),
-                )] * w;
-                gb += view.primal[grid.flat(
-                    spec.geometry.generation_below_slack.start,
-                    h,
-                    BlockIdx::new(blk),
-                )] * w;
+                let (turb_slack, below_slack, above_slack, gen_slack) =
+                    hydro_operational_slacks(view, spec, grid, h, blk);
+                tb += turb_slack * w;
+                ob += below_slack * w;
+                oa += above_slack * w;
+                gb += gen_slack * w;
             }
             (tb, ob, oa, gb)
         } else {
@@ -769,7 +813,6 @@ fn extract_hydro_per_block<'a>(
     hydro_id: i32,
     stage_id: u32,
 ) -> impl Iterator<Item = SimulationHydroResult> + 'a {
-    let study_dims = spec.study_dims;
     let n_blks = spec.n_blks;
     let grid = spec.block_grid();
 
@@ -829,23 +872,7 @@ fn extract_hydro_per_block<'a>(
         };
 
         let (turbined_slack, outflow_slack_below, outflow_slack_above, generation_slack) =
-            if study_dims.has_operational_violations {
-                (
-                    view.primal
-                        [grid.flat(spec.geometry.turbine_below_slack.start, h, BlockIdx::new(b))],
-                    view.primal
-                        [grid.flat(spec.geometry.outflow_below_slack.start, h, BlockIdx::new(b))],
-                    view.primal
-                        [grid.flat(spec.geometry.outflow_above_slack.start, h, BlockIdx::new(b))],
-                    view.primal[grid.flat(
-                        spec.geometry.generation_below_slack.start,
-                        h,
-                        BlockIdx::new(b),
-                    )],
-                )
-            } else {
-                (0.0, 0.0, 0.0, 0.0)
-            };
+            hydro_operational_slacks(view, spec, grid, h, b);
 
         // Chronological block `b` reports its own boundary pair `(Sᵇ, Sᵇ⁺¹)` via the
         // accessor (interior columns stride `n_blks − 1`, so the read cannot go

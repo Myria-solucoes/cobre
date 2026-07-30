@@ -2250,12 +2250,12 @@ fn column_accessors_match_open_coded_formulas() {
                 "outflow_above_col"
             );
             assert_eq!(
-                layout.turbine_below_col(HydroSys::new(entity), BlockIdx::new(blk)),
+                layout.turbine_below_col(HydroCell::new(entity), BlockIdx::new(blk)),
                 layout.slack.oper_violation.turbine_below_slack.start + entity * n_blks + blk,
                 "turbine_below_col"
             );
             assert_eq!(
-                layout.generation_below_col(HydroSys::new(entity), BlockIdx::new(blk)),
+                layout.generation_below_col(HydroCell::new(entity), BlockIdx::new(blk)),
                 layout.slack.oper_violation.generation_below_slack.start + entity * n_blks + blk,
                 "generation_below_col"
             );

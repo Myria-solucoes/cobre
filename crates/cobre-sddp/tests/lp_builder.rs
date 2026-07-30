@@ -1551,8 +1551,10 @@ mod cell_partition_gates {
     /// distinct (non-own) buses credits each cell's generation to its OWN
     /// bus's load-balance row and to no other, while the plant's
     /// water-balance row still sums both cells' turbined flow at the same
-    /// `tau`. `num_cols` grows by exactly one turbine + one FPHA generation
-    /// column (`n_blks = 1` here).
+    /// `tau`. `num_cols` grows by one turbine + one FPHA generation column
+    /// for the new cell, plus one `turbine_below_slack` + one
+    /// `generation_below_slack` column (`OperViolationRanges` sizes both
+    /// power-family slacks per cell, not per hydro — `n_blks = 1` here).
     #[test]
     fn test_two_bus_plant_credits_each_bus_and_still_balances_water() {
         let tau_h = BLOCK_HOURS * M3S_TO_HM3;
@@ -1562,8 +1564,9 @@ mod cell_partition_gates {
 
         assert_eq!(
             tmpl_c.num_cols,
-            tmpl_b.num_cols + 2,
-            "variant C must add exactly 1 turbine + 1 FPHA generation column over B (n_blks=1)"
+            tmpl_b.num_cols + 4,
+            "variant C must add 1 turbine + 1 FPHA generation + 1 turbine_below_slack \
+             + 1 generation_below_slack column over B (n_blks=1)"
         );
 
         let cell_first_gen = find_col_by_upper(&tmpl_c, 7_000.0, 1e-9);
@@ -1599,17 +1602,19 @@ mod cell_partition_gates {
 
         // The load-balance entry: in the generation column's own row set,
         // not one of its cell's FPHA rows (excluded via the turbine
-        // column's row set), and not the plant-keyed min_generation_rows
-        // row shared with the OTHER cell.
-        let load_balance_entry = |gen_rows: &[(usize, f64)],
-                                  fpha_rows: &[usize],
-                                  other_gen_rows: &[(usize, f64)]|
+        // column's row set), and not its own cell's min_generation_rows
+        // row (a soft floor, `row_upper == +INF`; load-balance is an
+        // equality row, `row_upper` always finite -- see
+        // `fill_load_balance_rows`/`fill_operational_violation_rows`).
+        let load_balance_entry = |tmpl: &StageTemplate,
+                                  gen_rows: &[(usize, f64)],
+                                  fpha_rows: &[usize]|
          -> (usize, f64) {
             let candidates: Vec<(usize, f64)> = gen_rows
                 .iter()
                 .copied()
                 .filter(|(r, _)| !fpha_rows.contains(r))
-                .filter(|(r, _)| !other_gen_rows.iter().any(|&(r2, _)| r2 == *r))
+                .filter(|(r, _)| tmpl.row_upper[*r].is_finite())
                 .collect();
             assert_eq!(
                 candidates.len(),
@@ -1620,9 +1625,9 @@ mod cell_partition_gates {
         };
 
         let (lb_row_first, lb_coeff_first) =
-            load_balance_entry(&gen_first_rows, &fpha_rows_first, &gen_second_rows);
+            load_balance_entry(&tmpl_c, &gen_first_rows, &fpha_rows_first);
         let (lb_row_second, lb_coeff_second) =
-            load_balance_entry(&gen_second_rows, &fpha_rows_second, &gen_first_rows);
+            load_balance_entry(&tmpl_c, &gen_second_rows, &fpha_rows_second);
 
         assert_ne!(
             lb_row_first, lb_row_second,
@@ -1647,18 +1652,19 @@ mod cell_partition_gates {
 
         // Water balance: both cells' turbine columns credit the SAME
         // plant-level row (shared, unlike the per-cell FPHA/load-balance
-        // rows), at the SAME tau. The two turbine columns share FOUR
+        // rows), at the SAME tau. The two turbine columns share THREE
         // plant-keyed rows in total -- water-balance (coefficient tau_h) and
-        // three operational-violation soft floors that also sum every cell's
-        // turbine column (min_outflow_rows, max_outflow_rows,
-        // min_turbine_rows, each coefficient exactly 1.0,
-        // `fill_operational_violation_entries`) -- disambiguated by value
-        // since tau_h != 1.0 for this fixture's block duration.
+        // the two hydro-keyed outflow soft floors that also sum every cell's
+        // turbine column (min_outflow_rows, max_outflow_rows, each
+        // coefficient exactly 1.0, `fill_operational_violation_entries`).
+        // min_turbine_rows is NOT among them: it is cell-keyed, so each
+        // cell owns its own row rather than sharing the plant's. Disambiguated
+        // by value since tau_h != 1.0 for this fixture's block duration.
         let shared_turbine_rows = common_rows(&turb_first_rows, &turb_second_rows);
         assert_eq!(
             shared_turbine_rows.len(),
-            4,
-            "turbine columns must share exactly 4 plant-keyed rows"
+            3,
+            "turbine columns must share exactly 3 plant-keyed rows"
         );
         let water_balance_row = shared_turbine_rows
             .into_iter()

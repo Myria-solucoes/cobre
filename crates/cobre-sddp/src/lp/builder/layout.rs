@@ -342,26 +342,32 @@ pub(crate) struct EquipmentColumns {
 
 /// Column and row ranges for the four operational-violation slack families
 /// (below-min-outflow, above-max-outflow, below-min-turbine,
-/// below-min-generation), non-empty only when `n_h > 0`. Slack columns follow
-/// the withdrawal slacks; constraint rows follow the evaporation rows. Kept as
-/// one nested struct (not destructured) because the column and row halves are
-/// allocated as two back-to-back `RangeCursor` runs — see [`Self::new`].
+/// below-min-generation). The two flow families are sized `n_h * n_blks`
+/// (non-empty only when `n_h > 0`); the two power families are sized
+/// `n_cells * n_blks` (non-empty only when `n_cells > 0`) — a cell's own
+/// min-turbine/min-generation floor is the sum of ITS OWN member groups, never
+/// the plant's aggregate, so each cell gets its own row and its own slack
+/// column. See the min-floor contract in `.claude/rules/sddp.md`. Slack
+/// columns follow the withdrawal slacks; constraint rows follow the
+/// evaporation rows. Kept as one nested struct (not destructured) because the
+/// column and row halves are allocated as two back-to-back `RangeCursor` runs
+/// — see [`Self::new`].
 pub(crate) struct OperViolationRanges {
     /// Column range for outflow-below-minimum slack (one per hydro per block).
     pub(crate) outflow_below_slack: Range<usize>,
     /// Column range for outflow-above-maximum slack (one per hydro per block).
     pub(crate) outflow_above_slack: Range<usize>,
-    /// Column range for turbine-below-minimum slack (one per hydro per block).
+    /// Column range for turbine-below-minimum slack (one per hydro CELL per block).
     pub(crate) turbine_below_slack: Range<usize>,
-    /// Column range for generation-below-minimum slack (one per hydro per block).
+    /// Column range for generation-below-minimum slack (one per hydro CELL per block).
     pub(crate) generation_below_slack: Range<usize>,
     /// Row range for min-outflow constraints (one per hydro per block).
     pub(crate) min_outflow_rows: Range<usize>,
     /// Row range for max-outflow constraints (one per hydro per block).
     pub(crate) max_outflow_rows: Range<usize>,
-    /// Row range for min-turbine constraints (one per hydro per block).
+    /// Row range for min-turbine constraints (one per hydro CELL per block).
     pub(crate) min_turbine_rows: Range<usize>,
-    /// Row range for min-generation constraints (one per hydro per block).
+    /// Row range for min-generation constraints (one per hydro CELL per block).
     pub(crate) min_generation_rows: Range<usize>,
 }
 
@@ -369,17 +375,24 @@ impl OperViolationRanges {
     /// Allocate the four column families then the four row families,
     /// contiguously in that order: reordering these eight `alloc` calls would
     /// shift every downstream column/row, so `col`/`row` are threaded through
-    /// and consumed in exactly this order.
-    fn new(col: &mut RangeCursor, row: &mut RangeCursor, n_op: usize) -> Self {
+    /// and consumed in exactly this order. `n_op_hydro` sizes the two flow
+    /// families; `n_op_cell` sizes the two power families — they diverge the
+    /// moment any plant declares groups on more than one bus.
+    fn new(
+        col: &mut RangeCursor,
+        row: &mut RangeCursor,
+        n_op_hydro: usize,
+        n_op_cell: usize,
+    ) -> Self {
         Self {
-            outflow_below_slack: col.alloc(n_op),
-            outflow_above_slack: col.alloc(n_op),
-            turbine_below_slack: col.alloc(n_op),
-            generation_below_slack: col.alloc(n_op),
-            min_outflow_rows: row.alloc(n_op),
-            max_outflow_rows: row.alloc(n_op),
-            min_turbine_rows: row.alloc(n_op),
-            min_generation_rows: row.alloc(n_op),
+            outflow_below_slack: col.alloc(n_op_hydro),
+            outflow_above_slack: col.alloc(n_op_hydro),
+            turbine_below_slack: col.alloc(n_op_cell),
+            generation_below_slack: col.alloc(n_op_cell),
+            min_outflow_rows: row.alloc(n_op_hydro),
+            max_outflow_rows: row.alloc(n_op_hydro),
+            min_turbine_rows: row.alloc(n_op_cell),
+            min_generation_rows: row.alloc(n_op_cell),
         }
     }
 }
@@ -1112,12 +1125,14 @@ impl<'a> StageLayout<'a> {
 
         // Withdrawal slacks + the four operational-violation slack families (after
         // the evaporation columns) and their matching rows (after the evaporation
-        // rows). `n_op` is `0` when `n_h == 0`, so `alloc(0)` collapses every
-        // family onto the post-equipment cursor with no branch.
+        // rows). `n_op_hydro`/`n_op_cell` are `0` when `n_h`/`n_cells == 0`, so
+        // `alloc(0)` collapses every family onto the post-equipment cursor with no
+        // branch.
         let withdrawal_slack_neg = col.alloc(n_h);
         let withdrawal_slack_pos = col.alloc(n_h);
-        let n_op = n_h * n_blks;
-        let oper_violation = OperViolationRanges::new(&mut col, &mut row, n_op);
+        let n_op_hydro = n_h * n_blks;
+        let n_op_cell = n_cells * n_blks;
+        let oper_violation = OperViolationRanges::new(&mut col, &mut row, n_op_hydro, n_op_cell);
 
         let n_ant_state = ctx.n_anticipated * ctx.k_max;
 
@@ -1392,22 +1407,22 @@ impl<'a> StageLayout<'a> {
         )
     }
 
-    /// Turbine-below-minimum slack column for hydro `h`, block `blk`.
+    /// Turbine-below-minimum slack column for cell `c`, block `blk`.
     #[inline]
-    pub(crate) fn turbine_below_col(&self, h: HydroSys, blk: BlockIdx) -> usize {
+    pub(crate) fn turbine_below_col(&self, c: HydroCell, blk: BlockIdx) -> usize {
         self.block_col(
             self.slack.oper_violation.turbine_below_slack.start,
-            h.get(),
+            c.get(),
             blk,
         )
     }
 
-    /// Generation-below-minimum slack column for hydro `h`, block `blk`.
+    /// Generation-below-minimum slack column for cell `c`, block `blk`.
     #[inline]
-    pub(crate) fn generation_below_col(&self, h: HydroSys, blk: BlockIdx) -> usize {
+    pub(crate) fn generation_below_col(&self, c: HydroCell, blk: BlockIdx) -> usize {
         self.block_col(
             self.slack.oper_violation.generation_below_slack.start,
-            h.get(),
+            c.get(),
             blk,
         )
     }

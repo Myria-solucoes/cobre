@@ -5482,6 +5482,192 @@ fn d52_hours_weighted_fold_delta_matches_hand_derivation() {
     );
 }
 
+/// D53: a per-cell min-turbine floor genuinely BINDS under water starvation —
+/// the behavioral fixture for the per-cell min-floor reversal (spec §7.9,
+/// `.claude/rules/sddp.md`'s min-floor contract).
+///
+/// Same split-plant topology as D51 (one FPHA hydro, unit group 0 on bus 0 /
+/// cell A with no floor, unit group 1 on bus 1 / cell B with
+/// `min_turbined_m3s = 27.0`), but WITHOUT D51's max-side group-bounds
+/// overrides, and with deliberately low inflow (`3.0`/`2.0 m3/s` at stages
+/// 0/1) so the reservoir cannot sustain cell B's floor: total available
+/// water is `120.0 hm3` (initial storage) `+ (3.0 + 2.0) * 730 * 0.0036 hm3`
+/// (inflow) `= 133.14 hm3`, while cell B's floor alone demands
+/// `27.0 * 730 * 0.0036 * 2 = 141.9 hm3` over the two stages — a shortfall
+/// that cannot be closed even with cell A turbining nothing (cell A has no
+/// floor and is economically free to do so). This is genuine water
+/// starvation, not a structural cap: cell B's own `max_turbined_m3s` stays
+/// `28.0` at every stage, strictly above the `27.0` floor, so the shortfall
+/// below can only come from insufficient water, never an unreachable column
+/// bound.
+///
+/// `final_lb == final_ub` to within `1e-6` (both backends observed
+/// bit-identical); pinned at the observed converged value, matching the
+/// established pattern for structurally complex FPHA fixtures (D31, D40,
+/// D42, D51) — the FPHA plane's storage term couples the two stages, so this
+/// case is not hand-derived symbolically. What IS hand-derived and asserted
+/// directly is the min-floor contract itself: cell B's actual turbined flow
+/// plus its slack reaches EXACTLY the declared floor every block, storage is
+/// fully drained to `0.0` by the terminal stage (proving water scarcity, not
+/// a capacity artifact), and each stage's `turbined_violation_cost` equals
+/// `shortfall * turbined_violation_below_cost * block_hours` — "penalty =
+/// shortfall × plant price" — computed from the SAME observed slack the
+/// floor assertion above uses, read straight off `SimulationCostResult`
+/// rather than re-derived.
+#[test]
+fn d53_hydro_cell_min_floor_binds_under_water_starvation() {
+    const FLOOR_M3S: f64 = 27.0;
+    const TURBINED_VIOLATION_BELOW_COST: f64 = 10_000.0;
+    const PEAK_HOURS: f64 = 200.0;
+    const OFFPEAK_HOURS: f64 = 530.0;
+    const STAGE1_HOURS: f64 = 730.0;
+
+    let case_dir = Path::new("../../examples/deterministic/d53-hydro-cell-min-floor");
+    let (result, scenario_results, _summary) = run_with_simulation(case_dir);
+
+    assert!(
+        result.final_gap.abs() < 1e-6,
+        "D53: gap={:.2e}",
+        result.final_gap
+    );
+    assert!(
+        (result.final_lb - result.final_ub).abs() < 1e-6,
+        "D53: LB ({}) must equal UB ({}) to tolerance",
+        result.final_lb,
+        result.final_ub
+    );
+    assert!(
+        result.iterations <= 10,
+        "D53: iterations={}",
+        result.iterations
+    );
+    assert_cost(result.final_lb, 40_373_560.917_320_274, 1.0, "D53");
+
+    assert_eq!(
+        scenario_results.len(),
+        1,
+        "D53: exactly 1 simulated scenario"
+    );
+    let scenario = &scenario_results[0];
+    assert_eq!(scenario.stages.len(), 2, "D53: exactly 2 stages");
+
+    let mut checked_blocks = 0_usize;
+    for stage in &scenario.stages {
+        assert_eq!(
+            stage.costs.len(),
+            1,
+            "D53 stage {}: one stage-level cost aggregate",
+            stage.stage_id
+        );
+        let mut expected_turbined_violation_cost = 0.0_f64;
+
+        for h in &stage.hydros {
+            assert_eq!(h.hydro_id, 0, "D53: the only hydro is H0");
+            let hours = match (stage.stage_id, h.block_id) {
+                (0, Some(0)) => PEAK_HOURS,
+                (0, Some(1)) => OFFPEAK_HOURS,
+                (1, Some(0)) => STAGE1_HOURS,
+                other => panic!("D53: unexpected (stage, block) {other:?}"),
+            };
+
+            // The floor genuinely binds: actual turbined flow is strictly
+            // below the declared floor, and the slack picks up exactly the
+            // difference (the soft row's `q_c + slack_c >= floor` holds as an
+            // equality at the cost-minimizing optimum).
+            assert!(
+                h.turbined_m3s < FLOOR_M3S - 1e-6,
+                "D53 stage {} block {:?}: turbined ({}) must fall strictly below the \
+                 {FLOOR_M3S} m3/s floor — the fixture's whole point is that it starves",
+                stage.stage_id,
+                h.block_id,
+                h.turbined_m3s
+            );
+            assert!(
+                h.turbined_slack_m3s > 1e-6,
+                "D53 stage {} block {:?}: turbined_slack ({}) must be strictly positive \
+                 — the floor must be active, not merely declared",
+                stage.stage_id,
+                h.block_id,
+                h.turbined_slack_m3s
+            );
+            assert!(
+                (h.turbined_m3s + h.turbined_slack_m3s - FLOOR_M3S).abs() < 1e-6,
+                "D53 stage {} block {:?}: turbined ({}) + slack ({}) must reach the \
+                 {FLOOR_M3S} m3/s floor exactly",
+                stage.stage_id,
+                h.block_id,
+                h.turbined_m3s,
+                h.turbined_slack_m3s
+            );
+            assert_eq!(
+                h.generation_slack_mw, 0.0,
+                "D53 stage {} block {:?}: the generation floor is declared 0.0 and must \
+                 stay inert — only the turbined floor is exercised by this fixture",
+                stage.stage_id, h.block_id
+            );
+
+            expected_turbined_violation_cost +=
+                h.turbined_slack_m3s * TURBINED_VIOLATION_BELOW_COST * hours;
+            checked_blocks += 1;
+        }
+
+        // "Penalty = shortfall × plant price": the stage's reported
+        // turbined-violation cost equals the SAME slack values asserted
+        // above, priced at the plant's declared `turbined_violation_below_cost`
+        // (10000.0, `penalties.json`) for each block's own hours — never
+        // divided by the plant's cell count (there is only one floor-bearing
+        // cell here, so a `1/|cells|` apportionment bug would still show up
+        // as a factor-of-2 understatement against cell A's own zero floor
+        // contributing nothing).
+        assert!(
+            (stage.costs[0].turbined_violation_cost - expected_turbined_violation_cost).abs()
+                < 1e-3,
+            "D53 stage {}: reported turbined_violation_cost ({}) must equal shortfall * \
+             price * hours ({expected_turbined_violation_cost})",
+            stage.stage_id,
+            stage.costs[0].turbined_violation_cost
+        );
+        assert_eq!(
+            stage.costs[0].generation_violation_cost, 0.0,
+            "D53 stage {}: the generation floor is inert, so its violation cost must be 0.0",
+            stage.stage_id
+        );
+
+        // Storage is fully drained by the terminal stage: the shortfall above
+        // is genuine water starvation, not a structural cap set below the
+        // floor (cell B's own max_turbined_m3s stays 28.0 > 27.0 throughout).
+        if stage.stage_id == 1 {
+            for h in &stage.hydros {
+                assert_eq!(
+                    h.storage_final_hm3, 0.0,
+                    "D53: storage must be fully drained by the terminal stage, proving the \
+                     floor's shortfall comes from water scarcity, not an unreachable cap"
+                );
+            }
+        }
+
+        // Cell A (bus 0) carries no floor and is economically free to turbine
+        // nothing, ceding all available water to cell B (bus 1) — confirming
+        // the plant-level slack summed above is entirely cell B's own, never
+        // apportioned across the plant's two cells.
+        for hb in &stage.hydro_bus_generation {
+            if hb.bus_id == 0 {
+                assert!(
+                    hb.turbined_m3s.abs() < 1e-6,
+                    "D53 stage {} block {:?}: cell A (bus 0) must turbine ~0.0, got {}",
+                    stage.stage_id,
+                    hb.block_id,
+                    hb.turbined_m3s
+                );
+            }
+        }
+    }
+    assert_eq!(
+        checked_blocks, 3,
+        "D53: 2 blocks at stage 0 + 1 at stage 1 = 3 (stage, block) pairs"
+    );
+}
+
 /// Chronological-blocks telescoping ⇒ parallel bound-agreement anchor.
 ///
 /// Pins the "telescoping ⇒ parallel agreement when interiors are inert" contract

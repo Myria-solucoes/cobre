@@ -543,13 +543,17 @@ pub(super) fn check_fpha_constraints(data: &ParsedData, ctx: &mut ValidationCont
     }
 }
 
-/// Rules 39-41: unit group `id` uniqueness within its own plant (rule 39, ids
-/// are plant-scoped — a `HashSet` rebuilt per hydro, never hoisted above the
-/// loop); per-group turbined/generation bound consistency (rule 40); and the
+/// Rules 39-41, 44: unit group `id` uniqueness within its own plant (rule 39,
+/// ids are plant-scoped — a `HashSet` rebuilt per hydro, never hoisted above
+/// the loop); per-group turbined/generation bound consistency (rule 40); the
 /// sum of group maxima against the plant's own declared value (rule 41,
 /// entity declaration only — a per-stage `hydro_bounds` override is not
-/// checked here). Per-group turbined bound sign is rejected earlier, at parse
-/// time, by `hydros.rs::validate_unit_groups` — `validate_schema` aborts
+/// checked here); and, in the OPPOSITE direction, the sum of group minima
+/// against the plant's own declared value (rule 44 — the plant's declared
+/// floor must be reachable by summing its groups' own floors, `Σ ≥ declared`,
+/// never `Σ ≤ declared` as rule 41 checks for the ceiling). Per-group
+/// turbined bound sign is rejected earlier, at parse time, by
+/// `hydros.rs::validate_unit_groups` — `validate_schema` aborts
 /// all-or-nothing before a negative value ever reaches this Layer-5 check, so
 /// it is not re-checked here. Mirrors the plant's turbined-only sign guard:
 /// `min_generation_mw`/`max_generation_mw` are unchecked for sign at both
@@ -639,6 +643,44 @@ pub(super) fn check_hydro_unit_groups(data: &ParsedData, ctx: &mut ValidationCon
                      a plant's capacity",
                     hydro.unit_groups.len(),
                     hydro.max_generation_mw
+                ),
+            );
+        }
+
+        // Rule 44 (flipped direction vs rule 41 above): the plant's declared
+        // MINIMUM is a floor its unit groups must be able to reach, `Σ ≥
+        // declared`, so the violation condition is `sum < declared - tolerance`
+        // — the mirror of rule 41's `sum > declared + tolerance` ceiling check.
+        let min_turbined_sum: f64 = hydro.unit_groups.iter().map(|g| g.min_turbined_m3s).sum();
+        let min_turbined_tolerance = ENVELOPE_TOLERANCE * hydro.min_turbined_m3s.abs().max(1.0);
+        if min_turbined_sum < hydro.min_turbined_m3s - min_turbined_tolerance {
+            ctx.add_error(
+                ErrorKind::InvalidValue,
+                "system/hydros.json",
+                Some(&entity_str),
+                format!(
+                    "{entity_str}: unit group min_turbined_m3s sums to {min_turbined_sum} \
+                     across {} unit groups, below the plant's own min_turbined_m3s ({}); the \
+                     plant's declared minimum is a floor its unit groups must be able to cover",
+                    hydro.unit_groups.len(),
+                    hydro.min_turbined_m3s
+                ),
+            );
+        }
+
+        let min_generation_sum: f64 = hydro.unit_groups.iter().map(|g| g.min_generation_mw).sum();
+        let min_generation_tolerance = ENVELOPE_TOLERANCE * hydro.min_generation_mw.abs().max(1.0);
+        if min_generation_sum < hydro.min_generation_mw - min_generation_tolerance {
+            ctx.add_error(
+                ErrorKind::InvalidValue,
+                "system/hydros.json",
+                Some(&entity_str),
+                format!(
+                    "{entity_str}: unit group min_generation_mw sums to {min_generation_sum} \
+                     across {} unit groups, below the plant's own min_generation_mw ({}); the \
+                     plant's declared minimum is a floor its unit groups must be able to cover",
+                    hydro.unit_groups.len(),
+                    hydro.min_generation_mw
                 ),
             );
         }
@@ -777,9 +819,14 @@ mod tests {
 
     // ── Hydro turbine bounds tests ────────────────────────────────────────────
 
-    /// min_turbined > max_turbined produces exactly one InvalidValue error.
-    /// Declares an explicit unit group with bounds that satisfy rules 40/41/42
-    /// on their own, so only the plant-level rule 40 this test isolates fires.
+    /// min_turbined > max_turbined produces exactly one PLANT-LEVEL InvalidValue
+    /// error. Declares an explicit unit group with bounds that satisfy rules
+    /// 40/41 on their own, so no group-level rule fires from the GROUP's own
+    /// bounds. Rule 44 (Σ group min ≥ plant min) still fires as a mathematical
+    /// consequence, not a fixture bug: rule 41 caps the group's own max at the
+    /// plant's max (100), rule 40 caps the group's own min at its own max, so
+    /// the group's min can never reach the plant's inconsistent min (500) —
+    /// both findings are legitimately true of this deliberately-broken plant.
     #[test]
     fn test_hydro_turbine_min_greater_than_max() {
         let mut hydro = make_hydro(2, None);
@@ -802,24 +849,42 @@ mod tests {
             .into_iter()
             .filter(|e| e.kind == ErrorKind::InvalidValue)
             .collect();
+        let plant_level: Vec<_> = turbine_errors
+            .iter()
+            .filter(|e| !e.message.contains("unit group"))
+            .collect();
         assert_eq!(
-            turbine_errors.len(),
+            plant_level.len(),
             1,
-            "expected exactly 1 InvalidValue error, got: {:?}",
+            "expected exactly 1 plant-level InvalidValue error, got: {:?}",
             turbine_errors
                 .iter()
                 .map(|e| &e.message)
                 .collect::<Vec<_>>()
         );
         assert!(
-            turbine_errors[0].message.contains("Hydro 2"),
+            plant_level[0].message.contains("Hydro 2"),
             "message should contain 'Hydro 2', got: {}",
-            turbine_errors[0].message
+            plant_level[0].message
+        );
+        let group_level: Vec<_> = turbine_errors
+            .iter()
+            .filter(|e| e.message.contains("unit group"))
+            .collect();
+        assert_eq!(
+            group_level.len(),
+            1,
+            "rule 44 must also fire — the group's own bounds provably cannot \
+             reach the plant's inconsistent minimum, got: {:?}",
+            turbine_errors
+                .iter()
+                .map(|e| &e.message)
+                .collect::<Vec<_>>()
         );
         assert!(
-            !turbine_errors[0].message.contains("unit group"),
-            "the sole error must be the plant-level rule, not a unit-group rule, got: {}",
-            turbine_errors[0].message
+            group_level[0].message.contains("min_turbined_m3s"),
+            "the companion group-level finding must be the turbined floor, got: {}",
+            group_level[0].message
         );
     }
 
@@ -2327,6 +2392,79 @@ mod tests {
         );
         assert!(
             !msg.contains("max_turbined_m3s"),
+            "the exactly-equal turbined column must not be named, got: {msg}"
+        );
+        assert!(
+            !ctx.errors().iter().any(|e| e.message.contains("Hydro 11")),
+            "the no-declared-groups plant must produce zero findings, got: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Rule 44 (the flipped-inequality mirror of rule 41 above): hydro 9
+    /// (`min_generation_mw = 100`, `min_turbined_m3s = 50`) declares two groups
+    /// whose `min_generation_mw` sums to 80 (below — rejected, the floor is
+    /// unreachable) and whose `min_turbined_m3s` sums to exactly 50 (equals —
+    /// must be accepted, since containment here is "must reach", not "must
+    /// exceed"). Hydro 11 declares no groups at all, so its declared minima
+    /// stay at `make_hydro`'s default `0.0`, never falling short of themselves
+    /// — the positive-path pin every plant with no declared groups exercises.
+    #[test]
+    fn test_min_envelope_containment_rejects_shortfall_and_accepts_equality() {
+        let mut shortfall_hydro = make_hydro(9, None);
+        shortfall_hydro.min_generation_mw = 100.0;
+        shortfall_hydro.min_turbined_m3s = 50.0;
+        shortfall_hydro.unit_groups = vec![
+            make_unit_group(3, 1, 30.0, 500.0, 20.0, 500.0),
+            make_unit_group(5, 1, 50.0, 500.0, 30.0, 500.0),
+        ];
+
+        let no_groups_hydro = make_hydro(11, None);
+
+        let data = make_data(
+            vec![shortfall_hydro, no_groups_hydro],
+            vec![],
+            vec![],
+            make_stages(vec![0]),
+            vec![],
+            vec![],
+        );
+        let mut ctx = ValidationContext::new();
+        validate_semantic_hydro_thermal(&data, &mut ctx);
+
+        let invalid_values: Vec<_> = ctx
+            .errors()
+            .into_iter()
+            .filter(|e| e.kind == ErrorKind::InvalidValue)
+            .collect();
+        assert_eq!(
+            invalid_values.len(),
+            1,
+            "expected exactly 1 InvalidValue (generation floor only), got: {:?}",
+            invalid_values
+                .iter()
+                .map(|e| &e.message)
+                .collect::<Vec<_>>()
+        );
+        let msg = &invalid_values[0].message;
+        assert!(
+            msg.contains("Hydro 9"),
+            "message should name Hydro 9, got: {msg}"
+        );
+        assert!(
+            msg.contains("min_generation_mw"),
+            "message should name min_generation_mw, got: {msg}"
+        );
+        assert!(
+            msg.contains("80"),
+            "message should name the sum 80, got: {msg}"
+        );
+        assert!(
+            msg.contains("100"),
+            "message should name the plant value 100, got: {msg}"
+        );
+        assert!(
+            !msg.contains("min_turbined_m3s"),
             "the exactly-equal turbined column must not be named, got: {msg}"
         );
         assert!(

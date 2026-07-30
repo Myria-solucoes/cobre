@@ -183,13 +183,31 @@ fn fill_theta_column(layout: &StageLayout, bufs: &mut ColumnBufs<'_>) {
 /// Bundles the resolved group-bounds table with the three indices that are
 /// constant across a cell's member groups, so `cell_max_turbined`/
 /// `cell_max_generation` take one bundled parameter instead of four loose
-/// ones that would cross `clippy::too_many_arguments`.
+/// ones that would cross `clippy::too_many_arguments`. `pub(super)` (plus the
+/// `new` constructor and the `min_*` readers) so `rows.rs` can resolve the
+/// same per-block group override when it fills the min-floor row RHS.
 #[derive(Clone, Copy)]
-struct GroupBoundLookup<'a> {
+pub(super) struct GroupBoundLookup<'a> {
     table: &'a ResolvedHydroUnitGroupBounds,
     hydro_idx: usize,
     stage_idx: usize,
     block_idx: usize,
+}
+
+impl<'a> GroupBoundLookup<'a> {
+    pub(super) fn new(
+        table: &'a ResolvedHydroUnitGroupBounds,
+        hydro_idx: usize,
+        stage_idx: usize,
+        block_idx: usize,
+    ) -> Self {
+        Self {
+            table,
+            hydro_idx,
+            stage_idx,
+            block_idx,
+        }
+    }
 }
 
 impl GroupBoundLookup<'_> {
@@ -209,6 +227,24 @@ impl GroupBoundLookup<'_> {
             .override_at_block(self.hydro_idx, group_pos, self.stage_idx, self.block_idx)
             .max_generation_mw
             .unwrap_or(group.max_generation_mw)
+    }
+
+    /// Group `group_pos`'s resolved turbined-flow minimum — the override when
+    /// the study supplies one, `group.min_turbined_m3s` otherwise.
+    pub(super) fn min_turbined(&self, group_pos: usize, group: &HydroUnitGroup) -> f64 {
+        self.table
+            .override_at_block(self.hydro_idx, group_pos, self.stage_idx, self.block_idx)
+            .min_turbined_m3s
+            .unwrap_or(group.min_turbined_m3s)
+    }
+
+    /// Group `group_pos`'s resolved generation minimum — the override when the
+    /// study supplies one, `group.min_generation_mw` otherwise.
+    pub(super) fn min_generation(&self, group_pos: usize, group: &HydroUnitGroup) -> f64 {
+        self.table
+            .override_at_block(self.hydro_idx, group_pos, self.stage_idx, self.block_idx)
+            .min_generation_mw
+            .unwrap_or(group.min_generation_mw)
     }
 }
 
@@ -261,6 +297,23 @@ fn cell_max_turbined(
     sum.min(fold(hb.max_turbined_m3s, hb.max_generation_mw))
 }
 
+/// Cell `c`'s min-turbine soft-floor RHS: the PLAIN SUM of the cell's own
+/// member groups' resolved `min_turbined_m3s`, never a fold and never clamped
+/// against the plant's declared minimum — see the min-floor contract in
+/// `.claude/rules/sddp.md`. A floor on a sum of variables (the cell's member
+/// groups all feed the same aggregate turbine column) adds; it does not fold
+/// or clamp the way the closing `MAX` bound does.
+pub(super) fn cell_min_turbined(
+    groups: &[HydroUnitGroup],
+    positions: &[usize],
+    lookup: GroupBoundLookup<'_>,
+) -> f64 {
+    positions
+        .iter()
+        .map(|&pos| lookup.min_turbined(pos, &groups[pos]))
+        .sum()
+}
+
 /// Turbine columns per hydro cell per block.
 ///
 /// A suspended hydro (`PreFilling`/`Filling`) forces BOTH bounds to `[0, 0]` on
@@ -310,9 +363,10 @@ fn fill_turbine_columns(
                     lookup,
                 );
                 let col = layout.turbine_col(cell, BlockIdx::new(blk));
-                // Never a group's own min_turbined_m3s: the plant's minimum is the
-                // soft slack-backed min_turbine_rows row, not a column floor, and a
-                // per-group hard floor would invent an asymmetry with its own maximum.
+                // Never a group's own min_turbined_m3s: the cell's floor is the soft
+                // slack-backed min_turbine_rows row (this cell's own group-sum), not a
+                // column floor, and a per-group hard floor would invent an asymmetry
+                // with its own maximum.
                 bufs.col_lower[col] = 0.0;
                 bufs.col_upper[col] = if suspended { 0.0 } else { turb_upper };
                 bufs.objective[col] = hp.turbined_cost * block_hours;
@@ -682,6 +736,21 @@ fn cell_max_generation(
     sum.min(hb.max_generation_mw)
 }
 
+/// Cell `c`'s min-generation soft-floor RHS: the PLAIN SUM of the cell's own
+/// member groups' resolved `min_generation_mw` — never folded through a
+/// productivity, never clamped against the plant's declared minimum. See
+/// [`cell_min_turbined`] and the min-floor contract in `.claude/rules/sddp.md`.
+pub(super) fn cell_min_generation(
+    groups: &[HydroUnitGroup],
+    positions: &[usize],
+    lookup: GroupBoundLookup<'_>,
+) -> f64 {
+    positions
+        .iter()
+        .map(|&pos| lookup.min_generation(pos, &groups[pos]))
+        .sum()
+}
+
 /// FPHA generation columns (`g_{h,k}`): one per FPHA hydro CELL per block, bounds
 /// `[0, max_generation_mw]`, objective `0.0` (turbined cost is on the turbine column).
 ///
@@ -720,7 +789,7 @@ fn fill_fpha_generation_columns(
                 let col = layout.generation_col(FphaCellLocal::new(fpha_cell_base + offset), blk);
                 // Never a group's own min_generation_mw: see fill_turbine_columns's
                 // identical col_lower contract (min_generation_rows stays the sole
-                // owner of the plant's soft floor).
+                // owner of the cell's soft floor).
                 bufs.col_lower[col] = 0.0;
                 bufs.col_upper[col] = gen_upper;
             }
@@ -830,13 +899,17 @@ fn fill_withdrawal_slack_columns(
     }
 }
 
-/// One operational-violation slack family, addressing a disjoint `n_h * n_blks`
-/// column range. Every activation predicate reads the resolved per-block bound
+/// One hydro-keyed operational-violation slack family (min-outflow,
+/// max-outflow), addressing a disjoint `n_h * n_blks` column range. Every
+/// activation predicate reads the resolved per-block bound
 /// (`hydro_bounds_at_block`) inside the `for blk` loop — never the entity
 /// declaration on `ctx.hydros[h_idx]` (drops per-stage/per-block overrides) and
 /// never a stage-level read hoisted above the loop (drops a block-only floor,
 /// e.g. `min_outflow_m3s > 0.0` on one block only, leaving no slack column to
 /// relax it); either alternative compiles and silently mis-activates the column.
+/// The power-side families (min-turbine, min-generation) are CELL-keyed —
+/// see [`CellSlackFamily`] — because a plant's floor is a per-cell sum, not a
+/// plant-level aggregate; only the two flow families stay hydro-keyed here.
 #[derive(Clone, Copy)]
 enum BlockSlackFamily {
     /// Active iff resolved `min_outflow_m3s > 0.0`.
@@ -844,14 +917,24 @@ enum BlockSlackFamily {
     /// Active iff resolved `max_outflow_m3s.is_some()` — NOT `> 0.0`: a `Some(0.0)`
     /// cap still activates the column.
     OutflowAbove,
-    /// Active iff resolved `min_turbined_m3s > 0.0`.
+}
+
+/// The two cell-keyed operational-violation slack families, addressing a
+/// disjoint `n_cells * n_blks` column range — the min-floor mirror of
+/// [`BlockSlackFamily`]'s hydro-keyed families. See the min-floor contract in
+/// `.claude/rules/sddp.md`.
+#[derive(Clone, Copy)]
+enum CellSlackFamily {
+    /// Active iff the cell's resolved `cell_min_turbined` sum is `> 0.0`.
     TurbineBelow,
-    /// Active iff resolved `min_generation_mw > 0.0`.
+    /// Active iff the cell's resolved `cell_min_generation` sum is `> 0.0`.
     GenerationBelow,
 }
 
-/// Operational violation slack columns: 4 families of `n_h * n_blks` columns, each
-/// a disjoint range, so call order does not affect the result.
+/// Operational violation slack columns: the two hydro-keyed flow families
+/// (`n_h * n_blks` each) and the two cell-keyed power families (`n_cells *
+/// n_blks` each), all four disjoint ranges so call order does not affect the
+/// result.
 fn fill_operational_slack_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -862,15 +945,19 @@ fn fill_operational_slack_columns(
     for family in [
         BlockSlackFamily::OutflowBelow,
         BlockSlackFamily::OutflowAbove,
-        BlockSlackFamily::TurbineBelow,
-        BlockSlackFamily::GenerationBelow,
     ] {
         fill_block_family(ctx, stage, stage_idx, layout, bufs, family);
     }
+    for family in [
+        CellSlackFamily::TurbineBelow,
+        CellSlackFamily::GenerationBelow,
+    ] {
+        fill_cell_block_family(ctx, stage, stage_idx, layout, bufs, family);
+    }
 }
 
-/// Fill one operational-violation slack family's `n_h * n_blks` columns; `col_lower`
-/// stays at the `0.0` vec default.
+/// Fill one hydro-keyed operational-violation slack family's `n_h * n_blks`
+/// columns; `col_lower` stays at the `0.0` vec default.
 fn fill_block_family(
     ctx: &TemplateBuildCtx<'_>,
     stage: &Stage,
@@ -884,8 +971,6 @@ fn fill_block_family(
         let cost = match family {
             BlockSlackFamily::OutflowBelow => hp.outflow_violation_below_cost,
             BlockSlackFamily::OutflowAbove => hp.outflow_violation_above_cost,
-            BlockSlackFamily::TurbineBelow => hp.turbined_violation_below_cost,
-            BlockSlackFamily::GenerationBelow => hp.generation_violation_below_cost,
         };
         for blk in 0..layout.n_blks {
             let hb = ctx
@@ -895,8 +980,6 @@ fn fill_block_family(
             let active = match family {
                 BlockSlackFamily::OutflowBelow => hb.min_outflow_m3s > 0.0,
                 BlockSlackFamily::OutflowAbove => hb.max_outflow_m3s.is_some(),
-                BlockSlackFamily::TurbineBelow => hb.min_turbined_m3s > 0.0,
-                BlockSlackFamily::GenerationBelow => hb.min_generation_mw > 0.0,
             };
             let col = match family {
                 BlockSlackFamily::OutflowBelow => {
@@ -905,15 +988,59 @@ fn fill_block_family(
                 BlockSlackFamily::OutflowAbove => {
                     layout.outflow_above_col(HydroSys::new(h_idx), BlockIdx::new(blk))
                 }
-                BlockSlackFamily::TurbineBelow => {
-                    layout.turbine_below_col(HydroSys::new(h_idx), BlockIdx::new(blk))
-                }
-                BlockSlackFamily::GenerationBelow => {
-                    layout.generation_below_col(HydroSys::new(h_idx), BlockIdx::new(blk))
-                }
             };
             bufs.col_upper[col] = if active { f64::INFINITY } else { 0.0 };
             bufs.objective[col] = cost * stage.blocks[blk].duration_hours;
+        }
+    }
+}
+
+/// Fill one cell-keyed operational-violation slack family's `n_cells * n_blks`
+/// columns; `col_lower` stays at the `0.0` vec default. The cost is the
+/// PLANT's own penalty (`HydroPenalties` is plant-level) at FULL magnitude —
+/// never divided by the plant's cell count — replicated onto every one of the
+/// plant's cells; see the min-floor contract in `.claude/rules/sddp.md`.
+fn fill_cell_block_family(
+    ctx: &TemplateBuildCtx<'_>,
+    stage: &Stage,
+    stage_idx: usize,
+    layout: &StageLayout,
+    bufs: &mut ColumnBufs<'_>,
+    family: CellSlackFamily,
+) {
+    for h_idx in 0..layout.n_h {
+        let hydro = &ctx.hydros[h_idx];
+        let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
+        let cost = match family {
+            CellSlackFamily::TurbineBelow => hp.turbined_violation_below_cost,
+            CellSlackFamily::GenerationBelow => hp.generation_violation_below_cost,
+        };
+        for blk in 0..layout.n_blks {
+            let lookup =
+                GroupBoundLookup::new(ctx.resolved.bounds.group_overlay(), h_idx, stage_idx, blk);
+            let block_hours = stage.blocks[blk].duration_hours;
+            for cell_idx in ctx.hydro_cell_index.cells_of(HydroSys::new(h_idx)) {
+                let cell = HydroCell::new(cell_idx);
+                let positions = ctx.hydro_cell_index.groups_of(cell);
+                let cell_min = match family {
+                    CellSlackFamily::TurbineBelow => {
+                        cell_min_turbined(&hydro.unit_groups, positions, lookup)
+                    }
+                    CellSlackFamily::GenerationBelow => {
+                        cell_min_generation(&hydro.unit_groups, positions, lookup)
+                    }
+                };
+                let col = match family {
+                    CellSlackFamily::TurbineBelow => {
+                        layout.turbine_below_col(cell, BlockIdx::new(blk))
+                    }
+                    CellSlackFamily::GenerationBelow => {
+                        layout.generation_below_col(cell, BlockIdx::new(blk))
+                    }
+                };
+                bufs.col_upper[col] = if cell_min > 0.0 { f64::INFINITY } else { 0.0 };
+                bufs.objective[col] = cost * block_hours;
+            }
         }
     }
 }
@@ -3557,7 +3684,7 @@ mod block_family_slack_tests {
     use crate::hydro_models::{
         EvaporationModel, EvaporationModelSet, ProductionModelSet, ResolvedProductionModel,
     };
-    use crate::indexer::{BlockIdx, HydroCellIndex, HydroSys};
+    use crate::indexer::{BlockIdx, HydroCell, HydroCellIndex, HydroSys};
     use crate::lead_time::AnticipatedResolution;
     use crate::resolved_parameters::ResolvedParameters;
 
@@ -3822,7 +3949,19 @@ mod block_family_slack_tests {
 
     impl SlackFixtures {
         fn new(specs: &[HydroSpec; N_HYDROS]) -> Self {
-            let hydros: Vec<Hydro> = (0..N_HYDROS).map(|i| fixture_hydro(i as i32 + 1)).collect();
+            let mut hydros: Vec<Hydro> =
+                (0..N_HYDROS).map(|i| fixture_hydro(i as i32 + 1)).collect();
+            // `fixture_hydro` mirrors the entity's OWN (zero) min_turbined_m3s/
+            // min_generation_mw into its single group at construction time, before
+            // this spec's intended activation state is known; the cell-keyed
+            // min-floor families now read the GROUP's own resolved minimum
+            // (`cell_min_turbined`/`cell_min_generation`), so the mirror must be
+            // overwritten here to carry each spec's value — otherwise every cell
+            // reads back 0.0 regardless of `spec.min_turbined_m3s`/`min_generation_mw`.
+            for (i, hydro) in hydros.iter_mut().enumerate() {
+                hydro.unit_groups[0].min_turbined_m3s = specs[i].min_turbined_m3s;
+                hydro.unit_groups[0].min_generation_mw = specs[i].min_generation_mw;
+            }
             let cascade = CascadeTopology::build(&hydros);
             let hydro_cell_index = HydroCellIndex::build(&hydros);
             let (bounds, penalties) = resolved_tables(specs);
@@ -3923,12 +4062,24 @@ mod block_family_slack_tests {
         }
     }
 
-    /// One family's expected contract: its name, the activation predicate over a
-    /// `HydroSpec`, the `StageLayout` column accessor, and the expected cost field.
+    /// One hydro-keyed family's expected contract: its name, the activation
+    /// predicate over a `HydroSpec`, the `StageLayout` column accessor, and the
+    /// expected cost field.
     struct FamilyCheck<'b> {
         name: &'static str,
         predicate: fn(&HydroSpec) -> bool,
         accessor: fn(&StageLayout<'b>, HydroSys, BlockIdx) -> usize,
+        cost_of: fn(&HydroSpec) -> f64,
+    }
+
+    /// One cell-keyed family's expected contract — the min-floor mirror of
+    /// [`FamilyCheck`]: the `StageLayout` accessor now takes a [`HydroCell`],
+    /// never a [`HydroSys`], since a plant's min-turbine/min-generation floor is
+    /// now a per-cell sum, not a plant-level aggregate.
+    struct CellFamilyCheck<'b> {
+        name: &'static str,
+        predicate: fn(&HydroSpec) -> bool,
+        accessor: fn(&StageLayout<'b>, HydroCell, BlockIdx) -> usize,
         cost_of: fn(&HydroSpec) -> f64,
     }
 
@@ -3937,7 +4088,9 @@ mod block_family_slack_tests {
     /// is `+∞` exactly when the family's resolved predicate holds (else `0.0`),
     /// `objective` is the family's resolved cost times the block duration, and
     /// `col_lower` stays at the `0.0` default. Hydro 2's `Some(0.0)` cap locks the
-    /// `is_some()` outflow-above semantics against a `> 0.0` regression.
+    /// `is_some()` outflow-above semantics against a `> 0.0` regression. Every
+    /// fixture hydro carries exactly one (mirrored) group, so `HydroCell::new(h_idx)`
+    /// is that hydro's own cell under the single-bus identity partition.
     #[test]
     fn block_family_driver_matches_legacy_slack_fills() {
         let specs = hydro_specs();
@@ -3957,7 +4110,7 @@ mod block_family_slack_tests {
         };
         fill_operational_slack_columns(&ctx, &stage, STAGE_IDX, &layout, &mut bufs);
 
-        let families = [
+        let hydro_families = [
             FamilyCheck {
                 name: "outflow_below",
                 predicate: |s| s.min_outflow_m3s > 0.0,
@@ -3970,13 +4123,15 @@ mod block_family_slack_tests {
                 accessor: StageLayout::outflow_above_col,
                 cost_of: |s| s.outflow_above_cost,
             },
-            FamilyCheck {
+        ];
+        let cell_families = [
+            CellFamilyCheck {
                 name: "turbine_below",
                 predicate: |s| s.min_turbined_m3s > 0.0,
                 accessor: StageLayout::turbine_below_col,
                 cost_of: |s| s.turbined_below_cost,
             },
-            FamilyCheck {
+            CellFamilyCheck {
                 name: "generation_below",
                 predicate: |s| s.min_generation_mw > 0.0,
                 accessor: StageLayout::generation_below_col,
@@ -3987,13 +4142,38 @@ mod block_family_slack_tests {
         // The block loop iterates BLOCK_HOURS directly; assert the layout agrees so a
         // fixture/layout block-count drift cannot silently skip blocks.
         assert_eq!(layout.n_blks, BLOCK_HOURS.len());
-        for family in &families {
+        for family in &hydro_families {
             let name = family.name;
             for (h_idx, spec) in specs.iter().enumerate() {
                 let active = (family.predicate)(spec);
                 let cost = (family.cost_of)(spec);
                 for (blk, &hours) in BLOCK_HOURS.iter().enumerate() {
                     let col = (family.accessor)(&layout, HydroSys::new(h_idx), BlockIdx::new(blk));
+                    let expected_upper = if active { f64::INFINITY } else { 0.0 };
+                    assert_eq!(
+                        col_upper[col], expected_upper,
+                        "{name} h{h_idx} blk{blk}: col_upper[{col}] expected {expected_upper}"
+                    );
+                    let expected_obj = cost * hours;
+                    assert_eq!(
+                        objective[col], expected_obj,
+                        "{name} h{h_idx} blk{blk}: objective[{col}] expected {expected_obj}"
+                    );
+                    assert_eq!(
+                        col_lower[col], 0.0,
+                        "{name} h{h_idx} blk{blk}: col_lower[{col}] must stay at 0.0"
+                    );
+                }
+            }
+        }
+        for family in &cell_families {
+            let name = family.name;
+            for (h_idx, spec) in specs.iter().enumerate() {
+                let active = (family.predicate)(spec);
+                let cost = (family.cost_of)(spec);
+                let cell = HydroCell::new(h_idx);
+                for (blk, &hours) in BLOCK_HOURS.iter().enumerate() {
+                    let col = (family.accessor)(&layout, cell, BlockIdx::new(blk));
                     let expected_upper = if active { f64::INFINITY } else { 0.0 };
                     assert_eq!(
                         col_upper[col], expected_upper,
@@ -5940,9 +6120,10 @@ mod hydro_block_bound_tests {
     use cobre_core::{
         BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
         CascadeTopology, ContractBlockBounds, EntityId, Hydro, HydroBlockBounds,
-        HydroBlockOverride, HydroStageBounds, HydroStagePenalties, LineBlockBounds,
-        LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
-        PumpingBlockBounds, ResolvedBlockBounds, ResolvedBounds, ResolvedGenericConstraintBounds,
+        HydroBlockOverride, HydroStageBounds, HydroStagePenalties, HydroUnitGroupBoundsCountsSpec,
+        HydroUnitGroupOverride, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
+        PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBlockBounds,
+        ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedHydroUnitGroupBounds,
         ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties,
         ThermalBlockBounds, ThermalStageBounds,
     };
@@ -6183,7 +6364,17 @@ mod hydro_block_bound_tests {
             }
         }
 
+        /// Also syncs `hydro.unit_groups[0]`'s `min_turbined_m3s`/`min_generation_mw`
+        /// to `hb`'s: `fixture_hydro`'s `declare_mirror_unit_group` mirrors the
+        /// entity's (hard-coded zero) declared minimum at construction time, before
+        /// this per-stage bound is known, and the min-floor rows now read the
+        /// GROUP's own resolved minimum, never `HydroBlockBounds`. Every fixture
+        /// hydro carries exactly one group at position 0, and this module's
+        /// `N_STAGES == 1`, so overwriting it here tracks the single call's value
+        /// with no cross-stage ambiguity.
         fn set_hydro_bounds(&mut self, h_idx: usize, stage_idx: usize, hb: HydroBlockBounds) {
+            self.hydros[h_idx].unit_groups[0].min_turbined_m3s = hb.min_turbined_m3s;
+            self.hydros[h_idx].unit_groups[0].min_generation_mw = hb.min_generation_mw;
             *self.bounds.hydro_block_base_mut(h_idx, stage_idx) = hb;
         }
 
@@ -6215,6 +6406,37 @@ mod hydro_block_bound_tests {
                 .bounds
                 .block_overlay_mut()
                 .hydro_override_mut(h_idx, stage_idx, block_idx)
+                .expect("overlay cell must exist for a fixture-sized overlay") = over;
+        }
+
+        /// Install the group-bounds overlay, sized from each hydro's own
+        /// declared `unit_groups` count (every fixture hydro carries exactly one,
+        /// via `declare_mirror_unit_group`).
+        fn install_group_overlay(&mut self) {
+            let groups_per_plant: Vec<usize> =
+                self.hydros.iter().map(|h| h.unit_groups.len()).collect();
+            self.bounds
+                .set_group_overlay(ResolvedHydroUnitGroupBounds::new(
+                    &HydroUnitGroupBoundsCountsSpec {
+                        groups_per_plant: &groups_per_plant,
+                        n_stages: N_STAGES,
+                        max_blocks: N_BLKS,
+                    },
+                ));
+        }
+
+        fn set_group_block_override(
+            &mut self,
+            h_idx: usize,
+            group_pos: usize,
+            stage_idx: usize,
+            block_idx: usize,
+            over: HydroUnitGroupOverride,
+        ) {
+            *self
+                .bounds
+                .group_overlay_mut()
+                .block_override_mut(h_idx, group_pos, stage_idx, block_idx)
                 .expect("overlay cell must exist for a fixture-sized overlay") = over;
         }
 
@@ -6766,8 +6988,12 @@ mod hydro_block_bound_tests {
         }
     }
 
-    /// A hydro with stage-wide `min_turbined_m3s = 0.0` and a `block_id = 1`
-    /// override to `75.0` binds ONLY block 1's min-turbine row lower bound.
+    /// A hydro with a declared group `min_turbined_m3s = 0.0` and a group
+    /// `block_id = 1` override to `75.0` (`hydro_unit_group_bounds.parquet`'s
+    /// per-cell floor overlay — BU-F1's previously-unconsumed override column,
+    /// now the min-turbine row's sole RHS source) binds ONLY block 1's
+    /// min-turbine row lower bound. The stage-wide `HydroBlockBounds.min_turbined_m3s`
+    /// set below stays `0.0` throughout and is NOT what the row reads.
     #[test]
     fn test_per_block_min_turbine_row_bound() {
         let hydros = vec![fixture_hydro(1, None)];
@@ -6777,12 +7003,13 @@ mod hydro_block_bound_tests {
             STAGE_IDX,
             hydro_block_bounds(0.0, 50.0, 0.0, None, 0.0, 45.0, None),
         );
-        fixtures.install_block_overlay();
-        fixtures.set_hydro_block_override(
+        fixtures.install_group_overlay();
+        fixtures.set_group_block_override(
+            0,
             0,
             STAGE_IDX,
             1,
-            HydroBlockOverride {
+            HydroUnitGroupOverride {
                 min_turbined_m3s: Some(75.0),
                 ..Default::default()
             },
@@ -6794,12 +7021,13 @@ mod hydro_block_bound_tests {
         assert_eq!(
             row_lower,
             vec![0.0, 75.0, 0.0],
-            "min-turbine row_lower reads per block"
+            "min-turbine row_lower reads the group's own per-block override"
         );
     }
 
-    /// A hydro with stage-wide `min_generation_mw = 0.0` and a `block_id = 0`
-    /// override to `50.0` binds ONLY block 0's min-generation row lower bound.
+    /// A hydro with a declared group `min_generation_mw = 0.0` and a group
+    /// `block_id = 0` override to `50.0` binds ONLY block 0's min-generation
+    /// row lower bound — the min-generation mirror of the min-turbine test above.
     #[test]
     fn test_per_block_min_generation_row_bound() {
         let hydros = vec![fixture_hydro(1, None)];
@@ -6809,12 +7037,13 @@ mod hydro_block_bound_tests {
             STAGE_IDX,
             hydro_block_bounds(0.0, 50.0, 0.0, None, 0.0, 45.0, None),
         );
-        fixtures.install_block_overlay();
-        fixtures.set_hydro_block_override(
+        fixtures.install_group_overlay();
+        fixtures.set_group_block_override(
+            0,
             0,
             STAGE_IDX,
             0,
-            HydroBlockOverride {
+            HydroUnitGroupOverride {
                 min_generation_mw: Some(50.0),
                 ..Default::default()
             },
@@ -6826,7 +7055,7 @@ mod hydro_block_bound_tests {
         assert_eq!(
             row_lower,
             vec![50.0, 0.0, 0.0],
-            "min-generation row_lower reads per block"
+            "min-generation row_lower reads the group's own per-block override"
         );
     }
 
@@ -6940,8 +7169,8 @@ mod cell_column_bound_tests {
         BLOCK_HOURS, state_layout_for, three_block_stage, zero_hydro_penalties,
     };
     use super::{
-        ColumnBufs, StageLayout, TemplateBuildCtx, fill_fpha_generation_columns,
-        fill_turbine_columns,
+        ColumnBufs, GroupBoundLookup, StageLayout, TemplateBuildCtx, cell_min_generation,
+        cell_min_turbined, fill_fpha_generation_columns, fill_turbine_columns,
     };
 
     const N_STAGES: usize = 1;
@@ -7978,6 +8207,88 @@ mod cell_column_bound_tests {
             100.0_f64.to_bits(),
             "the same cell at another stage must keep the declared value even at block 1"
         );
+    }
+
+    /// `cell_min_turbined`/`cell_min_generation` are declaration-order
+    /// invariant: a plant declaring the SAME three groups (one on bus 5, two on
+    /// bus 6) in a different `Vec` order produces the IDENTICAL per-cell floor
+    /// sum, bit-for-bit — the min-floor mirror of `HydroCellIndex`'s own
+    /// declaration-order invariance
+    /// (`test_cell_index_is_invariant_to_group_declaration_order_and_ids` in
+    /// `lp/indexer/hydro_cell.rs`).
+    #[test]
+    fn test_cell_min_floor_is_invariant_to_group_declaration_order() {
+        let group_a = make_unit_group(EntityId(10), EntityId(5), 8.0, 500.0, 5.0, 500.0);
+        let group_b = make_unit_group(EntityId(11), EntityId(6), 4.0, 500.0, 3.0, 500.0);
+        let group_c = make_unit_group(EntityId(12), EntityId(6), 5.0, 500.0, 4.0, 500.0);
+
+        let forward = grouped_hydro(
+            1,
+            EntityId(999),
+            vec![group_a.clone(), group_b.clone(), group_c.clone()],
+            1000.0,
+            1000.0,
+        );
+        let reversed = grouped_hydro(
+            1,
+            EntityId(999),
+            vec![group_c, group_b, group_a],
+            1000.0,
+            1000.0,
+        );
+
+        let index_forward = HydroCellIndex::build(std::slice::from_ref(&forward));
+        let index_reversed = HydroCellIndex::build(std::slice::from_ref(&reversed));
+        assert_eq!(index_forward.n_cells(), index_reversed.n_cells());
+        assert_eq!(
+            index_forward.n_cells(),
+            2,
+            "bus 5 and bus 6 must partition into 2 cells"
+        );
+
+        let empty = ResolvedHydroUnitGroupBounds::empty();
+        let lookup = GroupBoundLookup::new(&empty, 0, 0, 0);
+
+        for c in 0..index_forward.n_cells() {
+            let cell_f = HydroCell::new(c);
+            let bus = index_forward.bus_of(cell_f);
+            let cell_r = (0..index_reversed.n_cells())
+                .map(HydroCell::new)
+                .find(|&cr| index_reversed.bus_of(cr) == bus)
+                .expect("both declaration orders must partition onto the same buses");
+
+            let min_turb_f = cell_min_turbined(
+                &forward.unit_groups,
+                index_forward.groups_of(cell_f),
+                lookup,
+            );
+            let min_turb_r = cell_min_turbined(
+                &reversed.unit_groups,
+                index_reversed.groups_of(cell_r),
+                lookup,
+            );
+            assert_eq!(
+                min_turb_f.to_bits(),
+                min_turb_r.to_bits(),
+                "bus {bus:?}: min-turbine floor must not depend on group declaration order"
+            );
+
+            let min_gen_f = cell_min_generation(
+                &forward.unit_groups,
+                index_forward.groups_of(cell_f),
+                lookup,
+            );
+            let min_gen_r = cell_min_generation(
+                &reversed.unit_groups,
+                index_reversed.groups_of(cell_r),
+                lookup,
+            );
+            assert_eq!(
+                min_gen_f.to_bits(),
+                min_gen_r.to_bits(),
+                "bus {bus:?}: min-generation floor must not depend on group declaration order"
+            );
+        }
     }
 
     /// The same opposite-binding-sides pair `test_same_bus_groups_sum_into_one_cell_box`

@@ -1401,11 +1401,17 @@ pub(super) fn fill_z_inflow_entries(
 /// Fill entries for the 4 operational-violation families, linking decision
 /// variables to their slack columns:
 ///
-/// - **Min outflow** (`>=`): `q + s + d + sigma_below`
-/// - **Max outflow** (`<=`): `q + s + d - sigma_above`
-/// - **Min turbine** (`>=`): `q + sigma_below`
-/// - **Min generation** (`>=`): `var + sigma_below`, where `var` is `rho * q` for
-///   constant-productivity hydros or the generation column `g` for FPHA.
+/// - **Min outflow** (`>=`, per hydro): `q + s + d + sigma_below`
+/// - **Max outflow** (`<=`, per hydro): `q + s + d - sigma_above`
+/// - **Min turbine** (`>=`, per CELL): `q_c + sigma_below_c`
+/// - **Min generation** (`>=`, per CELL): `var_c + sigma_below_c`, where `var_c`
+///   is `rho * q_c` for constant-productivity hydros or the cell's own
+///   generation column `g_c` for FPHA.
+///
+/// The two power-side families couple only the CELL's own columns to the
+/// CELL's own slack — never summed across a plant's cells the way the two
+/// flow families above are — see the min-floor contract in
+/// `.claude/rules/sddp.md`.
 pub(super) fn fill_operational_violation_entries(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -1452,38 +1458,41 @@ pub(super) fn fill_operational_violation_entries(
             col_entries[col_slack].push((row, -1.0));
         }
 
-        for blk in (0..n_blks).map(BlockIdx::new) {
-            let row = grid.flat(
-                layout.slack.oper_violation.min_turbine_rows.start,
-                h_idx,
-                blk,
-            );
-            for c in ctx.hydro_cell_index.cells_of(HydroSys::new(h_idx)) {
-                let col_q = layout.turbine_col(HydroCell::new(c), blk);
+        // Per-cell, not plant-keyed: each cell's own min-turbine row couples ONLY
+        // its own turbine column to its own slack column — never the plant's other
+        // cells (see fill_operational_violation_rows for the matching per-cell RHS).
+        for c in ctx.hydro_cell_index.cells_of(HydroSys::new(h_idx)) {
+            let cell = HydroCell::new(c);
+            for blk in (0..n_blks).map(BlockIdx::new) {
+                let row = grid.flat(layout.slack.oper_violation.min_turbine_rows.start, c, blk);
+                let col_q = layout.turbine_col(cell, blk);
                 col_entries[col_q].push((row, 1.0));
+                let col_slack = layout.turbine_below_col(cell, blk);
+                col_entries[col_slack].push((row, 1.0));
             }
-            let col_slack = layout.turbine_below_col(HydroSys::new(h_idx), blk);
-            col_entries[col_slack].push((row, 1.0));
         }
 
-        // Plant-keyed by design, not oversight: turbine bounds and HydroPenalties are
-        // both plant-level, so a split plant's min-turbine/min-generation violation is
-        // reported for the plant, not attributed to a side.
+        // Per-cell min-generation row: FPHA couples the cell's own generation
+        // column; ConstantProductivity couples the cell's own turbine column at rho.
         if let Some(&local_fpha_idx) = fpha_local_entry.as_ref() {
             let fpha_base = layout.fpha_local_first_cell(local_fpha_idx).get();
-            let n_cells = ctx.hydro_cell_index.cells_of(HydroSys::new(h_idx)).len();
-            for blk in (0..n_blks).map(BlockIdx::new) {
-                let row = grid.flat(
-                    layout.slack.oper_violation.min_generation_rows.start,
-                    h_idx,
-                    blk,
-                );
-                for offset in 0..n_cells {
+            for (offset, c) in ctx
+                .hydro_cell_index
+                .cells_of(HydroSys::new(h_idx))
+                .enumerate()
+            {
+                let cell = HydroCell::new(c);
+                for blk in (0..n_blks).map(BlockIdx::new) {
+                    let row = grid.flat(
+                        layout.slack.oper_violation.min_generation_rows.start,
+                        c,
+                        blk,
+                    );
                     let col_g = layout.generation_col(FphaCellLocal::new(fpha_base + offset), blk);
                     col_entries[col_g].push((row, 1.0));
+                    let col_slack = layout.generation_below_col(cell, blk);
+                    col_entries[col_slack].push((row, 1.0));
                 }
-                let col_slack = layout.generation_below_col(HydroSys::new(h_idx), blk);
-                col_entries[col_slack].push((row, 1.0));
             }
         } else {
             // Read rho from the resolved per-stage production model, not a static field.
@@ -1496,18 +1505,19 @@ pub(super) fn fill_operational_violation_entries(
                     );
                 }
             };
-            for blk in (0..n_blks).map(BlockIdx::new) {
-                let row = grid.flat(
-                    layout.slack.oper_violation.min_generation_rows.start,
-                    h_idx,
-                    blk,
-                );
-                for c in ctx.hydro_cell_index.cells_of(HydroSys::new(h_idx)) {
-                    let col_q = layout.turbine_col(HydroCell::new(c), blk);
+            for c in ctx.hydro_cell_index.cells_of(HydroSys::new(h_idx)) {
+                let cell = HydroCell::new(c);
+                for blk in (0..n_blks).map(BlockIdx::new) {
+                    let row = grid.flat(
+                        layout.slack.oper_violation.min_generation_rows.start,
+                        c,
+                        blk,
+                    );
+                    let col_q = layout.turbine_col(cell, blk);
                     col_entries[col_q].push((row, rho));
+                    let col_slack = layout.generation_below_col(cell, blk);
+                    col_entries[col_slack].push((row, 1.0));
                 }
-                let col_slack = layout.generation_below_col(HydroSys::new(h_idx), blk);
-                col_entries[col_slack].push((row, 1.0));
             }
         }
     }
@@ -3095,11 +3105,11 @@ mod pumping_water_tests {
     use crate::test_support::make_unit_group;
 
     use super::super::M3S_TO_HM3;
-    use super::super::columns::{ColumnBufs, fill_pumping_columns};
+    use super::super::columns::{ColumnBufs, fill_pumping_columns, fill_stage_columns};
     use super::super::layout::{ResolvedTables, StageLayout, TemplateBuildCtx};
     use super::super::rows::fill_stage_rows;
     use super::super::test_support::{
-        state_layout_for, three_block_stage, two_block_stage, zero_hydro_penalties,
+        BLOCK_HOURS, state_layout_for, three_block_stage, two_block_stage, zero_hydro_penalties,
     };
     use super::{
         LpMatrixBuffers, assemble_csc, build_stage_matrix_entries, fill_fpha_entries,
@@ -4972,13 +4982,15 @@ mod pumping_water_tests {
         }
     }
 
-    /// The four operational-violation families stay plant-keyed — one row per
-    /// `(plant, block)` — and each row sums the plant's cells. Plant 1's second
-    /// cell is `cell_idx = 2`; block 1 numerically coincides with plant 1's own
+    /// The two power-side operational-violation families (min-turbine,
+    /// min-generation) are now CELL-keyed — one row per `(cell, block)`, each
+    /// row coupling ONLY that cell's own columns — while the two flow
+    /// families (min/max-outflow) stay plant-keyed. Plant 1's second cell is
+    /// `cell_idx = 2`; block 1 numerically coincides with plant 1's own
     /// index, so block 0 is also checked to give a genuinely three-way-distinct
     /// `(h_idx, cell_idx, blk_idx)` assertion point.
     #[test]
-    fn test_operational_violation_rows_sum_cells_and_keep_plant_row_keys() {
+    fn test_operational_violation_power_rows_are_per_cell_not_plant() {
         let fixtures = split_plant_fixture();
         let ctx = fixtures.make_ctx();
         let stage = three_block_stage(0);
@@ -4988,93 +5000,359 @@ mod pumping_water_tests {
 
         let n_h = layout.n_h;
         let n_blks = layout.n_blks;
+        let n_cells = ctx.hydro_cell_index.n_cells();
         assert_eq!(
             layout.slack.oper_violation.min_outflow_rows.len(),
             n_h * n_blks,
-            "min_outflow_rows family must stay sized n_hydros * n_blks"
+            "min_outflow_rows family stays sized n_hydros * n_blks"
         );
         assert_eq!(
             layout.slack.oper_violation.max_outflow_rows.len(),
             n_h * n_blks,
-            "max_outflow_rows family must stay sized n_hydros * n_blks"
+            "max_outflow_rows family stays sized n_hydros * n_blks"
         );
         assert_eq!(
             layout.slack.oper_violation.min_turbine_rows.len(),
-            n_h * n_blks,
-            "min_turbine_rows family must stay sized n_hydros * n_blks"
+            n_cells * n_blks,
+            "min_turbine_rows family is now sized n_cells * n_blks"
         );
         assert_eq!(
             layout.slack.oper_violation.min_generation_rows.len(),
-            n_h * n_blks,
-            "min_generation_rows family must stay sized n_hydros * n_blks"
+            n_cells * n_blks,
+            "min_generation_rows family is now sized n_cells * n_blks"
         );
 
-        let plant1_idx = 1;
         let grid = layout.block_grid();
         let rho = 1.0; // PumpFixtures' default ConstantProductivity productivity.
+        let cell1 = HydroCell::new(1);
+        let cell2 = HydroCell::new(2);
 
         for &blk in &[0_usize, 1] {
             let blk_idx = BlockIdx::new(blk);
-            let row_min_turbine = i32::try_from(grid.flat(
+            let row_min_turbine_1 = i32::try_from(grid.flat(
                 layout.slack.oper_violation.min_turbine_rows.start,
-                plant1_idx,
+                1,
                 blk_idx,
             ))
             .unwrap();
-            let row_min_gen = i32::try_from(grid.flat(
+            let row_min_turbine_2 = i32::try_from(grid.flat(
+                layout.slack.oper_violation.min_turbine_rows.start,
+                2,
+                blk_idx,
+            ))
+            .unwrap();
+            assert_ne!(
+                row_min_turbine_1, row_min_turbine_2,
+                "blk {blk}: plant 1's two cells must own DISTINCT min_turbine_rows rows"
+            );
+
+            assert_eq!(
+                coeff_at(&csc, layout.turbine_col(cell1, blk_idx), row_min_turbine_1),
+                1.0,
+                "blk {blk}: cell 1's own turbine column must carry +1.0 on ITS OWN row"
+            );
+            assert_eq!(
+                coeff_at(&csc, layout.turbine_col(cell2, blk_idx), row_min_turbine_1),
+                0.0,
+                "blk {blk}: cell 2's turbine column must NOT appear on cell 1's row"
+            );
+            assert_eq!(
+                coeff_at(&csc, layout.turbine_col(cell2, blk_idx), row_min_turbine_2),
+                1.0,
+                "blk {blk}: cell 2's own turbine column must carry +1.0 on ITS OWN row"
+            );
+            assert_eq!(
+                coeff_at(
+                    &csc,
+                    layout.turbine_below_col(cell1, blk_idx),
+                    row_min_turbine_1
+                ),
+                1.0,
+                "blk {blk}: cell 1's own turbine_below_slack column must carry +1.0 on ITS OWN row"
+            );
+            assert_eq!(
+                coeff_at(
+                    &csc,
+                    layout.turbine_below_col(cell2, blk_idx),
+                    row_min_turbine_2
+                ),
+                1.0,
+                "blk {blk}: cell 2's own turbine_below_slack column must carry +1.0 on ITS OWN row"
+            );
+            assert_ne!(
+                layout.turbine_below_col(cell1, blk_idx),
+                layout.turbine_below_col(cell2, blk_idx),
+                "blk {blk}: the two cells must own DISTINCT turbine_below_slack columns"
+            );
+
+            let row_min_gen_1 = i32::try_from(grid.flat(
                 layout.slack.oper_violation.min_generation_rows.start,
-                plant1_idx,
+                1,
                 blk_idx,
             ))
             .unwrap();
-
-            assert_eq!(
-                coeff_at(
-                    &csc,
-                    layout.turbine_col(HydroCell::new(1), blk_idx),
-                    row_min_turbine
-                ),
-                1.0,
-                "blk {blk}: plant 1's first cell must carry +1.0 on its min_turbine_rows row"
+            let row_min_gen_2 = i32::try_from(grid.flat(
+                layout.slack.oper_violation.min_generation_rows.start,
+                2,
+                blk_idx,
+            ))
+            .unwrap();
+            assert_ne!(
+                row_min_gen_1, row_min_gen_2,
+                "blk {blk}: plant 1's two cells must own DISTINCT min_generation_rows rows"
             );
             assert_eq!(
-                coeff_at(
-                    &csc,
-                    layout.turbine_col(HydroCell::new(2), blk_idx),
-                    row_min_turbine
-                ),
-                1.0,
-                "blk {blk}: plant 1's second cell must carry +1.0 on its min_turbine_rows row"
-            );
-            assert_eq!(
-                coeff_at(
-                    &csc,
-                    layout.turbine_below_col(HydroSys::new(plant1_idx), blk_idx),
-                    row_min_turbine
-                ),
-                1.0,
-                "blk {blk}: plant 1's single turbine_below_slack column must carry +1.0"
-            );
-
-            assert_eq!(
-                coeff_at(
-                    &csc,
-                    layout.turbine_col(HydroCell::new(1), blk_idx),
-                    row_min_gen
-                ),
+                coeff_at(&csc, layout.turbine_col(cell1, blk_idx), row_min_gen_1),
                 rho,
-                "blk {blk}: plant 1's first cell must carry rho on its min_generation_rows row"
+                "blk {blk}: cell 1's own turbine column must carry rho on ITS OWN min_generation row"
             );
             assert_eq!(
-                coeff_at(
-                    &csc,
-                    layout.turbine_col(HydroCell::new(2), blk_idx),
-                    row_min_gen
-                ),
+                coeff_at(&csc, layout.turbine_col(cell2, blk_idx), row_min_gen_1),
+                0.0,
+                "blk {blk}: cell 2's turbine column must NOT appear on cell 1's min_generation row"
+            );
+            assert_eq!(
+                coeff_at(&csc, layout.turbine_col(cell2, blk_idx), row_min_gen_2),
                 rho,
-                "blk {blk}: plant 1's second cell must carry rho on its min_generation_rows row"
+                "blk {blk}: cell 2's own turbine column must carry rho on ITS OWN min_generation row"
             );
         }
+    }
+
+    /// A single plant with a `ConstantProductivity` model and two cells: cell A
+    /// (bus 30) owns one group; cell B (bus 31) owns two groups. Every group's
+    /// `min_turbined_m3s * rho` is deliberately BELOW its own `min_generation_mw`
+    /// (discriminates a rho-fold mutation on the generation floor), cell B's two
+    /// groups have distinct minima (discriminates a max-fold mutation), and the
+    /// plant's OWN declared `min_turbined_m3s`/`min_generation_mw` are set below
+    /// EVERY cell's own group-sum (discriminates a `.min(plant)` clamp). Pins the
+    /// min-floor contract in `.claude/rules/sddp.md`: RHS = plain sum of the
+    /// cell's own groups, never a fold, never a plant clamp, never apportioned.
+    fn min_floor_fixture() -> Hydro {
+        let mut hydro = fixture_hydro_ds(20, None);
+        hydro.min_turbined_m3s = 1.0;
+        hydro.min_generation_mw = 1.0;
+        hydro.max_turbined_m3s = 1000.0;
+        hydro.max_generation_mw = 1000.0;
+        hydro.unit_groups = vec![
+            make_unit_group(EntityId(200), EntityId(30), 8.0, 500.0, 5.0, 500.0),
+            make_unit_group(EntityId(201), EntityId(31), 4.0, 500.0, 3.0, 500.0),
+            make_unit_group(EntityId(202), EntityId(31), 5.0, 500.0, 4.0, 500.0),
+        ];
+        hydro
+    }
+
+    /// The min-floor contract, end to end: RHS is the plain sum of a cell's OWN
+    /// member groups' resolved minima, the matrix couples only the cell's own
+    /// columns to the cell's own slack, and the penalty is the plant's price at
+    /// FULL magnitude on every cell. Mutation-verified (by hand-patching
+    /// `cell_min_turbined`/`cell_min_generation`/`fill_cell_block_family` and
+    /// re-running) to fail under: (a) a `.min(plant)` clamp — would read `1.0`
+    /// on every row instead of `5.0`/`7.0`/`8.0`/`9.0`; (b) a `max`-fold over a
+    /// cell's own groups — cell B's `min_turbined` row would read `4.0` instead
+    /// of `7.0`; (c) summing over the WHOLE PLANT instead of the cell (the
+    /// pre-reversal plant-keyed behavior) — every row would read `12.0`
+    /// (turbine) or `17.0` (generation) instead of the per-cell values; (d)
+    /// `1/|cells|` price apportionment — every slack objective would read half
+    /// its expected value.
+    #[test]
+    fn test_min_floor_rhs_is_the_cells_own_group_sum() {
+        let hydro = min_floor_fixture();
+        let mut fixtures = PumpFixtures::new(vec![hydro], Vec::new());
+        fixtures.penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 1,
+                n_buses: fixtures.buses.len(),
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: N_STAGES,
+            },
+            &PenaltiesDefaults {
+                hydro: HydroStagePenalties {
+                    spillage_cost: 0.0,
+                    diversion_cost: 0.0,
+                    turbined_cost: 0.0,
+                    storage_violation_below_cost: 0.0,
+                    filling_target_violation_cost: 0.0,
+                    turbined_violation_below_cost: 7.0,
+                    outflow_violation_below_cost: 0.0,
+                    outflow_violation_above_cost: 0.0,
+                    generation_violation_below_cost: 11.0,
+                    evaporation_violation_cost: 0.0,
+                    water_withdrawal_violation_cost: 0.0,
+                    water_withdrawal_violation_pos_cost: 0.0,
+                    water_withdrawal_violation_neg_cost: 0.0,
+                    evaporation_violation_pos_cost: 0.0,
+                    evaporation_violation_neg_cost: 0.0,
+                    inflow_nonnegativity_cost: 0.0,
+                },
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        let ctx = fixtures.make_ctx();
+        assert_eq!(
+            ctx.hydro_cell_index.n_cells(),
+            2,
+            "bus 30 (1 group) and bus 31 (2 groups) must partition into 2 cells"
+        );
+        let cell_a = HydroCell::new(0);
+        let cell_b = HydroCell::new(1);
+
+        let stage = three_block_stage(0);
+        let state = state_layout_for(&ctx);
+        let layout = StageLayout::new(&ctx, &state, &stage, 0);
+        let n_cells = ctx.hydro_cell_index.n_cells();
+        let n_blks = layout.n_blks;
+
+        let (row_lower, _row_upper) = fill_stage_rows(&ctx, &stage, 0, &layout);
+        let (_col_lower, col_upper, objective) = fill_stage_columns(&ctx, &stage, 0, &layout);
+        let csc = build_sorted_csc(&ctx, &stage, 0, &layout);
+        let grid = layout.block_grid();
+        let blk0 = BlockIdx::new(0);
+
+        assert_eq!(
+            layout.slack.oper_violation.min_turbine_rows.len(),
+            n_cells * n_blks,
+            "min_turbine_rows must be sized n_cells * n_blks"
+        );
+        assert_eq!(
+            layout.slack.oper_violation.min_generation_rows.len(),
+            n_cells * n_blks,
+            "min_generation_rows must be sized n_cells * n_blks"
+        );
+
+        let row_turb_a = grid.flat(layout.slack.oper_violation.min_turbine_rows.start, 0, blk0);
+        let row_turb_b = grid.flat(layout.slack.oper_violation.min_turbine_rows.start, 1, blk0);
+        let row_gen_a = grid.flat(
+            layout.slack.oper_violation.min_generation_rows.start,
+            0,
+            blk0,
+        );
+        let row_gen_b = grid.flat(
+            layout.slack.oper_violation.min_generation_rows.start,
+            1,
+            blk0,
+        );
+
+        // RHS: plain sum of the cell's OWN groups, never the plant's declared
+        // 1.0, never a fold, never the whole-plant sum (12.0 / 17.0).
+        assert_eq!(row_lower[row_turb_a], 5.0, "cell A min-turbine RHS");
+        assert_eq!(
+            row_lower[row_turb_b], 7.0,
+            "cell B min-turbine RHS (3.0 + 4.0)"
+        );
+        assert_eq!(row_lower[row_gen_a], 8.0, "cell A min-generation RHS");
+        assert_eq!(
+            row_lower[row_gen_b], 9.0,
+            "cell B min-generation RHS (4.0 + 5.0)"
+        );
+
+        // Coupling: each cell's own turbine column at +1.0 on its OWN row only.
+        let row_turb_a_i32 = i32::try_from(row_turb_a).unwrap();
+        let row_turb_b_i32 = i32::try_from(row_turb_b).unwrap();
+        assert_eq!(
+            coeff_at(&csc, layout.turbine_col(cell_a, blk0), row_turb_a_i32),
+            1.0,
+            "cell A's turbine column must carry +1.0 on cell A's row"
+        );
+        assert_eq!(
+            coeff_at(&csc, layout.turbine_col(cell_b, blk0), row_turb_a_i32),
+            0.0,
+            "cell B's turbine column must NOT appear on cell A's row"
+        );
+        assert_eq!(
+            coeff_at(&csc, layout.turbine_col(cell_b, blk0), row_turb_b_i32),
+            1.0,
+            "cell B's turbine column must carry +1.0 on cell B's row"
+        );
+        assert_eq!(
+            coeff_at(&csc, layout.turbine_below_col(cell_a, blk0), row_turb_a_i32),
+            1.0,
+            "cell A's turbine_below_slack must carry +1.0 on cell A's row"
+        );
+        assert_eq!(
+            coeff_at(&csc, layout.turbine_below_col(cell_b, blk0), row_turb_b_i32),
+            1.0,
+            "cell B's turbine_below_slack must carry +1.0 on cell B's row"
+        );
+
+        // Coupling: ConstantProductivity's min-generation row reads the cell's
+        // own turbine column at rho (here rho == 1.0, PumpFixtures' default).
+        let rho = 1.0;
+        let row_gen_a_i32 = i32::try_from(row_gen_a).unwrap();
+        let row_gen_b_i32 = i32::try_from(row_gen_b).unwrap();
+        assert_eq!(
+            coeff_at(&csc, layout.turbine_col(cell_a, blk0), row_gen_a_i32),
+            rho,
+            "cell A's turbine column must carry rho on cell A's min-generation row"
+        );
+        assert_eq!(
+            coeff_at(&csc, layout.turbine_col(cell_b, blk0), row_gen_a_i32),
+            0.0,
+            "cell B's turbine column must NOT appear on cell A's min-generation row"
+        );
+        assert_eq!(
+            coeff_at(&csc, layout.turbine_col(cell_b, blk0), row_gen_b_i32),
+            rho,
+            "cell B's turbine column must carry rho on cell B's min-generation row"
+        );
+        assert_eq!(
+            coeff_at(
+                &csc,
+                layout.generation_below_col(cell_a, blk0),
+                row_gen_a_i32
+            ),
+            1.0,
+            "cell A's generation_below_slack must carry +1.0 on cell A's row"
+        );
+        assert_eq!(
+            coeff_at(
+                &csc,
+                layout.generation_below_col(cell_b, blk0),
+                row_gen_b_i32
+            ),
+            1.0,
+            "cell B's generation_below_slack must carry +1.0 on cell B's row"
+        );
+
+        // Penalty: the PLANT's price at FULL magnitude on EVERY cell — never
+        // divided by the plant's cell count (2).
+        let hours0 = BLOCK_HOURS[0];
+        let turb_below_a = layout.turbine_below_col(cell_a, blk0);
+        let turb_below_b = layout.turbine_below_col(cell_b, blk0);
+        let gen_below_a = layout.generation_below_col(cell_a, blk0);
+        let gen_below_b = layout.generation_below_col(cell_b, blk0);
+        assert_eq!(
+            objective[turb_below_a],
+            7.0 * hours0,
+            "cell A turbine_below price"
+        );
+        assert_eq!(
+            objective[turb_below_b],
+            7.0 * hours0,
+            "cell B turbine_below price (same, full magnitude)"
+        );
+        assert_eq!(
+            objective[gen_below_a],
+            11.0 * hours0,
+            "cell A generation_below price"
+        );
+        assert_eq!(
+            objective[gen_below_b],
+            11.0 * hours0,
+            "cell B generation_below price (same, full magnitude)"
+        );
+
+        // Activation: every cell's floor is > 0.0, so every slack is unbounded above.
+        assert_eq!(col_upper[turb_below_a], f64::INFINITY);
+        assert_eq!(col_upper[turb_below_b], f64::INFINITY);
+        assert_eq!(col_upper[gen_below_a], f64::INFINITY);
+        assert_eq!(col_upper[gen_below_b], f64::INFINITY);
     }
 
     /// Plant-total invariance: the SAME total upstream release, pinned through

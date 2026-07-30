@@ -264,9 +264,9 @@ pub struct StageGeometry {
     pub outflow_below_slack: Range<usize>,
     /// Outflow-above-maximum slack column range (one per hydro per block).
     pub outflow_above_slack: Range<usize>,
-    /// Turbine-below-minimum slack column range (one per hydro per block).
+    /// Turbine-below-minimum slack column range (one per hydro CELL per block).
     pub turbine_below_slack: Range<usize>,
-    /// Generation-below-minimum slack column range (one per hydro per block).
+    /// Generation-below-minimum slack column range (one per hydro CELL per block).
     pub generation_below_slack: Range<usize>,
     /// Import-contract column range (one per import contract per block); empty
     /// `start..start` (not `0..0`) at the pumping-end column when there are none.

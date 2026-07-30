@@ -1,8 +1,9 @@
 use cobre_core::{BlockMode, Stage};
 
 use crate::hydro_models::EvaporationModel;
-use crate::indexer::BlockIdx;
+use crate::indexer::{BlockIdx, HydroCell, HydroSys};
 
+use super::columns::{GroupBoundLookup, cell_min_generation, cell_min_turbined};
 use super::fpha_cursor::for_each_fpha_plane;
 use super::layout::{StageLayout, TemplateBuildCtx};
 
@@ -427,14 +428,18 @@ fn fill_z_inflow_rows(
 
 /// Fill row bounds for the 4 operational violation constraint families.
 ///
-/// Per-block formulation: one row per hydro per block. RHS is in rate units
-/// (m3/s for flow families, MW for generation).
+/// The two flow families are per-hydro per-block; RHS is in rate units
+/// (m3/s). The two power families (min-turbine, min-generation) are per-hydro
+/// CELL per-block: each cell's RHS is the PLAIN SUM of its own member groups'
+/// resolved minimum (`cell_min_turbined`/`cell_min_generation`), never the
+/// plant's declared `min_turbined_m3s`/`min_generation_mw` — see the
+/// min-floor contract in `.claude/rules/sddp.md`.
 ///
 /// - **Min outflow** (`>=`): `row_lower = min_outflow_m3s`, `row_upper = +INF`.
 /// - **Max outflow** (`<=`): `row_lower = -INF`, `row_upper = max_outflow_m3s`
 ///   (or `+INF` when the bound is absent, making the row non-binding).
-/// - **Min turbine** (`>=`): `row_lower = min_turbined_m3s`, `row_upper = +INF`.
-/// - **Min generation** (`>=`): `row_lower = min_generation_mw`, `row_upper = +INF`.
+/// - **Min turbine** (`>=`, per cell): `row_lower = cell_min_turbined`, `row_upper = +INF`.
+/// - **Min generation** (`>=`, per cell): `row_lower = cell_min_generation`, `row_upper = +INF`.
 pub(super) fn fill_operational_violation_rows(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -463,21 +468,37 @@ pub(super) fn fill_operational_violation_rows(
                     f64::NEG_INFINITY,
                     hb.max_outflow_m3s.unwrap_or(f64::INFINITY),
                 ),
-                (
-                    layout.slack.oper_violation.min_turbine_rows.start,
-                    hb.min_turbined_m3s,
-                    f64::INFINITY,
-                ),
-                (
-                    layout.slack.oper_violation.min_generation_rows.start,
-                    hb.min_generation_mw,
-                    f64::INFINITY,
-                ),
             ];
             for (row_start, lower, upper) in families {
                 let row = grid.flat(row_start, h_idx, BlockIdx::new(blk));
                 row_lower[row] = lower;
                 row_upper[row] = upper;
+            }
+        }
+
+        let hydro = &ctx.hydros[h_idx];
+        for blk in 0..layout.n_blks {
+            let lookup =
+                GroupBoundLookup::new(ctx.resolved.bounds.group_overlay(), h_idx, stage_idx, blk);
+            for cell_idx in ctx.hydro_cell_index.cells_of(HydroSys::new(h_idx)) {
+                let cell = HydroCell::new(cell_idx);
+                let positions = ctx.hydro_cell_index.groups_of(cell);
+
+                let row_t = grid.flat(
+                    layout.slack.oper_violation.min_turbine_rows.start,
+                    cell_idx,
+                    BlockIdx::new(blk),
+                );
+                row_lower[row_t] = cell_min_turbined(&hydro.unit_groups, positions, lookup);
+                row_upper[row_t] = f64::INFINITY;
+
+                let row_g = grid.flat(
+                    layout.slack.oper_violation.min_generation_rows.start,
+                    cell_idx,
+                    BlockIdx::new(blk),
+                );
+                row_lower[row_g] = cell_min_generation(&hydro.unit_groups, positions, lookup);
+                row_upper[row_g] = f64::INFINITY;
             }
         }
     }
