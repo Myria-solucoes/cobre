@@ -33,6 +33,7 @@ mod convert;
 mod errors;
 mod io;
 mod model;
+mod policy;
 mod results;
 mod run;
 mod schema;
@@ -173,6 +174,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
 
     m.add_function(wrap_pyfunction!(version::version_info, m)?)?;
+    m.add_function(wrap_pyfunction!(policy::write_policy_checkpoint, m)?)?;
 
     // Top-level classes (`cobre.Study`, `cobre.Policy`), not submodule members.
     m.add_class::<study::Study>()?;

@@ -1,0 +1,297 @@
+//! `cobre.write_policy_checkpoint` — writes a policy checkpoint from plain
+//! Python dicts/sequences, single-sourcing the `FlatBuffers` byte layout in
+//! `cobre_io`.
+//!
+//! Input dict shapes mirror what [`crate::results::load_policy`] emits, so a
+//! loaded checkpoint round-trips: load -> edit -> write.
+
+use std::path::PathBuf;
+
+use pyo3::exceptions::PyValueError;
+use pyo3::prelude::*;
+
+use cobre_io::{
+    ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL, EntitySlot, PolicyBasisRecord, PolicyCheckpointMetadata,
+    PolicyCutRecord, StageCutsPayload, StageStatesPayload,
+};
+
+use crate::errors::{ErrorSource, convert_error};
+
+#[derive(Debug, FromPyObject)]
+#[pyo3(from_item_all)]
+pub(crate) struct PyEntitySlot {
+    entity_type: u8,
+    entity_id: i32,
+    subindex: u32,
+    was_active: bool,
+    #[pyo3(default = ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL)]
+    delivery_anchor: i32,
+}
+
+impl From<&PyEntitySlot> for EntitySlot {
+    fn from(slot: &PyEntitySlot) -> Self {
+        Self {
+            entity_type: slot.entity_type,
+            entity_id: slot.entity_id,
+            subindex: slot.subindex,
+            was_active: slot.was_active,
+            delivery_anchor: slot.delivery_anchor,
+        }
+    }
+}
+
+#[derive(Debug, FromPyObject)]
+#[pyo3(from_item_all)]
+pub(crate) struct PyCutRecord {
+    cut_id: u64,
+    slot_index: u32,
+    iteration: u32,
+    forward_pass_index: u32,
+    intercept: f64,
+    coefficients: Vec<f64>,
+    is_active: bool,
+}
+
+#[derive(Debug, FromPyObject)]
+#[pyo3(from_item_all)]
+pub(crate) struct PyStageCutsPayload {
+    stage_id: u32,
+    state_dimension: u32,
+    capacity: u32,
+    #[pyo3(default)]
+    warm_start_count: u32,
+    cuts: Vec<PyCutRecord>,
+    #[pyo3(default)]
+    active_cut_indices: Vec<u32>,
+    #[pyo3(default)]
+    populated_count: Option<u32>,
+    #[pyo3(default)]
+    entity_manifest: Vec<PyEntitySlot>,
+}
+
+#[derive(Debug, FromPyObject)]
+#[pyo3(from_item_all)]
+pub(crate) struct PyBasisRecord {
+    stage_id: u32,
+    iteration: u32,
+    column_status: Vec<u8>,
+    row_status: Vec<u8>,
+    num_cut_rows: u32,
+}
+
+#[derive(Debug, FromPyObject)]
+#[pyo3(from_item_all)]
+pub(crate) struct PyStageStatesPayload {
+    stage_id: u32,
+    state_dimension: u32,
+    count: u32,
+    data: Vec<f64>,
+    #[pyo3(default)]
+    entity_manifest: Vec<PyEntitySlot>,
+}
+
+#[derive(Debug, FromPyObject)]
+#[pyo3(from_item_all)]
+pub(crate) struct PyPolicyCheckpointMetadata {
+    cobre_version: String,
+    created_at: String,
+    completed_iterations: u32,
+    final_lower_bound: f64,
+    #[pyo3(default)]
+    best_upper_bound: Option<f64>,
+    state_dimension: u32,
+    num_stages: u32,
+    max_iterations: u32,
+    forward_passes: u32,
+    warm_start_cuts: u32,
+    #[pyo3(default)]
+    warm_start_counts: Vec<u32>,
+    rng_seed: u64,
+    #[pyo3(default)]
+    total_visited_states: u64,
+    #[pyo3(default)]
+    training_block_mode: String,
+    #[pyo3(default)]
+    training_block_mode_per_stage: Vec<String>,
+    #[pyo3(default)]
+    cost_scale_factor: Option<f64>,
+}
+
+impl From<PyPolicyCheckpointMetadata> for PolicyCheckpointMetadata {
+    fn from(m: PyPolicyCheckpointMetadata) -> Self {
+        Self {
+            cobre_version: m.cobre_version,
+            created_at: m.created_at,
+            completed_iterations: m.completed_iterations,
+            final_lower_bound: m.final_lower_bound,
+            best_upper_bound: m.best_upper_bound,
+            state_dimension: m.state_dimension,
+            num_stages: m.num_stages,
+            max_iterations: m.max_iterations,
+            forward_passes: m.forward_passes,
+            warm_start_cuts: m.warm_start_cuts,
+            warm_start_counts: m.warm_start_counts,
+            rng_seed: m.rng_seed,
+            total_visited_states: m.total_visited_states,
+            training_block_mode: m.training_block_mode,
+            training_block_mode_per_stage: m.training_block_mode_per_stage,
+            cost_scale_factor: m.cost_scale_factor,
+        }
+    }
+}
+
+/// Convert a length to `u32`, naming `what` in the overflow error.
+fn checked_u32_len(len: usize, what: &str) -> PyResult<u32> {
+    u32::try_from(len)
+        .map_err(|_| PyValueError::new_err(format!("{what} has {len} entries, exceeding u32::MAX")))
+}
+
+/// Validate each stage's cut coefficient lengths against its `state_dimension`
+/// and resolve the `populated_count` default (`cuts.len()`), naming the
+/// offending stage/cut on failure.
+fn resolve_populated_counts(stage_cuts: &[PyStageCutsPayload]) -> PyResult<Vec<u32>> {
+    let mut resolved = Vec::with_capacity(stage_cuts.len());
+    for sc in stage_cuts {
+        for cut in &sc.cuts {
+            if cut.coefficients.len() != sc.state_dimension as usize {
+                return Err(PyValueError::new_err(format!(
+                    "stage {} cut {}: coefficients has {} entries, expected \
+                     state_dimension={}",
+                    sc.stage_id,
+                    cut.cut_id,
+                    cut.coefficients.len(),
+                    sc.state_dimension
+                )));
+            }
+        }
+        resolved.push(match sc.populated_count {
+            Some(p) => p,
+            None => checked_u32_len(sc.cuts.len(), "cuts")?,
+        });
+    }
+    Ok(resolved)
+}
+
+/// Validate each stage's flat state-data length against `count * state_dimension`,
+/// naming the offending stage on failure.
+fn validate_stage_states(stage_states: &[PyStageStatesPayload]) -> PyResult<()> {
+    for ss in stage_states {
+        let expected = ss.count as usize * ss.state_dimension as usize;
+        if ss.data.len() != expected {
+            return Err(PyValueError::new_err(format!(
+                "stage {}: states data has {} entries, expected count*state_dimension={}",
+                ss.stage_id,
+                ss.data.len(),
+                expected
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Write a policy checkpoint from plain Python dicts/sequences to `path`.
+///
+/// `stage_cuts` and `metadata` mirror the `"stage_cuts"`/`"metadata"` keys
+/// [`crate::results::load_policy`] returns; `stage_bases`/`stage_states`
+/// default to empty when omitted (a checkpoint authored from raw cut data
+/// carries neither).
+///
+/// # Errors
+///
+/// `ValueError` when a cut's `coefficients` length does not match its stage's
+/// `state_dimension`, or a stage's state data length does not match
+/// `count * state_dimension`; otherwise the `cobre.errors` leaf mapped from
+/// the underlying [`cobre_io::OutputError`].
+#[pyfunction]
+#[pyo3(signature = (path, stage_cuts, metadata, stage_bases=None, stage_states=None))]
+#[allow(clippy::needless_pass_by_value)]
+pub fn write_policy_checkpoint(
+    py: Python<'_>,
+    path: PathBuf,
+    stage_cuts: Vec<PyStageCutsPayload>,
+    metadata: PyPolicyCheckpointMetadata,
+    stage_bases: Option<Vec<PyBasisRecord>>,
+    stage_states: Option<Vec<PyStageStatesPayload>>,
+) -> PyResult<()> {
+    let stage_bases = stage_bases.unwrap_or_default();
+    let stage_states = stage_states.unwrap_or_default();
+
+    let populated_counts = resolve_populated_counts(&stage_cuts)?;
+    validate_stage_states(&stage_states)?;
+
+    let metadata: PolicyCheckpointMetadata = metadata.into();
+
+    py.detach(|| {
+        let mut entity_manifests: Vec<Vec<EntitySlot>> = Vec::with_capacity(stage_cuts.len());
+        let mut cut_records: Vec<Vec<PolicyCutRecord<'_>>> = Vec::with_capacity(stage_cuts.len());
+        for sc in &stage_cuts {
+            entity_manifests.push(sc.entity_manifest.iter().map(EntitySlot::from).collect());
+            cut_records.push(
+                sc.cuts
+                    .iter()
+                    .map(|c| PolicyCutRecord {
+                        cut_id: c.cut_id,
+                        slot_index: c.slot_index,
+                        iteration: c.iteration,
+                        forward_pass_index: c.forward_pass_index,
+                        intercept: c.intercept,
+                        coefficients: &c.coefficients,
+                        is_active: c.is_active,
+                    })
+                    .collect(),
+            );
+        }
+
+        let stage_cuts_payloads: Vec<StageCutsPayload<'_>> = stage_cuts
+            .iter()
+            .enumerate()
+            .map(|(i, sc)| StageCutsPayload {
+                stage_id: sc.stage_id,
+                state_dimension: sc.state_dimension,
+                capacity: sc.capacity,
+                warm_start_count: sc.warm_start_count,
+                cuts: &cut_records[i],
+                active_cut_indices: &sc.active_cut_indices,
+                populated_count: populated_counts[i],
+                entity_manifest: &entity_manifests[i],
+            })
+            .collect();
+
+        let basis_records: Vec<PolicyBasisRecord<'_>> = stage_bases
+            .iter()
+            .map(|b| PolicyBasisRecord {
+                stage_id: b.stage_id,
+                iteration: b.iteration,
+                column_status: &b.column_status,
+                row_status: &b.row_status,
+                num_cut_rows: b.num_cut_rows,
+            })
+            .collect();
+
+        let state_manifests: Vec<Vec<EntitySlot>> = stage_states
+            .iter()
+            .map(|ss| ss.entity_manifest.iter().map(EntitySlot::from).collect())
+            .collect();
+
+        let state_payloads: Vec<StageStatesPayload<'_>> = stage_states
+            .iter()
+            .enumerate()
+            .map(|(i, ss)| StageStatesPayload {
+                stage_id: ss.stage_id,
+                state_dimension: ss.state_dimension,
+                count: ss.count,
+                data: &ss.data,
+                entity_manifest: &state_manifests[i],
+            })
+            .collect();
+
+        cobre_io::write_policy_checkpoint(
+            &path,
+            &stage_cuts_payloads,
+            &basis_records,
+            &metadata,
+            &state_payloads,
+        )
+    })
+    .map_err(|e| convert_error(ErrorSource::Output(&e)))
+}

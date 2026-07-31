@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`cobre.write_policy_checkpoint(...)`** writes a policy checkpoint to disk
+  from plain Python dicts/sequences, mirroring the shape
+  `cobre.results.load_policy` returns so a loaded checkpoint round-trips (load,
+  edit, write). It exposes the existing Rust writer, keeping the on-disk
+  FlatBuffers layout single-sourced, and lets an external producer author a
+  checkpoint from raw cut data. It validates each cut's coefficient count
+  against the stage's `state_dimension` and each stage's state-data length
+  before writing.
+
 ## [0.13.0] - 2026-07-30
 
 ### Added
