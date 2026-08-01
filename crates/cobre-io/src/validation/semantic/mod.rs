@@ -125,6 +125,8 @@ mod stages;
 mod thermal;
 mod travel_time;
 
+pub use inflow_seeding::seed_lag_state_depth;
+
 #[cfg(test)]
 mod test_support;
 

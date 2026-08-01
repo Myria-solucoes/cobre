@@ -329,10 +329,15 @@ pub fn standardize_historical_windows(
         library.n_hydros(),
         hydro_ids.len(),
     );
-    debug_assert_eq!(
-        library.max_order(),
-        par.max_order(),
-        "library.max_order() ({}) must equal par.max_order() ({})",
+    // `library.max_order()` may exceed `par.max_order()` when the caller widens
+    // it to a declared lag-state depth beyond the fitted AR order (`psi_slice`'s
+    // length stays `par.max_order()`; `solve_par_noise` only ever reads its own
+    // `psi.len()` prefix of `lags`, per its `lags.len() >= psi.len()` contract);
+    // it must never fall short of `par.max_order()`, which would truncate a
+    // real PAR coefficient.
+    debug_assert!(
+        library.max_order() >= par.max_order(),
+        "library.max_order() ({}) must be >= par.max_order() ({})",
         library.max_order(),
         par.max_order(),
     );

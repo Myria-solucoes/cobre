@@ -217,11 +217,13 @@ pub(super) fn apply_training_policy(
                 let _ = stderr.write_line(&format!("warning: {msg}"));
             }
         };
+        let declared_inflow_lag_depth = root_config.and_then(|c| c.state_space.inflow_lag_depth);
         let boundary_records = load_boundary_cuts(
             &boundary_path,
             bp.source_stage,
             state_dim,
             &current_manifest,
+            declared_inflow_lag_depth,
             setup.stage_data.stage_templates.cost_scale_factor,
             &mut on_warning,
         )

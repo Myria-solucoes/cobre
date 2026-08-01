@@ -30,6 +30,7 @@ pub mod modeling;
 pub mod policy;
 pub mod scenario_source;
 pub mod simulation;
+pub mod state_space;
 pub mod training;
 
 pub use estimation::{EstimationConfig, OrderSelectionMethod};
@@ -40,6 +41,7 @@ pub use scenario_source::{
     HistoricalYearRange, RawClassConfigEntry, RawHistoricalYearsConfig, RawScenarioSourceConfig,
 };
 pub use simulation::SimulationConfig;
+pub use state_space::StateSpaceConfig;
 pub use training::{
     BackwardScheduler, DualEdgeWeight, LipschitzConfig, ParallelismConfig,
     PhaseSolverProfileConfig, PresolveMode, PriceStrategy, RowSelectionConfig, ScaleStrategy,
@@ -68,6 +70,10 @@ pub struct Config {
     /// Modeling options (inflow non-negativity treatment).
     #[serde(default)]
     pub modeling: ModelingConfig,
+
+    /// State-space options (inflow-lag state depth).
+    #[serde(default)]
+    pub state_space: StateSpaceConfig,
 
     /// Training parameters — contains mandatory fields.
     pub training: TrainingConfig,
@@ -513,6 +519,27 @@ mod tests {
         assert_eq!(cfg.simulation.num_scenarios, 2000);
         assert_eq!(cfg.policy.mode, PolicyMode::Fresh);
         assert_eq!(cfg.policy.path, "./policy");
+    }
+
+    /// C1 input-compatibility: a `config.json` written before `state_space`
+    /// existed loads with `state_space.inflow_lag_depth` defaulted to `None`.
+    #[test]
+    fn test_config_without_state_space_defaults_to_none() {
+        let f = write_config(
+            r#"{"training": {"forward_passes": 1, "stopping_rules": [{"type": "iteration_limit", "limit": 10}]}}"#,
+        );
+        let cfg = parse_config(f.path()).unwrap();
+        assert_eq!(cfg.state_space.inflow_lag_depth, None);
+    }
+
+    /// A present `state_space.inflow_lag_depth` survives `parse_config`.
+    #[test]
+    fn test_config_state_space_inflow_lag_depth_present() {
+        let f = write_config(
+            r#"{"training": {"forward_passes": 1, "stopping_rules": [{"type": "iteration_limit", "limit": 10}]}, "state_space": {"inflow_lag_depth": 12}}"#,
+        );
+        let cfg = parse_config(f.path()).unwrap();
+        assert_eq!(cfg.state_space.inflow_lag_depth, Some(12));
     }
 
     /// AC-2: missing `training.forward_passes` → SchemaError with field name.

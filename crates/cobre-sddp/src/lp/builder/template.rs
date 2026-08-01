@@ -686,15 +686,7 @@ pub fn build_stage_templates(
         "ctx's threaded anticipated_lead_stages must match the state_layout it was built from"
     );
     debug_assert_eq!(
-        ctx.max_par_order,
-        system
-            .inflow_models()
-            .iter()
-            .filter(|m| m.stage_id >= 0)
-            .map(|m| m.ar_coefficients.len())
-            .max()
-            .unwrap_or(0)
-            .max(par_lp.max_order()),
+        ctx.max_par_order, state_layout.max_par_order,
         "ctx's threaded max_par_order must match the state_layout it was built from"
     );
 
@@ -747,7 +739,7 @@ pub fn build_stage_templates_resolving_layout(
     resolved_parameters: &ResolvedParameters,
 ) -> Result<StageTemplates, SddpError> {
     let topology = build_transit_bucket_topology(system);
-    let (state_layout, _, _) = resolve_state_layout(system, par_lp, &topology)?;
+    let (state_layout, _, _) = resolve_state_layout(system, par_lp, &topology, None)?;
     let hydro_cell_index = HydroCellIndex::build(system.hydros());
     build_stage_templates(
         system,

@@ -59,6 +59,7 @@ slow-tests = []
 arrow = { version = "59", default-features = false }
 assert_cmd = "2"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
+cobre-core = { version = "0.13.0", path = "../cobre-core", features = ["test-support"] }
 cobre-io = { version = "0.13.0", path = "../cobre-io" }
 cobre-solver = { version = "0.13.0", path = "../cobre-solver", default-features = false }
 parquet = { version = "59", default-features = false, features = ["arrow"] }

@@ -496,6 +496,7 @@ fn minimal_fpha_misconfigured_system(n_stages: usize) -> cobre_core::System {
 fn minimal_config(forward_passes: u32, max_iterations: u32) -> Config {
     Config {
         schema: None,
+        state_space: cobre_io::config::StateSpaceConfig::default(),
         modeling: ModelingConfig {
             inflow_non_negativity: InflowNonNegativityConfig {
                 method: CfgInflowMethod::Penalty,
@@ -1234,6 +1235,7 @@ fn study_params_from_config_defaults() {
 
     let config = Config {
         schema: None,
+        state_space: cobre_io::config::StateSpaceConfig::default(),
         modeling: ModelingConfig {
             inflow_non_negativity: InflowNonNegativityConfig {
                 method: CfgInflowMethod::None,
@@ -1301,6 +1303,7 @@ fn study_params_from_config_explicit() {
 
     let config = Config {
         schema: None,
+        state_space: cobre_io::config::StateSpaceConfig::default(),
         modeling: ModelingConfig {
             inflow_non_negativity: InflowNonNegativityConfig {
                 method: CfgInflowMethod::Penalty,
@@ -1386,6 +1389,7 @@ fn write_minimal_case_dir(root: &std::path::Path) {
 fn minimal_prepare_config() -> cobre_io::Config {
     Config {
         schema: None,
+        state_space: cobre_io::config::StateSpaceConfig::default(),
         modeling: ModelingConfig {
             inflow_non_negativity: InflowNonNegativityConfig {
                 method: CfgInflowMethod::None,
@@ -6201,6 +6205,160 @@ fn stage_data_state_matches_indexer_role_a_uniform() {
     .expect("setup");
 
     assert_state_layout_finalized(&setup.stage_data.state);
+}
+
+/// Given `state_space.inflow_lag_depth` (24) greater than the fitted AR order
+/// (2, from `minimal_system_2_hydros_with_history`'s `ar_coefficients: vec![0.5,
+/// 0.3]`), `resolve_state_layout` must widen BOTH the dense stride
+/// (`max_par_order`) AND the per-hydro activeness mask in lockstep: the
+/// `StateRegion::Lag` mask must contain `24 * hydro_count` active entries, not
+/// `2 * hydro_count` — a regression that fails if the mask is left un-widened
+/// while the dense stride grows (the exact wrong-but-compiling outcome the
+/// ticket's widening exists to prevent).
+#[test]
+fn resolve_state_layout_widens_dense_stride_and_mask_to_declared_depth() {
+    let system = minimal_system_2_hydros_with_history(3, None, vec![]);
+    let mut config = minimal_config(1, 5);
+    config.state_space.inflow_lag_depth = Some(24);
+
+    let stochastic = build_stochastic_context(
+        &system,
+        42,
+        None,
+        &[],
+        &[],
+        OpeningTreeInputs::default(),
+        ClassSchemes {
+            inflow: Some(SamplingScheme::InSample),
+            load: Some(SamplingScheme::InSample),
+            ncs: Some(SamplingScheme::InSample),
+        },
+    )
+    .expect("stochastic context");
+
+    let setup = StudySetup::new(
+        &system,
+        &config,
+        stochastic,
+        PrepareHydroModelsResult::default_from_system(&system),
+    )
+    .expect("setup with a declared depth exceeding the AR order");
+
+    let state = &setup.stage_data.state;
+    assert_eq!(
+        state.max_par_order, 24,
+        "dense stride must widen to the declared depth (AR order is 2)"
+    );
+
+    let lag_active_count = state
+        .nonzero_state_indices
+        .iter()
+        .filter(|d| state.inflow_lags.contains(&d.get()))
+        .count();
+    assert_eq!(
+        lag_active_count,
+        24 * system.hydros().len(),
+        "lag mask must mark all 24 declared slots active per hydro, not just the AR order"
+    );
+}
+
+/// Given `state_space.inflow_lag_depth` (1) LESS than the fitted AR order (2),
+/// `resolve_state_layout` must never shrink below the AR order: `max(AR order,
+/// declared depth)` floors at AR order, both for the dense stride and for every
+/// hydro's activeness-mask entry.
+#[test]
+fn resolve_state_layout_floors_declared_depth_at_ar_order() {
+    let system = minimal_system_2_hydros_with_history(3, None, vec![]);
+    let mut config = minimal_config(1, 5);
+    config.state_space.inflow_lag_depth = Some(1);
+
+    let stochastic = build_stochastic_context(
+        &system,
+        42,
+        None,
+        &[],
+        &[],
+        OpeningTreeInputs::default(),
+        ClassSchemes {
+            inflow: Some(SamplingScheme::InSample),
+            load: Some(SamplingScheme::InSample),
+            ncs: Some(SamplingScheme::InSample),
+        },
+    )
+    .expect("stochastic context");
+
+    let setup = StudySetup::new(
+        &system,
+        &config,
+        stochastic,
+        PrepareHydroModelsResult::default_from_system(&system),
+    )
+    .expect("setup with a declared depth below the AR order");
+
+    let state = &setup.stage_data.state;
+    assert_eq!(
+        state.max_par_order, 2,
+        "a declared depth below the AR order must not shrink the dense stride"
+    );
+
+    let lag_active_count = state
+        .nonzero_state_indices
+        .iter()
+        .filter(|d| state.inflow_lags.contains(&d.get()))
+        .count();
+    assert_eq!(
+        lag_active_count,
+        2 * system.hydros().len(),
+        "a declared depth below the AR order must leave the mask at the unwidened AR order"
+    );
+}
+
+/// AC-5 cross-crate coherence: cobre-io's seed lag depth
+/// (`cobre_io::seed_lag_state_depth`, the formula `max_seed_lag_depth` uses) and
+/// cobre-sddp's `resolve_state_layout` dense stride (`state.max_par_order`) must
+/// return the identical `L_state` under the same declared depth — both apply
+/// `max(AR, declared)`. A drift desyncs the load-time seed derivation from the
+/// runtime state layout. The fixture's fitted AR order is 2 with no annual
+/// component.
+#[test]
+fn cobre_io_seed_depth_matches_resolve_state_layout_depth_under_declared() {
+    const FIXTURE_AR_ORDER: usize = 2;
+
+    for declared in [24u32, 1] {
+        let system = minimal_system_2_hydros_with_history(3, None, vec![]);
+        let mut config = minimal_config(1, 5);
+        config.state_space.inflow_lag_depth = Some(declared);
+
+        let stochastic = build_stochastic_context(
+            &system,
+            42,
+            None,
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::InSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .expect("stochastic context");
+
+        let setup = StudySetup::new(
+            &system,
+            &config,
+            stochastic,
+            PrepareHydroModelsResult::default_from_system(&system),
+        )
+        .expect("setup");
+
+        let io_depth = cobre_io::seed_lag_state_depth(FIXTURE_AR_ORDER, false, Some(declared));
+        assert_eq!(
+            setup.stage_data.state.max_par_order, io_depth,
+            "cobre-io seed depth and resolve_state_layout dense stride must agree at \
+             declared depth {declared}"
+        );
+    }
 }
 
 /// 2-hydro cascade: hydro 2 (upstream) declares a travel-time arc into hydro 1

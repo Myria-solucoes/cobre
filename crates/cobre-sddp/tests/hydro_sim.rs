@@ -1187,6 +1187,7 @@ mod decomp_integration {
             source_stage,
             state_dim,
             &current_manifest,
+            None,
             1_000_000.0,
             &mut |msg| warnings.push(msg.to_string()),
         )
@@ -1277,6 +1278,7 @@ mod decomp_integration {
             source_stage,
             state_dim,
             &current_manifest,
+            None,
             1_000_000.0,
             &mut |_| {},
         );

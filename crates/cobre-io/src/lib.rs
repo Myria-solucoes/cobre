@@ -132,6 +132,7 @@ pub use system::{
     parse_pumping_stations, parse_thermals,
 };
 pub use validation::scalar_parameters::validate_scalar_parameters;
+pub use validation::semantic::seed_lag_state_depth;
 pub use validation::structural::{FileManifest, validate_structure};
 pub use validation::{ErrorKind, Severity, ValidationContext, ValidationEntry};
 

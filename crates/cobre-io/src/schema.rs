@@ -218,7 +218,7 @@ mod tests {
             panic!("config schema /properties is not an object");
         });
 
-        for expected_field in &["training", "simulation", "exports"] {
+        for expected_field in &["training", "simulation", "exports", "state_space"] {
             assert!(
                 obj.contains_key(*expected_field),
                 "config schema /properties should contain '{expected_field}'"

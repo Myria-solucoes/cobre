@@ -5969,6 +5969,7 @@ mod chronological_telescoping {
     fn build_config() -> Config {
         Config {
             schema: None,
+            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::None,
@@ -6523,6 +6524,7 @@ mod chronological_attribution {
     fn build_config() -> Config {
         Config {
             schema: None,
+            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::None,

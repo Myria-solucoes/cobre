@@ -353,6 +353,7 @@ mod anticipated_5stage_k2_smoke {
     fn build_config() -> Config {
         Config {
             schema: None,
+            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
@@ -833,6 +834,7 @@ mod anticipated_two_plants_smoke {
     fn build_config() -> Config {
         Config {
             schema: None,
+            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
@@ -1300,6 +1302,7 @@ mod anticipated_simulation_ring_buffer {
     fn build_config(training_iters: u32) -> Config {
         Config {
             schema: None,
+            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,
@@ -1843,6 +1846,7 @@ mod anticipated_generic_constraint_e2e {
     fn build_config() -> Config {
         Config {
             schema: None,
+            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::None,
@@ -2852,6 +2856,7 @@ mod anticipated_commitment_at_cap {
     fn build_config() -> Config {
         Config {
             schema: None,
+            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::Penalty,

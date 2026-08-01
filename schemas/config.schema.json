@@ -892,6 +892,23 @@
       },
       "type": "object"
     },
+    "StateSpaceConfig": {
+      "additionalProperties": false,
+      "description": "State-space options (`config.json → state_space`).",
+      "properties": {
+        "inflow_lag_depth": {
+          "default": null,
+          "description": "Number of active inflow-lag state slots, decoupled from the fitted AR\norder. Absent leaves the depth undeclared; a present value must be `>= 1`.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "StoppingRuleConfig": {
       "description": "Deserialized configuration for one entry in `training.stopping_rules[]`.\n\nUses a `\"type\"` discriminator field (internally tagged) with `snake_case`\nvariant names matching the JSON schema. `deny_unknown_fields` makes a\nparameter belonging to a different rule type a load-time error rather\nthan a silently ignored key.\n\nThe `GracefulShutdown` rule has no JSON representation — it is injected at\nruntime by `StoppingRuleSet` construction and is never deserialized.\n\n# Examples\n\n```\nuse cobre_io::config::StoppingRuleConfig;\n\nlet json = r#\"{\"type\": \"iteration_limit\", \"limit\": 100}\"#;\nlet rule: StoppingRuleConfig = serde_json::from_str(json).unwrap();\nassert!(matches!(rule, StoppingRuleConfig::IterationLimit { limit: 100 }));\n```",
       "oneOf": [
@@ -1252,6 +1269,13 @@
         "solver": null
       },
       "description": "Post-training simulation settings."
+    },
+    "state_space": {
+      "$ref": "#/$defs/StateSpaceConfig",
+      "default": {
+        "inflow_lag_depth": null
+      },
+      "description": "State-space options (inflow-lag state depth)."
     },
     "training": {
       "$ref": "#/$defs/TrainingConfig",

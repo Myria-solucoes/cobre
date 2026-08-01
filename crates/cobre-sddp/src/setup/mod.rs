@@ -347,6 +347,7 @@ impl StudySetup {
             simulation_solver,
             backward_scheduler,
             cost_scale_factor,
+            inflow_lag_depth,
         } = config;
 
         // Fail fast on a backend-unsupported field before any template exists;
@@ -380,8 +381,12 @@ impl StudySetup {
         // the built LP, and `build_stage_templates` needs the finished `StateSpace`
         // threaded in as a parameter (the single role-(a) owner — see
         // `resolve_state_layout`).
-        let (state_layout, hydro_count, anticipated_thermal_indices) =
-            resolve_state_layout(system, stochastic.par(), &transit_bucket_topology)?;
+        let (state_layout, hydro_count, anticipated_thermal_indices) = resolve_state_layout(
+            system,
+            stochastic.par(),
+            &transit_bucket_topology,
+            inflow_lag_depth,
+        )?;
 
         // The sole `derive_inflow_seeds` call site: every consumer (the lag block
         // below, `StudySetup::derived_inflow_seeds`) reads this one value — do not
@@ -808,6 +813,17 @@ fn build_energy_and_templates(
     })
 }
 
+/// `L_state = max(computed_order, declared_depth)` — the single widening
+/// every lag-state-slot source (`resolve_state_layout`'s dense stride and
+/// per-hydro activeness mask, `build_opening_tree_library`,
+/// `rebuild_historical_library_non_root`) applies in lockstep so a declared
+/// `state_space.inflow_lag_depth` never truncates on one source while
+/// widening another. `None` leaves `computed_order` unchanged.
+#[must_use]
+pub fn widen_lag_state_depth(computed_order: usize, declared_depth: Option<u32>) -> usize {
+    declared_depth.map_or(computed_order, |d| computed_order.max(d as usize))
+}
+
 /// Resolve every anticipated thermal's delivery-anchored commitment and
 /// construct the single role-(a) [`StateSpace`] — before stage templates
 /// exist, since none of the state dimensions depend on the built LP.
@@ -825,6 +841,7 @@ pub(crate) fn resolve_state_layout(
     system: &System,
     par_lp: &PrecomputedPar,
     transit_bucket_topology: &bucket_topology::TransitBucketTopology,
+    inflow_lag_depth: Option<u32>,
 ) -> Result<(StateSpace, usize, Vec<usize>), SddpError> {
     let anticipated_thermal_indices: Vec<usize> = system
         .thermals()
@@ -871,29 +888,35 @@ pub(crate) fn resolve_state_layout(
         .max(anticipated_lead_stages.iter().copied().max().unwrap_or(0));
 
     let hydro_count = system.hydros().len();
-    let max_par_order: usize = system
-        .inflow_models()
-        .iter()
-        .filter(|m| m.stage_id >= 0)
-        .map(|m| m.ar_coefficients.len())
-        .max()
-        .unwrap_or(0)
-        .max(par_lp.max_order());
+    let max_par_order: usize = widen_lag_state_depth(
+        system
+            .inflow_models()
+            .iter()
+            .filter(|m| m.stage_id >= 0)
+            .map(|m| m.ar_coefficients.len())
+            .max()
+            .unwrap_or(0)
+            .max(par_lp.max_order()),
+        inflow_lag_depth,
+    );
 
     // Per-hydro lag-state-slot count for the cut sparse mask: `max_par_order` (the
     // widened psi stride) when PAR(p)-A annual is active, else the classical AR
-    // order. `par.order(h)` here would silently truncate the cut row's coefficients
-    // on the annual-`ψ̂/12` lag slots and produce over-estimating cuts. Falls back
-    // to the dense `max_par_order` stride for a hydro `par_lp` omits (`h >=
-    // par_lp.n_hydros()`) — production's `par_lp` always covers every system
-    // hydro, so the fallback is inert there; a hydro-free `PrecomputedPar` test
-    // fixture paired with a hydro-bearing system relies on it to satisfy the
-    // `StateSpace::new` length contract.
+    // order, each further raised to `inflow_lag_depth` via `widen_lag_state_depth`
+    // — the same `L_state = max(AR order, declared depth)` formula `max_par_order`
+    // above applies, so a declared depth widens every hydro's activeness mask in
+    // lockstep with the dense stride. `par.order(h)` here would silently truncate
+    // the cut row's coefficients on the annual-`ψ̂/12` lag slots and produce
+    // over-estimating cuts. Falls back to the dense (already-widened) `max_par_order`
+    // stride for a hydro `par_lp` omits (`h >= par_lp.n_hydros()`) — production's
+    // `par_lp` always covers every system hydro, so the fallback is inert there; a
+    // hydro-free `PrecomputedPar` test fixture paired with a hydro-bearing system
+    // relies on it to satisfy the `StateSpace::new` length contract.
     let effective_lag_counts: Vec<usize> = if max_par_order > 0 {
         (0..hydro_count)
             .map(|h| {
                 if h < par_lp.n_hydros() {
-                    par_lp.effective_lag_count(h)
+                    widen_lag_state_depth(par_lp.effective_lag_count(h), inflow_lag_depth)
                 } else {
                     max_par_order
                 }

@@ -2155,6 +2155,7 @@ mod water_travel_time_no_arc_byte_identity {
 
         Config {
             schema: None,
+            state_space: cobre_io::config::StateSpaceConfig::default(),
             modeling: ModelingConfig {
                 inflow_non_negativity: InflowNonNegativityConfig {
                     method: CfgInflowMethod::None,

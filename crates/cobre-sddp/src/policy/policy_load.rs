@@ -22,6 +22,7 @@ use cobre_solver::{Basis, BasisStatus};
 
 use crate::SddpError;
 use crate::cut::pool::CutPool;
+use crate::policy::policy_export::ENTITY_TYPE_HYDRO_INFLOW_LAG;
 use crate::setup::StudySetup;
 use crate::workspace::CapturedBasis;
 
@@ -213,7 +214,8 @@ pub fn validate_policy_load<K: PolicyLoadKind>(
 ) -> Result<PolicyLoadProof<K>, SddpError> {
     if source.state_dimension != current.state_dimension {
         return Err(SddpError::Validation(format!(
-            "policy state_dimension mismatch: policy has {}, current system has {}",
+            "policy state_dimension mismatch: policy has {}, current system has {} (a lag-state \
+             depth mismatch, e.g. state_space.inflow_lag_depth, is a common cause)",
             source.state_dimension, current.state_dimension
         )));
     }
@@ -392,6 +394,18 @@ pub fn compare_manifest_slot_identity(
     Ok(())
 }
 
+/// The deepest inflow-lag slot a manifest carries a cut coefficient on — the
+/// 1-based `HydroInflowLag` subindex (`policy_export::build_stage_entity_manifest`
+/// emits `lag + 1`), `0` when the manifest carries no lag slot.
+fn boundary_cut_lag_depth(manifest: &[EntitySlot]) -> u32 {
+    manifest
+        .iter()
+        .filter(|slot| slot.entity_type == ENTITY_TYPE_HYDRO_INFLOW_LAG)
+        .map(|slot| slot.subindex)
+        .max()
+        .unwrap_or(0)
+}
+
 /// Load boundary cuts from the `source_stage` of a source Cobre policy checkpoint.
 ///
 /// Per-slot matching compares the source stage's manifest to the current
@@ -406,11 +420,18 @@ pub fn compare_manifest_slot_identity(
 /// the result in a [`ValidatedBoundaryCuts`] — the sole constructor
 /// [`inject_boundary_cuts`] accepts.
 ///
+/// `declared_inflow_lag_depth` is `config.state_space.inflow_lag_depth`; when
+/// `Some`, a boundary cut referencing inflow-lag state deeper than the declared
+/// depth is rejected before the manifest checks, so the lag-depth-specific
+/// message wins over the generic `state_dimension` reject.
+///
 /// # Errors
 ///
 /// Returns [`SddpError::Validation`] if:
 /// - The checkpoint cannot be read
 /// - `source_stage` does not exist in the checkpoint
+/// - The boundary cut references inflow-lag state deeper than a declared
+///   `inflow_lag_depth`
 /// - The source stage's state dimension does not match `current_state_dimension`
 /// - A populated boundary manifest disagrees with `current_manifest` in length or
 ///   in any slot's `(entity_type, entity_id, subindex)`
@@ -419,6 +440,7 @@ pub fn load_boundary_cuts(
     source_stage: u32,
     current_state_dimension: u32,
     current_manifest: &[EntitySlot],
+    declared_inflow_lag_depth: Option<u32>,
     loading_cost_scale_factor: f64,
     on_warning: &mut dyn FnMut(&str),
 ) -> Result<ValidatedBoundaryCuts, SddpError> {
@@ -445,6 +467,20 @@ pub fn load_boundary_cuts(
                     .collect::<Vec<_>>()
             ))
         })?;
+
+    if let Some(declared) = declared_inflow_lag_depth {
+        let depth = boundary_cut_lag_depth(&stage_result.entity_manifest);
+        if depth > declared {
+            return Err(SddpError::Validation(format!(
+                "lag-state depth too shallow for boundary policy stage {source_stage}: the loaded \
+                 cuts reference inflow-lag state to depth {depth}, exceeding the declared \
+                 state_space.inflow_lag_depth = {declared}; inflow_lag_depth must cover the deepest \
+                 lag any loaded cut references so the lag state holds the conditioning history the \
+                 recombination claim depends on — raise state_space.inflow_lag_depth to at least \
+                 {depth}"
+            )));
+        }
+    }
 
     let source = PolicyStageManifest {
         state_dimension: stage_result.state_dimension,
@@ -714,6 +750,7 @@ mod tests {
                 0,
                 2,
                 &[],
+                None,
                 loading_factor,
                 &mut ignore_warnings(),
             )
@@ -758,6 +795,7 @@ mod tests {
             0,
             2,
             &[],
+            None,
             LEGACY_COST_SCALE_FACTOR,
             &mut ignore_warnings(),
         )
@@ -782,6 +820,7 @@ mod tests {
             0,
             2,
             &[],
+            None,
             loading_factor,
             &mut ignore_warnings(),
         )
@@ -971,8 +1010,16 @@ mod tests {
         let intercepts = vec![10.0, 20.0, 30.0];
         write_minimal_checkpoint(tmp.path(), 12, 10, &intercepts);
 
-        let cuts = load_boundary_cuts(tmp.path(), 2, 10, &[], 1_000_000.0, &mut ignore_warnings())
-            .unwrap();
+        let cuts = load_boundary_cuts(
+            tmp.path(),
+            2,
+            10,
+            &[],
+            None,
+            1_000_000.0,
+            &mut ignore_warnings(),
+        )
+        .unwrap();
 
         assert_eq!(cuts.len(), 3, "should return all 3 cuts from stage 2");
         let returned_intercepts: Vec<f64> = cuts.iter().map(|c| c.intercept).collect();
@@ -997,8 +1044,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_minimal_checkpoint(tmp.path(), 5, 10, &[1.0]);
 
-        let result =
-            load_boundary_cuts(tmp.path(), 99, 10, &[], 1_000_000.0, &mut ignore_warnings());
+        let result = load_boundary_cuts(
+            tmp.path(),
+            99,
+            10,
+            &[],
+            None,
+            1_000_000.0,
+            &mut ignore_warnings(),
+        );
 
         assert!(result.is_err(), "should fail for missing stage");
         let msg = result.unwrap_err().to_string();
@@ -1020,7 +1074,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_minimal_checkpoint(tmp.path(), 5, 10, &[1.0]);
 
-        let result = load_boundary_cuts(tmp.path(), 0, 5, &[], 1_000_000.0, &mut ignore_warnings());
+        let result = load_boundary_cuts(
+            tmp.path(),
+            0,
+            5,
+            &[],
+            None,
+            1_000_000.0,
+            &mut ignore_warnings(),
+        );
 
         assert!(result.is_err(), "should fail for dimension mismatch");
         let msg = result.unwrap_err().to_string();
@@ -1039,6 +1101,7 @@ mod tests {
             0,
             10,
             &[],
+            None,
             1_000_000.0,
             &mut ignore_warnings(),
         );
@@ -1079,6 +1142,86 @@ mod tests {
         }
     }
 
+    /// A single active `HydroInflowLag` slot (`entity_type 1`): `id` is the
+    /// hydro, `lag_depth` the 1-based lag (as `build_stage_entity_manifest` emits).
+    fn inflow_lag_slot(id: i32, lag_depth: u32) -> EntitySlot {
+        EntitySlot {
+            entity_type: 1,
+            entity_id: id,
+            subindex: lag_depth,
+            was_active: true,
+            delivery_anchor: cobre_io::ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
+        }
+    }
+
+    /// A boundary cut carrying inflow-lag coefficients to depth 12, loaded against
+    /// a study declaring `inflow_lag_depth = 6`, is rejected before the manifest
+    /// checks with a message naming the boundary depth (12), the declared depth
+    /// (6), and the fix (raise to at least 12) — the recombination-soundness gate.
+    #[test]
+    fn load_boundary_cuts_lag_depth_exceeds_declared_rejects_naming_depths_and_fix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = vec![storage_slot(1), inflow_lag_slot(1, 12)];
+        write_checkpoint_with_manifest(tmp.path(), 5, 2, &[10.0, 20.0], &manifest);
+
+        let current = vec![storage_slot(1), inflow_lag_slot(1, 12)];
+        let result = load_boundary_cuts(
+            tmp.path(),
+            0,
+            2,
+            &current,
+            Some(6),
+            1_000_000.0,
+            &mut ignore_warnings(),
+        );
+
+        assert!(
+            result.is_err(),
+            "a boundary cut deeper than the declared inflow_lag_depth must reject"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("12"),
+            "must name the boundary-cut depth 12: {msg}"
+        );
+        assert!(msg.contains('6'), "must name the declared depth 6: {msg}");
+        assert!(
+            msg.contains("inflow_lag_depth"),
+            "must name the config field to raise: {msg}"
+        );
+        assert!(
+            msg.contains("at least 12"),
+            "must instruct raising to at least 12: {msg}"
+        );
+    }
+
+    /// A boundary cut at depth 12 loaded against `inflow_lag_depth = 12` clears the
+    /// depth gate; a slot-for-slot matching manifest then loads.
+    #[test]
+    fn load_boundary_cuts_lag_depth_within_declared_loads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = vec![storage_slot(1), inflow_lag_slot(1, 12)];
+        write_checkpoint_with_manifest(tmp.path(), 5, 2, &[10.0, 20.0], &manifest);
+
+        let current = vec![storage_slot(1), inflow_lag_slot(1, 12)];
+        let cuts = load_boundary_cuts(
+            tmp.path(),
+            0,
+            2,
+            &current,
+            Some(12),
+            1_000_000.0,
+            &mut ignore_warnings(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            cuts.len(),
+            2,
+            "a boundary within the declared depth must load"
+        );
+    }
+
     /// Given a checkpoint whose source-stage manifest matches the current study's
     /// terminal manifest slot-for-slot, `load_boundary_cuts` returns `Ok` with the
     /// source cuts and emits no warning.
@@ -1090,7 +1233,7 @@ mod tests {
 
         let current = storage_manifest(1, 2);
         let mut warnings: Vec<String> = Vec::new();
-        let cuts = load_boundary_cuts(tmp.path(), 0, 2, &current, 1_000_000.0, &mut |m| {
+        let cuts = load_boundary_cuts(tmp.path(), 0, 2, &current, None, 1_000_000.0, &mut |m| {
             warnings.push(m.to_string());
         })
         .unwrap();
@@ -1117,6 +1260,7 @@ mod tests {
             0,
             2,
             &current,
+            None,
             1_000_000.0,
             &mut ignore_warnings(),
         );
@@ -1151,6 +1295,7 @@ mod tests {
             0,
             2,
             &current,
+            None,
             1_000_000.0,
             &mut ignore_warnings(),
         );
@@ -1178,7 +1323,7 @@ mod tests {
 
         let current = storage_manifest(1, 2);
         let mut warnings: Vec<String> = Vec::new();
-        let cuts = load_boundary_cuts(tmp.path(), 0, 2, &current, 1_000_000.0, &mut |m| {
+        let cuts = load_boundary_cuts(tmp.path(), 0, 2, &current, None, 1_000_000.0, &mut |m| {
             warnings.push(m.to_string());
         })
         .unwrap();
@@ -1205,7 +1350,7 @@ mod tests {
 
         let current = storage_manifest(1, 2);
         let mut warnings: Vec<String> = Vec::new();
-        let cuts = load_boundary_cuts(tmp.path(), 0, 2, &current, 1_000_000.0, &mut |m| {
+        let cuts = load_boundary_cuts(tmp.path(), 0, 2, &current, None, 1_000_000.0, &mut |m| {
             warnings.push(m.to_string());
         })
         .unwrap();
@@ -1232,7 +1377,7 @@ mod tests {
 
         let current = vec![storage_slot(1), transit_bucket_slot(2, 1)];
         let mut warnings: Vec<String> = Vec::new();
-        let cuts = load_boundary_cuts(tmp.path(), 0, 2, &current, 1_000_000.0, &mut |m| {
+        let cuts = load_boundary_cuts(tmp.path(), 0, 2, &current, None, 1_000_000.0, &mut |m| {
             warnings.push(m.to_string());
         })
         .unwrap();
@@ -1262,6 +1407,7 @@ mod tests {
             0,
             2,
             &current,
+            None,
             1_000_000.0,
             &mut ignore_warnings(),
         );
@@ -1297,6 +1443,7 @@ mod tests {
             0,
             3,
             &current,
+            None,
             1_000_000.0,
             &mut ignore_warnings(),
         );
@@ -1448,7 +1595,9 @@ mod tests {
         );
     }
 
-    /// A `state_dimension` mismatch is a hard reject on `FullFcf`.
+    /// A `state_dimension` mismatch is a hard reject on `FullFcf`, and its message
+    /// names lag depth as a probable cause so an `inflow_lag_depth`-driven mismatch
+    /// is legible.
     #[test]
     fn validate_policy_load_full_fcf_state_dimension_mismatch_rejects() {
         let slots = storage_manifest(1, 2);
@@ -1470,6 +1619,10 @@ mod tests {
         assert!(msg.contains("state_dimension"), "{msg}");
         assert!(msg.contains("10"), "should include source value: {msg}");
         assert!(msg.contains('8'), "should include current value: {msg}");
+        assert!(
+            msg.contains("inflow_lag_depth"),
+            "message must name lag depth as a probable cause: {msg}"
+        );
     }
 
     /// A `num_stages` mismatch is a hard reject on `FullFcf` but the identical

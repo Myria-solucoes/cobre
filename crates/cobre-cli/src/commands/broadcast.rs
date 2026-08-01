@@ -103,6 +103,10 @@ pub(crate) struct BroadcastConfig {
     /// Resolved objective cost-scale factor (`modeling.cost_scale_factor`),
     /// resolved identically on every rank by [`StudyParams::from_config`].
     pub(crate) cost_scale_factor: f64,
+    /// Declared inflow-lag state depth (`state_space.inflow_lag_depth`); `None`
+    /// when the study leaves it undeclared. Rebuilt into `ConstructionConfig`
+    /// on every rank, widening `L_state` in `resolve_state_layout`.
+    pub(crate) inflow_lag_depth: Option<u32>,
 }
 
 impl BroadcastConfig {
@@ -177,6 +181,7 @@ impl BroadcastConfig {
             simulation_solver: params.simulation_solver,
             backward_scheduler: params.backward_scheduler.into(),
             cost_scale_factor: params.cost_scale_factor,
+            inflow_lag_depth: params.inflow_lag_depth,
         })
     }
 }
@@ -395,6 +400,29 @@ mod tests {
             !bcast.training_enabled,
             "training_enabled should be false when config.training.enabled is false"
         );
+    }
+
+    /// A present `state_space.inflow_lag_depth` reaches `BroadcastConfig` and
+    /// survives the postcard wire hop.
+    #[test]
+    fn broadcast_config_carries_inflow_lag_depth() {
+        use super::BroadcastConfig;
+
+        let json = r#"{
+            "training": {
+                "forward_passes": 4,
+                "stopping_rules": [{ "type": "iteration_limit", "limit": 10 }]
+            },
+            "state_space": { "inflow_lag_depth": 12 }
+        }"#;
+        let config: cobre_io::Config = serde_json::from_str(json).unwrap();
+        let original = BroadcastConfig::from_config(&config).unwrap();
+        assert_eq!(original.inflow_lag_depth, Some(12));
+
+        let bytes = postcard::to_allocvec(&original).expect("postcard serialization must succeed");
+        let decoded: BroadcastConfig =
+            postcard::from_bytes(&bytes).expect("postcard deserialization must succeed");
+        assert_eq!(decoded.inflow_lag_depth, Some(12));
     }
 
     /// Postcard serialization round-trip for `BroadcastConfig`.

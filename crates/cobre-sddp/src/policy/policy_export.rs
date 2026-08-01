@@ -23,7 +23,7 @@ use crate::training::TrainingResult;
 /// `EntityType::HydroStorage` discriminant from `schemas/policy.fbs`.
 const ENTITY_TYPE_HYDRO_STORAGE: u8 = 0;
 /// `EntityType::HydroInflowLag` discriminant from `schemas/policy.fbs`.
-const ENTITY_TYPE_HYDRO_INFLOW_LAG: u8 = 1;
+pub(crate) const ENTITY_TYPE_HYDRO_INFLOW_LAG: u8 = 1;
 /// `EntityType::AnticipatedThermalState` discriminant from `schemas/policy.fbs`.
 const ENTITY_TYPE_ANTICIPATED_THERMAL_STATE: u8 = 2;
 /// `EntityType::HydroTransitBucket` discriminant from `schemas/policy.fbs`.

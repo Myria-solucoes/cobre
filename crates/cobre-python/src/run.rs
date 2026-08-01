@@ -1104,6 +1104,7 @@ pub(crate) fn apply_training_policy_mode(
             bp.source_stage,
             state_dim,
             &current_manifest,
+            config.state_space.inflow_lag_depth,
             setup.stage_data.stage_templates.cost_scale_factor,
             &mut on_warning,
         )

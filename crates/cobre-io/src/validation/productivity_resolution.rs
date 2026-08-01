@@ -304,6 +304,7 @@ mod tests {
     fn base_parsed_data() -> ParsedData {
         let config = Config {
             schema: None,
+            state_space: crate::config::StateSpaceConfig::default(),
             modeling: ModelingConfig::default(),
             training: TrainingConfig {
                 enabled: true,

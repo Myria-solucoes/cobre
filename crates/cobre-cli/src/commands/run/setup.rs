@@ -38,7 +38,7 @@ use cobre_sddp::{
     build_hydro_model_summary, prepare_hydro_models, prepare_stochastic,
     setup::{
         ConstructionConfig, build_ncs_factor_entries, load_load_factors_for_stochastic,
-        study_stage_noise_group_ids,
+        study_stage_noise_group_ids, widen_lag_state_depth,
     },
 };
 use cobre_solver::active_solver_name;
@@ -437,7 +437,8 @@ fn reconstruct_stochastic_context_non_root(
         .map(|(ncs_id, stage_id, pairs)| (*ncs_id, *stage_id, pairs.as_slice()))
         .collect();
 
-    let opening_tree_library = rebuild_historical_library_non_root(system, training_src)?;
+    let opening_tree_library =
+        rebuild_historical_library_non_root(system, training_src, bcast_config.inflow_lag_depth)?;
 
     build_stochastic_context(
         system,
@@ -466,6 +467,7 @@ fn reconstruct_stochastic_context_non_root(
 fn rebuild_historical_library_non_root(
     system: &System,
     training_src: &ScenarioSource,
+    declared_lag_depth: Option<u32>,
 ) -> Result<Option<HistoricalScenarioLibrary>, CliError> {
     use cobre_core::temporal::NoiseMethod;
 
@@ -494,7 +496,7 @@ fn rebuild_historical_library_non_root(
                 .map_err(|e| CliError::Internal {
                     message: format!("PAR build error on non-root rank: {e}"),
                 })?;
-        let max_order = par.max_order();
+        let max_order = widen_lag_state_depth(par.max_order(), declared_lag_depth);
         let user_pool = training_src.historical_years.as_ref();
         let window_years = discover_historical_windows(
             system.inflow_history(),
@@ -608,6 +610,7 @@ fn build_study_setup(
         simulation_solver,
         backward_scheduler: bcast_config.backward_scheduler.into(),
         cost_scale_factor: bcast_config.cost_scale_factor,
+        inflow_lag_depth: bcast_config.inflow_lag_depth,
     };
     StudySetup::from_broadcast_params(
         system,
@@ -757,10 +760,29 @@ fn run_root_exports(
 mod tests {
     use std::path::PathBuf;
 
+    use chrono::NaiveDate;
     use console::Term;
 
+    use cobre_core::{
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, EntityId,
+        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, InitialConditions,
+        LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
+        PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, ScenarioSource,
+        System, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+        entities::{
+            bus::{Bus, DeficitSegment},
+            hydro::{Hydro, HydroGenerationModel, HydroPenalties},
+        },
+        scenario::{InflowHistoryRow, InflowModel, LoadModel, SamplingScheme},
+        temporal::{
+            Block, BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig,
+            SeasonCycleType, SeasonDefinition, SeasonMap, Stage, StageRiskConfig, StageStateConfig,
+        },
+    };
+
     use super::{
-        load_case_and_config, reconstruct_stochastic_context_non_root, study_stage_noise_group_ids,
+        load_case_and_config, rebuild_historical_library_non_root,
+        reconstruct_stochastic_context_non_root, study_stage_noise_group_ids,
     };
     use crate::commands::run::{CommBackendArg, RunArgs};
 
@@ -819,6 +841,339 @@ mod tests {
             non_root_tree.dim(),
             rank0_tree.dim(),
             "non-root opening tree dim must match rank 0's under shared noise groups"
+        );
+    }
+
+    /// A standard 12-month `SeasonMap` (id `i` = calendar month `i+1`).
+    fn monthly_season_map() -> SeasonMap {
+        let seasons: Vec<SeasonDefinition> = (0..12_u32)
+            .map(|i| SeasonDefinition {
+                id: i as usize,
+                label: format!("Month{}", i + 1),
+                month_start: i + 1,
+                day_start: None,
+                month_end: None,
+                day_end: None,
+            })
+            .collect();
+        SeasonMap {
+            cycle_type: SeasonCycleType::Monthly,
+            seasons,
+        }
+    }
+
+    /// 12 monthly study stages (season 0=Jan .. 11=Dec, year 2026), one hydro,
+    /// AR(0) — the declared depth alone drives widening, with no fitted lag
+    /// dependence to entangle it, and a real monthly `SeasonMap`. History
+    /// covers all 12 study months plus `n_lag_months` pre-study lag months
+    /// immediately preceding January 2026 (spanning back as many prior years
+    /// as needed). Mirrors `cobre_sddp::setup::stochastic_pipeline`'s own
+    /// `build_ar0_fixture_with_declared_lag_history` test fixture.
+    // Rationale: one flat literal `System` fixture (bus, hydro, 12 stages,
+    // inflow models, bounds, penalties); splitting it fragments a
+    // single-purpose, single-call fixture across artificial sub-functions.
+    #[allow(
+        clippy::too_many_lines,
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap
+    )]
+    fn ar0_fixture_with_declared_lag_history(n_lag_months: u32) -> (System, ScenarioSource) {
+        let hydro_id = EntityId(1);
+        let bus_id = EntityId(2);
+
+        let make_stage = |index: usize, month: u32| {
+            let start = NaiveDate::from_ymd_opt(2026, month, 1).unwrap();
+            let end = if month == 12 {
+                NaiveDate::from_ymd_opt(2027, 1, 1).unwrap()
+            } else {
+                NaiveDate::from_ymd_opt(2026, month + 1, 1).unwrap()
+            };
+            Stage {
+                index,
+                id: index as i32,
+                start_date: start,
+                end_date: end,
+                season_id: Some(index),
+                blocks: vec![Block {
+                    index: 0,
+                    name: "S".to_string(),
+                    duration_hours: 720.0,
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: true,
+                    inflow_lags: true,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::HistoricalResiduals,
+                },
+            }
+        };
+        let stages: Vec<Stage> = (1..=12_u32)
+            .map(|m| make_stage((m - 1) as usize, m))
+            .collect();
+
+        let inflow_models: Vec<InflowModel> = (0..12_i32)
+            .map(|stage_id| InflowModel {
+                hydro_id,
+                stage_id,
+                mean_m3s: 100.0,
+                std_m3s: 20.0,
+                ar_coefficients: vec![],
+                residual_std_ratio: 1.0,
+                annual: None,
+            })
+            .collect();
+
+        let mut inflow_history: Vec<InflowHistoryRow> = stages
+            .iter()
+            .map(|s| InflowHistoryRow {
+                hydro_id,
+                start_date: s.start_date,
+                end_date: s.end_date,
+                value_m3s: 100.0,
+            })
+            .collect();
+        // Pre-study lag months immediately preceding January 2026 (month
+        // index 0), walking back `n_lag_months` — possibly several prior
+        // years — via Euclidean division so `k=12` lands on January 2025 and
+        // `k=13` on December 2024, matching `nth_previous_occurrence`'s
+        // monthly step-back semantics (`cobre_stochastic::seeds`).
+        for k in 1..=n_lag_months {
+            let month_index = -i32::try_from(k).unwrap();
+            let year = 2026 + month_index.div_euclid(12);
+            let month = u32::try_from(month_index.rem_euclid(12)).unwrap() + 1;
+            let start = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+            let end = if month == 12 {
+                NaiveDate::from_ymd_opt(year + 1, 1, 1).unwrap()
+            } else {
+                NaiveDate::from_ymd_opt(year, month + 1, 1).unwrap()
+            };
+            inflow_history.push(InflowHistoryRow {
+                hydro_id,
+                start_date: start,
+                end_date: end,
+                value_m3s: 1000.0 + f64::from(k),
+            });
+        }
+
+        let load_models: Vec<LoadModel> = (0..12_i32)
+            .map(|stage_id| LoadModel {
+                bus_id,
+                stage_id,
+                mean_mw: 100.0,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        let bus = Bus {
+            id: bus_id,
+            name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 500.0,
+            }],
+            excess_cost: 0.0,
+        };
+        let mut hydro = Hydro {
+            unit_groups: Vec::new(),
+            id: hydro_id,
+            name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            downstream_id: None,
+            travel_time_hours: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 200.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 250.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: HydroPenalties {
+                spillage_cost: 0.01,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 0.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+        };
+        hydro.declare_mirror_unit_group(bus_id);
+
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: 12,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 200.0,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                hydro_block: HydroBlockBounds {
+                    min_turbined_m3s: 0.0,
+                    max_turbined_m3s: 100.0,
+                    min_outflow_m3s: 0.0,
+                    max_outflow_m3s: None,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 250.0,
+                    max_diversion_m3s: None,
+                },
+                thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+                thermal_block: ThermalBlockBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                },
+                line_block: LineBlockBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping_block: PumpingBlockBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract_block: ContractBlockBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 1,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: 12,
+            },
+            &PenaltiesDefaults {
+                hydro: HydroStagePenalties {
+                    spillage_cost: 0.01,
+                    diversion_cost: 0.0,
+                    turbined_cost: 0.0,
+                    storage_violation_below_cost: 500.0,
+                    filling_target_violation_cost: 0.0,
+                    turbined_violation_below_cost: 0.0,
+                    outflow_violation_below_cost: 0.0,
+                    outflow_violation_above_cost: 0.0,
+                    generation_violation_below_cost: 0.0,
+                    evaporation_violation_cost: 0.0,
+                    water_withdrawal_violation_cost: 0.0,
+                    water_withdrawal_violation_pos_cost: 0.0,
+                    water_withdrawal_violation_neg_cost: 0.0,
+                    evaporation_violation_pos_cost: 0.0,
+                    evaporation_violation_neg_cost: 0.0,
+                    inflow_nonnegativity_cost: 1000.0,
+                },
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        let policy_graph = PolicyGraph {
+            graph_type: PolicyGraphType::FiniteHorizon,
+            annual_discount_rate: 0.0,
+            transitions: vec![],
+            season_map: Some(monthly_season_map()),
+        };
+
+        let system = SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(vec![hydro])
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .load_models(load_models)
+            .inflow_history(inflow_history)
+            .bounds(bounds)
+            .penalties(penalties)
+            .policy_graph(policy_graph)
+            .initial_conditions(InitialConditions {
+                storage: vec![],
+                filling_storage: vec![],
+                past_anticipated_commitments: vec![],
+                recent_observations: vec![],
+                past_defluences: vec![],
+            })
+            .build()
+            .expect("AR(0) declared-lag-history fixture: valid system");
+
+        let training_source = ScenarioSource {
+            inflow_scheme: SamplingScheme::InSample,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            seed: None,
+            historical_years: None,
+        };
+        (system, training_source)
+    }
+
+    /// Given a declared lag depth (24, the ticket's worked AC example)
+    /// greater than the fixture's fitted AR order (0),
+    /// `rebuild_historical_library_non_root` must widen the returned
+    /// library's `max_order()` to 24 — matching
+    /// `cobre_sddp::setup::stochastic_pipeline::build_opening_tree_library`'s
+    /// widening for the SAME declared depth (mirroring rank 0's library on
+    /// every non-root rank is the entire point of this function) — rather
+    /// than leaving it at the un-widened `par.max_order()` (0). A regression
+    /// that fails if this source is left un-widened while another is fixed,
+    /// exactly the divergent-sources bug this ticket exists to kill.
+    ///
+    /// `rebuild_historical_library_non_root` (cobre-cli) is unreachable from
+    /// cobre-sddp's test scope, so this crate-boundary source is pinned to
+    /// the same declared-depth-24 value independently here rather than inside
+    /// the cross-source comparison test — see
+    /// `cobre_sddp::setup::stochastic_pipeline::tests::
+    /// build_opening_tree_library_and_resolve_state_layout_agree_at_declared_depth`,
+    /// which compares `resolve_state_layout` and `build_opening_tree_library`
+    /// directly. Together, the three tests pin all three sources to `24`.
+    #[test]
+    fn rebuild_historical_library_non_root_widens_max_order_to_declared_depth() {
+        let (system, training_source) = ar0_fixture_with_declared_lag_history(24);
+
+        let lib = rebuild_historical_library_non_root(&system, &training_source, Some(24))
+            .expect("rebuild_historical_library_non_root must succeed with a declared depth")
+            .expect("HistoricalResiduals noise method must build a library");
+
+        assert_eq!(
+            lib.max_order(),
+            24,
+            "library max_order must widen to the declared depth (fixture AR order is 0)"
         );
     }
 }

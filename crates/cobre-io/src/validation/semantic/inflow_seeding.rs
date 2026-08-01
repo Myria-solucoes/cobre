@@ -131,18 +131,36 @@ fn classical_max_ar_order(data: &ParsedData) -> usize {
     counts.values().copied().max().unwrap_or(0)
 }
 
-/// `L_state`: the number of PAR lag slots the seed derivation fills — the
-/// classical AR order widened to 12 when an annual component is present
-/// (mirrors `PrecomputedPar::max_order`'s `max(classical, 12·annual)`). A
-/// future declared `state_space.inflow_lag_depth` widens this to
-/// `max(ar_order, declared_depth)` by extending this one local.
+/// `L_state` for the study in `data` — see [`seed_lag_state_depth`] for the
+/// formula; the declared depth is read off `data.config.state_space`.
 fn max_seed_lag_depth(data: &ParsedData) -> usize {
-    let classical = classical_max_ar_order(data);
-    if data.inflow_annual_components.is_empty() {
-        classical
+    seed_lag_state_depth(
+        classical_max_ar_order(data),
+        !data.inflow_annual_components.is_empty(),
+        data.config.state_space.inflow_lag_depth,
+    )
+}
+
+/// `L_state`: the classical AR order, floored at 12 when an annual component is
+/// present (mirrors `PrecomputedPar::max_order`'s `max(classical, 12·annual)`),
+/// then widened to a declared `state_space.inflow_lag_depth` via
+/// `max(computed, declared)`; `None` leaves the computed depth unchanged.
+///
+/// The state-layout resolution applies the identical `max(computed, declared)`
+/// widening, so the load-time seed depth and the runtime state layout never
+/// disagree — kept identical by a cross-crate coherence regression.
+#[must_use]
+pub fn seed_lag_state_depth(
+    classical_ar_order: usize,
+    has_annual_component: bool,
+    declared_inflow_lag_depth: Option<u32>,
+) -> usize {
+    let computed = if has_annual_component {
+        classical_ar_order.max(12)
     } else {
-        classical.max(12)
-    }
+        classical_ar_order
+    };
+    declared_inflow_lag_depth.map_or(computed, |declared| computed.max(declared as usize))
 }
 
 /// `n_fin`: the number of season-period occurrences that finalize (complete)
@@ -990,5 +1008,49 @@ mod tests {
             "no negative value must produce no warning, got: {:?}",
             ctx.warnings()
         );
+    }
+
+    // ── max_seed_lag_depth / seed_lag_state_depth: declared-depth widening ──
+
+    fn order_six_data(declared: Option<u32>) -> ParsedData {
+        let stages = make_stages_with_seasons(60, true);
+        let mut data = make_data(
+            vec![make_hydro(1, None)],
+            vec![],
+            vec![],
+            stages,
+            vec![],
+            vec![],
+        );
+        data.inflow_ar_coefficients = (1..=6).map(|lag| make_ar_row(1, 0, lag)).collect();
+        data.config.state_space.inflow_lag_depth = declared;
+        data
+    }
+
+    #[test]
+    fn test_declared_depth_widens_seed_lag_depth_above_ar_order() {
+        assert_eq!(max_seed_lag_depth(&order_six_data(Some(24))), 24);
+    }
+
+    #[test]
+    fn test_declared_depth_below_ar_order_floors_at_ar_order() {
+        assert_eq!(max_seed_lag_depth(&order_six_data(Some(3))), 6);
+    }
+
+    #[test]
+    fn test_absent_declared_depth_is_byte_neutral() {
+        let data = order_six_data(None);
+        assert_eq!(data.config.state_space.inflow_lag_depth, None);
+        assert_eq!(max_seed_lag_depth(&data), 6);
+    }
+
+    #[test]
+    fn test_seed_lag_state_depth_formula_floors_and_widens() {
+        assert_eq!(seed_lag_state_depth(6, false, Some(24)), 24);
+        assert_eq!(seed_lag_state_depth(6, false, Some(3)), 6);
+        assert_eq!(seed_lag_state_depth(6, false, None), 6);
+        assert_eq!(seed_lag_state_depth(1, true, Some(8)), 12);
+        assert_eq!(seed_lag_state_depth(1, true, Some(24)), 24);
+        assert_eq!(seed_lag_state_depth(1, true, None), 12);
     }
 }
