@@ -114,7 +114,7 @@ fn run_with_simulation(
 
     let mut config_with_sim = config.clone();
     config_with_sim.simulation.enabled = true;
-    config_with_sim.simulation.num_scenarios = 1;
+    config_with_sim.simulation.num_scenarios = Some(1);
 
     let mut setup = build_setup_for_case(
         case_dir,
@@ -1367,7 +1367,7 @@ fn d12_checkpoint_round_trip() {
 
     let mut config_with_sim = config.clone();
     config_with_sim.simulation.enabled = true;
-    config_with_sim.simulation.num_scenarios = 1;
+    config_with_sim.simulation.num_scenarios = Some(1);
 
     let mut setup = StudySetup::new(&system, &config_with_sim, stochastic, hydro_models)
         .expect("StudySetup must build");
@@ -3429,7 +3429,7 @@ fn frozen_vs_fallback_simulation_costs_are_identical() {
 
     let mut config_with_sim = config.clone();
     config_with_sim.simulation.enabled = true;
-    config_with_sim.simulation.num_scenarios = 4;
+    config_with_sim.simulation.num_scenarios = Some(4);
 
     let mut setup = StudySetup::new(&system, &config_with_sim, stochastic, hydro_models)
         .expect("StudySetup must build");
@@ -5983,11 +5983,12 @@ mod chronological_telescoping {
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
                     limit: N_ITERATIONS,
                 }]),
-                stopping_mode: "any".to_string(),
+                stopping_mode: cobre_io::config::StoppingMode::Any,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
+                selection: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
@@ -6536,11 +6537,12 @@ mod chronological_attribution {
                 tree_seed: Some(42),
                 forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
-                stopping_mode: "any".to_string(),
+                stopping_mode: cobre_io::config::StoppingMode::Any,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
+                selection: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
@@ -6968,7 +6970,7 @@ mod nonzero_stage_fpha_override_regression {
 
         let mut config_with_sim = config.clone();
         config_with_sim.simulation.enabled = true;
-        config_with_sim.simulation.num_scenarios = 1;
+        config_with_sim.simulation.num_scenarios = Some(1);
 
         let mut setup =
             build_setup_for_case(dir, &config_with_sim, &system, stochastic, hydro_models);

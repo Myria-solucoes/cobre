@@ -94,9 +94,13 @@ impl StudyParams {
             .tree_seed
             .map_or(DEFAULT_SEED, i64::unsigned_abs);
 
+        // Synthetic label mirroring the loader's `<config_overrides>` convention:
+        // rejections already fired at load, so this resolve only extracts the count.
+        let config_label = std::path::Path::new("<config>");
+
         let forward_passes = config
-            .training
-            .forward_passes
+            .resolve_forward_passes(config_label)
+            .map_err(|e| SddpError::Validation(e.to_string()))?
             .unwrap_or(DEFAULT_FORWARD_PASSES);
 
         let rule_configs = match &config.training.stopping_rules {
@@ -122,18 +126,30 @@ impl StudyParams {
                     iterations: u64::from(iterations),
                     tolerance,
                 }),
-                StoppingRuleConfig::Simulation { .. } => Err(SddpError::Validation(
-                    "simulation-based stopping rule is not yet implemented; \
-                     use iteration_limit, time_limit, or bound_stalling"
-                        .to_string(),
-                )),
+                StoppingRuleConfig::Gap {
+                    tolerance,
+                    relative_tolerance,
+                } => {
+                    if tolerance.is_none() && relative_tolerance.is_none() {
+                        Err(SddpError::Validation(
+                            "gap stopping rule requires at least one of tolerance / \
+                             relative_tolerance to be present"
+                                .to_string(),
+                        ))
+                    } else {
+                        Err(SddpError::Validation(
+                            "gap stopping rule is not yet supported; its evaluation is \
+                             wired in a later release"
+                                .to_string(),
+                        ))
+                    }
+                }
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let stopping_mode = if config.training.stopping_mode.eq_ignore_ascii_case("all") {
-            StoppingMode::All
-        } else {
-            StoppingMode::Any
+        let stopping_mode = match config.training.stopping_mode {
+            cobre_io::config::StoppingMode::Any => StoppingMode::Any,
+            cobre_io::config::StoppingMode::All => StoppingMode::All,
         };
 
         let stopping_rule_set = StoppingRuleSet {
@@ -142,7 +158,9 @@ impl StudyParams {
         };
 
         let n_scenarios = if config.simulation.enabled {
-            config.simulation.num_scenarios
+            config
+                .resolve_num_scenarios(config_label)
+                .map_err(|e| SddpError::Validation(e.to_string()))?
         } else {
             0
         };
@@ -334,7 +352,8 @@ mod tests {
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
         InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, ParallelismConfig,
         PolicyConfig, RowSelectionConfig, SimulationConfig as IoSimulationConfig,
-        StoppingRuleConfig, TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+        SimulationSelection, StoppingMode, StoppingRuleConfig, TrainingConfig, TrainingSelection,
+        TrainingSolverConfig, UpperBoundEvaluationConfig,
     };
     use tracing::{Event, Level, Metadata, Subscriber, span};
 
@@ -423,11 +442,12 @@ mod tests {
                 tree_seed: Some(42),
                 forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
-                stopping_mode: "any".to_string(),
+                stopping_mode: StoppingMode::Any,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 parallelism: ParallelismConfig::default(),
                 scenario_source: None,
+                selection: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
@@ -449,15 +469,23 @@ mod tests {
         config
     }
 
-    /// Stopping rules containing a `Simulation` entry.
-    fn config_with_simulation_stopping_rule() -> Config {
+    /// Stopping rules containing a `Gap` entry with neither `tolerance` nor
+    /// `relative_tolerance` set.
+    fn config_with_gap_stopping_rule_neither_field() -> Config {
         let mut config = base_test_config();
-        config.training.stopping_rules = Some(vec![StoppingRuleConfig::Simulation {
-            replications: 100,
-            period: 12,
-            bound_window: 10,
-            distance_tol: 0.05,
-            bound_tol: 0.01,
+        config.training.stopping_rules = Some(vec![StoppingRuleConfig::Gap {
+            tolerance: None,
+            relative_tolerance: None,
+        }]);
+        config
+    }
+
+    /// Stopping rules containing a well-formed `Gap` entry (`tolerance` set).
+    fn config_with_gap_stopping_rule() -> Config {
+        let mut config = base_test_config();
+        config.training.stopping_rules = Some(vec![StoppingRuleConfig::Gap {
+            tolerance: Some(1000.0),
+            relative_tolerance: None,
         }]);
         config
     }
@@ -622,29 +650,99 @@ mod tests {
         );
     }
 
-    /// `from_config` must return `SddpError::Validation` when the stopping
-    /// rules list contains a `simulation_based` entry, because the feature is
-    /// not yet implemented. Silent no-op (fold into iteration limit) is
-    /// forbidden.
+    /// `from_config` rejects a `Gap` rule with neither `tolerance` nor
+    /// `relative_tolerance` set, naming both fields.
     #[test]
-    fn from_config_rejects_simulation_stopping_rule() {
+    fn from_config_rejects_gap_stopping_rule_with_neither_field() {
         use crate::SddpError;
 
-        let err = StudyParams::from_config(&config_with_simulation_stopping_rule())
-            .expect_err("Simulation stopping rule must be rejected");
+        let err = StudyParams::from_config(&config_with_gap_stopping_rule_neither_field())
+            .expect_err("Gap stopping rule with neither field must be rejected");
         assert!(
             matches!(err, SddpError::Validation(_)),
             "expected SddpError::Validation, got: {err:?}"
         );
         let msg = err.to_string();
         assert!(
-            msg.contains("simulation-based stopping rule"),
-            "error message must mention 'simulation-based stopping rule'; got: {msg}"
+            msg.contains("tolerance"),
+            "error message must mention 'tolerance'; got: {msg}"
         );
         assert!(
-            msg.contains("not yet implemented"),
-            "error message must say 'not yet implemented'; got: {msg}"
+            msg.contains("relative_tolerance"),
+            "error message must mention 'relative_tolerance'; got: {msg}"
         );
+    }
+
+    /// `from_config` must return `SddpError::Validation` for a well-formed
+    /// `Gap` stopping rule, because evaluation is not yet wired. Silent no-op
+    /// (fold into iteration limit) is forbidden.
+    #[test]
+    fn from_config_rejects_gap_stopping_rule_as_not_yet_supported() {
+        use crate::SddpError;
+
+        let err = StudyParams::from_config(&config_with_gap_stopping_rule())
+            .expect_err("Gap stopping rule must be rejected as not yet supported");
+        assert!(
+            matches!(err, SddpError::Validation(_)),
+            "expected SddpError::Validation, got: {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not yet supported"),
+            "error message must say 'not yet supported'; got: {msg}"
+        );
+        assert!(
+            msg.contains("gap"),
+            "error message must mention 'gap'; got: {msg}"
+        );
+    }
+
+    /// `from_config` resolves the forward-pass count from a `sampled` selection,
+    /// bit-identical to declaring the deprecated root alias instead.
+    #[test]
+    fn from_config_resolves_forward_passes_from_selection() {
+        let mut via_selection = base_test_config();
+        via_selection.training.forward_passes = None;
+        via_selection.training.selection = Some(TrainingSelection::Sampled { forward_passes: 8 });
+        let params_selection = StudyParams::from_config(&via_selection)
+            .expect("sampled selection is a valid forward-pass source");
+        assert_eq!(params_selection.forward_passes, 8);
+
+        let mut via_alias = base_test_config();
+        via_alias.training.forward_passes = Some(8);
+        let params_alias =
+            StudyParams::from_config(&via_alias).expect("root alias is a valid source");
+        assert_eq!(params_alias.forward_passes, params_selection.forward_passes);
+    }
+
+    /// `from_config` re-fires the both-declared rejection as
+    /// `SddpError::Validation` for a config that bypassed the loader.
+    #[test]
+    fn from_config_rejects_both_declared_forward_passes() {
+        use crate::SddpError;
+
+        let mut config = base_test_config();
+        config.training.forward_passes = Some(8);
+        config.training.selection = Some(TrainingSelection::Sampled { forward_passes: 8 });
+        let err = StudyParams::from_config(&config)
+            .expect_err("declaring both the alias and selection must be rejected");
+        assert!(
+            matches!(err, SddpError::Validation(_)),
+            "expected SddpError::Validation, got: {err:?}"
+        );
+    }
+
+    /// `from_config` resolves the simulation scenario count from a `sampled`
+    /// selection when simulation is enabled.
+    #[test]
+    fn from_config_resolves_num_scenarios_from_selection() {
+        let mut config = base_test_config();
+        config.simulation.enabled = true;
+        config.simulation.num_scenarios = None;
+        config.simulation.selection = Some(SimulationSelection::Sampled { num_scenarios: 500 });
+        let params =
+            StudyParams::from_config(&config).expect("sampled simulation selection is valid");
+        assert_eq!(params.n_scenarios, 500);
     }
 
     /// When `max_active_per_stage` is less than `forward_passes`, `StudyParams::from_config`

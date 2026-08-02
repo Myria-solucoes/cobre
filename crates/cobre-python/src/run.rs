@@ -1224,7 +1224,7 @@ pub(crate) fn run_via_study(
     } = build_study_setup(case_dir, &output_dir, overrides.as_ref())?;
 
     let should_simulate =
-        !skip_simulation && config.simulation.enabled && config.simulation.num_scenarios > 0;
+        !skip_simulation && config.simulation.enabled && setup.simulation_config.n_scenarios > 0;
     let hydro_models_summary = Some(hydro_models_summary);
 
     let training_enabled = config.training.enabled;

@@ -1,8 +1,9 @@
 //! Training-phase configuration types for `config.json → training`.
 
+use std::fmt;
 use std::num::NonZeroUsize;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::scenario_source::RawScenarioSourceConfig;
 
@@ -32,9 +33,9 @@ pub struct TrainingConfig {
     /// **Mandatory** — no default. Must contain at least one `iteration_limit` rule.
     pub stopping_rules: Option<Vec<StoppingRuleConfig>>,
 
-    /// How multiple stopping rules combine: `"any"` (OR) or `"all"` (AND).
-    #[serde(default = "TrainingConfig::default_stopping_mode")]
-    pub stopping_mode: String,
+    /// How multiple stopping rules combine: `any` (OR) or `all` (AND).
+    #[serde(default)]
+    pub stopping_mode: StoppingMode,
 
     /// Row-selection settings.
     // Rationale: the type stays algorithm-neutral (`RowSelectionConfig`) per the
@@ -56,15 +57,73 @@ pub struct TrainingConfig {
     /// When absent, all classes default to `in_sample`.
     #[serde(default)]
     pub scenario_source: Option<RawScenarioSourceConfig>,
+
+    /// Phase-level scenario selection. Absent resolves the count from the
+    /// `forward_passes` alias (the default sampled behaviour).
+    #[serde(default)]
+    pub selection: Option<TrainingSelection>,
+}
+
+/// Training-phase scenario selection and its method-specific parameters
+/// (`config.json → training.selection`).
+///
+/// Internally tagged on `method`; the tag is the semantic selection word, never
+/// a mechanism name. `sampled` runs `forward_passes` trajectories per iteration;
+/// `enumerated` walks the scenario openings exhaustively. Each variant carries
+/// only its own parameters, so pairing a count with `enumerated` is a parse
+/// error under `deny_unknown_fields` rather than a runtime-gated combination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum TrainingSelection {
+    /// Sampled forward passes: `forward_passes` trajectories per iteration.
+    Sampled {
+        /// Number of forward-pass trajectories per iteration.
+        forward_passes: u32,
+    },
+    /// Exhaustive enumeration of the scenario openings.
+    // A braced variant, not a unit one: serde enforces `deny_unknown_fields`
+    // only for braced variants of an internally tagged enum, and this variant
+    // must reject a stray `forward_passes`.
+    Enumerated {},
 }
 
 impl TrainingConfig {
     pub(super) fn default_enabled() -> bool {
         true
     }
+}
 
-    pub(super) fn default_stopping_mode() -> String {
-        "any".to_string()
+/// How multiple stopping rules combine into a single stop decision
+/// (`config.json → training.stopping_mode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum StoppingMode {
+    /// Stop when any configured rule triggers (OR).
+    #[default]
+    Any,
+    /// Stop when all configured rules trigger at the same iteration (AND).
+    All,
+}
+
+impl<'de> Deserialize<'de> for StoppingMode {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "any" => Ok(Self::Any),
+            "all" => Ok(Self::All),
+            other => Err(serde::de::Error::unknown_variant(other, &["any", "all"])),
+        }
+    }
+}
+
+impl fmt::Display for StoppingMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Any => f.write_str("any"),
+            Self::All => f.write_str("all"),
+        }
     }
 }
 
@@ -418,18 +477,17 @@ pub enum StoppingRuleConfig {
         /// Relative improvement threshold.
         tolerance: f64,
     },
-    /// Stop when both the bound and simulated policy costs have stabilized.
-    Simulation {
-        /// Number of Monte Carlo forward simulations per check.
-        replications: u32,
-        /// Iterations between checks.
-        period: u32,
-        /// Number of past iterations for bound stability check.
-        bound_window: u32,
-        /// Normalized distance threshold between consecutive simulation results.
-        distance_tol: f64,
-        /// Relative tolerance for bound stability.
-        bound_tol: f64,
+    /// Stop when the exact upper bound is within tolerance of the lower
+    /// bound. At least one of `tolerance` / `relative_tolerance` must be
+    /// present (checked at `from_config`); rejected as not-yet-supported
+    /// until a later release wires evaluation.
+    Gap {
+        /// Absolute gap tolerance, canonical R$.
+        #[serde(default)]
+        tolerance: Option<f64>,
+        /// Relative gap tolerance (fraction), mirroring reported `gap_percent`.
+        #[serde(default)]
+        relative_tolerance: Option<f64>,
     },
 }
 
@@ -478,7 +536,7 @@ pub struct LipschitzConfig {
 mod tests {
     use super::{
         BackwardScheduler, DualEdgeWeight, NonZeroUsize, PresolveMode, PriceStrategy,
-        ScaleStrategy, SelectionMethod, TrainingConfig,
+        ScaleStrategy, SelectionMethod, StoppingRuleConfig, TrainingConfig, TrainingSelection,
     };
 
     /// A `dynamic` selection block round-trips through the tagged enum, with
@@ -852,6 +910,37 @@ mod tests {
         }
     }
 
+    /// A `sampled` phase selection round-trips into the `Sampled` variant.
+    #[test]
+    fn sampled_selection_round_trips() {
+        let json = r#"{
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "selection": { "method": "sampled", "forward_passes": 8 }
+        }"#;
+        let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            cfg.selection,
+            Some(TrainingSelection::Sampled { forward_passes: 8 })
+        );
+    }
+
+    /// A count under `enumerated` is unrepresentable — `deny_unknown_fields` on
+    /// the braced variant rejects it at parse time, so the invalid pairing is
+    /// never gated at runtime.
+    #[test]
+    fn enumerated_selection_with_count_is_deserialize_error() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
+            "selection": { "method": "enumerated", "forward_passes": 8 }
+        }"#;
+        let result = serde_json::from_str::<TrainingConfig>(json);
+        assert!(
+            result.is_err(),
+            "a count under enumerated must be rejected as unrepresentable"
+        );
+    }
+
     /// A parameter belonging to a different stopping-rule type is a
     /// deserialize error under `deny_unknown_fields` (here `seconds` under
     /// `iteration_limit`), never a silently ignored key.
@@ -868,5 +957,43 @@ mod tests {
             result.is_err(),
             "a time_limit-only field under iteration_limit must be rejected"
         );
+    }
+
+    /// A `gap` rule with only `tolerance` set deserializes into
+    /// `StoppingRuleConfig::Gap`.
+    #[test]
+    fn gap_stopping_rule_tolerance_only_round_trips() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "gap", "tolerance": 1000.0 }]
+        }"#;
+        let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
+        let rules = cfg.stopping_rules.expect("stopping_rules present");
+        assert!(matches!(
+            rules[0],
+            StoppingRuleConfig::Gap {
+                tolerance: Some(t),
+                relative_tolerance: None
+            } if (t - 1000.0).abs() < f64::EPSILON
+        ));
+    }
+
+    /// A `gap` rule with only `relative_tolerance` set deserializes into
+    /// `StoppingRuleConfig::Gap`.
+    #[test]
+    fn gap_stopping_rule_relative_tolerance_only_round_trips() {
+        let json = r#"{
+            "forward_passes": 4,
+            "stopping_rules": [{ "type": "gap", "relative_tolerance": 0.01 }]
+        }"#;
+        let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
+        let rules = cfg.stopping_rules.expect("stopping_rules present");
+        assert!(matches!(
+            rules[0],
+            StoppingRuleConfig::Gap {
+                tolerance: None,
+                relative_tolerance: Some(rt)
+            } if (rt - 0.01).abs() < f64::EPSILON
+        ));
     }
 }

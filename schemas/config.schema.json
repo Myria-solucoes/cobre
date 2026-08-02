@@ -306,6 +306,58 @@
       },
       "type": "object"
     },
+    "Openings": {
+      "description": "Where a stage's openings originate (`config.json` scenario-source `source`).\n\nThe tag key is `source` and the field is `openings`, deliberately distinct\nfrom the per-class `scheme` key: `openings.source` selects where a stage's\nopenings come from, while `scheme` selects how a class's noise is modelled.\nA single word would otherwise carry both axes. An absent `openings`\ndeclaration is equivalent to `generated`.\n\nOnly `generated` is admitted today; `external` and `file` are reserved and\nrejected at load until a later release wires opening routing.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Openings come from noise generation (the default when `openings` is absent).",
+          "properties": {
+            "source": {
+              "const": "generated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "source"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Openings come from an external deck. Reserved; rejected at load.",
+          "properties": {
+            "source": {
+              "const": "external",
+              "type": "string"
+            }
+          },
+          "required": [
+            "source"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Openings come from a declared file. Reserved; rejected at load.",
+          "properties": {
+            "path": {
+              "description": "Declared openings file path.",
+              "type": "string"
+            },
+            "source": {
+              "const": "file",
+              "type": "string"
+            }
+          },
+          "required": [
+            "source",
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "OrderSelectionMethod": {
       "description": "Order selection criterion for autoregressive model fitting.\n\nControls how the lag order is chosen when fitting a time series model.\nTwo variants are accepted:\n\n- `\"pacf\"` — classical periodic Yule-Walker with PACF-based order\n  selection. Default.\n- `\"pacf_annual\"` — extends `\"pacf\"` with an annual component (PAR(p)-A),\n  adding one extra coefficient ψ per (entity, season) that multiplies\n  the rolling 12-month average of past observations.",
       "oneOf": [
@@ -562,8 +614,8 @@
       "description": "Intermediate serde type for a single per-class scenario scheme in `config.json`.",
       "properties": {
         "scheme": {
-          "description": "Scheme string: `\"in_sample\"`, `\"out_of_sample\"`, `\"external\"`, or `\"historical\"`.",
-          "type": "string"
+          "$ref": "#/$defs/RawSamplingScheme",
+          "description": "Forward-pass scenario scheme for this class."
         }
       },
       "required": [
@@ -587,6 +639,31 @@
         }
       ],
       "description": "Intermediate serde type for `historical_years` in `config.json`.\n\nHandles two JSON representations via `#[serde(untagged)]`:\n- Array: `[1940, 1953, 1971]` → [`RawHistoricalYearsConfig::List`]\n- Object: `{\"from\": 1940, \"to\": 2010}` → [`RawHistoricalYearsConfig::Range`]\n\nThe `List` variant must be declared first so serde tries it before `Range`\n(an integer array is tried before an object)."
+    },
+    "RawSamplingScheme": {
+      "description": "Per-class forward-pass scenario scheme (`config.json` scenario-source `scheme`).",
+      "oneOf": [
+        {
+          "const": "in_sample",
+          "description": "Reuse the backward-pass opening tree for the forward pass.",
+          "type": "string"
+        },
+        {
+          "const": "out_of_sample",
+          "description": "Draw fresh noise from the same distribution with an independent seed.",
+          "type": "string"
+        },
+        {
+          "const": "external",
+          "description": "Draw from an externally supplied scenario file.",
+          "type": "string"
+        },
+        {
+          "const": "historical",
+          "description": "Replay historical realisations.",
+          "type": "string"
+        }
+      ]
     },
     "RawScenarioSourceConfig": {
       "additionalProperties": false,
@@ -639,6 +716,18 @@
           ],
           "default": null,
           "description": "NCS class scenario config. Absent defaults to `in_sample`."
+        },
+        "openings": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Openings"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Where a stage's openings come from. Absent defaults to `generated`,\npreserving generation-sourced openings."
         },
         "seed": {
           "default": null,
@@ -859,11 +948,14 @@
           "type": "integer"
         },
         "num_scenarios": {
-          "default": 2000,
-          "description": "Number of simulation scenarios.",
+          "default": null,
+          "description": "Number of simulation scenarios. Deprecated alias for the `sampled`\nselection count; declaring it alongside `selection` is rejected at load.\nAbsent resolves to the default sampled count.",
           "format": "uint32",
           "minimum": 0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "scenario_source": {
           "anyOf": [
@@ -876,6 +968,18 @@
           ],
           "default": null,
           "description": "Scenario source configuration for the post-training simulation forward pass.\nWhen absent, falls back to the training scenario source."
+        },
+        "selection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SimulationSelection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Phase-level scenario selection. Absent resolves the count from the\n`num_scenarios` alias (the default sampled behaviour)."
         },
         "solver": {
           "anyOf": [
@@ -891,6 +995,46 @@
         }
       },
       "type": "object"
+    },
+    "SimulationSelection": {
+      "description": "Post-training scenario selection and its method-specific parameters\n(`config.json → simulation.selection`).\n\nInternally tagged on `method`; the tag is the semantic selection word, never\na mechanism name. `sampled` draws `num_scenarios` trajectories; `enumerated`\nwalks the scenario set exhaustively. Each variant carries only its own\nparameters, so pairing a count with `enumerated` is a parse error under\n`deny_unknown_fields` rather than a runtime-gated combination.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Sampled scenarios: draw `num_scenarios` trajectories.",
+          "properties": {
+            "method": {
+              "const": "sampled",
+              "type": "string"
+            },
+            "num_scenarios": {
+              "description": "Number of simulation trajectories to draw.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "method",
+            "num_scenarios"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Exhaustive enumeration of the scenario set.",
+          "properties": {
+            "method": {
+              "const": "enumerated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "method"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "StateSpaceConfig": {
       "additionalProperties": false,
@@ -908,6 +1052,21 @@
         }
       },
       "type": "object"
+    },
+    "StoppingMode": {
+      "description": "How multiple stopping rules combine into a single stop decision\n(`config.json → training.stopping_mode`).",
+      "oneOf": [
+        {
+          "const": "any",
+          "description": "Stop when any configured rule triggers (OR).",
+          "type": "string"
+        },
+        {
+          "const": "all",
+          "description": "Stop when all configured rules trigger at the same iteration (AND).",
+          "type": "string"
+        }
+      ]
     },
     "StoppingRuleConfig": {
       "description": "Deserialized configuration for one entry in `training.stopping_rules[]`.\n\nUses a `\"type\"` discriminator field (internally tagged) with `snake_case`\nvariant names matching the JSON schema. `deny_unknown_fields` makes a\nparameter belonging to a different rule type a load-time error rather\nthan a silently ignored key.\n\nThe `GracefulShutdown` rule has no JSON representation — it is injected at\nruntime by `StoppingRuleSet` construction and is never deserialized.\n\n# Examples\n\n```\nuse cobre_io::config::StoppingRuleConfig;\n\nlet json = r#\"{\"type\": \"iteration_limit\", \"limit\": 100}\"#;\nlet rule: StoppingRuleConfig = serde_json::from_str(json).unwrap();\nassert!(matches!(rule, StoppingRuleConfig::IterationLimit { limit: 100 }));\n```",
@@ -982,48 +1141,33 @@
         },
         {
           "additionalProperties": false,
-          "description": "Stop when both the bound and simulated policy costs have stabilized.",
+          "description": "Stop when the exact upper bound is within tolerance of the lower\nbound. At least one of `tolerance` / `relative_tolerance` must be\npresent (checked at `from_config`); rejected as not-yet-supported\nuntil a later release wires evaluation.",
           "properties": {
-            "bound_tol": {
-              "description": "Relative tolerance for bound stability.",
+            "relative_tolerance": {
+              "default": null,
+              "description": "Relative gap tolerance (fraction), mirroring reported `gap_percent`.",
               "format": "double",
-              "type": "number"
+              "type": [
+                "number",
+                "null"
+              ]
             },
-            "bound_window": {
-              "description": "Number of past iterations for bound stability check.",
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "distance_tol": {
-              "description": "Normalized distance threshold between consecutive simulation results.",
+            "tolerance": {
+              "default": null,
+              "description": "Absolute gap tolerance, canonical R$.",
               "format": "double",
-              "type": "number"
-            },
-            "period": {
-              "description": "Iterations between checks.",
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "replications": {
-              "description": "Number of Monte Carlo forward simulations per check.",
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
+              "type": [
+                "number",
+                "null"
+              ]
             },
             "type": {
-              "const": "simulation",
+              "const": "gap",
               "type": "string"
             }
           },
           "required": [
-            "type",
-            "replications",
-            "period",
-            "bound_window",
-            "distance_tol",
-            "bound_tol"
+            "type"
           ],
           "type": "object"
         }
@@ -1077,6 +1221,18 @@
           "default": null,
           "description": "Scenario source configuration for the training forward pass.\nWhen absent, all classes default to `in_sample`."
         },
+        "selection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrainingSelection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Phase-level scenario selection. Absent resolves the count from the\n`forward_passes` alias (the default sampled behaviour)."
+        },
         "solver": {
           "$ref": "#/$defs/TrainingSolverConfig",
           "default": {
@@ -1088,9 +1244,9 @@
           "description": "LP solver retry settings and optional per-phase solver profiles."
         },
         "stopping_mode": {
+          "$ref": "#/$defs/StoppingMode",
           "default": "any",
-          "description": "How multiple stopping rules combine: `\"any\"` (OR) or `\"all\"` (AND).",
-          "type": "string"
+          "description": "How multiple stopping rules combine: `any` (OR) or `all` (AND)."
         },
         "stopping_rules": {
           "description": "List of stopping rule configurations.\n\n**Mandatory** — no default. Must contain at least one `iteration_limit` rule.",
@@ -1113,6 +1269,46 @@
         }
       },
       "type": "object"
+    },
+    "TrainingSelection": {
+      "description": "Training-phase scenario selection and its method-specific parameters\n(`config.json → training.selection`).\n\nInternally tagged on `method`; the tag is the semantic selection word, never\na mechanism name. `sampled` runs `forward_passes` trajectories per iteration;\n`enumerated` walks the scenario openings exhaustively. Each variant carries\nonly its own parameters, so pairing a count with `enumerated` is a parse\nerror under `deny_unknown_fields` rather than a runtime-gated combination.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Sampled forward passes: `forward_passes` trajectories per iteration.",
+          "properties": {
+            "forward_passes": {
+              "description": "Number of forward-pass trajectories per iteration.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "method": {
+              "const": "sampled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "method",
+            "forward_passes"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Exhaustive enumeration of the scenario openings.",
+          "properties": {
+            "method": {
+              "const": "enumerated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "method"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "TrainingSolverConfig": {
       "additionalProperties": false,
@@ -1264,8 +1460,9 @@
       "default": {
         "enabled": false,
         "io_channel_capacity": 64,
-        "num_scenarios": 2000,
+        "num_scenarios": null,
         "scenario_source": null,
+        "selection": null,
         "solver": null
       },
       "description": "Post-training simulation settings."

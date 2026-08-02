@@ -18,12 +18,28 @@ use crate::error::CliError;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-/// Postcard-serializable stopping rule.
+/// Postcard-serializable stopping rule. Mirrors [`StoppingRule`], whose
+/// internally-tagged serde representation postcard (non-self-describing)
+/// refuses to deserialize (`WontImplement`).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum BroadcastStoppingRule {
-    IterationLimit { limit: u64 },
-    TimeLimit { seconds: f64 },
-    BoundStalling { iterations: u64, tolerance: f64 },
+    IterationLimit {
+        limit: u64,
+    },
+    TimeLimit {
+        seconds: f64,
+    },
+    BoundStalling {
+        iterations: u64,
+        tolerance: f64,
+    },
+    /// Mirrors [`StoppingRule::Gap`].
+    Gap {
+        /// Absolute gap tolerance, canonical R$.
+        tolerance: Option<f64>,
+        /// Relative gap tolerance (fraction).
+        relative_tolerance: Option<f64>,
+    },
 }
 
 /// Postcard-serializable stopping mode.
@@ -141,9 +157,16 @@ impl BroadcastConfig {
                     iterations: *iterations,
                     tolerance: *tolerance,
                 },
-                // SimulationBased and GracefulShutdown evaluate on rank 0 only and are
-                // not broadcastable; non-root ranks fall back to an iteration limit.
-                StoppingRule::SimulationBased { .. } | StoppingRule::GracefulShutdown => {
+                StoppingRule::Gap {
+                    tolerance,
+                    relative_tolerance,
+                } => BroadcastStoppingRule::Gap {
+                    tolerance: *tolerance,
+                    relative_tolerance: *relative_tolerance,
+                },
+                // GracefulShutdown evaluates on rank 0 only and is not
+                // broadcastable; non-root ranks fall back to an iteration limit.
+                StoppingRule::GracefulShutdown => {
                     tracing::warn!(
                         "stopping rule not broadcastable, \
                          substituting IterationLimit({DEFAULT_MAX_ITERATIONS})"
@@ -336,6 +359,13 @@ pub(crate) fn stopping_rules_from_broadcast(cfg: &BroadcastConfig) -> StoppingRu
                 iterations: *iterations,
                 tolerance: *tolerance,
             },
+            BroadcastStoppingRule::Gap {
+                tolerance,
+                relative_tolerance,
+            } => StoppingRule::Gap {
+                tolerance: *tolerance,
+                relative_tolerance: *relative_tolerance,
+            },
         })
         .collect();
 
@@ -410,7 +440,7 @@ where
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::float_cmp)]
 mod tests {
-    use super::{BroadcastNodeGraph, BroadcastOpeningTree, broadcast_value};
+    use super::{BroadcastNodeGraph, BroadcastOpeningTree, BroadcastStoppingRule, broadcast_value};
     use crate::error::CliError;
     use cobre_sddp::setup::{NodeGraph, NodeOpenings, NodeRuntime, NodeSuccessor, OpeningSource};
 
@@ -620,6 +650,29 @@ mod tests {
         let decoded: NodeGraph = result.unwrap().into();
         assert_eq!(decoded.node_ids, original.node_ids);
         assert_eq!(decoded.n_pools, original.n_pools);
+    }
+
+    // ------------------------------------------------------------------
+    // BroadcastStoppingRule tests
+    // ------------------------------------------------------------------
+
+    /// Postcard round-trip for the `BroadcastStoppingRule::Gap` arm — the
+    /// mirror `BroadcastStoppingRule`'s doc comment exists for.
+    #[test]
+    fn broadcast_stopping_rule_gap_round_trips_via_postcard() {
+        let original = BroadcastStoppingRule::Gap {
+            tolerance: Some(1000.0),
+            relative_tolerance: Some(0.01),
+        };
+        let bytes = postcard::to_allocvec(&original).unwrap();
+        let decoded: BroadcastStoppingRule = postcard::from_bytes(&bytes).unwrap();
+        assert!(matches!(
+            decoded,
+            BroadcastStoppingRule::Gap {
+                tolerance: Some(t),
+                relative_tolerance: Some(rt)
+            } if (t - 1000.0).abs() < f64::EPSILON && (rt - 0.01).abs() < f64::EPSILON
+        ));
     }
 
     // ------------------------------------------------------------------

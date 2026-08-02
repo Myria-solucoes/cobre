@@ -232,7 +232,7 @@ mod d17_signed_evaporation {
 
         let mut config_with_sim = config.clone();
         config_with_sim.simulation.enabled = true;
-        config_with_sim.simulation.num_scenarios = 1;
+        config_with_sim.simulation.num_scenarios = Some(1);
 
         let sentinel = Path::new("config.json");
         let training_source = config_with_sim
@@ -389,7 +389,7 @@ mod d41_energy_contracts_simulation {
         // The shipped parity case trains only; enable one sim scenario so the contract extraction path runs.
         config.simulation = SimulationConfig {
             enabled: true,
-            num_scenarios: 1,
+            num_scenarios: Some(1),
             io_channel_capacity: 8,
             ..SimulationConfig::default()
         };

@@ -61,7 +61,6 @@ pub struct ConvergenceMonitor {
     iteration_count: u64,
     start_time: Instant,
     shutdown_requested: bool,
-    simulation_costs: Option<Vec<f64>>,
 }
 
 impl ConvergenceMonitor {
@@ -79,7 +78,6 @@ impl ConvergenceMonitor {
             iteration_count: 0,
             start_time: Instant::now(),
             shutdown_requested: false,
-            simulation_costs: None,
         }
     }
 
@@ -100,21 +98,18 @@ impl ConvergenceMonitor {
         self.iteration_count += 1;
         self.lower_bound_history.push(lb);
 
-        // Move the vecs into MonitorState without cloning, then restore them.
+        // Move the vec into MonitorState without cloning, then restore it.
         let history = std::mem::take(&mut self.lower_bound_history);
-        let sim_costs = std::mem::take(&mut self.simulation_costs);
         let state = MonitorState {
             iteration: self.iteration_count,
             wall_time_seconds: self.start_time.elapsed().as_secs_f64(),
             lower_bound: self.lower_bound,
             lower_bound_history: history,
             shutdown_requested: self.shutdown_requested,
-            simulation_costs: sim_costs,
         };
 
         let result = self.rule_set.evaluate(&state);
         self.lower_bound_history = state.lower_bound_history;
-        self.simulation_costs = state.simulation_costs;
         result
     }
 
@@ -122,13 +117,6 @@ impl ConvergenceMonitor {
     /// returns `(true, _)` with the `GracefulShutdown` rule triggered.
     pub fn set_shutdown(&mut self) {
         self.shutdown_requested = true;
-    }
-
-    /// Provide simulation costs for the [`crate::stopping_rule::StoppingRule::SimulationBased`]
-    /// rule; forwarded into [`MonitorState::simulation_costs`] on the next
-    /// [`ConvergenceMonitor::update`].
-    pub fn set_simulation_costs(&mut self, costs: Vec<f64>) {
-        self.simulation_costs = Some(costs);
     }
 
     /// Current lower bound.
@@ -302,33 +290,19 @@ mod tests {
     }
 
     #[test]
-    fn set_simulation_costs_populates_monitor_state() {
-        // Use a SimulationBased rule evaluated at period=1.
-        // Provide simulation costs and verify the rule reaches evaluation
-        // (i.e., costs pass through to MonitorState).
+    fn gap_rule_surfaces_placeholder_result_through_update() {
         let rule_set = StoppingRuleSet {
-            rules: vec![StoppingRule::SimulationBased {
-                period: 1,
-                distance_tolerance: 1e6, // always trigger if costs present
-                replications: 10,
-                bound_stability_window: 1,
+            rules: vec![StoppingRule::Gap {
+                tolerance: Some(1000.0),
+                relative_tolerance: None,
             }],
             mode: StoppingMode::Any,
         };
         let mut monitor = ConvergenceMonitor::new(rule_set);
-        monitor.set_simulation_costs(vec![100.0, 200.0, 300.0]);
-        let (_stop, results) = monitor.update(80.0, &default_sync());
-        // The SimulationBased rule must have received the costs (it evaluates at
-        // iteration 1 which is divisible by period=1) and reached the distance check.
-        assert_eq!(results[0].rule_name, "simulation_based");
-        // costs are present → detail must NOT contain "no simulation results available"
-        assert!(
-            !results[0]
-                .detail
-                .contains("no simulation results available"),
-            "detail should not indicate missing costs: {}",
-            results[0].detail
-        );
+        let (stop, results) = monitor.update(80.0, &default_sync());
+        assert!(!stop, "the Gap placeholder never triggers");
+        assert_eq!(results[0].rule_name, "gap");
+        assert!(!results[0].triggered);
     }
 
     #[test]

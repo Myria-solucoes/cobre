@@ -419,7 +419,6 @@ mod stopping_rule_conformance {
             lower_bound: lb,
             lower_bound_history: history,
             shutdown_requested: shutdown,
-            simulation_costs: None,
         }
     }
 
@@ -481,7 +480,6 @@ mod stopping_rule_conformance {
                         lower_bound: 100.0,
                         lower_bound_history: history,
                         shutdown_requested: shutdown,
-                        simulation_costs: None,
                     };
                     let (should_stop, results) = rule_set.evaluate(&state);
                     assert!(

@@ -31,8 +31,8 @@ use cobre_core::{
 use cobre_io::config::{
     Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
     InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
-    RawClassConfigEntry, RawScenarioSourceConfig, RowSelectionConfig,
-    SimulationConfig as IoSimulationConfig, StoppingRuleConfig, TrainingConfig,
+    RawClassConfigEntry, RawSamplingScheme, RawScenarioSourceConfig, RowSelectionConfig,
+    SimulationConfig as IoSimulationConfig, StoppingMode, StoppingRuleConfig, TrainingConfig,
     TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
 use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
@@ -526,11 +526,12 @@ fn minimal_config(forward_passes: u32, max_iterations: u32) -> Config {
             stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
                 limit: max_iterations,
             }]),
-            stopping_mode: "any".to_string(),
+            stopping_mode: StoppingMode::Any,
             cut_selection: RowSelectionConfig::default(),
             solver: TrainingSolverConfig::default(),
             parallelism: cobre_io::config::ParallelismConfig::default(),
             scenario_source: None,
+            selection: None,
         },
         upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
         policy: PolicyConfig::default(),
@@ -540,32 +541,26 @@ fn minimal_config(forward_passes: u32, max_iterations: u32) -> Config {
     }
 }
 
-/// `inflow_scheme`/`load_scheme`/`ncs_scheme` take the JSON schema scheme values
-/// (`"in_sample"`, `"historical"`, `"external"`, `"out_of_sample"`); `None`
+/// `inflow_scheme`/`load_scheme`/`ncs_scheme` select each class's scheme; `None`
 /// leaves the class at `in_sample`.
 fn minimal_config_with_schemes(
     forward_passes: u32,
     max_iterations: u32,
-    inflow_scheme: Option<&str>,
-    load_scheme: Option<&str>,
-    ncs_scheme: Option<&str>,
+    inflow_scheme: Option<RawSamplingScheme>,
+    load_scheme: Option<RawSamplingScheme>,
+    ncs_scheme: Option<RawSamplingScheme>,
 ) -> Config {
     // A seed is required when any class uses a non-in-sample scheme.
-    let needs_seed = inflow_scheme.is_some_and(|s| s != "in_sample")
-        || load_scheme.is_some_and(|s| s != "in_sample")
-        || ncs_scheme.is_some_and(|s| s != "in_sample");
+    let needs_seed = inflow_scheme.is_some_and(|s| s != RawSamplingScheme::InSample)
+        || load_scheme.is_some_and(|s| s != RawSamplingScheme::InSample)
+        || ncs_scheme.is_some_and(|s| s != RawSamplingScheme::InSample);
     let scenario_source = RawScenarioSourceConfig {
         seed: if needs_seed { Some(42) } else { None },
         historical_years: None,
-        inflow: inflow_scheme.map(|s| RawClassConfigEntry {
-            scheme: s.to_string(),
-        }),
-        load: load_scheme.map(|s| RawClassConfigEntry {
-            scheme: s.to_string(),
-        }),
-        ncs: ncs_scheme.map(|s| RawClassConfigEntry {
-            scheme: s.to_string(),
-        }),
+        inflow: inflow_scheme.map(|scheme| RawClassConfigEntry { scheme }),
+        load: load_scheme.map(|scheme| RawClassConfigEntry { scheme }),
+        ncs: ncs_scheme.map(|scheme| RawClassConfigEntry { scheme }),
+        openings: None,
     };
     let mut config = minimal_config(forward_passes, max_iterations);
     config.training.scenario_source = Some(scenario_source);
@@ -1205,7 +1200,7 @@ fn simulation_config_reflects_setup_fields() {
     let mut config = minimal_config(1, 5);
     config.simulation = IoSimulationConfig {
         enabled: true,
-        num_scenarios: 50,
+        num_scenarios: Some(50),
         io_channel_capacity: 16,
         ..IoSimulationConfig::default()
     };
@@ -1341,7 +1336,7 @@ fn simulate_after_train_returns_nonempty_costs() {
     let mut config = minimal_config(1, 3);
     config.simulation = IoSimulationConfig {
         enabled: true,
-        num_scenarios: 3,
+        num_scenarios: Some(3),
         io_channel_capacity: 8,
         ..IoSimulationConfig::default()
     };
@@ -1422,11 +1417,12 @@ fn study_params_from_config_defaults() {
             tree_seed: None,
             forward_passes: None,
             stopping_rules: None,
-            stopping_mode: "any".to_string(),
+            stopping_mode: cobre_io::config::StoppingMode::Any,
             cut_selection: RowSelectionConfig::default(),
             solver: TrainingSolverConfig::default(),
             parallelism: cobre_io::config::ParallelismConfig::default(),
             scenario_source: None,
+            selection: None,
         },
         upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
         policy: PolicyConfig::default(),
@@ -1493,11 +1489,12 @@ fn study_params_from_config_explicit() {
                 StoppingRuleConfig::IterationLimit { limit: 50 },
                 StoppingRuleConfig::TimeLimit { seconds: 60.0 },
             ]),
-            stopping_mode: "all".to_string(),
+            stopping_mode: cobre_io::config::StoppingMode::All,
             cut_selection: RowSelectionConfig::default(),
             solver: TrainingSolverConfig::default(),
             parallelism: cobre_io::config::ParallelismConfig::default(),
             scenario_source: None,
+            selection: None,
         },
         upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
         policy: PolicyConfig {
@@ -1506,7 +1503,7 @@ fn study_params_from_config_explicit() {
         },
         simulation: IoSimulationConfig {
             enabled: true,
-            num_scenarios: 200,
+            num_scenarios: Some(200),
             ..IoSimulationConfig::default()
         },
         exports: ExportsConfig::default(),
@@ -1576,11 +1573,12 @@ fn minimal_prepare_config() -> cobre_io::Config {
             tree_seed: None,
             forward_passes: None,
             stopping_rules: None,
-            stopping_mode: "any".to_string(),
+            stopping_mode: StoppingMode::Any,
             cut_selection: RowSelectionConfig::default(),
             solver: TrainingSolverConfig::default(),
             parallelism: cobre_io::config::ParallelismConfig::default(),
             scenario_source: None,
+            selection: None,
         },
         upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
         policy: PolicyConfig::default(),
@@ -4654,7 +4652,7 @@ fn system_with_historical_inflow(n_stages: usize) -> cobre_core::System {
 #[test]
 fn historical_library_built_when_scheme_is_historical() {
     let system = system_with_historical_inflow(2);
-    let config = minimal_config_with_schemes(1, 5, Some("historical"), None, None);
+    let config = minimal_config_with_schemes(1, 5, Some(RawSamplingScheme::Historical), None, None);
     let stochastic = build_stochastic_context(
         &system,
         42,
@@ -4932,7 +4930,7 @@ fn external_inflow_library_built_when_scheme_is_external() {
         .build()
         .expect("system with external inflow: valid");
 
-    let config = minimal_config_with_schemes(1, 5, Some("external"), None, None);
+    let config = minimal_config_with_schemes(1, 5, Some(RawSamplingScheme::External), None, None);
     let stochastic = build_stochastic_context(
         &system,
         42,
@@ -5205,7 +5203,7 @@ fn external_load_library_built_when_scheme_is_external() {
         .build()
         .expect("system with external load: valid");
 
-    let config = minimal_config_with_schemes(1, 5, None, Some("external"), None);
+    let config = minimal_config_with_schemes(1, 5, None, Some(RawSamplingScheme::External), None);
     let stochastic = build_stochastic_context(
         &system,
         42,
@@ -5505,7 +5503,7 @@ fn external_ncs_library_built_when_scheme_is_external() {
         .build()
         .expect("system with external NCS: valid");
 
-    let config = minimal_config_with_schemes(1, 5, None, None, Some("external"));
+    let config = minimal_config_with_schemes(1, 5, None, None, Some(RawSamplingScheme::External));
     let stochastic = build_stochastic_context(
         &system,
         42,
@@ -5765,7 +5763,7 @@ fn historical_library_fails_when_no_valid_windows() {
         .build()
         .expect("system: valid");
 
-    let config = minimal_config_with_schemes(1, 5, Some("historical"), None, None);
+    let config = minimal_config_with_schemes(1, 5, Some(RawSamplingScheme::Historical), None, None);
     let stochastic = build_stochastic_context(
         &system,
         42,
@@ -5805,10 +5803,11 @@ fn test_simulate_uses_simulation_scheme() {
         seed: Some(99),
         historical_years: None,
         inflow: Some(RawClassConfigEntry {
-            scheme: "out_of_sample".to_string(),
+            scheme: RawSamplingScheme::OutOfSample,
         }),
         load: None,
         ncs: None,
+        openings: None,
     });
 
     let stochastic = build_stochastic_context(
@@ -5858,10 +5857,11 @@ fn test_sim_historical_library_built_when_sim_scheme_is_historical() {
         seed: Some(42),
         historical_years: None,
         inflow: Some(RawClassConfigEntry {
-            scheme: "historical".to_string(),
+            scheme: RawSamplingScheme::Historical,
         }),
         load: None,
         ncs: None,
+        openings: None,
     });
 
     // The stochastic context is built for the training scheme (InSample).
@@ -8256,4 +8256,315 @@ fn g2_accepts_matching_external_library_width() {
         assert_external_library_widths(&system, &libs).is_ok(),
         "a library width matching noise_entity_order's block width must pass"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Admission gate: risk-measure arm, census substrate, enumeration cross-check
+// ---------------------------------------------------------------------------
+
+/// A generated-source runtime node with an `openings.len` of `len`. `pool_id`,
+/// `offset`, and `q` are irrelevant to `enumerated_scenario_count`, which reads
+/// only `stage`, `successors`, and `openings.len`.
+fn ng_node(stage: usize, len: usize) -> super::NodeRuntime {
+    super::NodeRuntime {
+        stage,
+        pool_id: 0,
+        openings: super::NodeOpenings {
+            source: super::OpeningSource::Generated,
+            offset: 0,
+            len,
+            q: 0.0,
+        },
+    }
+}
+
+fn ng_edge(child: usize) -> super::NodeSuccessor {
+    super::NodeSuccessor {
+        child,
+        probability: 0.5,
+    }
+}
+
+/// Root (stage 0, |Ω|=2) fans to child A (stage 1, |Ω|=3) → leaf grandchild
+/// (stage 2, |Ω|=5), and directly to leaf B (stage 1, |Ω|=7): the root→leaf
+/// path-product-sum is 2·3·5 + 2·7 = 44. Asymmetric so the test cannot pass a
+/// uniform-fan tautology.
+fn asymmetric_fan_node_graph() -> super::NodeGraph {
+    super::NodeGraph {
+        node_ids: vec![0, 1, 2, 3],
+        nodes: vec![ng_node(0, 2), ng_node(1, 3), ng_node(2, 5), ng_node(1, 7)],
+        successors: vec![
+            vec![ng_edge(1), ng_edge(3)],
+            vec![ng_edge(2)],
+            vec![],
+            vec![],
+        ],
+        n_pools: 1,
+    }
+}
+
+/// A 3-node chain whose per-node |Ω| = 6·10⁹ makes the path product overflow
+/// `u64` (`u64::MAX ≈ 1.8·10¹⁹`, so the first multiply already overflows).
+fn overflowing_chain_node_graph() -> super::NodeGraph {
+    super::NodeGraph {
+        node_ids: vec![0, 1, 2],
+        nodes: vec![
+            ng_node(0, 6_000_000_000),
+            ng_node(1, 6_000_000_000),
+            ng_node(2, 6_000_000_000),
+        ],
+        successors: vec![vec![ng_edge(1)], vec![ng_edge(2)], vec![]],
+        n_pools: 1,
+    }
+}
+
+fn rules_with_gap() -> crate::stopping_rule::StoppingRuleSet {
+    use crate::stopping_rule::{StoppingMode, StoppingRule, StoppingRuleSet};
+    StoppingRuleSet {
+        rules: vec![
+            StoppingRule::IterationLimit { limit: 100 },
+            StoppingRule::Gap {
+                tolerance: Some(1000.0),
+                relative_tolerance: None,
+            },
+        ],
+        mode: StoppingMode::Any,
+    }
+}
+
+fn rules_without_gap() -> crate::stopping_rule::StoppingRuleSet {
+    use crate::stopping_rule::{StoppingMode, StoppingRule, StoppingRuleSet};
+    StoppingRuleSet {
+        rules: vec![StoppingRule::IterationLimit { limit: 100 }],
+        mode: StoppingMode::Any,
+    }
+}
+
+/// A `gap` rule under a stage carrying an effective `CVaR` (`lambda > 0`) is
+/// rejected, the message naming the rule, the measure, the offending stage, and
+/// the admitting (expectation) condition.
+#[test]
+fn admission_gate_rejects_gap_under_effective_cvar() {
+    use crate::risk_measure::RiskMeasure;
+    let measures = vec![
+        RiskMeasure::Expectation,
+        RiskMeasure::CVaR {
+            alpha: 0.1,
+            lambda: 0.5,
+        },
+    ];
+    match super::admission_gate(&measures, &rules_with_gap()) {
+        Err(SddpError::Validation(msg)) => {
+            assert!(msg.contains("gap"), "names the rule: {msg}");
+            assert!(msg.contains("CVaR"), "names the measure: {msg}");
+            assert!(msg.contains("stage 1"), "names the offending stage: {msg}");
+            assert!(
+                msg.contains("expectation"),
+                "names the admitting condition: {msg}"
+            );
+        }
+        other => panic!("expected a Validation reject, got {other:?}"),
+    }
+}
+
+/// `CVaR { lambda: 0 }` is documented-equivalent to `Expectation`, so a `gap`
+/// rule under it is admitted — the effective-measure predicate must not trip.
+#[test]
+fn admission_gate_accepts_gap_under_cvar_lambda_zero() {
+    use crate::risk_measure::RiskMeasure;
+    let measures = vec![RiskMeasure::CVaR {
+        alpha: 0.1,
+        lambda: 0.0,
+    }];
+    assert!(
+        super::admission_gate(&measures, &rules_with_gap()).is_ok(),
+        "CVaR with lambda == 0 is effectively expectation and must admit a gap rule"
+    );
+}
+
+/// A `gap` rule with an expectation measure at every stage is admitted.
+#[test]
+fn admission_gate_accepts_gap_under_all_expectation() {
+    use crate::risk_measure::RiskMeasure;
+    let measures = vec![RiskMeasure::Expectation, RiskMeasure::Expectation];
+    assert!(super::admission_gate(&measures, &rules_with_gap()).is_ok());
+}
+
+/// An effective `CVaR` measure with no `gap` rule present is admitted — the arm
+/// gates the pairing, not risk aversion alone.
+#[test]
+fn admission_gate_accepts_cvar_without_gap() {
+    use crate::risk_measure::RiskMeasure;
+    let measures = vec![RiskMeasure::CVaR {
+        alpha: 0.1,
+        lambda: 0.9,
+    }];
+    assert!(super::admission_gate(&measures, &rules_without_gap()).is_ok());
+}
+
+/// The default study shape (expectation everywhere, an iteration-limit rule)
+/// returns `Ok(())` unconditionally — the byte-neutral path.
+#[test]
+fn admission_gate_accepts_default_shape() {
+    use crate::risk_measure::RiskMeasure;
+    let measures = vec![RiskMeasure::Expectation; 4];
+    assert!(super::admission_gate(&measures, &rules_without_gap()).is_ok());
+}
+
+/// `enumerated_scenario_count` returns Σ over root→leaf paths of Π |Ω|: for the
+/// asymmetric fan that is 2·3·5 + 2·7 = 44.
+#[test]
+fn enumerated_scenario_count_returns_path_product_sum() {
+    let ng = asymmetric_fan_node_graph();
+    assert_eq!(
+        super::node_graph::enumerated_scenario_count(&ng).unwrap(),
+        44
+    );
+}
+
+/// `enumerated_scenario_count` returns an overflow `Err` (never a wrapped
+/// count) when the path product exceeds `u64`.
+#[test]
+fn enumerated_scenario_count_errors_on_overflow() {
+    let ng = overflowing_chain_node_graph();
+    match super::node_graph::enumerated_scenario_count(&ng) {
+        Err(SddpError::Validation(msg)) => {
+            assert!(msg.contains("overflow"), "names the overflow: {msg}");
+        }
+        other => panic!("expected an overflow Validation error, got {other:?}"),
+    }
+}
+
+/// A declared census count that disagrees with the derived count is rejected,
+/// the message naming both counts and their sources.
+#[test]
+fn check_census_rejects_count_disagreement() {
+    match super::check_census(Some(7), 44) {
+        Err(SddpError::Validation(msg)) => {
+            assert!(msg.contains('7'), "names the declared count: {msg}");
+            assert!(msg.contains("44"), "names the derived count: {msg}");
+            assert!(
+                msg.contains("declared") && msg.contains("graph"),
+                "names both sources: {msg}"
+            );
+        }
+        other => panic!("expected a census-disagreement Validation error, got {other:?}"),
+    }
+}
+
+/// A declared census equal to the derived count, and an absent declaration,
+/// both admit.
+#[test]
+fn check_census_accepts_agreement_and_absent() {
+    assert!(
+        super::check_census(Some(44), 44).is_ok(),
+        "equal counts admit"
+    );
+    assert!(
+        super::check_census(None, 44).is_ok(),
+        "an absent declaration admits"
+    );
+}
+
+/// Exactly one phase declaring `enumerated` emits an advisory naming both
+/// phases and the specific unavailable capability — never a generic message.
+/// Both asymmetric directions are exercised.
+#[test]
+fn enumeration_asymmetry_warns_naming_both_phases_and_capability() {
+    // Training enumerated, simulation sampled: the weighted simulation
+    // statistics are the missing capability.
+    {
+        let (subscriber, messages) = WarnRecorder::new();
+        tracing::subscriber::with_default(subscriber, || {
+            super::warn_on_enumeration_asymmetry(true, false);
+        });
+        let recorded = messages.lock().unwrap();
+        assert_eq!(recorded.len(), 1, "exactly one advisory, got: {recorded:?}");
+        let msg = &recorded[0];
+        assert!(
+            msg.contains("training") && msg.contains("simulation"),
+            "names both phases: {msg}"
+        );
+        assert!(
+            msg.contains("simulation statistics"),
+            "names the weighted simulation statistics as unavailable: {msg}"
+        );
+    }
+    // Simulation enumerated, training sampled: the exact lower bound is the
+    // missing capability.
+    {
+        let (subscriber, messages) = WarnRecorder::new();
+        tracing::subscriber::with_default(subscriber, || {
+            super::warn_on_enumeration_asymmetry(false, true);
+        });
+        let recorded = messages.lock().unwrap();
+        assert_eq!(recorded.len(), 1, "exactly one advisory, got: {recorded:?}");
+        let msg = &recorded[0];
+        assert!(
+            msg.contains("training") && msg.contains("simulation"),
+            "names both phases: {msg}"
+        );
+        assert!(
+            msg.contains("exact lower bound"),
+            "names the exact lower bound as unavailable: {msg}"
+        );
+    }
+}
+
+/// Symmetric declarations (both enumerated, or neither) emit no advisory.
+#[test]
+fn enumeration_asymmetry_symmetric_declarations_do_not_warn() {
+    for (t, s) in [(true, true), (false, false)] {
+        let (subscriber, messages) = WarnRecorder::new();
+        tracing::subscriber::with_default(subscriber, || {
+            super::warn_on_enumeration_asymmetry(t, s);
+        });
+        let recorded = messages.lock().unwrap();
+        assert!(
+            recorded.is_empty(),
+            "symmetric declaration ({t}, {s}) must not warn, got: {recorded:?}"
+        );
+    }
+}
+
+/// Documented exhaustive-destructure guard (a compile-fail proxy; trybuild is
+/// not wired in this workspace). `is_effective_non_expectation` destructures
+/// `RiskMeasure` and `rule_is_gap` destructures `StoppingRule` with every field
+/// and variant named — no `..` on the gated variants, no `_ =>` arm — so adding
+/// a field to `RiskMeasure::CVaR` / `StoppingRule::Gap`, or a new variant to
+/// either enum, fails to compile until it is dispositioned in those matches.
+/// This test exercises every current arm so the totality is executed, not only
+/// asserted in prose.
+#[test]
+fn admission_gate_predicates_destructure_exhaustively() {
+    use crate::risk_measure::RiskMeasure;
+    use crate::stopping_rule::StoppingRule;
+
+    assert!(!super::is_effective_non_expectation(
+        &RiskMeasure::Expectation
+    ));
+    assert!(!super::is_effective_non_expectation(&RiskMeasure::CVaR {
+        alpha: 0.1,
+        lambda: 0.0,
+    }));
+    assert!(super::is_effective_non_expectation(&RiskMeasure::CVaR {
+        alpha: 0.1,
+        lambda: 0.5,
+    }));
+
+    assert!(super::rule_is_gap(&StoppingRule::Gap {
+        tolerance: Some(1.0),
+        relative_tolerance: None,
+    }));
+    assert!(!super::rule_is_gap(&StoppingRule::IterationLimit {
+        limit: 1
+    }));
+    assert!(!super::rule_is_gap(&StoppingRule::TimeLimit {
+        seconds: 1.0
+    }));
+    assert!(!super::rule_is_gap(&StoppingRule::BoundStalling {
+        tolerance: 0.1,
+        iterations: 1,
+    }));
+    assert!(!super::rule_is_gap(&StoppingRule::GracefulShutdown));
 }

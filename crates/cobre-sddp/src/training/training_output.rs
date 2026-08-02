@@ -13,7 +13,7 @@ use cobre_io::{
     TrainingOutput,
 };
 
-use crate::stopping_rule::{RULE_BOUND_STALLING, RULE_SIMULATION_BASED};
+use crate::stopping_rule::RULE_BOUND_STALLING;
 use crate::{FutureCostFunction, TrainingResult};
 
 /// Per-iteration accumulator filled by [`accumulate_partial_records`] from
@@ -338,7 +338,7 @@ pub fn build_training_output(
         rows_in_lp_max,
     };
 
-    let converged = result.reason == RULE_BOUND_STALLING || result.reason == RULE_SIMULATION_BASED;
+    let converged = result.reason == RULE_BOUND_STALLING;
 
     // None for non-positive lower bound: the gap percentage is undefined
     // (final_lb == 0) or sign-inverted (final_lb < 0).
@@ -604,17 +604,6 @@ mod tests {
     #[test]
     fn converged_true_for_bound_stalling() {
         let result = make_result("bound_stalling", 100.0, 101.0, 0.01, 5);
-        let events = vec![make_iteration_summary(1, 100.0, 101.0, 0.01)];
-        let fcf = make_empty_fcf();
-
-        let output = build_training_output(&result, &events, &fcf);
-
-        assert!(output.converged);
-    }
-
-    #[test]
-    fn converged_true_for_simulation_based() {
-        let result = make_result("simulation_based", 100.0, 101.0, 0.01, 5);
         let events = vec![make_iteration_summary(1, 100.0, 101.0, 0.01)];
         let fcf = make_empty_fcf();
 

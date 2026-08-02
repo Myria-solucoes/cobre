@@ -505,8 +505,9 @@ mod tests {
         use crate::{
             config::{
                 Config, EstimationConfig, ExportsConfig, ModelingConfig, ParallelismConfig,
-                PolicyConfig, RowSelectionConfig, SimulationConfig, StoppingRuleConfig,
-                TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+                PolicyConfig, RowSelectionConfig, SimulationConfig, StoppingMode,
+                StoppingRuleConfig, TrainingConfig, TrainingSolverConfig,
+                UpperBoundEvaluationConfig,
             },
             stages::StagesData,
         };
@@ -524,11 +525,12 @@ mod tests {
                 tree_seed: None,
                 forward_passes: Some(10),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 100 }]),
-                stopping_mode: "any".to_string(),
+                stopping_mode: StoppingMode::Any,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 parallelism: ParallelismConfig::default(),
                 scenario_source: None,
+                selection: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),

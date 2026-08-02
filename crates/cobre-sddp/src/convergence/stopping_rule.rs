@@ -17,7 +17,6 @@
 //!     lower_bound_history: vec![90.0, 95.0, 98.0, 99.0, 100.0,
 //!                              100.0, 100.0, 100.0, 100.0, 100.0],
 //!     shutdown_requested: false,
-//!     simulation_costs: None,
 //! };
 //!
 //! let rule = StoppingRule::IterationLimit { limit: 10 };
@@ -36,8 +35,8 @@ pub const RULE_ITERATION_LIMIT: &str = "iteration_limit";
 pub const RULE_TIME_LIMIT: &str = "time_limit";
 /// Rule name for the lower-bound stalling stopping rule.
 pub const RULE_BOUND_STALLING: &str = "bound_stalling";
-/// Rule name for the simulation-based stopping rule.
-pub const RULE_SIMULATION_BASED: &str = "simulation_based";
+/// Rule name for the exact-upper-bound gap stopping rule.
+pub const RULE_GAP: &str = "gap";
 /// Rule name for the graceful-shutdown stopping rule.
 pub const RULE_GRACEFUL_SHUTDOWN: &str = "graceful_shutdown";
 
@@ -63,10 +62,6 @@ pub struct MonitorState {
 
     /// Whether an external shutdown signal (SIGTERM / SIGINT) has been received.
     pub shutdown_requested: bool,
-
-    /// Per-stage mean costs from the most recent simulation, or `None` if no
-    /// [`StoppingRule::SimulationBased`] check has run yet.
-    pub simulation_costs: Option<Vec<f64>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -124,24 +119,18 @@ pub enum StoppingRule {
         iterations: u64,
     },
 
-    /// Terminate when both the lower bound and simulated policy costs have
-    /// stabilized, evaluated every `period` iterations. Two-stage: a cheap bound
-    /// stability pre-filter, then comparison of per-stage mean simulation costs
-    /// between consecutive evaluations.
-    SimulationBased {
-        /// Evaluate this rule every `period` iterations.
-        period: u64,
+    /// Terminate once the exact upper bound is within `tolerance` of the
+    /// lower bound. `evaluate` is a placeholder returning `triggered: false`
+    /// until a later release wires the exact-upper-bound computation this
+    /// check needs; `StudyParams::from_config` rejects any config-declared
+    /// `Gap` rule until then.
+    Gap {
+        /// Absolute gap tolerance, canonical R$.
+        tolerance: Option<f64>,
 
-        /// Normalized Euclidean distance threshold for simulation cost
-        /// comparison between consecutive evaluations.
-        distance_tolerance: f64,
-
-        /// Number of Monte Carlo forward simulations to run when the bound
-        /// stability pre-filter passes (executed by the convergence monitor).
-        replications: u32,
-
-        /// Number of past iterations for the bound stability pre-check.
-        bound_stability_window: u64,
+        /// Relative gap tolerance (fraction, mirrors the reported
+        /// `gap_percent`).
+        relative_tolerance: Option<f64>,
     },
 
     /// Terminate when an external shutdown signal (SIGTERM / SIGINT) is received.
@@ -152,8 +141,7 @@ pub enum StoppingRule {
 
 impl StoppingRule {
     /// Evaluate this rule against the current monitor state (pure; reads `state`
-    /// only). For [`StoppingRule::SimulationBased`], the monitor must have stored
-    /// results in `state.simulation_costs` beforehand.
+    /// only).
     #[must_use]
     pub fn evaluate(&self, state: &MonitorState) -> StoppingRuleResult {
         match self {
@@ -183,12 +171,14 @@ impl StoppingRule {
                 iterations,
             } => Self::evaluate_bound_stalling(state, *tolerance, *iterations),
 
-            Self::SimulationBased {
-                period,
-                distance_tolerance,
-                replications: _,
-                bound_stability_window: _,
-            } => Self::evaluate_simulation_based(state, *period, *distance_tolerance),
+            Self::Gap {
+                tolerance: _,
+                relative_tolerance: _,
+            } => StoppingRuleResult {
+                rule_name: RULE_GAP,
+                triggered: false,
+                detail: Cow::Borrowed("gap evaluation is wired in a later release"),
+            },
 
             Self::GracefulShutdown => {
                 let triggered = state.shutdown_requested;
@@ -245,58 +235,6 @@ impl StoppingRule {
             )),
         }
     }
-
-    /// Evaluate the [`StoppingRule::SimulationBased`] condition.
-    fn evaluate_simulation_based(
-        state: &MonitorState,
-        period: u64,
-        distance_tolerance: f64,
-    ) -> StoppingRuleResult {
-        if period == 0 || !state.iteration.is_multiple_of(period) {
-            return StoppingRuleResult {
-                rule_name: RULE_SIMULATION_BASED,
-                triggered: false,
-                detail: Cow::Owned(format!(
-                    "not a check iteration ({}/{})",
-                    state.iteration, period
-                )),
-            };
-        }
-
-        // `simulation_costs` is populated iff the bound-stability pre-filter
-        // passed and simulations were run.
-        let Some(ref current_costs) = state.simulation_costs else {
-            return StoppingRuleResult {
-                rule_name: RULE_SIMULATION_BASED,
-                triggered: false,
-                detail: Cow::Borrowed(
-                    "no simulation results available (bound stability check failed or first check)",
-                ),
-            };
-        };
-
-        // Distance is measured against a zero baseline, not the previous
-        // snapshot: the full two-snapshot comparison is deferred, so this is
-        // deliberately conservative (it cannot trigger on a first evaluation).
-        let distance: f64 = current_costs
-            .iter()
-            .map(|&c| {
-                let denom = c.abs().max(1.0_f64);
-                let normalized = c / denom;
-                normalized * normalized
-            })
-            .sum::<f64>()
-            .sqrt();
-
-        let triggered = distance < distance_tolerance;
-        StoppingRuleResult {
-            rule_name: RULE_SIMULATION_BASED,
-            triggered,
-            detail: Cow::Owned(format!(
-                "simulation distance {distance:.6} / tolerance {distance_tolerance:.6}"
-            )),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -318,7 +256,6 @@ impl StoppingRule {
 ///     lower_bound: 100.0,
 ///     lower_bound_history: vec![],
 ///     shutdown_requested: false,
-///     simulation_costs: None,
 /// };
 ///
 /// let rule_set = StoppingRuleSet {
@@ -397,7 +334,6 @@ mod tests {
             lower_bound: lb,
             lower_bound_history: history,
             shutdown_requested: false,
-            simulation_costs: None,
         }
     }
 
@@ -497,6 +433,18 @@ mod tests {
         let state = make_state(4, 0.0, 0.001, history);
         let result = rule.evaluate(&state);
         assert!(result.triggered);
+    }
+
+    #[test]
+    fn gap_evaluate_never_triggers_placeholder_seam() {
+        let rule = StoppingRule::Gap {
+            tolerance: Some(1000.0),
+            relative_tolerance: None,
+        };
+        let state = make_state(1, 0.0, 0.0, vec![]);
+        let result = rule.evaluate(&state);
+        assert!(!result.triggered);
+        assert_eq!(result.rule_name, "gap");
     }
 
     #[test]

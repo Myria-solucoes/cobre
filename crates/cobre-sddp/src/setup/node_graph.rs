@@ -363,6 +363,72 @@ pub(crate) fn assemble_outcome_weights(
     );
 }
 
+/// Number of fully-enumerated scenarios the node graph encodes: the sum over
+/// every root→leaf path of the product of `openings.len` along that path
+/// (`f(n) = |Ω_n| · Σ_child f(child)`, `f(leaf) = |Ω_leaf|`, then summed over
+/// the predecessor-free roots). A leaf has no successors; a root has no
+/// predecessor.
+///
+/// Overflow-safe: a `K^T` fan overflows `u64` for even a modest branching
+/// factor and horizon, so every product and sum is checked and an overflow is
+/// an `Err`, never a wrapped count. This owns the count only — the derived-count
+/// reconciliation that rejects an over-large enumeration consumes it elsewhere.
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] when the path-product-sum exceeds `u64`.
+// Consumer is the derived-count reconciliation gate, not yet wired here;
+// unit-tested substrate until that consumer lands.
+#[allow(dead_code)]
+pub(crate) fn enumerated_scenario_count(graph: &NodeGraph) -> Result<u64, SddpError> {
+    fn overflow_err() -> SddpError {
+        SddpError::Validation(
+            "enumerated scenario count exceeds u64: the policy graph's root→leaf \
+             path-product-sum (Π |Ω| per path, summed over paths) overflows"
+                .to_string(),
+        )
+    }
+
+    let n = graph.nodes.len();
+    let mut has_predecessor = vec![false; n];
+    for succs in &graph.successors {
+        for succ in succs {
+            has_predecessor[succ.child] = true;
+        }
+    }
+
+    // Resolve `f` in descending-stage order: every successor sits exactly one
+    // stage downstream (t -> t+1), so a node's children are already resolved
+    // when it is visited.
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| graph.nodes[b].stage.cmp(&graph.nodes[a].stage));
+
+    let mut subtree = vec![0_u64; n];
+    for &pos in &order {
+        let len = u64::try_from(graph.nodes[pos].openings.len).map_err(|_| overflow_err())?;
+        let children = if graph.successors[pos].is_empty() {
+            1_u64
+        } else {
+            let mut acc = 0_u64;
+            for succ in &graph.successors[pos] {
+                acc = acc
+                    .checked_add(subtree[succ.child])
+                    .ok_or_else(overflow_err)?;
+            }
+            acc
+        };
+        subtree[pos] = len.checked_mul(children).ok_or_else(overflow_err)?;
+    }
+
+    let mut total = 0_u64;
+    for (pos, &has_pred) in has_predecessor.iter().enumerate() {
+        if !has_pred {
+            total = total.checked_add(subtree[pos]).ok_or_else(overflow_err)?;
+        }
+    }
+    Ok(total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -38,16 +38,19 @@ pub use exports::ExportsConfig;
 pub use modeling::{InflowNonNegativityConfig, InflowNonNegativityMethod, ModelingConfig};
 pub use policy::{BoundaryPolicy, CheckpointingConfig, PolicyConfig, PolicyMode};
 pub use scenario_source::{
-    HistoricalYearRange, RawClassConfigEntry, RawHistoricalYearsConfig, RawScenarioSourceConfig,
+    HistoricalYearRange, Openings, RawClassConfigEntry, RawHistoricalYearsConfig,
+    RawSamplingScheme, RawScenarioSourceConfig,
 };
-pub use simulation::SimulationConfig;
+pub use simulation::{SimulationConfig, SimulationSelection};
 pub use state_space::StateSpaceConfig;
 pub use training::{
     BackwardScheduler, DualEdgeWeight, LipschitzConfig, ParallelismConfig,
     PhaseSolverProfileConfig, PresolveMode, PriceStrategy, RowSelectionConfig, ScaleStrategy,
-    SelectionMethod, StoppingRuleConfig, TrainingConfig, TrainingSolverConfig,
-    UpperBoundEvaluationConfig,
+    SelectionMethod, StoppingMode, StoppingRuleConfig, TrainingConfig, TrainingSelection,
+    TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
+
+use simulation::DEFAULT_NUM_SCENARIOS;
 
 use cobre_core::scenario::{HistoricalYears, SamplingScheme, ScenarioSource};
 
@@ -157,9 +160,10 @@ fn extract_field_from_serde_msg(msg: &str) -> String {
 }
 
 /// Post-deserialization validation that the mandatory `forward_passes` and
-/// `stopping_rules` fields are present.
+/// `stopping_rules` fields are present, and that the scenario-selection axis is
+/// well-formed on both phases.
 pub(crate) fn validate_config(config: &Config, path: &Path) -> Result<(), LoadError> {
-    if config.training.forward_passes.is_none() {
+    if config.resolve_forward_passes(path)?.is_none() {
         return Err(LoadError::SchemaError {
             path: path.to_path_buf(),
             field: "training.forward_passes".to_string(),
@@ -175,49 +179,50 @@ pub(crate) fn validate_config(config: &Config, path: &Path) -> Result<(), LoadEr
         });
     }
 
+    // Fire the simulation selection rejections (reserved `enumerated`,
+    // both-declared) at load; the resolved count itself is consumed downstream.
+    config.resolve_num_scenarios(path)?;
+
     Ok(())
+}
+
+/// Build the `enumerated`-is-reserved rejection for `{section}.selection`.
+fn reject_enumerated_selection(section: &str, path: &Path) -> LoadError {
+    LoadError::SchemaError {
+        path: path.to_path_buf(),
+        field: format!("{section}.selection"),
+        message: format!(
+            "{section}.selection method 'enumerated' is not yet supported; \
+             enumeration is wired in a later release — use 'sampled'"
+        ),
+    }
+}
+
+/// Build the both-declared rejection naming `{section}.selection` and the
+/// deprecated `{section}.{alias}` count alias.
+fn reject_both_declared_count(section: &str, alias: &str, path: &Path) -> LoadError {
+    LoadError::SchemaError {
+        path: path.to_path_buf(),
+        field: format!("{section}.selection"),
+        message: format!(
+            "{section}.selection and the deprecated {section}.{alias} are both set; \
+             declare the sampled count in exactly one place"
+        ),
+    }
 }
 
 // ── ScenarioSource helpers ───────────────────────────────────────────────────
 
-/// Convert a `scheme` string from `config.json` to [`SamplingScheme`].
-///
-/// `field` is the dot-separated JSON path to the scheme key (e.g.
-/// `"training.scenario_source.inflow.scheme"`), used verbatim in the error
-/// message so the caller can identify which field has the invalid value.
-fn convert_sampling_scheme_cfg(
-    s: &str,
-    field: &str,
-    path: &Path,
-) -> Result<SamplingScheme, LoadError> {
-    match s {
-        "in_sample" => Ok(SamplingScheme::InSample),
-        "out_of_sample" => Ok(SamplingScheme::OutOfSample),
-        "external" => Ok(SamplingScheme::External),
-        "historical" => Ok(SamplingScheme::Historical),
-        other => Err(LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: field.to_string(),
-            message: format!(
-                "unknown scheme '{other}', expected one of: in_sample, out_of_sample, external, historical"
-            ),
-        }),
+/// Map a per-class config entry to its [`SamplingScheme`], defaulting to
+/// `InSample` when the entry is absent. Infallible: an unknown scheme is
+/// rejected at parse by [`RawSamplingScheme`]'s `Deserialize`.
+fn convert_class_scheme_cfg(class: Option<&RawClassConfigEntry>) -> SamplingScheme {
+    match class.map(|c| c.scheme) {
+        None | Some(RawSamplingScheme::InSample) => SamplingScheme::InSample,
+        Some(RawSamplingScheme::OutOfSample) => SamplingScheme::OutOfSample,
+        Some(RawSamplingScheme::External) => SamplingScheme::External,
+        Some(RawSamplingScheme::Historical) => SamplingScheme::Historical,
     }
-}
-
-/// Convert a per-class config entry to its [`SamplingScheme`], defaulting to
-/// `in_sample` when the entry is absent.
-fn convert_class_scheme_cfg(
-    class: Option<&RawClassConfigEntry>,
-    section: &str,
-    class_name: &str,
-    path: &Path,
-) -> Result<SamplingScheme, LoadError> {
-    convert_sampling_scheme_cfg(
-        class.map_or("in_sample", |c| c.scheme.as_str()),
-        &format!("{section}.scenario_source.{class_name}.scheme"),
-        path,
-    )
 }
 
 /// Convert `Option<RawScenarioSourceConfig>` into a [`ScenarioSource`].
@@ -236,9 +241,9 @@ fn convert_scenario_source_config(
         return Ok(ScenarioSource::default());
     };
 
-    let inflow_scheme = convert_class_scheme_cfg(r.inflow.as_ref(), section, "inflow", path)?;
-    let load_scheme = convert_class_scheme_cfg(r.load.as_ref(), section, "load", path)?;
-    let ncs_scheme = convert_class_scheme_cfg(r.ncs.as_ref(), section, "ncs", path)?;
+    let inflow_scheme = convert_class_scheme_cfg(r.inflow.as_ref());
+    let load_scheme = convert_class_scheme_cfg(r.load.as_ref());
+    let ncs_scheme = convert_class_scheme_cfg(r.ncs.as_ref());
 
     let source = ScenarioSource {
         inflow_scheme,
@@ -255,8 +260,51 @@ fn convert_scenario_source_config(
     };
 
     validate_scenario_source_cfg(&source, section, path)?;
+    validate_openings_cfg(r.openings.as_ref(), section, path)?;
 
     Ok(source)
+}
+
+/// Validate a declared `openings` source from `config.json`.
+///
+/// Only `generated` (or an absent declaration) is admitted; `external` and
+/// `file` are structurally valid but reserved, rejected until opening routing is
+/// wired, and any declaration outside the `training` section is rejected.
+fn validate_openings_cfg(
+    openings: Option<&Openings>,
+    section: &str,
+    path: &Path,
+) -> Result<(), LoadError> {
+    let Some(openings) = openings else {
+        return Ok(());
+    };
+
+    let field = format!("{section}.scenario_source.openings");
+
+    if section != "training" {
+        return Err(LoadError::SchemaError {
+            path: path.to_path_buf(),
+            field,
+            message: format!(
+                "openings is only valid under training.scenario_source, not \
+                 {section}.scenario_source"
+            ),
+        });
+    }
+
+    let reserved = match openings {
+        Openings::Generated {} => return Ok(()),
+        Openings::External {} => "external",
+        Openings::File { .. } => "file",
+    };
+    Err(LoadError::SchemaError {
+        path: path.to_path_buf(),
+        field,
+        message: format!(
+            "openings source '{reserved}' is not yet supported; openings routing is \
+             wired in a later release — use 'generated'"
+        ),
+    })
 }
 
 /// Tier-1 structural validation of a parsed [`ScenarioSource`] from `config.json`.
@@ -373,6 +421,67 @@ impl Config {
             )
         } else {
             self.training_scenario_source(path)
+        }
+    }
+
+    /// Resolve the effective training forward-pass count from `training.selection`
+    /// or the deprecated `training.forward_passes` alias.
+    ///
+    /// Returns `Ok(None)` when neither is present, leaving the mandatory-count
+    /// decision to the caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LoadError::SchemaError`] when `training.selection` declares the
+    /// reserved `enumerated` method, or when both `training.selection` and the
+    /// `training.forward_passes` alias are set.
+    pub fn resolve_forward_passes(&self, path: &Path) -> Result<Option<u32>, LoadError> {
+        match &self.training.selection {
+            Some(TrainingSelection::Enumerated {}) => {
+                Err(reject_enumerated_selection("training", path))
+            }
+            Some(TrainingSelection::Sampled { forward_passes }) => {
+                if self.training.forward_passes.is_some() {
+                    return Err(reject_both_declared_count(
+                        "training",
+                        "forward_passes",
+                        path,
+                    ));
+                }
+                Ok(Some(*forward_passes))
+            }
+            None => Ok(self.training.forward_passes),
+        }
+    }
+
+    /// Resolve the effective simulation scenario count from `simulation.selection`
+    /// or the deprecated `simulation.num_scenarios` alias, defaulting to
+    /// [`DEFAULT_NUM_SCENARIOS`] when neither is present.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LoadError::SchemaError`] when `simulation.selection` declares the
+    /// reserved `enumerated` method, or when both `simulation.selection` and the
+    /// `simulation.num_scenarios` alias are set.
+    pub fn resolve_num_scenarios(&self, path: &Path) -> Result<u32, LoadError> {
+        match &self.simulation.selection {
+            Some(SimulationSelection::Enumerated {}) => {
+                Err(reject_enumerated_selection("simulation", path))
+            }
+            Some(SimulationSelection::Sampled { num_scenarios }) => {
+                if self.simulation.num_scenarios.is_some() {
+                    return Err(reject_both_declared_count(
+                        "simulation",
+                        "num_scenarios",
+                        path,
+                    ));
+                }
+                Ok(*num_scenarios)
+            }
+            None => Ok(self
+                .simulation
+                .num_scenarios
+                .unwrap_or(DEFAULT_NUM_SCENARIOS)),
         }
     }
 
@@ -509,14 +618,19 @@ mod tests {
 
         assert_eq!(cfg.training.forward_passes, Some(192));
         assert_eq!(cfg.training.tree_seed, Some(42));
-        assert_eq!(cfg.training.stopping_mode, "any");
+        assert_eq!(cfg.training.stopping_mode, StoppingMode::Any);
         assert!(cfg.training.enabled);
         assert_eq!(
             cfg.modeling.inflow_non_negativity.method,
             InflowNonNegativityMethod::Penalty
         );
         assert!(!cfg.simulation.enabled);
-        assert_eq!(cfg.simulation.num_scenarios, 2000);
+        assert_eq!(cfg.simulation.num_scenarios, None);
+        assert_eq!(
+            cfg.resolve_num_scenarios(f.path()).unwrap(),
+            2000,
+            "absent num_scenarios resolves to the default sampled count"
+        );
         assert_eq!(cfg.policy.mode, PolicyMode::Fresh);
         assert_eq!(cfg.policy.path, "./policy");
     }
@@ -649,7 +763,7 @@ mod tests {
         );
 
         assert_eq!(cfg.training.forward_passes, Some(192));
-        assert_eq!(cfg.training.stopping_mode, "any");
+        assert_eq!(cfg.training.stopping_mode, StoppingMode::Any);
         let rules = cfg.training.stopping_rules.as_ref().unwrap();
         assert_eq!(rules.len(), 2);
         let cut_sel = &cfg.training.cut_selection;
@@ -671,7 +785,7 @@ mod tests {
         assert_eq!(cfg.policy.checkpointing.enabled, Some(true));
 
         assert!(cfg.simulation.enabled);
-        assert_eq!(cfg.simulation.num_scenarios, 2000);
+        assert_eq!(cfg.simulation.num_scenarios, Some(2000));
 
         assert!(cfg.exports.states);
         assert!(cfg.exports.stochastic);
@@ -702,12 +816,8 @@ mod tests {
               {"type": "time_limit", "seconds": 3600.0},
               {"type": "bound_stalling", "iterations": 10, "tolerance": 0.0001},
               {
-                "type": "simulation",
-                "replications": 100,
-                "period": 20,
-                "bound_window": 5,
-                "distance_tol": 0.01,
-                "bound_tol": 0.0001
+                "type": "gap",
+                "tolerance": 1000.0
               }
             ]
           }
@@ -731,11 +841,10 @@ mod tests {
         ));
         assert!(matches!(
             rules[3],
-            StoppingRuleConfig::Simulation {
-                replications: 100,
-                period: 20,
+            StoppingRuleConfig::Gap {
+                tolerance: Some(t),
                 ..
-            }
+            } if (t - 1000.0).abs() < f64::EPSILON
         ));
     }
 
@@ -749,6 +858,23 @@ mod tests {
         assert!(
             matches!(err, LoadError::SchemaError { .. }),
             "expected SchemaError for unknown rule type, got: {err:?}"
+        );
+    }
+
+    /// The retired `simulation` stopping-rule type (replaced by `gap`) is
+    /// rejected as an unknown variant, not a recognized-but-invalid one.
+    #[test]
+    fn old_simulation_stopping_rule_type_is_unknown_variant() {
+        let f = write_config(
+            r#"{"training": {"forward_passes": 10, "stopping_rules": [
+                {"type": "simulation", "replications": 100, "period": 20,
+                 "bound_window": 5, "distance_tol": 0.01, "bound_tol": 0.0001}
+            ]}}"#,
+        );
+        let err = parse_config(f.path()).unwrap_err();
+        assert!(
+            matches!(err, LoadError::SchemaError { .. }),
+            "expected SchemaError for the retired simulation rule type, got: {err:?}"
         );
     }
 
@@ -1165,6 +1291,58 @@ mod tests {
         }
     }
 
+    /// An unknown per-class `scheme` is rejected during parse, and the error
+    /// names the accepted set.
+    #[test]
+    fn unknown_scheme_is_rejected_naming_accepted_set() {
+        let f = write_with_training_scenario_source(r#"{"inflow": {"scheme": "antithetic"}}"#);
+        let err = parse_config(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { message, .. } => {
+                assert!(
+                    message.contains("in_sample")
+                        && message.contains("out_of_sample")
+                        && message.contains("external")
+                        && message.contains("historical"),
+                    "message should name the accepted set, got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// `stopping_mode = "any"` / `"all"` both parse into the enum — the accepted
+    /// set is unchanged by the representation promotion.
+    #[test]
+    fn stopping_mode_any_and_all_parse() {
+        for (value, expected) in [("any", StoppingMode::Any), ("all", StoppingMode::All)] {
+            let f = write_config(&format!(
+                r#"{{"training": {{"forward_passes": 10, "stopping_rules": [{{"type": "iteration_limit", "limit": 5}}], "stopping_mode": "{value}"}}}}"#
+            ));
+            let cfg = parse_config(f.path()).unwrap();
+            assert_eq!(cfg.training.stopping_mode, expected);
+        }
+    }
+
+    /// An unknown `stopping_mode` is rejected during parse (the tightening: no
+    /// silent fallback to `any`), and the error names the accepted set.
+    #[test]
+    fn unknown_stopping_mode_is_rejected_naming_accepted_set() {
+        let f = write_config(
+            r#"{"training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}], "stopping_mode": "either"}}"#,
+        );
+        let err = parse_config(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { message, .. } => {
+                assert!(
+                    message.contains("any") && message.contains("all"),
+                    "message should name the accepted set, got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
     /// OutOfSample without seed → SchemaError.
     #[test]
     fn test_scenario_source_seed_required_for_oos() {
@@ -1219,6 +1397,95 @@ mod tests {
             }
             other => panic!("expected SchemaError, got: {other:?}"),
         }
+    }
+
+    // ── openings source tests ─────────────────────────────────────────────────
+
+    /// A declared `generated` openings source under training is admitted, and
+    /// the resolved `ScenarioSource` is unchanged (openings lives on the raw
+    /// config, not `ScenarioSource`).
+    #[test]
+    fn openings_generated_accepted_under_training() {
+        let f = write_with_training_scenario_source(r#"{"openings": {"source": "generated"}}"#);
+        let cfg = parse_config(f.path()).unwrap();
+        let source = cfg.training_scenario_source(f.path()).unwrap();
+        assert_eq!(source, ScenarioSource::default());
+    }
+
+    /// An `external` openings source is reserved: rejected at load naming the
+    /// field with the not-yet-supported message.
+    #[test]
+    fn openings_external_rejected_not_yet_supported() {
+        let f = write_with_training_scenario_source(r#"{"openings": {"source": "external"}}"#);
+        let cfg = parse_config(f.path()).unwrap();
+        let err = cfg.training_scenario_source(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert_eq!(field, "training.scenario_source.openings");
+                assert!(
+                    message.contains("not yet supported"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// A `file` openings source is reserved and rejected as not-yet-supported
+    /// for any declared path (the path-resolution diagnostic is deferred).
+    #[test]
+    fn openings_file_rejected_not_yet_supported_for_any_path() {
+        let f = write_with_training_scenario_source(
+            r#"{"openings": {"source": "file", "path": "scenarios/openings.parquet"}}"#,
+        );
+        let cfg = parse_config(f.path()).unwrap();
+        let err = cfg.training_scenario_source(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert_eq!(field, "training.scenario_source.openings");
+                assert!(
+                    message.contains("not yet supported"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// `openings` under `simulation.scenario_source` is rejected naming the
+    /// field — a declared openings source is valid only for training.
+    #[test]
+    fn openings_under_simulation_rejected() {
+        let f = write_with_both_scenario_sources(
+            r#"{"inflow": {"scheme": "in_sample"}}"#,
+            r#"{"openings": {"source": "generated"}}"#,
+        );
+        let cfg = parse_config(f.path()).unwrap();
+        let err = cfg.simulation_scenario_source(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert_eq!(field, "simulation.scenario_source.openings");
+                assert!(
+                    message.contains("only valid under training.scenario_source"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// A `file` openings source round-trips through serde into the `File`
+    /// variant carrying its declared path.
+    #[test]
+    fn openings_file_variant_round_trips() {
+        let parsed: Openings =
+            serde_json::from_str(r#"{"source": "file", "path": "openings.parquet"}"#).unwrap();
+        assert_eq!(
+            parsed,
+            Openings::File {
+                path: "openings.parquet".to_string()
+            }
+        );
     }
 
     /// `simulation.sampling_scheme` (dead field) is now rejected because
@@ -1496,7 +1763,7 @@ mod tests {
         assert_eq!(cfg.training.tree_seed, Some(7));
         // Siblings unchanged from base.
         assert_eq!(cfg.training.forward_passes, Some(192));
-        assert_eq!(cfg.training.stopping_mode, "any");
+        assert_eq!(cfg.training.stopping_mode, StoppingMode::Any);
         let rules = cfg.training.stopping_rules.as_deref().unwrap();
         assert!(matches!(
             rules,
@@ -1665,8 +1932,7 @@ mod tests {
                     { "type": "iteration_limit", "limit": 10 },
                     { "type": "time_limit", "seconds": 60.0 },
                     { "type": "bound_stalling", "iterations": 5, "tolerance": 0.001 },
-                    { "type": "simulation", "replications": 10, "period": 5,
-                      "bound_window": 5, "distance_tol": 0.05, "bound_tol": 0.01 }
+                    { "type": "gap", "tolerance": 1000.0, "relative_tolerance": 0.01 }
                 ],
                 "stopping_mode": "any",
                 "cut_selection": {
@@ -1730,7 +1996,8 @@ mod tests {
                     "historical_years": [1940, 1953],
                     "inflow": { "scheme": "historical" }
                 },
-                "solver": { "price": "row" }
+                "solver": { "price": "row" },
+                "selection": { "method": "sampled", "num_scenarios": 100 }
             },
             "exports": { "states": true, "stochastic": true, "fpha_deviation_points": true },
             "estimation": {
@@ -1756,7 +2023,8 @@ mod tests {
                 },
                 "parallelism": {
                     "backward_scheduler": { "method": "opening_block", "block_size": 4 }
-                }
+                },
+                "selection": { "method": "sampled", "forward_passes": 4 }
             }
         });
         vec![trial_point_flavored, opening_block_flavored]
@@ -1814,6 +2082,138 @@ mod tests {
                      but the config loaded successfully"
                 );
             }
+        }
+    }
+
+    // ── Scenario-selection count resolution ───────────────────────────────────
+
+    /// A `sampled` training selection resolves the forward-pass count, and that
+    /// count is bit-identical to declaring the deprecated root alias instead.
+    #[test]
+    fn training_sampled_selection_count_matches_root_alias() {
+        let via_selection = write_config(
+            r#"{"training": {"selection": {"method": "sampled", "forward_passes": 8}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}}"#,
+        );
+        let cfg_sel = parse_config(via_selection.path()).unwrap();
+        assert_eq!(
+            cfg_sel
+                .resolve_forward_passes(via_selection.path())
+                .unwrap(),
+            Some(8)
+        );
+
+        let via_alias = write_config(
+            r#"{"training": {"forward_passes": 8, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}}"#,
+        );
+        let cfg_alias = parse_config(via_alias.path()).unwrap();
+        assert_eq!(
+            cfg_alias.resolve_forward_passes(via_alias.path()).unwrap(),
+            Some(8)
+        );
+    }
+
+    /// Declaring both the root `training.forward_passes` alias and a
+    /// `training.selection` is rejected at load, naming both keys.
+    #[test]
+    fn training_both_declared_count_is_rejected() {
+        let f = write_config(
+            r#"{"training": {"forward_passes": 8, "selection": {"method": "sampled", "forward_passes": 8}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}}"#,
+        );
+        let err = parse_config(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert_eq!(field, "training.selection");
+                assert!(
+                    message.contains("forward_passes") && message.contains("both set"),
+                    "message must name the alias and the conflict, got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// A `training.selection` of `enumerated` is rejected at load with a
+    /// not-yet-supported message naming the training phase.
+    #[test]
+    fn training_enumerated_selection_rejected_at_load() {
+        let f = write_config(
+            r#"{"training": {"selection": {"method": "enumerated"}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}}"#,
+        );
+        let err = parse_config(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert_eq!(field, "training.selection");
+                assert!(
+                    message.contains("not yet supported"),
+                    "message must say not yet supported, got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// The simulation mirror of `enumerated` is rejected at load, naming the
+    /// simulation phase.
+    #[test]
+    fn simulation_enumerated_selection_rejected_at_load() {
+        let f = write_config(
+            r#"{"training": {"forward_passes": 4, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}, "simulation": {"enabled": true, "selection": {"method": "enumerated"}}}"#,
+        );
+        let err = parse_config(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert_eq!(field, "simulation.selection");
+                assert!(
+                    message.contains("not yet supported"),
+                    "message must say not yet supported, got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    /// A `sampled` simulation selection resolves its scenario count; an absent
+    /// count (no selection, no alias) resolves to the default.
+    #[test]
+    fn simulation_sampled_and_default_num_scenarios_resolve() {
+        let via_selection = write_config(
+            r#"{"training": {"forward_passes": 4, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}, "simulation": {"enabled": true, "selection": {"method": "sampled", "num_scenarios": 500}}}"#,
+        );
+        let cfg_sel = parse_config(via_selection.path()).unwrap();
+        assert_eq!(
+            cfg_sel.resolve_num_scenarios(via_selection.path()).unwrap(),
+            500
+        );
+
+        let via_default = write_config(
+            r#"{"training": {"forward_passes": 4, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}, "simulation": {"enabled": true}}"#,
+        );
+        let cfg_default = parse_config(via_default.path()).unwrap();
+        assert_eq!(
+            cfg_default
+                .resolve_num_scenarios(via_default.path())
+                .unwrap(),
+            2000
+        );
+    }
+
+    /// Declaring both the root `simulation.num_scenarios` alias and a
+    /// `simulation.selection` is rejected at load, naming both keys.
+    #[test]
+    fn simulation_both_declared_count_is_rejected() {
+        let f = write_config(
+            r#"{"training": {"forward_passes": 4, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}, "simulation": {"enabled": true, "num_scenarios": 500, "selection": {"method": "sampled", "num_scenarios": 700}}}"#,
+        );
+        let err = parse_config(f.path()).unwrap_err();
+        match &err {
+            LoadError::SchemaError { field, message, .. } => {
+                assert_eq!(field, "simulation.selection");
+                assert!(
+                    message.contains("num_scenarios") && message.contains("both set"),
+                    "message must name the alias and the conflict, got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
         }
     }
 }

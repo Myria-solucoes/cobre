@@ -561,6 +561,8 @@ impl StudySetup {
             &stochastic,
         )?;
 
+        admission_gate(&risk_measures, &stopping_rule_set)?;
+
         let hydro_min_storage_hm3: Vec<f64> =
             system.hydros().iter().map(|h| h.min_storage_hm3).collect();
 
@@ -1482,6 +1484,136 @@ fn build_risk_measures(system: &System) -> Vec<RiskMeasure> {
         .filter(|s| s.id >= 0)
         .map(|s| RiskMeasure::from(s.risk_config))
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Admission gate
+// ---------------------------------------------------------------------------
+
+/// The setup-time admission gate: the permanent arms that survive the
+/// node-native collapse, evaluated once from
+/// [`StudySetup::from_broadcast_params`]. Absent the gated features (no `gap`
+/// stopping rule, or an expectation measure at every stage) it returns `Ok(())`
+/// unconditionally, so a default study is byte-neutral.
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] when a `gap` stopping rule is present under
+/// any stage's effective non-expectation risk measure.
+fn admission_gate(
+    risk_measures: &[RiskMeasure],
+    stopping_rules: &StoppingRuleSet,
+) -> Result<(), SddpError> {
+    reject_gap_under_effective_risk_aversion(risk_measures, stopping_rules)
+}
+
+/// Reject a `gap` stopping rule under an effective non-expectation risk measure:
+/// the exact upper bound a `gap` rule compares the lower bound against is
+/// defined only under expectation, so pairing a `gap` rule with an effectively
+/// risk-averse measure at any stage is inadmissible. No `gap` rule present ⇒
+/// `Ok(())`.
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] naming the rule, the offending stage's
+/// measure, and the admitting condition (an expectation measure).
+fn reject_gap_under_effective_risk_aversion(
+    risk_measures: &[RiskMeasure],
+    stopping_rules: &StoppingRuleSet,
+) -> Result<(), SddpError> {
+    if !stopping_rules.rules.iter().any(rule_is_gap) {
+        return Ok(());
+    }
+    for (stage, measure) in risk_measures.iter().enumerate() {
+        if is_effective_non_expectation(measure) {
+            return Err(SddpError::Validation(format!(
+                "gap stopping rule is inadmissible under the effective non-expectation \
+                 risk measure at stage {stage} ({measure:?}); a gap rule admits only an \
+                 expectation risk measure at every stage"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `rule` is the `gap` stopping-rule variant. Total match (every variant
+/// named, `Gap` destructured with no `..`) so a new field on
+/// [`StoppingRule::Gap`] or a new [`StoppingRule`] variant must be dispositioned
+/// here rather than silently falling through.
+fn rule_is_gap(rule: &StoppingRule) -> bool {
+    match rule {
+        StoppingRule::Gap {
+            tolerance: _,
+            relative_tolerance: _,
+        } => true,
+        StoppingRule::IterationLimit { .. }
+        | StoppingRule::TimeLimit { .. }
+        | StoppingRule::BoundStalling { .. }
+        | StoppingRule::GracefulShutdown => false,
+    }
+}
+
+/// Whether `measure` is *effectively* non-expectation (risk-averse).
+/// `CVaR { lambda: 0 }` is documented-equivalent to `Expectation` (its convex
+/// weight on the tail is zero), so only a positive risk-aversion weight counts.
+/// `RiskMeasure` is destructured exhaustively (every field named, no `..`) so a
+/// new `CVaR` field or a new variant must be dispositioned here.
+fn is_effective_non_expectation(measure: &RiskMeasure) -> bool {
+    match measure {
+        RiskMeasure::Expectation => false,
+        RiskMeasure::CVaR { alpha: _, lambda } => *lambda > 0.0,
+    }
+}
+
+/// Reject when a declared simulation census count disagrees with the
+/// graph-derived enumerated scenario count. Spelling-agnostic: it takes the
+/// already-extracted `declared` count, never a config field, so which key
+/// declares the census stays the consuming feature's wiring concern. `None`, or
+/// `Some(k)` with `k == derived`, is `Ok(())`.
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] naming both counts and their sources when
+/// `declared` is `Some(k)` and `k != derived`.
+// Consumer is the declared-census consistency check; the census config spelling
+// lands with the consuming feature, so this is unit-tested substrate until then.
+#[allow(dead_code)]
+pub(crate) fn check_census(declared: Option<u32>, derived: u64) -> Result<(), SddpError> {
+    match declared {
+        Some(k) if u64::from(k) != derived => Err(SddpError::Validation(format!(
+            "declared simulation census count ({k}) disagrees with the graph-derived \
+             enumerated scenario count ({derived}); the declared census (source: the \
+             study's simulation selection) must equal the count enumerated from the \
+             policy graph's root→leaf paths (source: the node graph)"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// Advisory (never a reject) for an asymmetric enumeration declaration: when
+/// exactly one phase declares `enumerated` scenario selection, one census-only
+/// capability is unavailable. Names both phases and the specific missing
+/// capability — the exact lower bound (needs enumerated training) or the
+/// weighted census simulation statistics (needs enumerated simulation) — never
+/// a generic "census required". Symmetric declarations warn nothing.
+// Consumer is the setup admission gate once a phase can declare `enumerated`
+// selection (rejected at config load until then); unit-tested substrate here.
+#[allow(dead_code)]
+fn warn_on_enumeration_asymmetry(training_enumerated: bool, simulation_enumerated: bool) {
+    match (training_enumerated, simulation_enumerated) {
+        (true, false) => tracing::warn!(
+            "training declares enumerated scenario selection but simulation declares \
+             sampled: the exact lower bound from exhaustive training enumeration is \
+             available, but the weighted census simulation statistics are not, since \
+             simulation samples its scenarios"
+        ),
+        (false, true) => tracing::warn!(
+            "simulation declares enumerated scenario selection but training declares \
+             sampled: the weighted census simulation statistics are available, but the \
+             exact lower bound is not, since training samples its scenarios"
+        ),
+        (true, true) | (false, false) => {}
+    }
 }
 
 fn build_entity_counts(system: &System) -> EntityCounts {

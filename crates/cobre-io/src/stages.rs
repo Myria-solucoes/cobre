@@ -50,7 +50,7 @@ use cobre_core::temporal::{
     SeasonCycleType, SeasonDefinition, SeasonMap, Stage, StageRiskConfig, StageStateConfig,
     Transition,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
@@ -128,10 +128,10 @@ pub(crate) struct RawSeasonEntry {
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub(crate) struct RawPolicyGraph {
-    /// Horizon type. Only `"finite_horizon"` is supported; `"cyclic"` is reserved
-    /// and rejected (no engine consumer today).
+    /// Horizon type. Only `finite_horizon` is supported; `cyclic` is reserved
+    /// and rejected during conversion (no engine consumer today).
     #[serde(rename = "type")]
-    graph_type: String,
+    graph_type: RawPolicyGraphType,
     /// Global annual discount rate. Must be >= 0.0.
     annual_discount_rate: f64,
     /// Stage transitions.
@@ -196,9 +196,9 @@ pub(crate) struct RawStage {
     season_id: Option<usize>,
     /// Load blocks within this stage.
     blocks: Vec<RawBlock>,
-    /// Block mode: `"parallel"` (default) or `"chronological"`.
-    #[serde(default = "default_block_mode_str")]
-    block_mode: String,
+    /// Block mode: `parallel` (default) or `chronological`.
+    #[serde(default)]
+    block_mode: RawBlockMode,
     /// State variable flags.
     #[serde(default)]
     state_variables: Option<RawStateVariables>,
@@ -210,12 +210,113 @@ pub(crate) struct RawStage {
     /// only external openings. Accepts the legacy `num_scenarios` spelling.
     #[serde(alias = "num_scenarios", default)]
     num_openings: Option<u32>,
-    /// Sampling method for noise generation. Default: `"saa"`.
-    #[serde(default = "default_sampling_method_str")]
-    sampling_method: String,
+    /// Sampling method for noise generation. Default: `saa`.
+    #[serde(default)]
+    sampling_method: RawNoiseMethod,
     /// Per-stage annual discount rate override; absent uses `policy_graph.annual_discount_rate`.
     #[serde(default)]
     annual_discount_rate_override: Option<f64>,
+}
+
+/// Horizon type discriminator (`stages.json` `policy_graph.type`).
+///
+/// Both variants parse; `cyclic` is rejected as reserved during conversion
+/// (see [`convert_policy_graph_type`]), never at parse, so the reserved message
+/// fires rather than a generic unknown-variant error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) enum RawPolicyGraphType {
+    /// Acyclic stage chain with a definite end stage.
+    FiniteHorizon,
+    /// Infinite periodic horizon (reserved; not yet supported).
+    Cyclic,
+}
+
+impl<'de> Deserialize<'de> for RawPolicyGraphType {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "finite_horizon" => Ok(Self::FiniteHorizon),
+            "cyclic" => Ok(Self::Cyclic),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["finite_horizon", "cyclic"],
+            )),
+        }
+    }
+}
+
+/// Block formulation mode discriminator (`stages.json` `stages[].block_mode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) enum RawBlockMode {
+    /// Independent sub-periods solved simultaneously.
+    #[default]
+    Parallel,
+    /// Sequential blocks with intra-stage state transitions.
+    Chronological,
+}
+
+impl<'de> Deserialize<'de> for RawBlockMode {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "parallel" => Ok(Self::Parallel),
+            "chronological" => Ok(Self::Chronological),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["parallel", "chronological"],
+            )),
+        }
+    }
+}
+
+/// Opening-tree noise-generation method discriminator (`stages.json`
+/// `stages[].sampling_method`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub(crate) enum RawNoiseMethod {
+    /// Sample Average Approximation (pure Monte Carlo).
+    #[default]
+    Saa,
+    /// Latin Hypercube Sampling.
+    Lhs,
+    /// Quasi-Monte Carlo with Sobol sequences.
+    QmcSobol,
+    /// Quasi-Monte Carlo with Halton sequences.
+    QmcHalton,
+    /// Selective/representative sampling.
+    Selective,
+    /// Historical residuals from the historical scenario library.
+    HistoricalResiduals,
+}
+
+impl<'de> Deserialize<'de> for RawNoiseMethod {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "saa" => Ok(Self::Saa),
+            "lhs" => Ok(Self::Lhs),
+            "qmc_sobol" => Ok(Self::QmcSobol),
+            "qmc_halton" => Ok(Self::QmcHalton),
+            "selective" => Ok(Self::Selective),
+            "historical_residuals" => Ok(Self::HistoricalResiduals),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &[
+                    "saa",
+                    "lhs",
+                    "qmc_sobol",
+                    "qmc_halton",
+                    "selective",
+                    "historical_residuals",
+                ],
+            )),
+        }
+    }
 }
 
 /// Intermediate type for a pre-study stage entry (negative IDs).
@@ -299,14 +400,6 @@ pub(crate) struct RawCVarParams {
 }
 
 // ── Default functions ─────────────────────────────────────────────────────────
-
-fn default_block_mode_str() -> String {
-    "parallel".to_string()
-}
-
-fn default_sampling_method_str() -> String {
-    "saa".to_string()
-}
 
 fn default_risk_measure() -> RawRiskMeasure {
     RawRiskMeasure::Expectation("expectation".to_string())
@@ -660,18 +753,10 @@ fn convert_stages(raw: RawStagesFile, path: &Path) -> Result<StagesData, LoadErr
         }
 
         let blocks = convert_blocks(&raw_stage.blocks);
-        let block_mode = convert_block_mode(
-            &raw_stage.block_mode,
-            &format!("stages[{i}].block_mode"),
-            path,
-        )?;
+        let block_mode = convert_block_mode(raw_stage.block_mode);
         let state_config = convert_state_config(raw_stage.state_variables);
         let risk_config = convert_risk_measure(raw_stage.risk_measure);
-        let noise_method = convert_noise_method(
-            &raw_stage.sampling_method,
-            &format!("stages[{i}].sampling_method"),
-            path,
-        )?;
+        let noise_method = convert_noise_method(raw_stage.sampling_method);
         let branching_factor = raw_stage.num_openings.unwrap_or(1) as usize;
         let season_id = resolve_or_validate_season_id(
             raw_stage.season_id,
@@ -755,7 +840,7 @@ fn convert_stages(raw: RawStagesFile, path: &Path) -> Result<StagesData, LoadErr
 }
 
 fn convert_policy_graph(raw: RawPolicyGraph, path: &Path) -> Result<PolicyGraph, LoadError> {
-    let graph_type = convert_policy_graph_type(&raw.graph_type, path)?;
+    let graph_type = convert_policy_graph_type(raw.graph_type, path)?;
 
     let transitions: Vec<Transition> = raw
         .transitions
@@ -925,54 +1010,38 @@ fn convert_risk_measure(raw: RawRiskMeasure) -> StageRiskConfig {
     }
 }
 
-// ── String-to-enum converters ─────────────────────────────────────────────────
+// ── Raw-to-canonical converters ───────────────────────────────────────────────
 
-fn convert_block_mode(s: &str, field: &str, path: &Path) -> Result<BlockMode, LoadError> {
-    match s {
-        "parallel" => Ok(BlockMode::Parallel),
-        "chronological" => Ok(BlockMode::Chronological),
-        other => Err(LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: field.to_string(),
-            message: format!(
-                "unknown block_mode '{other}', expected 'parallel' or 'chronological'"
-            ),
-        }),
+fn convert_block_mode(mode: RawBlockMode) -> BlockMode {
+    match mode {
+        RawBlockMode::Parallel => BlockMode::Parallel,
+        RawBlockMode::Chronological => BlockMode::Chronological,
     }
 }
 
-fn convert_noise_method(s: &str, field: &str, path: &Path) -> Result<NoiseMethod, LoadError> {
-    match s {
-        "saa" => Ok(NoiseMethod::Saa),
-        "lhs" => Ok(NoiseMethod::Lhs),
-        "qmc_sobol" => Ok(NoiseMethod::QmcSobol),
-        "qmc_halton" => Ok(NoiseMethod::QmcHalton),
-        "selective" => Ok(NoiseMethod::Selective),
-        "historical_residuals" => Ok(NoiseMethod::HistoricalResiduals),
-        other => Err(LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: field.to_string(),
-            message: format!(
-                "unknown sampling_method '{other}', expected one of: saa, lhs, qmc_sobol, qmc_halton, selective, historical_residuals"
-            ),
-        }),
+fn convert_noise_method(method: RawNoiseMethod) -> NoiseMethod {
+    match method {
+        RawNoiseMethod::Saa => NoiseMethod::Saa,
+        RawNoiseMethod::Lhs => NoiseMethod::Lhs,
+        RawNoiseMethod::QmcSobol => NoiseMethod::QmcSobol,
+        RawNoiseMethod::QmcHalton => NoiseMethod::QmcHalton,
+        RawNoiseMethod::Selective => NoiseMethod::Selective,
+        RawNoiseMethod::HistoricalResiduals => NoiseMethod::HistoricalResiduals,
     }
 }
 
-fn convert_policy_graph_type(s: &str, path: &Path) -> Result<PolicyGraphType, LoadError> {
-    match s {
-        "finite_horizon" => Ok(PolicyGraphType::FiniteHorizon),
-        "cyclic" => Err(LoadError::SchemaError {
+fn convert_policy_graph_type(
+    graph_type: RawPolicyGraphType,
+    path: &Path,
+) -> Result<PolicyGraphType, LoadError> {
+    match graph_type {
+        RawPolicyGraphType::FiniteHorizon => Ok(PolicyGraphType::FiniteHorizon),
+        RawPolicyGraphType::Cyclic => Err(LoadError::SchemaError {
             path: path.to_path_buf(),
             field: "policy_graph.type".to_string(),
             message: "policy_graph type 'cyclic' is reserved and not yet supported; \
                       expected 'finite_horizon'"
                 .to_string(),
-        }),
-        other => Err(LoadError::SchemaError {
-            path: path.to_path_buf(),
-            field: "policy_graph.type".to_string(),
-            message: format!("unknown policy_graph type '{other}', expected 'finite_horizon'"),
         }),
     }
 }
@@ -2187,6 +2256,80 @@ mod tests {
         }
     }
 
+    /// An unknown `policy_graph.type` that is not the reserved `cyclic` is
+    /// rejected at parse, and the serde error names the accepted set.
+    #[test]
+    fn unknown_policy_graph_type_is_rejected_naming_accepted_set() {
+        let json = r#"{
+          "policy_graph": { "type": "elliptic", "annual_discount_rate": 0.0, "transitions": [] },
+          "stages": [
+            { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
+              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 5 }
+          ]
+        }"#;
+        let f = write_json(json);
+        let err = parse_stages(f.path()).unwrap_err();
+        match &err {
+            LoadError::ParseError { message, .. } => {
+                assert!(
+                    message.contains("finite_horizon") && message.contains("cyclic"),
+                    "message should name the accepted set, got: {message}"
+                );
+            }
+            other => panic!("expected ParseError, got: {other:?}"),
+        }
+    }
+
+    /// An unknown `block_mode` is rejected at parse, and the serde error names
+    /// the accepted set.
+    #[test]
+    fn unknown_block_mode_is_rejected_naming_accepted_set() {
+        let json = r#"{
+          "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] },
+          "stages": [
+            { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
+              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 5,
+              "block_mode": "diagonal" }
+          ]
+        }"#;
+        let f = write_json(json);
+        let err = parse_stages(f.path()).unwrap_err();
+        match &err {
+            LoadError::ParseError { message, .. } => {
+                assert!(
+                    message.contains("parallel") && message.contains("chronological"),
+                    "message should name the accepted set, got: {message}"
+                );
+            }
+            other => panic!("expected ParseError, got: {other:?}"),
+        }
+    }
+
+    /// An unknown `sampling_method` is rejected at parse, and the serde error
+    /// names the accepted set.
+    #[test]
+    fn unknown_sampling_method_is_rejected_naming_accepted_set() {
+        let json = r#"{
+          "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] },
+          "stages": [
+            { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
+              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 5,
+              "sampling_method": "antithetic" }
+          ]
+        }"#;
+        let f = write_json(json);
+        let err = parse_stages(f.path()).unwrap_err();
+        match &err {
+            LoadError::ParseError { message, .. } => {
+                assert!(
+                    message.contains("saa") && message.contains("historical_residuals"),
+                    "message should name the accepted set, got: {message}"
+                );
+            }
+            other => panic!("expected ParseError, got: {other:?}"),
+        }
+    }
+
     /// A deck spelling the legacy `num_scenarios` loads unchanged through the
     /// `num_openings` alias (C1), and the count reaches `branching_factor` (B1).
     #[test]
@@ -2313,17 +2456,14 @@ mod tests {
         );
     }
 
-    /// `convert_noise_method("historical_residuals", ...)` returns
-    /// `Ok(NoiseMethod::HistoricalResiduals)`.
+    /// `convert_noise_method(RawNoiseMethod::HistoricalResiduals)` returns
+    /// `NoiseMethod::HistoricalResiduals`.
     #[test]
     fn test_convert_noise_method_historical_residuals() {
-        let f = write_json(VALID_JSON);
-        let result = convert_noise_method(
-            "historical_residuals",
-            "stages[0].sampling_method",
-            f.path(),
+        assert_eq!(
+            convert_noise_method(RawNoiseMethod::HistoricalResiduals),
+            NoiseMethod::HistoricalResiduals
         );
-        assert_eq!(result.unwrap(), NoiseMethod::HistoricalResiduals);
     }
 
     /// Given study stages whose ids are non-contiguous and non-0-based (a

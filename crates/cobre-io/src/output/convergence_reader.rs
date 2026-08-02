@@ -284,8 +284,8 @@ mod tests {
         use crate::config::{
             CheckpointingConfig, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
             ModelingConfig, ParallelismConfig, PolicyConfig, PolicyMode, RowSelectionConfig,
-            SimulationConfig, StoppingRuleConfig, TrainingConfig, TrainingSolverConfig,
-            UpperBoundEvaluationConfig,
+            SimulationConfig, StoppingMode, StoppingRuleConfig, TrainingConfig,
+            TrainingSolverConfig, UpperBoundEvaluationConfig,
         };
         crate::Config {
             schema: None,
@@ -299,11 +299,12 @@ mod tests {
                 tree_seed: None,
                 forward_passes: Some(4),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 10 }]),
-                stopping_mode: "any".to_string(),
+                stopping_mode: StoppingMode::Any,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 parallelism: ParallelismConfig::default(),
                 scenario_source: None,
+                selection: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig {
@@ -314,10 +315,11 @@ mod tests {
             },
             simulation: SimulationConfig {
                 enabled: false,
-                num_scenarios: 0,
+                num_scenarios: Some(0),
                 io_channel_capacity: 64,
                 scenario_source: None,
                 solver: None,
+                selection: None,
             },
             exports: ExportsConfig::default(),
             estimation: EstimationConfig::default(),

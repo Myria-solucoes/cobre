@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::panic, clippy::doc_markdown)]
 
 use cobre_io::PolicyMode;
-use cobre_io::config::{InflowNonNegativityMethod, parse_config};
+use cobre_io::config::{InflowNonNegativityMethod, StoppingMode, parse_config};
 use std::io::Write;
 use tempfile::NamedTempFile;
 
@@ -35,7 +35,8 @@ fn test_minimal_config_all_defaults() {
         "training.enabled should default to true"
     );
     assert_eq!(
-        cfg.training.stopping_mode, "any",
+        cfg.training.stopping_mode,
+        StoppingMode::Any,
         "training.stopping_mode should default to 'any'"
     );
     assert!(
@@ -48,8 +49,13 @@ fn test_minimal_config_all_defaults() {
         "simulation.enabled should default to false"
     );
     assert_eq!(
-        cfg.simulation.num_scenarios, 2000,
-        "simulation.num_scenarios should default to 2000"
+        cfg.simulation.num_scenarios, None,
+        "simulation.num_scenarios alias defaults to absent"
+    );
+    assert_eq!(
+        cfg.resolve_num_scenarios(f.path()).unwrap(),
+        2000,
+        "absent num_scenarios resolves to the default sampled count"
     );
 
     assert_eq!(
@@ -150,13 +156,13 @@ fn test_config_all_sections_explicit_no_defaults_applied() {
     assert!(!cfg.training.enabled, "enabled: false should be preserved");
     assert_eq!(cfg.training.tree_seed, Some(7));
     assert_eq!(cfg.training.forward_passes, Some(192));
-    assert_eq!(cfg.training.stopping_mode, "all");
+    assert_eq!(cfg.training.stopping_mode, StoppingMode::All);
 
     assert!(
         cfg.simulation.enabled,
         "simulation.enabled: true should be preserved"
     );
-    assert_eq!(cfg.simulation.num_scenarios, 500);
+    assert_eq!(cfg.simulation.num_scenarios, Some(500));
 
     assert_eq!(cfg.policy.path, "./my_policy");
     assert_eq!(cfg.policy.mode, PolicyMode::WarmStart);
@@ -201,8 +207,13 @@ fn test_config_absent_simulation_uses_defaults() {
         "absent simulation section must default enabled to false"
     );
     assert_eq!(
-        cfg.simulation.num_scenarios, 2000,
-        "absent simulation section must default num_scenarios to 2000"
+        cfg.simulation.num_scenarios, None,
+        "absent simulation section leaves the num_scenarios alias absent"
+    );
+    assert_eq!(
+        cfg.resolve_num_scenarios(f.path()).unwrap(),
+        2000,
+        "absent simulation section resolves num_scenarios to the default"
     );
 }
 

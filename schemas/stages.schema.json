@@ -27,6 +27,21 @@
       ],
       "type": "object"
     },
+    "RawBlockMode": {
+      "description": "Block formulation mode discriminator (`stages.json` `stages[].block_mode`).",
+      "oneOf": [
+        {
+          "const": "parallel",
+          "description": "Independent sub-periods solved simultaneously.",
+          "type": "string"
+        },
+        {
+          "const": "chronological",
+          "description": "Sequential blocks with intra-stage state transitions.",
+          "type": "string"
+        }
+      ]
+    },
     "RawCVarParams": {
       "additionalProperties": false,
       "description": "`CVaR` parameters nested inside the `cvar` key.",
@@ -86,6 +101,41 @@
       ],
       "type": "object"
     },
+    "RawNoiseMethod": {
+      "description": "Opening-tree noise-generation method discriminator (`stages.json`\n`stages[].sampling_method`).",
+      "oneOf": [
+        {
+          "const": "saa",
+          "description": "Sample Average Approximation (pure Monte Carlo).",
+          "type": "string"
+        },
+        {
+          "const": "lhs",
+          "description": "Latin Hypercube Sampling.",
+          "type": "string"
+        },
+        {
+          "const": "qmc_sobol",
+          "description": "Quasi-Monte Carlo with Sobol sequences.",
+          "type": "string"
+        },
+        {
+          "const": "qmc_halton",
+          "description": "Quasi-Monte Carlo with Halton sequences.",
+          "type": "string"
+        },
+        {
+          "const": "selective",
+          "description": "Selective/representative sampling.",
+          "type": "string"
+        },
+        {
+          "const": "historical_residuals",
+          "description": "Historical residuals from the historical scenario library.",
+          "type": "string"
+        }
+      ]
+    },
     "RawPolicyGraph": {
       "additionalProperties": false,
       "description": "Intermediate type for the `policy_graph` sub-object.",
@@ -110,8 +160,8 @@
           "type": "array"
         },
         "type": {
-          "description": "Horizon type. Only `\"finite_horizon\"` is supported; `\"cyclic\"` is reserved\nand rejected (no engine consumer today).",
-          "type": "string"
+          "$ref": "#/$defs/RawPolicyGraphType",
+          "description": "Horizon type. Only `finite_horizon` is supported; `cyclic` is reserved\nand rejected during conversion (no engine consumer today)."
         }
       },
       "required": [
@@ -119,6 +169,21 @@
         "annual_discount_rate"
       ],
       "type": "object"
+    },
+    "RawPolicyGraphType": {
+      "description": "Horizon type discriminator (`stages.json` `policy_graph.type`).\n\nBoth variants parse; `cyclic` is rejected as reserved during conversion\n(see [`convert_policy_graph_type`]), never at parse, so the reserved message\nfires rather than a generic unknown-variant error.",
+      "oneOf": [
+        {
+          "const": "finite_horizon",
+          "description": "Acyclic stage chain with a definite end stage.",
+          "type": "string"
+        },
+        {
+          "const": "cyclic",
+          "description": "Infinite periodic horizon (reserved; not yet supported).",
+          "type": "string"
+        }
+      ]
     },
     "RawPreStudyStage": {
       "additionalProperties": false,
@@ -271,9 +336,9 @@
           ]
         },
         "block_mode": {
+          "$ref": "#/$defs/RawBlockMode",
           "default": "parallel",
-          "description": "Block mode: `\"parallel\"` (default) or `\"chronological\"`.",
-          "type": "string"
+          "description": "Block mode: `parallel` (default) or `chronological`."
         },
         "blocks": {
           "description": "Load blocks within this stage.",
@@ -306,9 +371,9 @@
           "description": "Risk measure: `\"expectation\"` or `{\"cvar\": {\"alpha\": ..., \"lambda\": ...}}`."
         },
         "sampling_method": {
+          "$ref": "#/$defs/RawNoiseMethod",
           "default": "saa",
-          "description": "Sampling method for noise generation. Default: `\"saa\"`.",
-          "type": "string"
+          "description": "Sampling method for noise generation. Default: `saa`."
         },
         "season_id": {
           "default": null,

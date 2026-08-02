@@ -1235,7 +1235,7 @@ mod basis_reconstruct_churn {
         config.training.cut_selection.max_active_per_stage = None;
 
         config.simulation.enabled = true;
-        config.simulation.num_scenarios = 2;
+        config.simulation.num_scenarios = Some(2);
 
         let system = cobre_io::load_case(&case_dir).expect("load_case must succeed");
         let prepare_result =

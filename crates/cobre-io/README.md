@@ -89,8 +89,9 @@ one `iteration_limit` rule) have no defaults; `parse_config` returns
 `training.stopping_rules` accepts four internally-tagged (`"type"`) rule
 variants — `iteration_limit { limit }`, `time_limit { seconds }`,
 `bound_stalling { iterations, tolerance }`, and
-`simulation { replications, period, bound_window, distance_tol, bound_tol }` —
-combined via `training.stopping_mode`: `"any"` (default, OR) or `"all"` (AND).
+`gap { tolerance, relative_tolerance }` (parses but is rejected at load;
+evaluation is not yet wired) — combined via `training.stopping_mode`: `"any"`
+(default, OR) or `"all"` (AND).
 
 `policy.mode` is one of `PolicyMode::Fresh` (default, start from scratch),
 `WarmStart` (load existing cuts/states from `policy.path`), or `Resume`

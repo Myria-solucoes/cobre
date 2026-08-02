@@ -194,7 +194,7 @@ mod d38_dead_volume_filling_simulation {
         // The shipped parity case trains only; enable one sim scenario so the extraction path runs.
         config.simulation = SimulationConfig {
             enabled: true,
-            num_scenarios: 1,
+            num_scenarios: Some(1),
             io_channel_capacity: 8,
             ..SimulationConfig::default()
         };
@@ -764,7 +764,7 @@ mod d40_filling_cascade_simulation {
         // The shipped parity case trains only; enable one sim scenario so the extraction path runs.
         config.simulation = SimulationConfig {
             enabled: true,
-            num_scenarios: 1,
+            num_scenarios: Some(1),
             io_channel_capacity: 8,
             ..SimulationConfig::default()
         };
@@ -1154,7 +1154,7 @@ mod prefilling_spillage_frozen {
             cobre_io::parse_config(&case_dir.join("config.json")).expect("config must parse");
         config.simulation = SimulationConfig {
             enabled: true,
-            num_scenarios: 1,
+            num_scenarios: Some(1),
             io_channel_capacity: 8,
             ..SimulationConfig::default()
         };
@@ -1678,11 +1678,12 @@ mod filling_cut_validity {
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
                     limit: N_ITERATIONS as u32,
                 }]),
-                stopping_mode: "any".to_string(),
+                stopping_mode: cobre_io::config::StoppingMode::Any,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
+                selection: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
@@ -1989,7 +1990,7 @@ mod d35_pumping_commissioning_simulation {
         // The shipped parity case trains only; enable one sim scenario so the pumping extraction path runs.
         config.simulation = SimulationConfig {
             enabled: true,
-            num_scenarios: 1,
+            num_scenarios: Some(1),
             io_channel_capacity: 8,
             ..SimulationConfig::default()
         };
@@ -2148,7 +2149,7 @@ mod d36_thermal_line_commissioning_simulation {
         // extraction paths run (`StudySetup::new` reads `n_scenarios` from this).
         config.simulation = SimulationConfig {
             enabled: true,
-            num_scenarios: 1,
+            num_scenarios: Some(1),
             io_channel_capacity: 8,
             ..SimulationConfig::default()
         };
@@ -2453,7 +2454,7 @@ mod d42_nonfilling_hydro_commissioning {
             cobre_io::parse_config(&case_dir.join("config.json")).expect("config must parse");
         config.simulation = SimulationConfig {
             enabled: true,
-            num_scenarios: 1,
+            num_scenarios: Some(1),
             io_channel_capacity: 8,
             ..SimulationConfig::default()
         };

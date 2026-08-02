@@ -413,7 +413,7 @@ mod self_reproducibility_regression {
 
         let mut config_with_sim = config;
         config_with_sim.simulation.enabled = true;
-        config_with_sim.simulation.num_scenarios = 1;
+        config_with_sim.simulation.num_scenarios = Some(1);
 
         let sentinel = Path::new("config.json");
         let training_source = config_with_sim
@@ -644,7 +644,7 @@ mod b6a_hydro_inflow_parity {
         // simulation LP as well as the training LP, mirroring the D-case harness.
         let mut config_with_sim = config;
         config_with_sim.simulation.enabled = true;
-        config_with_sim.simulation.num_scenarios = 1;
+        config_with_sim.simulation.num_scenarios = Some(1);
 
         let mut setup =
             build_setup_for_case(&dir, &config_with_sim, &system, stochastic, hydro_models);
@@ -2170,11 +2170,12 @@ mod water_travel_time_no_arc_byte_identity {
                 tree_seed: Some(42),
                 forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
-                stopping_mode: "any".to_string(),
+                stopping_mode: cobre_io::config::StoppingMode::Any,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
+                selection: None,
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
