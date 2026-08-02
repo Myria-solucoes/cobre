@@ -107,7 +107,10 @@ fn lb_init_rank0<S: SolverInterface>(
     lb_cut_row_map: Option<&mut CutRowMap>,
 ) {
     let state_layout = training_ctx.state;
-    let cut_state = &training_ctx.cut_state_layouts[0];
+    // Pool id resolved from the node graph for the root node (stage 0); on the
+    // chain degeneracy this is `0`.
+    let pool_id = training_ctx.node_graph.nodes[0].pool_id;
+    let cut_state = &training_ctx.cut_state_layouts[pool_id];
     let template = &ctx.templates[0];
 
     // Append-only: cuts are never removed, keeping the lower bound monotone across
@@ -119,7 +122,7 @@ fn lb_init_rank0<S: SolverInterface>(
         append_new_cuts_to_lp(
             solver,
             fcf,
-            0,
+            pool_id,
             state_layout,
             cut_state,
             &template.col_scale,
@@ -130,7 +133,7 @@ fn lb_init_rank0<S: SolverInterface>(
         build_cut_row_batch_into(
             lb_cut_batch,
             fcf,
-            0,
+            pool_id,
             state_layout,
             cut_state,
             &template.col_scale,

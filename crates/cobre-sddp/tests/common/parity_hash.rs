@@ -9,8 +9,10 @@
 //!
 //! ## Hash whitelist (in fixed order)
 //!
-//! 1. Per-stage, per-cut: `stage_u32_le || intercept_f64_le ||
-//!    coefficient_count_u32_le || coefficient_f64_le[]`
+//! 1. Per-pool, per-cut: `pool_id_u32_le || intercept_f64_le ||
+//!    coefficient_count_u32_le || coefficient_f64_le[]`. The hashed key
+//!    iterates `fcf`'s `pools` in pool-id order — equal to stage order on a
+//!    chain (`pool_id == stage`), the only shape this harness exercises.
 //! 2. Primal trajectory (`storage_final_hm3`) per scenario per stage.
 //! 3. Dual trajectory (`water_value_per_hm3`) per scenario per stage.
 //! 4. Per-block equipment (`spillage_m3s`) — base shifts off stage 0's block
@@ -48,13 +50,14 @@ pub fn compute_parity_hash(
 ) -> String {
     let mut hasher = Sha256::new();
 
-    // Active cuts in ascending stage order, then active_cuts() slot order — fixed
-    // iteration order is what makes the cut digest declaration-order-stable.
+    // Active cuts in ascending pool-id order (equal to stage order on a chain),
+    // then active_cuts() slot order — fixed iteration order is what makes the
+    // cut digest declaration-order-stable.
     let fcf = &setup.fcf;
-    let num_stages = fcf.pools.len();
-    for stage in 0..num_stages {
-        for (_slot, intercept, coefficients) in fcf.active_cuts(stage) {
-            hasher.update((stage as u32).to_le_bytes());
+    let n_pools = fcf.pools.len();
+    for pool in 0..n_pools {
+        for (_slot, intercept, coefficients) in fcf.active_cuts(pool) {
+            hasher.update((pool as u32).to_le_bytes());
             hasher.update(intercept.to_le_bytes());
             hasher.update((coefficients.len() as u32).to_le_bytes());
             for &c in coefficients {

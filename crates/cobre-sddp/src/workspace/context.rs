@@ -135,12 +135,13 @@ pub struct TrainingContext<'a> {
     /// `n_state`, the resolvers, and the mask. Every hot-path state-column read
     /// resolves through this handle.
     pub state: &'a StateSpace,
-    /// Per-pool cut-state projection, indexed by pool `t` (paired 1:1 with
-    /// `FutureCostFunction::pools`). The backward pass reads
-    /// `cut_state_layouts[t]` when solving stage `t+1` to size pool `t`'s
-    /// extracted subgradient and every per-stage backward buffer. Empty on the
-    /// non-training paths (simulation, lower-bound eval), which never extract
-    /// cuts.
+    /// Per-pool cut-state projection, indexed by pool id (paired 1:1 with
+    /// `FutureCostFunction::pools`), resolved from the node graph's
+    /// `node → pool` map. The backward pass reads `cut_state_layouts[pool_id]`
+    /// when solving a node's successor to size that node's own pool's
+    /// extracted subgradient and every per-stage backward buffer. On the
+    /// chain degeneracy `pool_id == stage`. Empty on the non-training paths
+    /// (simulation, lower-bound eval), which never extract cuts.
     pub cut_state_layouts: &'a [CutStateProjection],
     /// Single owner of the study-invariant, non-state LP shape: non-state entity
     /// counts, optional-column presence flags, anticipated-thermal identity list.

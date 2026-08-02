@@ -1343,6 +1343,7 @@ mod hybrid_reconstruction {
             base_rows,
             slots.len(),
             state_at_capture.len(),
+            0,
         );
         cb.basis.row_status.clear();
         cb.basis.row_status.resize(base_rows, B);

@@ -261,11 +261,18 @@ pub fn validate_policy_load<K: PolicyLoadKind>(
 /// cuts between capture and export) or no cut record matches, fall back to safe
 /// all-template behavior (empty `cut_row_slots`; every cut row reconstructs
 /// BASIC). This changes only the warm-start solve path, never the optimum.
+///
+/// `node_ids` (the CURRENT study's `NodeGraph::node_ids`, one entry per stage)
+/// tags each reconstructed basis's `node_id`: a checkpoint resume/warm-start
+/// continues the same node topology, so the node at a checkpoint stage is the
+/// current study's node at that stage — never a value recovered from the
+/// checkpoint itself (the checkpoint wire carries no node id).
 #[must_use]
 pub fn build_basis_cache_from_checkpoint(
     num_stages: usize,
     stage_bases: &[OwnedPolicyBasisRecord],
     stage_cuts: &[StageCutsReadResult],
+    node_ids: &[i32],
 ) -> Vec<Option<CapturedBasis>> {
     let mut cache: Vec<Option<CapturedBasis>> = vec![None; num_stages];
     for record in stage_bases {
@@ -317,6 +324,7 @@ pub fn build_basis_cache_from_checkpoint(
             base_row_count,
             cut_row_slots,
             state_at_capture: Vec::new(),
+            node_id: node_ids[stage],
         });
     }
     cache
@@ -1887,6 +1895,7 @@ mod tests {
             base_row_count: row_status.len(),
             cut_row_slots: Vec::new(),
             state_at_capture: Vec::new(),
+            node_id: 0,
         };
         let training_result = TrainingResult::new(
             0.0,
@@ -1914,7 +1923,7 @@ mod tests {
         let buf = serialize_stage_basis(&record);
         let owned = deserialize_stage_basis(&buf).expect("codec round-trip must succeed");
 
-        let cache = build_basis_cache_from_checkpoint(1, std::slice::from_ref(&owned), &[]);
+        let cache = build_basis_cache_from_checkpoint(1, std::slice::from_ref(&owned), &[], &[0]);
         let recovered = cache[0].as_ref().expect("stage 0 basis must be present");
 
         assert_eq!(
@@ -1953,7 +1962,7 @@ mod tests {
         let buf = serialize_stage_basis(&record);
         let owned = deserialize_stage_basis(&buf).expect("codec round-trip must succeed");
 
-        let cache = build_basis_cache_from_checkpoint(1, std::slice::from_ref(&owned), &[]);
+        let cache = build_basis_cache_from_checkpoint(1, std::slice::from_ref(&owned), &[], &[0]);
         let recovered = cache[0].as_ref().expect("stage 0 basis must be present");
 
         let expected_col: Vec<BasisStatus> = col_bytes

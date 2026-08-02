@@ -197,6 +197,7 @@ impl StageOpeningSolver {
             stage_index: s,
             scenario_index: scenario,
             iteration: Some(iteration),
+            node_id: succ.successor_node_id,
         };
 
         let view = run_stage_solve(ws, &inputs)?;
@@ -302,11 +303,14 @@ impl StageOpeningSolver {
             scenario_index: scenario,
             iteration: Some(iteration),
             continue_carry,
+            node_id: succ.successor_node_id,
         };
         // The DCS LP renders `successor_pool`'s cuts into stage `s` (== successor);
-        // its projection is pool `successor`'s, NOT `succ.cut_state` (pool `t`'s,
-        // used only for the incoming extraction below).
-        let successor_cut_layout = &training_ctx.cut_state_layouts[succ.successor];
+        // its projection is the successor node's pool's, NOT `succ.cut_state`
+        // (the pool `t`'s node resolves to, used only for the incoming
+        // extraction below).
+        let successor_pool_id = training_ctx.node_graph.nodes[succ.successor].pool_id;
+        let successor_cut_layout = &training_ctx.cut_state_layouts[successor_pool_id];
         lazy_solve_preloaded(
             &mut ws.solver,
             core,

@@ -204,6 +204,14 @@ where
             .unwrap_or(0);
         fwd_pool.resize_scratch_bases(max_cols, max_rows);
 
+        // DcsSolveScratch/DcsScoringScratch are shared per worker, not per
+        // pool, so they must cover the LARGEST pool a worker's sweep may
+        // touch — sizing from `pools[0]` alone (as `initial_pool_capacity`
+        // does for the other backward-accumulator buffers above) under-covers
+        // any pool with a larger warm-start count or visit bound than pool 0's.
+        let max_pool_capacity = fcf.pools.iter().map(|p| p.capacity).max().unwrap_or(0);
+        fwd_pool.reserve_dcs_scratch(ranks.n_state, max_pool_capacity);
+
         // Sized for max local forward passes so scenario indices stay stable
         // across iterations.
         let basis_store = BasisStore::new(ranks.max_local_fwd, ranks.num_stages);
@@ -228,7 +236,7 @@ where
             config.cut_management.cut_selection.is_some() || config.events.export_states;
         let visited_archive = if needs_archive {
             Some(VisitedStatesArchive::new(
-                ranks.num_stages,
+                training_ctx.node_graph.nodes.len(),
                 ranks.n_state,
                 config.loop_config.max_iterations,
                 total_forward_passes,
@@ -400,6 +408,14 @@ where
 
         self.run_cut_management(iteration);
 
+        grow_pools_for_next_iteration(self.fcf, u64::from(self.config.loop_config.forward_passes));
+        // Growth-only: a pool `grow_pools_for_next_iteration` just grew may now
+        // exceed what the DCS scratch covers; re-reserve before the next
+        // sweep touches it (never inside the sweep itself).
+        let max_pool_capacity = self.fcf.pools.iter().map(|p| p.capacity).max().unwrap_or(0);
+        self.fwd_pool
+            .reserve_dcs_scratch(self.ranks.n_state, max_pool_capacity);
+
         let (lb, lb_lp_solves, lb_wall_ms, lb_solve_time_ms) = self.run_lower_bound(iteration)?;
 
         let (should_stop, rule_results) = self.convergence_monitor.update(lb, &sync_result);
@@ -528,8 +544,12 @@ where
             },
         );
 
-        let basis_cache =
-            broadcast_basis_cache(&self.basis_store, self.ranks.num_stages, self.comm)?;
+        let basis_cache = broadcast_basis_cache(
+            &self.basis_store,
+            self.ranks.num_stages,
+            &self.training_ctx.node_graph.node_ids,
+            self.comm,
+        )?;
 
         Ok(TrainingOutcome {
             result: TrainingResult::new(
@@ -862,13 +882,16 @@ where
             let mut rows_deactivated = 0u32;
             let mut per_stage = Vec::with_capacity(num_sel_stages);
 
+            let node_graph = self.training_ctx.node_graph;
+
             // Selection covers interior stages 1..=T-2 only. Stage 0's cuts are
             // never a backward-pass successor (their activity is never updated);
             // the terminal stage T-1 receives no cuts. Stage 0 is recorded here;
             // the loop below ranges 1..num_sel_stages.
             #[allow(clippy::cast_possible_truncation)]
             {
-                let pool0 = &self.fcf.pools[0];
+                let pool0_id = node_graph.nodes[0].pool_id;
+                let pool0 = &self.fcf.pools[pool0_id];
                 let active_0 = pool0.active_count() as u32;
                 per_stage.push(StageRowSelectionRecord {
                     stage: 0,
@@ -889,30 +912,31 @@ where
             // saturates the cores via its inner parallelism.
             let pools = &self.fcf.pools;
             #[allow(clippy::cast_possible_truncation)]
-            let deactivations: Vec<(usize, CutActivityUpdates, f64)> = (1..num_sel_stages)
+            let deactivations: Vec<(usize, usize, CutActivityUpdates, f64)> = (1..num_sel_stages)
                 .map(|stage| {
-                    let pool = &pools[stage];
-                    let states = archive_ref.map_or(&[] as &[f64], |a| a.states_for_stage(stage));
+                    let pool_id = node_graph.nodes[stage].pool_id;
+                    let pool = &pools[pool_id];
+                    let states = archive_ref.map_or(&[] as &[f64], |a| a.states_for_node(stage));
                     let start = Instant::now();
                     let deact = strategy.select_for_stage(pool, states, iteration, stage as u32);
                     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-                    (stage, deact, elapsed_ms)
+                    (stage, pool_id, deact, elapsed_ms)
                 })
                 .collect();
 
             #[allow(clippy::cast_possible_truncation)]
-            for (stage, deact, stage_sel_time_ms) in deactivations {
-                let pool = &self.fcf.pools[stage];
+            for (stage, pool_id, deact, stage_sel_time_ms) in deactivations {
+                let pool = &self.fcf.pools[pool_id];
                 let populated = pool.populated() as u32;
                 let active_before = pool.active_count() as u32;
                 let n_deact = deact.updates.len() as u32;
                 let n_reactivated = deact.reactivations.len() as u32;
                 rows_deactivated += n_deact;
 
-                self.fcf.pools[stage].apply_updates(&deact);
+                self.fcf.pools[pool_id].apply_updates(&deact);
 
-                let active_after = self.fcf.pools[stage].active_count() as u32;
-                let rows_in_lp = self.fcf.pools[stage].cuts_in_lp() as u32;
+                let active_after = self.fcf.pools[pool_id].active_count() as u32;
+                let rows_in_lp = self.fcf.pools[pool_id].cuts_in_lp() as u32;
                 per_stage.push(StageRowSelectionRecord {
                     stage: stage as u32,
                     rows_populated: populated,
@@ -969,9 +993,11 @@ where
         if let Some(b) = self.config.cut_management.budget {
             let budget_start = Instant::now();
             let mut total_evicted = 0u32;
+            let node_graph = self.training_ctx.node_graph;
             for stage in 0..self.ranks.num_stages {
+                let pool_id = node_graph.nodes[stage].pool_id;
                 #[allow(clippy::cast_possible_truncation)]
-                let result = self.fcf.pools[stage].enforce_budget(
+                let result = self.fcf.pools[pool_id].enforce_budget(
                     b,
                     iteration,
                     self.config.loop_config.forward_passes,
@@ -1034,10 +1060,10 @@ where
     /// returning the total number of cut rows frozen.
     ///
     /// Each `frozen_templates[t]` becomes the base template plus one structural
-    /// row per active cut in `fcf.pools[t]` (`active_cuts()` order). With no
-    /// active cuts (a fresh start) every batch is empty and the freeze is a
-    /// structural copy of the base template — identical to the pre-freeze done in
-    /// `IterationScratch::new`.
+    /// row per active cut in the pool the node graph resolves for stage `t`
+    /// (`active_cuts()` order). With no active cuts (a fresh start) every batch
+    /// is empty and the freeze is a structural copy of the base template —
+    /// identical to the pre-freeze done in `IterationScratch::new`.
     ///
     /// Deliberately left unoptimized: the refreeze is quadratic in the active-cut
     /// count only in the no-cut-selection default, which production never runs at
@@ -1046,13 +1072,15 @@ where
     fn freeze_active_cuts_into_templates(&mut self) -> u64 {
         let mut total_rows_frozen: u64 = 0;
         let state = self.training_ctx.state;
+        let node_graph = self.training_ctx.node_graph;
         for t in 0..self.ranks.num_stages {
+            let pool_id = node_graph.nodes[t].pool_id;
             build_cut_row_batch_into(
                 &mut self.scratch.freeze_row_batches[t],
                 self.fcf,
-                t,
+                pool_id,
                 state,
-                &self.training_ctx.cut_state_layouts[t],
+                &self.training_ctx.cut_state_layouts[pool_id],
                 &self.stage_ctx.templates[t].col_scale,
             );
             #[allow(clippy::cast_possible_truncation)]
@@ -1149,6 +1177,39 @@ where
     }
 }
 
+/// Between-iteration capacity growth (reserved seam): doubles a pool's
+/// capacity via [`crate::cut::CutPool::grow`] (`Vec::resize`, position-stable
+/// — the append-only/slot-identity contract survives) when
+/// `realized_visits` exceeds its remaining free slots. Runs once per
+/// iteration from [`TrainingSession::run_iteration`], never inside the
+/// forward/backward sweep. A chain pool's construction-time floor already
+/// equals exactly `forward_passes` per iteration
+/// ([`crate::setup::node_graph::sampled_visit_bound`]), so feeding it the
+/// same value here never triggers growth; a declared graph's realized
+/// per-pool visit source is supplied once a general-graph traversal is
+/// wired.
+fn grow_pools_for_next_iteration(fcf: &mut FutureCostFunction, realized_visits: u64) {
+    for pool in &mut fcf.pools {
+        let populated = pool.populated();
+        // Cast cannot truncate: SDDP runs only on 64-bit targets.
+        #[allow(clippy::cast_possible_truncation)]
+        let remaining = (pool.capacity - populated) as u64;
+        if realized_visits <= remaining {
+            continue;
+        }
+        let mut new_capacity = pool.capacity.max(1);
+        loop {
+            #[allow(clippy::cast_possible_truncation)]
+            let free = (new_capacity - populated) as u64;
+            if free >= realized_visits {
+                break;
+            }
+            new_capacity *= 2;
+        }
+        pool.grow(new_capacity);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1190,7 +1251,7 @@ mod tests {
         ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context,
     };
 
-    use super::{IterationOutcome, TrainingSession};
+    use super::{IterationOutcome, TrainingSession, grow_pools_for_next_iteration};
     use crate::{
         SolverProfiles, StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
         config::{CutManagementConfig, EventConfig, LoopConfig},
@@ -2108,5 +2169,66 @@ mod tests {
             "events[10] must be TrainingFinished, got: {:?}",
             events[10]
         );
+    }
+
+    // ── grow_pools_for_next_iteration ───────────────────────────────────────
+
+    #[test]
+    fn grow_pools_for_next_iteration_doubles_when_floor_exceeded_and_preserves_slots() {
+        // A deliberately undersized "sampled-general" floor: one pool, one
+        // populated slot, one remaining slot.
+        let mut fcf = FutureCostFunction::new_per_pool(&[1], 1, 1, 2, &[0], &[1]);
+        assert_eq!(fcf.pools[0].capacity, 2);
+        fcf.pools[0].add_cut(0, 0, 7.0, &[3.0]);
+        let prior_capacity = fcf.pools[0].capacity;
+
+        grow_pools_for_next_iteration(&mut fcf, 3);
+
+        assert!(
+            fcf.pools[0].capacity > prior_capacity,
+            "capacity must grow when realized visits exceed the remaining slots"
+        );
+        assert!(
+            fcf.pools[0].is_active(0),
+            "slot 0 stays active after growth"
+        );
+        assert_eq!(fcf.pools[0].intercept(0), 7.0);
+        assert_eq!(fcf.pools[0].coefficient_row(0), &[3.0]);
+    }
+
+    #[test]
+    fn grow_pools_for_next_iteration_is_noop_when_floor_suffices() {
+        let mut fcf = FutureCostFunction::new_per_pool(&[1], 1, 1, 10, &[0], &[1]);
+        fcf.pools[0].add_cut(0, 0, 1.0, &[1.0]);
+        let prior_capacity = fcf.pools[0].capacity;
+
+        grow_pools_for_next_iteration(&mut fcf, 1);
+
+        assert_eq!(
+            fcf.pools[0].capacity, prior_capacity,
+            "no growth (no allocation) when the floor already suffices"
+        );
+    }
+
+    #[test]
+    fn grow_pools_for_next_iteration_chain_never_triggers() {
+        // A chain-shaped FCF (visit_bound == forward_passes for every pool,
+        // sampled_visit_bound): remaining capacity after any
+        // iteration is always >= forward_passes, so this reserved seam is
+        // inert on the only live path.
+        let forward_passes = 4u32;
+        let max_iterations = 3u64;
+        let mut fcf = FutureCostFunction::new(2, 1, forward_passes, max_iterations, &[0, 0]);
+        for pool in &mut fcf.pools {
+            for fp in 0..forward_passes {
+                pool.add_cut(0, fp, 1.0, &[1.0]);
+            }
+        }
+        let capacities_before: Vec<usize> = fcf.pools.iter().map(|p| p.capacity).collect();
+
+        grow_pools_for_next_iteration(&mut fcf, u64::from(forward_passes));
+
+        let capacities_after: Vec<usize> = fcf.pools.iter().map(|p| p.capacity).collect();
+        assert_eq!(capacities_before, capacities_after);
     }
 }

@@ -18,6 +18,7 @@ use cobre_io::output::policy::{
 use crate::cut::FutureCostFunction;
 use crate::indexer::{CutSlot, CutStateProjection, StateRegion, StateSpace};
 use crate::lp_builder::delivery_ring::DeliveryRing;
+use crate::setup::NodeGraph;
 use crate::training::TrainingResult;
 
 /// `EntityType::HydroStorage` discriminant from `schemas/policy.fbs`.
@@ -419,25 +420,32 @@ pub fn build_stage_basis_records<'a>(
 /// Build per-stage [`StageStatesPayload`]s from the visited states archive.
 ///
 /// Returns an empty `Vec` if the archive is `None` (non-Dominated strategies).
-/// `stage_manifests[t]` is the same per-pool entity manifest the cut payloads
-/// carry, attached to stage `t`'s states payload.
+/// `archive` is indexed per NODE (one `NodeStates` per `node_graph` position);
+/// `stage_manifests` is indexed per POOL, one entry per `fcf.pools` slot —
+/// the same array [`build_stage_cuts_payloads`] indexes. A branching graph has
+/// strictly more nodes than pools (sibling leaves share one pool), so node
+/// `t`'s manifest is `stage_manifests[node_graph.nodes[t].pool_id]` — never
+/// `stage_manifests[t]`, which is only safe on the chain degeneracy where
+/// `pool_id == t`.
 #[must_use]
 pub fn build_stage_states_payloads<'a>(
     archive: Option<&'a VisitedStatesArchive>,
     stage_manifests: &'a [Vec<EntitySlot>],
+    node_graph: &NodeGraph,
 ) -> Vec<StageStatesPayload<'a>> {
     let Some(archive) = archive else {
         return Vec::new();
     };
-    (0..archive.num_stages())
+    (0..archive.num_nodes())
         .map(|t| {
-            let stage = archive.stage(t);
+            let node = archive.node(t);
+            let pool_id = node_graph.nodes[t].pool_id;
             StageStatesPayload {
                 stage_id: t as u32,
-                state_dimension: stage.state_dimension() as u32,
-                count: stage.count() as u32,
-                data: stage.states(),
-                entity_manifest: &stage_manifests[t],
+                state_dimension: node.state_dimension() as u32,
+                count: node.count() as u32,
+                data: node.states(),
+                entity_manifest: &stage_manifests[pool_id],
             }
         })
         .collect()
@@ -454,11 +462,14 @@ pub fn build_stage_states_payloads<'a>(
 mod tests {
     use super::{
         ENTITY_TYPE_ANTICIPATED_THERMAL_STATE, ENTITY_TYPE_HYDRO_INFLOW_LAG,
-        ENTITY_TYPE_HYDRO_STORAGE, ENTITY_TYPE_HYDRO_TRANSIT_BUCKET, build_stage_entity_manifest,
+        ENTITY_TYPE_HYDRO_STORAGE, ENTITY_TYPE_HYDRO_TRANSIT_BUCKET, EntitySlot,
+        build_stage_entity_manifest, build_stage_states_payloads,
     };
     use crate::indexer::{CutStateProjection, StateSpace};
     use crate::lead_time::{AnticipatedResolution, LeadTime};
+    use crate::setup::{NodeGraph, NodeOpenings, NodeRuntime, NodeSuccessor, OpeningSource};
     use crate::test_support;
+    use crate::visited_states::VisitedStatesArchive;
     use cobre_core::commissioning::hydro_operating_active;
     use cobre_core::temporal::StageStateConfig;
     use cobre_core::{
@@ -1091,5 +1102,102 @@ mod tests {
             2024 * 12 + 4,
             "ℓ=2 plant slot 1 delivers at index 1 (2024-05)"
         );
+    }
+
+    // -- build_stage_states_payloads: node-vs-pool manifest indexing --
+
+    /// A 7-node binary tree mirroring `setup::tests::
+    /// node_native_binary_tree_loads_and_constructs_node_graph`'s fixture:
+    /// nodes 0/1/2 are internal and each own their own pool (0/1/2); leaves
+    /// 3/4/5/6 share pool 3. `n_pools == 4 < nodes.len() == 7`.
+    fn binary_tree_node_graph() -> NodeGraph {
+        let opening = NodeOpenings {
+            source: OpeningSource::Generated,
+            offset: 0,
+            len: 1,
+            q: 1.0,
+        };
+        let node = |stage: usize, pool_id: usize| NodeRuntime {
+            stage,
+            pool_id,
+            openings: opening,
+        };
+        let edge = |child: usize| NodeSuccessor {
+            child,
+            probability: 0.5,
+        };
+        NodeGraph {
+            node_ids: vec![0, 1, 2, 3, 4, 5, 6],
+            nodes: vec![
+                node(0, 0),
+                node(1, 1),
+                node(1, 2),
+                node(2, 3),
+                node(2, 3),
+                node(2, 3),
+                node(2, 3),
+            ],
+            successors: vec![
+                vec![edge(1), edge(2)],
+                vec![edge(3), edge(4)],
+                vec![edge(5), edge(6)],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ],
+            n_pools: 4,
+        }
+    }
+
+    /// A one-slot manifest tagging `pool_id` into `entity_id`, so a payload's
+    /// manifest can be traced back to the pool it came from.
+    fn manifest_for_pool(pool_id: usize) -> Vec<EntitySlot> {
+        vec![EntitySlot {
+            entity_type: ENTITY_TYPE_HYDRO_STORAGE,
+            entity_id: 100 + i32::try_from(pool_id).unwrap(),
+            subindex: 0,
+            was_active: true,
+            delivery_anchor: ENTITY_SLOT_DELIVERY_ANCHOR_SENTINEL,
+        }]
+    }
+
+    /// On a branching graph, `archive.num_nodes() (7) > stage_manifests.len()
+    /// (4)`: indexing the manifest directly by node position `t` is wrong — it
+    /// panics out of bounds the moment `t >= 4`. Indexing through
+    /// `node_graph.nodes[t].pool_id` stays in range and resolves every one of
+    /// the 4 leaves (t = 3..=6) to the SAME shared pool-3 manifest.
+    #[test]
+    fn tree_states_payload_resolves_manifest_through_node_pool_id() {
+        let node_graph = binary_tree_node_graph();
+        let stage_manifests: Vec<Vec<EntitySlot>> =
+            (0..node_graph.n_pools).map(manifest_for_pool).collect();
+
+        let mut archive = VisitedStatesArchive::new(node_graph.nodes.len(), 1, 1, 1);
+        for t in 0..node_graph.nodes.len() {
+            archive.archive_gathered_states(t, &[0.0], 1);
+        }
+
+        let payloads = build_stage_states_payloads(Some(&archive), &stage_manifests, &node_graph);
+
+        assert_eq!(payloads.len(), 7, "one payload per node, not per pool");
+        for (t, payload) in payloads.iter().enumerate() {
+            let expected_pool = node_graph.nodes[t].pool_id;
+            assert_eq!(
+                payload.entity_manifest.len(),
+                1,
+                "node {t} manifest must not be empty"
+            );
+            assert_eq!(
+                payload.entity_manifest[0].entity_id,
+                100 + i32::try_from(expected_pool).unwrap(),
+                "node {t} must carry pool {expected_pool}'s manifest, not stage_manifests[{t}]"
+            );
+        }
+
+        // The 4 leaves all resolve to the one shared pool-3 manifest.
+        for payload in &payloads[3..=6] {
+            assert_eq!(payload.entity_manifest[0].entity_id, 103);
+        }
     }
 }

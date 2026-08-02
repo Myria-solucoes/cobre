@@ -233,6 +233,7 @@ pub(crate) fn process_stage_backward_opening_block<S: SolverInterface + Send>(
                         stage_index: s,
                         scenario_index: scenario,
                         iteration: Some(iteration),
+                        node_id: succ.successor_node_id,
                     };
                     let view = run_stage_solve(ws, &inputs)?;
                     let objective = extract_duals_from_view(
@@ -324,8 +325,8 @@ pub(crate) fn process_stage_backward_opening_block<S: SolverInterface + Send>(
 /// `scratch` is `BackwardPassState::opening_block_scratch`, sized once by `set_scheduler`;
 /// the scatter overwrites `arena[0..local_work * n_openings]` in full before the
 /// aggregation loop reads it, so no clear pass is required between stages. Each
-/// touched slot's `coefficients` (and `coeffs_buf`) resize to THIS stage's
-/// `cut_n_state`, which may differ from a prior stage's — always within the
+/// touched slot's `coefficients` (and `coeffs_buf`) resize to THIS pool's
+/// `cut_n_state`, which may differ from a prior pool's — always within the
 /// capacity `OpeningBlockScratch::sized` reserved at the run's global `n_state`, so
 /// this never reallocates on the hot path.
 // Rationale: mirrors the staged-cut merge's disjoint-borrow argument list.
@@ -339,7 +340,7 @@ pub(crate) fn opening_block_finish<S: SolverInterface>(
     probabilities: &[f64],
     risk_measure: &RiskMeasure,
     fcf: &mut FutureCostFunction,
-    t: usize,
+    pool: usize,
     iteration: u64,
     fwd_offset: usize,
     scratch: &mut OpeningBlockScratch,
@@ -391,7 +392,7 @@ pub(crate) fn opening_block_finish<S: SolverInterface>(
         );
         #[allow(clippy::cast_possible_truncation)]
         fcf.add_cut(
-            t,
+            pool,
             iteration,
             (fwd_offset + m) as u32,
             intercept,

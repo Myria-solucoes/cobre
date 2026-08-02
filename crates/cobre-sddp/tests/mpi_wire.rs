@@ -165,6 +165,7 @@ mod test_mpi_wire_format_version {
             base_row_count,
             cut_slot_capacity,
             n_state,
+            0,
         );
         // Minimal valid data so the Some-path sentinel (i32_buf[0] == 1) is written.
         original
@@ -293,6 +294,7 @@ mod test_mpi_4rank_basis_broadcast_round_trip {
             base_row_count,
             cut_slot_capacity,
             n_state,
+            0,
         );
 
         for i in 0..num_cols {

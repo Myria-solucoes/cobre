@@ -429,9 +429,132 @@ pub(crate) fn enumerated_scenario_count(graph: &NodeGraph) -> Result<u64, SddpEr
     Ok(total)
 }
 
+/// Standard-deviation multiplier for [`sampled_visit_bound`]'s per-node
+/// margin (mean + this many σ under the binomial approximation for a node's
+/// realized visit count). A chain node's probability is exactly `1.0`, so its
+/// variance term is exactly `0.0` regardless of this value — the chain
+/// identity does not depend on the multiplier chosen here.
+const VISIT_BOUND_SIGMA_MULTIPLIER: f64 = 3.0;
+
+/// Per-pool construction-time visit floor under sampled forward-pass
+/// selection: for each node `n`, `⌈F·P(n) + σ·√(F·P(n)·(1−P(n)))⌉` where
+/// `P(n)` is the root→`n` product of (already load-time-normalized) edge
+/// probabilities (`P(root) = 1`, `P(m) = Σ_{n: m∈n's successors} P(n)·prob(n→m)`),
+/// summed over the nodes sharing a pool id and capped at `F` (only `F` passes
+/// exist, so no pool can realize more visits than that). This is the
+/// top-down dual of [`enumerated_scenario_count`]'s bottom-up opening-count
+/// walk, propagated in the same ascending/descending-stage order.
+///
+/// A chain node's single successor normalizes to exactly `1.0`
+/// (`chain_transition_probability`), so `P(n) = 1.0`, the variance term is
+/// exactly `0.0`, and the floor is `F` bit-for-bit for every pool — the
+/// sacred-parity chain identity falls out of this one formula with no shape
+/// branch.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation
+)]
+pub(crate) fn sampled_visit_bound(graph: &NodeGraph, forward_passes: u32) -> Vec<u64> {
+    let n = graph.nodes.len();
+    let mut has_predecessor = vec![false; n];
+    for succs in &graph.successors {
+        for succ in succs {
+            has_predecessor[succ.child] = true;
+        }
+    }
+
+    // Ascending-stage order: every successor sits exactly one stage
+    // downstream (t -> t+1), so a node's own probability is fully
+    // accumulated from its predecessors before it propagates to its children.
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&i| graph.nodes[i].stage);
+
+    let mut prob = vec![0.0f64; n];
+    for &i in &order {
+        if !has_predecessor[i] {
+            prob[i] = 1.0;
+        }
+        for succ in &graph.successors[i] {
+            prob[succ.child] += prob[i] * succ.probability;
+        }
+    }
+
+    let f = f64::from(forward_passes);
+    let mut pool_sum = vec![0u64; graph.n_pools];
+    for (i, node) in graph.nodes.iter().enumerate() {
+        let p = prob[i];
+        let mean = f * p;
+        let variance = (f * p * (1.0 - p)).max(0.0);
+        let margin = mean + VISIT_BOUND_SIGMA_MULTIPLIER * variance.sqrt();
+        pool_sum[node.pool_id] += margin.ceil() as u64;
+    }
+
+    let cap = u64::from(forward_passes);
+    pool_sum.into_iter().map(|s| s.min(cap)).collect()
+}
+
+/// Per-pool exact visit count under exhaustive (`enumerated`) forward-pass
+/// selection: the number of distinct root→node prefixes,
+/// `π(n) = Σ_{(parent, n) edges} π(parent)·|Ω_parent|`, `π(root) = 1`,
+/// summed per pool (leaf-sharing aggregates several nodes into one pool). The
+/// top-down dual of [`enumerated_scenario_count`]'s bottom-up walk:
+/// `Σ_leaf π(leaf)·|Ω_leaf| == enumerated_scenario_count(graph)`. Overflow-safe
+/// (`checked_mul`/`checked_add`), mirroring that function's guard.
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] when a path-product-sum exceeds `u64`.
+// Consumer is the `enumerated` forward-pass-selection dispatch, not yet wired
+// here; unit-tested substrate until that consumer lands.
+#[allow(dead_code)]
+pub(crate) fn enumerated_visit_bound(graph: &NodeGraph) -> Result<Vec<u64>, SddpError> {
+    fn overflow_err() -> SddpError {
+        SddpError::Validation(
+            "enumerated visit bound exceeds u64: the policy graph's root→node \
+             path-product-sum overflows"
+                .to_string(),
+        )
+    }
+
+    let n = graph.nodes.len();
+    let mut has_predecessor = vec![false; n];
+    for succs in &graph.successors {
+        for succ in succs {
+            has_predecessor[succ.child] = true;
+        }
+    }
+
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&i| graph.nodes[i].stage);
+
+    let mut prefix_count = vec![0_u64; n];
+    for &i in &order {
+        if !has_predecessor[i] {
+            prefix_count[i] = 1;
+        }
+        let len = u64::try_from(graph.nodes[i].openings.len).map_err(|_| overflow_err())?;
+        let contribution = prefix_count[i].checked_mul(len).ok_or_else(overflow_err)?;
+        for succ in &graph.successors[i] {
+            prefix_count[succ.child] = prefix_count[succ.child]
+                .checked_add(contribution)
+                .ok_or_else(overflow_err)?;
+        }
+    }
+
+    let mut pool_sum = vec![0_u64; graph.n_pools];
+    for (i, node) in graph.nodes.iter().enumerate() {
+        pool_sum[node.pool_id] = pool_sum[node.pool_id]
+            .checked_add(prefix_count[i])
+            .ok_or_else(overflow_err)?;
+    }
+    Ok(pool_sum)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cut::FutureCostFunction;
     use cobre_core::temporal::{Node as PolicyNode, PolicyGraphType, Transition};
     use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
     use std::collections::HashMap as StdHashMap;
@@ -985,5 +1108,203 @@ mod tests {
                 assert_eq!(ea.probability.to_bits(), eb.probability.to_bits());
             }
         }
+    }
+
+    // ── sampled_visit_bound: chain identity ─────────────────────────────────
+
+    #[test]
+    fn sampled_visit_bound_chain_matches_forward_passes_over_a_sweep() {
+        let n_stages = 4;
+        let stochastic = stochastic_context(n_stages, 1, 5);
+        let graph = empty_graph();
+        let study_stage_ids: Vec<i32> = (0..n_stages as i32).collect();
+        let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+        let ng = build_node_graph(&graph, n_stages, &resolver, &stochastic).unwrap();
+
+        for &(warm_start, max_iterations, forward_passes) in &[
+            (0u32, 1u64, 1u32),
+            (5, 10, 100),
+            (0, 100, 1),
+            (1000, 1, 4096),
+            (7, 37, 13),
+            (12, 1, 1),
+        ] {
+            let visit_bound = sampled_visit_bound(&ng, forward_passes);
+            assert_eq!(visit_bound.len(), ng.n_pools);
+            for &vb in &visit_bound {
+                assert_eq!(
+                    vb,
+                    u64::from(forward_passes),
+                    "chain visit_bound must equal forward_passes exactly"
+                );
+            }
+
+            let fcf = FutureCostFunction::new_per_pool(
+                &vec![1; ng.n_pools],
+                1,
+                forward_passes,
+                max_iterations,
+                &vec![warm_start; ng.n_pools],
+                &visit_bound,
+            );
+            for pool in &fcf.pools {
+                assert_eq!(
+                    pool.capacity,
+                    warm_start as usize + max_iterations as usize * forward_passes as usize,
+                    "chain capacity must equal warm_start + max_iterations * forward_passes exactly"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sampled_visit_bound_declared_chain_matches_synthesized_chain() {
+        let n_stages = 3;
+        let forward_passes = 17u32;
+        let stochastic_a = stochastic_context(n_stages, 1, 5);
+        let stochastic_b = stochastic_context(n_stages, 1, 5);
+        let study_stage_ids: Vec<i32> = (0..n_stages as i32).collect();
+        let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+
+        let ng_synthesized =
+            build_node_graph(&empty_graph(), n_stages, &resolver, &stochastic_a).unwrap();
+
+        // The same chain, declared explicitly (one node per stage, a single
+        // successor at probability 1.0 each) rather than synthesized from an
+        // empty `nodes[]`.
+        let declared = PolicyGraph {
+            nodes: vec![node(0, 0, None), node(1, 1, None), node(2, 2, None)],
+            transitions: vec![transition(0, 1, 1.0), transition(1, 2, 1.0)],
+            ..empty_graph()
+        };
+        let ng_declared = build_node_graph(&declared, n_stages, &resolver, &stochastic_b).unwrap();
+
+        assert_eq!(
+            sampled_visit_bound(&ng_synthesized, forward_passes),
+            sampled_visit_bound(&ng_declared, forward_passes),
+            "a declared chain and the synthesized one must derive identical visit bounds"
+        );
+    }
+
+    // ── enumerated_visit_bound: exact prefix counts ─────────────────────────
+
+    #[test]
+    fn enumerated_visit_bound_k_fan_matches_hand_computed_prefix_counts() {
+        // Root (stage 0, own pool) fans into K=4 leaves (stage 1, sharing ONE
+        // pool per the leaf-sharing rule). branching_factor=1 gives every
+        // node's own opening count exactly 1, so each root->leaf path
+        // contributes exactly 1 -- the DECOMP shape the epic's
+        // over-allocation example cites.
+        let stochastic = stochastic_context(2, 1, 1);
+        let graph = PolicyGraph {
+            nodes: vec![
+                node(0, 0, None),
+                node(1, 1, None),
+                node(2, 1, None),
+                node(3, 1, None),
+                node(4, 1, None),
+            ],
+            transitions: vec![
+                transition(0, 1, 0.25),
+                transition(0, 2, 0.25),
+                transition(0, 3, 0.25),
+                transition(0, 4, 0.25),
+            ],
+            ..empty_graph()
+        };
+        let study_stage_ids = [0, 1];
+        let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+        let ng = build_node_graph(&graph, 2, &resolver, &stochastic).unwrap();
+        assert_eq!(ng.n_pools, 2, "one pool for the root, one shared leaf pool");
+
+        let visit_bound = enumerated_visit_bound(&ng).unwrap();
+        let root_pool = ng.nodes[0].pool_id;
+        let leaf_pool = ng.nodes[1].pool_id;
+        assert_eq!(
+            visit_bound[root_pool], 1,
+            "root: a single root prefix, π(root) = 1"
+        );
+        assert_eq!(
+            visit_bound[leaf_pool], 4,
+            "shared leaf pool: 4 leaves each contribute π(leaf_i) = 1, summed"
+        );
+
+        let warm_start = 5u32;
+        let max_iterations = 10u64;
+        let fcf = FutureCostFunction::new_per_pool(
+            &vec![1; ng.n_pools],
+            1,
+            1,
+            max_iterations,
+            &vec![warm_start; ng.n_pools],
+            &visit_bound,
+        );
+        assert_eq!(
+            fcf.pools[root_pool].capacity,
+            warm_start as usize + max_iterations as usize
+        );
+        assert_eq!(
+            fcf.pools[leaf_pool].capacity,
+            warm_start as usize + max_iterations as usize * 4
+        );
+    }
+
+    #[test]
+    fn enumerated_visit_bound_duality_with_enumerated_scenario_count() {
+        // K-fan (branching_factor=1): duality holds with every leaf's own
+        // contribution at 1.
+        let stochastic_kfan = stochastic_context(2, 1, 1);
+        let graph_kfan = PolicyGraph {
+            nodes: vec![node(0, 0, None), node(1, 1, None), node(2, 1, None)],
+            transitions: vec![transition(0, 1, 0.5), transition(0, 2, 0.5)],
+            ..empty_graph()
+        };
+        let study_stage_ids = [0, 1];
+        let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+        let ng_kfan = build_node_graph(&graph_kfan, 2, &resolver, &stochastic_kfan).unwrap();
+        assert_prefix_duality(&ng_kfan);
+
+        // A non-DECOMP shape: the root carries its OWN within-node branching
+        // (|Ω_root| = 3), so a child's prefix count is not simply the node
+        // count -- the case that distinguishes the prefix-product formula
+        // from a bare per-node count.
+        let stochastic_branchy = stochastic_context(2, 1, 3);
+        let graph_branchy = PolicyGraph {
+            nodes: vec![node(0, 0, None), node(1, 1, None), node(2, 1, None)],
+            transitions: vec![transition(0, 1, 0.5), transition(0, 2, 0.5)],
+            ..empty_graph()
+        };
+        let ng_branchy =
+            build_node_graph(&graph_branchy, 2, &resolver, &stochastic_branchy).unwrap();
+        let visit_bound = enumerated_visit_bound(&ng_branchy).unwrap();
+        assert_eq!(
+            visit_bound[ng_branchy.nodes[1].pool_id], 6,
+            "the shared leaf pool sums both children's π = |Ω_root| each, not divided between them"
+        );
+        assert_prefix_duality(&ng_branchy);
+    }
+
+    /// `Σ_leaf π(leaf)·|Ω_leaf| == enumerated_scenario_count(graph)` — the
+    /// prefix-count/scenario-count duality [`enumerated_visit_bound`] cites.
+    /// Assumes every leaf sharing a pool carries the same `openings.len`
+    /// (true of every fixture this helper is called on).
+    fn assert_prefix_duality(graph: &NodeGraph) {
+        let visit_bound = enumerated_visit_bound(graph).unwrap();
+        let expected = enumerated_scenario_count(graph).unwrap();
+
+        let mut leaf_len_by_pool: HashMap<usize, usize> = HashMap::new();
+        for (i, n) in graph.nodes.iter().enumerate() {
+            if graph.successors[i].is_empty() {
+                leaf_len_by_pool.insert(n.pool_id, n.openings.len);
+            }
+        }
+        let total: u64 = leaf_len_by_pool
+            .iter()
+            .map(|(&pool, &len)| visit_bound[pool] * len as u64)
+            .sum();
+        assert_eq!(
+            total, expected,
+            "Σ_leaf π(leaf)*|Ω_leaf| must equal enumerated_scenario_count"
+        );
     }
 }

@@ -421,11 +421,17 @@ fn basis_store_with_one(
     // path; the reconstruction copies the template rows verbatim and
     // emits an empty cut block.
     let base_row_count = basis.row_status.len();
+    // `stage` doubles as the node id: every fixture in this module drives a
+    // chain (`chain_node_graph`), where `node_ids[t] == t`, so this must equal
+    // the successor's `node_id` for the warm-start propagation path this
+    // helper exercises to actually reach the warm path.
+    let node_id = i32::try_from(stage).expect("test fixture stage count fits in i32");
     *store.get_mut(scenario, stage) = Some(CapturedBasis {
         basis,
         base_row_count,
         cut_row_slots: Vec::new(),
         state_at_capture: Vec::new(),
+        node_id,
     });
     store
 }
@@ -4472,6 +4478,7 @@ fn run_one_trial_point_with_stores(
     let succ_spec = super::SuccessorSpec {
         t: 0,
         successor: 1,
+        successor_node_id: training_ctx.node_graph.node_ids[1],
         my_rank: 0,
         probabilities: &succ_probabilities,
         cut_batch: &empty_cut_batch,
@@ -4625,7 +4632,7 @@ fn patch_opening_bounds_pins_transit_bucket_incoming_columns_per_stage_visit() {
 fn resolve_backward_basis_returns_some_when_slot_is_populated() {
     use crate::workspace::{BasisStore, CapturedBasis};
 
-    let b = CapturedBasis::new(2, 2, 0, 0, 0);
+    let b = CapturedBasis::new(2, 2, 0, 0, 0, 0);
     let mut store = BasisStore::new(1, 2);
     *store.get_mut(0, 1) = Some(b);
 
@@ -4691,6 +4698,10 @@ fn backward_write_preserves_slot_on_infeasibility_at_omega_zero() {
         base_row_count: 2,
         cut_row_slots: Vec::new(),
         state_at_capture: vec![42.0],
+        // Matches the chain's node_ids[1] == 1 so the pre-existing slot is
+        // still eligible as a warm-start input, not silently dropped cold by
+        // the node-tag check this fixture is not exercising.
+        node_id: 1,
     };
     let mut basis_store = BasisStore::new(1, 2);
     *basis_store.get_mut(0, 1) = Some(pre_existing);
@@ -5317,6 +5328,7 @@ fn run_dcs_backward_trial_point_at(
     let succ = super::SuccessorSpec {
         t: 0,
         successor: 1,
+        successor_node_id: training_ctx.node_graph.node_ids[1],
         my_rank: 0,
         probabilities: &probabilities,
         cut_batch: &cut_batch,
@@ -5831,6 +5843,7 @@ fn backward_dcs_frozen_cuts_present_no_duplicate_rows() {
     let succ = super::SuccessorSpec {
         t: 0,
         successor: 1,
+        successor_node_id: training_ctx.node_graph.node_ids[1],
         my_rank: 0,
         probabilities: &probabilities,
         cut_batch: &cut_batch,

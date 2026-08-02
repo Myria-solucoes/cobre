@@ -51,7 +51,7 @@
 //! use cobre_sddp::workspace::CapturedBasis;
 //! use cobre_solver::Basis;
 //!
-//! let stored = CapturedBasis::new(4, 3, 3, 0, 0); // empty — shim state
+//! let stored = CapturedBasis::new(4, 3, 3, 0, 0, 0); // empty — shim state
 //! let target = ReconstructionTarget { base_row_count: 3, num_cols: 4 };
 //! let mut out = Basis::new(0, 0);
 //! let mut lookup: Vec<Option<u32>> = vec![None; 16];
@@ -359,6 +359,7 @@ mod tests {
             base_rows,
             slots.len(),
             state_at_capture.len(),
+            0,
         );
 
         cb.basis.row_status.clear();
@@ -542,7 +543,7 @@ mod tests {
     fn uniform_basic_appends_all_basic_cut_rows() {
         // Template rows must be LOWER here, so build the CapturedBasis directly
         // rather than via make_stored_basis (which forces template rows BASIC).
-        let mut stored = CapturedBasis::new(3, 2, 2, 0, 0);
+        let mut stored = CapturedBasis::new(3, 2, 2, 0, 0, 0);
         stored.basis.col_status.clear();
         stored.basis.col_status.extend_from_slice(&[B, B, L]);
         stored.basis.row_status.clear();
@@ -566,7 +567,7 @@ mod tests {
     /// one, so the repair demotes exactly one trailing BASIC cut row.
     #[test]
     fn uniform_basic_then_invariant_repair_balances() {
-        let mut stored = CapturedBasis::new(3, 2, 2, 0, 0);
+        let mut stored = CapturedBasis::new(3, 2, 2, 0, 0, 0);
         stored.basis.col_status.clear();
         stored.basis.col_status.extend_from_slice(&[B, B, B]); // col_basic = 3
         stored.basis.row_status.clear();
@@ -683,7 +684,7 @@ mod tests {
     /// reconstruction lands two basics short of the target's 8 rows.
     #[test]
     fn reconstruct_from_grown_base_row_count_yields_deficit() {
-        let mut stored = CapturedBasis::new(5, 6, 2, 4, 0);
+        let mut stored = CapturedBasis::new(5, 6, 2, 4, 0, 0);
         stored.basis.col_status.clear();
         stored.basis.col_status.extend_from_slice(&[B, B, B, B, L]);
         stored.basis.row_status.clear();

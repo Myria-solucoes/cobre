@@ -141,6 +141,7 @@ pub(crate) fn save_basis_at_omega_zero<S: SolverInterface + Send>(
             base_row_count,
             cut_row_count,
             x_hat,
+            succ.successor_node_id,
         );
     } else {
         let mut captured = CapturedBasis::new(
@@ -149,6 +150,7 @@ pub(crate) fn save_basis_at_omega_zero<S: SolverInterface + Send>(
             base_row_count,
             cut_row_count,
             x_hat.len(),
+            succ.successor_node_id,
         );
         ws.solver.get_basis(&mut captured.basis);
         write_capture_metadata(
@@ -157,6 +159,7 @@ pub(crate) fn save_basis_at_omega_zero<S: SolverInterface + Send>(
             base_row_count,
             cut_row_count,
             x_hat,
+            succ.successor_node_id,
         );
         *basis_slice.get_mut(m, s) = Some(captured);
     }

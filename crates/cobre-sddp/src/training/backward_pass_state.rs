@@ -531,7 +531,7 @@ impl BackwardPassState {
         })
     }
 
-    /// Synchronise per-slot cut binding metadata across MPI ranks for one stage via
+    /// Synchronise per-slot cut binding metadata across MPI ranks for one pool via
     /// one `allreduce(Sum)` over `metadata_sync_contribution`.
     ///
     /// The reduction is bounded to `populated_count`, not the full pool capacity:
@@ -540,13 +540,13 @@ impl BackwardPassState {
     /// rank), so all ranks reduce over the same length.
     fn sync_stage_metadata<C: Communicator>(
         &mut self,
-        successor: usize,
+        pool: usize,
         iteration: u64,
         workspaces: &[SolverWorkspace<impl SolverInterface>],
         fcf: &mut FutureCostFunction,
         comm: &C,
     ) -> Result<(), SddpError> {
-        let populated_count = fcf.pools[successor].populated();
+        let populated_count = fcf.pools[pool].populated();
         if populated_count == 0 {
             return Ok(());
         }
@@ -573,7 +573,7 @@ impl BackwardPassState {
         .map_err(SddpError::from)?;
         for (slot, &inc) in self.global_increments_buf.iter().enumerate() {
             if inc > 0 {
-                fcf.pools[successor].record_binding(slot, inc, iteration);
+                fcf.pools[pool].record_binding(slot, inc, iteration);
             }
         }
         Ok(())
@@ -840,11 +840,17 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
     let training_ctx = inputs.training_ctx;
     let ctx = inputs.ctx;
     let cut_state = training_ctx.state;
-    // Pool `t`'s projection (sized from stage `t+1`'s state_config): the dimension
-    // this stage's extracted subgradient and per-stage backward buffers carry.
-    let cut_state_projection = &training_ctx.cut_state_layouts[t];
     let num_stages = training_ctx.horizon.num_stages();
     let successor = t + 1;
+    // Pool ids resolved from the node graph for the node processed at this
+    // stage (`t`, the trial point's own node) and its successor — on the
+    // chain degeneracy both equal their stage index byte-for-byte.
+    let pool_id = training_ctx.node_graph.nodes[t].pool_id;
+    let successor_pool_id = training_ctx.node_graph.nodes[successor].pool_id;
+    // Pool `pool_id`'s projection (sized from the successor's state_config):
+    // the dimension this stage's extracted subgradient and per-stage backward
+    // buffers carry.
+    let cut_state_projection = &training_ctx.cut_state_layouts[pool_id];
 
     // State exchange runs here, once per stage inside the backward sweep — not in a
     // separate pre-pass before the loop (sddp.md "Per-stage exchange").
@@ -873,13 +879,14 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
 
     let batch_start = Instant::now();
     let template_num_rows = ctx.templates[successor].num_rows;
-    // Rendering pool `successor`'s cuts uses pool `successor`'s projection — NOT
-    // `cut_state_projection` (pool `t`'s, used only for extraction below).
-    let successor_cut_layout = &training_ctx.cut_state_layouts[successor];
+    // Rendering the successor's cuts uses pool `successor_pool_id`'s projection
+    // — NOT `cut_state_projection` (pool `pool_id`'s, used only for extraction
+    // below).
+    let successor_cut_layout = &training_ctx.cut_state_layouts[successor_pool_id];
     build_delta_cut_row_batch_into(
         &mut inputs.cut_batches[successor],
         inputs.fcf,
-        successor,
+        successor_pool_id,
         cut_state,
         successor_cut_layout,
         &ctx.templates[successor].col_scale,
@@ -892,13 +899,17 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
     let cut_batch_build_ms = batch_start.elapsed().as_millis() as u64;
 
     state.successor_active_slots_buf.clear();
-    state
-        .successor_active_slots_buf
-        .extend(inputs.fcf.active_cuts(successor).map(|(slot, _, _)| slot));
+    state.successor_active_slots_buf.extend(
+        inputs
+            .fcf
+            .active_cuts(successor_pool_id)
+            .map(|(slot, _, _)| slot),
+    );
 
     let succ_spec = SuccessorSpec {
         t,
         successor,
+        successor_node_id: training_ctx.node_graph.node_ids[successor],
         my_rank: params.my_rank,
         probabilities: &state.probabilities_buf,
         cut_batch: &inputs.cut_batches[successor],
@@ -907,8 +918,8 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
         frozen_template: frozen_tmpl,
         successor_active_slots: &state.successor_active_slots_buf,
         cut_activity_tolerance: inputs.cut_activity_tolerance,
-        successor_populated_count: inputs.fcf.pools[successor].populated(),
-        successor_pool: &inputs.fcf.pools[successor],
+        successor_populated_count: inputs.fcf.pools[successor_pool_id].populated(),
+        successor_pool: &inputs.fcf.pools[successor_pool_id],
         cut_state: cut_state_projection,
     };
 
@@ -977,7 +988,7 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
             &state.probabilities_buf,
             &inputs.risk_measures[t],
             inputs.fcf,
-            t,
+            pool_id,
             inputs.iteration,
             inputs.fwd_offset,
             &mut state.opening_block_scratch,
@@ -1034,7 +1045,7 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
                     "coefficients_range must span exactly the pool's cut n_state and lie within the worker arena"
                 );
                 inputs.fcf.add_cut(
-                    t,
+                    pool_id,
                     inputs.iteration,
                     cut.forward_pass_index,
                     cut.intercept,
@@ -1056,11 +1067,11 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
     let sync_start = Instant::now();
     let n_local = inputs
         .cut_sync_bufs
-        .pack_local_records(inputs.fcf, t, inputs.iteration);
+        .pack_local_records(inputs.fcf, pool_id, inputs.iteration);
     let remote_cuts =
         inputs
             .cut_sync_bufs
-            .sync_packed_records(t, n_local, inputs.fcf, inputs.comm)?;
+            .sync_packed_records(pool_id, n_local, inputs.fcf, inputs.comm)?;
     #[allow(clippy::cast_possible_truncation)]
     let cut_sync_ms = sync_start.elapsed().as_millis() as u64;
 
@@ -1070,7 +1081,7 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
     let cuts_generated = n_local + remote_cuts;
 
     state.sync_stage_metadata(
-        successor,
+        successor_pool_id,
         inputs.iteration,
         inputs.workspaces,
         inputs.fcf,

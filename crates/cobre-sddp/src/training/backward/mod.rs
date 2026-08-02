@@ -187,6 +187,11 @@ pub(crate) struct SuccessorSpec<'a> {
     pub(crate) t: usize,
     /// Successor stage index (`t + 1`), where the LP is actually solved.
     pub(crate) successor: usize,
+    /// Declared node id of the successor (`NodeGraph::node_ids[successor]`) —
+    /// on the chain degeneracy equal to `successor` byte-for-byte. Tags the
+    /// basis captured at [`SuccessorSpec::successor`] and the node the
+    /// backward apply sites solve against.
+    pub(crate) successor_node_id: i32,
     /// This rank's MPI rank index (used to address exchange buffer state).
     pub(crate) my_rank: usize,
     /// Product weights `P(n→m) · q_{m,ψ}` over the current node's successor
@@ -208,13 +213,17 @@ pub(crate) struct SuccessorSpec<'a> {
     pub(crate) successor_active_slots: &'a [usize],
     /// Minimum dual multiplier for a cut to count as binding.
     pub(crate) cut_activity_tolerance: f64,
-    /// Populated count of the successor's cut pool.
+    /// Populated count of the successor's cut pool (the pool id resolved from
+    /// the node graph for the node at the successor stage).
     pub(crate) successor_populated_count: usize,
-    /// Cut pool at the successor stage for binding-activity tracking.
+    /// Cut pool resolved for the successor's node (via the node graph's
+    /// `node → pool` map) for binding-activity tracking.
     pub(crate) successor_pool: &'a CutPool,
-    /// Cut-state projection for the pool this stage's cut is inserted into (pool
-    /// `t`, sized from `stages[t+1].state_config`): the LP incoming-state columns
-    /// dual extraction reads and the dimension every per-stage backward buffer is
-    /// sized to. `n_slots()` equals `successor_pool.state_dimension`.
+    /// Cut-state projection for the pool this stage's cut is inserted into
+    /// (the pool id resolved from the node graph for the node at stage `t`,
+    /// sized from its successor's `state_config`): the LP incoming-state
+    /// columns dual extraction reads and the dimension every per-stage
+    /// backward buffer is sized to. `n_slots()` equals
+    /// `successor_pool.state_dimension`.
     pub(crate) cut_state: &'a CutStateProjection,
 }

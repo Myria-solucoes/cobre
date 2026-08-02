@@ -474,17 +474,64 @@ impl StudySetup {
         let max_iterations = max_iterations_from_rules(&stopping_rule_set);
         let fcf_capacity_iterations = max_iterations.saturating_add(1);
 
-        let cut_state_layouts = build_cut_state_layouts(system, &state_layout, n_stages);
+        let stages: Vec<Stage> = system
+            .stages()
+            .iter()
+            .filter(|s| s.id >= 0)
+            .cloned()
+            .collect();
+        let study_stage_ids: Vec<i32> = stages.iter().map(|s| s.id).collect();
+
+        let LagData {
+            stage_lag_transitions,
+            noise_group_ids,
+            downstream_par_order,
+        } = precompute_lag_data(system, &stages, &stochastic, season_map_ref);
+
+        let hydro_ids: Vec<EntityId> = system.hydros().iter().map(|h| h.id).collect();
+
+        let scenario_libraries = build_scenario_libraries(
+            system,
+            &stages,
+            &hydro_ids,
+            &stochastic,
+            &stage_lag_transitions,
+            training_source,
+            simulation_source,
+            forward_passes,
+            downstream_par_order,
+            &derived_inflow_seeds.lag_values,
+            state_layout.max_par_order,
+            &derived_inflow_seeds.accum,
+            &derived_inflow_seeds.weight,
+        )?;
+
+        // G1: binds after `build_scenario_libraries` — an `External`-bound
+        // node's Ω addresses the standardized library's raw scenario axis,
+        // so binding earlier would race the library's own standardization.
+        // Also binds BEFORE the FCF / cut_state_layouts construction below: the
+        // pool axis they use is resolved through this graph's `node → pool` map.
+        let stage_id_resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+        let node_graph = node_graph::build_node_graph(
+            system.policy_graph(),
+            n_stages,
+            &stage_id_resolver,
+            &stochastic,
+        )?;
+
+        let cut_state_layouts = build_cut_state_layouts(system, &state_layout, &node_graph);
         let pool_state_dimensions: Vec<usize> = cut_state_layouts
             .iter()
             .map(CutStateProjection::n_slots)
             .collect();
-        let fcf = FutureCostFunction::new_per_stage(
+        let visit_bounds = node_graph::sampled_visit_bound(&node_graph, forward_passes);
+        let fcf = FutureCostFunction::new_per_pool(
             &pool_state_dimensions,
             state_layout.n_state,
             forward_passes,
             fcf_capacity_iterations,
-            &vec![0; n_stages],
+            &vec![0; node_graph.n_pools],
+            &visit_bounds,
         );
 
         let horizon = HorizonMode::Finite {
@@ -517,49 +564,7 @@ impl StudySetup {
             build_contract_prices_per_stage(system, n_stages, &block_counts_per_stage);
         let contract_is_import = build_contract_is_import(system);
 
-        let stages: Vec<Stage> = system
-            .stages()
-            .iter()
-            .filter(|s| s.id >= 0)
-            .cloned()
-            .collect();
-        let study_stage_ids: Vec<i32> = stages.iter().map(|s| s.id).collect();
         let anticipated_windows = build_anticipated_windows(system);
-
-        let LagData {
-            stage_lag_transitions,
-            noise_group_ids,
-            downstream_par_order,
-        } = precompute_lag_data(system, &stages, &stochastic, season_map_ref);
-
-        let hydro_ids: Vec<EntityId> = system.hydros().iter().map(|h| h.id).collect();
-
-        let scenario_libraries = build_scenario_libraries(
-            system,
-            &stages,
-            &hydro_ids,
-            &stochastic,
-            &stage_lag_transitions,
-            training_source,
-            simulation_source,
-            forward_passes,
-            downstream_par_order,
-            &derived_inflow_seeds.lag_values,
-            state_layout.max_par_order,
-            &derived_inflow_seeds.accum,
-            &derived_inflow_seeds.weight,
-        )?;
-
-        // G1: binds after `build_scenario_libraries` — an `External`-bound
-        // node's Ω addresses the standardized library's raw scenario axis,
-        // so binding earlier would race the library's own standardization.
-        let stage_id_resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
-        let node_graph = node_graph::build_node_graph(
-            system.policy_graph(),
-            n_stages,
-            &stage_id_resolver,
-            &stochastic,
-        )?;
 
         admission_gate(&risk_measures, &stopping_rule_set)?;
 
@@ -1149,44 +1154,58 @@ fn leadstages_decision_sets_are_singletons(
     })
 }
 
-/// Build the per-pool [`CutStateProjection`], one per stage (pool) `t`, projecting
-/// the global [`StateSpace`] onto the cut-state dimensions each pool carries.
+/// Build the per-pool [`CutStateProjection`], one per pool id, projecting the
+/// global [`StateSpace`] onto the cut-state dimensions each pool carries.
 ///
-/// Pool `t` is sized by `stages[t + 1].state_config` — the cost-to-go this
-/// stage's **successor** generates for it (pool `t` is populated by the backward
-/// pass when it solves stage `t + 1`'s LP and reads stage `t + 1`'s
-/// incoming-state reduced costs). Sizing pool `t` from `stages[t].state_config`
-/// is the off-by-one that compiles but stores cuts at the wrong dimension.
-/// Stage 0's config never sizes a pool (it has no predecessor pool).
+/// Pool `p`, owned by a non-leaf node `n` (`n.pool_id == p`), is sized by its
+/// successor's `state_config` — the cost-to-go node `n`'s successor generates
+/// for it (pool `p` is populated by the backward pass when it solves the
+/// successor's LP and reads the successor's incoming-state reduced costs).
+/// Every edge in the node graph goes `t -> t+1` (asserted in
+/// `node_graph::build_declared_node_graph`), so all of `n`'s successors sit at
+/// one stage and agree on that stage's `state_config` — the dimension is
+/// well-defined by construction, no heterogeneity rule needed. Sizing pool `p`
+/// from node `n`'s OWN stage's config instead of its successor's is the
+/// off-by-one that compiles but stores cuts at the wrong dimension.
 ///
-/// The terminal pool `n_stages - 1` has no successor stage, so the `t + 1` rule
-/// does not apply: it is sized by the **full global `n_state`**. With
-/// `config.policy.boundary` set, the injected boundary cuts come from the
-/// external study and are validated and rebuilt against `fcf.state_dimension`
-/// (the global `n_state`) by `load_boundary_cuts` / `inject_boundary_cuts`, so
-/// the global dimension is exactly the size injection requires — never a DECOMP
-/// stage's reduced config. (Per-slot identity reconciliation between a
-/// differently-scoped boundary manifest and the local layout is out of scope
-/// here.)
+/// A leaf node has no successor, so the `successor.state_config` rule does not
+/// apply to its pool (the trailing shared leaf pool on a declared graph; the
+/// terminal pool `n_stages - 1` on a chain): it is sized by the **full global
+/// `n_state`**. With `config.policy.boundary` set, the injected boundary cuts
+/// come from the external study and are validated and rebuilt against
+/// `fcf.state_dimension` (the global `n_state`) by `load_boundary_cuts` /
+/// `inject_boundary_cuts`, so the global dimension is exactly the size
+/// injection requires — never a DECOMP stage's reduced config. (Per-slot
+/// identity reconciliation between a differently-scoped boundary manifest and
+/// the local layout is out of scope here.)
+///
+/// On the chain degeneracy (`nodes[]` absent), `node_graph.n_pools ==
+/// n_stages` and `node.pool_id == t`, so this reduces byte-for-byte to the
+/// pre-node-native per-stage projection.
 fn build_cut_state_layouts(
     system: &System,
     state_layout: &StateSpace,
-    n_stages: usize,
+    node_graph: &NodeGraph,
 ) -> Vec<CutStateProjection> {
     let study_stages: Vec<&Stage> = system.stages().iter().filter(|s| s.id >= 0).collect();
-    (0..n_stages)
-        .map(|t| {
-            if t + 1 < n_stages {
-                CutStateProjection::new(state_layout, study_stages[t + 1].state_config)
-            } else {
-                CutStateProjection::new(state_layout, FULL_STATE_CONFIG)
-            }
-        })
-        .collect()
+    // Every pool defaults to the full-dimension projection — the correct value
+    // for a leaf-owned pool (no successor) — then non-leaf nodes overwrite
+    // their own (disjoint) pool id with the successor-sized projection below.
+    let mut layouts =
+        vec![CutStateProjection::new(state_layout, FULL_STATE_CONFIG); node_graph.n_pools];
+    for (pos, node) in node_graph.nodes.iter().enumerate() {
+        let Some(succ) = node_graph.successors[pos].first() else {
+            continue;
+        };
+        let config = study_stages[node_graph.nodes[succ.child].stage].state_config;
+        layouts[node.pool_id] = CutStateProjection::new(state_layout, config);
+    }
+    layouts
 }
 
 /// The all-dimensions cut-state config, sizing a pool to the full global
-/// `n_state`. Used for the terminal pool (no successor stage to govern it).
+/// `n_state`. Used for a leaf-owned pool (no successor to govern it) — the
+/// terminal pool on a chain.
 const FULL_STATE_CONFIG: StageStateConfig = StageStateConfig {
     storage: true,
     inflow_lags: true,

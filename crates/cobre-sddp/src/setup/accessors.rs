@@ -101,13 +101,15 @@ impl StudySetup {
         &self.stage_data.state
     }
 
-    /// Build the per-slot entity-identity manifest for the terminal stage's cut
-    /// pool — the stage a boundary policy injects into.
+    /// Build the per-slot entity-identity manifest for the terminal cut pool —
+    /// the pool a boundary policy injects into.
     ///
     /// Delegates to
     /// [`build_stage_entity_manifest`],
     /// the single owner of identity resolution shared with the checkpoint writer,
-    /// against the terminal stage's projection. The caller passes the result to
+    /// against the terminal pool's projection (the last entry of
+    /// `cut_state_layouts`, pool-id-indexed; on the chain degeneracy this is the
+    /// terminal stage). The caller passes the result to
     /// [`load_boundary_cuts`](crate::load_boundary_cuts) so a boundary cut whose
     /// slot identity diverges from the current study is rejected rather than
     /// silently mis-loaded.

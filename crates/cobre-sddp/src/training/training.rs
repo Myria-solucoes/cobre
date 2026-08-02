@@ -164,6 +164,12 @@ fn checked_broadcast_len(len: usize, operation: &'static str) -> Result<i32, Sdd
 /// for the i32 and f64 buffers). Single-rank runs skip the broadcast and clone
 /// local scenario 0 directly.
 ///
+/// `node_ids` (`NodeGraph::node_ids`, one entry per stage) fills each
+/// reconstructed basis's `node_id` out-of-band after
+/// `try_from_broadcast_payload`, since `node_id` is not part of the wire
+/// payload. The single-rank clone path needs no fill: capture already set
+/// `node_id` via `write_capture_metadata`.
+///
 /// # Errors
 ///
 /// Returns `SddpError::Communication(CommError::InvalidBufferSize { .. })` when
@@ -173,6 +179,7 @@ fn checked_broadcast_len(len: usize, operation: &'static str) -> Result<i32, Sdd
 pub(crate) fn broadcast_basis_cache<C: Communicator>(
     basis_store: &BasisStore,
     num_stages: usize,
+    node_ids: &[i32],
     comm: &C,
 ) -> Result<Vec<Option<CapturedBasis>>, SddpError> {
     // Single-rank fast path: no communication needed — clone the full
@@ -235,17 +242,27 @@ pub(crate) fn broadcast_basis_cache<C: Communicator>(
     f64_buf.resize(f64_total_len, 0.0_f64);
     comm.broadcast(&mut f64_buf, 0).map_err(SddpError::from)?;
 
+    debug_assert_eq!(
+        node_ids.len(),
+        num_stages,
+        "broadcast_basis_cache: node_ids.len() {} != num_stages {}",
+        node_ids.len(),
+        num_stages,
+    );
     let mut cache: Vec<Option<CapturedBasis>> = Vec::with_capacity(num_stages);
     let mut pos = 0_usize;
     let mut f64_pos = 0_usize;
-    for stage in 0..num_stages {
-        let captured = CapturedBasis::try_from_broadcast_payload(
+    for (stage, &node_id) in node_ids.iter().enumerate().take(num_stages) {
+        let mut captured = CapturedBasis::try_from_broadcast_payload(
             stage,
             &buf,
             &mut pos,
             &f64_buf,
             &mut f64_pos,
         )?;
+        if let Some(ref mut cb) = captured {
+            cb.node_id = node_id;
+        }
         cache.push(captured);
     }
 

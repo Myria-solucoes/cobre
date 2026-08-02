@@ -345,8 +345,10 @@ impl ForwardPassState {
 
         let noise_dim = stochastic.dim();
 
-        let terminal_has_boundary_cuts =
-            num_stages > 0 && inputs.fcf.pools[num_stages - 1].warm_start_count > 0;
+        let terminal_has_boundary_cuts = num_stages > 0
+            && inputs.fcf.pools[training_ctx.node_graph.nodes[num_stages - 1].pool_id]
+                .warm_start_count
+                > 0;
 
         // Re-size the per-worker per-stage accumulators: the worker count may
         // differ from `new()` if the pool shrank. Fast path resets in place when
@@ -707,6 +709,9 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
             })?;
             let raw_noise = noise.as_slice();
 
+            // Pool id resolved from the node graph for the node at the current
+            // stage — the pool whose cuts the frozen/DCS LP at stage `t` embeds.
+            let pool_id = params.training_ctx.node_graph.nodes[t].pool_id;
             let key = StageKey {
                 t,
                 m,
@@ -716,7 +721,7 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
                 raw_noise,
                 basis_row_capacity: params.frozen[t].num_rows,
                 terminal_has_boundary_cuts: params.terminal_has_boundary_cuts,
-                pool: &params.fcf.pools[t],
+                pool: &params.fcf.pools[pool_id],
                 dcs: dcs_params,
             };
             let stats_before_stage = ws.solver.statistics();

@@ -5,22 +5,27 @@
 //! by each forward pass so that the domination test can evaluate every cut at
 //! every visited point.
 //!
-//! The archive is organised as one [`StageStates`] per stage.  Each
-//! `StageStates` stores its state vectors in a single flat `Vec<f64>` for
-//! cache-friendly iteration during the domination sweep.
+//! The archive holds one [`NodeStates`] per **node**, never per stage: sibling
+//! nodes share a stage but not a future, so a cut dominated in one sibling's
+//! visited region may be the binding cut in another's — pooling siblings into
+//! one shared stage-level bucket would silently drop that cut, with no error
+//! beyond a worse policy. On a chain (`nodes[]` absent) node position equals
+//! stage index, so this degenerates byte-for-byte to the pre-node-native
+//! per-stage archive. Each `NodeStates` stores its state vectors in a single
+//! flat `Vec<f64>` for cache-friendly iteration during the domination sweep.
 
-/// Single-stage visited-states buffer.
+/// Single-node visited-states buffer.
 ///
 /// Stores forward-pass trial points as a flat contiguous `Vec<f64>`:
 /// entry `i * state_dimension .. (i + 1) * state_dimension` holds state `i`.
 #[derive(Debug, Clone)]
-pub struct StageStates {
+pub struct NodeStates {
     data: Vec<f64>,
     count: usize,
     state_dimension: usize,
 }
 
-impl StageStates {
+impl NodeStates {
     /// Creates a buffer pre-allocated for `capacity_states` state vectors.
     #[must_use]
     pub fn new(state_dimension: usize, capacity_states: usize) -> Self {
@@ -79,8 +84,8 @@ impl StageStates {
     }
 }
 
-/// Multi-stage archive of visited forward-pass states, one [`StageStates`] per
-/// stage.
+/// Multi-node archive of visited forward-pass states, one [`NodeStates`] per
+/// node.
 ///
 /// Allocated when any [`CutSelectionStrategy`](crate::CutSelectionStrategy)
 /// variant is enabled (the value-evaluation kernel evaluates every populated cut
@@ -88,22 +93,22 @@ impl StageStates {
 /// [`EventConfig::export_states`](crate::config::EventConfig::export_states).
 #[derive(Debug, Clone)]
 pub struct VisitedStatesArchive {
-    stages: Vec<StageStates>,
+    nodes: Vec<NodeStates>,
     total_forward_passes: usize,
 }
 
 impl VisitedStatesArchive {
-    /// Per-stage pre-allocation cap, bounding upfront virtual-memory reservation
+    /// Per-node pre-allocation cap, bounding upfront virtual-memory reservation
     /// when `max_iterations * total_forward_passes` is large; the `Vec` still
     /// grows past it on demand.
     const MAX_INITIAL_CAPACITY: usize = 4096;
 
-    /// Creates an archive with one [`StageStates`] per stage, each pre-allocated
+    /// Creates an archive with one [`NodeStates`] per node, each pre-allocated
     /// for `max_iterations * total_forward_passes` state vectors capped at
     /// [`Self::MAX_INITIAL_CAPACITY`].
     #[must_use]
     pub fn new(
-        num_stages: usize,
+        num_nodes: usize,
         state_dimension: usize,
         max_iterations: u64,
         total_forward_passes: usize,
@@ -111,59 +116,59 @@ impl VisitedStatesArchive {
         let total_states = usize::try_from(max_iterations)
             .unwrap_or(usize::MAX)
             .saturating_mul(total_forward_passes);
-        let capacity_per_stage = total_states.min(Self::MAX_INITIAL_CAPACITY);
-        let stages = (0..num_stages)
-            .map(|_| StageStates::new(state_dimension, capacity_per_stage))
+        let capacity_per_node = total_states.min(Self::MAX_INITIAL_CAPACITY);
+        let nodes = (0..num_nodes)
+            .map(|_| NodeStates::new(state_dimension, capacity_per_node))
             .collect();
         Self {
-            stages,
+            nodes,
             total_forward_passes,
         }
     }
 
-    /// Returns the number of stages in the archive.
+    /// Returns the number of nodes in the archive.
     #[must_use]
-    pub fn num_stages(&self) -> usize {
-        self.stages.len()
+    pub fn num_nodes(&self) -> usize {
+        self.nodes.len()
     }
 
-    /// Returns a shared reference to the [`StageStates`] for `stage`.
+    /// Returns a shared reference to the [`NodeStates`] for `node`.
     ///
     /// # Panics
     ///
-    /// Panics if `stage >= self.num_stages()`.
+    /// Panics if `node >= self.num_nodes()`.
     #[must_use]
-    pub fn stage(&self, stage: usize) -> &StageStates {
-        &self.stages[stage]
+    pub fn node(&self, node: usize) -> &NodeStates {
+        &self.nodes[node]
     }
 
-    /// Returns a mutable reference to the [`StageStates`] for `stage`.
+    /// Returns a mutable reference to the [`NodeStates`] for `node`.
     ///
     /// # Panics
     ///
-    /// Panics if `stage >= self.num_stages()`.
-    pub fn stage_mut(&mut self, stage: usize) -> &mut StageStates {
-        &mut self.stages[stage]
+    /// Panics if `node >= self.num_nodes()`.
+    pub fn node_mut(&mut self, node: usize) -> &mut NodeStates {
+        &mut self.nodes[node]
     }
 
-    /// Archive one iteration's gathered states for `stage`.
-    pub fn archive_gathered_states(&mut self, stage: usize, gathered: &[f64], total_fwd: usize) {
-        self.stages[stage].append(gathered, total_fwd);
+    /// Archive one iteration's gathered states for `node`.
+    pub fn archive_gathered_states(&mut self, node: usize, gathered: &[f64], total_fwd: usize) {
+        self.nodes[node].append(gathered, total_fwd);
     }
 
-    /// Return the flat state slice for `stage`.
+    /// Return the flat state slice for `node`.
     #[must_use]
-    pub fn states_for_stage(&self, stage: usize) -> &[f64] {
-        self.stages[stage].states()
+    pub fn states_for_node(&self, node: usize) -> &[f64] {
+        self.nodes[node].states()
     }
 
-    /// Number of states accumulated at a given stage.
+    /// Number of states accumulated at a given node.
     #[must_use]
-    pub fn count(&self, stage: usize) -> usize {
-        self.stages[stage].count()
+    pub fn count(&self, node: usize) -> usize {
+        self.nodes[node].count()
     }
 
-    /// Trim each stage to the most recent `window_iterations` iterations' worth
+    /// Trim each node to the most recent `window_iterations` iterations' worth
     /// of forward-pass states (`window_iterations * total_forward_passes`).
     ///
     /// Called once per cut-selection check, so the post-trim (steady-state)
@@ -175,15 +180,15 @@ impl VisitedStatesArchive {
         let window_states = usize::try_from(window_iterations)
             .unwrap_or(usize::MAX)
             .saturating_mul(self.total_forward_passes);
-        for stage in &mut self.stages {
-            stage.trim_to_window(window_states);
+        for node in &mut self.nodes {
+            node.trim_to_window(window_states);
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{StageStates, VisitedStatesArchive};
+    use super::{NodeStates, VisitedStatesArchive};
 
     /// Build a synthetic gathered buffer: `base, base+1, ..., base + total_fwd*state_dim - 1`.
     #[allow(clippy::cast_precision_loss)]
@@ -194,8 +199,8 @@ mod tests {
     }
 
     #[test]
-    fn stage_states_new_preallocates() {
-        let s = StageStates::new(4, 100);
+    fn node_states_new_preallocates() {
+        let s = NodeStates::new(4, 100);
         assert!(s.states().is_empty());
         assert_eq!(s.count(), 0);
         assert_eq!(s.state_dimension(), 4);
@@ -203,8 +208,8 @@ mod tests {
     }
 
     #[test]
-    fn stage_states_append_single_batch() {
-        let mut s = StageStates::new(2, 10);
+    fn node_states_append_single_batch() {
+        let mut s = NodeStates::new(2, 10);
         let gathered = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         s.append(&gathered, 3);
         assert_eq!(s.count(), 3);
@@ -212,8 +217,8 @@ mod tests {
     }
 
     #[test]
-    fn stage_states_append_multiple_batches() {
-        let mut s = StageStates::new(2, 10);
+    fn node_states_append_multiple_batches() {
+        let mut s = NodeStates::new(2, 10);
         let g1 = make_gathered(2, 3, 0.0);
         s.append(&g1, 3);
         let g2 = make_gathered(2, 2, 100.0);
@@ -226,19 +231,19 @@ mod tests {
     }
 
     #[test]
-    fn stage_states_empty_states() {
-        let s = StageStates::new(3, 50);
+    fn node_states_empty_states() {
+        let s = NodeStates::new(3, 50);
         assert_eq!(s.states(), &[] as &[f64]);
         assert_eq!(s.count(), 0);
     }
 
     #[test]
-    fn archive_new_creates_correct_stages() {
+    fn archive_new_creates_correct_nodes() {
         let a = VisitedStatesArchive::new(5, 4, 10, 20);
-        assert_eq!(a.num_stages(), 5);
+        assert_eq!(a.num_nodes(), 5);
         for t in 0..5 {
             assert_eq!(a.count(t), 0);
-            assert!(a.states_for_stage(t).is_empty());
+            assert!(a.states_for_node(t).is_empty());
         }
     }
 
@@ -264,24 +269,55 @@ mod tests {
     }
 
     #[test]
-    fn archive_states_for_stage_returns_flat_slice() {
+    fn archive_states_for_node_returns_flat_slice() {
         let mut a = VisitedStatesArchive::new(3, 2, 10, 10);
         let gathered = vec![10.0, 20.0, 30.0, 40.0];
         a.archive_gathered_states(1, &gathered, 2);
-        assert_eq!(a.states_for_stage(1), &[10.0, 20.0, 30.0, 40.0]);
-        assert!(a.states_for_stage(0).is_empty());
-        assert!(a.states_for_stage(2).is_empty());
+        assert_eq!(a.states_for_node(1), &[10.0, 20.0, 30.0, 40.0]);
+        assert!(a.states_for_node(0).is_empty());
+        assert!(a.states_for_node(2).is_empty());
     }
 
-    // -- StageStates::trim_to_window ------------------------------------
+    // -- Sibling-node independence (AC 2) --------------------------------
+
+    /// A two-sibling fan: node 0 is the parent stage's node, nodes 1 and 2 are
+    /// two sibling nodes at the next stage (mirroring `NodeGraph`'s K-fan
+    /// shape). Writing sibling A's (node 1) states must never appear in
+    /// sibling B's (node 2) archive, or in the parent's — each node's
+    /// dominance test must see only its own visited region.
+    #[test]
+    fn sibling_nodes_at_the_same_stage_archive_independently() {
+        let mut a = VisitedStatesArchive::new(3, 2, 10, 5);
+        let first_sibling_states = make_gathered(2, 3, 0.0);
+        let second_sibling_states = make_gathered(2, 3, 100.0);
+
+        a.archive_gathered_states(1, &first_sibling_states, 3);
+        a.archive_gathered_states(2, &second_sibling_states, 3);
+
+        assert_eq!(a.states_for_node(1), first_sibling_states.as_slice());
+        assert_eq!(a.states_for_node(2), second_sibling_states.as_slice());
+        assert_eq!(a.count(1), 3);
+        assert_eq!(a.count(2), 3);
+        assert!(
+            a.states_for_node(0).is_empty(),
+            "the parent node must not receive either sibling's states"
+        );
+        assert_ne!(
+            a.states_for_node(1),
+            a.states_for_node(2),
+            "sibling A's states must not leak into sibling B's archive"
+        );
+    }
+
+    // -- NodeStates::trim_to_window ------------------------------------
 
     // Trimming 100 dim-2 states to window 30 keeps the LAST 30
     // (elements 140..200 of the original flat buffer).
     #[test]
-    fn stage_states_trim_to_window_drops_oldest_states() {
+    fn node_states_trim_to_window_drops_oldest_states() {
         let state_dim = 2;
         let total = 100;
-        let mut s = StageStates::new(state_dim, total);
+        let mut s = NodeStates::new(state_dim, total);
         let gathered = make_gathered(state_dim, total, 0.0);
         s.append(&gathered, total);
         assert_eq!(s.count(), 100);
@@ -298,10 +334,10 @@ mod tests {
     }
 
     #[test]
-    fn stage_states_trim_to_window_noop_when_count_below_window() {
+    fn node_states_trim_to_window_noop_when_count_below_window() {
         let state_dim = 2;
         let total = 20;
-        let mut s = StageStates::new(state_dim, total);
+        let mut s = NodeStates::new(state_dim, total);
         let gathered = make_gathered(state_dim, total, 0.0);
         s.append(&gathered, total);
         assert_eq!(s.count(), 20);
@@ -314,10 +350,10 @@ mod tests {
     }
 
     #[test]
-    fn stage_states_trim_to_window_count_equals_window_is_noop() {
+    fn node_states_trim_to_window_count_equals_window_is_noop() {
         let state_dim = 3;
         let total = 7;
-        let mut s = StageStates::new(state_dim, total);
+        let mut s = NodeStates::new(state_dim, total);
         let gathered = make_gathered(state_dim, total, 10.0);
         s.append(&gathered, total);
         let before: Vec<f64> = s.states().to_vec();
@@ -329,10 +365,10 @@ mod tests {
     }
 
     #[test]
-    fn stage_states_trim_to_window_to_zero_clears_buffer() {
+    fn node_states_trim_to_window_to_zero_clears_buffer() {
         let state_dim = 2;
         let total = 5;
-        let mut s = StageStates::new(state_dim, total);
+        let mut s = NodeStates::new(state_dim, total);
         let gathered = make_gathered(state_dim, total, 0.0);
         s.append(&gathered, total);
 
@@ -345,9 +381,9 @@ mod tests {
     // After a trim, the retained window stays at the head and newly appended
     // states sit at the tail.
     #[test]
-    fn stage_states_trim_then_append_preserves_data() {
+    fn node_states_trim_then_append_preserves_data() {
         let state_dim = 2;
-        let mut s = StageStates::new(state_dim, 100);
+        let mut s = NodeStates::new(state_dim, 100);
         // Initial: 10 states with base 0.0  (values 0..20).
         s.append(&make_gathered(state_dim, 10, 0.0), 10);
         // Trim down to last 4 states (elements 12..20 of original).
@@ -368,17 +404,17 @@ mod tests {
 
     // -- VisitedStatesArchive::trim_to_window ---------------------------
 
-    // 5 stages of 100 states each, trimmed with window=3 and total_fwd=10,
-    // leaves each stage with 30 states.
+    // 5 nodes of 100 states each, trimmed with window=3 and total_fwd=10,
+    // leaves each node with 30 states.
     #[test]
-    fn archive_trim_to_window_trims_each_stage() {
-        let num_stages = 5;
+    fn archive_trim_to_window_trims_each_node() {
+        let num_nodes = 5;
         let state_dim = 2;
         let total_fwd = 10;
-        let mut a = VisitedStatesArchive::new(num_stages, state_dim, 10, total_fwd);
+        let mut a = VisitedStatesArchive::new(num_nodes, state_dim, 10, total_fwd);
 
-        // Fill each stage with 100 states (10 iterations * 10 forward passes).
-        for t in 0..num_stages {
+        // Fill each node with 100 states (10 iterations * 10 forward passes).
+        for t in 0..num_nodes {
             for it in 0..10_i32 {
                 let base = f64::from(i32::try_from(t).unwrap()) * 1000.0 + f64::from(it) * 100.0;
                 let gathered = make_gathered(state_dim, total_fwd, base);
@@ -389,10 +425,10 @@ mod tests {
 
         a.trim_to_window(3);
 
-        for t in 0..num_stages {
-            assert!(a.count(t) <= 30, "stage {t} has count {}", a.count(t));
+        for t in 0..num_nodes {
+            assert!(a.count(t) <= 30, "node {t} has count {}", a.count(t));
             assert_eq!(a.count(t), 30);
-            assert_eq!(a.states_for_stage(t).len(), 30 * state_dim);
+            assert_eq!(a.states_for_node(t).len(), 30 * state_dim);
         }
     }
 
@@ -400,22 +436,22 @@ mod tests {
     fn archive_trim_to_window_noop_when_within_window() {
         let total_fwd = 10;
         let mut a = VisitedStatesArchive::new(2, 2, 10, total_fwd);
-        // 2 iterations * 10 forward passes = 20 states per stage.
+        // 2 iterations * 10 forward passes = 20 states per node.
         for it in 0..2_i32 {
             let gathered = make_gathered(2, total_fwd, f64::from(it) * 100.0);
             a.archive_gathered_states(0, &gathered, total_fwd);
             a.archive_gathered_states(1, &gathered, total_fwd);
         }
-        let before_0: Vec<f64> = a.states_for_stage(0).to_vec();
-        let before_1: Vec<f64> = a.states_for_stage(1).to_vec();
+        let before_0: Vec<f64> = a.states_for_node(0).to_vec();
+        let before_1: Vec<f64> = a.states_for_node(1).to_vec();
 
         // window=5 -> window_states = 50 > 20.
         a.trim_to_window(5);
 
         assert_eq!(a.count(0), 20);
         assert_eq!(a.count(1), 20);
-        assert_eq!(a.states_for_stage(0), before_0.as_slice());
-        assert_eq!(a.states_for_stage(1), before_1.as_slice());
+        assert_eq!(a.states_for_node(0), before_0.as_slice());
+        assert_eq!(a.states_for_node(1), before_1.as_slice());
     }
 
     #[test]
@@ -442,11 +478,11 @@ mod tests {
         // Expected: values from iterations 2 and 3.
         let mut expected: Vec<f64> = (200..210).map(f64::from).collect();
         expected.extend((300..310).map(f64::from));
-        assert_eq!(a.states_for_stage(0), expected.as_slice());
+        assert_eq!(a.states_for_node(0), expected.as_slice());
     }
 
     #[test]
-    fn archive_trim_to_window_zero_clears_all_stages() {
+    fn archive_trim_to_window_zero_clears_all_nodes() {
         let total_fwd = 4;
         let mut a = VisitedStatesArchive::new(3, 2, 10, total_fwd);
         for t in 0..3 {
@@ -457,7 +493,7 @@ mod tests {
 
         for t in 0..3 {
             assert_eq!(a.count(t), 0);
-            assert!(a.states_for_stage(t).is_empty());
+            assert!(a.states_for_node(t).is_empty());
         }
     }
 }

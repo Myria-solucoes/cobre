@@ -119,6 +119,7 @@ fn load_checkpoint_into_setup(
             setup.stage_data.stage_templates.templates.len(),
             &checkpoint.stage_bases,
             &checkpoint.stage_cuts,
+            &setup.node_graph.node_ids,
         );
         setup.set_warm_start_basis_cache(basis_cache);
     }
@@ -154,6 +155,9 @@ pub(super) fn apply_training_policy(
                 load_and_validate_checkpoint(ctx, &policy_dir, system, setup)?;
             load_checkpoint_into_setup(&checkpoint, &proof, setup)?;
             if ctx.is_root && !ctx.quiet {
+                // Pool 0 (the chain's stage-0 / lowest-id pool) stands in as a
+                // representative sample for this advisory message, not a
+                // per-pool count.
                 let warm_count = setup.fcf.pools[0].warm_start_count;
                 let _ = ctx.stderr.write_line(&format!(
                     "Warm-start: loaded {warm_count} cuts per stage from prior policy."
@@ -275,6 +279,7 @@ pub(super) fn load_policy_for_simulation(
         setup.stage_data.stage_templates.templates.len(),
         &checkpoint.stage_bases,
         &checkpoint.stage_cuts,
+        &setup.node_graph.node_ids,
     );
 
     Ok(TrainingResult::new(

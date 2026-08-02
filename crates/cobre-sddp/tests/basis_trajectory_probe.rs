@@ -796,8 +796,9 @@ fn lag_fold_check_stage(
                 .expect("StageSolvePrep::run must not error on cobre_rodada");
 
             let stored_basis = (omega_position == 0).then_some(forward_basis);
-            let view = solve_stage_for_probe(ws, &ctx, pool_ref, stored_basis, stage, m)
-                .expect("stage solve must not error on cobre_rodada");
+            let view =
+                solve_stage_for_probe(ws, &ctx, pool_ref, stored_basis, stage, m, stage as i32)
+                    .expect("stage solve must not error on cobre_rodada");
             let rc = view.reduced_costs;
             let y = view.dual;
             solves += 1;
@@ -1085,8 +1086,9 @@ fn run_lag_fold_ab_stage(
                     .expect("StageSolvePrep::run must not error on cobre_rodada");
 
                 let stored_basis = (omega_position == 0).then_some(forward_basis);
-                let view = solve_stage_for_probe(ws, &ctx, pool_ref, stored_basis, stage, m)
-                    .expect("stage solve must not error on cobre_rodada");
+                let view =
+                    solve_stage_for_probe(ws, &ctx, pool_ref, stored_basis, stage, m, stage as i32)
+                        .expect("stage solve must not error on cobre_rodada");
                 let wall_ms = view.solve_time_seconds * 1_000.0;
                 let pivots = view.iterations;
                 let objective = view.objective;

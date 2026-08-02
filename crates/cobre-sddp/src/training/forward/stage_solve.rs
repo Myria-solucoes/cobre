@@ -119,13 +119,18 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
             // Forward pass solves one LP per (stage, scenario): always a fresh
             // solve, never a carried continuation.
             continue_carry: false,
+            node_id: training_ctx.node_graph.node_ids[t],
         };
+        // Pool id resolved from the node graph for the node at the current
+        // stage — the same pool `pool` (already resolved by the caller) belongs
+        // to, so its projection sizes this render/extraction identically.
+        let pool_id = training_ctx.node_graph.nodes[t].pool_id;
         lazy_solve_preloaded(
             &mut ws.solver,
             &ctx.templates[t],
             pool,
             state,
-            &training_ctx.cut_state_layouts[t],
+            &training_ctx.cut_state_layouts[pool_id],
             col_scale,
             None,
             &ws.backward_accum.dcs_initial_resident,
@@ -146,6 +151,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
             stage_index: t,
             scenario_index: m,
             iteration: Some(iteration),
+            node_id: training_ctx.node_graph.node_ids[t],
         };
 
         let view = run_stage_solve(ws, &inputs).map_err(|e| {
@@ -220,6 +226,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     // would corrupt the warm-start; the DCS path leaves the (m, t) slot untouched.
     if dcs.is_none() {
         let cut_row_count = basis_row_capacity.saturating_sub(ctx.templates[t].num_rows);
+        let node_id = training_ctx.node_graph.node_ids[t];
         let captured = basis_slice.get_mut(m, t).get_or_insert_with(|| {
             CapturedBasis::new(
                 ctx.templates[t].num_cols,
@@ -227,6 +234,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
                 ctx.templates[t].num_rows,
                 cut_row_count,
                 state.n_state,
+                node_id,
             )
         });
         ws.solver.get_basis(&mut captured.basis);
@@ -236,6 +244,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
             ctx.templates[t].num_rows,
             cut_row_count,
             &ws.current_state[..state.n_state],
+            node_id,
         );
     }
     Ok(stage_cost)

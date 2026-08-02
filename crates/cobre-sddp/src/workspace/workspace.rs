@@ -29,6 +29,13 @@ use crate::solver_stats::SolverStatsDelta;
 /// slot identity rather than row count. Pre-sized via [`CapturedBasis::new`] so
 /// the forward capture site reuses one `CapturedBasis` across iterations without
 /// reallocation.
+///
+/// `node_id` tags the node this basis was captured at; the apply sites
+/// (`run_stage_solve`, `lazy_solve_preloaded`) treat a stored basis whose
+/// `node_id` differs from the node being solved as cold, never warm-started
+/// from it — a resampled path visiting a different node than the one that
+/// captured the basis. Not part of the broadcast wire (see
+/// [`CapturedBasis::to_broadcast_payload`]).
 #[derive(Clone, Debug)]
 pub struct CapturedBasis {
     /// The underlying solver basis (row and column statuses).
@@ -42,6 +49,8 @@ pub struct CapturedBasis {
     /// State vector `x_hat` at capture, the operating point for evaluating newly
     /// added cuts on the backward warm-start.
     pub state_at_capture: Vec<f64>,
+    /// Declared node id (`NodeGraph::node_ids[node]`) this basis was captured at.
+    pub node_id: i32,
 }
 
 /// Wire-format version for `CapturedBasis` broadcast payloads.
@@ -90,12 +99,14 @@ impl CapturedBasis {
         base_row_count: usize,
         cut_slot_capacity: usize,
         n_state: usize,
+        node_id: i32,
     ) -> Self {
         Self {
             basis: Basis::new(num_cols, num_rows),
             base_row_count,
             cut_row_slots: Vec::with_capacity(cut_slot_capacity),
             state_at_capture: Vec::with_capacity(n_state),
+            node_id,
         }
     }
 
@@ -304,6 +315,9 @@ impl CapturedBasis {
             base_row_count,
             cut_row_slots,
             state_at_capture,
+            // node_id is not on the wire; broadcast_basis_cache fills it
+            // out-of-band from the per-stage node mapping after this call.
+            node_id: 0,
         }))
     }
 }
@@ -910,6 +924,20 @@ impl<S: SolverInterface> WorkspacePool<S> {
             ws.scratch_basis = Basis::new(max_cols, max_rows);
         }
     }
+
+    /// Re-reserve every workspace's DCS scratch ([`DcsSolveScratch`]) to
+    /// `pool_capacity`, growth-only (`DcsSolveScratch::reserve`) — a no-op once
+    /// every workspace already covers it.
+    ///
+    /// `pool_capacity` must be the LARGEST capacity across every pool a
+    /// workspace's sweep may touch, never a single pool's own value: the
+    /// scratch is shared per WORKER, not per pool, so sizing it from one
+    /// pool under-covers every other pool that worker also solves against.
+    pub(crate) fn reserve_dcs_scratch(&mut self, n_state: usize, pool_capacity: usize) {
+        for ws in &mut self.workspaces {
+            ws.backward_accum.dcs_solve.reserve(n_state, pool_capacity);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1404,7 +1432,7 @@ mod tests {
     #[test]
     fn basis_store_get_mut_set_and_retrieve() {
         let mut store = BasisStore::new(2, 3);
-        *store.get_mut(1, 2) = Some(CapturedBasis::new(4, 2, 0, 0, 0));
+        *store.get_mut(1, 2) = Some(CapturedBasis::new(4, 2, 0, 0, 0, 0));
         assert!(store.get(1, 2).is_some());
         assert!(store.get(0, 0).is_none());
         assert!(store.get(1, 0).is_none());
@@ -1432,9 +1460,9 @@ mod tests {
         let mut slices = store.split_workers_mut(2);
 
         // Worker 0 writes to scenario 0 stage 1.
-        *slices[0].get_mut(0, 1) = Some(CapturedBasis::new(2, 1, 0, 0, 0));
+        *slices[0].get_mut(0, 1) = Some(CapturedBasis::new(2, 1, 0, 0, 0, 0));
         // Worker 1 writes to scenario 3 stage 2.
-        *slices[1].get_mut(3, 2) = Some(CapturedBasis::new(2, 1, 0, 0, 0));
+        *slices[1].get_mut(3, 2) = Some(CapturedBasis::new(2, 1, 0, 0, 0, 0));
 
         // Drop slices to release the borrow on store.
         drop(slices);
@@ -1455,7 +1483,7 @@ mod tests {
     fn basis_store_split_single_worker() {
         let mut store = BasisStore::new(3, 2);
         let mut slices = store.split_workers_mut(1);
-        *slices[0].get_mut(2, 1) = Some(CapturedBasis::new(1, 0, 0, 0, 0));
+        *slices[0].get_mut(2, 1) = Some(CapturedBasis::new(1, 0, 0, 0, 0, 0));
         drop(slices);
         assert!(store.get(2, 1).is_some());
     }
@@ -1480,8 +1508,8 @@ mod tests {
         let mut slices = store.split_workers_mut(3);
 
         // Worker 1 covers absolute scenarios 2..4.
-        *slices[1].get_mut(2, 0) = Some(CapturedBasis::new(1, 0, 0, 0, 0));
-        *slices[1].get_mut(3, 1) = Some(CapturedBasis::new(1, 0, 0, 0, 0));
+        *slices[1].get_mut(2, 0) = Some(CapturedBasis::new(1, 0, 0, 0, 0, 0));
+        *slices[1].get_mut(3, 1) = Some(CapturedBasis::new(1, 0, 0, 0, 0, 0));
         drop(slices);
 
         assert!(store.get(2, 0).is_some());
@@ -1492,13 +1520,15 @@ mod tests {
 
     #[test]
     fn test_captured_basis_new_capacities() {
-        // AC: CapturedBasis::new(4, 6, 3, 10, 2) must produce:
+        // AC: CapturedBasis::new(4, 6, 3, 10, 2, 9) must produce:
         //   basis.row_status.len() == 6, base_row_count == 3,
         //   cut_row_slots.capacity() >= 10, cut_row_slots.len() == 0,
-        //   state_at_capture.capacity() >= 2, state_at_capture.len() == 0.
-        let cb = CapturedBasis::new(4, 6, 3, 10, 2);
+        //   state_at_capture.capacity() >= 2, state_at_capture.len() == 0,
+        //   node_id == 9.
+        let cb = CapturedBasis::new(4, 6, 3, 10, 2, 9);
         assert_eq!(cb.basis.row_status.len(), 6, "row_status length");
         assert_eq!(cb.base_row_count, 3, "base_row_count");
+        assert_eq!(cb.node_id, 9, "node_id");
         assert!(
             cb.cut_row_slots.capacity() >= 10,
             "cut_row_slots capacity must be >= 10 (got {})",
@@ -1532,7 +1562,7 @@ mod tests {
             }
         }
         // Write a CapturedBasis at [1][3]; read it back.
-        *store.get_mut(1, 3) = Some(CapturedBasis::new(4, 6, 3, 10, 2));
+        *store.get_mut(1, 3) = Some(CapturedBasis::new(4, 6, 3, 10, 2, 0));
         let retrieved = store.get(1, 3);
         assert!(retrieved.is_some(), "slot [1][3] must be Some after write");
         let cb = retrieved.expect("just checked is_some");
@@ -1624,6 +1654,7 @@ mod tests {
             base_row_count: 1,
             cut_row_slots: vec![10_u32, 20],
             state_at_capture: vec![1.5_f64, 2.5, 3.5],
+            node_id: 0,
         };
 
         let mut i32_buf: Vec<i32> = Vec::new();
@@ -1679,6 +1710,7 @@ mod tests {
             base_row_count: 1,
             cut_row_slots: vec![],
             state_at_capture: vec![],
+            node_id: 0,
         };
 
         let mut i32_buf: Vec<i32> = Vec::new();
@@ -1731,6 +1763,7 @@ mod tests {
             base_row_count: 2,
             cut_row_slots: vec![100_u32, 200, 300],
             state_at_capture: vec![0.1_f64, 0.2],
+            node_id: 0,
         };
 
         let mut i32_buf: Vec<i32> = Vec::new();
@@ -1799,6 +1832,7 @@ mod tests {
             base_row_count: 1,
             cut_row_slots: vec![5_u32],
             state_at_capture: vec![9.9_f64],
+            node_id: 0,
         };
 
         let mut i32_buf: Vec<i32> = Vec::new();
@@ -1849,6 +1883,7 @@ mod tests {
             base_row_count: 1,
             cut_row_slots: vec![],
             state_at_capture: vec![1.0_f64, 2.0, 3.0],
+            node_id: 0,
         };
 
         let mut i32_buf: Vec<i32> = Vec::new();
@@ -1916,6 +1951,7 @@ mod tests {
             base_row_count: 2,
             cut_row_slots: vec![10_u32, 20],
             state_at_capture: vec![0.5_f64, 1.5],
+            node_id: 0,
         };
 
         let mut i32_buf: Vec<i32> = Vec::new();
@@ -1979,6 +2015,7 @@ mod tests {
             base_row_count: 2,
             cut_row_slots: vec![10_u32, 20],
             state_at_capture: vec![0.5_f64, 1.5],
+            node_id: 0,
         };
 
         let mut i32_buf: Vec<i32> = Vec::new();
@@ -2027,6 +2064,7 @@ mod tests {
             base_row_count: 1,
             cut_row_slots: vec![],
             state_at_capture: vec![],
+            node_id: 0,
         };
 
         let mut i32_buf: Vec<i32> = Vec::new();
@@ -2071,6 +2109,64 @@ mod tests {
         assert_eq!(f64_cursor, f64_buf.len(), "f64_cursor must be at end");
     }
 
+    /// `node_id` is in-memory-only metadata: `to_broadcast_payload` does not
+    /// serialize it and `try_from_broadcast_payload` cannot recover the
+    /// original value. Adding it to the wire would break `mpi_wire.rs`'s
+    /// byte-parity gate — this test pins the exclusion so a future reader does
+    /// not "fix" a perceived missing field.
+    #[test]
+    fn captured_basis_node_id_is_not_carried_by_the_wire() {
+        let original = CapturedBasis {
+            basis: Basis {
+                col_status: vec![BasisStatus::Lower],
+                row_status: vec![BasisStatus::Basic],
+            },
+            base_row_count: 1,
+            cut_row_slots: vec![],
+            state_at_capture: vec![],
+            node_id: 77,
+        };
+
+        let mut i32_buf: Vec<i32> = Vec::new();
+        let mut f64_buf: Vec<f64> = Vec::new();
+        original.to_broadcast_payload(&mut i32_buf, &mut f64_buf);
+        let bytes_with_node_id = i32_buf.len();
+
+        let mut other = original.clone();
+        other.node_id = -1;
+        let mut i32_buf2: Vec<i32> = Vec::new();
+        let mut f64_buf2: Vec<f64> = Vec::new();
+        other.to_broadcast_payload(&mut i32_buf2, &mut f64_buf2);
+
+        assert_eq!(
+            i32_buf, i32_buf2,
+            "the payload must be byte-identical regardless of node_id"
+        );
+        assert_eq!(
+            bytes_with_node_id,
+            i32_buf2.len(),
+            "node_id must not change the wire byte count"
+        );
+
+        let mut i32_cursor = 0_usize;
+        let mut f64_cursor = 0_usize;
+        let recovered = CapturedBasis::try_from_broadcast_payload(
+            0,
+            &i32_buf,
+            &mut i32_cursor,
+            &f64_buf,
+            &mut f64_cursor,
+        )
+        .expect("round-trip must not fail")
+        .expect("sentinel is 1; must return Some");
+
+        assert_ne!(
+            recovered.node_id, original.node_id,
+            "node_id does not round-trip through the wire; the caller \
+             (broadcast_basis_cache) fills it out-of-band"
+        );
+    }
+
     // ---------------------------------------------------------------------------
     // Anticipated-state roundtrip tests
     // ---------------------------------------------------------------------------
@@ -2109,6 +2205,7 @@ mod tests {
             base_row_count: 2,
             cut_row_slots: vec![10_u32, 20],
             state_at_capture: state_at_capture.clone(),
+            node_id: 0,
         };
 
         let mut i32_buf: Vec<i32> = Vec::new();
@@ -2169,6 +2266,7 @@ mod tests {
             base_row_count: 2,
             cut_row_slots: vec![],
             state_at_capture: vec![0.0_f64; 6],
+            node_id: 0,
         };
         let mut i32_buf: Vec<i32> = Vec::new();
         let mut f64_buf: Vec<f64> = Vec::new();
@@ -2195,6 +2293,7 @@ mod tests {
             base_row_count: 1,
             cut_row_slots: vec![],
             state_at_capture: vec![],
+            node_id: 0,
         };
         let mut i32_buf2: Vec<i32> = Vec::new();
         let mut f64_buf2: Vec<f64> = Vec::new();
@@ -2215,6 +2314,7 @@ mod tests {
             base_row_count: 3,
             cut_row_slots: vec![1_u32, 2],
             state_at_capture: large_state.clone(),
+            node_id: 0,
         };
         let mut i32_buf3: Vec<i32> = Vec::new();
         let mut f64_buf3: Vec<f64> = Vec::new();
@@ -2264,6 +2364,7 @@ mod tests {
             base_row_count: 3,
             cut_row_slots: vec![10_u32, 20],
             state_at_capture: state_at_capture.clone(),
+            node_id: 0,
         };
 
         let mut i32_buf = Vec::new();
@@ -2315,6 +2416,7 @@ mod tests {
             base_row_count: 6,
             cut_row_slots: vec![10_u32, 20],
             state_at_capture: state_at_capture.clone(),
+            node_id: 0,
         };
 
         let mut i32_buf: Vec<i32> = Vec::new();
@@ -2369,6 +2471,7 @@ mod tests {
             base_row_count: 8,
             cut_row_slots: vec![],
             state_at_capture: vec![0.0_f64; 6],
+            node_id: 0,
         };
 
         let mut i32_buf: Vec<i32> = Vec::new();
@@ -2466,6 +2569,7 @@ mod tests {
             base_row_count: 6,
             cut_row_slots: vec![7_u32, 42],
             state_at_capture: state_at_capture.clone(),
+            node_id: 0,
         };
 
         let mut i32_buf: Vec<i32> = Vec::new();

@@ -98,17 +98,23 @@ pub fn write_checkpoint(
     params: &CheckpointParams,
 ) -> Result<(), OutputError> {
     let fcf = &setup.fcf;
-    let n_stages = fcf.pools.len();
+    // `n_pools` sizes the pool-indexed vectors below (`fcf.pools`,
+    // `cut_state_layouts`, `stage_manifests`); `n_stages` (the true study stage
+    // count, from `setup.num_stages()` — NOT `fcf.pools.len()`, which counts
+    // pools, equal to the stage count only on the chain degeneracy) is the
+    // checkpoint metadata's own field.
+    let n_pools = fcf.pools.len();
+    let n_stages = setup.num_stages();
     let state_dimension = fcf.state_dimension;
 
     let global_layout = setup.stage_state();
-    let stage_manifests: Vec<Vec<EntitySlot>> = (0..n_stages)
-        .map(|t| {
+    let stage_manifests: Vec<Vec<EntitySlot>> = (0..n_pools)
+        .map(|p| {
             build_stage_entity_manifest(
                 system,
                 global_layout,
-                &setup.stage_data.cut_state_layouts[t],
-                setup.study_stage_ids[t],
+                &setup.stage_data.cut_state_layouts[p],
+                setup.study_stage_ids[p],
             )
         })
         .collect();
@@ -152,14 +158,18 @@ pub fn write_checkpoint(
         total_visited_states: training_result
             .visited_archive
             .as_ref()
-            .map_or(0, |a| (0..a.num_stages()).map(|t| a.count(t) as u64).sum()),
+            .map_or(0, |a| (0..a.num_nodes()).map(|t| a.count(t) as u64).sum()),
         training_block_mode,
         training_block_mode_per_stage,
         cost_scale_factor: Some(setup.stage_data.stage_templates.cost_scale_factor),
     };
 
     let stage_states = if params.export_states {
-        build_stage_states_payloads(training_result.visited_archive.as_ref(), &stage_manifests)
+        build_stage_states_payloads(
+            training_result.visited_archive.as_ref(),
+            &stage_manifests,
+            &setup.node_graph,
+        )
     } else {
         Vec::new()
     };

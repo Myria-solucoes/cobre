@@ -2196,6 +2196,7 @@ fn ac_broadcast_basis_cache_uses_scenario_0_not_last() {
             base_row_count: 0,
             cut_row_slots: Vec::new(),
             state_at_capture: Vec::new(),
+            node_id: 0,
         });
     }
 
@@ -2209,11 +2210,13 @@ fn ac_broadcast_basis_cache_uses_scenario_0_not_last() {
             base_row_count: 0,
             cut_row_slots: Vec::new(),
             state_at_capture: Vec::new(),
+            node_id: 0,
         });
     }
 
     let comm = StubComm; // single-rank, no broadcast
-    let cache = broadcast_basis_cache(&store, num_stages, &comm).unwrap();
+    let node_ids: Vec<i32> = (0..num_stages as i32).collect();
+    let cache = broadcast_basis_cache(&store, num_stages, &node_ids, &comm).unwrap();
 
     assert_eq!(cache.len(), num_stages);
     for (t, entry) in cache.iter().enumerate() {
@@ -2243,7 +2246,8 @@ fn ac_broadcast_basis_cache_none_slots_preserved() {
     let store = BasisStore::new(1, num_stages);
 
     let comm = StubComm;
-    let cache = broadcast_basis_cache(&store, num_stages, &comm).unwrap();
+    let node_ids: Vec<i32> = (0..num_stages as i32).collect();
+    let cache = broadcast_basis_cache(&store, num_stages, &node_ids, &comm).unwrap();
 
     assert_eq!(cache.len(), num_stages);
     for t in 0..num_stages {
@@ -2271,11 +2275,13 @@ fn broadcast_basis_cache_single_rank_preserves_metadata() {
         base_row_count: 2,
         cut_row_slots: vec![10_u32, 11_u32, 12_u32],
         state_at_capture: vec![1.5_f64, 2.5_f64],
+        node_id: 4,
     });
     // Stage 1 left None.
 
     let comm = StubComm; // size == 1
-    let cache = broadcast_basis_cache(&store, num_stages, &comm).unwrap();
+    let node_ids: Vec<i32> = (0..num_stages as i32).collect();
+    let cache = broadcast_basis_cache(&store, num_stages, &node_ids, &comm).unwrap();
 
     assert_eq!(cache.len(), num_stages);
     let cb = cache[0].as_ref().expect("stage 0 must have captured basis");
@@ -2289,6 +2295,11 @@ fn broadcast_basis_cache_single_rank_preserves_metadata() {
         cb.state_at_capture,
         vec![1.5_f64, 2.5_f64],
         "state_at_capture must be preserved"
+    );
+    assert_eq!(
+        cb.node_id, 4,
+        "single-rank path must preserve node_id from capture, not overwrite it \
+         from node_ids (only the multi-rank reconstruction path needs the fill)"
     );
     assert!(cache[1].is_none(), "stage 1 must remain None");
 }
@@ -2491,16 +2502,22 @@ fn broadcast_basis_cache_multi_rank_round_trips_full_metadata() {
         base_row_count: 4,
         cut_row_slots: vec![10_u32, 11_u32, 12_u32],
         state_at_capture: vec![1.5_f64, 2.5_f64],
+        // Deliberately distinct from node_ids[0] below: node_id is not on the
+        // wire, so rank 1's copy must come from the mapping, never this value.
+        node_id: 3,
     });
     // Stage 1 left None.
 
+    // Distinct per stage so a fill from the wrong stage's mapping is visible.
+    let node_ids = [7_i32, 8];
+
     let root_comm = MultiRankMockComm::new_root();
-    let _cache_rank0 = broadcast_basis_cache(&store, 2, &root_comm).unwrap();
+    let _cache_rank0 = broadcast_basis_cache(&store, 2, &node_ids, &root_comm).unwrap();
 
     let peer_comm = MultiRankMockComm::new_peer(&root_comm);
     // Rank 1's basis_store is empty — all data must come from the broadcast.
     let empty_store = BasisStore::new(1, 2);
-    let cache = broadcast_basis_cache(&empty_store, 2, &peer_comm).unwrap();
+    let cache = broadcast_basis_cache(&empty_store, 2, &node_ids, &peer_comm).unwrap();
 
     assert_eq!(cache.len(), 2);
     let cb0 = cache[0]
@@ -2530,6 +2547,12 @@ fn broadcast_basis_cache_multi_rank_round_trips_full_metadata() {
         cb0.base_row_count, 4,
         "base_row_count must round-trip on non-root rank"
     );
+    assert_eq!(
+        cb0.node_id, node_ids[0],
+        "node_id is not on the wire; it must be filled out-of-band from \
+         node_ids[stage] after try_from_broadcast_payload, not carried from \
+         rank 0's captured value"
+    );
     assert!(cache[1].is_none(), "stage 1 had no basis → None");
 }
 
@@ -2547,14 +2570,16 @@ fn broadcast_basis_cache_empty_cut_slots_round_trips_ok() {
         base_row_count: 1,
         cut_row_slots: vec![], // deliberately empty
         state_at_capture: vec![3.75_f64],
+        node_id: 0,
     });
 
+    let node_ids = [0_i32];
     let root_comm = MultiRankMockComm::new_root();
-    let _ = broadcast_basis_cache(&store, 1, &root_comm).unwrap();
+    let _ = broadcast_basis_cache(&store, 1, &node_ids, &root_comm).unwrap();
 
     let peer_comm = MultiRankMockComm::new_peer(&root_comm);
     let empty_store = BasisStore::new(1, 1);
-    let cache = broadcast_basis_cache(&empty_store, 1, &peer_comm).unwrap();
+    let cache = broadcast_basis_cache(&empty_store, 1, &node_ids, &peer_comm).unwrap();
 
     assert_eq!(cache.len(), 1);
     let cb = cache[0]
@@ -2597,11 +2622,13 @@ fn broadcast_basis_cache_truncated_cut_slots_returns_validation() {
         base_row_count: 1,
         cut_row_slots: vec![10_u32, 11_u32, 12_u32],
         state_at_capture: vec![0.0_f64],
+        node_id: 0,
     });
 
     // Record rank-0 payloads.
+    let node_ids = [0_i32];
     let root_comm = MultiRankMockComm::new_root();
-    let _ = broadcast_basis_cache(&store, 1, &root_comm).unwrap();
+    let _ = broadcast_basis_cache(&store, 1, &node_ids, &root_comm).unwrap();
     let mut snapshot = root_comm.snapshot();
 
     // snapshot[1] is the Ints(payload) entry. Remove the last i32 value
@@ -2625,7 +2652,7 @@ fn broadcast_basis_cache_truncated_cut_slots_returns_validation() {
 
     let peer_comm = MultiRankMockComm::new_peer_from_queue(snapshot);
     let empty_store = BasisStore::new(1, 1);
-    let result = broadcast_basis_cache(&empty_store, 1, &peer_comm);
+    let result = broadcast_basis_cache(&empty_store, 1, &node_ids, &peer_comm);
 
     match result {
         Err(SddpError::Validation(msg)) => {
@@ -2659,10 +2686,12 @@ fn broadcast_basis_cache_truncated_state_returns_validation() {
         base_row_count: 1,
         cut_row_slots: vec![],
         state_at_capture: vec![1.0_f64, 2.0_f64, 3.0_f64],
+        node_id: 0,
     });
 
+    let node_ids = [0_i32];
     let root_comm = MultiRankMockComm::new_root();
-    let _ = broadcast_basis_cache(&store, 1, &root_comm).unwrap();
+    let _ = broadcast_basis_cache(&store, 1, &node_ids, &root_comm).unwrap();
     let mut snapshot = root_comm.snapshot();
 
     // snapshot[3] is the Floats(f64-payload) entry with 3 values.
@@ -2690,7 +2719,7 @@ fn broadcast_basis_cache_truncated_state_returns_validation() {
 
     let peer_comm = MultiRankMockComm::new_peer_from_queue(snapshot);
     let empty_store = BasisStore::new(1, 1);
-    let result = broadcast_basis_cache(&empty_store, 1, &peer_comm);
+    let result = broadcast_basis_cache(&empty_store, 1, &node_ids, &peer_comm);
 
     match result {
         Err(SddpError::Validation(msg)) => {
@@ -2902,6 +2931,7 @@ fn ac_training_result_new_assigns_all_fields() {
         base_row_count: 3,
         cut_row_slots: vec![4_u32],
         state_at_capture: vec![5.0_f64],
+        node_id: 6,
     })];
     let solver_stats_log = vec![SolverStatsLogEntry::from_raw(
         7,

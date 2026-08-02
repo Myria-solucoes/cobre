@@ -1048,6 +1048,7 @@ pub(crate) fn apply_training_policy_mode(
                 setup.stage_data.stage_templates.templates.len(),
                 &checkpoint.stage_bases,
                 &checkpoint.stage_cuts,
+                &setup.node_graph.node_ids,
             );
             setup.set_warm_start_basis_cache(basis_cache);
         }
@@ -1085,6 +1086,7 @@ pub(crate) fn apply_training_policy_mode(
                 setup.stage_data.stage_templates.templates.len(),
                 &checkpoint.stage_bases,
                 &checkpoint.stage_cuts,
+                &setup.node_graph.node_ids,
             );
             setup.set_warm_start_basis_cache(basis_cache);
         }
@@ -1163,6 +1165,7 @@ pub(crate) fn reconstruct_policy_from_checkpoint(
         setup.stage_data.stage_templates.templates.len(),
         &checkpoint.stage_bases,
         &checkpoint.stage_cuts,
+        &setup.node_graph.node_ids,
     );
 
     let training_result = TrainingResult::new(

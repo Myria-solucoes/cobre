@@ -164,6 +164,7 @@ mod simulation_only {
             n_stages,
             &checkpoint.stage_bases,
             &checkpoint.stage_cuts,
+            &setup.node_graph.node_ids,
         );
         assert_eq!(
             loaded_basis_cache.len(),

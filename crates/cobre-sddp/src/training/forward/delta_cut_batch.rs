@@ -13,19 +13,16 @@ use crate::indexer::{CutStateProjection, StateSpace};
 /// excluded. The CSR layout and coefficient transformation mirror
 /// [`build_cut_row_batch_into`](crate::cut::row::build_cut_row_batch_into); when
 /// the pool holds only `current_iteration` cuts the two produce byte-identical
-/// output. `cut_state` is pool `stage`'s projection; `coefficients` has length
+/// output. `cut_state` is pool `pool`'s projection; `coefficients` has length
 /// `cut_state.n_slots()`.
 ///
 /// # Panics
 ///
 /// Panics if total non-zeros exceeds `i32::MAX` (`HiGHS` API limit).
-// Rationale: clippy::similar_names flags the role-(a) `state` handle next to the
-// `stage` index; both are established names, so renaming either would obscure intent.
-#[allow(clippy::similar_names)]
 pub fn build_delta_cut_row_batch_into(
     batch: &mut RowBatch,
     fcf: &FutureCostFunction,
-    stage: usize,
+    pool: usize,
     state: &StateSpace,
     cut_state: &CutStateProjection,
     col_scale: &[f64],
@@ -36,9 +33,7 @@ pub fn build_delta_cut_row_batch_into(
     let n_cut_state = cut_state.n_slots();
     let theta_col = state.theta;
 
-    let num_cuts: usize = fcf.pools[stage]
-        .active_delta_cuts(current_iteration)
-        .count();
+    let num_cuts: usize = fcf.pools[pool].active_delta_cuts(current_iteration).count();
 
     if num_cuts == 0 {
         batch.row_starts.push(0_i32);
@@ -51,7 +46,7 @@ pub fn build_delta_cut_row_batch_into(
 
     let mut nz_offset = 0;
 
-    for (_slot, intercept, coefficients) in fcf.pools[stage].active_delta_cuts(current_iteration) {
+    for (_slot, intercept, coefficients) in fcf.pools[pool].active_delta_cuts(current_iteration) {
         debug_assert_eq!(
             coefficients.len(),
             n_cut_state,

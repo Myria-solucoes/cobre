@@ -14,6 +14,11 @@ use crate::workspace::CapturedBasis;
 /// `row_status` is resized to `base_row_count + cut_row_count` so the invariant
 /// holds even when `get_basis` is a no-op (test mocks); real solvers write the
 /// correct length, making this a no-op.
+///
+/// `node_id` is the declared id of the node being solved
+/// (`NodeGraph::node_ids[node]`); this is the single owner that sets
+/// `CapturedBasis::node_id` — both the forward and backward capture routes
+/// reach it through this function, never a second call site.
 #[allow(clippy::cast_possible_truncation)]
 pub(crate) fn write_capture_metadata(
     captured: &mut CapturedBasis,
@@ -21,6 +26,7 @@ pub(crate) fn write_capture_metadata(
     base_row_count: usize,
     cut_row_count: usize,
     current_state: &[f64],
+    node_id: i32,
 ) {
     captured.cut_row_slots.clear();
     for (slot, _intercept, _coeffs) in pool.active_cuts().take(cut_row_count) {
@@ -29,6 +35,7 @@ pub(crate) fn write_capture_metadata(
     captured.state_at_capture.clear();
     captured.state_at_capture.extend_from_slice(current_state);
     captured.base_row_count = base_row_count;
+    captured.node_id = node_id;
     let expected_len = base_row_count + cut_row_count;
     if captured.basis.row_status.len() != expected_len {
         captured

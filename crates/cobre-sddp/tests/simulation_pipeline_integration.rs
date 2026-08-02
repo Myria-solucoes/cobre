@@ -2839,7 +2839,10 @@ fn simulate_with_captured_basis_preserves_row_statuses() {
         "populated_count must be 13 (slot 12 + 1)"
     );
 
-    let mut cb = CapturedBasis::new(4, 5, 2, 3, 1);
+    // node_id must match the chain's node_ids[0] == 0 (n_stages = 1 below) or the
+    // new node-tag check drops this basis to cold, breaking the warm-start
+    // assertions this test exists to pin.
+    let mut cb = CapturedBasis::new(4, 5, 2, 3, 1, 0);
     cb.basis.row_status = vec![
         BASE_STATUS,
         BASE_STATUS,

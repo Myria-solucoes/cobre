@@ -32,6 +32,9 @@ pub struct StageInputs<'a> {
     /// simulation. Forward supplies it so `SddpError::Infeasible { iteration }`
     /// is populated without the caller re-wrapping the error.
     pub iteration: Option<u64>,
+    /// Declared id of the node being solved (`NodeGraph::node_ids[node]`); a
+    /// `stored_basis` whose `node_id` differs is treated as cold.
+    pub node_id: i32,
 }
 
 /// Execute one LP solve at stage `t` for scenario `m`, owning basis
@@ -57,7 +60,15 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
             .resize(inputs.pool.populated(), None);
     }
 
-    let view = if let Some(captured) = inputs.stored_basis {
+    // A stored basis whose node_id differs from the node being solved is
+    // treated as cold: a resampled path may visit a different node than the
+    // one that captured it, and CLP accepts a shape-mismatched basis
+    // silently, so the check must live here, not in a solver-specific path.
+    let stored_basis = inputs
+        .stored_basis
+        .filter(|captured| captured.node_id == inputs.node_id);
+
+    let solved = if let Some(captured) = stored_basis {
         // `base_row_count` is the non-frozen template row count so cut rows are
         // matched by slot identity, not positional copy from the stored basis.
         let target = ReconstructionTarget {
@@ -91,24 +102,19 @@ pub fn run_stage_solve<'ws, S: SolverInterface>(
 
         ws.solver.record_reconstruction_stats();
 
-        ws.solver.solve(Some(&ws.scratch_basis)).map_err(|e| {
-            map_solver_error(
-                e,
-                inputs.stage_index,
-                inputs.scenario_index,
-                inputs.iteration,
-            )
-        })?
+        ws.solver.solve(Some(&ws.scratch_basis))
     } else {
-        ws.solver.solve(None).map_err(|e| {
-            map_solver_error(
-                e,
-                inputs.stage_index,
-                inputs.scenario_index,
-                inputs.iteration,
-            )
-        })?
+        ws.solver.solve(None)
     };
+
+    let view = solved.map_err(|e| {
+        map_solver_error(
+            e,
+            inputs.stage_index,
+            inputs.scenario_index,
+            inputs.iteration,
+        )
+    })?;
 
     Ok(view)
 }
@@ -350,6 +356,7 @@ mod tests {
             stage_index: 0,
             scenario_index: 0,
             iteration: Some(1),
+            node_id: 0,
         };
 
         let result = run_stage_solve(&mut ws, &inputs);
@@ -390,6 +397,7 @@ mod tests {
             template.num_rows,
             0,
             1,
+            5, // node_id — matches inputs.node_id below (the match/warm case)
         );
         captured.basis.col_status.clear();
         captured.basis.col_status.push(B); // x0 BASIC
@@ -407,6 +415,7 @@ mod tests {
             stage_index: 0,
             scenario_index: 0,
             iteration: None,
+            node_id: 5,
         };
 
         let result = run_stage_solve(&mut ws, &inputs);
@@ -446,6 +455,7 @@ mod tests {
             stage_index: 0,
             scenario_index: 7,
             iteration: Some(42),
+            node_id: 0,
         };
 
         let result = run_stage_solve(&mut ws, &inputs);
@@ -491,6 +501,7 @@ mod tests {
             template.num_rows,
             0,
             1,
+            9, // node_id — matches inputs.node_id below (the match/warm case)
         );
 
         let inputs = StageInputs {
@@ -500,6 +511,7 @@ mod tests {
             stage_index: 0,
             scenario_index: 3,
             iteration: Some(5),
+            node_id: 9,
         };
 
         match run_stage_solve(&mut ws, &inputs) {
@@ -516,6 +528,53 @@ mod tests {
             }
             other => panic!("expected Err(SddpError::BasisShapeMismatch {{ .. }}), got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Node-tag mismatch: cross-node reuse is treated as cold
+    // -----------------------------------------------------------------------
+
+    /// The same deficit-shaped `CapturedBasis` `basis_deficit_rejected_before_solver_sees_it`
+    /// uses to prove the warm path surfaces `BasisShapeMismatch` — but tagged with a
+    /// node id that does NOT match `inputs.node_id`. The mismatch must drop to the
+    /// cold path before `reconstruct_basis`/`enforce_basic_count_invariant` ever see
+    /// the deficit-shaped basis, so the solve succeeds instead of erroring.
+    #[test]
+    fn run_stage_solve_cross_node_stored_basis_is_treated_as_cold() {
+        let template = make_template();
+        let templates = std::slice::from_ref(&template);
+        let ctx = make_context(templates);
+        let pool = make_empty_pool();
+        let mut ws = make_workspace(&template);
+        ws.scratch.recon_slot_lookup = vec![None; 16];
+
+        // Deficit shape identical to basis_deficit_rejected_before_solver_sees_it —
+        // would surface as BasisShapeMismatch if the warm path were taken.
+        let stored_at_node_a = CapturedBasis::new(
+            template.num_cols,
+            template.num_rows,
+            template.num_rows,
+            0,
+            1,
+            1, // node A
+        );
+
+        let inputs = StageInputs {
+            stage_context: &ctx,
+            pool: &pool,
+            stored_basis: Some(&stored_at_node_a),
+            stage_index: 0,
+            scenario_index: 3,
+            iteration: Some(5),
+            node_id: 2, // node B — mismatches the stored basis's node A
+        };
+
+        let result = run_stage_solve(&mut ws, &inputs);
+        assert!(
+            result.is_ok(),
+            "a node-id mismatch must drop to the cold path, never attempting the \
+             deficit-shaped stored basis: {result:?}"
+        );
     }
 
     /// `SolverError::BasisInconsistent` must route to `SddpError::Solver`, not

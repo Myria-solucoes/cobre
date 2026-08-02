@@ -1178,6 +1178,18 @@ fn node_native_binary_tree_loads_and_constructs_node_graph() {
         setup.node_graph.n_pools, 4,
         "3 internal nodes each own a pool, 4 leaves share one"
     );
+    // The FCF and its paired cut-state layouts are sized to the pool axis
+    // (`n_pools`), NOT the node count or the stage count (3).
+    assert_eq!(
+        setup.fcf.pools.len(),
+        setup.node_graph.n_pools,
+        "FutureCostFunction.pools is sized to n_pools, not node count or stage count"
+    );
+    assert_eq!(
+        setup.stage_data.cut_state_layouts.len(),
+        setup.node_graph.n_pools,
+        "cut_state_layouts is sized to n_pools, paired 1:1 with fcf.pools"
+    );
 
     // Canonical (ascending child node id) successor structure, matching the
     // declared transitions: 0->{1,2}, 1->{3,4}, 2->{5,6}; leaves have none.
@@ -1192,6 +1204,49 @@ fn node_native_binary_tree_loads_and_constructs_node_graph() {
     assert_eq!(child_ids(2), vec![5, 6]);
     for leaf_pos in 3..7 {
         assert!(setup.node_graph.successors[leaf_pos].is_empty());
+    }
+}
+
+/// Counterpart to [`node_native_binary_tree_loads_and_constructs_node_graph`]:
+/// on the chain degeneracy (`nodes[]` absent), `StudySetup`'s FCF has exactly
+/// `num_stages` pools and every node's `pool_id` is the identity `t`, so the
+/// pool re-key reduces byte-for-byte to the pre-node-native per-stage FCF.
+#[test]
+fn chain_fcf_pools_len_equals_num_stages_with_pool_id_identity() {
+    let n_stages = 4;
+    let system = minimal_system(n_stages);
+    let config = minimal_config(1, 1);
+    let stochastic = build_stochastic_context(
+        &system,
+        42,
+        None,
+        &[],
+        &[],
+        OpeningTreeInputs::default(),
+        ClassSchemes {
+            inflow: Some(SamplingScheme::InSample),
+            load: Some(SamplingScheme::InSample),
+            ncs: Some(SamplingScheme::InSample),
+        },
+    )
+    .expect("stochastic context");
+
+    let setup = StudySetup::new(
+        &system,
+        &config,
+        stochastic,
+        PrepareHydroModelsResult::default_from_system(&system),
+    )
+    .expect("setup: chain must load end-to-end");
+
+    assert_eq!(setup.node_graph.n_pools, n_stages);
+    assert_eq!(setup.fcf.pools.len(), n_stages);
+    assert_eq!(setup.stage_data.cut_state_layouts.len(), n_stages);
+    for t in 0..n_stages {
+        assert_eq!(
+            setup.node_graph.nodes[t].pool_id, t,
+            "chain degeneracy: pool_id must equal stage index {t}"
+        );
     }
 }
 

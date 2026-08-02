@@ -918,6 +918,53 @@ impl CutPool {
             candidates_buf: Vec::new(),
         }
     }
+
+    /// Grow this pool's capacity in place. `Vec::resize` only appends new
+    /// (zeroed/inactive) slots when growing — it never relocates an existing
+    /// element — so every populated slot keeps its index, the invariant a
+    /// stored basis's slot-identity match depends on (`.claude/rules/sddp.md`,
+    /// "Cut pool is append-only; basis matches by slot identity"). Reserved
+    /// seam: the training session's between-iteration growth hook calls this
+    /// when a pool's realized visit rate would exceed its construction-time
+    /// floor.
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if `new_capacity < self.capacity` — growth-only, never shrinks.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use cobre_sddp::cut::pool::CutPool;
+    ///
+    /// let mut pool = CutPool::new(2, 2, 1, 0);
+    /// pool.add_cut(0, 0, 5.0, &[1.0, 2.0]);
+    /// pool.grow(10);
+    /// assert_eq!(pool.capacity, 10);
+    /// assert!(pool.is_active(0));
+    /// assert_eq!(pool.intercept(0), 5.0);
+    /// ```
+    pub fn grow(&mut self, new_capacity: usize) {
+        debug_assert!(
+            new_capacity >= self.capacity,
+            "grow: new_capacity {new_capacity} < current capacity {}",
+            self.capacity
+        );
+        self.coefficients
+            .resize(new_capacity * self.state_dimension, 0.0);
+        self.intercepts.resize(new_capacity, 0.0);
+        self.metadata.resize(
+            new_capacity,
+            CutMetadata {
+                iteration_generated: 0,
+                forward_pass_index: 0,
+                active_count: 0,
+                last_active_iter: 0,
+            },
+        );
+        self.active.resize(new_capacity, false);
+        self.capacity = new_capacity;
+    }
 }
 
 /// Diagnostic report of exact-zero coefficients across active cuts in a [`CutPool`].
@@ -2036,5 +2083,46 @@ mod tests {
         pool.replace_selection(&[meta.clone(), meta], &[false, false]);
 
         assert_eq!(pool.active_count(), 0);
+    }
+
+    // ── grow ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn grow_preserves_populated_slot_positions_and_values() {
+        let mut pool = CutPool::new(2, 2, 1, 0);
+        pool.add_cut(0, 0, 5.0, &[1.0, 2.0]);
+        pool.add_cut(1, 0, 6.0, &[3.0, 4.0]);
+
+        pool.grow(10);
+
+        assert_eq!(pool.capacity, 10);
+        assert_eq!(pool.populated(), 2, "growth does not touch populated_count");
+        assert!(pool.is_active(0));
+        assert_eq!(pool.intercept(0), 5.0);
+        assert_eq!(pool.coefficient_row(0), &[1.0, 2.0]);
+        assert!(pool.is_active(1));
+        assert_eq!(pool.intercept(1), 6.0);
+        assert_eq!(pool.coefficient_row(1), &[3.0, 4.0]);
+    }
+
+    #[test]
+    fn grow_new_slots_are_writable_via_add_cut() {
+        let mut pool = CutPool::new(2, 1, 1, 0);
+        pool.add_cut(0, 0, 1.0, &[1.0]); // slot 0
+        pool.grow(5);
+        // slot = 0 + 1*1 + 0 = 1 is already populated; grow one more forward
+        // pass worth of stride to reach a genuinely new slot at iteration 4.
+        pool.add_cut(4, 0, 9.0, &[7.0]); // slot 4, beyond the original capacity
+        assert!(pool.is_active(4));
+        assert_eq!(pool.intercept(4), 9.0);
+        assert_eq!(pool.coefficient_row(4), &[7.0]);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "new_capacity")]
+    fn grow_to_a_smaller_capacity_panics_in_debug() {
+        let mut pool = CutPool::new(10, 2, 1, 0);
+        pool.grow(5);
     }
 }

@@ -35,7 +35,6 @@ use crate::{
     FutureCostFunction,
     context::{StageContext, TrainingContext},
     cut::row::build_cut_row_batch_into,
-    indexer::{CutStateProjection, StateSpace},
     simulation::{
         config::SimulationConfig,
         error::SimulationError,
@@ -239,8 +238,7 @@ impl SimulationState {
         refreeze_templates_if_needed(
             inputs.fcf,
             inputs.ctx,
-            state,
-            training_ctx.cut_state_layouts,
+            training_ctx,
             num_stages,
             inputs.frozen_templates,
             &mut self.freeze_batch,
@@ -502,8 +500,7 @@ fn build_sim_sampler<'a>(
 fn refreeze_templates_if_needed(
     fcf: &FutureCostFunction,
     ctx: &StageContext<'_>,
-    state: &StateSpace,
-    cut_state_layouts: &[CutStateProjection],
+    training_ctx: &TrainingContext<'_>,
     num_stages: usize,
     caller_frozen: Option<&[StageTemplate]>,
     freeze_batch: &mut RowBatch,
@@ -515,18 +512,24 @@ fn refreeze_templates_if_needed(
         return;
     }
 
+    let state = training_ctx.state;
+    let cut_state_layouts = training_ctx.cut_state_layouts;
+    let node_graph = training_ctx.node_graph;
+
     let mut owned = Vec::with_capacity(num_stages);
     // Rationale: `t` is the stage index passed to `build_cut_row_batch_into` AND used
-    // to index three parallel slices (fcf pools, cut_state_layouts, templates); an
+    // to index the templates slice (structure per stage); `pool_id` (resolved from
+    // the node graph) indexes the fcf pools / cut_state_layouts slices instead. An
     // iterator zip would not carry the stage index the builder needs.
     #[allow(clippy::needless_range_loop)]
     for t in 0..num_stages {
+        let pool_id = node_graph.nodes[t].pool_id;
         build_cut_row_batch_into(
             freeze_batch,
             fcf,
-            t,
+            pool_id,
             state,
-            &cut_state_layouts[t],
+            &cut_state_layouts[pool_id],
             &ctx.templates[t].col_scale,
         );
         let mut frozen = StageTemplate::empty();

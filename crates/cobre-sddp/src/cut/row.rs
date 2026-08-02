@@ -85,23 +85,17 @@ pub(crate) fn push_cut_row(
 /// Fill a pre-allocated [`RowBatch`] with Benders cut rows from the FCF.
 ///
 /// Clears `batch` and repopulates it with active cuts from `fcf` at the
-/// given `stage`. The buffers inside `batch` retain their allocated capacity
+/// given `pool` id. The buffers inside `batch` retain their allocated capacity
 /// across calls, eliminating heap allocation on the hot path.
 ///
 /// # Panics
 ///
 /// Panics if the total number of non-zeros exceeds `i32::MAX` (the `HiGHS`
 /// API limit for CSR indices).
-// Rationale: clippy::similar_names flags the role-(a) `state` handle next to the
-// `stage` index. Both names are established — `state` matches `StageData.state` /
-// `TrainingContext.state`, and `stage` is the stage index — so renaming either to
-// satisfy the heuristic would obscure intent (the same exemption `StageLayout::new`
-// takes).
-#[allow(clippy::similar_names)]
 pub fn build_cut_row_batch_into(
     batch: &mut RowBatch,
     fcf: &FutureCostFunction,
-    stage: usize,
+    pool: usize,
     state: &StateSpace,
     cut_state: &CutStateProjection,
     col_scale: &[f64],
@@ -111,7 +105,7 @@ pub fn build_cut_row_batch_into(
     let n_cut_state = cut_state.n_slots();
     let theta_col = state.theta;
 
-    let num_cuts = fcf.pools[stage].active_count();
+    let num_cuts = fcf.pools[pool].active_count();
 
     if num_cuts == 0 {
         batch.row_starts.push(0_i32);
@@ -123,7 +117,7 @@ pub fn build_cut_row_batch_into(
 
     let mut nz_offset = 0;
 
-    for (_slot, intercept, coefficients) in fcf.active_cuts(stage) {
+    for (_slot, intercept, coefficients) in fcf.active_cuts(pool) {
         debug_assert_eq!(
             coefficients.len(),
             n_cut_state,
@@ -176,12 +170,10 @@ pub fn build_cut_row_batch_into(
 /// Convenience wrapper around [`build_cut_row_batch_into`] that allocates a
 /// new `RowBatch`. For allocation-free usage on the hot path, prefer calling
 /// [`build_cut_row_batch_into`] with a pre-allocated batch.
-// `clippy::similar_names`: role-(a) `state` handle next to the `stage` index.
-#[allow(clippy::similar_names)]
 #[must_use]
 pub fn build_cut_row_batch(
     fcf: &FutureCostFunction,
-    stage: usize,
+    pool: usize,
     state: &StateSpace,
     cut_state: &CutStateProjection,
     col_scale: &[f64],
@@ -194,7 +186,7 @@ pub fn build_cut_row_batch(
         row_lower: Vec::new(),
         row_upper: Vec::new(),
     };
-    build_cut_row_batch_into(&mut batch, fcf, stage, state, cut_state, col_scale);
+    build_cut_row_batch_into(&mut batch, fcf, pool, state, cut_state, col_scale);
     batch
 }
 
@@ -211,20 +203,19 @@ pub fn build_cut_row_batch(
 /// # Arguments
 ///
 /// - `col_scale`: column scaling factors (empty slice if no scaling).
-/// - `row_map`: per-stage [`CutRowMap`] to update.
+/// - `row_map`: per-pool [`CutRowMap`] to update.
 /// - `batch_buf`: reusable [`RowBatch`] buffer for constructing the new cut rows.
 ///
 /// # Panics
 ///
 /// Panics if `total_nnz` exceeds `i32::MAX` (LP exceeds the `HiGHS` API limit).
-/// In debug builds, also panics if `stage >= fcf.pools.len()`.
+/// In debug builds, also panics if `pool >= fcf.pools.len()`.
 ///
 /// [`CutRowMap`]: CutRowMap
-#[allow(clippy::similar_names)] // `state` (role-a handle) vs `stage` index — both established names
 pub fn append_new_cuts_to_lp<S: SolverInterface>(
     solver: &mut S,
     fcf: &FutureCostFunction,
-    stage: usize,
+    pool: usize,
     state: &StateSpace,
     cut_state: &CutStateProjection,
     col_scale: &[f64],
@@ -240,7 +231,7 @@ pub fn append_new_cuts_to_lp<S: SolverInterface>(
     let mut new_count = 0usize;
     let mut nz_offset = 0usize;
 
-    for (slot, intercept, coefficients) in fcf.active_cuts(stage) {
+    for (slot, intercept, coefficients) in fcf.active_cuts(pool) {
         if row_map.lp_row_for_slot(slot).is_some() {
             continue;
         }
@@ -303,7 +294,6 @@ pub fn append_new_cuts_to_lp<S: SolverInterface>(
 /// limit), matching [`append_new_cuts_to_lp`].
 ///
 /// [`CutPool`]: CutPool
-#[allow(clippy::similar_names)] // `state` (role-a handle) vs `stage` index — both established names
 pub fn append_slots_to_lp<S: SolverInterface>(
     solver: &mut S,
     pool: &CutPool,

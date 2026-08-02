@@ -748,6 +748,7 @@ pub fn solve_stage_for_probe<'ws, S: SolverInterface>(
     stored_basis: Option<&CapturedBasis>,
     stage_index: usize,
     scenario_index: usize,
+    node_id: i32,
 ) -> Result<SolutionView<'ws>, SddpError> {
     let inputs = StageInputs {
         stage_context,
@@ -756,6 +757,7 @@ pub fn solve_stage_for_probe<'ws, S: SolverInterface>(
         stage_index,
         scenario_index,
         iteration: None,
+        node_id,
     };
     run_stage_solve(ws, &inputs)
 }

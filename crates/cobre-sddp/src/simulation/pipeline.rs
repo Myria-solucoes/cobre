@@ -403,10 +403,12 @@ fn solve_simulation_stage<S: SolverInterface>(
     let col_scale = &ctx.templates[t].col_scale;
     let row_scale = &ctx.templates[t].row_scale;
 
+    let pool_id = training_ctx.node_graph.nodes[t].pool_id;
+
     let view_objective: f64 = if let Some(params) = dcs {
         // Simulation has no iteration counter; seed with `current_iteration = 0`.
         build_initial_resident_set(
-            &fcf.pools[t],
+            &fcf.pools[pool_id],
             0,
             params.k2,
             &mut ws.backward_accum.dcs_initial_resident,
@@ -417,15 +419,16 @@ fn solve_simulation_stage<S: SolverInterface>(
             iteration: None, // disables the k1 window → every cut a candidate
             // Simulation solves one LP per (stage, scenario): always fresh.
             continue_carry: false,
+            node_id: training_ctx.node_graph.node_ids[t],
         };
         // Disjoint borrows of `ws`: `solver`, `dcs_initial_resident` (shared), and
         // `dcs_solve` (mut) are distinct fields.
         lazy_solve_preloaded(
             &mut ws.solver,
             &ctx.templates[t],
-            &fcf.pools[t],
+            &fcf.pools[pool_id],
             state,
-            &training_ctx.cut_state_layouts[t],
+            &training_ctx.cut_state_layouts[pool_id],
             col_scale,
             None,
             &ws.backward_accum.dcs_initial_resident,
@@ -448,11 +451,12 @@ fn solve_simulation_stage<S: SolverInterface>(
     } else {
         let inputs = StageInputs {
             stage_context: ctx,
-            pool: &fcf.pools[t],
+            pool: &fcf.pools[pool_id],
             stored_basis: load_spec.warm_basis,
             stage_index: t,
             scenario_index: ids.scenario_id as usize,
             iteration: None, // simulation has no iteration counter
+            node_id: training_ctx.node_graph.node_ids[t],
         };
 
         let view = run_stage_solve(ws, &inputs).map_err(|e| map_sim_solver_error(e, ids))?;
