@@ -1103,9 +1103,11 @@ fn build_season_mapped_system(first_season: usize, n: usize) -> cobre_core::Syst
         .collect();
 
     let policy_graph = PolicyGraph {
+        stage_discount_rate_overrides: std::collections::HashMap::new(),
         graph_type: PolicyGraphType::FiniteHorizon,
         annual_discount_rate: 0.0,
         transitions: Vec::new(),
+        nodes: Vec::new(),
         season_map: Some(monthly_season_map()),
     };
 

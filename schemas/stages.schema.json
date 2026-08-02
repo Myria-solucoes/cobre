@@ -48,6 +48,44 @@
       ],
       "type": "object"
     },
+    "RawNode": {
+      "additionalProperties": false,
+      "description": "Intermediate type for one policy-graph node.",
+      "properties": {
+        "id": {
+          "description": "Unique node id, referenced by `transitions` endpoints when `nodes` is declared.",
+          "format": "int32",
+          "type": "integer"
+        },
+        "label": {
+          "default": null,
+          "description": "Optional human-readable label.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "realization_id": {
+          "default": null,
+          "description": "Per-stage external-library realization column this node carries. Required at a\nstage carrying a slot-occupying external class, omitted where none. `realization_id: k`\nis exactly the degenerate one-element weighted opening set\n`[{ \"realization_id\": k, \"probability\": 1.0 }]` (documented equivalence; the\nweighted-list spelling is not parsed here).",
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "stage_id": {
+          "description": "Declared study-stage id this node sits at; resolved against the study stages, never an array index.",
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "stage_id"
+      ],
+      "type": "object"
+    },
     "RawPolicyGraph": {
       "additionalProperties": false,
       "description": "Intermediate type for the `policy_graph` sub-object.",
@@ -57,6 +95,13 @@
           "format": "double",
           "type": "number"
         },
+        "nodes": {
+          "description": "Policy-graph nodes. Absent ⇒ the graph is a stage chain and `transitions`\nendpoints are stage ids.",
+          "items": {
+            "$ref": "#/$defs/RawNode"
+          },
+          "type": "array"
+        },
         "transitions": {
           "description": "Stage transitions.",
           "items": {
@@ -65,7 +110,7 @@
           "type": "array"
         },
         "type": {
-          "description": "Horizon type: `\"finite_horizon\"` or `\"cyclic\"`.",
+          "description": "Horizon type. Only `\"finite_horizon\"` is supported; `\"cyclic\"` is reserved\nand rejected (no engine consumer today).",
           "type": "string"
         }
       },
@@ -216,6 +261,15 @@
       "additionalProperties": false,
       "description": "Intermediate type for a study stage entry.",
       "properties": {
+        "annual_discount_rate_override": {
+          "default": null,
+          "description": "Per-stage annual discount rate override; absent uses `policy_graph.annual_discount_rate`.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "block_mode": {
           "default": "parallel",
           "description": "Block mode: `\"parallel\"` (default) or `\"chronological\"`.",
@@ -237,11 +291,15 @@
           "format": "int32",
           "type": "integer"
         },
-        "num_scenarios": {
-          "description": "Number of scenarios (branching factor). Must be > 0.",
+        "num_openings": {
+          "default": null,
+          "description": "Number of within-node openings. Required (and `> 0`) on the chain dialect and\nat a generated-openings stage under `nodes[]`; rejected where a stage carries\nonly external openings. Accepts the legacy `num_scenarios` spelling.",
           "format": "uint32",
           "minimum": 0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "risk_measure": {
           "$ref": "#/$defs/RawRiskMeasure",
@@ -282,8 +340,7 @@
         "id",
         "start_date",
         "end_date",
-        "blocks",
-        "num_scenarios"
+        "blocks"
       ],
       "type": "object"
     },
@@ -323,12 +380,12 @@
           "type": "number"
         },
         "source_id": {
-          "description": "Source stage ID.",
+          "description": "Source endpoint: a node id when `policy_graph.nodes` is non-empty, a stage id otherwise.",
           "format": "int32",
           "type": "integer"
         },
         "target_id": {
-          "description": "Target stage ID.",
+          "description": "Target endpoint: a node id when `policy_graph.nodes` is non-empty, a stage id otherwise.",
           "format": "int32",
           "type": "integer"
         }

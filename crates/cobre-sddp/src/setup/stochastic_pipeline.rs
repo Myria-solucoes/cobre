@@ -1,6 +1,6 @@
 //! Stochastic preprocessing pipeline: PAR estimation, opening tree loading, and stochastic context construction.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use cobre_core::temporal::SeasonCycleType::Monthly;
@@ -11,6 +11,7 @@ use cobre_core::{
 };
 use cobre_io::Config;
 use cobre_io::LoadFactorEntry;
+use cobre_io::StageIdResolver;
 use cobre_io::ValidationContext;
 use cobre_io::scenarios::assemble_opening_tree;
 use cobre_io::scenarios::estimation::estimate_from_history;
@@ -75,19 +76,18 @@ fn load_user_opening_tree_inner(
 
     let expected_dim = noise_entity_order(system).dim();
 
-    let expected_stages = system.stages().iter().filter(|s| s.id >= 0).count();
-    let mut openings_by_stage: BTreeMap<i32, BTreeSet<u32>> = BTreeMap::new();
-    for row in &rows {
-        openings_by_stage
-            .entry(row.stage_id)
-            .or_default()
-            .insert(row.opening_index);
-    }
-    let openings_per_stage: Vec<usize> = openings_by_stage.values().map(BTreeSet::len).collect();
+    let study_stage_ids: Vec<i32> = system
+        .stages()
+        .iter()
+        .filter(|s| s.id >= 0)
+        .map(|s| s.id)
+        .collect();
+    let expected_stages = study_stage_ids.len();
+    let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
 
-    validate_noise_openings(&rows, expected_dim, expected_stages, &openings_per_stage)?;
+    validate_noise_openings(&rows, expected_dim, expected_stages, &resolver)?;
 
-    let tree = assemble_opening_tree(rows, expected_dim);
+    let tree = assemble_opening_tree(rows, expected_dim, &resolver);
     Ok(Some(tree))
 }
 
@@ -257,98 +257,84 @@ fn build_opening_tree_library(
     Ok(Some(lib))
 }
 
+/// Per-class per-stage raw scenario count for opening-tree clamping, keyed by the
+/// resolved study index. `None` when the class is not External. A row whose
+/// `stage_id` does not resolve is impossible here — cobre-io's A2 rejects it at
+/// load — and the resolve consumes the study stage-id resolver's map, never a
+/// `stage_id as usize` index a gapped or 1-based domain would mis-key.
+fn class_scenario_counts(
+    scheme: SamplingScheme,
+    stage_ids: impl Iterator<Item = i32>,
+    n_entities: usize,
+    n_stages: usize,
+    resolver: &StageIdResolver,
+) -> Option<Vec<usize>> {
+    if scheme != SamplingScheme::External {
+        return None;
+    }
+    let mut rows_per_stage = vec![0usize; n_stages];
+    for stage_id in stage_ids {
+        if let Some(idx) = resolver.resolve(stage_id) {
+            rows_per_stage[idx] += 1;
+        }
+    }
+    Some(if n_entities > 0 {
+        rows_per_stage.iter().map(|&r| r / n_entities).collect()
+    } else {
+        vec![0usize; n_stages]
+    })
+}
+
 /// Compute per-stage external scenario counts for opening tree clamping.
 ///
 /// When any entity class uses External sampling, the external library is padded
 /// to a uniform scenario count after loading. The opening tree generator must
-/// clamp per-stage openings to the pre-padding raw count. The element-wise
-/// minimum across entity classes is returned.
+/// clamp per-stage openings to the pre-padding raw count. P-B1 (cobre-io Layer
+/// 5b) rejects any deck whose slot-occupying external classes disagree on the
+/// per-stage raw count, so the present classes are guaranteed to agree here and
+/// the first present class's vector is authoritative — never an element-wise
+/// minimum, which would silently truncate a class's scenario set to a wrong
+/// answer.
 fn compute_external_scenario_counts(
     system: &System,
     training_source: &ScenarioSource,
 ) -> Option<Vec<usize>> {
-    let n_stages = system.stages().iter().filter(|s| s.id >= 0).count();
+    let study_stage_ids: Vec<i32> = system
+        .stages()
+        .iter()
+        .filter(|s| s.id >= 0)
+        .map(|s| s.id)
+        .collect();
+    let n_stages = study_stage_ids.len();
+    if n_stages == 0 {
+        return None;
+    }
+    let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
     let noise_order = noise_entity_order(system);
 
-    let inflow_counts: Option<Vec<usize>> =
-        if training_source.inflow_scheme == SamplingScheme::External && n_stages > 0 {
-            let external_rows = system.external_scenarios();
-            let n_hydros = noise_order.hydro_ids.len();
-            let mut rows_per_stage = vec![0usize; n_stages];
-            #[allow(clippy::cast_sign_loss)]
-            for row in external_rows {
-                let s = row.stage_id as usize;
-                if s < n_stages {
-                    rows_per_stage[s] += 1;
-                }
-            }
-            Some(if n_hydros > 0 {
-                rows_per_stage.iter().map(|&r| r / n_hydros).collect()
-            } else {
-                vec![0usize; n_stages]
-            })
-        } else {
-            None
-        };
+    let inflow_counts = class_scenario_counts(
+        training_source.inflow_scheme,
+        system.external_scenarios().iter().map(|r| r.stage_id),
+        noise_order.hydro_ids.len(),
+        n_stages,
+        &resolver,
+    );
+    let load_counts = class_scenario_counts(
+        training_source.load_scheme,
+        system.external_load_scenarios().iter().map(|r| r.stage_id),
+        noise_order.load_bus_ids.len(),
+        n_stages,
+        &resolver,
+    );
+    let ncs_counts = class_scenario_counts(
+        training_source.ncs_scheme,
+        system.external_ncs_scenarios().iter().map(|r| r.stage_id),
+        noise_order.ncs_entity_ids.len(),
+        n_stages,
+        &resolver,
+    );
 
-    let load_counts: Option<Vec<usize>> =
-        if training_source.load_scheme == SamplingScheme::External && n_stages > 0 {
-            let external_rows = system.external_load_scenarios();
-            let n_buses = noise_order.load_bus_ids.len();
-            let mut rows_per_stage = vec![0usize; n_stages];
-            #[allow(clippy::cast_sign_loss)]
-            for row in external_rows {
-                let s = row.stage_id as usize;
-                if s < n_stages {
-                    rows_per_stage[s] += 1;
-                }
-            }
-            Some(if n_buses > 0 {
-                rows_per_stage.iter().map(|&r| r / n_buses).collect()
-            } else {
-                vec![0usize; n_stages]
-            })
-        } else {
-            None
-        };
-
-    let ncs_counts: Option<Vec<usize>> =
-        if training_source.ncs_scheme == SamplingScheme::External && n_stages > 0 {
-            let external_rows = system.external_ncs_scenarios();
-            let n_ncs = noise_order.ncs_entity_ids.len();
-            let mut rows_per_stage = vec![0usize; n_stages];
-            #[allow(clippy::cast_sign_loss)]
-            for row in external_rows {
-                let s = row.stage_id as usize;
-                if s < n_stages {
-                    rows_per_stage[s] += 1;
-                }
-            }
-            Some(if n_ncs > 0 {
-                rows_per_stage.iter().map(|&r| r / n_ncs).collect()
-            } else {
-                vec![0usize; n_stages]
-            })
-        } else {
-            None
-        };
-
-    match (inflow_counts, load_counts, ncs_counts) {
-        (None, None, None) => None,
-        (Some(a), None, None) => Some(a),
-        (None, Some(b), None) => Some(b),
-        (None, None, Some(c)) => Some(c),
-        (Some(a), Some(b), None) => Some(a.iter().zip(b.iter()).map(|(&x, &y)| x.min(y)).collect()),
-        (Some(a), None, Some(c)) => Some(a.iter().zip(c.iter()).map(|(&x, &y)| x.min(y)).collect()),
-        (None, Some(b), Some(c)) => Some(b.iter().zip(c.iter()).map(|(&x, &y)| x.min(y)).collect()),
-        (Some(a), Some(b), Some(c)) => Some(
-            a.iter()
-                .zip(b.iter())
-                .zip(c.iter())
-                .map(|((&x, &y), &z)| x.min(y).min(z))
-                .collect(),
-        ),
-    }
+    inflow_counts.or(load_counts).or(ncs_counts)
 }
 
 /// Run the stochastic preprocessing pipeline: PAR estimation, block factor
@@ -443,7 +429,9 @@ mod tests {
             bus::{Bus, DeficitSegment},
             hydro::{Hydro, HydroGenerationModel, HydroPenalties},
         },
-        scenario::{InflowHistoryRow, InflowModel, LoadModel},
+        scenario::{
+            ExternalLoadRow, ExternalScenarioRow, InflowHistoryRow, InflowModel, LoadModel,
+        },
         temporal::{
             Block, BlockMode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig,
             SeasonCycleType, SeasonDefinition, SeasonMap, Stage, StageLagTransition,
@@ -781,9 +769,11 @@ mod tests {
         );
 
         let policy_graph = PolicyGraph {
+            stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             transitions: vec![],
+            nodes: Vec::new(),
             season_map: Some(ring_season_map()),
         };
 
@@ -1198,9 +1188,11 @@ mod tests {
         );
 
         let policy_graph = PolicyGraph {
+            stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             transitions: vec![],
+            nodes: Vec::new(),
             season_map: Some(monthly_season_map()),
         };
 
@@ -1369,6 +1361,307 @@ mod tests {
         assert!(
             unwidened_seeds.lag_values.is_empty(),
             "sanity: the un-widened AR(0) order provides no lag slots at all"
+        );
+    }
+
+    // ── compute_external_scenario_counts: min + silent-drop deletion ──────────
+
+    /// A `System` with one hydro and one std-bearing load bus over `stage_ids`,
+    /// carrying `inflow_per_stage`/`load_per_stage` external realizations per stage
+    /// (one row per entity per realization). Deliberately supports disagreeing
+    /// per-class counts so a unit test can drive `compute_external_scenario_counts`
+    /// directly — a disagreement P-B1 (cobre-io) would reject at load, unreachable
+    /// through the public API but the exact input that separates take-first from an
+    /// element-wise minimum.
+    #[allow(clippy::too_many_lines)]
+    fn external_count_system(
+        stage_ids: &[i32],
+        inflow_per_stage: usize,
+        load_per_stage: usize,
+    ) -> System {
+        let hydro_id = EntityId(1);
+        let bus_id = EntityId(2);
+        let n_stages = stage_ids.len();
+
+        let stages: Vec<Stage> = stage_ids
+            .iter()
+            .enumerate()
+            .map(|(index, &id)| Stage {
+                index,
+                id,
+                start_date: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2026, 2, 1).unwrap(),
+                season_id: Some(0),
+                blocks: vec![Block {
+                    index: 0,
+                    name: "S".to_string(),
+                    duration_hours: 744.0,
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: true,
+                    inflow_lags: false,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+            })
+            .collect();
+
+        let inflow_models: Vec<InflowModel> = stage_ids
+            .iter()
+            .map(|&stage_id| InflowModel {
+                hydro_id,
+                stage_id,
+                mean_m3s: 100.0,
+                std_m3s: 20.0,
+                ar_coefficients: vec![],
+                residual_std_ratio: 1.0,
+                annual: None,
+            })
+            .collect();
+        let load_models: Vec<LoadModel> = stage_ids
+            .iter()
+            .map(|&stage_id| LoadModel {
+                bus_id,
+                stage_id,
+                mean_mw: 100.0,
+                std_mw: 10.0,
+            })
+            .collect();
+
+        let mut external_scenarios = Vec::new();
+        let mut external_load_scenarios = Vec::new();
+        for &stage_id in stage_ids {
+            for s in 0..inflow_per_stage {
+                external_scenarios.push(ExternalScenarioRow {
+                    stage_id,
+                    scenario_id: i32::try_from(s).unwrap(),
+                    hydro_id,
+                    value_m3s: 1.0,
+                });
+            }
+            for s in 0..load_per_stage {
+                external_load_scenarios.push(ExternalLoadRow {
+                    stage_id,
+                    scenario_id: i32::try_from(s).unwrap(),
+                    bus_id,
+                    value_mw: 1.0,
+                });
+            }
+        }
+
+        let bus = Bus {
+            id: bus_id,
+            name: "B1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            deficit_segments: vec![DeficitSegment {
+                depth_mw: None,
+                cost_per_mwh: 500.0,
+            }],
+            excess_cost: 0.0,
+        };
+        let mut hydro = Hydro {
+            unit_groups: Vec::new(),
+            id: hydro_id,
+            name: "H1".to_string(),
+            operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            downstream_id: None,
+            travel_time_hours: None,
+            entry_stage_id: None,
+            exit_stage_id: None,
+            min_storage_hm3: 0.0,
+            max_storage_hm3: 200.0,
+            min_outflow_m3s: 0.0,
+            max_outflow_m3s: None,
+            generation_model: HydroGenerationModel::ConstantProductivity,
+            min_turbined_m3s: 0.0,
+            max_turbined_m3s: 100.0,
+            specific_productivity_mw_per_m3s_per_m: None,
+            min_generation_mw: 0.0,
+            max_generation_mw: 250.0,
+            tailrace: None,
+            hydraulic_losses: None,
+            efficiency: None,
+            evaporation_coefficients_mm: None,
+            evaporation_reference_volumes_hm3: None,
+            diversion: None,
+            filling: None,
+            penalties: HydroPenalties {
+                spillage_cost: 0.01,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 0.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+        };
+        hydro.declare_mirror_unit_group(bus_id);
+
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 200.0,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                hydro_block: HydroBlockBounds {
+                    min_turbined_m3s: 0.0,
+                    max_turbined_m3s: 100.0,
+                    min_outflow_m3s: 0.0,
+                    max_outflow_m3s: None,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 250.0,
+                    max_diversion_m3s: None,
+                },
+                thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+                thermal_block: ThermalBlockBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                },
+                line_block: LineBlockBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping_block: PumpingBlockBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract_block: ContractBlockBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 1,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages,
+            },
+            &PenaltiesDefaults {
+                hydro: HydroStagePenalties {
+                    spillage_cost: 0.01,
+                    diversion_cost: 0.0,
+                    turbined_cost: 0.0,
+                    storage_violation_below_cost: 500.0,
+                    filling_target_violation_cost: 0.0,
+                    turbined_violation_below_cost: 0.0,
+                    outflow_violation_below_cost: 0.0,
+                    outflow_violation_above_cost: 0.0,
+                    generation_violation_below_cost: 0.0,
+                    evaporation_violation_cost: 0.0,
+                    water_withdrawal_violation_cost: 0.0,
+                    water_withdrawal_violation_pos_cost: 0.0,
+                    water_withdrawal_violation_neg_cost: 0.0,
+                    evaporation_violation_pos_cost: 0.0,
+                    evaporation_violation_neg_cost: 0.0,
+                    inflow_nonnegativity_cost: 1000.0,
+                },
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        let policy_graph = PolicyGraph {
+            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            graph_type: PolicyGraphType::FiniteHorizon,
+            annual_discount_rate: 0.0,
+            transitions: vec![],
+            nodes: Vec::new(),
+            season_map: None,
+        };
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(vec![hydro])
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .load_models(load_models)
+            .bounds(bounds)
+            .penalties(penalties)
+            .policy_graph(policy_graph)
+            .initial_conditions(InitialConditions {
+                storage: vec![],
+                filling_storage: vec![],
+                past_anticipated_commitments: vec![],
+                recent_observations: vec![],
+                past_defluences: vec![],
+            })
+            .external_scenarios(external_scenarios)
+            .external_load_scenarios(external_load_scenarios)
+            .build()
+            .expect("external-count fixture: valid system")
+    }
+
+    fn external_source(inflow: SamplingScheme, load: SamplingScheme) -> ScenarioSource {
+        ScenarioSource {
+            inflow_scheme: inflow,
+            load_scheme: load,
+            ncs_scheme: SamplingScheme::InSample,
+            seed: None,
+            historical_years: None,
+        }
+    }
+
+    /// The element-wise minimum is gone: with inflow (3) and load (2) external
+    /// classes disagreeing on the per-stage raw count, the returned vector is the
+    /// first present class's (inflow, 3) — never `min(3, 2) = 2`. This deck is
+    /// P-B1-rejected at load; the direct call is the only way to observe the
+    /// reconciliation was deleted rather than relocated.
+    #[test]
+    fn compute_external_scenario_counts_takes_first_never_min() {
+        let system = external_count_system(&[0], 3, 2);
+        let source = external_source(SamplingScheme::External, SamplingScheme::External);
+        let counts = compute_external_scenario_counts(&system, &source);
+        assert_eq!(
+            counts,
+            Some(vec![3]),
+            "the first present class's raw count is authoritative, not the element-wise minimum"
+        );
+    }
+
+    /// The `if stage_id as usize < n_stages` silent-drop is gone: a study numbered
+    /// `[10, 11]` (never 0-based) counts every external row through the resolver.
+    /// The pre-deletion code keyed on `stage_id as usize` and dropped all
+    /// rows (`10 < 2` is false), returning `[0, 0]`; the resolver returns `[1, 1]`.
+    #[test]
+    fn compute_external_scenario_counts_resolves_non_zero_based_stage_ids() {
+        let system = external_count_system(&[10, 11], 1, 0);
+        let source = external_source(SamplingScheme::External, SamplingScheme::InSample);
+        let counts = compute_external_scenario_counts(&system, &source);
+        assert_eq!(
+            counts,
+            Some(vec![1, 1]),
+            "rows must be counted through the resolver, not dropped by a stage_id-as-index guard"
         );
     }
 }

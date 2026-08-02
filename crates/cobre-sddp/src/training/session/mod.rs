@@ -1201,6 +1201,7 @@ mod tests {
         indexer::{CutStateProjection, StateSpace, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
         risk_measure::RiskMeasure,
+        setup::NodeGraph,
         solver_stats::WORKER_STATS_ENTRY_STRIDE,
         test_support,
     };
@@ -1599,6 +1600,7 @@ mod tests {
         stochastic: &'a StochasticContext,
         initial_state: &'a [f64],
         stages: &'a [Stage],
+        node_graph: &'a NodeGraph,
     ) -> TrainingContext<'a> {
         TrainingContext {
             horizon,
@@ -1619,6 +1621,7 @@ mod tests {
             lag_accum_seed: &[],
             lag_weight_seed: &[],
             dcs: None,
+            node_graph,
         }
     }
 
@@ -1646,6 +1649,7 @@ mod tests {
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
         let study_dims = test_support::study_dims();
         let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, n_stages);
+        let node_graph_fixture = test_support::chain_node_graph(&stochastic);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,
@@ -1654,6 +1658,7 @@ mod tests {
             &stochastic,
             &initial_state,
             &stages,
+            &node_graph_fixture,
         );
 
         let session = TrainingSession::new(
@@ -1722,6 +1727,7 @@ mod tests {
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
         let study_dims = test_support::study_dims();
         let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, n_stages);
+        let node_graph_fixture = test_support::chain_node_graph(&stochastic);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,
@@ -1730,6 +1736,7 @@ mod tests {
             &stochastic,
             &initial_state,
             &stages,
+            &node_graph_fixture,
         );
 
         let session = TrainingSession::new(
@@ -1785,6 +1792,7 @@ mod tests {
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
         let study_dims = test_support::study_dims();
         let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, n_stages);
+        let node_graph_fixture = test_support::chain_node_graph(&stochastic);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,
@@ -1793,6 +1801,7 @@ mod tests {
             &stochastic,
             &initial_state,
             &stages,
+            &node_graph_fixture,
         );
 
         let session = TrainingSession::new(
@@ -1849,6 +1858,7 @@ mod tests {
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
         let study_dims = test_support::study_dims();
         let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, n_stages);
+        let node_graph_fixture = test_support::chain_node_graph(&stochastic);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,
@@ -1857,6 +1867,7 @@ mod tests {
             &stochastic,
             &initial_state,
             &stages,
+            &node_graph_fixture,
         );
 
         let mut session = TrainingSession::new(
@@ -1904,6 +1915,7 @@ mod tests {
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
         let study_dims = test_support::study_dims();
         let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, n_stages);
+        let node_graph_fixture = test_support::chain_node_graph(&stochastic);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,
@@ -1912,6 +1924,7 @@ mod tests {
             &stochastic,
             &initial_state,
             &stages,
+            &node_graph_fixture,
         );
 
         let mut session = TrainingSession::new(
@@ -1976,6 +1989,7 @@ mod tests {
         let stage_ctx = make_stage_ctx(&templates, &base_rows, &block_counts);
         let study_dims = test_support::study_dims();
         let cut_state_layouts = test_support::all_enabled_cut_state_layouts(&state, n_stages);
+        let node_graph_fixture = test_support::chain_node_graph(&stochastic);
         let training_ctx = make_training_ctx(
             &horizon,
             &study_dims,
@@ -1984,6 +1998,7 @@ mod tests {
             &stochastic,
             &initial_state,
             &stages,
+            &node_graph_fixture,
         );
 
         let mut session = TrainingSession::new(

@@ -336,9 +336,11 @@ mod tests {
         };
 
         ParsedData {
+            has_noise_openings: false,
             config,
             penalties: global_penalties,
             stages: StagesData {
+                openings_declared: std::collections::HashSet::new(),
                 stages: vec![make_stage(0)],
                 policy_graph: PolicyGraph::default(),
             },

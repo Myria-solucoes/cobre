@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 use cobre_core::{Bus, ResolvedLoadFactors, Stage};
 
+use crate::StageIdResolver;
 use crate::scenarios::LoadFactorEntry;
 
 /// Build a resolved load factor table from parsed entries.
@@ -32,12 +33,9 @@ pub fn resolve_load_factors(
         .map(|(idx, b)| (b.id.0, idx))
         .collect();
 
-    let stage_id_to_idx: HashMap<i32, usize> = stages
-        .iter()
-        .filter(|s| s.id >= 0)
-        .enumerate()
-        .map(|(idx, s)| (s.id, idx))
-        .collect();
+    let study_stage_ids: Vec<i32> = stages.iter().filter(|s| s.id >= 0).map(|s| s.id).collect();
+    let stage_resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+    let stage_id_to_idx = stage_resolver.index_map();
 
     let n_buses = buses.len();
     let n_stages = stage_id_to_idx.len();

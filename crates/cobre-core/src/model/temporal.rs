@@ -14,6 +14,7 @@
 //! Source: `stages.json`. See `internal-structures.md` SS12.
 
 use chrono::{Datelike, NaiveDate};
+use std::collections::HashMap;
 
 pub mod overlap;
 pub mod stage_key;
@@ -524,10 +525,10 @@ impl SeasonMap {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Transition {
-    /// Source stage ID. Must exist in the stage set.
+    /// Source endpoint: a node id when the policy graph declares `nodes`, a stage id otherwise.
     pub source_id: i32,
 
-    /// Target stage ID. Must exist in the stage set.
+    /// Target endpoint: a node id when the policy graph declares `nodes`, a stage id otherwise.
     pub target_id: i32,
 
     /// Transition probability. Outgoing probabilities from each source
@@ -538,6 +539,35 @@ pub struct Transition {
     /// [`PolicyGraph`] global rate.
     /// See [Discount Rate §3](../math/discount-rate.md).
     pub annual_discount_rate_override: Option<f64>,
+}
+
+// ---------------------------------------------------------------------------
+// Node (SS12.9.1)
+// ---------------------------------------------------------------------------
+
+/// A single policy-graph node: one decision point at a study stage, carrying the
+/// per-stage external-library realization it addresses.
+///
+/// A declared [`PolicyGraph::nodes`] makes the graph node-native — the engine
+/// solves the node graph directly and [`Transition`] endpoints are node ids. An
+/// empty `nodes` leaves the graph a stage chain (endpoints are stage ids).
+///
+/// Source: `stages.json` `policy_graph.nodes[]`.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Node {
+    /// Unique node id; [`Transition`] endpoints reference it under a declared graph.
+    pub id: i32,
+
+    /// Declared study-stage id this node sits at; a domain id, never an array index.
+    pub stage_id: i32,
+
+    /// Per-stage external-library realization column this node carries; `None` at a
+    /// stage with no slot-occupying external class.
+    pub realization_id: Option<i32>,
+
+    /// Optional human-readable label.
+    pub label: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -568,6 +598,16 @@ pub struct PolicyGraph {
     /// one back-edge (`source_id >= target_id`).
     pub transitions: Vec<Transition>,
 
+    /// Policy-graph nodes; empty ⇒ a stage chain (`Transition` endpoints are stage
+    /// ids), non-empty ⇒ node-native (endpoints are node ids).
+    pub nodes: Vec<Node>,
+
+    /// Per-study-stage annual discount rate override, keyed by `Stage::id`; a stage
+    /// absent from the map uses `annual_discount_rate`. The declared home of the
+    /// override (`stages[].annual_discount_rate_override`); the chain dialect folds
+    /// its departing-edge `Transition::annual_discount_rate_override` in here at load.
+    pub stage_discount_rate_overrides: HashMap<i32, f64>,
+
     /// Season definitions; `None` when none are provided or required.
     pub season_map: Option<SeasonMap>,
 }
@@ -580,6 +620,8 @@ impl Default for PolicyGraph {
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             transitions: Vec::new(),
+            nodes: Vec::new(),
+            stage_discount_rate_overrides: HashMap::new(),
             season_map: None,
         }
     }
@@ -661,9 +703,11 @@ mod tests {
         ];
 
         let graph = PolicyGraph {
+            stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.06,
             transitions,
+            nodes: Vec::new(),
             season_map: None,
         };
 
@@ -675,6 +719,42 @@ mod tests {
             Some(0.08)
         );
         assert!(graph.season_map.is_none());
+        assert!(graph.nodes.is_empty());
+    }
+
+    #[test]
+    fn test_policy_graph_carries_nodes() {
+        let graph = PolicyGraph {
+            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            graph_type: PolicyGraphType::FiniteHorizon,
+            annual_discount_rate: 0.0,
+            transitions: vec![Transition {
+                source_id: 10,
+                target_id: 11,
+                probability: 1.0,
+                annual_discount_rate_override: None,
+            }],
+            nodes: vec![
+                Node {
+                    id: 10,
+                    stage_id: 0,
+                    realization_id: Some(3),
+                    label: Some("root".to_string()),
+                },
+                Node {
+                    id: 11,
+                    stage_id: 1,
+                    realization_id: None,
+                    label: None,
+                },
+            ],
+            season_map: None,
+        };
+
+        assert_eq!(graph.nodes.len(), 2);
+        assert_eq!(graph.nodes[0].stage_id, 0);
+        assert_eq!(graph.nodes[0].realization_id, Some(3));
+        assert_eq!(graph.nodes[1].realization_id, None);
     }
 
     #[test]
@@ -916,6 +996,7 @@ mod tests {
     #[test]
     fn test_policy_graph_serde_roundtrip() {
         let graph = PolicyGraph {
+            stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.06,
             transitions: vec![
@@ -932,6 +1013,7 @@ mod tests {
                     annual_discount_rate_override: None,
                 },
             ],
+            nodes: Vec::new(),
             season_map: None,
         };
 

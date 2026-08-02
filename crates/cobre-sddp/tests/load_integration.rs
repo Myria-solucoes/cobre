@@ -446,6 +446,7 @@ fn test_stochastic_load_training_completes() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
@@ -581,6 +582,7 @@ fn test_deterministic_load_training_matches_baseline() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
@@ -699,6 +701,7 @@ fn test_stochastic_load_seed_determinism() {
             &mut fcf,
             &stage_ctx,
             &TrainingContext {
+                node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
                 horizon: &horizon,
                 state: &state,
                 cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),

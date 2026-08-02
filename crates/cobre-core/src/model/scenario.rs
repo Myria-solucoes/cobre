@@ -307,7 +307,7 @@ pub struct InflowModel {
     /// Hydro plant this model belongs to.
     pub hydro_id: EntityId,
 
-    /// Stage (0-based index within `System::stages`) this model applies to.
+    /// Declared study-stage id this model applies to (not a 0-based index).
     pub stage_id: i32,
 
     /// Seasonal mean inflow μ in m³/s.
@@ -369,7 +369,7 @@ pub struct LoadModel {
     /// Bus this load model belongs to.
     pub bus_id: EntityId,
 
-    /// Stage (0-based index within `System::stages`) this model applies to.
+    /// Declared study-stage id this model applies to (not a 0-based index).
     pub stage_id: i32,
 
     /// Seasonal mean load demand in MW.
@@ -411,7 +411,7 @@ pub struct NcsModel {
     /// NCS entity identifier matching `NonControllableSource.id`.
     pub ncs_id: EntityId,
 
-    /// Stage (0-based index within `System::stages`) this model applies to.
+    /// Declared study-stage id this model applies to (not a 0-based index).
     pub stage_id: i32,
 
     /// Mean availability factor [dimensionless, in `[0, 1]`].
@@ -478,7 +478,7 @@ pub struct InflowHistoryRow {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExternalScenarioRow {
-    /// Stage index (0-based within `System::stages`).
+    /// Declared study-stage id this row applies to (not a 0-based index).
     pub stage_id: i32,
 
     /// Scenario index (0-based). Must be >= 0.
@@ -513,7 +513,7 @@ pub struct ExternalScenarioRow {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExternalLoadRow {
-    /// Stage index (0-based within `System::stages`).
+    /// Declared study-stage id this row applies to (not a 0-based index).
     pub stage_id: i32,
 
     /// Scenario index (0-based). Must be >= 0.
@@ -549,7 +549,7 @@ pub struct ExternalLoadRow {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExternalNcsRow {
-    /// Stage index (0-based within `System::stages`).
+    /// Declared study-stage id this row applies to (not a 0-based index).
     pub stage_id: i32,
 
     /// Scenario index (0-based). Must be >= 0.
@@ -673,7 +673,7 @@ pub struct CorrelationProfile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CorrelationScheduleEntry {
-    /// Stage index (0-based within `System::stages`) this entry applies to.
+    /// Declared study-stage id this entry applies to (not a 0-based index).
     pub stage_id: i32,
 
     /// Name of the correlation profile active for this stage.

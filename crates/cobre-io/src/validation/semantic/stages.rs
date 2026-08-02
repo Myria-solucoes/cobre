@@ -1,8 +1,13 @@
 //! Layer 5b — stage-structure semantic validation.
 
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
-use cobre_core::temporal::{PolicyGraphType, StageRiskConfig};
+use cobre_core::scenario::{SamplingScheme, ScenarioSource};
+use cobre_core::temporal::{Node, PolicyGraphType, StageRiskConfig, Transition};
+
+use crate::StageIdResolver;
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 use super::PROB_TOLERANCE;
@@ -14,28 +19,34 @@ pub(super) fn check_stage_structure(data: &ParsedData, ctx: &mut ValidationConte
 
     let stage_ids: HashSet<i32> = stages.iter().map(|s| s.id).collect();
 
-    for transition in &graph.transitions {
-        if !stage_ids.contains(&transition.source_id) {
-            ctx.add_error(
-                ErrorKind::InvalidValue,
-                "stages.json",
-                None::<&str>,
-                format!(
-                    "transition source_id {} does not refer to a valid stage ID",
-                    transition.source_id
-                ),
-            );
-        }
-        if !stage_ids.contains(&transition.target_id) {
-            ctx.add_error(
-                ErrorKind::InvalidValue,
-                "stages.json",
-                None::<&str>,
-                format!(
-                    "transition target_id {} does not refer to a valid stage ID",
-                    transition.target_id
-                ),
-            );
+    // Endpoints are node ids when nodes[] is declared, stage ids otherwise; a chain
+    // declared with node ids satisfies both readings and any fan has an endpoint that
+    // is not a valid stage id, so the node-mode endpoint check (check_node_graph)
+    // catches it rather than this stage-id check silently rejecting valid node ids.
+    if graph.nodes.is_empty() {
+        for transition in &graph.transitions {
+            if !stage_ids.contains(&transition.source_id) {
+                ctx.add_error(
+                    ErrorKind::InvalidValue,
+                    "stages.json",
+                    None::<&str>,
+                    format!(
+                        "transition source_id {} does not refer to a valid stage ID",
+                        transition.source_id
+                    ),
+                );
+            }
+            if !stage_ids.contains(&transition.target_id) {
+                ctx.add_error(
+                    ErrorKind::InvalidValue,
+                    "stages.json",
+                    None::<&str>,
+                    format!(
+                        "transition target_id {} does not refer to a valid stage ID",
+                        transition.target_id
+                    ),
+                );
+            }
         }
     }
 
@@ -159,6 +170,612 @@ pub(super) fn check_inflow_lags_vs_par_order(data: &ParsedData, ctx: &mut Valida
     );
 }
 
+/// Validates a declared policy-graph `nodes[]` (node-native dialect): the
+/// `realization_id` conditional requirement (rule 36) and pointer bound
+/// (rule 37) per slot-occupying external class, structural well-formedness
+/// (rule 38: unknown/duplicate node id, unresolved stage, empty stage,
+/// unreachable node, cycle, mid-horizon leaf), the every-edge `t → t+1` rule
+/// (rule 39), and the recombinable-signature warning (rule 40). A no-op when
+/// `nodes` is empty — the chain dialect is unchanged (its endpoints are stage
+/// ids, validated by [`check_stage_structure`]).
+pub(super) fn check_node_graph(data: &ParsedData, ctx: &mut ValidationContext) {
+    let graph = &data.stages.policy_graph;
+    if graph.nodes.is_empty() {
+        return;
+    }
+    let nodes = &graph.nodes;
+    let transitions = &graph.transitions;
+
+    let study_ids: Vec<i32> = data
+        .stages
+        .stages
+        .iter()
+        .filter(|s| s.id >= 0)
+        .map(|s| s.id)
+        .collect();
+    let resolver = StageIdResolver::from_study_stage_ids(&study_ids);
+    let n_stages = study_ids.len();
+
+    let stage_index: Vec<Option<usize>> = nodes
+        .iter()
+        .map(|n| {
+            let idx = resolver.resolve(n.stage_id);
+            if idx.is_none() {
+                ctx.add_error(
+                    ErrorKind::InvalidValue,
+                    "stages.json",
+                    Some(format!("node {}", n.id)),
+                    format!(
+                        "node {} references stage_id {} which is not a declared study stage; \
+                         declared study stage ids: {study_ids:?}",
+                        n.id, n.stage_id
+                    ),
+                );
+            }
+            idx
+        })
+        .collect();
+
+    let mut id_to_pos: HashMap<i32, usize> = HashMap::new();
+    let mut dup = false;
+    for (pos, n) in nodes.iter().enumerate() {
+        if id_to_pos.insert(n.id, pos).is_some() {
+            dup = true;
+            ctx.add_error(
+                ErrorKind::DuplicateId,
+                "stages.json",
+                Some(format!("node {}", n.id)),
+                format!("duplicate policy-graph node id {}", n.id),
+            );
+        }
+    }
+
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
+    let mut endpoints_ok = true;
+    for tr in transitions {
+        match (id_to_pos.get(&tr.source_id), id_to_pos.get(&tr.target_id)) {
+            (Some(&sp), Some(&tp)) => children[sp].push(tp),
+            (s, t) => {
+                endpoints_ok = false;
+                if s.is_none() {
+                    ctx.add_error(
+                        ErrorKind::InvalidValue,
+                        "stages.json",
+                        None::<&str>,
+                        format!(
+                            "transition source_id {} does not refer to a declared node",
+                            tr.source_id
+                        ),
+                    );
+                }
+                if t.is_none() {
+                    ctx.add_error(
+                        ErrorKind::InvalidValue,
+                        "stages.json",
+                        None::<&str>,
+                        format!(
+                            "transition target_id {} does not refer to a declared node",
+                            tr.target_id
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    check_realization_rules(data, nodes, &resolver, ctx);
+    check_empty_stages(&stage_index, &study_ids, ctx);
+    let edges_ok = check_edges_t_plus_1(nodes, transitions, &stage_index, &id_to_pos, ctx);
+
+    let walkable = !dup && endpoints_ok && stage_index.iter().all(Option::is_some);
+    if walkable {
+        let acyclic = check_no_cycle(nodes, &children, ctx);
+        check_reachable_nodes(nodes, &children, &stage_index, ctx);
+        check_no_mid_horizon_leaf(nodes, &children, &stage_index, n_stages, ctx);
+        if acyclic && edges_ok {
+            check_recombinable_signature(nodes, &children, &stage_index, &study_ids, ctx);
+        }
+    }
+}
+
+/// Rules 36 (B3 conditional requirement) and 37 (R6.2 pointer bound): a node's
+/// `realization_id` is required exactly when its stage carries a slot-occupying
+/// external class and, when present, must index a valid column of every such
+/// class.
+fn check_realization_rules(
+    data: &ParsedData,
+    nodes: &[Node],
+    resolver: &StageIdResolver,
+    ctx: &mut ValidationContext,
+) {
+    let Ok(source) = data
+        .config
+        .training_scenario_source(Path::new("config.json"))
+    else {
+        return;
+    };
+
+    for node in nodes {
+        if resolver.resolve(node.stage_id).is_none() {
+            continue;
+        }
+        let classes = slot_occupying_classes(data, &source, node.stage_id);
+
+        match (classes.is_empty(), node.realization_id) {
+            (false, None) => ctx.add_error(
+                ErrorKind::InvalidValue,
+                "stages.json",
+                Some(format!("node {}", node.id)),
+                format!(
+                    "node {} at stage {} carries a slot-occupying external class but has no \
+                     realization_id; realization_id is required there",
+                    node.id, node.stage_id
+                ),
+            ),
+            (true, Some(k)) => ctx.add_error(
+                ErrorKind::InvalidValue,
+                "stages.json",
+                Some(format!("node {}", node.id)),
+                format!(
+                    "node {} at stage {} declares realization_id {k} but its stage carries no \
+                     slot-occupying external class; realization_id is meaningless there",
+                    node.id, node.stage_id
+                ),
+            ),
+            _ => {}
+        }
+
+        if let Some(k) = node.realization_id {
+            for (class_name, raw_c) in &classes {
+                if usize::try_from(k).map_or(true, |ku| ku >= *raw_c) {
+                    ctx.add_error(
+                        ErrorKind::InvalidValue,
+                        "stages.json",
+                        Some(format!("node {}", node.id)),
+                        format!(
+                            "node {} realization_id {k} is out of range for external class \
+                             '{class_name}' at stage {}: must be in [0, {raw_c})",
+                            node.id, node.stage_id
+                        ),
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The external classes that occupy a realization slot at `stage_id`: those set
+/// to the external scheme in the training scenario source (the phase that
+/// governs slot occupancy) that also carry at least one row there, paired with
+/// their per-stage raw column count.
+fn slot_occupying_classes(
+    data: &ParsedData,
+    source: &ScenarioSource,
+    stage_id: i32,
+) -> Vec<(&'static str, usize)> {
+    // raw_c is the distinct scenario_id count among a class's rows at this declared
+    // study stage — a per-class count, deliberately NOT rows / n_entities; the
+    // cross-class agreement and the exact {0..raw_c-1} set are enforced by the
+    // library-consistency validation layer, not here.
+    let mut out = Vec::new();
+    if source.inflow_scheme == SamplingScheme::External {
+        let raw_c = distinct_count(
+            data.external_scenarios
+                .iter()
+                .filter(|r| r.stage_id == stage_id)
+                .map(|r| r.scenario_id),
+        );
+        if raw_c > 0 {
+            out.push(("inflow", raw_c));
+        }
+    }
+    if source.load_scheme == SamplingScheme::External {
+        let raw_c = distinct_count(
+            data.external_load_scenarios
+                .iter()
+                .filter(|r| r.stage_id == stage_id)
+                .map(|r| r.scenario_id),
+        );
+        if raw_c > 0 {
+            out.push(("load", raw_c));
+        }
+    }
+    if source.ncs_scheme == SamplingScheme::External {
+        let raw_c = distinct_count(
+            data.external_ncs_scenarios
+                .iter()
+                .filter(|r| r.stage_id == stage_id)
+                .map(|r| r.scenario_id),
+        );
+        if raw_c > 0 {
+            out.push(("ncs", raw_c));
+        }
+    }
+    out
+}
+
+fn distinct_count(scenario_ids: impl Iterator<Item = i32>) -> usize {
+    scenario_ids.collect::<HashSet<i32>>().len()
+}
+
+/// Rule 38 (empty stage): every study stage must carry at least one node.
+fn check_empty_stages(
+    stage_index: &[Option<usize>],
+    study_ids: &[i32],
+    ctx: &mut ValidationContext,
+) {
+    let mut occupied = vec![false; study_ids.len()];
+    for idx in stage_index.iter().flatten() {
+        occupied[*idx] = true;
+    }
+    for (t, &occ) in occupied.iter().enumerate() {
+        if !occ {
+            let sid = study_ids[t];
+            ctx.add_error(
+                ErrorKind::InvalidValue,
+                "stages.json",
+                Some(format!("stage {sid}")),
+                format!(
+                    "study stage {sid} has no policy-graph node; every stage must carry at least \
+                     one node"
+                ),
+            );
+        }
+    }
+}
+
+/// Rule 39: every graph edge advances exactly one stage (`t → t+1`).
+fn check_edges_t_plus_1(
+    nodes: &[Node],
+    transitions: &[Transition],
+    stage_index: &[Option<usize>],
+    id_to_pos: &HashMap<i32, usize>,
+    ctx: &mut ValidationContext,
+) -> bool {
+    let mut ok = true;
+    for tr in transitions {
+        let (Some(&sp), Some(&tp)) = (id_to_pos.get(&tr.source_id), id_to_pos.get(&tr.target_id))
+        else {
+            continue;
+        };
+        let (Some(si), Some(ti)) = (stage_index[sp], stage_index[tp]) else {
+            continue;
+        };
+        if ti != si + 1 {
+            ok = false;
+            ctx.add_error(
+                ErrorKind::InvalidValue,
+                "stages.json",
+                None::<&str>,
+                format!(
+                    "transition from node {} (stage {}) to node {} (stage {}) does not advance \
+                     exactly one stage; every edge must go t -> t+1",
+                    tr.source_id, nodes[sp].stage_id, tr.target_id, nodes[tp].stage_id
+                ),
+            );
+        }
+    }
+    ok
+}
+
+/// Rule 38 (cycle): the node graph must be acyclic. Returns `true` when acyclic.
+fn check_no_cycle(nodes: &[Node], children: &[Vec<usize>], ctx: &mut ValidationContext) -> bool {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Color {
+        White,
+        Gray,
+        Black,
+    }
+    fn visit(node: usize, children: &[Vec<usize>], color: &mut [Color]) -> bool {
+        color[node] = Color::Gray;
+        for &c in &children[node] {
+            match color[c] {
+                Color::White => {
+                    if visit(c, children, color) {
+                        return true;
+                    }
+                }
+                Color::Gray => return true,
+                Color::Black => {}
+            }
+        }
+        color[node] = Color::Black;
+        false
+    }
+    let mut color = vec![Color::White; nodes.len()];
+    let mut found = false;
+    for start in 0..nodes.len() {
+        if color[start] == Color::White && visit(start, children, &mut color) {
+            found = true;
+            break;
+        }
+    }
+    if found {
+        ctx.add_error(
+            ErrorKind::CycleDetected,
+            "stages.json",
+            None::<&str>,
+            "policy-graph nodes contain a cycle; the node graph must be acyclic".to_string(),
+        );
+    }
+    !found
+}
+
+/// Rule 38 (unreachable node): every node must be reachable from a stage-0 node.
+fn check_reachable_nodes(
+    nodes: &[Node],
+    children: &[Vec<usize>],
+    stage_index: &[Option<usize>],
+    ctx: &mut ValidationContext,
+) {
+    let roots: Vec<usize> = (0..nodes.len())
+        .filter(|&p| stage_index[p] == Some(0))
+        .collect();
+    if roots.is_empty() {
+        return;
+    }
+    let mut reachable = vec![false; nodes.len()];
+    let mut stack = roots;
+    for &r in &stack {
+        reachable[r] = true;
+    }
+    while let Some(p) = stack.pop() {
+        for &c in &children[p] {
+            if !reachable[c] {
+                reachable[c] = true;
+                stack.push(c);
+            }
+        }
+    }
+    for (pos, node) in nodes.iter().enumerate() {
+        if !reachable[pos] {
+            ctx.add_error(
+                ErrorKind::InvalidValue,
+                "stages.json",
+                Some(format!("node {}", node.id)),
+                format!(
+                    "node {} (stage {}) is unreachable from the root stage",
+                    node.id, node.stage_id
+                ),
+            );
+        }
+    }
+}
+
+/// Rule 38 (mid-horizon leaf): a node with no successors must sit at the final
+/// stage; a leaf before the horizon end is rejected.
+fn check_no_mid_horizon_leaf(
+    nodes: &[Node],
+    children: &[Vec<usize>],
+    stage_index: &[Option<usize>],
+    n_stages: usize,
+    ctx: &mut ValidationContext,
+) {
+    for (pos, node) in nodes.iter().enumerate() {
+        if children[pos].is_empty()
+            && let Some(idx) = stage_index[pos]
+            && idx + 1 < n_stages
+        {
+            ctx.add_error(
+                ErrorKind::InvalidValue,
+                "stages.json",
+                Some(format!("node {}", node.id)),
+                format!(
+                    "node {} at stage {} has no successors but is not at the final stage \
+                     (mid-horizon leaf); a node without successors must be terminal",
+                    node.id, node.stage_id
+                ),
+            );
+        }
+    }
+}
+
+/// Rule 40 (recombinable-signature warning): warns once per stage carrying two
+/// or more nodes with structurally identical subtrees (same shape and
+/// realization pointers) — the signature of a graph the author probably meant to
+/// recombine. Runs only on an acyclic `t → t+1` graph.
+fn check_recombinable_signature(
+    nodes: &[Node],
+    children: &[Vec<usize>],
+    stage_index: &[Option<usize>],
+    study_ids: &[i32],
+    ctx: &mut ValidationContext,
+) {
+    let mut order: Vec<usize> = (0..nodes.len()).collect();
+    order.sort_by_key(|&p| Reverse(stage_index[p].unwrap_or_default()));
+
+    let mut sig: Vec<String> = vec![String::new(); nodes.len()];
+    for &p in &order {
+        let mut child_positions = children[p].clone();
+        child_positions.sort_by_key(|&c| nodes[c].id);
+        let joined = child_positions
+            .iter()
+            .map(|&c| sig[c].clone())
+            .collect::<Vec<_>>()
+            .join(",");
+        sig[p] = format!("r{:?};[{joined}]", nodes[p].realization_id);
+    }
+
+    for (t, &sid) in study_ids.iter().enumerate() {
+        let mut seen: HashMap<&str, usize> = HashMap::new();
+        let mut warned = false;
+        for (pos, s) in sig.iter().enumerate() {
+            if stage_index[pos] == Some(t) {
+                let count = seen.entry(s.as_str()).or_insert(0);
+                *count += 1;
+                if *count == 2 && !warned {
+                    warned = true;
+                    ctx.add_warning(
+                        ErrorKind::ModelQuality,
+                        "stages.json",
+                        Some(format!("stage {sid}")),
+                        format!(
+                            "stage {sid} carries multiple nodes with structurally identical \
+                             subtrees (same shape and realization pointers); without recombination \
+                             this trains independent chains with fewer cuts each"
+                        ),
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Rule 41 (B1): `num_openings` is required at a stage carrying generated openings
+/// (no slot-occupying external class) and rejected as meaningless where a stage
+/// carries only external openings. Declared `nodes[]` only — the chain dialect's
+/// requiredness is a parse-layer check ([`crate::stages::parse_stages`]). Generated
+/// openings are determined by [`slot_occupying_classes`], the same authoritative
+/// external-class machinery rule 36 uses.
+pub(super) fn check_num_openings_declaration(data: &ParsedData, ctx: &mut ValidationContext) {
+    let graph = &data.stages.policy_graph;
+    if graph.nodes.is_empty() {
+        return;
+    }
+    let Ok(source) = data
+        .config
+        .training_scenario_source(Path::new("config.json"))
+    else {
+        return;
+    };
+    let study_ids: Vec<i32> = data
+        .stages
+        .stages
+        .iter()
+        .filter(|s| s.id >= 0)
+        .map(|s| s.id)
+        .collect();
+    let resolver = StageIdResolver::from_study_stage_ids(&study_ids);
+
+    let mut staged: Vec<i32> = graph
+        .nodes
+        .iter()
+        .filter(|n| resolver.resolve(n.stage_id).is_some())
+        .map(|n| n.stage_id)
+        .collect::<HashSet<i32>>()
+        .into_iter()
+        .collect();
+    staged.sort_unstable();
+
+    for stage_id in staged {
+        let generated = slot_occupying_classes(data, &source, stage_id).is_empty();
+        let declared = data.stages.openings_declared.contains(&stage_id);
+        match (generated, declared) {
+            (true, false) => ctx.add_error(
+                ErrorKind::InvalidValue,
+                "stages.json",
+                Some(format!("stage {stage_id}")),
+                format!(
+                    "stage {stage_id} carries generated openings but declares no num_openings; \
+                     num_openings is required there"
+                ),
+            ),
+            (false, true) => ctx.add_error(
+                ErrorKind::InvalidValue,
+                "stages.json",
+                Some(format!("stage {stage_id}")),
+                format!(
+                    "stage {stage_id} carries only external openings but declares num_openings; \
+                     num_openings is meaningless there"
+                ),
+            ),
+            _ => {}
+        }
+    }
+}
+
+/// Rule 42 (B2): a per-edge `annual_discount_rate_override` is rejected under
+/// `nodes[]` — the override is a per-stage quantity declared on
+/// `stages[].annual_discount_rate_override`. The edge spelling stays legal in the
+/// chain dialect.
+pub(super) fn check_edge_discount_override_under_nodes(
+    data: &ParsedData,
+    ctx: &mut ValidationContext,
+) {
+    let graph = &data.stages.policy_graph;
+    if graph.nodes.is_empty() {
+        return;
+    }
+    for tr in &graph.transitions {
+        if tr.annual_discount_rate_override.is_some() {
+            ctx.add_error(
+                ErrorKind::InvalidValue,
+                "stages.json",
+                None::<&str>,
+                format!(
+                    "transition {} -> {} declares annual_discount_rate_override under a node graph; \
+                     declare it on stages[].annual_discount_rate_override instead",
+                    tr.source_id, tr.target_id
+                ),
+            );
+        }
+    }
+}
+
+/// Rule 43 (B6): a deck declaring `nodes[]` while shipping
+/// `scenarios/noise_openings.parquet` is rejected — nodes[] declares the opening set.
+pub(super) fn check_nodes_and_noise_openings(data: &ParsedData, ctx: &mut ValidationContext) {
+    if !data.stages.policy_graph.nodes.is_empty() && data.has_noise_openings {
+        ctx.add_error(
+            ErrorKind::InvalidValue,
+            "stages.json",
+            None::<&str>,
+            "policy_graph.nodes[] is declared while scenarios/noise_openings.parquet is present; \
+             nodes[] declares the opening set — remove one"
+                .to_string(),
+        );
+    }
+}
+
+/// Rule 44 (B5): `sampling_method` is inert under external openings and ill-defined
+/// at a multi-node stage; a warning names such a stage and the load succeeds.
+/// Declared `nodes[]` only — the chain dialect's `sampling_method` is unchanged.
+pub(super) fn check_sampling_method_meaningfulness(data: &ParsedData, ctx: &mut ValidationContext) {
+    let graph = &data.stages.policy_graph;
+    if graph.nodes.is_empty() {
+        return;
+    }
+    let source = data
+        .config
+        .training_scenario_source(Path::new("config.json"))
+        .ok();
+    let study_ids: Vec<i32> = data
+        .stages
+        .stages
+        .iter()
+        .filter(|s| s.id >= 0)
+        .map(|s| s.id)
+        .collect();
+    let resolver = StageIdResolver::from_study_stage_ids(&study_ids);
+
+    let mut node_count: HashMap<i32, usize> = HashMap::new();
+    for n in &graph.nodes {
+        if resolver.resolve(n.stage_id).is_some() {
+            *node_count.entry(n.stage_id).or_insert(0) += 1;
+        }
+    }
+    let mut staged: Vec<i32> = node_count.keys().copied().collect();
+    staged.sort_unstable();
+
+    for stage_id in staged {
+        let multi_node = node_count[&stage_id] >= 2;
+        let external = source
+            .as_ref()
+            .is_some_and(|s| !slot_occupying_classes(data, s, stage_id).is_empty());
+        if multi_node || external {
+            ctx.add_warning(
+                ErrorKind::ModelQuality,
+                "stages.json",
+                Some(format!("stage {stage_id}")),
+                format!(
+                    "stage {stage_id}: sampling_method is ignored here (inert under external \
+                     openings, ill-defined at a multi-node stage)"
+                ),
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -172,10 +789,12 @@ pub(super) fn check_inflow_lags_vs_par_order(data: &ParsedData, ctx: &mut Valida
 mod tests {
     use super::super::test_support::*;
     use super::super::validate_semantic_stages_penalties_scenarios;
+    use crate::validation::schema::ParsedData;
     use cobre_core::EntityId;
+    use cobre_core::scenario::ExternalScenarioRow;
     use cobre_core::temporal::{
-        Block, PolicyGraphType, SeasonCycleType, SeasonDefinition, SeasonMap, StageRiskConfig,
-        Transition,
+        Block, Node, PolicyGraphType, SeasonCycleType, SeasonDefinition, SeasonMap,
+        StageRiskConfig, Transition,
     };
 
     use crate::scenarios::InflowArCoefficientRow;
@@ -598,6 +1217,481 @@ mod tests {
                 .iter()
                 .any(|w| w.kind == ErrorKind::ModelQuality && w.message.contains("inflow lags")),
             "no inflow-lags warning for white-noise (order 0) models"
+        );
+    }
+
+    // ── Node graph (rules 36-40) ──────────────────────────────────────────────
+
+    fn node(id: i32, stage_id: i32, realization_id: Option<i32>) -> Node {
+        Node {
+            id,
+            stage_id,
+            realization_id,
+            label: None,
+        }
+    }
+
+    fn edge(source_id: i32, target_id: i32, probability: f64) -> Transition {
+        Transition {
+            source_id,
+            target_id,
+            probability,
+            annual_discount_rate_override: None,
+        }
+    }
+
+    fn ext_inflow(stage_id: i32, scenario_id: i32) -> ExternalScenarioRow {
+        ExternalScenarioRow {
+            stage_id,
+            scenario_id,
+            hydro_id: EntityId::from(1),
+            value_m3s: 1.0,
+        }
+    }
+
+    /// Build Layer-5b `ParsedData` over `n_stages` study stages carrying the given
+    /// node graph; other scenario inputs are minimal.
+    fn node_graph_data(
+        n_stages: i32,
+        nodes: Vec<Node>,
+        transitions: Vec<Transition>,
+    ) -> ParsedData {
+        let stages = make_stages_5b((0..n_stages).collect());
+        let mut data = make_data_5b(
+            vec![make_hydro_ordered_penalties(1)],
+            stages,
+            vec![make_bus_with_deficit(1, 10.0)],
+            vec![],
+            vec![],
+            None,
+        );
+        data.stages.policy_graph.nodes = nodes;
+        data.stages.policy_graph.transitions = transitions;
+        // Default: every study stage declares num_openings (the all-generated,
+        // in-sample case). External-opening tests override this to exclude the
+        // stages whose openings come from an external library.
+        data.stages.openings_declared = (0..n_stages).collect();
+        data
+    }
+
+    fn run(data: &ParsedData) -> ValidationContext {
+        let mut ctx = ValidationContext::new();
+        validate_semantic_stages_penalties_scenarios(data, &mut ctx);
+        ctx
+    }
+
+    fn errs_contain(ctx: &ValidationContext, needle: &str) -> bool {
+        ctx.errors().iter().any(|e| e.message.contains(needle))
+    }
+
+    /// A K-fan (root → K distinct-realization leaves) and a 3-stage binary tree
+    /// with distinct realizations load with no node-graph rule firing.
+    #[test]
+    fn test_node_graph_valid_k_fan_and_binary_tree() {
+        // K-fan: stage 0 root (no external there ⇒ realization_id absent), stage 1
+        // carries three external realizations.
+        let mut kfan = node_graph_data(
+            2,
+            vec![
+                node(0, 0, None),
+                node(1, 1, Some(0)),
+                node(2, 1, Some(1)),
+                node(3, 1, Some(2)),
+            ],
+            vec![
+                edge(0, 1, 1.0 / 3.0),
+                edge(0, 2, 1.0 / 3.0),
+                edge(0, 3, 1.0 / 3.0),
+            ],
+        );
+        kfan.config = config_with_training_external_inflow();
+        kfan.external_scenarios = vec![ext_inflow(1, 0), ext_inflow(1, 1), ext_inflow(1, 2)];
+        // Stage 0 is generated (num_openings declared); stage 1 is external (none).
+        kfan.stages.openings_declared = [0].into_iter().collect();
+        let ctx = run(&kfan);
+        assert!(!ctx.has_errors(), "valid K-fan errors: {:?}", ctx.errors());
+        assert!(
+            !ctx.warnings()
+                .iter()
+                .any(|w| w.message.contains("identical")),
+            "distinct-realization fan must not warn recombinable"
+        );
+
+        // Binary tree branching at stages 0 and 1, with distinct realizations at
+        // every stage so no two subtrees coincide.
+        let mut tree = node_graph_data(
+            3,
+            vec![
+                node(0, 0, None),
+                node(1, 1, Some(0)),
+                node(2, 1, Some(1)),
+                node(3, 2, Some(0)),
+                node(4, 2, Some(1)),
+                node(5, 2, Some(2)),
+                node(6, 2, Some(3)),
+            ],
+            vec![
+                edge(0, 1, 0.5),
+                edge(0, 2, 0.5),
+                edge(1, 3, 0.5),
+                edge(1, 4, 0.5),
+                edge(2, 5, 0.5),
+                edge(2, 6, 0.5),
+            ],
+        );
+        tree.config = config_with_training_external_inflow();
+        tree.external_scenarios = vec![
+            ext_inflow(1, 0),
+            ext_inflow(1, 1),
+            ext_inflow(2, 0),
+            ext_inflow(2, 1),
+            ext_inflow(2, 2),
+            ext_inflow(2, 3),
+        ];
+        // Stage 0 generated; stages 1 and 2 external.
+        tree.stages.openings_declared = [0].into_iter().collect();
+        let ctx = run(&tree);
+        assert!(!ctx.has_errors(), "valid tree errors: {:?}", ctx.errors());
+        assert!(
+            !ctx.warnings()
+                .iter()
+                .any(|w| w.message.contains("identical")),
+            "distinct-realization tree must not warn recombinable"
+        );
+    }
+
+    /// R6.2: a `realization_id` equal to (and beyond) `raw_c(t)` is rejected
+    /// naming the node, value, stage and bound; a value below `raw_c` is accepted.
+    #[test]
+    fn test_node_graph_realization_bound_at_and_beyond_raw_c() {
+        // Single stage carrying two external realizations ⇒ raw_c = 2.
+        let build = |rid: i32| {
+            let mut data = node_graph_data(1, vec![node(0, 0, Some(rid))], vec![]);
+            data.config = config_with_training_external_inflow();
+            data.external_scenarios = vec![ext_inflow(0, 0), ext_inflow(0, 1)];
+            // Stage 0 is external ⇒ num_openings meaningless there; not declared.
+            data.stages.openings_declared.clear();
+            data
+        };
+
+        let ctx = run(&build(2));
+        assert!(
+            ctx.errors()
+                .iter()
+                .any(|e| e.message.contains("realization_id 2 is out of range")
+                    && e.message.contains("[0, 2)")
+                    && e.message.contains("inflow")),
+            "realization_id == raw_c must be rejected naming value, class and bound: {:?}",
+            ctx.errors()
+        );
+
+        let ctx = run(&build(5));
+        assert!(
+            errs_contain(&ctx, "realization_id 5 is out of range"),
+            "realization_id beyond raw_c must be rejected"
+        );
+
+        let ctx = run(&build(1));
+        assert!(
+            !errs_contain(&ctx, "out of range"),
+            "realization_id < raw_c must be accepted: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// B3 arm 1: `realization_id` absent at a stage carrying a slot-occupying
+    /// external class is rejected.
+    #[test]
+    fn test_node_graph_b3_realization_required_but_absent() {
+        let mut data = node_graph_data(1, vec![node(0, 0, None)], vec![]);
+        data.config = config_with_training_external_inflow();
+        data.external_scenarios = vec![ext_inflow(0, 0)];
+        data.stages.openings_declared.clear();
+        let ctx = run(&data);
+        assert!(
+            errs_contain(&ctx, "realization_id is required there"),
+            "absent realization_id at an external stage must be rejected: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// B3 arm 2: `realization_id` present at a stage carrying no slot-occupying
+    /// external class is rejected as meaningless.
+    #[test]
+    fn test_node_graph_b3_realization_present_but_meaningless() {
+        // Default (in-sample) config ⇒ no slot-occupying external class anywhere.
+        let data = node_graph_data(1, vec![node(0, 0, Some(0))], vec![]);
+        let ctx = run(&data);
+        assert!(
+            errs_contain(&ctx, "realization_id is meaningless there"),
+            "present realization_id where no external class exists must be rejected: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Rule 38: an empty study stage is rejected naming the stage.
+    #[test]
+    fn test_node_graph_empty_stage_rejected() {
+        let data = node_graph_data(2, vec![node(0, 0, None)], vec![]);
+        let ctx = run(&data);
+        assert!(
+            errs_contain(&ctx, "study stage 1 has no policy-graph node"),
+            "empty stage must be rejected: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Rule 38: an unreachable node is rejected naming the node.
+    #[test]
+    fn test_node_graph_unreachable_node_rejected() {
+        let data = node_graph_data(
+            3,
+            vec![
+                node(0, 0, None),
+                node(1, 1, None),
+                node(2, 2, None),
+                node(99, 1, None),
+            ],
+            vec![edge(0, 1, 1.0), edge(1, 2, 1.0), edge(99, 2, 1.0)],
+        );
+        let ctx = run(&data);
+        assert!(
+            errs_contain(&ctx, "node 99") && errs_contain(&ctx, "unreachable"),
+            "unreachable node must be rejected: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Rule 38: a cycle in the node graph is rejected.
+    #[test]
+    fn test_node_graph_cycle_rejected() {
+        let data = node_graph_data(
+            2,
+            vec![node(0, 0, None), node(1, 1, None)],
+            vec![edge(0, 1, 1.0), edge(1, 0, 1.0)],
+        );
+        let ctx = run(&data);
+        assert!(
+            ctx.errors()
+                .iter()
+                .any(|e| e.kind == ErrorKind::CycleDetected),
+            "cycle must be rejected: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Rule 38: a leaf before the final stage (mid-horizon leaf) is rejected.
+    #[test]
+    fn test_node_graph_mid_horizon_leaf_rejected() {
+        let data = node_graph_data(
+            3,
+            vec![
+                node(0, 0, None),
+                node(1, 1, None),
+                node(2, 1, None),
+                node(3, 2, None),
+            ],
+            vec![edge(0, 1, 0.5), edge(0, 2, 0.5), edge(2, 3, 1.0)],
+        );
+        let ctx = run(&data);
+        assert!(
+            errs_contain(&ctx, "node 1") && errs_contain(&ctx, "mid-horizon leaf"),
+            "mid-horizon leaf must be rejected: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Rule 39: an edge that skips a stage is rejected naming both endpoints.
+    #[test]
+    fn test_node_graph_stage_skipping_edge_rejected() {
+        let data = node_graph_data(
+            3,
+            vec![node(0, 0, None), node(1, 1, None), node(2, 2, None)],
+            vec![edge(0, 1, 0.5), edge(0, 2, 0.5), edge(1, 2, 1.0)],
+        );
+        let ctx = run(&data);
+        assert!(
+            errs_contain(&ctx, "does not advance") && errs_contain(&ctx, "t -> t+1"),
+            "stage-skipping edge must be rejected: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Rule 40: a stage with structurally identical sibling subtrees emits a
+    /// recombinable-signature warning and the load succeeds.
+    #[test]
+    fn test_node_graph_recombinable_signature_warns() {
+        let data = node_graph_data(
+            2,
+            vec![node(0, 0, None), node(1, 1, None), node(2, 1, None)],
+            vec![edge(0, 1, 0.5), edge(0, 2, 0.5)],
+        );
+        let ctx = run(&data);
+        assert!(
+            !ctx.has_errors(),
+            "recombinable graph must load: {:?}",
+            ctx.errors()
+        );
+        assert!(
+            ctx.warnings()
+                .iter()
+                .any(|w| w.kind == ErrorKind::ModelQuality
+                    && w.message.contains("structurally identical")),
+            "identical sibling subtrees must warn: {:?}",
+            ctx.warnings()
+        );
+    }
+
+    /// A duplicate node id is rejected.
+    #[test]
+    fn test_node_graph_duplicate_node_id_rejected() {
+        let data = node_graph_data(2, vec![node(0, 0, None), node(0, 1, None)], vec![]);
+        let ctx = run(&data);
+        assert!(
+            ctx.errors()
+                .iter()
+                .any(|e| e.kind == ErrorKind::DuplicateId),
+            "duplicate node id must be rejected: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// A transition endpoint that is not a declared node is rejected.
+    #[test]
+    fn test_node_graph_unknown_endpoint_rejected() {
+        let data = node_graph_data(
+            2,
+            vec![node(0, 0, None), node(1, 1, None)],
+            vec![edge(0, 99, 1.0)],
+        );
+        let ctx = run(&data);
+        assert!(
+            errs_contain(&ctx, "target_id 99 does not refer to a declared node"),
+            "unknown endpoint must be rejected: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// A node whose `stage_id` names no declared study stage is rejected.
+    #[test]
+    fn test_node_graph_unresolved_stage_rejected() {
+        let data = node_graph_data(2, vec![node(0, 0, None), node(1, 5, None)], vec![]);
+        let ctx = run(&data);
+        assert!(
+            errs_contain(&ctx, "stage_id 5 which is not a declared study stage"),
+            "unresolved node stage must be rejected: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Absent `nodes[]` leaves the node-graph rules inert (chain dialect).
+    #[test]
+    fn test_node_graph_absent_nodes_is_inert() {
+        let mut data = node_graph_data(2, vec![], vec![]);
+        data.stages.policy_graph.transitions = vec![edge(0, 1, 1.0)];
+        let ctx = run(&data);
+        assert!(
+            !errs_contain(&ctx, "policy-graph node")
+                && !errs_contain(&ctx, "realization_id")
+                && !errs_contain(&ctx, "does not advance"),
+            "chain dialect must not trigger node-graph rules: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Rule 41 arm 1: `num_openings` absent at a stage carrying generated openings
+    /// is rejected naming the stage.
+    #[test]
+    fn test_num_openings_required_at_generated_stage() {
+        let mut data = node_graph_data(1, vec![node(0, 0, None)], vec![]);
+        data.stages.openings_declared.clear();
+        let ctx = run(&data);
+        assert!(
+            errs_contain(&ctx, "stage 0") && errs_contain(&ctx, "num_openings is required there"),
+            "generated stage without num_openings must be rejected: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Rule 41 arm 2: `num_openings` present at a stage carrying only external
+    /// openings is rejected as meaningless naming the stage.
+    #[test]
+    fn test_num_openings_meaningless_at_external_stage() {
+        let mut data = node_graph_data(1, vec![node(0, 0, Some(0))], vec![]);
+        data.config = config_with_training_external_inflow();
+        data.external_scenarios = vec![ext_inflow(0, 0)];
+        data.stages.openings_declared = [0].into_iter().collect();
+        let ctx = run(&data);
+        assert!(
+            errs_contain(&ctx, "stage 0")
+                && errs_contain(&ctx, "num_openings is meaningless there"),
+            "external stage declaring num_openings must be rejected: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Rule 42: a per-edge `annual_discount_rate_override` under `nodes[]` is
+    /// rejected naming the edge.
+    #[test]
+    fn test_edge_discount_override_rejected_under_nodes() {
+        let mut data = node_graph_data(
+            2,
+            vec![node(0, 0, None), node(1, 1, None)],
+            vec![Transition {
+                source_id: 0,
+                target_id: 1,
+                probability: 1.0,
+                annual_discount_rate_override: Some(0.08),
+            }],
+        );
+        data.stages.openings_declared = [0, 1].into_iter().collect();
+        let ctx = run(&data);
+        assert!(
+            errs_contain(&ctx, "transition 0 -> 1")
+                && errs_contain(&ctx, "annual_discount_rate_override")
+                && errs_contain(&ctx, "stages[].annual_discount_rate_override"),
+            "per-edge discount override under nodes[] must be rejected naming the edge: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Rule 43: declaring `nodes[]` while shipping `noise_openings.parquet` is
+    /// rejected, stating that nodes[] declares the opening set.
+    #[test]
+    fn test_nodes_and_noise_openings_parquet_rejected() {
+        let mut data = node_graph_data(1, vec![node(0, 0, None)], vec![]);
+        data.has_noise_openings = true;
+        let ctx = run(&data);
+        assert!(
+            errs_contain(&ctx, "nodes[] declares the opening set"),
+            "nodes[] with noise_openings.parquet must be rejected: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Rule 44: a multi-node stage carrying `sampling_method` warns naming the stage
+    /// and the load succeeds.
+    #[test]
+    fn test_sampling_method_warns_at_multi_node_stage() {
+        let data = node_graph_data(
+            2,
+            vec![node(0, 0, None), node(1, 1, None), node(2, 1, None)],
+            vec![edge(0, 1, 0.5), edge(0, 2, 0.5)],
+        );
+        let ctx = run(&data);
+        assert!(
+            !ctx.has_errors(),
+            "sampling_method meaninglessness is a warning, not an error: {:?}",
+            ctx.errors()
+        );
+        assert!(
+            ctx.warnings()
+                .iter()
+                .any(|w| w.kind == ErrorKind::ModelQuality
+                    && w.message.contains("stage 1")
+                    && w.message.contains("sampling_method is ignored")),
+            "multi-node stage must warn naming the stage: {:?}",
+            ctx.warnings()
         );
     }
 }

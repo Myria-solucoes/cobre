@@ -1915,9 +1915,11 @@ fn discounted_multi_stage_system() -> cobre_core::System {
     );
 
     let policy_graph = PolicyGraph {
+        stage_discount_rate_overrides: std::collections::HashMap::new(),
         graph_type: PolicyGraphType::FiniteHorizon,
         annual_discount_rate: 0.10,
         transitions: Vec::new(),
+        nodes: Vec::new(),
         season_map: None,
     };
 
@@ -2625,7 +2627,7 @@ fn relocated_diagnostic_template_operational_violation_correctness() {
 // ── build_filling_v_target backward fold ─────────────────────────────────
 
 use cobre_core::FillingConfig;
-use std::collections::BTreeMap as VTargetMap;
+use std::collections::HashMap as VTargetMap;
 
 /// A single non-cascade hydro carrying a `FillingConfig`
 /// (`start_stage_id`/`entry_stage_id`), used by the `build_filling_v_target`

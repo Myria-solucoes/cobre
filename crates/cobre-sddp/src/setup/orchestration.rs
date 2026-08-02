@@ -195,6 +195,7 @@ impl StudySetup {
                 .cut_selection
                 .as_ref()
                 .and_then(DcsParams::from_strategy),
+            node_graph: &self.node_graph,
         };
 
         let warm_start_basis_cache = self.warm_start_basis_cache.take();

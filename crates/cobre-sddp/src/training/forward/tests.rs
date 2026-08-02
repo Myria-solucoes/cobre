@@ -704,6 +704,7 @@ fn ac_two_scenarios_three_stages_fixed_solution() {
         &templates,
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(
@@ -835,6 +836,7 @@ fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
         &templates,
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(
@@ -970,6 +972,7 @@ fn cost_statistics_accumulated_correctly() {
         &templates,
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(
@@ -1410,6 +1413,7 @@ fn run_one_iteration(
         &templates,
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(
@@ -1575,6 +1579,7 @@ fn test_forward_pass_parallel_cost_agreement() {
         &templates,
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(
@@ -1620,6 +1625,7 @@ fn test_forward_pass_parallel_cost_agreement() {
         &templates,
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(
@@ -1733,6 +1739,7 @@ fn test_forward_pass_work_distribution() {
         &templates,
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(
@@ -2062,6 +2069,7 @@ fn run_single_stage_forward(
         &templates,
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(
@@ -2247,6 +2255,7 @@ fn none_method_unchanged_with_truncation_code_present() {
         &templates,
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(
@@ -2503,6 +2512,7 @@ fn test_forward_pass_parallel_infeasibility() {
         &templates,
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(
@@ -2669,6 +2679,7 @@ fn forward_pass_load_noise_positive_realization() {
         &templates,
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(
@@ -2830,6 +2841,7 @@ fn forward_pass_load_noise_clamped_to_zero() {
         &templates,
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(
@@ -2937,6 +2949,7 @@ fn forward_pass_no_load_buses_unchanged() {
         &templates,
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(
@@ -3596,6 +3609,7 @@ mod dcs_forward {
         };
         let study_dims = test_support::study_dims();
         let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(
@@ -3947,6 +3961,7 @@ mod transit_bucket_copy_gap {
         };
         let study_dims = test_support::study_dims();
         let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, 1),

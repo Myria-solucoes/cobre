@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 
 use cobre_core::{BlockMode, ContractType, EntityId, Hydro, ResolvedBounds, Stage, System};
+use cobre_io::StageIdResolver;
 use cobre_solver::StageTemplate;
 use cobre_stochastic::normal::precompute::PrecomputedNormal;
 use cobre_stochastic::par::precompute::PrecomputedPar;
@@ -787,7 +788,7 @@ pub(super) fn build_filling_v_target(
     hydros: &[Hydro],
     bounds: &ResolvedBounds,
     total_hours_per_stage: &[f64],
-    stage_id_to_idx: &BTreeMap<i32, usize>,
+    stage_id_to_idx: &HashMap<i32, usize>,
 ) -> BTreeMap<(usize, i32), f64> {
     let mut v_target: BTreeMap<(usize, i32), f64> = BTreeMap::new();
     for (h_idx, hydro) in hydros.iter().enumerate() {
@@ -993,19 +994,13 @@ fn build_template_build_ctx<'a>(
     // delivery index `t + K_i` to its id through this slice.
     let study_stage_ids: Vec<i32> = study_stages.iter().map(|s| s.id).collect();
 
-    // Inverse: study `stage.id` → study stage index. The filling-target fold reads
-    // per-stage ζ and bounds at the INDEX but expresses the window in stage IDs.
-    let stage_id_to_idx: BTreeMap<i32, usize> = study_stage_ids
-        .iter()
-        .enumerate()
-        .map(|(idx, &id)| (id, idx))
-        .collect();
+    let stage_resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
 
     let filling_v_target = build_filling_v_target(
         hydros,
         system.bounds(),
         &total_hours_per_stage,
-        &stage_id_to_idx,
+        stage_resolver.index_map(),
     );
 
     let ctx = TemplateBuildCtx {

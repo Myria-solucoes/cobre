@@ -632,6 +632,7 @@ fn train_simulate_write_cycle() {
     let cut_state_layouts = all_enabled_cut_state_layouts(&fx.state, fx.n_stages);
     let study_dims = study_dims_for(0, 0, 0, 0, false);
     let training_context = TrainingContext {
+        node_graph: &cobre_sddp::test_support::chain_node_graph(&fx.stochastic),
         horizon: &fx.horizon,
         state: &fx.state,
         cut_state_layouts: &cut_state_layouts,
@@ -1412,6 +1413,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
 
     let cut_state_layouts = all_enabled_cut_state_layouts(&state, n_stages);
     let training_context = TrainingContext {
+        node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
         horizon: &horizon,
         state: &state,
         cut_state_layouts: &cut_state_layouts,

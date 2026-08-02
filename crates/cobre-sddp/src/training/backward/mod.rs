@@ -189,7 +189,9 @@ pub(crate) struct SuccessorSpec<'a> {
     pub(crate) successor: usize,
     /// This rank's MPI rank index (used to address exchange buffer state).
     pub(crate) my_rank: usize,
-    /// Uniform opening probabilities for the successor stage.
+    /// Product weights `P(n→m) · q_{m,ψ}` over the current node's successor
+    /// outcome set `O(n) = {(m, ψ): m ∈ n⁺, ψ ∈ Ω_m}`, flattened in canonical
+    /// order (ascending child node id, then within-child ω).
     pub(crate) probabilities: &'a [f64],
     /// Pre-built cut rows to append to each successor LP.
     /// Delta batch when freeze is active, full active-cut batch otherwise.

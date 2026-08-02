@@ -298,16 +298,14 @@ pub fn standardize_external_inflow(
         let stage_idx = row.stage_id as usize;
         let scenario_idx = row.scenario_id as usize;
         if let Some(&h_idx) = hydro_index.get(&row.hydro_id) {
-            debug_assert!(
-                stage_idx < n_stages,
-                "row stage_id ({stage_idx}) >= n_stages ({n_stages})",
-            );
-            debug_assert!(
-                scenario_idx < n_scenarios,
-                "row scenario_id ({scenario_idx}) >= n_scenarios ({n_scenarios})",
-            );
-            raw_values[stage_idx * n_scenarios * n_hydros + scenario_idx * n_hydros + h_idx] =
-                row.value_m3s;
+            // Defensive bound: cobre-io's A1 (exact scenario_id set) and A2
+            // (stage_id resolution) are the load-bearing guards that reject an
+            // out-of-range index at load; this keeps a stray index from writing
+            // into a neighbouring stage's realization 0 instead of being caught.
+            if stage_idx < n_stages && scenario_idx < n_scenarios {
+                raw_values[stage_idx * n_scenarios * n_hydros + scenario_idx * n_hydros + h_idx] =
+                    row.value_m3s;
+            }
         }
     }
 
@@ -415,21 +413,18 @@ fn standardize_external_simple<R, M, FM, FR>(
         let stage_idx = stage_id as usize;
         let scenario_idx = scenario_id as usize;
         if let Some(&e_idx) = entity_index.get(&entity_id) {
-            debug_assert!(
-                stage_idx < n_stages,
-                "row stage_id ({stage_idx}) >= n_stages ({n_stages})",
-            );
-            debug_assert!(
-                scenario_idx < n_scenarios,
-                "row scenario_id ({scenario_idx}) >= n_scenarios ({n_scenarios})",
-            );
-            let (mean, std) = mean_std[stage_idx * n_entities + e_idx];
-            let eta = if std == 0.0 {
-                0.0
-            } else {
-                (value - mean) / std
-            };
-            library.eta_slice_mut(stage_idx, scenario_idx)[e_idx] = eta;
+            // Defensive bound: cobre-io's A1/A2 are the load-bearing guards that
+            // reject an out-of-range index at load; this keeps a stray index from
+            // writing into a neighbouring stage's realization 0.
+            if stage_idx < n_stages && scenario_idx < n_scenarios {
+                let (mean, std) = mean_std[stage_idx * n_entities + e_idx];
+                let eta = if std == 0.0 {
+                    0.0
+                } else {
+                    (value - mean) / std
+                };
+                library.eta_slice_mut(stage_idx, scenario_idx)[e_idx] = eta;
+            }
         }
     }
 }
@@ -1359,6 +1354,58 @@ mod tests {
 
         let eta = lib.eta_slice(0, 0)[0];
         assert!((eta - 1.0).abs() < 1e-10, "eta = {eta}");
+    }
+
+    /// The standardization bound is defensive, not load-bearing: cobre-io's A1
+    /// (exact `scenario_id` set) rejects an out-of-range `scenario_id` at load. An
+    /// index equal to `n_scenarios` must be dropped here, never written into the
+    /// next stage's realization 0 (the release-build corruption A1 now prevents).
+    #[test]
+    fn external_standardization_bound_is_defensive() {
+        let bus_id = EntityId(1);
+        let bus_ids = vec![bus_id];
+        let load_models = vec![
+            LoadModel {
+                bus_id,
+                stage_id: 0,
+                mean_mw: 0.0,
+                std_mw: 1.0,
+            },
+            LoadModel {
+                bus_id,
+                stage_id: 1,
+                mean_mw: 0.0,
+                std_mw: 1.0,
+            },
+        ];
+
+        // 2 stages, 2 scenarios, 1 bus. scenario_id == 2 is out of range; without
+        // the defensive bound its offset aliases stage 1's realization 0.
+        let mut lib = ExternalScenarioLibrary::new(2, 2, 1, "load", vec![2, 2]);
+        let rows = vec![
+            ExternalLoadRow {
+                stage_id: 0,
+                scenario_id: 0,
+                bus_id,
+                value_mw: 5.0,
+            },
+            ExternalLoadRow {
+                stage_id: 0,
+                scenario_id: 2,
+                bus_id,
+                value_mw: 99.0,
+            },
+        ];
+        standardize_external_load(&mut lib, &rows, &bus_ids, &load_models, 2);
+
+        assert!(
+            (lib.eta_slice(0, 0)[0] - 5.0).abs() < 1e-12,
+            "the in-range cell is written"
+        );
+        assert!(
+            lib.eta_slice(1, 0)[0].abs() < 1e-12,
+            "the out-of-range write is dropped, not aliased onto stage 1 realization 0"
+        );
     }
 
     // -----------------------------------------------------------------------

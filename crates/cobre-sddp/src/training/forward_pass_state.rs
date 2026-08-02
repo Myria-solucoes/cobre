@@ -1202,6 +1202,7 @@ mod tests {
         };
         let study_dims = study_dims();
         let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&fx.stochastic),
             horizon: &fx.horizon,
             state: &fx.state,
             cut_state_layouts: &[],
@@ -1279,6 +1280,7 @@ mod tests {
         };
         let study_dims = study_dims();
         let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&fx.stochastic),
             horizon: &fx.horizon,
             state: &fx.state,
             cut_state_layouts: &[],
@@ -1373,6 +1375,7 @@ mod tests {
         };
         let study_dims = study_dims();
         let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&fx.stochastic),
             horizon: &fx.horizon,
             state: &fx.state,
             cut_state_layouts: &[],
@@ -1505,6 +1508,7 @@ mod tests {
         };
         let study_dims = study_dims();
         let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&fx.stochastic),
             horizon: &fx.horizon,
             state: &fx.state,
             cut_state_layouts: &[],
@@ -1640,6 +1644,7 @@ mod tests {
         };
         let study_dims = study_dims();
         let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&fx.stochastic),
             horizon: &fx.horizon,
             state: &fx.state,
             cut_state_layouts: &[],
@@ -1939,6 +1944,7 @@ mod tests {
         let lag_accum_seed = [0.0_f64, 0.0_f64];
         let lag_weight_seed = [1.0_f64, 0.5_f64];
         let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &[],

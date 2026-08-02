@@ -1133,9 +1133,11 @@ mod anticipated_pre_horizon_seed_delivery {
         };
 
         let policy_graph = PolicyGraph {
+            stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             transitions: vec![],
+            nodes: Vec::new(),
             season_map: None,
         };
 
@@ -4143,9 +4145,11 @@ mod anticipated_numerical_reconciliation_k2 {
         // default change cannot silently introduce NPV scaling into the analytical
         // derivation.
         let policy_graph = PolicyGraph {
+            stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             transitions: vec![],
+            nodes: Vec::new(),
             season_map: None,
         };
 
@@ -4700,9 +4704,11 @@ mod anticipated_bridge_st_cruz_nova_k1 {
         };
 
         let policy_graph = PolicyGraph {
+            stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             transitions: vec![],
+            nodes: Vec::new(),
             season_map: None,
         };
 
@@ -5661,9 +5667,11 @@ mod a1b_value_cut_identity_anchor {
         };
 
         let policy_graph = PolicyGraph {
+            stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             transitions: vec![],
+            nodes: Vec::new(),
             season_map: None,
         };
 

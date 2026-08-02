@@ -53,6 +53,7 @@ pub(crate) mod pipeline;
 pub mod report;
 pub mod resolution;
 pub mod scenarios;
+pub mod stage_resolve;
 pub mod stages;
 pub mod system;
 pub mod validation;
@@ -125,6 +126,7 @@ pub use scenarios::{
     parse_external_ncs_scenarios, parse_inflow_ar_coefficients, parse_inflow_history,
     parse_inflow_seasonal_stats, parse_load_factors, parse_load_seasonal_stats,
 };
+pub use stage_resolve::StageIdResolver;
 pub use stages::{StagesData, build_season_stage_map, parse_stages};
 pub use system::{
     load_energy_contracts, load_non_controllable_sources, load_pumping_stations, parse_buses,

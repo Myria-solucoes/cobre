@@ -4118,9 +4118,11 @@ fn build_hydro_one_ant_system(
     );
 
     let policy_graph = PolicyGraph {
+        stage_discount_rate_overrides: std::collections::HashMap::new(),
         graph_type: PolicyGraphType::FiniteHorizon,
         annual_discount_rate,
         transitions: vec![],
+        nodes: Vec::new(),
         season_map: None,
     };
 

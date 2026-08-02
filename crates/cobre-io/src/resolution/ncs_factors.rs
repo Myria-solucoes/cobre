@@ -11,6 +11,7 @@ use cobre_core::Stage;
 use cobre_core::entities::NonControllableSource;
 use cobre_core::resolved::ResolvedNcsFactors;
 
+use crate::StageIdResolver;
 use crate::scenarios::NcsFactorEntry;
 
 /// Build a resolved NCS factor table from parsed entries.
@@ -34,12 +35,9 @@ pub fn resolve_ncs_factors(
         .map(|(idx, ncs)| (ncs.id.0, idx))
         .collect();
 
-    let stage_id_to_idx: HashMap<i32, usize> = stages
-        .iter()
-        .filter(|s| s.id >= 0)
-        .enumerate()
-        .map(|(idx, s)| (s.id, idx))
-        .collect();
+    let study_stage_ids: Vec<i32> = stages.iter().filter(|s| s.id >= 0).map(|s| s.id).collect();
+    let stage_resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+    let stage_id_to_idx = stage_resolver.index_map();
 
     let n_ncs = non_controllable_sources.len();
     let n_stages = stage_id_to_idx.len();

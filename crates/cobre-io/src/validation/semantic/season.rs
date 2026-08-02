@@ -428,11 +428,14 @@ mod tests {
             })
             .collect();
         StagesData {
+            openings_declared: std::collections::HashSet::new(),
             stages,
             policy_graph: PolicyGraph {
+                stage_discount_rate_overrides: std::collections::HashMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
                 transitions: vec![],
+                nodes: Vec::new(),
                 season_map: Some(season_map),
             },
         }
@@ -476,11 +479,14 @@ mod tests {
             })
             .collect();
         StagesData {
+            openings_declared: std::collections::HashSet::new(),
             stages,
             policy_graph: PolicyGraph {
+                stage_discount_rate_overrides: std::collections::HashMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
                 transitions: vec![],
+                nodes: Vec::new(),
                 season_map: Some(season_map),
             },
         }
@@ -1070,11 +1076,14 @@ mod tests {
             })
             .collect();
         let stages_data = StagesData {
+            openings_declared: std::collections::HashSet::new(),
             stages,
             policy_graph: PolicyGraph {
+                stage_discount_rate_overrides: std::collections::HashMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
                 transitions: vec![],
+                nodes: Vec::new(),
                 season_map: Some(season_map),
             },
         };
@@ -1306,11 +1315,14 @@ mod tests {
             })
             .collect();
         let stages = StagesData {
+            openings_declared: std::collections::HashSet::new(),
             stages: stages_vec,
             policy_graph: PolicyGraph {
+                stage_discount_rate_overrides: std::collections::HashMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
                 transitions: vec![],
+                nodes: Vec::new(),
                 season_map: Some(season_map),
             },
         };

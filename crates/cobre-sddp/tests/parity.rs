@@ -1271,6 +1271,7 @@ mod determinism {
                     &mut fcf,
                     &stage_ctx,
                     &TrainingContext {
+                        node_graph: &cobre_sddp::test_support::chain_node_graph(&fx.stochastic),
                         horizon: &fx.horizon,
                         state: &fx.state,
                         cut_state_layouts: &all_enabled_cut_state_layouts(&fx.state, fx.n_stages),
@@ -1404,6 +1405,7 @@ mod determinism {
                     },
                     fcf,
                     &TrainingContext {
+                        node_graph: &cobre_sddp::test_support::chain_node_graph(&fx.stochastic),
                         horizon: &fx.horizon,
                         state: &fx.state,
                         cut_state_layouts: &all_enabled_cut_state_layouts(&fx.state, fx.n_stages),

@@ -5,7 +5,7 @@
 //!
 //! | Column           | Type    | Required | Description                                  |
 //! | ---------------- | ------- | -------- | -------------------------------------------- |
-//! | `stage_id`       | INT32   | Yes      | Stage index (0-based)                        |
+//! | `stage_id`       | INT32   | Yes      | Declared study-stage id (not a 0-based index)|
 //! | `opening_index`  | UINT32  | Yes      | Opening index within the stage (0-based)     |
 //! | `entity_index`   | UINT32  | Yes      | Entity index within the noise vector (0-based)|
 //! | `value`          | DOUBLE  | Yes      | Noise realisation value                      |
@@ -22,6 +22,7 @@ use std::fs::File;
 use std::path::Path;
 
 use crate::LoadError;
+use crate::StageIdResolver;
 use crate::parquet_helpers::{
     extract_required_float64, extract_required_int32, extract_required_uint32,
 };
@@ -46,7 +47,7 @@ use crate::parquet_helpers::{
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct NoiseOpeningRow {
-    /// Stage index (0-based within `System::stages`).
+    /// Declared study-stage id this row applies to (not a 0-based index).
     pub stage_id: i32,
     /// Opening index within the stage (0-based).
     pub opening_index: u32,
@@ -121,25 +122,31 @@ pub fn parse_noise_openings(path: &Path) -> Result<Vec<NoiseOpeningRow>, LoadErr
     Ok(rows)
 }
 
-/// Validate parsed noise opening rows against expected system dimensions.
+/// Validate parsed noise opening rows against expected system dimensions,
+/// keying every stage check on the resolved study index (`resolver`) so a deck
+/// numbered `1..T` validates identically to its `0..T-1` equivalent.
 ///
 /// Assumes `rows` is already sorted by `(stage_id, opening_index, entity_index)`
-/// as produced by [`parse_noise_openings`].
+/// as produced by [`parse_noise_openings`]. The expected opening count per stage
+/// is the number of distinct openings present for that stage; the check is that
+/// those indices form `0..count`.
 ///
 /// # Errors
 ///
-/// | Condition                                                      | Error variant              |
-/// |----------------------------------------------------------------|----------------------------|
+/// | Condition                                                     | Error variant              |
+/// |---------------------------------------------------------------|----------------------------|
+/// | A row `stage_id` resolves to no declared study stage          | [`LoadError::SchemaError`] |
 /// | Distinct entity count != `expected_dim`                       | [`LoadError::SchemaError`] |
-/// | Distinct stage count != `expected_stages`                     | [`LoadError::SchemaError`] |
-/// | Opening indices for any stage are not `0..openings_per_stage` | [`LoadError::SchemaError`] |
+/// | Distinct resolved stage count != `expected_stages`            | [`LoadError::SchemaError`] |
+/// | A stage's opening indices are not `0..count`                   | [`LoadError::SchemaError`] |
 ///
-/// Returns [`LoadError::SchemaError`] if any `expected_count` exceeds `u32::MAX`.
+/// Returns [`LoadError::SchemaError`] if any opening count exceeds `u32::MAX`.
 ///
 /// # Examples
 ///
 /// ```
 /// use cobre_io::scenarios::{NoiseOpeningRow, validate_noise_openings};
+/// use cobre_io::StageIdResolver;
 ///
 /// // 2 stages, 3 openings each, dim=2 → 12 rows
 /// let rows: Vec<NoiseOpeningRow> = (0..2_i32)
@@ -148,19 +155,30 @@ pub fn parse_noise_openings(path: &Path) -> Result<Vec<NoiseOpeningRow>, LoadErr
 ///     })))
 ///     .collect();
 ///
-/// validate_noise_openings(&rows, 2, 2, &[3, 3]).expect("valid dimensions");
+/// let resolver = StageIdResolver::from_study_stage_ids(&[0, 1]);
+/// validate_noise_openings(&rows, 2, 2, &resolver).expect("valid dimensions");
 /// ```
 pub fn validate_noise_openings(
     rows: &[NoiseOpeningRow],
     expected_dim: usize,
     expected_stages: usize,
-    expected_openings_per_stage: &[usize],
+    resolver: &StageIdResolver,
 ) -> Result<(), LoadError> {
+    for (i, row) in rows.iter().enumerate() {
+        if resolver.resolve(row.stage_id).is_none() {
+            return Err(resolver.unresolved_stage_id_error(
+                "scenarios/noise_openings.parquet",
+                format!("noise_openings[{i}].stage_id"),
+                row.stage_id,
+            ));
+        }
+    }
+
     let distinct_entities: BTreeSet<u32> = rows.iter().map(|r| r.entity_index).collect();
     let actual_dim = distinct_entities.len();
     if actual_dim != expected_dim {
         return Err(LoadError::SchemaError {
-            path: std::path::PathBuf::from("scenarios/noise_openings.parquet"),
+            path: PathBuf::from("scenarios/noise_openings.parquet"),
             field: "entity_index".to_string(),
             message: format!(
                 "dimension mismatch: expected {expected_dim} entities, found {actual_dim}"
@@ -168,11 +186,14 @@ pub fn validate_noise_openings(
         });
     }
 
-    let distinct_stages: BTreeSet<i32> = rows.iter().map(|r| r.stage_id).collect();
+    let distinct_stages: BTreeSet<usize> = rows
+        .iter()
+        .filter_map(|r| resolver.resolve(r.stage_id))
+        .collect();
     let actual_stages = distinct_stages.len();
     if actual_stages != expected_stages {
         return Err(LoadError::SchemaError {
-            path: std::path::PathBuf::from("scenarios/noise_openings.parquet"),
+            path: PathBuf::from("scenarios/noise_openings.parquet"),
             field: "stage_id".to_string(),
             message: format!(
                 "stage count mismatch: expected {expected_stages} stages, found {actual_stages}"
@@ -180,25 +201,28 @@ pub fn validate_noise_openings(
         });
     }
 
-    let mut openings_by_stage: BTreeMap<i32, BTreeSet<u32>> = BTreeMap::new();
+    let mut openings_by_index: BTreeMap<usize, BTreeSet<u32>> = BTreeMap::new();
     for row in rows {
-        openings_by_stage
-            .entry(row.stage_id)
-            .or_default()
-            .insert(row.opening_index);
+        if let Some(idx) = resolver.resolve(row.stage_id) {
+            openings_by_index
+                .entry(idx)
+                .or_default()
+                .insert(row.opening_index);
+        }
     }
 
-    for (stage_pos, (&stage_id, opening_set)) in openings_by_stage.iter().enumerate() {
-        let expected_count = expected_openings_per_stage[stage_pos];
-        let expected_max = u32::try_from(expected_count).map_err(|_| LoadError::SchemaError {
-            path: PathBuf::from("noise_openings.parquet"),
+    for (&idx, opening_set) in &openings_by_index {
+        let count = opening_set.len();
+        let expected_max = u32::try_from(count).map_err(|_| LoadError::SchemaError {
+            path: PathBuf::from("scenarios/noise_openings.parquet"),
             field: String::new(),
-            message: format!("opening count {expected_count} exceeds u32::MAX"),
+            message: format!("opening count {count} exceeds u32::MAX"),
         })?;
         let expected_set: BTreeSet<u32> = (0..expected_max).collect();
         if *opening_set != expected_set {
+            let stage_id = resolver.id_at(idx).unwrap_or_default();
             return Err(LoadError::SchemaError {
-                path: std::path::PathBuf::from("scenarios/noise_openings.parquet"),
+                path: PathBuf::from("scenarios/noise_openings.parquet"),
                 field: "opening_index".to_string(),
                 message: format!("missing opening indices for stage {stage_id}"),
             });
@@ -208,12 +232,16 @@ pub fn validate_noise_openings(
     Ok(())
 }
 
-/// Assemble an [`OpeningTree`] from validated, sorted noise opening rows.
+/// Assemble an [`OpeningTree`] from validated, sorted noise opening rows, laid
+/// out by resolved study index (`resolver`) rather than by sorted-`stage_id`
+/// position, so a deck numbered `1..T` assembles the same tree as its `0..T-1`
+/// equivalent.
 ///
 /// `rows` must be sorted by `(stage_id, opening_index, entity_index)` ascending —
 /// the layout produced by [`parse_noise_openings`] — and must have already passed
-/// [`validate_noise_openings`]. The sort order matches the stage-major, row-major
-/// memory layout required by [`OpeningTree::from_parts`].
+/// [`validate_noise_openings`] (in particular every `stage_id` resolves). The
+/// sort order matches the stage-major, row-major memory layout required by
+/// [`OpeningTree::from_parts`].
 ///
 /// `dim` is the number of entities per opening vector (the noise dimension).
 ///
@@ -226,6 +254,7 @@ pub fn validate_noise_openings(
 ///
 /// ```
 /// use cobre_io::scenarios::{NoiseOpeningRow, assemble_opening_tree};
+/// use cobre_io::StageIdResolver;
 ///
 /// // 2 stages, 3 openings each, dim=2 → 12 rows
 /// let rows: Vec<NoiseOpeningRow> = (0..2_i32)
@@ -234,24 +263,30 @@ pub fn validate_noise_openings(
 ///     })))
 ///     .collect();
 ///
-/// let tree = assemble_opening_tree(rows, 2);
+/// let resolver = StageIdResolver::from_study_stage_ids(&[0, 1]);
+/// let tree = assemble_opening_tree(rows, 2, &resolver);
 /// assert_eq!(tree.n_stages(), 2);
 /// assert_eq!(tree.n_openings(0), 3);
 /// assert_eq!(tree.dim(), 2);
 /// ```
 #[must_use]
-pub fn assemble_opening_tree(rows: Vec<NoiseOpeningRow>, dim: usize) -> OpeningTree {
+pub fn assemble_opening_tree(
+    rows: Vec<NoiseOpeningRow>,
+    dim: usize,
+    resolver: &StageIdResolver,
+) -> OpeningTree {
     let mut openings_per_stage: Vec<usize> = Vec::new();
-    let mut current_stage: Option<i32> = None;
+    let mut current_index: Option<usize> = None;
     let mut current_opening_count: usize = 0;
     let mut last_opening: Option<u32> = None;
 
     for row in &rows {
-        if current_stage != Some(row.stage_id) {
-            if current_stage.is_some() {
+        let study_index = resolver.resolve(row.stage_id);
+        if current_index != study_index {
+            if current_index.is_some() {
                 openings_per_stage.push(current_opening_count);
             }
-            current_stage = Some(row.stage_id);
+            current_index = study_index;
             current_opening_count = 1;
             last_opening = Some(row.opening_index);
         } else if Some(row.opening_index) != last_opening {
@@ -259,7 +294,7 @@ pub fn assemble_opening_tree(rows: Vec<NoiseOpeningRow>, dim: usize) -> OpeningT
             last_opening = Some(row.opening_index);
         }
     }
-    if current_stage.is_some() {
+    if current_index.is_some() {
         openings_per_stage.push(current_opening_count);
     }
 
@@ -421,7 +456,8 @@ mod tests {
     #[test]
     fn validate_correct_dimensions_returns_ok() {
         let rows = make_rows(2, 3, 2);
-        validate_noise_openings(&rows, 2, 2, &[3, 3]).unwrap();
+        let resolver = StageIdResolver::from_study_stage_ids(&[0, 1]);
+        validate_noise_openings(&rows, 2, 2, &resolver).unwrap();
     }
 
     // ── validate_dimension_mismatch_returns_error ─────────────────────────────
@@ -429,7 +465,8 @@ mod tests {
     #[test]
     fn validate_dimension_mismatch_returns_error() {
         let rows = make_rows(2, 3, 3);
-        let err = validate_noise_openings(&rows, 2, 2, &[3, 3]).unwrap_err();
+        let resolver = StageIdResolver::from_study_stage_ids(&[0, 1]);
+        let err = validate_noise_openings(&rows, 2, 2, &resolver).unwrap_err();
 
         match &err {
             LoadError::SchemaError { message, .. } => {
@@ -447,7 +484,9 @@ mod tests {
     #[test]
     fn validate_stage_count_mismatch_returns_error() {
         let rows = make_rows(2, 3, 2);
-        let err = validate_noise_openings(&rows, 2, 3, &[3, 3, 3]).unwrap_err();
+        // Study declares 3 stages, but the deck only covers 2.
+        let resolver = StageIdResolver::from_study_stage_ids(&[0, 1, 2]);
+        let err = validate_noise_openings(&rows, 2, 3, &resolver).unwrap_err();
 
         match &err {
             LoadError::SchemaError { message, .. } => {
@@ -477,7 +516,8 @@ mod tests {
             })
             .collect();
 
-        let err = validate_noise_openings(&rows, 2, 1, &[3]).unwrap_err();
+        let resolver = StageIdResolver::from_study_stage_ids(&[0]);
+        let err = validate_noise_openings(&rows, 2, 1, &resolver).unwrap_err();
 
         match &err {
             LoadError::SchemaError { message, .. } => {
@@ -497,7 +537,8 @@ mod tests {
         let rows = make_rows(2, 3, 2);
         let expected: Vec<f64> = rows.iter().map(|r| r.value).collect();
 
-        let tree = assemble_opening_tree(rows, 2);
+        let resolver = StageIdResolver::from_study_stage_ids(&[0, 1]);
+        let tree = assemble_opening_tree(rows, 2, &resolver);
 
         assert_eq!(tree.n_stages(), 2);
         assert_eq!(tree.n_openings(0), 3);
@@ -515,5 +556,81 @@ mod tests {
         assert_eq!(tree.opening(1, 0), &[6.0_f64, 7.0]);
         // Stage 1, opening 2: values 10.0, 11.0
         assert_eq!(tree.opening(1, 2), &[10.0_f64, 11.0]);
+    }
+
+    // ── noise_openings_rekey_matches_zero_based_equivalent ────────────────────
+
+    /// A `1..T` deck and its `0..T-1` equivalent (identical opening/entity/value
+    /// content, stage labels shifted by one) assemble a byte-identical
+    /// `OpeningTree` once each is keyed through its own resolver.
+    #[test]
+    fn noise_openings_rekey_matches_zero_based_equivalent() {
+        let zero_rows = make_rows(4, 3, 2);
+        let zero_resolver = StageIdResolver::from_study_stage_ids(&[0, 1, 2, 3]);
+        let zero_tree = assemble_opening_tree(zero_rows, 2, &zero_resolver);
+
+        let mut one_rows = make_rows(4, 3, 2);
+        for row in &mut one_rows {
+            row.stage_id += 1;
+        }
+        let one_resolver = StageIdResolver::from_study_stage_ids(&[1, 2, 3, 4]);
+        let one_tree = assemble_opening_tree(one_rows, 2, &one_resolver);
+
+        assert_eq!(one_tree.n_stages(), zero_tree.n_stages());
+        for s in 0..zero_tree.n_stages() {
+            assert_eq!(one_tree.n_openings(s), zero_tree.n_openings(s));
+        }
+        assert_eq!(one_tree.dim(), zero_tree.dim());
+        assert_eq!(one_tree.data(), zero_tree.data());
+    }
+
+    // ── noise_openings_unresolved_stage_id_rejected ───────────────────────────
+
+    /// A row whose `stage_id` matches no declared study stage fails validation
+    /// with the shared error naming the file, the offending value, and the
+    /// declared study-stage-id set.
+    #[test]
+    fn noise_openings_unresolved_stage_id_rejected() {
+        let mut rows = make_rows(2, 3, 2);
+        rows.push(NoiseOpeningRow {
+            stage_id: 5,
+            opening_index: 0,
+            entity_index: 0,
+            value: 0.0,
+        });
+        rows.push(NoiseOpeningRow {
+            stage_id: 5,
+            opening_index: 0,
+            entity_index: 1,
+            value: 0.0,
+        });
+        rows.sort_by(|a, b| {
+            a.stage_id
+                .cmp(&b.stage_id)
+                .then_with(|| a.opening_index.cmp(&b.opening_index))
+                .then_with(|| a.entity_index.cmp(&b.entity_index))
+        });
+
+        let resolver = StageIdResolver::from_study_stage_ids(&[0, 1]);
+        let err = validate_noise_openings(&rows, 2, 2, &resolver).unwrap_err();
+
+        match &err {
+            LoadError::SchemaError { path, message, .. } => {
+                assert!(
+                    path.to_string_lossy()
+                        .contains("scenarios/noise_openings.parquet"),
+                    "path names the file, got: {path:?}"
+                );
+                assert!(
+                    message.contains('5'),
+                    "message names the offending value, got: {message}"
+                );
+                assert!(
+                    message.contains("[0, 1]"),
+                    "message names the declared set, got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
     }
 }

@@ -494,11 +494,14 @@ mod tests {
             stages.push(make_study_stage(id, study_duration_hours));
         }
         StagesData {
+            openings_declared: std::collections::HashSet::new(),
             stages,
             policy_graph: PolicyGraph {
+                stage_discount_rate_overrides: std::collections::HashMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
                 transitions: vec![],
+                nodes: Vec::new(),
                 season_map: None,
             },
         }

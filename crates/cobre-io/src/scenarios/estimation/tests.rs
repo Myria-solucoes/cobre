@@ -2596,9 +2596,11 @@ fn build_monthly_system_with_conditioning(
     let h1 = EntityId(1);
     let stages = make_monthly_stages_for_annual(n_years);
     let policy_graph = PolicyGraph {
+        stage_discount_rate_overrides: std::collections::HashMap::new(),
         graph_type: PolicyGraphType::FiniteHorizon,
         annual_discount_rate: 0.0,
         transitions: vec![],
+        nodes: Vec::new(),
         season_map: Some(monthly_season_map()),
     };
     let initial_conditions = InitialConditions {

@@ -1,7 +1,12 @@
-use super::{StudySetup, build_contract_prices_per_stage};
+use super::{
+    PhaseLibraries, ScenarioLibraries, StudySetup, assert_external_library_widths,
+    build_contract_prices_per_stage,
+};
+use crate::SddpError;
 use crate::hydro_models::{PrepareHydroModelsResult, ProductionModelSet, ResolvedProductionModel};
 use crate::indexer::StateSpace;
 use crate::test_support;
+use cobre_stochastic::ExternalScenarioLibrary;
 
 use cobre_core::{
     BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
@@ -33,13 +38,23 @@ use cobre_io::config::{
 use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
 /// Bounds and penalties are non-zero defaults so `build_stage_templates` succeeds.
+fn minimal_system(n_stages: usize) -> cobre_core::System {
+    minimal_system_with_policy_graph(n_stages, PolicyGraph::default())
+}
+
+/// [`minimal_system`]'s body, generalized to accept a caller-supplied
+/// `policy_graph` (a node-native or discount-override fixture, e.g.) instead
+/// of always defaulting to a plain chain.
 #[allow(
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::items_after_statements
 )]
-fn minimal_system(n_stages: usize) -> cobre_core::System {
+fn minimal_system_with_policy_graph(
+    n_stages: usize,
+    policy_graph: PolicyGraph,
+) -> cobre_core::System {
     use chrono::NaiveDate;
 
     let bus = Bus {
@@ -264,6 +279,7 @@ fn minimal_system(n_stages: usize) -> cobre_core::System {
         .load_models(load_models)
         .bounds(bounds)
         .penalties(penalties)
+        .policy_graph(policy_graph)
         .build()
         .expect("minimal_system: valid")
 }
@@ -1023,6 +1039,165 @@ fn train_generates_cuts_in_fcf() {
         setup.fcf.pools[0].populated() > 0,
         "expected at least one cut in FCF pool[0] after training"
     );
+}
+
+/// A 3-stage binary tree (root fanning ×2 at stage 0, ×2 again at stage 1 —
+/// the design's own headline node-native shape, DESIGN-node-native-engine.md's
+/// fixture (b)) loads end-to-end through `StudySetup::new` and constructs
+/// the runtime node graph correctly: node identity/count, the `node → pool`
+/// map with leaf sharing, and canonical (ascending child id) successor lists.
+/// All 7 nodes are generated (`realization_id: None`).
+///
+/// TODO(per-node-backward-traversal): assert end-to-end branching training
+/// here once per-node opening-to-child-node substrate routing and per-node
+/// pools land. The backward pass still routes openings per STAGE
+/// (`tree_view.n_openings(successor_stage)`), so training this graph panics
+/// today: a node with more than one child duplicates or exceeds that stage's
+/// raw opening count, violating `trial_point.rs`'s "`solve_order(s)` must be a
+/// permutation of `0..n_openings`" invariant. Chain topologies are unaffected
+/// and stay bit-for-bit pinned by the golden parity suite.
+#[test]
+fn node_native_binary_tree_loads_and_constructs_node_graph() {
+    use cobre_core::temporal::{Node, Transition};
+    use std::collections::HashMap;
+
+    let policy_graph = PolicyGraph {
+        graph_type: PolicyGraphType::FiniteHorizon,
+        annual_discount_rate: 0.0,
+        nodes: vec![
+            Node {
+                id: 0,
+                stage_id: 0,
+                realization_id: None,
+                label: None,
+            },
+            Node {
+                id: 1,
+                stage_id: 1,
+                realization_id: None,
+                label: None,
+            },
+            Node {
+                id: 2,
+                stage_id: 1,
+                realization_id: None,
+                label: None,
+            },
+            Node {
+                id: 3,
+                stage_id: 2,
+                realization_id: None,
+                label: None,
+            },
+            Node {
+                id: 4,
+                stage_id: 2,
+                realization_id: None,
+                label: None,
+            },
+            Node {
+                id: 5,
+                stage_id: 2,
+                realization_id: None,
+                label: None,
+            },
+            Node {
+                id: 6,
+                stage_id: 2,
+                realization_id: None,
+                label: None,
+            },
+        ],
+        transitions: vec![
+            Transition {
+                source_id: 0,
+                target_id: 1,
+                probability: 0.5,
+                annual_discount_rate_override: None,
+            },
+            Transition {
+                source_id: 0,
+                target_id: 2,
+                probability: 0.5,
+                annual_discount_rate_override: None,
+            },
+            Transition {
+                source_id: 1,
+                target_id: 3,
+                probability: 0.5,
+                annual_discount_rate_override: None,
+            },
+            Transition {
+                source_id: 1,
+                target_id: 4,
+                probability: 0.5,
+                annual_discount_rate_override: None,
+            },
+            Transition {
+                source_id: 2,
+                target_id: 5,
+                probability: 0.5,
+                annual_discount_rate_override: None,
+            },
+            Transition {
+                source_id: 2,
+                target_id: 6,
+                probability: 0.5,
+                annual_discount_rate_override: None,
+            },
+        ],
+        stage_discount_rate_overrides: HashMap::new(),
+        season_map: None,
+    };
+
+    let system = minimal_system_with_policy_graph(3, policy_graph);
+    let config = minimal_config(1, 1);
+    let stochastic = build_stochastic_context(
+        &system,
+        42,
+        None,
+        &[],
+        &[],
+        OpeningTreeInputs::default(),
+        ClassSchemes {
+            inflow: Some(SamplingScheme::InSample),
+            load: Some(SamplingScheme::InSample),
+            ncs: Some(SamplingScheme::InSample),
+        },
+    )
+    .expect("stochastic context");
+
+    let setup = StudySetup::new(
+        &system,
+        &config,
+        stochastic,
+        PrepareHydroModelsResult::default_from_system(&system),
+    )
+    .expect("setup: node-native binary tree must load end-to-end");
+
+    // The runtime node graph mirrors the declared 7-node binary tree: nodes
+    // 0/1/2 have successors and own their own pool; nodes 3/4/5/6 are leaves
+    // and share exactly one pool.
+    assert_eq!(setup.node_graph.nodes.len(), 7);
+    assert_eq!(
+        setup.node_graph.n_pools, 4,
+        "3 internal nodes each own a pool, 4 leaves share one"
+    );
+
+    // Canonical (ascending child node id) successor structure, matching the
+    // declared transitions: 0->{1,2}, 1->{3,4}, 2->{5,6}; leaves have none.
+    let child_ids = |pos: usize| -> Vec<i32> {
+        setup.node_graph.successors[pos]
+            .iter()
+            .map(|s| setup.node_graph.node_ids[s.child])
+            .collect()
+    };
+    assert_eq!(child_ids(0), vec![1, 2]);
+    assert_eq!(child_ids(1), vec![3, 4]);
+    assert_eq!(child_ids(2), vec![5, 6]);
+    for leaf_pos in 3..7 {
+        assert!(setup.node_graph.successors[leaf_pos].is_empty());
+    }
 }
 
 #[test]
@@ -2203,9 +2378,11 @@ fn minimal_system_2_hydros_with_history(
         .bounds(bounds)
         .penalties(penalties)
         .policy_graph(PolicyGraph {
+            stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.0,
             transitions: vec![],
+            nodes: Vec::new(),
             season_map,
         })
         .initial_conditions(cobre_core::InitialConditions {
@@ -6213,8 +6390,8 @@ fn stage_data_state_matches_indexer_role_a_uniform() {
 /// (`max_par_order`) AND the per-hydro activeness mask in lockstep: the
 /// `StateRegion::Lag` mask must contain `24 * hydro_count` active entries, not
 /// `2 * hydro_count` — a regression that fails if the mask is left un-widened
-/// while the dense stride grows (the exact wrong-but-compiling outcome the
-/// ticket's widening exists to prevent).
+/// while the dense stride grows (the exact wrong-but-compiling outcome this
+/// lockstep widening exists to prevent).
 #[test]
 fn resolve_state_layout_widens_dense_stride_and_mask_to_declared_depth() {
     let system = minimal_system_2_hydros_with_history(3, None, vec![]);
@@ -6313,7 +6490,7 @@ fn resolve_state_layout_floors_declared_depth_at_ar_order() {
     );
 }
 
-/// AC-5 cross-crate coherence: cobre-io's seed lag depth
+/// Cross-crate coherence: cobre-io's seed lag depth
 /// (`cobre_io::seed_lag_state_depth`, the formula `max_seed_lag_depth` uses) and
 /// cobre-sddp's `resolve_state_layout` dense stride (`state.max_par_order`) must
 /// return the identical `L_state` under the same declared depth — both apply
@@ -6358,6 +6535,53 @@ fn cobre_io_seed_depth_matches_resolve_state_layout_depth_under_declared() {
             "cobre-io seed depth and resolve_state_layout dense stride must agree at \
              declared depth {declared}"
         );
+    }
+}
+
+/// Cross-crate coherence: a `StageIdResolver` built (via the cobre-io
+/// constructor) from a `System`'s study stages agrees, in both directions, with
+/// the canonical `study_stage_ids` slice `StudySetup` carries. Fails if the
+/// resolver's index semantics ever diverge from that slice.
+#[test]
+fn stage_id_resolver_agrees_with_study_stage_ids() {
+    let system = minimal_system_2_hydros_with_history(3, None, vec![]);
+    let config = minimal_config(1, 5);
+    let stochastic = build_stochastic_context(
+        &system,
+        42,
+        None,
+        &[],
+        &[],
+        OpeningTreeInputs::default(),
+        ClassSchemes {
+            inflow: Some(SamplingScheme::InSample),
+            load: Some(SamplingScheme::InSample),
+            ncs: Some(SamplingScheme::InSample),
+        },
+    )
+    .expect("stochastic context");
+
+    let setup = StudySetup::new(
+        &system,
+        &config,
+        stochastic,
+        PrepareHydroModelsResult::default_from_system(&system),
+    )
+    .expect("setup");
+
+    // Resolver built independently from the System's study stages.
+    let ids: Vec<i32> = system
+        .stages()
+        .iter()
+        .filter(|s| s.id >= 0)
+        .map(|s| s.id)
+        .collect();
+    let resolver = cobre_io::StageIdResolver::from_study_stage_ids(&ids);
+
+    assert_eq!(resolver.study_stage_ids(), setup.study_stage_ids.as_slice());
+    for (i, &id) in setup.study_stage_ids.iter().enumerate() {
+        assert_eq!(resolver.resolve(id), Some(i));
+        assert_eq!(resolver.id_at(i), Some(id));
     }
 }
 
@@ -7966,5 +8190,70 @@ fn test_contract_price_table_carries_per_block_override() {
         prices[0],
         vec![80.0, 120.0, 80.0, 80.0, 80.0, 80.0],
         "contract 0 carries the block-1 override ([80, 120, 80]); contract 1's three cells are unaffected"
+    );
+}
+
+// ── G2 (rule 49): external-library width assertion ───────────────────────────
+
+/// Build a `ScenarioLibraries` whose training phase carries `inflow` as its
+/// external inflow library and no other external libraries.
+fn scenario_libraries_with_inflow(inflow: Option<ExternalScenarioLibrary>) -> ScenarioLibraries {
+    let empty = || PhaseLibraries {
+        inflow_scheme: SamplingScheme::InSample,
+        load_scheme: SamplingScheme::InSample,
+        ncs_scheme: SamplingScheme::InSample,
+        historical: None,
+        external_inflow: None,
+        external_load: None,
+        external_ncs: None,
+    };
+    let mut training = empty();
+    if inflow.is_some() {
+        training.inflow_scheme = SamplingScheme::External;
+    }
+    training.external_inflow = inflow;
+    ScenarioLibraries {
+        training,
+        simulation: empty(),
+    }
+}
+
+/// A standardized external library whose `n_entities()` disagrees with its
+/// `noise_entity_order` block width is rejected naming the class and both widths.
+#[test]
+fn g2_rejects_external_library_width_mismatch() {
+    // minimal_system has one hydro, so the inflow block width is 1.
+    let system = minimal_system(1);
+    let libs = scenario_libraries_with_inflow(Some(ExternalScenarioLibrary::new(
+        1,
+        2,
+        2,
+        "inflow",
+        vec![2],
+    )));
+    match assert_external_library_widths(&system, &libs) {
+        Err(SddpError::Validation(msg)) => assert!(
+            msg.contains("inflow") && msg.contains('2') && msg.contains('1'),
+            "the error names the class and both widths, got: {msg}"
+        ),
+        other => panic!("expected a width-mismatch Validation error, got {other:?}"),
+    }
+}
+
+/// A library whose width matches the `noise_entity_order` block width passes —
+/// the entity order used is `noise_entity_order`'s, not a re-derivation.
+#[test]
+fn g2_accepts_matching_external_library_width() {
+    let system = minimal_system(1);
+    let libs = scenario_libraries_with_inflow(Some(ExternalScenarioLibrary::new(
+        1,
+        2,
+        1,
+        "inflow",
+        vec![2],
+    )));
+    assert!(
+        assert_external_library_widths(&system, &libs).is_ok(),
+        "a library width matching noise_entity_order's block width must pass"
     );
 }

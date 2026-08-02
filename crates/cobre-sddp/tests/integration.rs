@@ -598,6 +598,7 @@ fn run_one_deterministic_pass(
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(stochastic),
             horizon: &fx.horizon,
             state: &fx.state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&fx.state, fx.n_stages),
@@ -687,6 +688,7 @@ fn train_converges_with_mock_solver() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&fx.stochastic),
             horizon: &fx.horizon,
             state: &fx.state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&fx.state, fx.n_stages),
@@ -805,6 +807,7 @@ fn train_lb_monotonically_nondecreasing() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&fx.stochastic),
             horizon: &fx.horizon,
             state: &fx.state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&fx.state, fx.n_stages),
@@ -912,6 +915,7 @@ fn train_emits_correct_event_sequence() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&fx.stochastic),
             horizon: &fx.horizon,
             state: &fx.state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&fx.state, fx.n_stages),
@@ -1025,6 +1029,7 @@ fn train_stops_at_iteration_limit() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&fx.stochastic),
             horizon: &fx.horizon,
             state: &fx.state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&fx.state, fx.n_stages),
@@ -1125,6 +1130,7 @@ fn train_stops_on_graceful_shutdown() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&fx.stochastic),
             horizon: &fx.horizon,
             state: &fx.state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&fx.state, fx.n_stages),
@@ -1215,6 +1221,7 @@ fn train_propagates_infeasible_error() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&fx.stochastic),
             horizon: &fx.horizon,
             state: &fx.state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&fx.state, fx.n_stages),
@@ -1326,6 +1333,7 @@ fn d17_level1_cut_selection_convergence() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&fx.stochastic),
             horizon: &fx.horizon,
             state: &fx.state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&fx.state, fx.n_stages),
@@ -1484,6 +1492,7 @@ fn d17_level1_cut_selection_reconstruction() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&fx.stochastic),
             horizon: &fx.horizon,
             state: &fx.state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&fx.state, fx.n_stages),
@@ -1596,6 +1605,7 @@ fn d18_lml1_cut_selection_convergence() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&fx.stochastic),
             horizon: &fx.horizon,
             state: &fx.state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&fx.state, fx.n_stages),
@@ -1829,6 +1839,7 @@ fn frozen_backward_pass_smoke_test() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&fx.stochastic),
             horizon: &fx.horizon,
             state: &fx.state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&fx.state, fx.n_stages),

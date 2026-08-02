@@ -771,6 +771,7 @@ fn single_stage_system_produces_no_cuts() {
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -873,6 +874,7 @@ fn two_stage_system_two_trial_points_generates_two_cuts_at_stage_0() {
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -978,6 +980,7 @@ fn cut_inserted_with_correct_stage_iteration_and_forward_pass_index() {
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1077,6 +1080,7 @@ fn no_cuts_generated_at_last_stage() {
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1177,6 +1181,7 @@ fn elapsed_ms_is_non_negative() {
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1272,6 +1277,7 @@ fn infeasible_solver_returns_sddp_infeasible_error() {
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1415,6 +1421,7 @@ fn cut_coefficients_and_intercept_match_dual_extraction_formula() {
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1536,6 +1543,7 @@ fn cut_gradient_sign_physically_correct() {
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1662,6 +1670,7 @@ fn cut_is_tight_at_trial_point() {
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1774,6 +1783,7 @@ fn single_rank_backward_pass_with_local_backend_produces_correct_fcf() {
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1897,6 +1907,7 @@ fn forward_pass_index_matches_global_scenario_index() {
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -2006,6 +2017,7 @@ fn warm_start_uses_prepopulated_forward_basis() {
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -2108,6 +2120,7 @@ fn multi_opening_subsequent_openings_use_internal_hotstart() {
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -2216,6 +2229,7 @@ fn backward_solver_error_propagates() {
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -2377,6 +2391,7 @@ fn test_backward_pass_parallel_cut_determinism() {
         fcf: &mut fcf_1,
         cut_batches: &mut empty_cut_batches(n_stages),
         training_ctx: &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -2466,6 +2481,7 @@ fn test_backward_pass_parallel_cut_determinism() {
         fcf: &mut fcf_4,
         cut_batches: &mut empty_cut_batches(n_stages),
         training_ctx: &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -2860,6 +2876,7 @@ fn backward_pass_load_patches_applied() {
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -3036,6 +3053,7 @@ fn backward_pass_no_load_buses_unchanged() {
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -3217,6 +3235,7 @@ fn backward_pass_cut_coefficients_unaffected() {
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -3346,6 +3365,7 @@ fn per_stage_cut_sync_invariant_after_bug1_fix() {
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -3484,6 +3504,7 @@ fn metadata_sync_updates_active_count_and_last_active_iter() {
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -3676,6 +3697,7 @@ fn run_backward_pass_with_n_workers(n_workers: usize) -> FutureCostFunction {
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -4044,6 +4066,7 @@ fn allgatherv_single_rank_two_workers_stage_stats_has_per_worker_entries() {
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -4272,6 +4295,7 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(templates.len()),
         training_ctx: &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -4401,6 +4425,7 @@ fn run_one_trial_point_with_stores(
     let risk_measures = vec![RiskMeasure::Expectation; n_stages];
     let study_dims = test_support::study_dims();
     let training_ctx = TrainingContext {
+        node_graph: &crate::test_support::chain_node_graph(&stochastic),
         horizon: &horizon,
         state: &state,
         cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -4548,6 +4573,7 @@ fn patch_opening_bounds_pins_transit_bucket_incoming_columns_per_stage_visit() {
     let horizon = HorizonMode::Finite { num_stages: 1 };
     let study_dims = test_support::study_dims();
     let training_ctx = TrainingContext {
+        node_graph: &crate::test_support::chain_node_graph(&stochastic),
         horizon: &horizon,
         state: &state,
         cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, 1),
@@ -4808,6 +4834,7 @@ fn handshake_passes_with_local_backend() {
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(n_stages),
         training_ctx: &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -4972,6 +4999,7 @@ fn handshake_rejects_nonuniform_workers() {
         fcf: &mut fcf,
         cut_batches: &mut empty_cut_batches(n_stages),
         training_ctx: &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -5257,6 +5285,7 @@ fn run_dcs_backward_trial_point_at(
     };
     let study_dims = test_support::study_dims();
     let training_ctx = TrainingContext {
+        node_graph: &crate::test_support::chain_node_graph(&stochastic),
         horizon: &horizon,
         state: &state,
         cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -5767,6 +5796,7 @@ fn backward_dcs_frozen_cuts_present_no_duplicate_rows() {
     };
     let study_dims = test_support::study_dims();
     let training_ctx = TrainingContext {
+        node_graph: &crate::test_support::chain_node_graph(&stochastic),
         horizon: &horizon,
         state: &state,
         cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),

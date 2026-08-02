@@ -1727,6 +1727,7 @@ mod opening_block_scratch {
         };
         let study_dims_fixture = study_dims();
         let training_ctx = TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state_layout_fixture,
             cut_state_layouts: &all_enabled_cut_state_layouts(&state_layout_fixture, n_stages),
@@ -1864,6 +1865,7 @@ mod opening_block_scratch {
         };
         let study_dims_fixture = study_dims();
         let training_ctx = TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state_layout_fixture,
             cut_state_layouts: &all_enabled_cut_state_layouts(&state_layout_fixture, n_stages),

@@ -219,6 +219,7 @@ impl StudySetup {
                 .cut_selection
                 .as_ref()
                 .and_then(DcsParams::from_strategy),
+            node_graph: &self.node_graph,
         }
     }
 
@@ -286,6 +287,7 @@ impl StudySetup {
                 .cut_selection
                 .as_ref()
                 .and_then(DcsParams::from_strategy),
+            node_graph: &self.node_graph,
         }
     }
 }

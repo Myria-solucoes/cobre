@@ -14,10 +14,12 @@ use std::collections::{BTreeMap, HashMap};
 use chrono::NaiveDate;
 use cobre_core::{
     Block, BlockMode, Bus, CascadeTopology, DeficitSegment, EntityId, Hydro, HydroGenerationModel,
-    HydroPenalties, HydroUnitGroup, NoiseMethod, ResolvedBounds, ResolvedGenericConstraintBounds,
-    ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors, ResolvedPenalties,
-    ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig,
+    HydroPenalties, HydroUnitGroup, NoiseMethod, PolicyGraph, ResolvedBounds,
+    ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
+    ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig,
 };
+use cobre_io::StageIdResolver;
+use cobre_stochastic::StochasticContext;
 use cobre_stochastic::par::precompute::PrecomputedPar;
 
 use crate::context::{StageContext, TrainingContext};
@@ -33,6 +35,7 @@ use crate::policy::policy_load::{
     FullFcf, PolicyLoadProof, PolicyStageManifest, validate_policy_load,
 };
 use crate::resolved_parameters::ResolvedParameters;
+use crate::setup::node_graph::{NodeGraph, build_node_graph};
 use crate::solve::stage_solve::{StageInputs, run_stage_solve};
 use crate::training::stage_solve_prep::{
     InflowNoise, LoadNoise, OpeningMode, StageSolvePrep, StageSolvePrepParams, StateSource,
@@ -775,4 +778,28 @@ pub fn trial_point_records(states: &[Vec<f64>], n_stages: usize) -> Vec<Trajecto
             })
         })
         .collect()
+}
+
+/// The byte-exact chain [`NodeGraph`] (C1) for `stochastic`: one node per
+/// stage, pools 1:1, each node's `Ω` view spanning exactly that stage's
+/// [`StochasticContext::opening_tree`] openings. Delegates to
+/// [`build_node_graph`]'s own chain path (an empty `nodes[]`) instead of
+/// re-deriving the shape, so a fixture's declared branching factor and its
+/// node graph can never drift apart.
+///
+/// # Panics
+///
+/// Never in practice — see the rationale below.
+#[allow(clippy::expect_used)]
+// Rationale: build_node_graph only returns Err for a transition/node naming
+// an undeclared id; PolicyGraph::default() carries no nodes/transitions at
+// all, so that error path is unreachable here.
+#[must_use]
+pub fn chain_node_graph(stochastic: &StochasticContext) -> NodeGraph {
+    let n_stages = stochastic.n_stages();
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+    let study_stage_ids: Vec<i32> = (0..n_stages as i32).collect();
+    let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+    build_node_graph(&PolicyGraph::default(), n_stages, &resolver, stochastic)
+        .expect("chain_node_graph: build_node_graph never errors for an empty nodes[] graph")
 }

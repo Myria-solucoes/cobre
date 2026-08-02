@@ -160,6 +160,11 @@ pub(crate) struct ParsedData {
     pub(crate) ncs_bounds: Vec<NcsBoundsRow>,
     /// `constraints/hydro_unit_group_bounds.parquet`.
     pub(crate) hydro_unit_group_bounds: Vec<HydroUnitGroupBoundsRow>,
+
+    /// Whether `scenarios/noise_openings.parquet` is present in the case directory.
+    /// Only presence is carried (from the file manifest) — the rows are parsed by the
+    /// solver-side stochastic pipeline, not here.
+    pub(crate) has_noise_openings: bool,
 }
 
 // ── Error mapping helper ──────────────────────────────────────────────────────
@@ -692,6 +697,7 @@ pub(crate) fn validate_schema(
         penalty_overrides_ncs,
         ncs_bounds,
         hydro_unit_group_bounds,
+        has_noise_openings: manifest.scenarios_noise_openings_parquet,
     })
 }
 

@@ -538,6 +538,7 @@ mod tests {
         };
 
         ParsedData {
+            has_noise_openings: false,
             config,
             penalties: GlobalPenaltyDefaults {
                 bus_deficit_segments: vec![DeficitSegment {
@@ -567,6 +568,7 @@ mod tests {
                 ncs_curtailment_cost: 1.0,
             },
             stages: StagesData {
+                openings_declared: std::collections::HashSet::new(),
                 stages: vec![make_stage(0), make_stage(1)],
                 policy_graph: PolicyGraph::default(),
             },
@@ -920,6 +922,7 @@ mod tests {
         let mut data = base_parsed_data();
         // Include one pre-study stage (id = -1) alongside the study stages.
         data.stages = StagesData {
+            openings_declared: std::collections::HashSet::new(),
             stages: vec![make_pre_study_stage(-1), make_stage(0), make_stage(1)],
             policy_graph: PolicyGraph::default(),
         };

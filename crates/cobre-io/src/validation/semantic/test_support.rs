@@ -188,11 +188,14 @@ pub(super) fn make_stage_with_blocks(id: i32, n: usize) -> Stage {
 /// Build a minimal valid `StagesData` with the given stage IDs.
 pub(super) fn make_stages(ids: Vec<i32>) -> StagesData {
     StagesData {
+        openings_declared: std::collections::HashSet::new(),
         stages: ids.into_iter().map(make_stage).collect(),
         policy_graph: PolicyGraph {
+            stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.06,
             transitions: vec![],
+            nodes: Vec::new(),
             season_map: None,
         },
     }
@@ -203,6 +206,7 @@ pub(super) fn make_stages(ids: Vec<i32>) -> StagesData {
 /// `ParsedData` skeleton: one `BUS_1` bus, every other field empty or `None`.
 fn base_parsed_data(stages: StagesData) -> ParsedData {
     ParsedData {
+        has_noise_openings: false,
         config: minimal_config(),
         penalties: minimal_global_penalties(),
         stages,
@@ -280,6 +284,7 @@ pub(super) fn make_data(
         hydro.sort_unit_groups();
     }
     ParsedData {
+        has_noise_openings: false,
         thermals,
         hydros,
         lines,
@@ -308,6 +313,7 @@ pub(super) fn make_data_5b(
         hydro.sort_unit_groups();
     }
     ParsedData {
+        has_noise_openings: false,
         buses,
         hydros,
         inflow_seasonal_stats: inflow_stats,
@@ -473,6 +479,34 @@ pub(super) fn config_with_training_external_inflow() -> Config {
     parse_config(tmp.path()).unwrap()
 }
 
+/// Build a `Config` whose training scenario source sets the `external` scheme for
+/// each requested class, leaving the rest at their default (in-sample) scheme.
+pub(super) fn config_with_training_external(inflow: bool, load: bool, ncs: bool) -> Config {
+    let mut classes: Vec<&str> = Vec::new();
+    if inflow {
+        classes.push(r#""inflow": { "scheme": "external" }"#);
+    }
+    if load {
+        classes.push(r#""load": { "scheme": "external" }"#);
+    }
+    if ncs {
+        classes.push(r#""ncs": { "scheme": "external" }"#);
+    }
+    let json = format!(
+        r#"{{
+            "training": {{
+                "forward_passes": 10,
+                "stopping_rules": [{{ "type": "iteration_limit", "limit": 100 }}],
+                "scenario_source": {{ "seed": 42, {} }}
+            }}
+        }}"#,
+        classes.join(", ")
+    );
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), json).unwrap();
+    parse_config(tmp.path()).unwrap()
+}
+
 /// Build a `Config` with `simulation.scenario_source.load.scheme = "external"`.
 pub(super) fn config_with_simulation_external_load() -> Config {
     let json = r#"{
@@ -554,11 +588,14 @@ pub(super) fn make_stages_with_seasons(n_months: usize, with_season_map: bool) -
         stages.push(stage);
     }
     StagesData {
+        openings_declared: std::collections::HashSet::new(),
         stages,
         policy_graph: PolicyGraph {
+            stage_discount_rate_overrides: std::collections::HashMap::new(),
             graph_type: PolicyGraphType::FiniteHorizon,
             annual_discount_rate: 0.06,
             transitions: vec![],
+            nodes: Vec::new(),
             season_map: with_season_map.then(make_monthly_season_map),
         },
     }
@@ -579,6 +616,7 @@ pub(super) fn make_data_estimation(
         hydro.sort_unit_groups();
     }
     ParsedData {
+        has_noise_openings: false,
         hydros,
         inflow_history,
         ..base_parsed_data(stages)

@@ -78,7 +78,7 @@
 //! | 2  | Outgoing transition probabilities sum to 1.0 (±1e-6) per source stage  | `stages.json`                                  | `InvalidValue`           |
 //! | 3  | Cyclic graph: `annual_discount_rate > 0.0`                              | `stages.json`                                  | `InvalidValue`           |
 //! | 4  | Every `Block.duration_hours > 0.0`                                      | `stages.json`                                  | `InvalidValue`           |
-//! | 5  | CVaR: `alpha` in (0, 1], `lambda` in [0, 1]                             | `stages.json`                                  | `InvalidValue`           |
+//! | 5  | `CVaR`: `alpha` in (0, 1], `lambda` in [0, 1]                             | `stages.json`                                  | `InvalidValue`           |
 //! | 6  | `max(deficit_segment_costs) > filling_target_violation_cost`            | `penalties.json`                               | `ModelQuality` (warning) |
 //! | 7  | `storage_violation_below_cost > max(deficit_segment_costs)`             | `penalties.json`                               | `ModelQuality` (warning) |
 //! | 8  | `max(deficit_segment_costs) > max(constraint_violation_costs)`          | `penalties.json`                               | `ModelQuality` (warning) |
@@ -109,6 +109,24 @@
 //! |33  | Filling schedule reaches the dead volume: `Σ ζ_s·rate_s >= min_storage − seed` | `system/hydros.json`               | `BusinessRuleViolation`  |
 //! |34  | PAR order > 0 but every study stage has `inflow_lags == false` (inflow-lag state omitted) | `stages.json`        | `ModelQuality` (warning) |
 //! |35  | User-supplied `inflow_ar_coefficients.parquet` must pass the periodic-ACF closure stationarity gate (external-input path only; annual-aware; season resolved via `resolve_stage_seasons`'s `season_map`-or-fallback) | `scenarios/inflow_ar_coefficients.parquet` | `InvalidValue` (or `BusinessRuleViolation` when a stage's season is genuinely unresolvable) |
+//! |36  | Node `realization_id` required at a stage carrying a slot-occupying external class, rejected as meaningless where none (declared `nodes[]` only) | `stages.json` | `InvalidValue` |
+//! |37  | Node `realization_id` in `[0, raw_c(t))` for every slot-occupying external class (declared `nodes[]` only) | `stages.json` | `InvalidValue` |
+//! |38  | Node graph well-formedness: unique/known node ids, resolvable stage, no empty stage, no unreachable node, acyclic, no mid-horizon leaf (declared `nodes[]` only) | `stages.json` | `InvalidValue` / `DuplicateId` / `CycleDetected` |
+//! |39  | Every graph edge advances exactly one stage (`t → t+1`, no stage-skipping) (declared `nodes[]` only) | `stages.json` | `InvalidValue` |
+//! |40  | A stage carrying multiple nodes with structurally identical subtrees (recombinable signature) (declared `nodes[]` only) | `stages.json` | `ModelQuality` (warning) |
+//! |41  | `num_openings` required at a stage carrying generated openings, rejected as meaningless where a stage carries only external openings (declared `nodes[]` only; chain-dialect requiredness is a parse-layer check) | `stages.json` | `InvalidValue` |
+//! |42  | Per-edge `annual_discount_rate_override` rejected under `nodes[]` — the override is a per-stage quantity on `stages[]` (legal in the chain dialect) | `stages.json` | `InvalidValue` |
+//! |43  | `nodes[]` declared while `scenarios/noise_openings.parquet` is present — nodes[] declares the opening set | `stages.json` | `InvalidValue` |
+//! |44  | `sampling_method` inert under external openings / ill-defined at a multi-node stage (declared `nodes[]` only) | `stages.json` | `ModelQuality` (warning) |
+//! |45  | All slot-occupying external classes agree on the per-stage raw column-count vector `raw_c(t)` — no element-wise-minimum reconciliation, fires with or without `nodes[]` (P-B1) | `scenarios/external_*_scenarios.parquet` | `BusinessRuleViolation` |
+//! |46  | Every (slot-occupying external class, stage) carries the exact `scenario_id` set `{0..raw_c(t)-1}` per entity — a set check (rejects 1-based deck, gap, duplicate, out-of-range), not a bound check (A1) | `scenarios/external_*_scenarios.parquet` | `BusinessRuleViolation` |
+//! |47  | Every external scenario row's `stage_id` resolves to a declared study stage via the [`StageIdResolver`], never silently dropped (A2) | `scenarios/external_*_scenarios.parquet` | `InvalidValue` |
+//! |48  | Per edge `n → m` and slot-occupying external class, the raw cells of columns `realization_id(n)`/`realization_id(m)` agree bitwise over the shared prefix `s <= t(n)` (declared `nodes[]` only) | `scenarios/external_*_scenarios.parquet` | `ModelQuality` (warning) |
+//!
+//! Rule 49 (G2 — each standardized external library's `n_entities()` matches its
+//! `noise_entity_order` block width) is enforced downstream at study setup
+//! (`build_scenario_libraries`), where the standardized libraries exist; it is
+//! not a pre-build load-time semantic rule.
 
 use super::{ValidationContext, schema::ParsedData};
 
@@ -166,6 +184,11 @@ pub(crate) fn validate_semantic_stages_penalties_scenarios(
     ctx: &mut ValidationContext,
 ) {
     stages::check_stage_structure(data, ctx);
+    stages::check_node_graph(data, ctx);
+    stages::check_num_openings_declaration(data, ctx);
+    stages::check_edge_discount_override_under_nodes(data, ctx);
+    stages::check_nodes_and_noise_openings(data, ctx);
+    stages::check_sampling_method_meaningfulness(data, ctx);
     stages::check_inflow_lags_vs_par_order(data, ctx);
     sobol::check_sobol_power_of_2(data, ctx);
     scenarios::check_penalty_ordering(data, ctx);
@@ -176,6 +199,7 @@ pub(crate) fn validate_semantic_stages_penalties_scenarios(
     correlation::check_correlation_matrices(data, ctx);
     correlation::check_correlation_same_type(data, ctx);
     scenarios::check_external_scheme_has_files(data, ctx);
+    scenarios::check_external_library_coherence(data, ctx);
     scenarios::check_load_factor_consistency(data, ctx);
     scenarios::check_estimation_prerequisites(data, ctx);
     season::check_season_id_consistency(data, ctx);

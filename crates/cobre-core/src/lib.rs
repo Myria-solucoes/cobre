@@ -94,7 +94,7 @@ pub use model::scenario::{
     ScenarioSource,
 };
 pub use model::temporal::{
-    Block, BlockMode, CalendarMonth, NoiseMethod, PolicyGraph, PolicyGraphType,
+    Block, BlockMode, CalendarMonth, Node, NoiseMethod, PolicyGraph, PolicyGraphType,
     ScenarioSourceConfig, SeasonCycleType, SeasonDefinition, SeasonMap, Stage, StageId,
     StageRiskConfig, StageStateConfig, StudyPos, Transition, month_of, window_period_overlaps,
 };

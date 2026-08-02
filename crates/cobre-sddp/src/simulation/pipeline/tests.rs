@@ -837,6 +837,7 @@ fn simulation_load_patches_applied() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1003,6 +1004,7 @@ fn simulation_no_load_buses_unchanged() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1140,6 +1142,7 @@ fn simulation_state_set_profile_reaches_current_profile_after_run() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1289,6 +1292,7 @@ fn simulation_inflow_extraction_unaffected() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1665,6 +1669,7 @@ fn simulation_truncation_clamps_negative_inflow_noise() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1798,6 +1803,7 @@ fn simulation_none_method_produces_raw_negative_noise() {
         },
         &fcf,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -2108,6 +2114,7 @@ mod dcs_simulation {
         };
         let study_dims = test_support::study_dims();
         let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, 1),
@@ -2663,6 +2670,7 @@ mod anticipated_ring_matches_forward_propagation {
             downstream_par_order: 0,
         };
         let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &cut_state_layouts,

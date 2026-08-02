@@ -490,6 +490,7 @@ fn ac_train_completes_with_iteration_limit() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -593,6 +594,7 @@ fn ac_train_returns_partial_on_infeasible() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -709,6 +711,7 @@ fn ac_train_emits_correct_event_sequence() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -911,6 +914,7 @@ fn ac_worker_timing_per_worker_event_count_and_setup_invariant() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1085,6 +1089,7 @@ fn ac_train_result_fields_populated() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1188,6 +1193,7 @@ fn ac_train_with_no_event_sender() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1288,6 +1294,7 @@ fn ac_total_time_ms_is_non_negative() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1396,6 +1403,7 @@ fn cut_selection_none_skips_step() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1513,6 +1521,7 @@ fn cut_selection_level1_runs_at_frequency() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1640,6 +1649,7 @@ fn cut_selection_stage0_exempt_preserves_cuts() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1777,6 +1787,7 @@ fn existing_train_tests_pass_with_none() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -1886,6 +1897,7 @@ fn ac_train_partial_result_on_mid_iteration_failure() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -2010,6 +2022,7 @@ fn start_iteration_resumes_from_offset() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -2115,6 +2128,7 @@ fn start_iteration_at_or_beyond_max_runs_zero_iterations() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),
@@ -2798,6 +2812,7 @@ fn template_freeze_event_emitted() {
         &mut fcf,
         &stage_ctx,
         &TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &test_support::all_enabled_cut_state_layouts(&state, n_stages),

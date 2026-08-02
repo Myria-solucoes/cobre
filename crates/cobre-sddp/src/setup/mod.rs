@@ -36,6 +36,7 @@ use cobre_io::config::BackwardScheduler;
 use cobre_solver::ActiveProfile;
 use cobre_stochastic::DerivedInflowSeeds;
 use cobre_stochastic::derive_inflow_seeds;
+use cobre_stochastic::noise_entity_order;
 use cobre_stochastic::par::lag_transition::derive_downstream_par_order;
 use cobre_stochastic::par::lag_transition::precompute_noise_groups;
 use cobre_stochastic::par::lag_transition::precompute_stage_lag_transitions;
@@ -51,6 +52,7 @@ mod accessors;
 pub(crate) mod bucket_seed;
 pub(crate) mod bucket_topology;
 pub(crate) mod methodology_config;
+pub mod node_graph;
 mod orchestration;
 pub mod params;
 pub(crate) mod scenario_libraries;
@@ -59,6 +61,7 @@ pub mod stage_data;
 pub mod stochastic_pipeline;
 pub(crate) mod template_postprocess;
 
+pub use node_graph::{NodeGraph, NodeOpenings, NodeRuntime, NodeSuccessor, OpeningSource};
 pub use params::{
     ConstructionConfig, DEFAULT_COST_SCALE_FACTOR, DEFAULT_FORWARD_PASSES, DEFAULT_MAX_ITERATIONS,
     DEFAULT_SEED, StudyParams,
@@ -77,6 +80,7 @@ use cobre_core::{
     AnticipatedConfig, EntityId, Hydro, Stage, StageId, System, Thermal,
     scenario::{SamplingScheme, ScenarioSource},
 };
+use cobre_io::StageIdResolver;
 use cobre_io::build_hydro_reference_volumes_resolved;
 use cobre_stochastic::par::precompute::PrecomputedPar;
 use cobre_stochastic::{
@@ -174,6 +178,12 @@ pub struct StudySetup {
 
     /// Sampling schemes and pre-built libraries for training and simulation phases.
     pub scenario_libraries: ScenarioLibraries,
+
+    /// The runtime node graph (F7): node identity/order, the `node → pool`
+    /// map, and per-node Ω views/out-edges. Absent `nodes[]` this is the
+    /// byte-exact chain degeneracy (C1). Reached through
+    /// [`crate::context::TrainingContext::node_graph`] on the hot path.
+    pub node_graph: node_graph::NodeGraph,
     /// Iteration-loop parameters projected from [`crate::config::LoopConfig`].
     ///
     /// `n_fwd_threads` is excluded (derived at runtime) and supplied as a per-call
@@ -540,6 +550,17 @@ impl StudySetup {
             &derived_inflow_seeds.weight,
         )?;
 
+        // G1: binds after `build_scenario_libraries` — an `External`-bound
+        // node's Ω addresses the standardized library's raw scenario axis,
+        // so binding earlier would race the library's own standardization.
+        let stage_id_resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+        let node_graph = node_graph::build_node_graph(
+            system.policy_graph(),
+            n_stages,
+            &stage_id_resolver,
+            &stochastic,
+        )?;
+
         let hydro_min_storage_hm3: Vec<f64> =
             system.hydros().iter().map(|h| h.min_storage_hm3).collect();
 
@@ -572,6 +593,7 @@ impl StudySetup {
             anticipated_windows,
             study_stage_ids,
             scenario_libraries,
+            node_graph,
             loop_params: LoopParams {
                 seed,
                 forward_passes,
@@ -1371,7 +1393,7 @@ fn build_scenario_libraries(
             None
         };
 
-    Ok(ScenarioLibraries {
+    let libraries = ScenarioLibraries {
         training: PhaseLibraries {
             inflow_scheme,
             load_scheme,
@@ -1390,7 +1412,43 @@ fn build_scenario_libraries(
             external_load: simulation_external_load,
             external_ncs: simulation_external_ncs,
         },
-    })
+    };
+
+    assert_external_library_widths(system, &libraries)?;
+    Ok(libraries)
+}
+
+/// G2 (rule 49): every standardized external library's `n_entities()` matches its
+/// `noise_entity_order` block width. Reuses [`noise_entity_order`] — the single
+/// owner of the three-block entity order — rather than re-deriving a class's
+/// entity count a third time; a mismatch is a hard [`SddpError::Validation`]
+/// naming the class and both widths. Runs at setup because the standardized
+/// libraries exist only after [`build_scenario_libraries`].
+fn assert_external_library_widths(
+    system: &System,
+    libraries: &ScenarioLibraries,
+) -> Result<(), SddpError> {
+    let order = noise_entity_order(system);
+    let check = |library: Option<&ExternalScenarioLibrary>, block_width: usize| {
+        library.map_or(Ok(()), |lib| {
+            if lib.n_entities() == block_width {
+                Ok(())
+            } else {
+                Err(SddpError::Validation(format!(
+                    "external {} library width mismatch: n_entities() = {} but the \
+                     noise_entity_order block width is {block_width}",
+                    lib.entity_class(),
+                    lib.n_entities(),
+                )))
+            }
+        })
+    };
+    for phase in [&libraries.training, &libraries.simulation] {
+        check(phase.external_inflow.as_ref(), order.hydro_ids.len())?;
+        check(phase.external_load.as_ref(), order.load_bus_ids.len())?;
+        check(phase.external_ncs.as_ref(), order.ncs_entity_ids.len())?;
+    }
+    Ok(())
 }
 
 /// Return the maximum iteration budget from the stopping rule set.

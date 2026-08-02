@@ -288,7 +288,7 @@ pub struct HydroBoundsRow {
 pub struct LineBoundsRow {
     /// Transmission line this override applies to.
     pub line_id: EntityId,
-    /// Stage (0-based) this override applies to.
+    /// Declared study-stage id this override applies to (not a 0-based index).
     pub stage_id: i32,
     /// Override for direct-flow capacity (MW). `None` means use base value.
     pub direct_mw: Option<f64>,
@@ -324,7 +324,7 @@ pub struct LineBoundsRow {
 pub struct PumpingBoundsRow {
     /// Pumping station this override applies to.
     pub station_id: EntityId,
-    /// Stage (0-based) this override applies to.
+    /// Declared study-stage id this override applies to (not a 0-based index).
     pub stage_id: i32,
     /// Override for minimum pumping flow (m³/s). `None` means use base value.
     pub min_m3s: Option<f64>,
@@ -361,7 +361,7 @@ pub struct PumpingBoundsRow {
 pub struct ContractBoundsRow {
     /// Energy contract this override applies to.
     pub contract_id: EntityId,
-    /// Stage (0-based) this override applies to.
+    /// Declared study-stage id this override applies to (not a 0-based index).
     pub stage_id: i32,
     /// Override for minimum power (MW). `None` means use base value.
     pub min_mw: Option<f64>,

@@ -894,6 +894,7 @@ mod lb_conformance {
         ];
         let inflow_method = InflowNonNegativityMethod::None;
         let training_ctx = TrainingContext {
+            node_graph: &cobre_sddp::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state_layout,
             cut_state_layouts: &cut_state_layouts,

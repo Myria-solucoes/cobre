@@ -1,12 +1,16 @@
 //! Layer 5b — scenario, penalty, and probability-data validation.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::Path;
 
 use cobre_core::Hydro;
+use cobre_core::scenario::SamplingScheme;
 use cobre_stochastic::par::{
     AnnualParams, ClosureRejection, check_stationarity, check_stationarity_annual,
 };
 use cobre_stochastic::season_cast::{RealizedWindow, SeasonPeriodWindow, cast};
+
+use crate::{LoadError, StageIdResolver};
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 
@@ -415,9 +419,6 @@ fn describe_par_rejection(hydro_id: i32, rejection: &ClosureRejection) -> String
 /// Validates that when a class uses the `External` sampling scheme, the
 /// corresponding external scenario file data is non-empty.
 pub(super) fn check_external_scheme_has_files(data: &ParsedData, ctx: &mut ValidationContext) {
-    use cobre_core::scenario::SamplingScheme;
-    use std::path::Path;
-
     // Config is Layer-2-validated, so these reads do not fail in practice.
     let Ok(training_source) = data
         .config
@@ -478,6 +479,298 @@ pub(super) fn check_external_scheme_has_files(data: &ParsedData, ctx: &mut Valid
             "ncs",
             data.external_ncs_scenarios.is_empty(),
         );
+    }
+}
+
+// ── Rules 45-48: External-library coherence ──────────────────────────────────
+
+/// Per-class extract of a slot-occupying external scenario file: the raw cell
+/// values (keyed by resolved study index, `scenario_id`, and entity id), the
+/// entity ids present, and the per-stage raw column count `raw_c(t)` (the
+/// distinct `scenario_id` count at that stage — the canonical, cross-class-agreed
+/// count [`check_node_graph`]'s pointer bound quantifies over).
+struct ClassExternal {
+    name: &'static str,
+    file: &'static str,
+    /// `(stage_idx, scenario_id, entity_id) -> value` over rows whose `stage_id`
+    /// resolves; a repeated key is an A1 duplicate, caught on insert.
+    cells: HashMap<(usize, i32, i32), f64>,
+    entities: BTreeSet<i32>,
+    raw_c: Vec<usize>,
+}
+
+/// Rules 45-48: external-library coherence across the slot-occupying external
+/// classes of the training scenario source — the shared per-stage raw
+/// column-count vector `raw_c(t)` (P-B1, rule 45), the exact `scenario_id` set
+/// per (class, stage) (A1, rule 46), out-of-range `stage_id` rejection (A2, rule
+/// 47), and the prefix-coherence warning (rule 48). P-B1/A1/A2 fire for every
+/// study; the prefix-coherence warning only when `nodes[]` is declared. Reads
+/// raw parsed values only — the standardized-library width assertion (G2) runs
+/// at study setup, where the standardized libraries exist.
+pub(super) fn check_external_library_coherence(data: &ParsedData, ctx: &mut ValidationContext) {
+    let Ok(source) = data
+        .config
+        .training_scenario_source(Path::new("config.json"))
+    else {
+        return;
+    };
+
+    let study_ids: Vec<i32> = data
+        .stages
+        .stages
+        .iter()
+        .filter(|s| s.id >= 0)
+        .map(|s| s.id)
+        .collect();
+    let resolver = StageIdResolver::from_study_stage_ids(&study_ids);
+    let n_stages = study_ids.len();
+
+    let mut classes: Vec<ClassExternal> = Vec::new();
+    if source.inflow_scheme == SamplingScheme::External && !data.external_scenarios.is_empty() {
+        classes.push(extract_class(
+            "inflow",
+            "scenarios/external_inflow_scenarios.parquet",
+            "ExternalScenarioRow",
+            data.external_scenarios
+                .iter()
+                .map(|r| (r.hydro_id.0, r.stage_id, r.scenario_id, r.value_m3s)),
+            &resolver,
+            n_stages,
+            ctx,
+        ));
+    }
+    if source.load_scheme == SamplingScheme::External && !data.external_load_scenarios.is_empty() {
+        classes.push(extract_class(
+            "load",
+            "scenarios/external_load_scenarios.parquet",
+            "ExternalLoadRow",
+            data.external_load_scenarios
+                .iter()
+                .map(|r| (r.bus_id.0, r.stage_id, r.scenario_id, r.value_mw)),
+            &resolver,
+            n_stages,
+            ctx,
+        ));
+    }
+    if source.ncs_scheme == SamplingScheme::External && !data.external_ncs_scenarios.is_empty() {
+        classes.push(extract_class(
+            "ncs",
+            "scenarios/external_ncs_scenarios.parquet",
+            "ExternalNcsRow",
+            data.external_ncs_scenarios
+                .iter()
+                .map(|r| (r.ncs_id.0, r.stage_id, r.scenario_id, r.value)),
+            &resolver,
+            n_stages,
+            ctx,
+        ));
+    }
+
+    check_raw_c_agreement(&classes, &study_ids, ctx);
+
+    if !data.stages.policy_graph.nodes.is_empty() {
+        check_prefix_coherence(data, &classes, &resolver, ctx);
+    }
+}
+
+/// Extract one external class, running A2 (`stage_id` resolution, rule 47) and A1
+/// (exact `scenario_id` set, rule 46) as it builds the [`ClassExternal`].
+fn extract_class(
+    name: &'static str,
+    file: &'static str,
+    row_label: &'static str,
+    rows: impl Iterator<Item = (i32, i32, i32, f64)>,
+    resolver: &StageIdResolver,
+    n_stages: usize,
+    ctx: &mut ValidationContext,
+) -> ClassExternal {
+    let mut cells: HashMap<(usize, i32, i32), f64> = HashMap::new();
+    let mut entities: BTreeSet<i32> = BTreeSet::new();
+    let mut union_by_stage: Vec<BTreeSet<i32>> = vec![BTreeSet::new(); n_stages];
+    let mut entity_scen: HashMap<(usize, i32), BTreeSet<i32>> = HashMap::new();
+
+    for (i, (entity_id, stage_id, scenario_id, value)) in rows.enumerate() {
+        // A2 (rule 47): an out-of-range stage_id is rejected through the shared
+        // StageIdResolver constructor, never silently dropped.
+        let Some(stage_idx) = resolver.resolve(stage_id) else {
+            add_resolver_error(
+                ctx,
+                resolver.unresolved_stage_id_error(
+                    file,
+                    format!("{row_label}[{i}].stage_id"),
+                    stage_id,
+                ),
+            );
+            continue;
+        };
+        if cells
+            .insert((stage_idx, scenario_id, entity_id), value)
+            .is_some()
+        {
+            ctx.add_error(
+                ErrorKind::BusinessRuleViolation,
+                file,
+                Some(format!("{row_label}[{i}]")),
+                format!(
+                    "{name} external library has a duplicate row at stage {stage_id} for \
+                     scenario_id {scenario_id}, entity {entity_id}; each (entity, scenario_id) \
+                     must appear exactly once per stage"
+                ),
+            );
+        }
+        entities.insert(entity_id);
+        union_by_stage[stage_idx].insert(scenario_id);
+        entity_scen
+            .entry((stage_idx, entity_id))
+            .or_default()
+            .insert(scenario_id);
+    }
+
+    let mut raw_c = vec![0usize; n_stages];
+    for (t, union) in union_by_stage.iter().enumerate() {
+        let c = union.len();
+        raw_c[t] = c;
+        if c == 0 {
+            continue;
+        }
+        let stage_id = resolver.id_at(t).unwrap_or_default();
+        let c_i32 = i32::try_from(c).unwrap_or(i32::MAX);
+        // A1 (rule 46): every entity present at this stage must carry exactly the
+        // scenario_id set {0..raw_c-1} — a set check, not a bound check, so a
+        // 1-based deck (which is in-bounds below raw_c but shifted) is rejected.
+        for &e in &entities {
+            let Some(es) = entity_scen.get(&(t, e)) else {
+                continue;
+            };
+            let out_of_range: Vec<i32> = es
+                .iter()
+                .copied()
+                .filter(|&s| s < 0 || s >= c_i32)
+                .collect();
+            let missing: Vec<i32> = (0..c_i32).filter(|m| !es.contains(m)).collect();
+            if !out_of_range.is_empty() || !missing.is_empty() {
+                ctx.add_error(
+                    ErrorKind::BusinessRuleViolation,
+                    file,
+                    Some(format!("{name} entity {e} stage {stage_id}")),
+                    format!(
+                        "{name} external library at stage {stage_id}, entity {e}: scenario_id set \
+                         must be exactly {{0..{}}} ({c} realizations); out-of-range {out_of_range:?}, \
+                         missing {missing:?}",
+                        c_i32 - 1
+                    ),
+                );
+            }
+        }
+    }
+
+    ClassExternal {
+        name,
+        file,
+        cells,
+        entities,
+        raw_c,
+    }
+}
+
+/// Feed [`StageIdResolver::unresolved_stage_id_error`] into the
+/// validation context so A2 reports the identical message shape the
+/// `noise_openings.parquet` resolver uses — one message shape, not two.
+fn add_resolver_error(ctx: &mut ValidationContext, err: LoadError) {
+    if let LoadError::SchemaError {
+        path,
+        field,
+        message,
+    } = err
+    {
+        ctx.add_error(ErrorKind::InvalidValue, path, Some(field), message);
+    }
+}
+
+/// P-B1 (rule 45): all slot-occupying external classes must agree on the
+/// per-stage raw column-count vector `raw_c(t)`; a disagreement is a hard error
+/// naming both classes, the stage and both counts — with or without `nodes[]`.
+/// No element-wise-minimum reconciliation: a truncated scenario set is a wrong
+/// answer, so the deck is rejected instead of repaired.
+fn check_raw_c_agreement(
+    classes: &[ClassExternal],
+    study_ids: &[i32],
+    ctx: &mut ValidationContext,
+) {
+    let Some((base, rest)) = classes.split_first() else {
+        return;
+    };
+    for other in rest {
+        for (t, (&bc, &oc)) in base.raw_c.iter().zip(other.raw_c.iter()).enumerate() {
+            if bc != oc {
+                let stage_id = study_ids.get(t).copied().unwrap_or_default();
+                ctx.add_error(
+                    ErrorKind::BusinessRuleViolation,
+                    other.file,
+                    Some(format!("stage {stage_id}")),
+                    format!(
+                        "external classes '{}' and '{}' disagree on the raw column count at \
+                         stage {stage_id}: {bc} vs {oc}; all slot-occupying external classes must \
+                         declare one shared realization axis",
+                        base.name, other.name
+                    ),
+                );
+            }
+        }
+    }
+}
+
+/// Prefix-coherence warning (rule 48): for every edge `n → m` and every
+/// slot-occupying external class, the raw cells of columns `realization_id(n)`
+/// and `realization_id(m)` must agree bitwise at every stage `s <= t(n)` — the
+/// shared prefix along the root path. Disagreement warns (never rejects), naming
+/// the edge, the class, the stage and both values; a bridge-shaped column pair
+/// with identical trunk cells is silent.
+fn check_prefix_coherence(
+    data: &ParsedData,
+    classes: &[ClassExternal],
+    resolver: &StageIdResolver,
+    ctx: &mut ValidationContext,
+) {
+    let graph = &data.stages.policy_graph;
+    let mut node_info: HashMap<i32, (usize, Option<i32>)> = HashMap::new();
+    for node in &graph.nodes {
+        if let Some(idx) = resolver.resolve(node.stage_id) {
+            node_info.insert(node.id, (idx, node.realization_id));
+        }
+    }
+
+    for tr in &graph.transitions {
+        let (Some(&(sn, Some(cn))), Some(&(_, Some(cm)))) =
+            (node_info.get(&tr.source_id), node_info.get(&tr.target_id))
+        else {
+            continue;
+        };
+        for class in classes {
+            for s in 0..=sn {
+                let disagreement = class.entities.iter().find_map(|&e| {
+                    match (class.cells.get(&(s, cn, e)), class.cells.get(&(s, cm, e))) {
+                        (Some(&va), Some(&vb)) if va.to_bits() != vb.to_bits() => Some((e, va, vb)),
+                        _ => None,
+                    }
+                });
+                if let Some((e, va, vb)) = disagreement {
+                    let stage_id = resolver.id_at(s).unwrap_or_default();
+                    ctx.add_warning(
+                        ErrorKind::ModelQuality,
+                        class.file,
+                        Some(format!("edge {}->{}", tr.source_id, tr.target_id)),
+                        format!(
+                            "prefix-coherence: external class '{}' columns {cn} and {cm} \
+                             (edge {}->{}) disagree at stage {stage_id}, entity {e}: {va} vs {vb}; \
+                             a node reproduces its pointed column's own history, not the mixed path",
+                            class.name, tr.source_id, tr.target_id
+                        ),
+                    );
+                    break;
+                }
+            }
+        }
     }
 }
 
@@ -793,13 +1086,15 @@ mod tests {
             InflowSeasonalStatsRow, LoadFactorEntry, LoadSeasonalStatsRow,
         },
         stages::StagesData,
-        validation::{ErrorKind, ValidationContext},
+        validation::{ErrorKind, ValidationContext, schema::ParsedData},
     };
     use cobre_core::{
         EntityId, Hydro,
         entities::HydroGenerationModel,
+        scenario::{ExternalLoadRow, ExternalNcsRow, ExternalScenarioRow},
         temporal::{
-            Block, PolicyGraph, PolicyGraphType, SeasonCycleType, SeasonDefinition, SeasonMap,
+            Block, Node, PolicyGraph, PolicyGraphType, SeasonCycleType, SeasonDefinition,
+            SeasonMap, Transition,
         },
     };
 
@@ -814,11 +1109,14 @@ mod tests {
             duration_hours: 744.0,
         }];
         StagesData {
+            openings_declared: std::collections::HashSet::new(),
             stages: vec![stage],
             policy_graph: PolicyGraph {
+                stage_discount_rate_overrides: std::collections::HashMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
                 transitions: vec![],
+                nodes: Vec::new(),
                 season_map: None,
             },
         }
@@ -1152,11 +1450,14 @@ mod tests {
             })
             .collect();
         StagesData {
+            openings_declared: std::collections::HashSet::new(),
             stages,
             policy_graph: PolicyGraph {
+                stage_discount_rate_overrides: std::collections::HashMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
                 transitions: vec![],
+                nodes: Vec::new(),
                 season_map: Some(season_map_n(n)),
             },
         }
@@ -1868,11 +2169,14 @@ mod tests {
             })
             .collect();
         StagesData {
+            openings_declared: std::collections::HashSet::new(),
             stages,
             policy_graph: PolicyGraph {
+                stage_discount_rate_overrides: std::collections::HashMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
                 transitions: vec![],
+                nodes: Vec::new(),
                 season_map: None,
             },
         }
@@ -2032,6 +2336,405 @@ mod tests {
         assert!(
             relevant.is_empty(),
             "non-filling hydro must emit no sufficiency diagnostic, got: {relevant:?}"
+        );
+    }
+
+    // ── Rules 45-48: External-library coherence ───────────────────────────────
+
+    /// Build `ParsedData` with the given study stage ids and external classes,
+    /// wired for the training external scheme of each supplied non-empty vector.
+    fn external_data(
+        stage_ids: Vec<i32>,
+        inflow: Vec<ExternalScenarioRow>,
+        load: Vec<ExternalLoadRow>,
+        ncs: Vec<ExternalNcsRow>,
+    ) -> ParsedData {
+        let mut data = make_data_5b(
+            vec![],
+            make_stages_5b(stage_ids),
+            vec![make_bus_with_deficit(1, 10.0)],
+            vec![],
+            vec![],
+            None,
+        );
+        data.config =
+            config_with_training_external(!inflow.is_empty(), !load.is_empty(), !ncs.is_empty());
+        data.external_scenarios = inflow;
+        data.external_load_scenarios = load;
+        data.external_ncs_scenarios = ncs;
+        data
+    }
+
+    /// One inflow row for hydro `hydro`, `(stage_id, scenario_id, value)`.
+    fn inflow_row(
+        hydro: i32,
+        stage_id: i32,
+        scenario_id: i32,
+        value_m3s: f64,
+    ) -> ExternalScenarioRow {
+        ExternalScenarioRow {
+            stage_id,
+            scenario_id,
+            hydro_id: EntityId::from(hydro),
+            value_m3s,
+        }
+    }
+
+    fn run(data: &ParsedData) -> ValidationContext {
+        let mut ctx = ValidationContext::new();
+        validate_semantic_stages_penalties_scenarios(data, &mut ctx);
+        ctx
+    }
+
+    fn error_msgs(ctx: &ValidationContext) -> Vec<String> {
+        ctx.errors().iter().map(|e| e.message.clone()).collect()
+    }
+
+    // ── A1: exact scenario_id set (rule 46) ───────────────────────────────────
+
+    /// A 1-based deck (`{1, 2}`) is rejected — the case that loads today,
+    /// aliases stage `t+1`'s realization 0, and zero-fills realization 0.
+    #[test]
+    fn a1_rejects_one_based_deck() {
+        let data = external_data(
+            vec![0],
+            vec![inflow_row(1, 0, 1, 10.0), inflow_row(1, 0, 2, 20.0)],
+            vec![],
+            vec![],
+        );
+        let ctx = run(&data);
+        assert!(
+            error_msgs(&ctx)
+                .iter()
+                .any(|m| m.contains("scenario_id set must be exactly") && m.contains("inflow")),
+            "1-based deck must be rejected as a set violation, got: {:?}",
+            error_msgs(&ctx)
+        );
+    }
+
+    /// A gapped deck (`{0, 2}`) is rejected — a set check, not a bound check.
+    #[test]
+    fn a1_rejects_gap() {
+        let data = external_data(
+            vec![0],
+            vec![inflow_row(1, 0, 0, 10.0), inflow_row(1, 0, 2, 20.0)],
+            vec![],
+            vec![],
+        );
+        let ctx = run(&data);
+        assert!(
+            error_msgs(&ctx)
+                .iter()
+                .any(|m| m.contains("scenario_id set must be exactly")),
+            "a gap must be rejected, got: {:?}",
+            error_msgs(&ctx)
+        );
+    }
+
+    /// A duplicated `(entity, scenario_id)` pair is rejected.
+    #[test]
+    fn a1_rejects_duplicate() {
+        let data = external_data(
+            vec![0],
+            vec![inflow_row(1, 0, 0, 10.0), inflow_row(1, 0, 0, 11.0)],
+            vec![],
+            vec![],
+        );
+        let ctx = run(&data);
+        assert!(
+            error_msgs(&ctx).iter().any(|m| m.contains("duplicate row")),
+            "a duplicate must be rejected, got: {:?}",
+            error_msgs(&ctx)
+        );
+    }
+
+    /// An out-of-range member (`5`) is rejected naming the offending value.
+    #[test]
+    fn a1_rejects_out_of_range() {
+        let data = external_data(
+            vec![0],
+            vec![
+                inflow_row(1, 0, 0, 10.0),
+                inflow_row(1, 0, 1, 20.0),
+                inflow_row(1, 0, 5, 30.0),
+            ],
+            vec![],
+            vec![],
+        );
+        let ctx = run(&data);
+        assert!(
+            error_msgs(&ctx)
+                .iter()
+                .any(|m| m.contains("scenario_id set must be exactly") && m.contains('5')),
+            "an out-of-range member must be rejected naming the value, got: {:?}",
+            error_msgs(&ctx)
+        );
+    }
+
+    // ── A2: out-of-range stage_id (rule 47) ───────────────────────────────────
+
+    /// Reuses the shared error shape ("resolves to no declared study
+    /// stage") for the inflow file.
+    #[test]
+    fn a2_rejects_out_of_range_stage_id_inflow() {
+        let data = external_data(vec![0], vec![inflow_row(1, 5, 0, 10.0)], vec![], vec![]);
+        let ctx = run(&data);
+        assert!(
+            ctx.errors().iter().any(|e| {
+                e.message.contains("resolves to no declared study stage")
+                    && e.file
+                        .to_string_lossy()
+                        .contains("external_inflow_scenarios")
+            }),
+            "an out-of-range inflow stage_id must be rejected, got: {:?}",
+            error_msgs(&ctx)
+        );
+    }
+
+    #[test]
+    fn a2_rejects_out_of_range_stage_id_load() {
+        let load = vec![ExternalLoadRow {
+            stage_id: 5,
+            scenario_id: 0,
+            bus_id: EntityId::from(1),
+            value_mw: 10.0,
+        }];
+        let data = external_data(vec![0], vec![], load, vec![]);
+        let ctx = run(&data);
+        assert!(
+            ctx.errors().iter().any(|e| {
+                e.message.contains("resolves to no declared study stage")
+                    && e.file.to_string_lossy().contains("external_load_scenarios")
+            }),
+            "an out-of-range load stage_id must be rejected, got: {:?}",
+            error_msgs(&ctx)
+        );
+    }
+
+    #[test]
+    fn a2_rejects_out_of_range_stage_id_ncs() {
+        let ncs = vec![ExternalNcsRow {
+            stage_id: 5,
+            scenario_id: 0,
+            ncs_id: EntityId::from(1),
+            value: 0.5,
+        }];
+        let data = external_data(vec![0], vec![], vec![], ncs);
+        let ctx = run(&data);
+        assert!(
+            ctx.errors().iter().any(|e| {
+                e.message.contains("resolves to no declared study stage")
+                    && e.file.to_string_lossy().contains("external_ncs_scenarios")
+            }),
+            "an out-of-range ncs stage_id must be rejected, got: {:?}",
+            error_msgs(&ctx)
+        );
+    }
+
+    // ── P-B1: cross-class raw_c agreement (rule 45) ───────────────────────────
+
+    /// inflow (`raw_c = 2`) and load (`raw_c = 3`) disagree on the per-stage raw
+    /// column count on a chain (no `nodes[]`) — rejected, naming both classes and
+    /// both counts, with no element-wise-minimum reconciliation.
+    #[test]
+    fn p_b1_rejects_raw_c_disagreement_chain() {
+        let load = vec![
+            ExternalLoadRow {
+                stage_id: 0,
+                scenario_id: 0,
+                bus_id: EntityId::from(1),
+                value_mw: 1.0,
+            },
+            ExternalLoadRow {
+                stage_id: 0,
+                scenario_id: 1,
+                bus_id: EntityId::from(1),
+                value_mw: 2.0,
+            },
+            ExternalLoadRow {
+                stage_id: 0,
+                scenario_id: 2,
+                bus_id: EntityId::from(1),
+                value_mw: 3.0,
+            },
+        ];
+        let data = external_data(
+            vec![0],
+            vec![inflow_row(1, 0, 0, 10.0), inflow_row(1, 0, 1, 20.0)],
+            load,
+            vec![],
+        );
+        assert!(data.stages.policy_graph.nodes.is_empty(), "chain fixture");
+        let ctx = run(&data);
+        assert!(
+            error_msgs(&ctx)
+                .iter()
+                .any(|m| m.contains("disagree on the raw column count")
+                    && m.contains("inflow")
+                    && m.contains("load")
+                    && m.contains('2')
+                    && m.contains('3')),
+            "cross-class raw_c disagreement on a chain must be rejected, got: {:?}",
+            error_msgs(&ctx)
+        );
+    }
+
+    /// The same disagreement under a declared `nodes[]` graph is rejected too —
+    /// P-B1 fires with or without a graph.
+    #[test]
+    fn p_b1_rejects_raw_c_disagreement_graph() {
+        let load = vec![
+            ExternalLoadRow {
+                stage_id: 0,
+                scenario_id: 0,
+                bus_id: EntityId::from(1),
+                value_mw: 1.0,
+            },
+            ExternalLoadRow {
+                stage_id: 0,
+                scenario_id: 1,
+                bus_id: EntityId::from(1),
+                value_mw: 2.0,
+            },
+            ExternalLoadRow {
+                stage_id: 0,
+                scenario_id: 2,
+                bus_id: EntityId::from(1),
+                value_mw: 3.0,
+            },
+        ];
+        let mut data = external_data(
+            vec![0],
+            vec![inflow_row(1, 0, 0, 10.0), inflow_row(1, 0, 1, 20.0)],
+            load,
+            vec![],
+        );
+        data.stages.policy_graph.nodes = vec![Node {
+            id: 0,
+            stage_id: 0,
+            realization_id: Some(0),
+            label: None,
+        }];
+        let ctx = run(&data);
+        assert!(
+            error_msgs(&ctx)
+                .iter()
+                .any(|m| m.contains("disagree on the raw column count")),
+            "cross-class raw_c disagreement under a graph must be rejected, got: {:?}",
+            error_msgs(&ctx)
+        );
+    }
+
+    // ── Prefix-coherence warning (rule 48) ────────────────────────────────────
+
+    /// Two stages, one hydro, columns 0 and 1. Edge `0 -> 2` points at columns 0
+    /// and 1; a disagreeing shared-prefix cell (stage 0) warns and the run
+    /// proceeds. The bridge edge `0 -> 1` (same column) is silent.
+    fn prefix_graph_data(stage0_col0: f64, stage0_col1: f64) -> ParsedData {
+        let inflow = vec![
+            inflow_row(1, 0, 0, stage0_col0),
+            inflow_row(1, 0, 1, stage0_col1),
+            inflow_row(1, 1, 0, 30.0),
+            inflow_row(1, 1, 1, 40.0),
+        ];
+        let mut data = external_data(vec![0, 1], inflow, vec![], vec![]);
+        data.stages.policy_graph.nodes = vec![
+            Node {
+                id: 0,
+                stage_id: 0,
+                realization_id: Some(0),
+                label: None,
+            },
+            Node {
+                id: 1,
+                stage_id: 1,
+                realization_id: Some(0),
+                label: None,
+            },
+            Node {
+                id: 2,
+                stage_id: 1,
+                realization_id: Some(1),
+                label: None,
+            },
+        ];
+        data.stages.policy_graph.transitions = vec![
+            Transition {
+                source_id: 0,
+                target_id: 1,
+                probability: 0.5,
+                annual_discount_rate_override: None,
+            },
+            Transition {
+                source_id: 0,
+                target_id: 2,
+                probability: 0.5,
+                annual_discount_rate_override: None,
+            },
+        ];
+        data
+    }
+
+    #[test]
+    fn prefix_coherence_warns_on_disagreeing_column() {
+        let data = prefix_graph_data(10.0, 20.0);
+        let ctx = run(&data);
+        let prefix_warnings: Vec<_> = ctx
+            .warnings()
+            .into_iter()
+            .filter(|w| w.message.contains("prefix-coherence"))
+            .collect();
+        assert_eq!(
+            prefix_warnings.len(),
+            1,
+            "the disagreeing edge 0->2 must warn exactly once, got: {:?}",
+            ctx.warnings()
+        );
+        let msg = &prefix_warnings[0].message;
+        assert!(
+            msg.contains("0->2") && msg.contains("10") && msg.contains("20"),
+            "the warning names the edge and both values, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn prefix_coherence_silent_on_identical_trunk() {
+        let data = prefix_graph_data(10.0, 10.0);
+        let ctx = run(&data);
+        assert!(
+            !ctx.warnings()
+                .iter()
+                .any(|w| w.message.contains("prefix-coherence")),
+            "identical trunk columns must not warn, got: {:?}",
+            ctx.warnings()
+        );
+    }
+
+    /// A coherent single-class deck (no `nodes[]`) produces no coherence
+    /// diagnostics — the C1 precondition the golden parity gate rests on.
+    #[test]
+    fn coherent_external_deck_has_no_coherence_errors() {
+        let data = external_data(
+            vec![0, 1],
+            vec![
+                inflow_row(1, 0, 0, 10.0),
+                inflow_row(1, 0, 1, 20.0),
+                inflow_row(1, 1, 0, 30.0),
+                inflow_row(1, 1, 1, 40.0),
+            ],
+            vec![],
+            vec![],
+        );
+        let ctx = run(&data);
+        assert!(
+            !error_msgs(&ctx).iter().any(|m| {
+                m.contains("scenario_id set must be exactly")
+                    || m.contains("disagree on the raw column count")
+                    || m.contains("resolves to no declared study stage")
+                    || m.contains("duplicate row")
+            }),
+            "a coherent deck must produce no coherence errors, got: {:?}",
+            error_msgs(&ctx)
         );
     }
 }

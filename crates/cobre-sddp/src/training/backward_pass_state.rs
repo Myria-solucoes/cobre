@@ -16,6 +16,7 @@ use rayon::iter::{
 };
 
 use crate::risk_measure::BackwardOutcome;
+use crate::setup::node_graph::NodeGraph;
 use crate::{
     backward::{
         BackwardResult, StageOpeningSolver, StageWorkerOpeningDelta, StagedCut, SuccessorSpec,
@@ -804,6 +805,22 @@ struct StageOutput {
     cut_sync_ms: u64,
 }
 
+/// Flatten node `node_pos`'s successor outcome set
+/// `O(n) = {(m, ψ): m ∈ n⁺, ψ ∈ Ω_m}` into `out`, canonical order (ascending
+/// child node id — `node_graph.successors[node_pos]`'s own invariant — then
+/// within-child ω): `CVaR`'s tail weighting is index-order-sensitive (sddp.md
+/// "Backward opening order is warm-start-only"). Delegates to the shared
+/// [`crate::setup::node_graph::assemble_outcome_weights`] primitive — the
+/// single owner of this fill, shared with
+/// `lower_bound::assemble_outcome_weights`.
+fn assemble_successor_outcome_weights(node_graph: &NodeGraph, node_pos: usize, out: &mut Vec<f64>) {
+    crate::setup::node_graph::assemble_outcome_weights(
+        node_graph,
+        &node_graph.successors[node_pos],
+        out,
+    );
+}
+
 /// Execute one backward stage (index `t`, solving at successor `t + 1`).
 ///
 /// Returns a [`StageOutput`] accumulating all timing components and the cut
@@ -851,12 +868,8 @@ fn run_one_backward_stage<S: SolverInterface + Send, C: Communicator>(
         .worker_stats_before
         .extend(inputs.workspaces.iter().map(|w| w.solver.statistics()));
 
-    let n_openings = training_ctx.stochastic.tree_view().n_openings(successor);
-    state.probabilities_buf.clear();
-    #[allow(clippy::cast_precision_loss)]
-    state
-        .probabilities_buf
-        .resize(n_openings, 1.0_f64 / n_openings as f64);
+    assemble_successor_outcome_weights(training_ctx.node_graph, t, &mut state.probabilities_buf);
+    let n_openings = state.probabilities_buf.len();
 
     let batch_start = Instant::now();
     let template_num_rows = ctx.templates[successor].num_rows;
@@ -1250,7 +1263,8 @@ mod tests {
         cut_sync::CutSyncBuffers,
         horizon_mode::HorizonMode,
         inflow_method::InflowNonNegativityMethod,
-        risk_measure::RiskMeasure,
+        risk_measure::{BackwardOutcome, RiskMeasure},
+        setup::node_graph::{NodeOpenings, NodeRuntime, NodeSuccessor, OpeningSource},
         solver_stats::WORKER_STATS_ENTRY_STRIDE,
         state_exchange::ExchangeBuffers,
         test_support::{
@@ -1739,6 +1753,7 @@ mod tests {
         };
         let study_dims = study_dims();
         let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
@@ -1877,6 +1892,7 @@ mod tests {
         };
         let study_dims = study_dims();
         let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state_layout_fixture,
             cut_state_layouts: &all_enabled_cut_state_layouts(&state_layout_fixture, n_stages),
@@ -2023,6 +2039,7 @@ mod tests {
         };
         let study_dims = study_dims();
         let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &all_enabled_cut_state_layouts(&state, n_stages),
@@ -2161,5 +2178,278 @@ mod tests {
             "non-binding slot 0 must stay frozen at its generation iteration {g}"
         );
         assert_eq!(fcf.pools[successor].metadata(0).active_count, 0);
+    }
+
+    // ── successor outcome set assembly ──────────────────────────────────────
+
+    /// A single node fanning into two children (ascending id `1`, `2`) with
+    /// distinct within-node opening counts and distinct out-edge
+    /// probabilities: child `1` carries 2 openings at `P(0→1) = 0.25`, child
+    /// `2` carries 2 openings at `P(0→2) = 0.75`.
+    fn k_fan_node_graph() -> NodeGraph {
+        NodeGraph {
+            node_ids: vec![0, 1, 2],
+            nodes: vec![
+                NodeRuntime {
+                    stage: 0,
+                    pool_id: 0,
+                    openings: NodeOpenings {
+                        source: OpeningSource::Generated,
+                        offset: 0,
+                        len: 1,
+                        q: 1.0,
+                    },
+                },
+                NodeRuntime {
+                    stage: 1,
+                    pool_id: 1,
+                    openings: NodeOpenings {
+                        source: OpeningSource::Generated,
+                        offset: 0,
+                        len: 2,
+                        q: 0.5,
+                    },
+                },
+                NodeRuntime {
+                    stage: 1,
+                    pool_id: 2,
+                    openings: NodeOpenings {
+                        source: OpeningSource::Generated,
+                        offset: 0,
+                        len: 2,
+                        q: 0.5,
+                    },
+                },
+            ],
+            successors: vec![
+                vec![
+                    NodeSuccessor {
+                        child: 1,
+                        probability: 0.25,
+                    },
+                    NodeSuccessor {
+                        child: 2,
+                        probability: 0.75,
+                    },
+                ],
+                Vec::new(),
+                Vec::new(),
+            ],
+            n_pools: 3,
+        }
+    }
+
+    #[test]
+    fn assemble_successor_outcome_weights_k_fan_canonical_order_and_product_weights() {
+        let node_graph = k_fan_node_graph();
+        let mut buf = Vec::new();
+        assemble_successor_outcome_weights(&node_graph, 0, &mut buf);
+        // Ascending child id (1 then 2), then within-child ω: P(0→1)·q_{1,ψ} =
+        // 0.25·0.5 = 0.125 (twice), P(0→2)·q_{2,ψ} = 0.75·0.5 = 0.375 (twice).
+        assert_eq!(buf, vec![0.125, 0.125, 0.375, 0.375]);
+    }
+
+    #[test]
+    fn assemble_successor_outcome_weights_chain_degenerate_reduces_to_pinned_uniform_bit_pattern() {
+        let n = 7_usize;
+        let q = 1.0_f64 / (n as f64);
+        let node_graph = NodeGraph {
+            node_ids: vec![0, 1],
+            nodes: vec![
+                NodeRuntime {
+                    stage: 0,
+                    pool_id: 0,
+                    openings: NodeOpenings {
+                        source: OpeningSource::Generated,
+                        offset: 0,
+                        len: 1,
+                        q: 1.0,
+                    },
+                },
+                NodeRuntime {
+                    stage: 1,
+                    pool_id: 1,
+                    openings: NodeOpenings {
+                        source: OpeningSource::Generated,
+                        offset: 0,
+                        len: n,
+                        q,
+                    },
+                },
+            ],
+            successors: vec![
+                vec![NodeSuccessor {
+                    child: 1,
+                    probability: 1.0,
+                }],
+                Vec::new(),
+            ],
+            n_pools: 2,
+        };
+        let mut buf = Vec::new();
+        assemble_successor_outcome_weights(&node_graph, 0, &mut buf);
+        assert_eq!(buf.len(), n);
+        let expected_bits = q.to_bits();
+        for &w in &buf {
+            assert_eq!(
+                w.to_bits(),
+                expected_bits,
+                "chain weight (P=1.0 times q) must be the exact pinned \
+                 1.0/(n as f64) bit pattern, not a re-derived value"
+            );
+        }
+    }
+
+    /// AC: analytical product-weighted cut regression. `aggregate_cut`'s
+    /// result over the assembled weights must equal the closed-form flat sum
+    /// `Σ_(m,ψ) P(n→m)·q_{m,ψ}·outcome`, with the outcome vector ordered by
+    /// ascending child node id then ω.
+    #[test]
+    fn analytical_product_weighted_cut_regression_k_fan() {
+        let node_graph = k_fan_node_graph();
+        let mut probabilities = Vec::new();
+        assemble_successor_outcome_weights(&node_graph, 0, &mut probabilities);
+
+        // One outcome per (child, ψ) in the same canonical order as `probabilities`:
+        // child 1's two openings, then child 2's two.
+        let outcomes = vec![
+            BackwardOutcome {
+                intercept: 10.0,
+                coefficients: vec![1.0, 0.0],
+                objective_value: 10.0,
+            },
+            BackwardOutcome {
+                intercept: 20.0,
+                coefficients: vec![2.0, 0.0],
+                objective_value: 20.0,
+            },
+            BackwardOutcome {
+                intercept: 30.0,
+                coefficients: vec![0.0, 3.0],
+                objective_value: 30.0,
+            },
+            BackwardOutcome {
+                intercept: 40.0,
+                coefficients: vec![0.0, 4.0],
+                objective_value: 40.0,
+            },
+        ];
+
+        let (intercept, coefficients) =
+            RiskMeasure::Expectation.aggregate_cut(&outcomes, &probabilities);
+
+        let expected_intercept: f64 = probabilities
+            .iter()
+            .zip(&outcomes)
+            .map(|(p, o)| p * o.intercept)
+            .sum();
+        let expected_c0: f64 = probabilities
+            .iter()
+            .zip(&outcomes)
+            .map(|(p, o)| p * o.coefficients[0])
+            .sum();
+        let expected_c1: f64 = probabilities
+            .iter()
+            .zip(&outcomes)
+            .map(|(p, o)| p * o.coefficients[1])
+            .sum();
+
+        assert!((intercept - expected_intercept).abs() < 1e-12);
+        assert!((coefficients[0] - expected_c0).abs() < 1e-12);
+        assert!((coefficients[1] - expected_c1).abs() < 1e-12);
+    }
+
+    /// AC: `CVaR` tie-break order. Two tied-objective outcomes with distinct
+    /// product weights: `CVaR`'s greedy allocation processes tied entries in
+    /// their array (= canonical child-id-then-ω) index order — `child 1`
+    /// (index 0) is allocated its full upper bound first, `child 2` (index 1)
+    /// receives only the remainder. A `realization_id`- or declaration-ordered
+    /// successor set (child 2 processed first) would allocate the opposite
+    /// way and produce a different intercept.
+    #[test]
+    fn cvar_aggregation_tie_break_follows_canonical_child_order() {
+        let node_graph = NodeGraph {
+            node_ids: vec![0, 1, 2],
+            nodes: vec![
+                NodeRuntime {
+                    stage: 0,
+                    pool_id: 0,
+                    openings: NodeOpenings {
+                        source: OpeningSource::Generated,
+                        offset: 0,
+                        len: 1,
+                        q: 1.0,
+                    },
+                },
+                NodeRuntime {
+                    stage: 1,
+                    pool_id: 1,
+                    openings: NodeOpenings {
+                        source: OpeningSource::Generated,
+                        offset: 0,
+                        len: 1,
+                        q: 1.0,
+                    },
+                },
+                NodeRuntime {
+                    stage: 1,
+                    pool_id: 2,
+                    openings: NodeOpenings {
+                        source: OpeningSource::Generated,
+                        offset: 0,
+                        len: 1,
+                        q: 1.0,
+                    },
+                },
+            ],
+            successors: vec![
+                vec![
+                    NodeSuccessor {
+                        child: 1,
+                        probability: 0.3,
+                    },
+                    NodeSuccessor {
+                        child: 2,
+                        probability: 0.7,
+                    },
+                ],
+                Vec::new(),
+                Vec::new(),
+            ],
+            n_pools: 3,
+        };
+        let mut probabilities = Vec::new();
+        assemble_successor_outcome_weights(&node_graph, 0, &mut probabilities);
+        assert_eq!(probabilities, vec![0.3, 0.7]);
+
+        // Tied objective_value: the sort key carries no information, so the
+        // greedy allocation's processing order is decided purely by array
+        // (= canonical) index.
+        let outcomes = vec![
+            BackwardOutcome {
+                intercept: 10.0,
+                coefficients: vec![],
+                objective_value: 100.0,
+            },
+            BackwardOutcome {
+                intercept: 20.0,
+                coefficients: vec![],
+                objective_value: 100.0,
+            },
+        ];
+        let risk = RiskMeasure::CVaR {
+            alpha: 0.5,
+            lambda: 1.0,
+        };
+        let (intercept, _) = risk.aggregate_cut(&outcomes, &probabilities);
+
+        // mu[0] = min(0.3/0.5, 1.0) = 0.6, remaining = 0.4;
+        // mu[1] = min(0.7/0.5, 0.4) = 0.4.
+        // intercept = 0.6*10.0 + 0.4*20.0 = 14.0 — NOT 20.0, which is what a
+        // child-2-processed-first (declaration/realization_id) order would give.
+        assert!(
+            (intercept - 14.0).abs() < 1e-12,
+            "expected canonical-order CVaR tie-break intercept 14.0, got {intercept}"
+        );
     }
 }

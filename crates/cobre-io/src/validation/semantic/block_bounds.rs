@@ -749,11 +749,14 @@ mod tests {
     /// stay distinct so a global-maximum bug and a per-stage lookup diverge.
     fn two_stage_study_stages() -> StagesData {
         StagesData {
+            openings_declared: std::collections::HashSet::new(),
             stages: vec![make_stage_with_blocks(0, 3), make_stage_with_blocks(1, 2)],
             policy_graph: PolicyGraph {
+                stage_discount_rate_overrides: std::collections::HashMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
                 annual_discount_rate: 0.06,
                 transitions: vec![],
+                nodes: Vec::new(),
                 season_map: None,
             },
         }
@@ -981,11 +984,14 @@ mod tests {
             vec![],
             vec![],
             StagesData {
+                openings_declared: std::collections::HashSet::new(),
                 stages: vec![make_stage_with_blocks(0, 1), make_stage_with_blocks(1, 3)],
                 policy_graph: PolicyGraph {
+                    stage_discount_rate_overrides: std::collections::HashMap::new(),
                     graph_type: PolicyGraphType::FiniteHorizon,
                     annual_discount_rate: 0.06,
                     transitions: vec![],
+                    nodes: Vec::new(),
                     season_map: None,
                 },
             },
@@ -1218,11 +1224,14 @@ mod tests {
             vec![],
             vec![],
             StagesData {
+                openings_declared: std::collections::HashSet::new(),
                 stages: vec![make_stage_with_blocks(0, 2)],
                 policy_graph: PolicyGraph {
+                    stage_discount_rate_overrides: std::collections::HashMap::new(),
                     graph_type: PolicyGraphType::FiniteHorizon,
                     annual_discount_rate: 0.06,
                     transitions: vec![],
+                    nodes: Vec::new(),
                     season_map: None,
                 },
             },

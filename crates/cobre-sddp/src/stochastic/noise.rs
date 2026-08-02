@@ -986,6 +986,7 @@ mod tests {
         };
         let study_dims = test_support::study_dims();
         let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &[],
@@ -1070,6 +1071,7 @@ mod tests {
         };
         let study_dims = test_support::study_dims();
         let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &[],
@@ -1154,6 +1156,7 @@ mod tests {
         };
         let study_dims = test_support::study_dims();
         let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
             horizon: &horizon,
             state: &state,
             cut_state_layouts: &[],

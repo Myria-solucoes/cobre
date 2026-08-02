@@ -10,6 +10,7 @@ use crate::{
     indexer::{CutStateProjection, StateSpace, StudyDimensions},
     inflow_method::InflowNonNegativityMethod,
     lp_builder::StageGeometry,
+    setup::node_graph::NodeGraph,
 };
 
 /// Immutable per-stage LP layout and noise scaling parameters.
@@ -180,4 +181,11 @@ pub struct TrainingContext<'a> {
     /// past `start_iteration`, the backward pass solves each stage LP lazily;
     /// otherwise the frozen all-cuts path is used.
     pub dcs: Option<DcsParams>,
+    /// The runtime node graph (F7): node identity/order, the `node → pool`
+    /// map, and per-node Ω views/out-edges. Absent `nodes[]` this is the
+    /// byte-exact chain degeneracy (one node per stage, C1). Discount is NOT
+    /// carried here — it stays per-stage on
+    /// [`StageContext::cumulative_discount_factors`], reached through a
+    /// node's own `stage` field.
+    pub node_graph: &'a NodeGraph,
 }

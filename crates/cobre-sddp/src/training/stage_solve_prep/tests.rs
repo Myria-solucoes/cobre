@@ -307,6 +307,7 @@ fn run_matches_open_coded_forward_block_for_minimal_fixture() {
     let horizon = HorizonMode::Finite { num_stages: 1 };
     let study_dims = study_dims();
     let training_ctx = TrainingContext {
+        node_graph: &crate::test_support::chain_node_graph(&stochastic),
         horizon: &horizon,
         state: &state,
         cut_state_layouts: &all_enabled_cut_state_layouts(&state, 1),
@@ -583,6 +584,7 @@ fn run_wires_ncs_patch_matching_pre_collapse_inline_pattern() {
     };
     let stages = vec![ncs_stage];
     let training_ctx = TrainingContext {
+        node_graph: &crate::test_support::chain_node_graph(&stoch),
         horizon: &horizon,
         state: &state,
         cut_state_layouts: &all_enabled_cut_state_layouts(&state, 1),
@@ -739,6 +741,7 @@ fn run_skips_load_and_inflow_transform_under_absent_and_prebuilt() {
     let horizon = HorizonMode::Finite { num_stages: 1 };
     let study_dims = study_dims();
     let training_ctx = TrainingContext {
+        node_graph: &crate::test_support::chain_node_graph(&stochastic),
         horizon: &horizon,
         state: &state,
         cut_state_layouts: &all_enabled_cut_state_layouts(&state, 1),

@@ -776,6 +776,7 @@ mod tests {
 
     #[test]
     fn write_then_read_round_trips() {
+        use crate::StageIdResolver;
         use crate::scenarios::{NoiseOpeningRow, assemble_opening_tree, parse_noise_openings};
 
         let tree = make_tree_2s_2d();
@@ -786,7 +787,9 @@ mod tests {
         assert!(path.exists(), "file must exist after write");
 
         let rows: Vec<NoiseOpeningRow> = parse_noise_openings(&path).expect("parse must succeed");
-        let recovered = assemble_opening_tree(rows, tree.dim());
+        let study_stage_ids: Vec<i32> = (0..i32::try_from(tree.n_stages()).unwrap()).collect();
+        let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+        let recovered = assemble_opening_tree(rows, tree.dim(), &resolver);
 
         assert_eq!(
             recovered.n_stages(),

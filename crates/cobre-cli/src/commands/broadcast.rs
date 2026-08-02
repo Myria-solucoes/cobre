@@ -10,6 +10,7 @@ use cobre_io::config::{BackwardScheduler, PhaseSolverProfileConfig};
 use cobre_sddp::{
     CutSelectionStrategy, DEFAULT_MAX_ITERATIONS, InflowNonNegativityMethod, StoppingMode,
     StoppingRule, StoppingRuleSet, StudyParams,
+    setup::{NodeGraph, NodeOpenings, NodeRuntime, NodeSuccessor, OpeningSource},
 };
 
 use crate::error::CliError;
@@ -196,6 +197,127 @@ pub(crate) struct BroadcastOpeningTree {
     pub(crate) dim: usize,
 }
 
+/// Postcard-serializable wrapper for [`NodeGraph`] broadcast — plain
+/// struct-of-`Vec`s (no tagged enum on the wire), mirroring
+/// [`BroadcastOpeningTree`]'s shape. `NodeOpenings::source` becomes the
+/// `is_external` flag; successor lists flatten to a CSR triple
+/// (`successor_offsets`/`successor_child`/`successor_probability`).
+///
+/// Not currently wired into the live MPI broadcast: [`NodeGraph`] is a pure,
+/// deterministic function of already-broadcast inputs (`System::policy_graph`
+/// — carried whole by the existing `System` broadcast — and the standardized
+/// scenario libraries, themselves rebuilt identically on every rank inside
+/// `StudySetup::from_broadcast_params`), so every rank constructs a
+/// bitwise-identical graph without a wire hop — the same guarantee
+/// `cut_state_layouts`/`stage_templates`/`scenario_libraries` already rely on.
+/// This type exists so a future caller can transport the graph explicitly
+/// (e.g. to cross-check the deterministic-construction guarantee, the way
+/// [`BroadcastOpeningTree`] transports a user-supplied tree) without
+/// inventing a second wire shape.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct BroadcastNodeGraph {
+    pub(crate) node_ids: Vec<i32>,
+    pub(crate) stage: Vec<usize>,
+    pub(crate) pool_id: Vec<usize>,
+    pub(crate) is_external: Vec<bool>,
+    pub(crate) offset: Vec<usize>,
+    pub(crate) len: Vec<usize>,
+    pub(crate) q: Vec<f64>,
+    pub(crate) n_pools: usize,
+    /// CSR row-pointer over `successor_child`/`successor_probability`,
+    /// length `node_ids.len() + 1`; node `i`'s successors are
+    /// `successor_offsets[i]..successor_offsets[i + 1]`.
+    pub(crate) successor_offsets: Vec<usize>,
+    pub(crate) successor_child: Vec<usize>,
+    pub(crate) successor_probability: Vec<f64>,
+}
+
+impl From<&NodeGraph> for BroadcastNodeGraph {
+    fn from(ng: &NodeGraph) -> Self {
+        let n = ng.nodes.len();
+        let mut stage = Vec::with_capacity(n);
+        let mut pool_id = Vec::with_capacity(n);
+        let mut is_external = Vec::with_capacity(n);
+        let mut offset = Vec::with_capacity(n);
+        let mut len = Vec::with_capacity(n);
+        let mut q = Vec::with_capacity(n);
+        for node in &ng.nodes {
+            stage.push(node.stage);
+            pool_id.push(node.pool_id);
+            is_external.push(node.openings.source == OpeningSource::External);
+            offset.push(node.openings.offset);
+            len.push(node.openings.len);
+            q.push(node.openings.q);
+        }
+
+        let mut successor_offsets = Vec::with_capacity(n + 1);
+        let mut successor_child = Vec::new();
+        let mut successor_probability = Vec::new();
+        successor_offsets.push(0);
+        for succs in &ng.successors {
+            for s in succs {
+                successor_child.push(s.child);
+                successor_probability.push(s.probability);
+            }
+            successor_offsets.push(successor_child.len());
+        }
+
+        Self {
+            node_ids: ng.node_ids.clone(),
+            stage,
+            pool_id,
+            is_external,
+            offset,
+            len,
+            q,
+            n_pools: ng.n_pools,
+            successor_offsets,
+            successor_child,
+            successor_probability,
+        }
+    }
+}
+
+impl From<BroadcastNodeGraph> for NodeGraph {
+    fn from(b: BroadcastNodeGraph) -> Self {
+        let n = b.node_ids.len();
+        let nodes = (0..n)
+            .map(|i| NodeRuntime {
+                stage: b.stage[i],
+                pool_id: b.pool_id[i],
+                openings: NodeOpenings {
+                    source: if b.is_external[i] {
+                        OpeningSource::External
+                    } else {
+                        OpeningSource::Generated
+                    },
+                    offset: b.offset[i],
+                    len: b.len[i],
+                    q: b.q[i],
+                },
+            })
+            .collect();
+        let successors = (0..n)
+            .map(|i| {
+                let start = b.successor_offsets[i];
+                let end = b.successor_offsets[i + 1];
+                (start..end)
+                    .map(|j| NodeSuccessor {
+                        child: b.successor_child[j],
+                        probability: b.successor_probability[j],
+                    })
+                    .collect()
+            })
+            .collect();
+        NodeGraph {
+            node_ids: b.node_ids,
+            nodes,
+            successors,
+            n_pools: b.n_pools,
+        }
+    }
+}
+
 pub(crate) fn stopping_rules_from_broadcast(cfg: &BroadcastConfig) -> StoppingRuleSet {
     let rules = cfg
         .stopping_rules
@@ -288,8 +410,9 @@ where
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::float_cmp)]
 mod tests {
-    use super::{BroadcastOpeningTree, broadcast_value};
+    use super::{BroadcastNodeGraph, BroadcastOpeningTree, broadcast_value};
     use crate::error::CliError;
+    use cobre_sddp::setup::{NodeGraph, NodeOpenings, NodeRuntime, NodeSuccessor, OpeningSource};
 
     #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
     struct Simple {
@@ -374,6 +497,129 @@ mod tests {
             "openings_per_stage must survive round-trip"
         );
         assert_eq!(decoded.dim, original.dim, "dim must survive round-trip");
+    }
+
+    // ------------------------------------------------------------------
+    // BroadcastNodeGraph tests
+    // ------------------------------------------------------------------
+
+    /// A 3-node fixture (one root fanning into a `Generated` and an
+    /// `External` child) exercising both `OpeningSource` variants and a
+    /// non-trivial successor CSR.
+    fn sample_node_graph() -> NodeGraph {
+        NodeGraph {
+            node_ids: vec![0, 1, 2],
+            nodes: vec![
+                NodeRuntime {
+                    stage: 0,
+                    pool_id: 0,
+                    openings: NodeOpenings {
+                        source: OpeningSource::Generated,
+                        offset: 0,
+                        len: 3,
+                        q: 1.0 / 3.0,
+                    },
+                },
+                NodeRuntime {
+                    stage: 1,
+                    pool_id: 1,
+                    openings: NodeOpenings {
+                        source: OpeningSource::Generated,
+                        offset: 0,
+                        len: 4,
+                        q: 0.25,
+                    },
+                },
+                NodeRuntime {
+                    stage: 1,
+                    pool_id: 2,
+                    openings: NodeOpenings {
+                        source: OpeningSource::External,
+                        offset: 7,
+                        len: 1,
+                        q: 1.0,
+                    },
+                },
+            ],
+            successors: vec![
+                vec![
+                    NodeSuccessor {
+                        child: 1,
+                        probability: 0.5,
+                    },
+                    NodeSuccessor {
+                        child: 2,
+                        probability: 0.5,
+                    },
+                ],
+                Vec::new(),
+                Vec::new(),
+            ],
+            n_pools: 3,
+        }
+    }
+
+    #[test]
+    fn broadcast_node_graph_round_trips_via_postcard() {
+        let original = sample_node_graph();
+        let bcast = BroadcastNodeGraph::from(&original);
+        let bytes = postcard::to_allocvec(&bcast).unwrap();
+        let decoded_bcast: BroadcastNodeGraph = postcard::from_bytes(&bytes).unwrap();
+        let decoded: NodeGraph = decoded_bcast.into();
+
+        assert_eq!(decoded.node_ids, original.node_ids);
+        assert_eq!(decoded.n_pools, original.n_pools);
+        assert_eq!(decoded.nodes.len(), original.nodes.len());
+        for (d, o) in decoded.nodes.iter().zip(original.nodes.iter()) {
+            assert_eq!(d.stage, o.stage);
+            assert_eq!(d.pool_id, o.pool_id);
+            assert_eq!(d.openings.source, o.openings.source);
+            assert_eq!(d.openings.offset, o.openings.offset);
+            assert_eq!(d.openings.len, o.openings.len);
+            assert_eq!(
+                d.openings.q.to_bits(),
+                o.openings.q.to_bits(),
+                "q must survive the wire hop bit-exact"
+            );
+        }
+        assert_eq!(decoded.successors.len(), original.successors.len());
+        for (d, o) in decoded.successors.iter().zip(original.successors.iter()) {
+            assert_eq!(d.len(), o.len());
+            for (de, oe) in d.iter().zip(o.iter()) {
+                assert_eq!(de.child, oe.child);
+                assert_eq!(de.probability.to_bits(), oe.probability.to_bits());
+            }
+        }
+    }
+
+    /// Guardrail mirroring `broadcast_config_wire_excludes_deleted_fields`:
+    /// the wire type is a plain struct-of-`Vec`s, never a tagged enum — a
+    /// serde-internally-tagged `OpeningSource` on the wire would inject a
+    /// `"Generated"`/`"External"` string tag into the postcard bytes, which
+    /// this test would catch.
+    #[test]
+    fn broadcast_node_graph_wire_carries_no_variant_tag_strings() {
+        let bcast = BroadcastNodeGraph::from(&sample_node_graph());
+        let bytes = postcard::to_allocvec(&bcast).unwrap();
+        let as_string = String::from_utf8_lossy(&bytes);
+        for tag in ["Generated", "External"] {
+            assert!(
+                !as_string.contains(tag),
+                "BroadcastNodeGraph postcard bytes must not contain the enum variant tag '{tag}' \
+                 — is_external must stay a plain bool field, not a tagged enum on the wire"
+            );
+        }
+    }
+
+    #[test]
+    fn broadcast_optional_node_graph_local_round_trips() {
+        let comm = cobre_comm::LocalBackend;
+        let original = sample_node_graph();
+        let bcast = Some(BroadcastNodeGraph::from(&original));
+        let result = broadcast_value(Some(bcast), &comm).unwrap();
+        let decoded: NodeGraph = result.unwrap().into();
+        assert_eq!(decoded.node_ids, original.node_ids);
+        assert_eq!(decoded.n_pools, original.n_pools);
     }
 
     // ------------------------------------------------------------------
