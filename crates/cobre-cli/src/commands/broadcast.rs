@@ -54,15 +54,15 @@ pub(crate) enum BroadcastStoppingMode {
 /// postcard (non-self-describing) refuses to deserialize (`WontImplement`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum BroadcastBackwardScheduler {
-    TrialPoint,
-    OpeningBlock { block_size: Option<NonZeroUsize> },
+    ByScenario,
+    ByNode { block_size: Option<NonZeroUsize> },
 }
 
 impl From<BackwardScheduler> for BroadcastBackwardScheduler {
     fn from(value: BackwardScheduler) -> Self {
         match value {
-            BackwardScheduler::TrialPoint {} => Self::TrialPoint,
-            BackwardScheduler::OpeningBlock { block_size } => Self::OpeningBlock { block_size },
+            BackwardScheduler::ByScenario {} => Self::ByScenario,
+            BackwardScheduler::ByNode { block_size } => Self::ByNode { block_size },
         }
     }
 }
@@ -70,10 +70,8 @@ impl From<BackwardScheduler> for BroadcastBackwardScheduler {
 impl From<BroadcastBackwardScheduler> for BackwardScheduler {
     fn from(value: BroadcastBackwardScheduler) -> Self {
         match value {
-            BroadcastBackwardScheduler::TrialPoint => Self::TrialPoint {},
-            BroadcastBackwardScheduler::OpeningBlock { block_size } => {
-                Self::OpeningBlock { block_size }
-            }
+            BroadcastBackwardScheduler::ByScenario => Self::ByScenario {},
+            BroadcastBackwardScheduler::ByNode { block_size } => Self::ByNode { block_size },
         }
     }
 }
@@ -114,7 +112,7 @@ pub(crate) struct BroadcastConfig {
     /// Simulation solver profile override (`simulation.solver`).
     pub(crate) simulation_solver: Option<PhaseSolverProfileConfig>,
     /// Backward-pass scheduler (`training.parallelism.backward_scheduler`),
-    /// carrying the opening-block size when the `opening_block` method is
+    /// carrying the opening-block size when the `by_node` method is
     /// selected.
     pub(crate) backward_scheduler: BroadcastBackwardScheduler,
     /// Resolved objective cost-scale factor (`modeling.cost_scale_factor`),
@@ -784,9 +782,9 @@ mod tests {
 
     /// Postcard round-trip for the scheduler field at its non-default value —
     /// `broadcast_config_roundtrips_via_postcard` above only exercises the
-    /// `TrialPoint` default.
+    /// `ByScenario` default.
     #[test]
-    fn broadcast_config_roundtrips_via_postcard_with_opening_block_scheduler() {
+    fn broadcast_config_roundtrips_via_postcard_with_by_node_scheduler() {
         use std::num::NonZeroUsize;
 
         use super::{BroadcastBackwardScheduler, BroadcastConfig};
@@ -794,7 +792,7 @@ mod tests {
         let json = r#"{
             "training": {
                 "parallelism": {
-                    "backward_scheduler": { "method": "opening_block", "block_size": 4 }
+                    "backward_scheduler": { "method": "by_node", "block_size": 4 }
                 }
             }
         }"#;
@@ -809,7 +807,7 @@ mod tests {
         assert_eq!(decoded.backward_scheduler, original.backward_scheduler);
         assert_eq!(
             decoded.backward_scheduler,
-            BroadcastBackwardScheduler::OpeningBlock {
+            BroadcastBackwardScheduler::ByNode {
                 block_size: NonZeroUsize::new(4)
             }
         );

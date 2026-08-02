@@ -48,7 +48,7 @@
 //! stage `t+1`); the inner trial-point loop is parallelised across
 //! [`SolverWorkspace`](crate::workspace::SolverWorkspace) instances with static
 //! scenario partitioning. Each worker generates cuts into a thread-local
-//! `StagedCut` buffer, sorted by `trial_point_idx` after the parallel region for
+//! `StagedCut` buffer, sorted by `trial_state_idx` after the parallel region for
 //! deterministic FCF insertion regardless of thread completion order.
 
 use cobre_solver::{RowBatch, StageTemplate};
@@ -57,21 +57,22 @@ use crate::{cut::pool::CutPool, indexer::CutStateProjection, solver_stats::Solve
 
 use std::ops::Range;
 
+mod by_node;
+mod by_scenario;
 mod duals_extraction;
 mod lp_setup;
-mod opening_block;
 mod outcome_aggregation;
-mod trial_point;
+mod replicated;
 
 #[cfg(test)]
 mod tests;
 
-pub(crate) use opening_block::{
-    OpeningOutcome, hardest_first_block_order, identity_block_order, merge_block_pivots,
-    opening_block_count, opening_block_finish, process_stage_backward_opening_block,
-    resolve_block_size,
+pub(crate) use by_node::{
+    OpeningOutcome, by_node_block_count, by_node_finish, hardest_first_block_order,
+    identity_block_order, merge_block_pivots, process_stage_backward_by_node, resolve_block_size,
 };
-pub(crate) use trial_point::{StageOpeningSolver, process_trial_point_backward};
+pub(crate) use by_scenario::{StageOpeningSolver, process_by_scenario_backward};
+pub(crate) use replicated::{outcome_stride, solve_replicated_outcome_slice};
 
 #[cfg(test)]
 pub(crate) use lp_setup::{load_backward_lp, patch_opening_bounds, resolve_backward_basis};
@@ -155,12 +156,12 @@ pub struct BackwardResult {
 ///
 /// Each worker thread populates one `StagedCut` per trial point instead of
 /// writing directly into the `FutureCostFunction`. After the parallel region,
-/// staged cuts are sorted by `trial_point_idx` and merged into the FCF in
+/// staged cuts are sorted by `trial_state_idx` and merged into the FCF in
 /// deterministic order regardless of thread completion order.
 pub(crate) struct StagedCut {
     /// Local trial-point index within `0..local_work`. Used for deterministic
     /// merge ordering after the parallel region.
-    pub(crate) trial_point_idx: usize,
+    pub(crate) trial_state_idx: usize,
 
     /// Aggregated cut intercept (result of `RiskMeasure::aggregate_cut`).
     pub(crate) intercept: f64,
@@ -187,10 +188,13 @@ pub(crate) struct SuccessorSpec<'a> {
     pub(crate) t: usize,
     /// Successor stage index (`t + 1`), where the LP is actually solved.
     pub(crate) successor: usize,
-    /// Declared node id of the successor (`NodeGraph::node_ids[successor]`) —
+    /// Successor's canonical node position (`NodeGraph::nodes` index) — the
+    /// warm-start `BasisStore` node-axis key. On the chain degeneracy equal to
+    /// [`SuccessorSpec::successor`] byte-for-byte.
+    pub(crate) successor_node: usize,
+    /// Declared node id of the successor (`NodeGraph::node_ids[successor_node]`) —
     /// on the chain degeneracy equal to `successor` byte-for-byte. Tags the
-    /// basis captured at [`SuccessorSpec::successor`] and the node the
-    /// backward apply sites solve against.
+    /// captured basis and the node the backward apply sites solve against.
     pub(crate) successor_node_id: i32,
     /// This rank's MPI rank index (used to address exchange buffer state).
     pub(crate) my_rank: usize,

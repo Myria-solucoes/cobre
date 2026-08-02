@@ -1,7 +1,7 @@
-//! Per-trial-point opening-solve dispatch and the deterministic trial-point kernel.
+//! Per-trial-point opening-solve dispatch and the deterministic by-scenario kernel.
 //!
 //! [`StageOpeningSolver`] is the closed two-variant per-opening solve strategy
-//! (frozen all-cuts vs lazy resident-set DCS), and `process_trial_point_backward`
+//! (frozen all-cuts vs lazy resident-set DCS), and `process_by_scenario_backward`
 //! drives it: it solves a trial point's openings in a run-constant, rank-invariant
 //! `solve_order` permutation but writes and aggregates outcomes by canonical ω, so
 //! the generated cut is bit-identical regardless of solve order.
@@ -186,7 +186,7 @@ impl StageOpeningSolver {
         ws.solver.statistics_into(&mut stats_before_omega);
 
         let stored_basis = if is_first {
-            resolve_backward_basis(basis_slice, m, s)
+            resolve_backward_basis(basis_slice, m, succ.successor_node)
         } else {
             None
         };
@@ -371,7 +371,7 @@ impl StageOpeningSolver {
 // or a risk slice. Merging into a struct would add indirection without reducing the caller's
 // borrow count.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
+pub(crate) fn process_by_scenario_backward<S: SolverInterface + Send>(
     ws: &mut SolverWorkspace<S>,
     ctx: &StageContext<'_>,
     training_ctx: &TrainingContext<'_>,
@@ -469,7 +469,7 @@ pub(crate) fn process_trial_point_backward<S: SolverInterface + Send>(
         }
     }
     Ok(StagedCut {
-        trial_point_idx: m,
+        trial_state_idx: m,
         intercept: agg_intercept,
         coefficients_range,
         forward_pass_index,

@@ -75,6 +75,7 @@ impl IterationScratch {
                 primal: Vec::new(),
                 dual: Vec::new(),
                 stage_cost: 0.0,
+                node_id: 0,
                 state: vec![0.0; n_state],
             })
             .collect();
@@ -94,17 +95,7 @@ impl IterationScratch {
             k_max,
         );
 
-        let cut_batches: Vec<RowBatch> = (0..num_stages)
-            .map(|_| RowBatch {
-                num_rows: 0,
-                row_starts: Vec::new(),
-                col_indices: Vec::new(),
-                values: Vec::new(),
-                row_lower: Vec::new(),
-                row_upper: Vec::new(),
-            })
-            .collect();
-        let lb_cut_batch = RowBatch {
+        let empty_row_batch = || RowBatch {
             num_rows: 0,
             row_starts: Vec::new(),
             col_indices: Vec::new(),
@@ -112,19 +103,13 @@ impl IterationScratch {
             row_lower: Vec::new(),
             row_upper: Vec::new(),
         };
+        let cut_batches: Vec<RowBatch> = (0..num_stages).map(|_| empty_row_batch()).collect();
+        let lb_cut_batch = empty_row_batch();
 
         let mut frozen_templates: Vec<StageTemplate> =
             (0..num_stages).map(|_| StageTemplate::empty()).collect();
-        let freeze_row_batches: Vec<RowBatch> = (0..num_stages)
-            .map(|_| RowBatch {
-                num_rows: 0,
-                row_starts: Vec::new(),
-                col_indices: Vec::new(),
-                values: Vec::new(),
-                row_lower: Vec::new(),
-                row_upper: Vec::new(),
-            })
-            .collect();
+        let freeze_row_batches: Vec<RowBatch> =
+            (0..num_stages).map(|_| empty_row_batch()).collect();
 
         let mut freeze_scratch = FreezeScratch::new();
 

@@ -69,7 +69,7 @@ pub struct StudyParams {
     /// Simulation solver profile override (`simulation.solver`).
     pub simulation_solver: Option<PhaseSolverProfileConfig>,
     /// Backward-pass scheduler (`training.parallelism.backward_scheduler`),
-    /// carrying the opening-block size when the `opening_block` method is
+    /// carrying the opening-block size when the `by_node` method is
     /// selected.
     pub backward_scheduler: BackwardScheduler,
     /// Resolved objective cost-scale factor (`modeling.cost_scale_factor`,
@@ -329,7 +329,7 @@ pub struct ConstructionConfig {
     /// Simulation solver profile override (`simulation.solver`).
     pub simulation_solver: Option<PhaseSolverProfileConfig>,
     /// Backward-pass scheduler (`training.parallelism.backward_scheduler`),
-    /// carrying the opening-block size when the `opening_block` method is
+    /// carrying the opening-block size when the `by_node` method is
     /// selected.
     pub backward_scheduler: BackwardScheduler,
     /// Resolved objective cost-scale factor (`modeling.cost_scale_factor`,

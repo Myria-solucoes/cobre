@@ -213,8 +213,9 @@ where
         fwd_pool.reserve_dcs_scratch(ranks.n_state, max_pool_capacity);
 
         // Sized for max local forward passes so scenario indices stay stable
-        // across iterations.
-        let basis_store = BasisStore::new(ranks.max_local_fwd, ranks.num_stages);
+        // across iterations; the second axis is the node count (== num_stages on
+        // the chain) so the backward warm-start keys by successor node position.
+        let basis_store = BasisStore::new(ranks.max_local_fwd, training_ctx.node_graph.nodes.len());
 
         let actual_per_rank = ranks.actual_per_rank(total_forward_passes);
         let exchange_bufs = ExchangeBuffers::with_actual_counts(

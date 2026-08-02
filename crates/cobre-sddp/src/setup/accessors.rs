@@ -63,7 +63,7 @@ impl StudySetup {
     }
 
     /// Test-support hook: override the backward-pass scheduler
-    /// (`training.parallelism.backward_scheduler`) to force `opening_block`
+    /// (`training.parallelism.backward_scheduler`) to force `by_node`
     /// without a config file edit.
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_scheduler(&mut self, scheduler: BackwardScheduler) {

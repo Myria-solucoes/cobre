@@ -2494,6 +2494,7 @@ mod anticipated_ring_matches_forward_propagation {
                 primal: Vec::new(),
                 dual: Vec::new(),
                 stage_cost: 0.0,
+                node_id: 0,
                 state: Vec::new(),
             })
             .collect();
@@ -2512,6 +2513,7 @@ mod anticipated_ring_matches_forward_propagation {
                 terminal_has_boundary_cuts: false,
                 pool: &fcf.pools[t],
                 dcs: None,
+                node: t,
             };
             run_forward_stage(
                 &mut ws,

@@ -1749,7 +1749,7 @@ mod test_backward_cache_reduces_pivots {
     /// warm-starts from the cached rank-0 m=0 basis rather than the forward basis.
     ///
     /// On failure, the assertion message lists the triage steps; the key read site is
-    /// `process_trial_point_backward`, which must prefer `succ.backward_store[stage]`
+    /// `process_by_scenario_backward`, which must prefer `succ.backward_store[stage]`
     /// over `succ.basis_store.get(m, s)` when the stored backward basis is `Some`.
     #[test]
     fn test_backward_cache_reduces_pivots() {

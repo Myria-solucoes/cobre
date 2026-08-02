@@ -25,9 +25,6 @@ use super::{StageKey, write_capture_metadata};
 
 /// Execute the stage-level LP solve for one (scenario, stage) pair.
 ///
-/// Applies noise patches, warm-starts the solver, records the trajectory step,
-/// and updates the current state and basis store for the next stage.
-///
 /// Returns the stage cost on success, or propagates the solver error.
 ///
 /// # Errors
@@ -60,7 +57,11 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         terminal_has_boundary_cuts,
         pool,
         dcs,
+        node,
     } = *key;
+    let node_graph = training_ctx.node_graph;
+    let pool_id = node_graph.nodes[node].pool_id;
+    let node_id = node_graph.node_ids[node];
     let state = training_ctx.state;
     let horizon = training_ctx.horizon;
 
@@ -119,12 +120,8 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
             // Forward pass solves one LP per (stage, scenario): always a fresh
             // solve, never a carried continuation.
             continue_carry: false,
-            node_id: training_ctx.node_graph.node_ids[t],
+            node_id,
         };
-        // Pool id resolved from the node graph for the node at the current
-        // stage — the same pool `pool` (already resolved by the caller) belongs
-        // to, so its projection sizes this render/extraction identically.
-        let pool_id = training_ctx.node_graph.nodes[t].pool_id;
         lazy_solve_preloaded(
             &mut ws.solver,
             &ctx.templates[t],
@@ -151,7 +148,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
             stage_index: t,
             scenario_index: m,
             iteration: Some(iteration),
-            node_id: training_ctx.node_graph.node_ids[t],
+            node_id,
         };
 
         let view = run_stage_solve(ws, &inputs).map_err(|e| {
@@ -172,11 +169,13 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     let d_t = ctx.discount_factors.get(t).copied().unwrap_or(1.0);
     let stage_cost = (view_objective - d_t * unscaled_primal[state.theta]) * ctx.cost_scale_factor;
     let rec = &mut worker_records[local_m * num_stages + t];
-    // Only rec.state is consumed downstream; the backward pass needs no primal
-    // or dual here, and simulation reads them directly from the solver.
+    // rec.primal/dual stay empty: only state and node_id feed downstream
+    // consumers (the backward pass reads state; node_id tags the visit for
+    // per-node output) — simulation reads primal/dual directly from the solver.
     rec.primal.clear();
     rec.dual.clear();
     rec.stage_cost = stage_cost;
+    rec.node_id = node_id;
 
     // Save incoming lag values before overwriting state with primal.
     let lag_start = state.inflow_lags.start;
@@ -226,7 +225,6 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     // would corrupt the warm-start; the DCS path leaves the (m, t) slot untouched.
     if dcs.is_none() {
         let cut_row_count = basis_row_capacity.saturating_sub(ctx.templates[t].num_rows);
-        let node_id = training_ctx.node_graph.node_ids[t];
         let captured = basis_slice.get_mut(m, t).get_or_insert_with(|| {
             CapturedBasis::new(
                 ctx.templates[t].num_cols,

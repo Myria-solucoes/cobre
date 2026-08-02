@@ -378,15 +378,16 @@ pub struct ParallelismConfig {
 #[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum BackwardScheduler {
-    /// Per-trial-point backward scheduling (the default): each parallel work
-    /// unit is one whole trial point.
+    /// By-scenario backward scheduling (the default): each parallel work
+    /// unit claims one whole trial point (a row of the backward work
+    /// rectangle).
     // A braced variant, not a unit one: serde enforces `deny_unknown_fields`
     // only for braced variants of an internally tagged enum, and this variant
     // must reject `block_size`.
-    TrialPoint {},
-    /// Opening-block backward scheduling: each parallel work unit is one
-    /// (trial point, opening-block) pair claimed dynamically by workers.
-    OpeningBlock {
+    ByScenario {},
+    /// By-node backward scheduling: each parallel work unit claims one
+    /// (trial point, opening-block) tile of the backward work rectangle.
+    ByNode {
         /// Openings per block. Absent resolves per stage to `⌈|Ω_s|/2⌉` (half
         /// the openings, rounded up); a set value is clamped to
         /// `min(|Ω_s|, block_size)`.
@@ -397,7 +398,7 @@ pub enum BackwardScheduler {
 
 impl Default for BackwardScheduler {
     fn default() -> Self {
-        Self::TrialPoint {}
+        Self::ByScenario {}
     }
 }
 
@@ -785,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn backward_scheduler_defaults_to_trial_point_when_absent() {
+    fn backward_scheduler_defaults_to_by_scenario_when_absent() {
         let json = r#"{
             "forward_passes": 4,
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }]
@@ -793,65 +794,88 @@ mod tests {
         let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
         assert_eq!(
             cfg.parallelism.backward_scheduler,
-            BackwardScheduler::TrialPoint {}
+            BackwardScheduler::ByScenario {}
         );
     }
 
-    /// `{"method": "opening_block", "block_size": 4}` round-trips into the
-    /// `OpeningBlock` variant carrying `Some(4)`.
+    /// `{"method": "by_node", "block_size": 4}` round-trips into the
+    /// `ByNode` variant carrying `Some(4)`.
     #[test]
-    fn opening_block_scheduler_and_block_size_round_trip() {
+    fn by_node_scheduler_and_block_size_round_trip() {
         let json = r#"{
             "forward_passes": 4,
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
             "parallelism": {
-                "backward_scheduler": { "method": "opening_block", "block_size": 4 }
+                "backward_scheduler": { "method": "by_node", "block_size": 4 }
             }
         }"#;
         let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
         assert_eq!(
             cfg.parallelism.backward_scheduler,
-            BackwardScheduler::OpeningBlock {
+            BackwardScheduler::ByNode {
                 block_size: NonZeroUsize::new(4)
             }
         );
     }
 
-    /// An `opening_block` scheduler without `block_size` round-trips into
+    /// A `by_node` scheduler without `block_size` round-trips into
     /// `block_size: None` (the per-stage `⌈|Ω_s|/2⌉` resolution).
     #[test]
-    fn opening_block_scheduler_without_block_size_round_trips() {
+    fn by_node_scheduler_without_block_size_round_trips() {
         let json = r#"{
             "forward_passes": 4,
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
             "parallelism": {
-                "backward_scheduler": { "method": "opening_block" }
+                "backward_scheduler": { "method": "by_node" }
             }
         }"#;
         let cfg: TrainingConfig = serde_json::from_str(json).unwrap();
         assert_eq!(
             cfg.parallelism.backward_scheduler,
-            BackwardScheduler::OpeningBlock { block_size: None }
+            BackwardScheduler::ByNode { block_size: None }
         );
     }
 
-    /// `block_size` under `trial_point` is a deserialize error under
+    /// `block_size` under `by_scenario` is a deserialize error under
     /// `deny_unknown_fields` — the invalid combination is unrepresentable, not
     /// warned-and-ignored.
     #[test]
-    fn block_size_under_trial_point_is_deserialize_error() {
+    fn block_size_under_by_scenario_is_deserialize_error() {
         let json = r#"{
             "forward_passes": 4,
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
             "parallelism": {
-                "backward_scheduler": { "method": "trial_point", "block_size": 4 }
+                "backward_scheduler": { "method": "by_scenario", "block_size": 4 }
             }
         }"#;
         let result = serde_json::from_str::<TrainingConfig>(json);
         assert!(
             result.is_err(),
-            "block_size under trial_point must be rejected"
+            "block_size under by_scenario must be rejected"
         );
+    }
+
+    /// The retired `trial_point` / `opening_block` spellings are unknown-variant
+    /// deserialize errors — no `serde(alias)` accepts them (clean break, no
+    /// deprecated-with-fallback).
+    #[test]
+    fn retired_scheduler_spellings_are_deserialize_error() {
+        for method in ["trial_point", "opening_block"] {
+            let json = format!(
+                r#"{{
+                    "forward_passes": 4,
+                    "stopping_rules": [{{ "type": "iteration_limit", "limit": 100 }}],
+                    "parallelism": {{
+                        "backward_scheduler": {{ "method": "{method}" }}
+                    }}
+                }}"#
+            );
+            let result = serde_json::from_str::<TrainingConfig>(&json);
+            assert!(
+                result.is_err(),
+                "retired scheduler spelling '{method}' must be an unknown-variant error"
+            );
+        }
     }
 
     /// A misspelled scheduler `method` is an unknown-variant deserialize error.
@@ -861,7 +885,7 @@ mod tests {
             "forward_passes": 4,
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
             "parallelism": {
-                "backward_scheduler": { "method": "openin_block" }
+                "backward_scheduler": { "method": "by_nod" }
             }
         }"#;
         let result = serde_json::from_str::<TrainingConfig>(json);
@@ -875,7 +899,7 @@ mod tests {
             "forward_passes": 4,
             "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
             "parallelism": {
-                "backward_scheduler": { "method": "opening_block", "block_size": 0 }
+                "backward_scheduler": { "method": "by_node", "block_size": 0 }
             }
         }"#;
         let result = serde_json::from_str::<TrainingConfig>(json);

@@ -150,6 +150,10 @@ pub(crate) struct StageKey<'a> {
     /// solved lazily against the cut pool from the cut-free base template; when
     /// `None`, the frozen all-cuts path is used.
     pub(crate) dcs: Option<DcsParams>,
+    /// Canonical node-graph position this visit resolved to
+    /// (`NodeGraph::nodes` index) — the pool/node-id resolution site, never
+    /// `t` itself once a stage carries more than one alive node.
+    pub(crate) node: usize,
 }
 
 /// Execute the forward pass for one training iteration on this rank.

@@ -89,7 +89,6 @@ pub struct CutSyncBuffers {
     /// remote ranks' deserialized cuts.
     max_n_state: usize,
 
-    /// Total number of MPI ranks.
     num_ranks: usize,
 
     /// Maximum wire record size `cut_wire_size(max_n_state)`; the buffer-capacity
@@ -106,6 +105,12 @@ pub struct CutSyncBuffers {
     /// Deserialization scratch for coefficients (flat layout); grown lazily,
     /// never shrunk.
     deserialize_coefficients_buf: Vec<f64>,
+
+    /// Per-pool `(pool, record_size, n_local)` packing plan built by
+    /// [`Self::sync_level_records`], reused across calls via
+    /// [`std::mem::take`] (never a fresh `Vec::new` per call) so the
+    /// level-batched cut exchange stays allocation-free.
+    level_plan_scratch: Vec<(usize, usize, usize)>,
 }
 
 impl CutSyncBuffers {
@@ -179,6 +184,7 @@ impl CutSyncBuffers {
             per_rank_cuts,
             deserialize_headers_buf: Vec::new(),
             deserialize_coefficients_buf: Vec::new(),
+            level_plan_scratch: Vec::new(),
         }
     }
 
@@ -346,12 +352,29 @@ impl CutSyncBuffers {
     ///
     /// Panics in debug builds if the number of eligible cuts exceeds the send
     /// buffer capacity.
-    #[allow(clippy::cast_possible_truncation)]
     pub fn pack_local_records(
         &mut self,
         fcf: &FutureCostFunction,
         pool: usize,
         iteration: u64,
+    ) -> usize {
+        let record_size = cut_wire_size(fcf.pools[pool].state_dimension);
+        self.pack_pool_into(fcf, pool, iteration, record_size, 0)
+    }
+
+    /// Serialize `pool`'s active cuts generated at `iteration` into
+    /// `send_buf[send_offset..]` at the pool's own wire stride, returning the
+    /// count packed. Shared by [`Self::pack_local_records`] (offset `0`) and the
+    /// level-batched packing in [`Self::sync_level_records`] (contiguous
+    /// per-pool offsets).
+    #[allow(clippy::cast_possible_truncation)]
+    fn pack_pool_into(
+        &mut self,
+        fcf: &FutureCostFunction,
+        pool: usize,
+        iteration: u64,
+        record_size: usize,
+        send_offset: usize,
     ) -> usize {
         let cut_pool = &fcf.pools[pool];
 
@@ -359,7 +382,6 @@ impl CutSyncBuffers {
         // `max_record_size` (see the `max_n_state` field doc): packing at the global
         // max while the slice below reads `cut_pool.state_dimension` coefficients
         // mis-strides every record once a pool is reduced.
-        let record_size = cut_wire_size(cut_pool.state_dimension);
         debug_assert!(
             record_size <= self.max_record_size,
             "record size {record_size} exceeds buffer-capacity max {}",
@@ -376,14 +398,14 @@ impl CutSyncBuffers {
                 continue;
             }
 
-            let required = (n_cuts + 1) * record_size;
+            let start = send_offset + n_cuts * record_size;
             debug_assert!(
-                required <= self.send_buf.len(),
-                "pack_local_records: {required} bytes required, exceeds send_buf capacity {}",
+                start + record_size <= self.send_buf.len(),
+                "pack_pool_into: {} bytes required, exceeds send_buf capacity {}",
+                start + record_size,
                 self.send_buf.len()
             );
 
-            let start = n_cuts * record_size;
             let coeffs = cut_pool.coefficient_row(slot);
             serialize_cut(
                 &mut self.send_buf[start..start + record_size],
@@ -522,6 +544,155 @@ impl CutSyncBuffers {
         Ok(remote_cut_count)
     }
 
+    /// Exchange every pool of one reverse-topological cut-sharing level in a
+    /// SINGLE `allgatherv`, inserting only remote cuts (each pool's local cuts
+    /// were already inserted by the node's backward compute). Batching per level
+    /// — never one collective per node — keeps the collective count scaling with
+    /// level count, not node count. Returns `(local_total, remote_total)` cut
+    /// counts summed over the level's pools.
+    ///
+    /// With a single pool this is byte-for-byte the `pack_local_records` +
+    /// `sync_packed_records` path (identical send bytes, counts, displacements,
+    /// and remote inserts).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(SddpError::Validation(_))` if any pool's local cut count
+    /// differs from `per_rank_cuts[my_rank]` (the same guard as
+    /// `sync_packed_records`, per pool); returns `Err(SddpError::Communication(_))`
+    /// if the underlying `allgatherv` fails.
+    pub fn sync_level_records<C: Communicator>(
+        &mut self,
+        pools: &[usize],
+        fcf: &mut FutureCostFunction,
+        iteration: u64,
+        comm: &C,
+    ) -> Result<(usize, usize), SddpError> {
+        let my_rank = comm.rank();
+        let expected_for_me = self.per_rank_cuts[my_rank];
+
+        // Grow the send/recv buffers to the level's total across its pools when a
+        // multi-pool level exceeds the per-pool capacity the constructor sized —
+        // a no-op on the single-pool levels the shipped shape produces, so the
+        // chain path never resizes and stays byte-identical.
+        let total_cuts_all_ranks: usize = self.per_rank_cuts.iter().sum();
+        let mut needed_send = 0usize;
+        let mut needed_recv = 0usize;
+        for &pool in pools {
+            let record_size = cut_wire_size(fcf.pools[pool].state_dimension);
+            needed_send += expected_for_me * record_size;
+            needed_recv += total_cuts_all_ranks * record_size;
+        }
+        if self.send_buf.len() < needed_send {
+            self.send_buf.resize(needed_send, 0);
+        }
+        if self.recv_buf.len() < needed_recv {
+            self.recv_buf.resize(needed_recv, 0);
+        }
+
+        // Pack every pool's local records contiguously (pool-major), recording
+        // each pool's (record_size, n_local) for the count/deserialize passes.
+        // Taken out of `level_plan_scratch` (never a fresh `Vec::new`) so
+        // `pack_pool_into` can borrow `self` mutably below; restored just
+        // before returning `Ok`.
+        let mut plan = std::mem::take(&mut self.level_plan_scratch);
+        plan.clear();
+        let mut send_len = 0usize;
+        let mut local_total = 0usize;
+        for &pool in pools {
+            let pool_n_state = fcf.pools[pool].state_dimension;
+            debug_assert!(
+                pool_n_state <= self.max_n_state,
+                "pool {pool} dimension {pool_n_state} exceeds buffer-capacity max {}",
+                self.max_n_state
+            );
+            let record_size = cut_wire_size(pool_n_state);
+            let n_local = self.pack_pool_into(fcf, pool, iteration, record_size, send_len);
+            if n_local != expected_for_me {
+                return Err(SddpError::Validation(format!(
+                    "sync_cuts invariant violated at pool {pool}: rank \
+                     {my_rank} produced {n_local} cuts, expected \
+                     {expected_for_me} per the cut-distribution plan. \
+                     Releasing this divergence to allgatherv would corrupt \
+                     remote ranks' deserialized cut buffers."
+                )));
+            }
+            send_len += n_local * record_size;
+            local_total += n_local;
+            plan.push((pool, record_size, n_local));
+        }
+
+        for r in 0..self.num_ranks {
+            let mut bytes = 0usize;
+            for &(_, record_size, n_local) in &plan {
+                let cuts_for_r = if r == my_rank {
+                    n_local
+                } else {
+                    self.per_rank_cuts[r]
+                };
+                bytes += cuts_for_r * record_size;
+            }
+            self.counts[r] = bytes;
+        }
+        self.displs[0] = 0;
+        for r in 1..self.num_ranks {
+            self.displs[r] = self.displs[r - 1] + self.counts[r - 1];
+        }
+
+        let recv_len: usize = self.counts.iter().sum();
+        debug_assert!(
+            send_len <= self.send_buf.len(),
+            "send_len {send_len} exceeds send_buf capacity {}",
+            self.send_buf.len()
+        );
+        debug_assert!(
+            recv_len <= self.recv_buf.len(),
+            "recv_len {recv_len} exceeds recv_buf capacity {}",
+            self.recv_buf.len()
+        );
+
+        comm.allgatherv(
+            &self.send_buf[..send_len],
+            &mut self.recv_buf[..recv_len],
+            &self.counts,
+            &self.displs,
+        )?;
+
+        let mut remote_total = 0usize;
+        for r in 0..self.num_ranks {
+            if r == my_rank {
+                continue;
+            }
+            let mut cursor = self.displs[r];
+            for &(pool, record_size, _) in &plan {
+                let pool_n_state = fcf.pools[pool].state_dimension;
+                let seg_len = self.per_rank_cuts[r] * record_size;
+                let slice = &self.recv_buf[cursor..cursor + seg_len];
+                deserialize_cuts_from_buffer_into(
+                    slice,
+                    pool_n_state,
+                    &mut self.deserialize_headers_buf,
+                    &mut self.deserialize_coefficients_buf,
+                )?;
+                for (i, header) in self.deserialize_headers_buf.iter().enumerate() {
+                    let coeff_start = i * pool_n_state;
+                    fcf.add_cut(
+                        pool,
+                        u64::from(header.iteration),
+                        header.forward_pass_index,
+                        header.intercept,
+                        &self.deserialize_coefficients_buf[coeff_start..coeff_start + pool_n_state],
+                    );
+                    remote_total += 1;
+                }
+                cursor += seg_len;
+            }
+        }
+
+        self.level_plan_scratch = plan;
+        Ok((local_total, remote_total))
+    }
+
     /// Return the send buffer capacity in bytes.
     #[must_use]
     pub fn send_capacity(&self) -> usize {
@@ -532,6 +703,83 @@ impl CutSyncBuffers {
     #[must_use]
     pub fn recv_capacity(&self) -> usize {
         self.recv_buf.len()
+    }
+}
+
+/// Reusable buffers for the replicated-aggregation outcome `allgatherv` at a
+/// singleton-trial-state group, where ranks split the successor outcome set and
+/// every rank must reassemble the whole set to run the identical flat
+/// aggregation. Grown lazily; never on the trial-point-distributed path.
+#[derive(Debug, Default, Clone)]
+pub struct OutcomeExchangeScratch {
+    send: Vec<f64>,
+    recv: Vec<f64>,
+    counts: Vec<usize>,
+    displs: Vec<usize>,
+}
+
+impl OutcomeExchangeScratch {
+    /// `allgatherv` every rank's canonical outcome slice into the full outcome
+    /// set, in rank order — which equals canonical `(m, ψ)` order because
+    /// `partition` assigns each rank a contiguous canonical range. Each outcome
+    /// is `1 + n_state` doubles (objective, then subgradient). Returns the
+    /// reassembled full set; the caller runs the identical `aggregate_cut_into`
+    /// over it on every rank.
+    ///
+    /// Mirrors the cut `allgatherv` buffer discipline: per-rank counts/displs
+    /// and a per-rank-count mismatch guard.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(SddpError::Validation(_))` when `local`'s length is not
+    /// `outcome_counts[my_rank] * (1 + n_state)` (a divergence that would
+    /// corrupt the reassembly); returns `Err(SddpError::Communication(_))` if
+    /// the `allgatherv` fails.
+    pub fn allgather_outcomes<C: Communicator>(
+        &mut self,
+        local: &[f64],
+        n_state: usize,
+        outcome_counts: &[usize],
+        comm: &C,
+    ) -> Result<&[f64], SddpError> {
+        let my_rank = comm.rank();
+        let stride = 1 + n_state;
+        let expected = outcome_counts[my_rank] * stride;
+        if local.len() != expected {
+            return Err(SddpError::Validation(format!(
+                "allgather_outcomes invariant violated: rank {my_rank} produced \
+                 {} doubles, expected {expected} ({} outcomes * {stride}) per the \
+                 outcome partition. Releasing this divergence to allgatherv would \
+                 corrupt remote ranks' reassembled outcome set.",
+                local.len(),
+                outcome_counts[my_rank],
+            )));
+        }
+
+        self.counts.clear();
+        self.counts
+            .extend(outcome_counts.iter().map(|&c| c * stride));
+        self.displs.clear();
+        let mut acc = 0usize;
+        for &c in &self.counts {
+            self.displs.push(acc);
+            acc += c;
+        }
+        let total = acc;
+
+        self.send.clear();
+        self.send.extend_from_slice(local);
+        if self.recv.len() < total {
+            self.recv.resize(total, 0.0);
+        }
+
+        comm.allgatherv(
+            &self.send,
+            &mut self.recv[..total],
+            &self.counts,
+            &self.displs,
+        )?;
+        Ok(&self.recv[..total])
     }
 }
 
@@ -1392,5 +1640,210 @@ mod tests {
             }
             other => panic!("expected SddpError::Validation, got: {other:?}"),
         }
+    }
+
+    // ── replicated aggregation (outcome allgather + skip) ─────────────────
+
+    /// A singleton-trial-state group's successor outcome set, split across two
+    /// rank slices, allgathered in canonical `(m, ψ)` order and aggregated on
+    /// each slice, yields a cut bitwise identical (`to_bits`) to the single-rank
+    /// aggregation over the whole set — and the replicated group's cut exchange
+    /// is skipped (an empty pool list exchanges nothing; a naive exchange would
+    /// multiply the cut by the rank count). `CVaR` makes the aggregation
+    /// index-order-sensitive, so a reassembly that lost canonical order would
+    /// fail the bitwise check.
+    #[test]
+    fn d2_replicated_split_equals_single_rank_and_skips_exchange() {
+        use super::OutcomeExchangeScratch;
+        use crate::risk_measure::{BackwardOutcome, RiskMeasure, RiskMeasureScratch};
+
+        /// Rank 0 of a 2-rank world; `allgatherv` writes only rank 0's own slice
+        /// (`displs[0] = 0`), leaving rank 1's pre-populated segment intact.
+        struct Rank0Of2Outcome;
+        impl Communicator for Rank0Of2Outcome {
+            fn allgatherv<T: CommData>(
+                &self,
+                send: &[T],
+                recv: &mut [T],
+                counts: &[usize],
+                _displs: &[usize],
+            ) -> Result<(), CommError> {
+                recv[..counts[0]].clone_from_slice(&send[..counts[0]]);
+                Ok(())
+            }
+            fn allreduce<T: CommData>(
+                &self,
+                _s: &[T],
+                _r: &mut [T],
+                _o: ReduceOp,
+            ) -> Result<(), CommError> {
+                unreachable!()
+            }
+            fn broadcast<T: CommData>(&self, _b: &mut [T], _root: usize) -> Result<(), CommError> {
+                unreachable!()
+            }
+            fn barrier(&self) -> Result<(), CommError> {
+                unreachable!()
+            }
+            fn rank(&self) -> usize {
+                0
+            }
+            fn size(&self) -> usize {
+                2
+            }
+            fn abort(&self, code: i32) -> ! {
+                std::process::exit(code)
+            }
+        }
+
+        let n_state = 2usize;
+        let stride = 1 + n_state;
+        let x_hat = [1.0_f64, 2.0_f64];
+        // Four distinct outcomes (objective, subgradient); intercept =
+        // objective − subgradient·x_hat, matching the replicated reconstruct.
+        let raw: [(f64, [f64; 2]); 4] = [
+            (30.0, [1.0, 0.5]),
+            (10.0, [0.2, -0.3]),
+            (50.0, [-1.0, 2.0]),
+            (20.0, [0.7, 0.1]),
+        ];
+        let probabilities = [0.25_f64, 0.25, 0.25, 0.25];
+        let risk = RiskMeasure::CVaR {
+            alpha: 0.5,
+            lambda: 1.0,
+        };
+
+        let build = |sub: &[(f64, [f64; 2])]| -> Vec<BackwardOutcome> {
+            sub.iter()
+                .map(|&(obj, g)| {
+                    let intercept = obj - (g[0] * x_hat[0] + g[1] * x_hat[1]);
+                    BackwardOutcome {
+                        intercept,
+                        coefficients: g.to_vec(),
+                        objective_value: obj,
+                    }
+                })
+                .collect()
+        };
+
+        // Single-rank aggregation over the whole canonical set.
+        let whole = build(&raw);
+        let mut int_a = 0.0_f64;
+        let mut coeffs_a = vec![0.0_f64; n_state];
+        let mut scratch_a = RiskMeasureScratch::default();
+        risk.aggregate_cut_into(
+            &whole,
+            &probabilities,
+            &mut int_a,
+            &mut coeffs_a,
+            &mut scratch_a,
+        );
+
+        // Split: rank 0 owns outcomes [0, 2), rank 1 owns [2, 4). Each rank's
+        // local flat buffer is `objective ‖ subgradient` per outcome.
+        let flat = |sub: &[(f64, [f64; 2])]| -> Vec<f64> {
+            let mut v = Vec::new();
+            for &(obj, g) in sub {
+                v.push(obj);
+                v.extend_from_slice(&g);
+            }
+            v
+        };
+        let rank0_local = flat(&raw[..2]);
+        let rank1_local = flat(&raw[2..]);
+        let total = raw.len() * stride;
+
+        let mut ex = OutcomeExchangeScratch::default();
+        // Pre-populate rank 1's segment; `allgather_outcomes` preserves it (its
+        // resize only grows) and the stub overwrites only rank 0's prefix.
+        ex.recv.resize(total, 0.0);
+        ex.recv[2 * stride..total].copy_from_slice(&rank1_local);
+
+        let full = ex
+            .allgather_outcomes(&rank0_local, n_state, &[2, 2], &Rank0Of2Outcome)
+            .unwrap();
+
+        // Canonical order preserved: reassembled == rank0 ‖ rank1 == whole.
+        let expected_full = flat(&raw);
+        assert_eq!(
+            full,
+            &expected_full[..],
+            "allgather must reassemble in canonical (m, ψ) order"
+        );
+
+        // Reconstruct and aggregate on the reassembled full set.
+        let mut reassembled = Vec::new();
+        for o in 0..raw.len() {
+            let base = o * stride;
+            let objective = full[base];
+            let coefficients = full[base + 1..base + 1 + n_state].to_vec();
+            let intercept = objective - (coefficients[0] * x_hat[0] + coefficients[1] * x_hat[1]);
+            reassembled.push(BackwardOutcome {
+                intercept,
+                coefficients,
+                objective_value: objective,
+            });
+        }
+        let mut int_b = 0.0_f64;
+        let mut coeffs_b = vec![0.0_f64; n_state];
+        let mut scratch_b = RiskMeasureScratch::default();
+        risk.aggregate_cut_into(
+            &reassembled,
+            &probabilities,
+            &mut int_b,
+            &mut coeffs_b,
+            &mut scratch_b,
+        );
+
+        assert_eq!(
+            int_a.to_bits(),
+            int_b.to_bits(),
+            "split replicated aggregation intercept must be bitwise identical to single-rank"
+        );
+        for (a, b) in coeffs_a.iter().zip(&coeffs_b) {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "split replicated aggregation coefficient must be bitwise identical to single-rank"
+            );
+        }
+
+        // Cut-exchange skip: a replicated group contributes no pool, so the
+        // level's batched exchange runs over an empty pool list — nothing sent,
+        // nothing inserted.
+        let mut fcf = FutureCostFunction::new(1, n_state, 1, 10, &[0; 1]);
+        let mut bufs = CutSyncBuffers::new(n_state, 1, 1);
+        let (local, remote) = bufs
+            .sync_level_records(&[], &mut fcf, 1, &LocalBackend)
+            .unwrap();
+        assert_eq!((local, remote), (0, 0));
+        assert_eq!(fcf.total_active_cuts(), 0);
+    }
+
+    /// A level's two differing-dimension pools exchanged in ONE `sync_level_records`
+    /// call (not one collective per node): both pools' local cuts pack and pass
+    /// the per-pool guard; single-rank inserts no remote and never double-inserts
+    /// the local cuts.
+    #[test]
+    fn sync_level_records_batches_two_pools_in_one_exchange() {
+        let dims = [2usize, 3usize];
+        let mut fcf = FutureCostFunction::new_per_pool(&dims, 3, 1, 10, &[0; 2], &[6; 2]);
+        let mut bufs = CutSyncBuffers::new(3, 1, 1);
+        fcf.add_cut(0, 1, 0, 10.0, &[1.0, 2.0]);
+        fcf.add_cut(1, 1, 0, 20.0, &[3.0, 4.0, 5.0]);
+
+        let (local, remote) = bufs
+            .sync_level_records(&[0, 1], &mut fcf, 1, &LocalBackend)
+            .unwrap();
+        assert_eq!(
+            local, 2,
+            "both pools' single local cut packed in one exchange"
+        );
+        assert_eq!(remote, 0, "single-rank: no remote cuts");
+        assert_eq!(
+            fcf.total_active_cuts(),
+            2,
+            "local cuts must not be re-inserted"
+        );
     }
 }

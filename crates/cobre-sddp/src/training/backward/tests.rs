@@ -440,7 +440,7 @@ fn basis_store_with_one(
 /// pass repacks them from.
 ///
 /// The pass repacks `exchange` from `records` once per stage, so the two must
-/// agree: both are derived here from the same [`test_support::trial_point_records`]
+/// agree: both are derived here from the same [`test_support::trial_state_records`]
 /// (which replicates each scenario's state across every stage), and the buffers are
 /// pre-populated by driving the real `exchange` those records feed. A caller that
 /// instead crafted the buffers independently of `records` would have its trial
@@ -452,7 +452,7 @@ fn exchange_and_records(
 ) -> (ExchangeBuffers, Vec<TrajectoryRecord>) {
     use cobre_comm::LocalBackend;
 
-    let records = test_support::trial_point_records(states, n_stages);
+    let records = test_support::trial_state_records(states, n_stages);
     let mut bufs = ExchangeBuffers::new(n_state, states.len(), 1);
     bufs.exchange(&records, 0, n_stages, &LocalBackend).unwrap();
     (bufs, records)
@@ -469,6 +469,7 @@ fn exchange_with_states(n_state: usize, states: Vec<Vec<f64>>) -> ExchangeBuffer
             primal: vec![],
             dual: vec![],
             stage_cost: 0.0,
+            node_id: 0,
             state,
         })
         .collect();
@@ -816,7 +817,7 @@ fn single_stage_system_produces_no_cuts() {
 }
 
 #[test]
-fn two_stage_system_two_trial_points_generates_two_cuts_at_stage_0() {
+fn two_stage_system_two_trial_states_generates_two_cuts_at_stage_0() {
     let n_stages = 2_usize;
     let n_openings = 2_usize;
     let stochastic = make_stochastic_context(n_stages, n_openings);
@@ -1604,7 +1605,7 @@ fn cut_gradient_sign_physically_correct() {
 
 #[test]
 #[allow(clippy::too_many_lines)]
-fn cut_is_tight_at_trial_point() {
+fn cut_is_tight_at_trial_state() {
     // Regression test: a Benders cut must be tight (exact) at the trial
     // point x̂ where it was generated. That is:
     //   intercept + coefficient * x̂ = Q(x̂)
@@ -2295,7 +2296,7 @@ fn backward_solver_error_propagates() {
 fn test_backward_pass_parallel_cut_determinism() {
     let n_stages = 3_usize;
     let n_openings = 2_usize;
-    let n_trial_points = 8_usize;
+    let n_trial_states = 8_usize;
 
     let stochastic = make_stochastic_context(n_stages, n_openings);
     let state = test_support::state_layout(1, 0);
@@ -2304,10 +2305,10 @@ fn test_backward_pass_parallel_cut_determinism() {
 
     let n_state = state.n_state;
     #[allow(clippy::cast_possible_truncation)]
-    let forward_passes = n_trial_points as u32;
+    let forward_passes = n_trial_states as u32;
 
     // Build 8 distinct trial-point states.
-    let states: Vec<Vec<f64>> = (0..n_trial_points).map(|i| vec![i as f64 + 1.0]).collect();
+    let states: Vec<Vec<f64>> = (0..n_trial_states).map(|i| vec![i as f64 + 1.0]).collect();
     let (mut exchange, records) = exchange_and_records(n_state, &states, n_stages);
 
     let horizon = HorizonMode::Finite {
@@ -3752,7 +3753,7 @@ fn work_stealing_produces_identical_results_across_worker_counts() {
     // Acceptance criterion: the FCF state after running the backward pass
     // with 1 workspace must be bit-identical to the state after running
     // with 3 workspaces, given the same inputs. This verifies that the
-    // sort-by-trial_point_idx post-processing in the work-stealing
+    // sort-by-trial_state_idx post-processing in the work-stealing
     // implementation produces a deterministic FCF regardless of which
     // worker claims which trial point.
     let fcf_1 = run_backward_pass_with_n_workers(1);
@@ -4359,16 +4360,16 @@ fn allgatherv_dual_rank_stub_stage_stats_contains_both_ranks() {
 
 // ── read-site prefer-with-fallback unit tests ────────────────
 
-/// Run `process_trial_point_backward` for stage 0 → successor 1 with
+/// Run `process_by_scenario_backward` for stage 0 → successor 1 with
 /// explicitly-provided backward and forward basis stores.
 ///
 /// `basis_store` is taken by `&mut` so a `BasisStoreSliceMut` can be
-/// derived from it and passed to `process_trial_point_backward`.
+/// derived from it and passed to `process_by_scenario_backward`.
 ///
 /// Returns the mutated workspace so the caller can inspect
 /// `ws.solver.warm_start_calls`.
 #[allow(clippy::too_many_lines)]
-fn run_one_trial_point_with_stores(
+fn run_one_trial_state_with_stores(
     basis_store: &mut BasisStore,
 ) -> Result<Vec<SolverWorkspace<MockSolver>>, crate::SddpError> {
     use crate::context::StageContext;
@@ -4478,6 +4479,7 @@ fn run_one_trial_point_with_stores(
     let succ_spec = super::SuccessorSpec {
         t: 0,
         successor: 1,
+        successor_node: 1,
         successor_node_id: training_ctx.node_graph.node_ids[1],
         my_rank: 0,
         probabilities: &succ_probabilities,
@@ -4511,7 +4513,7 @@ fn run_one_trial_point_with_stores(
         ws.backward_accum.agg_arena.resize(n_state, 0.0_f64);
     }
 
-    super::process_trial_point_backward(
+    super::process_by_scenario_backward(
         ws,
         &ctx,
         &training_ctx,
@@ -4662,7 +4664,7 @@ fn resolve_backward_basis_returns_none_when_slot_is_empty() {
 #[test]
 fn backward_write_populates_basis_store_at_omega_zero() {
     let mut basis_store = BasisStore::new(1, 2);
-    let workspaces = run_one_trial_point_with_stores(&mut basis_store).unwrap();
+    let workspaces = run_one_trial_state_with_stores(&mut basis_store).unwrap();
 
     // Verify the BasisStore slot was written.
     assert!(
@@ -4713,16 +4715,16 @@ fn backward_write_preserves_slot_on_infeasibility_at_omega_zero() {
         "sentinel must be in place before the infeasible solve"
     );
 
-    // run_one_trial_point_with_stores uses MockSolver::always_ok, so we
+    // run_one_trial_state_with_stores uses MockSolver::always_ok, so we
     // exercise the reuse path (successful solve overwrites slot). For the
     // infeasibility path, the structural guarantee is: `?` in
-    // process_trial_point_backward propagates Err before the write site.
+    // process_by_scenario_backward propagates Err before the write site.
     // That path is integration-tested by `backward_pass_propagates_infeasible_error`.
     //
     // Here we test the complementary invariant: a *successful* solve at ω=0
     // with a pre-existing slot uses the reuse branch (get_basis into the
     // existing allocation) and leaves the slot Some (not None).
-    let result = run_one_trial_point_with_stores(&mut basis_store);
+    let result = run_one_trial_state_with_stores(&mut basis_store);
     assert!(result.is_ok(), "expected Ok for successful solve");
 
     // The slot must still be Some after the successful reuse-path write.
@@ -5225,20 +5227,20 @@ fn dcs_active_workspace() -> Vec<SolverWorkspace<ActiveSolver>> {
 /// and return the produced [`StagedCut`] plus the post-call per-slot
 /// `metadata_sync_contribution` snapshot. `dcs` toggles the path. The
 /// incoming state is pinned to `x_hat = 2.0`.
-fn run_dcs_backward_trial_point(
+fn run_dcs_backward_trial_state(
     dcs: Option<DcsParams>,
     iteration: u64,
 ) -> (super::StagedCut, Vec<f64>, Vec<u64>) {
-    run_dcs_backward_trial_point_at(dcs, iteration, 2.0)
+    run_dcs_backward_trial_state_at(dcs, iteration, 2.0)
 }
 
-/// `run_dcs_backward_trial_point` with the incoming-state pin `x_hat`
+/// `run_dcs_backward_trial_state` with the incoming-state pin `x_hat`
 /// parameterized, so a sweep can vary the pinned state (which cut binds).
 ///
 /// Returns the produced [`StagedCut`], its coefficient slice resolved from
 /// the worker arena (the bytes the FCF would receive), and the post-call
 /// `metadata_sync_contribution` snapshot.
-fn run_dcs_backward_trial_point_at(
+fn run_dcs_backward_trial_state_at(
     dcs: Option<DcsParams>,
     iteration: u64,
     x_hat: f64,
@@ -5328,6 +5330,7 @@ fn run_dcs_backward_trial_point_at(
     let succ = super::SuccessorSpec {
         t: 0,
         successor: 1,
+        successor_node: 1,
         successor_node_id: training_ctx.node_graph.node_ids[1],
         my_rank: 0,
         probabilities: &probabilities,
@@ -5385,7 +5388,7 @@ fn run_dcs_backward_trial_point_at(
         *slot = SolverStatsDelta::default();
     }
 
-    let cut = super::process_trial_point_backward(
+    let cut = super::process_by_scenario_backward(
         ws,
         &ctx,
         &training_ctx,
@@ -5428,9 +5431,9 @@ fn dcs_params(start_iteration: u64) -> DcsParams {
 #[test]
 fn backward_dcs_cut_equals_all_cuts_cut() {
     let iteration = 5;
-    let (frozen_cut, frozen_coefficients, _) = run_dcs_backward_trial_point(None, iteration);
+    let (frozen_cut, frozen_coefficients, _) = run_dcs_backward_trial_state(None, iteration);
     let (dcs_cut, dcs_coefficients, _) =
-        run_dcs_backward_trial_point(Some(dcs_params(2)), iteration);
+        run_dcs_backward_trial_state(Some(dcs_params(2)), iteration);
 
     assert!(
         (frozen_cut.intercept - dcs_cut.intercept).abs() < 1e-9,
@@ -5462,8 +5465,8 @@ fn backward_dcs_cut_equals_all_cuts_cut() {
 /// to the pre-DCS baseline (same fixture run with `None`).
 #[test]
 fn backward_dcs_off_is_identical_to_baseline() {
-    let (cut_a, coefficients_a, _) = run_dcs_backward_trial_point(None, 5);
-    let (cut_b, coefficients_b, _) = run_dcs_backward_trial_point(None, 5);
+    let (cut_a, coefficients_a, _) = run_dcs_backward_trial_state(None, 5);
+    let (cut_b, coefficients_b, _) = run_dcs_backward_trial_state(None, 5);
     assert_eq!(cut_a.intercept, cut_b.intercept);
     assert_eq!(coefficients_a, coefficients_b);
     // Baseline binding gradient.
@@ -5475,9 +5478,9 @@ fn backward_dcs_off_is_identical_to_baseline() {
 #[test]
 fn backward_dcs_inactive_before_start_iteration() {
     // start_iteration = 4, iteration = 1 → inactive.
-    let (frozen_cut, frozen_coefficients, frozen_meta) = run_dcs_backward_trial_point(None, 1);
+    let (frozen_cut, frozen_coefficients, frozen_meta) = run_dcs_backward_trial_state(None, 1);
     let (early_cut, early_coefficients, early_meta) =
-        run_dcs_backward_trial_point(Some(dcs_params(4)), 1);
+        run_dcs_backward_trial_state(Some(dcs_params(4)), 1);
     assert_eq!(frozen_cut.intercept, early_cut.intercept);
     assert_eq!(frozen_coefficients, early_coefficients);
     // Frozen path updates binding-count metadata; the inactive-DCS run takes
@@ -5496,8 +5499,8 @@ fn backward_dcs_inactive_before_start_iteration() {
 /// to no other.
 #[test]
 fn backward_dcs_binding_counts_match_frozen() {
-    let (_, _, frozen_meta) = run_dcs_backward_trial_point(None, 5);
-    let (_, _, dcs_meta) = run_dcs_backward_trial_point(Some(dcs_params(2)), 5);
+    let (_, _, frozen_meta) = run_dcs_backward_trial_state(None, 5);
+    let (_, _, dcs_meta) = run_dcs_backward_trial_state(Some(dcs_params(2)), 5);
 
     // Frozen path bumps exactly the binding slot 1 (the floor-4 cut at x=2).
     assert_eq!(
@@ -5559,10 +5562,10 @@ fn dcs_params_k1(start_iteration: u64, k1: Option<u32>) -> DcsParams {
 #[test]
 fn backward_dcs_exactness_and_terminates() {
     let iteration = 5;
-    let (frozen, frozen_coefficients, _) = run_dcs_backward_trial_point(None, iteration);
+    let (frozen, frozen_coefficients, _) = run_dcs_backward_trial_state(None, iteration);
 
     // Default-cap DCS reaches the no-violation stop and matches all-cuts.
-    let (dcs, dcs_coefficients, _) = run_dcs_backward_trial_point(Some(dcs_params(2)), iteration);
+    let (dcs, dcs_coefficients, _) = run_dcs_backward_trial_state(Some(dcs_params(2)), iteration);
     assert!((frozen.intercept - dcs.intercept).abs() < 1e-9);
     for (b, d) in frozen_coefficients.iter().zip(&dcs_coefficients) {
         assert!((b - d).abs() < 1e-9, "coeff mismatch frozen {b} vs DCS {d}");
@@ -5574,7 +5577,7 @@ fn backward_dcs_exactness_and_terminates() {
         max_inner_iterations: 1,
         ..dcs_params(2)
     };
-    let (dcs_tc, dcs_tc_coefficients, _) = run_dcs_backward_trial_point(Some(tight), iteration);
+    let (dcs_tc, dcs_tc_coefficients, _) = run_dcs_backward_trial_state(Some(tight), iteration);
     assert!((frozen.intercept - dcs_tc.intercept).abs() < 1e-9);
     for (b, d) in frozen_coefficients.iter().zip(&dcs_tc_coefficients) {
         assert!(
@@ -5593,12 +5596,12 @@ fn backward_dcs_exactness_and_terminates() {
 #[test]
 fn backward_dcs_finite_k1_window_takes_effect() {
     let iteration = 5;
-    let (frozen, frozen_coefficients, _) = run_dcs_backward_trial_point(None, iteration);
+    let (frozen, frozen_coefficients, _) = run_dcs_backward_trial_state(None, iteration);
     // Sanity: the all-cuts (and k1=None DCS) gradient is the binding cut's 2.0.
     assert!((frozen_coefficients[0] - 2.0).abs() < 1e-9);
 
     let (windowed, windowed_coefficients, _) =
-        run_dcs_backward_trial_point(Some(dcs_params_k1(2, Some(1))), iteration);
+        run_dcs_backward_trial_state(Some(dcs_params_k1(2, Some(1))), iteration);
     // The binding cut is windowed out, so the windowed optimum differs:
     // the surviving cuts (slots 0,2, both gradient 0) give a 0 gradient and
     // a different intercept than the all-cuts cut.
@@ -5621,8 +5624,8 @@ fn backward_dcs_finite_k1_window_takes_effect() {
 /// metadata, so cut + metadata bit-identity is the determinism surface.
 #[test]
 fn backward_dcs_run_to_run_determinism() {
-    let (cut_a, coefficients_a, meta_a) = run_dcs_backward_trial_point(Some(dcs_params(2)), 5);
-    let (cut_b, coefficients_b, meta_b) = run_dcs_backward_trial_point(Some(dcs_params(2)), 5);
+    let (cut_a, coefficients_a, meta_a) = run_dcs_backward_trial_state(Some(dcs_params(2)), 5);
+    let (cut_b, coefficients_b, meta_b) = run_dcs_backward_trial_state(Some(dcs_params(2)), 5);
     assert_eq!(
         cut_a.intercept.to_bits(),
         cut_b.intercept.to_bits(),
@@ -5656,9 +5659,9 @@ fn backward_dcs_exactness_sweep() {
     for &iteration in &iterations {
         for &x in &x_hats {
             let (frozen, frozen_coefficients, _) =
-                run_dcs_backward_trial_point_at(None, iteration, x);
+                run_dcs_backward_trial_state_at(None, iteration, x);
             let (dcs, dcs_coefficients, _) =
-                run_dcs_backward_trial_point_at(Some(dcs_params(2)), iteration, x);
+                run_dcs_backward_trial_state_at(Some(dcs_params(2)), iteration, x);
             assert!(
                 (frozen.intercept - dcs.intercept).abs() < 1e-9,
                 "sweep iter {iteration} x_hat {x}: intercept frozen {} vs DCS {}",
@@ -5843,6 +5846,7 @@ fn backward_dcs_frozen_cuts_present_no_duplicate_rows() {
     let succ = super::SuccessorSpec {
         t: 0,
         successor: 1,
+        successor_node: 1,
         successor_node_id: training_ctx.node_graph.node_ids[1],
         my_rank: 0,
         probabilities: &probabilities,
@@ -5900,7 +5904,7 @@ fn backward_dcs_frozen_cuts_present_no_duplicate_rows() {
         *slot = SolverStatsDelta::default();
     }
 
-    let dcs_cut = super::process_trial_point_backward(
+    let dcs_cut = super::process_by_scenario_backward(
         ws,
         &ctx,
         &training_ctx,
@@ -5921,7 +5925,7 @@ fn backward_dcs_frozen_cuts_present_no_duplicate_rows() {
     let _ = (&mut fcf, &mut exchange);
 
     // The all-cuts reference cut (cut-free base + full pool, no DCS).
-    let (allcuts, allcuts_coefficients, _) = run_dcs_backward_trial_point(None, iteration);
+    let (allcuts, allcuts_coefficients, _) = run_dcs_backward_trial_state(None, iteration);
 
     // With the fix (core = cut-free ctx.templates[s]), the binding cut is
     // added exactly once and the DCS cut matches the all-cuts cut. With the

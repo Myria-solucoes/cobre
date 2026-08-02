@@ -115,7 +115,8 @@ pub(crate) fn write_opening_outcome<S: SolverInterface + Send>(
             .sum::<f64>();
 }
 
-/// Capture the post-solve basis at the first-solved opening into `basis_slice[m, s]`.
+/// Capture the post-solve basis at the first-solved opening into
+/// `basis_slice[m, successor_node]`.
 ///
 /// Only the first-solved opening (`solve_order[0]`, = canonical ω=0 under the
 /// identity order) may capture: a later capture would store a basis whose retained
@@ -128,39 +129,28 @@ pub(crate) fn save_basis_at_omega_zero<S: SolverInterface + Send>(
     m: usize,
     x_hat: &[f64],
 ) {
-    let s = succ.successor;
-    let num_cols = succ.frozen_template.num_cols;
+    let successor_node = succ.successor_node;
     let base_row_count = succ.template_num_rows;
     let cut_row_count = succ.num_cuts_at_successor;
-    let basis_row_capacity = base_row_count + cut_row_count;
-    if let Some(captured) = basis_slice.get_mut(m, s).as_mut() {
-        ws.solver.get_basis(&mut captured.basis);
-        write_capture_metadata(
-            captured,
-            succ.successor_pool,
-            base_row_count,
-            cut_row_count,
-            x_hat,
-            succ.successor_node_id,
-        );
-    } else {
-        let mut captured = CapturedBasis::new(
-            num_cols,
-            basis_row_capacity,
-            base_row_count,
-            cut_row_count,
-            x_hat.len(),
-            succ.successor_node_id,
-        );
-        ws.solver.get_basis(&mut captured.basis);
-        write_capture_metadata(
-            &mut captured,
-            succ.successor_pool,
-            base_row_count,
-            cut_row_count,
-            x_hat,
-            succ.successor_node_id,
-        );
-        *basis_slice.get_mut(m, s) = Some(captured);
-    }
+    let captured = basis_slice
+        .get_mut(m, successor_node)
+        .get_or_insert_with(|| {
+            CapturedBasis::new(
+                succ.frozen_template.num_cols,
+                base_row_count + cut_row_count,
+                base_row_count,
+                cut_row_count,
+                x_hat.len(),
+                succ.successor_node_id,
+            )
+        });
+    ws.solver.get_basis(&mut captured.basis);
+    write_capture_metadata(
+        captured,
+        succ.successor_pool,
+        base_row_count,
+        cut_row_count,
+        x_hat,
+        succ.successor_node_id,
+    );
 }

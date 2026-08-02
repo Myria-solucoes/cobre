@@ -11,7 +11,7 @@
 //! count and of the claim/block order, by construction. Outcomes are
 //! accumulated worker-locally and scattered into a per-`(m, ω)` arena after the
 //! parallel region; cut aggregation runs canonically over ω per trial point, in
-//! ascending m (sddp.md "Opening-block scheduler is warm-start-only").
+//! ascending m (sddp.md "By-node scheduler is warm-start-only").
 
 use std::cmp;
 use std::num::NonZeroUsize;
@@ -29,7 +29,7 @@ use crate::{
     solver_stats::SolverStatsDelta,
     stage_solve::{StageInputs, run_stage_solve},
     state_exchange::ExchangeBuffers,
-    workspace::{BasisStore, OpeningBlockScratch, SolverWorkspace},
+    workspace::{BasisStore, ByNodeScratch, SolverWorkspace},
 };
 
 use super::{
@@ -51,23 +51,23 @@ pub(crate) struct OpeningOutcome {
 /// Never a function of worker or rank count.
 pub(crate) fn resolve_block_size(
     n_openings: usize,
-    opening_block_size: Option<NonZeroUsize>,
+    node_block_size: Option<NonZeroUsize>,
 ) -> usize {
-    let requested = opening_block_size.map_or(n_openings.div_ceil(2), NonZeroUsize::get);
+    let requested = node_block_size.map_or(n_openings.div_ceil(2), NonZeroUsize::get);
     requested.min(n_openings)
 }
 
 /// Resolve the number of opening-blocks `n_blocks` a stage's `n_openings`
 /// split into under `block_size` — the single owner of this formula, shared
-/// by [`process_stage_backward_opening_block`] (the claim-loop unit count) and its
+/// by [`process_stage_backward_by_node`] (the claim-loop unit count) and its
 /// caller (the block-pivot merge's per-stage block count).
-pub(crate) fn opening_block_count(n_openings: usize, block_size: usize) -> usize {
+pub(crate) fn by_node_block_count(n_openings: usize, block_size: usize) -> usize {
     n_openings.div_ceil(block_size.max(1))
 }
 
 /// Fill `out[..n_blocks]` with the identity permutation `0..n_blocks` — the
 /// canonical claim order (hardest-first disabled) and [`hardest_first_block_order`]'s pre-sort
-/// seed. `out` is pre-allocated (`OpeningBlockScratch::block_order`, reserved
+/// seed. `out` is pre-allocated (`ByNodeScratch::block_order`, reserved
 /// capacity `n_blocks_max`); cleared and refilled in place, never reallocated
 /// on the hot path.
 pub(crate) fn identity_block_order(n_blocks: usize, out: &mut Vec<u32>) {
@@ -118,13 +118,13 @@ pub(crate) fn hardest_first_block_order(
 /// that aborted its claim loop or `(worker_index, outcome_count)` — the count
 /// of entries this worker recorded into its own
 /// `ws.backward_accum.opening_outcomes_buf[..outcome_count]`, which
-/// [`opening_block_finish`] resolves back through `workspaces[worker_index]`.
+/// [`by_node_finish`] resolves back through `workspaces[worker_index]`.
 // Rationale: mirrors `process_stage_backward`'s disjoint-borrow argument list;
 // too_many_lines is the claim loop's single sequential region (LP load, warm-chain
 // solve, dual extraction, pivot accumulation, outcome recording) — splitting it
 // would scatter state the next step in the same loop iteration reads.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub(crate) fn process_stage_backward_opening_block<S: SolverInterface + Send>(
+pub(crate) fn process_stage_backward_by_node<S: SolverInterface + Send>(
     workspaces: &mut [SolverWorkspace<S>],
     ctx: &StageContext<'_>,
     training_ctx: &TrainingContext<'_>,
@@ -140,7 +140,7 @@ pub(crate) fn process_stage_backward_opening_block<S: SolverInterface + Send>(
     let n_openings = succ.probabilities.len();
     let cut_n_state = succ.cut_state.n_slots();
     let pop = succ.successor_populated_count;
-    let n_blocks = opening_block_count(n_openings, block_size);
+    let n_blocks = by_node_block_count(n_openings, block_size);
     debug_assert_eq!(
         block_order.len(),
         n_blocks,
@@ -218,11 +218,11 @@ pub(crate) fn process_stage_backward_opening_block<S: SolverInterface + Send>(
                     ws.solver.statistics_into(&mut stats_before);
 
                     // Only the block's first position warm-starts from the
-                    // captured `(m, s)` basis; later positions warm-continue the
-                    // block's own retained factorization (the same
-                    // first-solved-only rule the trial-point path enforces).
+                    // captured `(m, successor node)` basis; later positions
+                    // warm-continue the block's own retained factorization (the
+                    // same first-solved-only rule the trial-point path enforces).
                     let stored = if local_idx == 0 {
-                        basis_store.get(m, s)
+                        basis_store.get(m, succ.successor_node)
                     } else {
                         None
                     };
@@ -319,19 +319,19 @@ pub(crate) fn process_stage_backward_opening_block<S: SolverInterface + Send>(
 
 /// Scatter worker outcomes into the pre-allocated per-`(m, ω)` arena, aggregate
 /// each trial point's cut canonically over ω, and insert into the FCF in
-/// ascending m (sddp.md "Opening-block scheduler is warm-start-only" — never
+/// ascending m (sddp.md "By-node scheduler is warm-start-only" — never
 /// claim order).
 ///
-/// `scratch` is `BackwardPassState::opening_block_scratch`, sized once by `set_scheduler`;
+/// `scratch` is `BackwardPassState::by_node_scratch`, sized once by `set_scheduler`;
 /// the scatter overwrites `arena[0..local_work * n_openings]` in full before the
 /// aggregation loop reads it, so no clear pass is required between stages. Each
 /// touched slot's `coefficients` (and `coeffs_buf`) resize to THIS pool's
 /// `cut_n_state`, which may differ from a prior pool's — always within the
-/// capacity `OpeningBlockScratch::sized` reserved at the run's global `n_state`, so
+/// capacity `ByNodeScratch::sized` reserved at the run's global `n_state`, so
 /// this never reallocates on the hot path.
 // Rationale: mirrors the staged-cut merge's disjoint-borrow argument list.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn opening_block_finish<S: SolverInterface>(
+pub(crate) fn by_node_finish<S: SolverInterface>(
     worker_out: Vec<Result<(usize, usize), SddpError>>,
     workspaces: &[SolverWorkspace<S>],
     local_work: usize,
@@ -343,18 +343,18 @@ pub(crate) fn opening_block_finish<S: SolverInterface>(
     pool: usize,
     iteration: u64,
     fwd_offset: usize,
-    scratch: &mut OpeningBlockScratch,
+    scratch: &mut ByNodeScratch,
 ) -> Result<usize, SddpError> {
     let arena_len = local_work * n_openings;
     debug_assert!(
         scratch.arena.len() >= arena_len,
-        "OpeningBlockScratch arena must already cover local_work * n_openings ({arena_len}); got \
+        "ByNodeScratch arena must already cover local_work * n_openings ({arena_len}); got \
          arena len = {}",
         scratch.arena.len(),
     );
     debug_assert!(
         cut_n_state <= scratch.coeffs_buf.capacity(),
-        "cut_n_state ({cut_n_state}) exceeds OpeningBlockScratch::coeffs_buf's reserved capacity \
+        "cut_n_state ({cut_n_state}) exceeds ByNodeScratch::coeffs_buf's reserved capacity \
          ({}) — resizing must never reallocate on the opening-block hot path",
         scratch.coeffs_buf.capacity()
     );
@@ -402,17 +402,17 @@ pub(crate) fn opening_block_finish<S: SolverInterface>(
     }
     debug_assert_eq!(
         cuts_added, local_work,
-        "opening_block_finish must add exactly local_work cuts, matching the trial-point path"
+        "by_node_finish must add exactly local_work cuts, matching the by-scenario path"
     );
     Ok(cuts_added)
 }
 
 /// Merge each worker's per-block `(simplex_iterations sum, count)` — filled
-/// during [`process_stage_backward_opening_block`]'s claim loop, aggregated over every
+/// during [`process_stage_backward_by_node`]'s claim loop, aggregated over every
 /// trial point `m` a worker claimed for a block by construction — into
-/// [`OpeningBlockScratch::block_pivots`] at `stage_key`'s row. Telemetry-only:
+/// [`ByNodeScratch::block_pivots`] at `stage_key`'s row. Telemetry-only:
 /// touches no cut-generation state, so it is cut-neutral by construction
-/// (disjoint from `opening_block_finish`'s per-`(m, ω)` arena and FCF insertion).
+/// (disjoint from `by_node_finish`'s per-`(m, ω)` arena and FCF insertion).
 ///
 /// `per_worker` yields each worker's `(sums, counts)` slices, both indexed
 /// `[0, n_blocks)`; `n_blocks <= scratch.n_blocks_max` is the caller's
@@ -421,7 +421,7 @@ pub(crate) fn merge_block_pivots<'a>(
     per_worker: impl Iterator<Item = (&'a [u64], &'a [u64])>,
     n_blocks: usize,
     stage_key: usize,
-    scratch: &mut OpeningBlockScratch,
+    scratch: &mut ByNodeScratch,
 ) {
     debug_assert!(
         n_blocks <= scratch.n_blocks_max,
@@ -449,10 +449,10 @@ mod tests {
     use std::num::NonZeroUsize;
 
     use super::{
-        hardest_first_block_order, identity_block_order, merge_block_pivots, opening_block_count,
+        by_node_block_count, hardest_first_block_order, identity_block_order, merge_block_pivots,
         resolve_block_size,
     };
-    use crate::workspace::OpeningBlockScratch;
+    use crate::workspace::ByNodeScratch;
 
     #[test]
     fn resolve_block_size_defaults_to_half_openings_rounded_up() {
@@ -468,10 +468,10 @@ mod tests {
     }
 
     #[test]
-    fn opening_block_count_matches_div_ceil() {
-        assert_eq!(opening_block_count(7, 4), 2);
-        assert_eq!(opening_block_count(8, 4), 2);
-        assert_eq!(opening_block_count(1, 1), 1);
+    fn by_node_block_count_matches_div_ceil() {
+        assert_eq!(by_node_block_count(7, 4), 2);
+        assert_eq!(by_node_block_count(8, 4), 2);
+        assert_eq!(by_node_block_count(1, 1), 1);
     }
 
     /// Two workers' per-block `simplex_iterations` sums/counts merged into the
@@ -483,7 +483,7 @@ mod tests {
         let n_blocks = 2_usize;
         let bwd_max_openings = 4_usize;
         let num_stages = 3_usize;
-        let mut scratch = OpeningBlockScratch::sized(1, bwd_max_openings, 1, num_stages);
+        let mut scratch = ByNodeScratch::sized(1, bwd_max_openings, 1, num_stages);
         let stage_key = 1_usize;
 
         let worker0_sum = [10_u64, 0];

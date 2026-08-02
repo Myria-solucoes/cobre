@@ -74,9 +74,9 @@ use crate::{error::SddpError, trajectory::TrajectoryRecord};
 /// let mut bufs = ExchangeBuffers::new(2, 3, 1);
 ///
 /// let records: Vec<TrajectoryRecord> = vec![
-///     TrajectoryRecord { primal: vec![], dual: vec![], stage_cost: 0.0, state: vec![1.0, 2.0] },
-///     TrajectoryRecord { primal: vec![], dual: vec![], stage_cost: 0.0, state: vec![3.0, 4.0] },
-///     TrajectoryRecord { primal: vec![], dual: vec![], stage_cost: 0.0, state: vec![5.0, 6.0] },
+///     TrajectoryRecord { primal: vec![], dual: vec![], stage_cost: 0.0, node_id: 0, state: vec![1.0, 2.0] },
+///     TrajectoryRecord { primal: vec![], dual: vec![], stage_cost: 0.0, node_id: 0, state: vec![3.0, 4.0] },
+///     TrajectoryRecord { primal: vec![], dual: vec![], stage_cost: 0.0, node_id: 0, state: vec![5.0, 6.0] },
 /// ];
 ///
 /// let comm = LocalBackend;
@@ -391,6 +391,7 @@ mod tests {
             primal: vec![],
             dual: vec![],
             stage_cost: 0.0,
+            node_id: 0,
             state,
         }
     }

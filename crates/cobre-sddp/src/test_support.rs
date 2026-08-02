@@ -768,7 +768,7 @@ pub fn solve_stage_for_probe<'ws, S: SolverInterface>(
 /// per-stage repack of the gather buffers reproduces exactly `states` at whichever
 /// stage it runs — letting a test pin cut arithmetic against a known trial point.
 #[must_use]
-pub fn trial_point_records(states: &[Vec<f64>], n_stages: usize) -> Vec<TrajectoryRecord> {
+pub fn trial_state_records(states: &[Vec<f64>], n_stages: usize) -> Vec<TrajectoryRecord> {
     states
         .iter()
         .flat_map(|state| {
@@ -776,6 +776,7 @@ pub fn trial_point_records(states: &[Vec<f64>], n_stages: usize) -> Vec<Trajecto
                 primal: Vec::new(),
                 dual: Vec::new(),
                 stage_cost: 0.0,
+                node_id: 0,
                 state: state.clone(),
             })
         })

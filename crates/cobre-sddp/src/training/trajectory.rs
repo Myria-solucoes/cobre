@@ -32,6 +32,9 @@ pub struct TrajectoryRecord {
     /// LP objective value at this stage, excluding the future-cost theta variable.
     pub stage_cost: f64,
 
+    /// Declared JSON node id this visit resolved against (`NodeGraph::node_ids`).
+    pub node_id: i32,
+
     /// End-of-stage state vector (length `n_state`), extracted from `primal` by the stage indexer.
     pub state: Vec<f64>,
 }
@@ -46,12 +49,14 @@ mod tests {
             primal: vec![1.0, 2.0, 3.0],
             dual: vec![0.5, 0.6],
             stage_cost: 42.0,
+            node_id: 3,
             state: vec![9.0, 8.0],
         };
 
         assert_eq!(record.primal, vec![1.0, 2.0, 3.0]);
         assert_eq!(record.dual, vec![0.5, 0.6]);
         assert_eq!(record.stage_cost, 42.0);
+        assert_eq!(record.node_id, 3);
         assert_eq!(record.state, vec![9.0, 8.0]);
     }
 
@@ -61,6 +66,7 @@ mod tests {
             primal: vec![],
             dual: vec![],
             stage_cost: 42.0,
+            node_id: 0,
             state: vec![],
         };
         assert_eq!(record.stage_cost, 42.0);
@@ -72,6 +78,7 @@ mod tests {
             primal: vec![1.0, 2.0],
             dual: vec![3.0],
             stage_cost: 7.5,
+            node_id: 5,
             state: vec![4.0, 5.0],
         };
 
@@ -80,6 +87,7 @@ mod tests {
         assert_eq!(cloned.primal, original.primal);
         assert_eq!(cloned.dual, original.dual);
         assert_eq!(cloned.stage_cost, original.stage_cost);
+        assert_eq!(cloned.node_id, original.node_id);
         assert_eq!(cloned.state, original.state);
 
         cloned.stage_cost = 0.0;
@@ -94,6 +102,7 @@ mod tests {
             primal: vec![1.0],
             dual: vec![2.0],
             stage_cost: 3.0,
+            node_id: 0,
             state: vec![4.0],
         };
         let s = format!("{record:?}");
@@ -110,6 +119,7 @@ mod tests {
                 primal: vec![],
                 dual: vec![],
                 stage_cost: f64::from(i),
+                node_id: 0,
                 state: vec![],
             })
             .collect();

@@ -1919,7 +1919,7 @@ mod tests {
     /// family (both scheduler methods, a `level1` and a `dynamic` selection,
     /// all four stopping-rule types, both `historical_years` forms).
     fn injection_sweep_base_configs() -> Vec<serde_json::Value> {
-        let trial_point_flavored = serde_json::json!({
+        let by_scenario_flavored = serde_json::json!({
             "modeling": {
                 "inflow_non_negativity": { "method": "penalty" },
                 "cost_scale_factor": 1_000_000.0
@@ -1962,7 +1962,7 @@ mod tests {
                     "forward": { "price": "row_hyper_sparse" }
                 },
                 "parallelism": {
-                    "backward_scheduler": { "method": "trial_point" }
+                    "backward_scheduler": { "method": "by_scenario" }
                 },
                 "scenario_source": {
                     "seed": 7,
@@ -2007,7 +2007,7 @@ mod tests {
                 "max_coefficient_magnitude": 2.0
             }
         });
-        let opening_block_flavored = serde_json::json!({
+        let by_node_flavored = serde_json::json!({
             "training": {
                 "forward_passes": 4,
                 "stopping_rules": [{ "type": "iteration_limit", "limit": 10 }],
@@ -2022,12 +2022,12 @@ mod tests {
                     }
                 },
                 "parallelism": {
-                    "backward_scheduler": { "method": "opening_block", "block_size": 4 }
+                    "backward_scheduler": { "method": "by_node", "block_size": 4 }
                 },
                 "selection": { "method": "sampled", "forward_passes": 4 }
             }
         });
-        vec![trial_point_flavored, opening_block_flavored]
+        vec![by_scenario_flavored, by_node_flavored]
     }
 
     /// Collect the JSON Pointer of every object node in `value`.

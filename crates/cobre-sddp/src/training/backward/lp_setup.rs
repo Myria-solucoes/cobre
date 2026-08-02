@@ -66,14 +66,15 @@ pub(crate) fn patch_opening_bounds<S: SolverInterface + Send>(
     )
 }
 
-/// Resolve the ω=0 warm-start basis from the worker's `BasisStoreSliceMut`.
+/// Resolve the ω=0 warm-start basis from the worker's `BasisStoreSliceMut`,
+/// keyed by the trial point `m` and the successor's canonical node position.
 ///
 /// Returns `None` when the slot is empty (cold start or no prior capture).
 #[inline]
 pub(crate) fn resolve_backward_basis<'a>(
     basis_slice: &'a BasisStoreSliceMut<'_>,
     m: usize,
-    s: usize,
+    successor_node: usize,
 ) -> Option<&'a CapturedBasis> {
-    basis_slice.get(m, s)
+    basis_slice.get(m, successor_node)
 }

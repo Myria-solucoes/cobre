@@ -215,6 +215,7 @@ fn empty_records(n: usize) -> Vec<TrajectoryRecord> {
             primal: Vec::new(),
             dual: Vec::new(),
             stage_cost: 0.0,
+            node_id: 0,
             state: Vec::new(),
         })
         .collect()
@@ -3643,6 +3644,7 @@ mod dcs_forward {
             primal: Vec::new(),
             dual: Vec::new(),
             stage_cost: 0.0,
+            node_id: 0,
             state: Vec::new(),
         }];
         let key = StageKey {
@@ -3656,6 +3658,7 @@ mod dcs_forward {
             terminal_has_boundary_cuts: false,
             pool: &fcf.pools[0],
             dcs,
+            node: 0,
         };
         let mut slices = basis_store.split_workers_mut(1);
         let stage_cost = run_forward_stage(
@@ -3989,6 +3992,7 @@ mod transit_bucket_copy_gap {
             primal: Vec::new(),
             dual: Vec::new(),
             stage_cost: 0.0,
+            node_id: 0,
             state: Vec::new(),
         }];
         let key = StageKey {
@@ -4002,6 +4006,7 @@ mod transit_bucket_copy_gap {
             terminal_has_boundary_cuts: false,
             pool: &fcf.pools[0],
             dcs: None,
+            node: 0,
         };
         let mut slices = basis_store.split_workers_mut(1);
         run_forward_stage(

@@ -29,6 +29,7 @@ use crate::{
     error::SddpError,
     forward::{ForwardResult, StageKey, run_forward_stage},
     indexer::StateSpace,
+    setup::node_graph::NodeGraph,
     solve::partition,
     solver_phase::Phase,
     solver_stats::SolverStatsDelta,
@@ -345,10 +346,11 @@ impl ForwardPassState {
 
         let noise_dim = stochastic.dim();
 
-        let terminal_has_boundary_cuts = num_stages > 0
-            && inputs.fcf.pools[training_ctx.node_graph.nodes[num_stages - 1].pool_id]
-                .warm_start_count
-                > 0;
+        let terminal_has_boundary_cuts = num_stages > 0 && {
+            let terminal_node = frontier_node(training_ctx.node_graph, num_stages - 1);
+            inputs.fcf.pools[training_ctx.node_graph.nodes[terminal_node].pool_id].warm_start_count
+                > 0
+        };
 
         // Re-size the per-worker per-stage accumulators: the worker count may
         // differ from `new()` if the pool shrank. Fast path resets in place when
@@ -579,6 +581,58 @@ impl ForwardPassState {
     }
 }
 
+/// Ascending node-graph positions with `nodes[pos].stage == stage` — the
+/// stage's alive frontier. Structural only (reads [`NodeGraph::nodes`]; no
+/// sampling or enumeration selection): a synthesized or declared chain's
+/// frontier is always a singleton, and below a recombination join a declared
+/// graph's frontier carries more than one node.
+fn stage_frontier(node_graph: &NodeGraph, stage: usize) -> impl Iterator<Item = usize> + '_ {
+    node_graph
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(move |(_, n)| n.stage == stage)
+        .map(|(pos, _)| pos)
+}
+
+/// `node`'s single canonical predecessor, or `None` at a root. A node reached
+/// by more than one edge is a recombination join — `debug_assert`-checked
+/// (construction invariant), never silently resolved to an arbitrary
+/// predecessor.
+fn node_parent(node_graph: &NodeGraph, node: usize) -> Option<usize> {
+    let mut candidates = node_graph
+        .successors
+        .iter()
+        .enumerate()
+        .filter(|(_, succs)| succs.iter().any(|s| s.child == node))
+        .map(|(pos, _)| pos);
+    let parent = candidates.next();
+    debug_assert!(
+        candidates.next().is_none(),
+        "node_parent: node {node} has more than one predecessor (a recombination join)"
+    );
+    parent
+}
+
+/// Stage `stage`'s sole alive frontier node. The scenario-count visit set
+/// [`run_forward_worker`] assigns does not yet split scenarios across a
+/// multi-node frontier, so a frontier carrying more than one node here is a
+/// `debug_assert`-checked construction invariant, not a silent default.
+fn frontier_node(node_graph: &NodeGraph, stage: usize) -> usize {
+    let mut frontier = stage_frontier(node_graph, stage);
+    let node = frontier.next();
+    debug_assert!(
+        node.is_some(),
+        "frontier_node: stage {stage} carries no alive node"
+    );
+    debug_assert!(
+        frontier.next().is_none(),
+        "frontier_node: stage {stage} carries more than one alive node"
+    );
+    // `stage` itself is a safe fallback consistent with the debug-checked invariants above.
+    node.unwrap_or(stage)
+}
+
 /// Execute the forward pass for one rayon worker's scenario partition, through
 /// every stage, accumulating trajectory costs and per-stage solver statistics.
 ///
@@ -628,6 +682,11 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
         .dcs
         .filter(|p| p.is_active(params.iteration));
 
+    // Rationale: `t` indexes several parallel per-stage collections
+    // (params.frozen, params.ctx.cumulative_discount_factors, the resolved
+    // frontier node) beyond `per_stage_stats`, so an iterator over
+    // `per_stage_stats` alone would not eliminate the range index.
+    #[allow(clippy::needless_range_loop)]
     for t in 0..params.num_stages {
         let cum_d = params
             .ctx
@@ -635,6 +694,27 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
             .get(t)
             .copied()
             .unwrap_or(1.0);
+
+        // This stage's frontier visit — every scenario at stage `t` resolves
+        // its pool/node-id against this SAME node (frontier_node's singleton
+        // invariant); below a recombination join a declared graph's frontier
+        // would carry more than one node, one visit per distinct prefix, not
+        // yet driven by this scenario-count visit set.
+        let node = frontier_node(params.training_ctx.node_graph, t);
+        let pool_id = params.training_ctx.node_graph.nodes[node].pool_id;
+
+        // Each visit's incoming state is its parent node's outgoing state
+        // along the canonical path — on today's singleton frontier the parent
+        // sits at stage t-1, the same trajectory's own previous record.
+        let parent_stage = (t > 0).then(|| {
+            let parent = node_parent(params.training_ctx.node_graph, node);
+            debug_assert!(
+                parent.is_some(),
+                "run_forward_worker: a non-root visit must resolve a parent (t -> t+1 graph invariant)"
+            );
+            parent.map_or(t - 1, |p| params.training_ctx.node_graph.nodes[p].stage)
+        });
+
         for (local_m, m) in (start_m..end_m).enumerate() {
             // Reset the solver's simplex state at the per-scenario boundary so
             // this scenario's landed vertex cannot depend on which scenarios the
@@ -654,10 +734,9 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
                 ws.solver.load_model(&params.frozen[t]);
             }
             ws.current_state.clear();
-            let src: &[f64] = if t == 0 {
-                params.initial_state
-            } else {
-                &worker_records[local_m * params.num_stages + (t - 1)].state
+            let src: &[f64] = match parent_stage {
+                None => params.initial_state,
+                Some(ps) => &worker_records[local_m * params.num_stages + ps].state,
             };
             ws.current_state.extend_from_slice(src);
 
@@ -709,9 +788,6 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
             })?;
             let raw_noise = noise.as_slice();
 
-            // Pool id resolved from the node graph for the node at the current
-            // stage — the pool whose cuts the frozen/DCS LP at stage `t` embeds.
-            let pool_id = params.training_ctx.node_graph.nodes[t].pool_id;
             let key = StageKey {
                 t,
                 m,
@@ -723,6 +799,7 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
                 terminal_has_boundary_cuts: params.terminal_has_boundary_cuts,
                 pool: &params.fcf.pools[pool_id],
                 dcs: dcs_params,
+                node,
             };
             let stats_before_stage = ws.solver.statistics();
             let stage_cost = run_forward_stage(
@@ -1136,6 +1213,7 @@ mod tests {
                     primal: Vec::new(),
                     dual: Vec::new(),
                     stage_cost: 0.0,
+                    node_id: 0,
                     state: Vec::new(),
                 })
                 .collect();
@@ -1451,6 +1529,7 @@ mod tests {
                 primal: Vec::new(),
                 dual: Vec::new(),
                 stage_cost: 0.0,
+                node_id: 0,
                 state: Vec::new(),
             })
             .collect();
@@ -2026,6 +2105,7 @@ mod tests {
             primal: Vec::new(),
             dual: Vec::new(),
             stage_cost: 0.0,
+            node_id: 0,
             state: Vec::new(),
         }];
         let mut per_stage_stats = vec![SolverStatsDelta::default()];
@@ -2051,5 +2131,148 @@ mod tests {
             "hydro B (half coverage) weight should be 0.5, got {}",
             ws.scratch.lag_weight_accum[1]
         );
+    }
+
+    // ── Declared-graph frontier resolution (branching coverage) ─────────────
+
+    /// A root fanning into 4 leaves at stage 1. Each leaf's frontier visit
+    /// must read its OWN pool id (the shared leaf pool) and node id — never a
+    /// positional `nodes[t]` read, which on this declared graph would land on
+    /// whichever leaf happens to occupy canonical position 1 — and its
+    /// incoming state must resolve to the root's own outgoing state.
+    #[test]
+    fn declared_k_fan_frontier_resolves_each_leaf_own_pool_and_node_id_with_root_incoming_state() {
+        use cobre_core::temporal::{Node, PolicyGraph, PolicyGraphType, Transition};
+        use cobre_io::StageIdResolver;
+
+        use crate::setup::node_graph::build_node_graph;
+
+        fn node(id: i32, stage_id: i32) -> Node {
+            Node {
+                id,
+                stage_id,
+                realization_id: None,
+                label: None,
+            }
+        }
+        fn transition(source_id: i32, target_id: i32, probability: f64) -> Transition {
+            Transition {
+                source_id,
+                target_id,
+                probability,
+                annual_discount_rate_override: None,
+            }
+        }
+
+        let stochastic = make_stochastic_context_2_stages();
+        let study_stage_ids = [0_i32, 1_i32];
+        let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+        let graph = PolicyGraph {
+            graph_type: PolicyGraphType::FiniteHorizon,
+            annual_discount_rate: 0.0,
+            nodes: vec![node(0, 0), node(1, 1), node(2, 1), node(3, 1), node(4, 1)],
+            transitions: vec![
+                transition(0, 1, 0.25),
+                transition(0, 2, 0.25),
+                transition(0, 3, 0.25),
+                transition(0, 4, 0.25),
+            ],
+            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            season_map: None,
+        };
+        let node_graph = build_node_graph(&graph, 2, &resolver, &stochastic)
+            .expect("declared K-fan graph must build");
+
+        let root = 0_usize;
+        let leaves: Vec<usize> = stage_frontier(&node_graph, 1).collect();
+        assert_eq!(leaves.len(), 4, "all 4 leaves must be alive at stage 1");
+
+        let expected_leaf_pool = node_graph.nodes[leaves[0]].pool_id;
+        assert_ne!(
+            expected_leaf_pool, node_graph.nodes[root].pool_id,
+            "the shared leaf pool must differ from the root's own pool"
+        );
+        let leaf_node_ids: Vec<i32> = leaves.iter().map(|&l| node_graph.node_ids[l]).collect();
+        assert_eq!(
+            leaf_node_ids,
+            vec![1, 2, 3, 4],
+            "each leaf must resolve its OWN declared node id"
+        );
+
+        let root_state = vec![7.0_f64, 8.0_f64];
+        let num_stages = 2_usize;
+        let mut worker_records: Vec<TrajectoryRecord> = (0..num_stages)
+            .map(|_| TrajectoryRecord {
+                primal: Vec::new(),
+                dual: Vec::new(),
+                stage_cost: 0.0,
+                node_id: 0,
+                state: Vec::new(),
+            })
+            .collect();
+        worker_records[0].state = root_state.clone();
+        worker_records[0].node_id = node_graph.node_ids[root];
+
+        for &leaf in &leaves {
+            assert_eq!(
+                node_graph.nodes[leaf].pool_id, expected_leaf_pool,
+                "leaf {leaf} must read its own pool_id (the shared leaf pool)"
+            );
+
+            let parent = node_parent(&node_graph, leaf);
+            assert_eq!(
+                parent,
+                Some(root),
+                "leaf {leaf}'s parent must resolve to the root"
+            );
+            let parent_stage = node_graph.nodes[parent.unwrap()].stage;
+            assert_eq!(
+                worker_records[parent_stage].state, root_state,
+                "leaf {leaf}'s incoming state must equal the root's own outgoing state"
+            );
+        }
+    }
+
+    // ── No graph-shape dispatch in the forward path ──────────────────────────
+
+    /// The forward path carries no graph-shape dispatch — chain parity is
+    /// degeneracy (the node-native path running on the one-node-per-stage
+    /// graph), never a fork to preserved legacy code. Banned tokens are
+    /// assembled from char arrays so this check is not itself a false-positive
+    /// hit for the same predicate it looks for.
+    #[test]
+    fn forward_path_has_no_shape_selected_layout_branch() {
+        let banned: Vec<String> = vec![
+            ['i', 's', '_', 'c', 'h', 'a', 'i', 'n'].iter().collect(),
+            [
+                'n', 'o', 'd', 'e', 's', '.', 'i', 's', '_', 'e', 'm', 'p', 't', 'y', '(', ')',
+            ]
+            .iter()
+            .collect(),
+            [
+                'g', 'r', 'a', 'p', 'h', '.', 'i', 's', '_', 'n', 'o', 'n', 'e', '(', ')',
+            ]
+            .iter()
+            .collect(),
+        ];
+        let sources: [(&str, &str); 3] = [
+            (
+                "forward_pass_state.rs",
+                include_str!("forward_pass_state.rs"),
+            ),
+            ("forward/mod.rs", include_str!("forward/mod.rs")),
+            (
+                "forward/stage_solve.rs",
+                include_str!("forward/stage_solve.rs"),
+            ),
+        ];
+        for (name, src) in sources {
+            for token in &banned {
+                assert!(
+                    !src.contains(token.as_str()),
+                    "{name}: forward path must not branch on a graph-shape predicate ({token})"
+                );
+            }
+        }
     }
 }

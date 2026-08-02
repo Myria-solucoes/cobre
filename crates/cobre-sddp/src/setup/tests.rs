@@ -1048,7 +1048,7 @@ fn train_generates_cuts_in_fcf() {
 /// pools land. The backward pass still routes openings per STAGE
 /// (`tree_view.n_openings(successor_stage)`), so training this graph panics
 /// today: a node with more than one child duplicates or exceeds that stage's
-/// raw opening count, violating `trial_point.rs`'s "`solve_order(s)` must be a
+/// raw opening count, violating `by_scenario.rs`'s "`solve_order(s)` must be a
 /// permutation of `0..n_openings`" invariant. Chain topologies are unaffected
 /// and stay bit-for-bit pinned by the golden parity suite.
 #[test]

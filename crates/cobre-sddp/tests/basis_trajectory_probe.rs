@@ -496,6 +496,7 @@ fn run_extra_forward_pass(
             primal: Vec::new(),
             dual: Vec::new(),
             stage_cost: 0.0,
+            node_id: 0,
             state: Vec::new(),
         })
         .collect();

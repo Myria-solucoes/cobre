@@ -363,6 +363,42 @@ pub(crate) fn assemble_outcome_weights(
     );
 }
 
+/// Reverse-topological cut-sharing levels: cut-generating nodes (those with at
+/// least one successor — a leaf produces no cut) grouped by stage, the outer
+/// list descending by stage and each inner list ascending by canonical node
+/// position. Sibling subtrees at one level are independent (nested per-node
+/// risk), so a level is one cut-sharing barrier. Absent `nodes[]` every stage
+/// carries one such node, so each level holds exactly one node (== that stage)
+/// and the sweep reduces to the reversed stage loop.
+pub(crate) fn backward_cut_levels(graph: &NodeGraph) -> Vec<Vec<usize>> {
+    let cut_generating = |pos: usize| !graph.successors[pos].is_empty();
+    let Some(max_stage) = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|&(pos, _)| cut_generating(pos))
+        .map(|(_, n)| n.stage)
+        .max()
+    else {
+        return Vec::new();
+    };
+
+    let mut levels: Vec<Vec<usize>> = Vec::new();
+    for stage in (0..=max_stage).rev() {
+        let level: Vec<usize> = graph
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|&(pos, n)| n.stage == stage && cut_generating(pos))
+            .map(|(pos, _)| pos)
+            .collect();
+        if !level.is_empty() {
+            levels.push(level);
+        }
+    }
+    levels
+}
+
 /// Number of fully-enumerated scenarios the node graph encodes: the sum over
 /// every root→leaf path of the product of `openings.len` along that path
 /// (`f(n) = |Ω_n| · Σ_child f(child)`, `f(leaf) = |Ω_leaf|`, then summed over
@@ -1282,6 +1318,68 @@ mod tests {
             "the shared leaf pool sums both children's π = |Ω_root| each, not divided between them"
         );
         assert_prefix_duality(&ng_branchy);
+    }
+
+    // ── backward_cut_levels: reverse-topological level decomposition ────────
+
+    #[test]
+    fn backward_cut_levels_chain_is_one_node_per_level_descending_stage() {
+        let n_stages = 4;
+        let stochastic = stochastic_context(n_stages, 1, 3);
+        let study_stage_ids: Vec<i32> = (0..n_stages as i32).collect();
+        let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+        let ng = build_node_graph(&empty_graph(), n_stages, &resolver, &stochastic).unwrap();
+
+        let levels = backward_cut_levels(&ng);
+        // The terminal leaf (stage 3) generates no cut; stages 2,1,0 each hold
+        // exactly one cut-generating node, descending.
+        assert_eq!(levels, vec![vec![2], vec![1], vec![0]]);
+    }
+
+    #[test]
+    fn backward_cut_levels_multi_node_level_is_ascending_node_id_descending_stage() {
+        // Root (stage 0) fans into two INTERIOR nodes at stage 1 (each with its
+        // own two leaves at stage 2). The stage-1 level therefore carries two
+        // cut-generating nodes; the leaves generate none.
+        let stochastic = stochastic_context(3, 1, 2);
+        let graph = PolicyGraph {
+            nodes: vec![
+                node(0, 0, None),
+                node(1, 1, None),
+                node(2, 1, None),
+                node(3, 2, None),
+                node(4, 2, None),
+                node(5, 2, None),
+                node(6, 2, None),
+            ],
+            transitions: vec![
+                transition(0, 1, 0.5),
+                transition(0, 2, 0.5),
+                transition(1, 3, 0.5),
+                transition(1, 4, 0.5),
+                transition(2, 5, 0.5),
+                transition(2, 6, 0.5),
+            ],
+            ..empty_graph()
+        };
+        let study_stage_ids = [0, 1, 2];
+        let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+        let ng = build_node_graph(&graph, 3, &resolver, &stochastic).unwrap();
+
+        let levels = backward_cut_levels(&ng);
+        // Stage 1 (both interior nodes, ascending position) before stage 0.
+        assert_eq!(levels, vec![vec![1, 2], vec![0]]);
+        for level in &levels {
+            assert!(
+                level.windows(2).all(|w| w[0] < w[1]),
+                "each level's node positions must be strictly ascending"
+            );
+            let stages: Vec<usize> = level.iter().map(|&p| ng.nodes[p].stage).collect();
+            assert!(
+                stages.windows(2).all(|w| w[0] == w[1]),
+                "every node in a level shares one stage"
+            );
+        }
     }
 
     /// `Σ_leaf π(leaf)·|Ω_leaf| == enumerated_scenario_count(graph)` — the

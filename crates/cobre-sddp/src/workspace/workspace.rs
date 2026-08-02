@@ -411,10 +411,10 @@ pub(crate) struct BackwardAccumulators {
     /// `n_openings`). Re-initialised once per stage; merged into the per-stage
     /// `Vec<SolverStatsDelta>` in `BackwardResult::stage_stats`.
     pub(crate) per_opening_stats: Vec<SolverStatsDelta>,
-    /// Per-block `simplex_iterations` sum for the opening-block
+    /// Per-block `simplex_iterations` sum for the by-node
     /// scheduler's pivot accumulator, index `b` in `[0, n_blocks)` for
     /// the current stage. Re-initialised once per stage (never per trial
-    /// point); merged into `OpeningBlockScratch::block_pivots` after the
+    /// point); merged into `ByNodeScratch::block_pivots` after the
     /// parallel region.
     pub(crate) block_pivot_sum: Vec<u64>,
     /// Per-block solved-opening count, parallel to `block_pivot_sum`.
@@ -427,8 +427,8 @@ pub(crate) struct BackwardAccumulators {
     /// Per-worker staging buffer for cuts produced within one stage; drained at
     /// the rayon closure boundary so ownership can cross the closure return.
     pub(crate) staged_cuts_buf: Vec<StagedCut>,
-    /// Per-worker opening-block scheduler out-buffer (`process_stage_backward_opening_block`'s
-    /// claim loop). Starts empty — zero footprint under the default `TrialPoint`
+    /// Per-worker by-node scheduler out-buffer (`process_stage_backward_by_node`'s
+    /// claim loop). Starts empty — zero footprint under the default `ByScenario`
     /// scheduler, which never touches it. The outer `Vec` grows once, per worker,
     /// to a stage's claimed-unit high-water mark (indexed by a per-stage count,
     /// never `clear`ed/`drain`ed); each slot's `coefficients` resizes to the
@@ -490,35 +490,35 @@ impl BackwardAccumulators {
 }
 
 // ---------------------------------------------------------------------------
-// OpeningBlockScratch
+// ByNodeScratch
 // ---------------------------------------------------------------------------
 
-/// Rank-level pre-allocated scratch for the opening-block scheduler
+/// Rank-level pre-allocated scratch for the by-node scheduler
 /// (`training.parallelism.backward_scheduler`), held on `BackwardPassState`
 /// and reused across every backward stage for the lifetime of a training run.
 ///
-/// Empty (`arena` capacity `0`) under `BackwardScheduler::TrialPoint` (the
+/// Empty (`arena` capacity `0`) under `BackwardScheduler::ByScenario` (the
 /// default) — sized once by `BackwardPassState::set_scheduler` when the resolved
-/// scheduler is `OpeningBlock`, never on the hot path (sddp.md "Opening-block
+/// scheduler is `ByNode`, never on the hot path (sddp.md "By-node
 /// scheduler is warm-start-only").
 #[derive(Default)]
-pub(crate) struct OpeningBlockScratch {
+pub(crate) struct ByNodeScratch {
     /// Per-`(m, ω)` outcome arena, addressed `arena[m * n_openings + omega]` for
     /// the CURRENT stage's `n_openings` — a prefix of the full
     /// `max_local_fwd * bwd_max_openings`-outcome allocation; a stage with fewer
     /// openings than the run's max simply uses less of it. Mirrors
     /// `BackwardAccumulators::agg_arena`'s grow-once/overwrite-before-read
     /// discipline: every `(m, ω)` in the active region is written by
-    /// `opening_block_finish`'s scatter before the aggregation loop reads it, so no clear
+    /// `by_node_finish`'s scatter before the aggregation loop reads it, so no clear
     /// pass is required between stages. Each entry's `coefficients` starts at
     /// `n_state` length but is resized (never reallocated — capacity is the
     /// invariant) to the CURRENT stage's `cut_n_state` during that scatter, a
     /// stage whose successor disables a state group projecting to fewer slots.
     pub(crate) arena: Vec<BackwardOutcome>,
-    /// `CVaR` weight-computation scratch for `opening_block_finish`'s per-trial-point
+    /// `CVaR` weight-computation scratch for `by_node_finish`'s per-trial-point
     /// aggregation loop.
     pub(crate) risk_scratch: RiskMeasureScratch,
-    /// Aggregated cut coefficients buffer for `opening_block_finish`'s per-trial-point
+    /// Aggregated cut coefficients buffer for `by_node_finish`'s per-trial-point
     /// aggregation loop; starts at `n_state` length, resized (within reserved
     /// capacity) to each stage's `cut_n_state` — see [`Self::arena`].
     pub(crate) coeffs_buf: Vec<f64>,
@@ -552,8 +552,8 @@ pub(crate) struct OpeningBlockScratch {
     pub(crate) block_order: Vec<u32>,
 }
 
-impl OpeningBlockScratch {
-    /// Allocate the arena and aggregation scratch for `OpeningBlock`: `arena`
+impl ByNodeScratch {
+    /// Allocate the arena and aggregation scratch for `ByNode`: `arena`
     /// holds `max_local_fwd * bwd_max_openings` outcomes, each with an
     /// `n_state`-length coefficient vector; `block_pivots` and
     /// `block_pivots_prev` each hold `num_stages * bwd_max_openings`
@@ -944,15 +944,18 @@ impl<S: SolverInterface> WorkspacePool<S> {
 // BasisStore
 // ---------------------------------------------------------------------------
 
-/// Per-scenario, per-stage basis storage for warm-starting LP solves.
+/// Per-scenario, per-node basis storage for warm-starting LP solves.
 ///
-/// The store is indexed as `store[scenario_index][stage_index]`. During the
-/// forward pass, each worker writes to its disjoint scenario range. During
-/// the backward pass, all workers read from any scenario's basis.
+/// The store is indexed as `store[scenario_index][node_position]`. The forward
+/// pass writes each visit at its stage position and the backward pass
+/// warm-starts a cut's successor at that successor's canonical node position;
+/// absent `nodes[]` node position == stage, so the two coincide. During the
+/// forward pass, each worker writes to its disjoint scenario range; during the
+/// backward pass, all workers read from any scenario's basis.
 ///
 /// Internally, data is stored flat as
-/// `bases[scenario * num_stages + stage]` for cache-friendly sequential
-/// access within a single scenario's stage loop.
+/// `bases[scenario * num_nodes + node]` for cache-friendly sequential
+/// access within a single scenario's node loop.
 ///
 /// # Cut selection interaction
 ///
@@ -965,15 +968,15 @@ impl<S: SolverInterface> WorkspacePool<S> {
 ///
 /// [`SolverStatistics`]: cobre_solver::SolverStatistics
 pub struct BasisStore {
-    /// Flat storage: `bases[scenario * num_stages + stage]`.
+    /// Flat storage: `bases[scenario * num_nodes + node]`.
     bases: Vec<Option<CapturedBasis>>,
-    /// Number of stages per scenario.
-    num_stages: usize,
+    /// Node-axis length (canonical node count; equals `num_stages` on the chain).
+    num_nodes: usize,
 }
 
 impl BasisStore {
-    /// Allocate a new store for `num_scenarios` scenarios and `num_stages`
-    /// stages, with every slot initialised to `None`.
+    /// Allocate a new store for `num_scenarios` scenarios and `num_nodes`
+    /// node positions, with every slot initialised to `None`.
     ///
     /// # Examples
     ///
@@ -982,41 +985,41 @@ impl BasisStore {
     ///
     /// let store = BasisStore::new(4, 10);
     /// assert_eq!(store.num_scenarios(), 4);
-    /// assert_eq!(store.num_stages(), 10);
+    /// assert_eq!(store.num_nodes(), 10);
     /// assert!(store.get(0, 0).is_none());
     /// ```
     #[must_use]
-    pub fn new(num_scenarios: usize, num_stages: usize) -> Self {
-        let len = num_scenarios * num_stages;
+    pub fn new(num_scenarios: usize, num_nodes: usize) -> Self {
+        let len = num_scenarios * num_nodes;
         Self {
             bases: vec![None; len],
-            num_stages,
+            num_nodes,
         }
     }
 
     /// Return the number of scenarios this store was allocated for.
     #[must_use]
     pub fn num_scenarios(&self) -> usize {
-        self.bases.len().checked_div(self.num_stages).unwrap_or(0)
+        self.bases.len().checked_div(self.num_nodes).unwrap_or(0)
     }
 
-    /// Return the number of stages.
+    /// Return the node-axis length.
     #[must_use]
-    pub fn num_stages(&self) -> usize {
-        self.num_stages
+    pub fn num_nodes(&self) -> usize {
+        self.num_nodes
     }
 
-    /// Get an immutable reference to the basis at `[scenario][stage]`.
+    /// Get an immutable reference to the basis at `[scenario][node]`.
     ///
     /// Returns `None` if the slot has not yet been populated.
     #[must_use]
-    pub fn get(&self, scenario: usize, stage: usize) -> Option<&CapturedBasis> {
-        self.bases[scenario * self.num_stages + stage].as_ref()
+    pub fn get(&self, scenario: usize, node: usize) -> Option<&CapturedBasis> {
+        self.bases[scenario * self.num_nodes + node].as_ref()
     }
 
-    /// Get a mutable reference to the basis slot at `[scenario][stage]`.
-    pub fn get_mut(&mut self, scenario: usize, stage: usize) -> &mut Option<CapturedBasis> {
-        &mut self.bases[scenario * self.num_stages + stage]
+    /// Get a mutable reference to the basis slot at `[scenario][node]`.
+    pub fn get_mut(&mut self, scenario: usize, node: usize) -> &mut Option<CapturedBasis> {
+        &mut self.bases[scenario * self.num_nodes + node]
     }
 
     /// Split the store into `n_workers` disjoint mutable sub-views by scenario
@@ -1045,13 +1048,13 @@ impl BasisStore {
         for w in 0..n_workers {
             let (start, end) = partition(total_scenarios, n_workers, w);
             let count = end - start;
-            let chunk = count * self.num_stages;
+            let chunk = count * self.num_nodes;
             let (bases_left, bases_rest) = bases_rem.split_at_mut(chunk);
             bases_rem = bases_rest;
             slices.push(BasisStoreSliceMut {
                 bases: bases_left,
                 scenario_offset: offset,
-                num_stages: self.num_stages,
+                num_nodes: self.num_nodes,
             });
             offset += count;
         }
@@ -1070,13 +1073,13 @@ pub struct BasisStoreSliceMut<'a> {
     bases: &'a mut [Option<CapturedBasis>],
     /// Absolute scenario index of the first scenario in this slice.
     scenario_offset: usize,
-    /// Number of stages per scenario.
-    num_stages: usize,
+    /// Node-axis length (see [`BasisStore`]).
+    num_nodes: usize,
 }
 
 impl BasisStoreSliceMut<'_> {
     /// Get an immutable reference to the basis at absolute scenario index
-    /// `scenario` and stage `stage`.
+    /// `scenario` and node position `node`.
     ///
     /// Returns `None` if the slot has not yet been populated.
     ///
@@ -1084,20 +1087,20 @@ impl BasisStoreSliceMut<'_> {
     ///
     /// Panics if `scenario < self.scenario_offset` (scenario not in this slice).
     #[must_use]
-    pub fn get(&self, scenario: usize, stage: usize) -> Option<&CapturedBasis> {
+    pub fn get(&self, scenario: usize, node: usize) -> Option<&CapturedBasis> {
         let local = scenario - self.scenario_offset;
-        self.bases[local * self.num_stages + stage].as_ref()
+        self.bases[local * self.num_nodes + node].as_ref()
     }
 
     /// Get a mutable reference to the basis slot at absolute scenario index
-    /// `scenario` and stage `stage`.
+    /// `scenario` and node position `node`.
     ///
     /// # Panics
     ///
     /// Panics if `scenario < self.scenario_offset` (scenario not in this slice).
-    pub fn get_mut(&mut self, scenario: usize, stage: usize) -> &mut Option<CapturedBasis> {
+    pub fn get_mut(&mut self, scenario: usize, node: usize) -> &mut Option<CapturedBasis> {
         let local = scenario - self.scenario_offset;
-        &mut self.bases[local * self.num_stages + stage]
+        &mut self.bases[local * self.num_nodes + node]
     }
 }
 
@@ -1106,8 +1109,8 @@ mod tests {
     #[cfg(feature = "highs")]
     use super::PatchBuffer;
     use super::{
-        BasisStore, CapturedBasis, OpeningBlockScratch, ScratchBuffers, SolverWorkspace,
-        WorkspacePool, WorkspaceSizing,
+        BasisStore, ByNodeScratch, CapturedBasis, ScratchBuffers, SolverWorkspace, WorkspacePool,
+        WorkspaceSizing,
     };
     use cobre_solver::{
         Basis, BasisStatus, SolutionView, SolverError, SolverInterface, SolverStatistics,
@@ -1215,7 +1218,7 @@ mod tests {
     #[test]
     fn test_backward_accumulators_opening_outcomes_buf_starts_empty() {
         // A nonzero max_openings must not eagerly build opening_outcomes_buf —
-        // the default TrialPoint scheduler never touches it (zero opening-block footprint).
+        // the default ByScenario scheduler never touches it (zero opening-block footprint).
         let pool = WorkspacePool::new(
             0,
             2,
@@ -1330,12 +1333,12 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // OpeningBlockScratch tests
+    // ByNodeScratch tests
     // ---------------------------------------------------------------------------
 
     #[test]
-    fn backward_opening_block_scratch_default_is_empty() {
-        let scratch = OpeningBlockScratch::default();
+    fn backward_by_node_scratch_default_is_empty() {
+        let scratch = ByNodeScratch::default();
         assert_eq!(scratch.arena.capacity(), 0, "arena must start capacity 0");
         assert!(scratch.arena.is_empty());
         assert!(scratch.coeffs_buf.is_empty());
@@ -1346,14 +1349,13 @@ mod tests {
     }
 
     #[test]
-    fn backward_opening_block_scratch_sized_matches_study_dims() {
+    fn backward_by_node_scratch_sized_matches_study_dims() {
         let max_local_fwd = 3_usize;
         let bwd_max_openings = 4_usize;
         let n_state = 5_usize;
         let num_stages = 6_usize;
 
-        let scratch =
-            OpeningBlockScratch::sized(max_local_fwd, bwd_max_openings, n_state, num_stages);
+        let scratch = ByNodeScratch::sized(max_local_fwd, bwd_max_openings, n_state, num_stages);
 
         assert_eq!(
             scratch.arena.len(),
@@ -1401,8 +1403,8 @@ mod tests {
     }
 
     #[test]
-    fn backward_opening_block_scratch_sized_zero_dims_yields_empty_arena() {
-        let scratch = OpeningBlockScratch::sized(0, 0, 0, 0);
+    fn backward_by_node_scratch_sized_zero_dims_yields_empty_arena() {
+        let scratch = ByNodeScratch::sized(0, 0, 0, 0);
         assert!(scratch.arena.is_empty());
         assert!(scratch.coeffs_buf.is_empty());
         assert!(scratch.block_pivots.is_empty());
@@ -1418,7 +1420,7 @@ mod tests {
     fn basis_store_new_all_none() {
         let store = BasisStore::new(3, 5);
         assert_eq!(store.num_scenarios(), 3);
-        assert_eq!(store.num_stages(), 5);
+        assert_eq!(store.num_nodes(), 5);
         for s in 0..3 {
             for t in 0..5 {
                 assert!(
@@ -1442,14 +1444,14 @@ mod tests {
     fn basis_store_zero_scenarios() {
         let store = BasisStore::new(0, 5);
         assert_eq!(store.num_scenarios(), 0);
-        assert_eq!(store.num_stages(), 5);
+        assert_eq!(store.num_nodes(), 5);
     }
 
     #[test]
     fn basis_store_zero_stages() {
         let store = BasisStore::new(3, 0);
         assert_eq!(store.num_scenarios(), 0);
-        assert_eq!(store.num_stages(), 0);
+        assert_eq!(store.num_nodes(), 0);
     }
 
     #[test]

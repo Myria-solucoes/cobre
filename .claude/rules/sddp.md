@@ -291,11 +291,14 @@ real bug caught during D15). The patch inputs ride on `StageContext`
 site reads.
 Read: `training/lower_bound.rs`, `training/stage_solve_prep.rs`.
 
-## Per-stage exchange in the backward pass
+## Per-level exchange in the backward pass
 
-`exchange()` is called inside the backward loop, once per stage, not in a
-separate pre-pass before the loop.
-Read: `training/backward_pass_state.rs`.
+`exchange()` is called inside the reverse-topological sweep, once per
+cut-sharing level (one node — == one stage — per level absent `nodes[]`), not
+in a separate pre-pass before the loop. The level driver owns the one state
+exchange and the one batched cut exchange per level; a per-node collective
+would scale the collective count with node count.
+Read: `training/backward_pass_state.rs` (`run_one_backward_level`).
 
 ## Backward opening order is warm-start-only
 
@@ -320,17 +323,17 @@ solve position — or handing solve-order-permuted probabilities to
 makes the cut depend on solve order, silently
 breaking declaration-order invariance and run-to-run reproducibility.
 Read: `stochastic/noise_key.rs` (`build_noise_key_table`, `apply_chain_order`),
-`training/backward/trial_point.rs` (`process_trial_point_backward` — solves by
+`training/backward/by_scenario.rs` (`process_by_scenario_backward` — solves by
 `solve_order`, aggregates by canonical ω), `training/backward/outcome_aggregation.rs`
 (`write_opening_outcome`). Pinned by the `opening_order_determinism` gate in
 `tests/mpi_wire.rs` (threads=k / threads=1 / a same-shape repeat / a 2-rank
 stub, bitwise `final_lb`) and the MPI SLURM Integration job's rank-invariance
 comparison on `examples/4ree`.
 
-## Opening-block scheduler is warm-start-only
+## By-node scheduler is warm-start-only
 
-The opt-in opening-block scheduler
-(`training.parallelism.backward_scheduler = { method = opening_block }`)
+The opt-in by-node scheduler
+(`training.parallelism.backward_scheduler = { method = by_node }`)
 reassigns the backward pass's work unit from a whole trial point to an
 opening-block: workers claim `(trial point, block)` units in any order from a
 shared atomic counter, warm-chaining each block's openings from a fresh
@@ -343,27 +346,27 @@ is produced. Aggregating the arena in claim/solve-position order, or keying it
 on the claim index instead of `(m, ω)`, is the wrong-but-compiling
 alternative — CVaR's tail weighting is order-sensitive, so it silently breaks
 CVaR reproducibility and declaration-order invariance the same way a
-solve-order-keyed aggregation would break the trial-point path above. An
-active Dynamic Cut Selection iteration always falls back to the trial-point
-path: the opening-block scheduler's frozen-LP load is incompatible with
+solve-order-keyed aggregation would break the by-scenario path above. An
+active Dynamic Cut Selection iteration always falls back to the by-scenario
+path: the by-node scheduler's frozen-LP load is incompatible with
 DCS's cut-free lazy core.
-Read: `training/backward/opening_block.rs`
-(`process_stage_backward_opening_block`'s claim loop,
-`opening_block_finish`'s per-`(m, ω)` arena and ascending-m aggregation),
-`training/backward_pass_state.rs` (`run_one_backward_stage`'s
-`use_opening_block` dispatch). Pinned by
-`opening_block_scheduler_determinism_expectation` and
-`opening_block_scheduler_determinism_cvar` in `tests/mpi_wire.rs` (threads=4
+Read: `training/backward/by_node.rs`
+(`process_stage_backward_by_node`'s claim loop,
+`by_node_finish`'s per-`(m, ω)` arena and ascending-m aggregation),
+`training/backward_pass_state.rs` (`compute_one_backward_node`'s
+scheduler dispatch via `resolve_backward_scheduler`). Pinned by
+`by_node_scheduler_determinism_expectation` and
+`by_node_scheduler_determinism_cvar` in `tests/mpi_wire.rs` (threads=4
 / a same-shape threads=4 repeat / threads=2 / threads=1 / a `Rank0Of2`
 2-rank stub, bitwise `final_lb`, on both an expectation and a `CVaR`
-configuration), `opening_block_degenerates_on_single_opening`
-(opening-block-vs-trial-point equality on a single-opening case whose
+configuration), `by_node_degenerates_on_single_opening`
+(by-node-vs-by-scenario equality on a single-opening case whose
 resolved block count is `1`), and
-`opening_block_handles_non_uniform_cut_projection`
-(opening-block-vs-trial-point equality on a case whose per-stage cut-state
+`by_node_handles_non_uniform_cut_projection`
+(by-node-vs-by-scenario equality on a case whose per-stage cut-state
 projection dimension varies across stages).
 
-**Hardest-first claim order is result-neutral.** Under `OpeningBlock`,
+**Hardest-first claim order is result-neutral.** Under `ByNode`,
 claims are further ordered hardest-`(stage, block)`-first
 (longest-processing-time, LPT) by the PREVIOUS iteration's per-`(stage,
 block)` mean `simplex_iterations` pivot — never per-`(m, block)`, since
@@ -381,10 +384,10 @@ claim order itself nondeterministic across otherwise-identical runs.
 `BackwardPassState::run` swaps it in from `block_pivots` once per call, never
 per stage; reading `block_pivots` instead during the sweep is stale
 (reset-then-partially-filled).
-Read: `training/backward/opening_block.rs`
-(`process_stage_backward_opening_block`'s `block_order`-indexed decode,
+Read: `training/backward/by_node.rs`
+(`process_stage_backward_by_node`'s `block_order`-indexed decode,
 `hardest_first_block_order`, `identity_block_order`),
-`training/backward_pass_state.rs` (`run_one_backward_stage`'s block-order
+`training/backward_pass_state.rs` (`compute_one_backward_node`'s block-order
 computation, the `run` swap). Pinned by
 `hardest_first_claim_order_is_result_neutral` in `tests/mpi_wire.rs`
 (hardest-first on vs off, bitwise `final_lb`).

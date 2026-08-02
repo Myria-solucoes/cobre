@@ -816,12 +816,12 @@ mod derived_inflow_seeds_rank_invariance {
     }
 }
 
-mod opening_block_scheduler_determinism {
-    //! opening-block scheduler determinism gates: train `examples/1dtoy`
+mod by_node_scheduler_determinism {
+    //! by-node scheduler determinism gates: train `examples/1dtoy`
     //! under `training.parallelism.backward_scheduler` via the public
     //! `train` entry point. Hardest-first claim ordering is always-on under
-    //! `opening_block` (no config field gates it), so
-    //! `opening_block_scheduler_determinism_expectation` and `opening_block_scheduler_determinism_cvar`
+    //! `by_node` (no config field gates it), so
+    //! `by_node_scheduler_determinism_expectation` and `by_node_scheduler_determinism_cvar`
     //! exercise hardest-first-on from iteration 2 onward (`CVaR` coverage rides `_cvar`);
     //! both still assert `final_lb` is bitwise identical across five execution
     //! shapes of the SAME config — threads=4, a same-shape threads=4 repeat
@@ -829,33 +829,33 @@ mod opening_block_scheduler_determinism {
     //! threads=1, and a `Rank0Of2` 2-rank stub at threads=4 — on both an
     //! expectation and a `CVaR` risk configuration.
     //! `hardest_first_claim_order_is_result_neutral` is the direct hardest-first-on-vs-off gate.
-    //! `opening_block_degenerates_on_single_opening` and
-    //! `opening_block_handles_non_uniform_cut_projection` are the two places a genuinely
-    //! executed opening-block run (`process_stage_backward_opening_block`'s own claim loop, not the
-    //! DCS bypass below) is compared directly against the trial-point path's `final_lb`: the
+    //! `by_node_degenerates_on_single_opening` and
+    //! `by_node_handles_non_uniform_cut_projection` are the two places a genuinely
+    //! executed by-node run (`process_stage_backward_by_node`'s own claim loop, not the
+    //! DCS bypass below) is compared directly against the by-scenario path's `final_lb`: the
     //! former on a single-opening deterministic case whose resolved
-    //! opening-block count is `1` (a trial-point-equivalent unit), the latter on a
+    //! opening-block count is `1` (a by-scenario-equivalent unit), the latter on a
     //! case whose per-stage cut-state projection dimension varies across
-    //! stages. `opening_block_falls_back_to_trial_point_under_active_dcs` also compares
-    //! two labeled runs, but both execute the SAME trial-point code path
-    //! under active DCS, so it pins the fallback dispatch rather than the opening-block scheduler's
-    //! own arithmetic; `opening_block_generates_one_cut_per_trial_point` pins cut-count
-    //! parity; `opening_block_populates_backward_wall_ms` pins the telemetry surface.
+    //! stages. `by_node_falls_back_to_by_scenario_under_active_dcs` also compares
+    //! two labeled runs, but both execute the SAME by-scenario code path
+    //! under active DCS, so it pins the fallback dispatch rather than the by-node scheduler's
+    //! own arithmetic; `by_node_generates_one_cut_per_trial_state` pins cut-count
+    //! parity; `by_node_populates_backward_wall_ms` pins the telemetry surface.
     //! The scratch arena's no-alloc property is pinned primarily by
-    //! `opening_block_scratch`'s `opening_block_scratch_capacity_stable_across_training`; the 5-way
-    //! gates additionally reuse `opening_block_scratch::run_opening_block_one_iteration` as a
+    //! `by_node_scratch`'s `by_node_scratch_capacity_stable_across_training`; the 5-way
+    //! gates additionally reuse `by_node_scratch::run_by_node_one_iteration` as a
     //! defense-in-depth capacity check paired with the threads=4 leg.
     //!
     //! Power statement: the 5-way gates are powerless on a fixture whose
     //! resolved opening-block count never reaches `2` on any stage (a single
-    //! block is a trial-point-equivalent unit); each asserts this as its own
+    //! block is a by-scenario-equivalent unit); each asserts this as its own
     //! self-check, mirroring `opening_order_determinism`'s `n_openings >= 3`
     //! check.
     //!
-    //! A real multi-rank opening-block run is not CI-covered; the in-process
-    //! `Rank0Of2` 2-rank stub is the CI-time signal. The opening-block
+    //! A real multi-rank by-node run is not CI-covered; the in-process
+    //! `Rank0Of2` 2-rank stub is the CI-time signal. The by-node
     //! scheduler is opt-in and the existing MPI SLURM Integration job trains
-    //! the default scheduler on `examples/4ree`, not `opening_block`.
+    //! the default scheduler on `examples/4ree`, not `by_node`.
 
     use std::path::Path;
     use std::sync::mpsc;
@@ -867,8 +867,8 @@ mod opening_block_scheduler_determinism {
     use cobre_sddp::{RiskMeasure, StudySetup};
     use cobre_solver::ActiveSolver;
 
+    use crate::by_node_scratch::run_by_node_one_iteration;
     use crate::common::{Rank0Of2, StubComm};
-    use crate::opening_block_scratch::run_opening_block_one_iteration;
 
     fn fixture_case_dir() -> &'static Path {
         Path::new("../../examples/1dtoy")
@@ -970,8 +970,8 @@ mod opening_block_scheduler_determinism {
     }
 
     /// Resolved opening-block count for `n_openings` under the default
-    /// (unconfigured) block size — mirrors `opening_block::resolve_block_size`
-    /// / `opening_block::opening_block_count` (both `pub(crate)`, unreachable
+    /// (unconfigured) block size — mirrors `by_node::resolve_block_size`
+    /// / `by_node::by_node_block_count` (both `pub(crate)`, unreachable
     /// from this external test crate).
     fn resolved_block_count(n_openings: usize) -> usize {
         let block_size = n_openings.div_ceil(2).min(n_openings);
@@ -980,19 +980,16 @@ mod opening_block_scheduler_determinism {
 
     /// Powerless-gate self-check: a fixture whose every stage resolves to a
     /// single opening-block gives the opening-block scheduler nothing to distinguish from the trial-point path (see
-    /// `opening_block_degenerates_on_single_opening`), so at least one
+    /// `by_node_degenerates_on_single_opening`), so at least one
     /// stage's resolved block count must reach `>= 2`.
     fn assert_has_multi_block_stage(case_dir: &Path) {
-        let probe = fresh_setup(
-            case_dir,
-            BackwardScheduler::OpeningBlock { block_size: None },
-        );
+        let probe = fresh_setup(case_dir, BackwardScheduler::ByNode { block_size: None });
         let tree_view = probe.stochastic.tree_view();
         let has_multi_block_stage = (0..probe.num_stages())
             .any(|stage| resolved_block_count(tree_view.n_openings(stage)) >= 2);
         assert!(
             has_multi_block_stage,
-            "opening_block_scheduler_determinism: fixture {} has no stage whose resolved \
+            "by_node_scheduler_determinism: fixture {} has no stage whose resolved \
              opening-block count is >= 2 under the default block size — the gate is \
              powerless here; point it at a genuinely multi-opening case",
             case_dir.display()
@@ -1000,23 +997,21 @@ mod opening_block_scheduler_determinism {
     }
 
     /// Defense-in-depth capacity check paired with the threads=4 leg below:
-    /// the opening-block scratch arena's capacity (the no-alloc property `opening_block_scratch`'s
-    /// `opening_block_scratch_capacity_stable_across_training` primarily pins) is
+    /// the opening-block scratch arena's capacity (the no-alloc property `by_node_scratch`'s
+    /// `by_node_scratch_capacity_stable_across_training` primarily pins) is
     /// reproduced identically across two independent direct-drive runs of the
     /// same fixture.
-    fn assert_opening_block_scratch_capacity_invariant() {
+    fn assert_by_node_scratch_capacity_invariant() {
         const N_OPENINGS: usize = 4;
-        let capacity_a =
-            run_opening_block_one_iteration(N_OPENINGS).opening_block_scratch_arena_capacity();
-        let capacity_b =
-            run_opening_block_one_iteration(N_OPENINGS).opening_block_scratch_arena_capacity();
+        let capacity_a = run_by_node_one_iteration(N_OPENINGS).by_node_scratch_arena_capacity();
+        let capacity_b = run_by_node_one_iteration(N_OPENINGS).by_node_scratch_arena_capacity();
         assert_eq!(
             capacity_a, capacity_b,
             "opening-block scratch arena capacity must be reproducible across independent direct-drive runs"
         );
     }
 
-    /// Train one shape (`opening_block` forced, optional per-stage risk
+    /// Train one shape (`by_node` forced, optional per-stage risk
     /// measures) via the public `train` entry point, returning `final_lb`.
     fn run_shape(
         case_dir: &Path,
@@ -1024,10 +1019,7 @@ mod opening_block_scheduler_determinism {
         comm: &impl Communicator,
         risk_measures: Option<Vec<RiskMeasure>>,
     ) -> f64 {
-        let mut setup = fresh_setup(
-            case_dir,
-            BackwardScheduler::OpeningBlock { block_size: None },
-        );
+        let mut setup = fresh_setup(case_dir, BackwardScheduler::ByNode { block_size: None });
         if let Some(risk_measures) = risk_measures {
             setup.set_risk_measures(risk_measures);
         }
@@ -1035,18 +1027,18 @@ mod opening_block_scheduler_determinism {
     }
 
     /// Train the 5 execution shapes of one config on the SAME
-    /// `opening_block`-forced fixture and assert `final_lb.to_bits()` is
+    /// `by_node`-forced fixture and assert `final_lb.to_bits()` is
     /// bitwise identical across all five: threads=4, a same-shape threads=4
     /// repeat (the claim loop's run-to-run assignment randomization),
     /// threads=2, threads=1, and a `Rank0Of2` 2-rank stub at threads=4.
-    fn assert_opening_block_shapes_agree(case_dir: &Path, risk_measures: Option<Vec<RiskMeasure>>) {
+    fn assert_by_node_shapes_agree(case_dir: &Path, risk_measures: Option<Vec<RiskMeasure>>) {
         assert_has_multi_block_stage(case_dir);
 
         let stub = StubComm;
         let rank0_of_2 = Rank0Of2;
 
         let lb_threads_4 = run_shape(case_dir, 4, &stub, risk_measures.clone());
-        assert_opening_block_scratch_capacity_invariant();
+        assert_by_node_scratch_capacity_invariant();
         let lb_threads_4_repeat = run_shape(case_dir, 4, &stub, risk_measures.clone());
         let lb_threads_2 = run_shape(case_dir, 2, &stub, risk_measures.clone());
         let lb_threads_1 = run_shape(case_dir, 1, &stub, risk_measures.clone());
@@ -1071,8 +1063,8 @@ mod opening_block_scheduler_determinism {
         not(feature = "slow-tests"),
         ignore = "slow: run with --features slow-tests"
     )]
-    fn opening_block_scheduler_determinism_expectation() {
-        assert_opening_block_shapes_agree(fixture_case_dir(), None);
+    fn by_node_scheduler_determinism_expectation() {
+        assert_by_node_shapes_agree(fixture_case_dir(), None);
     }
 
     /// `alpha=0.5, lambda=1.0` mirrors `retry_armed_determinism_cvar`'s
@@ -1083,13 +1075,10 @@ mod opening_block_scheduler_determinism {
         not(feature = "slow-tests"),
         ignore = "slow: run with --features slow-tests"
     )]
-    fn opening_block_scheduler_determinism_cvar() {
+    fn by_node_scheduler_determinism_cvar() {
         let case_dir = fixture_case_dir();
-        let num_stages = fresh_setup(
-            case_dir,
-            BackwardScheduler::OpeningBlock { block_size: None },
-        )
-        .num_stages();
+        let num_stages =
+            fresh_setup(case_dir, BackwardScheduler::ByNode { block_size: None }).num_stages();
         let risk_measures = vec![
             RiskMeasure::CVaR {
                 alpha: 0.5,
@@ -1097,12 +1086,12 @@ mod opening_block_scheduler_determinism {
             };
             num_stages
         ];
-        assert_opening_block_shapes_agree(case_dir, Some(risk_measures));
+        assert_by_node_shapes_agree(case_dir, Some(risk_measures));
     }
 
     /// Hardest-first claim-order byte-neutrality gate (sddp.md "Opening-block
     /// scheduler is warm-start-only" — hardest-first result-neutrality): training the
-    /// SAME `opening_block`-forced fixture with hardest-first on (the production
+    /// SAME `by_node`-forced fixture with hardest-first on (the production
     /// default) and again with `set_hardest_first_claim_order(false)` (the canonical
     /// ascending block order) must produce a bit-identical `final_lb` at the
     /// same thread count — hardest-first reorders only which worker claims which
@@ -1119,10 +1108,8 @@ mod opening_block_scheduler_determinism {
 
         let lb_hardest_first_on = run_shape(case_dir, 4, &stub, None);
 
-        let mut setup_hardest_first_off = fresh_setup(
-            case_dir,
-            BackwardScheduler::OpeningBlock { block_size: None },
-        );
+        let mut setup_hardest_first_off =
+            fresh_setup(case_dir, BackwardScheduler::ByNode { block_size: None });
         setup_hardest_first_off.set_hardest_first_claim_order(false);
         let lb_hardest_first_off = train_final_lb(setup_hardest_first_off, 4, &stub);
 
@@ -1139,39 +1126,36 @@ mod opening_block_scheduler_determinism {
     }
 
     /// Single-opening degeneracy gate: `d01-thermal-dispatch` has exactly one
-    /// opening per stage, so `opening_block`'s resolved block count is `1` —
+    /// opening per stage, so `by_node`'s resolved block count is `1` —
     /// the whole trial point, a trial-point-equivalent unit — and `final_lb` must
-    /// equal the `trial_point` run bit-for-bit. The 5-way gates above compare
+    /// equal the `by_scenario` run bit-for-bit. The 5-way gates above compare
     /// opening-block-to-opening-block across shapes only; this and
-    /// `opening_block_handles_non_uniform_cut_projection` below are the two gates that
+    /// `by_node_handles_non_uniform_cut_projection` below are the two gates that
     /// compare a genuinely executed opening-block run to the trial-point path.
     #[test]
     #[cfg_attr(
         not(feature = "slow-tests"),
         ignore = "slow: run with --features slow-tests"
     )]
-    fn opening_block_degenerates_on_single_opening() {
+    fn by_node_degenerates_on_single_opening() {
         let case_dir = single_opening_case_dir();
         let stub = StubComm;
 
-        let lb_opening_block = train_final_lb(
-            fresh_setup(
-                case_dir,
-                BackwardScheduler::OpeningBlock { block_size: None },
-            ),
+        let lb_by_node = train_final_lb(
+            fresh_setup(case_dir, BackwardScheduler::ByNode { block_size: None }),
             1,
             &stub,
         );
-        let lb_trial_point = train_final_lb(
-            fresh_setup(case_dir, BackwardScheduler::TrialPoint {}),
+        let lb_by_scenario = train_final_lb(
+            fresh_setup(case_dir, BackwardScheduler::ByScenario {}),
             1,
             &stub,
         );
 
         assert_eq!(
-            lb_opening_block.to_bits(),
-            lb_trial_point.to_bits(),
-            "opening_block must degenerate to trial_point bit-for-bit on a single-opening case"
+            lb_by_node.to_bits(),
+            lb_by_scenario.to_bits(),
+            "by_node must degenerate to by_scenario bit-for-bit on a single-opening case"
         );
     }
 
@@ -1181,40 +1165,37 @@ mod opening_block_scheduler_determinism {
 
     /// Non-uniform cut-projection gate: `d43-storage-only-cut` disables
     /// `inflow_lags` on one interior stage only, so successive backward
-    /// stages solved by the SAME worker hand `process_stage_backward_opening_block` (and
-    /// `opening_block_finish`) a `cut_n_state` that shrinks then regrows across
+    /// stages solved by the SAME worker hand `process_stage_backward_by_node` (and
+    /// `by_node_finish`) a `cut_n_state` that shrinks then regrows across
     /// stages — a stale-length buffer reuse across that change panics in
     /// `copy_from_slice`. `d43` is also single-opening per stage (like `d01` above),
-    /// so `opening_block` degenerates to a trial-point-equivalent unit here too, and
-    /// `final_lb` must equal the `trial_point` run bit-for-bit.
+    /// so `by_node` degenerates to a trial-point-equivalent unit here too, and
+    /// `final_lb` must equal the `by_scenario` run bit-for-bit.
     #[test]
     #[cfg_attr(
         not(feature = "slow-tests"),
         ignore = "slow: run with --features slow-tests"
     )]
-    fn opening_block_handles_non_uniform_cut_projection() {
+    fn by_node_handles_non_uniform_cut_projection() {
         let case_dir = non_uniform_cut_projection_case_dir();
         let stub = StubComm;
 
-        let lb_opening_block = train_final_lb(
-            fresh_setup(
-                case_dir,
-                BackwardScheduler::OpeningBlock { block_size: None },
-            ),
+        let lb_by_node = train_final_lb(
+            fresh_setup(case_dir, BackwardScheduler::ByNode { block_size: None }),
             1,
             &stub,
         );
-        let lb_trial_point = train_final_lb(
-            fresh_setup(case_dir, BackwardScheduler::TrialPoint {}),
+        let lb_by_scenario = train_final_lb(
+            fresh_setup(case_dir, BackwardScheduler::ByScenario {}),
             1,
             &stub,
         );
 
         assert_eq!(
-            lb_opening_block.to_bits(),
-            lb_trial_point.to_bits(),
-            "opening_block must handle a non-uniform per-stage cut projection and match \
-             trial_point bit-for-bit"
+            lb_by_node.to_bits(),
+            lb_by_scenario.to_bits(),
+            "by_node must handle a non-uniform per-stage cut projection and match \
+             by_scenario bit-for-bit"
         );
     }
 
@@ -1223,28 +1204,25 @@ mod opening_block_scheduler_determinism {
         not(feature = "slow-tests"),
         ignore = "slow: run with --features slow-tests"
     )]
-    fn opening_block_falls_back_to_trial_point_under_active_dcs() {
+    fn by_node_falls_back_to_by_scenario_under_active_dcs() {
         let case_dir = fixture_case_dir();
         let stub = StubComm;
 
-        let lb_opening_block = train_final_lb(
-            fresh_setup_with_active_dcs(
-                case_dir,
-                BackwardScheduler::OpeningBlock { block_size: None },
-            ),
+        let lb_by_node = train_final_lb(
+            fresh_setup_with_active_dcs(case_dir, BackwardScheduler::ByNode { block_size: None }),
             1,
             &stub,
         );
-        let lb_trial_point = train_final_lb(
-            fresh_setup_with_active_dcs(case_dir, BackwardScheduler::TrialPoint {}),
+        let lb_by_scenario = train_final_lb(
+            fresh_setup_with_active_dcs(case_dir, BackwardScheduler::ByScenario {}),
             1,
             &stub,
         );
 
         assert_eq!(
-            lb_opening_block.to_bits(),
-            lb_trial_point.to_bits(),
-            "opening_block must degenerate to trial_point bit-for-bit under active DCS"
+            lb_by_node.to_bits(),
+            lb_by_scenario.to_bits(),
+            "by_node must degenerate to by_scenario bit-for-bit under active DCS"
         );
     }
 
@@ -1253,31 +1231,28 @@ mod opening_block_scheduler_determinism {
         not(feature = "slow-tests"),
         ignore = "slow: run with --features slow-tests"
     )]
-    fn opening_block_generates_one_cut_per_trial_point() {
+    fn by_node_generates_one_cut_per_by_scenario() {
         let case_dir = fixture_case_dir();
         let stub = StubComm;
 
-        let rows_opening_block = train_rows_generated(
-            fresh_setup_one_iteration(
-                case_dir,
-                BackwardScheduler::OpeningBlock { block_size: None },
-            ),
+        let rows_by_node = train_rows_generated(
+            fresh_setup_one_iteration(case_dir, BackwardScheduler::ByNode { block_size: None }),
             &stub,
         );
-        let rows_trial_point = train_rows_generated(
-            fresh_setup_one_iteration(case_dir, BackwardScheduler::TrialPoint {}),
+        let rows_by_scenario = train_rows_generated(
+            fresh_setup_one_iteration(case_dir, BackwardScheduler::ByScenario {}),
             &stub,
         );
 
         assert_eq!(
-            rows_opening_block, rows_trial_point,
-            "opening_block and trial_point must generate the same number of cuts"
+            rows_by_node, rows_by_scenario,
+            "by_node and by_scenario must generate the same number of cuts"
         );
     }
 
     /// The opening-block path's per-worker `backward_wall_ms` is observable through the
     /// event channel on the public `StudySetup::train` entry point (unlike
-    /// `opening_block_scratch`'s scratch-sizing gate below, which has no such
+    /// `by_node_scratch`'s scratch-sizing gate below, which has no such
     /// surface), so this test drives the real training path rather than
     /// `BackwardPassState` directly.
     #[test]
@@ -1285,13 +1260,11 @@ mod opening_block_scheduler_determinism {
         not(feature = "slow-tests"),
         ignore = "slow: run with --features slow-tests"
     )]
-    fn opening_block_populates_backward_wall_ms() {
+    fn by_node_populates_backward_wall_ms() {
         let case_dir = fixture_case_dir();
         let stub = StubComm;
-        let mut setup = fresh_setup_one_iteration(
-            case_dir,
-            BackwardScheduler::OpeningBlock { block_size: None },
-        );
+        let mut setup =
+            fresh_setup_one_iteration(case_dir, BackwardScheduler::ByNode { block_size: None });
         let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
         let (event_tx, event_rx) = mpsc::channel::<TrainingEvent>();
         let outcome = setup
@@ -1334,9 +1307,9 @@ mod opening_block_scheduler_determinism {
     }
 }
 
-mod opening_block_scratch {
-    //! `OpeningBlockScratch` sizing/gating/no-alloc gate. Unlike
-    //! `opening_block_scheduler_determinism`'s `examples/1dtoy`-based tests, these drive
+mod by_node_scratch {
+    //! `ByNodeScratch` sizing/gating/no-alloc gate. Unlike
+    //! `by_node_scheduler_determinism`'s `examples/1dtoy`-based tests, these drive
     //! `BackwardPassState` directly against a small synthetic 2-stage, 2-opening
     //! fixture: `set_scheduler` and the opening-block scratch it sizes are internal to the
     //! backward pass and have no observable surface through the public
@@ -1360,7 +1333,7 @@ mod opening_block_scratch {
         inflow_method::InflowNonNegativityMethod,
         risk_measure::RiskMeasure,
         test_support::{
-            all_enabled_cut_state_layouts, state_layout, study_dims, trial_point_records,
+            all_enabled_cut_state_layouts, state_layout, study_dims, trial_state_records,
         },
         workspace::{BasisStore, WorkspacePool, WorkspaceSizing},
     };
@@ -1597,20 +1570,20 @@ mod opening_block_scratch {
     }
 
     #[test]
-    fn opening_block_scratch_empty_on_trial_point_default() {
+    fn by_node_scratch_empty_on_by_scenario_default() {
         let mut state = BackwardPassState::new(1, 1, 4, 0, 3, 5, 2);
-        state.set_scheduler(BackwardScheduler::TrialPoint {});
+        state.set_scheduler(BackwardScheduler::ByScenario {});
         assert_eq!(
-            state.opening_block_scratch_arena_capacity(),
+            state.by_node_scratch_arena_capacity(),
             0,
-            "the default trial_point scheduler must keep the opening-block scratch arena empty"
+            "the default by_scenario scheduler must keep the opening-block scratch arena empty"
         );
-        assert!(state.opening_block_scratch_arena().is_empty());
+        assert!(state.by_node_scratch_arena().is_empty());
         assert!(state.block_pivot_means().is_empty());
     }
 
     #[test]
-    fn opening_block_scratch_sized_from_study_dims() {
+    fn by_node_scratch_sized_from_study_dims() {
         let max_local_fwd = 3_usize;
         let bwd_max_openings = 4_usize;
         let n_state = 5_usize;
@@ -1625,9 +1598,9 @@ mod opening_block_scratch {
             num_stages,
         );
 
-        state.set_scheduler(BackwardScheduler::OpeningBlock { block_size: None });
+        state.set_scheduler(BackwardScheduler::ByNode { block_size: None });
 
-        let arena = state.opening_block_scratch_arena();
+        let arena = state.by_node_scratch_arena();
         assert_eq!(
             arena.len(),
             max_local_fwd * bwd_max_openings,
@@ -1656,7 +1629,7 @@ mod opening_block_scratch {
     }
 
     /// Drives `BackwardPassState` directly across several repeated backward-pass
-    /// runs under `OpeningBlock`: the arena's `.capacity()` right after
+    /// runs under `ByNode`: the arena's `.capacity()` right after
     /// `set_scheduler` must equal its capacity after every run — no hot-path
     /// reallocation.
     #[test]
@@ -1664,7 +1637,7 @@ mod opening_block_scratch {
         not(feature = "slow-tests"),
         ignore = "slow: run with --features slow-tests"
     )]
-    fn opening_block_scratch_capacity_stable_across_training() {
+    fn by_node_scratch_capacity_stable_across_training() {
         let n_stages = 2_usize;
         let n_openings = 2_usize;
         let stochastic = make_stochastic_context(n_stages, n_openings);
@@ -1678,7 +1651,7 @@ mod opening_block_scratch {
         let mut fcf =
             FutureCostFunction::new(n_stages, n_state, forward_passes, 20, &vec![0; n_stages]);
         let trial_states = vec![vec![10.0], vec![20.0]];
-        let records = trial_point_records(&trial_states, n_stages);
+        let records = trial_state_records(&trial_states, n_stages);
         let mut exchange = ExchangeBuffers::new(n_state, trial_states.len(), 1);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
@@ -1753,13 +1726,13 @@ mod opening_block_scratch {
         let local_count = exchange.local_count();
         let mut state =
             BackwardPassState::new(1, 1, n_openings, n_state, local_count, n_state, n_stages);
-        state.set_scheduler(BackwardScheduler::OpeningBlock {
+        state.set_scheduler(BackwardScheduler::ByNode {
             block_size: NonZeroUsize::new(1),
         });
-        let capacity_after_set_scheduler = state.opening_block_scratch_arena_capacity();
+        let capacity_after_set_scheduler = state.by_node_scratch_arena_capacity();
         assert!(
             capacity_after_set_scheduler > 0,
-            "OpeningBlock must size the opening-block scratch arena at set_scheduler time"
+            "ByNode must size the opening-block scratch arena at set_scheduler time"
         );
 
         let mut inputs = BackwardPassInputs {
@@ -1789,7 +1762,7 @@ mod opening_block_scratch {
                 .run(&mut inputs)
                 .expect("backward pass must not error");
             assert_eq!(
-                state.opening_block_scratch_arena_capacity(),
+                state.by_node_scratch_arena_capacity(),
                 capacity_after_set_scheduler,
                 "opening-block scratch arena must not reallocate across repeated backward-pass runs \
                  (iteration {iteration})"
@@ -1798,12 +1771,12 @@ mod opening_block_scratch {
     }
 
     /// Build a fresh 2-stage, `n_openings`-opening direct-drive fixture under
-    /// `OpeningBlock` (block size 1, so every opening is its own block), run
+    /// `ByNode` (block size 1, so every opening is its own block), run
     /// exactly one backward-pass iteration, and return the resulting
     /// [`BackwardPassState`] for the caller to inspect (e.g. via
-    /// `block_pivot_means` or `opening_block_scratch_arena_capacity`). `pub(crate)`:
-    /// also reused by `opening_block_scheduler_determinism`'s capacity-invariance check.
-    pub(crate) fn run_opening_block_one_iteration(n_openings: usize) -> BackwardPassState {
+    /// `block_pivot_means` or `by_node_scratch_arena_capacity`). `pub(crate)`:
+    /// also reused by `by_node_scheduler_determinism`'s capacity-invariance check.
+    pub(crate) fn run_by_node_one_iteration(n_openings: usize) -> BackwardPassState {
         let n_stages = 2_usize;
         let stochastic = make_stochastic_context(n_stages, n_openings);
         let state_layout_fixture = state_layout(1, 0);
@@ -1816,7 +1789,7 @@ mod opening_block_scratch {
         let mut fcf =
             FutureCostFunction::new(n_stages, n_state, forward_passes, 20, &vec![0; n_stages]);
         let trial_states = vec![vec![10.0], vec![20.0]];
-        let records = trial_point_records(&trial_states, n_stages);
+        let records = trial_state_records(&trial_states, n_stages);
         let mut exchange = ExchangeBuffers::new(n_state, trial_states.len(), 1);
         let horizon = HorizonMode::Finite {
             num_stages: n_stages,
@@ -1891,7 +1864,7 @@ mod opening_block_scratch {
         let local_count = exchange.local_count();
         let mut state =
             BackwardPassState::new(1, 1, n_openings, n_state, local_count, n_state, n_stages);
-        state.set_scheduler(BackwardScheduler::OpeningBlock {
+        state.set_scheduler(BackwardScheduler::ByNode {
             block_size: NonZeroUsize::new(1),
         });
 
@@ -1926,7 +1899,7 @@ mod opening_block_scratch {
     /// public `StudySetup::train` entry point (`block_pivot_means` is a
     /// `BackwardPassState` accessor, and `BackwardPassState` is internal to
     /// `TrainingSession` — see this module's doc comment), so this test drives
-    /// it directly, mirroring `opening_block_scratch_capacity_stable_across_training`
+    /// it directly, mirroring `by_node_scratch_capacity_stable_across_training`
     /// above, rather than training `examples/1dtoy` via the public API.
     ///
     /// Two independently-constructed fixtures, each trained for one iteration,
@@ -1937,8 +1910,8 @@ mod opening_block_scratch {
     fn block_pivots_reproducible_and_populated() {
         let n_openings = 4_usize;
 
-        let means_a = run_opening_block_one_iteration(n_openings).block_pivot_means();
-        let means_b = run_opening_block_one_iteration(n_openings).block_pivot_means();
+        let means_a = run_by_node_one_iteration(n_openings).block_pivot_means();
+        let means_b = run_by_node_one_iteration(n_openings).block_pivot_means();
 
         assert_eq!(
             means_a, means_b,

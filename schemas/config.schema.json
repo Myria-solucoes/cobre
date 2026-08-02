@@ -5,10 +5,10 @@
       "oneOf": [
         {
           "additionalProperties": false,
-          "description": "Per-trial-point backward scheduling (the default): each parallel work\nunit is one whole trial point.",
+          "description": "By-scenario backward scheduling (the default): each parallel work\nunit claims one whole trial point (a row of the backward work\nrectangle).",
           "properties": {
             "method": {
-              "const": "trial_point",
+              "const": "by_scenario",
               "type": "string"
             }
           },
@@ -19,7 +19,7 @@
         },
         {
           "additionalProperties": false,
-          "description": "Opening-block backward scheduling: each parallel work unit is one\n(trial point, opening-block) pair claimed dynamically by workers.",
+          "description": "By-node backward scheduling: each parallel work unit claims one\n(trial point, opening-block) tile of the backward work rectangle.",
           "properties": {
             "block_size": {
               "default": null,
@@ -32,7 +32,7 @@
               ]
             },
             "method": {
-              "const": "opening_block",
+              "const": "by_node",
               "type": "string"
             }
           },
@@ -380,7 +380,7 @@
         "backward_scheduler": {
           "$ref": "#/$defs/BackwardScheduler",
           "default": {
-            "method": "trial_point"
+            "method": "by_scenario"
           },
           "description": "Backward-pass scheduler selection."
         }
@@ -1204,7 +1204,7 @@
           "$ref": "#/$defs/ParallelismConfig",
           "default": {
             "backward_scheduler": {
-              "method": "trial_point"
+              "method": "by_scenario"
             }
           },
           "description": "Parallel-execution settings."

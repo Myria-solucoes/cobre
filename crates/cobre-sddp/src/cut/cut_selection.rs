@@ -802,7 +802,7 @@ mod tests {
     /// state [1.0]: cut0=2+0=2, cut1=0+3=3 → cut1 is max, oldest at max = cut1
     /// Union: both cut0 and cut1 selected → cut2 deactivated.
     #[test]
-    fn lml1_union_across_trial_points() {
+    fn lml1_union_across_trial_states() {
         let strategy = CutSelectionStrategy::Lml1 {
             check_frequency: 5,
             tie_tolerance: 1e-10,
