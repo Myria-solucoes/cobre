@@ -7670,9 +7670,9 @@ mod k_fan_enumerated_exact_bound {
         }
     }
 
-    /// The simulation-enumerated guard stays: weighted/census simulation is a
-    /// later epic, so an enumerated `K >= 2` simulation is rejected with a crisp
-    /// named `SddpError::Validation` (training-only guard lift).
+    /// The simulation-enumerated guard stays: weighted/census simulation is not yet
+    /// built, so an enumerated `K >= 2` simulation is rejected with a crisp named
+    /// `SddpError::Validation` (the training-only guard lift does not extend to it).
     #[test]
     fn enumerated_k_ge_2_simulation_is_rejected() {
         let err = try_k_fan_simulation_enumerated(K)

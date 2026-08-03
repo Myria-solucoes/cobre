@@ -1589,8 +1589,7 @@ mod tests {
         // Root (stage 0, own pool) fans into K=4 leaves (stage 1, sharing ONE
         // pool per the leaf-sharing rule). branching_factor=1 gives every
         // node's own opening count exactly 1, so each root->leaf path
-        // contributes exactly 1 -- the DECOMP shape the epic's
-        // over-allocation example cites.
+        // contributes exactly 1.
         let stochastic = stochastic_context(2, 1, 1);
         let graph = PolicyGraph {
             nodes: vec![
