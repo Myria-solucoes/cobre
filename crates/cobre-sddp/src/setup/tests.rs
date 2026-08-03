@@ -8355,6 +8355,7 @@ fn asymmetric_fan_node_graph() -> super::NodeGraph {
             vec![],
         ],
         n_pools: 1,
+        pool_stage: vec![0],
     }
 }
 
@@ -8370,6 +8371,7 @@ fn overflowing_chain_node_graph() -> super::NodeGraph {
         ],
         successors: vec![vec![ng_edge(1)], vec![ng_edge(2)], vec![]],
         n_pools: 1,
+        pool_stage: vec![0],
     }
 }
 
@@ -8595,6 +8597,7 @@ fn deterministic_chain_node_graph() -> super::NodeGraph {
         nodes: vec![ng_node(0, 1), ng_node(1, 1)],
         successors: vec![vec![ng_edge(1)], vec![]],
         n_pools: 1,
+        pool_stage: vec![0],
     }
 }
 

@@ -84,8 +84,9 @@ pub struct TrainingResult {
     /// decides whether to persist it based on `exports.states`.
     pub visited_archive: Option<VisitedStatesArchive>,
 
-    /// Final-iteration frozen templates, one per stage. Always `Some`: freeze
-    /// runs unconditionally before the first iteration and is never reverted.
+    /// Final-iteration frozen templates, one per POOL (each is a pool's base
+    /// stage template plus that pool's active cuts). Always `Some`: freeze runs
+    /// unconditionally before the first iteration and is never reverted.
     pub frozen_templates: Option<Vec<StageTemplate>>,
 }
 
@@ -164,11 +165,13 @@ fn checked_broadcast_len(len: usize, operation: &'static str) -> Result<i32, Sdd
 /// for the i32 and f64 buffers). Single-rank runs skip the broadcast and clone
 /// local scenario 0 directly.
 ///
-/// `node_ids` (`NodeGraph::node_ids`, one entry per stage) fills each
+/// `node_ids` (`NodeGraph::node_ids`, one entry per node) fills each
 /// reconstructed basis's `node_id` out-of-band after
 /// `try_from_broadcast_payload`, since `node_id` is not part of the wire
 /// payload. The single-rank clone path needs no fill: capture already set
-/// `node_id` via `write_capture_metadata`.
+/// `node_id` via `write_capture_metadata`. The cache stays keyed by the first
+/// `num_stages` node slots here (chain-correct; a branching graph's per-pool
+/// cache keying is resolved where checkpoints are exported/loaded).
 ///
 /// # Errors
 ///
@@ -242,13 +245,6 @@ pub(crate) fn broadcast_basis_cache<C: Communicator>(
     f64_buf.resize(f64_total_len, 0.0_f64);
     comm.broadcast(&mut f64_buf, 0).map_err(SddpError::from)?;
 
-    debug_assert_eq!(
-        node_ids.len(),
-        num_stages,
-        "broadcast_basis_cache: node_ids.len() {} != num_stages {}",
-        node_ids.len(),
-        num_stages,
-    );
     let mut cache: Vec<Option<CapturedBasis>> = Vec::with_capacity(num_stages);
     let mut pos = 0_usize;
     let mut f64_pos = 0_usize;

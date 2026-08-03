@@ -47,7 +47,8 @@ use crate::{
     lower_bound::LbEvalScratchBundle,
     lower_bound::evaluate_lower_bound,
     rank_reconcile::{reconcile_error_flag, reconcile_result},
-    setup::node_graph::max_successor_outcome_count,
+    setup::NodeGraph,
+    setup::node_graph::{frontier_node, max_successor_outcome_count},
     solver_stats::{
         SOLVER_STATS_DELTA_SCALAR_FIELDS, SolverStatsDelta, SolverStatsLogEntry,
         aggregate_solver_statistics, pack_delta_scalars, unpack_delta_scalars,
@@ -160,6 +161,13 @@ where
         // training cuts pack densely with no reserved leading block.
         fcf.set_iteration_base(config.loop_config.start_iteration + 1);
 
+        // Per-slot backward buffers (`slot_increments`, `metadata_sync_contribution`,
+        // the recon lookup) are indexed by cut-pool slot, so they must cover the
+        // LARGEST pool a worker's sweep may touch — sizing from `pools[0]` alone
+        // truncates a pool whose heterogeneous visit bound exceeds pool 0's. On a
+        // chain every pool has identical capacity, so this equals `pools[0]`.
+        let max_pool_capacity = fcf.pools.iter().map(|p| p.capacity).max().unwrap_or(0);
+
         let n_threads = config.loop_config.n_fwd_threads.max(1);
         // The wrong-but-compiling alternative is the per-stage term alone: on a
         // declared multi-successor node (a fan-out), `n_openings` is the
@@ -184,7 +192,7 @@ where
                 n_buckets: state.n_buckets,
                 downstream_par_order: stage_ctx.downstream_par_order,
                 max_openings,
-                initial_pool_capacity: fcf.pools[0].capacity,
+                initial_pool_capacity: max_pool_capacity,
                 n_state: ranks.n_state,
                 max_local_fwd: ranks.max_local_fwd,
                 total_forward_passes,
@@ -212,12 +220,9 @@ where
             .unwrap_or(0);
         fwd_pool.resize_scratch_bases(max_cols, max_rows);
 
-        // DcsSolveScratch/DcsScoringScratch are shared per worker, not per
-        // pool, so they must cover the LARGEST pool a worker's sweep may
-        // touch — sizing from `pools[0]` alone (as `initial_pool_capacity`
-        // does for the other backward-accumulator buffers above) under-covers
-        // any pool with a larger warm-start count or visit bound than pool 0's.
-        let max_pool_capacity = fcf.pools.iter().map(|p| p.capacity).max().unwrap_or(0);
+        // DcsSolveScratch/DcsScoringScratch are shared per worker, not per pool,
+        // so they must cover the LARGEST pool a worker's sweep may touch (same
+        // `max_pool_capacity` the per-slot backward buffers size from).
         fwd_pool.reserve_dcs_scratch(ranks.n_state, max_pool_capacity);
 
         // Sized for max local forward passes so scenario indices stay stable
@@ -283,11 +288,19 @@ where
 
         let results = TrainingResults::new(config.loop_config.start_iteration);
 
+        // The LB LP is the ROOT's stage-0 LP, so its append-only cut-row map is
+        // sized from the root pool's capacity — resolved by STAGE, never by array
+        // position: nodes[0] is the smallest-id node, not necessarily the root, so
+        // fcf.pools[0] could under-size the map for a root pool larger than pool 0.
+        // On a chain the root IS nodes[0] (pool 0), so this equals pools[0].
+        let lb_root_pool =
+            training_ctx.node_graph.nodes[frontier_node(training_ctx.node_graph, 0)].pool_id;
         let scratch = IterationScratch::new(
             ranks.max_local_fwd,
             ranks.num_stages,
+            &training_ctx.node_graph.pool_stage,
             ranks.n_state,
-            fcf.pools[0].capacity,
+            fcf.pools[lb_root_pool].capacity,
             stage_ctx.templates[0].num_rows,
             state.hydro_count,
             state.max_par_order,
@@ -880,8 +893,11 @@ where
     // phase wrote, so splitting into helpers would pass every field individually.
     #[allow(clippy::too_many_lines)]
     fn run_cut_management(&mut self, iteration: u64) {
-        // `sel_state` is `Some` only when strategy-based selection ran.
+        // `sel_state` is `Some` only when strategy-based selection ran;
+        // `record_by_pool` (built in the same block) maps a pool id to its
+        // `per_stage` record index for the budget back-annotation below.
         let mut sel_state: Option<(Vec<StageRowSelectionRecord>, u32, u64, u32)> = None;
+        let mut record_by_pool: Option<Vec<Option<usize>>> = None;
 
         if let Some(strategy) = self.config.cut_management.cut_selection.as_ref()
             && strategy.should_run(iteration)
@@ -892,44 +908,61 @@ where
             let mut per_stage = Vec::with_capacity(num_sel_stages);
 
             let node_graph = self.training_ctx.node_graph;
+            // Root pool resolved by STAGE (the sole stage-0 node), never by array
+            // position: nodes[0] is the smallest-id node, not necessarily the
+            // root on a branching graph (the same resolution the LB path uses).
+            let root_pool = node_graph.nodes[frontier_node(node_graph, 0)].pool_id;
 
-            // Selection covers interior stages 1..=T-2 only. Stage 0's cuts are
-            // never a backward-pass successor (their activity is never updated);
-            // the terminal stage T-1 receives no cuts. Stage 0 is recorded here;
-            // the loop below ranges 1..num_sel_stages.
+            // Selection covers interior cut-generating nodes only. The root's
+            // cuts are never a backward-pass successor (activity never updated);
+            // terminal leaves receive no cuts. The root (the sole stage-0 alive
+            // node) is recorded here; the loop below scores each interior
+            // cut-generating node against ITS OWN visited region.
             #[allow(clippy::cast_possible_truncation)]
             {
-                let pool0_id = node_graph.nodes[0].pool_id;
-                let pool0 = &self.fcf.pools[pool0_id];
-                let active_0 = pool0.active_count() as u32;
+                let root_cut_pool = &self.fcf.pools[root_pool];
+                let root_active = root_cut_pool.active_count() as u32;
                 per_stage.push(StageRowSelectionRecord {
                     stage: 0,
-                    rows_populated: pool0.populated() as u32,
-                    rows_active_before: active_0,
+                    rows_populated: root_cut_pool.populated() as u32,
+                    rows_active_before: root_active,
                     rows_deactivated: 0,
                     rows_reactivated: 0,
-                    rows_active_after: active_0,
+                    rows_active_after: root_active,
                     selection_time_ms: 0.0,
                     budget_evicted: None,
                     active_after_budget: None,
-                    rows_in_lp: pool0.cuts_in_lp() as u32,
+                    rows_in_lp: root_cut_pool.cuts_in_lp() as u32,
                 });
             }
 
             let archive_ref = self.visited_archive.as_ref();
+            // Interior cut-generating nodes in canonical order. A cut-generating
+            // (non-leaf) node always owns its own pool, so scoring by node is
+            // per-pool; the visited states are read by NODE position (siblings at
+            // one stage own distinct visited regions). On a chain node position
+            // equals stage, reproducing the former 1..T-2 stage loop.
+            let interior_nodes: Vec<usize> = (0..node_graph.nodes.len())
+                .filter(|&pos| {
+                    node_graph.nodes[pos].stage >= 1 && !node_graph.successors[pos].is_empty()
+                })
+                .collect();
             // Sequential (not `into_par_iter`): the m-block kernel already
             // saturates the cores via its inner parallelism.
             let pools = &self.fcf.pools;
             #[allow(clippy::cast_possible_truncation)]
-            let deactivations: Vec<(usize, usize, CutActivityUpdates, f64)> = (1..num_sel_stages)
-                .map(|stage| {
-                    let pool_id = node_graph.nodes[stage].pool_id;
+            let deactivations: Vec<(usize, usize, CutActivityUpdates, f64)> = interior_nodes
+                .iter()
+                .map(|&node_pos| {
+                    let node = &node_graph.nodes[node_pos];
+                    let pool_id = node.pool_id;
                     let pool = &pools[pool_id];
-                    let states = archive_ref.map_or(&[] as &[f64], |a| a.states_for_node(stage));
+                    let states = archive_ref.map_or(&[] as &[f64], |a| a.states_for_node(node_pos));
                     let start = Instant::now();
-                    let deact = strategy.select_for_stage(pool, states, iteration, stage as u32);
+                    let deact =
+                        strategy.select_for_stage(pool, states, iteration, node.stage as u32);
                     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-                    (stage, pool_id, deact, elapsed_ms)
+                    (node.stage, pool_id, deact, elapsed_ms)
                 })
                 .collect();
 
@@ -989,6 +1022,12 @@ where
             #[allow(clippy::cast_possible_truncation)]
             let stages_processed_sel = num_sel_stages as u32;
 
+            record_by_pool = Some(selection_record_index_by_pool(
+                node_graph,
+                root_pool,
+                &interior_nodes,
+            ));
+
             sel_state = Some((
                 per_stage,
                 rows_deactivated,
@@ -1002,9 +1041,10 @@ where
         if let Some(b) = self.config.cut_management.budget {
             let budget_start = Instant::now();
             let mut total_evicted = 0u32;
-            let node_graph = self.training_ctx.node_graph;
-            for stage in 0..self.ranks.num_stages {
-                let pool_id = node_graph.nodes[stage].pool_id;
+            // Budget is a per-POOL cap: enforce over every pool, never
+            // `nodes[stage].pool_id` (a stage-as-node-position read that misses
+            // sibling pools on a branching graph). On a chain `pool_id == stage`.
+            for pool_id in 0..self.fcf.pools.len() {
                 #[allow(clippy::cast_possible_truncation)]
                 let result = self.fcf.pools[pool_id].enforce_budget(
                     b,
@@ -1012,8 +1052,14 @@ where
                     self.config.loop_config.forward_passes,
                 );
                 total_evicted += result.evicted_count;
+                // Annotate the pool's OWN selection record via `record_by_pool`,
+                // never `per_stage[pool_id]`: the record index equals the pool id
+                // only on a chain (see `selection_record_index_by_pool`).
                 if let Some((ref mut per_stage, _, _, _)) = sel_state
-                    && let Some(rec) = per_stage.get_mut(stage)
+                    && let Some(rec_idx) = record_by_pool
+                        .as_ref()
+                        .and_then(|m| m.get(pool_id).copied().flatten())
+                    && let Some(rec) = per_stage.get_mut(rec_idx)
                 {
                     rec.budget_evicted = Some(result.evicted_count);
                     rec.active_after_budget = Some(result.active_after);
@@ -1065,14 +1111,17 @@ where
         );
     }
 
-    /// Rebuild every stage's frozen template from the current active cut set,
+    /// Rebuild every pool's frozen template from the current active cut set,
     /// returning the total number of cut rows frozen.
     ///
-    /// Each `frozen_templates[t]` becomes the base template plus one structural
-    /// row per active cut in the pool the node graph resolves for stage `t`
-    /// (`active_cuts()` order). With no active cuts (a fresh start) every batch
-    /// is empty and the freeze is a structural copy of the base template —
-    /// identical to the pre-freeze done in `IterationScratch::new`.
+    /// Each `frozen_templates[p]` becomes pool `p`'s base stage template
+    /// (`templates[pool_stage[p]]`) plus one structural row per active cut in
+    /// pool `p` (`active_cuts()` order). Indexing the overlay by POOL, not stage,
+    /// is the whole correction: a branching stage holds several nodes with
+    /// distinct pools, so freezing one pool per stage would bake one node's cuts
+    /// into a sibling's (or the terminal leaf's) LP. With no active cuts (a fresh
+    /// start) every batch is empty and the freeze is a structural copy of the
+    /// base template — identical to the pre-freeze done in `IterationScratch::new`.
     ///
     /// Deliberately left unoptimized: the refreeze is quadratic in the active-cut
     /// count only in the no-cut-selection default, which production never runs at
@@ -1082,24 +1131,24 @@ where
         let mut total_rows_frozen: u64 = 0;
         let state = self.training_ctx.state;
         let node_graph = self.training_ctx.node_graph;
-        for t in 0..self.ranks.num_stages {
-            let pool_id = node_graph.nodes[t].pool_id;
+        for p in 0..node_graph.n_pools {
+            let t = node_graph.pool_stage[p];
             build_cut_row_batch_into(
-                &mut self.scratch.freeze_row_batches[t],
+                &mut self.scratch.freeze_row_batches[p],
                 self.fcf,
-                pool_id,
+                p,
                 state,
-                &self.training_ctx.cut_state_layouts[pool_id],
+                &self.training_ctx.cut_state_layouts[p],
                 &self.stage_ctx.templates[t].col_scale,
             );
             #[allow(clippy::cast_possible_truncation)]
             {
-                total_rows_frozen += self.scratch.freeze_row_batches[t].num_rows as u64;
+                total_rows_frozen += self.scratch.freeze_row_batches[p].num_rows as u64;
             }
             freeze_rows_into_template(
                 &self.stage_ctx.templates[t],
-                &self.scratch.freeze_row_batches[t],
-                &mut self.scratch.frozen_templates[t],
+                &self.scratch.freeze_row_batches[p],
+                &mut self.scratch.frozen_templates[p],
                 &mut self.scratch.freeze_scratch,
             );
         }
@@ -1186,6 +1235,28 @@ where
     }
 }
 
+/// Pool → per-iteration selection-record index, in the order
+/// [`TrainingSession::run_cut_management`] emits `per_stage`: the root pool's
+/// record first (index 0), then each interior cut-generating node's pool in
+/// canonical order (`interior_nodes`). The shared leaf pool (no selection
+/// record) stays `None`. Budget enforcement iterates every pool but must
+/// annotate each pool's record through THIS map, never by pool id used as a
+/// `per_stage` index — on a branching graph whose root is not the smallest-id
+/// node the two differ, so eviction stats would land on a sibling's record. On
+/// a chain `pool_id` equals the record index, so the map is the identity.
+fn selection_record_index_by_pool(
+    node_graph: &NodeGraph,
+    root_pool: usize,
+    interior_nodes: &[usize],
+) -> Vec<Option<usize>> {
+    let mut by_pool = vec![None; node_graph.n_pools];
+    by_pool[root_pool] = Some(0);
+    for (record_idx, &pos) in interior_nodes.iter().enumerate() {
+        by_pool[node_graph.nodes[pos].pool_id] = Some(1 + record_idx);
+    }
+    by_pool
+}
+
 /// Between-iteration capacity growth (reserved seam): doubles a pool's
 /// capacity via [`crate::cut::CutPool::grow`] (`Vec::resize`, position-stable
 /// — the append-only/slot-identity contract survives) when
@@ -1260,7 +1331,10 @@ mod tests {
         ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context,
     };
 
-    use super::{IterationOutcome, TrainingSession, grow_pools_for_next_iteration};
+    use super::{
+        IterationOutcome, TrainingSession, grow_pools_for_next_iteration,
+        selection_record_index_by_pool,
+    };
     use crate::{
         SolverProfiles, StoppingMode, StoppingRule, StoppingRuleSet, TrainingConfig,
         config::{CutManagementConfig, EventConfig, LoopConfig},
@@ -1271,7 +1345,8 @@ mod tests {
         indexer::{CutStateProjection, StateSpace, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
         risk_measure::RiskMeasure,
-        setup::NodeGraph,
+        setup::node_graph::frontier_node,
+        setup::{NodeGraph, NodeOpenings, NodeRuntime, NodeSuccessor, OpeningSource},
         solver_stats::WORKER_STATS_ENTRY_STRIDE,
         test_support,
     };
@@ -2239,5 +2314,89 @@ mod tests {
 
         let capacities_after: Vec<usize> = fcf.pools.iter().map(|p| p.capacity).collect();
         assert_eq!(capacities_before, capacities_after);
+    }
+
+    fn gen_openings() -> NodeOpenings {
+        NodeOpenings {
+            source: OpeningSource::Generated,
+            offset: 0,
+            len: 1,
+            q: 1.0,
+        }
+    }
+
+    /// On a branching graph whose canonical (ascending-id) order does NOT
+    /// place the root first, the cut-budget back-annotation must reach each
+    /// pool's OWN selection record through `selection_record_index_by_pool`, not
+    /// by using the pool id as a `per_stage` index.
+    ///
+    /// Ids 1,2 (leaves, positions 0,1), 3,7 (fan nodes, positions 2,3), 10
+    /// (root, position 4). Pools: fan A→0, fan B→1, root→2, shared leaf→3. The
+    /// `per_stage` record order is [root, fan A, fan B], so the correct map sends
+    /// pool 2→record 0, pool 0→record 1, pool 1→record 2, leaf pool 3→None —
+    /// deliberately NOT the identity `pool_id→pool_id` the pre-fix read assumed.
+    #[test]
+    fn selection_record_index_by_pool_maps_branching_root_not_by_pool_id() {
+        let leaf = |pool_id| NodeRuntime {
+            stage: 2,
+            pool_id,
+            openings: gen_openings(),
+        };
+        let fan = |pool_id| NodeRuntime {
+            stage: 1,
+            pool_id,
+            openings: gen_openings(),
+        };
+        let root = NodeRuntime {
+            stage: 0,
+            pool_id: 2,
+            openings: gen_openings(),
+        };
+        let succ = |child| NodeSuccessor {
+            child,
+            probability: 1.0,
+        };
+        let node_graph = NodeGraph {
+            node_ids: vec![1, 2, 3, 7, 10],
+            nodes: vec![leaf(3), leaf(3), fan(0), fan(1), root],
+            successors: vec![
+                Vec::new(),
+                Vec::new(),
+                vec![succ(0)],
+                vec![succ(1)],
+                vec![succ(2), succ(3)],
+            ],
+            n_pools: 4,
+            pool_stage: vec![1, 1, 0, 2],
+        };
+
+        // root_pool + interior_nodes computed exactly as run_cut_management does.
+        let root_pool = node_graph.nodes[frontier_node(&node_graph, 0)].pool_id;
+        let interior_nodes: Vec<usize> = (0..node_graph.nodes.len())
+            .filter(|&pos| {
+                node_graph.nodes[pos].stage >= 1 && !node_graph.successors[pos].is_empty()
+            })
+            .collect();
+        assert_eq!(root_pool, 2, "the root owns pool 2, not pool 0");
+        assert_eq!(
+            interior_nodes,
+            vec![2, 3],
+            "fan nodes at canonical positions 2, 3"
+        );
+
+        let map = selection_record_index_by_pool(&node_graph, root_pool, &interior_nodes);
+        assert_eq!(
+            map,
+            vec![Some(1), Some(2), Some(0), None],
+            "pool 0→record 1, pool 1→record 2, pool 2 (root)→record 0, leaf pool 3→None"
+        );
+
+        // Power: the fix genuinely differs from the pre-fix identity map.
+        let identity: Vec<Option<usize>> = (0..node_graph.n_pools).map(Some).collect();
+        assert_ne!(
+            map, identity,
+            "on a root-not-smallest-id graph the record map must NOT be the identity — \
+             using pool id as a per_stage index misattributes eviction stats"
+        );
     }
 }

@@ -2001,16 +2001,6 @@ mod k_fan_graph_invariance {
     /// same-shape repeat, bitwise-identical `final_lb`/`final_ub`/`final_ub_std`
     /// on the DECOMP K-fan graph path.
     #[test]
-    #[ignore = "TODO(k-fan-per-node-frozen-templates): the forward_pass_index compaction (the \
-                double-insert) is fixed, but a separate node-native gap remains — \
-                freeze_active_cuts_into_templates (training/session/mod.rs) freezes ONE pool per \
-                STAGE via node_graph.nodes[t].pool_id, using the stage index t as a node \
-                POSITION. On a chain position==stage so it is correct; on a branching graph a \
-                stage has several nodes with distinct pools, so the leaf stage's frozen template \
-                embeds a fan node's cuts (nodes[2] is fan pool 2 in k_fan_setup(8,6,3)), and once \
-                that pool holds a cut with intercept>0 the terminal leaf's pinned theta makes the \
-                LP infeasible at iteration 3. Needs per-node/per-pool frozen templates + per-node \
-                forward LP load; out of scope for the forward_pass_index fix."]
     fn k_fan_thread_shape_invariance() {
         assert_genuine_multi_node_level(4);
 
@@ -2057,11 +2047,6 @@ mod k_fan_graph_invariance {
     /// FOUR distinct thread-partition boundaries (1, 2, 3, 4) — not merely
     /// the single threads=1-vs-k pair the sibling gate above crosses.
     #[test]
-    #[ignore = "TODO(k-fan-per-node-frozen-templates): blocked on the same per-stage frozen \
-                template gap as k_fan_thread_shape_invariance (freeze_active_cuts_into_templates \
-                keys pools by stage-as-node-position); training the K-fan reaches an infeasible \
-                iteration-3 leaf before this assertion runs. The forward_pass_index compaction is \
-                fixed; this needs per-node frozen templates."]
     fn k_fan_weighted_aggregation_canonical_order_invariance() {
         assert_genuine_multi_node_level(4);
 

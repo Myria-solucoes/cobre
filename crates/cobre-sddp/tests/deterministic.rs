@@ -7158,8 +7158,10 @@ mod k_fan_branching_sampled_coverage {
     //! backward sweep, and the per-pool trial-state routing end-to-end.
 
     use std::collections::HashSet;
+    use std::sync::mpsc;
 
     use cobre_sddp::TrainingOutcome;
+    use cobre_sddp::aggregate_simulation;
     use cobre_sddp::test_support::k_fan_setup;
     use cobre_solver::ActiveSolver;
 
@@ -7362,5 +7364,141 @@ mod k_fan_branching_sampled_coverage {
                 fixture.enumerated_scenario_count
             );
         }
+    }
+
+    /// A declared branching graph went infeasible past ~2 iterations before the
+    /// per-pool frozen overlay landed (a leaf stage's frozen template embedded a
+    /// fan node's cut, and the terminal leaf's pinned theta then made the LP
+    /// infeasible). This asserts the K-fan trains the full run without an
+    /// `Infeasible { .. }`, that the frozen overlay is per POOL (not per stage),
+    /// and that each node genuinely warm-starts from its OWN node basis — the
+    /// offered bases are reused and every one is accepted (no slot-identity
+    /// reconstruction failure), not silently all-cold.
+    #[test]
+    fn k_fan_trains_per_pool_frozen_with_reused_node_bases() {
+        let (fixture, outcome) = train_k_fan();
+        let result = outcome.result;
+
+        assert!(
+            result.iterations >= 3,
+            "the K-fan must train past the pre-fix ~2-iteration infeasibility point (ran {})",
+            result.iterations
+        );
+        assert!(result.final_lb.is_finite(), "final_lb must be finite");
+
+        // The frozen overlay is one template per POOL, and this fixture has
+        // strictly more pools than stages (leaf sharing gives n_pools = K+2 over
+        // 3 stages) — so a per-stage overlay could not have produced this length.
+        let node_graph = &fixture.setup.node_graph;
+        let n_pools = node_graph.n_pools;
+        let n_stages: usize = node_graph
+            .nodes
+            .iter()
+            .map(|n| n.stage)
+            .collect::<HashSet<_>>()
+            .len();
+        assert!(
+            n_pools > n_stages,
+            "the K-fan must have more pools ({n_pools}) than stages ({n_stages}) via leaf sharing"
+        );
+        let frozen = result
+            .frozen_templates
+            .as_ref()
+            .expect("training always returns frozen templates");
+        assert_eq!(
+            frozen.len(),
+            n_pools,
+            "frozen overlay must carry one template per pool, not per stage"
+        );
+
+        // Warm-start reuse: forward+backward solves offer stored node bases, and
+        // every offer is accepted. A broken (m, stage) key would alias sibling
+        // nodes, the node_id guard would turn each into a cold solve (no offer),
+        // and `basis_offered` would collapse; a broken slot-identity
+        // reconstruction would instead raise `basis_consistency_failures`.
+        let (offered, rejected) = result
+            .solver_stats_log
+            .iter()
+            .filter(|e| e.phase == "forward" || e.phase == "backward")
+            .fold((0u64, 0u64), |(o, r), e| {
+                (
+                    o + e.delta.basis_offered,
+                    r + e.delta.basis_consistency_failures,
+                )
+            });
+        assert!(
+            offered > 0,
+            "branching warm-start must reuse node bases (basis_offered > 0), not solve all-cold"
+        );
+        assert_eq!(
+            rejected, 0,
+            "every offered node basis must reconstruct by slot and be accepted \
+             (basis_consistency_failures must be 0), got {rejected}"
+        );
+    }
+
+    /// Branching SIMULATION: each scenario's sampled walk visits a fan node and
+    /// its leaf, and each stage solve must load the VISITED node's own pool
+    /// frozen template (the per-pool overlay), not a per-stage mix. Pre-fix this
+    /// went infeasible the same way training did. Asserts every scenario
+    /// simulates to a finite cost.
+    #[test]
+    fn k_fan_simulation_loads_visited_node_pool_cuts() {
+        let (mut fixture, outcome) = train_k_fan();
+        let result = outcome.result;
+
+        // Simulate one scenario per enumerated fan path so several distinct
+        // visited nodes (hence distinct pools) are exercised.
+        let n_scenarios = u32::try_from(K).expect("K fits u32");
+        fixture.setup.simulation_config.n_scenarios = n_scenarios;
+
+        let comm = StubComm;
+        let mut pool = fixture
+            .setup
+            .create_workspace_pool(&comm, 1, ActiveSolver::new)
+            .expect("simulation workspace pool must build");
+
+        let io_capacity = fixture.setup.simulation_config.io_channel_capacity.max(1);
+        let (result_tx, result_rx) = mpsc::sync_channel(io_capacity);
+        let drain = std::thread::spawn(move || result_rx.into_iter().collect::<Vec<_>>());
+
+        let local_costs = fixture
+            .setup
+            .simulate(
+                &mut pool.workspaces,
+                &comm,
+                &result_tx,
+                None,
+                result.frozen_templates.as_deref(),
+                &result.basis_cache,
+            )
+            .expect("branching simulation must not go infeasible");
+        drop(result_tx);
+        let scenario_results = drain.join().expect("drain thread must not panic");
+
+        assert_eq!(
+            scenario_results.len(),
+            n_scenarios as usize,
+            "every simulated scenario must produce a result"
+        );
+        for r in &scenario_results {
+            assert!(
+                r.total_cost.is_finite(),
+                "scenario {} cost must be finite (a per-stage frozen mix would infeasible)",
+                r.scenario_id
+            );
+        }
+        assert_eq!(
+            local_costs.costs.len(),
+            n_scenarios as usize,
+            "compact cost buffer must carry one entry per scenario"
+        );
+        let summary =
+            aggregate_simulation(&local_costs.costs, fixture.setup.simulation_config(), &comm)
+                .expect("aggregate_simulation must succeed");
+        assert!(
+            summary.mean_cost.is_finite(),
+            "aggregate mean simulation cost must be finite"
+        );
     }
 }

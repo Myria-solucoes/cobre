@@ -223,7 +223,7 @@ impl StudySetup {
     /// # Errors
     ///
     /// Returns `SimulationError` on LP infeasibility, solver failure, channel closure,
-    /// or if `frozen_templates.len() != num_stages`.
+    /// or if `frozen_templates.len() != n_pools`.
     pub fn simulate<S, C: Communicator>(
         &self,
         workspaces: &mut [SolverWorkspace<S>],

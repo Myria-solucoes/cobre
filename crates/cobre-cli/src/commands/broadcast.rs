@@ -315,7 +315,7 @@ impl From<&NodeGraph> for BroadcastNodeGraph {
 impl From<BroadcastNodeGraph> for NodeGraph {
     fn from(b: BroadcastNodeGraph) -> Self {
         let n = b.node_ids.len();
-        let nodes = (0..n)
+        let nodes: Vec<NodeRuntime> = (0..n)
             .map(|i| NodeRuntime {
                 stage: b.stage[i],
                 pool_id: b.pool_id[i],
@@ -331,6 +331,12 @@ impl From<BroadcastNodeGraph> for NodeGraph {
                 },
             })
             .collect();
+        // Derived, not transported: pool -> stage is a pure function of the
+        // nodes, so re-deriving here keeps the wire format minimal and drift-free.
+        let mut pool_stage = vec![0usize; b.n_pools];
+        for node in &nodes {
+            pool_stage[node.pool_id] = node.stage;
+        }
         let successors = (0..n)
             .map(|i| {
                 let start = b.successor_offsets[i];
@@ -348,6 +354,7 @@ impl From<BroadcastNodeGraph> for NodeGraph {
             nodes,
             successors,
             n_pools: b.n_pools,
+            pool_stage,
         }
     }
 }
@@ -597,6 +604,7 @@ mod tests {
                 Vec::new(),
             ],
             n_pools: 3,
+            pool_stage: vec![0, 1, 1],
         }
     }
 
@@ -610,6 +618,10 @@ mod tests {
 
         assert_eq!(decoded.node_ids, original.node_ids);
         assert_eq!(decoded.n_pools, original.n_pools);
+        assert_eq!(
+            decoded.pool_stage, original.pool_stage,
+            "pool_stage must be re-derived identically after the wire hop"
+        );
         assert_eq!(decoded.nodes.len(), original.nodes.len());
         for (d, o) in decoded.nodes.iter().zip(original.nodes.iter()) {
             assert_eq!(d.stage, o.stage);

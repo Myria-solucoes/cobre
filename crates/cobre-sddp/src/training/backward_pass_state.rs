@@ -410,7 +410,7 @@ impl BackwardPassState {
     /// - `inputs.ctx.templates.len() != num_stages`
     /// - `inputs.ctx.base_rows.len() != num_stages`
     /// - `inputs.risk_measures.len() != num_stages`
-    /// - `inputs.frozen.len() != num_stages`
+    /// - `inputs.frozen.len() != n_pools`
     pub fn run<S, C: Communicator>(
         &mut self,
         inputs: &mut BackwardPassInputs<'_, S, C>,
@@ -426,8 +426,8 @@ impl BackwardPassState {
         debug_assert_eq!(inputs.risk_measures.len(), num_stages);
         debug_assert_eq!(
             inputs.frozen.len(),
-            num_stages,
-            "frozen.len() must equal num_stages"
+            training_ctx.node_graph.n_pools,
+            "frozen.len() must equal n_pools"
         );
 
         let start = Instant::now();
@@ -990,7 +990,16 @@ fn run_one_backward_level<S: SolverInterface + Send, C: Communicator>(
         inputs
             .exchange
             .pack_real_states_into(&mut state.real_states_buf);
-        archive.archive_gathered_states(level_stage, &state.real_states_buf, total_fwd);
+        // Archive by NODE position, not `level_stage` used as a node index:
+        // sibling nodes at one stage own distinct pools and cut regions, so each
+        // reads back its own archive (`states_for_node`). The exchange gathers the
+        // level's states without per-node split, so every node in a multi-node
+        // level receives the level's states — a conservative over-inclusion that
+        // never drops a binding cut. On a chain the level is one node, giving the
+        // former single stage-keyed bucket byte-for-byte.
+        for &node_pos in level {
+            archive.archive_gathered_states(node_pos, &state.real_states_buf, total_fwd);
+        }
     }
 
     // Route this rank's trial points to the level's pools once (a mem-swapped
@@ -1133,7 +1142,7 @@ fn compute_one_backward_node<S: SolverInterface + Send, C: Communicator>(
     // NOT `cut_state_projection` (pool `pool_id`'s, used only for extraction).
     let successor_cut_layout = &training_ctx.cut_state_layouts[successor_pool_id];
     build_delta_cut_row_batch_into(
-        &mut inputs.cut_batches[successor_stage],
+        &mut inputs.cut_batches[successor_pool_id],
         inputs.fcf,
         successor_pool_id,
         cut_state,
@@ -1141,9 +1150,14 @@ fn compute_one_backward_node<S: SolverInterface + Send, C: Communicator>(
         &ctx.templates[successor_stage].col_scale,
         inputs.iteration,
     );
-    let frozen_tmpl = &inputs.frozen[successor_stage];
+    // The successor LP is loaded per POOL: its frozen rows and the delta cut
+    // batch both belong to pool `successor_pool_id`. `num_cuts_at_successor`
+    // MUST count the frozen pool's own cut rows (`frozen[successor_pool_id]`)
+    // plus that same pool's delta — mixing a frozen pool's row count with a
+    // different pool's delta count corrupts warm-start slot reconstruction.
+    let frozen_tmpl = &inputs.frozen[successor_pool_id];
     let num_cuts_at_successor =
-        (frozen_tmpl.num_rows - template_num_rows) + inputs.cut_batches[successor_stage].num_rows;
+        (frozen_tmpl.num_rows - template_num_rows) + inputs.cut_batches[successor_pool_id].num_rows;
     #[allow(clippy::cast_possible_truncation)]
     let cut_batch_build_ms = batch_start.elapsed().as_millis() as u64;
 
@@ -1162,7 +1176,7 @@ fn compute_one_backward_node<S: SolverInterface + Send, C: Communicator>(
         successor_node_id: training_ctx.node_graph.node_ids[successor_node],
         my_rank: params.my_rank,
         probabilities: &state.probabilities_buf,
-        cut_batch: &inputs.cut_batches[successor_stage],
+        cut_batch: &inputs.cut_batches[successor_pool_id],
         num_cuts_at_successor,
         template_num_rows,
         frozen_template: frozen_tmpl,
@@ -2523,7 +2537,12 @@ mod tests {
         scheduler: BackwardScheduler,
         n_workers: usize,
     ) -> (usize, Vec<usize>) {
-        let frozen_templates = templates.to_vec();
+        // Frozen overlay is per POOL: pool `p`'s base is `templates[pool_stage[p]]`
+        // (all templates identical here, so this just spans every pool, including
+        // the leaf pool at position >= n_stages).
+        let frozen_templates: Vec<StageTemplate> = (0..node_graph.n_pools)
+            .map(|p| templates[node_graph.pool_stage[p]].clone())
+            .collect();
         let n_state = state.n_state;
         let trial_count = records.len() / n_stages;
         let forward_passes = u32::try_from(trial_count).expect("trial_count fits u32");
@@ -2559,7 +2578,8 @@ mod tests {
         // not stage count — the two coincide only on a chain.
         let mut basis_store = empty_basis_store(exchange.local_count(), node_graph.nodes.len());
         let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
-        let mut cut_batches = empty_cut_batches(n_stages);
+        // Cut-batch scratch is pool-indexed (backward writes `cut_batches[successor_pool_id]`).
+        let mut cut_batches = empty_cut_batches(node_graph.n_pools);
         let ctx = StageContext {
             geometry_per_stage: &[],
             templates,
@@ -3216,6 +3236,7 @@ mod tests {
                 Vec::new(),
             ],
             n_pools: 3,
+            pool_stage: vec![0, 1, 1],
         }
     }
 
@@ -3265,6 +3286,7 @@ mod tests {
                 Vec::new(),
             ],
             n_pools: 2,
+            pool_stage: vec![0, 1],
         };
         let mut buf = Vec::new();
         assemble_successor_outcome_weights(&node_graph, 0, &mut buf);
@@ -3397,6 +3419,7 @@ mod tests {
                 Vec::new(),
             ],
             n_pools: 3,
+            pool_stage: vec![0, 1, 1],
         };
         let mut probabilities = Vec::new();
         assemble_successor_outcome_weights(&node_graph, 0, &mut probabilities);

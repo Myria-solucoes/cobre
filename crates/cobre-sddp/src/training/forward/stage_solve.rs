@@ -144,7 +144,11 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
         let inputs = StageInputs {
             stage_context: ctx,
             pool,
-            stored_basis: basis_slice.get_mut(m, t).as_ref(),
+            // Warm-start basis keyed by NODE, matching the backward pass and the
+            // store's node axis; keying by stage aliases sibling nodes that share
+            // a stage, forcing every branching warm-start cold (the per-stage key
+            // is the wrong-but-compiling alternative). On a chain node == stage.
+            stored_basis: basis_slice.get_mut(m, node).as_ref(),
             stage_index: t,
             scenario_index: m,
             iteration: Some(iteration),
@@ -155,7 +159,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
             // Invalidate the stored basis on Infeasible so the next warm-start
             // attempt cold-solves.
             if matches!(e, SddpError::Infeasible { .. }) {
-                *basis_slice.get_mut(m, t) = None;
+                *basis_slice.get_mut(m, node) = None;
             }
             e
         })?;
@@ -225,7 +229,7 @@ pub(crate) fn run_forward_stage<S: SolverInterface + Send>(
     // would corrupt the warm-start; the DCS path leaves the (m, t) slot untouched.
     if dcs.is_none() {
         let cut_row_count = basis_row_capacity.saturating_sub(ctx.templates[t].num_rows);
-        let captured = basis_slice.get_mut(m, t).get_or_insert_with(|| {
+        let captured = basis_slice.get_mut(m, node).get_or_insert_with(|| {
             CapturedBasis::new(
                 ctx.templates[t].num_cols,
                 basis_row_capacity,

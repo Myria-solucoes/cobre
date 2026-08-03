@@ -267,10 +267,12 @@ pub(crate) struct SimScenarioLoadSpec<'a> {
 }
 
 impl<'a> SimScenarioLoadSpec<'a> {
+    /// `pool_id` indexes the per-pool frozen overlay (the visited node's own
+    /// pool cuts); `t` still indexes the per-stage warm-start basis cache.
     #[inline]
-    fn stage(&self, t: usize) -> SimStageLoadSpec<'a> {
+    fn stage(&self, t: usize, pool_id: usize) -> SimStageLoadSpec<'a> {
         SimStageLoadSpec {
-            frozen_template: &self.frozen_templates[t],
+            frozen_template: &self.frozen_templates[pool_id],
             warm_basis: self.stage_bases.get(t).and_then(Option::as_ref),
         }
     }
@@ -893,7 +895,7 @@ pub(crate) fn process_scenario_stages<S: SolverInterface>(
             ctx,
             fcf,
             training_ctx,
-            &load_spec.stage(t),
+            &load_spec.stage(t, node_graph.nodes[node].pool_id),
             output,
             &SimStageIds {
                 t,

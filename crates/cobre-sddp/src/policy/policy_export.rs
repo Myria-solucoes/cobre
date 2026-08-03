@@ -1147,6 +1147,7 @@ mod tests {
                 Vec::new(),
             ],
             n_pools: 4,
+            pool_stage: vec![0, 1, 1, 2],
         }
     }
 

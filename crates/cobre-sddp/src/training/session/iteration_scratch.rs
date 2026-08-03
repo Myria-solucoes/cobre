@@ -27,13 +27,17 @@ pub(crate) struct IterationScratch {
     pub patch_buf: PatchBuffer,
     /// Per-scenario per-stage trajectory records; sized `max_local_fwd * num_stages`.
     pub records: Vec<TrajectoryRecord>,
-    /// Cut row batches built during the backward pass, one per stage.
+    /// Cut row batches built during the backward pass, one per pool.
     pub cut_batches: Vec<RowBatch>,
     /// Cut row batch used exclusively for lower-bound evaluation (stage 0).
     pub lb_cut_batch: RowBatch,
-    /// Frozen stage templates (structural copies of base templates + active cuts).
+    /// Frozen LP templates, one per POOL (not per stage): each is its pool's
+    /// base stage template plus that pool's own active cuts. A per-stage overlay
+    /// is the wrong-but-compiling alternative — on a branching graph one stage
+    /// holds several nodes with distinct pools, so a per-stage frozen row batch
+    /// would bake one node's cuts into every sibling's LP.
     pub frozen_templates: Vec<StageTemplate>,
-    /// Row batches used to build the active-cut rows before freeze, one per stage.
+    /// Row batches used to build the active-cut rows before freeze, one per pool.
     pub freeze_row_batches: Vec<RowBatch>,
     /// Cut row map for the lower-bound LP (tracks row positions within stage 0 template).
     pub lb_cut_row_map: CutRowMap,
@@ -50,16 +54,18 @@ pub(crate) struct IterationScratch {
 
 impl IterationScratch {
     /// Allocate and initialise all iteration scratch buffers, pre-freeze each
-    /// `frozen_templates[t]` as an empty-cut-batch structural copy of
-    /// `stage_ctx.templates[t]` so iteration 1 can use the frozen load path.
+    /// `frozen_templates[p]` as an empty-cut-batch structural copy of pool `p`'s
+    /// base stage template `stage_ctx.templates[pool_stage[p]]` so iteration 1
+    /// can use the frozen load path.
     // Rationale: each argument sizes a distinct pre-allocated scratch region with
     // its own sizing formula, so no sub-struct would group a subset of the arity.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         max_local_fwd: usize,
         num_stages: usize,
+        pool_stage: &[usize],
         n_state: usize,
-        fcf_pool_0_capacity: usize,
+        lb_root_pool_capacity: usize,
         template_0_num_rows: usize,
         hydro_count: usize,
         max_par_order: usize,
@@ -68,6 +74,7 @@ impl IterationScratch {
         k_max: usize,
         stage_ctx: &StageContext<'_>,
     ) -> Self {
+        let n_pools = pool_stage.len();
         // Construct each record fresh: `Vec::new()` is cheaper than cloning a
         // capacity-0 Vec.
         let records: Vec<TrajectoryRecord> = (0..max_local_fwd * num_stages)
@@ -103,26 +110,26 @@ impl IterationScratch {
             row_lower: Vec::new(),
             row_upper: Vec::new(),
         };
-        let cut_batches: Vec<RowBatch> = (0..num_stages).map(|_| empty_row_batch()).collect();
+        let cut_batches: Vec<RowBatch> = (0..n_pools).map(|_| empty_row_batch()).collect();
         let lb_cut_batch = empty_row_batch();
 
         let mut frozen_templates: Vec<StageTemplate> =
-            (0..num_stages).map(|_| StageTemplate::empty()).collect();
-        let freeze_row_batches: Vec<RowBatch> =
-            (0..num_stages).map(|_| empty_row_batch()).collect();
+            (0..n_pools).map(|_| StageTemplate::empty()).collect();
+        let freeze_row_batches: Vec<RowBatch> = (0..n_pools).map(|_| empty_row_batch()).collect();
 
         let mut freeze_scratch = FreezeScratch::new();
 
-        for t in 0..num_stages {
+        for p in 0..n_pools {
+            let t = pool_stage[p];
             freeze_rows_into_template(
                 &stage_ctx.templates[t],
-                &freeze_row_batches[t],
-                &mut frozen_templates[t],
+                &freeze_row_batches[p],
+                &mut frozen_templates[p],
                 &mut freeze_scratch,
             );
         }
 
-        let lb_cut_row_map = CutRowMap::new(fcf_pool_0_capacity, template_0_num_rows);
+        let lb_cut_row_map = CutRowMap::new(lb_root_pool_capacity, template_0_num_rows);
 
         let lb_scratch = LbEvalScratch::new();
 
@@ -231,7 +238,7 @@ mod tests {
         let max_local_fwd = 2;
         let num_stages = 3;
         let n_state = 4;
-        let fcf_pool_0_capacity = 10;
+        let lb_root_pool_capacity = 10;
         let template_0_num_rows = 5;
         let hydro_count = 1;
         let max_par_order = 1;
@@ -242,8 +249,9 @@ mod tests {
         let scratch = IterationScratch::new(
             max_local_fwd,
             num_stages,
+            &(0..num_stages).collect::<Vec<usize>>(),
             n_state,
-            fcf_pool_0_capacity,
+            lb_root_pool_capacity,
             template_0_num_rows,
             hydro_count,
             max_par_order,
@@ -288,7 +296,7 @@ mod tests {
         let max_local_fwd = 2;
         let num_stages = 3;
         let n_state = 4;
-        let fcf_pool_0_capacity = 10;
+        let lb_root_pool_capacity = 10;
         let template_0_num_rows = 5;
         let hydro_count = 1;
         let max_par_order = 1;
@@ -299,8 +307,9 @@ mod tests {
         let scratch = IterationScratch::new(
             max_local_fwd,
             num_stages,
+            &(0..num_stages).collect::<Vec<usize>>(),
             n_state,
-            fcf_pool_0_capacity,
+            lb_root_pool_capacity,
             template_0_num_rows,
             hydro_count,
             max_par_order,
@@ -340,7 +349,7 @@ mod tests {
         let max_local_fwd = 1;
         let num_stages = 2;
         let n_state = 4;
-        let fcf_pool_0_capacity = 4;
+        let lb_root_pool_capacity = 4;
         let template_0_num_rows = 4;
         let hydro_count = 2;
         let max_par_order = 1;
@@ -353,8 +362,9 @@ mod tests {
         let scratch = IterationScratch::new(
             max_local_fwd,
             num_stages,
+            &(0..num_stages).collect::<Vec<usize>>(),
             n_state,
-            fcf_pool_0_capacity,
+            lb_root_pool_capacity,
             template_0_num_rows,
             hydro_count,
             max_par_order,
@@ -404,7 +414,7 @@ mod tests {
         let max_local_fwd = 1;
         let num_stages = 2;
         let n_state = 2;
-        let fcf_pool_0_capacity = 4;
+        let lb_root_pool_capacity = 4;
         let template_0_num_rows = 4;
         let hydro_count = 2;
         let max_par_order = 1;
@@ -415,8 +425,9 @@ mod tests {
         let scratch = IterationScratch::new(
             max_local_fwd,
             num_stages,
+            &(0..num_stages).collect::<Vec<usize>>(),
             n_state,
-            fcf_pool_0_capacity,
+            lb_root_pool_capacity,
             template_0_num_rows,
             hydro_count,
             max_par_order,
@@ -445,7 +456,7 @@ mod tests {
         let max_local_fwd = 1;
         let num_stages = 2;
         let n_state = 5;
-        let fcf_pool_0_capacity = 4;
+        let lb_root_pool_capacity = 4;
         let template_0_num_rows = 4;
         let hydro_count = 2;
         let max_par_order = 1;
@@ -457,8 +468,9 @@ mod tests {
         let scratch = IterationScratch::new(
             max_local_fwd,
             num_stages,
+            &(0..num_stages).collect::<Vec<usize>>(),
             n_state,
-            fcf_pool_0_capacity,
+            lb_root_pool_capacity,
             template_0_num_rows,
             hydro_count,
             max_par_order,

@@ -284,7 +284,7 @@ impl ForwardPassState {
     ///
     /// - `inputs.records.len() != inputs.local_forward_passes * num_stages`
     /// - `inputs.training_ctx.initial_state.len() != state.n_state`
-    /// - `inputs.frozen.len() != num_stages`
+    /// - `inputs.frozen.len() != n_pools`
     pub(crate) fn run<S>(
         &mut self,
         inputs: &mut ForwardPassInputs<'_, S>,
@@ -308,10 +308,11 @@ impl ForwardPassState {
 
         debug_assert_eq!(inputs.records.len(), forward_passes * num_stages);
         debug_assert_eq!(initial_state.len(), state.n_state);
+        let n_pools = training_ctx.node_graph.n_pools;
         debug_assert_eq!(
             inputs.frozen.len(),
-            num_stages,
-            "frozen templates length mismatch: expected {num_stages}, got {}",
+            n_pools,
+            "frozen templates length mismatch: expected {n_pools} pools, got {}",
             inputs.frozen.len()
         );
 
@@ -686,7 +687,7 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
             // the cut-free base template (loading frozen would double-append the
             // embedded cut rows), so the frozen load is skipped.
             if dcs_params.is_none() {
-                ws.solver.load_model(&params.frozen[t]);
+                ws.solver.load_model(&params.frozen[pool_id]);
             }
             ws.current_state.clear();
             // Each trajectory's incoming state is its OWN previous-stage record —
@@ -762,7 +763,7 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
                 num_stages: params.num_stages,
                 iteration: params.iteration,
                 raw_noise,
-                basis_row_capacity: params.frozen[t].num_rows,
+                basis_row_capacity: params.frozen[pool_id].num_rows,
                 terminal_has_boundary_cuts: params.terminal_has_boundary_cuts,
                 pool: &params.fcf.pools[pool_id],
                 dcs: dcs_params,
@@ -2390,7 +2391,9 @@ mod tests {
         };
 
         let mut ws = single_workspace(MockSolver::always_ok(fixed_solution_1_0()), &state);
-        let mut basis_store = BasisStore::new(forward_passes, 2);
+        // Basis store axis is NODE: the K-fan visits leaf nodes at positions
+        // beyond `num_stages`, so the store must span every node, not the stages.
+        let mut basis_store = BasisStore::new(forward_passes, node_graph.nodes.len());
         let mut basis_slices = basis_store.split_workers_mut(1);
         let mut basis_slice = basis_slices.remove(0);
         let mut records: Vec<TrajectoryRecord> = (0..forward_passes * 2)

@@ -228,13 +228,14 @@ impl SimulationState {
 
         debug_assert_inputs(inputs.ctx, num_stages, initial_state.len(), state.n_state);
 
+        let n_pools = training_ctx.node_graph.n_pools;
         if let Some(frozen) = inputs.frozen_templates
-            && frozen.len() != num_stages
+            && frozen.len() != n_pools
         {
             return Err(SimulationError::InvalidConfiguration(format!(
-                "frozen_templates length {} != num_stages {}",
+                "frozen_templates length {} != n_pools {}",
                 frozen.len(),
-                num_stages
+                n_pools
             )));
         }
 
@@ -242,7 +243,6 @@ impl SimulationState {
             inputs.fcf,
             inputs.ctx,
             training_ctx,
-            num_stages,
             inputs.frozen_templates,
             &mut self.freeze_batch,
             &mut self.owned_frozen,
@@ -503,14 +503,14 @@ fn build_sim_sampler<'a>(
 
 /// Populate `owned_frozen` when the caller did not provide pre-frozen templates.
 ///
-/// No-op if `caller_frozen` is `Some`. Otherwise rebuilds `owned_frozen` from the
-/// FCF, context templates, and state layout, using `freeze_batch` as scratch (its
-/// post-call contents are unspecified). Cost `O(num_stages * num_active_cuts)`.
+/// No-op if `caller_frozen` is `Some`. Otherwise rebuilds `owned_frozen` — one
+/// frozen template per POOL — from the FCF, context templates, and state layout,
+/// using `freeze_batch` as scratch (its post-call contents are unspecified). Cost
+/// `O(n_pools * num_active_cuts)`.
 fn refreeze_templates_if_needed(
     fcf: &FutureCostFunction,
     ctx: &StageContext<'_>,
     training_ctx: &TrainingContext<'_>,
-    num_stages: usize,
     caller_frozen: Option<&[StageTemplate]>,
     freeze_batch: &mut RowBatch,
     owned_frozen: &mut Option<Vec<StageTemplate>>,
@@ -525,20 +525,22 @@ fn refreeze_templates_if_needed(
     let cut_state_layouts = training_ctx.cut_state_layouts;
     let node_graph = training_ctx.node_graph;
 
-    let mut owned = Vec::with_capacity(num_stages);
-    // Rationale: `t` is the stage index passed to `build_cut_row_batch_into` AND used
-    // to index the templates slice (structure per stage); `pool_id` (resolved from
-    // the node graph) indexes the fcf pools / cut_state_layouts slices instead. An
-    // iterator zip would not carry the stage index the builder needs.
+    // Per-POOL frozen overlay, mirroring the training freeze: pool `p`'s cuts on
+    // pool `p`'s base stage template `templates[pool_stage[p]]`. A per-stage build
+    // would bake one node's cuts into a sibling's LP on a branching graph.
+    let mut owned = Vec::with_capacity(node_graph.n_pools);
+    // Rationale: `p` is the pool passed by value to `build_cut_row_batch_into` and
+    // mapped through `pool_stage[p]` to the base stage template; an `enumerate`
+    // over one pool-keyed slice would not carry those other uses.
     #[allow(clippy::needless_range_loop)]
-    for t in 0..num_stages {
-        let pool_id = node_graph.nodes[t].pool_id;
+    for p in 0..node_graph.n_pools {
+        let t = node_graph.pool_stage[p];
         build_cut_row_batch_into(
             freeze_batch,
             fcf,
-            pool_id,
+            p,
             state,
-            &cut_state_layouts[pool_id],
+            &cut_state_layouts[p],
             &ctx.templates[t].col_scale,
         );
         let mut frozen = StageTemplate::empty();

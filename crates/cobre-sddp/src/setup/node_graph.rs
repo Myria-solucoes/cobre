@@ -112,6 +112,15 @@ pub struct NodeGraph {
     pub successors: Vec<Vec<NodeSuccessor>>,
     /// `max(pool_id) + 1`.
     pub n_pools: usize,
+    /// `pool_stage[p]` is the study-stage index of the node(s) owning pool `p`
+    /// — the base LP structure a per-pool frozen overlay composes onto
+    /// (`freeze(templates[pool_stage[p]], active_cuts(p))`). Well-defined
+    /// because every node sharing a pool shares one stage (a non-leaf pool has
+    /// exactly one owner; the shared leaf pool's leaves are all terminal).
+    /// The frozen overlay MUST index its base by this, never by a pool ordinal
+    /// used as a stage: on a branching graph `pool_id != stage`. On a chain
+    /// `pool_stage[t] == t`.
+    pub pool_stage: Vec<usize>,
 }
 
 /// Build the runtime node graph from the validated, normalized `PolicyGraph`.
@@ -175,6 +184,7 @@ fn build_chain_node_graph(
         nodes,
         successors,
         n_pools: n_stages,
+        pool_stage: (0..n_stages).collect(),
     }
 }
 
@@ -200,6 +210,11 @@ fn chain_transition_probability(graph: &PolicyGraph, resolver: &StageIdResolver,
 /// no boundary-source discriminator — and each node's Ω binds through
 /// its own `realization_id` (a single external-library column, degenerate
 /// `|Ω| = 1`) or the stage's generated set (`realization_id: None`).
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] on a duplicate node id, or on a transition
+/// / node naming an id that resolves to no declared node/stage.
 fn build_declared_node_graph(
     graph: &PolicyGraph,
     resolver: &StageIdResolver,
@@ -210,6 +225,20 @@ fn build_declared_node_graph(
     let mut order: Vec<usize> = (0..graph.nodes.len()).collect();
     order.sort_by_key(|&i| graph.nodes[i].id);
     let node_ids: Vec<i32> = order.iter().map(|&i| graph.nodes[i].id).collect();
+    // Reject duplicate node ids: the forward/backward warm-start apply guard
+    // matches a stored basis to the current LP by `CapturedBasis.node_id`, so a
+    // duplicate id would false-match one node's basis onto another's LP (the CLP
+    // backend accepts a shape-mismatched basis silently). Ascending order makes
+    // duplicates adjacent.
+    if let Some(dup) = node_ids
+        .iter()
+        .zip(node_ids.iter().skip(1))
+        .find_map(|(a, b)| (a == b).then_some(*a))
+    {
+        return Err(SddpError::Validation(format!(
+            "node graph: duplicate node id {dup} declared more than once"
+        )));
+    }
     let id_to_position: HashMap<i32, usize> = node_ids
         .iter()
         .enumerate()
@@ -303,6 +332,30 @@ fn build_declared_node_graph(
         });
     }
 
+    // pool -> stage: every node sharing a pool shares one stage (a non-leaf
+    // pool has one owner; leaves sharing the terminal pool are all terminal),
+    // so the last writer per pool is also the only stage value written. The
+    // debug-only conflict check guards a future leaf-terminality relaxation or a
+    // programmatic construction path that bypasses cobre-io validation.
+    let mut pool_stage = vec![0usize; n_pools];
+    #[cfg(debug_assertions)]
+    let mut pool_stage_seen = vec![false; n_pools];
+    for node in &nodes {
+        #[cfg(debug_assertions)]
+        {
+            if pool_stage_seen[node.pool_id] {
+                debug_assert_eq!(
+                    pool_stage[node.pool_id], node.stage,
+                    "node graph: pool {} owned by nodes at differing stages; every node \
+                     sharing a pool must share one stage",
+                    node.pool_id,
+                );
+            }
+            pool_stage_seen[node.pool_id] = true;
+        }
+        pool_stage[node.pool_id] = node.stage;
+    }
+
     // Every edge goes t -> t+1 (upstream structural validation); every
     // successor of a node therefore sits exactly one stage downstream —
     // asserted, not re-derived, since this is what makes pool dimension
@@ -325,6 +378,7 @@ fn build_declared_node_graph(
         nodes,
         successors,
         n_pools,
+        pool_stage,
     })
 }
 
@@ -1071,6 +1125,85 @@ mod tests {
             "a node with successors never shares the leaf pool"
         );
         assert_eq!(ng.n_pools, 2, "one pool for the root, one shared leaf pool");
+    }
+
+    #[test]
+    fn duplicate_node_id_is_rejected_at_build() {
+        // Two nodes declared with the same id 1; the basis apply-guard keys on
+        // node id, so a duplicate must be rejected before any solve.
+        let stochastic = stochastic_context(2, 1, 2);
+        let graph = PolicyGraph {
+            nodes: vec![node(0, 0, None), node(1, 1, None), node(1, 1, None)],
+            transitions: vec![transition(0, 1, 1.0)],
+            ..empty_graph()
+        };
+        let study_stage_ids = [0, 1];
+        let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+
+        let err = build_node_graph(&graph, 2, &resolver, &stochastic)
+            .expect_err("a duplicate node id must be rejected");
+        match err {
+            SddpError::Validation(msg) => {
+                assert!(
+                    msg.contains("duplicate node id 1"),
+                    "the rejection must name the duplicate id: {msg}"
+                );
+            }
+            other => panic!("expected SddpError::Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pool_stage_maps_each_pool_to_its_owning_stage_over_a_k_fan() {
+        // Root (stage 0, own pool) fans into two interior nodes at stage 1 (each
+        // its own pool) with two leaves each at stage 2 (shared leaf pool).
+        let stochastic = stochastic_context(3, 1, 2);
+        let graph = PolicyGraph {
+            nodes: vec![
+                node(0, 0, None),
+                node(1, 1, None),
+                node(2, 1, None),
+                node(3, 2, None),
+                node(4, 2, None),
+                node(5, 2, None),
+                node(6, 2, None),
+            ],
+            transitions: vec![
+                transition(0, 1, 0.5),
+                transition(0, 2, 0.5),
+                transition(1, 3, 0.5),
+                transition(1, 4, 0.5),
+                transition(2, 5, 0.5),
+                transition(2, 6, 0.5),
+            ],
+            ..empty_graph()
+        };
+        let study_stage_ids = [0, 1, 2];
+        let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+        let ng = build_node_graph(&graph, 3, &resolver, &stochastic).unwrap();
+
+        assert_eq!(ng.pool_stage.len(), ng.n_pools);
+        // Every pool's recorded stage must equal the stage of every node owning
+        // it (leaf pool: all owners terminal → one shared stage).
+        for (pos, n) in ng.nodes.iter().enumerate() {
+            assert_eq!(
+                ng.pool_stage[n.pool_id], n.stage,
+                "pool_stage[pool of node {pos}] must equal that node's stage"
+            );
+        }
+        // The shared leaf pool maps to the terminal stage 2.
+        let leaf_pool = ng.nodes[3].pool_id;
+        assert_eq!(ng.pool_stage[leaf_pool], 2);
+    }
+
+    #[test]
+    fn pool_stage_chain_is_identity() {
+        let n_stages = 4;
+        let stochastic = stochastic_context(n_stages, 1, 3);
+        let study_stage_ids: Vec<i32> = (0..n_stages as i32).collect();
+        let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+        let ng = build_node_graph(&empty_graph(), n_stages, &resolver, &stochastic).unwrap();
+        assert_eq!(ng.pool_stage, vec![0, 1, 2, 3]);
     }
 
     #[test]

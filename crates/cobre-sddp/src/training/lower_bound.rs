@@ -24,7 +24,7 @@ use crate::{
     noise::compute_effective_eta,
     rank_reconcile::reconcile_error_flag,
     risk_measure::RiskMeasure,
-    setup::{NodeGraph, NodeSuccessor},
+    setup::{NodeGraph, NodeSuccessor, node_graph::frontier_node},
     training::stage_solve_prep::{
         InflowNoise, LoadNoise, OpeningMode, StageSolvePrep, StageSolvePrepParams, StateSource,
     },
@@ -107,9 +107,12 @@ fn lb_init_rank0<S: SolverInterface>(
     lb_cut_row_map: Option<&mut CutRowMap>,
 ) {
     let state_layout = training_ctx.state;
-    // Pool id resolved from the node graph for the root node (stage 0); on the
-    // chain degeneracy this is `0`.
-    let pool_id = training_ctx.node_graph.nodes[0].pool_id;
+    // Root pool resolved by STAGE (the sole stage-0 node), never by array
+    // position: build_declared_node_graph sorts nodes by ascending id, so
+    // nodes[0] is the smallest-id node, not necessarily the root — reading
+    // nodes[0].pool_id would inject a sibling's cuts onto the root's stage-0 LP.
+    // On a chain the root IS nodes[0] (pool 0).
+    let pool_id = training_ctx.node_graph.nodes[frontier_node(training_ctx.node_graph, 0)].pool_id;
     let cut_state = &training_ctx.cut_state_layouts[pool_id];
     let template = &ctx.templates[0];
 
@@ -458,7 +461,8 @@ pub fn evaluate_lower_bound<S: SolverInterface, C: Communicator>(
 mod tests {
     use super::{
         LbEvalScratch, LbEvalScratchBundle, assemble_outcome_weights,
-        assemble_root_outcome_weights, evaluate_lower_bound, lb_evaluate_stage_0,
+        assemble_root_outcome_weights, evaluate_lower_bound, find_root_position,
+        lb_evaluate_stage_0, lb_init_rank0,
     };
     use crate::{
         PrepareHydroModelsResult, ResolvedParameters, StageTemplates,
@@ -2979,6 +2983,7 @@ mod tests {
                 Vec::new(),
             ],
             n_pools: 3,
+            pool_stage: vec![1, 1, 0],
         }
     }
 
@@ -3110,6 +3115,7 @@ mod tests {
             nodes: vec![node_a, node_b],
             successors: vec![Vec::new(), Vec::new()],
             n_pools: 2,
+            pool_stage: vec![0, 0],
         };
 
         let mut weights = Vec::new();
@@ -3124,6 +3130,115 @@ mod tests {
             }
             other => panic!("expected SddpError::Validation naming stage 0, got {other:?}"),
         }
+    }
+
+    /// Root-pool regression pin: `lb_init_rank0` must load the ROOT's own pool cuts
+    /// onto the stage-0 LB LP, resolving the root by STAGE, never by array position.
+    ///
+    /// The declared graph's stage-0 root is NOT the smallest-id node: canonical
+    /// ascending-id order puts leaves (ids 1, 2) at positions 0, 1 and the root
+    /// (id 3, stage 0) at position 2, so `nodes[0]` is a leaf and
+    /// `nodes[0].pool_id` is the shared leaf pool, distinct from the root's pool.
+    /// With the root pool carrying a different active-cut count than the leaf
+    /// pool, the built LB cut batch's row count reveals which pool was resolved:
+    /// the pre-fix `nodes[0].pool_id` read yields the leaf pool's count and
+    /// fails this assertion; the stage-resolved root yields the root pool's.
+    #[test]
+    fn lb_init_rank0_resolves_root_pool_by_stage_not_array_position() {
+        let mut fixture = SimpleLbFixture::new(
+            minimal_template(),
+            1,
+            vec![],
+            0,
+            1,
+            simple_opening_tree(1),
+            InflowNonNegativityMethod::None,
+            vec![0.0_f64],
+        );
+        let n_state = fixture.state.n_state;
+
+        let leaf = |pool_id| NodeRuntime {
+            stage: 1,
+            pool_id,
+            openings: NodeOpenings {
+                source: OpeningSource::Generated,
+                offset: 0,
+                len: 1,
+                q: 1.0,
+            },
+        };
+        let root = NodeRuntime {
+            stage: 0,
+            pool_id: 0,
+            openings: NodeOpenings {
+                source: OpeningSource::Generated,
+                offset: 0,
+                len: 1,
+                q: 1.0,
+            },
+        };
+        fixture.node_graph = NodeGraph {
+            node_ids: vec![1, 2, 3],
+            nodes: vec![leaf(1), leaf(1), root],
+            successors: vec![
+                Vec::new(),
+                Vec::new(),
+                vec![
+                    NodeSuccessor {
+                        child: 0,
+                        probability: 0.5,
+                    },
+                    NodeSuccessor {
+                        child: 1,
+                        probability: 0.5,
+                    },
+                ],
+            ],
+            n_pools: 2,
+            pool_stage: vec![0, 1],
+        };
+
+        // Power precondition: the buggy nodes[0] read and the stage-resolved root
+        // genuinely disagree on which pool is the root's.
+        let root_pos = find_root_position(&fixture.node_graph).unwrap();
+        let root_pool = fixture.node_graph.nodes[root_pos].pool_id;
+        let leaf_pool = fixture.node_graph.nodes[0].pool_id;
+        assert_eq!(root_pos, 2, "root is at canonical position 2 (id 3), not 0");
+        assert_ne!(
+            root_pool, leaf_pool,
+            "the fixture must distinguish the root pool from nodes[0].pool_id"
+        );
+
+        // Root pool: 3 active cuts; leaf pool at nodes[0]: 1. Distinct counts so
+        // the resolved pool is observable through the built batch's row count.
+        let mut fcf = make_fcf(2, n_state);
+        let coeff = vec![0.0_f64; n_state];
+        fcf.add_cut(root_pool, 1, 0, 0.0, &coeff);
+        fcf.add_cut(root_pool, 1, 1, 0.0, &coeff);
+        fcf.add_cut(root_pool, 2, 0, 0.0, &coeff);
+        fcf.add_cut(leaf_pool, 1, 0, 0.0, &coeff);
+        assert_eq!(fcf.pools[root_pool].active_count(), 3);
+        assert_eq!(fcf.pools[leaf_pool].active_count(), 1);
+
+        let mut solver = MockSolver::with_objectives(vec![0.0]);
+        let mut lb_cut_batch = empty_row_batch();
+        let ctx = fixture.ctx();
+        let training_ctx = fixture.training_ctx();
+        lb_init_rank0(
+            &mut solver,
+            &fcf,
+            &ctx,
+            &training_ctx,
+            &mut lb_cut_batch,
+            None,
+        );
+
+        assert_eq!(
+            lb_cut_batch.num_rows,
+            fcf.pools[root_pool].active_count(),
+            "lb_init_rank0 must build the stage-0 LB LP from the ROOT's own pool \
+             cuts (resolved by stage), not nodes[0]'s leaf pool"
+        );
     }
 
     /// Inspection guard: production lower-bound code carries no
