@@ -20,9 +20,10 @@ use cobre_stochastic::context::{ClassSchemes, OpeningTreeInputs, build_stochasti
 
 use cobre_comm::LocalBackend;
 
+use super::stats_aggregation::weighted_cost_reduction;
 use super::{
-    ForwardPassBatch, ForwardResult, SyncResult, build_delta_cut_row_batch_into, run_forward_pass,
-    sync_forward,
+    ForwardBound, ForwardPassBatch, ForwardResult, SyncResult, build_delta_cut_row_batch_into,
+    run_forward_pass, sync_forward,
 };
 use crate::cut::row::build_cut_row_batch_into;
 use crate::solve::partition;
@@ -634,6 +635,7 @@ fn ac_two_scenarios_three_stages_fixed_solution() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 2,
+            training_enumerated: false,
             max_iterations: 100,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -766,6 +768,7 @@ fn ac_infeasible_at_stage_1_scenario_0_returns_infeasible_error() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 2,
+            training_enumerated: false,
             max_iterations: 100,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -902,6 +905,7 @@ fn cost_statistics_accumulated_correctly() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 2,
+            training_enumerated: false,
             max_iterations: 100,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -1072,7 +1076,7 @@ fn ub_statistics_four_scenarios_correct_mean_and_std() {
         stage_stats: Vec::new(),
     };
     let comm = LocalBackend;
-    let result = sync_forward(&local, &comm, 4).unwrap();
+    let result = sync_forward(&local, &comm, 4, ForwardBound::Statistical).unwrap();
 
     assert_eq!(result.global_ub_mean, 75.0, "mean must be 300/4 = 75");
 
@@ -1112,7 +1116,7 @@ fn acceptance_criterion_ub_mean() {
         stage_stats: Vec::new(),
     };
     let comm = LocalBackend;
-    let result = sync_forward(&local, &comm, 4).unwrap();
+    let result = sync_forward(&local, &comm, 4, ForwardBound::Statistical).unwrap();
 
     assert_eq!(result.global_ub_mean, 75.0);
     let expected_std = (500.0_f64 / 3.0).sqrt();
@@ -1142,7 +1146,7 @@ fn canonical_summation_identical_regardless_of_partition() {
         stage_stats: Vec::new(),
     };
     let comm = LocalBackend;
-    let result_single = sync_forward(&single_rank, &comm, 4).unwrap();
+    let result_single = sync_forward(&single_rank, &comm, 4, ForwardBound::Statistical).unwrap();
 
     // Build the full global buffer manually; sequential summation must yield
     // the same statistics as the single-rank result above.
@@ -1181,7 +1185,7 @@ fn bessel_correction_single_scenario_zero_std_and_ci() {
         stage_stats: Vec::new(),
     };
     let comm = LocalBackend;
-    let result = sync_forward(&local, &comm, 1).unwrap();
+    let result = sync_forward(&local, &comm, 1, ForwardBound::Statistical).unwrap();
 
     assert_eq!(
         result.global_ub_std, 0.0,
@@ -1210,7 +1214,7 @@ fn negative_variance_guard_produces_zero_std_not_nan() {
         stage_stats: Vec::new(),
     };
     let comm = LocalBackend;
-    let result = sync_forward(&local, &comm, 2).unwrap();
+    let result = sync_forward(&local, &comm, 2, ForwardBound::Statistical).unwrap();
 
     assert!(
         !result.global_ub_std.is_nan(),
@@ -1239,7 +1243,7 @@ fn sync_forward_local_backend_global_equals_local() {
         stage_stats: Vec::new(),
     };
     let comm = LocalBackend;
-    let result = sync_forward(&local, &comm, 2).unwrap();
+    let result = sync_forward(&local, &comm, 2, ForwardBound::Statistical).unwrap();
 
     // In single-rank mode, allgatherv is an identity copy.
     assert_eq!(
@@ -1260,7 +1264,7 @@ fn sync_forward_sync_time_ms_is_valid_u64() {
         stage_stats: Vec::new(),
     };
     let comm = LocalBackend;
-    let result = sync_forward(&local, &comm, 2).unwrap();
+    let result = sync_forward(&local, &comm, 2, ForwardBound::Statistical).unwrap();
     // sync_time_ms is u64 — any value is a valid non-negative u64.
     // We just verify the field exists and doesn't overflow to something absurd.
     let _ = result.sync_time_ms;
@@ -1324,12 +1328,108 @@ fn sync_forward_comm_error_wraps_as_sddp_communication() {
         stage_stats: Vec::new(),
     };
     let comm = FailingComm;
-    let err = sync_forward(&local, &comm, 1).unwrap_err();
+    let err = sync_forward(&local, &comm, 1, ForwardBound::Statistical).unwrap_err();
 
     assert!(
         matches!(err, SddpError::Communication(_)),
         "CommError must be wrapped as SddpError::Communication, got: {err:?}"
     );
+}
+
+// ── Unit tests: exact probability-weighted upper bound ───────────────────
+
+/// `Σ wᵢ·cᵢ` on a hand-checked vector: costs [10, 20, 30] with weights
+/// [0.5, 0.25, 0.25] → 5.0 + 5.0 + 7.5 = 17.5 (every product exact in f64).
+#[test]
+fn weighted_cost_reduction_matches_hand_computed_sum() {
+    let costs = [10.0_f64, 20.0, 30.0];
+    let weights = [0.5_f64, 0.25, 0.25];
+    assert_eq!(weighted_cost_reduction(&costs, &weights), 17.5);
+}
+
+/// Uniform `wᵢ = 1/n` reproduces the arithmetic mean bit-for-bit: for
+/// [1, 2, 3, 4] the reduction equals `10/4 = 2.5`.
+#[test]
+fn weighted_cost_reduction_uniform_weights_reproduce_mean() {
+    let costs = [1.0_f64, 2.0, 3.0, 4.0];
+    let uniform = vec![1.0_f64 / 4.0; 4];
+    let mean = costs.iter().sum::<f64>() / 4.0;
+    assert_eq!(
+        weighted_cost_reduction(&costs, &uniform).to_bits(),
+        mean.to_bits(),
+        "uniform-weighted reduction must reproduce the arithmetic mean bit-for-bit"
+    );
+}
+
+/// A single element returns its own `w·c`: `w = 1` yields the cost verbatim,
+/// and a non-unit weight scales it — pinning that the reduction is `Σ w·c`,
+/// never a weight-ignoring special case at `n == 1`.
+#[test]
+fn weighted_cost_reduction_single_element_is_weighted_cost() {
+    assert_eq!(weighted_cost_reduction(&[42.0], &[1.0]), 42.0);
+    assert_eq!(weighted_cost_reduction(&[42.0], &[0.5]), 21.0);
+}
+
+/// `sync_forward` under [`ForwardBound::Exact`] reports the probability-weighted
+/// `Σ w·c` — distinct from the Welford mean the same costs would give — with the
+/// standard deviation and CI half-width both zeroed.
+#[test]
+fn sync_forward_exact_reduces_weighted_sum_and_zeroes_ci() {
+    let local = ForwardResult {
+        scenario_costs: vec![100.0, 200.0],
+        elapsed_ms: 0,
+        lp_solves: 0,
+        setup_time_ms: 0,
+        load_imbalance_ms: 0,
+        scheduling_overhead_ms: 0,
+        stage_stats: Vec::new(),
+    };
+    let comm = LocalBackend;
+    let weights = [0.75_f64, 0.25];
+    let result = sync_forward(
+        &local,
+        &comm,
+        2,
+        ForwardBound::Exact {
+            path_weights: &weights,
+        },
+    )
+    .unwrap();
+
+    // 0.75*100 + 0.25*200 = 125.0, whereas the sampled Welford mean would be 150.0.
+    assert_eq!(result.global_ub_mean, 125.0);
+    assert_eq!(result.global_ub_std, 0.0);
+    assert_eq!(result.ci_95_half_width, 0.0);
+}
+
+/// The degenerate single-path enumeration (`w = 1`) reports that path's cost as
+/// the exact bound with a zero CI half-width.
+#[test]
+fn sync_forward_exact_single_path_returns_cost_with_zero_ci() {
+    let local = ForwardResult {
+        scenario_costs: vec![500.0],
+        elapsed_ms: 0,
+        lp_solves: 0,
+        setup_time_ms: 0,
+        load_imbalance_ms: 0,
+        scheduling_overhead_ms: 0,
+        stage_stats: Vec::new(),
+    };
+    let comm = LocalBackend;
+    let weights = [1.0_f64];
+    let result = sync_forward(
+        &local,
+        &comm,
+        1,
+        ForwardBound::Exact {
+            path_weights: &weights,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(result.global_ub_mean, 500.0);
+    assert_eq!(result.global_ub_std, 0.0);
+    assert_eq!(result.ci_95_half_width, 0.0);
 }
 
 // ── Unit tests: warm-start basis caching ─────────────────────────────────
@@ -1346,6 +1446,7 @@ fn run_one_iteration(
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 100,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -2186,6 +2287,7 @@ fn none_method_unchanged_with_truncation_code_present() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 2,
+            training_enumerated: false,
             max_iterations: 100,
             start_iteration: 0,
             n_fwd_threads: 1,

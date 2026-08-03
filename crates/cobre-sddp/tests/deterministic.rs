@@ -6032,6 +6032,66 @@ mod chronological_telescoping {
         );
     }
 
+    /// A `count == 1` enumerated study (a chain graph, no stochastic branching)
+    /// is admitted, trains to `LB == UB`, and the exact probability-weighted
+    /// bound over its single path (`w = 1`) equals that path's cost with a zero
+    /// CI half-width — the only enumerated case reachable until the all-paths
+    /// forward engine lands.
+    #[test]
+    fn enumerated_count_one_study_reports_exact_bound_with_zero_ci() {
+        use cobre_io::config::TrainingSelection;
+        use cobre_sddp::forward::{ForwardBound, ForwardResult, sync_forward};
+
+        let system = build_system(BlockMode::Parallel);
+        let mut config = build_config();
+        config.training.forward_passes = None;
+        config.training.selection = Some(TrainingSelection::Enumerated {});
+
+        let mut setup = build_setup_in_code(system, &config);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("enumerated count==1 training must not return Err");
+        assert!(
+            outcome.error.is_none(),
+            "training error: {:?}",
+            outcome.error
+        );
+        let result = outcome.result;
+
+        let tol = 1e-6 * result.final_ub.abs().max(1.0);
+        assert!(
+            (result.final_lb - result.final_ub).abs() <= tol,
+            "enumerated count==1 must converge LB {} to the exact UB {} within {tol}",
+            result.final_lb,
+            result.final_ub,
+        );
+
+        // The exact reduction over the single trained path reproduces that path's
+        // cost as the upper bound, with the CI half-width zeroed under enumeration.
+        let local = ForwardResult {
+            scenario_costs: vec![result.final_ub],
+            elapsed_ms: 0,
+            lp_solves: 0,
+            setup_time_ms: 0,
+            load_imbalance_ms: 0,
+            scheduling_overhead_ms: 0,
+            stage_stats: Vec::new(),
+        };
+        let sync = sync_forward(
+            &local,
+            &comm,
+            1,
+            ForwardBound::Exact {
+                path_weights: &[1.0],
+            },
+        )
+        .unwrap();
+        assert_eq!(sync.global_ub_mean, result.final_ub);
+        assert_eq!(sync.ci_95_half_width, 0.0);
+    }
+
     /// Train a policy under `train_mode`, write it to a fresh `TempDir` via the
     /// shared `write_checkpoint` writer, and read it back.
     ///

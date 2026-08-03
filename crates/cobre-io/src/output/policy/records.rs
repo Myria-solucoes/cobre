@@ -157,7 +157,8 @@ pub struct PolicyCheckpointMetadata {
     pub completed_iterations: u32,
     /// Lower bound value after the final completed iteration.
     pub final_lower_bound: f64,
-    /// Best upper bound observed during training, if available.
+    /// Last iteration's upper bound, if available (the final value, not a
+    /// min-tracked best).
     pub best_upper_bound: Option<f64>,
     /// Number of state variables (determines cut coefficient vector length).
     pub state_dimension: u32,

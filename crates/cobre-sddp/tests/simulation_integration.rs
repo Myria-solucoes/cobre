@@ -584,6 +584,7 @@ fn train_simulate_write_cycle() {
     let training_config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 10,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -1392,6 +1393,7 @@ fn simulation_min_outflow_slack_extracted_from_primal() {
     let training_config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 1,
             start_iteration: 0,
             n_fwd_threads: 1,

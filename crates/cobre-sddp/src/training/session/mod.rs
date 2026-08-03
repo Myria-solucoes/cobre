@@ -42,7 +42,7 @@ use crate::{
     cut::row::build_cut_row_batch_into,
     cut_selection::CutActivityUpdates,
     cut_sync::CutSyncBuffers,
-    forward::{ForwardResult, SyncResult, sync_forward},
+    forward::{ForwardBound, ForwardResult, SyncResult, sync_forward},
     forward_pass_state::{ForwardPassInputs, ForwardPassState},
     lower_bound::LbEvalScratchBundle,
     lower_bound::evaluate_lower_bound,
@@ -778,11 +778,26 @@ where
             },
         );
 
-        let sync_result = sync_forward(
-            &forward_result,
-            self.comm,
-            self.ranks.num_total_forward_passes,
-        )?;
+        // Enumerated forwards reduce the exact `Σ w·c` bound over per-path weights;
+        // the weights ride the reused iteration scratch (no per-iteration alloc).
+        // Sampled forwards keep the statistical Welford path untouched.
+        let global_n = self.ranks.num_total_forward_passes;
+        let bound = if self.config.loop_config.training_enumerated {
+            #[allow(clippy::cast_precision_loss)]
+            let uniform = if global_n == 0 {
+                0.0_f64
+            } else {
+                1.0_f64 / global_n as f64
+            };
+            self.scratch.ub_path_weights.clear();
+            self.scratch.ub_path_weights.resize(global_n, uniform);
+            ForwardBound::Exact {
+                path_weights: &self.scratch.ub_path_weights,
+            }
+        } else {
+            ForwardBound::Statistical
+        };
+        let sync_result = sync_forward(&forward_result, self.comm, global_n, bound)?;
 
         emit(
             self.runtime.event_sender(),
@@ -1683,6 +1698,7 @@ mod tests {
         TrainingConfig {
             loop_config: LoopConfig {
                 forward_passes,
+                training_enumerated: false,
                 max_iterations,
                 start_iteration: 0,
                 n_fwd_threads: 1,

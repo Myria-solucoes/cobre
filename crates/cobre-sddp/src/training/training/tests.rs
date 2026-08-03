@@ -435,6 +435,7 @@ fn ac_train_completes_with_iteration_limit() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 5,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -539,6 +540,7 @@ fn ac_train_returns_partial_on_infeasible() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 5,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -656,6 +658,7 @@ fn ac_train_emits_correct_event_sequence() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 10,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -859,6 +862,7 @@ fn ac_worker_timing_per_worker_event_count_and_setup_invariant() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 10,
             start_iteration: 0,
             n_fwd_threads: 4,
@@ -1034,6 +1038,7 @@ fn ac_train_result_fields_populated() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 5,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -1138,6 +1143,7 @@ fn ac_train_with_no_event_sender() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 2,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -1239,6 +1245,7 @@ fn ac_total_time_ms_is_non_negative() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 1,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -1348,6 +1355,7 @@ fn cut_selection_none_skips_step() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 10,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -1463,6 +1471,7 @@ fn cut_selection_level1_runs_at_frequency() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 10,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -1591,6 +1600,7 @@ fn cut_selection_stage0_exempt_preserves_cuts() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 10,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -1732,6 +1742,7 @@ fn existing_train_tests_pass_with_none() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 3,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -1838,6 +1849,7 @@ fn ac_train_partial_result_on_mid_iteration_failure() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 5,
             start_iteration: 0,
             n_fwd_threads: 1,
@@ -1967,6 +1979,7 @@ fn start_iteration_resumes_from_offset() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 5,
             start_iteration: 3,
             n_fwd_threads: 1,
@@ -2073,6 +2086,7 @@ fn start_iteration_at_or_beyond_max_runs_zero_iterations() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 5,
             start_iteration: 5,
             n_fwd_threads: 1,
@@ -2785,6 +2799,7 @@ fn template_freeze_event_emitted() {
     let config = TrainingConfig {
         loop_config: LoopConfig {
             forward_passes: 1,
+            training_enumerated: false,
             max_iterations: 10,
             start_iteration: 0,
             n_fwd_threads: 1,

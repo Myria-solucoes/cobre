@@ -637,6 +637,7 @@ impl StudySetup {
             loop_params: LoopParams {
                 seed,
                 forward_passes,
+                training_enumerated,
                 max_iterations,
                 start_iteration: 0,
                 max_blocks,

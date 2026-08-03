@@ -50,6 +50,9 @@ pub(crate) struct IterationScratch {
     pub lb_noise_scratch: ScratchBuffers,
     /// Reusable scratch buffers for `freeze_rows_into_template` (count/emit-pass temporaries).
     pub(crate) freeze_scratch: FreezeScratch,
+    /// Per-path probability weights for the exact upper-bound reduction, filled
+    /// only on an enumerated forward. Empty (unallocated) on the sampled path.
+    pub(crate) ub_path_weights: Vec<f64>,
 }
 
 impl IterationScratch {
@@ -155,6 +158,7 @@ impl IterationScratch {
             lb_scratch,
             lb_noise_scratch,
             freeze_scratch,
+            ub_path_weights: Vec::new(),
         }
     }
 }

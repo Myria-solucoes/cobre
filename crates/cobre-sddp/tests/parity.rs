@@ -758,7 +758,7 @@ mod determinism {
         context::{StageContext, TrainingContext},
         cut::FutureCostFunction,
         energy_conversion::{EnergyConversion, EnergyConversionSet},
-        forward::{ForwardResult, sync_forward},
+        forward::{ForwardBound, ForwardResult, sync_forward},
         horizon_mode::HorizonMode,
         indexer::{CutStateProjection, StateSpace, StudyDimensions},
         inflow_method::InflowNonNegativityMethod,
@@ -1212,6 +1212,7 @@ mod determinism {
         let config = TrainingConfig {
             loop_config: LoopConfig {
                 forward_passes: 1,
+                training_enumerated: false,
                 max_iterations: n_iterations,
                 start_iteration: 0,
                 n_fwd_threads: 1,
@@ -1705,7 +1706,13 @@ mod determinism {
                 scheduling_overhead_ms: 0,
                 stage_stats: Vec::new(),
             };
-            sync_forward(&local, &StubComm, TOTAL_FWD_PASSES).unwrap()
+            sync_forward(
+                &local,
+                &StubComm,
+                TOTAL_FWD_PASSES,
+                ForwardBound::Statistical,
+            )
+            .unwrap()
         };
 
         let result_2rank = {
@@ -1720,7 +1727,7 @@ mod determinism {
                 scheduling_overhead_ms: 0,
                 stage_stats: Vec::new(),
             };
-            sync_forward(&local, &comm, TOTAL_FWD_PASSES).unwrap()
+            sync_forward(&local, &comm, TOTAL_FWD_PASSES, ForwardBound::Statistical).unwrap()
         };
 
         let result_4rank = {
@@ -1735,7 +1742,7 @@ mod determinism {
                 scheduling_overhead_ms: 0,
                 stage_stats: Vec::new(),
             };
-            sync_forward(&local, &comm, TOTAL_FWD_PASSES).unwrap()
+            sync_forward(&local, &comm, TOTAL_FWD_PASSES, ForwardBound::Statistical).unwrap()
         };
 
         assert_eq!(

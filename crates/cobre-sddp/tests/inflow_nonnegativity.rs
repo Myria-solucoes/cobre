@@ -537,6 +537,7 @@ fn train_fixture(
         TrainingConfig {
             loop_config: LoopConfig {
                 forward_passes: 1,
+                training_enumerated: false,
                 max_iterations: 10,
                 start_iteration: 0,
                 n_fwd_threads: 1,
