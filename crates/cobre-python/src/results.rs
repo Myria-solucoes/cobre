@@ -1525,6 +1525,16 @@ pub fn load_simulation_arrow(
 ///             "capacity": 100,
 ///             "warm_start_count": 0,
 ///             "populated_count": 50,
+///             "entity_manifest": [
+///                 {
+///                     "entity_type": 0,
+///                     "entity_id": 0,
+///                     "subindex": 0,
+///                     "was_active": True,
+///                     "delivery_anchor": -1,
+///                 },
+///                 ...
+///             ],
 ///             "cuts": [
 ///                 {
 ///                     "cut_id": 0,
@@ -1605,6 +1615,22 @@ pub fn load_policy(
         sc_dict.set_item("capacity", into_py(py, sc.capacity)?)?;
         sc_dict.set_item("warm_start_count", into_py(py, sc.warm_start_count)?)?;
         sc_dict.set_item("populated_count", into_py(py, sc.populated_count)?)?;
+
+        // Emit the per-slot entity manifest so a loaded checkpoint round-trips
+        // through `write_policy_checkpoint` (whose binding already accepts this
+        // exact shape). Without it the manifest — present on disk and required by
+        // external boundary-cut authoring — is silently dropped on the read side.
+        let manifest_list = PyList::empty(py);
+        for slot in &sc.entity_manifest {
+            let slot_dict = PyDict::new(py);
+            slot_dict.set_item("entity_type", into_py(py, slot.entity_type)?)?;
+            slot_dict.set_item("entity_id", into_py(py, slot.entity_id)?)?;
+            slot_dict.set_item("subindex", into_py(py, slot.subindex)?)?;
+            slot_dict.set_item("was_active", PyBool::new(py, slot.was_active).to_owned())?;
+            slot_dict.set_item("delivery_anchor", into_py(py, slot.delivery_anchor)?)?;
+            manifest_list.append(slot_dict)?;
+        }
+        sc_dict.set_item("entity_manifest", manifest_list)?;
 
         let cuts_list = PyList::empty(py);
         for cut in &sc.cuts {
