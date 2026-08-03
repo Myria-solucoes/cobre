@@ -81,6 +81,59 @@ the process into a Markov lattice as SDDP.jl's "Markov chain approach" does. The
 node graph is for **explicit discrete branching** (scenario trees, regime states);
 the two compose — a branching graph whose nodes each carry the continuous lag state.
 
+## Enumerated forward selection requires a structural tree of single-realization nodes
+
+`training.selection = enumerated` computes the exact upper bound `Σ_ℓ P(ℓ)·C(ℓ)` by
+walking every root→leaf path. It enumerates only the **structural** axis of the graph
+— the node/edge branching — solving each node once per distinct incoming prefix, and
+multiplying a single opening weight per node into the path probability
+(`enumerate_forward_paths`, `crates/cobre-sddp/src/setup/node_graph.rs`). It does
+**not** enumerate the other two ways a graph can carry randomness, and rejects them at
+setup rather than compute a biased bound.
+
+### Within-node openings must be singleton (`|Ω_n| = 1`)
+
+A node also owns an opening set `Ω_n` (its inflow realizations). Because the engine
+solves each node once and its probability walk multiplies one opening weight per node,
+a node with `|Ω_n| > 1` would cover only a subset of scenarios, with weights that no
+longer sum to one and a single-sample cost — an invalid bound. `setup` rejects
+`|Ω_n| > 1` under enumerated training with a named error
+(`reject_within_node_opening_enumeration`, `crates/cobre-sddp/src/setup/mod.rs`).
+Express the stochasticity structurally (one realization per node) or use sampled
+selection.
+
+### The graph must be a tree (single predecessor per node)
+
+A node reached from two different parents — a recombination join, i.e. the
+dense-transition-matrix Markov case — has a different incoming continuous state per
+incoming prefix. The engine reconstructs that state from a single-predecessor map
+(`build_parent_map`), so a recombining node would be solved once under one arbitrarily
+chosen parent's state while paths arriving via the other parent silently read the
+wrong state — an invalid bound in a release build. `setup` rejects a node with
+in-degree ≥ 2 under enumerated training with a named error
+(`reject_recombining_node_enumeration`). Full recombination support — per-prefix state
+reconstruction for a multi-parent node — is a reserved seam, and is what a genuine
+Markovian graph with a dense transition matrix would need under enumerated selection.
+
+### Sampled selection has neither restriction
+
+`training.selection = sampled` Monte-Carlo draws one opening per visited node and
+carries per-trajectory state, so it handles both `|Ω_n| > 1` and recombining graphs
+natively. It is the general mode; enumerated is the exact-bound specialization for
+small structural trees (scenario trees, the extensive-form oracle fixtures). A
+multi-opening chain has `Π|Ω|` enumerated scenarios and is intractable to enumerate
+regardless.
+
+### How a node's openings are bound (both modes)
+
+A declared node's opening set is either a single external-library column
+(`realization_id` present → `|Ω_n| = 1`) or the **stage's** generated opening set
+(`realization_id` absent → `|Ω_n| = n_openings(stage)`), the latter shared by every
+generated node at that stage. So a node with its own distinct multi-opening
+distribution — different from its siblings at the same stage — is not yet expressible:
+siblings either share the stage's generated set or are pinned to single external
+columns (`build_declared_node_graph`, `crates/cobre-sddp/src/setup/node_graph.rs`).
+
 ## References
 
 - SDDP.jl policy graphs — <https://sddp.dev/stable/tutorial/first_steps/>
