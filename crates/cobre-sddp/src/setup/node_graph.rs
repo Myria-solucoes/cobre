@@ -587,6 +587,106 @@ pub(crate) fn enumerated_visit_bound(graph: &NodeGraph) -> Result<Vec<u64>, Sddp
     Ok(pool_sum)
 }
 
+// ── Driver-shared traversal helpers ─────────────────────────────────────────
+//
+// Structural resolution helpers shared by the forward training driver
+// (`training::forward_pass_state`) and the simulation driver
+// (`simulation::pipeline`/`simulation::state`) — both walk this graph the
+// same way, so the resolution logic has one owner.
+
+/// Ascending node-graph positions with `nodes[pos].stage == stage` — the
+/// stage's alive frontier. Structural only (reads [`NodeGraph::nodes`]; no
+/// sampling or enumeration selection): a synthesized or declared chain's
+/// frontier is always a singleton, and below a recombination join a declared
+/// graph's frontier carries more than one node.
+pub(crate) fn stage_frontier(
+    node_graph: &NodeGraph,
+    stage: usize,
+) -> impl Iterator<Item = usize> + '_ {
+    node_graph
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(move |(_, n)| n.stage == stage)
+        .map(|(pos, _)| pos)
+}
+
+/// The study's sole root: stage `stage`'s one alive node. Used only for
+/// stage-0 root resolution — every sampled trajectory starts here (a
+/// multi-root graph is out of scope for the sampled walk) — so a stage
+/// carrying more than one node here is a `debug_assert`-checked construction
+/// invariant, not a silent default.
+pub(crate) fn frontier_node(node_graph: &NodeGraph, stage: usize) -> usize {
+    let mut frontier = stage_frontier(node_graph, stage);
+    let node = frontier.next();
+    debug_assert!(
+        node.is_some(),
+        "frontier_node: stage {stage} carries no alive node"
+    );
+    debug_assert!(
+        frontier.next().is_none(),
+        "frontier_node: stage {stage} carries more than one alive node"
+    );
+    // `stage` itself is a safe fallback consistent with the debug-checked invariants above.
+    node.unwrap_or(stage)
+}
+
+/// Any one node at `stage` — the first in ascending canonical order. Unlike
+/// [`frontier_node`], this tolerates a stage carrying several nodes: every
+/// node at the terminal stage is a leaf (no edge crosses the horizon), and
+/// leaves sharing a stage share ONE pool (this module's leaf-sharing rule),
+/// so any representative resolves the same pool.
+pub(crate) fn any_stage_node(node_graph: &NodeGraph, stage: usize) -> usize {
+    let node = stage_frontier(node_graph, stage).next();
+    debug_assert!(
+        node.is_some(),
+        "any_stage_node: stage {stage} carries no alive node"
+    );
+    node.unwrap_or(stage)
+}
+
+/// `node`'s single canonical predecessor, or `None` at a root. A node reached
+/// by more than one edge is a recombination join — `debug_assert`-checked
+/// (construction invariant), never silently resolved to an arbitrary
+/// predecessor. A structural inspection utility, not a hot-path call — the
+/// forward walk needs no parent lookup (every trajectory carries its own
+/// previous-stage record directly); its only callers today are tests.
+#[cfg(test)]
+pub(crate) fn node_parent(node_graph: &NodeGraph, node: usize) -> Option<usize> {
+    let mut candidates = node_graph
+        .successors
+        .iter()
+        .enumerate()
+        .filter(|(_, succs)| succs.iter().any(|s| s.child == node))
+        .map(|(pos, _)| pos);
+    let parent = candidates.next();
+    debug_assert!(
+        candidates.next().is_none(),
+        "node_parent: node {node} has more than one predecessor (a recombination join)"
+    );
+    parent
+}
+
+/// A visit's node-Ω sub-range for the within-node opening draw: `node`'s own
+/// `(offset, len)` when its view addresses the generated tree, or the full
+/// stage range as a safe fallback when it instead binds to an
+/// external-library column (a node-level identity orthogonal to the study's
+/// class-level sampling scheme — validated upstream, not re-checked here). A
+/// chain-degenerate node's Generated view already spans the whole stage, so
+/// the chain path reduces to `(0, tree.n_openings(stage_idx))` either way.
+pub(crate) fn node_opening_range(
+    node_graph: &NodeGraph,
+    node: usize,
+    stochastic: &StochasticContext,
+    stage_idx: usize,
+) -> (usize, usize) {
+    let openings = node_graph.nodes[node].openings;
+    match openings.source {
+        OpeningSource::Generated => (openings.offset, openings.len),
+        OpeningSource::External => (0, stochastic.opening_tree().n_openings(stage_idx)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

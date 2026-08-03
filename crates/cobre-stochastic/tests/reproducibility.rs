@@ -242,6 +242,8 @@ fn deterministic_reproducibility() {
                     scenario,
                     stage_domain_id,
                     stage_idx,
+                    0,
+                    view_a.n_openings(stage_idx),
                 );
                 let (idx_b, slice_b) = sample_forward(
                     &view_b,
@@ -250,6 +252,8 @@ fn deterministic_reproducibility() {
                     scenario,
                     stage_domain_id,
                     stage_idx,
+                    0,
+                    view_b.n_openings(stage_idx),
                 );
 
                 assert_eq!(

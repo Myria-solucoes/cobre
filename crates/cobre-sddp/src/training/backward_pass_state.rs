@@ -283,6 +283,17 @@ pub struct BackwardPassState {
     /// Per-level trial-point-distributed pool list for the batched cut exchange,
     /// reused across levels alongside `level_nodes_scratch`.
     level_pools_scratch: Vec<usize>,
+
+    /// Per-level routing of this rank's own trial points to the level's
+    /// cut-generating nodes, CSR values: `routed_trials_scratch[
+    /// routed_offsets_scratch[i]..routed_offsets_scratch[i + 1]]` are the
+    /// ascending trial-point indices whose stage visit resolves to `level[i]`'s
+    /// pool. Reused across levels alongside `level_nodes_scratch`.
+    routed_trials_scratch: Vec<usize>,
+
+    /// CSR offsets into `routed_trials_scratch`: one entry per level node plus a
+    /// trailing bound (`offsets[i]..offsets[i + 1]` bounds level node `i`).
+    routed_offsets_scratch: Vec<usize>,
 }
 
 impl BackwardPassState {
@@ -345,6 +356,8 @@ impl BackwardPassState {
             by_node_scratch: ByNodeScratch::default(),
             level_nodes_scratch: Vec::new(),
             level_pools_scratch: Vec::new(),
+            routed_trials_scratch: Vec::new(),
+            routed_offsets_scratch: Vec::new(),
         }
     }
 
@@ -895,10 +908,61 @@ fn assemble_successor_outcome_weights(node_graph: &NodeGraph, node_pos: usize, o
     );
 }
 
+/// Group this rank's own local trial points (`0..local_work`) by the
+/// cut-generating node each visited at `level_stage`, into CSR form:
+/// `routed[offsets[i]..offsets[i + 1]]` are the ascending trial-point indices
+/// whose visit resolves to `level[i]`'s pool. A cut-generating node always owns
+/// its own pool, so grouping by visited node *is* per-pool routing — each cut
+/// anchors at its own node's sampled incoming states (Σ over a level's pools of
+/// their trial counts = `local_work`).
+///
+/// A single-node level carries exactly one node at its stage (a mid-horizon
+/// leaf beside it is rejected at setup), so every trial point that reached the
+/// stage visited that node: route all with no per-record lookup. This is the
+/// chain and terminal-fan case, and reproduces the pre-routing `0..local_work`
+/// slice byte-for-byte. Only a multi-node level reads `TrajectoryRecord::node_id`
+/// to split siblings that own distinct pools.
+fn build_trial_routing(
+    node_graph: &NodeGraph,
+    level: &[usize],
+    level_stage: usize,
+    records: &[TrajectoryRecord],
+    num_stages: usize,
+    local_work: usize,
+    routed: &mut Vec<usize>,
+    offsets: &mut Vec<usize>,
+) {
+    routed.clear();
+    offsets.clear();
+    offsets.push(0);
+    if level.len() == 1 {
+        routed.extend(0..local_work);
+        offsets.push(local_work);
+        return;
+    }
+    for &node_pos in level {
+        let node_id = node_graph.node_ids[node_pos];
+        for m in 0..local_work {
+            if records[m * num_stages + level_stage].node_id == node_id {
+                routed.push(m);
+            }
+        }
+        offsets.push(routed.len());
+    }
+    debug_assert_eq!(
+        routed.len(),
+        local_work,
+        "every local trial point must route to exactly one cut-generating node in the level \
+         (a mid-horizon leaf would be rejected at setup); routed {} of {local_work}",
+        routed.len()
+    );
+}
+
 /// Execute one reverse-topological cut-sharing level: one state exchange for the
-/// level, each node's backward cut computed independently, ONE batched cut
-/// exchange over the level's trial-point-distributed pools, then per-node
-/// metadata/timing/stats. Absent `nodes[]` a level is one node (== stage), so
+/// level, each node's backward cut computed independently over ONLY the trial
+/// points routed to its pool, ONE batched cut exchange over the level's
+/// trial-point-distributed pools, then per-node metadata/timing/stats. Absent
+/// `nodes[]` a level is one node (== stage) and every trial routes to it, so
 /// this is byte-for-byte the reversed stage loop (one state exchange, one cut
 /// exchange, one metadata/stats gather).
 fn run_one_backward_level<S: SolverInterface + Send, C: Communicator>(
@@ -929,14 +993,32 @@ fn run_one_backward_level<S: SolverInterface + Send, C: Communicator>(
         archive.archive_gathered_states(level_stage, &state.real_states_buf, total_fwd);
     }
 
+    // Route this rank's trial points to the level's pools once (a mem-swapped
+    // local so the borrow does not conflict with `&mut state` below); a
+    // cut-generating node then anchors its cut ONLY at the states its own pool
+    // was visited with.
+    let mut routed_trials = std::mem::take(&mut state.routed_trials_scratch);
+    let mut routed_offsets = std::mem::take(&mut state.routed_offsets_scratch);
+    build_trial_routing(
+        training_ctx.node_graph,
+        level,
+        level_stage,
+        inputs.records,
+        num_stages,
+        inputs.local_work,
+        &mut routed_trials,
+        &mut routed_offsets,
+    );
+
     // Reuse the per-level buffers across levels (mem-swapped out so the loop
     // allocates nothing per level; the empty placeholder left on `state` frees
     // the mutable-borrow conflict with `compute_one_backward_node`).
     let mut nodes_out = std::mem::take(&mut state.level_nodes_scratch);
     nodes_out.clear();
     let mut cut_batch_build_ms = 0u64;
-    for &node_pos in level {
-        let nc = compute_one_backward_node(state, inputs, node_pos, params)?;
+    for (level_idx, &node_pos) in level.iter().enumerate() {
+        let trial_points = &routed_trials[routed_offsets[level_idx]..routed_offsets[level_idx + 1]];
+        let nc = compute_one_backward_node(state, inputs, node_pos, trial_points, params)?;
         cut_batch_build_ms += nc.cut_batch_build_ms;
         nodes_out.push(nc);
     }
@@ -988,6 +1070,8 @@ fn run_one_backward_level<S: SolverInterface + Send, C: Communicator>(
 
     state.level_nodes_scratch = nodes_out;
     state.level_pools_scratch = level_pools;
+    state.routed_trials_scratch = routed_trials;
+    state.routed_offsets_scratch = routed_offsets;
 
     Ok(LevelOutput {
         cuts_generated,
@@ -1001,11 +1085,12 @@ fn run_one_backward_level<S: SolverInterface + Send, C: Communicator>(
     })
 }
 
-/// Compute one node's backward cut: build the successor cut batch, solve (the
-/// the replicated aggregation at a singleton-trial-state group, else the by-node
-/// or trial-point path), insert the local cut(s), reconcile, and compute this
-/// node's timing. The level driver owns the state exchange, the batched cut
-/// exchange, and the metadata/stats gather.
+/// Compute one node's backward cut over `trial_points` — the trial-point
+/// indices routed to this node's pool — building the successor cut batch,
+/// solving (the replicated aggregation at a singleton-trial-state group, else
+/// the by-node or trial-point path), inserting the local cut(s), reconciling,
+/// and computing this node's timing. The level driver owns the state exchange,
+/// the routing, the batched cut exchange, and the metadata/stats gather.
 // RATIONALE: sequences the per-node solve phases whose intermediate state each
 // next phase reads; splitting further would thread every disjoint sub-field as
 // &mut without gaining clarity.
@@ -1014,6 +1099,7 @@ fn compute_one_backward_node<S: SolverInterface + Send, C: Communicator>(
     state: &mut BackwardPassState,
     inputs: &mut BackwardPassInputs<'_, S, C>,
     node_pos: usize,
+    trial_points: &[usize],
     params: &StageDerivedParams,
 ) -> Result<NodeCompute, SddpError> {
     let training_ctx = inputs.training_ctx;
@@ -1122,7 +1208,7 @@ fn compute_one_backward_node<S: SolverInterface + Send, C: Communicator>(
             inputs.workspaces,
             ctx,
             training_ctx,
-            inputs.local_work,
+            trial_points,
             inputs.exchange,
             inputs.fwd_offset,
             inputs.iteration,
@@ -1150,7 +1236,7 @@ fn compute_one_backward_node<S: SolverInterface + Send, C: Communicator>(
         let result = by_node_finish(
             worker_out,
             &*inputs.workspaces,
-            inputs.local_work,
+            trial_points,
             n_openings,
             cut_state_projection.n_slots(),
             &state.probabilities_buf,
@@ -1170,7 +1256,7 @@ fn compute_one_backward_node<S: SolverInterface + Send, C: Communicator>(
             inputs.workspaces,
             ctx,
             training_ctx,
-            inputs.local_work,
+            trial_points,
             inputs.exchange,
             inputs.fwd_offset,
             inputs.iteration,
@@ -1204,7 +1290,7 @@ fn compute_one_backward_node<S: SolverInterface + Send, C: Communicator>(
             state
                 .staged_cuts_buf
                 .sort_by_key(|(_, cut)| cut.trial_state_idx);
-            debug_assert_eq!(state.staged_cuts_buf.len(), inputs.local_work);
+            debug_assert_eq!(state.staged_cuts_buf.len(), trial_points.len());
             for (w, cut) in &state.staged_cuts_buf {
                 let range = cut.coefficients_range.clone();
                 let arena = &inputs.workspaces[*w].backward_accum.agg_arena;
@@ -1276,10 +1362,10 @@ struct ReplicatedAggregate {
 /// the cut by the rank count).
 ///
 /// Inert until the forward pass emits a DEDUPED trial-state count distinct from
-/// the scenario count [`ExchangeBuffers::real_total_scenarios`]:
-/// `frontier_node` asserts a singleton forward frontier today, so no such node
-/// is trainable end-to-end, and [`trial_state_axis_is_singleton`] is never
-/// satisfiable from the scenario count alone. When that count lands, wire it into
+/// the scenario count [`ExchangeBuffers::real_total_scenarios`]: the sampled
+/// walk resolves a node per trajectory, but no per-node trial-state count
+/// exists yet, so [`trial_state_axis_is_singleton`] is never satisfiable from
+/// the scenario count alone. When that count lands, wire it into
 /// `compute_one_backward_node`'s scheduler resolution ([`resolve_backward_scheduler`])
 /// so this path runs and the pool is excluded from the level's batched exchange.
 /// The allgather + aggregation math is pinned by the backward-pass unit tests.
@@ -1370,7 +1456,8 @@ fn run_backward_node_replicated<S: SolverInterface + Send, C: Communicator>(
     Ok(1)
 }
 
-/// Evaluate all trial points for a single backward stage, returning staged cuts.
+/// Evaluate this node's routed `trial_points` for a single backward stage,
+/// returning staged cuts (one per trial point).
 // RATIONALE: 10 args are individually-borrowed slices passed through the rayon closure
 // boundary. Bundling them into a struct would require either cloning or an `Arc`, both of
 // which conflict with the zero-allocation HPC constraint for backward-pass hot code.
@@ -1379,7 +1466,7 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
     workspaces: &mut [SolverWorkspace<S>],
     ctx: &StageContext<'_>,
     training_ctx: &TrainingContext<'_>,
-    local_work: usize,
+    trial_points: &[usize],
     exchange: &ExchangeBuffers,
     fwd_offset: usize,
     iteration: u64,
@@ -1394,7 +1481,6 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
     // `write_opening_outcome`'s `copy_from_slice` reads stale full-length data.
     let cut_n_state = succ.cut_state.n_slots();
     let pop = succ.successor_populated_count;
-    let n_workers = workspaces.len().max(1);
 
     // Opening-solve strategy, chosen once per stage. The decision depends only on
     // `iteration`, so it is constant across workers and trial points.
@@ -1441,13 +1527,22 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
                 *slot = SolverStatsDelta::default();
             }
 
-            // Static partition, matching the basis_slice view.
-            let (start_m, end_m) = partition(local_work, n_workers, w);
+            // Worker `w` processes exactly the routed trial points whose GLOBAL
+            // scenario index falls in its own basis-slice window, so
+            // `basis_slice.get(m, node)` is in-bounds by construction. A node's
+            // routed subset is scattered across the global scenario axis, so an
+            // even split of `trial_points.len()` would misalign with the
+            // contiguous per-worker basis window and index out of the slice. On a
+            // single-node level the window tiling reproduces the pre-routing
+            // `partition(local_work, n_workers, w)` assignment exactly.
+            let (w_start, w_end) = basis_slice.scenario_window();
+            let owns = move |m: usize| w_start <= m && m < w_end;
+            let count_w = trial_points.iter().filter(|&&m| owns(m)).count();
             // Grow-only arena (one `cut_n_state` slot per owned trial point);
             // content is overwritten per trial point before read, so no zero-fill.
             // Stride is `cut_n_state` — must match the `coefficients_range` length
             // `process_by_scenario_backward` writes.
-            let arena_len = (end_m - start_m) * cut_n_state;
+            let arena_len = count_w * cut_n_state;
             if ws.backward_accum.agg_arena.len() < arena_len {
                 ws.backward_accum.agg_arena.resize(arena_len, 0.0_f64);
             }
@@ -1458,7 +1553,9 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
             // is never reset, so a snapshot-delta is the only correct attribution).
             let scoring_seconds_before = ws.backward_accum.dcs_solve.scoring_time_seconds;
 
-            for m in start_m..end_m {
+            // `local_i` is the arena row within this worker's owned subset (ascending
+            // m, since `trial_points` is ascending); `m` is the real trial index.
+            for (local_i, &m) in trial_points.iter().filter(|&&m| owns(m)).enumerate() {
                 // Reset so the cold-head solve cannot depend on which trial points
                 // the worker solved before it (determinism across thread/rank counts).
                 // No-op for HiGHS; for CLP recreates the model (`Clp_loadProblem`
@@ -1471,7 +1568,7 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
                 ws.backward_accum.slot_increments[..pop].fill(0);
                 // Call before the push to avoid a simultaneous mutable borrow of
                 // `staged_cuts_buf` (push receiver) and `ws` (function argument).
-                let arena_offset = (m - start_m) * cut_n_state;
+                let arena_offset = local_i * cut_n_state;
                 let cut = process_by_scenario_backward(
                     ws,
                     ctx,
@@ -1531,6 +1628,7 @@ mod tests {
         cut::FutureCostFunction,
         cut_sync::CutSyncBuffers,
         horizon_mode::HorizonMode,
+        indexer::StateSpace,
         inflow_method::InflowNonNegativityMethod,
         risk_measure::{BackwardOutcome, RiskMeasure},
         setup::node_graph::{NodeOpenings, NodeRuntime, NodeSuccessor, OpeningSource},
@@ -1539,6 +1637,7 @@ mod tests {
         test_support::{
             all_enabled_cut_state_layouts, state_layout, study_dims, trial_state_records,
         },
+        trajectory::TrajectoryRecord,
         workspace::{
             BackwardAccumulators, BasisStore, CapturedBasis, ScratchBuffers, SolverWorkspace,
         },
@@ -1732,6 +1831,7 @@ mod tests {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
+                current_node_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -2103,6 +2203,620 @@ mod tests {
             !result.stage_stats.is_empty(),
             "stage_stats must be non-empty after a successful backward pass"
         );
+    }
+
+    /// `records`, with `leaf_node_ids[m]` written into trial point `m`'s
+    /// LAST-stage record (the leaf visit); every earlier stage keeps the
+    /// placeholder `0` — mirroring [`trial_state_records`] except for that one
+    /// per-trial override.
+    fn trial_state_records_with_leaf_ids(
+        states: &[Vec<f64>],
+        n_stages: usize,
+        leaf_node_ids: &[i32],
+    ) -> Vec<TrajectoryRecord> {
+        states
+            .iter()
+            .zip(leaf_node_ids)
+            .flat_map(|(state, &leaf_node_id)| {
+                (0..n_stages).map(move |t| TrajectoryRecord {
+                    primal: Vec::new(),
+                    dual: Vec::new(),
+                    stage_cost: 0.0,
+                    node_id: if t + 1 == n_stages { leaf_node_id } else { 0 },
+                    state: state.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// Runs `BackwardPassState::run` once over a declared K-fan and returns
+    /// `(cuts_generated, root_pool_active_cuts, leaf_pool_active_cuts)`.
+    #[allow(clippy::too_many_arguments)]
+    fn run_backward_over_k_fan(
+        node_graph: &NodeGraph,
+        stochastic: &cobre_stochastic::StochasticContext,
+        state: &StateSpace,
+        templates: &[StageTemplate],
+        base_rows: &[usize],
+        n_stages: usize,
+        records: &[TrajectoryRecord],
+    ) -> (usize, usize, usize) {
+        let frozen_templates = templates.to_vec();
+        let n_state = state.n_state;
+        let trial_count = records.len() / n_stages;
+        let forward_passes = u32::try_from(trial_count).expect("trial_count fits u32");
+        // The root's own level fans out into every successor's own opening
+        // count (the product measure `assemble_outcome_weights` flattens), so
+        // `bwd_max_openings` must cover that combined count, not just a
+        // single node's own `Ω`.
+        let bwd_max_openings = node_graph
+            .successors
+            .iter()
+            .map(|succs| {
+                succs
+                    .iter()
+                    .map(|s| node_graph.nodes[s.child].openings.len)
+                    .sum::<usize>()
+            })
+            .max()
+            .unwrap_or(0)
+            .max(1);
+
+        let mut fcf = FutureCostFunction::new(
+            node_graph.n_pools,
+            n_state,
+            forward_passes,
+            10,
+            &vec![0; node_graph.n_pools],
+        );
+        let mut exchange = ExchangeBuffers::new(n_state, trial_count, 1);
+        let horizon = HorizonMode::Finite {
+            num_stages: n_stages,
+        };
+        let risk_measures = vec![RiskMeasure::Expectation; n_stages];
+
+        let solution = solution_1_0(100.0, -5.0);
+        let comm = StubComm;
+        let mut workspaces = single_workspace(MockSolver::always_ok(solution), n_state);
+        let mut basis_store = empty_basis_store(exchange.local_count(), n_stages);
+        let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
+        let mut cut_batches = empty_cut_batches(n_stages);
+        let ctx = StageContext {
+            geometry_per_stage: &[],
+            templates,
+            base_rows,
+            noise_scale: &[],
+            n_hydros: 0,
+            cost_scale_factor: 1_000_000.0,
+            n_load_buses: 0,
+            load_balance_row_starts: &[],
+            load_bus_indices: &[],
+            block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+            ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
+            discount_factors: &[],
+            cumulative_discount_factors: &[],
+            stage_lag_transitions: &[],
+            noise_group_ids: &[],
+            downstream_par_order: 0,
+        };
+        let study_dims = study_dims();
+        let training_ctx = TrainingContext {
+            node_graph,
+            horizon: &horizon,
+            state,
+            cut_state_layouts: &all_enabled_cut_state_layouts(state, n_stages),
+            study_dims: &study_dims,
+            inflow_method: &InflowNonNegativityMethod::None,
+            stochastic,
+            initial_state: &[],
+            inflow_scheme: SamplingScheme::InSample,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            stages: &[],
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
+            dcs: None,
+        };
+
+        let local_count = exchange.local_count();
+        let mut state_machine = BackwardPassState::new(
+            1,
+            1,
+            bwd_max_openings,
+            n_state,
+            local_count,
+            n_state,
+            n_stages,
+        );
+
+        let mut inputs = BackwardPassInputs {
+            workspaces: &mut workspaces,
+            basis_store: &mut basis_store,
+            ctx: &ctx,
+            frozen: &frozen_templates,
+            fcf: &mut fcf,
+            cut_batches: &mut cut_batches,
+            training_ctx: &training_ctx,
+            comm: &comm,
+            exchange: &mut exchange,
+            records,
+            cut_sync_bufs: &mut csb,
+            visited_archive: None,
+            event_sender: None,
+            risk_measures: &risk_measures,
+            cut_activity_tolerance: 0.0,
+            iteration: 1,
+            local_work: local_count,
+            fwd_offset: 0,
+        };
+
+        let result = state_machine
+            .run(&mut inputs)
+            .expect("backward pass over a declared K-fan must not error");
+
+        let root_pool = node_graph.nodes[0].pool_id;
+        let leaf_pool = node_graph.nodes[node_graph.successors[0][0].child].pool_id;
+        (
+            result.cuts_generated,
+            fcf.active_cuts(root_pool).count(),
+            fcf.active_cuts(leaf_pool).count(),
+        )
+    }
+
+    /// Trial states exchanged to the backward sweep route to the K-fan's
+    /// shared leaf pool the same way whether each trial's stage-1 record
+    /// carries the SPECIFIC leaf it visited or one stage-uniform id — the
+    /// exchange and cut generation are keyed by trial-point position and the
+    /// declared graph's own (leaf-sharing) pool structure, never by the
+    /// per-record `node_id`. Two runs differing ONLY in that field must
+    /// produce byte-identical cut counts.
+    #[test]
+    fn backward_pass_state_run_over_k_fan_is_invariant_to_per_trial_leaf_node_id() {
+        use cobre_core::temporal::{Node, PolicyGraph, PolicyGraphType, Transition};
+        use cobre_io::StageIdResolver;
+
+        use crate::setup::node_graph::build_node_graph;
+
+        fn node(id: i32, stage_id: i32) -> Node {
+            Node {
+                id,
+                stage_id,
+                realization_id: None,
+                label: None,
+            }
+        }
+        fn transition(source_id: i32, target_id: i32, probability: f64) -> Transition {
+            Transition {
+                source_id,
+                target_id,
+                probability,
+                annual_discount_rate_override: None,
+            }
+        }
+
+        let n_stages = 2_usize;
+        let n_openings = 2_usize;
+        let stochastic = make_stochastic_context(n_stages, n_openings);
+        let study_stage_ids = [0_i32, 1_i32];
+        let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+        let graph = PolicyGraph {
+            graph_type: PolicyGraphType::FiniteHorizon,
+            annual_discount_rate: 0.0,
+            nodes: vec![node(0, 0), node(1, 1), node(2, 1), node(3, 1)],
+            transitions: vec![
+                transition(0, 1, 1.0 / 3.0),
+                transition(0, 2, 1.0 / 3.0),
+                transition(0, 3, 1.0 / 3.0),
+            ],
+            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            season_map: None,
+        };
+        let node_graph = build_node_graph(&graph, n_stages, &resolver, &stochastic)
+            .expect("declared K-fan graph must build");
+        let leaf_node_ids: Vec<i32> = node_graph.successors[0]
+            .iter()
+            .map(|s| node_graph.node_ids[s.child])
+            .collect();
+        assert_eq!(leaf_node_ids.len(), 3, "the K-fan must declare 3 leaves");
+
+        let state = state_layout(1, 0);
+        let templates = vec![minimal_template_1_0(); n_stages];
+        let base_rows = vec![1_usize; n_stages];
+        let trial_states = vec![vec![10.0], vec![20.0], vec![30.0]];
+
+        let hetero_records =
+            trial_state_records_with_leaf_ids(&trial_states, n_stages, &leaf_node_ids);
+        let homogeneous_leaf_ids = vec![leaf_node_ids[0]; trial_states.len()];
+        let homo_records =
+            trial_state_records_with_leaf_ids(&trial_states, n_stages, &homogeneous_leaf_ids);
+
+        let hetero = run_backward_over_k_fan(
+            &node_graph,
+            &stochastic,
+            &state,
+            &templates,
+            &base_rows,
+            n_stages,
+            &hetero_records,
+        );
+        let homo = run_backward_over_k_fan(
+            &node_graph,
+            &stochastic,
+            &state,
+            &templates,
+            &base_rows,
+            n_stages,
+            &homo_records,
+        );
+
+        assert_eq!(
+            hetero, homo,
+            "(cuts_generated, root_pool_active_cuts, leaf_pool_active_cuts) must be identical \
+             whether stage-1 records carry each trial's own visited leaf or one stage-uniform \
+             leaf id"
+        );
+        assert_eq!(
+            hetero.0,
+            trial_states.len(),
+            "3 trial points must each produce one cut at the root pool"
+        );
+    }
+
+    /// `records` with `stage1_ids[m]` written into trial point `m`'s STAGE-1
+    /// record — the interior-node visit a two-interior-node level routes on.
+    /// Stage 0 carries the root id `0`; every other stage a placeholder `0`
+    /// (routing never reads a single-node level's records).
+    fn trial_state_records_with_stage1_ids(
+        states: &[Vec<f64>],
+        n_stages: usize,
+        stage1_ids: &[i32],
+    ) -> Vec<TrajectoryRecord> {
+        states
+            .iter()
+            .zip(stage1_ids)
+            .flat_map(|(state, &stage1_id)| {
+                (0..n_stages).map(move |t| TrajectoryRecord {
+                    primal: Vec::new(),
+                    dual: Vec::new(),
+                    stage_cost: 0.0,
+                    node_id: if t == 1 { stage1_id } else { 0 },
+                    state: state.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// `n_workers` `MockSolver` workspaces, worker ids `0..n_workers`, for the
+    /// multi-worker routing regression (`split_workers_mut` splits the basis store
+    /// across exactly these).
+    fn workspaces_n(count: usize, n_state: usize) -> Vec<SolverWorkspace<MockSolver>> {
+        (0..count)
+            .map(|i| {
+                let mut ws =
+                    single_workspace(MockSolver::always_ok(solution_1_0(100.0, -5.0)), n_state);
+                let mut w = ws.remove(0);
+                w.worker_id = i as i32;
+                w
+            })
+            .collect()
+    }
+
+    /// Runs `BackwardPassState::run` once over a declared 3-stage binary tree
+    /// (root → 2 interior nodes → 4 leaves) under `scheduler` with `n_workers`
+    /// worker threads, returning `(cuts_generated, per_pool_active_cuts)` with the
+    /// second entry indexed by pool id.
+    #[allow(clippy::too_many_arguments)]
+    fn run_backward_over_binary_tree(
+        node_graph: &NodeGraph,
+        stochastic: &cobre_stochastic::StochasticContext,
+        state: &StateSpace,
+        templates: &[StageTemplate],
+        base_rows: &[usize],
+        n_stages: usize,
+        records: &[TrajectoryRecord],
+        scheduler: BackwardScheduler,
+        n_workers: usize,
+    ) -> (usize, Vec<usize>) {
+        let frozen_templates = templates.to_vec();
+        let n_state = state.n_state;
+        let trial_count = records.len() / n_stages;
+        let forward_passes = u32::try_from(trial_count).expect("trial_count fits u32");
+        let bwd_max_openings = node_graph
+            .successors
+            .iter()
+            .map(|succs| {
+                succs
+                    .iter()
+                    .map(|s| node_graph.nodes[s.child].openings.len)
+                    .sum::<usize>()
+            })
+            .max()
+            .unwrap_or(0)
+            .max(1);
+
+        let mut fcf = FutureCostFunction::new(
+            node_graph.n_pools,
+            n_state,
+            forward_passes,
+            10,
+            &vec![0; node_graph.n_pools],
+        );
+        let mut exchange = ExchangeBuffers::new(n_state, trial_count, 1);
+        let horizon = HorizonMode::Finite {
+            num_stages: n_stages,
+        };
+        let risk_measures = vec![RiskMeasure::Expectation; n_stages];
+
+        let comm = StubComm;
+        let mut workspaces = workspaces_n(n_workers, n_state);
+        // The basis store's second axis is NODE count (keyed by node position),
+        // not stage count — the two coincide only on a chain.
+        let mut basis_store = empty_basis_store(exchange.local_count(), node_graph.nodes.len());
+        let mut csb = CutSyncBuffers::with_distribution(n_state, 64, 1, exchange.local_count());
+        let mut cut_batches = empty_cut_batches(n_stages);
+        let ctx = StageContext {
+            geometry_per_stage: &[],
+            templates,
+            base_rows,
+            noise_scale: &[],
+            n_hydros: 0,
+            cost_scale_factor: 1_000_000.0,
+            n_load_buses: 0,
+            load_balance_row_starts: &[],
+            load_bus_indices: &[],
+            block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+            ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
+            discount_factors: &[],
+            cumulative_discount_factors: &[],
+            stage_lag_transitions: &[],
+            noise_group_ids: &[],
+            downstream_par_order: 0,
+        };
+        let study_dims = study_dims();
+        let training_ctx = TrainingContext {
+            node_graph,
+            horizon: &horizon,
+            state,
+            // `cut_state_layouts` is keyed by POOL id (a cut-generating node
+            // owns its own pool), so it is sized by `n_pools`, not `n_stages` —
+            // the two coincide only on a chain.
+            cut_state_layouts: &all_enabled_cut_state_layouts(state, node_graph.n_pools),
+            study_dims: &study_dims,
+            inflow_method: &InflowNonNegativityMethod::None,
+            stochastic,
+            initial_state: &[],
+            inflow_scheme: SamplingScheme::InSample,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            stages: &[],
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
+            dcs: None,
+        };
+
+        let local_count = exchange.local_count();
+        let mut state_machine = BackwardPassState::new(
+            n_workers,
+            1,
+            bwd_max_openings,
+            n_state,
+            local_count,
+            n_state,
+            n_stages,
+        );
+        state_machine.set_scheduler(scheduler);
+
+        let mut inputs = BackwardPassInputs {
+            workspaces: &mut workspaces,
+            basis_store: &mut basis_store,
+            ctx: &ctx,
+            frozen: &frozen_templates,
+            fcf: &mut fcf,
+            cut_batches: &mut cut_batches,
+            training_ctx: &training_ctx,
+            comm: &comm,
+            exchange: &mut exchange,
+            records,
+            cut_sync_bufs: &mut csb,
+            visited_archive: None,
+            event_sender: None,
+            risk_measures: &risk_measures,
+            cut_activity_tolerance: 0.0,
+            iteration: 1,
+            local_work: local_count,
+            fwd_offset: 0,
+        };
+
+        let result = state_machine
+            .run(&mut inputs)
+            .expect("backward pass over a declared binary tree must not error");
+
+        let per_pool: Vec<usize> = (0..node_graph.n_pools)
+            .map(|p| fcf.active_cuts(p).count())
+            .collect();
+        (result.cuts_generated, per_pool)
+    }
+
+    /// Cut-generation routing at a two-INTERIOR-node level: each cut-generating
+    /// node anchors its cut ONLY at the trial states routed to its own pool. Two
+    /// forwards that partition trajectories differently across the siblings must
+    /// produce DIFFERENT per-pool cut sets — a trajectory switching sibling moves
+    /// its cut from one pool to the other. This is the mirror of
+    /// `backward_pass_state_run_over_k_fan_is_invariant_to_per_trial_leaf_node_id`
+    /// (where a single cut-generating node makes routing a no-op); under per-stage
+    /// aggregation both partitions would wrongly give each pool `F` cuts. Both
+    /// backward schedulers must route identically.
+    #[test]
+    fn backward_pass_state_routes_trial_states_to_the_visited_nodes_pool() {
+        use cobre_core::temporal::{Node, PolicyGraph, PolicyGraphType, Transition};
+        use cobre_io::StageIdResolver;
+
+        use crate::setup::node_graph::build_node_graph;
+
+        fn node(id: i32, stage_id: i32) -> Node {
+            Node {
+                id,
+                stage_id,
+                realization_id: None,
+                label: None,
+            }
+        }
+        fn transition(source_id: i32, target_id: i32, probability: f64) -> Transition {
+            Transition {
+                source_id,
+                target_id,
+                probability,
+                annual_discount_rate_override: None,
+            }
+        }
+
+        let n_stages = 3_usize;
+        let branching = 2_usize;
+        let stochastic = make_stochastic_context(n_stages, branching);
+        let study_stage_ids = [0_i32, 1, 2];
+        let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+        // Root (stage 0) → two INTERIOR nodes (stage 1, distinct pools) → four
+        // leaves (stage 2, one shared pool). backward_cut_levels == [[1, 2], [0]].
+        let graph = PolicyGraph {
+            graph_type: PolicyGraphType::FiniteHorizon,
+            annual_discount_rate: 0.0,
+            nodes: vec![
+                node(0, 0),
+                node(1, 1),
+                node(2, 1),
+                node(3, 2),
+                node(4, 2),
+                node(5, 2),
+                node(6, 2),
+            ],
+            transitions: vec![
+                transition(0, 1, 0.5),
+                transition(0, 2, 0.5),
+                transition(1, 3, 0.5),
+                transition(1, 4, 0.5),
+                transition(2, 5, 0.5),
+                transition(2, 6, 0.5),
+            ],
+            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            season_map: None,
+        };
+        let node_graph = build_node_graph(&graph, n_stages, &resolver, &stochastic)
+            .expect("declared binary-tree graph must build");
+
+        let root_pool = node_graph.nodes[0].pool_id;
+        let pool1 = node_graph.nodes[1].pool_id;
+        let pool2 = node_graph.nodes[2].pool_id;
+        assert_ne!(
+            pool1, pool2,
+            "two interior siblings at one level must own distinct pools"
+        );
+
+        let state = state_layout(1, 0);
+        let templates = vec![minimal_template_1_0(); n_stages];
+        let base_rows = vec![1_usize; n_stages];
+        let trial_states = vec![vec![10.0], vec![20.0], vec![30.0], vec![40.0]];
+        let f = trial_states.len();
+
+        // Config A: 3 trajectories visit node 1, 1 visits node 2 (at stage 1).
+        let ids_a = [1_i32, 1, 1, 2];
+        // Config B: the mirror partition — 1 visits node 1, 3 visit node 2.
+        let ids_b = [1_i32, 2, 2, 2];
+
+        // The by-scenario path exercises routing on a multi-successor,
+        // multi-pool level. The by-node scheduler is not run here: it indexes a
+        // single successor's `solve_order` and does not yet handle a node's
+        // flattened multi-successor opening set (orthogonal to routing; its
+        // routing threading is covered on chains by the by-node determinism
+        // gates in `tests/mpi_wire.rs`).
+        let scheduler = BackwardScheduler::ByScenario {};
+        let records_a = trial_state_records_with_stage1_ids(&trial_states, n_stages, &ids_a);
+        let records_b = trial_state_records_with_stage1_ids(&trial_states, n_stages, &ids_b);
+
+        // Both worker counts. `n_workers == 2` is the regression: a node's routed
+        // subset is scattered across the global scenario axis, so a worker must be
+        // handed only the routed points inside its own contiguous basis window —
+        // splitting `trial_points.len()` evenly instead indexes a routed `m` out of
+        // another worker's basis slice (a deterministic OOB panic). Routing is
+        // worker-count invariant, so the per-pool counts match across both legs.
+        for n_workers in [1_usize, 2] {
+            let (gen_a, pools_a) = run_backward_over_binary_tree(
+                &node_graph,
+                &stochastic,
+                &state,
+                &templates,
+                &base_rows,
+                n_stages,
+                &records_a,
+                scheduler,
+                n_workers,
+            );
+            let (_gen_b, pools_b) = run_backward_over_binary_tree(
+                &node_graph,
+                &stochastic,
+                &state,
+                &templates,
+                &base_rows,
+                n_stages,
+                &records_b,
+                scheduler,
+                n_workers,
+            );
+
+            assert_eq!(
+                pools_a[root_pool], f,
+                "the root (single-node level) anchors a cut at every trajectory's stage-0 state"
+            );
+            assert_eq!(
+                pools_a[pool1], 3,
+                "node 1's pool: the 3 trajectories that visited it"
+            );
+            assert_eq!(
+                pools_a[pool2], 1,
+                "node 2's pool: the 1 trajectory that visited it"
+            );
+            assert_eq!(
+                pools_a[pool1] + pools_a[pool2],
+                f,
+                "Σ over the level's pools of their trial counts must equal F"
+            );
+            assert_eq!(
+                gen_a,
+                2 * f,
+                "F cuts at the two-interior-node level plus F at the root"
+            );
+
+            assert_eq!(pools_b[root_pool], f);
+            assert_eq!(pools_b[pool1], 1);
+            assert_eq!(pools_b[pool2], 3);
+
+            assert_ne!(
+                pools_a[pool1], pools_b[pool1],
+                "routing is load-bearing: repartitioning trajectories across the siblings must \
+                 move cuts between the sibling pools (per-stage aggregation would give each F)"
+            );
+        }
     }
 
     /// A profile installed via `set_profile` before `run()` is the one

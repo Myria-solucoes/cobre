@@ -402,10 +402,26 @@ pub(crate) fn process_by_scenario_backward<S: SolverInterface + Send>(
     // warm-start chain, never which cuts are produced. Defaults to the identity
     // permutation when no order is installed.
     let solve_order = tree_view.solve_order_data(s);
+    // `succ.probabilities` flattens EVERY successor of the current node in
+    // canonical order (ascending child id, then within-child ω —
+    // `assemble_outcome_weights`), but `solve_order(s)`/`tree_view.opening(s,
+    // _)` only understand a single successor's own within-stage index — so a
+    // flattened `omega` is split into a successor block and a LOCAL within-
+    // stage index below. A single-successor node has exactly one block, whose
+    // local index equals `omega` unconditionally: chain parity depends on that
+    // degeneracy, not on a separate code path.
+    let n_local_openings = tree_view.n_openings(s);
+    debug_assert_eq!(
+        succ.probabilities.len() % n_local_openings,
+        0,
+        "process_by_scenario_backward: {} flattened outcomes must be an exact multiple of \
+         stage {s}'s own {n_local_openings} openings",
+        succ.probabilities.len()
+    );
     debug_assert_eq!(
         solve_order.len(),
-        succ.probabilities.len(),
-        "solve_order(s) must be a permutation of 0..n_openings"
+        n_local_openings,
+        "solve_order(s) must be a permutation of 0..n_local_openings"
     );
     // First-solved opening: it owns the per-(m, s) basis load/capture and the fresh
     // (non-warm-carry) solve.
@@ -413,10 +429,13 @@ pub(crate) fn process_by_scenario_backward<S: SolverInterface + Send>(
 
     let mut omega_position = 0usize;
     while omega_position < succ.probabilities.len() {
-        let omega = solve_order[omega_position] as usize;
+        let block = omega_position / n_local_openings;
+        let local_pos = omega_position % n_local_openings;
+        let local_omega = solve_order[local_pos] as usize;
+        let omega = block * n_local_openings + local_omega;
         omega_position += 1;
 
-        let raw_noise = tree_view.opening(s, omega);
+        let raw_noise = tree_view.opening(s, local_omega);
         let is_first = omega == first;
 
         opening_solver.solve_opening(

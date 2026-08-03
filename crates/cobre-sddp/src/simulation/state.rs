@@ -35,14 +35,14 @@ use crate::{
     FutureCostFunction,
     context::{StageContext, TrainingContext},
     cut::row::build_cut_row_batch_into,
+    setup::node_graph::frontier_node,
     simulation::{
         config::SimulationConfig,
         error::SimulationError,
         extraction::assign_scenarios,
         pipeline::{
-            SIMULATION_SEED_OFFSET, ScenarioIds, SimLookups, SimulationOutputSpec,
-            SimulationRunResult, WorkerCosts, WorkerStats, dispatch_scenario_result,
-            emit_sim_progress, process_scenario_stages,
+            ScenarioIds, SimLookups, SimulationOutputSpec, SimulationRunResult, WorkerCosts,
+            WorkerStats, dispatch_scenario_result, emit_sim_progress, process_scenario_stages,
         },
     },
     solve::partition,
@@ -139,6 +139,9 @@ pub(crate) struct SimWorkerParams<'w> {
     num_stages: usize,
     /// Number of MPI ranks, scaling rank-local progress to a global estimate.
     world_size: u32,
+    /// The stage-0 root's canonical `NodeGraph` position — every scenario's
+    /// sampled walk starts here.
+    root_node: usize,
 }
 
 /// Owned scratch state for one simulation run.
@@ -284,6 +287,10 @@ impl SimulationState {
             ws.solver.set_profile(&self.profile);
         }
 
+        // Every scenario's sampled walk starts at the same stage-0 root —
+        // resolved once, mirroring the training forward pass's own root_node.
+        let root_node = frontier_node(training_ctx.node_graph, 0);
+
         let params = SimWorkerParams {
             ctx: inputs.ctx,
             fcf: inputs.fcf,
@@ -300,6 +307,7 @@ impl SimulationState {
             sampler: &sampler,
             num_stages,
             world_size,
+            root_node,
         };
 
         let worker_results: Vec<Result<(WorkerCosts, WorkerStats), SimulationError>> = inputs
@@ -403,7 +411,7 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
     for local_idx in start_local..end_local {
         #[allow(clippy::cast_possible_truncation)]
         let scenario_id = (params.scenario_start + local_idx) as u32;
-        let global_scenario = SIMULATION_SEED_OFFSET.saturating_add(scenario_id);
+        let global_scenario = scenario_id;
 
         let stats_before = ws.solver.statistics();
         let load_spec = SimScenarioLoadSpec {
@@ -429,6 +437,7 @@ fn run_worker_scenarios<S: SolverInterface + Send>(
                 raw_noise_buf: &mut raw_noise_buf,
                 perm_scratch: &mut perm_scratch,
                 sampler: params.sampler,
+                root_node: params.root_node,
             },
             &lookups,
         );

@@ -41,7 +41,10 @@ use super::{
 
 /// One solved (trial point, opening) outcome produced by an opening-block unit.
 pub(crate) struct OpeningOutcome {
-    pub(crate) m: usize,
+    /// Position of the trial point within this node's routed set (the arena row),
+    /// NOT the rank-local trial-point index — the two coincide only on a
+    /// single-node level, where routing is the identity `0..local_work`.
+    pub(crate) trial_pos: usize,
     pub(crate) omega: usize,
     pub(crate) outcome: BackwardOutcome,
 }
@@ -128,7 +131,7 @@ pub(crate) fn process_stage_backward_by_node<S: SolverInterface + Send>(
     workspaces: &mut [SolverWorkspace<S>],
     ctx: &StageContext<'_>,
     training_ctx: &TrainingContext<'_>,
-    local_work: usize,
+    trial_points: &[usize],
     exchange: &ExchangeBuffers,
     fwd_offset: usize,
     iteration: u64,
@@ -146,7 +149,8 @@ pub(crate) fn process_stage_backward_by_node<S: SolverInterface + Send>(
         n_blocks,
         "block_order must hold exactly n_blocks entries"
     );
-    let total_units = local_work * n_blocks;
+    let n_trial = trial_points.len();
+    let total_units = n_trial * n_blocks;
     let tree_view = training_ctx.stochastic.tree_view();
     let solve_order = tree_view.solve_order_data(succ.successor);
     let next_unit = AtomicUsize::new(0);
@@ -197,8 +201,9 @@ pub(crate) fn process_stage_backward_by_node<S: SolverInterface + Send>(
                 if u >= total_units {
                     break;
                 }
-                let b = block_order[u / local_work] as usize;
-                let m = u % local_work;
+                let pos = u % n_trial;
+                let b = block_order[u / n_trial] as usize;
+                let m = trial_points[pos];
                 let x_hat = exchange.state_at(succ.my_rank, m);
                 let scenario = fwd_offset + m;
 
@@ -278,7 +283,7 @@ pub(crate) fn process_stage_backward_by_node<S: SolverInterface + Send>(
                     // `copy_from_slice` panics on a length mismatch.
                     if ws.backward_accum.opening_outcomes_buf.len() <= count {
                         ws.backward_accum.opening_outcomes_buf.push(OpeningOutcome {
-                            m: 0,
+                            trial_pos: 0,
                             omega: 0,
                             outcome: BackwardOutcome {
                                 intercept: 0.0,
@@ -289,7 +294,7 @@ pub(crate) fn process_stage_backward_by_node<S: SolverInterface + Send>(
                     }
                     let recorded = &mut ws.backward_accum.opening_outcomes_buf[count];
                     recorded.outcome.coefficients.resize(cut_n_state, 0.0_f64);
-                    recorded.m = m;
+                    recorded.trial_pos = pos;
                     recorded.omega = omega;
                     recorded
                         .outcome
@@ -317,14 +322,14 @@ pub(crate) fn process_stage_backward_by_node<S: SolverInterface + Send>(
         .collect()
 }
 
-/// Scatter worker outcomes into the pre-allocated per-`(m, ω)` arena, aggregate
-/// each trial point's cut canonically over ω, and insert into the FCF in
-/// ascending m (sddp.md "By-node scheduler is warm-start-only" — never
-/// claim order).
+/// Scatter worker outcomes into the pre-allocated per-`(routed position, ω)`
+/// arena, aggregate each routed trial point's cut canonically over ω, and insert
+/// into the FCF in ascending routed position — which is ascending trial-point
+/// index (sddp.md "By-node scheduler is warm-start-only" — never claim order).
 ///
 /// `scratch` is `BackwardPassState::by_node_scratch`, sized once by `set_scheduler`;
-/// the scatter overwrites `arena[0..local_work * n_openings]` in full before the
-/// aggregation loop reads it, so no clear pass is required between stages. Each
+/// the scatter overwrites `arena[0..trial_points.len() * n_openings]` in full before
+/// the aggregation loop reads it, so no clear pass is required between stages. Each
 /// touched slot's `coefficients` (and `coeffs_buf`) resize to THIS pool's
 /// `cut_n_state`, which may differ from a prior pool's — always within the
 /// capacity `ByNodeScratch::sized` reserved at the run's global `n_state`, so
@@ -334,7 +339,7 @@ pub(crate) fn process_stage_backward_by_node<S: SolverInterface + Send>(
 pub(crate) fn by_node_finish<S: SolverInterface>(
     worker_out: Vec<Result<(usize, usize), SddpError>>,
     workspaces: &[SolverWorkspace<S>],
-    local_work: usize,
+    trial_points: &[usize],
     n_openings: usize,
     cut_n_state: usize,
     probabilities: &[f64],
@@ -345,10 +350,11 @@ pub(crate) fn by_node_finish<S: SolverInterface>(
     fwd_offset: usize,
     scratch: &mut ByNodeScratch,
 ) -> Result<usize, SddpError> {
-    let arena_len = local_work * n_openings;
+    let n_trial = trial_points.len();
+    let arena_len = n_trial * n_openings;
     debug_assert!(
         scratch.arena.len() >= arena_len,
-        "ByNodeScratch arena must already cover local_work * n_openings ({arena_len}); got \
+        "ByNodeScratch arena must already cover trial_points.len() * n_openings ({arena_len}); got \
          arena len = {}",
         scratch.arena.len(),
     );
@@ -362,7 +368,7 @@ pub(crate) fn by_node_finish<S: SolverInterface>(
     for res in worker_out {
         let (w, count) = res?;
         for recorded in &workspaces[w].backward_accum.opening_outcomes_buf[..count] {
-            let slot = &mut scratch.arena[recorded.m * n_openings + recorded.omega];
+            let slot = &mut scratch.arena[recorded.trial_pos * n_openings + recorded.omega];
             debug_assert!(
                 cut_n_state <= slot.coefficients.capacity(),
                 "cut_n_state ({cut_n_state}) exceeds this arena slot's reserved capacity ({}) — \
@@ -377,32 +383,37 @@ pub(crate) fn by_node_finish<S: SolverInterface>(
         }
     }
     let mut cuts_added = 0usize;
-    for m in 0..local_work {
+    // Ascending routed position == ascending trial-point index (`trial_points`
+    // is built ascending), so the cut set is claim/worker-count independent
+    // (sddp.md "By-node scheduler is warm-start-only"); the FCF forward-pass tag
+    // is the real trial-point index `real_m`.
+    for (pos, &real_m) in trial_points.iter().enumerate() {
         let mut intercept = 0.0_f64;
         risk_measure.aggregate_cut_into(
-            &scratch.arena[m * n_openings..(m + 1) * n_openings],
+            &scratch.arena[pos * n_openings..(pos + 1) * n_openings],
             probabilities,
             &mut intercept,
             &mut scratch.coeffs_buf,
             &mut scratch.risk_scratch,
         );
+        let scenario = fwd_offset + real_m;
         debug_assert!(
-            u32::try_from(fwd_offset + m).is_ok(),
+            u32::try_from(scenario).is_ok(),
             "global scenario index overflows u32"
         );
         #[allow(clippy::cast_possible_truncation)]
         fcf.add_cut(
             pool,
             iteration,
-            (fwd_offset + m) as u32,
+            scenario as u32,
             intercept,
             &scratch.coeffs_buf,
         );
         cuts_added += 1;
     }
     debug_assert_eq!(
-        cuts_added, local_work,
-        "by_node_finish must add exactly local_work cuts, matching the by-scenario path"
+        cuts_added, n_trial,
+        "by_node_finish must add exactly one cut per routed trial point"
     );
     Ok(cuts_added)
 }

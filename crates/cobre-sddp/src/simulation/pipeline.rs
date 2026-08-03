@@ -13,7 +13,9 @@ use cobre_core::{EntityId, TrainingEvent};
 use cobre_solver::ActiveProfile;
 use cobre_solver::{SolverInterface, StageTemplate};
 use cobre_stochastic::par::resolve_stage_lag_transition;
-use cobre_stochastic::{ClassSampleRequest, ForwardSampler, SampleRequest};
+use cobre_stochastic::{
+    ClassSampleRequest, ForwardSampler, SampleRequest, select_transition_child,
+};
 
 use crate::energy_conversion::EnergyConversionSet;
 use crate::error::SddpError::Infeasible;
@@ -34,6 +36,7 @@ use crate::{
     context::{StageContext, TrainingContext},
     dcs::{DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
     indexer::{HydroCellIndex, StateSpace},
+    setup::node_graph::node_opening_range,
     simulation::{
         config::SimulationConfig,
         error::SimulationError,
@@ -51,11 +54,14 @@ use crate::{
     workspace::{CapturedBasis, SolverWorkspace},
 };
 
-/// Offset added to the simulation scenario ID before passing to [`ForwardSampler::sample`].
-///
-/// Separates the simulation seed domain from the training forward pass domain so
-/// the two never draw the same noise stream.
-pub(crate) const SIMULATION_SEED_OFFSET: u32 = u32::MAX / 2;
+/// Reserved sentinel iteration for every simulation seed derivation call
+/// (noise draws and, on a declared graph, the transition draw).
+/// `training::session::iteration_range` is 1-based
+/// (`start_iteration + 1 ..= max_iterations`), so `0` never collides with a
+/// real training iteration — domain separation from the training forward
+/// pass follows from this alone, structurally, with no scenario-index offset
+/// required for that purpose.
+pub(crate) const SIMULATION_ITERATION: u32 = 0;
 
 /// Per-worker scenario cost accumulation: `(scenario_id, total_cost, category_costs)`.
 pub(crate) type WorkerCosts = Vec<(u32, f64, ScenarioCategoryCosts)>;
@@ -164,8 +170,9 @@ pub struct SimulationOutputSpec<'a> {
 pub(crate) struct ScenarioIds<'a> {
     /// Local scenario ID (0-based index within this rank's assigned slice).
     pub(crate) scenario_id: u32,
-    /// Global scenario ID passed to `ForwardSampler::sample`, including
-    /// [`SIMULATION_SEED_OFFSET`].
+    /// This scenario's "path" identity passed to `ForwardSampler::sample` and
+    /// the transition draw — the scenario's own native id, mirroring how a
+    /// training forward pass's global scenario index plays the same role.
     pub(crate) global_scenario: u32,
     /// Total number of stages in the planning horizon.
     pub(crate) num_stages: usize,
@@ -177,6 +184,9 @@ pub(crate) struct ScenarioIds<'a> {
     pub(crate) perm_scratch: &'a mut [usize],
     /// Noise sampler used to draw per-stage stochastic values.
     pub(crate) sampler: &'a ForwardSampler<'a>,
+    /// The stage-0 root's canonical `NodeGraph` position — this scenario's
+    /// sampled walk starts here, mirroring the training forward pass.
+    pub(crate) root_node: usize,
 }
 
 /// Rebuild the stage `row_lower` slice into `scratch_buf` in original (unscaled)
@@ -231,6 +241,10 @@ struct SimStageIds {
     stage_id_u32: u32,
     /// Scenario ID for error messages.
     scenario_id: u32,
+    /// Canonical `NodeGraph` position this scenario's sampled walk visits at
+    /// stage `t` — the pool/node-id resolution site, never `t` itself once a
+    /// stage carries more than one alive node.
+    node: usize,
 }
 
 /// Load-path inputs bundled for `solve_simulation_stage`.
@@ -403,7 +417,8 @@ fn solve_simulation_stage<S: SolverInterface>(
     let col_scale = &ctx.templates[t].col_scale;
     let row_scale = &ctx.templates[t].row_scale;
 
-    let pool_id = training_ctx.node_graph.nodes[t].pool_id;
+    let node = ids.node;
+    let pool_id = training_ctx.node_graph.nodes[node].pool_id;
 
     let view_objective: f64 = if let Some(params) = dcs {
         // Simulation has no iteration counter; seed with `current_iteration = 0`.
@@ -419,7 +434,7 @@ fn solve_simulation_stage<S: SolverInterface>(
             iteration: None, // disables the k1 window → every cut a candidate
             // Simulation solves one LP per (stage, scenario): always fresh.
             continue_carry: false,
-            node_id: training_ctx.node_graph.node_ids[t],
+            node_id: training_ctx.node_graph.node_ids[node],
         };
         // Disjoint borrows of `ws`: `solver`, `dcs_initial_resident` (shared), and
         // `dcs_solve` (mut) are distinct fields.
@@ -456,7 +471,7 @@ fn solve_simulation_stage<S: SolverInterface>(
             stage_index: t,
             scenario_index: ids.scenario_id as usize,
             iteration: None, // simulation has no iteration counter
-            node_id: training_ctx.node_graph.node_ids[t],
+            node_id: training_ctx.node_graph.node_ids[node],
         };
 
         let view = run_stage_solve(ws, &inputs).map_err(|e| map_sim_solver_error(e, ids))?;
@@ -741,6 +756,7 @@ fn reset_scenario_state<S: SolverInterface>(
     total_scenarios: u32,
     inflow_lags_start: usize,
     training_ctx: &TrainingContext<'_>,
+    root_node: usize,
 ) {
     // Reset solver simplex state at the scenario boundary so a scenario's result
     // cannot depend on which scenarios ran before it (determinism across thread/
@@ -752,18 +768,24 @@ fn reset_scenario_state<S: SolverInterface>(
         initial_state,
         lag_accum_seed,
         lag_weight_seed,
+        node_graph,
+        stochastic,
         ..
     } = training_ctx;
+    let (node_opening_offset, node_opening_len) =
+        node_opening_range(node_graph, root_node, stochastic, 0);
     ws.current_state.clear();
     ws.current_state.extend_from_slice(initial_state);
     sampler.apply_initial_state(
         &ClassSampleRequest {
-            iteration: 0,
+            iteration: SIMULATION_ITERATION,
             scenario: global_scenario,
             stage: 0,
             stage_idx: 0,
             total_scenarios,
             noise_group_id: 0,
+            node_opening_offset,
+            node_opening_len,
         },
         &mut ws.current_state,
         inflow_lags_start,
@@ -783,6 +805,40 @@ fn reset_scenario_state<S: SolverInterface>(
     ws.scratch.downstream_n_completed = 0;
 }
 
+/// Advance `node` to the one this scenario visits at `t + 1`, mirroring the
+/// training forward pass's sampled walk: a single out-edge is taken with
+/// probability 1 WITHOUT deriving a seed, so a chain never perturbs the
+/// within-node noise stream above (C1 chain-parity).
+///
+/// # Panics (debug builds only)
+///
+/// Panics if `node` has no out-edge before the terminal stage (a
+/// graph-construction invariant).
+fn advance_simulation_node(
+    training_ctx: &TrainingContext<'_>,
+    node: usize,
+    stage_id_u32: u32,
+    global_scenario: u32,
+) -> usize {
+    let successors = &training_ctx.node_graph.successors[node];
+    debug_assert!(
+        !successors.is_empty(),
+        "advance_simulation_node: node {node} at stage {stage_id_u32} has no out-edge before \
+         the terminal stage (a graph-construction invariant)"
+    );
+    if successors.len() == 1 {
+        successors[0].child
+    } else {
+        let idx = select_transition_child(
+            SIMULATION_ITERATION,
+            global_scenario,
+            stage_id_u32,
+            successors.iter().map(|s| s.probability),
+        );
+        successors[idx].child
+    }
+}
+
 pub(crate) fn process_scenario_stages<S: SolverInterface>(
     ws: &mut SolverWorkspace<S>,
     ctx: &StageContext<'_>,
@@ -793,7 +849,12 @@ pub(crate) fn process_scenario_stages<S: SolverInterface>(
     ids: &mut ScenarioIds<'_>,
     lookups: &SimLookups,
 ) -> Result<(f64, Vec<SimulationStageResult>), SimulationError> {
-    let TrainingContext { state, .. } = training_ctx;
+    let TrainingContext {
+        state,
+        node_graph,
+        stochastic,
+        ..
+    } = training_ctx;
     reset_scenario_state(
         ws,
         ids.sampler,
@@ -801,16 +862,20 @@ pub(crate) fn process_scenario_stages<S: SolverInterface>(
         ids.total_scenarios,
         state.inflow_lags.start,
         training_ctx,
+        ids.root_node,
     );
     let mut total_cost = 0.0_f64;
     let mut stage_results = Vec::with_capacity(ids.num_stages);
+    let mut node = ids.root_node;
 
     #[allow(clippy::needless_range_loop)] // t indexes load_spec, ctx arrays, and SimStageIds
     for t in 0..ids.num_stages {
         #[allow(clippy::cast_possible_truncation)]
         let stage_id_u32 = t as u32;
+        let (node_opening_offset, node_opening_len) =
+            node_opening_range(node_graph, node, stochastic, t);
         let noise = ids.sampler.sample(SampleRequest {
-            iteration: 0,
+            iteration: SIMULATION_ITERATION,
             scenario: ids.global_scenario,
             stage: stage_id_u32,
             stage_idx: t,
@@ -818,6 +883,8 @@ pub(crate) fn process_scenario_stages<S: SolverInterface>(
             perm_scratch: ids.perm_scratch,
             total_scenarios: ids.total_scenarios,
             noise_group_id: ctx.noise_group_id_at(t),
+            node_opening_offset,
+            node_opening_len,
         })?;
         let raw_noise = noise.as_slice();
 
@@ -832,6 +899,7 @@ pub(crate) fn process_scenario_stages<S: SolverInterface>(
                 t,
                 stage_id_u32,
                 scenario_id: ids.scenario_id,
+                node,
             },
             lookups,
             raw_noise,
@@ -843,6 +911,10 @@ pub(crate) fn process_scenario_stages<S: SolverInterface>(
             .unwrap_or(1.0);
         total_cost += cum_d * cost;
         stage_results.push(result);
+
+        if t + 1 < ids.num_stages {
+            node = advance_simulation_node(training_ctx, node, stage_id_u32, ids.global_scenario);
+        }
     }
     Ok((total_cost, stage_results))
 }

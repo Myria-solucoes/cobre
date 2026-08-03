@@ -635,6 +635,7 @@ mod tests {
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
+            current_node_buf: Vec::new(),
         }
     }
 

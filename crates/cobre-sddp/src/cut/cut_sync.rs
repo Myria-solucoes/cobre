@@ -557,10 +557,11 @@ impl CutSyncBuffers {
     ///
     /// # Errors
     ///
-    /// Returns `Err(SddpError::Validation(_))` if any pool's local cut count
-    /// differs from `per_rank_cuts[my_rank]` (the same guard as
-    /// `sync_packed_records`, per pool); returns `Err(SddpError::Communication(_))`
-    /// if the underlying `allgatherv` fails.
+    /// Returns `Err(SddpError::Validation(_))` when, across >1 rank, a pool's
+    /// local cut count differs from `per_rank_cuts[my_rank]` — per-pool routing
+    /// at a multi-node level needs per-`(rank, pool)` counts exchanged before the
+    /// allgatherv, which is not yet wired (single-rank is unaffected). Returns
+    /// `Err(SddpError::Communication(_))` if the underlying `allgatherv` fails.
     pub fn sync_level_records<C: Communicator>(
         &mut self,
         pools: &[usize],
@@ -608,13 +609,21 @@ impl CutSyncBuffers {
             );
             let record_size = cut_wire_size(pool_n_state);
             let n_local = self.pack_pool_into(fcf, pool, iteration, record_size, send_len);
-            if n_local != expected_for_me {
+            // Per-pool routing lets a pool's local cut count differ from the
+            // uniform per-rank plan (a sibling pool at a multi-node level takes
+            // only its own visitors). The remote-rank layout below still assumes
+            // `per_rank_cuts[r]` cuts per pool, so a divergence is safe ONLY at a
+            // single rank (no remote segment is read). Across >1 rank a
+            // multi-node level needs per-`(rank, pool)` counts exchanged first —
+            // not yet wired; reject loudly rather than corrupt remote buffers.
+            if self.num_ranks > 1 && n_local != expected_for_me {
                 return Err(SddpError::Validation(format!(
                     "sync_cuts invariant violated at pool {pool}: rank \
                      {my_rank} produced {n_local} cuts, expected \
                      {expected_for_me} per the cut-distribution plan. \
-                     Releasing this divergence to allgatherv would corrupt \
-                     remote ranks' deserialized cut buffers."
+                     Per-pool routing across >1 rank needs per-(rank, pool) cut \
+                     counts exchanged before the allgatherv (run a branching \
+                     graph on a single rank until that lands)."
                 )));
             }
             send_len += n_local * record_size;

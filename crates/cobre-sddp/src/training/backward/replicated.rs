@@ -4,9 +4,10 @@
 //! appends the identical cut.
 //!
 //! Reserved: inert until the forward pass emits a DEDUPED trial-state count
-//! distinct from the scenario count (`frontier_node` asserts a singleton forward
-//! frontier today, so no dedup/recombining node is trainable end-to-end). The
-//! orchestrator and its activation condition live at `run_backward_node_replicated`
+//! distinct from the scenario count — the sampled walk resolves a node per
+//! trajectory, but no per-node trial-state count exists yet, so no
+//! dedup/recombining node is trainable end-to-end. The orchestrator and its
+//! activation condition live at `run_backward_node_replicated`
 //! (`training::backward_pass_state`); the aggregation identity is pinned by the
 //! backward-pass unit tests.
 

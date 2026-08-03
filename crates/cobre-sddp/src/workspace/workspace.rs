@@ -659,6 +659,13 @@ pub struct ScratchBuffers {
     /// Per-worker permutation scratch for the forward-pass sampler and simulation
     /// worker loop. Pre-sized to `total_forward_passes.max(1)`.
     pub(crate) perm_scratch: Vec<usize>,
+
+    /// Per-trajectory sampled-walk node carrier: `current_node_buf[local_m]` is
+    /// trajectory `local_m`'s [`crate::setup::node_graph::NodeGraph`] position at
+    /// the stage the forward loop is about to visit, root-initialized then
+    /// advanced by the transition draw. Resized (never reallocated once at
+    /// capacity) at each `run_forward_worker` call.
+    pub(crate) current_node_buf: Vec<usize>,
 }
 
 /// All per-thread mutable resources required for one LP solve sequence.
@@ -799,6 +806,7 @@ impl ScratchBuffers {
             trajectory_costs_buf: Vec::with_capacity(max_local_fwd),
             raw_noise_buf: Vec::with_capacity(noise_dim),
             perm_scratch: Vec::with_capacity(total_forward_passes.max(1)),
+            current_node_buf: Vec::with_capacity(max_local_fwd),
         }
     }
 }
@@ -1090,6 +1098,16 @@ impl BasisStoreSliceMut<'_> {
     pub fn get(&self, scenario: usize, node: usize) -> Option<&CapturedBasis> {
         let local = scenario - self.scenario_offset;
         self.bases[local * self.num_nodes + node].as_ref()
+    }
+
+    /// This slice's global scenario window `[start, end)` — the scenarios
+    /// `get`/`get_mut` address in-bounds. The backward trial-point router assigns
+    /// each routed scenario to the worker whose window contains it, so its
+    /// `get(m, node)` never indexes outside this slice.
+    #[must_use]
+    pub fn scenario_window(&self) -> (usize, usize) {
+        let count = self.bases.len() / self.num_nodes;
+        (self.scenario_offset, self.scenario_offset + count)
     }
 
     /// Get a mutable reference to the basis slot at absolute scenario index

@@ -13,7 +13,7 @@ use cobre_solver::{SolverInterface, SolverStatistics, StageTemplate};
 use cobre_stochastic::context::ClassSchemes;
 use cobre_stochastic::{
     ClassDimensions, ClassSampleRequest, ForwardSampler, ForwardSamplerConfig, SampleRequest,
-    build_forward_sampler,
+    build_forward_sampler, select_transition_child,
 };
 use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator,
@@ -29,7 +29,7 @@ use crate::{
     error::SddpError,
     forward::{ForwardResult, StageKey, run_forward_stage},
     indexer::StateSpace,
-    setup::node_graph::NodeGraph,
+    setup::node_graph::{any_stage_node, frontier_node, node_opening_range},
     solve::partition,
     solver_phase::Phase,
     solver_stats::SolverStatsDelta,
@@ -129,6 +129,9 @@ pub(crate) struct ForwardWorkerParams<'a> {
     pub fwd_offset: usize,
     /// True when the last stage has warm-start (boundary) cuts.
     pub terminal_has_boundary_cuts: bool,
+    /// The stage-0 root's canonical `NodeGraph` position — every trajectory's
+    /// walk starts here. A chain-degenerate graph's root is `nodes[0]`.
+    pub root_node: usize,
     /// Noise dimension for worker-local sampling buffers (`OutOfSample` path).
     pub noise_dim: usize,
     /// Initial reservoir state shared across all workers.
@@ -346,8 +349,10 @@ impl ForwardPassState {
 
         let noise_dim = stochastic.dim();
 
+        let root_node = frontier_node(training_ctx.node_graph, 0);
+
         let terminal_has_boundary_cuts = num_stages > 0 && {
-            let terminal_node = frontier_node(training_ctx.node_graph, num_stages - 1);
+            let terminal_node = any_stage_node(training_ctx.node_graph, num_stages - 1);
             inputs.fcf.pools[training_ctx.node_graph.nodes[terminal_node].pool_id].warm_start_count
                 > 0
         };
@@ -408,6 +413,7 @@ impl ForwardPassState {
             iteration: inputs.iteration,
             fwd_offset: inputs.fwd_offset,
             terminal_has_boundary_cuts,
+            root_node,
             noise_dim,
             initial_state,
             lag_accum_seed,
@@ -581,58 +587,6 @@ impl ForwardPassState {
     }
 }
 
-/// Ascending node-graph positions with `nodes[pos].stage == stage` — the
-/// stage's alive frontier. Structural only (reads [`NodeGraph::nodes`]; no
-/// sampling or enumeration selection): a synthesized or declared chain's
-/// frontier is always a singleton, and below a recombination join a declared
-/// graph's frontier carries more than one node.
-fn stage_frontier(node_graph: &NodeGraph, stage: usize) -> impl Iterator<Item = usize> + '_ {
-    node_graph
-        .nodes
-        .iter()
-        .enumerate()
-        .filter(move |(_, n)| n.stage == stage)
-        .map(|(pos, _)| pos)
-}
-
-/// `node`'s single canonical predecessor, or `None` at a root. A node reached
-/// by more than one edge is a recombination join — `debug_assert`-checked
-/// (construction invariant), never silently resolved to an arbitrary
-/// predecessor.
-fn node_parent(node_graph: &NodeGraph, node: usize) -> Option<usize> {
-    let mut candidates = node_graph
-        .successors
-        .iter()
-        .enumerate()
-        .filter(|(_, succs)| succs.iter().any(|s| s.child == node))
-        .map(|(pos, _)| pos);
-    let parent = candidates.next();
-    debug_assert!(
-        candidates.next().is_none(),
-        "node_parent: node {node} has more than one predecessor (a recombination join)"
-    );
-    parent
-}
-
-/// Stage `stage`'s sole alive frontier node. The scenario-count visit set
-/// [`run_forward_worker`] assigns does not yet split scenarios across a
-/// multi-node frontier, so a frontier carrying more than one node here is a
-/// `debug_assert`-checked construction invariant, not a silent default.
-fn frontier_node(node_graph: &NodeGraph, stage: usize) -> usize {
-    let mut frontier = stage_frontier(node_graph, stage);
-    let node = frontier.next();
-    debug_assert!(
-        node.is_some(),
-        "frontier_node: stage {stage} carries no alive node"
-    );
-    debug_assert!(
-        frontier.next().is_none(),
-        "frontier_node: stage {stage} carries more than one alive node"
-    );
-    // `stage` itself is a safe fallback consistent with the debug-checked invariants above.
-    node.unwrap_or(stage)
-}
-
 /// Execute the forward pass for one rayon worker's scenario partition, through
 /// every stage, accumulating trajectory costs and per-stage solver statistics.
 ///
@@ -644,6 +598,11 @@ fn frontier_node(node_graph: &NodeGraph, stage: usize) -> usize {
 ///
 /// Propagates `Err(SddpError::Stochastic(_))` from `sampler.sample(...)` and
 /// `Err(SddpError::Infeasible/Solver(_))` from [`run_forward_stage`].
+// RATIONALE: one sequential per-(stage, trajectory) pipeline — node/state
+// resolution, LP solve, and the transition-draw advance are load-bearing
+// ordering, not independent steps a split would clarify; the numerical work
+// itself is already delegated to `run_forward_stage`/`select_transition_child`.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
     w: usize,
     ws: &mut SolverWorkspace<S>,
@@ -671,6 +630,15 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
     let mut perm_scratch = std::mem::take(&mut ws.scratch.perm_scratch);
     perm_scratch.resize((params.total_forward_passes).max(1), 0_usize);
 
+    // Per-trajectory sampled-walk node carrier, root-initialized: each
+    // trajectory advances its own entry by the transition draw at the end of
+    // every stage below. On a chain the root is the only node at every stage
+    // (single out-edge, short-circuited — see the transition-draw call site),
+    // so this reduces to reading `nodes[t]` byte-for-byte.
+    let mut current_node_buf = std::mem::take(&mut ws.scratch.current_node_buf);
+    current_node_buf.clear();
+    current_node_buf.resize(n_local, params.root_node);
+
     let local_solve_count_before = ws.solver.statistics().solve_count;
     #[allow(clippy::cast_possible_truncation)]
     let total_scenarios_u32 = params.total_forward_passes as u32;
@@ -683,9 +651,9 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
         .filter(|p| p.is_active(params.iteration));
 
     // Rationale: `t` indexes several parallel per-stage collections
-    // (params.frozen, params.ctx.cumulative_discount_factors, the resolved
-    // frontier node) beyond `per_stage_stats`, so an iterator over
-    // `per_stage_stats` alone would not eliminate the range index.
+    // (params.frozen, params.ctx.cumulative_discount_factors) beyond
+    // `per_stage_stats`, so an iterator over `per_stage_stats` alone would not
+    // eliminate the range index.
     #[allow(clippy::needless_range_loop)]
     for t in 0..params.num_stages {
         let cum_d = params
@@ -695,27 +663,14 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
             .copied()
             .unwrap_or(1.0);
 
-        // This stage's frontier visit — every scenario at stage `t` resolves
-        // its pool/node-id against this SAME node (frontier_node's singleton
-        // invariant); below a recombination join a declared graph's frontier
-        // would carry more than one node, one visit per distinct prefix, not
-        // yet driven by this scenario-count visit set.
-        let node = frontier_node(params.training_ctx.node_graph, t);
-        let pool_id = params.training_ctx.node_graph.nodes[node].pool_id;
-
-        // Each visit's incoming state is its parent node's outgoing state
-        // along the canonical path — on today's singleton frontier the parent
-        // sits at stage t-1, the same trajectory's own previous record.
-        let parent_stage = (t > 0).then(|| {
-            let parent = node_parent(params.training_ctx.node_graph, node);
-            debug_assert!(
-                parent.is_some(),
-                "run_forward_worker: a non-root visit must resolve a parent (t -> t+1 graph invariant)"
-            );
-            parent.map_or(t - 1, |p| params.training_ctx.node_graph.nodes[p].stage)
-        });
-
         for (local_m, m) in (start_m..end_m).enumerate() {
+            // Each trajectory resolves its OWN visited node — the sampled walk;
+            // below a recombination join, or on a declared fan, distinct
+            // trajectories may sit at distinct nodes at the same stage `t`.
+            let node = current_node_buf[local_m];
+            let node_graph = params.training_ctx.node_graph;
+            let pool_id = node_graph.nodes[node].pool_id;
+
             // Reset the solver's simplex state at the per-scenario boundary so
             // this scenario's landed vertex cannot depend on which scenarios the
             // worker solved before it (determinism across thread/rank counts).
@@ -734,9 +689,14 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
                 ws.solver.load_model(&params.frozen[t]);
             }
             ws.current_state.clear();
-            let src: &[f64] = match parent_stage {
-                None => params.initial_state,
-                Some(ps) => &worker_records[local_m * params.num_stages + ps].state,
+            // Each trajectory's incoming state is its OWN previous-stage record —
+            // a per-trajectory walk needs no parent-node lookup: every edge is
+            // t -> t+1, so the state that fed this visit is always this same
+            // trajectory's own `t - 1` solve, on a chain or a declared graph alike.
+            let src: &[f64] = if t == 0 {
+                params.initial_state
+            } else {
+                &worker_records[local_m * params.num_stages + (t - 1)].state
             };
             ws.current_state.extend_from_slice(src);
 
@@ -761,6 +721,9 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
             #[allow(clippy::cast_possible_truncation)]
             let (i32, s32, t32) = (params.iteration as u32, global_scenario as u32, t as u32);
 
+            let (node_opening_offset, node_opening_len) =
+                node_opening_range(node_graph, node, params.training_ctx.stochastic, t);
+
             if t == 0 {
                 let class_req = ClassSampleRequest {
                     iteration: i32,
@@ -769,6 +732,8 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
                     stage_idx: 0,
                     total_scenarios: total_scenarios_u32,
                     noise_group_id: 0,
+                    node_opening_offset,
+                    node_opening_len,
                 };
                 params.sampler.apply_initial_state(
                     &class_req,
@@ -785,6 +750,8 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
                 perm_scratch: &mut perm_scratch,
                 total_scenarios: total_scenarios_u32,
                 noise_group_id: params.ctx.noise_group_id_at(t),
+                node_opening_offset,
+                node_opening_len,
             })?;
             let raw_noise = noise.as_slice();
 
@@ -814,12 +781,37 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
                 SolverStatsDelta::from_snapshots(&stats_before_stage, &ws.solver.statistics());
             SolverStatsDelta::accumulate_into(&mut per_stage_stats[t], &stage_delta);
             ws.scratch.trajectory_costs_buf[local_m] += cum_d * stage_cost;
+
+            // Advance this trajectory to the node it will visit at t + 1. A
+            // single out-edge is taken with probability 1 WITHOUT deriving a
+            // seed — no branch means no draw, so the within-node noise stream
+            // above is never perturbed (C1 chain-parity depends on this).
+            if t + 1 < params.num_stages {
+                let successors = &node_graph.successors[node];
+                debug_assert!(
+                    !successors.is_empty(),
+                    "run_forward_worker: node {node} at stage {t} has no out-edge before the \
+                     terminal stage (a graph-construction invariant)"
+                );
+                current_node_buf[local_m] = if successors.len() == 1 {
+                    successors[0].child
+                } else {
+                    let idx = select_transition_child(
+                        i32,
+                        s32,
+                        t32,
+                        successors.iter().map(|s| s.probability),
+                    );
+                    successors[idx].child
+                };
+            }
         }
     }
 
     // Restore taken scratch buffers so they survive into the next iteration.
     ws.scratch.raw_noise_buf = raw_noise_buf;
     ws.scratch.perm_scratch = perm_scratch;
+    ws.scratch.current_node_buf = current_node_buf;
 
     let local_solves = ws.solver.statistics().solve_count - local_solve_count_before;
     ws.worker_timing_buf.forward_wall_ms += worker_wall_start.elapsed().as_secs_f64() * 1_000.0;
@@ -866,6 +858,7 @@ mod tests {
         indexer::StateSpace,
         inflow_method::InflowNonNegativityMethod,
         lp_builder::PatchBuffer,
+        setup::node_graph::{node_parent, stage_frontier},
         test_support::{state_layout, study_dims},
         trajectory::TrajectoryRecord,
         workspace::{BackwardAccumulators, BasisStore, ScratchBuffers, SolverWorkspace},
@@ -1013,6 +1006,7 @@ mod tests {
                 trajectory_costs_buf: Vec::new(),
                 raw_noise_buf: Vec::new(),
                 perm_scratch: Vec::new(),
+                current_node_buf: Vec::new(),
             },
             scratch_basis: Basis::new(0, 0),
             backward_accum: BackwardAccumulators::default(),
@@ -1507,6 +1501,7 @@ mod tests {
             iteration: 1,
             fwd_offset: 0,
             terminal_has_boundary_cuts: false,
+            root_node: 0,
             noise_dim: fx.stochastic.dim(),
             initial_state: &fx.initial_state,
             lag_accum_seed: &[],
@@ -2077,6 +2072,7 @@ mod tests {
             iteration: 1,
             fwd_offset: 0,
             terminal_has_boundary_cuts: false,
+            root_node: 0,
             noise_dim: stochastic.dim(),
             initial_state: &initial_state,
             lag_accum_seed: &lag_accum_seed,
@@ -2231,6 +2227,228 @@ mod tests {
                 "leaf {leaf}'s incoming state must equal the root's own outgoing state"
             );
         }
+    }
+
+    /// A full `run_forward_worker` pass over a declared K-fan: each
+    /// trajectory's recorded leaf must equal `select_transition_child`'s own
+    /// pinned-seed choice for that trajectory's `(iteration, global_scenario)`
+    /// — never a stage-uniform node — and the pinned range must resolve more
+    /// than one leaf, proving the walk is not collapsed to one node per
+    /// stage (the exact restriction the singleton-frontier resolver used to
+    /// impose).
+    // Rationale: a real `run_forward_worker` call needs the full fixture
+    // (graph, LP template, sampler, workspace) the sibling declared-K-fan
+    // test above builds by hand; splitting the assembly out would scatter a
+    // single-use fixture across helpers with no other caller.
+    #[allow(clippy::too_many_lines)]
+    #[test]
+    fn run_forward_worker_k_fan_pinned_trajectories_match_selected_transitions() {
+        use cobre_core::temporal::{Node, PolicyGraph, PolicyGraphType, Transition};
+        use cobre_io::StageIdResolver;
+
+        use crate::setup::node_graph::build_node_graph;
+
+        fn node(id: i32, stage_id: i32) -> Node {
+            Node {
+                id,
+                stage_id,
+                realization_id: None,
+                label: None,
+            }
+        }
+        fn transition(source_id: i32, target_id: i32, probability: f64) -> Transition {
+            Transition {
+                source_id,
+                target_id,
+                probability,
+                annual_discount_rate_override: None,
+            }
+        }
+
+        let stochastic = make_stochastic_context_2_stages();
+        let study_stage_ids = [0_i32, 1_i32];
+        let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+        let graph = PolicyGraph {
+            graph_type: PolicyGraphType::FiniteHorizon,
+            annual_discount_rate: 0.0,
+            nodes: vec![node(0, 0), node(1, 1), node(2, 1), node(3, 1), node(4, 1)],
+            transitions: vec![
+                transition(0, 1, 0.25),
+                transition(0, 2, 0.25),
+                transition(0, 3, 0.25),
+                transition(0, 4, 0.25),
+            ],
+            stage_discount_rate_overrides: std::collections::HashMap::new(),
+            season_map: None,
+        };
+        let node_graph = build_node_graph(&graph, 2, &resolver, &stochastic)
+            .expect("declared K-fan graph must build");
+        let root = 0_usize;
+
+        let state = state_layout(1, 0);
+        let templates = vec![minimal_template_1_0(); 2];
+        let base_rows = vec![0_usize; 2];
+        let initial_state = vec![0.0_f64; state.n_state];
+        let fcf = FutureCostFunction::new(
+            node_graph.n_pools,
+            state.n_state,
+            2,
+            10,
+            &vec![0; node_graph.n_pools],
+        );
+        let horizon = HorizonMode::Finite { num_stages: 2 };
+        let noise_scale = vec![0.0_f64; 2 * state.hydro_count];
+        let ctx = StageContext {
+            geometry_per_stage: &[],
+            templates: &templates,
+            base_rows: &base_rows,
+            noise_scale: &noise_scale,
+            n_hydros: 1,
+            cost_scale_factor: 1_000_000.0,
+            n_load_buses: 0,
+            load_balance_row_starts: &[],
+            load_bus_indices: &[],
+            block_counts_per_stage: &[],
+            ncs_col_starts: &[],
+            n_ncs: 0,
+            ncs_stochastic_dense_col: &[],
+            ncs_stochastic_windows: &[],
+            anticipated_windows: &[],
+            study_stage_ids: &[],
+            ncs_max_gen: &[],
+            ncs_allow_curtailment: &[],
+            discount_factors: &[],
+            cumulative_discount_factors: &[],
+            stage_lag_transitions: &[],
+            noise_group_ids: &[],
+            downstream_par_order: 0,
+        };
+        let study_dims = study_dims();
+        let stages = make_stages_2();
+        let training_ctx = TrainingContext {
+            node_graph: &node_graph,
+            horizon: &horizon,
+            state: &state,
+            cut_state_layouts: &[],
+            study_dims: &study_dims,
+            inflow_method: &InflowNonNegativityMethod::None,
+            stochastic: &stochastic,
+            initial_state: &initial_state,
+            inflow_scheme: SamplingScheme::InSample,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            stages: &stages,
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
+            dcs: None,
+        };
+        let sampler = build_forward_sampler(ForwardSamplerConfig {
+            class_schemes: ClassSchemes {
+                inflow: Some(SamplingScheme::InSample),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+            ctx: &stochastic,
+            stages: &stages,
+            dims: ClassDimensions {
+                n_hydros: stochastic.n_hydros(),
+                n_load_buses: stochastic.n_load_buses(),
+                n_ncs: stochastic.n_stochastic_ncs(),
+            },
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+        })
+        .expect("sampler build must not error");
+
+        let forward_passes = 6_usize;
+        let pinned_iteration = 3_u64;
+        let params = ForwardWorkerParams {
+            forward_passes,
+            total_forward_passes: forward_passes,
+            num_stages: 2,
+            n_workers: 1,
+            iteration: pinned_iteration,
+            fwd_offset: 0,
+            terminal_has_boundary_cuts: false,
+            root_node: root,
+            noise_dim: stochastic.dim(),
+            initial_state: &initial_state,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
+            state: &state,
+            ctx: &ctx,
+            frozen: &templates,
+            fcf: &fcf,
+            training_ctx: &training_ctx,
+            sampler: &sampler,
+        };
+
+        let mut ws = single_workspace(MockSolver::always_ok(fixed_solution_1_0()), &state);
+        let mut basis_store = BasisStore::new(forward_passes, 2);
+        let mut basis_slices = basis_store.split_workers_mut(1);
+        let mut basis_slice = basis_slices.remove(0);
+        let mut records: Vec<TrajectoryRecord> = (0..forward_passes * 2)
+            .map(|_| TrajectoryRecord {
+                primal: Vec::new(),
+                dual: Vec::new(),
+                stage_cost: 0.0,
+                node_id: 0,
+                state: Vec::new(),
+            })
+            .collect();
+        let mut per_stage_stats = vec![SolverStatsDelta::default(); 2];
+
+        run_forward_worker(
+            0,
+            &mut ws,
+            &mut records,
+            &mut basis_slice,
+            &mut per_stage_stats,
+            &params,
+        )
+        .expect("run_forward_worker must not error");
+
+        let successors = &node_graph.successors[root];
+        let weights: Vec<f64> = successors.iter().map(|s| s.probability).collect();
+        let mut resolved_leaves: std::collections::BTreeSet<i32> =
+            std::collections::BTreeSet::new();
+        #[allow(clippy::cast_possible_truncation)]
+        let pinned_iteration_u32 = pinned_iteration as u32;
+        for m in 0..forward_passes {
+            #[allow(clippy::cast_possible_truncation)]
+            let global_scenario = m as u32;
+            let expected_idx = select_transition_child(
+                pinned_iteration_u32,
+                global_scenario,
+                0,
+                weights.iter().copied(),
+            );
+            let expected_leaf_node_id = node_graph.node_ids[successors[expected_idx].child];
+
+            assert_eq!(
+                records[m * 2].node_id,
+                node_graph.node_ids[root],
+                "trajectory {m}'s stage-0 record must carry the root's own node id"
+            );
+            assert_eq!(
+                records[m * 2 + 1].node_id,
+                expected_leaf_node_id,
+                "trajectory {m}'s recorded leaf must match select_transition_child's own \
+                 pinned-seed choice"
+            );
+            resolved_leaves.insert(expected_leaf_node_id);
+        }
+        assert!(
+            resolved_leaves.len() > 1,
+            "the pinned iteration/scenario range must resolve more than one leaf, or this \
+             test cannot distinguish a per-trajectory walk from a collapsed stage-uniform one"
+        );
     }
 
     // ── No graph-shape dispatch in the forward path ──────────────────────────

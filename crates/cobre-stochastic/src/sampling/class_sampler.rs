@@ -45,6 +45,15 @@ pub struct ClassSampleRequest {
     /// Seed-derivation identifier: stages sharing a `(season_id, year)` bucket
     /// share a `noise_group_id` so their `OutOfSample` draws are identical.
     pub noise_group_id: u32,
+    /// Sampled node's Ω sub-range within this stage's generated opening set —
+    /// `ClassSampler::InSample` draws its opening index inside
+    /// `node_opening_offset..node_opening_offset + node_opening_len` instead of
+    /// the full stage set. A chain-degenerate node's view spans the whole stage
+    /// (`NodeGraph`'s synthesized `(0, tree.n_openings(stage))`), so a chain's
+    /// draw is unchanged. Every other scheme ignores both fields.
+    pub node_opening_offset: usize,
+    /// See [`Self::node_opening_offset`].
+    pub node_opening_len: usize,
 }
 
 /// Per-class noise source for one entity class (inflow, load, or NCS).
@@ -120,6 +129,62 @@ const HISTORICAL_SELECTION_BASE_SEED: u64 = 0x6869_7374_6f72_6963; // b"historic
 /// Scenario-selection seed base, distinct from both the forward-pass noise and
 /// historical-selection domains.
 const EXTERNAL_SELECTION_BASE_SEED: u64 = 0x6578_7465_726e_616c; // b"external" as u64 LE
+
+/// Node-graph transition-draw seed base, distinct from the forward-pass noise,
+/// historical-selection, and external-selection domains.
+const TRANSITION_SELECTION_BASE_SEED: u64 = 0x6e74_6973_6e61_7274; // b"transitn" as u64 LE
+
+/// Select an out-edge by inverse-CDF over `weights` (a node's successors,
+/// ascending child-position order — the caller supplies the canonical order;
+/// this function does not know about `NodeGraph`), using
+/// `u = (h >> 11) * 2^-53` from
+/// `derive_forward_seed(TRANSITION_SELECTION_BASE_SEED, iteration, path,
+/// stage)`. `weights` need not be pre-normalized to sum to exactly 1.0 (the
+/// walk here compensates its own running sum); a compensated sum that still
+/// falls short of `u` due to floating-point rounding resolves to the last
+/// index, never a panic or an out-of-range index.
+///
+/// A single out-edge must never reach this function — the caller short-
+/// circuits to that edge without deriving a seed at all, so the within-node
+/// noise stream is never perturbed by a branch that had no choice to make
+/// (chain byte-parity depends on this).
+///
+/// # Panics (debug builds only)
+///
+/// Panics if `weights` is empty.
+#[must_use]
+pub fn select_transition_child<I>(iteration: u32, path: u32, stage: u32, weights: I) -> usize
+where
+    I: IntoIterator<Item = f64>,
+{
+    let h = derive_forward_seed(TRANSITION_SELECTION_BASE_SEED, iteration, path, stage);
+    #[allow(clippy::cast_precision_loss)]
+    let u = ((h >> 11) as f64) * (1.0_f64 / (1_u64 << 53) as f64);
+
+    let mut cumsum = 0.0_f64;
+    let mut compensation = 0.0_f64;
+    let mut last_idx = 0_usize;
+    let mut any = false;
+    for (i, w) in weights.into_iter().enumerate() {
+        any = true;
+        last_idx = i;
+        // Neumaier-compensated running sum (mirrors cobre-io's
+        // `normalize_weights`), so a long successor list does not drift the
+        // cumulative boundary away from the true sum.
+        let t = cumsum + w;
+        if cumsum.abs() >= w.abs() {
+            compensation += (cumsum - t) + w;
+        } else {
+            compensation += (w - t) + cumsum;
+        }
+        cumsum = t;
+        if u < cumsum + compensation {
+            return i;
+        }
+    }
+    debug_assert!(any, "select_transition_child: weights must be non-empty");
+    last_idx
+}
 
 impl ClassSampler<'_> {
     /// Deterministic historical window index from `(iteration, scenario)`.
@@ -203,6 +268,8 @@ impl ClassSampler<'_> {
                     req.scenario,
                     req.stage,
                     req.stage_idx,
+                    req.node_opening_offset,
+                    req.node_opening_len,
                 );
                 output.copy_from_slice(&slice[*offset..*offset + *len]);
                 Ok(())
@@ -275,7 +342,95 @@ mod tests {
         tree::opening_tree::OpeningTree,
     };
 
-    use super::{ClassSampleRequest, ClassSampler};
+    use super::{ClassSampleRequest, ClassSampler, select_transition_child};
+
+    // -----------------------------------------------------------------------
+    // select_transition_child
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn transition_child_deterministic() {
+        let weights = [0.5_f64, 0.5];
+        assert_eq!(
+            select_transition_child(3, 7, 1, weights),
+            select_transition_child(3, 7, 1, weights),
+        );
+    }
+
+    #[test]
+    fn transition_child_single_weight_always_index_zero() {
+        // Never reached on the hot path (callers short-circuit a single
+        // out-edge without deriving a seed), but the function itself must
+        // still resolve correctly if called this way directly.
+        for path in 0_u32..50 {
+            assert_eq!(select_transition_child(0, path, 0, [1.0_f64]), 0);
+        }
+    }
+
+    #[test]
+    fn transition_child_index_always_in_bounds() {
+        let weights = [0.2_f64, 0.3, 0.1, 0.4];
+        for path in 0_u32..500 {
+            let idx = select_transition_child(2, path, 5, weights);
+            assert!(idx < weights.len(), "index {idx} out of bounds");
+        }
+    }
+
+    #[test]
+    fn transition_child_empirical_distribution_matches_weights() {
+        // A 3-child split at (0.7, 0.2, 0.1): over many draws (varying `path`),
+        // the realized frequency should land close to the declared weight —
+        // a coarse statistical sanity check on the inverse-CDF, not a proof.
+        let weights = [0.7_f64, 0.2, 0.1];
+        let n = 20_000_u32;
+        let mut counts = [0_u32; 3];
+        for path in 0..n {
+            counts[select_transition_child(11, path, 3, weights)] += 1;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let freq: Vec<f64> = counts
+            .iter()
+            .map(|&c| f64::from(c) / f64::from(n))
+            .collect();
+        for (f, w) in freq.iter().zip(weights) {
+            assert!(
+                (f - w).abs() < 0.02,
+                "empirical frequency {f} too far from declared weight {w}"
+            );
+        }
+    }
+
+    #[test]
+    fn transition_child_ascending_order_low_weight_first_child_rarely_wins() {
+        // (0.01, 0.99): the first child should win far less often than the
+        // second — pins that cumulative weight walks in the GIVEN (ascending
+        // child-position) order, not some other order.
+        let weights = [0.01_f64, 0.99];
+        let n = 5_000_u32;
+        let mut child0_wins = 0_u32;
+        for path in 0..n {
+            if select_transition_child(4, path, 0, weights) == 0 {
+                child0_wins += 1;
+            }
+        }
+        assert!(
+            child0_wins < n / 10,
+            "expected child 0 (weight 0.01) to win rarely, won {child0_wins}/{n} times"
+        );
+    }
+
+    #[test]
+    fn transition_child_varies_with_iteration_path_and_stage() {
+        let weights = [0.5_f64, 0.5];
+        let base = select_transition_child(0, 0, 0, weights);
+        let differs_by_any = (1..30_u32).any(|i| select_transition_child(i, 0, 0, weights) != base)
+            || (1..30_u32).any(|p| select_transition_child(0, p, 0, weights) != base)
+            || (1..30_u32).any(|s| select_transition_child(0, 0, s, weights) != base);
+        assert!(
+            differs_by_any,
+            "expected the selected child to vary across at least one of iteration/path/stage"
+        );
+    }
 
     // -----------------------------------------------------------------------
     // Helpers
@@ -297,6 +452,8 @@ mod tests {
             stage_idx: 0,
             total_scenarios: 10,
             noise_group_id: 0,
+            node_opening_offset: 0,
+            node_opening_len: 0,
         }
     }
 
@@ -318,7 +475,10 @@ mod tests {
 
         let mut output = vec![0.0f64; 3];
         let mut perm = vec![0usize; 10];
-        let req = base_req();
+        let req = ClassSampleRequest {
+            node_opening_len: tree.view().n_openings(0),
+            ..base_req()
+        };
 
         sampler.fill(&req, &mut output, &mut perm).unwrap();
 
@@ -334,6 +494,8 @@ mod tests {
             req.scenario,
             req.stage,
             req.stage_idx,
+            0,
+            tree.view().n_openings(req.stage_idx),
         );
         assert_eq!(&output, &full_slice[2..5]);
     }
@@ -357,6 +519,8 @@ mod tests {
             stage_idx: 1,
             total_scenarios: 5,
             noise_group_id: 0,
+            node_opening_offset: 0,
+            node_opening_len: tree.view().n_openings(1),
         };
 
         let mut out_a = vec![0.0f64; 2];
@@ -367,6 +531,52 @@ mod tests {
         sampler.fill(&req, &mut out_b, &mut perm).unwrap();
 
         assert_eq!(out_a, out_b, "InSample::fill must be deterministic");
+    }
+
+    /// An incidental `select_transition_child` call for the same `(iteration,
+    /// scenario, stage)` — its own domain-separated seed sharing no state with
+    /// the noise draw's — must not change what `fill` produces. This is the
+    /// invariant a single-out-edge short-circuit relies on to leave the
+    /// within-node stream untouched (chain bit-equality): the short circuit is
+    /// a call-site choice, not a defense against a stateful draw.
+    #[test]
+    fn transition_draw_call_does_not_perturb_subsequent_within_node_noise() {
+        let tree = uniform_tree(2, 5, 5);
+        let view = tree.view();
+
+        let sampler = ClassSampler::InSample {
+            tree: view,
+            base_seed: 99,
+            offset: 1,
+            len: 2,
+        };
+
+        let req = ClassSampleRequest {
+            iteration: 3,
+            scenario: 7,
+            stage: 1,
+            stage_idx: 1,
+            total_scenarios: 5,
+            noise_group_id: 0,
+            node_opening_offset: 0,
+            node_opening_len: tree.view().n_openings(1),
+        };
+
+        let mut out_no_draw = vec![0.0f64; 2];
+        let mut out_with_draw = vec![0.0f64; 2];
+        let mut perm = vec![0usize; 5];
+
+        sampler.fill(&req, &mut out_no_draw, &mut perm).unwrap();
+
+        let _ = select_transition_child(req.iteration, req.scenario, req.stage, [0.5_f64, 0.5]);
+
+        sampler.fill(&req, &mut out_with_draw, &mut perm).unwrap();
+
+        assert_eq!(
+            out_no_draw, out_with_draw,
+            "an incidental transition draw for the same (iteration, scenario, stage) must not \
+             perturb the within-node noise fill"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -391,6 +601,8 @@ mod tests {
             stage_idx: 0,
             total_scenarios: 10,
             noise_group_id: 0,
+            node_opening_offset: 0,
+            node_opening_len: 0,
         };
 
         let mut out_a = vec![0.0f64; 3];
@@ -459,6 +671,8 @@ mod tests {
             stage_idx: 1,
             total_scenarios: 10,
             noise_group_id: 0,
+            node_opening_offset: 0,
+            node_opening_len: 0,
         };
 
         let mut out_a = vec![0.0f64; 2];
@@ -489,6 +703,8 @@ mod tests {
                     stage_idx: 0,
                     total_scenarios: 20,
                     noise_group_id: 0,
+                    node_opening_offset: 0,
+                    node_opening_len: 0,
                 };
                 let mut out = vec![0.0f64; 2];
                 sampler.fill(&req, &mut out, &mut perm).unwrap();
@@ -516,6 +732,8 @@ mod tests {
             stage_idx: 0,
             total_scenarios: 10,
             noise_group_id: 0,
+            node_opening_offset: 0,
+            node_opening_len: 0,
         };
         let req_stage1 = ClassSampleRequest {
             stage_idx: 1,
@@ -568,6 +786,8 @@ mod tests {
             stage_idx: 2,
             total_scenarios: 10,
             noise_group_id: 0,
+            node_opening_offset: 0,
+            node_opening_len: 0,
         };
 
         let mut output = vec![0.0f64; 3];
@@ -600,6 +820,8 @@ mod tests {
                 stage_idx: 0,
                 total_scenarios: 20,
                 noise_group_id: 0,
+                node_opening_offset: 0,
+                node_opening_len: 0,
             };
             let scenario_via_helper =
                 ClassSampler::select_external_scenario(&req, lib.n_scenarios());
@@ -626,6 +848,8 @@ mod tests {
             stage_idx: 1,
             total_scenarios: 10,
             noise_group_id: 0,
+            node_opening_offset: 0,
+            node_opening_len: 0,
         };
 
         let mut out_a = vec![0.0f64; 3];
@@ -653,6 +877,8 @@ mod tests {
             stage_idx: 0,
             total_scenarios: 10,
             noise_group_id: 0,
+            node_opening_offset: 0,
+            node_opening_len: 0,
         };
         let req_stage1 = ClassSampleRequest {
             stage_idx: 1,
@@ -711,6 +937,8 @@ mod tests {
                 stage_idx: 0,
                 total_scenarios: 20,
                 noise_group_id: 0,
+                node_opening_offset: 0,
+                node_opening_len: 0,
             };
 
             let lag_offset = 5;
@@ -743,6 +971,8 @@ mod tests {
                 stage_idx: 0,
                 total_scenarios: 20,
                 noise_group_id: 0,
+                node_opening_offset: 0,
+                node_opening_len: 0,
             };
             let window_via_helper = ClassSampler::select_historical_window(&req, lib.n_windows());
 
@@ -880,6 +1110,8 @@ mod tests {
             stage_idx: 0,
             total_scenarios: 10,
             noise_group_id: 5,
+            node_opening_offset: 0,
+            node_opening_len: 0,
         };
         let req_stage1 = ClassSampleRequest {
             stage: 1,
@@ -917,6 +1149,8 @@ mod tests {
             stage_idx: 0,
             total_scenarios: 10,
             noise_group_id: 0,
+            node_opening_offset: 0,
+            node_opening_len: 0,
         };
         let req_group1 = ClassSampleRequest {
             noise_group_id: 1,

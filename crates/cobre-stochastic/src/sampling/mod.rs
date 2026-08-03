@@ -21,7 +21,7 @@ pub mod historical;
 pub mod insample;
 pub mod window;
 
-pub use class_sampler::{ClassSampleRequest, ClassSampler};
+pub use class_sampler::{ClassSampleRequest, ClassSampler, select_transition_child};
 pub use external::{
     ExternalScenarioLibrary, pad_library_to_uniform, standardize_external_inflow,
     standardize_external_load, standardize_external_ncs, validate_external_library,
@@ -158,6 +158,10 @@ pub struct SampleRequest<'b> {
     /// Seed-derivation identifier: stages sharing a `(season_id, year)` bucket
     /// share a `noise_group_id` so their noise draws are identical.
     pub noise_group_id: u32,
+    /// Sampled node's Ω sub-range — see [`ClassSampleRequest::node_opening_offset`].
+    pub node_opening_offset: usize,
+    /// See [`ClassSampleRequest::node_opening_offset`].
+    pub node_opening_len: usize,
 }
 
 impl ForwardSampler<'_> {
@@ -204,6 +208,8 @@ impl ForwardSampler<'_> {
             stage_idx: req.stage_idx,
             total_scenarios: req.total_scenarios,
             noise_group_id: req.noise_group_id,
+            node_opening_offset: req.node_opening_offset,
+            node_opening_len: req.node_opening_len,
         };
 
         self.inflow.fill(&class_req, inflow_buf, req.perm_scratch)?;
@@ -1044,6 +1050,8 @@ mod tests {
             perm_scratch: &mut perm_scratch,
             total_scenarios: 5,
             noise_group_id: 0,
+            node_opening_offset: 0,
+            node_opening_len: ctx.tree_view().n_openings(0),
         });
         let noise = result.expect("expected Ok from InSample sample()");
         assert_eq!(
@@ -1077,6 +1085,8 @@ mod tests {
                 perm_scratch: &mut perm_a,
                 total_scenarios: 5,
                 noise_group_id: 0,
+                node_opening_offset: 0,
+                node_opening_len: ctx.tree_view().n_openings(0),
             })
             .unwrap();
         let b = sampler
@@ -1089,6 +1099,8 @@ mod tests {
                 perm_scratch: &mut perm_b,
                 total_scenarios: 5,
                 noise_group_id: 0,
+                node_opening_offset: 0,
+                node_opening_len: ctx.tree_view().n_openings(0),
             })
             .unwrap();
 
@@ -1143,6 +1155,8 @@ mod tests {
             perm_scratch: &mut perm_scratch,
             total_scenarios: 3,
             noise_group_id: 0,
+            node_opening_offset: 0,
+            node_opening_len: tree.view().n_openings(0),
         });
 
         let noise = result.expect("expected Ok from composite InSample sample()");
@@ -1152,7 +1166,8 @@ mod tests {
             "total noise length must equal total_dim"
         );
 
-        let (_, full_slice) = sample_forward(&tree.view(), 42, 0, 0, 0, 0);
+        let (_, full_slice) =
+            sample_forward(&tree.view(), 42, 0, 0, 0, 0, 0, tree.view().n_openings(0));
         assert_eq!(
             noise.as_slice(),
             full_slice,
@@ -1183,6 +1198,8 @@ mod tests {
             perm_scratch: &mut perm_scratch,
             total_scenarios: 5,
             noise_group_id: 0,
+            node_opening_offset: 0,
+            node_opening_len: 0,
         });
 
         let noise = result.expect("expected Ok from OutOfSample sample()");
@@ -1220,6 +1237,8 @@ mod tests {
                 perm_scratch: &mut perm_a,
                 total_scenarios: 5,
                 noise_group_id: 0,
+                node_opening_offset: 0,
+                node_opening_len: 0,
             })
             .unwrap();
         let b = sampler
@@ -1232,6 +1251,8 @@ mod tests {
                 perm_scratch: &mut perm_b,
                 total_scenarios: 5,
                 noise_group_id: 0,
+                node_opening_offset: 0,
+                node_opening_len: 0,
             })
             .unwrap();
 
@@ -1268,6 +1289,8 @@ mod tests {
                 perm_scratch: &mut perm_a,
                 total_scenarios: 5,
                 noise_group_id: 7,
+                node_opening_offset: 0,
+                node_opening_len: 0,
             })
             .unwrap();
         let b = sampler
@@ -1280,6 +1303,8 @@ mod tests {
                 perm_scratch: &mut perm_b,
                 total_scenarios: 5,
                 noise_group_id: 7,
+                node_opening_offset: 0,
+                node_opening_len: 0,
             })
             .unwrap();
         assert_eq!(
@@ -1300,6 +1325,8 @@ mod tests {
                 perm_scratch: &mut perm_c,
                 total_scenarios: 5,
                 noise_group_id: 8,
+                node_opening_offset: 0,
+                node_opening_len: 0,
             })
             .unwrap();
         let any_differ = a.as_slice().iter().zip(c.as_slice()).any(|(x, y)| x != y);

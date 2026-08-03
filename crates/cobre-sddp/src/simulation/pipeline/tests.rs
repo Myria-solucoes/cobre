@@ -539,6 +539,7 @@ fn single_workspace_with_load_buses(
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
+            current_node_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -587,6 +588,7 @@ fn single_workspace(solver: MockSolver) -> Vec<SolverWorkspace<MockSolver>> {
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
+            current_node_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -1584,6 +1586,7 @@ fn single_workspace_with_hydros(
             trajectory_costs_buf: Vec::new(),
             raw_noise_buf: Vec::new(),
             perm_scratch: Vec::new(),
+            current_node_buf: Vec::new(),
         },
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
@@ -2163,6 +2166,7 @@ mod dcs_simulation {
             t: 0,
             stage_id_u32: 0,
             scenario_id: 0,
+            node: 0,
         };
         let load_spec = SimStageLoadSpec {
             frozen_template: frozen,
@@ -2606,6 +2610,7 @@ mod anticipated_ring_matches_forward_propagation {
                 t,
                 stage_id_u32: t as u32,
                 scenario_id: 0,
+                node: t,
             };
             let load_spec = SimStageLoadSpec {
                 frozen_template: template,
