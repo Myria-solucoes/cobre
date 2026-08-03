@@ -595,8 +595,10 @@ fn build_study_setup(
     let config = ConstructionConfig {
         seed: bcast_config.seed,
         forward_passes: bcast_config.forward_passes,
+        training_enumerated: bcast_config.training_enumerated,
         stopping_rule_set,
         n_scenarios: bcast_config.n_scenarios,
+        simulation_enumerated: bcast_config.simulation_enumerated,
         io_channel_capacity: usize::try_from(bcast_config.io_channel_capacity).unwrap_or(64),
         policy_path: bcast_config.policy_path.clone(),
         inflow_method: bcast_config.inflow_method,

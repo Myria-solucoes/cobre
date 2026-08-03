@@ -41,10 +41,10 @@ pub use scenario_source::{
     HistoricalYearRange, Openings, RawClassConfigEntry, RawHistoricalYearsConfig,
     RawSamplingScheme, RawScenarioSourceConfig,
 };
-pub use simulation::{SimulationConfig, SimulationSelection};
+pub use simulation::{NumScenariosResolution, SimulationConfig, SimulationSelection};
 pub use state_space::StateSpaceConfig;
 pub use training::{
-    BackwardScheduler, DualEdgeWeight, LipschitzConfig, ParallelismConfig,
+    BackwardScheduler, DualEdgeWeight, ForwardPassesResolution, LipschitzConfig, ParallelismConfig,
     PhaseSolverProfileConfig, PresolveMode, PriceStrategy, RowSelectionConfig, ScaleStrategy,
     SelectionMethod, StoppingMode, StoppingRuleConfig, TrainingConfig, TrainingSelection,
     TrainingSolverConfig, UpperBoundEvaluationConfig,
@@ -179,23 +179,11 @@ pub(crate) fn validate_config(config: &Config, path: &Path) -> Result<(), LoadEr
         });
     }
 
-    // Fire the simulation selection rejections (reserved `enumerated`,
-    // both-declared) at load; the resolved count itself is consumed downstream.
+    // Fire the simulation selection both-declared rejection at load; the
+    // resolved count itself (sampled or graph-derived) is consumed downstream.
     config.resolve_num_scenarios(path)?;
 
     Ok(())
-}
-
-/// Build the `enumerated`-is-reserved rejection for `{section}.selection`.
-fn reject_enumerated_selection(section: &str, path: &Path) -> LoadError {
-    LoadError::SchemaError {
-        path: path.to_path_buf(),
-        field: format!("{section}.selection"),
-        message: format!(
-            "{section}.selection method 'enumerated' is not yet supported; \
-             enumeration is wired in a later release — use 'sampled'"
-        ),
-    }
 }
 
 /// Build the both-declared rejection naming `{section}.selection` and the
@@ -424,21 +412,32 @@ impl Config {
         }
     }
 
-    /// Resolve the effective training forward-pass count from `training.selection`
+    /// Resolve the effective training forward-pass method from `training.selection`
     /// or the deprecated `training.forward_passes` alias.
     ///
     /// Returns `Ok(None)` when neither is present, leaving the mandatory-count
-    /// decision to the caller.
+    /// decision to the caller. An `enumerated` selection resolves to
+    /// [`ForwardPassesResolution::Enumerated`] — config load holds no policy
+    /// graph, so the count itself is derived downstream.
     ///
     /// # Errors
     ///
-    /// Returns [`LoadError::SchemaError`] when `training.selection` declares the
-    /// reserved `enumerated` method, or when both `training.selection` and the
+    /// Returns [`LoadError::SchemaError`] when both `training.selection` and the
     /// `training.forward_passes` alias are set.
-    pub fn resolve_forward_passes(&self, path: &Path) -> Result<Option<u32>, LoadError> {
+    pub fn resolve_forward_passes(
+        &self,
+        path: &Path,
+    ) -> Result<Option<ForwardPassesResolution>, LoadError> {
         match &self.training.selection {
             Some(TrainingSelection::Enumerated {}) => {
-                Err(reject_enumerated_selection("training", path))
+                if self.training.forward_passes.is_some() {
+                    return Err(reject_both_declared_count(
+                        "training",
+                        "forward_passes",
+                        path,
+                    ));
+                }
+                Ok(Some(ForwardPassesResolution::Enumerated))
             }
             Some(TrainingSelection::Sampled { forward_passes }) => {
                 if self.training.forward_passes.is_some() {
@@ -448,26 +447,36 @@ impl Config {
                         path,
                     ));
                 }
-                Ok(Some(*forward_passes))
+                Ok(Some(ForwardPassesResolution::Sampled(*forward_passes)))
             }
-            None => Ok(self.training.forward_passes),
+            None => Ok(self
+                .training
+                .forward_passes
+                .map(ForwardPassesResolution::Sampled)),
         }
     }
 
-    /// Resolve the effective simulation scenario count from `simulation.selection`
-    /// or the deprecated `simulation.num_scenarios` alias, defaulting to
-    /// [`DEFAULT_NUM_SCENARIOS`] when neither is present.
+    /// Resolve the effective simulation scenario-count method from
+    /// `simulation.selection` or the deprecated `simulation.num_scenarios`
+    /// alias, defaulting to [`DEFAULT_NUM_SCENARIOS`] when neither is present.
+    ///
+    /// An `enumerated` selection resolves to
+    /// [`NumScenariosResolution::Enumerated`] carrying the `num_scenarios`
+    /// alias (if declared) as the census cross-check count — config load holds
+    /// no policy graph, so the derived count and the cross-check itself happen
+    /// downstream.
     ///
     /// # Errors
     ///
-    /// Returns [`LoadError::SchemaError`] when `simulation.selection` declares the
-    /// reserved `enumerated` method, or when both `simulation.selection` and the
-    /// `simulation.num_scenarios` alias are set.
-    pub fn resolve_num_scenarios(&self, path: &Path) -> Result<u32, LoadError> {
+    /// Returns [`LoadError::SchemaError`] when both `simulation.selection` is
+    /// `sampled` and the `simulation.num_scenarios` alias are set (an
+    /// `enumerated` selection admits the alias as the census declaration, never
+    /// a conflict).
+    pub fn resolve_num_scenarios(&self, path: &Path) -> Result<NumScenariosResolution, LoadError> {
         match &self.simulation.selection {
-            Some(SimulationSelection::Enumerated {}) => {
-                Err(reject_enumerated_selection("simulation", path))
-            }
+            Some(SimulationSelection::Enumerated {}) => Ok(NumScenariosResolution::Enumerated {
+                declared: self.simulation.num_scenarios,
+            }),
             Some(SimulationSelection::Sampled { num_scenarios }) => {
                 if self.simulation.num_scenarios.is_some() {
                     return Err(reject_both_declared_count(
@@ -476,12 +485,13 @@ impl Config {
                         path,
                     ));
                 }
-                Ok(*num_scenarios)
+                Ok(NumScenariosResolution::Sampled(*num_scenarios))
             }
-            None => Ok(self
-                .simulation
-                .num_scenarios
-                .unwrap_or(DEFAULT_NUM_SCENARIOS)),
+            None => Ok(NumScenariosResolution::Sampled(
+                self.simulation
+                    .num_scenarios
+                    .unwrap_or(DEFAULT_NUM_SCENARIOS),
+            )),
         }
     }
 
@@ -628,7 +638,7 @@ mod tests {
         assert_eq!(cfg.simulation.num_scenarios, None);
         assert_eq!(
             cfg.resolve_num_scenarios(f.path()).unwrap(),
-            2000,
+            NumScenariosResolution::Sampled(2000),
             "absent num_scenarios resolves to the default sampled count"
         );
         assert_eq!(cfg.policy.mode, PolicyMode::Fresh);
@@ -2099,7 +2109,7 @@ mod tests {
             cfg_sel
                 .resolve_forward_passes(via_selection.path())
                 .unwrap(),
-            Some(8)
+            Some(ForwardPassesResolution::Sampled(8))
         );
 
         let via_alias = write_config(
@@ -2108,7 +2118,7 @@ mod tests {
         let cfg_alias = parse_config(via_alias.path()).unwrap();
         assert_eq!(
             cfg_alias.resolve_forward_passes(via_alias.path()).unwrap(),
-            Some(8)
+            Some(ForwardPassesResolution::Sampled(8))
         );
     }
 
@@ -2132,44 +2142,74 @@ mod tests {
         }
     }
 
-    /// A `training.selection` of `enumerated` is rejected at load with a
-    /// not-yet-supported message naming the training phase.
+    /// A `training.selection` of `enumerated` loads successfully and resolves
+    /// to [`ForwardPassesResolution::Enumerated`] — the count itself is a
+    /// setup-layer concern (the graph-derived count), not config load's.
     #[test]
-    fn training_enumerated_selection_rejected_at_load() {
+    fn training_enumerated_selection_resolves_without_declared_count() {
         let f = write_config(
             r#"{"training": {"selection": {"method": "enumerated"}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}}"#,
+        );
+        let cfg = parse_config(f.path()).unwrap();
+        assert_eq!(
+            cfg.resolve_forward_passes(f.path()).unwrap(),
+            Some(ForwardPassesResolution::Enumerated)
+        );
+    }
+
+    /// Declaring the deprecated `training.forward_passes` alias alongside an
+    /// `enumerated` selection is rejected, mirroring the `sampled` both-declared
+    /// case — `enumerated` carries no count of its own for the alias to
+    /// legitimately cross-check.
+    #[test]
+    fn training_enumerated_selection_with_alias_is_rejected() {
+        let f = write_config(
+            r#"{"training": {"forward_passes": 8, "selection": {"method": "enumerated"}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}}"#,
         );
         let err = parse_config(f.path()).unwrap_err();
         match &err {
             LoadError::SchemaError { field, message, .. } => {
                 assert_eq!(field, "training.selection");
                 assert!(
-                    message.contains("not yet supported"),
-                    "message must say not yet supported, got: {message}"
+                    message.contains("forward_passes") && message.contains("both set"),
+                    "message must name the alias and the conflict, got: {message}"
                 );
             }
             other => panic!("expected SchemaError, got: {other:?}"),
         }
     }
 
-    /// The simulation mirror of `enumerated` is rejected at load, naming the
-    /// simulation phase.
+    /// The simulation mirror of `enumerated` loads successfully and resolves to
+    /// [`NumScenariosResolution::Enumerated`] with no declared census
+    /// cross-check when the `num_scenarios` alias is absent.
     #[test]
-    fn simulation_enumerated_selection_rejected_at_load() {
+    fn simulation_enumerated_selection_resolves_without_declared_count() {
         let f = write_config(
             r#"{"training": {"forward_passes": 4, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}, "simulation": {"enabled": true, "selection": {"method": "enumerated"}}}"#,
         );
-        let err = parse_config(f.path()).unwrap_err();
-        match &err {
-            LoadError::SchemaError { field, message, .. } => {
-                assert_eq!(field, "simulation.selection");
-                assert!(
-                    message.contains("not yet supported"),
-                    "message must say not yet supported, got: {message}"
-                );
+        let cfg = parse_config(f.path()).unwrap();
+        assert_eq!(
+            cfg.resolve_num_scenarios(f.path()).unwrap(),
+            NumScenariosResolution::Enumerated { declared: None }
+        );
+    }
+
+    /// The `num_scenarios` alias, declared alongside `enumerated`, is NOT a
+    /// both-declared conflict — the `enumerated` selection is itself the census
+    /// declaration, so the alias only supplies an optional count to verify, and
+    /// `resolve_num_scenarios` carries it downstream as the cross-check value.
+    #[test]
+    fn simulation_enumerated_selection_carries_declared_alias_as_census_declaration() {
+        let f = write_config(
+            r#"{"training": {"forward_passes": 4, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}, "simulation": {"enabled": true, "num_scenarios": 500, "selection": {"method": "enumerated"}}}"#,
+        );
+        let cfg = parse_config(f.path()).unwrap();
+        assert_eq!(
+            cfg.resolve_num_scenarios(f.path()).unwrap(),
+            NumScenariosResolution::Enumerated {
+                declared: Some(500)
             }
-            other => panic!("expected SchemaError, got: {other:?}"),
-        }
+        );
     }
 
     /// A `sampled` simulation selection resolves its scenario count; an absent
@@ -2182,7 +2222,7 @@ mod tests {
         let cfg_sel = parse_config(via_selection.path()).unwrap();
         assert_eq!(
             cfg_sel.resolve_num_scenarios(via_selection.path()).unwrap(),
-            500
+            NumScenariosResolution::Sampled(500)
         );
 
         let via_default = write_config(
@@ -2193,7 +2233,7 @@ mod tests {
             cfg_default
                 .resolve_num_scenarios(via_default.path())
                 .unwrap(),
-            2000
+            NumScenariosResolution::Sampled(2000)
         );
     }
 

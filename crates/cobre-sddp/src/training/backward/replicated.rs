@@ -94,7 +94,6 @@ pub(crate) fn solve_replicated_outcome_slice<S: SolverInterface + Send>(
             &ctx.templates[s].col_scale,
             &mut state_duals,
         );
-        let _ = view;
         out.push(objective);
         out.extend_from_slice(&state_duals[..n_state]);
     }

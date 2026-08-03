@@ -1540,11 +1540,6 @@ mod tests {
 
     #[test]
     fn test_captured_basis_new_capacities() {
-        // AC: CapturedBasis::new(4, 6, 3, 10, 2, 9) must produce:
-        //   basis.row_status.len() == 6, base_row_count == 3,
-        //   cut_row_slots.capacity() >= 10, cut_row_slots.len() == 0,
-        //   state_at_capture.capacity() >= 2, state_at_capture.len() == 0,
-        //   node_id == 9.
         let cb = CapturedBasis::new(4, 6, 3, 10, 2, 9);
         assert_eq!(cb.basis.row_status.len(), 6, "row_status length");
         assert_eq!(cb.base_row_count, 3, "base_row_count");
@@ -1603,9 +1598,6 @@ mod tests {
 
     #[test]
     fn test_recon_slot_lookup_presized() {
-        // AC: every workspace in a freshly constructed WorkspacePool with
-        //   WorkspaceSizing { initial_pool_capacity: 50, .. }
-        //   must have recon_slot_lookup.len() == 50 and every entry is None.
         let pool = WorkspacePool::new(
             0,
             4,

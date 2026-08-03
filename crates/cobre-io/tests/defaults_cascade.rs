@@ -2,7 +2,9 @@
 #![allow(clippy::unwrap_used, clippy::panic, clippy::doc_markdown)]
 
 use cobre_io::PolicyMode;
-use cobre_io::config::{InflowNonNegativityMethod, StoppingMode, parse_config};
+use cobre_io::config::{
+    InflowNonNegativityMethod, NumScenariosResolution, StoppingMode, parse_config,
+};
 use std::io::Write;
 use tempfile::NamedTempFile;
 
@@ -54,7 +56,7 @@ fn test_minimal_config_all_defaults() {
     );
     assert_eq!(
         cfg.resolve_num_scenarios(f.path()).unwrap(),
-        2000,
+        NumScenariosResolution::Sampled(2000),
         "absent num_scenarios resolves to the default sampled count"
     );
 
@@ -212,7 +214,7 @@ fn test_config_absent_simulation_uses_defaults() {
     );
     assert_eq!(
         cfg.resolve_num_scenarios(f.path()).unwrap(),
-        2000,
+        NumScenariosResolution::Sampled(2000),
         "absent simulation section resolves num_scenarios to the default"
     );
 }

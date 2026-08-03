@@ -34,7 +34,7 @@ pub fn sample_forward<'tree, 'data>(
 where
     'data: 'tree,
 {
-    debug_assert!(
+    assert!(
         node_opening_offset + node_opening_len <= tree.n_openings(stage_idx),
         "sample_forward: node Ω range {node_opening_offset}..{} exceeds stage {stage_idx}'s \
          {} openings",
@@ -62,8 +62,7 @@ mod tests {
     }
 
     /// `sample_forward` over the FULL stage opening set (node Ω == the whole
-    /// stage) — the chain-degenerate range every test below exercised before
-    /// the node-Ω widening.
+    /// stage) — the chain-degenerate range.
     fn full<'tree, 'data>(
         view: &'tree OpeningTreeView<'data>,
         base_seed: u64,
@@ -200,9 +199,6 @@ mod tests {
 
     #[test]
     fn node_opening_range_matches_offset_plus_full_range_draw() {
-        // A sub-range draw's index equals `offset + <the same draw over
-        // 0..len>` — the offset shifts the window, it does not change which
-        // relative slot within it gets picked.
         let tree = uniform_tree(1, 20, 2);
         let view = tree.view();
         let (offset, len) = (8, 6);
@@ -216,6 +212,17 @@ mod tests {
                 "scenario {scenario}: node-Ω draw must equal offset + the 0-based draw"
             );
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds stage 0's 20 openings")]
+    fn node_opening_range_overrun_panics() {
+        let tree = uniform_tree(1, 20, 2);
+        let view = tree.view();
+
+        // offset + len (15 + 10) exceeds the stage's 20 openings; the range
+        // check is a hard `assert!`, so this panics in release builds too.
+        let _ = sample_forward(&view, 42, 0, 0, 0, 0, 15, 10);
     }
 
     #[test]

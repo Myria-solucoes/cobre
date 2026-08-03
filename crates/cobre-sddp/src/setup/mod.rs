@@ -64,7 +64,7 @@ pub(crate) mod template_postprocess;
 pub use node_graph::{NodeGraph, NodeOpenings, NodeRuntime, NodeSuccessor, OpeningSource};
 pub use params::{
     ConstructionConfig, DEFAULT_COST_SCALE_FACTOR, DEFAULT_FORWARD_PASSES, DEFAULT_MAX_ITERATIONS,
-    DEFAULT_SEED, StudyParams,
+    DEFAULT_SEED, SimulationEnumeratedRequest, StudyParams,
 };
 pub use scenario_library_set::{PhaseLibraries, ScenarioLibraries};
 pub use stage_data::StageData;
@@ -342,8 +342,10 @@ impl StudySetup {
         let ConstructionConfig {
             seed,
             forward_passes,
+            training_enumerated,
             stopping_rule_set,
             n_scenarios,
+            simulation_enumerated,
             io_channel_capacity,
             policy_path,
             inflow_method,
@@ -518,6 +520,37 @@ impl StudySetup {
             &stage_id_resolver,
             &stochastic,
         )?;
+
+        // Resolves any `enumerated`-declared phase's actual count now that the
+        // graph exists — config load could only signal the request, never the
+        // count. `forward_passes`/`n_scenarios` carry a `sampled`-shaped
+        // placeholder until this point when enumerated was requested.
+        warn_on_enumeration_asymmetry(
+            training_enumerated,
+            matches!(
+                simulation_enumerated,
+                SimulationEnumeratedRequest::Enumerated { .. }
+            ),
+        );
+        let forward_passes = if training_enumerated {
+            resolve_enumerated_count(
+                &node_graph,
+                None,
+                "training",
+                "the exhaustive forward-pass traversal",
+            )?
+        } else {
+            forward_passes
+        };
+        let n_scenarios = match simulation_enumerated {
+            SimulationEnumeratedRequest::Enumerated { declared } => resolve_enumerated_count(
+                &node_graph,
+                declared,
+                "simulation",
+                "the weighted census simulation",
+            )?,
+            SimulationEnumeratedRequest::Sampled => n_scenarios,
+        };
 
         let cut_state_layouts = build_cut_state_layouts(system, &state_layout, &node_graph);
         let pool_state_dimensions: Vec<usize> = cut_state_layouts
@@ -1594,9 +1627,6 @@ fn is_effective_non_expectation(measure: &RiskMeasure) -> bool {
 ///
 /// Returns [`SddpError::Validation`] naming both counts and their sources when
 /// `declared` is `Some(k)` and `k != derived`.
-// Consumer is the declared-census consistency check; the census config spelling
-// lands with the consuming feature, so this is unit-tested substrate until then.
-#[allow(dead_code)]
 pub(crate) fn check_census(declared: Option<u32>, derived: u64) -> Result<(), SddpError> {
     match declared {
         Some(k) if u64::from(k) != derived => Err(SddpError::Validation(format!(
@@ -1615,9 +1645,6 @@ pub(crate) fn check_census(declared: Option<u32>, derived: u64) -> Result<(), Sd
 /// capability — the exact lower bound (needs enumerated training) or the
 /// weighted census simulation statistics (needs enumerated simulation) — never
 /// a generic "census required". Symmetric declarations warn nothing.
-// Consumer is the setup admission gate once a phase can declare `enumerated`
-// selection (rejected at config load until then); unit-tested substrate here.
-#[allow(dead_code)]
 fn warn_on_enumeration_asymmetry(training_enumerated: bool, simulation_enumerated: bool) {
     match (training_enumerated, simulation_enumerated) {
         (true, false) => tracing::warn!(
@@ -1632,6 +1659,46 @@ fn warn_on_enumeration_asymmetry(training_enumerated: bool, simulation_enumerate
              exact lower bound is not, since training samples its scenarios"
         ),
         (true, true) | (false, false) => {}
+    }
+}
+
+/// Resolve an `enumerated`-declared phase's actual executed count once the
+/// node graph exists: derives the graph's scenario count via
+/// [`node_graph::enumerated_scenario_count`], propagating its overflow guard
+/// unchanged (the `K^T` rejection, stating the derived count is
+/// unrepresentable), then cross-validates any declared census count via
+/// [`check_census`]. The only derived count this admits for execution is `1`
+/// — a fully deterministic graph with no stochastic branching, where the
+/// existing sampled-with-one-pass walk already IS the enumeration bit-for-bit.
+/// Any larger derived count means `phase`'s enumerated execution (named by
+/// `capability`) is not yet wired, and is rejected rather than silently
+/// running as `sampled` (which draws i.i.d. with replacement and would not
+/// reproduce a true exhaustive traversal).
+///
+/// # Errors
+///
+/// Propagates [`node_graph::enumerated_scenario_count`]'s overflow
+/// [`SddpError::Validation`] unchanged; propagates [`check_census`]'s
+/// disagreement [`SddpError::Validation`] unchanged; returns a
+/// [`SddpError::Validation`] naming `phase`, `capability`, and the derived
+/// count when the derived count is not `1`.
+fn resolve_enumerated_count(
+    node_graph: &NodeGraph,
+    declared_census: Option<u32>,
+    phase: &str,
+    capability: &str,
+) -> Result<u32, SddpError> {
+    let derived = node_graph::enumerated_scenario_count(node_graph)?;
+    check_census(declared_census, derived)?;
+    if derived == 1 {
+        Ok(1)
+    } else {
+        Err(SddpError::Validation(format!(
+            "{phase} enumerated scenario selection derived {derived} scenarios from the \
+             policy graph, but {capability} is not yet wired; only a fully deterministic \
+             graph (derived count 1, no stochastic branching) executes enumerated selection \
+             today"
+        )))
     }
 }
 

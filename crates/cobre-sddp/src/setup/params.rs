@@ -2,13 +2,38 @@
 
 use cobre_core::ScalarParameter;
 use cobre_io::Config;
-use cobre_io::config::{BackwardScheduler, PhaseSolverProfileConfig, StoppingRuleConfig};
+use cobre_io::config::{
+    BackwardScheduler, ForwardPassesResolution, NumScenariosResolution, PhaseSolverProfileConfig,
+    StoppingRuleConfig,
+};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     InflowNonNegativityMethod, SddpError,
     cut_selection::{CutSelectionStrategy, parse_cut_selection_config},
     stopping_rule::{StoppingMode, StoppingRule, StoppingRuleSet},
 };
+
+/// Simulation's `enumerated`-selection declaration, carried on
+/// [`StudyParams`]/[`ConstructionConfig`] until the node graph resolves
+/// [`StudyParams::n_scenarios`] (config load holds no graph to derive the
+/// count from). A plain externally-tagged enum — never `Option<Option<u32>>`,
+/// which collapses the "not declared" / "declared, no cross-check" / "declared,
+/// cross-check N" states clippy's `option_option` lint flags as ambiguous —
+/// and carries no `#[serde(tag = ...)]`, so it round-trips over the MPI
+/// broadcast wire without a postcard mirror type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SimulationEnumeratedRequest {
+    /// `sampled` selection (or the default); [`StudyParams::n_scenarios`] is
+    /// already final.
+    Sampled,
+    /// `enumerated` selection declared; `declared` is the optional
+    /// `num_scenarios` alias census cross-check count.
+    Enumerated {
+        /// The declared census cross-check count, if any.
+        declared: Option<u32>,
+    },
+}
 
 /// Default number of forward-pass trajectories when not specified in config.
 pub const DEFAULT_FORWARD_PASSES: u32 = 1;
@@ -41,12 +66,25 @@ const COST_SCALE_FACTOR_ADVISORY_MAX: f64 = 1e12;
 pub struct StudyParams {
     /// Random seed for noise generation.
     pub seed: u64,
-    /// Number of forward-pass trajectories per training iteration.
+    /// Number of forward-pass trajectories per training iteration. A
+    /// placeholder ([`DEFAULT_FORWARD_PASSES`]) when [`Self::training_enumerated`]
+    /// is `true`, until the node graph resolves the derived count.
     pub forward_passes: u32,
+    /// `true` when `training.selection = enumerated` is declared — the setup
+    /// layer re-resolves [`Self::forward_passes`] from the node graph once it
+    /// exists (config load holds no graph to derive the count from).
+    pub training_enumerated: bool,
     /// Stopping rule set (rules + mode) governing when training halts.
     pub stopping_rule_set: StoppingRuleSet,
-    /// Number of simulation scenarios (0 if simulation is disabled).
+    /// Number of simulation scenarios (0 if simulation is disabled, or a
+    /// placeholder while [`Self::simulation_enumerated`] is
+    /// [`SimulationEnumeratedRequest::Enumerated`], until the node graph
+    /// resolves the derived count).
     pub n_scenarios: u32,
+    /// `simulation.selection`'s resolution — the setup layer re-resolves
+    /// [`Self::n_scenarios`] from the node graph once it exists when this is
+    /// [`SimulationEnumeratedRequest::Enumerated`].
+    pub simulation_enumerated: SimulationEnumeratedRequest,
     /// Buffer capacity for the simulation output channel.
     pub io_channel_capacity: usize,
     /// Policy directory path string.
@@ -98,10 +136,16 @@ impl StudyParams {
         // rejections already fired at load, so this resolve only extracts the count.
         let config_label = std::path::Path::new("<config>");
 
-        let forward_passes = config
+        let (forward_passes, training_enumerated) = match config
             .resolve_forward_passes(config_label)
             .map_err(|e| SddpError::Validation(e.to_string()))?
-            .unwrap_or(DEFAULT_FORWARD_PASSES);
+        {
+            Some(ForwardPassesResolution::Sampled(n)) => (n, false),
+            None => (DEFAULT_FORWARD_PASSES, false),
+            // The node graph does not exist yet; DEFAULT_FORWARD_PASSES is a
+            // placeholder `from_broadcast_params` overwrites once it does.
+            Some(ForwardPassesResolution::Enumerated) => (DEFAULT_FORWARD_PASSES, true),
+        };
 
         let rule_configs = match &config.training.stopping_rules {
             Some(rules) if !rules.is_empty() => rules.clone(),
@@ -157,12 +201,20 @@ impl StudyParams {
             mode: stopping_mode,
         };
 
-        let n_scenarios = if config.simulation.enabled {
-            config
+        let (n_scenarios, simulation_enumerated) = if config.simulation.enabled {
+            match config
                 .resolve_num_scenarios(config_label)
                 .map_err(|e| SddpError::Validation(e.to_string()))?
+            {
+                NumScenariosResolution::Sampled(n) => (n, SimulationEnumeratedRequest::Sampled),
+                // The node graph does not exist yet; 0 is a placeholder
+                // `from_broadcast_params` overwrites once it does.
+                NumScenariosResolution::Enumerated { declared } => {
+                    (0, SimulationEnumeratedRequest::Enumerated { declared })
+                }
+            }
         } else {
-            0
+            (0, SimulationEnumeratedRequest::Sampled)
         };
 
         let io_channel_capacity =
@@ -231,8 +283,10 @@ impl StudyParams {
         Ok(Self {
             seed,
             forward_passes,
+            training_enumerated,
             stopping_rule_set,
             n_scenarios,
+            simulation_enumerated,
             io_channel_capacity,
             policy_path,
             inflow_method,
@@ -257,8 +311,10 @@ impl StudyParams {
         ConstructionConfig {
             seed: self.seed,
             forward_passes: self.forward_passes,
+            training_enumerated: self.training_enumerated,
             stopping_rule_set: self.stopping_rule_set,
             n_scenarios: self.n_scenarios,
+            simulation_enumerated: self.simulation_enumerated,
             io_channel_capacity: self.io_channel_capacity,
             policy_path: self.policy_path,
             inflow_method: self.inflow_method,
@@ -290,12 +346,26 @@ impl StudyParams {
 pub struct ConstructionConfig {
     /// Random seed for noise generation.
     pub seed: u64,
-    /// Number of forward-pass trajectories per training iteration.
+    /// Number of forward-pass trajectories per training iteration. A
+    /// placeholder ([`DEFAULT_FORWARD_PASSES`]) when [`Self::training_enumerated`]
+    /// is `true`, until [`StudySetup::from_broadcast_params`](super::StudySetup::from_broadcast_params)
+    /// resolves the derived count from the node graph.
     pub forward_passes: u32,
+    /// `true` when `training.selection = enumerated` is declared — the setup
+    /// layer re-resolves [`Self::forward_passes`] from the node graph once it
+    /// exists (config load holds no graph to derive the count from).
+    pub training_enumerated: bool,
     /// Stopping rule set (rules + mode) governing when training halts.
     pub stopping_rule_set: StoppingRuleSet,
-    /// Number of simulation scenarios (0 if simulation is disabled).
+    /// Number of simulation scenarios (0 if simulation is disabled, or a
+    /// placeholder while [`Self::simulation_enumerated`] is
+    /// [`SimulationEnumeratedRequest::Enumerated`], until the node graph
+    /// resolves the derived count).
     pub n_scenarios: u32,
+    /// `simulation.selection`'s resolution — the setup layer re-resolves
+    /// [`Self::n_scenarios`] from the node graph once it exists when this is
+    /// [`SimulationEnumeratedRequest::Enumerated`].
+    pub simulation_enumerated: SimulationEnumeratedRequest,
     /// Buffer capacity for the simulation output channel.
     pub io_channel_capacity: usize,
     /// Policy directory path string.
@@ -743,6 +813,44 @@ mod tests {
         let params =
             StudyParams::from_config(&config).expect("sampled simulation selection is valid");
         assert_eq!(params.n_scenarios, 500);
+        assert_eq!(
+            params.simulation_enumerated,
+            super::SimulationEnumeratedRequest::Sampled
+        );
+    }
+
+    /// `from_config` accepts a training `enumerated` selection (the load-time
+    /// rejection is lifted): `forward_passes` carries the
+    /// [`super::DEFAULT_FORWARD_PASSES`] placeholder and `training_enumerated`
+    /// signals the setup layer to re-resolve it from the node graph.
+    #[test]
+    fn from_config_accepts_training_enumerated_selection() {
+        let mut config = base_test_config();
+        config.training.forward_passes = None;
+        config.training.selection = Some(TrainingSelection::Enumerated {});
+        let params =
+            StudyParams::from_config(&config).expect("enumerated training selection is valid");
+        assert_eq!(params.forward_passes, super::DEFAULT_FORWARD_PASSES);
+        assert!(params.training_enumerated);
+    }
+
+    /// `from_config` accepts a simulation `enumerated` selection, carrying the
+    /// declared `num_scenarios` alias (if any) as the census cross-check count.
+    #[test]
+    fn from_config_accepts_simulation_enumerated_selection_with_declared_census() {
+        let mut config = base_test_config();
+        config.simulation.enabled = true;
+        config.simulation.num_scenarios = Some(500);
+        config.simulation.selection = Some(SimulationSelection::Enumerated {});
+        let params =
+            StudyParams::from_config(&config).expect("enumerated simulation selection is valid");
+        assert_eq!(params.n_scenarios, 0);
+        assert_eq!(
+            params.simulation_enumerated,
+            super::SimulationEnumeratedRequest::Enumerated {
+                declared: Some(500)
+            }
+        );
     }
 
     /// When `max_active_per_stage` is less than `forward_passes`, `StudyParams::from_config`

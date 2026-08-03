@@ -83,6 +83,24 @@ pub enum SimulationSelection {
     Enumerated {},
 }
 
+/// Effective simulation scenario-count resolution
+/// ([`Config::resolve_num_scenarios`](super::Config::resolve_num_scenarios)):
+/// either a concrete sampled count or a signal that the count is derived from
+/// the policy graph downstream, since config load holds no graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumScenariosResolution {
+    /// `num_scenarios` sampled simulation trajectories.
+    Sampled(u32),
+    /// Exhaustive enumeration. `declared` is the optional `num_scenarios`
+    /// alias, when declared alongside `enumerated` as a census cross-check
+    /// value (never a conflict, unlike the `sampled` alias-vs-selection
+    /// pairing) — resolved against the graph-derived count downstream.
+    Enumerated {
+        /// The declared census cross-check count, if any.
+        declared: Option<u32>,
+    },
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {

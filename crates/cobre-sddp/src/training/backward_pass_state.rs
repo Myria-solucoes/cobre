@@ -736,9 +736,9 @@ impl BackwardPassState {
                 })?;
                 for omega in 0..n_openings {
                     let flat = (r * n_workers_local + w) * bwd_max_openings + omega;
-                    let delta = self.bwd_stats_unpack_buf[flat].clone();
+                    let delta = &self.bwd_stats_unpack_buf[flat];
                     if delta.lp_solves > 0 || omega == 0 {
-                        entries.push((rank_i32, wid_i32, omega, delta));
+                        entries.push((rank_i32, wid_i32, omega, delta.clone()));
                     }
                 }
             }

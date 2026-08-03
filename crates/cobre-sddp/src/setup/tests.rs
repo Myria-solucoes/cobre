@@ -8582,6 +8582,126 @@ fn enumeration_asymmetry_symmetric_declarations_do_not_warn() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// resolve_enumerated_count: the `K^T` guard + census + not-yet-wired gate
+// ---------------------------------------------------------------------------
+
+/// A 2-node chain with `|Ω| = 1` at every node: zero stochastic branching, so
+/// `enumerated_scenario_count` derives exactly `1` — the sole case
+/// `resolve_enumerated_count` admits for execution.
+fn deterministic_chain_node_graph() -> super::NodeGraph {
+    super::NodeGraph {
+        node_ids: vec![0, 1],
+        nodes: vec![ng_node(0, 1), ng_node(1, 1)],
+        successors: vec![vec![ng_edge(1)], vec![]],
+        n_pools: 1,
+    }
+}
+
+/// A fully deterministic (derived count `1`) graph resolves to `1` — the
+/// chain-degenerate case the existing sampled-with-one-pass walk already
+/// executes correctly.
+#[test]
+fn resolve_enumerated_count_admits_deterministic_graph() {
+    let ng = deterministic_chain_node_graph();
+    assert_eq!(
+        super::resolve_enumerated_count(
+            &ng,
+            None,
+            "training",
+            "the exhaustive forward-pass traversal"
+        )
+        .unwrap(),
+        1
+    );
+}
+
+/// A derived count greater than `1` names the phase's enumerated execution as
+/// not yet wired, stating the derived count — never a silent fallthrough to
+/// `sampled`.
+#[test]
+fn resolve_enumerated_count_rejects_non_deterministic_graph_as_not_wired() {
+    let ng = asymmetric_fan_node_graph();
+    match super::resolve_enumerated_count(
+        &ng,
+        None,
+        "training",
+        "the exhaustive forward-pass traversal",
+    ) {
+        Err(SddpError::Validation(msg)) => {
+            assert!(msg.contains("44"), "names the derived count: {msg}");
+            assert!(msg.contains("not yet wired"), "names the guard: {msg}");
+            assert!(msg.contains("training"), "names the phase: {msg}");
+        }
+        other => panic!("expected a not-yet-wired Validation error, got {other:?}"),
+    }
+}
+
+/// A `K^T` overflow propagates unchanged from `enumerated_scenario_count` (the
+/// `K^T` guard) — the derived count is unrepresentable, never a "not yet
+/// wired" message instead.
+#[test]
+fn resolve_enumerated_count_propagates_kt_overflow_guard() {
+    let ng = overflowing_chain_node_graph();
+    match super::resolve_enumerated_count(
+        &ng,
+        None,
+        "training",
+        "the exhaustive forward-pass traversal",
+    ) {
+        Err(SddpError::Validation(msg)) => {
+            assert!(msg.contains("overflow"), "names the overflow: {msg}");
+        }
+        other => panic!("expected an overflow Validation error, got {other:?}"),
+    }
+}
+
+/// A disagreeing declared census is rejected via `check_census` BEFORE the
+/// not-yet-wired execution gate is reached — the census-disagreement message,
+/// not the execution guard's.
+#[test]
+fn resolve_enumerated_count_checks_census_before_execution_gate() {
+    let ng = asymmetric_fan_node_graph();
+    match super::resolve_enumerated_count(
+        &ng,
+        Some(7),
+        "simulation",
+        "the weighted census simulation",
+    ) {
+        Err(SddpError::Validation(msg)) => {
+            assert!(
+                msg.contains('7') && msg.contains("44"),
+                "names both counts: {msg}"
+            );
+            assert!(
+                !msg.contains("not yet wired"),
+                "must be the census message, not the execution guard: {msg}"
+            );
+        }
+        other => panic!("expected a census-disagreement Validation error, got {other:?}"),
+    }
+}
+
+/// A declared census that agrees with the derived count passes the
+/// cross-check, then still hits the not-yet-wired execution gate for a
+/// non-deterministic derived count.
+#[test]
+fn resolve_enumerated_count_agreeing_census_still_rejects_non_deterministic_graph() {
+    let ng = asymmetric_fan_node_graph();
+    match super::resolve_enumerated_count(
+        &ng,
+        Some(44),
+        "simulation",
+        "the weighted census simulation",
+    ) {
+        Err(SddpError::Validation(msg)) => {
+            assert!(msg.contains("not yet wired"), "names the guard: {msg}");
+            assert!(msg.contains("simulation"), "names the phase: {msg}");
+        }
+        other => panic!("expected a not-yet-wired Validation error, got {other:?}"),
+    }
+}
+
 /// Documented exhaustive-destructure guard (a compile-fail proxy; trybuild is
 /// not wired in this workspace). `is_effective_non_expectation` destructures
 /// `RiskMeasure` and `rule_is_gap` destructures `StoppingRule` with every field

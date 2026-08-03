@@ -972,7 +972,6 @@ mod tests {
 
         bufs.sync_cuts(0, local_cuts, &mut fcf, &comm).unwrap();
 
-        // FCF must remain empty — local cuts are intentionally NOT inserted.
         assert_eq!(
             fcf.total_active_cuts(),
             0,

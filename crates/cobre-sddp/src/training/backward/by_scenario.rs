@@ -427,13 +427,11 @@ pub(crate) fn process_by_scenario_backward<S: SolverInterface + Send>(
     // (non-warm-carry) solve.
     let first = solve_order[0] as usize;
 
-    let mut omega_position = 0usize;
-    while omega_position < succ.probabilities.len() {
+    for omega_position in 0..succ.probabilities.len() {
         let block = omega_position / n_local_openings;
         let local_pos = omega_position % n_local_openings;
         let local_omega = solve_order[local_pos] as usize;
         let omega = block * n_local_openings + local_omega;
-        omega_position += 1;
 
         let raw_noise = tree_view.opening(s, local_omega);
         let is_first = omega == first;

@@ -304,16 +304,12 @@ impl ClassSampler<'_> {
             }
 
             ClassSampler::Historical { library } => {
-                // Stage is excluded from the selection hash so one window serves
-                // every stage of a trajectory.
                 let window_idx = Self::select_historical_window(req, library.n_windows());
                 output.copy_from_slice(library.eta_slice(window_idx, req.stage_idx));
                 Ok(())
             }
 
             ClassSampler::External { library } => {
-                // Stage is excluded from the selection hash so one scenario serves
-                // every stage of a trajectory.
                 let scenario_idx = Self::select_external_scenario(req, library.n_scenarios());
                 output.copy_from_slice(library.eta_slice(req.stage_idx, scenario_idx));
                 Ok(())

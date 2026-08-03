@@ -1729,14 +1729,6 @@ mod tests {
     }
 
     // ── downstream accumulation tests ────────────────────────────────────────
-    //
-    // These tests exercise the downstream (coarser-resolution) ring-buffer path
-    // of `accumulate_and_shift_lag_state`.  They validate:
-    //   • quarterly-average accumulation and ring-buffer storage
-    //   • multi-lag PAR(2) fill ordering
-    //   • post-rebuild state reset
-    //   • downstream spillover seeding
-    //   • multi-hydro independence
 
     /// Build a `StageLagTransition` for a standard monthly stage that also
     /// accumulates into the downstream (quarterly) ring buffer.

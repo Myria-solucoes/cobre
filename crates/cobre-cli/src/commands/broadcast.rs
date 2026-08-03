@@ -10,7 +10,10 @@ use cobre_io::config::{BackwardScheduler, PhaseSolverProfileConfig};
 use cobre_sddp::{
     CutSelectionStrategy, DEFAULT_MAX_ITERATIONS, InflowNonNegativityMethod, StoppingMode,
     StoppingRule, StoppingRuleSet, StudyParams,
-    setup::{NodeGraph, NodeOpenings, NodeRuntime, NodeSuccessor, OpeningSource},
+    setup::{
+        NodeGraph, NodeOpenings, NodeRuntime, NodeSuccessor, OpeningSource,
+        SimulationEnumeratedRequest,
+    },
 };
 
 use crate::error::CliError;
@@ -81,9 +84,17 @@ impl From<BroadcastBackwardScheduler> for BackwardScheduler {
 pub(crate) struct BroadcastConfig {
     pub(crate) seed: u64,
     pub(crate) forward_passes: u32,
+    /// `true` when `training.selection = enumerated` is declared; every rank
+    /// re-resolves `forward_passes` from the (identically-broadcast-derived)
+    /// node graph once it exists.
+    pub(crate) training_enumerated: bool,
     pub(crate) stopping_rules: Vec<BroadcastStoppingRule>,
     pub(crate) stopping_mode: BroadcastStoppingMode,
     pub(crate) n_scenarios: u32,
+    /// `simulation.selection`'s resolution; every rank re-resolves
+    /// `n_scenarios` from the node graph once it exists when this is
+    /// [`SimulationEnumeratedRequest::Enumerated`].
+    pub(crate) simulation_enumerated: SimulationEnumeratedRequest,
     pub(crate) io_channel_capacity: u32,
     pub(crate) policy_path: String,
     pub(crate) inflow_method: InflowNonNegativityMethod,
@@ -184,9 +195,11 @@ impl BroadcastConfig {
         Ok(Self {
             seed: params.seed,
             forward_passes: params.forward_passes,
+            training_enumerated: params.training_enumerated,
             stopping_rules,
             stopping_mode,
             n_scenarios: params.n_scenarios,
+            simulation_enumerated: params.simulation_enumerated,
             io_channel_capacity: u32::try_from(params.io_channel_capacity).unwrap_or(64),
             policy_path: params.policy_path,
             inflow_method: params.inflow_method,

@@ -413,9 +413,6 @@ pub(crate) fn backward_cut_levels(graph: &NodeGraph) -> Vec<Vec<usize>> {
 /// # Errors
 ///
 /// Returns [`SddpError::Validation`] when the path-product-sum exceeds `u64`.
-// Consumer is the derived-count reconciliation gate, not yet wired here;
-// unit-tested substrate until that consumer lands.
-#[allow(dead_code)]
 pub(crate) fn enumerated_scenario_count(graph: &NodeGraph) -> Result<u64, SddpError> {
     fn overflow_err() -> SddpError {
         SddpError::Validation(

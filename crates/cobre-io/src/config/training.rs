@@ -88,6 +88,18 @@ pub enum TrainingSelection {
     Enumerated {},
 }
 
+/// Effective training forward-pass resolution
+/// ([`Config::resolve_forward_passes`](super::Config::resolve_forward_passes)):
+/// either a concrete sampled count or a signal that the count is derived from
+/// the policy graph downstream, since config load holds no graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForwardPassesResolution {
+    /// `forward_passes` sampled trajectories per iteration.
+    Sampled(u32),
+    /// Exhaustive enumeration; the count is derived from the policy graph.
+    Enumerated,
+}
+
 impl TrainingConfig {
     pub(super) fn default_enabled() -> bool {
         true
