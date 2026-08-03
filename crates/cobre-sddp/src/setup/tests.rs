@@ -8410,7 +8410,7 @@ fn admission_gate_rejects_gap_under_effective_cvar() {
             lambda: 0.5,
         },
     ];
-    match super::admission_gate(&measures, &rules_with_gap()) {
+    match super::admission_gate(&measures, &rules_with_gap(), true) {
         Err(SddpError::Validation(msg)) => {
             assert!(msg.contains("gap"), "names the rule: {msg}");
             assert!(msg.contains("CVaR"), "names the measure: {msg}");
@@ -8434,7 +8434,7 @@ fn admission_gate_accepts_gap_under_cvar_lambda_zero() {
         lambda: 0.0,
     }];
     assert!(
-        super::admission_gate(&measures, &rules_with_gap()).is_ok(),
+        super::admission_gate(&measures, &rules_with_gap(), true).is_ok(),
         "CVaR with lambda == 0 is effectively expectation and must admit a gap rule"
     );
 }
@@ -8444,7 +8444,7 @@ fn admission_gate_accepts_gap_under_cvar_lambda_zero() {
 fn admission_gate_accepts_gap_under_all_expectation() {
     use crate::risk_measure::RiskMeasure;
     let measures = vec![RiskMeasure::Expectation, RiskMeasure::Expectation];
-    assert!(super::admission_gate(&measures, &rules_with_gap()).is_ok());
+    assert!(super::admission_gate(&measures, &rules_with_gap(), true).is_ok());
 }
 
 /// An effective `CVaR` measure with no `gap` rule present is admitted — the arm
@@ -8456,7 +8456,7 @@ fn admission_gate_accepts_cvar_without_gap() {
         alpha: 0.1,
         lambda: 0.9,
     }];
-    assert!(super::admission_gate(&measures, &rules_without_gap()).is_ok());
+    assert!(super::admission_gate(&measures, &rules_without_gap(), true).is_ok());
 }
 
 /// The default study shape (expectation everywhere, an iteration-limit rule)
@@ -8465,7 +8465,40 @@ fn admission_gate_accepts_cvar_without_gap() {
 fn admission_gate_accepts_default_shape() {
     use crate::risk_measure::RiskMeasure;
     let measures = vec![RiskMeasure::Expectation; 4];
-    assert!(super::admission_gate(&measures, &rules_without_gap()).is_ok());
+    assert!(super::admission_gate(&measures, &rules_without_gap(), true).is_ok());
+}
+
+/// A `gap` rule under sampled forward selection (`training_enumerated == false`)
+/// is rejected even with an expectation measure at every stage — the exact upper
+/// bound the gap needs is produced only by the enumerated engine.
+#[test]
+fn admission_gate_rejects_gap_under_sampled_selection() {
+    use crate::risk_measure::RiskMeasure;
+    let measures = vec![RiskMeasure::Expectation, RiskMeasure::Expectation];
+    match super::admission_gate(&measures, &rules_with_gap(), false) {
+        Err(SddpError::Validation(msg)) => {
+            assert!(msg.contains("gap"), "names the rule: {msg}");
+            assert!(
+                msg.contains("sampled"),
+                "names the offending selection: {msg}"
+            );
+            assert!(
+                msg.contains("enumerated"),
+                "names the admitting condition: {msg}"
+            );
+        }
+        other => panic!("expected a Validation reject, got {other:?}"),
+    }
+}
+
+/// A `gap` rule under enumerated selection with an expectation measure at every
+/// stage is admitted — the sampled arm gates selection, not the presence of a
+/// gap rule alone.
+#[test]
+fn admission_gate_accepts_gap_under_enumerated_expectation() {
+    use crate::risk_measure::RiskMeasure;
+    let measures = vec![RiskMeasure::Expectation, RiskMeasure::Expectation];
+    assert!(super::admission_gate(&measures, &rules_with_gap(), true).is_ok());
 }
 
 /// `enumerated_scenario_count` returns Σ over root→leaf paths of Π |Ω|: for the

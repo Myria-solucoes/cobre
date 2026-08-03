@@ -14,6 +14,7 @@
 //!     iteration: 10,
 //!     wall_time_seconds: 50.0,
 //!     lower_bound: 100.0,
+//!     upper_bound: 110.0,
 //!     lower_bound_history: vec![90.0, 95.0, 98.0, 99.0, 100.0,
 //!                              100.0, 100.0, 100.0, 100.0, 100.0],
 //!     shutdown_requested: false,
@@ -56,6 +57,10 @@ pub struct MonitorState {
 
     /// Current lower bound (stage-1 LP objective value).
     pub lower_bound: f64,
+
+    /// Current upper bound, canonical R$; the exact `Σ w·c` bound under
+    /// enumerated forwards that [`StoppingRule::Gap`] compares against.
+    pub upper_bound: f64,
 
     /// Lower bounds from past iterations, chronological: `[i]` is iteration `i + 1`.
     pub lower_bound_history: Vec<f64>,
@@ -119,17 +124,16 @@ pub enum StoppingRule {
         iterations: u64,
     },
 
-    /// Terminate once the exact upper bound is within `tolerance` of the
-    /// lower bound. `evaluate` is a placeholder returning `triggered: false`
-    /// until a later release wires the exact-upper-bound computation this
-    /// check needs; `StudyParams::from_config` rejects any config-declared
-    /// `Gap` rule until then.
+    /// Terminate once the clamped canonical-R$ gap `UB_exact − LB` satisfies the
+    /// disjunction of the configured tolerance arms. Admissible only under
+    /// enumerated forwards + an expectation measure (enforced by the setup
+    /// admission gate); at least one tolerance arm is required (enforced at
+    /// config mapping).
     Gap {
         /// Absolute gap tolerance, canonical R$.
         tolerance: Option<f64>,
 
-        /// Relative gap tolerance (fraction, mirrors the reported
-        /// `gap_percent`).
+        /// Relative gap tolerance (fraction): `gap / |LB|`.
         relative_tolerance: Option<f64>,
     },
 
@@ -172,13 +176,9 @@ impl StoppingRule {
             } => Self::evaluate_bound_stalling(state, *tolerance, *iterations),
 
             Self::Gap {
-                tolerance: _,
-                relative_tolerance: _,
-            } => StoppingRuleResult {
-                rule_name: RULE_GAP,
-                triggered: false,
-                detail: Cow::Borrowed("gap evaluation is wired in a later release"),
-            },
+                tolerance,
+                relative_tolerance,
+            } => Self::evaluate_gap(state, *tolerance, *relative_tolerance),
 
             Self::GracefulShutdown => {
                 let triggered = state.shutdown_requested;
@@ -235,6 +235,29 @@ impl StoppingRule {
             )),
         }
     }
+
+    /// Evaluate the [`StoppingRule::Gap`] condition: the clamped canonical-R$ gap
+    /// `UB_exact − LB` against the disjunction of the configured tolerance arms
+    /// (`gap ≤ tolerance` OR `gap / |LB| ≤ relative_tolerance`). Both bounds arrive
+    /// canonical-R$, so the difference is compared directly — never the monitor's
+    /// `/max(1, |UB|)` relative-gap expression. A small negative gap (float noise
+    /// at a closed gap) is clamped to `0` before comparing.
+    fn evaluate_gap(
+        state: &MonitorState,
+        tolerance: Option<f64>,
+        relative_tolerance: Option<f64>,
+    ) -> StoppingRuleResult {
+        let gap = (state.upper_bound - state.lower_bound).max(0.0);
+        let absolute_hit = tolerance.is_some_and(|t| gap <= t);
+        let relative_hit = relative_tolerance.is_some_and(|r| gap / state.lower_bound.abs() <= r);
+        StoppingRuleResult {
+            rule_name: RULE_GAP,
+            triggered: absolute_hit || relative_hit,
+            detail: Cow::Owned(format!(
+                "gap {gap:.6} (abs tol {tolerance:?}, rel tol {relative_tolerance:?})"
+            )),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -254,6 +277,7 @@ impl StoppingRule {
 ///     iteration: 100,
 ///     wall_time_seconds: 1000.0,
 ///     lower_bound: 100.0,
+///     upper_bound: 110.0,
 ///     lower_bound_history: vec![],
 ///     shutdown_requested: false,
 /// };
@@ -332,7 +356,19 @@ mod tests {
             iteration,
             wall_time_seconds: wall_time,
             lower_bound: lb,
+            upper_bound: 0.0,
             lower_bound_history: history,
+            shutdown_requested: false,
+        }
+    }
+
+    fn gap_state(lb: f64, ub: f64) -> MonitorState {
+        MonitorState {
+            iteration: 1,
+            wall_time_seconds: 0.0,
+            lower_bound: lb,
+            upper_bound: ub,
+            lower_bound_history: vec![],
             shutdown_requested: false,
         }
     }
@@ -436,15 +472,70 @@ mod tests {
     }
 
     #[test]
-    fn gap_evaluate_never_triggers_placeholder_seam() {
+    fn gap_absolute_arm_stops_within_tolerance() {
         let rule = StoppingRule::Gap {
-            tolerance: Some(1000.0),
+            tolerance: Some(10.0),
             relative_tolerance: None,
         };
-        let state = make_state(1, 0.0, 0.0, vec![]);
-        let result = rule.evaluate(&state);
-        assert!(!result.triggered);
-        assert_eq!(result.rule_name, "gap");
+        // gap = 105 - 100 = 5 <= 10 → stop; 120 - 100 = 20 > 10 → no stop.
+        assert!(rule.evaluate(&gap_state(100.0, 105.0)).triggered);
+        assert!(!rule.evaluate(&gap_state(100.0, 120.0)).triggered);
+        assert_eq!(rule.evaluate(&gap_state(100.0, 105.0)).rule_name, "gap");
+    }
+
+    #[test]
+    fn gap_relative_arm_stops_within_relative_tolerance() {
+        let rule = StoppingRule::Gap {
+            tolerance: None,
+            relative_tolerance: Some(0.1),
+        };
+        // gap/|LB| = 5/100 = 0.05 <= 0.1 → stop; 20/100 = 0.2 > 0.1 → no stop.
+        assert!(rule.evaluate(&gap_state(100.0, 105.0)).triggered);
+        assert!(!rule.evaluate(&gap_state(100.0, 120.0)).triggered);
+    }
+
+    #[test]
+    fn gap_disjunction_stops_when_only_relative_arm_holds() {
+        // abs tol 1.0 NOT met (gap 5 > 1); rel tol 0.1 met (0.05 <= 0.1) → OR stops.
+        let rule = StoppingRule::Gap {
+            tolerance: Some(1.0),
+            relative_tolerance: Some(0.1),
+        };
+        assert!(rule.evaluate(&gap_state(100.0, 105.0)).triggered);
+    }
+
+    #[test]
+    fn gap_disjunction_stops_when_only_absolute_arm_holds() {
+        // Large |LB| starves the relative arm (50/1e6 = 5e-5 > 1e-9); abs tol 100
+        // met (gap 50 <= 100) → OR stops.
+        let rule = StoppingRule::Gap {
+            tolerance: Some(100.0),
+            relative_tolerance: Some(1e-9),
+        };
+        assert!(
+            rule.evaluate(&gap_state(1_000_000.0, 1_000_050.0))
+                .triggered
+        );
+    }
+
+    #[test]
+    fn gap_negative_float_noise_clamps_to_zero_and_converges() {
+        // UB a hair below LB (closed-gap float noise): clamped to 0, reported
+        // non-negative, and counts as converged.
+        let rule = StoppingRule::Gap {
+            tolerance: Some(0.0),
+            relative_tolerance: None,
+        };
+        let result = rule.evaluate(&gap_state(100.0, 100.0 - 1e-9));
+        assert!(
+            result.triggered,
+            "a small negative gap must clamp to 0 and count as converged"
+        );
+        assert!(
+            !result.detail.contains("-0.000000"),
+            "the reported gap must be non-negative after clamping: {}",
+            result.detail
+        );
     }
 
     #[test]

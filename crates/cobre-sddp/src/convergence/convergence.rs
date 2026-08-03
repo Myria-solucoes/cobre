@@ -104,6 +104,7 @@ impl ConvergenceMonitor {
             iteration: self.iteration_count,
             wall_time_seconds: self.start_time.elapsed().as_secs_f64(),
             lower_bound: self.lower_bound,
+            upper_bound: self.upper_bound,
             lower_bound_history: history,
             shutdown_requested: self.shutdown_requested,
         };
@@ -290,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn gap_rule_surfaces_placeholder_result_through_update() {
+    fn gap_rule_evaluates_exact_gap_through_update() {
         let rule_set = StoppingRuleSet {
             rules: vec![StoppingRule::Gap {
                 tolerance: Some(1000.0),
@@ -299,9 +300,27 @@ mod tests {
             mode: StoppingMode::Any,
         };
         let mut monitor = ConvergenceMonitor::new(rule_set);
+        // update threads sync_result.global_ub_mean (110) as the upper bound;
+        // gap = 110 - 80 = 30 <= 1000 → stop.
         let (stop, results) = monitor.update(80.0, &default_sync());
-        assert!(!stop, "the Gap placeholder never triggers");
+        assert!(stop, "gap 30 within tolerance 1000 must stop");
         assert_eq!(results[0].rule_name, "gap");
+        assert!(results[0].triggered);
+    }
+
+    #[test]
+    fn gap_rule_does_not_stop_when_gap_exceeds_tolerance() {
+        let rule_set = StoppingRuleSet {
+            rules: vec![StoppingRule::Gap {
+                tolerance: Some(10.0),
+                relative_tolerance: None,
+            }],
+            mode: StoppingMode::Any,
+        };
+        let mut monitor = ConvergenceMonitor::new(rule_set);
+        // gap = 110 - 80 = 30 > 10 → no stop.
+        let (stop, results) = monitor.update(80.0, &default_sync());
+        assert!(!stop, "gap 30 exceeds tolerance 10; must not stop");
         assert!(!results[0].triggered);
     }
 

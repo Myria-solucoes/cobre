@@ -5711,7 +5711,7 @@ mod chronological_telescoping {
     use super::common::builders::{
         BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage,
     };
-    use super::common::{StubComm, build_setup_in_code};
+    use super::common::{StubComm, build_setup_in_code, try_build_setup_in_code};
 
     const N_STAGES: usize = 3;
     const N_ITERATIONS: u32 = 12;
@@ -6090,6 +6090,94 @@ mod chronological_telescoping {
         .unwrap();
         assert_eq!(sync.global_ub_mean, result.final_ub);
         assert_eq!(sync.ci_95_half_width, 0.0);
+    }
+
+    /// Train the parallel-block system under `config` (built deterministically),
+    /// panicking on any training error.
+    fn train_result(config: &Config) -> cobre_sddp::TrainingResult {
+        let mut setup = build_setup_in_code(build_system(BlockMode::Parallel), config);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("training must not return Err");
+        assert!(
+            outcome.error.is_none(),
+            "training error: {:?}",
+            outcome.error
+        );
+        outcome.result
+    }
+
+    fn enumerated_config_with_rules(rules: Vec<StoppingRuleConfig>) -> Config {
+        use cobre_io::config::TrainingSelection;
+        let mut config = build_config();
+        config.training.forward_passes = None;
+        config.training.selection = Some(TrainingSelection::Enumerated {});
+        config.training.stopping_rules = Some(rules);
+        config
+    }
+
+    /// An enumerated + expectation study with a `Gap { tolerance }` rule stops via
+    /// the gap rule — before the iteration cap — once the clamped canonical-R$
+    /// `UB_exact − LB` first drops to within the tolerance.
+    #[test]
+    fn enumerated_gap_rule_stops_when_exact_gap_within_tolerance() {
+        // Reference run: iteration limit only → converged exact bounds set the scale.
+        let ref_result = train_result(&enumerated_config_with_rules(vec![
+            StoppingRuleConfig::IterationLimit { limit: 20 },
+        ]));
+        assert!(ref_result.final_ub.is_finite() && ref_result.final_lb.is_finite());
+
+        // 0.1% of the converged bound: above the LP-tolerance floor (so the gap
+        // reaches it) yet a real threshold the exact gap must cross.
+        let tolerance = 1e-3 * ref_result.final_ub.abs().max(1.0);
+        let result = train_result(&enumerated_config_with_rules(vec![
+            StoppingRuleConfig::IterationLimit { limit: 20 },
+            StoppingRuleConfig::Gap {
+                tolerance: Some(tolerance),
+                relative_tolerance: None,
+            },
+        ]));
+
+        assert_eq!(
+            result.reason, "gap",
+            "training must stop via the gap rule, not the iteration cap"
+        );
+        assert!(
+            result.iterations < 20,
+            "the gap rule must stop before the iteration cap (ran {})",
+            result.iterations
+        );
+        let gap = (result.final_ub - result.final_lb).max(0.0);
+        assert!(
+            gap <= tolerance,
+            "the clamped canonical-R$ gap {gap} must be within tolerance {tolerance}"
+        );
+    }
+
+    /// A `Gap` rule under sampled forward selection is rejected at setup by the
+    /// admission gate — the exact upper bound the gap needs is produced only by
+    /// the enumerated engine.
+    #[test]
+    fn sampled_gap_rule_rejected_at_setup() {
+        let mut config = build_config();
+        config.training.stopping_rules = Some(vec![
+            StoppingRuleConfig::IterationLimit { limit: 5 },
+            StoppingRuleConfig::Gap {
+                tolerance: Some(1000.0),
+                relative_tolerance: None,
+            },
+        ]);
+        let err = try_build_setup_in_code(build_system(BlockMode::Parallel), &config)
+            .expect_err("a Gap rule under sampled selection must be rejected");
+        match err {
+            cobre_sddp::SddpError::Validation(msg) => {
+                assert!(msg.contains("gap"), "names the rule: {msg}");
+                assert!(msg.contains("sampled"), "names the selection: {msg}");
+            }
+            other => panic!("expected SddpError::Validation, got {other:?}"),
+        }
     }
 
     /// Train a policy under `train_mode`, write it to a fresh `TempDir` via the

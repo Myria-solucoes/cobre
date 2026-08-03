@@ -417,6 +417,7 @@ mod stopping_rule_conformance {
             iteration,
             wall_time_seconds: 0.0,
             lower_bound: lb,
+            upper_bound: 0.0,
             lower_bound_history: history,
             shutdown_requested: shutdown,
         }
@@ -478,6 +479,7 @@ mod stopping_rule_conformance {
                         iteration: iter_limit,
                         wall_time_seconds: 1000.0,
                         lower_bound: 100.0,
+                        upper_bound: 0.0,
                         lower_bound_history: history,
                         shutdown_requested: shutdown,
                     };

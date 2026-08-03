@@ -594,7 +594,7 @@ impl StudySetup {
 
         let anticipated_windows = build_anticipated_windows(system);
 
-        admission_gate(&risk_measures, &stopping_rule_set)?;
+        admission_gate(&risk_measures, &stopping_rule_set, training_enumerated)?;
 
         let hydro_min_storage_hm3: Vec<f64> =
             system.hydros().iter().map(|h| h.min_storage_hm3).collect();
@@ -1541,18 +1541,22 @@ fn build_risk_measures(system: &System) -> Vec<RiskMeasure> {
 /// The setup-time admission gate: the permanent arms that survive the
 /// node-native collapse, evaluated once from
 /// [`StudySetup::from_broadcast_params`]. Absent the gated features (no `gap`
-/// stopping rule, or an expectation measure at every stage) it returns `Ok(())`
-/// unconditionally, so a default study is byte-neutral.
+/// stopping rule, or enumerated forwards + an expectation measure at every
+/// stage) it returns `Ok(())` unconditionally, so a default study is
+/// byte-neutral.
 ///
 /// # Errors
 ///
 /// Returns [`SddpError::Validation`] when a `gap` stopping rule is present under
-/// any stage's effective non-expectation risk measure.
+/// any stage's effective non-expectation risk measure, or under sampled forward
+/// selection.
 fn admission_gate(
     risk_measures: &[RiskMeasure],
     stopping_rules: &StoppingRuleSet,
+    training_enumerated: bool,
 ) -> Result<(), SddpError> {
-    reject_gap_under_effective_risk_aversion(risk_measures, stopping_rules)
+    reject_gap_under_effective_risk_aversion(risk_measures, stopping_rules)?;
+    reject_gap_under_sampled_selection(stopping_rules, training_enumerated)
 }
 
 /// Reject a `gap` stopping rule under an effective non-expectation risk measure:
@@ -1580,6 +1584,34 @@ fn reject_gap_under_effective_risk_aversion(
                  expectation risk measure at every stage"
             )));
         }
+    }
+    Ok(())
+}
+
+/// Reject a `gap` stopping rule under sampled forward selection: the exact upper
+/// bound a `gap` rule compares the lower bound against is produced only by the
+/// enumerated engine; under sampled forwards the upper bound is a noisy
+/// statistical estimate, so their difference is not a valid gap. No `gap` rule
+/// present, or enumerated forwards ⇒ `Ok(())`.
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] naming the rule, the offending selection
+/// (sampled), and the admitting condition (enumerated forwards).
+fn reject_gap_under_sampled_selection(
+    stopping_rules: &StoppingRuleSet,
+    training_enumerated: bool,
+) -> Result<(), SddpError> {
+    if training_enumerated {
+        return Ok(());
+    }
+    if stopping_rules.rules.iter().any(rule_is_gap) {
+        return Err(SddpError::Validation(
+            "gap stopping rule is inadmissible under sampled forward selection; the upper \
+             bound is then a statistical estimate, not the exact bound a gap rule requires — \
+             a gap rule admits only enumerated forward selection"
+                .to_string(),
+        ));
     }
     Ok(())
 }

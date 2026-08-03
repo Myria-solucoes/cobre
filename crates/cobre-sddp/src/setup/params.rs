@@ -41,6 +41,10 @@ pub const DEFAULT_FORWARD_PASSES: u32 = 1;
 /// Default maximum iterations when no stopping rule specifies an iteration limit.
 pub const DEFAULT_MAX_ITERATIONS: u64 = 100;
 
+/// Sliding window (iterations) for the `BoundStalling` companion auto-injected
+/// alongside a relative-tolerance `Gap` rule.
+const GAP_COMPANION_STALL_WINDOW: u64 = 10;
+
 /// Default random seed for stochastic scenario generation.
 pub const DEFAULT_SEED: u64 = 42;
 
@@ -154,7 +158,7 @@ impl StudyParams {
             }],
         };
 
-        let stopping_rules: Vec<StoppingRule> = rule_configs
+        let mut stopping_rules: Vec<StoppingRule> = rule_configs
             .into_iter()
             .map(|c| match c {
                 StoppingRuleConfig::IterationLimit { limit } => Ok(StoppingRule::IterationLimit {
@@ -181,15 +185,16 @@ impl StudyParams {
                                 .to_string(),
                         ))
                     } else {
-                        Err(SddpError::Validation(
-                            "gap stopping rule is not yet supported; its evaluation is \
-                             wired in a later release"
-                                .to_string(),
-                        ))
+                        Ok(StoppingRule::Gap {
+                            tolerance,
+                            relative_tolerance,
+                        })
                     }
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
+
+        inject_gap_bound_stalling_companion(&mut stopping_rules);
 
         let stopping_mode = match config.training.stopping_mode {
             cobre_io::config::StoppingMode::Any => StoppingMode::Any,
@@ -330,6 +335,54 @@ impl StudyParams {
             cost_scale_factor: self.cost_scale_factor,
             inflow_lag_depth: self.inflow_lag_depth,
         }
+    }
+}
+
+/// Auto-inject a `BoundStalling` stall-insurance companion for a `Gap` rule that
+/// declares a `relative_tolerance` and has no user-declared `BoundStalling`. The
+/// companion reuses the existing relative-vs-relative rule (companion
+/// `tolerance == relative_tolerance`, dimensionally matched), so no bound value
+/// is needed at construction. A `Gap` rule declaring only an absolute `tolerance`
+/// injects nothing — an absolute R$ tolerance is not comparable to
+/// `BoundStalling`'s relative improvement — and only logs an advisory. Runs on
+/// the config-mapped rules (any `BoundStalling` present is user-declared and
+/// overrides); derived from the broadcast config, so the outcome is identical on
+/// every rank.
+fn inject_gap_bound_stalling_companion(rules: &mut Vec<StoppingRule>) {
+    if rules
+        .iter()
+        .any(|r| matches!(r, StoppingRule::BoundStalling { .. }))
+    {
+        return;
+    }
+    let Some((tolerance, relative_tolerance)) = rules.iter().find_map(|r| match r {
+        StoppingRule::Gap {
+            tolerance,
+            relative_tolerance,
+        } => Some((*tolerance, *relative_tolerance)),
+        _ => None,
+    }) else {
+        return;
+    };
+    if let Some(rel) = relative_tolerance {
+        rules.push(StoppingRule::BoundStalling {
+            tolerance: rel,
+            iterations: GAP_COMPANION_STALL_WINDOW,
+        });
+        tracing::warn!(
+            "a gap stopping rule declares relative_tolerance ({rel}) with no bound_stalling \
+             rule; injecting a bound_stalling companion (tolerance {rel}, window \
+             {GAP_COMPANION_STALL_WINDOW}) as stall insurance; declare an explicit \
+             bound_stalling rule to override"
+        );
+    } else if let Some(abs) = tolerance {
+        tracing::warn!(
+            "a gap stopping rule declares only an absolute tolerance ({abs}) with no \
+             bound_stalling rule; no stall-insurance companion is injected (an absolute R$ \
+             tolerance is not comparable to bound_stalling's relative improvement); declare an \
+             explicit bound_stalling rule if you want stall insurance — the iteration limit \
+             still bounds training"
+        );
     }
 }
 
@@ -550,13 +603,41 @@ mod tests {
         config
     }
 
-    /// Stopping rules containing a well-formed `Gap` entry (`tolerance` set).
+    /// Stopping rules containing a well-formed absolute-only `Gap` entry.
     fn config_with_gap_stopping_rule() -> Config {
         let mut config = base_test_config();
         config.training.stopping_rules = Some(vec![StoppingRuleConfig::Gap {
             tolerance: Some(1000.0),
             relative_tolerance: None,
         }]);
+        config
+    }
+
+    /// A relative-only `Gap` entry with no user `BoundStalling` — the case that
+    /// auto-injects the stall-insurance companion.
+    fn config_with_gap_relative_only() -> Config {
+        let mut config = base_test_config();
+        config.training.stopping_rules = Some(vec![StoppingRuleConfig::Gap {
+            tolerance: None,
+            relative_tolerance: Some(0.01),
+        }]);
+        config
+    }
+
+    /// A relative-only `Gap` entry alongside a user-declared `BoundStalling` —
+    /// the explicit rule must override the auto-companion.
+    fn config_with_gap_relative_and_user_bound_stalling() -> Config {
+        let mut config = base_test_config();
+        config.training.stopping_rules = Some(vec![
+            StoppingRuleConfig::Gap {
+                tolerance: None,
+                relative_tolerance: Some(0.01),
+            },
+            StoppingRuleConfig::BoundStalling {
+                iterations: 7,
+                tolerance: 0.5,
+            },
+        ]);
         config
     }
 
@@ -743,27 +824,104 @@ mod tests {
         );
     }
 
-    /// `from_config` must return `SddpError::Validation` for a well-formed
-    /// `Gap` stopping rule, because evaluation is not yet wired. Silent no-op
-    /// (fold into iteration limit) is forbidden.
+    /// `from_config` maps a well-formed absolute-only `Gap` rule to the runtime
+    /// rule; the absolute-only case injects no `BoundStalling` companion.
     #[test]
-    fn from_config_rejects_gap_stopping_rule_as_not_yet_supported() {
-        use crate::SddpError;
+    fn from_config_maps_absolute_gap_and_injects_no_companion() {
+        use crate::stopping_rule::StoppingRule;
 
-        let err = StudyParams::from_config(&config_with_gap_stopping_rule())
-            .expect_err("Gap stopping rule must be rejected as not yet supported");
+        let params = StudyParams::from_config(&config_with_gap_stopping_rule())
+            .expect("a well-formed Gap rule maps successfully");
+        let rules = &params.stopping_rule_set.rules;
         assert!(
-            matches!(err, SddpError::Validation(_)),
-            "expected SddpError::Validation, got: {err:?}"
+            rules.iter().any(|r| matches!(
+                r,
+                StoppingRule::Gap {
+                    tolerance: Some(_),
+                    relative_tolerance: None
+                }
+            )),
+            "the Gap rule must be present as a runtime rule: {rules:?}"
         );
-        let msg = err.to_string();
         assert!(
-            msg.contains("not yet supported"),
-            "error message must say 'not yet supported'; got: {msg}"
+            !rules
+                .iter()
+                .any(|r| matches!(r, StoppingRule::BoundStalling { .. })),
+            "an absolute-only Gap must not inject a bound_stalling companion: {rules:?}"
+        );
+    }
+
+    /// A relative-tolerance `Gap` with no user `BoundStalling` injects a
+    /// companion (`tolerance == relative_tolerance`, window
+    /// [`super::GAP_COMPANION_STALL_WINDOW`]) and logs the injection.
+    #[test]
+    fn from_config_relative_gap_injects_bound_stalling_companion() {
+        use crate::stopping_rule::StoppingRule;
+
+        let (subscriber, messages) = WarnRecorder::new();
+        let params = tracing::subscriber::with_default(subscriber, || {
+            StudyParams::from_config(&config_with_gap_relative_only())
+                .expect("a relative-only Gap rule maps successfully")
+        });
+        let rules = &params.stopping_rule_set.rules;
+        let companions: Vec<&StoppingRule> = rules
+            .iter()
+            .filter(|r| matches!(r, StoppingRule::BoundStalling { .. }))
+            .collect();
+        assert_eq!(
+            companions.len(),
+            1,
+            "exactly one bound_stalling companion must be injected: {rules:?}"
+        );
+        match companions[0] {
+            StoppingRule::BoundStalling {
+                tolerance,
+                iterations,
+            } => {
+                assert_eq!(
+                    *tolerance, 0.01,
+                    "companion tolerance == relative_tolerance"
+                );
+                assert_eq!(*iterations, super::GAP_COMPANION_STALL_WINDOW);
+            }
+            other => panic!("expected a BoundStalling companion, got {other:?}"),
+        }
+        let recorded = messages.lock().unwrap();
+        assert!(
+            recorded
+                .iter()
+                .any(|m| m.contains("bound_stalling companion")),
+            "the injection must be logged: {recorded:?}"
+        );
+    }
+
+    /// An explicit user `BoundStalling` overrides the auto-companion — the user's
+    /// values survive and no second companion is injected.
+    #[test]
+    fn from_config_explicit_bound_stalling_overrides_gap_companion() {
+        use crate::stopping_rule::StoppingRule;
+
+        let params = StudyParams::from_config(&config_with_gap_relative_and_user_bound_stalling())
+            .expect("Gap + explicit BoundStalling maps successfully");
+        let rules = &params.stopping_rule_set.rules;
+        let bound_stallings: Vec<&StoppingRule> = rules
+            .iter()
+            .filter(|r| matches!(r, StoppingRule::BoundStalling { .. }))
+            .collect();
+        assert_eq!(
+            bound_stallings.len(),
+            1,
+            "the explicit rule must not be doubled by an injection: {rules:?}"
         );
         assert!(
-            msg.contains("gap"),
-            "error message must mention 'gap'; got: {msg}"
+            matches!(
+                bound_stallings[0],
+                StoppingRule::BoundStalling {
+                    tolerance,
+                    iterations
+                } if *tolerance == 0.5 && *iterations == 7
+            ),
+            "the user's BoundStalling values must survive: {rules:?}"
         );
     }
 

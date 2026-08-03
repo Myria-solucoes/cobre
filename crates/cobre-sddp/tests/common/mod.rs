@@ -211,6 +211,34 @@ pub fn build_setup_in_code(system: System, config: &Config) -> StudySetup {
     StudySetup::new(&system, config, stochastic, hydro_models).expect("StudySetup::new")
 }
 
+/// Fallible sibling of [`build_setup_in_code`]: returns `StudySetup::new`'s
+/// `Result` so a test can assert a setup-time rejection (e.g. the admission
+/// gate) instead of panicking.
+#[allow(clippy::needless_pass_by_value)]
+pub fn try_build_setup_in_code(
+    system: System,
+    config: &Config,
+) -> Result<StudySetup, cobre_sddp::SddpError> {
+    let stochastic = build_stochastic_context(
+        &system,
+        42,
+        None,
+        &[],
+        &[],
+        OpeningTreeInputs::default(),
+        ClassSchemes {
+            inflow: Some(SamplingScheme::InSample),
+            load: Some(SamplingScheme::InSample),
+            ncs: Some(SamplingScheme::InSample),
+        },
+    )
+    .expect("build_stochastic_context");
+
+    let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
+
+    StudySetup::new(&system, config, stochastic, hydro_models)
+}
+
 /// Train `iterations`, then run the one-scenario simulation and return the drained
 /// per-scenario results.
 pub fn run_simulation(setup: &mut StudySetup, iterations: usize) -> Vec<SimulationScenarioResult> {
