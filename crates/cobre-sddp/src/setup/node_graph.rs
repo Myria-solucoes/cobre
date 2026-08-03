@@ -345,10 +345,7 @@ pub(crate) fn assemble_outcome_weights(
     successors: &[NodeSuccessor],
     out: &mut Vec<f64>,
 ) {
-    let expected_len: usize = successors
-        .iter()
-        .map(|s| node_graph.nodes[s.child].openings.len)
-        .sum();
+    let expected_len = successor_outcome_count(node_graph, successors);
     out.clear();
     out.reserve(expected_len);
     for succ in successors {
@@ -361,6 +358,36 @@ pub(crate) fn assemble_outcome_weights(
         expected_len,
         "assemble_outcome_weights: assembled outcome set must have length Σ_(m∈successors)|Ω_m|"
     );
+}
+
+/// `Σ_(m∈successors)|Ω_m|` — a node's flattened outcome-set length, the exact
+/// quantity [`assemble_outcome_weights`] fills `out` to. Standalone so a
+/// workspace-sizing caller (`max_successor_outcome_count`) shares this
+/// flattening instead of re-deriving it.
+fn successor_outcome_count(node_graph: &NodeGraph, successors: &[NodeSuccessor]) -> usize {
+    successors
+        .iter()
+        .map(|s| node_graph.nodes[s.child].openings.len)
+        .sum()
+}
+
+/// Maximum, over every node, of its own [`successor_outcome_count`] — the
+/// backward pass's true per-node `n_openings` upper bound
+/// (`compute_one_backward_node`'s `n_openings` is exactly this quantity for
+/// whichever node it processes). A leaf's empty successor list contributes
+/// `0`. Absent `nodes[]`, node `t`'s successor is stage `t+1`, so this is
+/// `max` over stages `1..num_stages` of `tree.n_openings` — it excludes stage
+/// 0's own opening count (no node's successor is ever the first stage), a
+/// DIFFERENT quantity the lower-bound evaluation needs separately: a caller
+/// sizing a buffer shared with that evaluation takes the max of both, rather
+/// than assuming this function alone covers it.
+pub(crate) fn max_successor_outcome_count(graph: &NodeGraph) -> usize {
+    graph
+        .successors
+        .iter()
+        .map(|succs| successor_outcome_count(graph, succs))
+        .max()
+        .unwrap_or(0)
 }
 
 /// Reverse-topological cut-sharing levels: cut-generating nodes (those with at

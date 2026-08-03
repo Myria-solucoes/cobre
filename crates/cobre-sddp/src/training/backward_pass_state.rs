@@ -1553,9 +1553,15 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
             // is never reset, so a snapshot-delta is the only correct attribution).
             let scoring_seconds_before = ws.backward_accum.dcs_solve.scoring_time_seconds;
 
-            // `local_i` is the arena row within this worker's owned subset (ascending
-            // m, since `trial_points` is ascending); `m` is the real trial index.
-            for (local_i, &m) in trial_points.iter().filter(|&&m| owns(m)).enumerate() {
+            // `compacted` is the trial point's index within the node's FULL routed
+            // subset (the cut slot's per-pool position); `local_i` is its row in
+            // this worker's own arena. They diverge only when a peer worker owns
+            // earlier routed points — `local_i` skips those, `compacted` counts them.
+            let mut local_i = 0usize;
+            for (compacted, &m) in trial_points.iter().enumerate() {
+                if !owns(m) {
+                    continue;
+                }
                 // Reset so the cold-head solve cannot depend on which trial points
                 // the worker solved before it (determinism across thread/rank counts).
                 // No-op for HiGHS; for CLP recreates the model (`Clp_loadProblem`
@@ -1581,9 +1587,11 @@ pub(crate) fn process_stage_backward<S: SolverInterface + Send>(
                     &mut basis_slice,
                     &opening_solver,
                     m,
+                    compacted,
                     arena_offset,
                 )?;
                 ws.backward_accum.staged_cuts_buf.push(cut);
+                local_i += 1;
             }
 
             ws.worker_timing_buf.backward_wall_ms +=
@@ -1631,7 +1639,9 @@ mod tests {
         indexer::StateSpace,
         inflow_method::InflowNonNegativityMethod,
         risk_measure::{BackwardOutcome, RiskMeasure},
-        setup::node_graph::{NodeOpenings, NodeRuntime, NodeSuccessor, OpeningSource},
+        setup::node_graph::{
+            NodeOpenings, NodeRuntime, NodeSuccessor, OpeningSource, max_successor_outcome_count,
+        },
         solver_stats::WORKER_STATS_ENTRY_STRIDE,
         state_exchange::ExchangeBuffers,
         test_support::{
@@ -2245,22 +2255,7 @@ mod tests {
         let n_state = state.n_state;
         let trial_count = records.len() / n_stages;
         let forward_passes = u32::try_from(trial_count).expect("trial_count fits u32");
-        // The root's own level fans out into every successor's own opening
-        // count (the product measure `assemble_outcome_weights` flattens), so
-        // `bwd_max_openings` must cover that combined count, not just a
-        // single node's own `Ω`.
-        let bwd_max_openings = node_graph
-            .successors
-            .iter()
-            .map(|succs| {
-                succs
-                    .iter()
-                    .map(|s| node_graph.nodes[s.child].openings.len)
-                    .sum::<usize>()
-            })
-            .max()
-            .unwrap_or(0)
-            .max(1);
+        let bwd_max_openings = max_successor_outcome_count(node_graph).max(1);
 
         let mut fcf = FutureCostFunction::new(
             node_graph.n_pools,

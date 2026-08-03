@@ -7145,3 +7145,222 @@ mod custom_weekly_evaporation_regression {
         );
     }
 }
+
+#[cfg(feature = "test-support")]
+mod k_fan_branching_sampled_coverage {
+    //! Branching-graph end-to-end sampled coverage on the DECOMP K-fan fixture
+    //! (`cobre_sddp::test_support::k_fan_setup`): a declared root fanning into
+    //! `K` distinct nodes, each with its own leaf, `num_nodes > n_pools` via
+    //! leaf sharing — a shape a chain-only suite cannot reach, where a
+    //! canonical-node-position-as-pool-id conflation bug would misroute or
+    //! overflow a pool instead of hiding behind `node_index == pool_id`.
+    //! Exercises the per-node forward frontier, the reverse-topological
+    //! backward sweep, and the per-pool trial-state routing end-to-end.
+
+    use std::collections::HashSet;
+
+    use cobre_sddp::TrainingOutcome;
+    use cobre_sddp::test_support::k_fan_setup;
+    use cobre_solver::ActiveSolver;
+
+    use super::common::StubComm;
+
+    const K: usize = 12;
+    const FORWARD_PASSES: u32 = 3;
+    const MAX_ITERATIONS: u32 = 5;
+
+    /// Train the K-fan fixture single-rank single-thread `sampled`, panicking
+    /// on any training error (a stored-cut slot out-of-bounds panics INSIDE
+    /// `train` via `CutPool::add_cut`'s own `debug_assert`, before this
+    /// function returns).
+    fn train_k_fan() -> (cobre_sddp::test_support::KFanFixture, TrainingOutcome) {
+        let mut fixture = k_fan_setup(K, FORWARD_PASSES, MAX_ITERATIONS);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = fixture
+            .setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("k_fan training must return Ok");
+        assert!(
+            outcome.error.is_none(),
+            "k_fan training must not error: {:?}",
+            outcome.error
+        );
+        (fixture, outcome)
+    }
+
+    /// Cuts appended to `pool_id` during `iteration`, read from the trained
+    /// [`cobre_sddp::CutPool`]'s own per-slot metadata — never a hard-coded
+    /// count. Every appended cut is 1:1 with a trial point routed to this
+    /// node this iteration (`compute_one_backward_node`'s
+    /// `debug_assert_eq!(staged_cuts_buf.len(), trial_points.len())`), so
+    /// this count IS the seed-deterministic sampled visit count.
+    fn cuts_in_iteration(
+        fixture: &cobre_sddp::test_support::KFanFixture,
+        pool_id: usize,
+        iteration: u64,
+    ) -> u64 {
+        let pool = &fixture.setup.fcf.pools[pool_id];
+        let mut count = 0u64;
+        for slot in 0..pool.populated() {
+            if pool.is_active(slot) && pool.metadata(slot).iteration_generated == iteration {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Load-bearing coverage gate: trains without panic (proving no
+    /// out-of-bounds cut slot — `CutPool::add_cut`'s
+    /// `debug_assert!(slot < capacity)` would panic first), then cross-checks
+    /// the routing structurally: the root (the sole stage-0 node) gets
+    /// exactly `forward_passes` cuts every iteration; the K fan nodes'
+    /// per-iteration cut counts sum to exactly `forward_passes` (every trial
+    /// point routes to exactly one fan node — neither dropped nor
+    /// double-routed); and the shared leaf pool never receives a cut (a leaf
+    /// has no successor to generate one for).
+    #[test]
+    fn k_fan_sampled_routing_sums_to_forward_passes_with_no_oob() {
+        let (fixture, _outcome) = train_k_fan();
+        let node_graph = &fixture.setup.node_graph;
+
+        let cut_generating: Vec<usize> = (0..node_graph.nodes.len())
+            .filter(|&pos| !node_graph.successors[pos].is_empty())
+            .collect();
+        assert_eq!(
+            cut_generating.len(),
+            1 + K,
+            "K-fan power precondition: exactly 1 root + K fan nodes must be cut-generating"
+        );
+        let root_pos = *cut_generating
+            .iter()
+            .find(|&&pos| node_graph.nodes[pos].stage == 0)
+            .expect("the root is cut-generating and is the fixture's sole stage-0 node");
+        let fan_positions: Vec<usize> = cut_generating
+            .iter()
+            .copied()
+            .filter(|&pos| pos != root_pos)
+            .collect();
+        assert_eq!(
+            fan_positions.len(),
+            K,
+            "K distinct fan nodes must be cut-generating"
+        );
+
+        let leaf_positions: Vec<usize> = (0..node_graph.nodes.len())
+            .filter(|&pos| node_graph.successors[pos].is_empty())
+            .collect();
+        assert_eq!(leaf_positions.len(), K, "K leaves, one per fan branch");
+        let leaf_pool = node_graph.nodes[leaf_positions[0]].pool_id;
+        for &pos in &leaf_positions {
+            assert_eq!(
+                node_graph.nodes[pos].pool_id, leaf_pool,
+                "every leaf must share the one leaf-sharing pool"
+            );
+        }
+        assert_eq!(
+            fixture.setup.fcf.pools[leaf_pool].populated(),
+            0,
+            "a leaf has no successor, so it must never generate a cut"
+        );
+
+        let mut touched_fan_nodes = HashSet::new();
+        let root_pool = node_graph.nodes[root_pos].pool_id;
+        for iteration in 1..=u64::from(MAX_ITERATIONS) {
+            assert_eq!(
+                cuts_in_iteration(&fixture, root_pool, iteration),
+                u64::from(FORWARD_PASSES),
+                "iteration {iteration}: the root is the sole stage-0 node, so every forward \
+                 trial point reaches it — its per-iteration cut count must always equal \
+                 forward_passes"
+            );
+
+            let mut fan_total = 0u64;
+            for &pos in &fan_positions {
+                let pool_id = node_graph.nodes[pos].pool_id;
+                let count = cuts_in_iteration(&fixture, pool_id, iteration);
+                assert!(
+                    count <= u64::from(FORWARD_PASSES),
+                    "iteration {iteration}: fan node at position {pos} (pool {pool_id}) got \
+                     {count} cuts, exceeding forward_passes ({FORWARD_PASSES}) — over-routed"
+                );
+                if count > 0 {
+                    touched_fan_nodes.insert(pos);
+                }
+                fan_total += count;
+            }
+            assert_eq!(
+                fan_total,
+                u64::from(FORWARD_PASSES),
+                "iteration {iteration}: the K fan nodes' per-iteration cut counts must sum to \
+                 forward_passes — every forward trial point routes to EXACTLY one fan node, \
+                 never zero (dropped) and never more than one (double-routed)"
+            );
+        }
+
+        assert!(
+            touched_fan_nodes.len() >= 2,
+            "power precondition: the run must genuinely touch >= 2 distinct fan nodes over \
+             {MAX_ITERATIONS} iterations (touched {}), or cross-node misrouting has nothing \
+             to be caught against",
+            touched_fan_nodes.len()
+        );
+    }
+
+    /// Sampled scale gate: sampled solves-per-iteration equals the sampled
+    /// node-visit work — every one of `forward_passes` trial points visits
+    /// exactly `path_length` nodes (root, its sampled fan node, that fan
+    /// node's leaf), so the forward-phase LP-solve count is
+    /// `forward_passes * path_length` every iteration, strictly below the
+    /// per-path enumeration `enumerated_scenario_count` — never the exact
+    /// per-node enumerated visit count (unwired: enumerated execution beyond
+    /// a derived count of 1 is not yet admitted).
+    #[test]
+    fn k_fan_sampled_forward_solves_equal_visit_work_below_enumerated() {
+        let (fixture, outcome) = train_k_fan();
+
+        let path_length = 1 + fixture
+            .setup
+            .node_graph
+            .nodes
+            .iter()
+            .map(|n| n.stage)
+            .max()
+            .expect("the K-fan graph has at least one node") as u64;
+        assert_eq!(
+            path_length, 3,
+            "the K-fan is root -> fan -> leaf, 3 stages deep"
+        );
+
+        let expected = u64::from(fixture.forward_passes) * path_length;
+        assert!(
+            expected < fixture.enumerated_scenario_count,
+            "power precondition: forward_passes * path_length ({expected}) must be strictly \
+             below enumerated_scenario_count ({}) — otherwise sampled and enumerated scale \
+             are indistinguishable on this fixture",
+            fixture.enumerated_scenario_count
+        );
+
+        for iteration in 1..=u64::from(MAX_ITERATIONS) {
+            let forward_solves: u64 = outcome
+                .result
+                .solver_stats_log
+                .iter()
+                .filter(|e| e.iteration == iteration && e.phase == "forward")
+                .map(|e| e.delta.lp_solves)
+                .sum();
+            assert_eq!(
+                forward_solves, expected,
+                "iteration {iteration}: forward-phase LP solves must equal forward_passes * \
+                 path_length — a regression toward per-path enumeration would instead scale \
+                 with K"
+            );
+            assert!(
+                forward_solves < fixture.enumerated_scenario_count,
+                "iteration {iteration}: sampled forward work ({forward_solves}) must stay \
+                 strictly below the per-path enumeration ({})",
+                fixture.enumerated_scenario_count
+            );
+        }
+    }
+}

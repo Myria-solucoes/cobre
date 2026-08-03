@@ -47,6 +47,7 @@ use crate::{
     lower_bound::LbEvalScratchBundle,
     lower_bound::evaluate_lower_bound,
     rank_reconcile::{reconcile_error_flag, reconcile_result},
+    setup::node_graph::max_successor_outcome_count,
     solver_stats::{
         SOLVER_STATS_DELTA_SCALAR_FIELDS, SolverStatsDelta, SolverStatsLogEntry,
         aggregate_solver_statistics, pack_delta_scalars, unpack_delta_scalars,
@@ -160,10 +161,17 @@ where
         fcf.set_iteration_base(config.loop_config.start_iteration + 1);
 
         let n_threads = config.loop_config.n_fwd_threads.max(1);
+        // The wrong-but-compiling alternative is the per-stage term alone: on a
+        // declared multi-successor node (a fan-out), `n_openings` is the
+        // FLATTENED successor-outcome count (`assemble_outcome_weights`), which
+        // can exceed every stage's own opening-tree size and overflow
+        // `StageWorkerStatsBuffer`; the per-node term below covers it. On a chain
+        // a node's successor IS the next stage, so it is already covered here.
         let max_openings = (0..ranks.num_stages)
             .map(|t| training_ctx.stochastic.opening_tree().n_openings(t))
             .max()
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .max(max_successor_outcome_count(training_ctx.node_graph));
         let mut fwd_pool = WorkspacePool::try_new(
             ranks.fwd_rank,
             n_threads,

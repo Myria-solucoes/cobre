@@ -383,6 +383,7 @@ pub(crate) fn process_by_scenario_backward<S: SolverInterface + Send>(
     basis_slice: &mut BasisStoreSliceMut<'_>,
     opening_solver: &StageOpeningSolver,
     m: usize,
+    compacted: usize,
     arena_offset: usize,
 ) -> Result<StagedCut, SddpError> {
     let tree_view = training_ctx.stochastic.tree_view();
@@ -472,12 +473,21 @@ pub(crate) fn process_by_scenario_backward<S: SolverInterface + Send>(
     );
     ws.backward_accum.agg_arena[coefficients_range.clone()]
         .copy_from_slice(&ws.backward_accum.agg_coefficients[..n_state]);
+    // The cut's `forward_pass_index` addresses `CutPool`'s per-iteration slot
+    // block at stride `visit_bound[pool]` (the node's own routed visit count),
+    // NOT `forward_passes`, so it must be the position within THIS node's routed
+    // subset: `fwd_offset + compacted`. On a single-node level the subset is the
+    // full global range and `compacted == m`, so this reduces to the global
+    // `scenario` (byte-neutral, and cross-rank-disjoint on a chain). The global
+    // `scenario` is the wrong-but-compiling alternative — on a fan its stride
+    // overshoots and two trajectories on one node collide on the same slot.
+    let node_relative_index = fwd_offset + compacted;
     debug_assert!(
-        u32::try_from(scenario).is_ok(),
-        "global scenario index overflows u32"
+        u32::try_from(node_relative_index).is_ok(),
+        "node-relative forward-pass index overflows u32"
     );
     #[allow(clippy::cast_possible_truncation)]
-    let forward_pass_index = scenario as u32;
+    let forward_pass_index = node_relative_index as u32;
     let pop = ws.backward_accum.slot_increments.len();
     for slot in 0..pop {
         let count = ws.backward_accum.slot_increments[slot];

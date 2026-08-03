@@ -4536,6 +4536,7 @@ fn run_one_trial_state_with_stores(
         &super::StageOpeningSolver::Frozen,
         0,
         0,
+        0,
     )?;
     Ok(workspaces)
 }
@@ -5412,6 +5413,7 @@ fn run_dcs_backward_trial_state_at(
         &opening_solver,
         0,
         0,
+        0,
     )
     .expect("backward trial-point solve must succeed");
 
@@ -5926,6 +5928,7 @@ fn backward_dcs_frozen_cuts_present_no_duplicate_rows() {
         &succ,
         &mut basis_slices[0],
         &opening_solver,
+        0,
         0,
         0,
     )

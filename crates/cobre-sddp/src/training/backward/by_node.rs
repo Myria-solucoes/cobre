@@ -385,9 +385,8 @@ pub(crate) fn by_node_finish<S: SolverInterface>(
     let mut cuts_added = 0usize;
     // Ascending routed position == ascending trial-point index (`trial_points`
     // is built ascending), so the cut set is claim/worker-count independent
-    // (sddp.md "By-node scheduler is warm-start-only"); the FCF forward-pass tag
-    // is the real trial-point index `real_m`.
-    for (pos, &real_m) in trial_points.iter().enumerate() {
+    // (sddp.md "By-node scheduler is warm-start-only").
+    for pos in 0..n_trial {
         let mut intercept = 0.0_f64;
         risk_measure.aggregate_cut_into(
             &scratch.arena[pos * n_openings..(pos + 1) * n_openings],
@@ -396,16 +395,22 @@ pub(crate) fn by_node_finish<S: SolverInterface>(
             &mut scratch.coeffs_buf,
             &mut scratch.risk_scratch,
         );
-        let scenario = fwd_offset + real_m;
+        // The FCF slot addresses the pool's per-iteration block at stride
+        // `visit_bound[pool]` (this node's routed visit count), so the tag is the
+        // NODE-RELATIVE position `fwd_offset + pos` — `pos` IS the compacted index
+        // (the arena is keyed by routed position). The global trial index is the
+        // wrong-but-compiling alternative that collides on a fan; mirrors the
+        // by-scenario path.
+        let node_relative_index = fwd_offset + pos;
         debug_assert!(
-            u32::try_from(scenario).is_ok(),
-            "global scenario index overflows u32"
+            u32::try_from(node_relative_index).is_ok(),
+            "node-relative forward-pass index overflows u32"
         );
         #[allow(clippy::cast_possible_truncation)]
         fcf.add_cut(
             pool,
             iteration,
-            scenario as u32,
+            node_relative_index as u32,
             intercept,
             &scratch.coeffs_buf,
         );

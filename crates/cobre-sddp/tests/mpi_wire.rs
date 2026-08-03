@@ -1925,3 +1925,169 @@ mod by_node_scratch {
         );
     }
 }
+
+#[cfg(feature = "test-support")]
+mod k_fan_graph_invariance {
+    //! Thread-shape invariance on the DECOMP K-fan graph path (sampled): the
+    //! end-to-end complement to the `n_workers ∈ {1,2}` per-pool-routing unit
+    //! test, certifying the per-pool trial-state routing and the
+    //! reverse-topological backward level's own batching are
+    //! worker-count-invariant on a genuinely branching graph. Also pins the
+    //! corpus-unstated obligation that the LB root evaluation, the
+    //! outcome-allgather aggregation, and the weighted forward sync each
+    //! reduce in canonical order — invariant across several distinct
+    //! worker-partition boundaries, not merely a single threads=1-vs-k pair.
+
+    use cobre_sddp::test_support::k_fan_setup;
+    use cobre_solver::ActiveSolver;
+
+    use crate::common::StubComm;
+
+    const K: usize = 8;
+    const FORWARD_PASSES: u32 = 6;
+    const MAX_ITERATIONS: u32 = 3;
+
+    /// Train a fresh K-fan fixture at `n_threads`, returning
+    /// `(final_lb, final_ub, final_ub_std)` — the LB root evaluation and the
+    /// statistical (Welford) upper bound's mean/std, both fed by the
+    /// outcome-allgather aggregation and the weighted forward sync.
+    fn run_shape(n_threads: usize) -> (f64, f64, f64) {
+        let mut fixture = k_fan_setup(K, FORWARD_PASSES, MAX_ITERATIONS);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = fixture
+            .setup
+            .train(&mut solver, &comm, n_threads, ActiveSolver::new, None, None)
+            .expect("k_fan training must return Ok");
+        assert!(
+            outcome.error.is_none(),
+            "k_fan training must not error: {:?}",
+            outcome.error
+        );
+        (
+            outcome.result.final_lb,
+            outcome.result.final_ub,
+            outcome.result.final_ub_std,
+        )
+    }
+
+    /// Power precondition shared by both gates below: the fan stage carries
+    /// `K` cut-generating nodes beyond the root (`>= 2`), and `forward_passes`
+    /// exceeds the largest thread count crossed, so a multi-worker shape
+    /// genuinely splits trial points across worker-partition boundaries
+    /// instead of degenerating to one trial point per worker.
+    fn assert_genuine_multi_node_level(max_threads_crossed: usize) {
+        let probe = k_fan_setup(K, FORWARD_PASSES, MAX_ITERATIONS);
+        let node_graph = &probe.setup.node_graph;
+        let cut_generating = (0..node_graph.nodes.len())
+            .filter(|&pos| !node_graph.successors[pos].is_empty())
+            .count();
+        let fan_nodes = cut_generating - 1;
+        assert!(
+            fan_nodes >= 2,
+            "power precondition: the K-fan must carry >= 2 cut-generating fan nodes \
+             (got {fan_nodes}) for thread-shape crossing to have power"
+        );
+        assert!(
+            usize::try_from(FORWARD_PASSES).expect("FORWARD_PASSES fits usize")
+                > max_threads_crossed,
+            "power precondition: forward_passes ({FORWARD_PASSES}) must exceed the largest \
+             thread count crossed ({max_threads_crossed}), or every worker gets at most one \
+             trial point and no partition boundary is genuinely crossed"
+        );
+    }
+
+    /// Thread-shape invariance: `--threads 1` vs `--threads k`, plus a
+    /// same-shape repeat, bitwise-identical `final_lb`/`final_ub`/`final_ub_std`
+    /// on the DECOMP K-fan graph path.
+    #[test]
+    #[ignore = "TODO(k-fan-per-node-frozen-templates): the forward_pass_index compaction (the \
+                double-insert) is fixed, but a separate node-native gap remains — \
+                freeze_active_cuts_into_templates (training/session/mod.rs) freezes ONE pool per \
+                STAGE via node_graph.nodes[t].pool_id, using the stage index t as a node \
+                POSITION. On a chain position==stage so it is correct; on a branching graph a \
+                stage has several nodes with distinct pools, so the leaf stage's frozen template \
+                embeds a fan node's cuts (nodes[2] is fan pool 2 in k_fan_setup(8,6,3)), and once \
+                that pool holds a cut with intercept>0 the terminal leaf's pinned theta makes the \
+                LP infeasible at iteration 3. Needs per-node/per-pool frozen templates + per-node \
+                forward LP load; out of scope for the forward_pass_index fix."]
+    fn k_fan_thread_shape_invariance() {
+        assert_genuine_multi_node_level(4);
+
+        let (lb_k, ub_k, ub_std_k) = run_shape(4);
+        let (lb_1, ub_1, ub_std_1) = run_shape(1);
+        let (lb_repeat, ub_repeat, ub_std_repeat) = run_shape(1);
+
+        assert_eq!(
+            lb_k.to_bits(),
+            lb_1.to_bits(),
+            "final_lb must be bitwise identical across thread shapes"
+        );
+        assert_eq!(
+            ub_k.to_bits(),
+            ub_1.to_bits(),
+            "final_ub must be bitwise identical across thread shapes"
+        );
+        assert_eq!(
+            ub_std_k.to_bits(),
+            ub_std_1.to_bits(),
+            "final_ub_std must be bitwise identical across thread shapes"
+        );
+        assert_eq!(
+            lb_1.to_bits(),
+            lb_repeat.to_bits(),
+            "same-shape repeat final_lb must be bitwise identical"
+        );
+        assert_eq!(
+            ub_1.to_bits(),
+            ub_repeat.to_bits(),
+            "same-shape repeat final_ub must be bitwise identical"
+        );
+        assert_eq!(
+            ub_std_1.to_bits(),
+            ub_std_repeat.to_bits(),
+            "same-shape repeat final_ub_std must be bitwise identical"
+        );
+    }
+
+    /// Weighted-aggregation canonical-order obligation: the LB root
+    /// evaluation, the outcome-allgather aggregation, and the weighted
+    /// forward sync each reduce in canonical order on the graph path, so
+    /// `final_lb`/`final_ub`/`final_ub_std` stay bitwise identical across
+    /// FOUR distinct thread-partition boundaries (1, 2, 3, 4) — not merely
+    /// the single threads=1-vs-k pair the sibling gate above crosses.
+    #[test]
+    #[ignore = "TODO(k-fan-per-node-frozen-templates): blocked on the same per-stage frozen \
+                template gap as k_fan_thread_shape_invariance (freeze_active_cuts_into_templates \
+                keys pools by stage-as-node-position); training the K-fan reaches an infeasible \
+                iteration-3 leaf before this assertion runs. The forward_pass_index compaction is \
+                fixed; this needs per-node frozen templates."]
+    fn k_fan_weighted_aggregation_canonical_order_invariance() {
+        assert_genuine_multi_node_level(4);
+
+        let shapes = [1usize, 2, 3, 4];
+        let results: Vec<(f64, f64, f64)> = shapes.iter().copied().map(run_shape).collect();
+
+        let (lb0, ub0, ub_std0) = results[0];
+        for (&n_threads, &(lb, ub, ub_std)) in shapes.iter().zip(&results).skip(1) {
+            assert_eq!(
+                lb.to_bits(),
+                lb0.to_bits(),
+                "final_lb (the LB root evaluation) must be bitwise identical between \
+                 threads=1 and threads={n_threads}"
+            );
+            assert_eq!(
+                ub.to_bits(),
+                ub0.to_bits(),
+                "final_ub (the weighted forward sync / outcome-allgather aggregation) must \
+                 be bitwise identical between threads=1 and threads={n_threads}"
+            );
+            assert_eq!(
+                ub_std.to_bits(),
+                ub_std0.to_bits(),
+                "final_ub_std must be bitwise identical between threads=1 and \
+                 threads={n_threads}"
+            );
+        }
+    }
+}

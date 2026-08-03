@@ -12,21 +12,37 @@
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::NaiveDate;
+use cobre_core::scenario::{InflowModel, LoadModel, SamplingScheme};
+use cobre_core::temporal::{Node as PolicyNode, PolicyGraphType, Transition};
 use cobre_core::{
-    Block, BlockMode, Bus, CascadeTopology, DeficitSegment, EntityId, Hydro, HydroGenerationModel,
-    HydroPenalties, HydroUnitGroup, NoiseMethod, PolicyGraph, ResolvedBounds,
+    Block, BlockMode, BoundsCountsSpec, BoundsDefaults, Bus, BusStagePenalties, CascadeTopology,
+    ContractBlockBounds, DeficitSegment, EntityId, Hydro, HydroBlockBounds, HydroGenerationModel,
+    HydroPenalties, HydroStageBounds, HydroStagePenalties, HydroStorage, HydroUnitGroup,
+    InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties, NoiseMethod,
+    PenaltiesCountsSpec, PenaltiesDefaults, PolicyGraph, PumpingBlockBounds, ResolvedBounds,
     ResolvedGenericConstraintBounds, ResolvedLoadFactors, ResolvedNcsBounds, ResolvedNcsFactors,
-    ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig,
+    ResolvedPenalties, ScenarioSourceConfig, Stage, StageRiskConfig, StageStateConfig, System,
+    SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
 };
 use cobre_io::StageIdResolver;
-use cobre_stochastic::StochasticContext;
+use cobre_io::config::{
+    Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig, InflowNonNegativityMethod,
+    ModelingConfig, ParallelismConfig, PolicyConfig, RowSelectionConfig,
+    SimulationConfig as IoSimulationConfig, StateSpaceConfig, StoppingMode, StoppingRuleConfig,
+    TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+};
 use cobre_stochastic::par::precompute::PrecomputedPar;
+use cobre_stochastic::{
+    ClassSchemes, OpeningTreeInputs, StochasticContext, build_stochastic_context,
+};
 
+use crate::StudySetup;
 use crate::context::{StageContext, TrainingContext};
 use crate::cut::pool::CutPool;
 use crate::error::SddpError;
 use crate::hydro_models::{
-    EvaporationModel, EvaporationModelSet, FphaPlane, ProductionModelSet, ResolvedProductionModel,
+    EvaporationModel, EvaporationModelSet, FphaPlane, PrepareHydroModelsResult, ProductionModelSet,
+    ResolvedProductionModel,
 };
 use crate::indexer::{CutStateProjection, HydroCellIndex, StateSpace, StudyDimensions, ThermalSys};
 use crate::lead_time::AnticipatedResolution;
@@ -35,7 +51,7 @@ use crate::policy::policy_load::{
     FullFcf, PolicyLoadProof, PolicyStageManifest, validate_policy_load,
 };
 use crate::resolved_parameters::ResolvedParameters;
-use crate::setup::node_graph::{NodeGraph, build_node_graph};
+use crate::setup::node_graph::{NodeGraph, build_node_graph, enumerated_scenario_count};
 use crate::solve::stage_solve::{StageInputs, run_stage_solve};
 use crate::training::stage_solve_prep::{
     InflowNoise, LoadNoise, OpeningMode, StageSolvePrep, StageSolvePrepParams, StateSource,
@@ -805,4 +821,466 @@ pub fn chain_node_graph(stochastic: &StochasticContext) -> NodeGraph {
     let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
     build_node_graph(&PolicyGraph::default(), n_stages, &resolver, stochastic)
         .expect("chain_node_graph: build_node_graph never errors for an empty nodes[] graph")
+}
+
+// ── DECOMP K-fan fixture ─────────────────────────────────────────────────
+
+/// Fixed training seed for [`k_fan_setup`] — every caller trains the identical,
+/// reproducible sampled walk; not a caller-configurable knob.
+const K_FAN_SEED: u64 = 42;
+/// [`K_FAN_SEED`], typed for [`Config`]'s `training.tree_seed` field.
+const K_FAN_TREE_SEED: i64 = 42;
+
+/// Study-stage id of the K-fan's root (a single node, the sole stage-0 alive node).
+const K_FAN_ROOT_STAGE_ID: i32 = 0;
+/// Study-stage id of the fan level: `k` distinct nodes, each cut-generating (each
+/// owns exactly one leaf successor).
+const K_FAN_BRANCH_STAGE_ID: i32 = 1;
+/// Study-stage id of the leaf level: `k` distinct nodes sharing ONE pool
+/// (`build_node_graph`'s leaf-sharing rule) — never cut-generating.
+const K_FAN_LEAF_STAGE_ID: i32 = 2;
+
+/// The declared `nodes[]`/`transitions[]` K-fan: root (id `0`) branches into fan
+/// nodes `1..=k` under strictly non-uniform weights `i / Σj` (never a uniform
+/// `1/k` split — a uniform split would make every reduction order sum identical
+/// terms, defeating the canonical-order gate's power), each fan node `i` then
+/// deterministically reaching its own leaf `k+i`. `num_nodes = 2k+1`,
+/// `n_pools = k+2` (root + k fan pools + one shared leaf pool) —
+/// `num_nodes > n_pools` for every `k >= 2`, so a canonical-node-position-as-pool-id
+/// conflation bug would misroute or overflow a pool here, where it cannot on a
+/// chain (`node_index == pool_id` there hides the bug).
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_wrap,
+    clippy::cast_possible_truncation
+)]
+fn k_fan_policy_graph(k: usize) -> PolicyGraph {
+    debug_assert!(k >= 2, "k_fan_policy_graph: k must be >= 2 (DECOMP shape)");
+    let mut nodes = Vec::with_capacity(1 + 2 * k);
+    let mut transitions = Vec::with_capacity(2 * k);
+    nodes.push(PolicyNode {
+        id: 0,
+        stage_id: K_FAN_ROOT_STAGE_ID,
+        realization_id: None,
+        label: None,
+    });
+    let total_weight: f64 = (1..=k).map(|i| i as f64).sum();
+    for i in 1..=k {
+        let fan_id = i as i32;
+        let leaf_id = fan_id + k as i32;
+        nodes.push(PolicyNode {
+            id: fan_id,
+            stage_id: K_FAN_BRANCH_STAGE_ID,
+            realization_id: None,
+            label: None,
+        });
+        nodes.push(PolicyNode {
+            id: leaf_id,
+            stage_id: K_FAN_LEAF_STAGE_ID,
+            realization_id: None,
+            label: None,
+        });
+        transitions.push(Transition {
+            source_id: 0,
+            target_id: fan_id,
+            probability: (i as f64) / total_weight,
+            annual_discount_rate_override: None,
+        });
+        transitions.push(Transition {
+            source_id: fan_id,
+            target_id: leaf_id,
+            probability: 1.0,
+            annual_discount_rate_override: None,
+        });
+    }
+    PolicyGraph {
+        graph_type: PolicyGraphType::FiniteHorizon,
+        annual_discount_rate: 0.0,
+        transitions,
+        nodes,
+        stage_discount_rate_overrides: HashMap::new(),
+        season_map: None,
+    }
+}
+
+/// One study stage at `(index, id)` with a single 744h block, storage state
+/// enabled (the hydro's storage is a genuine cut-bearing state across the K-fan),
+/// `branching_factor: 1` — every scale/routing signal in the K-fan comes from the
+/// declared node branching, never from within-node opening variance.
+///
+/// # Panics
+///
+/// Never in practice — see the rationale below.
+#[allow(clippy::expect_used)]
+// Rationale: the literal calendar dates below are valid by construction
+// (checked at write time); `from_ymd_opt` only returns `None` for an
+// out-of-range calendar date.
+fn k_fan_stage(index: usize, id: i32) -> Stage {
+    Stage {
+        index,
+        id,
+        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).expect("valid date"),
+        season_id: None,
+        blocks: vec![Block {
+            index: 0,
+            name: "S".to_string(),
+            duration_hours: 744.0,
+        }],
+        block_mode: BlockMode::Parallel,
+        state_config: StageStateConfig {
+            storage: true,
+            inflow_lags: false,
+        },
+        risk_config: StageRiskConfig::Expectation,
+        scenario_config: ScenarioSourceConfig {
+            branching_factor: 1,
+            noise_method: NoiseMethod::Saa,
+        },
+    }
+}
+
+/// A single-hydro, single-bus [`System`] over the 3-stage K-fan calendar: hydro
+/// storage/inflow/turbine dynamics against a bus deficit fallback, so every
+/// visited node solves a genuine (non-degenerate) LP with real dual activity.
+///
+/// # Panics
+///
+/// Never in practice — see the rationale below.
+#[allow(clippy::too_many_lines, clippy::expect_used)]
+// Rationale: one linear entity/bounds/penalties assembly, mirroring
+// `deterministic.rs`'s `build_system` — splitting further would scatter the
+// literal the caller reads as a whole. The calendar dates are valid by
+// construction, and `SystemBuilder::build` only errors on a malformed system,
+// which every literal below avoids.
+fn k_fan_system(k: usize) -> System {
+    let bus_id = EntityId(1);
+    let hydro_id = EntityId(2);
+
+    let bus = Bus {
+        id: bus_id,
+        name: "B".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+        deficit_segments: vec![DeficitSegment {
+            depth_mw: None,
+            cost_per_mwh: 500.0,
+        }],
+        excess_cost: 0.0,
+    };
+
+    let mut hydro = Hydro {
+        unit_groups: Vec::new(),
+        id: hydro_id,
+        name: "H".to_string(),
+        operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date"),
+        downstream_id: None,
+        travel_time_hours: None,
+        entry_stage_id: None,
+        exit_stage_id: None,
+        min_storage_hm3: 0.0,
+        max_storage_hm3: 200.0,
+        min_outflow_m3s: 0.0,
+        max_outflow_m3s: None,
+        generation_model: HydroGenerationModel::ConstantProductivity,
+        min_turbined_m3s: 0.0,
+        max_turbined_m3s: 100.0,
+        specific_productivity_mw_per_m3s_per_m: Some(0.5),
+        min_generation_mw: 0.0,
+        max_generation_mw: 250.0,
+        tailrace: None,
+        hydraulic_losses: None,
+        efficiency: None,
+        evaporation_coefficients_mm: None,
+        evaporation_reference_volumes_hm3: None,
+        diversion: None,
+        filling: None,
+        penalties: HydroPenalties {
+            spillage_cost: 0.01,
+            diversion_cost: 0.0,
+            turbined_cost: 0.0,
+            storage_violation_below_cost: 0.0,
+            filling_target_violation_cost: 0.0,
+            turbined_violation_below_cost: 0.0,
+            outflow_violation_below_cost: 0.0,
+            outflow_violation_above_cost: 0.0,
+            generation_violation_below_cost: 0.0,
+            evaporation_violation_cost: 0.0,
+            water_withdrawal_violation_cost: 0.0,
+            water_withdrawal_violation_pos_cost: 0.0,
+            water_withdrawal_violation_neg_cost: 0.0,
+            evaporation_violation_pos_cost: 0.0,
+            evaporation_violation_neg_cost: 0.0,
+            inflow_nonnegativity_cost: 1000.0,
+        },
+    };
+    hydro.declare_mirror_unit_group(bus_id);
+
+    let stages = vec![
+        k_fan_stage(0, K_FAN_ROOT_STAGE_ID),
+        k_fan_stage(1, K_FAN_BRANCH_STAGE_ID),
+        k_fan_stage(2, K_FAN_LEAF_STAGE_ID),
+    ];
+
+    let inflow_models = vec![
+        InflowModel {
+            hydro_id,
+            stage_id: K_FAN_ROOT_STAGE_ID,
+            mean_m3s: 60.0,
+            std_m3s: 0.0,
+            ar_coefficients: vec![],
+            residual_std_ratio: 1.0,
+            annual: None,
+        },
+        InflowModel {
+            hydro_id,
+            stage_id: K_FAN_BRANCH_STAGE_ID,
+            mean_m3s: 60.0,
+            std_m3s: 0.0,
+            ar_coefficients: vec![],
+            residual_std_ratio: 1.0,
+            annual: None,
+        },
+        InflowModel {
+            hydro_id,
+            stage_id: K_FAN_LEAF_STAGE_ID,
+            mean_m3s: 60.0,
+            std_m3s: 0.0,
+            ar_coefficients: vec![],
+            residual_std_ratio: 1.0,
+            annual: None,
+        },
+    ];
+
+    let load_models = vec![
+        LoadModel {
+            bus_id,
+            stage_id: K_FAN_ROOT_STAGE_ID,
+            mean_mw: 80.0,
+            std_mw: 0.0,
+        },
+        LoadModel {
+            bus_id,
+            stage_id: K_FAN_BRANCH_STAGE_ID,
+            mean_mw: 80.0,
+            std_mw: 0.0,
+        },
+        LoadModel {
+            bus_id,
+            stage_id: K_FAN_LEAF_STAGE_ID,
+            mean_mw: 80.0,
+            std_mw: 0.0,
+        },
+    ];
+
+    let bounds = ResolvedBounds::new(
+        &BoundsCountsSpec {
+            n_hydros: 1,
+            n_thermals: 0,
+            n_lines: 0,
+            n_pumping: 0,
+            n_contracts: 0,
+            n_stages: 3,
+            k_max: 0,
+        },
+        &BoundsDefaults {
+            hydro: HydroStageBounds {
+                min_storage_hm3: 0.0,
+                max_storage_hm3: 200.0,
+                filling_min_rate_m3s: 0.0,
+                water_withdrawal_m3s: 0.0,
+            },
+            hydro_block: HydroBlockBounds {
+                min_turbined_m3s: 0.0,
+                max_turbined_m3s: 100.0,
+                min_outflow_m3s: 0.0,
+                max_outflow_m3s: None,
+                min_generation_mw: 0.0,
+                max_generation_mw: 250.0,
+                max_diversion_m3s: None,
+            },
+            thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+            thermal_block: ThermalBlockBounds {
+                min_generation_mw: 0.0,
+                max_generation_mw: 0.0,
+            },
+            line_block: LineBlockBounds {
+                direct_mw: 0.0,
+                reverse_mw: 0.0,
+            },
+            pumping_block: PumpingBlockBounds {
+                min_flow_m3s: 0.0,
+                max_flow_m3s: 0.0,
+            },
+            contract_block: ContractBlockBounds {
+                min_mw: 0.0,
+                max_mw: 0.0,
+                price_per_mwh: 0.0,
+            },
+        },
+    );
+
+    let penalties = ResolvedPenalties::new(
+        &PenaltiesCountsSpec {
+            n_hydros: 1,
+            n_buses: 1,
+            n_lines: 0,
+            n_ncs: 0,
+            n_stages: 3,
+        },
+        &PenaltiesDefaults {
+            hydro: HydroStagePenalties {
+                spillage_cost: 0.01,
+                diversion_cost: 0.0,
+                turbined_cost: 0.0,
+                storage_violation_below_cost: 500.0,
+                filling_target_violation_cost: 0.0,
+                turbined_violation_below_cost: 0.0,
+                outflow_violation_below_cost: 0.0,
+                outflow_violation_above_cost: 0.0,
+                generation_violation_below_cost: 0.0,
+                evaporation_violation_cost: 0.0,
+                water_withdrawal_violation_cost: 0.0,
+                water_withdrawal_violation_pos_cost: 0.0,
+                water_withdrawal_violation_neg_cost: 0.0,
+                evaporation_violation_pos_cost: 0.0,
+                evaporation_violation_neg_cost: 0.0,
+                inflow_nonnegativity_cost: 1000.0,
+            },
+            bus: BusStagePenalties { excess_cost: 0.0 },
+            line: LineStagePenalties { exchange_cost: 0.0 },
+            ncs: NcsStagePenalties {
+                curtailment_cost: 0.0,
+            },
+        },
+    );
+
+    let initial_conditions = InitialConditions {
+        storage: vec![HydroStorage {
+            hydro_id,
+            value_hm3: 100.0,
+        }],
+        filling_storage: vec![],
+        past_anticipated_commitments: vec![],
+        recent_observations: vec![],
+        past_defluences: vec![],
+    };
+
+    SystemBuilder::new()
+        .buses(vec![bus])
+        .hydros(vec![hydro])
+        .stages(stages)
+        .inflow_models(inflow_models)
+        .load_models(load_models)
+        .bounds(bounds)
+        .penalties(penalties)
+        .initial_conditions(initial_conditions)
+        .policy_graph(k_fan_policy_graph(k))
+        .build()
+        .expect("k_fan_system: valid DECOMP K-fan study")
+}
+
+/// The `sampled`-mode training [`Config`] for [`k_fan_setup`]: `forward_passes`
+/// trajectories per iteration, `max_iterations` fixed via an iteration-limit
+/// stopping rule, no `enumerated` selection anywhere.
+fn k_fan_config(forward_passes: u32, max_iterations: u32) -> Config {
+    Config {
+        schema: None,
+        state_space: StateSpaceConfig::default(),
+        modeling: ModelingConfig {
+            inflow_non_negativity: InflowNonNegativityConfig {
+                method: InflowNonNegativityMethod::None,
+            },
+            cost_scale_factor: None,
+        },
+        training: TrainingConfig {
+            enabled: true,
+            tree_seed: Some(K_FAN_TREE_SEED),
+            forward_passes: Some(forward_passes),
+            stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
+                limit: max_iterations,
+            }]),
+            stopping_mode: StoppingMode::Any,
+            cut_selection: RowSelectionConfig::default(),
+            solver: TrainingSolverConfig::default(),
+            parallelism: ParallelismConfig::default(),
+            scenario_source: None,
+            selection: None,
+        },
+        upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
+        policy: PolicyConfig::default(),
+        simulation: IoSimulationConfig::default(),
+        exports: ExportsConfig::default(),
+        estimation: EstimationConfig::default(),
+    }
+}
+
+/// The DECOMP K-fan [`StudySetup`], bundled with the fixture parameters
+/// callers need to derive their own expected values — never a magic literal,
+/// always re-derived from these fields or from `setup.node_graph` directly.
+#[derive(Debug)]
+pub struct KFanFixture {
+    /// The built study: a single-hydro, single-bus system over the declared
+    /// K-fan graph, trained `sampled` with a fixed seed.
+    pub setup: StudySetup,
+    /// Fan-out width: `setup.node_graph` has `k` nodes at
+    /// [`K_FAN_BRANCH_STAGE_ID`] and `k` leaves at [`K_FAN_LEAF_STAGE_ID`].
+    pub k: usize,
+    /// `forward_passes` this fixture was configured with (mirrors
+    /// `setup`'s own resolved value; exposed so callers never re-guess it).
+    pub forward_passes: u32,
+    /// `node_graph::enumerated_scenario_count` for this fixture's graph — the
+    /// per-path enumeration the sampled scale assertion must stay strictly
+    /// below.
+    pub enumerated_scenario_count: u64,
+}
+
+/// Build the DECOMP K-fan [`StudySetup`]: a root (stage [`K_FAN_ROOT_STAGE_ID`])
+/// fanning into `k` distinct nodes (stage [`K_FAN_BRANCH_STAGE_ID`]) under
+/// non-uniform transition weights, each with its own deterministic leaf (stage
+/// [`K_FAN_LEAF_STAGE_ID`]) — `num_nodes (2k+1) > n_pools (k+2)` via leaf
+/// sharing, and a genuine `k`-node reverse-topological backward level at
+/// [`K_FAN_BRANCH_STAGE_ID`] (`backward_cut_levels`). Configured `sampled`
+/// (never `enumerated`) with a fixed seed, `forward_passes` trajectories per
+/// iteration, `max_iterations` iterations.
+///
+/// # Panics
+///
+/// Never in practice — see the rationale below.
+#[allow(clippy::expect_used)]
+// Rationale: every literal in `k_fan_system`/`k_fan_config` is a hand-checked,
+// internally-consistent fixture; `StudySetup::new` only errors on a malformed
+// system or config, neither of which this builder can produce, and
+// `enumerated_scenario_count` only errors on a `u64` path-product overflow,
+// unreachable at this fixture's scale.
+#[must_use]
+pub fn k_fan_setup(k: usize, forward_passes: u32, max_iterations: u32) -> KFanFixture {
+    let system = k_fan_system(k);
+    let config = k_fan_config(forward_passes, max_iterations);
+    let stochastic = build_stochastic_context(
+        &system,
+        K_FAN_SEED,
+        None,
+        &[],
+        &[],
+        OpeningTreeInputs::default(),
+        ClassSchemes {
+            inflow: Some(SamplingScheme::InSample),
+            load: Some(SamplingScheme::InSample),
+            ncs: Some(SamplingScheme::InSample),
+        },
+    )
+    .expect("k_fan_setup: build_stochastic_context must succeed");
+    let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
+
+    let setup = StudySetup::new(&system, &config, stochastic, hydro_models)
+        .expect("k_fan_setup: StudySetup::new must succeed");
+    let enumerated = enumerated_scenario_count(&setup.node_graph)
+        .expect("k_fan_setup: enumerated_scenario_count must not overflow at this scale");
+
+    KFanFixture {
+        setup,
+        k,
+        forward_passes,
+        enumerated_scenario_count: enumerated,
+    }
 }
