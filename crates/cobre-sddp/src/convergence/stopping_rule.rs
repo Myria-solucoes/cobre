@@ -314,14 +314,12 @@ impl StoppingRuleSet {
     /// [`StoppingMode::All`] stops only if all did.
     #[must_use]
     pub fn evaluate(&self, state: &MonitorState) -> (bool, Vec<StoppingRuleResult>) {
-        if state.shutdown_requested {
-            let results: Vec<StoppingRuleResult> =
-                self.rules.iter().map(|r| r.evaluate(state)).collect();
-            return (true, results);
-        }
-
         let results: Vec<StoppingRuleResult> =
             self.rules.iter().map(|r| r.evaluate(state)).collect();
+
+        if state.shutdown_requested {
+            return (true, results);
+        }
 
         // GracefulShutdown is excluded here — already handled above.
         let non_shutdown_triggered: Vec<bool> = self

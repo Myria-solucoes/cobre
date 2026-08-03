@@ -571,10 +571,6 @@ impl ForwardPassState {
 
     /// Sequential post-processing after the rayon parallel region.
     ///
-    /// Collects per-worker solver-statistic snapshots, decomposes timing
-    /// overhead, emits [`TrainingEvent::WorkerTiming`] events, and merges
-    /// per-worker cost vectors and stage stats into the final [`ForwardResult`].
-    ///
     /// # Errors
     ///
     /// Returns `Err(SddpError::*)` if any worker result is an `Err`.

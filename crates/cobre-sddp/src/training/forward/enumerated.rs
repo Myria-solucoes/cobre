@@ -76,7 +76,6 @@ impl AccumSnapshot {
         self.downstream_n_completed = ws_scratch.downstream_n_completed;
     }
 
-    /// Copy into another snapshot in place, reusing `dst`'s buffers.
     fn copy_into(&self, dst: &mut AccumSnapshot) {
         dst.lag_accumulator.clear();
         dst.lag_accumulator.extend_from_slice(&self.lag_accumulator);
@@ -230,6 +229,10 @@ pub(crate) struct EnumeratedForwardResult {
 /// # Errors
 ///
 /// Propagates `SddpError::Infeasible`/`SddpError::Solver` from the LP solve.
+// RATIONALE: one (node, prefix) LP solve threading disjoint partial borrows of the
+// solver workspace, cut state, and basis store; the pin-noise-solve-capture sequence is
+// one correctness-critical unit — extracting it would pass the whole workspace for no gain
+// or re-introduce the argument count.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn solve_forward_node<S: SolverInterface + Send>(
     ws: &mut SolverWorkspace<S>,
@@ -412,6 +415,9 @@ fn solve_forward_node<S: SolverInterface + Send>(
 /// # Errors
 ///
 /// Propagates `SddpError::Infeasible`/`SddpError::Solver` from any node solve.
+// RATIONALE: the stage-synced outer loop, per-stage (node, prefix) claim distribution, and
+// canonical-order arena scatter are one reproducibility-critical sequence; splitting it
+// would fragment the claim-order-independence contract for no clarity gain.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn run_enumerated_forward<S>(
     state: &mut EnumeratedForwardState,
@@ -652,6 +658,9 @@ fn walk_root_to_leaf(
 /// The capture slots — and every buffer they hold (`out_state`, the accumulator
 /// snapshot, the captured basis) — persist across stages and iterations, so no
 /// allocation occurs after warm-up.
+// RATIONALE: the per-worker claim loop threads disjoint partial borrows of one
+// &mut SolverWorkspace plus the shared claim counter and per-node arena; extracting would
+// pass the whole workspace for no gain or re-introduce the argument count.
 #[allow(clippy::too_many_arguments)]
 fn enumerated_stage_worker<S: SolverInterface + Send>(
     ws: &mut SolverWorkspace<S>,

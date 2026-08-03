@@ -341,10 +341,6 @@ mod tests {
 
     #[test]
     fn bound_stalling_triggers_when_stable() {
-        let monitor = ConvergenceMonitor::new(make_rule_set(StoppingRule::BoundStalling {
-            tolerance: 0.01,
-            iterations: 3,
-        }));
         let sync = default_sync();
         // 4 updates: history after each is [90], [90,99], [90,99,99.5], [90,99,99.5,100]
         // After 4th update: lb_window_start = history[4-3] = history[1] = 99.0
@@ -372,7 +368,6 @@ mod tests {
             "gap after 4th update must equal 10/110, got {}",
             monitor2.gap()
         );
-        let _ = monitor; // suppress unused warning
     }
 
     /// AC: IterationLimit(3) in Any mode triggers at the third update.

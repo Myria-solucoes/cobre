@@ -236,7 +236,6 @@ mod tests {
         }
     }
 
-    /// Verify that `IterationScratch::new` sizes all Vecs correctly.
     #[test]
     fn iteration_scratch_new_sizes_vecs_correctly() {
         let max_local_fwd = 2;
@@ -292,9 +291,6 @@ mod tests {
         );
     }
 
-    /// Verify that `IterationScratch::new` pre-freezes all templates so that
-    /// each `frozen_templates[t]` matches the structural shape of
-    /// `stage_ctx.templates[t]`.
     #[test]
     fn iteration_scratch_new_pre_freezes_templates() {
         let max_local_fwd = 2;
