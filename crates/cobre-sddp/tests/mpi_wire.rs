@@ -2076,3 +2076,147 @@ mod k_fan_graph_invariance {
         }
     }
 }
+
+mod k_fan_enumerated_determinism {
+    //! The enumerated all-paths forward's by-node reproducibility obligation on
+    //! the DECOMP K-fan: `final_lb`, the exact `final_ub`, and the generated cut
+    //! set are bit-identical (`to_bits`) across `--threads 1/2/4`, a same-shape
+    //! repeat, and a reversed input declaration order — the claim order is
+    //! decoupled from the per-node arena's canonical aggregation, so worker count
+    //! and thread scheduling cannot reach the result. A single-path (count-1)
+    //! chain under a `Rank0Of2` stub adds the 2-rank leg the backward by-node
+    //! gates also carry (faithful only at `forward_passes == 1`).
+
+    use cobre_comm::Communicator;
+    use cobre_sddp::StudySetup;
+    use cobre_sddp::test_support::{
+        KFanFixture, k_fan_setup_enumerated, k_fan_setup_enumerated_reversed,
+        single_path_enumerated_setup,
+    };
+    use cobre_solver::ActiveSolver;
+
+    use crate::common::{Rank0Of2, StubComm};
+
+    const K: usize = 6;
+    const MAX_ITERATIONS: u32 = 6;
+
+    /// Bit pattern of every active cut in the trained policy (`intercept`, then
+    /// each coefficient), pool-major then slot-major — the canonical, append-only
+    /// order, so two byte-identical policies produce identical vectors.
+    fn cut_set_bits(setup: &StudySetup) -> Vec<u64> {
+        let mut bits = Vec::new();
+        for pool in &setup.fcf.pools {
+            for slot in 0..pool.populated() {
+                if pool.is_active(slot) {
+                    bits.push(pool.intercept(slot).to_bits());
+                    bits.extend(pool.coefficient_row(slot).iter().map(|c| c.to_bits()));
+                }
+            }
+        }
+        bits
+    }
+
+    /// Train one K-fan shape, returning `(final_lb bits, final_ub bits, cut set
+    /// bits)`.
+    fn train_shape(mut fixture: KFanFixture, n_threads: usize) -> (u64, u64, Vec<u64>) {
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = fixture
+            .setup
+            .train(&mut solver, &comm, n_threads, ActiveSolver::new, None, None)
+            .expect("enumerated K-fan training must return Ok");
+        assert!(
+            outcome.error.is_none(),
+            "enumerated K-fan training must not error: {:?}",
+            outcome.error
+        );
+        (
+            outcome.result.final_lb.to_bits(),
+            outcome.result.final_ub.to_bits(),
+            cut_set_bits(&fixture.setup),
+        )
+    }
+
+    /// Power precondition: the fan carries `>= 2` cut-generating nodes and
+    /// `forward_passes` exceeds the largest thread count crossed, so a
+    /// multi-worker shape genuinely splits node work across worker boundaries.
+    fn assert_genuine_multi_node(max_threads: usize) {
+        let probe = k_fan_setup_enumerated(K, MAX_ITERATIONS);
+        let fan_nodes = (0..probe.setup.node_graph.nodes.len())
+            .filter(|&pos| !probe.setup.node_graph.successors[pos].is_empty())
+            .count()
+            - 1;
+        assert!(
+            fan_nodes >= 2,
+            "K-fan must carry >= 2 fan nodes (got {fan_nodes})"
+        );
+        assert!(
+            probe.forward_passes as usize > max_threads,
+            "forward_passes ({}) must exceed the largest thread count crossed ({max_threads})",
+            probe.forward_passes
+        );
+    }
+
+    #[test]
+    fn enumerated_k_fan_thread_and_declaration_shapes_agree() {
+        assert_genuine_multi_node(4);
+
+        let (lb1, ub1, cuts1) = train_shape(k_fan_setup_enumerated(K, MAX_ITERATIONS), 1);
+        let check = |label: &str, shape: (u64, u64, Vec<u64>)| {
+            let (lb, ub, cuts) = shape;
+            assert_eq!(lb, lb1, "{label}: final_lb must be bit-identical");
+            assert_eq!(ub, ub1, "{label}: exact final_ub must be bit-identical");
+            assert_eq!(
+                cuts, cuts1,
+                "{label}: the generated cut set must be bit-identical"
+            );
+        };
+        check(
+            "threads=4",
+            train_shape(k_fan_setup_enumerated(K, MAX_ITERATIONS), 4),
+        );
+        check(
+            "threads=2",
+            train_shape(k_fan_setup_enumerated(K, MAX_ITERATIONS), 2),
+        );
+        check(
+            "threads=1 repeat",
+            train_shape(k_fan_setup_enumerated(K, MAX_ITERATIONS), 1),
+        );
+        check(
+            "reversed-declaration threads=4",
+            train_shape(k_fan_setup_enumerated_reversed(K, MAX_ITERATIONS), 4),
+        );
+        assert!(!cuts1.is_empty(), "the run must generate at least one cut");
+    }
+
+    /// 2-rank stub: a single-path (count-1) enumerated chain trained rank-0-of-1
+    /// (`StubComm`) vs rank-0-of-2 (`Rank0Of2`, faithful at `forward_passes ==
+    /// 1`) yields a bit-identical `final_lb`/`final_ub` — the cross-rank
+    /// `allgatherv` displacement and the exact-bound reduction are rank-count
+    /// invariant, mirroring the backward by-node `Rank0Of2` gates.
+    #[test]
+    fn enumerated_single_path_2rank_stub_matches_single_rank() {
+        fn run(comm: &impl Communicator) -> (u64, u64) {
+            let mut setup = single_path_enumerated_setup(MAX_ITERATIONS);
+            let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+            let outcome = setup
+                .train(&mut solver, comm, 1, ActiveSolver::new, None, None)
+                .expect("single-path enumerated training must return Ok");
+            assert!(
+                outcome.error.is_none(),
+                "training error: {:?}",
+                outcome.error
+            );
+            (
+                outcome.result.final_lb.to_bits(),
+                outcome.result.final_ub.to_bits(),
+            )
+        }
+
+        let (lb_1, ub_1) = run(&StubComm);
+        let (lb_2, ub_2) = run(&Rank0Of2);
+        assert_eq!(lb_1, lb_2, "final_lb must be rank-count invariant");
+        assert_eq!(ub_1, ub_2, "exact final_ub must be rank-count invariant");
+    }
+}

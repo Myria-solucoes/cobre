@@ -27,7 +27,10 @@ use crate::{
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
     error::SddpError,
-    forward::{ForwardResult, StageKey, run_forward_stage},
+    forward::{
+        EnumeratedForwardResult, EnumeratedForwardState, EnumeratedParams, ForwardResult, StageKey,
+        run_enumerated_forward, run_forward_stage,
+    },
     indexer::StateSpace,
     setup::node_graph::{any_stage_node, frontier_node, node_opening_range},
     solve::partition,
@@ -224,6 +227,15 @@ pub(crate) struct ForwardPassState {
     /// Defaults to `Phase::Forward.profile()`; override with
     /// [`Self::set_profile`] before the first `run()` call.
     profile: ActiveProfile,
+
+    /// `true` when `selection = enumerated`: [`Self::run`] dispatches to the
+    /// enumerated all-paths engine instead of the sampled by-scenario driver.
+    /// Set once via [`Self::set_enumerated`]; defaults to `false` (sampled).
+    enumerated: bool,
+
+    /// Graph-invariant enumerated traversal plan + reused arenas, built lazily
+    /// on the first enumerated run. `None` on the sampled path.
+    enumerated_state: Option<EnumeratedForwardState>,
 }
 
 impl ForwardPassState {
@@ -256,6 +268,8 @@ impl ForwardPassState {
             stage_stats,
             reconcile_scratch: [0_i32; 1],
             profile: Phase::Forward.profile(),
+            enumerated: false,
+            enumerated_state: None,
         }
     }
 
@@ -263,6 +277,13 @@ impl ForwardPassState {
     /// entry (default: `Phase::Forward.profile()`). Call before `run()`.
     pub(crate) fn set_profile(&mut self, profile: ActiveProfile) {
         self.profile = profile;
+    }
+
+    /// Routes [`Self::run`] to the enumerated all-paths engine (`true`) or the
+    /// sampled by-scenario driver (`false`, the default). Set once from
+    /// `selection`; there is no separate forward-scheduler knob.
+    pub(crate) fn set_enumerated(&mut self, enumerated: bool) {
+        self.enumerated = enumerated;
     }
 
     /// Execute the forward pass for one training iteration on this rank.
@@ -334,6 +355,10 @@ impl ForwardPassState {
             external_load_library: training_ctx.external_load_library,
             external_ncs_library: training_ctx.external_ncs_library,
         })?;
+
+        if self.enumerated {
+            return self.run_enumerated(inputs, &sampler);
+        }
 
         let n_workers = inputs.workspaces.len().max(1);
         let start = Instant::now();
@@ -457,6 +482,91 @@ impl ForwardPassState {
             start,
         };
         self.post_process_worker_results(inputs, worker_results, &ppc)
+    }
+
+    /// Enumerated all-paths forward for one iteration: dispatched from
+    /// [`Self::run`] when `selection = enumerated`. Applies the forward profile,
+    /// builds (once) the graph-invariant traversal plan, and drives the by-node
+    /// engine, whose per-path costs feed the exact `Σ P(ℓ)·C(ℓ)` bound.
+    ///
+    /// # Errors
+    ///
+    /// Propagates `SddpError::Infeasible`/`SddpError::Solver` from any node solve.
+    fn run_enumerated<S>(
+        &mut self,
+        inputs: &mut ForwardPassInputs<'_, S>,
+        sampler: &ForwardSampler<'_>,
+    ) -> Result<ForwardResult, SddpError>
+    where
+        S: SolverInterface<Profile = ActiveProfile> + Send,
+    {
+        let start = Instant::now();
+        let training_ctx = inputs.training_ctx;
+        let num_stages = training_ctx.horizon.num_stages();
+        let n_state = training_ctx.state.n_state;
+
+        let forward_profile = self.profile;
+        for ws in inputs.workspaces.iter_mut() {
+            ws.solver.set_profile(&forward_profile);
+        }
+        for ws in inputs.workspaces.iter_mut() {
+            ws.worker_timing_buf = WorkerPhaseTimings::default();
+        }
+
+        let terminal_has_boundary_cuts = num_stages > 0 && {
+            let terminal_node = any_stage_node(training_ctx.node_graph, num_stages - 1);
+            inputs.fcf.pools[training_ctx.node_graph.nodes[terminal_node].pool_id].warm_start_count
+                > 0
+        };
+
+        let node_graph = training_ctx.node_graph;
+        let dcs_params = training_ctx.dcs.filter(|p| p.is_active(inputs.iteration));
+
+        let params = EnumeratedParams {
+            num_stages,
+            iteration: inputs.iteration,
+            fwd_offset: inputs.fwd_offset,
+            local_forward_passes: inputs.local_forward_passes,
+            total_forward_passes: inputs.total_forward_passes,
+            terminal_has_boundary_cuts,
+            noise_dim: training_ctx.stochastic.dim(),
+            initial_state: training_ctx.initial_state,
+            lag_accum_seed: training_ctx.lag_accum_seed,
+            lag_weight_seed: training_ctx.lag_weight_seed,
+            ctx: inputs.ctx,
+            frozen: inputs.frozen,
+            fcf: inputs.fcf,
+            training_ctx,
+            sampler,
+            dcs: dcs_params,
+        };
+
+        let enum_state = self
+            .enumerated_state
+            .get_or_insert_with(|| EnumeratedForwardState::new(node_graph, n_state));
+        let EnumeratedForwardResult {
+            scenario_costs,
+            lp_solves,
+            stage_stats,
+        } = run_enumerated_forward(
+            enum_state,
+            inputs.workspaces,
+            inputs.basis_store,
+            inputs.records,
+            &params,
+        )?;
+
+        #[allow(clippy::cast_possible_truncation)]
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        Ok(ForwardResult {
+            scenario_costs,
+            elapsed_ms,
+            lp_solves,
+            setup_time_ms: 0,
+            load_imbalance_ms: 0,
+            scheduling_overhead_ms: 0,
+            stage_stats,
+        })
     }
 
     /// Sequential post-processing after the rayon parallel region.

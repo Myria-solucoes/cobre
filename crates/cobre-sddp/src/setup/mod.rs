@@ -533,12 +533,7 @@ impl StudySetup {
             ),
         );
         let forward_passes = if training_enumerated {
-            resolve_enumerated_count(
-                &node_graph,
-                None,
-                "training",
-                "the exhaustive forward-pass traversal",
-            )?
+            resolve_enumerated_training_count(&node_graph)?
         } else {
             forward_passes
         };
@@ -1701,6 +1696,107 @@ fn resolve_enumerated_count(
              today"
         )))
     }
+}
+
+/// Resolve the `enumerated`-declared TRAINING forward-pass count once the node
+/// graph exists: the fully-enumerated path count
+/// [`node_graph::enumerated_scenario_count`], propagating its `K^T` overflow
+/// guard unchanged. Unlike the simulation resolver above, any derived count
+/// `>= 1` executes — the enumerated all-paths forward engine is the consumer.
+///
+/// Rejects a graph carrying a non-singleton within-node opening set at any
+/// node: the forward engine solves each node once per distinct incoming state,
+/// which enumerates the graph's structural branching but not within-node
+/// weighted openings (deferred). A generated multi-opening node would make the
+/// per-node solve count understate the true path set, silently biasing the
+/// exact bound — so it is rejected here, not run.
+///
+/// Also rejects a recombining node via [`reject_recombining_node_enumeration`]:
+/// the engine reconstructs incoming state through a single predecessor, which a
+/// multi-parent node has no unique choice of. Sampled selection admits both
+/// shapes.
+///
+/// # Errors
+///
+/// Propagates [`node_graph::enumerated_scenario_count`]'s overflow
+/// [`SddpError::Validation`]; returns [`SddpError::Validation`] when a node
+/// carries more than one opening, when a node has two or more predecessors (a
+/// recombination join), or when the derived count exceeds `u32`.
+fn resolve_enumerated_training_count(node_graph: &NodeGraph) -> Result<u32, SddpError> {
+    let derived = node_graph::enumerated_scenario_count(node_graph)?;
+    reject_within_node_opening_enumeration(node_graph)?;
+    reject_recombining_node_enumeration(node_graph)?;
+    u32::try_from(derived).map_err(|_| {
+        SddpError::Validation(format!(
+            "training enumerated scenario selection derived {derived} paths from the policy \
+             graph, exceeding the u32 forward-pass count the engine addresses"
+        ))
+    })
+}
+
+/// Reject an `enumerated` graph whose branching is expressed as within-node
+/// openings rather than structurally as distinct nodes: the enumerated forward
+/// engine solves each node once per distinct incoming state and does not
+/// enumerate a node's own opening set, so a `|Ω_n| > 1` node would be sampled
+/// at a single realization while the exact bound weights it as if fully
+/// enumerated. Declare the branching structurally (one realization per node)
+/// or use sampled selection.
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] naming the first offending node id, its
+/// stage, and its opening count.
+fn reject_within_node_opening_enumeration(node_graph: &NodeGraph) -> Result<(), SddpError> {
+    if let Some((pos, node)) = node_graph
+        .nodes
+        .iter()
+        .enumerate()
+        .find(|(_, n)| n.openings.len > 1)
+    {
+        return Err(SddpError::Validation(format!(
+            "enumerated scenario selection requires a singleton within-node opening set at \
+             every node, but node id {} (stage {}) carries {} openings; within-node weighted \
+             opening enumeration is not yet wired — declare the branching structurally (one \
+             realization per node) or use sampled selection",
+            node_graph.node_ids[pos], node.stage, node.openings.len
+        )));
+    }
+    Ok(())
+}
+
+/// Reject an `enumerated` graph carrying a recombination join — a node reached
+/// from two or more predecessor nodes (in-degree ≥ 2, counting how many
+/// successor edges name it as a child). The enumerated forward engine
+/// reconstructs each visited node's incoming state through the
+/// single-predecessor [`node_graph::build_parent_map`]; a multi-parent node
+/// would, in a release build, be solved once under one arbitrarily chosen
+/// parent's outgoing state while paths arriving through its other parent
+/// silently read that wrong state — an invalid exact bound, not a compile
+/// error. This setup-time guard precedes and makes release-active
+/// `build_parent_map`'s single-predecessor `debug_assert`. Sampled selection is
+/// unaffected: it carries each trajectory's own incoming state and resolves
+/// recombination natively.
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] naming the first offending node id and its
+/// stage (sibling to the within-node-opening rejection above).
+fn reject_recombining_node_enumeration(node_graph: &NodeGraph) -> Result<(), SddpError> {
+    let mut in_degree = vec![0usize; node_graph.nodes.len()];
+    for succ in node_graph.successors.iter().flatten() {
+        in_degree[succ.child] += 1;
+    }
+    if let Some(pos) = in_degree.iter().position(|&d| d >= 2) {
+        return Err(SddpError::Validation(format!(
+            "enumerated scenario selection requires a single-predecessor (tree) policy graph, \
+             but node id {} (stage {}) is reached from {} predecessor nodes (a recombination \
+             join); per-prefix state reconstruction for a multi-parent node is not yet wired — \
+             use sampled selection, which handles recombination, or declare a non-recombining \
+             graph (sibling requirement: a singleton within-node opening set at every node)",
+            node_graph.node_ids[pos], node_graph.nodes[pos].stage, in_degree[pos]
+        )));
+    }
+    Ok(())
 }
 
 fn build_entity_counts(system: &System) -> EntityCounts {

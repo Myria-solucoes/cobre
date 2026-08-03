@@ -28,8 +28,9 @@ use cobre_io::StageIdResolver;
 use cobre_io::config::{
     Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig, InflowNonNegativityMethod,
     ModelingConfig, ParallelismConfig, PolicyConfig, RowSelectionConfig,
-    SimulationConfig as IoSimulationConfig, StateSpaceConfig, StoppingMode, StoppingRuleConfig,
-    TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+    SimulationConfig as IoSimulationConfig, SimulationSelection, StateSpaceConfig, StoppingMode,
+    StoppingRuleConfig, TrainingConfig, TrainingSelection, TrainingSolverConfig,
+    UpperBoundEvaluationConfig,
 };
 use cobre_stochastic::par::precompute::PrecomputedPar;
 use cobre_stochastic::{
@@ -854,7 +855,7 @@ const K_FAN_LEAF_STAGE_ID: i32 = 2;
     clippy::cast_possible_wrap,
     clippy::cast_possible_truncation
 )]
-fn k_fan_policy_graph(k: usize) -> PolicyGraph {
+fn k_fan_policy_graph(k: usize, reversed: bool) -> PolicyGraph {
     debug_assert!(k >= 2, "k_fan_policy_graph: k must be >= 2 (DECOMP shape)");
     let mut nodes = Vec::with_capacity(1 + 2 * k);
     let mut transitions = Vec::with_capacity(2 * k);
@@ -892,6 +893,13 @@ fn k_fan_policy_graph(k: usize) -> PolicyGraph {
             probability: 1.0,
             annual_discount_rate_override: None,
         });
+    }
+    // A reversed declaration order must resolve to the identical canonical node
+    // graph (build_node_graph sorts nodes by id, out-edges by target) — the input
+    // for the enumerated engine's declaration-order-invariance gate.
+    if reversed {
+        nodes.reverse();
+        transitions.reverse();
     }
     PolicyGraph {
         graph_type: PolicyGraphType::FiniteHorizon,
@@ -953,7 +961,16 @@ fn k_fan_stage(index: usize, id: i32) -> Stage {
 // literal the caller reads as a whole. The calendar dates are valid by
 // construction, and `SystemBuilder::build` only errors on a malformed system,
 // which every literal below avoids.
-fn k_fan_system(k: usize) -> System {
+fn k_fan_system(k: usize, reversed: bool) -> System {
+    fan_or_chain_system(3, k_fan_policy_graph(k, reversed))
+}
+
+/// Shared single-hydro/single-bus study over `n_stages` stages (each a 744h
+/// block, `branching_factor: 1`), driven by an explicit `policy_graph` — the
+/// declared K-fan (`n_stages == 3`) or, with an empty graph, the chain
+/// degeneracy the enumerated engine's single-path (count-1) 2-rank stub needs.
+#[allow(clippy::too_many_lines, clippy::expect_used)]
+fn fan_or_chain_system(n_stages: usize, policy_graph: PolicyGraph) -> System {
     let bus_id = EntityId(1);
     let hydro_id = EntityId(2);
 
@@ -1015,62 +1032,31 @@ fn k_fan_system(k: usize) -> System {
     };
     hydro.declare_mirror_unit_group(bus_id);
 
-    let stages = vec![
-        k_fan_stage(0, K_FAN_ROOT_STAGE_ID),
-        k_fan_stage(1, K_FAN_BRANCH_STAGE_ID),
-        k_fan_stage(2, K_FAN_LEAF_STAGE_ID),
-    ];
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let stages: Vec<_> = (0..n_stages).map(|i| k_fan_stage(i, i as i32)).collect();
 
-    let inflow_models = vec![
-        InflowModel {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let inflow_models: Vec<_> = (0..n_stages)
+        .map(|i| InflowModel {
             hydro_id,
-            stage_id: K_FAN_ROOT_STAGE_ID,
+            stage_id: i as i32,
             mean_m3s: 60.0,
             std_m3s: 0.0,
             ar_coefficients: vec![],
             residual_std_ratio: 1.0,
             annual: None,
-        },
-        InflowModel {
-            hydro_id,
-            stage_id: K_FAN_BRANCH_STAGE_ID,
-            mean_m3s: 60.0,
-            std_m3s: 0.0,
-            ar_coefficients: vec![],
-            residual_std_ratio: 1.0,
-            annual: None,
-        },
-        InflowModel {
-            hydro_id,
-            stage_id: K_FAN_LEAF_STAGE_ID,
-            mean_m3s: 60.0,
-            std_m3s: 0.0,
-            ar_coefficients: vec![],
-            residual_std_ratio: 1.0,
-            annual: None,
-        },
-    ];
+        })
+        .collect();
 
-    let load_models = vec![
-        LoadModel {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let load_models: Vec<_> = (0..n_stages)
+        .map(|i| LoadModel {
             bus_id,
-            stage_id: K_FAN_ROOT_STAGE_ID,
+            stage_id: i as i32,
             mean_mw: 80.0,
             std_mw: 0.0,
-        },
-        LoadModel {
-            bus_id,
-            stage_id: K_FAN_BRANCH_STAGE_ID,
-            mean_mw: 80.0,
-            std_mw: 0.0,
-        },
-        LoadModel {
-            bus_id,
-            stage_id: K_FAN_LEAF_STAGE_ID,
-            mean_mw: 80.0,
-            std_mw: 0.0,
-        },
-    ];
+        })
+        .collect();
 
     let bounds = ResolvedBounds::new(
         &BoundsCountsSpec {
@@ -1079,7 +1065,7 @@ fn k_fan_system(k: usize) -> System {
             n_lines: 0,
             n_pumping: 0,
             n_contracts: 0,
-            n_stages: 3,
+            n_stages,
             k_max: 0,
         },
         &BoundsDefaults {
@@ -1125,7 +1111,7 @@ fn k_fan_system(k: usize) -> System {
             n_buses: 1,
             n_lines: 0,
             n_ncs: 0,
-            n_stages: 3,
+            n_stages,
         },
         &PenaltiesDefaults {
             hydro: HydroStagePenalties {
@@ -1174,9 +1160,9 @@ fn k_fan_system(k: usize) -> System {
         .bounds(bounds)
         .penalties(penalties)
         .initial_conditions(initial_conditions)
-        .policy_graph(k_fan_policy_graph(k))
+        .policy_graph(policy_graph)
         .build()
-        .expect("k_fan_system: valid DECOMP K-fan study")
+        .expect("fan_or_chain_system: valid study")
 }
 
 /// The `sampled`-mode training [`Config`] for [`k_fan_setup`]: `forward_passes`
@@ -1254,8 +1240,47 @@ pub struct KFanFixture {
 // unreachable at this fixture's scale.
 #[must_use]
 pub fn k_fan_setup(k: usize, forward_passes: u32, max_iterations: u32) -> KFanFixture {
-    let system = k_fan_system(k);
-    let config = k_fan_config(forward_passes, max_iterations);
+    k_fan_fixture(k, false, k_fan_config(forward_passes, max_iterations))
+}
+
+/// The DECOMP K-fan [`StudySetup`] configured `enumerated`: the forward
+/// distribution is the exhaustive all-paths engine, so `forward_passes` is
+/// resolved by the node graph to `enumerated_scenario_count` (= `k`), not a
+/// caller value. Otherwise identical to [`k_fan_setup`] (fixed seed, iteration
+/// limit `max_iterations`).
+///
+/// # Panics
+///
+/// Never in practice — as [`k_fan_setup`].
+#[must_use]
+pub fn k_fan_setup_enumerated(k: usize, max_iterations: u32) -> KFanFixture {
+    k_fan_fixture(k, false, k_fan_config_enumerated(max_iterations))
+}
+
+/// [`k_fan_setup_enumerated`] with the node/transition declaration order
+/// reversed. `build_node_graph`'s canonical sort must recover the identical
+/// graph, so an enumerated run over this fixture is bit-for-bit identical to
+/// the canonical one — the declaration-order-invariance gate.
+#[must_use]
+pub fn k_fan_setup_enumerated_reversed(k: usize, max_iterations: u32) -> KFanFixture {
+    k_fan_fixture(k, true, k_fan_config_enumerated(max_iterations))
+}
+
+/// A single-path (count-1) `enumerated` chain study: a 2-stage,
+/// `branching_factor: 1` chain (empty policy graph) whose enumerated path count
+/// resolves to `1`. The faithful fixture for the enumerated engine's 2-rank
+/// stub — `RankOf2` only faithfully simulates rank 0 of 2 when `forward_passes
+/// == 1` (rank 1 then genuinely does nothing), matching the backward by-node
+/// gates.
+///
+/// # Panics
+///
+/// Never in practice — as [`k_fan_setup`].
+#[allow(clippy::expect_used)]
+#[must_use]
+pub fn single_path_enumerated_setup(max_iterations: u32) -> StudySetup {
+    let system = fan_or_chain_system(2, PolicyGraph::default());
+    let config = k_fan_config_enumerated(max_iterations);
     let stochastic = build_stochastic_context(
         &system,
         K_FAN_SEED,
@@ -1269,18 +1294,94 @@ pub fn k_fan_setup(k: usize, forward_passes: u32, max_iterations: u32) -> KFanFi
             ncs: Some(SamplingScheme::InSample),
         },
     )
-    .expect("k_fan_setup: build_stochastic_context must succeed");
+    .expect("single_path_enumerated_setup: build_stochastic_context must succeed");
+    let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
+    StudySetup::new(&system, &config, stochastic, hydro_models)
+        .expect("single_path_enumerated_setup: StudySetup::new must succeed")
+}
+
+/// Shared build for [`k_fan_setup`]/[`k_fan_setup_enumerated`]: builds the
+/// stochastic context and study for `config` and derives the fixture's exposed
+/// counts from the resolved study (never a caller literal).
+// `config` is taken by value so callers pass an owned builder result inline; the
+// body only borrows it for `StudySetup::new`.
+#[allow(clippy::expect_used, clippy::needless_pass_by_value)]
+#[must_use]
+fn k_fan_fixture(k: usize, reversed: bool, config: Config) -> KFanFixture {
+    let system = k_fan_system(k, reversed);
+    let stochastic = build_stochastic_context(
+        &system,
+        K_FAN_SEED,
+        None,
+        &[],
+        &[],
+        OpeningTreeInputs::default(),
+        ClassSchemes {
+            inflow: Some(SamplingScheme::InSample),
+            load: Some(SamplingScheme::InSample),
+            ncs: Some(SamplingScheme::InSample),
+        },
+    )
+    .expect("k_fan_fixture: build_stochastic_context must succeed");
     let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
 
     let setup = StudySetup::new(&system, &config, stochastic, hydro_models)
-        .expect("k_fan_setup: StudySetup::new must succeed");
+        .expect("k_fan_fixture: StudySetup::new must succeed");
     let enumerated = enumerated_scenario_count(&setup.node_graph)
-        .expect("k_fan_setup: enumerated_scenario_count must not overflow at this scale");
+        .expect("k_fan_fixture: enumerated_scenario_count must not overflow at this scale");
 
     KFanFixture {
+        forward_passes: setup.loop_params.forward_passes,
         setup,
         k,
-        forward_passes,
         enumerated_scenario_count: enumerated,
     }
+}
+
+/// The `enumerated`-mode training [`Config`] for [`k_fan_setup_enumerated`]:
+/// `selection = enumerated` (no explicit `forward_passes` — the graph derives
+/// it), fixed seed, iteration-limit stopping rule.
+fn k_fan_config_enumerated(max_iterations: u32) -> Config {
+    let mut config = k_fan_config(1, max_iterations);
+    config.training.forward_passes = None;
+    config.training.selection = Some(TrainingSelection::Enumerated {});
+    config
+}
+
+/// Attempt to build the K-fan study with `simulation.selection = enumerated`,
+/// returning the setup result unpanicked — the enumerated `K >= 2` simulation
+/// rejection is a `Result`, not a fixture, so callers assert on the `Err`.
+///
+/// # Errors
+///
+/// Returns whatever `StudySetup::new` returns for the enumerated-simulation
+/// config (a [`SddpError::Validation`] on the `K >= 2` graph).
+///
+/// # Panics
+///
+/// Never in practice: `build_stochastic_context` is infallible for this
+/// hand-checked fixture (only the `StudySetup::new` result is returned).
+#[allow(clippy::expect_used)]
+pub fn try_k_fan_simulation_enumerated(k: usize) -> Result<StudySetup, SddpError> {
+    let system = k_fan_system(k, false);
+    let mut config = k_fan_config(1, 1);
+    config.simulation.enabled = true;
+    config.simulation.num_scenarios = None;
+    config.simulation.selection = Some(SimulationSelection::Enumerated {});
+    let stochastic = build_stochastic_context(
+        &system,
+        K_FAN_SEED,
+        None,
+        &[],
+        &[],
+        OpeningTreeInputs::default(),
+        ClassSchemes {
+            inflow: Some(SamplingScheme::InSample),
+            load: Some(SamplingScheme::InSample),
+            ncs: Some(SamplingScheme::InSample),
+        },
+    )
+    .expect("try_k_fan_simulation_enumerated: build_stochastic_context must succeed");
+    let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
+    StudySetup::new(&system, &config, stochastic, hydro_models)
 }

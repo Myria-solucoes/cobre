@@ -7562,3 +7562,129 @@ mod k_fan_branching_sampled_coverage {
         );
     }
 }
+
+mod k_fan_enumerated_exact_bound {
+    //! Enumerated all-paths forward on the DECOMP K-fan (`K >= 2`): the exhaustive
+    //! engine visits every distinct node once, reconstructs each root->leaf path's
+    //! cost, and reduces the exact bound `Σ_ℓ P(ℓ)·C(ℓ)`. The lower bound (an
+    //! independent root Bellman evaluation) is the reference the exact upper bound
+    //! must close to; the forward LP-solve total pins the dedup scale gate.
+
+    use cobre_sddp::TrainingOutcome;
+    use cobre_sddp::test_support::{k_fan_setup_enumerated, try_k_fan_simulation_enumerated};
+    use cobre_solver::ActiveSolver;
+
+    use super::common::StubComm;
+
+    const K: usize = 4;
+    const MAX_ITERATIONS: u32 = 15;
+
+    fn train() -> (cobre_sddp::test_support::KFanFixture, TrainingOutcome) {
+        let mut fixture = k_fan_setup_enumerated(K, MAX_ITERATIONS);
+        assert_eq!(
+            u64::from(fixture.forward_passes),
+            fixture.enumerated_scenario_count,
+            "enumerated forward_passes must resolve to the graph's path count"
+        );
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = fixture
+            .setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("enumerated K-fan training must return Ok");
+        assert!(
+            outcome.error.is_none(),
+            "enumerated K-fan training must not error: {:?}",
+            outcome.error
+        );
+        (fixture, outcome)
+    }
+
+    /// The exact upper bound `Σ_ℓ P(ℓ)·C(ℓ)` closes to the independent lower-bound
+    /// root evaluation (the reference), with a zero CI half-width (a deduplicated
+    /// enumeration carries no sampling distribution). Trains `>= 3` iterations
+    /// without an `Infeasible`.
+    #[test]
+    fn enumerated_k_fan_closes_lb_to_exact_ub_with_zero_ci() {
+        let (_fixture, outcome) = train();
+        let result = outcome.result;
+
+        assert!(
+            result.iterations >= 3,
+            "must train >= 3 iterations (ran {})",
+            result.iterations
+        );
+        assert!(result.final_lb.is_finite() && result.final_ub.is_finite());
+
+        let tol = 1e-6 * result.final_ub.abs().max(1.0);
+        assert!(
+            (result.final_ub - result.final_lb).abs() <= tol,
+            "the exact UB {} must close to the independent LB {} within {tol}",
+            result.final_ub,
+            result.final_lb,
+        );
+        assert_eq!(
+            result.final_ub_std, 0.0,
+            "an enumerated bound has no sampling distribution: std must be 0"
+        );
+    }
+
+    /// Dedup scale gate: the enumerated forward solves each distinct node
+    /// exactly once, so the per-iteration forward LP-solve total equals
+    /// `Σ enumerated_visit_bound` (the node count on a `|Ω|=1` tree), strictly
+    /// below the naive per-path total `enumerated_scenario_count * path_length`.
+    #[test]
+    fn enumerated_k_fan_forward_solves_equal_dedup_total_below_naive() {
+        let (fixture, outcome) = train();
+        let node_graph = &fixture.setup.node_graph;
+
+        // Σ enumerated_visit_bound on a |Ω|=1 tree == the node count (π(n) = 1).
+        let dedup_total = node_graph.nodes.len() as u64;
+        let path_length = 1 + node_graph
+            .nodes
+            .iter()
+            .map(|n| n.stage)
+            .max()
+            .expect("the K-fan has nodes") as u64;
+        assert_eq!(path_length, 3, "root -> fan -> leaf");
+        let naive_total = fixture.enumerated_scenario_count * path_length;
+        assert!(
+            dedup_total < naive_total,
+            "dedup total ({dedup_total}) must be strictly below naive per-path re-solving \
+             ({naive_total})"
+        );
+
+        for iteration in 1..=u64::from(MAX_ITERATIONS).min(outcome.result.iterations) {
+            let forward_solves: u64 = outcome
+                .result
+                .solver_stats_log
+                .iter()
+                .filter(|e| e.iteration == iteration && e.phase == "forward")
+                .map(|e| e.delta.lp_solves)
+                .sum();
+            assert_eq!(
+                forward_solves, dedup_total,
+                "iteration {iteration}: enumerated forward must solve each node once \
+                 (total {dedup_total}), not re-solve shared prefixes per path"
+            );
+        }
+    }
+
+    /// The simulation-enumerated guard stays: weighted/census simulation is a
+    /// later epic, so an enumerated `K >= 2` simulation is rejected with a crisp
+    /// named `SddpError::Validation` (training-only guard lift).
+    #[test]
+    fn enumerated_k_ge_2_simulation_is_rejected() {
+        let err = try_k_fan_simulation_enumerated(K)
+            .expect_err("enumerated K>=2 simulation must be rejected");
+        match err {
+            cobre_sddp::SddpError::Validation(msg) => {
+                assert!(
+                    msg.contains("simulation") && msg.contains("not yet wired"),
+                    "the rejection must name the simulation capability: {msg}"
+                );
+            }
+            other => panic!("expected SddpError::Validation, got {other:?}"),
+        }
+    }
+}

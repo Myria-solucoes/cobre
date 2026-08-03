@@ -8705,6 +8705,73 @@ fn resolve_enumerated_count_agreeing_census_still_rejects_non_deterministic_grap
     }
 }
 
+/// Root (stage 0) fans to two stage-1 nodes that both point at one stage-2 leaf
+/// (node id 3): that leaf is reached from two distinct parents, so its
+/// in-degree is 2 — a recombination join. Every node carries a singleton
+/// opening set, so the within-node-opening rejection passes and the
+/// recombination guard is what fires.
+fn recombining_tree_node_graph() -> super::NodeGraph {
+    super::NodeGraph {
+        node_ids: vec![0, 1, 2, 3],
+        nodes: vec![ng_node(0, 1), ng_node(1, 1), ng_node(1, 1), ng_node(2, 1)],
+        successors: vec![
+            vec![ng_edge(1), ng_edge(2)],
+            vec![ng_edge(3)],
+            vec![ng_edge(3)],
+            vec![],
+        ],
+        n_pools: 1,
+        pool_stage: vec![0],
+    }
+}
+
+/// A recombining node (in-degree ≥ 2) under enumerated TRAINING is a named
+/// `Validation` rejection — the release-active guard that stands in for
+/// `build_parent_map`'s single-predecessor `debug_assert`, so the enumerated
+/// engine never reconstructs a multi-parent node's incoming state from one
+/// arbitrary parent.
+#[test]
+fn resolve_enumerated_training_count_rejects_recombining_node() {
+    let ng = recombining_tree_node_graph();
+
+    // Confirm the fixture genuinely recombines before asserting: node id 3 must
+    // be reached by two distinct parents, or the rejection assertion is vacuous.
+    let leaf_in_degree = ng
+        .successors
+        .iter()
+        .flatten()
+        .filter(|s| s.child == 3)
+        .count();
+    assert_eq!(leaf_in_degree, 2, "fixture must recombine at node id 3");
+
+    match super::resolve_enumerated_training_count(&ng) {
+        Err(SddpError::Validation(msg)) => {
+            assert!(msg.contains("node id 3"), "names the offending node: {msg}");
+            assert!(msg.contains("stage 2"), "names its stage: {msg}");
+            assert!(
+                msg.contains("recombination"),
+                "names the recombination cause: {msg}"
+            );
+        }
+        other => panic!("expected a recombination Validation error, got {other:?}"),
+    }
+}
+
+/// The SAME recombining graph is admitted by the sampled forward's setup-time
+/// consumer (`sampled_visit_bound`): sampled carries per-trajectory state and
+/// needs no single-predecessor assumption, so the recombination guard is
+/// enumerated-only.
+#[test]
+fn sampled_admits_the_recombining_node_graph() {
+    let ng = recombining_tree_node_graph();
+    let bound = super::node_graph::sampled_visit_bound(&ng, 8);
+    assert_eq!(
+        bound.len(),
+        ng.n_pools,
+        "the sampled visit-bound path consumes the recombining graph without rejection"
+    );
+}
+
 /// Documented exhaustive-destructure guard (a compile-fail proxy; trybuild is
 /// not wired in this workspace). `is_effective_non_expectation` destructures
 /// `RiskMeasure` and `rule_is_gap` destructures `StoppingRule` with every field

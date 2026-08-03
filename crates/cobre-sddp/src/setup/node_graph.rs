@@ -608,21 +608,19 @@ pub(crate) fn sampled_visit_bound(graph: &NodeGraph, forward_passes: u32) -> Vec
     pool_sum.into_iter().map(|s| s.min(cap)).collect()
 }
 
-/// Per-pool exact visit count under exhaustive (`enumerated`) forward-pass
-/// selection: the number of distinct root→node prefixes,
-/// `π(n) = Σ_{(parent, n) edges} π(parent)·|Ω_parent|`, `π(root) = 1`,
-/// summed per pool (leaf-sharing aggregates several nodes into one pool). The
-/// top-down dual of [`enumerated_scenario_count`]'s bottom-up walk:
-/// `Σ_leaf π(leaf)·|Ω_leaf| == enumerated_scenario_count(graph)`. Overflow-safe
-/// (`checked_mul`/`checked_add`), mirroring that function's guard.
+/// Per-node exact prefix count under exhaustive (`enumerated`) forward-pass
+/// selection: `π(n)`, the number of distinct root→node prefixes,
+/// `π(n) = Σ_{(parent, n) edges} π(parent)·|Ω_parent|`, `π(root) = 1`, in
+/// canonical node-position order. The per-node dual of
+/// [`enumerated_scenario_count`]'s bottom-up opening walk;
+/// [`enumerated_visit_bound`] sums it per pool. The enumerated forward driver
+/// solves node `n` exactly `π(n)` times per iteration. Overflow-safe
+/// (`checked_mul`/`checked_add`), mirroring [`enumerated_scenario_count`].
 ///
 /// # Errors
 ///
 /// Returns [`SddpError::Validation`] when a path-product-sum exceeds `u64`.
-// Consumer is the `enumerated` forward-pass-selection dispatch, not yet wired
-// here; unit-tested substrate until that consumer lands.
-#[allow(dead_code)]
-pub(crate) fn enumerated_visit_bound(graph: &NodeGraph) -> Result<Vec<u64>, SddpError> {
+pub(crate) fn enumerated_node_visit_counts(graph: &NodeGraph) -> Result<Vec<u64>, SddpError> {
     fn overflow_err() -> SddpError {
         SddpError::Validation(
             "enumerated visit bound exceeds u64: the policy graph's root→node \
@@ -655,12 +653,33 @@ pub(crate) fn enumerated_visit_bound(graph: &NodeGraph) -> Result<Vec<u64>, Sddp
                 .ok_or_else(overflow_err)?;
         }
     }
+    Ok(prefix_count)
+}
 
+/// Per-pool exact visit count under exhaustive (`enumerated`) forward-pass
+/// selection: [`enumerated_node_visit_counts`] summed over the nodes sharing
+/// each pool id (leaf-sharing aggregates several nodes into one pool). The
+/// top-down dual of [`enumerated_scenario_count`]'s bottom-up walk:
+/// `Σ_leaf π(leaf)·|Ω_leaf| == enumerated_scenario_count(graph)`, and the
+/// enumerated forward driver's single-rank per-iteration solve total is
+/// `Σ` of this vector. Overflow-safe, mirroring that function's guard.
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] when a path-product-sum exceeds `u64`.
+pub(crate) fn enumerated_visit_bound(graph: &NodeGraph) -> Result<Vec<u64>, SddpError> {
+    let prefix_count = enumerated_node_visit_counts(graph)?;
     let mut pool_sum = vec![0_u64; graph.n_pools];
     for (i, node) in graph.nodes.iter().enumerate() {
         pool_sum[node.pool_id] = pool_sum[node.pool_id]
             .checked_add(prefix_count[i])
-            .ok_or_else(overflow_err)?;
+            .ok_or_else(|| {
+                SddpError::Validation(
+                    "enumerated visit bound exceeds u64: the policy graph's root→node \
+                     path-product-sum overflows"
+                        .to_string(),
+                )
+            })?;
     }
     Ok(pool_sum)
 }
@@ -763,6 +782,90 @@ pub(crate) fn node_opening_range(
         OpeningSource::Generated => (openings.offset, openings.len),
         OpeningSource::External => (0, stochastic.opening_tree().n_openings(stage_idx)),
     }
+}
+
+/// Single canonical predecessor of every node (`None` at a root), indexed by
+/// canonical node position. The enumerated forward driver reads it to pin each
+/// visited node's incoming state to its parent visit's outgoing state (every
+/// edge is `t -> t+1`, so a node's parent sits exactly one stage upstream). A
+/// node reached by more than one edge is a recombination join, which the graph
+/// does not yet admit — `debug_assert`-checked, never silently resolved to an
+/// arbitrary predecessor.
+pub(crate) fn build_parent_map(node_graph: &NodeGraph) -> Vec<Option<usize>> {
+    let mut parent = vec![None; node_graph.nodes.len()];
+    for (pos, succs) in node_graph.successors.iter().enumerate() {
+        for succ in succs {
+            debug_assert!(
+                parent[succ.child].is_none(),
+                "build_parent_map: node {} has more than one predecessor (a recombination join)",
+                succ.child
+            );
+            parent[succ.child] = Some(pos);
+        }
+    }
+    parent
+}
+
+/// Canonical root→leaf path enumeration for the exhaustive (`enumerated`)
+/// forward: one entry per fully-enumerated scenario path, in depth-first order
+/// with roots and successors both taken in canonical (ascending node id)
+/// order — the order `enumerated_scenario_count` counts and the exact upper
+/// bound reduces over.
+///
+/// Every admitted enumerated graph has `|Ω_n| == 1` at every node (within-node
+/// opening enumeration is deferred and rejected upstream), so a path is a
+/// distinct root→leaf node sequence and the path count is
+/// [`enumerated_scenario_count`].
+pub(crate) struct EnumeratedForwardPaths {
+    /// Leaf node position of each path, canonical order. Length = path count.
+    pub leaf: Vec<usize>,
+    /// `P(ℓ)` of each path, canonical order: the fixed-order root→leaf product
+    /// of edge transition probabilities and within-node opening weights `q`
+    /// (both already load-time-normalized). Length = path count.
+    pub weight: Vec<f64>,
+}
+
+/// Enumerate every root→leaf path in canonical order (see
+/// [`EnumeratedForwardPaths`]). Roots are the predecessor-free nodes in
+/// ascending canonical position; each root's subtree is walked depth-first in
+/// canonical successor order.
+pub(crate) fn enumerate_forward_paths(node_graph: &NodeGraph) -> EnumeratedForwardPaths {
+    fn walk(
+        node_graph: &NodeGraph,
+        node: usize,
+        weight_before_node: f64,
+        leaf: &mut Vec<usize>,
+        weight: &mut Vec<f64>,
+    ) {
+        let w = weight_before_node * node_graph.nodes[node].openings.q;
+        let succs = &node_graph.successors[node];
+        if succs.is_empty() {
+            leaf.push(node);
+            weight.push(w);
+            return;
+        }
+        for succ in succs {
+            walk(node_graph, succ.child, w * succ.probability, leaf, weight);
+        }
+    }
+
+    let n = node_graph.nodes.len();
+    let mut has_predecessor = vec![false; n];
+    for succs in &node_graph.successors {
+        for succ in succs {
+            has_predecessor[succ.child] = true;
+        }
+    }
+    let mut paths = EnumeratedForwardPaths {
+        leaf: Vec::new(),
+        weight: Vec::new(),
+    };
+    for (root, &has_pred) in has_predecessor.iter().enumerate() {
+        if !has_pred {
+            walk(node_graph, root, 1.0, &mut paths.leaf, &mut paths.weight);
+        }
+    }
+    paths
 }
 
 #[cfg(test)]
@@ -1661,5 +1764,116 @@ mod tests {
             total, expected,
             "Σ_leaf π(leaf)*|Ω_leaf| must equal enumerated_scenario_count"
         );
+    }
+
+    // ── enumerated forward traversal: per-node counts, paths, parents ───────
+
+    /// A 3-stage K-fan (root -> fan -> leaf), `branching_factor` 1, non-uniform
+    /// root out-edges `i / Σj` — the shape the enumerated forward driver walks.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap
+    )]
+    fn enumerated_k_fan(k: usize) -> NodeGraph {
+        let stochastic = stochastic_context(3, 1, 1);
+        let mut nodes = vec![node(0, 0, None)];
+        let mut transitions = Vec::new();
+        let total: f64 = (1..=k).map(|i| i as f64).sum();
+        for i in 1..=k {
+            let fan = i as i32;
+            let leaf = fan + k as i32;
+            nodes.push(node(fan, 1, None));
+            nodes.push(node(leaf, 2, None));
+            transitions.push(transition(0, fan, (i as f64) / total));
+            transitions.push(transition(fan, leaf, 1.0));
+        }
+        let graph = PolicyGraph {
+            nodes,
+            transitions,
+            ..empty_graph()
+        };
+        let study_stage_ids = [0, 1, 2];
+        let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+        build_node_graph(&graph, 3, &resolver, &stochastic).unwrap()
+    }
+
+    #[test]
+    fn enumerated_node_visit_counts_are_one_per_node_and_total_below_naive() {
+        let k = 5usize;
+        let ng = enumerated_k_fan(k);
+        let counts = enumerated_node_visit_counts(&ng).unwrap();
+        assert_eq!(counts.len(), ng.nodes.len());
+        assert!(
+            counts.iter().all(|&c| c == 1),
+            "every |Ω|=1 tree node has exactly one root->node prefix: {counts:?}"
+        );
+
+        let total: u64 = enumerated_visit_bound(&ng).unwrap().into_iter().sum();
+        assert_eq!(
+            total,
+            ng.nodes.len() as u64,
+            "Σ enumerated_visit_bound sums π(n)=1 over every node = the node count"
+        );
+        // The dedup total beats naive per-path re-solving.
+        let paths = enumerated_scenario_count(&ng).unwrap();
+        let path_length = 3u64;
+        assert_eq!(paths, k as u64, "one path per leaf on a |Ω|=1 K-fan");
+        assert!(
+            total < paths * path_length,
+            "Σ enumerated_visit_bound ({total}) must be strictly below \
+             enumerated_scenario_count * path_length ({})",
+            paths * path_length
+        );
+    }
+
+    #[test]
+    fn enumerate_forward_paths_weights_are_canonical_edge_probabilities() {
+        let k = 4usize;
+        let ng = enumerated_k_fan(k);
+        let paths = enumerate_forward_paths(&ng);
+        assert_eq!(paths.leaf.len(), k, "one path per leaf");
+        assert_eq!(paths.weight.len(), k);
+
+        // Canonical DFS order visits the root's successors ascending; each
+        // successor's edge probability IS that path's P(ℓ) (q = 1, single leaf
+        // edge at prob 1).
+        let root = (0..ng.nodes.len())
+            .find(|&p| ng.nodes[p].stage == 0)
+            .unwrap();
+        let expected: Vec<f64> = ng.successors[root].iter().map(|s| s.probability).collect();
+        for (got, want) in paths.weight.iter().zip(expected.iter()) {
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "path weight must be the canonical edge probability, bit-for-bit"
+            );
+        }
+        let sum: f64 = paths.weight.iter().sum();
+        assert!(
+            (sum - 1.0).abs() < 1e-12,
+            "enumerated path probabilities must sum to 1 (got {sum})"
+        );
+    }
+
+    #[test]
+    fn build_parent_map_resolves_the_single_predecessor() {
+        let ng = enumerated_k_fan(3);
+        let parent = build_parent_map(&ng);
+        let root = (0..ng.nodes.len())
+            .find(|&p| ng.nodes[p].stage == 0)
+            .unwrap();
+        assert_eq!(parent[root], None, "the root has no predecessor");
+        for (pos, node) in ng.nodes.iter().enumerate() {
+            if node.stage == 0 {
+                continue;
+            }
+            let p = parent[pos].expect("a non-root node has exactly one parent");
+            assert_eq!(
+                ng.nodes[p].stage,
+                node.stage - 1,
+                "a node's parent sits exactly one stage upstream"
+            );
+        }
     }
 }

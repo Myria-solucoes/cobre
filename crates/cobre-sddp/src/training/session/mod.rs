@@ -48,7 +48,7 @@ use crate::{
     lower_bound::evaluate_lower_bound,
     rank_reconcile::{reconcile_error_flag, reconcile_result},
     setup::NodeGraph,
-    setup::node_graph::{frontier_node, max_successor_outcome_count},
+    setup::node_graph::{enumerate_forward_paths, frontier_node, max_successor_outcome_count},
     solver_stats::{
         SOLVER_STATS_DELTA_SCALAR_FIELDS, SolverStatsDelta, SolverStatsLogEntry,
         aggregate_solver_statistics, pack_delta_scalars, unpack_delta_scalars,
@@ -314,6 +314,7 @@ where
         let mut fwd_state =
             ForwardPassState::new(n_workers_local, ranks.num_stages, ranks.max_local_fwd);
         fwd_state.set_profile(solver_profiles.forward);
+        fwd_state.set_enumerated(config.loop_config.training_enumerated);
 
         let real_states_capacity = exchange_bufs.real_total_scenarios() * ranks.n_state;
         let mut bwd_state = BackwardPassState::new(
@@ -778,19 +779,23 @@ where
             },
         );
 
-        // Enumerated forwards reduce the exact `Σ w·c` bound over per-path weights;
-        // the weights ride the reused iteration scratch (no per-iteration alloc).
-        // Sampled forwards keep the statistical Welford path untouched.
+        // Enumerated forwards reduce the exact `Σ w·c` bound over the per-path
+        // probabilities `P(ℓ) = ∏ (edge prob · opening q)`, in the canonical DFS
+        // order `sync_forward`'s gathered costs are assembled in — identical on
+        // every rank (a pure function of the graph). Sampled forwards keep the
+        // statistical Welford path untouched.
         let global_n = self.ranks.num_total_forward_passes;
         let bound = if self.config.loop_config.training_enumerated {
-            #[allow(clippy::cast_precision_loss)]
-            let uniform = if global_n == 0 {
-                0.0_f64
-            } else {
-                1.0_f64 / global_n as f64
-            };
+            let paths = enumerate_forward_paths(self.training_ctx.node_graph);
+            debug_assert_eq!(
+                paths.weight.len(),
+                global_n,
+                "enumerated path count must equal the resolved forward-pass count"
+            );
             self.scratch.ub_path_weights.clear();
-            self.scratch.ub_path_weights.resize(global_n, uniform);
+            self.scratch
+                .ub_path_weights
+                .extend_from_slice(&paths.weight);
             ForwardBound::Exact {
                 path_weights: &self.scratch.ub_path_weights,
             }
