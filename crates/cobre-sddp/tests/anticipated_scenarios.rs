@@ -48,6 +48,7 @@ mod anticipated_5stage_k2_smoke {
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
         ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
     };
+    use cobre_io::config::TrainingSelection;
     use cobre_io::config::{
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
         InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
@@ -364,14 +365,13 @@ mod anticipated_5stage_k2_smoke {
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: Some(42),
-                forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 8 }]),
                 stopping_mode: cobre_io::config::StoppingMode::Any,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
-                selection: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
@@ -503,6 +503,7 @@ mod anticipated_two_plants_smoke {
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
         ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
     };
+    use cobre_io::config::TrainingSelection;
     use cobre_io::config::{
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
         InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
@@ -846,14 +847,13 @@ mod anticipated_two_plants_smoke {
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: Some(42),
-                forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 12 }]),
                 stopping_mode: cobre_io::config::StoppingMode::Any,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
-                selection: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
@@ -961,6 +961,7 @@ mod anticipated_simulation_ring_buffer {
     //!
     //! not the seeded `past_anticipated_commitments` a broken ring would surface.
 
+    use cobre_io::config::{SimulationSelection, TrainingSelection};
     use std::sync::mpsc;
 
     use cobre_core::entities::{
@@ -1315,7 +1316,6 @@ mod anticipated_simulation_ring_buffer {
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: Some(42),
-                forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
                     limit: training_iters,
                 }]),
@@ -1324,14 +1324,14 @@ mod anticipated_simulation_ring_buffer {
                 solver: TrainingSolverConfig::default(),
                 parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
-                selection: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
             simulation: IoSimulationConfig {
                 enabled: true,
-                num_scenarios: Some(1),
                 io_channel_capacity: 8,
+                selection: Some(SimulationSelection::Sampled { num_scenarios: 1 }),
                 ..IoSimulationConfig::default()
             },
             exports: ExportsConfig::default(),
@@ -1556,6 +1556,7 @@ mod anticipated_generic_constraint_e2e {
     //! `anticipated_decision(N)`: one pins that a binding cap raises the lower bound,
     //! one that the validator rejects the reference on a non-anticipated thermal.
 
+    use cobre_io::config::TrainingSelection;
     use std::path::Path;
 
     use chrono::NaiveDate;
@@ -1860,14 +1861,13 @@ mod anticipated_generic_constraint_e2e {
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: Some(42),
-                forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 10 }]),
                 stopping_mode: cobre_io::config::StoppingMode::Any,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
-                selection: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
@@ -2140,10 +2140,10 @@ mod anticipated_generic_constraint_e2e {
             case_dir.join("config.json"),
             r#"{
   "training": {
-    "forward_passes": 1,
+    "selection": { "method": "sampled", "forward_passes": 1 },
     "stopping_rules": [{ "type": "iteration_limit", "limit": 2 }]
   },
-  "simulation": { "enabled": false, "num_scenarios": 1 },
+  "simulation": { "enabled": false },
   "modeling": { "inflow_non_negativity": { "method": "none" } }
 }"#,
         )
@@ -2311,6 +2311,7 @@ mod d37_anticipated_commissioning_simulation {
     //! window, an undelivered pre-entry commitment, an un-drained ring) could still
     //! hash-match. This test exercises those paths through train + simulate.
 
+    use cobre_io::config::SimulationSelection;
     use std::path::Path;
     use std::sync::mpsc;
 
@@ -2342,8 +2343,8 @@ mod d37_anticipated_commissioning_simulation {
         // deterministic scenario so the thermal extraction paths run.
         config.simulation = SimulationConfig {
             enabled: true,
-            num_scenarios: Some(1),
             io_channel_capacity: 8,
+            selection: Some(SimulationSelection::Sampled { num_scenarios: 1 }),
             ..SimulationConfig::default()
         };
 
@@ -2562,6 +2563,7 @@ mod anticipated_commitment_at_cap {
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
         ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
     };
+    use cobre_io::config::TrainingSelection;
     use cobre_io::config::{
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
         InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
@@ -2871,14 +2873,13 @@ mod anticipated_commitment_at_cap {
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: Some(42),
-                forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 4 }]),
                 stopping_mode: cobre_io::config::StoppingMode::Any,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
-                selection: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),

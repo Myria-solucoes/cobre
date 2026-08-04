@@ -671,7 +671,7 @@ fn default_config() -> Config {
 
 const MINIMAL_CONFIG_JSON: &str = r#"{
         "training": { "tree_seed": 42 },
-        "simulation": { "enabled": false, "num_scenarios": 0, "io_channel_capacity": 16 },
+        "simulation": { "enabled": false, "io_channel_capacity": 16 },
         "modeling": {},
         "policy": {},
         "exports": {}

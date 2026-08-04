@@ -821,6 +821,7 @@ mod basis_reconstruct_churn {
     //! hot-path allocation invariants against LML1 deactivation, budget eviction,
     //! and new-cut churn.
 
+    use cobre_io::config::{SimulationSelection, TrainingSelection};
     use std::path::Path;
     use std::sync::mpsc;
 
@@ -894,7 +895,7 @@ mod basis_reconstruct_churn {
         let config_path = case_dir.join("config.json");
         let mut config = cobre_io::parse_config(&config_path).expect("config must parse");
 
-        config.training.forward_passes = Some(3);
+        config.training.selection = Some(TrainingSelection::Sampled { forward_passes: 3 });
         config.training.stopping_rules =
             Some(vec![StoppingRuleConfig::IterationLimit { limit: 8 }]);
 
@@ -987,7 +988,7 @@ mod basis_reconstruct_churn {
         let config_path = case_dir.join("config.json");
         let mut config = cobre_io::parse_config(&config_path).expect("config must parse");
 
-        config.training.forward_passes = Some(2);
+        config.training.selection = Some(TrainingSelection::Sampled { forward_passes: 2 });
         config.training.stopping_rules =
             Some(vec![StoppingRuleConfig::IterationLimit { limit: 3 }]);
 
@@ -1062,7 +1063,7 @@ mod basis_reconstruct_churn {
         // Two IterationLimit rules in "any" mode: limit 2 sizes the FCF pool to
         // (2+1) × forward_passes slots/stage (capacity headroom); limit 1 fires first
         // and stops after iteration 1.
-        config.training.forward_passes = Some(2);
+        config.training.selection = Some(TrainingSelection::Sampled { forward_passes: 2 });
         config.training.stopping_rules = Some(vec![
             StoppingRuleConfig::IterationLimit { limit: 2 },
             StoppingRuleConfig::IterationLimit { limit: 1 },
@@ -1227,7 +1228,7 @@ mod basis_reconstruct_churn {
 
         // 2 iterations so iter 2's forward pass captures a basis with non-empty
         // cut_row_slots into basis_cache for the simulation warm-start.
-        config.training.forward_passes = Some(2);
+        config.training.selection = Some(TrainingSelection::Sampled { forward_passes: 2 });
         config.training.stopping_rules =
             Some(vec![StoppingRuleConfig::IterationLimit { limit: 2 }]);
 
@@ -1235,7 +1236,7 @@ mod basis_reconstruct_churn {
         config.training.cut_selection.max_active_per_stage = None;
 
         config.simulation.enabled = true;
-        config.simulation.num_scenarios = Some(2);
+        config.simulation.selection = Some(SimulationSelection::Sampled { num_scenarios: 2 });
 
         let system = cobre_io::load_case(&case_dir).expect("load_case must succeed");
         let prepare_result =

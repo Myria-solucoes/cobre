@@ -70,6 +70,7 @@ mod d38_dead_volume_filling_simulation {
     //! climbs above the dead volume and `σ^{v-} → 0` by id 5. `H1` is starved before
     //! Operating (seed 0, inflow 2/2/0/0 m³/s over ids 0–3).
 
+    use cobre_io::config::SimulationSelection;
     use std::path::Path;
     use std::sync::mpsc;
 
@@ -194,8 +195,8 @@ mod d38_dead_volume_filling_simulation {
         // The shipped parity case trains only; enable one sim scenario so the extraction path runs.
         config.simulation = SimulationConfig {
             enabled: true,
-            num_scenarios: Some(1),
             io_channel_capacity: 8,
+            selection: Some(SimulationSelection::Sampled { num_scenarios: 1 }),
             ..SimulationConfig::default()
         };
 
@@ -606,6 +607,7 @@ mod d40_filling_cascade_simulation {
     //! holding it. Inflows recover to 60 m³/s in Operating so both climb above the dead
     //! volume and `σ^{v-} → 0`.
 
+    use cobre_io::config::SimulationSelection;
     use std::path::Path;
     use std::sync::mpsc;
 
@@ -764,8 +766,8 @@ mod d40_filling_cascade_simulation {
         // The shipped parity case trains only; enable one sim scenario so the extraction path runs.
         config.simulation = SimulationConfig {
             enabled: true,
-            num_scenarios: Some(1),
             io_channel_capacity: 8,
+            selection: Some(SimulationSelection::Sampled { num_scenarios: 1 }),
             ..SimulationConfig::default()
         };
 
@@ -1066,6 +1068,7 @@ mod prefilling_spillage_frozen {
     //! these two stages are exactly the "PreFilling hydro upstream of an active
     //! reservoir" geometry the "spillage frozen [0,0] during PreFilling" contract targets.
 
+    use cobre_io::config::SimulationSelection;
     use std::path::Path;
     use std::sync::mpsc;
 
@@ -1154,8 +1157,8 @@ mod prefilling_spillage_frozen {
             cobre_io::parse_config(&case_dir.join("config.json")).expect("config must parse");
         config.simulation = SimulationConfig {
             enabled: true,
-            num_scenarios: Some(1),
             io_channel_capacity: 8,
+            selection: Some(SimulationSelection::Sampled { num_scenarios: 1 }),
             ..SimulationConfig::default()
         };
 
@@ -1279,6 +1282,7 @@ mod filling_cut_validity {
     //! water can land on `Hf2`'s frozen-identity RHS, producing a wrong-but-compiling
     //! cut.
 
+    use cobre_io::config::TrainingSelection;
     use std::sync::mpsc;
 
     use cobre_core::entities::{
@@ -1674,7 +1678,6 @@ mod filling_cut_validity {
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: Some(42),
-                forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
                     limit: N_ITERATIONS as u32,
                 }]),
@@ -1683,7 +1686,7 @@ mod filling_cut_validity {
                 solver: TrainingSolverConfig::default(),
                 parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
-                selection: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
@@ -1966,6 +1969,7 @@ mod d35_pumping_commissioning_simulation {
     //! dense layout a dormant station keeps its column but is pinned to `[0, 0]`,
     //! emitting a ZERO row rather than being absent.
 
+    use cobre_io::config::SimulationSelection;
     use std::path::Path;
     use std::sync::mpsc;
 
@@ -1990,8 +1994,8 @@ mod d35_pumping_commissioning_simulation {
         // The shipped parity case trains only; enable one sim scenario so the pumping extraction path runs.
         config.simulation = SimulationConfig {
             enabled: true,
-            num_scenarios: Some(1),
             io_channel_capacity: 8,
+            selection: Some(SimulationSelection::Sampled { num_scenarios: 1 }),
             ..SimulationConfig::default()
         };
 
@@ -2124,6 +2128,7 @@ mod d36_thermal_line_commissioning_simulation {
     //! `entry <= stage.id && stage.id < exit`. This test exercises those paths
     //! directly through the full train+simulate pipeline.
 
+    use cobre_io::config::SimulationSelection;
     use std::path::Path;
     use std::sync::mpsc;
 
@@ -2149,8 +2154,8 @@ mod d36_thermal_line_commissioning_simulation {
         // extraction paths run (`StudySetup::new` reads `n_scenarios` from this).
         config.simulation = SimulationConfig {
             enabled: true,
-            num_scenarios: Some(1),
             io_channel_capacity: 8,
+            selection: Some(SimulationSelection::Sampled { num_scenarios: 1 }),
             ..SimulationConfig::default()
         };
 
@@ -2333,6 +2338,7 @@ mod d42_nonfilling_hydro_commissioning {
     //! dormant, so an infeasibility here is a real trapped-water regression, not a
     //! tuning artifact.
 
+    use cobre_io::config::SimulationSelection;
     use std::path::Path;
     use std::sync::mpsc;
 
@@ -2454,8 +2460,8 @@ mod d42_nonfilling_hydro_commissioning {
             cobre_io::parse_config(&case_dir.join("config.json")).expect("config must parse");
         config.simulation = SimulationConfig {
             enabled: true,
-            num_scenarios: Some(1),
             io_channel_capacity: 8,
+            selection: Some(SimulationSelection::Sampled { num_scenarios: 1 }),
             ..SimulationConfig::default()
         };
 

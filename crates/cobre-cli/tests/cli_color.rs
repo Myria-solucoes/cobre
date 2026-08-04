@@ -22,7 +22,7 @@ fn cobre() -> Command {
 
 const CONFIG_JSON: &str = r#"{
     "training": {
-        "forward_passes": 1,
+        "selection": { "method": "sampled", "forward_passes": 1 },
         "stopping_rules": [
             { "type": "iteration_limit", "limit": 2 }
         ],

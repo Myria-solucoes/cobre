@@ -36,7 +36,7 @@ use crate::{
     context::{StageContext, TrainingContext},
     dcs::{DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
     indexer::{HydroCellIndex, StateSpace},
-    setup::node_graph::node_opening_range,
+    setup::node_graph::{node_opening_range, node_pinned_scenario},
     simulation::{
         config::SimulationConfig,
         error::SimulationError,
@@ -771,11 +771,9 @@ fn reset_scenario_state<S: SolverInterface>(
         lag_accum_seed,
         lag_weight_seed,
         node_graph,
-        stochastic,
         ..
     } = training_ctx;
-    let (node_opening_offset, node_opening_len) =
-        node_opening_range(node_graph, root_node, stochastic, 0);
+    let (node_opening_offset, node_opening_len) = node_opening_range(node_graph, root_node);
     ws.current_state.clear();
     ws.current_state.extend_from_slice(initial_state);
     sampler.apply_initial_state(
@@ -788,6 +786,7 @@ fn reset_scenario_state<S: SolverInterface>(
             noise_group_id: 0,
             node_opening_offset,
             node_opening_len,
+            pinned_scenario: node_pinned_scenario(node_graph, root_node),
         },
         &mut ws.current_state,
         inflow_lags_start,
@@ -852,10 +851,7 @@ pub(crate) fn process_scenario_stages<S: SolverInterface>(
     lookups: &SimLookups,
 ) -> Result<(f64, Vec<SimulationStageResult>), SimulationError> {
     let TrainingContext {
-        state,
-        node_graph,
-        stochastic,
-        ..
+        state, node_graph, ..
     } = training_ctx;
     reset_scenario_state(
         ws,
@@ -874,8 +870,7 @@ pub(crate) fn process_scenario_stages<S: SolverInterface>(
     for t in 0..ids.num_stages {
         #[allow(clippy::cast_possible_truncation)]
         let stage_id_u32 = t as u32;
-        let (node_opening_offset, node_opening_len) =
-            node_opening_range(node_graph, node, stochastic, t);
+        let (node_opening_offset, node_opening_len) = node_opening_range(node_graph, node);
         let noise = ids.sampler.sample(SampleRequest {
             iteration: SIMULATION_ITERATION,
             scenario: ids.global_scenario,
@@ -887,6 +882,7 @@ pub(crate) fn process_scenario_stages<S: SolverInterface>(
             noise_group_id: ctx.noise_group_id_at(t),
             node_opening_offset,
             node_opening_len,
+            pinned_scenario: node_pinned_scenario(node_graph, node),
         })?;
         let raw_noise = noise.as_slice();
 

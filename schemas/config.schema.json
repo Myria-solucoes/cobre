@@ -307,7 +307,7 @@
       "type": "object"
     },
     "Openings": {
-      "description": "Where a stage's openings originate (`config.json` scenario-source `source`).\n\nThe tag key is `source` and the field is `openings`, deliberately distinct\nfrom the per-class `scheme` key: `openings.source` selects where a stage's\nopenings come from, while `scheme` selects how a class's noise is modelled.\nA single word would otherwise carry both axes. An absent `openings`\ndeclaration is equivalent to `generated`.\n\nOnly `generated` is admitted today; `external` and `file` are reserved and\nrejected at load until a later release wires opening routing.",
+      "description": "Where a stage's openings originate (`config.json` scenario-source `source`).\n\nThe tag key is `source` and the field is `openings`, deliberately distinct\nfrom the per-class `scheme` key: `openings.source` selects where a stage's\nopenings come from, while `scheme` selects how a class's noise is modelled.\nA single word would otherwise carry both axes. An absent `openings`\ndeclaration is equivalent to `generated`.\n\nOnly `generated` is admitted today; `file` is reserved and rejected at load\nuntil a later release wires opening routing.",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -315,20 +315,6 @@
           "properties": {
             "source": {
               "const": "generated",
-              "type": "string"
-            }
-          },
-          "required": [
-            "source"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "description": "Openings come from an external deck. Reserved; rejected at load.",
-          "properties": {
-            "source": {
-              "const": "external",
               "type": "string"
             }
           },
@@ -947,16 +933,6 @@
           "minimum": 0,
           "type": "integer"
         },
-        "num_scenarios": {
-          "default": null,
-          "description": "Number of simulation scenarios. Deprecated alias for the `sampled`\nselection count; declaring it alongside `selection` is rejected at load.\nAbsent resolves to the default sampled count.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
         "scenario_source": {
           "anyOf": [
             {
@@ -1175,7 +1151,7 @@
     },
     "TrainingConfig": {
       "additionalProperties": false,
-      "description": "Training parameters (`config.json → training`).\n\n`forward_passes` and `stopping_rules` are mandatory — the loader returns\n[`crate::LoadError::SchemaError`] if either is absent.",
+      "description": "Training parameters (`config.json → training`).\n\nA forward-pass count (via `selection`) and `stopping_rules` are mandatory —\nthe loader returns [`crate::LoadError::SchemaError`] if either is absent.",
       "properties": {
         "cut_selection": {
           "$ref": "#/$defs/RowSelectionConfig",
@@ -1190,15 +1166,6 @@
           "default": true,
           "description": "Enable the training phase. When `false`, skip directly to simulation.",
           "type": "boolean"
-        },
-        "forward_passes": {
-          "description": "Number of forward-pass scenario trajectories $M$ per iteration.\n\n**Mandatory** — no default. The loader rejects any config that omits this field.",
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
         },
         "parallelism": {
           "$ref": "#/$defs/ParallelismConfig",
@@ -1231,7 +1198,7 @@
             }
           ],
           "default": null,
-          "description": "Phase-level scenario selection. Absent resolves the count from the\n`forward_passes` alias (the default sampled behaviour)."
+          "description": "Phase-level scenario selection. The forward-pass count lives in the\n`sampled` arm; absent is a missing-count load error."
         },
         "solver": {
           "$ref": "#/$defs/TrainingSolverConfig",
@@ -1460,7 +1427,6 @@
       "default": {
         "enabled": false,
         "io_channel_capacity": 64,
-        "num_scenarios": null,
         "scenario_source": null,
         "selection": null,
         "solver": null

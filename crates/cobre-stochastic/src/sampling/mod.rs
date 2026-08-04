@@ -162,6 +162,8 @@ pub struct SampleRequest<'b> {
     pub node_opening_offset: usize,
     /// See [`ClassSampleRequest::node_opening_offset`].
     pub node_opening_len: usize,
+    /// See [`ClassSampleRequest::pinned_scenario`].
+    pub pinned_scenario: Option<usize>,
 }
 
 impl ForwardSampler<'_> {
@@ -210,6 +212,7 @@ impl ForwardSampler<'_> {
             noise_group_id: req.noise_group_id,
             node_opening_offset: req.node_opening_offset,
             node_opening_len: req.node_opening_len,
+            pinned_scenario: req.pinned_scenario,
         };
 
         self.inflow.fill(&class_req, inflow_buf, req.perm_scratch)?;
@@ -1052,6 +1055,7 @@ mod tests {
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: ctx.tree_view().n_openings(0),
+            pinned_scenario: None,
         });
         let noise = result.expect("expected Ok from InSample sample()");
         assert_eq!(
@@ -1087,6 +1091,7 @@ mod tests {
                 noise_group_id: 0,
                 node_opening_offset: 0,
                 node_opening_len: ctx.tree_view().n_openings(0),
+                pinned_scenario: None,
             })
             .unwrap();
         let b = sampler
@@ -1101,6 +1106,7 @@ mod tests {
                 noise_group_id: 0,
                 node_opening_offset: 0,
                 node_opening_len: ctx.tree_view().n_openings(0),
+                pinned_scenario: None,
             })
             .unwrap();
 
@@ -1157,6 +1163,7 @@ mod tests {
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: tree.view().n_openings(0),
+            pinned_scenario: None,
         });
 
         let noise = result.expect("expected Ok from composite InSample sample()");
@@ -1200,6 +1207,7 @@ mod tests {
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: 0,
+            pinned_scenario: None,
         });
 
         let noise = result.expect("expected Ok from OutOfSample sample()");
@@ -1239,6 +1247,7 @@ mod tests {
                 noise_group_id: 0,
                 node_opening_offset: 0,
                 node_opening_len: 0,
+                pinned_scenario: None,
             })
             .unwrap();
         let b = sampler
@@ -1253,6 +1262,7 @@ mod tests {
                 noise_group_id: 0,
                 node_opening_offset: 0,
                 node_opening_len: 0,
+                pinned_scenario: None,
             })
             .unwrap();
 
@@ -1291,6 +1301,7 @@ mod tests {
                 noise_group_id: 7,
                 node_opening_offset: 0,
                 node_opening_len: 0,
+                pinned_scenario: None,
             })
             .unwrap();
         let b = sampler
@@ -1305,6 +1316,7 @@ mod tests {
                 noise_group_id: 7,
                 node_opening_offset: 0,
                 node_opening_len: 0,
+                pinned_scenario: None,
             })
             .unwrap();
         assert_eq!(
@@ -1327,6 +1339,7 @@ mod tests {
                 noise_group_id: 8,
                 node_opening_offset: 0,
                 node_opening_len: 0,
+                pinned_scenario: None,
             })
             .unwrap();
         let any_differ = a.as_slice().iter().zip(c.as_slice()).any(|(x, y)| x != y);

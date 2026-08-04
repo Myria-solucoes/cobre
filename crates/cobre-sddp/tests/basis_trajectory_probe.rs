@@ -43,6 +43,7 @@
     clippy::single_match_else
 )]
 
+use cobre_io::config::TrainingSelection;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -398,7 +399,7 @@ fn fresh_setup(
 ) -> StudySetup {
     let config_path = case_dir.join("config.json");
     let mut config = cobre_io::parse_config(&config_path).expect("config.json must parse");
-    config.training.forward_passes = Some(forward_passes);
+    config.training.selection = Some(TrainingSelection::Sampled { forward_passes });
     config.training.stopping_rules =
         Some(vec![cobre_io::config::StoppingRuleConfig::IterationLimit {
             limit: iteration_limit,

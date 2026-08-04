@@ -862,7 +862,7 @@ fn k_fan_policy_graph(k: usize, reversed: bool) -> PolicyGraph {
     nodes.push(PolicyNode {
         id: 0,
         stage_id: K_FAN_ROOT_STAGE_ID,
-        realization_id: None,
+        scenario_id: None,
         label: None,
     });
     let total_weight: f64 = (1..=k).map(|i| i as f64).sum();
@@ -872,13 +872,13 @@ fn k_fan_policy_graph(k: usize, reversed: bool) -> PolicyGraph {
         nodes.push(PolicyNode {
             id: fan_id,
             stage_id: K_FAN_BRANCH_STAGE_ID,
-            realization_id: None,
+            scenario_id: None,
             label: None,
         });
         nodes.push(PolicyNode {
             id: leaf_id,
             stage_id: K_FAN_LEAF_STAGE_ID,
-            realization_id: None,
+            scenario_id: None,
             label: None,
         });
         transitions.push(Transition {
@@ -1181,7 +1181,6 @@ fn k_fan_config(forward_passes: u32, max_iterations: u32) -> Config {
         training: TrainingConfig {
             enabled: true,
             tree_seed: Some(K_FAN_TREE_SEED),
-            forward_passes: Some(forward_passes),
             stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
                 limit: max_iterations,
             }]),
@@ -1190,7 +1189,7 @@ fn k_fan_config(forward_passes: u32, max_iterations: u32) -> Config {
             solver: TrainingSolverConfig::default(),
             parallelism: ParallelismConfig::default(),
             scenario_source: None,
-            selection: None,
+            selection: Some(TrainingSelection::Sampled { forward_passes }),
         },
         upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
         policy: PolicyConfig::default(),
@@ -1343,7 +1342,6 @@ fn k_fan_fixture(k: usize, reversed: bool, config: Config) -> KFanFixture {
 /// it), fixed seed, iteration-limit stopping rule.
 fn k_fan_config_enumerated(max_iterations: u32) -> Config {
     let mut config = k_fan_config(1, max_iterations);
-    config.training.forward_passes = None;
     config.training.selection = Some(TrainingSelection::Enumerated {});
     config
 }
@@ -1366,7 +1364,6 @@ pub fn try_k_fan_simulation_enumerated(k: usize) -> Result<StudySetup, SddpError
     let system = k_fan_system(k, false);
     let mut config = k_fan_config(1, 1);
     config.simulation.enabled = true;
-    config.simulation.num_scenarios = None;
     config.simulation.selection = Some(SimulationSelection::Enumerated {});
     let stochastic = build_stochastic_context(
         &system,

@@ -48,16 +48,14 @@ pub struct RawScenarioSourceConfig {
 /// A single word would otherwise carry both axes. An absent `openings`
 /// declaration is equivalent to `generated`.
 ///
-/// Only `generated` is admitted today; `external` and `file` are reserved and
-/// rejected at load until a later release wires opening routing.
+/// Only `generated` is admitted today; `file` is reserved and rejected at load
+/// until a later release wires opening routing.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum Openings {
     /// Openings come from noise generation (the default when `openings` is absent).
     Generated {},
-    /// Openings come from an external deck. Reserved; rejected at load.
-    External {},
     /// Openings come from a declared file. Reserved; rejected at load.
     File {
         /// Declared openings file path.

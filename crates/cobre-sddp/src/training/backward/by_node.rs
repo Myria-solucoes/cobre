@@ -26,6 +26,7 @@ use crate::{
     context::{StageContext, TrainingContext},
     cut::FutureCostFunction,
     risk_measure::{BackwardOutcome, RiskMeasure},
+    setup::node_graph::OpeningSource,
     solver_stats::SolverStatsDelta,
     stage_solve::{StageInputs, run_stage_solve},
     state_exchange::ExchangeBuffers,
@@ -35,7 +36,7 @@ use crate::{
 use super::{
     SuccessorSpec,
     duals_extraction::extract_duals_from_view,
-    lp_setup::{load_backward_lp, patch_opening_bounds},
+    lp_setup::{fill_external_opening_noise, load_backward_lp, patch_opening_bounds},
     outcome_aggregation::accumulate_opening_outcome,
 };
 
@@ -154,6 +155,14 @@ pub(crate) fn process_stage_backward_by_node<S: SolverInterface + Send>(
     let tree_view = training_ctx.stochastic.tree_view();
     let solve_order = tree_view.solve_order_data(succ.successor);
     let next_unit = AtomicUsize::new(0);
+    // An External successor node reads its declared column instead of the
+    // generated tree; assembled once per worker below (invariant across claims).
+    let opening_source = training_ctx.node_graph.nodes[succ.successor_node]
+        .openings
+        .source;
+    let external_k = training_ctx.node_graph.nodes[succ.successor_node]
+        .openings
+        .offset;
 
     workspaces
         .par_iter_mut()
@@ -196,6 +205,20 @@ pub(crate) fn process_stage_backward_by_node<S: SolverInterface + Send>(
             let s = succ.successor;
             let mut count = 0usize;
 
+            let mut external_noise: Option<Vec<f64>> = None;
+            if opening_source == OpeningSource::External {
+                let mut buf = std::mem::take(&mut ws.backward_accum.external_noise_buf);
+                fill_external_opening_noise(
+                    training_ctx,
+                    ctx,
+                    s,
+                    external_k,
+                    succ.successor_node_id,
+                    &mut buf,
+                )?;
+                external_noise = Some(buf);
+            }
+
             loop {
                 let u = next_unit.fetch_add(1, Ordering::Relaxed);
                 if u >= total_units {
@@ -214,7 +237,10 @@ pub(crate) fn process_stage_backward_by_node<S: SolverInterface + Send>(
                 let pos_end = (pos_start + block_size).min(n_openings);
                 for (local_idx, &omega_u32) in solve_order[pos_start..pos_end].iter().enumerate() {
                     let omega = omega_u32 as usize;
-                    let raw_noise = tree_view.opening(s, omega);
+                    let raw_noise: &[f64] = match &external_noise {
+                        Some(buf) => buf,
+                        None => tree_view.opening(s, omega),
+                    };
                     patch_opening_bounds(ws, ctx, training_ctx, raw_noise, x_hat, s)?;
 
                     let mut state_duals = std::mem::take(&mut ws.backward_accum.state_duals_buf);
@@ -316,6 +342,10 @@ pub(crate) fn process_stage_backward_by_node<S: SolverInterface + Send>(
 
             ws.worker_timing_buf.backward_wall_ms +=
                 worker_stage_wall_start.elapsed().as_secs_f64() * 1_000.0;
+
+            if let Some(buf) = external_noise {
+                ws.backward_accum.external_noise_buf = buf;
+            }
 
             Ok((w, count))
         })

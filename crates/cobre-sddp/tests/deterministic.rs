@@ -15,6 +15,7 @@
     clippy::too_many_lines
 )]
 
+use cobre_io::config::SimulationSelection;
 use std::path::Path;
 use std::sync::mpsc;
 
@@ -114,7 +115,7 @@ fn run_with_simulation(
 
     let mut config_with_sim = config.clone();
     config_with_sim.simulation.enabled = true;
-    config_with_sim.simulation.num_scenarios = Some(1);
+    config_with_sim.simulation.selection = Some(SimulationSelection::Sampled { num_scenarios: 1 });
 
     let mut setup = build_setup_for_case(
         case_dir,
@@ -1367,7 +1368,7 @@ fn d12_checkpoint_round_trip() {
 
     let mut config_with_sim = config.clone();
     config_with_sim.simulation.enabled = true;
-    config_with_sim.simulation.num_scenarios = Some(1);
+    config_with_sim.simulation.selection = Some(SimulationSelection::Sampled { num_scenarios: 1 });
 
     let mut setup = StudySetup::new(&system, &config_with_sim, stochastic, hydro_models)
         .expect("StudySetup must build");
@@ -3429,7 +3430,7 @@ fn frozen_vs_fallback_simulation_costs_are_identical() {
 
     let mut config_with_sim = config.clone();
     config_with_sim.simulation.enabled = true;
-    config_with_sim.simulation.num_scenarios = Some(4);
+    config_with_sim.simulation.selection = Some(SimulationSelection::Sampled { num_scenarios: 4 });
 
     let mut setup = StudySetup::new(&system, &config_with_sim, stochastic, hydro_models)
         .expect("StudySetup must build");
@@ -5698,7 +5699,7 @@ mod chronological_telescoping {
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
         InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
         RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
-        TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
+        TrainingConfig, TrainingSelection, TrainingSolverConfig, UpperBoundEvaluationConfig,
     };
     use cobre_solver::ActiveSolver;
 
@@ -5979,7 +5980,6 @@ mod chronological_telescoping {
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: Some(42),
-                forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
                     limit: N_ITERATIONS,
                 }]),
@@ -5988,7 +5988,7 @@ mod chronological_telescoping {
                 solver: TrainingSolverConfig::default(),
                 parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
-                selection: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
@@ -6044,7 +6044,6 @@ mod chronological_telescoping {
 
         let system = build_system(BlockMode::Parallel);
         let mut config = build_config();
-        config.training.forward_passes = None;
         config.training.selection = Some(TrainingSelection::Enumerated {});
 
         let mut setup = build_setup_in_code(system, &config);
@@ -6112,7 +6111,6 @@ mod chronological_telescoping {
     fn enumerated_config_with_rules(rules: Vec<StoppingRuleConfig>) -> Config {
         use cobre_io::config::TrainingSelection;
         let mut config = build_config();
-        config.training.forward_passes = None;
         config.training.selection = Some(TrainingSelection::Enumerated {});
         config.training.stopping_rules = Some(rules);
         config
@@ -6370,6 +6368,7 @@ mod chronological_attribution {
         NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds,
         ResolvedBounds, ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
     };
+    use cobre_io::config::TrainingSelection;
     use cobre_io::config::{
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
         InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
@@ -6683,14 +6682,13 @@ mod chronological_attribution {
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: Some(42),
-                forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
                 stopping_mode: cobre_io::config::StoppingMode::Any,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
-                selection: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
@@ -6943,6 +6941,7 @@ mod chronological_attribution {
 /// coefficient rather than the loud `FphaMissingEquivalentProductivity` error — the
 /// hazard this module pins.
 mod nonzero_stage_fpha_override_regression {
+    use cobre_io::config::SimulationSelection;
     use std::path::{Path, PathBuf};
 
     use cobre_core::scenario::ScenarioSource;
@@ -7118,7 +7117,8 @@ mod nonzero_stage_fpha_override_regression {
 
         let mut config_with_sim = config.clone();
         config_with_sim.simulation.enabled = true;
-        config_with_sim.simulation.num_scenarios = Some(1);
+        config_with_sim.simulation.selection =
+            Some(SimulationSelection::Sampled { num_scenarios: 1 });
 
         let mut setup =
             build_setup_for_case(dir, &config_with_sim, &system, stochastic, hydro_models);
@@ -7773,6 +7773,523 @@ mod k_fan_enumerated_exact_bound {
                 );
             }
             other => panic!("expected SddpError::Validation, got {other:?}"),
+        }
+    }
+}
+
+/// Enumerated + external activation: a `|Ω| = 1` single-path chain whose nodes
+/// each declare an external scenario column. The forward pin and the backward
+/// `OpeningSource` match make both passes read the same `eta_slice(stage, k)`,
+/// so the exact upper bound over the declared columns meets the lower bound.
+mod enumerated_external {
+    #![allow(clippy::cast_possible_wrap)]
+
+    use std::collections::HashMap;
+    use std::sync::mpsc;
+
+    use chrono::NaiveDate;
+    use cobre_core::{
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, DeficitSegment,
+        EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties, LineBlockBounds,
+        LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults,
+        PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, System, SystemBuilder,
+        ThermalBlockBounds, ThermalStageBounds,
+        entities::hydro::HydroGenerationModel,
+        scenario::{ExternalScenarioRow, InflowModel, LoadModel, SamplingScheme, ScenarioSource},
+        temporal::{
+            Node as PolicyNode, NoiseMethod, PolicyGraph, PolicyGraphType, ScenarioSourceConfig,
+            StageStateConfig, Transition,
+        },
+    };
+    use cobre_sddp::{
+        DEFAULT_COST_SCALE_FACTOR, InflowNonNegativityMethod, SimulationScenarioResult,
+        StoppingMode, StoppingRule, StoppingRuleSet, StudySetup,
+        hydro_models::PrepareHydroModelsResult,
+        setup::{ConstructionConfig, SimulationEnumeratedRequest},
+    };
+    use cobre_solver::ActiveSolver;
+    use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
+
+    use crate::common::StubComm;
+    use crate::common::builders::{
+        BusSpec, HydroSpec, StageSpec, make_bus, make_hydro, make_stage,
+    };
+
+    const N_STAGES: usize = 3;
+    /// Raw external inflow (m³/s) each node's declared column realizes — distinct
+    /// per stage, so the pinned column genuinely discriminates: were the backward
+    /// pass to read the generated tree instead, its cut would price a different
+    /// inflow and the lower bound would not meet the exact upper bound.
+    const EXTERNAL_INFLOW_M3S: [f64; N_STAGES] = [90.0, 40.0, 70.0];
+    /// A second external column (`scenario_id = 1`) the nodes do NOT declare.
+    /// Distinct enough that pricing it yields a different converged bound, so a
+    /// simulation walk that hash-selected (as `select_external_scenario` is
+    /// stage-independent, the hash picks one column for every stage of a scenario)
+    /// instead of honoring the node pin would evaluate a different policy — the
+    /// discriminator against a dropped pin.
+    const DECOY_INFLOW_M3S: [f64; N_STAGES] = [0.0, 0.0, 0.0];
+    const INFLOW_MEAN_M3S: f64 = 60.0;
+    const INFLOW_STD_M3S: f64 = 10.0;
+    const DEMAND_MW: f64 = 50.0;
+
+    fn build_system() -> System {
+        let bus_id = EntityId(1);
+        let hydro_id = EntityId(2);
+
+        let bus = make_bus(
+            bus_id,
+            BusSpec {
+                name: "B".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                deficit_segments: vec![DeficitSegment {
+                    depth_mw: None,
+                    cost_per_mwh: 500.0,
+                }],
+                excess_cost: 0.0,
+            },
+        );
+
+        let hydro = make_hydro(
+            hydro_id,
+            HydroSpec {
+                name: "H".to_string(),
+                operational_start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                bus_id,
+                min_storage_hm3: 0.0,
+                max_storage_hm3: 200.0,
+                min_outflow_m3s: 0.0,
+                max_outflow_m3s: None,
+                generation_model: HydroGenerationModel::ConstantProductivity,
+                min_turbined_m3s: 0.0,
+                max_turbined_m3s: 100.0,
+                specific_productivity_mw_per_m3s_per_m: Some(0.5),
+                min_generation_mw: 0.0,
+                max_generation_mw: 250.0,
+                ..HydroSpec::default()
+            },
+        );
+
+        let stages: Vec<_> = (0..N_STAGES)
+            .map(|i| {
+                make_stage(
+                    i,
+                    StageSpec {
+                        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                        season_id: None,
+                        state_config: StageStateConfig {
+                            storage: true,
+                            inflow_lags: false,
+                        },
+                        scenario_config: ScenarioSourceConfig {
+                            branching_factor: 1,
+                            noise_method: NoiseMethod::Saa,
+                        },
+                        ..StageSpec::default()
+                    },
+                )
+            })
+            .collect();
+
+        let inflow_models: Vec<_> = (0..N_STAGES)
+            .map(|i| InflowModel {
+                hydro_id,
+                stage_id: i as i32,
+                mean_m3s: INFLOW_MEAN_M3S,
+                std_m3s: INFLOW_STD_M3S,
+                ar_coefficients: vec![],
+                residual_std_ratio: 1.0,
+                annual: None,
+            })
+            .collect();
+
+        // Deterministic demand (std 0 ⇒ zero stochastic-load noise dimension), so
+        // the only noise class is the external inflow.
+        let load_models: Vec<_> = (0..N_STAGES)
+            .map(|i| LoadModel {
+                bus_id,
+                stage_id: i as i32,
+                mean_mw: DEMAND_MW,
+                std_mw: 0.0,
+            })
+            .collect();
+
+        // Two external columns per stage: column 0 (declared by the nodes here)
+        // and a decoy column 1 the pin must never select.
+        let external_scenarios: Vec<_> = (0..N_STAGES)
+            .flat_map(|i| {
+                [
+                    ExternalScenarioRow {
+                        stage_id: i as i32,
+                        scenario_id: 0,
+                        hydro_id,
+                        value_m3s: EXTERNAL_INFLOW_M3S[i],
+                    },
+                    ExternalScenarioRow {
+                        stage_id: i as i32,
+                        scenario_id: 1,
+                        hydro_id,
+                        value_m3s: DECOY_INFLOW_M3S[i],
+                    },
+                ]
+            })
+            .collect();
+
+        // Single-successor chain; every node declares external column 0, so the
+        // graph is node-native (External openings), a single enumerated path. The
+        // library also carries a decoy column 1 the nodes never declare — a
+        // dropped pin would hash-select it and price a different policy.
+        let nodes: Vec<_> = (0..N_STAGES)
+            .map(|i| PolicyNode {
+                id: i as i32,
+                stage_id: i as i32,
+                scenario_id: Some(0),
+                label: None,
+            })
+            .collect();
+        let transitions: Vec<_> = (0..N_STAGES - 1)
+            .map(|i| Transition {
+                source_id: i as i32,
+                target_id: (i + 1) as i32,
+                probability: 1.0,
+                annual_discount_rate_override: None,
+            })
+            .collect();
+        let policy_graph = PolicyGraph {
+            graph_type: PolicyGraphType::FiniteHorizon,
+            annual_discount_rate: 0.0,
+            transitions,
+            nodes,
+            stage_discount_rate_overrides: HashMap::new(),
+            season_map: None,
+        };
+
+        let bounds = ResolvedBounds::new(
+            &BoundsCountsSpec {
+                n_hydros: 1,
+                n_thermals: 0,
+                n_lines: 0,
+                n_pumping: 0,
+                n_contracts: 0,
+                n_stages: N_STAGES,
+                k_max: 0,
+            },
+            &BoundsDefaults {
+                hydro: HydroStageBounds {
+                    min_storage_hm3: 0.0,
+                    max_storage_hm3: 200.0,
+                    filling_min_rate_m3s: 0.0,
+                    water_withdrawal_m3s: 0.0,
+                },
+                hydro_block: HydroBlockBounds {
+                    min_turbined_m3s: 0.0,
+                    max_turbined_m3s: 100.0,
+                    min_outflow_m3s: 0.0,
+                    max_outflow_m3s: None,
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 250.0,
+                    max_diversion_m3s: None,
+                },
+                thermal: ThermalStageBounds { cost_per_mwh: 0.0 },
+                thermal_block: ThermalBlockBounds {
+                    min_generation_mw: 0.0,
+                    max_generation_mw: 0.0,
+                },
+                line_block: LineBlockBounds {
+                    direct_mw: 0.0,
+                    reverse_mw: 0.0,
+                },
+                pumping_block: PumpingBlockBounds {
+                    min_flow_m3s: 0.0,
+                    max_flow_m3s: 0.0,
+                },
+                contract_block: ContractBlockBounds {
+                    min_mw: 0.0,
+                    max_mw: 0.0,
+                    price_per_mwh: 0.0,
+                },
+            },
+        );
+        let penalties = ResolvedPenalties::new(
+            &PenaltiesCountsSpec {
+                n_hydros: 1,
+                n_buses: 1,
+                n_lines: 0,
+                n_ncs: 0,
+                n_stages: N_STAGES,
+            },
+            &PenaltiesDefaults {
+                hydro: HydroStagePenalties {
+                    spillage_cost: 0.01,
+                    diversion_cost: 0.0,
+                    turbined_cost: 0.0,
+                    storage_violation_below_cost: 500.0,
+                    filling_target_violation_cost: 0.0,
+                    turbined_violation_below_cost: 0.0,
+                    outflow_violation_below_cost: 0.0,
+                    outflow_violation_above_cost: 0.0,
+                    generation_violation_below_cost: 0.0,
+                    evaporation_violation_cost: 0.0,
+                    water_withdrawal_violation_cost: 0.0,
+                    water_withdrawal_violation_pos_cost: 0.0,
+                    water_withdrawal_violation_neg_cost: 0.0,
+                    evaporation_violation_pos_cost: 0.0,
+                    evaporation_violation_neg_cost: 0.0,
+                    inflow_nonnegativity_cost: 1000.0,
+                },
+                bus: BusStagePenalties { excess_cost: 0.0 },
+                line: LineStagePenalties { exchange_cost: 0.0 },
+                ncs: NcsStagePenalties {
+                    curtailment_cost: 0.0,
+                },
+            },
+        );
+
+        SystemBuilder::new()
+            .buses(vec![bus])
+            .hydros(vec![hydro])
+            .stages(stages)
+            .inflow_models(inflow_models)
+            .load_models(load_models)
+            .external_scenarios(external_scenarios)
+            .policy_graph(policy_graph)
+            .bounds(bounds)
+            .penalties(penalties)
+            .build()
+            .expect("enumerated-external chain system must build")
+    }
+
+    fn construction_config(
+        backward_scheduler: cobre_io::config::BackwardScheduler,
+        n_scenarios: u32,
+    ) -> ConstructionConfig {
+        ConstructionConfig {
+            seed: 42,
+            forward_passes: 1,
+            training_enumerated: true,
+            stopping_rule_set: StoppingRuleSet {
+                rules: vec![StoppingRule::IterationLimit { limit: 40 }],
+                mode: StoppingMode::Any,
+            },
+            n_scenarios,
+            simulation_enumerated: SimulationEnumeratedRequest::Sampled,
+            io_channel_capacity: 0,
+            policy_path: String::new(),
+            inflow_method: InflowNonNegativityMethod::None,
+            cut_selection: None,
+            cut_activity_tolerance: 0.0,
+            budget: None,
+            export_states: false,
+            scalar_parameters: Vec::new(),
+            training_solver_backward: None,
+            training_solver_forward: None,
+            simulation_solver: None,
+            backward_scheduler,
+            cost_scale_factor: DEFAULT_COST_SCALE_FACTOR,
+            inflow_lag_depth: None,
+        }
+    }
+
+    /// Train the enumerated-external chain under `backward_scheduler` and return
+    /// the converged `(LB, UB)`. Both backward schedulers route an External
+    /// successor node through the same `eta_slice(stage, k)` read.
+    fn train_final_bounds(backward_scheduler: cobre_io::config::BackwardScheduler) -> (f64, f64) {
+        let system = build_system();
+        let source = ScenarioSource {
+            inflow_scheme: SamplingScheme::External,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            seed: Some(42),
+            historical_years: None,
+        };
+        let stochastic = build_stochastic_context(
+            &system,
+            42,
+            Some(42),
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::External),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .expect("build_stochastic_context must succeed");
+        assert!(
+            stochastic.n_stochastic_ncs() == 0,
+            "fixture must carry no NCS noise dimension"
+        );
+
+        let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
+        let mut setup = StudySetup::from_broadcast_params(
+            &system,
+            stochastic,
+            construction_config(backward_scheduler, 0),
+            hydro_models,
+            &source,
+            &source,
+        )
+        .expect("StudySetup::from_broadcast_params must build");
+        assert!(
+            setup.scenario_libraries.training.external_inflow.is_some(),
+            "external inflow library must be present under the External scheme"
+        );
+
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("enumerated-external training must return Ok");
+        assert!(outcome.error.is_none(), "expected no training error");
+        (outcome.result.final_lb, outcome.result.final_ub)
+    }
+
+    /// By-scenario backward (default): forward and backward both read
+    /// `eta_slice(stage, k)` for the pinned column, so the exact upper bound over
+    /// the declared path meets the lower bound.
+    #[test]
+    fn enumerated_external_chain_lb_equals_ub_by_scenario() {
+        let (lb, ub) = train_final_bounds(cobre_io::config::BackwardScheduler::ByScenario {});
+        assert!(
+            (ub - lb).abs() < 1e-6,
+            "by-scenario enumerated-external forward≡backward must converge LB==UB: \
+             LB = {lb}, UB = {ub}",
+        );
+    }
+
+    /// By-node backward: the opening-block scheduler's claim loop takes the same
+    /// External `eta_slice(stage, k)` read, so it converges to the identical
+    /// LB==UB as the by-scenario path.
+    #[test]
+    fn enumerated_external_chain_lb_equals_ub_by_node() {
+        let (lb, ub) =
+            train_final_bounds(cobre_io::config::BackwardScheduler::ByNode { block_size: None });
+        assert!(
+            (ub - lb).abs() < 1e-6,
+            "by-node enumerated-external forward≡backward must converge LB==UB: \
+             LB = {lb}, UB = {ub}",
+        );
+    }
+
+    /// Train the enumerated-external chain, then run `n_sim` sampled simulation
+    /// scenarios over the same node graph, returning `(LB, UB, per-scenario
+    /// simulation results sorted by scenario id)`.
+    fn train_and_simulate(n_sim: u32) -> (f64, f64, Vec<SimulationScenarioResult>) {
+        let system = build_system();
+        let source = ScenarioSource {
+            inflow_scheme: SamplingScheme::External,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            seed: Some(42),
+            historical_years: None,
+        };
+        let stochastic = build_stochastic_context(
+            &system,
+            42,
+            Some(42),
+            &[],
+            &[],
+            OpeningTreeInputs::default(),
+            ClassSchemes {
+                inflow: Some(SamplingScheme::External),
+                load: Some(SamplingScheme::InSample),
+                ncs: Some(SamplingScheme::InSample),
+            },
+        )
+        .expect("build_stochastic_context must succeed");
+
+        let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
+        let mut setup = StudySetup::from_broadcast_params(
+            &system,
+            stochastic,
+            construction_config(cobre_io::config::BackwardScheduler::ByScenario {}, n_sim),
+            hydro_models,
+            &source,
+            &source,
+        )
+        .expect("StudySetup::from_broadcast_params must build");
+
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("enumerated-external training must return Ok");
+        assert!(outcome.error.is_none(), "expected no training error");
+        let (lb, ub) = (outcome.result.final_lb, outcome.result.final_ub);
+
+        let mut pool = setup
+            .create_workspace_pool(&comm, 1, ActiveSolver::new)
+            .expect("create_workspace_pool must succeed");
+        let (result_tx, result_rx) = mpsc::sync_channel(usize::try_from(n_sim.max(1)).unwrap());
+        let drain = std::thread::spawn(move || result_rx.into_iter().collect::<Vec<_>>());
+        setup
+            .simulate(
+                &mut pool.workspaces,
+                &comm,
+                &result_tx,
+                None,
+                None,
+                &outcome.result.basis_cache,
+            )
+            .expect("simulate must return Ok");
+        drop(result_tx);
+        let mut results = drain.join().expect("drain thread must not panic");
+        results.sort_by_key(|r| r.scenario_id);
+        (lb, ub, results)
+    }
+
+    /// Simulation honors the node's external pin: every simulated scenario replays
+    /// the DECLARED column 0 (cost == UB == LB), even though the library carries a
+    /// distinct decoy column 1. A dropped pin would hash-select over both columns
+    /// (`select_external_scenario` is stage-independent, so a scenario reads one
+    /// column for all its stages) and any scenario landing on the decoy would price
+    /// a different, higher-inflow-deprived cost — so `cost == UB` for every scenario
+    /// is the replay proof, not a hash-drawn value.
+    #[test]
+    fn enumerated_external_simulation_replays_the_declared_column() {
+        // The decoy column must differ from the declared one, else the fixture
+        // could not discriminate a pinned replay from a hash-drawn one.
+        assert_ne!(
+            EXTERNAL_INFLOW_M3S, DECOY_INFLOW_M3S,
+            "declared and decoy external columns must differ for the test to have power",
+        );
+        let (lb, ub, results) = train_and_simulate(8);
+        assert!(
+            (ub - lb).abs() < 1e-6,
+            "enumerated-external forward≡backward must converge LB==UB: LB = {lb}, UB = {ub}",
+        );
+        assert!(
+            !results.is_empty(),
+            "simulation must produce at least one scenario"
+        );
+        // The realized incremental inflow each stage is the pinned column's raw
+        // value (no PAR lags), so it discriminates the declared column from the
+        // decoy independently of the deficit-dominated cost: a dropped pin would
+        // hash-select and the scenarios landing on the decoy would report its
+        // inflow instead. The hydro is the sole entity, so `hydros[0]`.
+        for r in &results {
+            assert_eq!(
+                r.stages.len(),
+                N_STAGES,
+                "each simulated scenario must span every stage",
+            );
+            for (t, stage) in r.stages.iter().enumerate() {
+                let realized = stage.hydros[0].incremental_inflow_m3s;
+                assert!(
+                    (realized - EXTERNAL_INFLOW_M3S[t]).abs() < 1e-6,
+                    "scenario {} stage {t}: simulation must replay declared column \
+                     {} m³/s, got {realized} (decoy is {})",
+                    r.scenario_id,
+                    EXTERNAL_INFLOW_M3S[t],
+                    DECOY_INFLOW_M3S[t],
+                );
+            }
+            assert!(
+                (r.total_cost - ub).abs() < 1e-6,
+                "simulated scenario cost must match the exact bound UB {ub}, got {}",
+                r.total_cost,
+            );
         }
     }
 }

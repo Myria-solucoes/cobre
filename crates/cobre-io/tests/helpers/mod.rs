@@ -19,7 +19,7 @@ use tempfile::TempDir;
 /// Minimal valid `config.json`.
 pub const VALID_CONFIG_JSON: &str = r#"{
     "training": {
-        "forward_passes": 10,
+        "selection": {"method": "sampled", "forward_passes": 10},
         "stopping_rules": [
             { "type": "iteration_limit", "limit": 100 }
         ]

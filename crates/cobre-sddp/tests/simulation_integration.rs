@@ -14,6 +14,7 @@
 // seam from `common::builders` — a no-op today, not dead code.
 #![allow(clippy::needless_update)]
 
+use cobre_io::config::{SimulationSelection, TrainingSelection};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc;
 
@@ -408,14 +409,13 @@ fn make_config() -> Config {
         training: IoTrainingConfig {
             enabled: true,
             tree_seed: None,
-            forward_passes: Some(1),
             stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 3 }]),
             stopping_mode: cobre_io::config::StoppingMode::Any,
             cut_selection: RowSelectionConfig::default(),
             solver: TrainingSolverConfig::default(),
             parallelism: cobre_io::config::ParallelismConfig::default(),
             scenario_source: None,
-            selection: None,
+            selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
         },
         upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
         policy: PolicyConfig {
@@ -426,11 +426,10 @@ fn make_config() -> Config {
         },
         simulation: IoSimulationConfig {
             enabled: false,
-            num_scenarios: Some(0),
             io_channel_capacity: 64,
             scenario_source: None,
             solver: None,
-            selection: None,
+            selection: Some(SimulationSelection::Sampled { num_scenarios: 0 }),
         },
         exports: ExportsConfig::default(),
         estimation: EstimationConfig::default(),

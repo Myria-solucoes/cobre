@@ -32,8 +32,8 @@ use cobre_io::config::{
     Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
     InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
     RawClassConfigEntry, RawSamplingScheme, RawScenarioSourceConfig, RowSelectionConfig,
-    SimulationConfig as IoSimulationConfig, StoppingMode, StoppingRuleConfig, TrainingConfig,
-    TrainingSolverConfig, UpperBoundEvaluationConfig,
+    SimulationConfig as IoSimulationConfig, SimulationSelection, StoppingMode, StoppingRuleConfig,
+    TrainingConfig, TrainingSelection, TrainingSolverConfig, UpperBoundEvaluationConfig,
 };
 use cobre_stochastic::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
@@ -522,7 +522,6 @@ fn minimal_config(forward_passes: u32, max_iterations: u32) -> Config {
         training: TrainingConfig {
             enabled: true,
             tree_seed: Some(42),
-            forward_passes: Some(forward_passes),
             stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
                 limit: max_iterations,
             }]),
@@ -531,7 +530,7 @@ fn minimal_config(forward_passes: u32, max_iterations: u32) -> Config {
             solver: TrainingSolverConfig::default(),
             parallelism: cobre_io::config::ParallelismConfig::default(),
             scenario_source: None,
-            selection: None,
+            selection: Some(TrainingSelection::Sampled { forward_passes }),
         },
         upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
         policy: PolicyConfig::default(),
@@ -1041,7 +1040,7 @@ fn train_generates_cuts_in_fcf() {
 /// fixture (b)) loads end-to-end through `StudySetup::new` and constructs
 /// the runtime node graph correctly: node identity/count, the `node → pool`
 /// map with leaf sharing, and canonical (ascending child id) successor lists.
-/// All 7 nodes are generated (`realization_id: None`).
+/// All 7 nodes are generated (`scenario_id: None`).
 ///
 /// TODO(per-node-backward-traversal): assert end-to-end branching training
 /// here once per-node opening-to-child-node substrate routing and per-node
@@ -1063,43 +1062,43 @@ fn node_native_binary_tree_loads_and_constructs_node_graph() {
             Node {
                 id: 0,
                 stage_id: 0,
-                realization_id: None,
+                scenario_id: None,
                 label: None,
             },
             Node {
                 id: 1,
                 stage_id: 1,
-                realization_id: None,
+                scenario_id: None,
                 label: None,
             },
             Node {
                 id: 2,
                 stage_id: 1,
-                realization_id: None,
+                scenario_id: None,
                 label: None,
             },
             Node {
                 id: 3,
                 stage_id: 2,
-                realization_id: None,
+                scenario_id: None,
                 label: None,
             },
             Node {
                 id: 4,
                 stage_id: 2,
-                realization_id: None,
+                scenario_id: None,
                 label: None,
             },
             Node {
                 id: 5,
                 stage_id: 2,
-                realization_id: None,
+                scenario_id: None,
                 label: None,
             },
             Node {
                 id: 6,
                 stage_id: 2,
-                realization_id: None,
+                scenario_id: None,
                 label: None,
             },
         ],
@@ -1255,7 +1254,7 @@ fn simulation_config_reflects_setup_fields() {
     let mut config = minimal_config(1, 5);
     config.simulation = IoSimulationConfig {
         enabled: true,
-        num_scenarios: Some(50),
+        selection: Some(SimulationSelection::Sampled { num_scenarios: 50 }),
         io_channel_capacity: 16,
         ..IoSimulationConfig::default()
     };
@@ -1391,7 +1390,7 @@ fn simulate_after_train_returns_nonempty_costs() {
     let mut config = minimal_config(1, 3);
     config.simulation = IoSimulationConfig {
         enabled: true,
-        num_scenarios: Some(3),
+        selection: Some(SimulationSelection::Sampled { num_scenarios: 3 }),
         io_channel_capacity: 8,
         ..IoSimulationConfig::default()
     };
@@ -1470,7 +1469,6 @@ fn study_params_from_config_defaults() {
         training: TrainingConfig {
             enabled: true,
             tree_seed: None,
-            forward_passes: None,
             stopping_rules: None,
             stopping_mode: cobre_io::config::StoppingMode::Any,
             cut_selection: RowSelectionConfig::default(),
@@ -1539,7 +1537,6 @@ fn study_params_from_config_explicit() {
         training: TrainingConfig {
             enabled: true,
             tree_seed: Some(1234),
-            forward_passes: Some(5),
             stopping_rules: Some(vec![
                 StoppingRuleConfig::IterationLimit { limit: 50 },
                 StoppingRuleConfig::TimeLimit { seconds: 60.0 },
@@ -1549,7 +1546,7 @@ fn study_params_from_config_explicit() {
             solver: TrainingSolverConfig::default(),
             parallelism: cobre_io::config::ParallelismConfig::default(),
             scenario_source: None,
-            selection: None,
+            selection: Some(TrainingSelection::Sampled { forward_passes: 5 }),
         },
         upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
         policy: PolicyConfig {
@@ -1558,7 +1555,7 @@ fn study_params_from_config_explicit() {
         },
         simulation: IoSimulationConfig {
             enabled: true,
-            num_scenarios: Some(200),
+            selection: Some(SimulationSelection::Sampled { num_scenarios: 200 }),
             ..IoSimulationConfig::default()
         },
         exports: ExportsConfig::default(),
@@ -1626,7 +1623,6 @@ fn minimal_prepare_config() -> cobre_io::Config {
         training: TrainingConfig {
             enabled: true,
             tree_seed: None,
-            forward_passes: None,
             stopping_rules: None,
             stopping_mode: StoppingMode::Any,
             cut_selection: RowSelectionConfig::default(),
@@ -8525,37 +8521,6 @@ fn enumerated_scenario_count_errors_on_overflow() {
     }
 }
 
-/// A declared census count that disagrees with the derived count is rejected,
-/// the message naming both counts and their sources.
-#[test]
-fn check_census_rejects_count_disagreement() {
-    match super::check_census(Some(7), 44) {
-        Err(SddpError::Validation(msg)) => {
-            assert!(msg.contains('7'), "names the declared count: {msg}");
-            assert!(msg.contains("44"), "names the derived count: {msg}");
-            assert!(
-                msg.contains("declared") && msg.contains("graph"),
-                "names both sources: {msg}"
-            );
-        }
-        other => panic!("expected a census-disagreement Validation error, got {other:?}"),
-    }
-}
-
-/// A declared census equal to the derived count, and an absent declaration,
-/// both admit.
-#[test]
-fn check_census_accepts_agreement_and_absent() {
-    assert!(
-        super::check_census(Some(44), 44).is_ok(),
-        "equal counts admit"
-    );
-    assert!(
-        super::check_census(None, 44).is_ok(),
-        "an absent declaration admits"
-    );
-}
-
 /// Exactly one phase declaring `enumerated` emits an advisory naming both
 /// phases and the specific unavailable capability — never a generic message.
 /// Both asymmetric directions are exercised.
@@ -8618,7 +8583,7 @@ fn enumeration_asymmetry_symmetric_declarations_do_not_warn() {
 }
 
 // ---------------------------------------------------------------------------
-// resolve_enumerated_count: the `K^T` guard + census + not-yet-wired gate
+// resolve_enumerated_count: the `K^T` guard + not-yet-wired gate
 // ---------------------------------------------------------------------------
 
 /// A 2-node chain with `|Ω| = 1` at every node: zero stochastic branching, so
@@ -8641,13 +8606,8 @@ fn deterministic_chain_node_graph() -> super::NodeGraph {
 fn resolve_enumerated_count_admits_deterministic_graph() {
     let ng = deterministic_chain_node_graph();
     assert_eq!(
-        super::resolve_enumerated_count(
-            &ng,
-            None,
-            "training",
-            "the exhaustive forward-pass traversal"
-        )
-        .unwrap(),
+        super::resolve_enumerated_count(&ng, "training", "the exhaustive forward-pass traversal")
+            .unwrap(),
         1
     );
 }
@@ -8658,12 +8618,8 @@ fn resolve_enumerated_count_admits_deterministic_graph() {
 #[test]
 fn resolve_enumerated_count_rejects_non_deterministic_graph_as_not_wired() {
     let ng = asymmetric_fan_node_graph();
-    match super::resolve_enumerated_count(
-        &ng,
-        None,
-        "training",
-        "the exhaustive forward-pass traversal",
-    ) {
+    match super::resolve_enumerated_count(&ng, "training", "the exhaustive forward-pass traversal")
+    {
         Err(SddpError::Validation(msg)) => {
             assert!(msg.contains("44"), "names the derived count: {msg}");
             assert!(msg.contains("not yet wired"), "names the guard: {msg}");
@@ -8679,12 +8635,8 @@ fn resolve_enumerated_count_rejects_non_deterministic_graph_as_not_wired() {
 #[test]
 fn resolve_enumerated_count_propagates_kt_overflow_guard() {
     let ng = overflowing_chain_node_graph();
-    match super::resolve_enumerated_count(
-        &ng,
-        None,
-        "training",
-        "the exhaustive forward-pass traversal",
-    ) {
+    match super::resolve_enumerated_count(&ng, "training", "the exhaustive forward-pass traversal")
+    {
         Err(SddpError::Validation(msg)) => {
             assert!(msg.contains("overflow"), "names the overflow: {msg}");
         }
@@ -8692,44 +8644,13 @@ fn resolve_enumerated_count_propagates_kt_overflow_guard() {
     }
 }
 
-/// A disagreeing declared census is rejected via `check_census` BEFORE the
-/// not-yet-wired execution gate is reached — the census-disagreement message,
-/// not the execution guard's.
+/// The simulation phase's non-deterministic rejection names the simulation
+/// phase and its capability — the count is purely graph-derived, with no
+/// census cross-check.
 #[test]
-fn resolve_enumerated_count_checks_census_before_execution_gate() {
+fn resolve_enumerated_count_rejects_non_deterministic_simulation_as_not_wired() {
     let ng = asymmetric_fan_node_graph();
-    match super::resolve_enumerated_count(
-        &ng,
-        Some(7),
-        "simulation",
-        "the weighted census simulation",
-    ) {
-        Err(SddpError::Validation(msg)) => {
-            assert!(
-                msg.contains('7') && msg.contains("44"),
-                "names both counts: {msg}"
-            );
-            assert!(
-                !msg.contains("not yet wired"),
-                "must be the census message, not the execution guard: {msg}"
-            );
-        }
-        other => panic!("expected a census-disagreement Validation error, got {other:?}"),
-    }
-}
-
-/// A declared census that agrees with the derived count passes the
-/// cross-check, then still hits the not-yet-wired execution gate for a
-/// non-deterministic derived count.
-#[test]
-fn resolve_enumerated_count_agreeing_census_still_rejects_non_deterministic_graph() {
-    let ng = asymmetric_fan_node_graph();
-    match super::resolve_enumerated_count(
-        &ng,
-        Some(44),
-        "simulation",
-        "the weighted census simulation",
-    ) {
+    match super::resolve_enumerated_count(&ng, "simulation", "the weighted census simulation") {
         Err(SddpError::Validation(msg)) => {
             assert!(msg.contains("not yet wired"), "names the guard: {msg}");
             assert!(msg.contains("simulation"), "names the phase: {msg}");
@@ -8803,6 +8724,76 @@ fn sampled_admits_the_recombining_node_graph() {
         ng.n_pools,
         "the sampled visit-bound path consumes the recombining graph without rejection"
     );
+}
+
+// ---------------------------------------------------------------------------
+// reject_scenario_id_under_sampled_selection: the footgun-close guard
+// ---------------------------------------------------------------------------
+
+/// A runtime node whose `openings.source` is `External` with scenario column
+/// `offset` — the shape a declared node `scenario_id` produces.
+fn ng_external_node(stage: usize, offset: usize) -> super::NodeRuntime {
+    super::NodeRuntime {
+        stage,
+        pool_id: 0,
+        openings: super::NodeOpenings {
+            source: super::OpeningSource::External,
+            offset,
+            len: 1,
+            q: 1.0,
+        },
+    }
+}
+
+/// Root (stage 0, Generated, node id 7) → child (stage 1, External scenario
+/// column 2, node id 9): the child's `scenario_id` surfaces as an `External`
+/// opening, the shape the sampled-selection guard rejects.
+fn external_pointer_node_graph() -> super::NodeGraph {
+    super::NodeGraph {
+        node_ids: vec![7, 9],
+        nodes: vec![ng_node(0, 3), ng_external_node(1, 2)],
+        successors: vec![vec![ng_edge(1)], vec![]],
+        n_pools: 2,
+        pool_stage: vec![0, 1],
+    }
+}
+
+/// A node carrying a scenario pointer (`External` opening) under sampled forward
+/// selection is a named `Validation` rejection — closing the footgun where a
+/// `scenario_id` under sampled would be validated at load and silently ignored
+/// at solve.
+#[test]
+fn scenario_id_under_sampled_selection_is_rejected_naming_node_and_stage() {
+    let ng = external_pointer_node_graph();
+
+    // Confirm the fixture genuinely carries an external pointer before asserting.
+    assert!(
+        ng.nodes
+            .iter()
+            .any(|n| n.openings.source == super::OpeningSource::External),
+        "fixture must carry an external-bound node"
+    );
+
+    match super::reject_scenario_id_under_sampled_selection(&ng, false) {
+        Err(SddpError::Validation(msg)) => {
+            assert!(msg.contains("node 9"), "names the offending node: {msg}");
+            assert!(msg.contains("stage 1"), "names its stage: {msg}");
+            assert!(
+                msg.contains("enumerated selection"),
+                "names the admitting condition: {msg}"
+            );
+        }
+        other => panic!("expected a sampled-selection Validation error, got {other:?}"),
+    }
+}
+
+/// The SAME external-pointer graph is admitted under enumerated selection — the
+/// pointer is legal there (its count resolution is a separate concern).
+#[test]
+fn scenario_id_under_enumerated_selection_is_admitted() {
+    let ng = external_pointer_node_graph();
+    super::reject_scenario_id_under_sampled_selection(&ng, true)
+        .expect("enumerated selection admits a node scenario_id");
 }
 
 /// Documented exhaustive-destructure guard (a compile-fail proxy; trybuild is

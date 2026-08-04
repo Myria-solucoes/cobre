@@ -8,6 +8,7 @@ use cobre_core::scenario::{SamplingScheme, ScenarioSource};
 use cobre_core::temporal::{Node, PolicyGraphType, StageRiskConfig, Transition};
 
 use crate::StageIdResolver;
+use crate::config::ForwardPassesResolution;
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 use super::PROB_TOLERANCE;
@@ -171,7 +172,7 @@ pub(super) fn check_inflow_lags_vs_par_order(data: &ParsedData, ctx: &mut Valida
 }
 
 /// Validates a declared policy-graph `nodes[]` (node-native dialect): the
-/// `realization_id` conditional requirement (rule 36) and pointer bound
+/// `scenario_id` conditional requirement (rule 36) and pointer bound
 /// (rule 37) per slot-occupying external class, structural well-formedness
 /// (rule 38: unknown/duplicate node id, unresolved stage, empty stage,
 /// unreachable node, cycle, mid-horizon leaf), the every-edge `t → t+1` rule
@@ -278,16 +279,21 @@ pub(super) fn check_node_graph(data: &ParsedData, ctx: &mut ValidationContext) {
     }
 }
 
-/// Rules 36 (B3 conditional requirement) and 37 (R6.2 pointer bound): a node's
-/// `realization_id` is required exactly when its stage carries a slot-occupying
-/// external class and, when present, must index a valid column of every such
-/// class.
+/// Rules 36 (B3 conditional requirement) and 37 (R6.2 pointer bound), applied
+/// only under enumerated forward selection: a node's `scenario_id` is required
+/// exactly when its stage carries a slot-occupying external class and, when
+/// present, must index a valid column of every such class. Inert under any other
+/// selection — a `scenario_id` under sampled forwards carries no meaning here and
+/// is a setup rejection, not a check in this layer.
 fn check_realization_rules(
     data: &ParsedData,
     nodes: &[Node],
     resolver: &StageIdResolver,
     ctx: &mut ValidationContext,
 ) {
+    let Some(ForwardPassesResolution::Enumerated) = data.config.resolve_forward_passes() else {
+        return;
+    };
     let Ok(source) = data
         .config
         .training_scenario_source(Path::new("config.json"))
@@ -301,14 +307,14 @@ fn check_realization_rules(
         }
         let classes = slot_occupying_classes(data, &source, node.stage_id);
 
-        match (classes.is_empty(), node.realization_id) {
+        match (classes.is_empty(), node.scenario_id) {
             (false, None) => ctx.add_error(
                 ErrorKind::InvalidValue,
                 "stages.json",
                 Some(format!("node {}", node.id)),
                 format!(
                     "node {} at stage {} carries a slot-occupying external class but has no \
-                     realization_id; realization_id is required there",
+                     scenario_id; scenario_id is required there",
                     node.id, node.stage_id
                 ),
             ),
@@ -317,15 +323,15 @@ fn check_realization_rules(
                 "stages.json",
                 Some(format!("node {}", node.id)),
                 format!(
-                    "node {} at stage {} declares realization_id {k} but its stage carries no \
-                     slot-occupying external class; realization_id is meaningless there",
+                    "node {} at stage {} declares scenario_id {k} but its stage carries no \
+                     slot-occupying external class; scenario_id is meaningless there",
                     node.id, node.stage_id
                 ),
             ),
             _ => {}
         }
 
-        if let Some(k) = node.realization_id {
+        if let Some(k) = node.scenario_id {
             for (class_name, raw_c) in &classes {
                 if usize::try_from(k).map_or(true, |ku| ku >= *raw_c) {
                     ctx.add_error(
@@ -333,7 +339,7 @@ fn check_realization_rules(
                         "stages.json",
                         Some(format!("node {}", node.id)),
                         format!(
-                            "node {} realization_id {k} is out of range for external class \
+                            "node {} scenario_id {k} is out of range for external class \
                              '{class_name}' at stage {}: must be in [0, {raw_c})",
                             node.id, node.stage_id
                         ),
@@ -593,7 +599,7 @@ fn check_recombinable_signature(
             .map(|&c| sig[c].clone())
             .collect::<Vec<_>>()
             .join(",");
-        sig[p] = format!("r{:?};[{joined}]", nodes[p].realization_id);
+        sig[p] = format!("r{:?};[{joined}]", nodes[p].scenario_id);
     }
 
     for (t, &sid) in study_ids.iter().enumerate() {
@@ -712,16 +718,22 @@ pub(super) fn check_edge_discount_override_under_nodes(
     }
 }
 
-/// Rule 43 (B6): a deck declaring `nodes[]` while shipping
-/// `scenarios/noise_openings.parquet` is rejected — nodes[] declares the opening set.
+/// Rule 43 (B6): `scenarios/noise_openings.parquet` supplies the generated
+/// backward opening tree, consumed only under sampled forward selection; it is
+/// rejected under enumerated selection, which consumes no generated tree.
 pub(super) fn check_nodes_and_noise_openings(data: &ParsedData, ctx: &mut ValidationContext) {
-    if !data.stages.policy_graph.nodes.is_empty() && data.has_noise_openings {
+    let enumerated = matches!(
+        data.config.resolve_forward_passes(),
+        Some(ForwardPassesResolution::Enumerated)
+    );
+    if data.has_noise_openings && enumerated {
         ctx.add_error(
             ErrorKind::InvalidValue,
             "stages.json",
             None::<&str>,
-            "policy_graph.nodes[] is declared while scenarios/noise_openings.parquet is present; \
-             nodes[] declares the opening set — remove one"
+            "scenarios/noise_openings.parquet supplies the generated backward opening tree, \
+             which is not consumed under enumerated forward selection; remove it or use sampled \
+             selection"
                 .to_string(),
         );
     }
@@ -1222,11 +1234,11 @@ mod tests {
 
     // ── Node graph (rules 36-40) ──────────────────────────────────────────────
 
-    fn node(id: i32, stage_id: i32, realization_id: Option<i32>) -> Node {
+    fn node(id: i32, stage_id: i32, scenario_id: Option<i32>) -> Node {
         Node {
             id,
             stage_id,
-            realization_id,
+            scenario_id,
             label: None,
         }
     }
@@ -1288,7 +1300,7 @@ mod tests {
     /// with distinct realizations load with no node-graph rule firing.
     #[test]
     fn test_node_graph_valid_k_fan_and_binary_tree() {
-        // K-fan: stage 0 root (no external there ⇒ realization_id absent), stage 1
+        // K-fan: stage 0 root (no external there ⇒ scenario_id absent), stage 1
         // carries three external realizations.
         let mut kfan = node_graph_data(
             2,
@@ -1304,7 +1316,7 @@ mod tests {
                 edge(0, 3, 1.0 / 3.0),
             ],
         );
-        kfan.config = config_with_training_external_inflow();
+        kfan.config = config_enumerated_external_inflow();
         kfan.external_scenarios = vec![ext_inflow(1, 0), ext_inflow(1, 1), ext_inflow(1, 2)];
         // Stage 0 is generated (num_openings declared); stage 1 is external (none).
         kfan.stages.openings_declared = [0].into_iter().collect();
@@ -1339,7 +1351,7 @@ mod tests {
                 edge(2, 6, 0.5),
             ],
         );
-        tree.config = config_with_training_external_inflow();
+        tree.config = config_enumerated_external_inflow();
         tree.external_scenarios = vec![
             ext_inflow(1, 0),
             ext_inflow(1, 1),
@@ -1360,14 +1372,14 @@ mod tests {
         );
     }
 
-    /// R6.2: a `realization_id` equal to (and beyond) `raw_c(t)` is rejected
+    /// R6.2: a `scenario_id` equal to (and beyond) `raw_c(t)` is rejected
     /// naming the node, value, stage and bound; a value below `raw_c` is accepted.
     #[test]
     fn test_node_graph_realization_bound_at_and_beyond_raw_c() {
         // Single stage carrying two external realizations ⇒ raw_c = 2.
         let build = |rid: i32| {
             let mut data = node_graph_data(1, vec![node(0, 0, Some(rid))], vec![]);
-            data.config = config_with_training_external_inflow();
+            data.config = config_enumerated_external_inflow();
             data.external_scenarios = vec![ext_inflow(0, 0), ext_inflow(0, 1)];
             // Stage 0 is external ⇒ num_openings meaningless there; not declared.
             data.stages.openings_declared.clear();
@@ -1378,53 +1390,72 @@ mod tests {
         assert!(
             ctx.errors()
                 .iter()
-                .any(|e| e.message.contains("realization_id 2 is out of range")
+                .any(|e| e.message.contains("scenario_id 2 is out of range")
                     && e.message.contains("[0, 2)")
                     && e.message.contains("inflow")),
-            "realization_id == raw_c must be rejected naming value, class and bound: {:?}",
+            "scenario_id == raw_c must be rejected naming value, class and bound: {:?}",
             ctx.errors()
         );
 
         let ctx = run(&build(5));
         assert!(
-            errs_contain(&ctx, "realization_id 5 is out of range"),
-            "realization_id beyond raw_c must be rejected"
+            errs_contain(&ctx, "scenario_id 5 is out of range"),
+            "scenario_id beyond raw_c must be rejected"
         );
 
         let ctx = run(&build(1));
         assert!(
             !errs_contain(&ctx, "out of range"),
-            "realization_id < raw_c must be accepted: {:?}",
+            "scenario_id < raw_c must be accepted: {:?}",
             ctx.errors()
         );
     }
 
-    /// B3 arm 1: `realization_id` absent at a stage carrying a slot-occupying
+    /// B3 arm 1: `scenario_id` absent at a stage carrying a slot-occupying
     /// external class is rejected.
     #[test]
     fn test_node_graph_b3_realization_required_but_absent() {
+        let mut data = node_graph_data(1, vec![node(0, 0, None)], vec![]);
+        data.config = config_enumerated_external_inflow();
+        data.external_scenarios = vec![ext_inflow(0, 0)];
+        data.stages.openings_declared.clear();
+        let ctx = run(&data);
+        assert!(
+            errs_contain(&ctx, "scenario_id is required there"),
+            "absent scenario_id at an external stage must be rejected: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Rule 36 is inert under sampled forward selection: a `sampled + external`
+    /// stage whose node carries `scenario_id: None` raises no "required" error —
+    /// nodes are Generated there, and a present pointer is a setup rejection (D2),
+    /// not a check in this layer.
+    #[test]
+    fn test_node_graph_realization_inert_under_sampled_selection() {
         let mut data = node_graph_data(1, vec![node(0, 0, None)], vec![]);
         data.config = config_with_training_external_inflow();
         data.external_scenarios = vec![ext_inflow(0, 0)];
         data.stages.openings_declared.clear();
         let ctx = run(&data);
         assert!(
-            errs_contain(&ctx, "realization_id is required there"),
-            "absent realization_id at an external stage must be rejected: {:?}",
+            !errs_contain(&ctx, "scenario_id"),
+            "rule 36 must not fire under sampled selection: {:?}",
             ctx.errors()
         );
     }
 
-    /// B3 arm 2: `realization_id` present at a stage carrying no slot-occupying
+    /// B3 arm 2: `scenario_id` present at a stage carrying no slot-occupying
     /// external class is rejected as meaningless.
     #[test]
     fn test_node_graph_b3_realization_present_but_meaningless() {
-        // Default (in-sample) config ⇒ no slot-occupying external class anywhere.
-        let data = node_graph_data(1, vec![node(0, 0, Some(0))], vec![]);
+        // Enumerated, in-sample ⇒ rule 36 runs, no slot-occupying external class anywhere.
+        let mut data = node_graph_data(1, vec![node(0, 0, Some(0))], vec![]);
+        data.config = config_enumerated();
         let ctx = run(&data);
         assert!(
-            errs_contain(&ctx, "realization_id is meaningless there"),
-            "present realization_id where no external class exists must be rejected: {:?}",
+            errs_contain(&ctx, "scenario_id is meaningless there"),
+            "present scenario_id where no external class exists must be rejected: {:?}",
             ctx.errors()
         );
     }
@@ -1592,7 +1623,7 @@ mod tests {
         let ctx = run(&data);
         assert!(
             !errs_contain(&ctx, "policy-graph node")
-                && !errs_contain(&ctx, "realization_id")
+                && !errs_contain(&ctx, "scenario_id")
                 && !errs_contain(&ctx, "does not advance"),
             "chain dialect must not trigger node-graph rules: {:?}",
             ctx.errors()
@@ -1655,16 +1686,31 @@ mod tests {
         );
     }
 
-    /// Rule 43: declaring `nodes[]` while shipping `noise_openings.parquet` is
-    /// rejected, stating that nodes[] declares the opening set.
+    /// Rule 43: `noise_openings.parquet` present under enumerated forward
+    /// selection is rejected, stating the generated tree is not consumed there.
     #[test]
-    fn test_nodes_and_noise_openings_parquet_rejected() {
+    fn test_noise_openings_rejected_under_enumerated() {
+        let mut data = node_graph_data(1, vec![node(0, 0, None)], vec![]);
+        data.config = config_enumerated();
+        data.has_noise_openings = true;
+        let ctx = run(&data);
+        assert!(
+            errs_contain(&ctx, "not consumed under enumerated forward selection"),
+            "noise_openings.parquet under enumerated must be rejected: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Rule 43: `noise_openings.parquet` present under sampled forward selection
+    /// is admitted — it is the sampled generated-tree file arm, not rejected here.
+    #[test]
+    fn test_noise_openings_admitted_under_sampled() {
         let mut data = node_graph_data(1, vec![node(0, 0, None)], vec![]);
         data.has_noise_openings = true;
         let ctx = run(&data);
         assert!(
-            errs_contain(&ctx, "nodes[] declares the opening set"),
-            "nodes[] with noise_openings.parquet must be rejected: {:?}",
+            !errs_contain(&ctx, "noise_openings.parquet"),
+            "noise_openings.parquet under sampled must not be rejected by B6: {:?}",
             ctx.errors()
         );
     }

@@ -5,9 +5,8 @@ use serde::{Deserialize, Serialize};
 use super::scenario_source::RawScenarioSourceConfig;
 use super::training::PhaseSolverProfileConfig;
 
-/// Default scenario count when neither `simulation.selection` nor the
-/// `simulation.num_scenarios` alias is present. Sole owner of the value; the
-/// `Default` impl and the count resolver both read it.
+/// Default scenario count when `simulation.selection` is absent. Sole owner of
+/// the value; the count resolver reads it.
 pub(crate) const DEFAULT_NUM_SCENARIOS: u32 = 2000;
 
 /// Post-training simulation settings (`config.json → simulation`).
@@ -17,11 +16,6 @@ pub(crate) const DEFAULT_NUM_SCENARIOS: u32 = 2000;
 pub struct SimulationConfig {
     /// Enable post-training simulation.
     pub enabled: bool,
-
-    /// Number of simulation scenarios. Deprecated alias for the `sampled`
-    /// selection count; declaring it alongside `selection` is rejected at load.
-    /// Absent resolves to the default sampled count.
-    pub num_scenarios: Option<u32>,
 
     /// Bounded channel capacity between simulation threads and the I/O writer thread.
     pub io_channel_capacity: u32,
@@ -46,11 +40,6 @@ impl Default for SimulationConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            // None, not Some(DEFAULT_NUM_SCENARIOS): container-level serde default
-            // fills an omitted `num_scenarios` from here, and a Some default would
-            // make every present `selection` collide with the defaulted alias.
-            // The default count is applied by the resolver, not this field.
-            num_scenarios: None,
             io_channel_capacity: 64,
             scenario_source: None,
             solver: None,
@@ -91,14 +80,8 @@ pub enum SimulationSelection {
 pub enum NumScenariosResolution {
     /// `num_scenarios` sampled simulation trajectories.
     Sampled(u32),
-    /// Exhaustive enumeration. `declared` is the optional `num_scenarios`
-    /// alias, when declared alongside `enumerated` as a census cross-check
-    /// value (never a conflict, unlike the `sampled` alias-vs-selection
-    /// pairing) — resolved against the graph-derived count downstream.
-    Enumerated {
-        /// The declared census cross-check count, if any.
-        declared: Option<u32>,
-    },
+    /// Exhaustive enumeration; the count is derived from the policy graph.
+    Enumerated,
 }
 
 #[cfg(test)]
@@ -107,8 +90,7 @@ mod tests {
     use super::{SimulationConfig, SimulationSelection};
     use crate::config::training::{PriceStrategy, ScaleStrategy};
 
-    /// A `sampled` phase selection round-trips into the `Sampled` variant and
-    /// leaves the deprecated `num_scenarios` alias absent.
+    /// A `sampled` phase selection round-trips into the `Sampled` variant.
     #[test]
     fn sampled_selection_round_trips() {
         let json = r#"{"enabled": true, "selection": {"method": "sampled", "num_scenarios": 500}}"#;
@@ -117,7 +99,25 @@ mod tests {
             cfg.selection,
             Some(SimulationSelection::Sampled { num_scenarios: 500 })
         );
-        assert_eq!(cfg.num_scenarios, None);
+    }
+
+    /// The removed flat `num_scenarios` alias is an unknown-field deserialize
+    /// error under `deny_unknown_fields`; the count lives solely in the
+    /// `selection.sampled` arm.
+    #[test]
+    fn flat_num_scenarios_alias_is_deserialize_error() {
+        let alias = r#"{"enabled": true, "num_scenarios": 500}"#;
+        assert!(
+            serde_json::from_str::<SimulationConfig>(alias).is_err(),
+            "flat num_scenarios must be rejected as an unknown field"
+        );
+
+        let arm = r#"{"enabled": true, "selection": {"method": "sampled", "num_scenarios": 500}}"#;
+        let cfg: SimulationConfig = serde_json::from_str(arm).unwrap();
+        assert_eq!(
+            cfg.selection,
+            Some(SimulationSelection::Sampled { num_scenarios: 500 })
+        );
     }
 
     /// A count under `enumerated` is unrepresentable — `deny_unknown_fields` on
@@ -133,18 +133,11 @@ mod tests {
         );
     }
 
-    /// The `num_scenarios` alias defaults to absent; the resolver, not this
-    /// field, supplies the default count.
-    #[test]
-    fn num_scenarios_alias_defaults_to_none() {
-        assert_eq!(SimulationConfig::default().num_scenarios, None);
-    }
-
     #[test]
     fn simulation_solver_profile_block_round_trips() {
         let json = r#"{
             "enabled": true,
-            "num_scenarios": 500,
+            "selection": { "method": "sampled", "num_scenarios": 500 },
             "solver": {
                 "scale": "off",
                 "price": "row"
@@ -165,7 +158,7 @@ mod tests {
     fn simulation_solver_profile_steepest_edge_fallback_threshold_round_trips() {
         let json = r#"{
             "enabled": true,
-            "num_scenarios": 500,
+            "selection": { "method": "sampled", "num_scenarios": 500 },
             "solver": {
                 "steepest_edge_devex_fallback_threshold": 12.5
             }

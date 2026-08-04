@@ -80,9 +80,9 @@
             "null"
           ]
         },
-        "realization_id": {
+        "scenario_id": {
           "default": null,
-          "description": "Per-stage external-library realization column this node carries. Required at a\nstage carrying a slot-occupying external class, omitted where none. `realization_id: k`\nis exactly the degenerate one-element weighted opening set\n`[{ \"realization_id\": k, \"probability\": 1.0 }]` (documented equivalence; the\nweighted-list spelling is not parsed here).",
+          "description": "Per-stage external-library realization column this node carries. Required at a\nstage carrying a slot-occupying external class, omitted where none. `scenario_id: k`\nis exactly the degenerate one-element weighted opening set\n`[{ \"scenario_id\": k, \"probability\": 1.0 }]` (documented equivalence; the\nweighted-list spelling is not parsed here).",
           "format": "int32",
           "type": [
             "integer",

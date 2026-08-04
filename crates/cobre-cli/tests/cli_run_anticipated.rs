@@ -23,13 +23,13 @@ fn cobre() -> Command {
 
 const CONFIG_JSON: &str = r#"{
     "training": {
-        "forward_passes": 1,
+        "selection": { "method": "sampled", "forward_passes": 1 },
         "stopping_rules": [
             { "type": "iteration_limit", "limit": 2 }
         ],
         "scenario_source": { "inflow": { "scheme": "in_sample" }, "seed": 42 }
     },
-    "simulation": { "enabled": true, "num_scenarios": 1 }
+    "simulation": { "enabled": true, "selection": { "method": "sampled", "num_scenarios": 1 } }
 }"#;
 
 const PENALTIES_JSON: &str = r#"{

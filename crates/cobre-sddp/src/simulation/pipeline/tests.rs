@@ -2727,3 +2727,50 @@ mod anticipated_ring_matches_forward_propagation {
         }
     }
 }
+
+/// The pin the two simulation node-visit sites set is the shared
+/// `node_pinned_scenario`: `None` at a `Generated` node (the sampled/generated
+/// byte-parity guarantee) and the declared column `k` at an `External` node.
+#[test]
+fn simulation_node_pin_is_none_for_generated_and_declared_column_for_external() {
+    use crate::setup::node_graph::{
+        NodeGraph, NodeOpenings, NodeRuntime, NodeSuccessor, OpeningSource, node_pinned_scenario,
+    };
+
+    let external = NodeRuntime {
+        stage: 0,
+        pool_id: 0,
+        openings: NodeOpenings {
+            source: OpeningSource::External,
+            offset: 5,
+            len: 1,
+            q: 1.0,
+        },
+    };
+    let generated = NodeRuntime {
+        stage: 1,
+        pool_id: 1,
+        openings: NodeOpenings {
+            source: OpeningSource::Generated,
+            offset: 0,
+            len: 3,
+            q: 1.0 / 3.0,
+        },
+    };
+    let ng = NodeGraph {
+        node_ids: vec![0, 1],
+        nodes: vec![external, generated],
+        successors: vec![
+            vec![NodeSuccessor {
+                child: 1,
+                probability: 1.0,
+            }],
+            Vec::new(),
+        ],
+        n_pools: 2,
+        pool_stage: vec![0, 1],
+    };
+
+    assert_eq!(node_pinned_scenario(&ng, 0), Some(5));
+    assert_eq!(node_pinned_scenario(&ng, 1), None);
+}

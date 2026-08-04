@@ -10,7 +10,8 @@
 //!
 //! The following fields have no defaults and must be present in `config.json`:
 //!
-//! - `training.forward_passes` — number of scenario trajectories per iteration
+//! - `training.selection` — the scenario-selection method (carries the
+//!   forward-pass count in its `sampled` arm)
 //! - `training.stopping_rules` — at least one rule entry (must include `iteration_limit`)
 //!
 //! # Examples
@@ -20,7 +21,7 @@
 //! use std::path::Path;
 //!
 //! let cfg = parse_config(Path::new("case/config.json")).unwrap();
-//! println!("forward_passes = {:?}", cfg.training.forward_passes);
+//! println!("forward passes = {:?}", cfg.resolve_forward_passes());
 //! ```
 
 use serde_json::{Map, Value};
@@ -114,7 +115,7 @@ pub struct Config {
 /// | --------------------------------- | ----------------------------- |
 /// | File not found / read failure     | [`LoadError::IoError`]        |
 /// | Invalid JSON syntax               | [`LoadError::ParseError`]     |
-/// | `training.forward_passes` missing | [`LoadError::SchemaError`]    |
+/// | `training.selection` missing      | [`LoadError::SchemaError`]    |
 /// | `training.stopping_rules` missing | [`LoadError::SchemaError`]    |
 /// | Unknown stopping rule `"type"`    | [`LoadError::SchemaError`]    |
 ///
@@ -125,7 +126,7 @@ pub struct Config {
 /// use std::path::Path;
 ///
 /// let cfg = parse_config(Path::new("case/config.json")).unwrap();
-/// assert!(cfg.training.forward_passes.unwrap_or(0) > 0);
+/// assert!(cfg.resolve_forward_passes().is_some());
 /// ```
 pub fn parse_config(path: &Path) -> Result<Config, LoadError> {
     let raw = std::fs::read_to_string(path).map_err(|e| LoadError::io(path, e))?;
@@ -163,11 +164,11 @@ fn extract_field_from_serde_msg(msg: &str) -> String {
 /// `stopping_rules` fields are present, and that the scenario-selection axis is
 /// well-formed on both phases.
 pub(crate) fn validate_config(config: &Config, path: &Path) -> Result<(), LoadError> {
-    if config.resolve_forward_passes(path)?.is_none() {
+    if config.resolve_forward_passes().is_none() {
         return Err(LoadError::SchemaError {
             path: path.to_path_buf(),
-            field: "training.forward_passes".to_string(),
-            message: "required field is missing".to_string(),
+            field: "training.selection".to_string(),
+            message: "a forward-pass count is required via training.selection".to_string(),
         });
     }
 
@@ -179,24 +180,7 @@ pub(crate) fn validate_config(config: &Config, path: &Path) -> Result<(), LoadEr
         });
     }
 
-    // Fire the simulation selection both-declared rejection at load; the
-    // resolved count itself (sampled or graph-derived) is consumed downstream.
-    config.resolve_num_scenarios(path)?;
-
     Ok(())
-}
-
-/// Build the both-declared rejection naming `{section}.selection` and the
-/// deprecated `{section}.{alias}` count alias.
-fn reject_both_declared_count(section: &str, alias: &str, path: &Path) -> LoadError {
-    LoadError::SchemaError {
-        path: path.to_path_buf(),
-        field: format!("{section}.selection"),
-        message: format!(
-            "{section}.selection and the deprecated {section}.{alias} are both set; \
-             declare the sampled count in exactly one place"
-        ),
-    }
 }
 
 // ── ScenarioSource helpers ───────────────────────────────────────────────────
@@ -255,9 +239,9 @@ fn convert_scenario_source_config(
 
 /// Validate a declared `openings` source from `config.json`.
 ///
-/// Only `generated` (or an absent declaration) is admitted; `external` and
-/// `file` are structurally valid but reserved, rejected until opening routing is
-/// wired, and any declaration outside the `training` section is rejected.
+/// Only `generated` (or an absent declaration) is admitted; `file` is
+/// structurally valid but reserved, rejected until opening routing is wired, and
+/// any declaration outside the `training` section is rejected.
 fn validate_openings_cfg(
     openings: Option<&Openings>,
     section: &str,
@@ -282,7 +266,6 @@ fn validate_openings_cfg(
 
     let reserved = match openings {
         Openings::Generated {} => return Ok(()),
-        Openings::External {} => "external",
         Openings::File { .. } => "file",
     };
     Err(LoadError::SchemaError {
@@ -412,86 +395,39 @@ impl Config {
         }
     }
 
-    /// Resolve the effective training forward-pass method from `training.selection`
-    /// or the deprecated `training.forward_passes` alias.
+    /// Resolve the effective training forward-pass method from
+    /// `training.selection`.
     ///
-    /// Returns `Ok(None)` when neither is present, leaving the mandatory-count
-    /// decision to the caller. An `enumerated` selection resolves to
+    /// Returns `None` when `selection` is absent, leaving the mandatory-count
+    /// rejection to [`validate_config`]. An `enumerated` selection resolves to
     /// [`ForwardPassesResolution::Enumerated`] — config load holds no policy
     /// graph, so the count itself is derived downstream.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`LoadError::SchemaError`] when both `training.selection` and the
-    /// `training.forward_passes` alias are set.
-    pub fn resolve_forward_passes(
-        &self,
-        path: &Path,
-    ) -> Result<Option<ForwardPassesResolution>, LoadError> {
+    #[must_use]
+    pub fn resolve_forward_passes(&self) -> Option<ForwardPassesResolution> {
         match &self.training.selection {
-            Some(TrainingSelection::Enumerated {}) => {
-                if self.training.forward_passes.is_some() {
-                    return Err(reject_both_declared_count(
-                        "training",
-                        "forward_passes",
-                        path,
-                    ));
-                }
-                Ok(Some(ForwardPassesResolution::Enumerated))
-            }
+            Some(TrainingSelection::Enumerated {}) => Some(ForwardPassesResolution::Enumerated),
             Some(TrainingSelection::Sampled { forward_passes }) => {
-                if self.training.forward_passes.is_some() {
-                    return Err(reject_both_declared_count(
-                        "training",
-                        "forward_passes",
-                        path,
-                    ));
-                }
-                Ok(Some(ForwardPassesResolution::Sampled(*forward_passes)))
+                Some(ForwardPassesResolution::Sampled(*forward_passes))
             }
-            None => Ok(self
-                .training
-                .forward_passes
-                .map(ForwardPassesResolution::Sampled)),
+            None => None,
         }
     }
 
     /// Resolve the effective simulation scenario-count method from
-    /// `simulation.selection` or the deprecated `simulation.num_scenarios`
-    /// alias, defaulting to [`DEFAULT_NUM_SCENARIOS`] when neither is present.
+    /// `simulation.selection`, defaulting to [`DEFAULT_NUM_SCENARIOS`] when
+    /// absent.
     ///
     /// An `enumerated` selection resolves to
-    /// [`NumScenariosResolution::Enumerated`] carrying the `num_scenarios`
-    /// alias (if declared) as the census cross-check count — config load holds
-    /// no policy graph, so the derived count and the cross-check itself happen
-    /// downstream.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`LoadError::SchemaError`] when both `simulation.selection` is
-    /// `sampled` and the `simulation.num_scenarios` alias are set (an
-    /// `enumerated` selection admits the alias as the census declaration, never
-    /// a conflict).
-    pub fn resolve_num_scenarios(&self, path: &Path) -> Result<NumScenariosResolution, LoadError> {
+    /// [`NumScenariosResolution::Enumerated`] — config load holds no policy
+    /// graph, so the derived count happens downstream.
+    #[must_use]
+    pub fn resolve_num_scenarios(&self) -> NumScenariosResolution {
         match &self.simulation.selection {
-            Some(SimulationSelection::Enumerated {}) => Ok(NumScenariosResolution::Enumerated {
-                declared: self.simulation.num_scenarios,
-            }),
+            Some(SimulationSelection::Enumerated {}) => NumScenariosResolution::Enumerated,
             Some(SimulationSelection::Sampled { num_scenarios }) => {
-                if self.simulation.num_scenarios.is_some() {
-                    return Err(reject_both_declared_count(
-                        "simulation",
-                        "num_scenarios",
-                        path,
-                    ));
-                }
-                Ok(NumScenariosResolution::Sampled(*num_scenarios))
+                NumScenariosResolution::Sampled(*num_scenarios)
             }
-            None => Ok(NumScenariosResolution::Sampled(
-                self.simulation
-                    .num_scenarios
-                    .unwrap_or(DEFAULT_NUM_SCENARIOS),
-            )),
+            None => NumScenariosResolution::Sampled(DEFAULT_NUM_SCENARIOS),
         }
     }
 
@@ -622,11 +558,14 @@ mod tests {
     #[test]
     fn test_parse_minimal_config() {
         let f = write_config(
-            r#"{"training": {"tree_seed": 42, "forward_passes": 192, "stopping_rules": [{"type": "iteration_limit", "limit": 50}]}}"#,
+            r#"{"training": {"tree_seed": 42, "selection": {"method": "sampled", "forward_passes": 192}, "stopping_rules": [{"type": "iteration_limit", "limit": 50}]}}"#,
         );
         let cfg = parse_config(f.path()).unwrap();
 
-        assert_eq!(cfg.training.forward_passes, Some(192));
+        assert_eq!(
+            cfg.resolve_forward_passes(),
+            Some(ForwardPassesResolution::Sampled(192))
+        );
         assert_eq!(cfg.training.tree_seed, Some(42));
         assert_eq!(cfg.training.stopping_mode, StoppingMode::Any);
         assert!(cfg.training.enabled);
@@ -635,11 +574,10 @@ mod tests {
             InflowNonNegativityMethod::Penalty
         );
         assert!(!cfg.simulation.enabled);
-        assert_eq!(cfg.simulation.num_scenarios, None);
         assert_eq!(
-            cfg.resolve_num_scenarios(f.path()).unwrap(),
+            cfg.resolve_num_scenarios(),
             NumScenariosResolution::Sampled(2000),
-            "absent num_scenarios resolves to the default sampled count"
+            "absent simulation selection resolves to the default sampled count"
         );
         assert_eq!(cfg.policy.mode, PolicyMode::Fresh);
         assert_eq!(cfg.policy.path, "./policy");
@@ -650,7 +588,7 @@ mod tests {
     #[test]
     fn test_config_without_state_space_defaults_to_none() {
         let f = write_config(
-            r#"{"training": {"forward_passes": 1, "stopping_rules": [{"type": "iteration_limit", "limit": 10}]}}"#,
+            r#"{"training": {"selection": {"method": "sampled", "forward_passes": 1}, "stopping_rules": [{"type": "iteration_limit", "limit": 10}]}}"#,
         );
         let cfg = parse_config(f.path()).unwrap();
         assert_eq!(cfg.state_space.inflow_lag_depth, None);
@@ -660,13 +598,14 @@ mod tests {
     #[test]
     fn test_config_state_space_inflow_lag_depth_present() {
         let f = write_config(
-            r#"{"training": {"forward_passes": 1, "stopping_rules": [{"type": "iteration_limit", "limit": 10}]}, "state_space": {"inflow_lag_depth": 12}}"#,
+            r#"{"training": {"selection": {"method": "sampled", "forward_passes": 1}, "stopping_rules": [{"type": "iteration_limit", "limit": 10}]}, "state_space": {"inflow_lag_depth": 12}}"#,
         );
         let cfg = parse_config(f.path()).unwrap();
         assert_eq!(cfg.state_space.inflow_lag_depth, Some(12));
     }
 
-    /// AC-2: missing `training.forward_passes` → SchemaError with field name.
+    /// AC-2: missing `training.selection` (no forward-pass count) → SchemaError
+    /// with field name.
     #[test]
     fn test_missing_forward_passes() {
         let f = write_config(
@@ -676,8 +615,8 @@ mod tests {
         match &err {
             LoadError::SchemaError { field, .. } => {
                 assert!(
-                    field.contains("forward_passes"),
-                    "field should contain 'forward_passes', got: {field}"
+                    field.contains("selection"),
+                    "field should name training.selection, got: {field}"
                 );
             }
             other => panic!("expected SchemaError, got: {other:?}"),
@@ -687,7 +626,9 @@ mod tests {
     /// AC-2 variant: missing `training.stopping_rules` → SchemaError.
     #[test]
     fn test_missing_stopping_rules() {
-        let f = write_config(r#"{"training": {"tree_seed": 1, "forward_passes": 100}}"#);
+        let f = write_config(
+            r#"{"training": {"tree_seed": 1, "selection": {"method": "sampled", "forward_passes": 100}}}"#,
+        );
         let err = parse_config(f.path()).unwrap_err();
         match &err {
             LoadError::SchemaError { field, .. } => {
@@ -725,7 +666,7 @@ mod tests {
           },
           "training": {
             "tree_seed": 42,
-            "forward_passes": 192,
+            "selection": {"method": "sampled", "forward_passes": 192},
             "stopping_rules": [
               {"type": "iteration_limit", "limit": 50},
               {"type": "bound_stalling", "iterations": 10, "tolerance": 0.0001}
@@ -756,7 +697,7 @@ mod tests {
           },
           "simulation": {
             "enabled": true,
-            "num_scenarios": 2000
+            "selection": {"method": "sampled", "num_scenarios": 2000}
           },
           "exports": {
             "states": true,
@@ -772,7 +713,10 @@ mod tests {
             InflowNonNegativityMethod::Penalty
         );
 
-        assert_eq!(cfg.training.forward_passes, Some(192));
+        assert_eq!(
+            cfg.resolve_forward_passes(),
+            Some(ForwardPassesResolution::Sampled(192))
+        );
         assert_eq!(cfg.training.stopping_mode, StoppingMode::Any);
         let rules = cfg.training.stopping_rules.as_ref().unwrap();
         assert_eq!(rules.len(), 2);
@@ -795,7 +739,10 @@ mod tests {
         assert_eq!(cfg.policy.checkpointing.enabled, Some(true));
 
         assert!(cfg.simulation.enabled);
-        assert_eq!(cfg.simulation.num_scenarios, Some(2000));
+        assert_eq!(
+            cfg.resolve_num_scenarios(),
+            NumScenariosResolution::Sampled(2000)
+        );
 
         assert!(cfg.exports.states);
         assert!(cfg.exports.stochastic);
@@ -820,7 +767,7 @@ mod tests {
     fn test_stopping_rule_variants() {
         let json = r#"{
           "training": {
-            "forward_passes": 10,
+            "selection": {"method": "sampled", "forward_passes": 10},
             "stopping_rules": [
               {"type": "iteration_limit", "limit": 100},
               {"type": "time_limit", "seconds": 3600.0},
@@ -862,7 +809,7 @@ mod tests {
     #[test]
     fn test_unknown_stopping_rule_type() {
         let f = write_config(
-            r#"{"training": {"forward_passes": 10, "stopping_rules": [{"type": "nonexistent_rule"}]}}"#,
+            r#"{"training": {"selection": {"method": "sampled", "forward_passes": 10}, "stopping_rules": [{"type": "nonexistent_rule"}]}}"#,
         );
         let err = parse_config(f.path()).unwrap_err();
         assert!(
@@ -876,7 +823,7 @@ mod tests {
     #[test]
     fn old_simulation_stopping_rule_type_is_unknown_variant() {
         let f = write_config(
-            r#"{"training": {"forward_passes": 10, "stopping_rules": [
+            r#"{"training": {"selection": {"method": "sampled", "forward_passes": 10}, "stopping_rules": [
                 {"type": "simulation", "replications": 100, "period": 20,
                  "bound_window": 5, "distance_tol": 0.01, "bound_tol": 0.0001}
             ]}}"#,
@@ -893,7 +840,7 @@ mod tests {
     #[test]
     fn test_config_has_no_version_field() {
         let f = write_config(
-            r#"{"training": {"forward_passes": 1, "stopping_rules": [{"type": "iteration_limit", "limit": 10}]}}"#,
+            r#"{"training": {"selection": {"method": "sampled", "forward_passes": 1}, "stopping_rules": [{"type": "iteration_limit", "limit": 10}]}}"#,
         );
         let cfg = parse_config(f.path()).unwrap();
         assert!(cfg.schema.is_none(), "schema should be None when absent");
@@ -907,7 +854,7 @@ mod tests {
             r#"{
             "$schema": "https://raw.githubusercontent.com/cobre-rs/cobre/refs/heads/main/schemas/config.schema.json",
             "training": {
-                "forward_passes": 1,
+                "selection": {"method": "sampled", "forward_passes": 1},
                 "stopping_rules": [{"type": "iteration_limit", "limit": 10}]
             }
         }"#,
@@ -926,7 +873,7 @@ mod tests {
     #[test]
     fn test_invalid_policy_mode_rejected() {
         let f = write_config(
-            r#"{"training": {"forward_passes": 1, "stopping_rules": [{"type": "iteration_limit", "limit": 10}]}, "policy": {"mode": "warmstart"}}"#,
+            r#"{"training": {"selection": {"method": "sampled", "forward_passes": 1}, "stopping_rules": [{"type": "iteration_limit", "limit": 10}]}, "policy": {"mode": "warmstart"}}"#,
         );
         let err = parse_config(f.path()).unwrap_err();
         assert!(
@@ -944,7 +891,7 @@ mod tests {
             r#"{
             "version": "1.0.0",
             "training": {
-                "forward_passes": 1,
+                "selection": {"method": "sampled", "forward_passes": 1},
                 "stopping_rules": [{"type": "iteration_limit", "limit": 10}]
             }
         }"#,
@@ -967,7 +914,7 @@ mod tests {
         let f = write_config(
             r#"{
             "training": {
-                "forward_passes": 1,
+                "selection": {"method": "sampled", "forward_passes": 1},
                 "stopping_rules": [{"type": "iteration_limit", "limit": 10}]
             },
             "policy": {
@@ -995,7 +942,7 @@ mod tests {
                 }
             },
             "training": {
-                "forward_passes": 10,
+                "selection": {"method": "sampled", "forward_passes": 10},
                 "stopping_rules": [{"type": "iteration_limit", "limit": 5}]
             }
         }"#,
@@ -1019,7 +966,7 @@ mod tests {
                 }
             },
             "training": {
-                "forward_passes": 10,
+                "selection": {"method": "sampled", "forward_passes": 10},
                 "stopping_rules": [{"type": "iteration_limit", "limit": 5}]
             }
         }"#,
@@ -1038,7 +985,7 @@ mod tests {
     #[test]
     fn test_estimation_config_defaults() {
         let f = write_config(
-            r#"{"training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}}"#,
+            r#"{"training": {"selection": {"method": "sampled", "forward_passes": 10}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}}"#,
         );
         let cfg = parse_config(f.path()).unwrap();
         assert_eq!(cfg.estimation.max_order, 6);
@@ -1054,7 +1001,7 @@ mod tests {
     fn test_estimation_config_order_selection_fixed_rejected() {
         let f = write_config(
             r#"{
-            "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
+            "training": {"selection": {"method": "sampled", "forward_passes": 10}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
             "estimation": {"max_order": 3, "order_selection": "fixed", "min_observations_per_season": 20}
         }"#,
         );
@@ -1070,7 +1017,7 @@ mod tests {
     fn test_estimation_config_order_selection_pacf() {
         let f = write_config(
             r#"{
-            "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
+            "training": {"selection": {"method": "sampled", "forward_passes": 10}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
             "estimation": {"max_order": 4, "order_selection": "pacf", "min_observations_per_season": 15}
         }"#,
         );
@@ -1089,7 +1036,7 @@ mod tests {
     fn test_estimation_config_unknown_order_selection() {
         let f = write_config(
             r#"{
-            "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
+            "training": {"selection": {"method": "sampled", "forward_passes": 10}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
             "estimation": {"order_selection": "bogus"}
         }"#,
         );
@@ -1110,7 +1057,7 @@ mod tests {
     fn test_exports_stochastic_explicit_true() {
         let f = write_config(
             r#"{
-            "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
+            "training": {"selection": {"method": "sampled", "forward_passes": 10}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
             "exports": {"stochastic": true}
         }"#,
         );
@@ -1126,7 +1073,7 @@ mod tests {
     fn test_exports_stochastic_defaults_to_false() {
         let f = write_config(
             r#"{
-            "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}
+            "training": {"selection": {"method": "sampled", "forward_passes": 10}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}
         }"#,
         );
         let cfg = parse_config(f.path()).unwrap();
@@ -1141,7 +1088,7 @@ mod tests {
     fn test_exports_fpha_deviation_points_explicit_true() {
         let f = write_config(
             r#"{
-            "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
+            "training": {"selection": {"method": "sampled", "forward_passes": 10}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
             "exports": {"fpha_deviation_points": true}
         }"#,
         );
@@ -1158,7 +1105,7 @@ mod tests {
     fn test_exports_fpha_deviation_points_defaults_to_false() {
         let f = write_config(
             r#"{
-            "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}
+            "training": {"selection": {"method": "sampled", "forward_passes": 10}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}
         }"#,
         );
         let cfg = parse_config(f.path()).unwrap();
@@ -1170,12 +1117,11 @@ mod tests {
 
     // ── ScenarioSource parsing tests ──────────────────────────────────────────
 
-    const MINIMAL_TRAINING: &str =
-        r#"{"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}"#;
+    const MINIMAL_TRAINING: &str = r#"{"selection": {"method": "sampled", "forward_passes": 10}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}"#;
 
     fn write_with_training_scenario_source(scenario_source_json: &str) -> NamedTempFile {
         write_config(&format!(
-            r#"{{"training": {{"forward_passes": 10, "stopping_rules": [{{"type": "iteration_limit", "limit": 5}}], "scenario_source": {scenario_source_json}}}}}"#
+            r#"{{"training": {{"selection": {{"method": "sampled", "forward_passes": 10}}, "stopping_rules": [{{"type": "iteration_limit", "limit": 5}}], "scenario_source": {scenario_source_json}}}}}"#
         ))
     }
 
@@ -1184,7 +1130,7 @@ mod tests {
         simulation_json: &str,
     ) -> NamedTempFile {
         write_config(&format!(
-            r#"{{"training": {{"forward_passes": 10, "stopping_rules": [{{"type": "iteration_limit", "limit": 5}}], "scenario_source": {training_json}}}, "simulation": {{"scenario_source": {simulation_json}}}}}"#
+            r#"{{"training": {{"selection": {{"method": "sampled", "forward_passes": 10}}, "stopping_rules": [{{"type": "iteration_limit", "limit": 5}}], "scenario_source": {training_json}}}, "simulation": {{"scenario_source": {simulation_json}}}}}"#
         ))
     }
 
@@ -1327,7 +1273,7 @@ mod tests {
     fn stopping_mode_any_and_all_parse() {
         for (value, expected) in [("any", StoppingMode::Any), ("all", StoppingMode::All)] {
             let f = write_config(&format!(
-                r#"{{"training": {{"forward_passes": 10, "stopping_rules": [{{"type": "iteration_limit", "limit": 5}}], "stopping_mode": "{value}"}}}}"#
+                r#"{{"training": {{"selection": {{"method": "sampled", "forward_passes": 10}}, "stopping_rules": [{{"type": "iteration_limit", "limit": 5}}], "stopping_mode": "{value}"}}}}"#
             ));
             let cfg = parse_config(f.path()).unwrap();
             assert_eq!(cfg.training.stopping_mode, expected);
@@ -1339,7 +1285,7 @@ mod tests {
     #[test]
     fn unknown_stopping_mode_is_rejected_naming_accepted_set() {
         let f = write_config(
-            r#"{"training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}], "stopping_mode": "either"}}"#,
+            r#"{"training": {"selection": {"method": "sampled", "forward_passes": 10}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}], "stopping_mode": "either"}}"#,
         );
         let err = parse_config(f.path()).unwrap_err();
         match &err {
@@ -1422,22 +1368,20 @@ mod tests {
         assert_eq!(source, ScenarioSource::default());
     }
 
-    /// An `external` openings source is reserved: rejected at load naming the
-    /// field with the not-yet-supported message.
+    /// The dropped `external` openings source is now an unknown-variant parse
+    /// error — the arm no longer exists (`generated` and `file` remain).
     #[test]
-    fn openings_external_rejected_not_yet_supported() {
+    fn openings_external_is_unknown_variant_parse_error() {
         let f = write_with_training_scenario_source(r#"{"openings": {"source": "external"}}"#);
-        let cfg = parse_config(f.path()).unwrap();
-        let err = cfg.training_scenario_source(f.path()).unwrap_err();
+        let err = parse_config(f.path()).unwrap_err();
         match &err {
-            LoadError::SchemaError { field, message, .. } => {
-                assert_eq!(field, "training.scenario_source.openings");
+            LoadError::SchemaError { message, .. } => {
                 assert!(
-                    message.contains("not yet supported"),
+                    message.contains("unknown variant"),
                     "unexpected message: {message}"
                 );
             }
-            other => panic!("expected SchemaError, got: {other:?}"),
+            other => panic!("expected SchemaError (unknown variant), got: {other:?}"),
         }
     }
 
@@ -1505,7 +1449,7 @@ mod tests {
     fn test_dead_sampling_scheme_field_rejected() {
         let f = write_config(
             r#"{
-            "training": {"forward_passes": 10, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
+            "training": {"selection": {"method": "sampled", "forward_passes": 10}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]},
             "simulation": {"enabled": true, "sampling_scheme": {"type": "in_sample"}}
         }"#,
         );
@@ -1553,7 +1497,7 @@ mod tests {
         let f = write_config(
             r#"{
             "training": {
-                "forward_passes": 10,
+                "selection": {"method": "sampled", "forward_passes": 10},
                 "stopping_rules": [{"type": "iteration_limit", "limit": 5}],
                 "cut_selection": {"selection": {"method": "level1"}}
             }
@@ -1573,7 +1517,7 @@ mod tests {
         let f = write_config(
             r#"{
             "training": {
-                "forward_passes": 10,
+                "selection": {"method": "sampled", "forward_passes": 10},
                 "stopping_rules": [{"type": "iteration_limit", "limit": 5}]
             },
             "policy": {
@@ -1597,7 +1541,7 @@ mod tests {
         let f = write_config(
             r#"{
             "training": {
-                "forward_passes": 10,
+                "selection": {"method": "sampled", "forward_passes": 10},
                 "stopping_rules": [{"type": "iteration_limit", "limit": 5}]
             },
             "policy": {}
@@ -1616,7 +1560,7 @@ mod tests {
         let f = write_config(
             r#"{
             "training": {
-                "forward_passes": 10,
+                "selection": {"method": "sampled", "forward_passes": 10},
                 "stopping_rules": [{"type": "iteration_limit", "limit": 5}]
             },
             "policy": { "boundary": null }
@@ -1665,7 +1609,7 @@ mod tests {
     #[test]
     fn parse_config_rejects_removed_exports_fields() {
         let json = r#"{
-            "training": { "forward_passes": 4, "stopping_rules": [] },
+            "training": { "selection": {"method": "sampled", "forward_passes": 4}, "stopping_rules": [] },
             "exports": {
                 "training": true,
                 "cuts": false,
@@ -1740,7 +1684,7 @@ mod tests {
     const OVERRIDE_BASE_CONFIG: &str = r#"{
       "training": {
         "tree_seed": 42,
-        "forward_passes": 192,
+        "selection": {"method": "sampled", "forward_passes": 192},
         "stopping_rules": [{"type": "iteration_limit", "limit": 50}],
         "stopping_mode": "any"
       },
@@ -1772,7 +1716,10 @@ mod tests {
 
         assert_eq!(cfg.training.tree_seed, Some(7));
         // Siblings unchanged from base.
-        assert_eq!(cfg.training.forward_passes, Some(192));
+        assert_eq!(
+            cfg.resolve_forward_passes(),
+            Some(ForwardPassesResolution::Sampled(192))
+        );
         assert_eq!(cfg.training.stopping_mode, StoppingMode::Any);
         let rules = cfg.training.stopping_rules.as_deref().unwrap();
         assert!(matches!(
@@ -1836,14 +1783,14 @@ mod tests {
     #[test]
     fn with_overrides_invalid_value_fails_validation() {
         let base = base_value(OVERRIDE_BASE_CONFIG);
-        let overrides = override_map(&[("training.forward_passes", serde_json::Value::Null)]);
+        let overrides = override_map(&[("training.selection", serde_json::Value::Null)]);
 
         let err = Config::with_overrides(&base, &overrides).unwrap_err();
         match &err {
             LoadError::SchemaError { field, .. } => {
                 assert!(
-                    field.contains("training.forward_passes"),
-                    "field should name training.forward_passes, got: {field}"
+                    field.contains("training.selection"),
+                    "field should name training.selection, got: {field}"
                 );
             }
             other => panic!("expected SchemaError, got: {other:?}"),
@@ -1904,7 +1851,7 @@ mod tests {
     fn historical_years_range_stray_key_is_deserialize_error() {
         let json = r#"{
             "training": {
-                "forward_passes": 4,
+                "selection": {"method": "sampled", "forward_passes": 4},
                 "stopping_rules": [{ "type": "iteration_limit", "limit": 100 }],
                 "scenario_source": {
                     "seed": 7,
@@ -1937,7 +1884,7 @@ mod tests {
             "training": {
                 "enabled": true,
                 "tree_seed": 42,
-                "forward_passes": 4,
+                "selection": {"method": "sampled", "forward_passes": 4},
                 "stopping_rules": [
                     { "type": "iteration_limit", "limit": 10 },
                     { "type": "time_limit", "seconds": 60.0 },
@@ -1999,7 +1946,7 @@ mod tests {
             },
             "simulation": {
                 "enabled": true,
-                "num_scenarios": 100,
+                "selection": {"method": "sampled", "num_scenarios": 100},
                 "io_channel_capacity": 64,
                 "scenario_source": {
                     "seed": 9,
@@ -2019,7 +1966,7 @@ mod tests {
         });
         let by_node_flavored = serde_json::json!({
             "training": {
-                "forward_passes": 4,
+                "selection": {"method": "sampled", "forward_passes": 4},
                 "stopping_rules": [{ "type": "iteration_limit", "limit": 10 }],
                 "cut_selection": {
                     "selection": {
@@ -2097,163 +2044,94 @@ mod tests {
 
     // ── Scenario-selection count resolution ───────────────────────────────────
 
-    /// A `sampled` training selection resolves the forward-pass count, and that
-    /// count is bit-identical to declaring the deprecated root alias instead.
+    /// A `sampled` training selection resolves the forward-pass count.
     #[test]
-    fn training_sampled_selection_count_matches_root_alias() {
+    fn training_sampled_selection_resolves_count() {
         let via_selection = write_config(
             r#"{"training": {"selection": {"method": "sampled", "forward_passes": 8}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}}"#,
         );
         let cfg_sel = parse_config(via_selection.path()).unwrap();
         assert_eq!(
-            cfg_sel
-                .resolve_forward_passes(via_selection.path())
-                .unwrap(),
+            cfg_sel.resolve_forward_passes(),
             Some(ForwardPassesResolution::Sampled(8))
         );
+    }
 
-        let via_alias = write_config(
+    /// A config setting the removed root `training.forward_passes` alias fails
+    /// to load under `deny_unknown_fields`, the error naming the unknown field;
+    /// a flat `simulation.num_scenarios` alias likewise. The count lives solely
+    /// in the `selection.sampled` arm.
+    #[test]
+    fn removed_selection_aliases_fail_to_load() {
+        let root_fp = write_config(
             r#"{"training": {"forward_passes": 8, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}}"#,
         );
-        let cfg_alias = parse_config(via_alias.path()).unwrap();
-        assert_eq!(
-            cfg_alias.resolve_forward_passes(via_alias.path()).unwrap(),
-            Some(ForwardPassesResolution::Sampled(8))
+        let err = parse_config(root_fp.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("forward_passes"),
+            "root training.forward_passes must be an unknown-field load error naming it, got: {err}"
+        );
+
+        let flat_ns = write_config(
+            r#"{"training": {"selection": {"method": "sampled", "forward_passes": 4}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}, "simulation": {"enabled": true, "num_scenarios": 500}}"#,
+        );
+        let err = parse_config(flat_ns.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("num_scenarios"),
+            "flat simulation.num_scenarios must be an unknown-field load error naming it, got: {err}"
         );
     }
 
-    /// Declaring both the root `training.forward_passes` alias and a
-    /// `training.selection` is rejected at load, naming both keys.
-    #[test]
-    fn training_both_declared_count_is_rejected() {
-        let f = write_config(
-            r#"{"training": {"forward_passes": 8, "selection": {"method": "sampled", "forward_passes": 8}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}}"#,
-        );
-        let err = parse_config(f.path()).unwrap_err();
-        match &err {
-            LoadError::SchemaError { field, message, .. } => {
-                assert_eq!(field, "training.selection");
-                assert!(
-                    message.contains("forward_passes") && message.contains("both set"),
-                    "message must name the alias and the conflict, got: {message}"
-                );
-            }
-            other => panic!("expected SchemaError, got: {other:?}"),
-        }
-    }
-
-    /// A `training.selection` of `enumerated` loads successfully and resolves
-    /// to [`ForwardPassesResolution::Enumerated`] — the count itself is a
+    /// A `training.selection` of `enumerated` loads and resolves to
+    /// [`ForwardPassesResolution::Enumerated`] — the count itself is a
     /// setup-layer concern (the graph-derived count), not config load's.
     #[test]
-    fn training_enumerated_selection_resolves_without_declared_count() {
+    fn training_enumerated_selection_resolves() {
         let f = write_config(
             r#"{"training": {"selection": {"method": "enumerated"}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}}"#,
         );
         let cfg = parse_config(f.path()).unwrap();
         assert_eq!(
-            cfg.resolve_forward_passes(f.path()).unwrap(),
+            cfg.resolve_forward_passes(),
             Some(ForwardPassesResolution::Enumerated)
         );
     }
 
-    /// Declaring the deprecated `training.forward_passes` alias alongside an
-    /// `enumerated` selection is rejected, mirroring the `sampled` both-declared
-    /// case — `enumerated` carries no count of its own for the alias to
-    /// legitimately cross-check.
+    /// The simulation mirror of `enumerated` loads and resolves to
+    /// [`NumScenariosResolution::Enumerated`]; the census count is graph-derived
+    /// downstream, carried with no config-side count.
     #[test]
-    fn training_enumerated_selection_with_alias_is_rejected() {
+    fn simulation_enumerated_selection_resolves() {
         let f = write_config(
-            r#"{"training": {"forward_passes": 8, "selection": {"method": "enumerated"}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}}"#,
-        );
-        let err = parse_config(f.path()).unwrap_err();
-        match &err {
-            LoadError::SchemaError { field, message, .. } => {
-                assert_eq!(field, "training.selection");
-                assert!(
-                    message.contains("forward_passes") && message.contains("both set"),
-                    "message must name the alias and the conflict, got: {message}"
-                );
-            }
-            other => panic!("expected SchemaError, got: {other:?}"),
-        }
-    }
-
-    /// The simulation mirror of `enumerated` loads successfully and resolves to
-    /// [`NumScenariosResolution::Enumerated`] with no declared census
-    /// cross-check when the `num_scenarios` alias is absent.
-    #[test]
-    fn simulation_enumerated_selection_resolves_without_declared_count() {
-        let f = write_config(
-            r#"{"training": {"forward_passes": 4, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}, "simulation": {"enabled": true, "selection": {"method": "enumerated"}}}"#,
+            r#"{"training": {"selection": {"method": "sampled", "forward_passes": 4}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}, "simulation": {"enabled": true, "selection": {"method": "enumerated"}}}"#,
         );
         let cfg = parse_config(f.path()).unwrap();
         assert_eq!(
-            cfg.resolve_num_scenarios(f.path()).unwrap(),
-            NumScenariosResolution::Enumerated { declared: None }
-        );
-    }
-
-    /// The `num_scenarios` alias, declared alongside `enumerated`, is NOT a
-    /// both-declared conflict — the `enumerated` selection is itself the census
-    /// declaration, so the alias only supplies an optional count to verify, and
-    /// `resolve_num_scenarios` carries it downstream as the cross-check value.
-    #[test]
-    fn simulation_enumerated_selection_carries_declared_alias_as_census_declaration() {
-        let f = write_config(
-            r#"{"training": {"forward_passes": 4, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}, "simulation": {"enabled": true, "num_scenarios": 500, "selection": {"method": "enumerated"}}}"#,
-        );
-        let cfg = parse_config(f.path()).unwrap();
-        assert_eq!(
-            cfg.resolve_num_scenarios(f.path()).unwrap(),
-            NumScenariosResolution::Enumerated {
-                declared: Some(500)
-            }
+            cfg.resolve_num_scenarios(),
+            NumScenariosResolution::Enumerated
         );
     }
 
     /// A `sampled` simulation selection resolves its scenario count; an absent
-    /// count (no selection, no alias) resolves to the default.
+    /// selection resolves to the default sampled count.
     #[test]
     fn simulation_sampled_and_default_num_scenarios_resolve() {
         let via_selection = write_config(
-            r#"{"training": {"forward_passes": 4, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}, "simulation": {"enabled": true, "selection": {"method": "sampled", "num_scenarios": 500}}}"#,
+            r#"{"training": {"selection": {"method": "sampled", "forward_passes": 4}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}, "simulation": {"enabled": true, "selection": {"method": "sampled", "num_scenarios": 500}}}"#,
         );
         let cfg_sel = parse_config(via_selection.path()).unwrap();
         assert_eq!(
-            cfg_sel.resolve_num_scenarios(via_selection.path()).unwrap(),
+            cfg_sel.resolve_num_scenarios(),
             NumScenariosResolution::Sampled(500)
         );
 
         let via_default = write_config(
-            r#"{"training": {"forward_passes": 4, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}, "simulation": {"enabled": true}}"#,
+            r#"{"training": {"selection": {"method": "sampled", "forward_passes": 4}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}, "simulation": {"enabled": true}}"#,
         );
         let cfg_default = parse_config(via_default.path()).unwrap();
         assert_eq!(
-            cfg_default
-                .resolve_num_scenarios(via_default.path())
-                .unwrap(),
+            cfg_default.resolve_num_scenarios(),
             NumScenariosResolution::Sampled(2000)
         );
-    }
-
-    /// Declaring both the root `simulation.num_scenarios` alias and a
-    /// `simulation.selection` is rejected at load, naming both keys.
-    #[test]
-    fn simulation_both_declared_count_is_rejected() {
-        let f = write_config(
-            r#"{"training": {"forward_passes": 4, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]}, "simulation": {"enabled": true, "num_scenarios": 500, "selection": {"method": "sampled", "num_scenarios": 700}}}"#,
-        );
-        let err = parse_config(f.path()).unwrap_err();
-        match &err {
-            LoadError::SchemaError { field, message, .. } => {
-                assert_eq!(field, "simulation.selection");
-                assert!(
-                    message.contains("num_scenarios") && message.contains("both set"),
-                    "message must name the alias and the conflict, got: {message}"
-                );
-            }
-            other => panic!("expected SchemaError, got: {other:?}"),
-        }
     }
 }

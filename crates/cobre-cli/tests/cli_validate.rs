@@ -26,7 +26,7 @@ fn write_file(root: &Path, relative: &str, content: &str) {
 
 const CONFIG_JSON: &str = r#"{
     "training": {
-        "forward_passes": 10,
+        "selection": { "method": "sampled", "forward_passes": 10 },
         "stopping_rules": [
             { "type": "iteration_limit", "limit": 100 }
         ],
@@ -245,7 +245,7 @@ fn removed_cut_selection_field_fails_validate() {
 
     let removed_field_config = r#"{
         "training": {
-            "forward_passes": 10,
+            "selection": { "method": "sampled", "forward_passes": 10 },
             "stopping_rules": [
                 { "type": "iteration_limit", "limit": 100 }
             ],

@@ -828,8 +828,7 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
             #[allow(clippy::cast_possible_truncation)]
             let (i32, s32, t32) = (params.iteration as u32, global_scenario as u32, t as u32);
 
-            let (node_opening_offset, node_opening_len) =
-                node_opening_range(node_graph, node, params.training_ctx.stochastic, t);
+            let (node_opening_offset, node_opening_len) = node_opening_range(node_graph, node);
 
             if t == 0 {
                 let class_req = ClassSampleRequest {
@@ -841,6 +840,7 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
                     noise_group_id: 0,
                     node_opening_offset,
                     node_opening_len,
+                    pinned_scenario: None,
                 };
                 params.sampler.apply_initial_state(
                     &class_req,
@@ -859,6 +859,7 @@ pub(crate) fn run_forward_worker<S: SolverInterface + Send>(
                 noise_group_id: params.ctx.noise_group_id_at(t),
                 node_opening_offset,
                 node_opening_len,
+                pinned_scenario: None,
             })?;
             let raw_noise = noise.as_slice();
 
@@ -2254,7 +2255,7 @@ mod tests {
             Node {
                 id,
                 stage_id,
-                realization_id: None,
+                scenario_id: None,
                 label: None,
             }
         }
@@ -2359,7 +2360,7 @@ mod tests {
             Node {
                 id,
                 stage_id,
-                realization_id: None,
+                scenario_id: None,
                 label: None,
             }
         }

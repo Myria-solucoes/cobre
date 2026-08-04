@@ -296,6 +296,7 @@ fn insample_dispatch_returns_tree_slice_of_correct_dim() {
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: ctx.tree_view().n_openings(0),
+            pinned_scenario: None,
         })
         .unwrap();
 
@@ -337,6 +338,7 @@ fn insample_copy_equivalence_matches_direct_call() {
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: ctx.tree_view().n_openings(0),
+            pinned_scenario: None,
         })
         .unwrap();
 
@@ -390,6 +392,7 @@ fn out_of_sample_dispatch_returns_fresh_noise_of_correct_dim() {
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: 0,
+            pinned_scenario: None,
         })
         .unwrap();
 
@@ -436,6 +439,7 @@ fn out_of_sample_is_deterministic() {
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: 0,
+            pinned_scenario: None,
         })
         .unwrap();
 
@@ -451,6 +455,7 @@ fn out_of_sample_is_deterministic() {
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: 0,
+            pinned_scenario: None,
         })
         .unwrap();
 
@@ -494,6 +499,7 @@ fn out_of_sample_scenario_changes_noise() {
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: 0,
+            pinned_scenario: None,
         })
         .unwrap();
 
@@ -509,6 +515,7 @@ fn out_of_sample_scenario_changes_noise() {
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: 0,
+            pinned_scenario: None,
         })
         .unwrap();
 
@@ -557,6 +564,7 @@ fn out_of_sample_noise_is_finite() {
                 noise_group_id: 0,
                 node_opening_offset: 0,
                 node_opening_len: 0,
+                pinned_scenario: None,
             })
             .unwrap();
 
@@ -606,6 +614,7 @@ fn out_of_sample_correlation_matches_target() {
                 noise_group_id: 0,
                 node_opening_offset: 0,
                 node_opening_len: 0,
+                pinned_scenario: None,
             })
             .unwrap();
 
@@ -669,6 +678,7 @@ fn out_of_sample_per_stage_method_mixing() {
                     noise_group_id: 0,
                     node_opening_offset: 0,
                     node_opening_len: 0,
+                    pinned_scenario: None,
                 })
                 .unwrap();
 
@@ -797,6 +807,7 @@ fn out_of_sample_resume_invariance() {
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: 0,
+            pinned_scenario: None,
         })
         .unwrap();
     let first_values: Vec<f64> = first.as_slice().to_vec();
@@ -813,6 +824,7 @@ fn out_of_sample_resume_invariance() {
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: 0,
+            pinned_scenario: None,
         })
         .unwrap();
 

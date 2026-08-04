@@ -48,6 +48,7 @@ mod extraction_nonuniform_block_bases {
     //!    every cost category is an objective·primal·scale sum and the breakdown is
     //!    expected to reconcile to the LP objective to within floating-point round-off.
 
+    use cobre_io::config::SimulationSelection;
     use std::path::Path;
     use std::sync::mpsc;
 
@@ -84,7 +85,8 @@ mod extraction_nonuniform_block_bases {
 
         let mut config_with_sim = config.clone();
         config_with_sim.simulation.enabled = true;
-        config_with_sim.simulation.num_scenarios = Some(1);
+        config_with_sim.simulation.selection =
+            Some(SimulationSelection::Sampled { num_scenarios: 1 });
 
         let params = StudyParams::from_config(&config_with_sim)
             .expect("StudyParams::from_config must succeed");

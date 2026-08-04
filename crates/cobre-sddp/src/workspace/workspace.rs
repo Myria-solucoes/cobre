@@ -424,6 +424,10 @@ pub(crate) struct BackwardAccumulators {
     /// Per-opening scratch for cut-row duals; grows to
     /// `succ.num_cuts_at_successor`.
     pub(crate) cut_duals_buf: Vec<f64>,
+    /// Reusable `[hydro | load-bus | NCS]` opening-noise buffer for an External
+    /// successor node, assembled from the external libraries at the node's
+    /// column. Empty and never touched on the generated/sampled path.
+    pub(crate) external_noise_buf: Vec<f64>,
     /// Per-worker staging buffer for cuts produced within one stage; drained at
     /// the rayon closure boundary so ownership can cross the closure return.
     pub(crate) staged_cuts_buf: Vec<StagedCut>,
@@ -478,6 +482,7 @@ impl BackwardAccumulators {
             block_pivot_count: Vec::new(),
             state_duals_buf: Vec::new(),
             cut_duals_buf: Vec::new(),
+            external_noise_buf: Vec::new(),
             staged_cuts_buf: Vec::new(),
             opening_outcomes_buf: Vec::new(),
             risk_scratch: RiskMeasureScratch::new(),

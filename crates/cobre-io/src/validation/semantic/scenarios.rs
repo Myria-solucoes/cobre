@@ -721,8 +721,8 @@ fn check_raw_c_agreement(
 }
 
 /// Prefix-coherence warning (rule 48): for every edge `n → m` and every
-/// slot-occupying external class, the raw cells of columns `realization_id(n)`
-/// and `realization_id(m)` must agree bitwise at every stage `s <= t(n)` — the
+/// slot-occupying external class, the raw cells of columns `scenario_id(n)`
+/// and `scenario_id(m)` must agree bitwise at every stage `s <= t(n)` — the
 /// shared prefix along the root path. Disagreement warns (never rejects), naming
 /// the edge, the class, the stage and both values; a bridge-shaped column pair
 /// with identical trunk cells is silent.
@@ -736,7 +736,7 @@ fn check_prefix_coherence(
     let mut node_info: HashMap<i32, (usize, Option<i32>)> = HashMap::new();
     for node in &graph.nodes {
         if let Some(idx) = resolver.resolve(node.stage_id) {
-            node_info.insert(node.id, (idx, node.realization_id));
+            node_info.insert(node.id, (idx, node.scenario_id));
         }
     }
 
@@ -2612,7 +2612,7 @@ mod tests {
         data.stages.policy_graph.nodes = vec![Node {
             id: 0,
             stage_id: 0,
-            realization_id: Some(0),
+            scenario_id: Some(0),
             label: None,
         }];
         let ctx = run(&data);
@@ -2642,19 +2642,19 @@ mod tests {
             Node {
                 id: 0,
                 stage_id: 0,
-                realization_id: Some(0),
+                scenario_id: Some(0),
                 label: None,
             },
             Node {
                 id: 1,
                 stage_id: 1,
-                realization_id: Some(0),
+                scenario_id: Some(0),
                 label: None,
             },
             Node {
                 id: 2,
                 stage_id: 1,
-                realization_id: Some(1),
+                scenario_id: Some(1),
                 label: None,
             },
         ];

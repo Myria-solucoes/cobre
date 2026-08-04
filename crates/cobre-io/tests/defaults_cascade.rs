@@ -3,7 +3,8 @@
 
 use cobre_io::PolicyMode;
 use cobre_io::config::{
-    InflowNonNegativityMethod, NumScenariosResolution, StoppingMode, parse_config,
+    ForwardPassesResolution, InflowNonNegativityMethod, NumScenariosResolution, StoppingMode,
+    parse_config,
 };
 use std::io::Write;
 use tempfile::NamedTempFile;
@@ -19,7 +20,7 @@ fn test_minimal_config_all_defaults() {
     let f = write_json(
         r#"{
           "training": {
-            "forward_passes": 50,
+            "selection": {"method": "sampled", "forward_passes": 50},
             "stopping_rules": [{"type": "iteration_limit", "limit": 10}]
           }
         }"#,
@@ -51,13 +52,9 @@ fn test_minimal_config_all_defaults() {
         "simulation.enabled should default to false"
     );
     assert_eq!(
-        cfg.simulation.num_scenarios, None,
-        "simulation.num_scenarios alias defaults to absent"
-    );
-    assert_eq!(
-        cfg.resolve_num_scenarios(f.path()).unwrap(),
+        cfg.resolve_num_scenarios(),
         NumScenariosResolution::Sampled(2000),
-        "absent num_scenarios resolves to the default sampled count"
+        "absent simulation selection resolves to the default sampled count"
     );
 
     assert_eq!(
@@ -86,7 +83,7 @@ fn test_config_explicit_seed_preserved() {
         r#"{
           "training": {
             "tree_seed": 99,
-            "forward_passes": 50,
+            "selection": {"method": "sampled", "forward_passes": 50},
             "stopping_rules": [{"type": "iteration_limit", "limit": 10}]
           }
         }"#,
@@ -105,7 +102,7 @@ fn test_config_absent_seed_is_none() {
     let f = write_json(
         r#"{
           "training": {
-            "forward_passes": 50,
+            "selection": {"method": "sampled", "forward_passes": 50},
             "stopping_rules": [{"type": "iteration_limit", "limit": 10}]
           }
         }"#,
@@ -130,13 +127,13 @@ fn test_config_all_sections_explicit_no_defaults_applied() {
           "training": {
             "enabled": false,
             "tree_seed": 7,
-            "forward_passes": 192,
+            "selection": {"method": "sampled", "forward_passes": 192},
             "stopping_rules": [{"type": "iteration_limit", "limit": 200}],
             "stopping_mode": "all"
           },
           "simulation": {
             "enabled": true,
-            "num_scenarios": 500
+            "selection": {"method": "sampled", "num_scenarios": 500}
           },
           "policy": {
             "path": "./my_policy",
@@ -157,14 +154,20 @@ fn test_config_all_sections_explicit_no_defaults_applied() {
 
     assert!(!cfg.training.enabled, "enabled: false should be preserved");
     assert_eq!(cfg.training.tree_seed, Some(7));
-    assert_eq!(cfg.training.forward_passes, Some(192));
+    assert_eq!(
+        cfg.resolve_forward_passes(),
+        Some(ForwardPassesResolution::Sampled(192))
+    );
     assert_eq!(cfg.training.stopping_mode, StoppingMode::All);
 
     assert!(
         cfg.simulation.enabled,
         "simulation.enabled: true should be preserved"
     );
-    assert_eq!(cfg.simulation.num_scenarios, Some(500));
+    assert_eq!(
+        cfg.resolve_num_scenarios(),
+        NumScenariosResolution::Sampled(500)
+    );
 
     assert_eq!(cfg.policy.path, "./my_policy");
     assert_eq!(cfg.policy.mode, PolicyMode::WarmStart);
@@ -178,7 +181,7 @@ fn test_config_absent_modeling_uses_defaults() {
     let f = write_json(
         r#"{
           "training": {
-            "forward_passes": 10,
+            "selection": {"method": "sampled", "forward_passes": 10},
             "stopping_rules": [{"type": "iteration_limit", "limit": 5}]
           }
         }"#,
@@ -197,7 +200,7 @@ fn test_config_absent_simulation_uses_defaults() {
     let f = write_json(
         r#"{
           "training": {
-            "forward_passes": 10,
+            "selection": {"method": "sampled", "forward_passes": 10},
             "stopping_rules": [{"type": "iteration_limit", "limit": 5}]
           }
         }"#,
@@ -209,11 +212,7 @@ fn test_config_absent_simulation_uses_defaults() {
         "absent simulation section must default enabled to false"
     );
     assert_eq!(
-        cfg.simulation.num_scenarios, None,
-        "absent simulation section leaves the num_scenarios alias absent"
-    );
-    assert_eq!(
-        cfg.resolve_num_scenarios(f.path()).unwrap(),
+        cfg.resolve_num_scenarios(),
         NumScenariosResolution::Sampled(2000),
         "absent simulation section resolves num_scenarios to the default"
     );
@@ -224,7 +223,7 @@ fn test_config_absent_exports_uses_defaults() {
     let f = write_json(
         r#"{
           "training": {
-            "forward_passes": 10,
+            "selection": {"method": "sampled", "forward_passes": 10},
             "stopping_rules": [{"type": "iteration_limit", "limit": 5}]
           }
         }"#,

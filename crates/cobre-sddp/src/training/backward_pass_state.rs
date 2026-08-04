@@ -2401,7 +2401,7 @@ mod tests {
             Node {
                 id,
                 stage_id,
-                realization_id: None,
+                scenario_id: None,
                 label: None,
             }
         }
@@ -2694,7 +2694,7 @@ mod tests {
             Node {
                 id,
                 stage_id,
-                realization_id: None,
+                scenario_id: None,
                 label: None,
             }
         }
@@ -3365,7 +3365,7 @@ mod tests {
     /// product weights: `CVaR`'s greedy allocation processes tied entries in
     /// their array (= canonical child-id-then-ω) index order — `child 1`
     /// (index 0) is allocated its full upper bound first, `child 2` (index 1)
-    /// receives only the remainder. A `realization_id`- or declaration-ordered
+    /// receives only the remainder. A `scenario_id`- or declaration-ordered
     /// successor set (child 2 processed first) would allocate the opposite
     /// way and produce a different intercept.
     #[test]
@@ -3449,7 +3449,7 @@ mod tests {
         // mu[0] = min(0.3/0.5, 1.0) = 0.6, remaining = 0.4;
         // mu[1] = min(0.7/0.5, 0.4) = 0.4.
         // intercept = 0.6*10.0 + 0.4*20.0 = 14.0 — NOT 20.0, which is what a
-        // child-2-processed-first (declaration/realization_id) order would give.
+        // child-2-processed-first (declaration/scenario_id) order would give.
         assert!(
             (intercept - 14.0).abs() < 1e-12,
             "expected canonical-order CVaR tie-break intercept 14.0, got {intercept}"

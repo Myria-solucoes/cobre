@@ -1,6 +1,9 @@
 {
   "training": {
-    "forward_passes": 1,
+    "selection": {
+      "method": "sampled",
+      "forward_passes": 1
+    },
     "stopping_rules": [
       {
         "type": "iteration_limit",
@@ -9,8 +12,7 @@
     ]
   },
   "simulation": {
-    "enabled": false,
-    "num_scenarios": 1
+    "enabled": false
   },
   "modeling": {
     "inflow_non_negativity": {

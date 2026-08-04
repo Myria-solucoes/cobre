@@ -732,7 +732,7 @@ mod tests {
 
         let json = r#"{
             "training": {
-                "forward_passes": 4,
+                "selection": { "method": "sampled", "forward_passes": 4 },
                 "stopping_rules": [{ "type": "iteration_limit", "limit": 10 }]
             },
             "state_space": { "inflow_lag_depth": 12 }
@@ -756,7 +756,7 @@ mod tests {
 
         let json = r#"{
             "training": {
-                "forward_passes": 4,
+                "selection": { "method": "sampled", "forward_passes": 4 },
                 "stopping_rules": [
                     { "type": "iteration_limit", "limit": 10 }
                 ]
@@ -847,7 +847,7 @@ mod tests {
 
         let json = r#"{
             "training": {
-                "forward_passes": 4,
+                "selection": { "method": "sampled", "forward_passes": 4 },
                 "stopping_rules": [
                     { "type": "iteration_limit", "limit": 10 }
                 ],
@@ -931,7 +931,7 @@ mod tests {
 
         let json = r#"{
             "training": {
-                "forward_passes": 4,
+                "selection": { "method": "sampled", "forward_passes": 4 },
                 "stopping_rules": [
                     { "type": "iteration_limit", "limit": 10 }
                 ],
@@ -984,7 +984,7 @@ mod tests {
 
         let json = r#"{
             "training": {
-                "forward_passes": 4,
+                "selection": { "method": "sampled", "forward_passes": 4 },
                 "stopping_rules": [
                     { "type": "iteration_limit", "limit": 10 }
                 ]

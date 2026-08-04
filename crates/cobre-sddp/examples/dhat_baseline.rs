@@ -19,6 +19,7 @@
     clippy::print_stdout
 )]
 
+use cobre_io::config::TrainingSelection;
 #[cfg(feature = "dhat-heap")]
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
@@ -102,7 +103,7 @@ fn main() {
     let config_path = case_dir.join("config.json");
     let mut config = parse_config(&config_path).expect("config must parse");
 
-    config.training.forward_passes = Some(3);
+    config.training.selection = Some(TrainingSelection::Sampled { forward_passes: 3 });
     config.training.stopping_rules = Some(vec![StoppingRuleConfig::IterationLimit { limit: 10 }]);
 
     let system = cobre_io::load_case(case_dir).expect("load_case must succeed");

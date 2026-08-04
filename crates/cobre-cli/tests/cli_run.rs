@@ -21,7 +21,7 @@ fn cobre() -> Command {
 
 const CONFIG_JSON: &str = r#"{
     "training": {
-        "forward_passes": 1,
+        "selection": { "method": "sampled", "forward_passes": 1 },
         "stopping_rules": [
             { "type": "iteration_limit", "limit": 2 }
         ],
@@ -292,7 +292,7 @@ fn test_run_quiet_suppresses_banner_and_summary() {
 
 const CONFIG_STOCHASTIC_PAR_A_JSON: &str = r#"{
     "training": {
-        "forward_passes": 1,
+        "selection": { "method": "sampled", "forward_passes": 1 },
         "stopping_rules": [
             { "type": "iteration_limit", "limit": 2 }
         ],

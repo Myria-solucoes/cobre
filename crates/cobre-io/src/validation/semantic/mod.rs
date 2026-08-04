@@ -109,19 +109,19 @@
 //! |33  | Filling schedule reaches the dead volume: `Σ ζ_s·rate_s >= min_storage − seed` | `system/hydros.json`               | `BusinessRuleViolation`  |
 //! |34  | PAR order > 0 but every study stage has `inflow_lags == false` (inflow-lag state omitted) | `stages.json`        | `ModelQuality` (warning) |
 //! |35  | User-supplied `inflow_ar_coefficients.parquet` must pass the periodic-ACF closure stationarity gate (external-input path only; annual-aware; season resolved via `resolve_stage_seasons`'s `season_map`-or-fallback) | `scenarios/inflow_ar_coefficients.parquet` | `InvalidValue` (or `BusinessRuleViolation` when a stage's season is genuinely unresolvable) |
-//! |36  | Node `realization_id` required at a stage carrying a slot-occupying external class, rejected as meaningless where none (declared `nodes[]` only) | `stages.json` | `InvalidValue` |
-//! |37  | Node `realization_id` in `[0, raw_c(t))` for every slot-occupying external class (declared `nodes[]` only) | `stages.json` | `InvalidValue` |
+//! |36  | Node `scenario_id` required at a stage carrying a slot-occupying external class, rejected as meaningless where none (declared `nodes[]`, enumerated forward selection only) | `stages.json` | `InvalidValue` |
+//! |37  | Node `scenario_id` in `[0, raw_c(t))` for every slot-occupying external class (declared `nodes[]`, enumerated forward selection only) | `stages.json` | `InvalidValue` |
 //! |38  | Node graph well-formedness: unique/known node ids, resolvable stage, no empty stage, no unreachable node, acyclic, no mid-horizon leaf (declared `nodes[]` only) | `stages.json` | `InvalidValue` / `DuplicateId` / `CycleDetected` |
 //! |39  | Every graph edge advances exactly one stage (`t → t+1`, no stage-skipping) (declared `nodes[]` only) | `stages.json` | `InvalidValue` |
 //! |40  | A stage carrying multiple nodes with structurally identical subtrees (recombinable signature) (declared `nodes[]` only) | `stages.json` | `ModelQuality` (warning) |
 //! |41  | `num_openings` required at a stage carrying generated openings, rejected as meaningless where a stage carries only external openings (declared `nodes[]` only; chain-dialect requiredness is a parse-layer check) | `stages.json` | `InvalidValue` |
 //! |42  | Per-edge `annual_discount_rate_override` rejected under `nodes[]` — the override is a per-stage quantity on `stages[]` (legal in the chain dialect) | `stages.json` | `InvalidValue` |
-//! |43  | `nodes[]` declared while `scenarios/noise_openings.parquet` is present — nodes[] declares the opening set | `stages.json` | `InvalidValue` |
+//! |43  | `scenarios/noise_openings.parquet` present under enumerated forward selection — the generated backward opening tree is not consumed there | `stages.json` | `InvalidValue` |
 //! |44  | `sampling_method` inert under external openings / ill-defined at a multi-node stage (declared `nodes[]` only) | `stages.json` | `ModelQuality` (warning) |
 //! |45  | All slot-occupying external classes agree on the per-stage raw column-count vector `raw_c(t)` — no element-wise-minimum reconciliation, fires with or without `nodes[]` (P-B1) | `scenarios/external_*_scenarios.parquet` | `BusinessRuleViolation` |
 //! |46  | Every (slot-occupying external class, stage) carries the exact `scenario_id` set `{0..raw_c(t)-1}` per entity — a set check (rejects 1-based deck, gap, duplicate, out-of-range), not a bound check (A1) | `scenarios/external_*_scenarios.parquet` | `BusinessRuleViolation` |
 //! |47  | Every external scenario row's `stage_id` resolves to a declared study stage via the [`StageIdResolver`], never silently dropped (A2) | `scenarios/external_*_scenarios.parquet` | `InvalidValue` |
-//! |48  | Per edge `n → m` and slot-occupying external class, the raw cells of columns `realization_id(n)`/`realization_id(m)` agree bitwise over the shared prefix `s <= t(n)` (declared `nodes[]` only) | `scenarios/external_*_scenarios.parquet` | `ModelQuality` (warning) |
+//! |48  | Per edge `n → m` and slot-occupying external class, the raw cells of columns `scenario_id(n)`/`scenario_id(m)` agree bitwise over the shared prefix `s <= t(n)` (declared `nodes[]` only) | `scenarios/external_*_scenarios.parquet` | `ModelQuality` (warning) |
 //!
 //! Rule 49 (G2 — each standardized external library's `n_entities()` matches its
 //! `noise_entity_order` block width) is enforced downstream at study setup

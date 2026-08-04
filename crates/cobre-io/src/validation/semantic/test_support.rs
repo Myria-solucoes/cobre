@@ -449,7 +449,7 @@ pub(super) fn make_correlation(group: CorrelationGroup) -> CorrelationModel {
 pub(super) fn minimal_config() -> Config {
     let json = r#"{
         "training": {
-            "forward_passes": 10,
+            "selection": {"method": "sampled", "forward_passes": 10},
             "stopping_rules": [
                 { "type": "iteration_limit", "limit": 100 }
             ]
@@ -464,7 +464,7 @@ pub(super) fn minimal_config() -> Config {
 pub(super) fn config_with_training_external_inflow() -> Config {
     let json = r#"{
         "training": {
-            "forward_passes": 10,
+            "selection": {"method": "sampled", "forward_passes": 10},
             "stopping_rules": [
                 { "type": "iteration_limit", "limit": 100 }
             ],
@@ -472,6 +472,44 @@ pub(super) fn config_with_training_external_inflow() -> Config {
                 "seed": 42,
                 "inflow": { "scheme": "external" }
             }
+        }
+    }"#;
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), json).unwrap();
+    parse_config(tmp.path()).unwrap()
+}
+
+/// Build a `Config` with `training.selection = enumerated` and
+/// `training.scenario_source.inflow.scheme = "external"` — the enumerated
+/// external-openings case rule 36/37 governs.
+pub(super) fn config_enumerated_external_inflow() -> Config {
+    let json = r#"{
+        "training": {
+            "stopping_rules": [
+                { "type": "iteration_limit", "limit": 100 }
+            ],
+            "selection": { "method": "enumerated" },
+            "scenario_source": {
+                "seed": 42,
+                "inflow": { "scheme": "external" }
+            }
+        }
+    }"#;
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), json).unwrap();
+    parse_config(tmp.path()).unwrap()
+}
+
+/// Build a `Config` with `training.selection = enumerated` and every class at
+/// its default (in-sample) scheme — an enumerated study carrying no external
+/// class, where a node `scenario_id` is meaningless.
+pub(super) fn config_enumerated() -> Config {
+    let json = r#"{
+        "training": {
+            "stopping_rules": [
+                { "type": "iteration_limit", "limit": 100 }
+            ],
+            "selection": { "method": "enumerated" }
         }
     }"#;
     let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -495,7 +533,7 @@ pub(super) fn config_with_training_external(inflow: bool, load: bool, ncs: bool)
     let json = format!(
         r#"{{
             "training": {{
-                "forward_passes": 10,
+                "selection": {{"method": "sampled", "forward_passes": 10}},
                 "stopping_rules": [{{ "type": "iteration_limit", "limit": 100 }}],
                 "scenario_source": {{ "seed": 42, {} }}
             }}
@@ -511,7 +549,7 @@ pub(super) fn config_with_training_external(inflow: bool, load: bool, ncs: bool)
 pub(super) fn config_with_simulation_external_load() -> Config {
     let json = r#"{
         "training": {
-            "forward_passes": 10,
+            "selection": {"method": "sampled", "forward_passes": 10},
             "stopping_rules": [
                 { "type": "iteration_limit", "limit": 100 }
             ]

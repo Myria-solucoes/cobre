@@ -17,22 +17,16 @@ use crate::{
 /// Simulation's `enumerated`-selection declaration, carried on
 /// [`StudyParams`]/[`ConstructionConfig`] until the node graph resolves
 /// [`StudyParams::n_scenarios`] (config load holds no graph to derive the
-/// count from). A plain externally-tagged enum — never `Option<Option<u32>>`,
-/// which collapses the "not declared" / "declared, no cross-check" / "declared,
-/// cross-check N" states clippy's `option_option` lint flags as ambiguous —
-/// and carries no `#[serde(tag = ...)]`, so it round-trips over the MPI
-/// broadcast wire without a postcard mirror type.
+/// count from). A plain externally-tagged enum carrying no
+/// `#[serde(tag = ...)]`, so it round-trips over the MPI broadcast wire
+/// without a postcard mirror type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SimulationEnumeratedRequest {
     /// `sampled` selection (or the default); [`StudyParams::n_scenarios`] is
     /// already final.
     Sampled,
-    /// `enumerated` selection declared; `declared` is the optional
-    /// `num_scenarios` alias census cross-check count.
-    Enumerated {
-        /// The declared census cross-check count, if any.
-        declared: Option<u32>,
-    },
+    /// `enumerated` selection declared; the count is graph-derived downstream.
+    Enumerated,
 }
 
 /// Default number of forward-pass trajectories when not specified in config.
@@ -136,14 +130,7 @@ impl StudyParams {
             .tree_seed
             .map_or(DEFAULT_SEED, i64::unsigned_abs);
 
-        // Synthetic label mirroring the loader's `<config_overrides>` convention:
-        // rejections already fired at load, so this resolve only extracts the count.
-        let config_label = std::path::Path::new("<config>");
-
-        let (forward_passes, training_enumerated) = match config
-            .resolve_forward_passes(config_label)
-            .map_err(|e| SddpError::Validation(e.to_string()))?
-        {
+        let (forward_passes, training_enumerated) = match config.resolve_forward_passes() {
             Some(ForwardPassesResolution::Sampled(n)) => (n, false),
             None => (DEFAULT_FORWARD_PASSES, false),
             // The node graph does not exist yet; DEFAULT_FORWARD_PASSES is a
@@ -207,16 +194,11 @@ impl StudyParams {
         };
 
         let (n_scenarios, simulation_enumerated) = if config.simulation.enabled {
-            match config
-                .resolve_num_scenarios(config_label)
-                .map_err(|e| SddpError::Validation(e.to_string()))?
-            {
+            match config.resolve_num_scenarios() {
                 NumScenariosResolution::Sampled(n) => (n, SimulationEnumeratedRequest::Sampled),
                 // The node graph does not exist yet; 0 is a placeholder
                 // `from_broadcast_params` overwrites once it does.
-                NumScenariosResolution::Enumerated { declared } => {
-                    (0, SimulationEnumeratedRequest::Enumerated { declared })
-                }
+                NumScenariosResolution::Enumerated => (0, SimulationEnumeratedRequest::Enumerated),
             }
         } else {
             (0, SimulationEnumeratedRequest::Sampled)
@@ -563,14 +545,13 @@ mod tests {
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: Some(42),
-                forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
                 stopping_mode: StoppingMode::Any,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 parallelism: ParallelismConfig::default(),
                 scenario_source: None,
-                selection: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
@@ -584,7 +565,7 @@ mod tests {
     /// budget-below-forward-passes warning fires.
     fn config_with_budget_below_forward_passes() -> Config {
         let mut config = base_test_config();
-        config.training.forward_passes = Some(2);
+        config.training.selection = Some(TrainingSelection::Sampled { forward_passes: 2 });
         config.training.cut_selection = RowSelectionConfig {
             max_active_per_stage: Some(1),
             ..RowSelectionConfig::default()
@@ -925,39 +906,14 @@ mod tests {
         );
     }
 
-    /// `from_config` resolves the forward-pass count from a `sampled` selection,
-    /// bit-identical to declaring the deprecated root alias instead.
+    /// `from_config` resolves the forward-pass count from a `sampled` selection.
     #[test]
     fn from_config_resolves_forward_passes_from_selection() {
         let mut via_selection = base_test_config();
-        via_selection.training.forward_passes = None;
         via_selection.training.selection = Some(TrainingSelection::Sampled { forward_passes: 8 });
         let params_selection = StudyParams::from_config(&via_selection)
             .expect("sampled selection is a valid forward-pass source");
         assert_eq!(params_selection.forward_passes, 8);
-
-        let mut via_alias = base_test_config();
-        via_alias.training.forward_passes = Some(8);
-        let params_alias =
-            StudyParams::from_config(&via_alias).expect("root alias is a valid source");
-        assert_eq!(params_alias.forward_passes, params_selection.forward_passes);
-    }
-
-    /// `from_config` re-fires the both-declared rejection as
-    /// `SddpError::Validation` for a config that bypassed the loader.
-    #[test]
-    fn from_config_rejects_both_declared_forward_passes() {
-        use crate::SddpError;
-
-        let mut config = base_test_config();
-        config.training.forward_passes = Some(8);
-        config.training.selection = Some(TrainingSelection::Sampled { forward_passes: 8 });
-        let err = StudyParams::from_config(&config)
-            .expect_err("declaring both the alias and selection must be rejected");
-        assert!(
-            matches!(err, SddpError::Validation(_)),
-            "expected SddpError::Validation, got: {err:?}"
-        );
     }
 
     /// `from_config` resolves the simulation scenario count from a `sampled`
@@ -966,7 +922,6 @@ mod tests {
     fn from_config_resolves_num_scenarios_from_selection() {
         let mut config = base_test_config();
         config.simulation.enabled = true;
-        config.simulation.num_scenarios = None;
         config.simulation.selection = Some(SimulationSelection::Sampled { num_scenarios: 500 });
         let params =
             StudyParams::from_config(&config).expect("sampled simulation selection is valid");
@@ -984,7 +939,6 @@ mod tests {
     #[test]
     fn from_config_accepts_training_enumerated_selection() {
         let mut config = base_test_config();
-        config.training.forward_passes = None;
         config.training.selection = Some(TrainingSelection::Enumerated {});
         let params =
             StudyParams::from_config(&config).expect("enumerated training selection is valid");
@@ -992,22 +946,21 @@ mod tests {
         assert!(params.training_enumerated);
     }
 
-    /// `from_config` accepts a simulation `enumerated` selection, carrying the
-    /// declared `num_scenarios` alias (if any) as the census cross-check count.
+    /// `from_config` accepts a simulation `enumerated` selection: `n_scenarios`
+    /// carries the `0` placeholder and the request is
+    /// [`super::SimulationEnumeratedRequest::Enumerated`], with the census count
+    /// resolved from the node graph downstream.
     #[test]
-    fn from_config_accepts_simulation_enumerated_selection_with_declared_census() {
+    fn from_config_accepts_simulation_enumerated_selection() {
         let mut config = base_test_config();
         config.simulation.enabled = true;
-        config.simulation.num_scenarios = Some(500);
         config.simulation.selection = Some(SimulationSelection::Enumerated {});
         let params =
             StudyParams::from_config(&config).expect("enumerated simulation selection is valid");
         assert_eq!(params.n_scenarios, 0);
         assert_eq!(
             params.simulation_enumerated,
-            super::SimulationEnumeratedRequest::Enumerated {
-                declared: Some(500)
-            }
+            super::SimulationEnumeratedRequest::Enumerated
         );
     }
 

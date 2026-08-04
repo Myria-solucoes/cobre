@@ -54,6 +54,9 @@ pub struct ClassSampleRequest {
     pub node_opening_offset: usize,
     /// See [`Self::node_opening_offset`].
     pub node_opening_len: usize,
+    /// Optional scenario-column pin. `External` reads column `k` when `Some(k)`,
+    /// else hash-selects; every other arm ignores it.
+    pub pinned_scenario: Option<usize>,
 }
 
 /// Per-class noise source for one entity class (inflow, load, or NCS).
@@ -310,7 +313,9 @@ impl ClassSampler<'_> {
             }
 
             ClassSampler::External { library } => {
-                let scenario_idx = Self::select_external_scenario(req, library.n_scenarios());
+                let scenario_idx = req
+                    .pinned_scenario
+                    .unwrap_or_else(|| Self::select_external_scenario(req, library.n_scenarios()));
                 output.copy_from_slice(library.eta_slice(req.stage_idx, scenario_idx));
                 Ok(())
             }
@@ -450,6 +455,7 @@ mod tests {
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: 0,
+            pinned_scenario: None,
         }
     }
 
@@ -517,6 +523,7 @@ mod tests {
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: tree.view().n_openings(1),
+            pinned_scenario: None,
         };
 
         let mut out_a = vec![0.0f64; 2];
@@ -556,6 +563,7 @@ mod tests {
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: tree.view().n_openings(1),
+            pinned_scenario: None,
         };
 
         let mut out_no_draw = vec![0.0f64; 2];
@@ -599,6 +607,7 @@ mod tests {
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: 0,
+            pinned_scenario: None,
         };
 
         let mut out_a = vec![0.0f64; 3];
@@ -669,6 +678,7 @@ mod tests {
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: 0,
+            pinned_scenario: None,
         };
 
         let mut out_a = vec![0.0f64; 2];
@@ -701,6 +711,7 @@ mod tests {
                     noise_group_id: 0,
                     node_opening_offset: 0,
                     node_opening_len: 0,
+                    pinned_scenario: None,
                 };
                 let mut out = vec![0.0f64; 2];
                 sampler.fill(&req, &mut out, &mut perm).unwrap();
@@ -730,6 +741,7 @@ mod tests {
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: 0,
+            pinned_scenario: None,
         };
         let req_stage1 = ClassSampleRequest {
             stage_idx: 1,
@@ -784,6 +796,7 @@ mod tests {
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: 0,
+            pinned_scenario: None,
         };
 
         let mut output = vec![0.0f64; 3];
@@ -818,6 +831,7 @@ mod tests {
                 noise_group_id: 0,
                 node_opening_offset: 0,
                 node_opening_len: 0,
+                pinned_scenario: None,
             };
             let scenario_via_helper =
                 ClassSampler::select_external_scenario(&req, lib.n_scenarios());
@@ -846,6 +860,7 @@ mod tests {
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: 0,
+            pinned_scenario: None,
         };
 
         let mut out_a = vec![0.0f64; 3];
@@ -862,6 +877,67 @@ mod tests {
     }
 
     #[test]
+    fn test_external_fill_pinned_scenario_reads_that_column() {
+        let lib = make_external_library();
+        let sampler = ClassSampler::External { library: &lib };
+        let mut perm = vec![0usize; 10];
+
+        // A pinned column is read verbatim, independent of (iteration, scenario)
+        // — and distinct from what the hash would have chosen for the same request.
+        for pinned in [0_usize, 7, 23, 49] {
+            let req = ClassSampleRequest {
+                iteration: 3,
+                scenario: 17,
+                stage: 1,
+                stage_idx: 1,
+                total_scenarios: 10,
+                noise_group_id: 0,
+                node_opening_offset: 0,
+                node_opening_len: 0,
+                pinned_scenario: Some(pinned),
+            };
+            let mut output = vec![0.0f64; 3];
+            sampler.fill(&req, &mut output, &mut perm).unwrap();
+            assert_eq!(
+                &output,
+                lib.eta_slice(req.stage_idx, pinned),
+                "pinned_scenario=Some({pinned}) must read column {pinned}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_external_fill_pin_none_matches_hash_selection() {
+        // With no pin the External arm reproduces the hash selection bit-for-bit
+        // (the sampled path is byte-identical to the pre-pin behavior).
+        let lib = make_external_library();
+        let sampler = ClassSampler::External { library: &lib };
+        let mut perm = vec![0usize; 10];
+
+        for scenario in 0..20_u32 {
+            let req = ClassSampleRequest {
+                iteration: 5,
+                scenario,
+                stage: 0,
+                stage_idx: 2,
+                total_scenarios: 20,
+                noise_group_id: 0,
+                node_opening_offset: 0,
+                node_opening_len: 0,
+                pinned_scenario: None,
+            };
+            let hash_idx = ClassSampler::select_external_scenario(&req, lib.n_scenarios());
+            let mut output = vec![0.0f64; 3];
+            sampler.fill(&req, &mut output, &mut perm).unwrap();
+            assert_eq!(
+                &output,
+                lib.eta_slice(req.stage_idx, hash_idx),
+                "pinned_scenario=None must hash-select exactly as before for scenario={scenario}"
+            );
+        }
+    }
+
+    #[test]
     fn test_external_scenario_stable_across_stages() {
         let lib = make_external_library();
         let sampler = ClassSampler::External { library: &lib };
@@ -875,6 +951,7 @@ mod tests {
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: 0,
+            pinned_scenario: None,
         };
         let req_stage1 = ClassSampleRequest {
             stage_idx: 1,
@@ -935,6 +1012,7 @@ mod tests {
                 noise_group_id: 0,
                 node_opening_offset: 0,
                 node_opening_len: 0,
+                pinned_scenario: None,
             };
 
             let lag_offset = 5;
@@ -969,6 +1047,7 @@ mod tests {
                 noise_group_id: 0,
                 node_opening_offset: 0,
                 node_opening_len: 0,
+                pinned_scenario: None,
             };
             let window_via_helper = ClassSampler::select_historical_window(&req, lib.n_windows());
 
@@ -1108,6 +1187,7 @@ mod tests {
             noise_group_id: 5,
             node_opening_offset: 0,
             node_opening_len: 0,
+            pinned_scenario: None,
         };
         let req_stage1 = ClassSampleRequest {
             stage: 1,
@@ -1147,6 +1227,7 @@ mod tests {
             noise_group_id: 0,
             node_opening_offset: 0,
             node_opening_len: 0,
+            pinned_scenario: None,
         };
         let req_group1 = ClassSampleRequest {
             noise_group_id: 1,

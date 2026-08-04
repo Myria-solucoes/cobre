@@ -42,6 +42,7 @@ mod anticipated_backward_cut {
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
         ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
     };
+    use cobre_io::config::TrainingSelection;
     use cobre_io::config::{
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
         InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
@@ -390,7 +391,6 @@ mod anticipated_backward_cut {
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: Some(42),
-                forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
                     limit: iterations as u32,
                 }]),
@@ -399,7 +399,7 @@ mod anticipated_backward_cut {
                 solver: TrainingSolverConfig::default(),
                 parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
-                selection: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
@@ -781,6 +781,7 @@ mod anticipated_pre_horizon_seed_delivery {
         RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
         TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
     };
+    use cobre_io::config::{SimulationSelection, TrainingSelection};
 
     use super::common::build_setup_in_code;
     use super::common::builders::{
@@ -1175,7 +1176,6 @@ mod anticipated_pre_horizon_seed_delivery {
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: Some(42),
-                forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
                     limit: iterations as u32,
                 }]),
@@ -1184,14 +1184,14 @@ mod anticipated_pre_horizon_seed_delivery {
                 solver: TrainingSolverConfig::default(),
                 parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
-                selection: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
             simulation: IoSimulationConfig {
                 enabled: true,
-                num_scenarios: Some(1),
                 io_channel_capacity: 8,
+                selection: Some(SimulationSelection::Sampled { num_scenarios: 1 }),
                 ..IoSimulationConfig::default()
             },
             exports: ExportsConfig::default(),
@@ -1770,6 +1770,7 @@ mod anticipated_d_t_saturation {
         RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
         TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
     };
+    use cobre_io::config::{SimulationSelection, TrainingSelection};
 
     use super::common::build_setup_in_code;
     use super::common::builders::{
@@ -2146,7 +2147,6 @@ mod anticipated_d_t_saturation {
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: Some(42),
-                forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
                     limit: iterations as u32,
                 }]),
@@ -2155,14 +2155,14 @@ mod anticipated_d_t_saturation {
                 solver: TrainingSolverConfig::default(),
                 parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
-                selection: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
             simulation: IoSimulationConfig {
                 enabled: true,
-                num_scenarios: Some(1),
                 io_channel_capacity: 8,
+                selection: Some(SimulationSelection::Sampled { num_scenarios: 1 }),
                 ..IoSimulationConfig::default()
             },
             exports: ExportsConfig::default(),
@@ -2409,6 +2409,7 @@ mod anticipated_forward_pass {
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
         ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
     };
+    use cobre_io::config::TrainingSelection;
     use cobre_io::config::{
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
         InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
@@ -2722,14 +2723,13 @@ mod anticipated_forward_pass {
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: Some(42),
-                forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
                 stopping_mode: cobre_io::config::StoppingMode::Any,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
-                selection: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
@@ -3033,6 +3033,7 @@ mod anticipated_closed_form_lb_k1_single_thermal {
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
         ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
     };
+    use cobre_io::config::TrainingSelection;
     use cobre_io::config::{
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
         InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
@@ -3329,14 +3330,13 @@ mod anticipated_closed_form_lb_k1_single_thermal {
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: Some(42),
-                forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 4 }]),
                 stopping_mode: cobre_io::config::StoppingMode::Any,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
-                selection: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
@@ -3435,6 +3435,7 @@ mod lead_time_single_decider_end_to_end {
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
         ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
     };
+    use cobre_io::config::TrainingSelection;
     use cobre_io::config::{
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
         InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
@@ -3701,7 +3702,6 @@ mod lead_time_single_decider_end_to_end {
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: Some(42),
-                forward_passes: Some(1),
                 // 2 iterations reach the closed-form LB; 2 more settle the
                 // upper-bound gap to ~0 (mirrors the K=1 2-stage fixture's margin).
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 4 }]),
@@ -3710,7 +3710,7 @@ mod lead_time_single_decider_end_to_end {
                 solver: TrainingSolverConfig::default(),
                 parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
-                selection: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
@@ -3812,6 +3812,7 @@ mod anticipated_numerical_reconciliation_k2 {
     //! The 5/6/7 entity IDs are distinct from the K=2 and K=3 saturation tests so
     //! combined nextest runs give unambiguous per-entity failure attribution.
 
+    use cobre_io::config::{SimulationSelection, TrainingSelection};
     use std::sync::mpsc;
 
     use cobre_core::entities::{
@@ -4194,21 +4195,20 @@ mod anticipated_numerical_reconciliation_k2 {
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: Some(42),
-                forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 10 }]),
                 stopping_mode: cobre_io::config::StoppingMode::Any,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
-                selection: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
             simulation: IoSimulationConfig {
                 enabled: true,
-                num_scenarios: Some(1),
                 io_channel_capacity: 8,
+                selection: Some(SimulationSelection::Sampled { num_scenarios: 1 }),
                 ..IoSimulationConfig::default()
             },
             exports: ExportsConfig::default(),
@@ -4375,6 +4375,7 @@ mod anticipated_bridge_st_cruz_nova_k1 {
     //! The 60-series entity IDs are distinct from the other anticipated tests so
     //! combined nextest runs give unambiguous per-entity failure attribution.
 
+    use cobre_io::config::{SimulationSelection, TrainingSelection};
     use std::sync::mpsc;
 
     use cobre_core::entities::{
@@ -4755,21 +4756,20 @@ mod anticipated_bridge_st_cruz_nova_k1 {
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: Some(42),
-                forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit { limit: 1 }]),
                 stopping_mode: cobre_io::config::StoppingMode::Any,
                 cut_selection: RowSelectionConfig::default(),
                 solver: TrainingSolverConfig::default(),
                 parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
-                selection: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
             simulation: IoSimulationConfig {
                 enabled: true,
-                num_scenarios: Some(1),
                 io_channel_capacity: 8,
+                selection: Some(SimulationSelection::Sampled { num_scenarios: 1 }),
                 ..IoSimulationConfig::default()
             },
             exports: ExportsConfig::default(),
@@ -5434,6 +5434,7 @@ mod a1b_value_cut_identity_anchor {
         RowSelectionConfig, SimulationConfig as IoSimulationConfig, StoppingRuleConfig,
         TrainingConfig, TrainingSolverConfig, UpperBoundEvaluationConfig,
     };
+    use cobre_io::config::{SimulationSelection, TrainingSelection};
     use cobre_sddp::{SimulationScenarioResult, StudySetup};
     use cobre_solver::ActiveSolver;
 
@@ -5714,7 +5715,6 @@ mod a1b_value_cut_identity_anchor {
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: Some(42),
-                forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
                     limit: iterations as u32,
                 }]),
@@ -5723,14 +5723,14 @@ mod a1b_value_cut_identity_anchor {
                 solver: TrainingSolverConfig::default(),
                 parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
-                selection: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),
             simulation: IoSimulationConfig {
                 enabled: true,
-                num_scenarios: Some(1),
                 io_channel_capacity: 8,
+                selection: Some(SimulationSelection::Sampled { num_scenarios: 1 }),
                 ..IoSimulationConfig::default()
             },
             exports: ExportsConfig::default(),
@@ -5977,6 +5977,7 @@ mod a1c_stage_count_mode_anchor {
         PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
         ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
     };
+    use cobre_io::config::TrainingSelection;
     use cobre_io::config::{
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
         InflowNonNegativityMethod as CfgInflowMethod, ModelingConfig, PolicyConfig,
@@ -6353,7 +6354,6 @@ mod a1c_stage_count_mode_anchor {
             training: TrainingConfig {
                 enabled: true,
                 tree_seed: Some(42),
-                forward_passes: Some(1),
                 stopping_rules: Some(vec![StoppingRuleConfig::IterationLimit {
                     limit: ITERATIONS,
                 }]),
@@ -6362,7 +6362,7 @@ mod a1c_stage_count_mode_anchor {
                 solver: TrainingSolverConfig::default(),
                 parallelism: cobre_io::config::ParallelismConfig::default(),
                 scenario_source: None,
-                selection: None,
+                selection: Some(TrainingSelection::Sampled { forward_passes: 1 }),
             },
             upper_bound_evaluation: UpperBoundEvaluationConfig::default(),
             policy: PolicyConfig::default(),

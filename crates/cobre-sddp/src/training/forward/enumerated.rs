@@ -30,7 +30,7 @@ use crate::{
     noise::{DownstreamAccumState, LagAccumState, accumulate_and_shift_lag_state},
     setup::node_graph::{
         EnumeratedForwardPaths, NodeGraph, build_parent_map, enumerate_forward_paths,
-        enumerated_visit_bound, node_opening_range, stage_frontier,
+        enumerated_visit_bound, node_opening_range, node_pinned_scenario, stage_frontier,
     },
     solver_stats::SolverStatsDelta,
     stage_solve::{StageInputs, fill_unscaled, run_stage_solve},
@@ -714,8 +714,8 @@ fn enumerated_stage_worker<S: SolverInterface + Send>(
 
         #[allow(clippy::cast_possible_truncation)]
         let (i32_it, s32, t32) = (params.iteration as u32, global_scenario as u32, t as u32);
-        let (node_opening_offset, node_opening_len) =
-            node_opening_range(node_graph, node, params.training_ctx.stochastic, t);
+        let (node_opening_offset, node_opening_len) = node_opening_range(node_graph, node);
+        let pinned_scenario = node_pinned_scenario(node_graph, node);
 
         if parent[node].is_none() {
             let class_req = ClassSampleRequest {
@@ -727,6 +727,7 @@ fn enumerated_stage_worker<S: SolverInterface + Send>(
                 noise_group_id: 0,
                 node_opening_offset,
                 node_opening_len,
+                pinned_scenario,
             };
             params.sampler.apply_initial_state(
                 &class_req,
@@ -746,6 +747,7 @@ fn enumerated_stage_worker<S: SolverInterface + Send>(
             noise_group_id: params.ctx.noise_group_id_at(t),
             node_opening_offset,
             node_opening_len,
+            pinned_scenario,
         })?;
 
         // Reuse the capture slot at `count`, growing only until the widest stage's

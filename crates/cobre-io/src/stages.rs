@@ -169,12 +169,12 @@ pub(crate) struct RawNode {
     /// Declared study-stage id this node sits at; resolved against the study stages, never an array index.
     stage_id: i32,
     /// Per-stage external-library realization column this node carries. Required at a
-    /// stage carrying a slot-occupying external class, omitted where none. `realization_id: k`
+    /// stage carrying a slot-occupying external class, omitted where none. `scenario_id: k`
     /// is exactly the degenerate one-element weighted opening set
-    /// `[{ "realization_id": k, "probability": 1.0 }]` (documented equivalence; the
+    /// `[{ "scenario_id": k, "probability": 1.0 }]` (documented equivalence; the
     /// weighted-list spelling is not parsed here).
     #[serde(default)]
-    realization_id: Option<i32>,
+    scenario_id: Option<i32>,
     /// Optional human-readable label.
     #[serde(default)]
     label: Option<String>,
@@ -859,7 +859,7 @@ fn convert_policy_graph(raw: RawPolicyGraph, path: &Path) -> Result<PolicyGraph,
         .map(|n| Node {
             id: n.id,
             stage_id: n.stage_id,
-            realization_id: n.realization_id,
+            scenario_id: n.scenario_id,
             label: n.label,
         })
         .collect();
@@ -2500,7 +2500,7 @@ mod tests {
     // ── nodes[] parsing ───────────────────────────────────────────────────────
 
     /// A declared `nodes[]` parses into canonical `Node`s carrying
-    /// `{id, stage_id, realization_id, label}`.
+    /// `{id, stage_id, scenario_id, label}`.
     #[test]
     fn test_parse_nodes_carries_fields() {
         let json = r#"{
@@ -2508,7 +2508,7 @@ mod tests {
             "type": "finite_horizon",
             "annual_discount_rate": 0.0,
             "nodes": [
-              { "id": 0, "stage_id": 0, "realization_id": 2, "label": "root" },
+              { "id": 0, "stage_id": 0, "scenario_id": 2, "label": "root" },
               { "id": 1, "stage_id": 1 }
             ],
             "transitions": [ { "source_id": 0, "target_id": 1, "probability": 1.0 } ]
@@ -2526,10 +2526,10 @@ mod tests {
         assert_eq!(nodes.len(), 2);
         assert_eq!(nodes[0].id, 0);
         assert_eq!(nodes[0].stage_id, 0);
-        assert_eq!(nodes[0].realization_id, Some(2));
+        assert_eq!(nodes[0].scenario_id, Some(2));
         assert_eq!(nodes[0].label.as_deref(), Some("root"));
         assert_eq!(nodes[1].id, 1);
-        assert_eq!(nodes[1].realization_id, None);
+        assert_eq!(nodes[1].scenario_id, None);
         assert_eq!(nodes[1].label, None);
     }
 

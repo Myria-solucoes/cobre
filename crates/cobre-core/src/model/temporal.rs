@@ -564,7 +564,7 @@ pub struct Node {
 
     /// Per-stage external-library realization column this node carries; `None` at a
     /// stage with no slot-occupying external class.
-    pub realization_id: Option<i32>,
+    pub scenario_id: Option<i32>,
 
     /// Optional human-readable label.
     pub label: Option<String>,
@@ -738,13 +738,13 @@ mod tests {
                 Node {
                     id: 10,
                     stage_id: 0,
-                    realization_id: Some(3),
+                    scenario_id: Some(3),
                     label: Some("root".to_string()),
                 },
                 Node {
                     id: 11,
                     stage_id: 1,
-                    realization_id: None,
+                    scenario_id: None,
                     label: None,
                 },
             ],
@@ -753,8 +753,8 @@ mod tests {
 
         assert_eq!(graph.nodes.len(), 2);
         assert_eq!(graph.nodes[0].stage_id, 0);
-        assert_eq!(graph.nodes[0].realization_id, Some(3));
-        assert_eq!(graph.nodes[1].realization_id, None);
+        assert_eq!(graph.nodes[0].scenario_id, Some(3));
+        assert_eq!(graph.nodes[1].scenario_id, None);
     }
 
     #[test]

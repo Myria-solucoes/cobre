@@ -521,6 +521,8 @@ impl StudySetup {
             &stochastic,
         )?;
 
+        reject_scenario_id_under_sampled_selection(&node_graph, training_enumerated)?;
+
         // Resolves any `enumerated`-declared phase's actual count now that the
         // graph exists — config load could only signal the request, never the
         // count. `forward_passes`/`n_scenarios` carry a `sampled`-shaped
@@ -529,7 +531,7 @@ impl StudySetup {
             training_enumerated,
             matches!(
                 simulation_enumerated,
-                SimulationEnumeratedRequest::Enumerated { .. }
+                SimulationEnumeratedRequest::Enumerated
             ),
         );
         let forward_passes = if training_enumerated {
@@ -538,9 +540,8 @@ impl StudySetup {
             forward_passes
         };
         let n_scenarios = match simulation_enumerated {
-            SimulationEnumeratedRequest::Enumerated { declared } => resolve_enumerated_count(
+            SimulationEnumeratedRequest::Enumerated => resolve_enumerated_count(
                 &node_graph,
-                declared,
                 "simulation",
                 "the weighted census simulation",
             )?,
@@ -1645,28 +1646,6 @@ fn is_effective_non_expectation(measure: &RiskMeasure) -> bool {
     }
 }
 
-/// Reject when a declared simulation census count disagrees with the
-/// graph-derived enumerated scenario count. Spelling-agnostic: it takes the
-/// already-extracted `declared` count, never a config field, so which key
-/// declares the census stays the consuming feature's wiring concern. `None`, or
-/// `Some(k)` with `k == derived`, is `Ok(())`.
-///
-/// # Errors
-///
-/// Returns [`SddpError::Validation`] naming both counts and their sources when
-/// `declared` is `Some(k)` and `k != derived`.
-pub(crate) fn check_census(declared: Option<u32>, derived: u64) -> Result<(), SddpError> {
-    match declared {
-        Some(k) if u64::from(k) != derived => Err(SddpError::Validation(format!(
-            "declared simulation census count ({k}) disagrees with the graph-derived \
-             enumerated scenario count ({derived}); the declared census (source: the \
-             study's simulation selection) must equal the count enumerated from the \
-             policy graph's root→leaf paths (source: the node graph)"
-        ))),
-        _ => Ok(()),
-    }
-}
-
 /// Advisory (never a reject) for an asymmetric enumeration declaration: when
 /// exactly one phase declares `enumerated` scenario selection, one census-only
 /// capability is unavailable. Names both phases and the specific missing
@@ -1694,8 +1673,7 @@ fn warn_on_enumeration_asymmetry(training_enumerated: bool, simulation_enumerate
 /// node graph exists: derives the graph's scenario count via
 /// [`node_graph::enumerated_scenario_count`], propagating its overflow guard
 /// unchanged (the `K^T` rejection, stating the derived count is
-/// unrepresentable), then cross-validates any declared census count via
-/// [`check_census`]. The only derived count this admits for execution is `1`
+/// unrepresentable). The only derived count this admits for execution is `1`
 /// — a fully deterministic graph with no stochastic branching, where the
 /// existing sampled-with-one-pass walk already IS the enumeration bit-for-bit.
 /// Any larger derived count means `phase`'s enumerated execution (named by
@@ -1706,18 +1684,15 @@ fn warn_on_enumeration_asymmetry(training_enumerated: bool, simulation_enumerate
 /// # Errors
 ///
 /// Propagates [`node_graph::enumerated_scenario_count`]'s overflow
-/// [`SddpError::Validation`] unchanged; propagates [`check_census`]'s
-/// disagreement [`SddpError::Validation`] unchanged; returns a
-/// [`SddpError::Validation`] naming `phase`, `capability`, and the derived
-/// count when the derived count is not `1`.
+/// [`SddpError::Validation`] unchanged; returns a [`SddpError::Validation`]
+/// naming `phase`, `capability`, and the derived count when the derived count
+/// is not `1`.
 fn resolve_enumerated_count(
     node_graph: &NodeGraph,
-    declared_census: Option<u32>,
     phase: &str,
     capability: &str,
 ) -> Result<u32, SddpError> {
     let derived = node_graph::enumerated_scenario_count(node_graph)?;
-    check_census(declared_census, derived)?;
     if derived == 1 {
         Ok(1)
     } else {
@@ -1764,6 +1739,40 @@ fn resolve_enumerated_training_count(node_graph: &NodeGraph) -> Result<u32, Sddp
              graph, exceeding the u32 forward-pass count the engine addresses"
         ))
     })
+}
+
+/// Reject a node carrying a scenario pointer under sampled forward selection: a
+/// node's `scenario_id` (surfaced as an `External` opening) selects a
+/// deterministic external-library column, which only the enumerated forward
+/// engine consumes. Under sampled forwards every node draws its openings by hash,
+/// so a declared pointer would be validated at load and then silently ignored;
+/// an explicit rejection closes that footgun. Enumerated selection, or a graph
+/// carrying no external-bound node, ⇒ `Ok(())`.
+///
+/// # Errors
+///
+/// Returns [`SddpError::Validation`] naming the first offending node id, its
+/// stage, and the admitting condition (enumerated forward selection).
+fn reject_scenario_id_under_sampled_selection(
+    node_graph: &NodeGraph,
+    training_enumerated: bool,
+) -> Result<(), SddpError> {
+    if training_enumerated {
+        return Ok(());
+    }
+    if let Some((pos, node)) = node_graph
+        .nodes
+        .iter()
+        .enumerate()
+        .find(|(_, n)| n.openings.source == OpeningSource::External)
+    {
+        return Err(SddpError::Validation(format!(
+            "node {} (stage {}) declares a scenario_id but training uses sampled forward \
+             selection; scenario_id requires enumerated selection",
+            node_graph.node_ids[pos], node.stage
+        )));
+    }
+    Ok(())
 }
 
 /// Reject an `enumerated` graph whose branching is expressed as within-node

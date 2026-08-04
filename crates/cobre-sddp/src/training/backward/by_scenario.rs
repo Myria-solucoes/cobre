@@ -13,6 +13,7 @@ use crate::{
     context::{StageContext, TrainingContext},
     dcs::{DcsParams, DcsSolveContext, build_initial_resident_set, lazy_solve_preloaded},
     risk_measure::RiskMeasure,
+    setup::node_graph::OpeningSource,
     stage_solve::{StageInputs, run_stage_solve},
     state_exchange::ExchangeBuffers,
     workspace::{BasisStoreSliceMut, SolverWorkspace},
@@ -21,7 +22,9 @@ use crate::{
 use super::{
     StagedCut, SuccessorSpec,
     duals_extraction::{extract_duals_from_view, extract_state_duals_only},
-    lp_setup::{load_backward_lp, patch_opening_bounds, resolve_backward_basis},
+    lp_setup::{
+        fill_external_opening_noise, load_backward_lp, patch_opening_bounds, resolve_backward_basis,
+    },
     outcome_aggregation::{
         accumulate_dcs_binding_counts, accumulate_opening_outcome, save_basis_at_omega_zero,
         write_opening_outcome,
@@ -428,13 +431,34 @@ pub(crate) fn process_by_scenario_backward<S: SolverInterface + Send>(
     // (non-warm-carry) solve.
     let first = solve_order[0] as usize;
 
+    // An External successor reads its declared column `eta_slice(s, k)` (assembled
+    // once — invariant across the loop); a Generated successor keeps
+    // `tree_view.opening` byte-for-byte. Match on OpeningSource, never a global
+    // switch, so every sampled/generated study is unchanged.
+    let mut external_noise: Option<Vec<f64>> = None;
+    if training_ctx.node_graph.nodes[succ.successor_node]
+        .openings
+        .source
+        == OpeningSource::External
+    {
+        let k = training_ctx.node_graph.nodes[succ.successor_node]
+            .openings
+            .offset;
+        let mut buf = std::mem::take(&mut ws.backward_accum.external_noise_buf);
+        fill_external_opening_noise(training_ctx, ctx, s, k, succ.successor_node_id, &mut buf)?;
+        external_noise = Some(buf);
+    }
+
     for omega_position in 0..succ.probabilities.len() {
         let block = omega_position / n_local_openings;
         let local_pos = omega_position % n_local_openings;
         let local_omega = solve_order[local_pos] as usize;
         let omega = block * n_local_openings + local_omega;
 
-        let raw_noise = tree_view.opening(s, local_omega);
+        let raw_noise: &[f64] = match &external_noise {
+            Some(buf) => buf,
+            None => tree_view.opening(s, local_omega),
+        };
         let is_first = omega == first;
 
         opening_solver.solve_opening(
@@ -452,6 +476,10 @@ pub(crate) fn process_by_scenario_backward<S: SolverInterface + Send>(
             omega,
             is_first,
         )?;
+    }
+
+    if let Some(buf) = external_noise {
+        ws.backward_accum.external_noise_buf = buf;
     }
 
     // Aggregate into `agg_coefficients`, then copy into this trial point's arena
