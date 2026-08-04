@@ -62,7 +62,7 @@ fn make_id_date_misaligned_case(dir: &TempDir) {
             "start_date": "2024-01-01",
             "end_date": "2024-02-01",
             "blocks": [{ "id": 0, "name": "B0", "hours": 744.0 }],
-            "num_scenarios": 1
+            "num_openings": 1
         },
         {
             "id": 1,
@@ -72,7 +72,7 @@ fn make_id_date_misaligned_case(dir: &TempDir) {
                 { "id": 0, "name": "B0", "hours": 336.0 },
                 { "id": 1, "name": "B1", "hours": 336.0 }
             ],
-            "num_scenarios": 1
+            "num_openings": 1
         }
     ]
 }"#,
@@ -301,7 +301,7 @@ const SINGLE_STAGE_STAGES_JSON: &str = r#"{
             "start_date": "2024-01-01",
             "end_date": "2024-02-01",
             "blocks": [{ "id": 0, "name": "B0", "hours": 744.0 }],
-            "num_scenarios": 1
+            "num_openings": 1
         }
     ]
 }"#;

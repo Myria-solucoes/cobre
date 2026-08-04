@@ -65,7 +65,7 @@ const VALID_STAGES_JSON: &str = r#"{
             "start_date": "2024-01-01",
             "end_date": "2024-02-01",
             "blocks": [{ "id": 0, "name": "FLAT", "hours": 744.0 }],
-            "num_scenarios": 50
+            "num_openings": 50
         }
     ]
 }"#;
@@ -147,14 +147,14 @@ pub fn make_multi_entity_case(dir: &TempDir) {
             "start_date": "2024-01-01",
             "end_date": "2024-02-01",
             "blocks": [{ "id": 0, "name": "FLAT", "hours": 744.0 }],
-            "num_scenarios": 10
+            "num_openings": 10
         },
         {
             "id": 1,
             "start_date": "2024-02-01",
             "end_date": "2024-03-01",
             "blocks": [{ "id": 0, "name": "FLAT", "hours": 672.0 }],
-            "num_scenarios": 10
+            "num_openings": 10
         }
     ]
 }"#,

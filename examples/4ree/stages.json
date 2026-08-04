@@ -16,7 +16,7 @@
           "hours": 744
         }
       ],
-      "num_scenarios": 10
+      "num_openings": 10
     },
     {
       "id": 1,
@@ -29,7 +29,7 @@
           "hours": 672
         }
       ],
-      "num_scenarios": 10
+      "num_openings": 10
     },
     {
       "id": 2,
@@ -42,7 +42,7 @@
           "hours": 744
         }
       ],
-      "num_scenarios": 10
+      "num_openings": 10
     },
     {
       "id": 3,
@@ -55,7 +55,7 @@
           "hours": 720
         }
       ],
-      "num_scenarios": 10
+      "num_openings": 10
     },
     {
       "id": 4,
@@ -68,7 +68,7 @@
           "hours": 744
         }
       ],
-      "num_scenarios": 10
+      "num_openings": 10
     },
     {
       "id": 5,
@@ -81,7 +81,7 @@
           "hours": 720
         }
       ],
-      "num_scenarios": 10
+      "num_openings": 10
     },
     {
       "id": 6,
@@ -94,7 +94,7 @@
           "hours": 744
         }
       ],
-      "num_scenarios": 10
+      "num_openings": 10
     },
     {
       "id": 7,
@@ -107,7 +107,7 @@
           "hours": 744
         }
       ],
-      "num_scenarios": 10
+      "num_openings": 10
     },
     {
       "id": 8,
@@ -120,7 +120,7 @@
           "hours": 720
         }
       ],
-      "num_scenarios": 10
+      "num_openings": 10
     },
     {
       "id": 9,
@@ -133,7 +133,7 @@
           "hours": 744
         }
       ],
-      "num_scenarios": 10
+      "num_openings": 10
     },
     {
       "id": 10,
@@ -146,7 +146,7 @@
           "hours": 720
         }
       ],
-      "num_scenarios": 10
+      "num_openings": 10
     },
     {
       "id": 11,
@@ -159,7 +159,7 @@
           "hours": 744
         }
       ],
-      "num_scenarios": 10
+      "num_openings": 10
     }
   ]
 }

@@ -611,7 +611,7 @@ mod tests {
                     "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
                     "season_id": 0,
                     "blocks": [{ "id": 0, "name": "FLAT", "hours": 744.0 }],
-                    "num_scenarios": 10
+                    "num_openings": 10
                 }]
             }"#,
         )

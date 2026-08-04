@@ -12,7 +12,7 @@
         { "id": 0, "name": "LIGHT", "hours": 400 },
         { "id": 1, "name": "HEAVY", "hours": 330 }
       ],
-      "num_scenarios": 1
+      "num_openings": 1
     },
     {
       "id": 1,
@@ -22,7 +22,7 @@
         { "id": 0, "name": "LIGHT", "hours": 400 },
         { "id": 1, "name": "HEAVY", "hours": 330 }
       ],
-      "num_scenarios": 1
+      "num_openings": 1
     }
   ]
 }

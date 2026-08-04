@@ -238,14 +238,14 @@ fn test_inflow_history_wired_into_system() {
             "start_date": "2024-01-01",
             "end_date": "2024-02-01",
             "blocks": [{ "id": 0, "name": "FLAT", "hours": 744.0 }],
-            "num_scenarios": 10
+            "num_openings": 10
         },
         {
             "id": 1,
             "start_date": "2024-02-01",
             "end_date": "2024-03-01",
             "blocks": [{ "id": 0, "name": "FLAT", "hours": 672.0 }],
-            "num_scenarios": 10
+            "num_openings": 10
         }
     ]
 }"#,
@@ -770,21 +770,21 @@ fn test_lead_time_single_decider_on_disk_load() {
             "start_date": "2024-01-01",
             "end_date": "2024-02-01",
             "blocks": [{ "id": 0, "name": "S", "hours": 744.0 }],
-            "num_scenarios": 1
+            "num_openings": 1
         },
         {
             "id": 1,
             "start_date": "2024-02-01",
             "end_date": "2024-03-01",
             "blocks": [{ "id": 0, "name": "S", "hours": 744.0 }],
-            "num_scenarios": 1
+            "num_openings": 1
         },
         {
             "id": 2,
             "start_date": "2024-03-01",
             "end_date": "2024-04-01",
             "blocks": [{ "id": 0, "name": "S", "hours": 744.0 }],
-            "num_scenarios": 1
+            "num_openings": 1
         }
     ]
 }"#,

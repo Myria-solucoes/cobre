@@ -43,7 +43,7 @@
       "season_id": 0,
       "blocks": [{ "id": 0, "name": "SINGLE", "hours": 744 }],
       "state_variables": { "storage": true, "inflow_lags": true },
-      "num_scenarios": 1
+      "num_openings": 1
     },
     {
       "id": 1,
@@ -52,7 +52,7 @@
       "season_id": 1,
       "blocks": [{ "id": 0, "name": "SINGLE", "hours": 696 }],
       "state_variables": { "storage": true, "inflow_lags": true },
-      "num_scenarios": 1
+      "num_openings": 1
     },
     {
       "id": 2,
@@ -61,7 +61,7 @@
       "season_id": 2,
       "blocks": [{ "id": 0, "name": "SINGLE", "hours": 744 }],
       "state_variables": { "storage": true, "inflow_lags": false },
-      "num_scenarios": 1
+      "num_openings": 1
     },
     {
       "id": 3,
@@ -70,7 +70,7 @@
       "season_id": 3,
       "blocks": [{ "id": 0, "name": "SINGLE", "hours": 720 }],
       "state_variables": { "storage": true, "inflow_lags": true },
-      "num_scenarios": 1
+      "num_openings": 1
     }
   ]
 }

@@ -35,7 +35,7 @@ pub(super) fn check_sobol_power_of_2(data: &ParsedData, ctx: &mut ValidationCont
                 "stages.json",
                 Some(format!("Stage {}", stage.id)),
                 format!(
-                    "Stage {}: qmc_sobol with num_scenarios={bf} which is not a \
+                    "Stage {}: qmc_sobol with num_openings={bf} which is not a \
                      power of 2; Sobol sequences have optimal uniformity at powers \
                      of 2 ({suggestion})",
                     stage.id,

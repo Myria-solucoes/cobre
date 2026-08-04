@@ -358,7 +358,7 @@
         },
         "num_openings": {
           "default": null,
-          "description": "Number of within-node openings. Required (and `> 0`) on the chain dialect and\nat a generated-openings stage under `nodes[]`; rejected where a stage carries\nonly external openings. Accepts the legacy `num_scenarios` spelling.",
+          "description": "Number of within-node openings. Required (and `> 0`) on the chain dialect and\nat a generated-openings stage under `nodes[]`; rejected where a stage carries\nonly external openings.",
           "format": "uint32",
           "minimum": 0,
           "type": [

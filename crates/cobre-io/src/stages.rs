@@ -207,8 +207,8 @@ pub(crate) struct RawStage {
     risk_measure: RawRiskMeasure,
     /// Number of within-node openings. Required (and `> 0`) on the chain dialect and
     /// at a generated-openings stage under `nodes[]`; rejected where a stage carries
-    /// only external openings. Accepts the legacy `num_scenarios` spelling.
-    #[serde(alias = "num_scenarios", default)]
+    /// only external openings.
+    #[serde(default)]
     num_openings: Option<u32>,
     /// Sampling method for noise generation. Default: `saa`.
     #[serde(default)]
@@ -614,8 +614,7 @@ fn validate_num_openings(
         None if !nodes_declared => Err(LoadError::SchemaError {
             path: path.to_path_buf(),
             field: format!("stages[{stage_index}].num_openings"),
-            message: "num_openings is required (accepts the legacy num_scenarios spelling)"
-                .to_string(),
+            message: "num_openings is required".to_string(),
         }),
         _ => Ok(()),
     }
@@ -1270,19 +1269,19 @@ mod tests {
           "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
           "season_id": 0,
           "blocks": [{ "id": 0, "name": "LEVE", "hours": 744.0 }],
-          "num_scenarios": 50
+          "num_openings": 50
         },
         {
           "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
           "season_id": 1,
           "blocks": [{ "id": 0, "name": "LEVE", "hours": 696.0 }],
-          "num_scenarios": 50
+          "num_openings": 50
         },
         {
           "id": 2, "start_date": "2024-03-01", "end_date": "2024-04-01",
           "season_id": 2,
           "blocks": [{ "id": 0, "name": "LEVE", "hours": 744.0 }],
-          "num_scenarios": 50
+          "num_openings": 50
         }
       ]
     }"#;
@@ -1312,17 +1311,17 @@ mod tests {
             {
               "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
               "blocks": [{ "id": 0, "name": "SINGLE", "hours": 744.0 }],
-              "num_scenarios": 50
+              "num_openings": 50
             },
             {
               "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
               "blocks": [{ "id": 0, "name": "SINGLE", "hours": 696.0 }],
-              "num_scenarios": 50
+              "num_openings": 50
             },
             {
               "id": 2, "start_date": "2024-03-01", "end_date": "2024-04-01",
               "blocks": [{ "id": 0, "name": "SINGLE", "hours": 744.0 }],
-              "num_scenarios": 50
+              "num_openings": 50
             }
           ]
         }"#;
@@ -1372,7 +1371,7 @@ mod tests {
           "stages": [{
             "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
             "blocks": [{ "id": 0, "name": "LEVE", "hours": 744.0 }],
-            "num_scenarios": 50,
+            "num_openings": 50,
             "risk_measure": { "cvar": { "alpha": 0.95, "lambda": 0.5 } }
           }]
         }"#;
@@ -1406,7 +1405,7 @@ mod tests {
           "stages": [{
             "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
             "blocks": [{ "id": 0, "name": "LEVE", "hours": 744.0 }],
-            "num_scenarios": 50
+            "num_openings": 50
           }]
         }"#;
         let f = write_json(json);
@@ -1425,7 +1424,7 @@ mod tests {
           "stages": [{
             "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
             "blocks": [{ "id": 0, "name": "LEVE", "hours": 744.0 }],
-            "num_scenarios": 50
+            "num_openings": 50
           }]
         }"#;
         let f = write_json(json);
@@ -1474,7 +1473,7 @@ mod tests {
           "stages": [{
             "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
             "blocks": [{ "id": 0, "name": "LEVE", "hours": 744.0 }],
-            "num_scenarios": 50
+            "num_openings": 50
           }]
         }"#;
         let f = write_json(json);
@@ -1521,7 +1520,7 @@ mod tests {
               "season_definitions": {{ "cycle_type": "weekly", "seasons": [{seasons}] }},
               "stages": [{{
                 "id": 0, "start_date": "2024-01-15", "end_date": "2024-01-22",
-                "blocks": [{{ "id": 0, "name": "SINGLE", "hours": 168.0 }}], "num_scenarios": 1
+                "blocks": [{{ "id": 0, "name": "SINGLE", "hours": 168.0 }}], "num_openings": 1
               }}]
             }}"#
         );
@@ -1555,17 +1554,17 @@ mod tests {
             {
               "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
               "season_id": 0,
-              "blocks": [{ "id": 0, "name": "SINGLE", "hours": 744.0 }], "num_scenarios": 1
+              "blocks": [{ "id": 0, "name": "SINGLE", "hours": 744.0 }], "num_openings": 1
             },
             {
               "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
               "season_id": 1,
-              "blocks": [{ "id": 0, "name": "SINGLE", "hours": 696.0 }], "num_scenarios": 1
+              "blocks": [{ "id": 0, "name": "SINGLE", "hours": 696.0 }], "num_openings": 1
             },
             {
               "id": 2, "start_date": "2024-03-01", "end_date": "2024-04-01",
               "season_id": 2,
-              "blocks": [{ "id": 0, "name": "SINGLE", "hours": 744.0 }], "num_scenarios": 1
+              "blocks": [{ "id": 0, "name": "SINGLE", "hours": 744.0 }], "num_openings": 1
             }
           ]
         }"#;
@@ -1601,7 +1600,7 @@ mod tests {
           "stages": [{
             "id": 7, "start_date": "2024-03-01", "end_date": "2024-04-01",
             "season_id": 5,
-            "blocks": [{ "id": 0, "name": "SINGLE", "hours": 744.0 }], "num_scenarios": 1
+            "blocks": [{ "id": 0, "name": "SINGLE", "hours": 744.0 }], "num_openings": 1
           }]
         }"#;
         let f = write_json(json);
@@ -1643,7 +1642,7 @@ mod tests {
           "stages": [{
             "id": 4, "start_date": "2026-05-02", "end_date": "2026-05-09",
             "season_id": 3,
-            "blocks": [{ "id": 0, "name": "SINGLE", "hours": 168.0 }], "num_scenarios": 1
+            "blocks": [{ "id": 0, "name": "SINGLE", "hours": 168.0 }], "num_openings": 1
           }]
         }"#;
         let f = write_json(json);
@@ -1696,7 +1695,7 @@ mod tests {
               "stages": [{{
                 "id": 6, "start_date": "2024-07-01", "end_date": "2024-10-01",
                 "season_id": 12,
-                "blocks": [{{ "id": 0, "name": "SINGLE", "hours": 2208.0 }}], "num_scenarios": 1
+                "blocks": [{{ "id": 0, "name": "SINGLE", "hours": 2208.0 }}], "num_openings": 1
               }}]
             }}"#
         );
@@ -1721,7 +1720,7 @@ mod tests {
               "season_definitions": {D30_SHAPED_SEASON_DEFINITIONS},
               "stages": [{{
                 "id": 6, "start_date": "2024-07-01", "end_date": "2024-10-01",
-                "blocks": [{{ "id": 0, "name": "SINGLE", "hours": 2208.0 }}], "num_scenarios": 1
+                "blocks": [{{ "id": 0, "name": "SINGLE", "hours": 2208.0 }}], "num_openings": 1
               }}]
             }}"#
         );
@@ -1753,7 +1752,7 @@ mod tests {
               { "id": 1, "name": "OFF", "hours": 496.0 }
             ],
             "block_mode": "chronological",
-            "num_scenarios": 10
+            "num_openings": 10
           }]
         }"#;
         let f = write_json(json);
@@ -1781,12 +1780,12 @@ mod tests {
             {
               "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
               "blocks": [{ "id": 0, "name": "LEVE", "hours": 744.0 }],
-              "num_scenarios": 50
+              "num_openings": 50
             },
             {
               "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
               "blocks": [{ "id": 0, "name": "LEVE", "hours": 696.0 }],
-              "num_scenarios": 50
+              "num_openings": 50
             }
           ]
         }"#;
@@ -1856,9 +1855,9 @@ mod tests {
           "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] },
           "stages": [
             { "id": 5, "start_date": "2024-01-01", "end_date": "2024-02-01",
-              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 10 },
+              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 10 },
             { "id": 5, "start_date": "2024-02-01", "end_date": "2024-03-01",
-              "blocks": [{ "id": 0, "name": "A", "hours": 696.0 }], "num_scenarios": 10 }
+              "blocks": [{ "id": 0, "name": "A", "hours": 696.0 }], "num_openings": 10 }
           ]
         }"#;
         let f = write_json(json);
@@ -1889,7 +1888,7 @@ mod tests {
           ],
           "stages": [{
             "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
-            "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 10
+            "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 10
           }]
         }"#;
         let f = write_json(json);
@@ -1919,7 +1918,7 @@ mod tests {
           ],
           "stages": [{
             "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
-            "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 10
+            "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 10
           }]
         }"#;
         let f = write_json(json);
@@ -1939,15 +1938,15 @@ mod tests {
         }
     }
 
-    /// `num_scenarios = 0` -> `SchemaError` on `stages[i].num_scenarios`.
+    /// `num_openings = 0` -> `SchemaError` on `stages[i].num_openings`.
     #[test]
-    fn test_error_num_scenarios_zero() {
+    fn test_error_num_openings_zero() {
         let json = r#"{
           "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] },
           "stages": [{
             "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
             "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }],
-            "num_scenarios": 0
+            "num_openings": 0
           }]
         }"#;
         let f = write_json(json);
@@ -1974,7 +1973,7 @@ mod tests {
           "policy_graph": { "type": "finite_horizon", "annual_discount_rate": -0.01, "transitions": [] },
           "stages": [{
             "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
-            "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 10
+            "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 10
           }]
         }"#;
         let f = write_json(json);
@@ -2001,7 +2000,7 @@ mod tests {
           "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] },
           "stages": [{
             "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
-            "blocks": [{ "id": 0, "name": "A", "hours": 0.0 }], "num_scenarios": 10
+            "blocks": [{ "id": 0, "name": "A", "hours": 0.0 }], "num_openings": 10
           }]
         }"#;
         let f = write_json(json);
@@ -2029,7 +2028,7 @@ mod tests {
           "stages": [{
             "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
             "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }],
-            "num_scenarios": 10,
+            "num_openings": 10,
             "risk_measure": { "cvar": { "alpha": 0.0, "lambda": 0.5 } }
           }]
         }"#;
@@ -2058,7 +2057,7 @@ mod tests {
           "stages": [{
             "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
             "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }],
-            "num_scenarios": 10,
+            "num_openings": 10,
             "risk_measure": { "cvar": { "alpha": 0.95, "lambda": 1.5 } }
           }]
         }"#;
@@ -2086,7 +2085,7 @@ mod tests {
           "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] },
           "stages": [{
             "id": 0, "start_date": "2024-02-01", "end_date": "2024-01-01",
-            "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 10
+            "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 10
           }]
         }"#;
         let f = write_json(json);
@@ -2117,7 +2116,7 @@ mod tests {
               { "id": 0, "name": "A", "hours": 248.0 },
               { "id": 2, "name": "B", "hours": 496.0 }
             ],
-            "num_scenarios": 10
+            "num_openings": 10
           }]
         }"#;
         let f = write_json(json);
@@ -2144,7 +2143,7 @@ mod tests {
           "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] },
           "stages": [{
             "id": 0, "start_date": "not-a-date", "end_date": "2024-02-01",
-            "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 10
+            "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 10
           }]
         }"#;
         let f = write_json(json);
@@ -2173,18 +2172,18 @@ mod tests {
           "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] },
           "stages": [
             { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
-              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 10 },
+              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 10 },
             { "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
-              "blocks": [{ "id": 0, "name": "A", "hours": 696.0 }], "num_scenarios": 10 }
+              "blocks": [{ "id": 0, "name": "A", "hours": 696.0 }], "num_openings": 10 }
           ]
         }"#;
         let json_reversed = r#"{
           "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] },
           "stages": [
             { "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
-              "blocks": [{ "id": 0, "name": "A", "hours": 696.0 }], "num_scenarios": 10 },
+              "blocks": [{ "id": 0, "name": "A", "hours": 696.0 }], "num_openings": 10 },
             { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
-              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 10 }
+              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 10 }
           ]
         }"#;
         let f1 = write_json(json_forward);
@@ -2233,9 +2232,9 @@ mod tests {
           },
           "stages": [
             { "id": 0, "start_date": "2024-01-01", "end_date": "2024-07-01",
-              "blocks": [{ "id": 0, "name": "A", "hours": 4344.0 }], "num_scenarios": 5 },
+              "blocks": [{ "id": 0, "name": "A", "hours": 4344.0 }], "num_openings": 5 },
             { "id": 1, "start_date": "2024-07-01", "end_date": "2025-01-01",
-              "blocks": [{ "id": 0, "name": "A", "hours": 4416.0 }], "num_scenarios": 5 }
+              "blocks": [{ "id": 0, "name": "A", "hours": 4416.0 }], "num_openings": 5 }
           ]
         }"#;
         let f = write_json(json);
@@ -2264,7 +2263,7 @@ mod tests {
           "policy_graph": { "type": "elliptic", "annual_discount_rate": 0.0, "transitions": [] },
           "stages": [
             { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
-              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 5 }
+              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 5 }
           ]
         }"#;
         let f = write_json(json);
@@ -2288,7 +2287,7 @@ mod tests {
           "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] },
           "stages": [
             { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
-              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 5,
+              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 5,
               "block_mode": "diagonal" }
           ]
         }"#;
@@ -2313,7 +2312,7 @@ mod tests {
           "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] },
           "stages": [
             { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
-              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 5,
+              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 5,
               "sampling_method": "antithetic" }
           ]
         }"#;
@@ -2330,19 +2329,43 @@ mod tests {
         }
     }
 
-    /// A deck spelling the legacy `num_scenarios` loads unchanged through the
-    /// `num_openings` alias (C1), and the count reaches `branching_factor` (B1).
+    /// The removed per-stage `num_scenarios` spelling is a deserialize error
+    /// naming the offending field (`deny_unknown_fields` rejects it at parse,
+    /// surfaced as [`LoadError::ParseError`]); the canonical `num_openings`
+    /// spelling loads and its count reaches `branching_factor` (B1).
     #[test]
-    fn test_num_scenarios_alias_loads() {
-        let f = write_json(VALID_JSON);
-        let data = parse_stages(f.path()).unwrap();
-        assert_eq!(data.stages.len(), 3);
-        for stage in &data.stages {
-            assert_eq!(
-                stage.scenario_config.branching_factor, 50,
-                "num_scenarios alias must populate branching_factor"
-            );
+    fn test_num_scenarios_removed_field_rejected() {
+        let rejected = r#"{
+          "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] },
+          "stages": [
+            { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
+              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 5 }
+          ]
+        }"#;
+        let f = write_json(rejected);
+        match parse_stages(f.path()).unwrap_err() {
+            LoadError::ParseError { message, .. } => {
+                assert!(
+                    message.contains("num_scenarios") && message.contains("unknown field"),
+                    "removed field must surface as an unknown-field error naming it, got: {message}"
+                );
+            }
+            other => panic!("expected ParseError, got: {other:?}"),
         }
+
+        let accepted = r#"{
+          "policy_graph": { "type": "finite_horizon", "annual_discount_rate": 0.0, "transitions": [] },
+          "stages": [
+            { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
+              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 5 }
+          ]
+        }"#;
+        let f = write_json(accepted);
+        let data = parse_stages(f.path()).unwrap();
+        assert_eq!(
+            data.stages[0].scenario_config.branching_factor, 5,
+            "num_openings must populate branching_factor"
+        );
         assert!(
             data.openings_declared.contains(&0),
             "a declared count marks the stage in openings_declared"
@@ -2404,13 +2427,13 @@ mod tests {
           "stages": [
             { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
               "season_id": 0,
-              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 5 },
+              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 5 },
             { "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
               "season_id": 0,
-              "blocks": [{ "id": 0, "name": "A", "hours": 672.0 }], "num_scenarios": 5 },
+              "blocks": [{ "id": 0, "name": "A", "hours": 672.0 }], "num_openings": 5 },
             { "id": 2, "start_date": "2024-07-01", "end_date": "2024-08-01",
               "season_id": 1,
-              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 5 }
+              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 5 }
           ]
         }"#;
         let f = write_json(json);
@@ -2442,9 +2465,9 @@ mod tests {
           },
           "stages": [
             { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
-              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 5 },
+              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 5 },
             { "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
-              "blocks": [{ "id": 0, "name": "A", "hours": 672.0 }], "num_scenarios": 5 }
+              "blocks": [{ "id": 0, "name": "A", "hours": 672.0 }], "num_openings": 5 }
           ]
         }"#;
         let f = write_json(json);
@@ -2480,11 +2503,11 @@ mod tests {
           ],
           "stages": [
             { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
-              "blocks": [{ "id": 0, "name": "S", "hours": 744.0 }], "num_scenarios": 5 },
+              "blocks": [{ "id": 0, "name": "S", "hours": 744.0 }], "num_openings": 5 },
             { "id": 2, "start_date": "2024-02-01", "end_date": "2024-03-01",
-              "blocks": [{ "id": 0, "name": "S", "hours": 696.0 }], "num_scenarios": 5 },
+              "blocks": [{ "id": 0, "name": "S", "hours": 696.0 }], "num_openings": 5 },
             { "id": 5, "start_date": "2024-03-01", "end_date": "2024-04-01",
-              "blocks": [{ "id": 0, "name": "S", "hours": 744.0 }], "num_scenarios": 5 }
+              "blocks": [{ "id": 0, "name": "S", "hours": 744.0 }], "num_openings": 5 }
           ]
         }"#;
         let f = write_json(json);
@@ -2515,9 +2538,9 @@ mod tests {
           },
           "stages": [
             { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
-              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 5 },
+              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 5 },
             { "id": 1, "start_date": "2024-02-01", "end_date": "2024-03-01",
-              "blocks": [{ "id": 0, "name": "A", "hours": 696.0 }], "num_scenarios": 5 }
+              "blocks": [{ "id": 0, "name": "A", "hours": 696.0 }], "num_openings": 5 }
           ]
         }"#;
         let f = write_json(json);
@@ -2557,7 +2580,7 @@ mod tests {
           },
           "stages": [
             { "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
-              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_scenarios": 5 }
+              "blocks": [{ "id": 0, "name": "A", "hours": 744.0 }], "num_openings": 5 }
           ]
         }"#;
         let f = write_json(json);
@@ -2583,7 +2606,7 @@ mod tests {
                   }},
                   "stages": [
                     {{ "id": 0, "start_date": "2024-01-01", "end_date": "2024-02-01",
-                       "blocks": [{{ "id": 0, "name": "A", "hours": 744.0 }}], "num_scenarios": 5 }}
+                       "blocks": [{{ "id": 0, "name": "A", "hours": 744.0 }}], "num_openings": 5 }}
                   ]
                 }}"#
             );

@@ -66,14 +66,14 @@ const STAGES_JSON: &str = r#"{
             "start_date": "2024-01-01",
             "end_date": "2024-02-01",
             "blocks": [{ "id": 0, "name": "FLAT", "hours": 744.0 }],
-            "num_scenarios": 2
+            "num_openings": 2
         },
         {
             "id": 1,
             "start_date": "2024-02-01",
             "end_date": "2024-03-01",
             "blocks": [{ "id": 0, "name": "FLAT", "hours": 672.0 }],
-            "num_scenarios": 2
+            "num_openings": 2
         }
     ]
 }"#;

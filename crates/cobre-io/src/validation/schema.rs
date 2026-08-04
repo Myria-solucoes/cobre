@@ -837,7 +837,7 @@ mod tests {
     // stages.json: `target_id` in transitions must be an integer (not null).
     // For a single-stage finite horizon we omit transitions entirely.
     // Only mandatory per-stage fields: id, start_date, end_date, blocks,
-    // num_scenarios. season_id, block_mode, state_variables, risk_measure,
+    // num_openings. season_id, block_mode, state_variables, risk_measure,
     // sampling_method all have serde defaults and are optional.
     const VALID_STAGES_JSON: &str = r#"{
         "policy_graph": {
@@ -851,7 +851,7 @@ mod tests {
                 "start_date": "2024-01-01",
                 "end_date": "2024-02-01",
                 "blocks": [{ "id": 0, "name": "FLAT", "hours": 744.0 }],
-                "num_scenarios": 50
+                "num_openings": 50
             }
         ]
     }"#;

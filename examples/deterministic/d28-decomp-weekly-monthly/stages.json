@@ -35,7 +35,7 @@
         }
       ],
       "state_variables": { "storage": true, "inflow_lags": false },
-      "num_scenarios": 1,
+      "num_openings": 1,
       "sampling_method": "saa"
     },
     {
@@ -51,7 +51,7 @@
         }
       ],
       "state_variables": { "storage": true, "inflow_lags": false },
-      "num_scenarios": 1,
+      "num_openings": 1,
       "sampling_method": "saa"
     },
     {
@@ -67,7 +67,7 @@
         }
       ],
       "state_variables": { "storage": true, "inflow_lags": false },
-      "num_scenarios": 1,
+      "num_openings": 1,
       "sampling_method": "saa"
     },
     {
@@ -83,7 +83,7 @@
         }
       ],
       "state_variables": { "storage": true, "inflow_lags": false },
-      "num_scenarios": 1,
+      "num_openings": 1,
       "sampling_method": "saa"
     },
     {
@@ -99,7 +99,7 @@
         }
       ],
       "state_variables": { "storage": true, "inflow_lags": false },
-      "num_scenarios": 1,
+      "num_openings": 1,
       "sampling_method": "saa"
     },
     {
@@ -115,7 +115,7 @@
         }
       ],
       "state_variables": { "storage": true, "inflow_lags": false },
-      "num_scenarios": 5,
+      "num_openings": 5,
       "sampling_method": "saa"
     }
   ]

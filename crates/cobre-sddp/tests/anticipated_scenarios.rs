@@ -2066,28 +2066,28 @@ mod anticipated_generic_constraint_e2e {
       "start_date": "2024-01-01",
       "end_date": "2024-02-01",
       "blocks": [{ "id": 0, "name": "S", "hours": 744 }],
-      "num_scenarios": 1
+      "num_openings": 1
     },
     {
       "id": 1,
       "start_date": "2024-02-01",
       "end_date": "2024-03-01",
       "blocks": [{ "id": 0, "name": "S", "hours": 672 }],
-      "num_scenarios": 1
+      "num_openings": 1
     },
     {
       "id": 2,
       "start_date": "2024-03-01",
       "end_date": "2024-04-01",
       "blocks": [{ "id": 0, "name": "S", "hours": 744 }],
-      "num_scenarios": 1
+      "num_openings": 1
     },
     {
       "id": 3,
       "start_date": "2024-04-01",
       "end_date": "2024-05-01",
       "blocks": [{ "id": 0, "name": "S", "hours": 720 }],
-      "num_scenarios": 1
+      "num_openings": 1
     }
   ]
 }"#,
