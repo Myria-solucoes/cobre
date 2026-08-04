@@ -127,18 +127,20 @@ pub fn parse_noise_openings(path: &Path) -> Result<Vec<NoiseOpeningRow>, LoadErr
 /// numbered `1..T` validates identically to its `0..T-1` equivalent.
 ///
 /// Assumes `rows` is already sorted by `(stage_id, opening_index, entity_index)`
-/// as produced by [`parse_noise_openings`]. The expected opening count per stage
-/// is the number of distinct openings present for that stage; the check is that
-/// those indices form `0..count`.
+/// as produced by [`parse_noise_openings`]. `expected_openings_per_stage` is the
+/// declared opening count per study stage, indexed by resolved study index: each
+/// stage's loaded distinct-opening count must equal its declared count (the cross
+/// check against the declaration), and those indices must form `0..count`.
 ///
 /// # Errors
 ///
-/// | Condition                                                     | Error variant              |
-/// |---------------------------------------------------------------|----------------------------|
-/// | A row `stage_id` resolves to no declared study stage          | [`LoadError::SchemaError`] |
-/// | Distinct entity count != `expected_dim`                       | [`LoadError::SchemaError`] |
-/// | Distinct resolved stage count != `expected_stages`            | [`LoadError::SchemaError`] |
-/// | A stage's opening indices are not `0..count`                   | [`LoadError::SchemaError`] |
+/// | Condition                                                            | Error variant              |
+/// |----------------------------------------------------------------------|----------------------------|
+/// | A row `stage_id` resolves to no declared study stage                 | [`LoadError::SchemaError`] |
+/// | Distinct entity count != `expected_dim`                              | [`LoadError::SchemaError`] |
+/// | Distinct resolved stage count != `expected_openings_per_stage.len()` | [`LoadError::SchemaError`] |
+/// | A stage's loaded opening count != its declared count                 | [`LoadError::SchemaError`] |
+/// | A stage's opening indices are not `0..count`                         | [`LoadError::SchemaError`] |
 ///
 /// Returns [`LoadError::SchemaError`] if any opening count exceeds `u32::MAX`.
 ///
@@ -156,12 +158,12 @@ pub fn parse_noise_openings(path: &Path) -> Result<Vec<NoiseOpeningRow>, LoadErr
 ///     .collect();
 ///
 /// let resolver = StageIdResolver::from_study_stage_ids(&[0, 1]);
-/// validate_noise_openings(&rows, 2, 2, &resolver).expect("valid dimensions");
+/// validate_noise_openings(&rows, 2, &[3, 3], &resolver).expect("valid dimensions");
 /// ```
 pub fn validate_noise_openings(
     rows: &[NoiseOpeningRow],
     expected_dim: usize,
-    expected_stages: usize,
+    expected_openings_per_stage: &[usize],
     resolver: &StageIdResolver,
 ) -> Result<(), LoadError> {
     for (i, row) in rows.iter().enumerate() {
@@ -191,6 +193,7 @@ pub fn validate_noise_openings(
         .filter_map(|r| resolver.resolve(r.stage_id))
         .collect();
     let actual_stages = distinct_stages.len();
+    let expected_stages = expected_openings_per_stage.len();
     if actual_stages != expected_stages {
         return Err(LoadError::SchemaError {
             path: PathBuf::from("scenarios/noise_openings.parquet"),
@@ -213,6 +216,18 @@ pub fn validate_noise_openings(
 
     for (&idx, opening_set) in &openings_by_index {
         let count = opening_set.len();
+        let declared = expected_openings_per_stage.get(idx).copied().unwrap_or(0);
+        if count != declared {
+            let stage_id = resolver.id_at(idx).unwrap_or_default();
+            return Err(LoadError::SchemaError {
+                path: PathBuf::from("scenarios/noise_openings.parquet"),
+                field: "opening_index".to_string(),
+                message: format!(
+                    "opening count mismatch for stage {stage_id}: declared {declared} openings, \
+                     found {count}"
+                ),
+            });
+        }
         let expected_max = u32::try_from(count).map_err(|_| LoadError::SchemaError {
             path: PathBuf::from("scenarios/noise_openings.parquet"),
             field: String::new(),
@@ -457,7 +472,7 @@ mod tests {
     fn validate_correct_dimensions_returns_ok() {
         let rows = make_rows(2, 3, 2);
         let resolver = StageIdResolver::from_study_stage_ids(&[0, 1]);
-        validate_noise_openings(&rows, 2, 2, &resolver).unwrap();
+        validate_noise_openings(&rows, 2, &[3, 3], &resolver).unwrap();
     }
 
     // ── validate_dimension_mismatch_returns_error ─────────────────────────────
@@ -466,7 +481,7 @@ mod tests {
     fn validate_dimension_mismatch_returns_error() {
         let rows = make_rows(2, 3, 3);
         let resolver = StageIdResolver::from_study_stage_ids(&[0, 1]);
-        let err = validate_noise_openings(&rows, 2, 2, &resolver).unwrap_err();
+        let err = validate_noise_openings(&rows, 2, &[3, 3], &resolver).unwrap_err();
 
         match &err {
             LoadError::SchemaError { message, .. } => {
@@ -486,7 +501,7 @@ mod tests {
         let rows = make_rows(2, 3, 2);
         // Study declares 3 stages, but the deck only covers 2.
         let resolver = StageIdResolver::from_study_stage_ids(&[0, 1, 2]);
-        let err = validate_noise_openings(&rows, 2, 3, &resolver).unwrap_err();
+        let err = validate_noise_openings(&rows, 2, &[3, 3, 3], &resolver).unwrap_err();
 
         match &err {
             LoadError::SchemaError { message, .. } => {
@@ -517,13 +532,42 @@ mod tests {
             .collect();
 
         let resolver = StageIdResolver::from_study_stage_ids(&[0]);
-        let err = validate_noise_openings(&rows, 2, 1, &resolver).unwrap_err();
+        // Declared count matches the loaded distinct-opening count (2), so the
+        // count cross-check passes and the non-contiguous set trips contiguity.
+        let err = validate_noise_openings(&rows, 2, &[2], &resolver).unwrap_err();
 
         match &err {
             LoadError::SchemaError { message, .. } => {
                 assert!(
                     message.contains("missing opening indices"),
                     "message should contain 'missing opening indices', got: {message}"
+                );
+            }
+            other => panic!("expected SchemaError, got: {other:?}"),
+        }
+    }
+
+    // ── validate_count_mismatch_vs_declared_returns_error ─────────────────────
+
+    /// A stage whose loaded distinct-opening count differs from its declared
+    /// `num_openings` is rejected naming the stage, the declared count, and the
+    /// found count — the I8 cross-check against the declaration (not a
+    /// self-derived count).
+    #[test]
+    fn validate_count_mismatch_vs_declared_returns_error() {
+        // 2 stages, 3 openings each in the file; stage 1 declares only 2.
+        let rows = make_rows(2, 3, 2);
+        let resolver = StageIdResolver::from_study_stage_ids(&[0, 1]);
+        let err = validate_noise_openings(&rows, 2, &[3, 2], &resolver).unwrap_err();
+
+        match &err {
+            LoadError::SchemaError { message, .. } => {
+                assert!(
+                    message.contains("opening count mismatch")
+                        && message.contains("stage 1")
+                        && message.contains("declared 2")
+                        && message.contains("found 3"),
+                    "message should name stage/declared/found, got: {message}"
                 );
             }
             other => panic!("expected SchemaError, got: {other:?}"),
@@ -612,7 +656,7 @@ mod tests {
         });
 
         let resolver = StageIdResolver::from_study_stage_ids(&[0, 1]);
-        let err = validate_noise_openings(&rows, 2, 2, &resolver).unwrap_err();
+        let err = validate_noise_openings(&rows, 2, &[3, 3], &resolver).unwrap_err();
 
         match &err {
             LoadError::SchemaError { path, message, .. } => {

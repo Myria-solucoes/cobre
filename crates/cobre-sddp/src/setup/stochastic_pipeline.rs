@@ -10,15 +10,15 @@ use cobre_core::{
     scenario::{SamplingScheme, ScenarioSource},
 };
 use cobre_io::Config;
+use cobre_io::LoadError;
 use cobre_io::LoadFactorEntry;
 use cobre_io::StageIdResolver;
-use cobre_io::ValidationContext;
+use cobre_io::config::Openings;
 use cobre_io::scenarios::assemble_opening_tree;
 use cobre_io::scenarios::estimation::estimate_from_history;
 use cobre_io::scenarios::load_noise_openings;
 use cobre_io::scenarios::parse_load_factors;
 use cobre_io::scenarios::validate_noise_openings;
-use cobre_io::validate_structure;
 use cobre_stochastic::BlockFactorPair;
 use cobre_stochastic::ClassSchemes;
 use cobre_stochastic::DerivedInflowSeeds;
@@ -52,43 +52,57 @@ pub struct PrepareStochasticResult {
     pub estimation_path: EstimationPath,
 }
 
-/// Load and validate a user-supplied opening tree from `scenarios/noise_openings.parquet`.
+/// Load and validate a user-supplied opening tree when
+/// `training.scenario_source.openings` declares `{source: file}`, reading the
+/// convention-located `scenarios/noise_openings.parquet` — consumed by
+/// declaration, not by file existence.
 ///
-/// Returns `Ok(None)` if the file is absent.
+/// Returns `Ok(None)` when the declaration is absent or `generated` (the tree is
+/// generated downstream). A present-but-undeclared file is therefore ignored.
 ///
 /// # Errors
 ///
-/// Returns [`SddpError::Io`] if the file exists but cannot be read or fails validation.
+/// Returns [`SddpError::Io`] when `{source: file}` is declared but the
+/// conventional file is absent, unreadable, or fails validation against each
+/// stage's declared `num_openings` (its `branching_factor`).
 fn load_user_opening_tree_inner(
     case_dir: &Path,
     system: &System,
+    config: &Config,
 ) -> Result<Option<OpeningTree>, SddpError> {
-    let mut ctx = ValidationContext::new();
-    let manifest = validate_structure(case_dir, &mut ctx);
+    match config.training_openings() {
+        None | Some(Openings::Generated {}) => Ok(None),
+        Some(Openings::File {}) => {
+            let path = case_dir.join("scenarios").join("noise_openings.parquet");
+            if !path.exists() {
+                return Err(SddpError::Io(LoadError::io(
+                    &path,
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "openings source is 'file' but the conventional \
+                         scenarios/noise_openings.parquet is absent",
+                    ),
+                )));
+            }
 
-    if !manifest.scenarios_noise_openings_parquet {
-        return Ok(None);
+            let rows = load_noise_openings(Some(&path))?;
+
+            let expected_dim = noise_entity_order(system).dim();
+
+            let (study_stage_ids, expected_openings_per_stage): (Vec<i32>, Vec<usize>) = system
+                .stages()
+                .iter()
+                .filter(|s| s.id >= 0)
+                .map(|s| (s.id, s.scenario_config.branching_factor))
+                .unzip();
+            let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
+
+            validate_noise_openings(&rows, expected_dim, &expected_openings_per_stage, &resolver)?;
+
+            let tree = assemble_opening_tree(rows, expected_dim, &resolver);
+            Ok(Some(tree))
+        }
     }
-
-    let path = case_dir.join("scenarios").join("noise_openings.parquet");
-
-    let rows = load_noise_openings(Some(&path))?;
-
-    let expected_dim = noise_entity_order(system).dim();
-
-    let study_stage_ids: Vec<i32> = system
-        .stages()
-        .iter()
-        .filter(|s| s.id >= 0)
-        .map(|s| s.id)
-        .collect();
-    let expected_stages = study_stage_ids.len();
-    let resolver = StageIdResolver::from_study_stage_ids(&study_stage_ids);
-
-    validate_noise_openings(&rows, expected_dim, expected_stages, &resolver)?;
-
-    let tree = assemble_opening_tree(rows, expected_dim, &resolver);
-    Ok(Some(tree))
 }
 
 /// Noise-group ids for the study stages, delegating to [`precompute_noise_groups`].
@@ -354,7 +368,7 @@ pub fn prepare_stochastic(
     let (system, estimation_report, estimation_path) =
         estimate_from_history(system, case_dir, config)?;
 
-    let user_opening_tree = load_user_opening_tree_inner(case_dir, &system)?;
+    let user_opening_tree = load_user_opening_tree_inner(case_dir, &system, config)?;
 
     let load_factor_entries = load_load_factors_for_stochastic(case_dir)?;
     let block_pairs: Vec<Vec<BlockFactorPair>> = load_factor_entries
@@ -1663,5 +1677,84 @@ mod tests {
             Some(vec![1, 1]),
             "rows must be counted through the resolver, not dropped by a stage_id-as-index guard"
         );
+    }
+
+    // ── load_user_opening_tree_inner: by declaration, not existence ───────────
+
+    /// Parse a `Config` from an inline JSON string.
+    fn config_from_json(json: &str) -> Config {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        std::fs::write(tmp.path(), json).expect("write config");
+        cobre_io::parse_config(tmp.path()).expect("parse config")
+    }
+
+    const SAMPLED_TRAINING: &str = r#""selection": {"method": "sampled", "forward_passes": 10}, "stopping_rules": [{"type": "iteration_limit", "limit": 5}]"#;
+
+    /// Write a 5-stage, 1-opening-per-stage, dim-1 tree at
+    /// `case_dir/scenarios/noise_openings.parquet` — the shape the ring fixture's
+    /// `branching_factor = 1` study stages declare.
+    fn write_ring_noise_openings(case_dir: &Path) {
+        let path = case_dir.join("scenarios").join("noise_openings.parquet");
+        let tree = OpeningTree::from_parts(vec![0.1, 0.2, 0.3, 0.4, 0.5], vec![1; 5], 1);
+        cobre_io::output::stochastic::write_noise_openings(&path, &tree)
+            .expect("write noise_openings");
+    }
+
+    /// A `noise_openings.parquet` physically present but with no `openings`
+    /// declaration is ignored — consumption is by declaration, not existence.
+    #[test]
+    fn load_user_opening_tree_undeclared_file_is_ignored() {
+        let fx = build_ring_fixture();
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        write_ring_noise_openings(dir.path());
+
+        let config = config_from_json(&format!(r#"{{"training": {{{SAMPLED_TRAINING}}}}}"#));
+        let loaded = load_user_opening_tree_inner(dir.path(), &fx.system, &config)
+            .expect("an undeclared file must resolve to Ok(None)");
+        assert!(
+            loaded.is_none(),
+            "a present-but-undeclared noise_openings.parquet must be ignored"
+        );
+    }
+
+    /// A `{source: file}` declaration with a present, count-consistent file
+    /// installs the user opening tree.
+    #[test]
+    fn load_user_opening_tree_declared_file_installs_tree() {
+        let fx = build_ring_fixture();
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        write_ring_noise_openings(dir.path());
+
+        let config = config_from_json(&format!(
+            r#"{{"training": {{{SAMPLED_TRAINING}, "scenario_source": {{"openings": {{"source": "file"}}}}}}}}"#
+        ));
+        let loaded = load_user_opening_tree_inner(dir.path(), &fx.system, &config)
+            .expect("a declared, present file must load")
+            .expect("a declared file must install a tree");
+        assert_eq!(loaded.n_stages(), 5);
+        assert_eq!(loaded.dim(), 1);
+        for s in 0..5 {
+            assert_eq!(loaded.n_openings(s), 1, "stage {s} declares one opening");
+        }
+    }
+
+    /// A `{source: file}` declaration with the file absent is a named error.
+    #[test]
+    fn load_user_opening_tree_declared_absent_file_errors() {
+        let fx = build_ring_fixture();
+        let dir = tempfile::TempDir::new().expect("tempdir");
+
+        let config = config_from_json(&format!(
+            r#"{{"training": {{{SAMPLED_TRAINING}, "scenario_source": {{"openings": {{"source": "file"}}}}}}}}"#
+        ));
+        let err = load_user_opening_tree_inner(dir.path(), &fx.system, &config)
+            .expect_err("a declared but absent file must error");
+        match err {
+            SddpError::Io(e) => assert!(
+                e.to_string().contains("noise_openings.parquet"),
+                "the error must name the missing file, got: {e}"
+            ),
+            other => panic!("expected SddpError::Io, got: {other:?}"),
+        }
     }
 }

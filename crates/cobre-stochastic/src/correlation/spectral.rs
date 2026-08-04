@@ -542,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn spectral_matches_cholesky_for_pd_matrix() {
+    fn spectral_gram_reconstructs_pd_matrix() {
         // For a PD correlation matrix, D*D^T must equal the original within 1e-8.
         let matrix = vec![
             vec![1.0, 0.5, 0.2],

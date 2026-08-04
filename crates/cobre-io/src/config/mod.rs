@@ -237,26 +237,22 @@ fn convert_scenario_source_config(
     Ok(source)
 }
 
-/// Validate a declared `openings` source from `config.json`.
-///
-/// Only `generated` (or an absent declaration) is admitted; `file` is
-/// structurally valid but reserved, rejected until opening routing is wired, and
-/// any declaration outside the `training` section is rejected.
+/// Validate a declared `openings` source from `config.json`: `generated` and
+/// `file` are both admitted under `training`; any declaration outside the
+/// `training` section is rejected.
 fn validate_openings_cfg(
     openings: Option<&Openings>,
     section: &str,
     path: &Path,
 ) -> Result<(), LoadError> {
-    let Some(openings) = openings else {
+    if openings.is_none() {
         return Ok(());
-    };
-
-    let field = format!("{section}.scenario_source.openings");
+    }
 
     if section != "training" {
         return Err(LoadError::SchemaError {
             path: path.to_path_buf(),
-            field,
+            field: format!("{section}.scenario_source.openings"),
             message: format!(
                 "openings is only valid under training.scenario_source, not \
                  {section}.scenario_source"
@@ -264,18 +260,7 @@ fn validate_openings_cfg(
         });
     }
 
-    let reserved = match openings {
-        Openings::Generated {} => return Ok(()),
-        Openings::File { .. } => "file",
-    };
-    Err(LoadError::SchemaError {
-        path: path.to_path_buf(),
-        field,
-        message: format!(
-            "openings source '{reserved}' is not yet supported; openings routing is \
-             wired in a later release — use 'generated'"
-        ),
-    })
+    Ok(())
 }
 
 /// Tier-1 structural validation of a parsed [`ScenarioSource`] from `config.json`.
@@ -393,6 +378,17 @@ impl Config {
         } else {
             self.training_scenario_source(path)
         }
+    }
+
+    /// The training-phase `openings` source declaration, or `None` when absent
+    /// (equivalent to `generated`). Single owner of the training `openings`
+    /// lookup that downstream opening-tree selection reads.
+    #[must_use]
+    pub fn training_openings(&self) -> Option<&Openings> {
+        self.training
+            .scenario_source
+            .as_ref()
+            .and_then(|s| s.openings.as_ref())
     }
 
     /// Resolve the effective training forward-pass method from
@@ -1385,25 +1381,32 @@ mod tests {
         }
     }
 
-    /// A `file` openings source is reserved and rejected as not-yet-supported
-    /// for any declared path (the path-resolution diagnostic is deferred).
+    /// A `file` openings source under training is admitted, and
+    /// `training_openings()` surfaces the declared `File` arm.
     #[test]
-    fn openings_file_rejected_not_yet_supported_for_any_path() {
+    fn openings_file_accepted_under_training() {
+        let f = write_with_training_scenario_source(r#"{"openings": {"source": "file"}}"#);
+        let cfg = parse_config(f.path()).unwrap();
+        cfg.training_scenario_source(f.path())
+            .expect("file openings source must load under training");
+        assert_eq!(cfg.training_openings(), Some(&Openings::File {}));
+    }
+
+    /// The dropped `path` field on the `file` openings source is now an
+    /// unknown-field parse error — the arm is convention-located, no user path.
+    #[test]
+    fn openings_file_path_field_rejected() {
         let f = write_with_training_scenario_source(
             r#"{"openings": {"source": "file", "path": "scenarios/openings.parquet"}}"#,
         );
-        let cfg = parse_config(f.path()).unwrap();
-        let err = cfg.training_scenario_source(f.path()).unwrap_err();
-        match &err {
-            LoadError::SchemaError { field, message, .. } => {
-                assert_eq!(field, "training.scenario_source.openings");
-                assert!(
-                    message.contains("not yet supported"),
-                    "unexpected message: {message}"
-                );
-            }
-            other => panic!("expected SchemaError, got: {other:?}"),
-        }
+        let err = parse_config(f.path()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LoadError::SchemaError { .. } | LoadError::ParseError { .. }
+            ),
+            "a path field on the file arm must be rejected, got: {err:?}"
+        );
     }
 
     /// `openings` under `simulation.scenario_source` is rejected naming the
@@ -1429,17 +1432,11 @@ mod tests {
     }
 
     /// A `file` openings source round-trips through serde into the `File`
-    /// variant carrying its declared path.
+    /// variant (no path field).
     #[test]
     fn openings_file_variant_round_trips() {
-        let parsed: Openings =
-            serde_json::from_str(r#"{"source": "file", "path": "openings.parquet"}"#).unwrap();
-        assert_eq!(
-            parsed,
-            Openings::File {
-                path: "openings.parquet".to_string()
-            }
-        );
+        let parsed: Openings = serde_json::from_str(r#"{"source": "file"}"#).unwrap();
+        assert_eq!(parsed, Openings::File {});
     }
 
     /// `simulation.sampling_scheme` (dead field) is now rejected because

@@ -47,20 +47,14 @@ pub struct RawScenarioSourceConfig {
 /// openings come from, while `scheme` selects how a class's noise is modelled.
 /// A single word would otherwise carry both axes. An absent `openings`
 /// declaration is equivalent to `generated`.
-///
-/// Only `generated` is admitted today; `file` is reserved and rejected at load
-/// until a later release wires opening routing.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum Openings {
     /// Openings come from noise generation (the default when `openings` is absent).
     Generated {},
-    /// Openings come from a declared file. Reserved; rejected at load.
-    File {
-        /// Declared openings file path.
-        path: String,
-    },
+    /// Openings come from the conventional `scenarios/noise_openings.parquet` file.
+    File {},
 }
 
 /// Intermediate serde type for a single per-class scenario scheme in `config.json`.

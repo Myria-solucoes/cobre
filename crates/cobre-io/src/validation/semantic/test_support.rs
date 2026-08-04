@@ -206,7 +206,6 @@ pub(super) fn make_stages(ids: Vec<i32>) -> StagesData {
 /// `ParsedData` skeleton: one `BUS_1` bus, every other field empty or `None`.
 fn base_parsed_data(stages: StagesData) -> ParsedData {
     ParsedData {
-        has_noise_openings: false,
         config: minimal_config(),
         penalties: minimal_global_penalties(),
         stages,
@@ -284,7 +283,6 @@ pub(super) fn make_data(
         hydro.sort_unit_groups();
     }
     ParsedData {
-        has_noise_openings: false,
         thermals,
         hydros,
         lines,
@@ -313,7 +311,6 @@ pub(super) fn make_data_5b(
         hydro.sort_unit_groups();
     }
     ParsedData {
-        has_noise_openings: false,
         buses,
         hydros,
         inflow_seasonal_stats: inflow_stats,
@@ -545,6 +542,44 @@ pub(super) fn config_with_training_external(inflow: bool, load: bool, ncs: bool)
     parse_config(tmp.path()).unwrap()
 }
 
+/// Build a sampled `Config` declaring `training.scenario_source.openings =
+/// {source: file}` — the user-supplied opening-tree file arm.
+pub(super) fn config_sampled_file_openings() -> Config {
+    let json = r#"{
+        "training": {
+            "selection": {"method": "sampled", "forward_passes": 10},
+            "stopping_rules": [
+                { "type": "iteration_limit", "limit": 100 }
+            ],
+            "scenario_source": {
+                "openings": { "source": "file" }
+            }
+        }
+    }"#;
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), json).unwrap();
+    parse_config(tmp.path()).unwrap()
+}
+
+/// Build an enumerated `Config` declaring `training.scenario_source.openings =
+/// {source: file}` — the file arm is rejected under enumerated selection.
+pub(super) fn config_enumerated_file_openings() -> Config {
+    let json = r#"{
+        "training": {
+            "stopping_rules": [
+                { "type": "iteration_limit", "limit": 100 }
+            ],
+            "selection": { "method": "enumerated" },
+            "scenario_source": {
+                "openings": { "source": "file" }
+            }
+        }
+    }"#;
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), json).unwrap();
+    parse_config(tmp.path()).unwrap()
+}
+
 /// Build a `Config` with `simulation.scenario_source.load.scheme = "external"`.
 pub(super) fn config_with_simulation_external_load() -> Config {
     let json = r#"{
@@ -654,7 +689,6 @@ pub(super) fn make_data_estimation(
         hydro.sort_unit_groups();
     }
     ParsedData {
-        has_noise_openings: false,
         hydros,
         inflow_history,
         ..base_parsed_data(stages)

@@ -7,11 +7,6 @@
           "const": "spectral",
           "description": "Spectral (eigenvalue) decomposition.",
           "type": "string"
-        },
-        {
-          "const": "cholesky",
-          "description": "Cholesky decomposition.",
-          "type": "string"
         }
       ]
     },
@@ -120,7 +115,7 @@
     },
     "method": {
       "$ref": "#/$defs/CorrelationMethod",
-      "description": "Decomposition method for the correlation matrix. Accepts `spectral` or\n`cholesky`."
+      "description": "Decomposition method for the correlation matrix. Accepts `spectral`."
     },
     "profiles": {
       "additionalProperties": {

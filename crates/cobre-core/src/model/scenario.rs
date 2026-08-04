@@ -725,7 +725,7 @@ pub struct CorrelationScheduleEntry {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CorrelationModel {
-    /// Decomposition method (`"spectral"` default, `"cholesky"` accepted).
+    /// Decomposition method (`"spectral"`).
     /// `String`, not an enum, to keep old case files forward-compatible.
     pub method: String,
 

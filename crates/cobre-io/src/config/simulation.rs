@@ -30,8 +30,8 @@ pub struct SimulationConfig {
     #[serde(default)]
     pub solver: Option<PhaseSolverProfileConfig>,
 
-    /// Phase-level scenario selection. Absent resolves the count from the
-    /// `num_scenarios` alias (the default sampled behaviour).
+    /// Phase-level scenario selection. Absent resolves to the default sampled
+    /// count ([`DEFAULT_NUM_SCENARIOS`]).
     #[serde(default)]
     pub selection: Option<SimulationSelection>,
 }

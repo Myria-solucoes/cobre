@@ -8,7 +8,7 @@ use cobre_core::scenario::{SamplingScheme, ScenarioSource};
 use cobre_core::temporal::{Node, PolicyGraphType, StageRiskConfig, Transition};
 
 use crate::StageIdResolver;
-use crate::config::ForwardPassesResolution;
+use crate::config::{ForwardPassesResolution, Openings};
 
 use super::super::{ErrorKind, ValidationContext, schema::ParsedData};
 use super::PROB_TOLERANCE;
@@ -718,22 +718,40 @@ pub(super) fn check_edge_discount_override_under_nodes(
     }
 }
 
-/// Rule 43 (B6): `scenarios/noise_openings.parquet` supplies the generated
-/// backward opening tree, consumed only under sampled forward selection; it is
-/// rejected under enumerated selection, which consumes no generated tree.
+/// Rule 43 (B6): `openings = {source: file}` supplies a user-declared backward
+/// opening tree — a sampled, chain-dialect feature. It is rejected together with
+/// a declared `nodes[]` policy graph (nodes[] declares the opening set) and under
+/// enumerated forward selection (which consumes external columns, not a
+/// generated/file tree). Keyed on the declaration, not file existence — an
+/// undeclared `noise_openings.parquet` is ignored, so its presence is not a check
+/// here.
 pub(super) fn check_nodes_and_noise_openings(data: &ParsedData, ctx: &mut ValidationContext) {
-    let enumerated = matches!(
-        data.config.resolve_forward_passes(),
-        Some(ForwardPassesResolution::Enumerated)
-    );
-    if data.has_noise_openings && enumerated {
+    if !matches!(data.config.training_openings(), Some(Openings::File {})) {
+        return;
+    }
+
+    if !data.stages.policy_graph.nodes.is_empty() {
         ctx.add_error(
             ErrorKind::InvalidValue,
-            "stages.json",
+            "config.json",
             None::<&str>,
-            "scenarios/noise_openings.parquet supplies the generated backward opening tree, \
-             which is not consumed under enumerated forward selection; remove it or use sampled \
-             selection"
+            "openings = {source: file} supplies a user opening tree, which conflicts with a \
+             declared nodes[] policy graph (nodes[] declares the opening set); declare one or the \
+             other"
+                .to_string(),
+        );
+    }
+
+    if matches!(
+        data.config.resolve_forward_passes(),
+        Some(ForwardPassesResolution::Enumerated)
+    ) {
+        ctx.add_error(
+            ErrorKind::InvalidValue,
+            "config.json",
+            None::<&str>,
+            "openings = {source: file} supplies a generated backward opening tree, which is not \
+             consumed under enumerated forward selection; use sampled selection"
                 .to_string(),
         );
     }
@@ -1686,31 +1704,44 @@ mod tests {
         );
     }
 
-    /// Rule 43: `noise_openings.parquet` present under enumerated forward
-    /// selection is rejected, stating the generated tree is not consumed there.
+    /// Rule 43: `openings = {source: file}` under enumerated forward selection is
+    /// rejected, stating the generated tree is not consumed there.
     #[test]
-    fn test_noise_openings_rejected_under_enumerated() {
-        let mut data = node_graph_data(1, vec![node(0, 0, None)], vec![]);
-        data.config = config_enumerated();
-        data.has_noise_openings = true;
+    fn test_file_openings_rejected_under_enumerated() {
+        let mut data = node_graph_data(1, vec![], vec![]);
+        data.config = config_enumerated_file_openings();
         let ctx = run(&data);
         assert!(
             errs_contain(&ctx, "not consumed under enumerated forward selection"),
-            "noise_openings.parquet under enumerated must be rejected: {:?}",
+            "file openings under enumerated must be rejected: {:?}",
             ctx.errors()
         );
     }
 
-    /// Rule 43: `noise_openings.parquet` present under sampled forward selection
-    /// is admitted — it is the sampled generated-tree file arm, not rejected here.
+    /// Rule 43: `openings = {source: file}` declared alongside a `nodes[]` policy
+    /// graph is rejected — nodes[] declares the opening set.
     #[test]
-    fn test_noise_openings_admitted_under_sampled() {
+    fn test_file_openings_rejected_with_nodes() {
         let mut data = node_graph_data(1, vec![node(0, 0, None)], vec![]);
-        data.has_noise_openings = true;
+        data.config = config_sampled_file_openings();
         let ctx = run(&data);
         assert!(
-            !errs_contain(&ctx, "noise_openings.parquet"),
-            "noise_openings.parquet under sampled must not be rejected by B6: {:?}",
+            errs_contain(&ctx, "conflicts with a declared nodes[] policy graph"),
+            "file openings with a nodes[] graph must be rejected: {:?}",
+            ctx.errors()
+        );
+    }
+
+    /// Rule 43: `openings = {source: file}` under sampled selection with no
+    /// `nodes[]` is admitted — the chain-dialect user opening-tree file arm.
+    #[test]
+    fn test_file_openings_admitted_sampled_chain() {
+        let mut data = node_graph_data(1, vec![], vec![]);
+        data.config = config_sampled_file_openings();
+        let ctx = run(&data);
+        assert!(
+            !errs_contain(&ctx, "{source: file}"),
+            "file openings under sampled + chain dialect must not be rejected by B6: {:?}",
             ctx.errors()
         );
     }

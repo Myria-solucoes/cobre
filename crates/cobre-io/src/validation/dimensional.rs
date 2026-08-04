@@ -539,7 +539,6 @@ mod tests {
         };
 
         ParsedData {
-            has_noise_openings: false,
             config,
             penalties: GlobalPenaltyDefaults {
                 bus_deficit_segments: vec![DeficitSegment {

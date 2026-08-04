@@ -91,8 +91,7 @@ pub(crate) struct RawCorrelationFile {
     #[serde(rename = "$schema")]
     _schema: Option<String>,
 
-    /// Decomposition method for the correlation matrix. Accepts `spectral` or
-    /// `cholesky`.
+    /// Decomposition method for the correlation matrix. Accepts `spectral`.
     method: CorrelationMethod,
 
     /// Named correlation profiles. Must not be empty. Keys are profile names
@@ -114,8 +113,6 @@ pub(crate) struct RawCorrelationFile {
 pub(crate) enum CorrelationMethod {
     /// Spectral (eigenvalue) decomposition.
     Spectral,
-    /// Cholesky decomposition.
-    Cholesky,
 }
 
 impl<'de> Deserialize<'de> for CorrelationMethod {
@@ -123,11 +120,7 @@ impl<'de> Deserialize<'de> for CorrelationMethod {
         let s = String::deserialize(deserializer)?;
         match s.as_str() {
             "spectral" => Ok(Self::Spectral),
-            "cholesky" => Ok(Self::Cholesky),
-            other => Err(serde::de::Error::unknown_variant(
-                other,
-                &["spectral", "cholesky"],
-            )),
+            other => Err(serde::de::Error::unknown_variant(other, &["spectral"])),
         }
     }
 }
@@ -405,7 +398,6 @@ fn convert(raw: RawCorrelationFile) -> CorrelationModel {
     CorrelationModel {
         method: match raw.method {
             CorrelationMethod::Spectral => "spectral".to_string(),
-            CorrelationMethod::Cholesky => "cholesky".to_string(),
         },
         profiles,
         schedule,
@@ -914,7 +906,7 @@ mod tests {
         match &err {
             LoadError::ParseError { message, .. } => {
                 assert!(
-                    message.contains("spectral") && message.contains("cholesky"),
+                    message.contains("spectral"),
                     "message should name the accepted set, got: {message}"
                 );
             }
@@ -954,10 +946,11 @@ mod tests {
         assert!((model.profiles["default"].groups[0].matrix[0][0] - 1.0).abs() < f64::EPSILON);
     }
 
-    /// `"cholesky"` must still load without error — backward compatibility with
-    /// existing case files (the default is `"spectral"`).
+    /// `method: cholesky` is now an unknown-variant load error naming the
+    /// accepted set — the intended compat-break; it never drove a distinct
+    /// decomposition.
     #[test]
-    fn parse_accepts_cholesky_method() {
+    fn cholesky_method_is_rejected() {
         let json = r#"{
   "method": "cholesky",
   "profiles": {
@@ -979,13 +972,16 @@ mod tests {
   }
 }"#;
         let tmp = write_json(json);
-        let model = parse_correlation(tmp.path()).unwrap();
+        let err = parse_correlation(tmp.path()).unwrap_err();
 
-        assert_eq!(
-            model.method, "cholesky",
-            "cholesky must be accepted for backward compat"
-        );
-        assert_eq!(model.profiles.len(), 1);
-        assert!(model.schedule.is_empty());
+        match &err {
+            LoadError::ParseError { message, .. } => {
+                assert!(
+                    message.contains("spectral"),
+                    "message should name the accepted set, got: {message}"
+                );
+            }
+            other => panic!("expected ParseError, got: {other:?}"),
+        }
     }
 }

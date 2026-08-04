@@ -336,7 +336,6 @@ mod tests {
         };
 
         ParsedData {
-            has_noise_openings: false,
             config,
             penalties: global_penalties,
             stages: StagesData {
