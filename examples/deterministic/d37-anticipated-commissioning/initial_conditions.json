@@ -10,7 +10,15 @@
   "past_anticipated_commitments": [
     {
       "thermal_id": 1,
-      "values_mw": [0.0, 0.0]
+      "start_date": "2024-01-01",
+      "end_date": "2024-02-01",
+      "value_mw": 0.0
+    },
+    {
+      "thermal_id": 1,
+      "start_date": "2024-02-01",
+      "end_date": "2024-03-01",
+      "value_mw": 0.0
     }
   ]
 }

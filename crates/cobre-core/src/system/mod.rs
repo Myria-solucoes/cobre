@@ -1960,7 +1960,9 @@ mod tests {
             }],
             past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
                 thermal_id: EntityId(1),
-                values_mw: vec![100.0, 200.0],
+                start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                value_mw: 100.0,
             }],
             recent_observations: vec![RecentObservation {
                 hydro_id: EntityId(1),

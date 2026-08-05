@@ -43,6 +43,7 @@ gethostname = "1.1.0"
 [dev-dependencies]
 cobre-core = { path = "../cobre-core", features = ["test-support"] }
 parquet = { version = "59", default-features = false, features = ["arrow", "zstd"] }
+proptest = "1"
 tempfile = "3"
 
 [lints]

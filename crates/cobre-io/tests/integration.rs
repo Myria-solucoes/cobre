@@ -33,12 +33,8 @@ fn test_minimal_valid_case() {
     let dir = TempDir::new().unwrap();
     helpers::make_minimal_case(&dir);
 
-    let result = load_case(dir.path());
-
-    let system = match result {
-        Ok(s) => s,
-        Err(e) => panic!("expected Ok(System) for minimal case, got Err: {e}"),
-    };
+    let system = load_case(dir.path())
+        .unwrap_or_else(|e| panic!("expected Ok(System) for minimal case, got Err: {e}"));
 
     assert_eq!(
         system.n_buses(),
@@ -70,12 +66,8 @@ fn test_multi_entity_case() {
     let dir = TempDir::new().unwrap();
     helpers::make_multi_entity_case(&dir);
 
-    let result = load_case(dir.path());
-
-    let system = match result {
-        Ok(s) => s,
-        Err(e) => panic!("expected Ok(System) for multi-entity case, got Err: {e}"),
-    };
+    let system = load_case(dir.path())
+        .unwrap_or_else(|e| panic!("expected Ok(System) for multi-entity case, got Err: {e}"));
 
     assert_eq!(
         system.n_buses(),
@@ -121,9 +113,7 @@ fn test_missing_required_file() {
 
     std::fs::remove_file(dir.path().join("system/buses.json")).unwrap();
 
-    let result = load_case(dir.path());
-
-    match result {
+    match load_case(dir.path()) {
         Err(err) => {
             let display = err.to_string();
             assert!(
@@ -148,9 +138,7 @@ fn test_malformed_json() {
         "{ this is not valid json }",
     );
 
-    let result = load_case(dir.path());
-
-    match result {
+    match load_case(dir.path()) {
         Err(err) => {
             // Variant is implementation-defined (ParseError or ConstraintError wrapping the parse); assert only Err.
             let display = err.to_string();
@@ -170,9 +158,7 @@ fn test_referential_integrity_violation() {
     let dir = TempDir::new().unwrap();
     helpers::make_referential_violation_case(&dir);
 
-    let result = load_case(dir.path());
-
-    match result {
+    match load_case(dir.path()) {
         Err(err) => {
             let display = err.to_string();
             assert!(
@@ -797,7 +783,7 @@ fn test_lead_time_single_decider_on_disk_load() {
     "storage": [],
     "filling_storage": [],
     "past_anticipated_commitments": [
-        { "thermal_id": 2, "values_mw": [0.0] }
+        { "thermal_id": 2, "start_date": "2024-01-01", "end_date": "2024-02-01", "value_mw": 0.0 }
     ]
 }"#,
     );
@@ -1176,11 +1162,6 @@ fn test_split_plant_hydro_bus_generation_output_shape() {
     );
 }
 
-/// Single-bus control (recruiting `d02-single-hydro` rather than
-/// authoring a new case): a single-group plant's `hydro_bus_generation`
-/// still emits exactly one row per `(stage, block, hydro)`, with a non-null
-/// `bus_id` equal to that plant's one declared bus -- proving the output
-/// shape is uniform, not a split-plant special case.
 /// A fan run (two scenarios visiting distinct node ids per stage) writes entity
 /// files carrying `scenario_id`/`node_id` columns and a run-level `paths.parquet`;
 /// joining `paths` to an entity file on `(scenario_id, stage_id)` returns every
@@ -1277,6 +1258,11 @@ fn test_paths_join_to_entity_file_on_scenario_and_stage() {
     );
 }
 
+/// Single-bus control (recruiting `d02-single-hydro` rather than
+/// authoring a new case): a single-group plant's `hydro_bus_generation`
+/// still emits exactly one row per `(stage, block, hydro)`, with a non-null
+/// `bus_id` equal to that plant's one declared bus -- proving the output
+/// shape is uniform, not a split-plant special case.
 #[test]
 fn test_single_bus_hydro_bus_generation_output_shape() {
     let case_dir = Path::new("../../examples/deterministic/d02-single-hydro");

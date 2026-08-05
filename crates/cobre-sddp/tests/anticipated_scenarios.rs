@@ -23,6 +23,57 @@
 
 mod common;
 
+use chrono::{NaiveDate, TimeDelta};
+use cobre_core::{AnticipatedCommitmentHistory, EntityId};
+
+/// One windowed commitment per value, tiling stage `i`'s
+/// `[anchor + i*days_per_stage, anchor + (i+1)*days_per_stage)` span for `i`
+/// in `0..values.len()`.
+///
+/// `StageCalendar::coverage` (`cobre-stochastic`) resolves fractional overlap
+/// against each stage's own real `[start_date, end_date)` calendar span, so a
+/// window's `days_per_stage` must equal the matching `daily_stage_dates` call
+/// that built the fixture's `Stage`s — the two must derive from the same
+/// `anchor`/`days_per_stage`, or the window and the stage it should fully
+/// cover disagree and `build_initial_state`'s ring-buffer seed silently never
+/// writes the value (`fraction != 1.0`).
+fn windowed_commitments_daily(
+    thermal_id: EntityId,
+    anchor: NaiveDate,
+    days_per_stage: i64,
+    values: &[f64],
+) -> Vec<AnticipatedCommitmentHistory> {
+    values
+        .iter()
+        .enumerate()
+        .map(|(i, &value_mw)| AnticipatedCommitmentHistory {
+            thermal_id,
+            start_date: anchor + TimeDelta::days(days_per_stage * i as i64),
+            end_date: anchor + TimeDelta::days(days_per_stage * (i as i64 + 1)),
+            value_mw,
+        })
+        .collect()
+}
+
+/// Sequential stage boundary dates for `n_stages` stages of
+/// `days_per_stage` days each, starting at `anchor` — pass the SAME
+/// `anchor`/`days_per_stage` to [`windowed_commitments_daily`] so a
+/// commitment window's span matches a `Stage`'s own span exactly.
+fn daily_stage_dates(
+    anchor: NaiveDate,
+    n_stages: usize,
+    days_per_stage: i64,
+) -> Vec<(NaiveDate, NaiveDate)> {
+    (0..n_stages)
+        .map(|i| {
+            (
+                anchor + TimeDelta::days(days_per_stage * i as i64),
+                anchor + TimeDelta::days(days_per_stage * (i as i64 + 1)),
+            )
+        })
+        .collect()
+}
+
 mod anticipated_5stage_k2_smoke {
     //! Smoke test for K=2 anticipated thermal dispatch, 5 stages: structural
     //! assertions only. No `EXPECTED_LB` is pinned — this fixture has no closed form,
@@ -42,11 +93,11 @@ mod anticipated_5stage_k2_smoke {
         StageStateConfig,
     };
     use cobre_core::{
-        AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
-        ContractBlockBounds, EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties,
-        HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
-        PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
-        ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, EntityId,
+        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, HydroStorage, InitialConditions,
+        LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
+        PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder,
+        ThermalBlockBounds, ThermalStageBounds,
     };
     use cobre_io::config::TrainingSelection;
     use cobre_io::config::{
@@ -172,13 +223,15 @@ mod anticipated_5stage_k2_smoke {
         );
 
         let n_stages = 5_usize;
+        let calendar_anchor = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let stage_dates = super::daily_stage_dates(calendar_anchor, n_stages, 31);
         let stages: Vec<Stage> = (0..n_stages)
             .map(|i| {
                 make_stage(
                     i,
                     StageSpec {
-                        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                        start_date: stage_dates[i].0,
+                        end_date: stage_dates[i].1,
                         season_id: None,
                         blocks: vec![Block {
                             index: 0,
@@ -325,10 +378,12 @@ mod anticipated_5stage_k2_smoke {
                 value_hm3: 100.0,
             }],
             filling_storage: vec![],
-            past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
-                thermal_id: anticipated_id,
-                values_mw: vec![100.0, 50.0],
-            }],
+            past_anticipated_commitments: super::windowed_commitments_daily(
+                anticipated_id,
+                calendar_anchor,
+                31,
+                &[100.0, 50.0],
+            ),
             recent_observations: vec![],
             past_defluences: vec![],
         };
@@ -497,11 +552,11 @@ mod anticipated_two_plants_smoke {
         StageStateConfig,
     };
     use cobre_core::{
-        AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
-        ContractBlockBounds, EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties,
-        HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
-        PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
-        ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, EntityId,
+        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, HydroStorage, InitialConditions,
+        LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
+        PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder,
+        ThermalBlockBounds, ThermalStageBounds,
     };
     use cobre_io::config::TrainingSelection;
     use cobre_io::config::{
@@ -646,13 +701,15 @@ mod anticipated_two_plants_smoke {
         );
 
         let n_stages = 6_usize;
+        let calendar_anchor = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let stage_dates = super::daily_stage_dates(calendar_anchor, n_stages, 31);
         let stages: Vec<Stage> = (0..n_stages)
             .map(|i| {
                 make_stage(
                     i,
                     StageSpec {
-                        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                        start_date: stage_dates[i].0,
+                        end_date: stage_dates[i].1,
                         season_id: None,
                         blocks: vec![Block {
                             index: 0,
@@ -801,16 +858,16 @@ mod anticipated_two_plants_smoke {
                 value_hm3: 100.0,
             }],
             filling_storage: vec![],
-            past_anticipated_commitments: vec![
-                AnticipatedCommitmentHistory {
-                    thermal_id: ant_id_k2,
-                    values_mw: vec![60.0, 30.0],
-                },
-                AnticipatedCommitmentHistory {
-                    thermal_id: ant_id_k4,
-                    values_mw: vec![20.0, 25.0, 30.0, 35.0],
-                },
-            ],
+            past_anticipated_commitments: [
+                super::windowed_commitments_daily(ant_id_k2, calendar_anchor, 31, &[60.0, 30.0]),
+                super::windowed_commitments_daily(
+                    ant_id_k4,
+                    calendar_anchor,
+                    31,
+                    &[20.0, 25.0, 30.0, 35.0],
+                ),
+            ]
+            .concat(),
             recent_observations: vec![],
             past_defluences: vec![],
         };
@@ -975,11 +1032,11 @@ mod anticipated_simulation_ring_buffer {
         StageStateConfig,
     };
     use cobre_core::{
-        AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
-        ContractBlockBounds, EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties,
-        HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
-        PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
-        ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, EntityId,
+        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, HydroStorage, InitialConditions,
+        LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
+        PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder,
+        ThermalBlockBounds, ThermalStageBounds,
     };
     use cobre_io::config::{
         Config, EstimationConfig, ExportsConfig, InflowNonNegativityConfig,
@@ -1003,8 +1060,9 @@ mod anticipated_simulation_ring_buffer {
     /// expensive backup (id 4), 150 MW load, ring seeded with `past_commitments_mw`.
     ///
     /// The non-zero seed is intentional: constructing `System` directly via
-    /// `SystemBuilder::new()` bypasses `cobre-io`'s validator that rejects non-zero
-    /// `values_mw` — that rule applies to JSON through `load_case`, not here.
+    /// `SystemBuilder::new()` bypasses `cobre-io`'s semantic validation of
+    /// `past_anticipated_commitments` (coverage tiling, commissioning-window
+    /// checks) — those rules apply to JSON through `load_case`, not here.
     fn build_system(
         k: usize,
         past_commitments_mw: Vec<f64>,
@@ -1113,13 +1171,15 @@ mod anticipated_simulation_ring_buffer {
             },
         );
 
+        let calendar_anchor = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let stage_dates = super::daily_stage_dates(calendar_anchor, n_stages, 31);
         let stages: Vec<Stage> = (0..n_stages)
             .map(|i| {
                 make_stage(
                     i,
                     StageSpec {
-                        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                        start_date: stage_dates[i].0,
+                        end_date: stage_dates[i].1,
                         season_id: None,
                         blocks: vec![Block {
                             index: 0,
@@ -1276,10 +1336,12 @@ mod anticipated_simulation_ring_buffer {
                 value_hm3: 0.0,
             }],
             filling_storage: vec![],
-            past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
-                thermal_id: anticipated_id,
-                values_mw: past_commitments_mw,
-            }],
+            past_anticipated_commitments: super::windowed_commitments_daily(
+                anticipated_id,
+                calendar_anchor,
+                31,
+                &past_commitments_mw,
+            ),
             recent_observations: vec![],
             past_defluences: vec![],
         };
@@ -1354,7 +1416,7 @@ mod anticipated_simulation_ring_buffer {
         // fixed paths agree and neuter the test.
         let seed: Vec<f64> = vec![7.0];
 
-        let system = build_system(k, seed.clone(), n_stages);
+        let system = build_system(k, seed, n_stages);
         let config = build_config(50);
         let mut setup = build_setup_in_code(system, &config);
         let comm = StubComm;
@@ -1432,7 +1494,7 @@ mod anticipated_simulation_ring_buffer {
             .expect("anticipated_committed_mw must be Some at stage 0 under always-active fishing");
         assert!(
             (c0 - 7.0).abs() < 1e-6,
-            "committed_at(0) must equal the K=1 seed values_mw[0]=7.0; got {c0}",
+            "committed_at(0) must equal the K=1 seed window[0].value_mw=7.0; got {c0}",
         );
         assert!(
             d0.abs() > 1e-6,
@@ -1462,7 +1524,7 @@ mod anticipated_simulation_ring_buffer {
         // 100), so neither slot can coincide with a decision and mask a missing shift.
         let seed: Vec<f64> = vec![50.0, 30.0];
 
-        let system = build_system(k, seed.clone(), n_stages);
+        let system = build_system(k, seed, n_stages);
         let config = build_config(10);
         let mut setup = build_setup_in_code(system, &config);
         let comm = StubComm;
@@ -1523,13 +1585,13 @@ mod anticipated_simulation_ring_buffer {
             .expect("committed_at(0) must be Some under always-active fishing with K=2");
         assert!(
             (c0 - 50.0).abs() < 1e-6,
-            "committed_at(0) must equal K=2 seed values_mw[0]=50.0; got {c0}",
+            "committed_at(0) must equal K=2 seed window[0].value_mw=50.0; got {c0}",
         );
         let c1 = committed_at(1)
             .expect("committed_at(1) must be Some under always-active fishing with K=2");
         assert!(
             (c1 - 30.0).abs() < 1e-6,
-            "committed_at(1) must equal K=2 seed values_mw[1]=30.0 (shifted to slot 0); got {c1}",
+            "committed_at(1) must equal K=2 seed window[1].value_mw=30.0 (shifted to slot 0); got {c1}",
         );
 
         let d0 = decision_at(0).expect("decision at stage 0 must exist (0 + K < n_stages)");
@@ -1561,13 +1623,12 @@ mod anticipated_generic_constraint_e2e {
 
     use chrono::NaiveDate;
     use cobre_core::{
-        AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
-        ConstraintExpression, ConstraintSense, ContractBlockBounds, EntityId, GenericConstraint,
-        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, InitialConditions,
-        LineBlockBounds, LineStagePenalties, LinearTerm, NcsStagePenalties, PenaltiesCountsSpec,
-        PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedGenericConstraintBounds,
-        ResolvedPenalties, SlackConfig, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
-        VariableRef,
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ConstraintExpression, ConstraintSense,
+        ContractBlockBounds, EntityId, GenericConstraint, HydroBlockBounds, HydroStageBounds,
+        HydroStagePenalties, InitialConditions, LineBlockBounds, LineStagePenalties, LinearTerm,
+        NcsStagePenalties, PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds,
+        ResolvedBounds, ResolvedGenericConstraintBounds, ResolvedPenalties, SlackConfig,
+        SystemBuilder, ThermalBlockBounds, ThermalStageBounds, VariableRef,
         entities::{bus::DeficitSegment, thermal::AnticipatedConfig},
         scenario::LoadModel,
         temporal::{
@@ -1671,13 +1732,15 @@ mod anticipated_generic_constraint_e2e {
             },
         );
 
+        let calendar_anchor = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let stage_dates = super::daily_stage_dates(calendar_anchor, N_STAGES, 1);
         let stages: Vec<Stage> = (0..N_STAGES)
             .map(|i| {
                 make_stage(
                     i,
                     StageSpec {
-                        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                        start_date: stage_dates[i].0,
+                        end_date: stage_dates[i].1,
                         season_id: None,
                         blocks: vec![Block {
                             index: 0,
@@ -1816,10 +1879,12 @@ mod anticipated_generic_constraint_e2e {
         let initial_conditions = InitialConditions {
             storage: vec![],
             filling_storage: vec![],
-            past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
-                thermal_id: ANT_THERMAL_ID,
-                values_mw: vec![0.0, 0.0],
-            }],
+            past_anticipated_commitments: super::windowed_commitments_daily(
+                ANT_THERMAL_ID,
+                calendar_anchor,
+                1,
+                &[0.0, 0.0],
+            ),
             recent_observations: vec![],
             past_defluences: vec![],
         };
@@ -2102,7 +2167,8 @@ mod anticipated_generic_constraint_e2e {
   "storage": [],
   "filling_storage": [],
   "past_anticipated_commitments": [
-    { "thermal_id": 2, "values_mw": [0.0, 0.0] }
+    { "thermal_id": 2, "start_date": "2024-01-01", "end_date": "2024-02-01", "value_mw": 0.0 },
+    { "thermal_id": 2, "start_date": "2024-02-01", "end_date": "2024-03-01", "value_mw": 0.0 }
   ]
 }"#,
         )
@@ -2557,11 +2623,11 @@ mod anticipated_commitment_at_cap {
         StageStateConfig,
     };
     use cobre_core::{
-        AnticipatedCommitmentHistory, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
-        ContractBlockBounds, EntityId, HydroBlockBounds, HydroStageBounds, HydroStagePenalties,
-        HydroStorage, InitialConditions, LineBlockBounds, LineStagePenalties, NcsStagePenalties,
-        PenaltiesCountsSpec, PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds,
-        ResolvedPenalties, SystemBuilder, ThermalBlockBounds, ThermalStageBounds,
+        BoundsCountsSpec, BoundsDefaults, BusStagePenalties, ContractBlockBounds, EntityId,
+        HydroBlockBounds, HydroStageBounds, HydroStagePenalties, HydroStorage, InitialConditions,
+        LineBlockBounds, LineStagePenalties, NcsStagePenalties, PenaltiesCountsSpec,
+        PenaltiesDefaults, PumpingBlockBounds, ResolvedBounds, ResolvedPenalties, SystemBuilder,
+        ThermalBlockBounds, ThermalStageBounds,
     };
     use cobre_io::config::TrainingSelection;
     use cobre_io::config::{
@@ -2688,13 +2754,15 @@ mod anticipated_commitment_at_cap {
         );
 
         let n_stages = 4_usize;
+        let calendar_anchor = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let stage_dates = super::daily_stage_dates(calendar_anchor, n_stages, 31);
         let stages: Vec<Stage> = (0..n_stages)
             .map(|i| {
                 make_stage(
                     i,
                     StageSpec {
-                        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                        start_date: stage_dates[i].0,
+                        end_date: stage_dates[i].1,
                         season_id: None,
                         blocks: vec![Block {
                             index: 0,
@@ -2834,13 +2902,15 @@ mod anticipated_commitment_at_cap {
                 value_hm3: 100.0,
             }],
             filling_storage: vec![],
-            // Two pre-study commitments at `seed_mw`: the stage-0 delivery is
+            // Two pre-study commitment windows at `seed_mw`: the stage-0 delivery is
             // pinned directly, the stage-1 delivery is carried one K=2 ring
             // shift first.
-            past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
-                thermal_id: anticipated_id,
-                values_mw: vec![seed_mw, seed_mw],
-            }],
+            past_anticipated_commitments: super::windowed_commitments_daily(
+                anticipated_id,
+                calendar_anchor,
+                31,
+                &[seed_mw, seed_mw],
+            ),
             recent_observations: vec![],
             past_defluences: vec![],
         };

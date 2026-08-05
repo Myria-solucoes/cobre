@@ -90,13 +90,19 @@ const STAGES_JSON: &str = r#"{
     ]
 }"#;
 
-/// Anticipated thermal id=2 has `lead_stages=2`, so `values_mw` must have
-/// exactly two entries — the prior commitments before the study start.
+/// Anticipated thermal id=2 has `lead_stages=2`, so its commitment windows
+/// must tile exactly two leading delivery stages — the prior commitments
+/// before the study start, covering stage 0's `[2024-01-01, 2024-02-01)` and
+/// stage 1's `[2024-02-01, 2024-03-01)`. Coverage (`StageCalendar::coverage`)
+/// is computed on each stage's own real calendar span, not its declared
+/// block-hours, so the windows mirror `STAGES_JSON`'s `start_date`/`end_date`
+/// exactly (stage 1's real span is 29 days despite its 672 declared hours).
 const INITIAL_CONDITIONS_JSON: &str = r#"{
     "storage": [],
     "filling_storage": [],
     "past_anticipated_commitments": [
-        { "thermal_id": 2, "values_mw": [0.0, 0.0] }
+        { "thermal_id": 2, "start_date": "2024-01-01", "end_date": "2024-02-01", "value_mw": 0.0 },
+        { "thermal_id": 2, "start_date": "2024-02-01", "end_date": "2024-03-01", "value_mw": 0.0 }
     ]
 }"#;
 

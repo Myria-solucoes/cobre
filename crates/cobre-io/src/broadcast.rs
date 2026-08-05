@@ -591,8 +591,6 @@ mod tests {
         assert!(err.to_string().contains("<broadcast>"));
     }
 
-    /// `InitialConditions` with `past_anticipated_commitments` survives postcard
-    /// round-trip end-to-end, covering the MPI broadcast path.
     #[test]
     fn test_broadcast_initial_conditions_round_trips_past_anticipated_commitments() {
         let original = InitialConditions {
@@ -601,11 +599,15 @@ mod tests {
             past_anticipated_commitments: vec![
                 AnticipatedCommitmentHistory {
                     thermal_id: EntityId(1),
-                    values_mw: vec![120.0, 180.0],
+                    start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                    value_mw: 120.0,
                 },
                 AnticipatedCommitmentHistory {
                     thermal_id: EntityId(7),
-                    values_mw: vec![50.0, 75.0, 100.0, 200.0],
+                    start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+                    end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                    value_mw: 50.0,
                 },
             ],
             recent_observations: vec![],
@@ -622,23 +624,14 @@ mod tests {
             restored.past_anticipated_commitments[0].thermal_id,
             EntityId(1)
         );
-        assert_eq!(
-            restored.past_anticipated_commitments[0].values_mw,
-            vec![120.0, 180.0]
-        );
+        assert!((restored.past_anticipated_commitments[0].value_mw - 120.0).abs() < f64::EPSILON);
         assert_eq!(
             restored.past_anticipated_commitments[1].thermal_id,
             EntityId(7)
         );
-        assert_eq!(
-            restored.past_anticipated_commitments[1].values_mw,
-            vec![50.0, 75.0, 100.0, 200.0]
-        );
+        assert!((restored.past_anticipated_commitments[1].value_mw - 50.0).abs() < f64::EPSILON);
     }
 
-    /// Given an `InitialConditions` with an empty `past_anticipated_commitments`
-    /// vec, when serialized via postcard and deserialized back, the result has
-    /// an empty vec (no panics, no wire-format corruption).
     #[test]
     fn test_broadcast_initial_conditions_empty_past_anticipated_commitments() {
         let original = InitialConditions {

@@ -83,13 +83,14 @@ const STAGES_JSON: &str = r#"{
     ]
 }"#;
 
-/// Anticipated thermal id=2 has `lead_stages=1`, so `values_mw` must have
-/// exactly one entry — the prior commitment before the study start.
+/// Anticipated thermal id=2 has `lead_stages=1`, so its commitment windows
+/// must tile exactly one leading delivery stage — the prior commitment before
+/// the study start, covering stage 0's `[2024-01-01, 2024-02-01)` span.
 const INITIAL_CONDITIONS_JSON: &str = r#"{
     "storage": [],
     "filling_storage": [],
     "past_anticipated_commitments": [
-        { "thermal_id": 2, "values_mw": [0.0] }
+        { "thermal_id": 2, "start_date": "2024-01-01", "end_date": "2024-02-01", "value_mw": 0.0 }
     ]
 }"#;
 const BUSES_JSON: &str =

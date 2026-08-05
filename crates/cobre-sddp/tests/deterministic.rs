@@ -4260,9 +4260,10 @@ fn d47_travel_time_confluence_aggregation() {
 /// `U`'s single `past_defluences` window `[2023-12-18, 2024-01-01) = [start_0 -
 /// 336h, start_0)` at 100 m3/s covers exactly the arc's in-transit span
 /// `[start_0 - t_v, start_0)` (so it passes the io coverage gate). The seed
-/// (`build_initial_transit_bucket_state`) unrolls it through `ic_anchor_k`:
+/// (`build_initial_transit_bucket_state`) unrolls it through
+/// `StageCalendar::hour_window_shares`:
 ///   - `e_off = start_0 - end_date = 0`, `width = end_date - start_date = 336`.
-///   - `ic_anchor_k` sets `window_start = t_v - e_off - width = 0` and overlaps
+///   - `hour_window_shares` sets `window_start = t_v - e_off - width = 0` and overlaps
 ///     `[0, 336)` against the weekly stage clock `[168, 168, 168]` -> `[168,
 ///     168]` -> `k = [1/2, 1/2]`.
 ///   - `volume = width * M3S_TO_HM3 * value = 336 * 0.0036 * 100 = 120.96 hm3`.

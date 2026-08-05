@@ -728,6 +728,8 @@ mod tests {
         AnticipatedCommitmentHistory, AnticipatedConfig, EntityId, HorizonGraph, Hydro, Thermal,
     };
 
+    use chrono::NaiveDate;
+
     use super::super::test_support::*;
     use super::super::validate_semantic_hydro_thermal;
     use crate::ValidationEntry;
@@ -750,9 +752,17 @@ mod tests {
     /// Stage 0 declares 3 blocks, stage 1 declares 2 — the two counts must
     /// stay distinct so a global-maximum bug and a per-stage lookup diverge.
     fn two_stage_study_stages() -> StagesData {
+        // Contiguous 30-day (720 h) stages so the block-hour totals and the
+        // calendar-date span agree — the alignment StageCalendar coverage needs.
+        let mut stage_0 = make_stage_with_blocks(0, 3);
+        stage_0.start_date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        stage_0.end_date = NaiveDate::from_ymd_opt(2024, 1, 31).unwrap();
+        let mut stage_1 = make_stage_with_blocks(1, 2);
+        stage_1.start_date = NaiveDate::from_ymd_opt(2024, 1, 31).unwrap();
+        stage_1.end_date = NaiveDate::from_ymd_opt(2024, 3, 1).unwrap();
         StagesData {
             openings_declared: std::collections::HashSet::new(),
-            stages: vec![make_stage_with_blocks(0, 3), make_stage_with_blocks(1, 2)],
+            stages: vec![stage_0, stage_1],
             policy_graph: HorizonGraph {
                 stage_discount_rate_overrides: std::collections::HashMap::new(),
                 graph_type: PolicyGraphType::FiniteHorizon,
@@ -1542,11 +1552,14 @@ mod tests {
             vec![],
             vec![],
         );
-        // Coverage-length-matched, in-bounds, windowless history so no rule
-        // other than the one under test finds anything in this fixture.
+        // Full-coverage, in-bounds, zero-rate window over the single leading
+        // delivery stage (stage 0) so no rule other than the one under test
+        // finds anything in this fixture.
         data.initial_conditions.past_anticipated_commitments = vec![AnticipatedCommitmentHistory {
             thermal_id: EntityId::from(1),
-            values_mw: vec![0.0],
+            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2024, 1, 31).unwrap(),
+            value_mw: 0.0,
         }];
         // The anticipated thermal (1) appears at both stages and the plain
         // thermal (2) appears at stage 0 too, so `stage_id` cannot stand in

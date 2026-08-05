@@ -603,20 +603,23 @@ declaration order of their hydros produce identical `column_order`,
 incoming buckets directly from its `past_defluences` windows — never a
 positional walk over a fixed pre-study calendar. For upstream hydro `i`'s
 window `[start_date, end_date)`, `e_off = start_0 − end_date` and
-`width = end_date − start_date` feed `ic_anchor_k` exactly as it already
+`width = end_date − start_date` feed the shared `StageCalendar`'s
+`hour_window_shares(t_v, cumulative_before, period_duration)` — a pure
+hour-clock overlap over the study-stage durations, exactly as it already
 takes `(cumulative_before, period_duration)`: the windowed derivation lives
 entirely in how the caller computes those two offsets from calendar dates,
-never inside `ic_anchor_k` itself. A hydro may carry multiple, non-contiguous
-windows; the seed must `filter` over every window with a matching `hydro_id`
-and deposit each one independently
+never inside the resolver itself. A hydro may carry multiple, non-contiguous
+windows; the seed must `filter` over every
+window with a matching `hydro_id` and deposit each one independently
 (`volume = width · M3S_TO_HM3 · value_m3s`, `seed[start+d] += k[d] · volume`)
 — a `.find()` would silently keep only the first window and drop the rest,
 understating the seed with no error. There is no fallback for incomplete
 coverage: `cobre-io`'s `validate_travel_time` row-5 gate guarantees every
 declared arc's windows cover `[start_0 − t_v, start_0)` before setup ever
 runs this seed.
-Read: `setup/bucket_seed.rs` (`build_initial_transit_bucket_state`),
-`setup/bucket_topology.rs` (`ic_anchor_k`). Pinned by the single-window
+Read: `setup/mod.rs` (`build_initial_transit_bucket_state`,
+`splice_transit_bucket_seed`), `cobre-stochastic`'s
+`season_cast::StageCalendar::hour_window_shares`. Pinned by the single-window
 unroll regression (the `k`-weighted deposit matches the closed-form
 half-share), the gapped-two-window additive regression (two non-contiguous
 windows for one arc contribute independently), and the seed's own
@@ -700,24 +703,34 @@ pins that `fill_parallel_water_entries` never reads it.
 
 ### Pre-study anticipated commitments: calendar-derived coverage
 
-`AnticipatedCommitmentHistory::values_mw` (`cobre-core`) is an ordinal,
-delivery-stage-indexed vector — `values_mw[j]` is the MW delivered at the
-`j`-th pre-study-committed delivery stage — never date-windowed like
-`past_defluences`. Its length must equal the calendar-derived count of
-pre-study-committed delivery stages: `LeadStages(l)` clamps to
-`min(l, n_stages)`; `LeadTime(delta)` counts the leading study stages whose
-stage-end cumulative hours are `<= delta` (tie-inclusive). `cobre-io`'s
-`check_anticipated_thermals` computes this count itself, via
-`required_anticipated_commitment_count`, rather than calling into the
-solver crate's point-commitment resolver (cobre-io is upstream and cannot
-depend on it), and hard-rejects any length mismatch as a
-`BusinessRuleViolation`. A `len == lead_stages` gate is a plausible-looking
-alternative that silently mis-covers a `LeadTime`-configured plant on a
-non-uniform calendar, since the required count is calendar-derived, not a
-constant stage count; there is no fallback comparable to the one already
-rejected for `past_defluences` coverage above.
-Read: `crates/cobre-io/src/validation/semantic/thermal.rs`
-(`required_anticipated_commitment_count`, `check_anticipated_thermals`).
+`AnticipatedCommitmentHistory` (`cobre-core`) is a windowed record —
+`{thermal_id, start_date, end_date, value_mw}`, one commitment window per
+entry, mirroring `HydroPastDefluence`'s shape — never a per-stage array
+indexed by delivery order. A plant's commitment windows must TILE its
+calendar-derived leading delivery stages EXACTLY at coverage `1.0`: no gap
+(a leading stage left uncovered) and no over-coverage (a window reaching a
+stage at or beyond the horizon); overlap between two windows of the same
+plant is rejected earlier, at parse time, by the shared windowed-record
+validator that also serves `past_defluences` and `recent_observations`. The
+leading-stage count is calendar-derived, computed independently of the
+solver crate's point-commitment resolver (`cobre-io` is upstream and cannot
+depend on it): `LeadStages(l)` clamps to `min(l, n_stages)`; `LeadTime(delta)`
+counts the leading study stages whose stage-end cumulative hours are
+`<= delta` (tie-inclusive). `check_anticipated_thermals` resolves this count,
+then hands the plant's windows to the shared `StageCalendar` resolver — the
+same calendar walk `past_defluences` coverage uses — via `covers_exactly`
+(gap detection over the leading count) and a per-stage `coverage` sum
+(over-coverage detection beyond it); either failure hard-rejects as a
+`BusinessRuleViolation`, no fallback. A count-only gate
+(`records.len() == leading_stage_count`) is a plausible-looking alternative
+that accepts the right NUMBER of windows while missing a leading stage and
+duplicating another — silently mis-covering the plant — since only per-stage
+tiling, not a count, proves every leading stage is covered exactly once.
+Read: `crates/cobre-core/src/constraints/initial_conditions.rs`
+(`AnticipatedCommitmentHistory`), `crates/cobre-io/src/validation/semantic/thermal.rs`
+(`check_anticipated_thermals`, `lead_delivery_stage_count`,
+`check_commitment_coverage`), `crates/cobre-stochastic/src/season_cast/mod.rs`
+(`StageCalendar::covers_exactly`, `StageCalendar::coverage`).
 Pinned by `test_anticipated_lead_time_coverage_pmo_calendar` and
 `test_anticipated_lead_time_coverage_pmo_calendar_under_coverage_rejected`.
 

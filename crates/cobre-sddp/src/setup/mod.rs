@@ -26,6 +26,7 @@
 //! # }
 //! ```
 
+use chrono::NaiveDate;
 use cobre_core::ContractType::Import;
 use cobre_core::temporal::SeasonCycleType::Monthly;
 use cobre_core::temporal::SeasonMap;
@@ -40,6 +41,7 @@ use cobre_stochastic::noise_entity_order;
 use cobre_stochastic::par::lag_transition::derive_downstream_par_order;
 use cobre_stochastic::par::lag_transition::precompute_noise_groups;
 use cobre_stochastic::par::lag_transition::precompute_stage_lag_transitions;
+use cobre_stochastic::season_cast::{DatedWindow, StageCalendar};
 
 use crate::StageTemplates;
 use crate::config::LoopParams;
@@ -49,7 +51,6 @@ use crate::simulation::SimulationConfig;
 use crate::solve::solver_phase::{Phase, validate_phase_solver_config};
 use crate::stochastic::noise_key::build_noise_key_table;
 mod accessors;
-pub(crate) mod bucket_seed;
 pub(crate) mod bucket_topology;
 pub(crate) mod methodology_config;
 pub mod node_graph;
@@ -96,7 +97,7 @@ use crate::{
     hydro_models::PrepareHydroModelsResult,
     indexer::{CutStateProjection, HydroCellIndex, StateSpace, StudyDimensions},
     lead_time::{AnticipatedResolution, LeadTime, PointResolution, SpreadResolution},
-    lp_builder::build_stage_templates,
+    lp_builder::{M3S_TO_HM3, build_stage_templates},
     risk_measure::RiskMeasure,
     simulation::EntityCounts,
     stopping_rule::{StoppingRule, StoppingRuleSet},
@@ -2010,6 +2011,11 @@ fn build_initial_state(
         let thermal_positions = id_to_position(thermals, |t: &Thermal| t.id.0);
         let n_ant = layout.n_anticipated;
         let ant_start = layout.anticipated_slots_out.start;
+        let study_stages: &[Stage] = match system.stages().iter().position(|s| s.id >= 0) {
+            Some(idx) => &system.stages()[idx..],
+            None => &[],
+        };
+        let calendar = StageCalendar::new(study_stages);
         for history in &ic.past_anticipated_commitments {
             let Some(&global_idx) = thermal_positions.get(&history.thermal_id.0) else {
                 // Defense-in-depth — the cobre-io validator rejects an unknown ID in
@@ -2025,13 +2031,21 @@ fn build_initial_state(
                 // Not an anticipated plant (`anticipated_config: None`) — skip.
                 continue;
             };
-            // Clamp to K_i, not k_max: over-long input would otherwise corrupt the
-            // padding slots.
+            // Clamp to K_i, not k_max: a window resolving beyond it would otherwise
+            // corrupt the padding slots.
             let k_i = layout.anticipated_lead_stages[local_idx];
-            let n_slots = history.values_mw.len().min(k_i);
-            for slot in 0..n_slots {
-                let off = ant_start + slot * n_ant + local_idx;
-                state[off] = history.values_mw[slot];
+            let window = DatedWindow {
+                start_date: history.start_date,
+                end_date: history.end_date,
+            };
+            // coverage's whole-day-hours arithmetic keeps a full-coverage ratio
+            // bit-exact (mirrors StageCalendar::covers_exactly).
+            #[allow(clippy::float_cmp)]
+            for (slot, fraction) in calendar.coverage(&window).into_iter().enumerate().take(k_i) {
+                if fraction == 1.0 {
+                    let off = ant_start + slot * n_ant + local_idx;
+                    state[off] = history.value_mw;
+                }
             }
             // Padding slots `[K_i, k_max)` must stay 0.0 — a non-zero value corrupts
             // the ring buffer and causes LP infeasibility.
@@ -2050,6 +2064,111 @@ fn build_initial_state(
     state
 }
 
+/// Unroll every declared arc's `past_defluences` windows into the stage-0
+/// incoming bucket seed, in [`bucket_topology::TransitBucketTopology::column_order`]
+/// order. Runs single-threaded in that canonical order — never a
+/// rank-count-dependent parallel reduction.
+///
+/// Each window `[start_date, end_date)` for upstream hydro `i` contributes
+/// `k_d · D_i` (`D_i` the width-scaled volume, `k_d` from
+/// [`StageCalendar::hour_window_shares`] anchored at
+/// `e_off = start_0 − end_date`, width `end_date − start_date`) into every
+/// bucket it reaches. A hydro may carry multiple, non-contiguous windows; each
+/// is `filter`ed and deposited independently — never `find`, which would
+/// silently keep only the first window and drop the rest, understating the
+/// seed with no error.
+///
+/// `cobre-io`'s `validate_travel_time` coverage gate guarantees every declared
+/// arc's windows cover `[start_0 − t_v, start_0)` before this runs; there is no
+/// fallback for incomplete coverage.
+fn build_initial_transit_bucket_state(
+    system: &System,
+    topology: &bucket_topology::TransitBucketTopology,
+) -> Vec<f64> {
+    let mut seed = vec![0.0_f64; topology.n_buckets];
+    if topology.n_buckets == 0 {
+        return seed;
+    }
+
+    let Some(start_0) = study_start_date(system) else {
+        debug_assert!(
+            false,
+            "n_buckets > 0 implies build_transit_bucket_topology sized a depth from a non-empty \
+             study calendar, so at least one study stage must exist here"
+        );
+        return seed;
+    };
+    let study_stages: &[Stage] = match system.stages().iter().position(|s| s.id >= 0) {
+        Some(idx) => &system.stages()[idx..],
+        None => &[],
+    };
+    let calendar = StageCalendar::new(study_stages);
+    let ic = system.initial_conditions();
+    let hydros = system.hydros();
+
+    let mut start = 0_usize;
+    for &depth in &topology.per_plant_depth {
+        let plant_id = hydros[topology.column_order[start].0].id;
+
+        for upstream in hydros {
+            let Some(t_v) = upstream.travel_time_hours.filter(|&t| t > 0.0) else {
+                continue;
+            };
+            if upstream.downstream_id != Some(plant_id) {
+                continue;
+            }
+
+            for window in ic
+                .past_defluences
+                .iter()
+                .filter(|w| w.hydro_id == upstream.id)
+            {
+                debug_assert!(
+                    window.end_date <= start_0,
+                    "past_defluences window must end at or before start_0 ({start_0}); \
+                     cobre-io's validate_travel_time row-5b gate guarantees this"
+                );
+                let e_off = hours_between(start_0, window.end_date);
+                let width = hours_between(window.end_date, window.start_date);
+                let volume = width * M3S_TO_HM3 * window.value_m3s;
+
+                let k = calendar.hour_window_shares(t_v, e_off, width);
+                for (transit_bucket_offset, &k_val) in k.iter().enumerate().take(depth) {
+                    if k_val != 0.0 {
+                        seed[start + transit_bucket_offset] += k_val * volume;
+                    }
+                }
+            }
+        }
+
+        start += depth;
+    }
+
+    debug_assert_eq!(seed.len(), topology.n_buckets);
+    seed
+}
+
+/// The first study stage's (`id >= 0`, lowest `id`) start date — `start_0`, the
+/// anchor every `past_defluences` window's `(e_off, width)` measures against.
+/// `None` only when the system declares no study stages.
+fn study_start_date(system: &System) -> Option<NaiveDate> {
+    system
+        .stages()
+        .iter()
+        .filter(|s| s.id >= 0)
+        .min_by_key(|s| s.id)
+        .map(|s| s.start_date)
+}
+
+/// Hours of wall clock between `earlier` and `later` (`later − earlier`),
+/// positive when `earlier` precedes `later`.
+// Rationale: pre-study spans are on the order of years, far under f64's
+// exact-integer range; a checked conversion buys nothing.
+#[allow(clippy::cast_precision_loss)]
+fn hours_between(later: NaiveDate, earlier: NaiveDate) -> f64 {
+    (later - earlier).num_hours() as f64
+}
+
 /// Write the travel-time bucket seed into `state`'s declared `transit_buckets_out`
 /// slots — the same index space [`StateSpace::state_to_lp_incoming_column`]
 /// remaps to the pinned `transit_buckets_in` LP column, so no separate pin wiring is
@@ -2060,7 +2179,7 @@ fn splice_transit_bucket_seed(
     system: &System,
     topology: &bucket_topology::TransitBucketTopology,
 ) {
-    let seed = bucket_seed::build_initial_transit_bucket_state(system, topology);
+    let seed = build_initial_transit_bucket_state(system, topology);
     debug_assert_eq!(seed.len(), layout.n_buckets);
     for (b, &value) in seed.iter().enumerate() {
         state[layout.transit_buckets_out.start + b] = value;

@@ -122,25 +122,6 @@ fn horizon_cap_active(active: usize, stage: usize, n_stages: usize) -> usize {
     active.min(n_stages - 1 - stage)
 }
 
-/// Fraction of pre-study period `m`'s release — spanning
-/// `[t_v - cumulative_before - period_duration, t_v - cumulative_before)` in
-/// real time before stage 0 — landing in study stage `d` (at `result[d]`). The
-/// IC-anchor analogue of [`resolve_spread`]'s `k`, resolved against the forward
-/// calendar directly: [`window_period_overlaps`] depends only on relative
-/// offsets, so this equals anchoring a local calendar at period `m`.
-pub(crate) fn ic_anchor_k(
-    t_v: f64,
-    cumulative_before: f64,
-    period_duration: f64,
-    study_durations: &[f64],
-) -> Vec<f64> {
-    let window_start = t_v - cumulative_before - period_duration;
-    window_period_overlaps(window_start, period_duration, study_durations)
-        .into_iter()
-        .map(|overlap| overlap / period_duration)
-        .collect()
-}
-
 /// Build the [`TransitBucketTopology`]: confluence aggregates every arc feeding
 /// one downstream plant into a single block of depth `max_i L_i` (never one
 /// block per arc), sized as the max over every in-study stage anchor and the

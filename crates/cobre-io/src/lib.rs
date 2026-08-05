@@ -57,6 +57,7 @@ pub mod stage_resolve;
 pub mod stages;
 pub mod system;
 pub mod validation;
+pub(crate) mod windowed_history;
 
 pub use broadcast::{
     BroadcastComputedParameter, BroadcastParameterKind, BroadcastScalarParameter,

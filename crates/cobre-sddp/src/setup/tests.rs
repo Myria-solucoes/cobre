@@ -5,9 +5,12 @@ use super::{
 use crate::SddpError;
 use crate::hydro_models::{PrepareHydroModelsResult, ProductionModelSet, ResolvedProductionModel};
 use crate::indexer::StateSpace;
+use crate::lp_builder::M3S_TO_HM3;
 use crate::test_support;
 use cobre_stochastic::ExternalScenarioLibrary;
+use cobre_stochastic::season_cast::StageCalendar;
 
+use chrono::{Duration, NaiveDate};
 use cobre_core::{
     BlockBoundsCountsSpec, BoundsCountsSpec, BoundsDefaults, BusStagePenalties,
     ContractBlockBounds, ContractBlockOverride, HydroBlockBounds, HydroStageBounds,
@@ -16,7 +19,8 @@ use cobre_core::{
     ResolvedBounds, ResolvedPenalties, ThermalBlockBounds, ThermalStageBounds,
 };
 use cobre_core::{
-    ContractType, EnergyContract, EntityId, HorizonGraph, InitialConditions, SystemBuilder,
+    ContractType, EnergyContract, EntityId, HorizonGraph, HydroPastDefluence, InitialConditions,
+    SystemBuilder,
     entities::{
         bus::{Bus, DeficitSegment},
         hydro::{Hydro, HydroGenerationModel, HydroPenalties},
@@ -3524,6 +3528,20 @@ fn counts_with_anticipated(
     }
 }
 
+/// The `i`-th stage's `[start_date, end_date)` window shared by
+/// `system_with_anticipated_thermals` and
+/// `system_with_two_anticipated_thermals_staggered_dates`: a fixed 31-day
+/// block chained from `2024-01-01`. A window's real calendar span must equal
+/// its stage's declared `duration_hours` (744.0) for `StageCalendar::coverage`
+/// to resolve a whole-stage window at fraction 1.0 — a true calendar month
+/// (28-31 days) would drift against the fixed 744-hour declaration.
+fn anticipated_stage_window(i: usize) -> (chrono::NaiveDate, chrono::NaiveDate) {
+    use chrono::{NaiveDate, TimeDelta};
+    let start = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap() + TimeDelta::days(31 * i as i64);
+    let end = start + TimeDelta::days(31);
+    (start, end)
+}
+
 /// N anticipated thermals with the given `lead_stages`; IDs are `10 + i` (kept
 /// clear of the bus id 1 and hydro id 3). `past_commits` must be pre-sorted by
 /// `thermal_id`.
@@ -3614,29 +3632,32 @@ fn system_with_anticipated_thermals(
     };
     hydro.declare_mirror_unit_group(EntityId(1));
 
-    let n_stages = 2_usize;
+    let n_stages = 3_usize;
     let stages: Vec<Stage> = (0..n_stages)
-        .map(|i| Stage {
-            index: i,
-            id: i as i32,
-            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-            season_id: None,
-            blocks: vec![Block {
-                index: 0,
-                name: "S".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
+        .map(|i| {
+            let (start_date, end_date) = anticipated_stage_window(i);
+            Stage {
+                index: i,
+                id: i as i32,
+                start_date,
+                end_date,
+                season_id: None,
+                blocks: vec![Block {
+                    index: 0,
+                    name: "S".to_string(),
+                    duration_hours: 744.0,
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: true,
+                    inflow_lags: false,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+            }
         })
         .collect();
 
@@ -3884,29 +3905,32 @@ fn system_with_two_anticipated_thermals_staggered_dates(
     };
     hydro.declare_mirror_unit_group(EntityId(1));
 
-    let n_stages = 2_usize;
+    let n_stages = 3_usize;
     let stages: Vec<Stage> = (0..n_stages)
-        .map(|i| Stage {
-            index: i,
-            id: i as i32,
-            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-            season_id: None,
-            blocks: vec![Block {
-                index: 0,
-                name: "S".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
+        .map(|i| {
+            let (start_date, end_date) = anticipated_stage_window(i);
+            Stage {
+                index: i,
+                id: i as i32,
+                start_date,
+                end_date,
+                season_id: None,
+                blocks: vec![Block {
+                    index: 0,
+                    name: "S".to_string(),
+                    duration_hours: 744.0,
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: true,
+                    inflow_lags: false,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+            }
         })
         .collect();
 
@@ -4066,14 +4090,39 @@ fn build_initial_state_anticipated_seed_correct_under_staggered_commissioning_da
     use super::build_initial_state;
     use cobre_core::AnticipatedCommitmentHistory;
 
+    let (s0_start, s0_end) = anticipated_stage_window(0);
+    let (s1_start, s1_end) = anticipated_stage_window(1);
+    let (s2_start, s2_end) = anticipated_stage_window(2);
     let past_commits = vec![
         AnticipatedCommitmentHistory {
             thermal_id: EntityId(10),
-            values_mw: vec![10.0, 20.0],
+            start_date: s0_start,
+            end_date: s0_end,
+            value_mw: 10.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(10),
+            start_date: s1_start,
+            end_date: s1_end,
+            value_mw: 20.0,
         },
         AnticipatedCommitmentHistory {
             thermal_id: EntityId(11),
-            values_mw: vec![100.0, 200.0, 300.0],
+            start_date: s0_start,
+            end_date: s0_end,
+            value_mw: 100.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(11),
+            start_date: s1_start,
+            end_date: s1_end,
+            value_mw: 200.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(11),
+            start_date: s2_start,
+            end_date: s2_end,
+            value_mw: 300.0,
         },
     ];
     let system = system_with_two_anticipated_thermals_staggered_dates(past_commits);
@@ -4122,6 +4171,15 @@ fn build_initial_state_anticipated_seed_correct_under_staggered_commissioning_da
         "thermal id=10 slot 2 (K=2 padding) should be 0.0, got {}",
         state[s + 5]
     );
+
+    // Numeric neutrality: resolving through StageCalendar::coverage lands
+    // bit-identical (`==`, not an epsilon compare) to a positional per-stage
+    // splice for the same values.
+    assert_eq!(
+        state[s..s + 6],
+        [100.0, 10.0, 200.0, 20.0, 300.0, 0.0],
+        "anticipated seed must be bit-identical to a positional splice"
+    );
 }
 
 #[test]
@@ -4148,7 +4206,7 @@ fn build_initial_state_no_anticipated_state_unchanged() {
     );
 }
 
-/// Slot-major layout (`n_ant=1`), `values_mw = [50.0, 75.0]`:
+/// Slot-major layout (`n_ant=1`), per-stage windowed values `[50.0, 75.0]`:
 ///   slot 0 (`ant_start`)   → 50.0
 ///   slot 1 (`ant_start+1`) → 75.0
 #[test]
@@ -4158,10 +4216,22 @@ fn build_initial_state_single_anticipated_thermal_k2() {
 
     // Thermal ID 10 is the first (and only) anticipated plant.
     // The system thermals() sorts by ID, so global_idx == 0 for ID 10.
-    let past_commits = vec![AnticipatedCommitmentHistory {
-        thermal_id: EntityId(10),
-        values_mw: vec![50.0, 75.0],
-    }];
+    let (s0_start, s0_end) = anticipated_stage_window(0);
+    let (s1_start, s1_end) = anticipated_stage_window(1);
+    let past_commits = vec![
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(10),
+            start_date: s0_start,
+            end_date: s0_end,
+            value_mw: 50.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(10),
+            start_date: s1_start,
+            end_date: s1_end,
+            value_mw: 75.0,
+        },
+    ];
     let system = system_with_anticipated_thermals(&[2], past_commits);
 
     let layout = layout_with_anticipated(1, &[2]);
@@ -4205,14 +4275,39 @@ fn build_initial_state_two_anticipated_thermals_mixed_k() {
 
     // Thermal IDs 10 (K=2) and 11 (K=3); sorted ascending so global order
     // in system.thermals() is idx 0 → ID 10, idx 1 → ID 11.
+    let (s0_start, s0_end) = anticipated_stage_window(0);
+    let (s1_start, s1_end) = anticipated_stage_window(1);
+    let (s2_start, s2_end) = anticipated_stage_window(2);
     let past_commits = vec![
         AnticipatedCommitmentHistory {
             thermal_id: EntityId(10),
-            values_mw: vec![10.0, 20.0],
+            start_date: s0_start,
+            end_date: s0_end,
+            value_mw: 10.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(10),
+            start_date: s1_start,
+            end_date: s1_end,
+            value_mw: 20.0,
         },
         AnticipatedCommitmentHistory {
             thermal_id: EntityId(11),
-            values_mw: vec![100.0, 200.0, 300.0],
+            start_date: s0_start,
+            end_date: s0_end,
+            value_mw: 100.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(11),
+            start_date: s1_start,
+            end_date: s1_end,
+            value_mw: 200.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(11),
+            start_date: s2_start,
+            end_date: s2_end,
+            value_mw: 300.0,
         },
     ];
     let system = system_with_anticipated_thermals(&[2, 3], past_commits);
@@ -4301,9 +4396,12 @@ fn build_initial_state_unknown_thermal_id_silently_skipped() {
     use super::build_initial_state;
     use cobre_core::AnticipatedCommitmentHistory;
 
+    let (s0_start, s0_end) = anticipated_stage_window(0);
     let past_commits = vec![AnticipatedCommitmentHistory {
         thermal_id: EntityId(99999),
-        values_mw: vec![42.0, 43.0],
+        start_date: s0_start,
+        end_date: s0_end,
+        value_mw: 42.0,
     }];
     let system = system_with_anticipated_thermals(&[2], past_commits);
 
@@ -4331,9 +4429,11 @@ fn build_initial_state_unknown_thermal_id_silently_skipped() {
     }
 }
 
-/// `past_anticipated_commitments` carries `[100.0]` for plant 0 (`K_0=1`) and
-/// `[50.0, 75.0]` for plant 1 (`K_1=2`), each of length `K_i` exactly (the
-/// contract cobre-io's validator enforces in production).
+/// `past_anticipated_commitments` carries one window `100.0` for plant 0
+/// (`K_0=1`, tiling its single leading stage) and two windows `[50.0, 75.0]`
+/// for plant 1 (`K_1=2`, one per leading stage) — each plant's windows tile
+/// its leading `K_i` stages exactly (the contract cobre-io's validator
+/// enforces in production).
 ///
 /// Expected layout (`n_ant = 2`, slot-major):
 ///   - `ant_start + 0*2 + 0` (slot 0, plant 0) -> 100.0  (seed)
@@ -4341,21 +4441,33 @@ fn build_initial_state_unknown_thermal_id_silently_skipped() {
 ///   - `ant_start + 1*2 + 0` (slot 1, plant 0) ->   0.0  (padding; `K_0=1` < `k_max=2`)
 ///   - `ant_start + 1*2 + 1` (slot 1, plant 1) ->  75.0  (seed)
 ///
-/// The padding-slot `debug_assert!` must not fire — the `.min(k_i)` clamp
-/// prevents writing past slot `K_0=1` on plant 0.
+/// The padding-slot `debug_assert!` must not fire — the `.take(k_i)` clamp on
+/// the resolved coverage iterator prevents writing past slot `K_0=1` on plant 0.
 #[test]
 fn build_initial_state_anticipated_seed_padding_slot_stays_zero() {
     use super::build_initial_state;
     use cobre_core::AnticipatedCommitmentHistory;
 
+    let (s0_start, s0_end) = anticipated_stage_window(0);
+    let (s1_start, s1_end) = anticipated_stage_window(1);
     let past_commits = vec![
         AnticipatedCommitmentHistory {
             thermal_id: EntityId(10),
-            values_mw: vec![100.0],
+            start_date: s0_start,
+            end_date: s0_end,
+            value_mw: 100.0,
         },
         AnticipatedCommitmentHistory {
             thermal_id: EntityId(11),
-            values_mw: vec![50.0, 75.0],
+            start_date: s0_start,
+            end_date: s0_end,
+            value_mw: 50.0,
+        },
+        AnticipatedCommitmentHistory {
+            thermal_id: EntityId(11),
+            start_date: s1_start,
+            end_date: s1_end,
+            value_mw: 75.0,
         },
     ];
     let system = system_with_anticipated_thermals(&[1, 2], past_commits);
@@ -6038,28 +6150,40 @@ fn minimal_system_with_anticipated(
     };
     hydro.declare_mirror_unit_group(EntityId(1));
 
+    // Each stage's real calendar span (whole days, `stage_hours[i] / 24`) must
+    // match its own declared `duration_hours` for `StageCalendar::coverage` to
+    // resolve a whole-stage window at fraction 1.0 — a fixed date range shared
+    // by every stage (the pre-StageCalendar fixture) leaves the calendar
+    // overlapping and violates `StageCalendar::new`'s ordering precondition.
+    let mut stage_cursor = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
     let stages: Vec<Stage> = (0..n_stages)
-        .map(|i| Stage {
-            index: i,
-            id: i as i32,
-            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-            season_id: None,
-            blocks: vec![Block {
-                index: 0,
-                name: "S".to_string(),
-                duration_hours: stage_hours[i],
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
+        .map(|i| {
+            let width_days = (stage_hours[i] / 24.0).round() as i64;
+            let start_date = stage_cursor;
+            let end_date = start_date + chrono::TimeDelta::days(width_days);
+            stage_cursor = end_date;
+            Stage {
+                index: i,
+                id: i as i32,
+                start_date,
+                end_date,
+                season_id: None,
+                blocks: vec![Block {
+                    index: 0,
+                    name: "S".to_string(),
+                    duration_hours: stage_hours[i],
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: true,
+                    inflow_lags: false,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+            }
         })
         .collect();
 
@@ -6722,28 +6846,38 @@ fn system_with_travel_time_arc(n_stages: usize) -> cobre_core::System {
             hydro
         };
 
+    // One 31-day calendar month per stage: `StageCalendar::new` (the
+    // travel-time seed's resolver) requires chronologically ordered,
+    // non-overlapping stage dates — a fixed date range shared by every stage
+    // (the pre-StageCalendar fixture) violates that precondition.
+    let mut stage_cursor = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
     let stages: Vec<Stage> = (0..n_stages)
-        .map(|i| Stage {
-            index: i,
-            id: i as i32,
-            start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-            end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
-            season_id: None,
-            blocks: vec![Block {
-                index: 0,
-                name: "S".to_string(),
-                duration_hours: 744.0,
-            }],
-            block_mode: BlockMode::Parallel,
-            state_config: StageStateConfig {
-                storage: true,
-                inflow_lags: false,
-            },
-            risk_config: StageRiskConfig::Expectation,
-            scenario_config: ScenarioSourceConfig {
-                branching_factor: 1,
-                noise_method: NoiseMethod::Saa,
-            },
+        .map(|i| {
+            let start_date = stage_cursor;
+            let end_date = start_date + chrono::Duration::days(31);
+            stage_cursor = end_date;
+            Stage {
+                index: i,
+                id: i as i32,
+                start_date,
+                end_date,
+                season_id: None,
+                blocks: vec![Block {
+                    index: 0,
+                    name: "S".to_string(),
+                    duration_hours: 744.0,
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: true,
+                    inflow_lags: false,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+            }
         })
         .collect();
 
@@ -8836,4 +8970,362 @@ fn admission_gate_predicates_destructure_exhaustively() {
         iterations: 1,
     }));
     assert!(!super::rule_is_gap(&StoppingRule::GracefulShutdown));
+}
+
+// ---------------------------------------------------------------------------
+// Travel-time bucket seed (`build_initial_transit_bucket_state`)
+// ---------------------------------------------------------------------------
+
+fn bucket_seed_zero_penalties() -> HydroPenalties {
+    HydroPenalties {
+        spillage_cost: 0.0,
+        diversion_cost: 0.0,
+        turbined_cost: 0.0,
+        storage_violation_below_cost: 0.0,
+        filling_target_violation_cost: 0.0,
+        turbined_violation_below_cost: 0.0,
+        outflow_violation_below_cost: 0.0,
+        outflow_violation_above_cost: 0.0,
+        generation_violation_below_cost: 0.0,
+        evaporation_violation_cost: 0.0,
+        water_withdrawal_violation_cost: 0.0,
+        water_withdrawal_violation_pos_cost: 0.0,
+        water_withdrawal_violation_neg_cost: 0.0,
+        evaporation_violation_pos_cost: 0.0,
+        evaporation_violation_neg_cost: 0.0,
+        inflow_nonnegativity_cost: 0.0,
+    }
+}
+
+fn bucket_seed_date(y: i32, m: u32, d: u32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(y, m, d).unwrap()
+}
+
+fn bucket_seed_hydro(id: i32, downstream_id: Option<i32>, travel_time_hours: Option<f64>) -> Hydro {
+    let mut hydro = Hydro {
+        unit_groups: Vec::new(),
+        id: EntityId(id),
+        name: format!("H{id}"),
+        operational_start_date: bucket_seed_date(2024, 1, 1),
+        downstream_id: downstream_id.map(EntityId),
+        travel_time_hours,
+        entry_stage_id: None,
+        exit_stage_id: None,
+        min_storage_hm3: 0.0,
+        max_storage_hm3: 100.0,
+        min_outflow_m3s: 0.0,
+        max_outflow_m3s: None,
+        generation_model: HydroGenerationModel::ConstantProductivity,
+        min_turbined_m3s: 0.0,
+        max_turbined_m3s: 100.0,
+        specific_productivity_mw_per_m3s_per_m: None,
+        min_generation_mw: 0.0,
+        max_generation_mw: 100.0,
+        tailrace: None,
+        hydraulic_losses: None,
+        efficiency: None,
+        evaporation_coefficients_mm: None,
+        evaporation_reference_volumes_hm3: None,
+        diversion: None,
+        filling: None,
+        penalties: bucket_seed_zero_penalties(),
+    };
+    hydro.declare_mirror_unit_group(EntityId(1));
+    hydro
+}
+
+/// `n` study stages (`id = 0..n`), each carrying a single `hours`-long block,
+/// all anchored at `start_0 = 2024-01-01`.
+/// One whole calendar day per stage, independent of `hours`: `NaiveDate` has
+/// no sub-day resolution, and `StageCalendar::hour_window_shares` (the seed's
+/// resolver) reads only each `Stage`'s `duration_hours`, never its calendar
+/// dates — the nominal one-day-per-stage span exists solely to satisfy
+/// `StageCalendar::new`'s chronological-ordering precondition.
+fn bucket_seed_study_stages(n: i32, hours: f64) -> Vec<Stage> {
+    (0..n)
+        .map(|id| {
+            let start_date = bucket_seed_date(2024, 1, 1) + Duration::days(i64::from(id));
+            let end_date = start_date + Duration::days(1);
+            Stage {
+                index: usize::try_from(id).unwrap_or(0),
+                id,
+                start_date,
+                end_date,
+                season_id: None,
+                blocks: vec![Block {
+                    index: 0,
+                    name: "FLAT".to_string(),
+                    duration_hours: hours,
+                }],
+                block_mode: BlockMode::Parallel,
+                state_config: StageStateConfig {
+                    storage: true,
+                    inflow_lags: false,
+                },
+                risk_config: StageRiskConfig::Expectation,
+                scenario_config: ScenarioSourceConfig {
+                    branching_factor: 1,
+                    noise_method: NoiseMethod::Saa,
+                },
+            }
+        })
+        .collect()
+}
+
+fn bucket_seed_build_system(
+    hydros: Vec<Hydro>,
+    stages: Vec<Stage>,
+    past_defluences: Vec<HydroPastDefluence>,
+) -> cobre_core::System {
+    let bus = Bus {
+        id: EntityId(1),
+        name: "B1".to_string(),
+        operational_start_date: bucket_seed_date(2024, 1, 1),
+        deficit_segments: vec![DeficitSegment {
+            depth_mw: None,
+            cost_per_mwh: 500.0,
+        }],
+        excess_cost: 0.0,
+    };
+    SystemBuilder::new()
+        .buses(vec![bus])
+        .hydros(hydros)
+        .stages(stages)
+        .initial_conditions(InitialConditions {
+            past_defluences,
+            ..InitialConditions::default()
+        })
+        .build()
+        .expect("valid system")
+}
+
+/// `start_0 = 2024-01-01`. A single `past_defluences` window ending
+/// `start_0_minus_hours` before `start_0` and spanning `width_hours`, at rate
+/// `value` m³/s.
+fn bucket_seed_defluence_window(
+    hydro_id: i32,
+    start_0_minus_hours: f64,
+    width_hours: f64,
+    value: f64,
+) -> HydroPastDefluence {
+    let start_0 = bucket_seed_date(2024, 1, 1);
+    let end_date = start_0 - Duration::hours(start_0_minus_hours as i64);
+    let start_date = end_date - Duration::hours(width_hours as i64);
+    HydroPastDefluence {
+        hydro_id: EntityId(hydro_id),
+        start_date,
+        end_date,
+        value_m3s: value,
+    }
+}
+
+/// Single arc, `k = [1/2, 1/2]`, one window `[start_0 − 24h, start_0)` at
+/// 100 m³/s ⇒ `b_1 = k_1 · D = 1/2 · D` (`D` the width-scaled volume,
+/// mirroring how an in-study release is already volume-scaled by `τ`).
+#[test]
+fn test_single_arc_unroll_matches_ac1() {
+    let downstream = bucket_seed_hydro(1, None, None);
+    let upstream = bucket_seed_hydro(2, Some(1), Some(24.0));
+    let system = bucket_seed_build_system(
+        vec![downstream, upstream],
+        bucket_seed_study_stages(4, 12.0),
+        vec![bucket_seed_defluence_window(2, 0.0, 24.0, 100.0)],
+    );
+
+    let topology = super::bucket_topology::build_transit_bucket_topology(&system);
+    assert_eq!(topology.per_plant_depth, vec![2], "sanity: 2-bucket depth");
+
+    let seed = super::build_initial_transit_bucket_state(&system, &topology);
+    assert_eq!(seed.len(), topology.n_buckets);
+
+    let volume = 24.0 * M3S_TO_HM3 * 100.0;
+    assert!(
+        (seed[0] - 0.5 * volume).abs() < 1e-9,
+        "b_1 must equal 1/2 * volume, got {} vs expected {}",
+        seed[0],
+        0.5 * volume
+    );
+}
+
+/// A mid-horizon upstream entrant (`entry_stage_id`
+/// mid-study) supplies a zero-valued `past_defluences` window -- the
+/// physically correct value, since the plant did not exist pre-study --
+/// and every stage-0 bucket the arc feeds comes out zero.
+/// [`super::build_initial_transit_bucket_state`] never reads `entry_stage_id`;
+/// conservation is forced by the input data, not a code branch.
+#[test]
+fn test_mid_horizon_entrant_zero_history_zero_seeds_stage_0_transit_buckets() {
+    let downstream = bucket_seed_hydro(1, None, None);
+    let mut upstream = bucket_seed_hydro(2, Some(1), Some(24.0));
+    upstream.entry_stage_id = Some(2);
+    let system = bucket_seed_build_system(
+        vec![downstream, upstream],
+        bucket_seed_study_stages(4, 12.0),
+        vec![bucket_seed_defluence_window(2, 0.0, 24.0, 0.0)],
+    );
+
+    let topology = super::bucket_topology::build_transit_bucket_topology(&system);
+    assert_eq!(topology.per_plant_depth, vec![2], "sanity: 2-bucket depth");
+
+    let seed = super::build_initial_transit_bucket_state(&system, &topology);
+
+    assert!(
+        seed.iter().all(|&v| v.abs() < 1e-9),
+        "a mid-horizon entrant's zero-valued pre-study history must zero-seed \
+         every stage-0 bucket, got {seed:?}"
+    );
+}
+
+/// Confluence: two upstreams with different `t_v` feeding one downstream
+/// plant sum their unrolled shares into the SAME per-plant bucket block.
+#[test]
+fn test_confluence_aggregates_two_upstreams_into_shared_transit_buckets() {
+    let downstream = bucket_seed_hydro(1, None, None);
+    let upstream_a = bucket_seed_hydro(2, Some(1), Some(24.0));
+    let upstream_b = bucket_seed_hydro(3, Some(1), Some(12.0));
+    let system = bucket_seed_build_system(
+        vec![downstream, upstream_a, upstream_b],
+        bucket_seed_study_stages(4, 12.0),
+        vec![
+            bucket_seed_defluence_window(2, 0.0, 24.0, 100.0),
+            bucket_seed_defluence_window(3, 0.0, 24.0, 50.0),
+        ],
+    );
+
+    let topology = super::bucket_topology::build_transit_bucket_topology(&system);
+    assert_eq!(topology.per_plant_depth, vec![2], "sanity: 2-bucket depth");
+
+    let seed = super::build_initial_transit_bucket_state(&system, &topology);
+
+    let vol_a = 24.0 * M3S_TO_HM3 * 100.0;
+    let vol_b = 24.0 * M3S_TO_HM3 * 50.0;
+    let expected_b1 = 0.5 * vol_a + 0.5 * vol_b;
+    let expected_b2 = 0.5 * vol_a;
+
+    assert!(
+        (seed[0] - expected_b1).abs() < 1e-9,
+        "b_1 must sum both arcs' shares, got {} vs expected {expected_b1}",
+        seed[0]
+    );
+    assert!(
+        (seed[1] - expected_b2).abs() < 1e-9,
+        "b_2 must carry only the deeper arc's share, got {} vs expected {expected_b2}",
+        seed[1]
+    );
+}
+
+/// Declaration-order invariance: swapping the hydro input order must not
+/// change the seed (canonical sort in `SystemBuilder::build` plus the
+/// canonical-index-driven aggregation loop).
+#[test]
+fn test_seed_is_declaration_order_invariant() {
+    let downstream = bucket_seed_hydro(1, None, None);
+    let upstream_a = bucket_seed_hydro(2, Some(1), Some(24.0));
+    let upstream_b = bucket_seed_hydro(3, Some(1), Some(12.0));
+    let defluences = vec![
+        bucket_seed_defluence_window(2, 0.0, 24.0, 100.0),
+        bucket_seed_defluence_window(3, 0.0, 24.0, 50.0),
+    ];
+
+    let system_a = bucket_seed_build_system(
+        vec![downstream.clone(), upstream_a.clone(), upstream_b.clone()],
+        bucket_seed_study_stages(4, 12.0),
+        defluences.clone(),
+    );
+    let system_b = bucket_seed_build_system(
+        vec![upstream_b, upstream_a, downstream],
+        bucket_seed_study_stages(4, 12.0),
+        defluences,
+    );
+
+    let topology_a = super::bucket_topology::build_transit_bucket_topology(&system_a);
+    let topology_b = super::bucket_topology::build_transit_bucket_topology(&system_b);
+    let seed_a = super::build_initial_transit_bucket_state(&system_a, &topology_a);
+    let seed_b = super::build_initial_transit_bucket_state(&system_b, &topology_b);
+
+    assert_eq!(
+        seed_a, seed_b,
+        "seed must be bit-identical across input order"
+    );
+}
+
+/// `seed.len() == B` for every declared topology, including when no arc
+/// is declared at all (`B == 0`).
+#[test]
+fn test_seed_len_matches_n_buckets() {
+    let downstream = bucket_seed_hydro(1, None, None);
+    let upstream = bucket_seed_hydro(2, Some(1), Some(24.0));
+    let system = bucket_seed_build_system(
+        vec![downstream, upstream],
+        bucket_seed_study_stages(4, 12.0),
+        vec![bucket_seed_defluence_window(2, 0.0, 24.0, 100.0)],
+    );
+    let topology = super::bucket_topology::build_transit_bucket_topology(&system);
+    let seed = super::build_initial_transit_bucket_state(&system, &topology);
+    assert_eq!(seed.len(), topology.n_buckets);
+
+    let no_arc_downstream = bucket_seed_hydro(1, None, None);
+    let no_arc_system = bucket_seed_build_system(
+        vec![no_arc_downstream],
+        bucket_seed_study_stages(3, 24.0),
+        vec![],
+    );
+    let no_arc_topology = super::bucket_topology::build_transit_bucket_topology(&no_arc_system);
+    assert_eq!(no_arc_topology.n_buckets, 0);
+    let no_arc_seed = super::build_initial_transit_bucket_state(&no_arc_system, &no_arc_topology);
+    assert_eq!(no_arc_seed.len(), 0);
+}
+
+/// Two gapped (non-contiguous) windows for the same 72h arc land in
+/// DISJOINT bucket pairs: the recent window `[start_0 − 24h, start_0)`
+/// arrives at buckets 4-5 (`k = [0, 0, 0, 0, 1/2, 1/2]`), the older
+/// window `[start_0 − 72h, start_0 − 48h)` arrives at buckets 0-1
+/// (`k = [1/2, 1/2]`) -- a genuine 24h gap (`[start_0 − 48h,
+/// start_0 − 24h)`) separates the two release windows. Because the
+/// windows land in disjoint buckets, dropping the older one (the bug a
+/// `.find()` in place of `.filter()` would introduce) zeroes buckets 0-1
+/// and fails the assertion below.
+#[test]
+fn test_gapped_windows_contribute_additively() {
+    let downstream = bucket_seed_hydro(1, None, None);
+    let upstream = bucket_seed_hydro(2, Some(1), Some(72.0));
+    let system = bucket_seed_build_system(
+        vec![downstream, upstream],
+        bucket_seed_study_stages(6, 12.0),
+        vec![
+            bucket_seed_defluence_window(2, 0.0, 24.0, 100.0),
+            bucket_seed_defluence_window(2, 48.0, 24.0, 40.0),
+        ],
+    );
+
+    let topology = super::bucket_topology::build_transit_bucket_topology(&system);
+    let seed = super::build_initial_transit_bucket_state(&system, &topology);
+
+    let vol_recent = 24.0 * M3S_TO_HM3 * 100.0;
+    let vol_older = 24.0 * M3S_TO_HM3 * 40.0;
+    let study_stages: Vec<Stage> = system
+        .stages()
+        .iter()
+        .filter(|s| s.id >= 0)
+        .cloned()
+        .collect();
+    let calendar = StageCalendar::new(&study_stages);
+    let k_recent = calendar.hour_window_shares(72.0, 0.0, 24.0);
+    let k_older = calendar.hour_window_shares(72.0, 48.0, 24.0);
+
+    let mut expected = vec![0.0_f64; topology.n_buckets];
+    for (d, &k_val) in k_recent.iter().enumerate() {
+        expected[d] += k_val * vol_recent;
+    }
+    for (d, &k_val) in k_older.iter().enumerate() {
+        expected[d] += k_val * vol_older;
+    }
+
+    assert_eq!(seed.len(), expected.len());
+    for (idx, (&got, &want)) in seed.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (got - want).abs() < 1e-9,
+            "bucket {idx}: gapped windows must contribute additively, got {got} vs expected {want}"
+        );
+    }
 }

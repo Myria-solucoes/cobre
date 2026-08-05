@@ -150,7 +150,7 @@ mod anticipated_backward_cut {
     // ---------------------------------------------------------------------------
 
     fn build_system(fixture: &BackwardCutFixture) -> cobre_core::System {
-        use chrono::NaiveDate;
+        use chrono::{NaiveDate, TimeDelta};
 
         let date = |d: (i32, u32, u32)| NaiveDate::from_ymd_opt(d.0, d.1, d.2).expect("valid date");
 
@@ -209,13 +209,19 @@ mod anticipated_backward_cut {
             thermal_ant.id.0,
         );
 
+        // StageCalendar requires a chronologically ordered, non-overlapping
+        // calendar; one calendar day per stage keeps it valid while BLOCK_HOURS
+        // alone still drives every LP-facing duration.
+        let stage_date = |offset_days: i64| {
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap() + TimeDelta::days(offset_days)
+        };
         let stages: Vec<Stage> = (0..fixture.n_stages)
             .map(|i| {
                 make_stage(
                     i,
                     StageSpec {
-                        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                        start_date: stage_date(i as i64),
+                        end_date: stage_date(i as i64 + 1),
                         season_id: None,
                         blocks: vec![Block {
                             index: 0,
@@ -350,13 +356,21 @@ mod anticipated_backward_cut {
         );
 
         // Anticipated ring-buffer seeds; any feasible choice yields the same cut.
+        // One windowed record per seed, tiling delivery stages 0..k_max.
         let initial_conditions = InitialConditions {
             storage: vec![],
             filling_storage: vec![],
-            past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
-                thermal_id: fixture.ant_id,
-                values_mw: fixture.seeds_mw.to_vec(),
-            }],
+            past_anticipated_commitments: fixture
+                .seeds_mw
+                .iter()
+                .enumerate()
+                .map(|(i, &value_mw)| AnticipatedCommitmentHistory {
+                    thermal_id: fixture.ant_id,
+                    start_date: stage_date(i as i64),
+                    end_date: stage_date(i as i64 + 1),
+                    value_mw,
+                })
+                .collect(),
             recent_observations: vec![],
             past_defluences: vec![],
         };
@@ -855,16 +869,23 @@ mod anticipated_pre_horizon_seed_delivery {
     /// `fixture.hydro_id`, load 150 MW, ring-buffer seed `fixture.seeds_mw`.
     ///
     /// Constructing `System` directly via `SystemBuilder` bypasses the `cobre-io`
-    /// validator that rejects non-zero `values_mw`: the non-zero seed is the
-    /// deliberate fixture; the rejection rule applies only to JSON input through
-    /// `load_case`. The $10/MWh anticipated vs $5000/MWh backup asymmetry saturates
-    /// anticipated dispatch at max_gen, and `annual_discount_rate = 0.0` collapses
-    /// every discount factor to 1.0 so each test's analytical cost derivation is exact.
+    /// commissioning-window validator that rejects a non-zero seed maturing outside
+    /// it: the non-zero seed is the deliberate fixture; that rejection rule applies
+    /// only to JSON input through `load_case`. The $10/MWh anticipated vs $5000/MWh
+    /// backup asymmetry saturates anticipated dispatch at max_gen, and
+    /// `annual_discount_rate = 0.0` collapses every discount factor to 1.0 so each
+    /// test's analytical cost derivation is exact.
     fn build_system(fixture: &SeedDeliveryFixture) -> cobre_core::System {
-        use chrono::NaiveDate;
+        use chrono::{NaiveDate, TimeDelta};
 
         let k = fixture.k;
         let n_stages = fixture.n_stages;
+
+        // Each stage is a 744h (31-day) block; whole-day stage boundaries keep
+        // StageCalendar's date-based window coverage exact (744 / 24 = 31).
+        let stage_date = |index: usize| {
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap() + TimeDelta::days(31 * index as i64)
+        };
 
         let bus = make_bus(
             fixture.bus_id,
@@ -966,8 +987,8 @@ mod anticipated_pre_horizon_seed_delivery {
                 make_stage(
                     i,
                     StageSpec {
-                        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                        start_date: stage_date(i),
+                        end_date: stage_date(i + 1),
                         season_id: None,
                         blocks: vec![Block {
                             index: 0,
@@ -1127,10 +1148,17 @@ mod anticipated_pre_horizon_seed_delivery {
                 value_hm3: 0.0,
             }],
             filling_storage: vec![],
-            past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
-                thermal_id: fixture.anticipated_id,
-                values_mw: fixture.seeds_mw.to_vec(),
-            }],
+            past_anticipated_commitments: fixture
+                .seeds_mw
+                .iter()
+                .enumerate()
+                .map(|(i, &value_mw)| AnticipatedCommitmentHistory {
+                    thermal_id: fixture.anticipated_id,
+                    start_date: stage_date(i),
+                    end_date: stage_date(i + 1),
+                    value_mw,
+                })
+                .collect(),
             recent_observations: vec![],
             past_defluences: vec![],
         };
@@ -1347,16 +1375,18 @@ mod anticipated_pre_horizon_seed_delivery {
     /// always-active fishing predicate.
     ///
     /// With `K = 2`, `n_stages = 5`, a single anticipated thermal (id=42), and
-    /// `past_anticipated_commitments.values_mw = [80.0, 50.0]`, the LP must:
+    /// `past_anticipated_commitments` windows tiling stage 0 and stage 1 with
+    /// `value_mw` 80.0 and 50.0 respectively (`FIXTURE_K2.seeds_mw = [80.0, 50.0]`),
+    /// the LP must:
     ///
     /// 1. Deliver `committed_at(0) == 80.0 MW` — the always-active fishing
     ///    equality at stage 0 pins the anticipated thermal to slot 0 of the ring
-    ///    buffer, which holds the 80.0 MW seed (`values_mw[0]`). The cost-zeroing
+    ///    buffer, which holds the 80.0 MW seed (`seeds_mw[0]`). The cost-zeroing
     ///    predicate zeros the per-block objective for this column so the LP
     ///    accepts the delivery at zero additional cost.
     ///
     /// 2. Deliver `committed_at(1) == 50.0 MW` — the in-LP ring-shift definition
-    ///    row moves slot 1 (`values_mw[1] = 50.0`) into slot 0 at the start of
+    ///    row moves slot 1 (`seeds_mw[1] = 50.0`) into slot 0 at the start of
     ///    stage 1. Stage 1's always-active fishing equality then reads slot 0 =
     ///    50.0 MW. This is the K=2-specific assertion that the K=1 delivery test
     ///    cannot reach: K=1 has only one pre-horizon stage, so there is no
@@ -1438,7 +1468,7 @@ mod anticipated_pre_horizon_seed_delivery {
         );
         assert!(
             (c0 - 80.0).abs() < 1e-6,
-            "committed_at(0) = {c0} MW, expected 80.0 MW (values_mw[0]). \
+            "committed_at(0) = {c0} MW, expected 80.0 MW (seeds_mw[0]). \
          The fishing equality at stage 0 must pin the anticipated thermal to \
          slot 0 = 80.0 MW of the ring buffer.",
         );
@@ -1451,7 +1481,7 @@ mod anticipated_pre_horizon_seed_delivery {
     );
         assert!(
             (c1 - 50.0).abs() < 1e-6,
-            "committed_at(1) = {c1} MW, expected 50.0 MW (values_mw[1]). \
+            "committed_at(1) = {c1} MW, expected 50.0 MW (seeds_mw[1]). \
          The in-LP ring-shift definition row must move slot 1 (50.0 MW) into \
          slot 0 at the start of stage 1, and the fishing equality must read \
          that value. If the result is 80.0 MW, the ring-buffer shift is not \
@@ -1533,23 +1563,25 @@ mod anticipated_pre_horizon_seed_delivery {
     /// always-active fishing predicate.
     ///
     /// With `K = 3`, `n_stages = 6`, a single anticipated thermal (id=52), and
-    /// `past_anticipated_commitments.values_mw = [50.0, 30.0, 10.0]`, the LP must:
+    /// `past_anticipated_commitments` windows tiling stages 0-2 with `value_mw`
+    /// 50.0, 30.0, 10.0 respectively (`FIXTURE_K3.seeds_mw = [50.0, 30.0, 10.0]`),
+    /// the LP must:
     ///
     /// 1. Deliver `committed_at(0) == 50.0 MW` — the always-active fishing
     ///    equality at stage 0 pins the anticipated thermal to slot 0 of the ring
-    ///    buffer, which holds the 50.0 MW seed (`values_mw[0]`). The cost-zeroing
+    ///    buffer, which holds the 50.0 MW seed (`seeds_mw[0]`). The cost-zeroing
     ///    predicate zeros the per-block objective for this column so the LP
     ///    accepts the delivery at zero additional cost.
     ///
     /// 2. Deliver `committed_at(1) == 30.0 MW` — the in-LP ring-shift definition
-    ///    row moves slot 1 (`values_mw[1] = 30.0`) into slot 0 at
+    ///    row moves slot 1 (`seeds_mw[1] = 30.0`) into slot 0 at
     ///    the start of stage 1. Stage 1's always-active fishing equality then
     ///    reads slot 0 = 30.0 MW. This is one of the two K=3-specific assertions
     ///    that the K=1 and K=2 delivery tests cannot reach: K=3 has three
     ///    pre-horizon stages, with two ring-buffer shifts between them.
     ///
     /// 3. Deliver `committed_at(2) == 10.0 MW` — after two ring-buffer shifts,
-    ///    slot 0 holds `values_mw[2] = 10.0`. Stage 2's always-active fishing
+    ///    slot 0 holds `seeds_mw[2] = 10.0`. Stage 2's always-active fishing
     ///    equality delivers it at zero LP cost. This is the deepest pre-horizon
     ///    delivery assertion in the entire anticipated test suite.
     ///
@@ -1635,7 +1667,7 @@ mod anticipated_pre_horizon_seed_delivery {
         );
         assert!(
             (c0 - 50.0).abs() < 1e-6,
-            "committed_at(0) = {c0} MW, expected 50.0 MW (values_mw[0]). \
+            "committed_at(0) = {c0} MW, expected 50.0 MW (seeds_mw[0]). \
          The fishing equality at stage 0 must pin the anticipated thermal to \
          slot 0 = 50.0 MW of the ring buffer.",
         );
@@ -1647,7 +1679,7 @@ mod anticipated_pre_horizon_seed_delivery {
     );
         assert!(
             (c1 - 30.0).abs() < 1e-6,
-            "committed_at(1) = {c1} MW, expected 30.0 MW (values_mw[1]). \
+            "committed_at(1) = {c1} MW, expected 30.0 MW (seeds_mw[1]). \
          The in-LP ring-shift definition row must move slot 1 (30.0 MW) into \
          slot 0 at the start of stage 1, and the fishing equality must read \
          that value. If the result is 50.0 MW, the first ring-buffer shift is not \
@@ -1661,7 +1693,7 @@ mod anticipated_pre_horizon_seed_delivery {
     );
         assert!(
             (c2 - 10.0).abs() < 1e-6,
-            "committed_at(2) = {c2} MW, expected 10.0 MW (values_mw[2]). \
+            "committed_at(2) = {c2} MW, expected 10.0 MW (seeds_mw[2]). \
          After two ring-buffer shifts, slot 0 must hold 10.0 MW. \
          If the result is 30.0 MW, the second ring-buffer shift (between stages 1 \
          and 2) is not moving slot 1 (10.0 MW) into slot 0 correctly. \
@@ -1841,10 +1873,16 @@ mod anticipated_d_t_saturation {
     /// across all stages; seeds (`fixture.seeds_mw`) are zero to isolate the
     /// in-horizon behaviour from any seeding artefact.
     fn build_system(fixture: &SaturationFixture) -> cobre_core::System {
-        use chrono::NaiveDate;
+        use chrono::{NaiveDate, TimeDelta};
 
         let k = fixture.k;
         let n_stages = fixture.n_stages;
+
+        // Each stage is a 744h (31-day) block; whole-day stage boundaries keep
+        // StageCalendar's date-based window coverage exact (744 / 24 = 31).
+        let stage_date = |index: usize| {
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap() + TimeDelta::days(31 * index as i64)
+        };
 
         let bus = make_bus(
             fixture.bus_id,
@@ -1946,8 +1984,8 @@ mod anticipated_d_t_saturation {
                 make_stage(
                     i,
                     StageSpec {
-                        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                        start_date: stage_date(i),
+                        end_date: stage_date(i + 1),
                         season_id: None,
                         blocks: vec![Block {
                             index: 0,
@@ -2104,10 +2142,17 @@ mod anticipated_d_t_saturation {
                 value_hm3: 0.0,
             }],
             filling_storage: vec![],
-            past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
-                thermal_id: anticipated_id,
-                values_mw: fixture.seeds_mw.to_vec(),
-            }],
+            past_anticipated_commitments: fixture
+                .seeds_mw
+                .iter()
+                .enumerate()
+                .map(|(i, &value_mw)| AnticipatedCommitmentHistory {
+                    thermal_id: anticipated_id,
+                    start_date: stage_date(i),
+                    end_date: stage_date(i + 1),
+                    value_mw,
+                })
+                .collect(),
             recent_observations: vec![],
             past_defluences: vec![],
         };
@@ -2433,7 +2478,13 @@ mod anticipated_forward_pass {
     /// `[100.0, 50.0]`) and one backup thermal that alone covers the 150 MW load, so
     /// the LP is always feasible.
     fn build_system() -> cobre_core::System {
-        use chrono::NaiveDate;
+        use chrono::{NaiveDate, TimeDelta};
+
+        // Each stage is a 744h (31-day) block; whole-day stage boundaries keep
+        // StageCalendar's date-based window coverage exact (744 / 24 = 31).
+        let stage_date = |index: usize| {
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap() + TimeDelta::days(31 * index as i64)
+        };
 
         let bus = make_bus(
             EntityId(1),
@@ -2536,8 +2587,8 @@ mod anticipated_forward_pass {
                 make_stage(
                     i,
                     StageSpec {
-                        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                        start_date: stage_date(i),
+                        end_date: stage_date(i + 1),
                         season_id: None,
                         blocks: vec![Block {
                             index: 0,
@@ -2684,10 +2735,20 @@ mod anticipated_forward_pass {
                 value_hm3: 100.0,
             }],
             filling_storage: vec![],
-            past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
-                thermal_id: anticipated_id,
-                values_mw: vec![100.0, 50.0],
-            }],
+            past_anticipated_commitments: vec![
+                AnticipatedCommitmentHistory {
+                    thermal_id: anticipated_id,
+                    start_date: stage_date(0),
+                    end_date: stage_date(1),
+                    value_mw: 100.0,
+                },
+                AnticipatedCommitmentHistory {
+                    thermal_id: anticipated_id,
+                    start_date: stage_date(1),
+                    end_date: stage_date(2),
+                    value_mw: 50.0,
+                },
+            ],
             recent_observations: vec![],
             past_defluences: vec![],
         };
@@ -2892,8 +2953,9 @@ mod anticipated_closed_form_lb_k1_single_thermal {
     //!   `max_gen = B = 200 MW`. Strict ordering `c_a < c_b` is what makes the
     //!   anticipated commitment cheaper at delivery than backup.
     //! - Load `D = 50 MW` at both stages.
-    //! - `past_anticipated_commitments = [(thermal_id=2, values_mw=[0.0])]`.
-    //!   The past must be zero so that any non-zero anticipated
+    //! - `past_anticipated_commitments` has one window tiling stage 0 with
+    //!   `(thermal_id=2, value_mw=0.0)`. The past must be zero so that any
+    //!   non-zero anticipated
     //!   delivery observed at stage 1 is attributable to the stage-0 decision.
     //! - 1 deterministic opening per stage.
     //! - Default `HorizonGraph::annual_discount_rate = 0.0`, so every
@@ -3098,7 +3160,14 @@ mod anticipated_closed_form_lb_k1_single_thermal {
     // ---------------------------------------------------------------------------
 
     fn build_system() -> cobre_core::System {
-        use chrono::NaiveDate;
+        use chrono::{NaiveDate, TimeDelta};
+
+        // StageCalendar requires a chronologically ordered, non-overlapping
+        // calendar; one calendar day per stage keeps it valid while BLOCK_HOURS
+        // alone still drives every LP-facing duration.
+        let stage_date = |index: usize| {
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap() + TimeDelta::days(index as i64)
+        };
 
         let bus = make_bus(
             BUS_ID,
@@ -3151,8 +3220,8 @@ mod anticipated_closed_form_lb_k1_single_thermal {
                 make_stage(
                     i,
                     StageSpec {
-                        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                        start_date: stage_date(i),
+                        end_date: stage_date(i + 1),
                         season_id: None,
                         blocks: vec![Block {
                             index: 0,
@@ -3292,7 +3361,9 @@ mod anticipated_closed_form_lb_k1_single_thermal {
             filling_storage: vec![],
             past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
                 thermal_id: ANTICIPATED_ID,
-                values_mw: vec![0.0],
+                start_date: stage_date(0),
+                end_date: stage_date(1),
+                value_mw: 0.0,
             }],
             recent_observations: vec![],
             past_defluences: vec![],
@@ -3476,7 +3547,13 @@ mod lead_time_single_decider_end_to_end {
     const THERMAL_IDX_BACKUP: usize = 1;
 
     fn build_system() -> cobre_core::System {
-        use chrono::NaiveDate;
+        use chrono::{NaiveDate, TimeDelta};
+
+        // Each stage is a 744h (31-day) block; whole-day stage boundaries keep
+        // StageCalendar's date-based window coverage exact (744 / 24 = 31).
+        let stage_date = |index: usize| {
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap() + TimeDelta::days(31 * index as i64)
+        };
 
         let bus = make_bus(
             BUS_ID,
@@ -3529,8 +3606,8 @@ mod lead_time_single_decider_end_to_end {
                 make_stage(
                     i,
                     StageSpec {
-                        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                        start_date: stage_date(i),
+                        end_date: stage_date(i + 1),
                         season_id: None,
                         blocks: vec![Block {
                             index: 0,
@@ -3671,7 +3748,9 @@ mod lead_time_single_decider_end_to_end {
             filling_storage: vec![],
             past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
                 thermal_id: ANTICIPATED_ID,
-                values_mw: vec![0.0],
+                start_date: stage_date(0),
+                end_date: stage_date(1),
+                value_mw: 0.0,
             }],
             recent_observations: vec![],
             past_defluences: vec![],
@@ -3878,7 +3957,13 @@ mod anticipated_numerical_reconciliation_k2 {
     /// complicates interpretation. `annual_discount_rate = 0.0` collapses all
     /// discount factors to 1.0, making the analytical cost summation exact.
     fn build_system_reconciliation_k2() -> cobre_core::System {
-        use chrono::NaiveDate;
+        use chrono::{NaiveDate, TimeDelta};
+
+        // Each stage is a 744h (31-day) block; whole-day stage boundaries keep
+        // StageCalendar's date-based window coverage exact (744 / 24 = 31).
+        let stage_date = |index: usize| {
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap() + TimeDelta::days(31 * index as i64)
+        };
 
         let k: usize = 2;
         let n_stages: usize = 6;
@@ -3983,8 +4068,8 @@ mod anticipated_numerical_reconciliation_k2 {
                 make_stage(
                     i,
                     StageSpec {
-                        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                        start_date: stage_date(i),
+                        end_date: stage_date(i + 1),
                         season_id: None,
                         blocks: vec![Block {
                             index: 0,
@@ -4142,10 +4227,20 @@ mod anticipated_numerical_reconciliation_k2 {
                 value_hm3: 0.0,
             }],
             filling_storage: vec![],
-            past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
-                thermal_id: anticipated_id,
-                values_mw: vec![0.0, 0.0],
-            }],
+            past_anticipated_commitments: vec![
+                AnticipatedCommitmentHistory {
+                    thermal_id: anticipated_id,
+                    start_date: stage_date(0),
+                    end_date: stage_date(1),
+                    value_mw: 0.0,
+                },
+                AnticipatedCommitmentHistory {
+                    thermal_id: anticipated_id,
+                    start_date: stage_date(1),
+                    end_date: stage_date(2),
+                    value_mw: 0.0,
+                },
+            ],
             recent_observations: vec![],
             past_defluences: vec![],
         };
@@ -4355,7 +4450,8 @@ mod anticipated_bridge_st_cruz_nova_k1 {
     //! ## Analytical cost bound
     //!
     //! With `K = 1`, `n_stages = 5`, a single anticipated thermal (id=61,
-    //! `ST_CRUZ_NOVA`), and `past_anticipated_commitments.values_mw = [204.5647]`:
+    //! `ST_CRUZ_NOVA`), and a `past_anticipated_commitments` window tiling stage 0
+    //! with `value_mw = 204.5647`:
     //!
     //! - Stage 0: anticipated delivers seed (204.5647 MW, zero cost) + backup
     //!   covers remaining (250.0 - 204.5647) MW at $5000/MWh × 744 h ≈ $169,019,316.
@@ -4437,7 +4533,13 @@ mod anticipated_bridge_st_cruz_nova_k1 {
     /// prefer anticipated dispatch. `annual_discount_rate = 0.0` collapses all
     /// discount factors to 1.0, making the analytical cost derivation exact.
     fn build_system() -> cobre_core::System {
-        use chrono::NaiveDate;
+        use chrono::{NaiveDate, TimeDelta};
+
+        // Each stage is a 744h (31-day) block; whole-day stage boundaries keep
+        // StageCalendar's date-based window coverage exact (744 / 24 = 31).
+        let stage_date = |index: usize| {
+            NaiveDate::from_ymd_opt(2024, 9, 1).unwrap() + TimeDelta::days(31 * index as i64)
+        };
 
         let k: usize = 1;
         let n_stages: usize = 5;
@@ -4544,8 +4646,8 @@ mod anticipated_bridge_st_cruz_nova_k1 {
                 make_stage(
                     i,
                     StageSpec {
-                        start_date: NaiveDate::from_ymd_opt(2024, 9, 1).unwrap(),
-                        end_date: NaiveDate::from_ymd_opt(2024, 10, 1).unwrap(),
+                        start_date: stage_date(i),
+                        end_date: stage_date(i + 1),
                         season_id: None,
                         blocks: vec![Block {
                             index: 0,
@@ -4708,7 +4810,9 @@ mod anticipated_bridge_st_cruz_nova_k1 {
             filling_storage: vec![],
             past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
                 thermal_id: anticipated_id,
-                values_mw: vec![204.5647],
+                start_date: stage_date(0),
+                end_date: stage_date(1),
+                value_mw: 204.5647,
             }],
             recent_observations: vec![],
             past_defluences: vec![],
@@ -4945,7 +5049,7 @@ mod anticipated_convergence_slow {
     //! 5%) accommodates the anticipated ring-buffer variance source that is absent
     //! in the pure-hydro convergence test.
 
-    use chrono::NaiveDate;
+    use chrono::{NaiveDate, TimeDelta};
     use cobre_core::entities::{
         bus::DeficitSegment,
         hydro::{HydroGenerationModel, HydroPenalties},
@@ -4985,6 +5089,12 @@ mod anticipated_convergence_slow {
     /// 1 backup). The LP is always feasible: the backup thermal alone covers the
     /// 220 MW load.
     fn build_system(branching_factor: usize) -> cobre_core::System {
+        // Each stage is a 744h (31-day) block; whole-day stage boundaries keep
+        // StageCalendar's date-based window coverage exact (744 / 24 = 31).
+        let stage_date = |index: usize| {
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap() + TimeDelta::days(31 * index as i64)
+        };
+
         let bus = make_bus(
             EntityId(1),
             BusSpec {
@@ -5086,8 +5196,8 @@ mod anticipated_convergence_slow {
                 make_stage(
                     i,
                     StageSpec {
-                        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                        start_date: stage_date(i),
+                        end_date: stage_date(i + 1),
                         season_id: None,
                         blocks: vec![Block {
                             index: 0,
@@ -5234,10 +5344,20 @@ mod anticipated_convergence_slow {
                 value_hm3: 100.0,
             }],
             filling_storage: vec![],
-            past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
-                thermal_id: anticipated_id,
-                values_mw: vec![40.0, 20.0],
-            }],
+            past_anticipated_commitments: vec![
+                AnticipatedCommitmentHistory {
+                    thermal_id: anticipated_id,
+                    start_date: stage_date(0),
+                    end_date: stage_date(1),
+                    value_mw: 40.0,
+                },
+                AnticipatedCommitmentHistory {
+                    thermal_id: anticipated_id,
+                    start_date: stage_date(1),
+                    end_date: stage_date(2),
+                    value_mw: 20.0,
+                },
+            ],
             recent_observations: vec![],
             past_defluences: vec![],
         };
@@ -5480,8 +5600,11 @@ mod a1b_value_cut_identity_anchor {
     const ITERATIONS: usize = 20;
 
     fn build_system(anticipated_config: AnticipatedConfig) -> cobre_core::System {
-        use chrono::NaiveDate;
+        use chrono::{NaiveDate, TimeDelta};
         let date = |m: u32, d: u32| NaiveDate::from_ymd_opt(2024, m, d).expect("valid date");
+        // Each stage is a 744h (31-day) block; whole-day stage boundaries keep
+        // StageCalendar's date-based window coverage exact (744 / 24 = 31).
+        let stage_date = |index: usize| date(1, 1) + TimeDelta::days(31 * index as i64);
 
         let bus = make_bus(
             BUS_ID,
@@ -5534,8 +5657,8 @@ mod a1b_value_cut_identity_anchor {
                 make_stage(
                     i,
                     StageSpec {
-                        start_date: date(1, 1),
-                        end_date: date(2, 1),
+                        start_date: stage_date(i),
+                        end_date: stage_date(i + 1),
                         season_id: None,
                         blocks: vec![Block {
                             index: 0,
@@ -5677,7 +5800,9 @@ mod a1b_value_cut_identity_anchor {
             filling_storage: vec![],
             past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
                 thermal_id: ANT_ID,
-                values_mw: vec![0.0],
+                start_date: stage_date(0),
+                end_date: stage_date(1),
+                value_mw: 0.0,
             }],
             recent_observations: vec![],
             past_defluences: vec![],
@@ -6130,7 +6255,17 @@ mod a1c_stage_count_mode_anchor {
     /// the single pre-study decider (`decider[0] == None`) fixes the
     /// `past_anticipated_commitments` history length at 1.
     fn build_system() -> cobre_core::System {
-        use chrono::NaiveDate;
+        use chrono::{NaiveDate, TimeDelta};
+
+        // Distinct 31-day (744h) stage spans keep StageCalendar's date ordering
+        // invariant valid. `StageCalendar::coverage` divides overlap by each
+        // stage's REAL `[start_date, end_date)` calendar span — 744h here, not
+        // the declared `D37_DURATIONS[0]` (730h) — so stage 0's window must
+        // span the full 744h to hit exact fraction 1.0 (K_MAX=1, so no later
+        // stage boundary is ever addressed by a window).
+        let stage_date = |index: usize| {
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap() + TimeDelta::days(31 * index as i64)
+        };
 
         let bus = make_bus(
             BUS_ID,
@@ -6186,8 +6321,8 @@ mod a1c_stage_count_mode_anchor {
                 make_stage(
                     i,
                     StageSpec {
-                        start_date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                        end_date: NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+                        start_date: stage_date(i),
+                        end_date: stage_date(i + 1),
                         season_id: None,
                         blocks: vec![Block {
                             index: 0,
@@ -6326,7 +6461,9 @@ mod a1c_stage_count_mode_anchor {
             filling_storage: vec![],
             past_anticipated_commitments: vec![AnticipatedCommitmentHistory {
                 thermal_id: ANTICIPATED_ID,
-                values_mw: vec![0.0],
+                start_date: stage_date(0),
+                end_date: stage_date(1),
+                value_mw: 0.0,
             }],
             recent_observations: vec![],
             past_defluences: vec![],

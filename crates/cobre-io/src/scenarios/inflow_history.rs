@@ -40,7 +40,6 @@
 //! - `hydro_id` existence in the hydro registry — Layer 3.
 //! - Season/coverage alignment checks — Layer 4/5.
 
-use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 
@@ -53,6 +52,7 @@ use crate::LoadError;
 use crate::parquet_helpers::{
     extract_required_date32, extract_required_float64, extract_required_int32,
 };
+use crate::windowed_history::{WindowedRecord, validate_windowed_records};
 
 pub use cobre_core::scenario::InflowHistoryRow;
 
@@ -127,30 +127,7 @@ pub fn parse_inflow_history(path: &Path) -> Result<Vec<InflowHistoryRow>, LoadEr
             let hydro_id = EntityId::from(hydro_id_col.value(i));
             let start_date = parse_date32(start_date_col.value(i), path, row_idx, "start_date")?;
             let end_date = parse_date32(end_date_col.value(i), path, row_idx, "end_date")?;
-
-            if end_date <= start_date {
-                return Err(LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: format!("inflow_history[{row_idx}].end_date"),
-                    message: format!(
-                        "inflow_history[{row_idx}]: end_date must be after start_date \
-                         (start_date={start_date}, end_date={end_date})"
-                    ),
-                });
-            }
-
-            // A negative value is real hydrology, not corruption: incremental
-            // inflow is a difference (a plant's natural flow minus its upstream
-            // plants'), so restoring a `< 0.0` reject here rejects production
-            // records. Layer 5a reports the count instead.
             let value_m3s = value_col.value(i);
-            if !value_m3s.is_finite() {
-                return Err(LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: format!("inflow_history[{row_idx}].value_m3s"),
-                    message: format!("value must be finite, got {value_m3s}"),
-                });
-            }
 
             rows.push(InflowHistoryRow {
                 hydro_id,
@@ -168,7 +145,16 @@ pub fn parse_inflow_history(path: &Path) -> Result<Vec<InflowHistoryRow>, LoadEr
             .then_with(|| a.start_date.cmp(&b.start_date))
     });
 
-    validate_windows_no_overlap(&rows, path)?;
+    let windows: Vec<WindowedRecord> = rows
+        .iter()
+        .map(|r| WindowedRecord {
+            entity_id: r.hydro_id.0,
+            start_date: r.start_date,
+            end_date: r.end_date,
+            value: r.value_m3s,
+        })
+        .collect();
+    validate_windowed_records(&windows, "inflow_history", "hydro_id", "value_m3s", path)?;
 
     Ok(rows)
 }
@@ -195,45 +181,6 @@ fn parse_date32(
             field: format!("inflow_history[{row_idx}].{field_name}"),
             message: format!("cannot convert date32 value {raw} to a valid calendar date"),
         })
-}
-
-/// Check that for windows with the same `hydro_id`, `[start_date, end_date)`
-/// ranges do not overlap. Adjacent windows (`start_date == previous end_date`)
-/// are accepted (exclusive-end convention).
-///
-/// Precondition: every row's `end_date > start_date` (enforced by the ingest
-/// loop in [`parse_inflow_history`]).
-fn validate_windows_no_overlap(rows: &[InflowHistoryRow], path: &Path) -> Result<(), LoadError> {
-    let mut by_hydro: HashMap<i32, Vec<usize>> = HashMap::new();
-    for (i, row) in rows.iter().enumerate() {
-        by_hydro.entry(row.hydro_id.0).or_default().push(i);
-    }
-
-    let mut groups: Vec<(i32, Vec<usize>)> = by_hydro.into_iter().collect();
-    groups.sort_unstable_by_key(|(hydro_id, _)| *hydro_id);
-
-    for (hydro_id, mut indices) in groups {
-        indices.sort_by_key(|&i| rows[i].start_date);
-
-        for window in indices.windows(2) {
-            let (i_prev, i_curr) = (window[0], window[1]);
-            let prev_end = rows[i_prev].end_date;
-            let curr_start = rows[i_curr].start_date;
-
-            if curr_start < prev_end {
-                return Err(LoadError::SchemaError {
-                    path: path.to_path_buf(),
-                    field: format!("inflow_history[{i_curr}].start_date"),
-                    message: format!(
-                        "inflow_history: overlapping windows for hydro_id {hydro_id}: \
-                         entry [{i_prev}] ends on {prev_end} but entry [{i_curr}] starts on \
-                         {curr_start}"
-                    ),
-                });
-            }
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

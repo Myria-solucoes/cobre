@@ -2,25 +2,32 @@
   "$defs": {
     "RawAnticipatedCommitmentHistory": {
       "additionalProperties": false,
-      "description": "Past committed MW values for one anticipated thermal plant.\n\n`values_mw[j]` is the MW dispatched at the `j`-th pre-study-committed\ndelivery stage (delivery-anchored; required length is calendar-derived, not\n`lead_stages` on a non-uniform calendar — validated semantically). The\nvalues are sunk cost: they do not enter the study objective. Each value\nmust lie within the plant's `[min_generation_mw, max_generation_mw]` bounds\nand, if the plant has a commissioning window, mature inside it (both\nvalidated semantically).",
+      "description": "One past committed MW window for an anticipated thermal plant.\n\nA self-describing `[start_date, end_date)` window (ISO 8601, `end_date`\nexclusive and after `start_date`) carrying `value_mw`, the MW rate held\nconstant over the window. A plant's windows must tile its calendar-derived\nleading delivery stages exactly (validated semantically). The values are\nsunk cost: they do not enter the study objective. Each `value_mw` must lie\nwithin the plant's `[min_generation_mw, max_generation_mw]` bounds and, if\nthe plant has a commissioning window, mature inside it (both validated\nsemantically).",
       "properties": {
+        "end_date": {
+          "description": "End of the commitment window (exclusive), as an ISO 8601 date\n(YYYY-MM-DD). Must be after `start_date`.",
+          "type": "string"
+        },
+        "start_date": {
+          "description": "Start of the commitment window (inclusive), as an ISO 8601 date\n(YYYY-MM-DD).",
+          "type": "string"
+        },
         "thermal_id": {
           "description": "Thermal plant identifier. Must reference an anticipated thermal.",
           "format": "int32",
           "type": "integer"
         },
-        "values_mw": {
-          "description": "Past committed MW values, ordered by delivery stage ascending. Required\nlength is calendar-derived (validated semantically), not `lead_stages`.",
-          "items": {
-            "format": "double",
-            "type": "number"
-          },
-          "type": "array"
+        "value_mw": {
+          "description": "Committed MW rate over the window, held constant.",
+          "format": "double",
+          "type": "number"
         }
       },
       "required": [
         "thermal_id",
-        "values_mw"
+        "start_date",
+        "end_date",
+        "value_mw"
       ],
       "type": "object"
     },
@@ -127,7 +134,7 @@
       "type": "array"
     },
     "past_anticipated_commitments": {
-      "description": "Past committed MW values for each anticipated thermal plant, ordered by\ndelivery stage ascending. Present only when the study includes at least\none anticipated thermal. Optional; defaults to empty.",
+      "description": "Past committed MW windows per anticipated thermal plant, each a\nself-describing `[start_date, end_date)` window carrying a `value_mw`\nrate. Present only when the study includes at least one anticipated\nthermal. Windows for the same thermal must not overlap; adjacent ranges\n(start == previous end) are accepted. Optional; defaults to empty.",
       "items": {
         "$ref": "#/$defs/RawAnticipatedCommitmentHistory"
       },
